@@ -2,5 +2,12 @@
   "name": "@codeproctor/shared",
   "version": "0.0.0",
   "private": true,
-  "description": "Shared types, zod schemas and constants (placeholder)"
+  "description": "Shared types, zod schemas and constants (placeholder)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint ."
+  }
 }

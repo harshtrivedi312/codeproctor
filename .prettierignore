@@ -1,0 +1,9 @@
+node_modules
+dist
+.next
+coverage
+pnpm-lock.yaml
+apps/worker
+docs
+.claude
+CLAUDE.md
