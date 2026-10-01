@@ -45,7 +45,7 @@ For each attempt record: method, detected (yes/no), event produced, and a propos
 ```text
 Create infra for a free-tier staging environment:
 - One Linux VM (x86, confirm Judge0 compatibility) running Docker Compose with: api, worker, redis, judge0 (+ its db and redis), caddy (automatic HTTPS).
-- Managed Postgres (Supabase or Neon free) via DATABASE_URL; Cloudflare R2 buckets for media and backups; web app on Cloudflare Pages.
+- Managed Postgres (Supabase or Neon free) via DATABASE_URL; Cloudflare R2 buckets for media and backups (staging holds synthetic data only; pilot and production use AWS S3 through the same S3-compatible interface); web app on Cloudflare Pages.
 - GitHub Actions: on merge to main, build images, push to GitHub Container Registry, SSH-deploy to the VM with zero-downtime restart, run prisma migrate deploy, then smoke tests.
 - Sentry for web, api and worker; uptime checks on /health.
 Write /docs/runbook.md: deploy, rollback, rotate secrets, restore backup, scale up.
