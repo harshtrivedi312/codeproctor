@@ -1,0 +1,6 @@
+{
+  "name": "@codeproctor/lockdown",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Electron lockdown client (Phase 3 placeholder)"
+}

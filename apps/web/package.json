@@ -1,0 +1,6 @@
+{
+  "name": "@codeproctor/web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Next.js app for candidates and staff (placeholder; Next.js is installed in FE-01)"
+}

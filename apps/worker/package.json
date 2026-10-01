@@ -1,0 +1,9 @@
+{
+  "name": "@codeproctor/worker",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Python 3.12 analysis worker (placeholder wrapper so pnpm -r covers it; FastAPI is added in BE-08)",
+  "scripts": {
+    "build": "python3.12 -m compileall -q src"
+  }
+}

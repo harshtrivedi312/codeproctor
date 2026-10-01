@@ -1,0 +1,10 @@
+{
+  "name": "codeproctor",
+  "version": "0.0.0",
+  "private": true,
+  "description": "CodeProctor: proctored coding assessment platform for hiring",
+  "packageManager": "pnpm@12.8.1",
+  "engines": {
+    "node": ">=22.12.0 <23"
+  }
+}

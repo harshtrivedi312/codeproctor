@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codeproctor-worker"
+version = "0.0.0"
+description = "CodeProctor analysis worker (placeholder; FastAPI is added in BE-08)"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
