@@ -1,0 +1,65 @@
+# Local infrastructure for CodeProctor: PostgreSQL 16, Redis 8.8 and Adminer.
+# Judge0 is added in BE-05. The app role and its init script are added in DB-03.
+#
+# Run from the repository root (credentials come from .env, see .env.example):
+#   pnpm dev:infra
+name: codeproctor
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    # Values come from .env via `pnpm dev:infra` (--env-file .env) or from the shell.
+    # No defaults: without POSTGRES_PASSWORD the postgres image refuses to start.
+    environment:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+      - POSTGRES_DB
+    ports:
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # Redis 8.8 is used under its AGPLv3 licence option (ADR 0001, D-09).
+  # BullMQ requires maxmemory-policy noeviction (BullMQ docs, "Going to production").
+  redis:
+    image: redis:8.8
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
+    ports:
+      - '127.0.0.1:6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  adminer:
+    image: adminer:5
+    restart: unless-stopped
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    ports:
+      - '127.0.0.1:8080:8080'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:8080/ || exit 1']
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+
+volumes:
+  postgres_data:
+  redis_data:
