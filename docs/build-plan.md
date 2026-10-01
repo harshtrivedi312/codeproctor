@@ -1,0 +1,586 @@
+# CodeProctor build plan
+
+Owner: project-manager. Last updated: 2026-09-30. Status of every task: Not started (see /docs/status.md).
+
+Sources: CLAUDE.md, /docs/brd.md, /docs/fsd.md, /docs/architecture.md, /docs/database.md, /docs/test-cases.md, /docs/prompts/{database,backend,frontend,agents-qa-deploy}.md, .claude/agents/*.
+
+Companion files: /docs/status.md (progress, risks, open questions), /docs/requirements-trace.md (BR/FR/NFR to task to TC), /docs/briefs/ (task briefs).
+
+## 1. How to read this plan
+
+- **Task IDs mirror the prompt steps.** `DB-n` = Database prompt Step n, `BE-n` = Backend prompt Step n, `FE-n` = Frontend prompt Step n, `QA-*` and `DEP-*` = agents-qa-deploy.md QA and Deploy prompts. `ARC-*` are architect gates that the PM routing rules require (schema, shared contracts, security) and that the prompts do not name. Database Step 0 (CLAUDE.md) is already done.
+- **Splits beyond the prompts** (each needs a human nod, see status.md "Change requests"): ARC-01..05 (gates), BE-15A/B (audit vs staging tuning, because tuning needs the staging VM from DEP-01), QA-01A/B (matrix and manual scripts can start early; automation and CI gate come last), PA-01 (baseline lint/type-check scripts and CI workflow, folded into DB-01).
+- **Breakdown of each step** is the Deliverables list in its task block (section 9). One task = one branch = one PR.
+- **Relative size** S/M/L/XL is a PM judgment of effort relative to other tasks. The docs contain no effort or date data, so no durations are given.
+- **Same-agent tasks run one after another** by default. The main session may run two instances of one agent on separate worktrees only if the branches touch disjoint files.
+- **Branches:** `arch/<slug>`, `db/step-N`, `backend/step-N`, `frontend/step-N` (also used for the SDK steps 6-8, owned by proctor-sdk-engineer), `qa/<slug>`, `deploy/<slug>`.
+
+## 2. Agent roster and mapping
+
+Active agents are the files in `.claude/agents/`. The orchestrator prompt in agents-qa-deploy.md uses different names (see Open question Q-36). `.claude/agents-generated-backup/` holds the older generated set and is ignored by this plan.
+
+| Orchestrator prompt name | Active agent used here | Tasks |
+| --- | --- | --- |
+| (none) | architect | ARC-01..05, plus PR review of schema, shared contracts, security |
+| (database track) | db-engineer | DB-01..DB-08 |
+| backend-core | backend-engineer | BE-01..BE-07 |
+| backend-media | backend-engineer (BE-09), integrity-engineer (BE-08) | BE-08, BE-09 |
+| backend-integrity | integrity-engineer (BE-10, BE-12), backend-engineer (BE-11) | BE-10..BE-12 |
+| backend-review | backend-engineer | BE-13, BE-14 |
+| hardening | backend-engineer (integrity-engineer for worker findings), architect reviews | BE-15A, BE-15B |
+| frontend-staff | frontend-engineer | FE-01..FE-05 |
+| proctor-sdk | proctor-sdk-engineer | FE-06..FE-08 |
+| frontend-candidate, frontend-review | frontend-engineer | FE-09..FE-13 |
+| qa | qa-engineer | QA-01A, QA-01B, QA-02 |
+| (none) | TBD, proposed backend-engineer | DEP-01 |
+| (none) | TBD, proposed qa-engineer with architect review | DEP-02 |
+| (none) | Out of scope for this build (D-13) | FE-14 |
+| (every branch) | code-reviewer (read-only) | review gate on all tasks |
+| (this file) | project-manager | plan, status, trace, briefs |
+
+## 3. Phases and milestones
+
+| Phase | Goal | Tasks | Exit milestone |
+| --- | --- | --- | --- |
+| 0 Kickoff and contracts | Schema questions answered, contracts written, repo has a first commit | ADR 0001 overall architecture (Accepted 2026-10-01), ARC-01, ARC-02, ARC-03, ARC-04, ARC-05 (Judge0 part first), QA-01A | M0: schema freeze list approved; contracts v0 published |
+| 1 Database track | Monorepo, infra, Prisma schema, migrations, seed, org scoping, retention, backups, DB tests | DB-01..DB-08 | M1: Database track merged (gate for everything else) |
+| 2 Core backend, staff web, SDK | Auth, RBAC, question bank, Judge0, tests and invitations, session state machine; staff screens on MSW mocks; proctor SDK | BE-01..BE-07 ∥ FE-01..FE-05 ∥ FE-06..FE-08 | M2: BE-07 merged, SDK merged |
+| 3 Candidate journey | Media, identity, events, run/grade, integrity worker, candidate flow and test screen | BE-09, BE-10, BE-11, BE-08, BE-12, FE-09, FE-10 | M3: candidate can complete a proctored test on seeded data; worker scores it |
+| 4 Review and reporting | Review API, live gateway, reports, webhooks; review workspace, live grid, dashboard; staging environment | BE-13, BE-14, FE-11, FE-12, FE-13, DEP-01 | M4: reviewer journey works on staging; mocks removed |
+| 5 Hardening and QA | Security review and fixes, load tuning, automated suite and CI gate, red team | BE-15A, BE-15B, QA-01B, QA-02 | M5: all 48 P1 TCs green or manual-signed; security review closed |
+| 6 Go-live readiness | Go-live checklist and human decisions | DEP-02 | M6: checklist delivered. Pilot and legal approval are human-run (BRD section 10) |
+| Later phase (not this build) | Electron lockdown client | FE-14 | Out of scope for this build (D-13, closes Q-41). Until it ships, the LOCKDOWN proctor profile must not be selectable (review A-30). |
+
+## 4. Dependency graph
+
+Solid edges are hard dependencies. Notes after the diagram explain soft dependencies (mocks allow early start).
+
+```mermaid
+flowchart LR
+  subgraph P0[Phase 0 gates]
+    ARC_01["ARC-01 schema gaps"]
+    ARC_02["ARC-02 shared + API contract"]
+    ARC_03["ARC-03 security model"]
+    ARC_04["ARC-04 worker integration"]
+    ARC_05["ARC-05 deployment + Judge0 host"]
+    QA_01A["QA-01A test matrix"]
+  end
+  subgraph P1[Phase 1 database]
+    DB_01["DB-01 monorepo + infra"] --> DB_02["DB-02 Prisma schema"]
+    DB_02 --> DB_03["DB-03 migrations"]
+    DB_03 --> DB_04["DB-04 seed"]
+    DB_03 --> DB_05["DB-05 org scoping"]
+    DB_05 --> DB_06["DB-06 retention + erasure"]
+    DB_03 --> DB_07["DB-07 backups"]
+    DB_04 --> DB_08["DB-08 DB tests"]
+    DB_06 --> DB_08
+    DB_07 --> DB_08
+  end
+  ARC_01 --> DB_02
+  DB_01 --> ARC_02
+  ARC_01 --> ARC_02
+  ARC_01 --> ARC_03
+  ARC_03 --> ARC_04
+  subgraph P2[Phase 2 core backend]
+    BE_01 --> BE_02 --> BE_03 --> BE_04 --> BE_05 --> BE_06 --> BE_07
+  end
+  subgraph P2F[Phase 2 staff web]
+    FE_01 --> FE_02 --> FE_03 --> FE_04 --> FE_05
+  end
+  subgraph P2S[Phase 2 proctor SDK]
+    FE_06 --> FE_07 --> FE_08
+  end
+  DB_08 --> BE_01
+  DB_08 --> FE_01
+  DB_08 --> FE_06
+  ARC_03 --> BE_02
+  ARC_02 --> BE_03
+  ARC_05 --> BE_05
+  ARC_02 --> FE_01
+  ARC_02 --> FE_06
+  ARC_03 --> FE_06
+  subgraph P3[Phase 3 candidate journey]
+    BE_09["BE-09 media R2"]
+    BE_10["BE-10 events + HMAC"]
+    BE_11["BE-11 run/submit/grade"]
+    BE_08["BE-08 identity"]
+    BE_12["BE-12 integrity worker"]
+    FE_09["FE-09 pre-test flow"] --> FE_10["FE-10 test screen"]
+  end
+  BE_07 --> BE_09
+  BE_07 --> BE_10
+  BE_07 --> BE_11
+  BE_09 --> BE_08
+  ARC_04 --> BE_08
+  BE_08 --> BE_12
+  BE_09 --> BE_12
+  BE_10 --> BE_12
+  BE_11 --> BE_12
+  ARC_04 --> BE_12
+  BE_07 --> FE_09
+  FE_08 --> FE_09
+  FE_01 --> FE_09
+  subgraph P4[Phase 4 review and reporting]
+    BE_13["BE-13 review + live API"] --> BE_14["BE-14 reports + webhooks"]
+    FE_11["FE-11 review workspace"] --> FE_12["FE-12 live grid"] --> FE_13["FE-13 dashboard + a11y + e2e"]
+    DEP_01["DEP-01 staging"]
+  end
+  BE_12 --> BE_13
+  ARC_02 --> BE_13
+  FE_10 --> FE_11
+  FE_03 --> FE_11
+  FE_10 --> DEP_01
+  BE_12 --> DEP_01
+  ARC_05 --> DEP_01
+  BE_14 --> FE_13
+  subgraph P5[Phase 5 hardening and QA]
+    BE_15A["BE-15A security audit + fixes"] --> BE_15B["BE-15B staging load tuning"]
+    QA_01B["QA-01B automation + CI gate"]
+    QA_02["QA-02 red team"]
+  end
+  BE_14 --> BE_15A
+  DEP_01 --> BE_15B
+  FE_13 --> QA_01B
+  BE_14 --> QA_01B
+  DEP_01 --> QA_02
+  BE_15A --> QA_02
+  FE_13 --> QA_02
+  DEP_02["DEP-02 go-live checklist"]
+  BE_15B --> DEP_02
+  QA_01B --> DEP_02
+  QA_02 --> DEP_02
+```
+
+**Soft dependencies (mock-enabled, final unmocking at the named task):**
+FE-02 on BE-02; FE-03 on BE-03 and the org-settings endpoints (Q-16); FE-04 on BE-04/BE-05; FE-05 on BE-06 and candidate/status endpoints (Q-18); FE-09 on BE-08/BE-09; FE-10 on BE-10/BE-11; FE-11 and FE-12 on BE-13; FE-13 on BE-14 (FE-13 performs the final unmock sweep).
+
+**Real couplings the prompts understate (see Q-38):** BE-08 needs BE-09's presign endpoint. BE-12 needs the worker scaffold from BE-08, StorageService from BE-09, events from BE-10 and submissions/state from BE-11. DB-05/DB-06 need a minimal NestJS module in apps/api before BE-01 runs (Q-39). BE-15B needs the staging VM from DEP-01 (Q-36 and Deploy prompts do not say when staging is built).
+
+**Critical path** (about 22 sequential tasks, ARC-01 runs in parallel with DB-01):
+DB-01 → DB-02 → DB-03 → DB-05 → DB-06 → DB-08 → BE-01 → BE-02 → BE-03 → BE-04 → BE-05 → BE-06 → BE-07 → BE-09 → BE-08 → BE-12 → BE-13 → BE-14 → BE-15A → BE-15B → QA-01B → DEP-02.
+BE-11 and BE-10 run beside BE-09/BE-08 and must merge before BE-12. DEP-01 must finish before BE-15B, so it is a second near-critical chain (ARC-05, BE-12, FE-10 then DEP-01). Frontend and SDK lanes are shorter than the backend lane and are not critical unless a contract gate (ARC-02, ARC-03) slips.
+
+## 5. Parallelism by wave
+
+| Wave | Runs in parallel (different agents or disjoint files) | Waits for |
+| --- | --- | --- |
+| W0 | ARC-01 (draft options), DB-01, QA-01A | First commit on main (human), Q-01..Q-17 answers to finalize ARC-01 |
+| W1 | DB-02 → DB-03 (db-engineer); ARC-02 → ARC-03 → ARC-05 (Judge0 part) → ARC-04 (architect) | ARC-01 approved; DB-01 merged |
+| W1b | After DB-03: DB-04 ∥ DB-05 ∥ DB-07; DB-06 after DB-05; then DB-08 | DB-03 merged |
+| W2 | Backend lane BE-01..BE-07; staff web lane FE-01..FE-05; SDK lane FE-06..FE-08; architect reviews | M1 (DB-08 merged), ARC-02, ARC-03 |
+| W3 | backend-engineer BE-09 → BE-11; integrity-engineer BE-10 → BE-08 → BE-12; frontend-engineer FE-09 → FE-10 | BE-07 merged, SDK merged, ARC-04 |
+| W4 | backend-engineer BE-13 → BE-14; frontend-engineer FE-11 → FE-12 → FE-13; DEP-01 | BE-12 merged, FE-10 merged, ARC-05 |
+| W5 | BE-15A ∥ QA-01B; then BE-15B, QA-02 | BE-14 and FE-13 merged; DEP-01 |
+| W6 | DEP-02 | M5 |
+
+## 6. Gates
+
+**Architect before work starts** (routing rule: schema, shared contracts, security).
+
+| Task | Gate | Why |
+| --- | --- | --- |
+| DB-02 | ARC-01 | Schema gaps (Q-01..Q-17, Q-23, Q-24 and the review findings routed to ARC-01, D-03) must be decided before the Prisma schema is written; freeze list is ADR 0008 |
+| ARC-02 | ARC-01 | Event type list and identity/OTP decisions feed shared types |
+| FE-01 | ARC-02 | Typed client and MSW mocks need an API contract (no OpenAPI spec exists until BE-01) |
+| BE-02 | ARC-03 | Auth token model, recovery-code storage |
+| BE-03 | ARC-02 | Permission matrix in packages/shared |
+| BE-05 | ARC-05 (Judge0 part) | Judge0 hosting and local dev feasibility (x86, cgroup, privileged) |
+| BE-07 | ARC-03 | Candidate token binding, HMAC key lifecycle, OTP storage, link semantics |
+| BE-08, BE-12 | ARC-04 | Worker job consumption, worker-to-API state changes (face model decided: InsightFace, D-05) |
+| BE-09 | ARC-03 | R2 key layout for every object type, presign policy |
+| BE-10 | ARC-02, ARC-03 | events.ts, canonical JSON and HMAC rules |
+| BE-13 | ARC-02 | /live contract including the candidate socket |
+| FE-06, FE-07 | ARC-02, ARC-03 | events.ts, signing rules, presign contract |
+| DEP-01 | ARC-05 | AWS layout (D-04), web hosting choice, cookie domain plan |
+| FE-14 | new ADR (later phase) | Lockdown attestation design; out of scope for this build (D-13) |
+
+**Architect at PR review** (in addition to code-reviewer): DB-02, DB-03, DB-05, DB-06, BE-02, BE-03, BE-07, BE-09, BE-10, BE-12, BE-15A, and any PR touching `prisma/` or `packages/shared`.
+
+**Code-reviewer:** runs on every branch before a human merges. Verdict APPROVE or APPROVE WITH NITS is required; REQUEST CHANGES sends the task back to its owner.
+
+**Human merge:** humans merge in dependency order (agents never merge their own branches). The PM updates status.md and the trace only after the merge and a real test run.
+
+## 7. Global definition of done (applies to every task)
+
+1. Lint, type-check and tests pass locally and in CI (root scripts from DB-01; CI from PA-01 once approved).
+2. Every test name contains its FR and TC IDs (for example `TC-002 FR-101 locks account after 5 failures`).
+3. Docs are updated in the same PR where behavior, contracts or schema changed. Docs and code disagree: stop and ask (CLAUDE.md).
+4. No secrets, tokens, OTPs, HMAC keys or candidate media keys in logs, fixtures or commits.
+5. The PR description lists FR IDs implemented, TC IDs covered, files changed, commands run with results, and any change to `packages/shared` or the OpenAPI spec.
+6. code-reviewer verdict has no Blocking findings; architect review where section 6 requires it.
+7. Conventional commit messages, small commits.
+8. Status and trace updated by the PM from the actual test run.
+
+Per-task "Done when" lines below add to this list; they do not replace it.
+
+## 8. Assignment table
+
+Status values: Not started, In progress, In review, Changes requested, Done (merged), Blocked.
+
+| ID | Prompt step | Agent | Branch | Depends on (hard) | Review | Size | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| ARC-01 | Gate: schema gaps (widened, D-03, D-08) | architect | arch/adr-schema-gaps | human answers to finalize | human approves ADRs | L | Not started |
+| ARC-02 | Gate: shared + API contract v0 | architect | arch/contracts-v0 | DB-01, ARC-01 | code-reviewer | L | Not started |
+| ARC-03 | Gate: security model | architect | arch/adr-security-model | ARC-01 | human approves ADRs | M | Not started |
+| ARC-04 | Gate: worker integration | architect | arch/adr-worker-integration | ARC-01, ARC-03 | human approves ADRs | S | Not started |
+| ARC-05 | Gate: deployment + Judge0 host | architect | arch/adr-deployment | none (human-provisioned AWS x86 instance for spike) | human approves ADRs | M | Not started |
+| DB-01 | Database Step 1 | db-engineer | db/step-1 | none | code-reviewer | M | Not started |
+| DB-02 | Database Step 2 | db-engineer | db/step-2 | DB-01, ARC-01 | architect + code-reviewer | L | Not started |
+| DB-03 | Database Step 3 | db-engineer | db/step-3 | DB-02 | architect + code-reviewer | M | Not started |
+| DB-04 | Database Step 4 | db-engineer | db/step-4 | DB-03 | code-reviewer | L | Not started |
+| DB-05 | Database Step 5 | db-engineer | db/step-5 | DB-03 | architect + code-reviewer | M | Not started |
+| DB-06 | Database Step 6 | db-engineer | db/step-6 | DB-05 | architect + code-reviewer | M | Not started |
+| DB-07 | Database Step 7 | db-engineer | db/step-7 | DB-03 | code-reviewer | S | Not started |
+| DB-08 | Database Step 8 | db-engineer | db/step-8 | DB-03 (prompt order: DB-04..DB-07) | code-reviewer | M | Not started |
+| BE-01 | Backend Step 1 | backend-engineer | backend/step-1 | DB-08 | code-reviewer | M | Not started |
+| BE-02 | Backend Step 2 | backend-engineer | backend/step-2 | BE-01, ARC-03 | architect + code-reviewer | L | Not started |
+| BE-03 | Backend Step 3 | backend-engineer | backend/step-3 | BE-02, ARC-02 | architect + code-reviewer | L | Not started |
+| BE-04 | Backend Step 4 | backend-engineer | backend/step-4 | BE-03 | code-reviewer | XL | Not started |
+| BE-05 | Backend Step 5 | backend-engineer | backend/step-5 | BE-04, ARC-05 | code-reviewer | L | Not started |
+| BE-06 | Backend Step 6 | backend-engineer | backend/step-6 | BE-05 (real: BE-03, BE-04) | code-reviewer | XL | Not started |
+| BE-07 | Backend Step 7 | backend-engineer | backend/step-7 | BE-06, ARC-03 | architect + code-reviewer | XL | Not started |
+| BE-08 | Backend Step 8 | integrity-engineer | backend/step-8 | BE-07, BE-09, ARC-04 | code-reviewer | L | Not started |
+| BE-09 | Backend Step 9 | backend-engineer | backend/step-9 | BE-07, ARC-03 | architect + code-reviewer | L | Not started |
+| BE-10 | Backend Step 10 | integrity-engineer | backend/step-10 | BE-07, ARC-02, ARC-03 | architect + code-reviewer | L | Not started |
+| BE-11 | Backend Step 11 | backend-engineer | backend/step-11 | BE-07 (and BE-05) | code-reviewer | L | Not started |
+| BE-12 | Backend Step 12 | integrity-engineer | backend/step-12 | BE-08, BE-09, BE-10, BE-11, ARC-04 | architect + code-reviewer | XL | Not started |
+| BE-13 | Backend Step 13 | backend-engineer | backend/step-13 | BE-12, BE-09, BE-10, BE-03, ARC-02 | code-reviewer | XL | Not started |
+| BE-14 | Backend Step 14 | backend-engineer | backend/step-14 | BE-13, BE-09 | code-reviewer | L | Not started |
+| BE-15A | Backend Step 15 (audit, fixes, k6 scripts) | backend-engineer | backend/step-15a | BE-14 | architect + code-reviewer | XL | Not started |
+| BE-15B | Backend Step 15 (staging tuning) | backend-engineer | backend/step-15b | BE-15A, DEP-01 | code-reviewer | M | Not started |
+| FE-01 | Frontend Step 1 | frontend-engineer | frontend/step-1 | DB-08, ARC-02 | code-reviewer | L | Not started |
+| FE-02 | Frontend Step 2 | frontend-engineer | frontend/step-2 | FE-01 | code-reviewer | M | Not started |
+| FE-03 | Frontend Step 3 | frontend-engineer | frontend/step-3 | FE-02 | code-reviewer | L | Not started |
+| FE-04 | Frontend Step 4 | frontend-engineer | frontend/step-4 | FE-03 | code-reviewer | XL | Not started |
+| FE-05 | Frontend Step 5 | frontend-engineer | frontend/step-5 | FE-04 | code-reviewer | L | Not started |
+| FE-06 | Frontend Step 6 | proctor-sdk-engineer | frontend/step-6 | DB-08, ARC-02, ARC-03 | code-reviewer | XL | Not started |
+| FE-07 | Frontend Step 7 | proctor-sdk-engineer | frontend/step-7 | FE-06 | code-reviewer | L | Not started |
+| FE-08 | Frontend Step 8 | proctor-sdk-engineer | frontend/step-8 | FE-07 | code-reviewer | XL | Not started |
+| FE-09 | Frontend Step 9 | frontend-engineer | frontend/step-9 | BE-07, FE-01, FE-08 | code-reviewer | XL | Not started |
+| FE-10 | Frontend Step 10 | frontend-engineer | frontend/step-10 | FE-09 | code-reviewer | XL | Not started |
+| FE-11 | Frontend Step 11 | frontend-engineer | frontend/step-11 | FE-03, FE-10 | code-reviewer | XL | Not started |
+| FE-12 | Frontend Step 12 | frontend-engineer | frontend/step-12 | FE-03, FE-10 | code-reviewer | M | Not started |
+| FE-13 | Frontend Step 13 | frontend-engineer | frontend/step-13 | FE-09..FE-12, BE-14 | code-reviewer | L | Not started |
+| FE-14 | Frontend Step 14 (later phase, out of scope for this build, D-13) | TBD | frontend/step-14 | later-phase go-ahead, new ADR, BE-07, FE-10 | architect + code-reviewer | XL | Out of scope |
+| QA-01A | QA 1 (matrix and manual scripts) | qa-engineer | qa/test-matrix | none | code-reviewer | M | Not started |
+| QA-01B | QA 1 (automation, CI gate, scans) | qa-engineer | qa/automation-ci | BE-14, FE-13, DEP-01 | code-reviewer | XL | Not started |
+| QA-02 | QA 2 | qa-engineer | qa/red-team | DEP-01, BE-15A, FE-13 | architect reads report | L | Not started |
+| DEP-01 | Deploy 1 | TBD (proposed backend-engineer) | deploy/staging | ARC-05, BE-12, FE-10 | architect + code-reviewer | XL | Not started |
+| DEP-02 | Deploy 2 | TBD (proposed qa-engineer, architect review) | deploy/go-live-checklist | BE-15B, QA-01B, QA-02, FE-13 | architect | M | Not started |
+
+Totals: 48 tasks (5 architect gates, 8 database, 16 backend, 14 frontend/SDK, 3 QA, 2 deploy).
+
+## 9. Task catalogue
+
+Format per task: owner, branch, depends on, can run in parallel with, FR/NFR covered, TCs, gates, deliverables (the breakdown of the prompt step), done-when. "PM-assigned" marks TCs that the prompts do not name for this step (Q-33).
+
+### Phase 0: gates and kickoff
+
+#### ARC-01: Schema readiness review
+- Owner: architect. Branch: `arch/adr-schema-gaps`. Depends on: none to draft; human answers to finalize. Parallel with: DB-01, QA-01A. Size L (widened 2026-10-01, D-03 and D-08).
+- Covers: FR-104, FR-105, FR-106, FR-203, FR-205, FR-301, FR-303, FR-403, FR-404, FR-406, FR-505, FR-609, FR-704, FR-801, FR-803, FR-804, FR-904, NFR-04, NFR-05. TCs informed: TC-005, TC-007, TC-008, TC-012, TC-021, TC-022, TC-024, TC-033, TC-036, TC-045, TC-048, TC-050, TC-063, TC-065, TC-072, TC-079, TC-094.
+- Scope: Q-01..Q-17; Q-23 and Q-24 (pause and resume policy, moved from ARC-03, D-08); review findings A-01, A-02, A-03, A-04 (if a column is chosen), A-06, A-07, A-09 (retention hold during review and appeals), A-10, A-11, A-21 items 2 and 4, A-22, A-23 (review section 5 routing). A-01 (variant model) and A-03 (per-section timing) are decided first.
+- Deliverables: ADRs 0002 to 0007 under /docs/adr/ (options, recommendation, affected agents); after human approval only, update /docs/database.md (DDL, ERD, table reference, data rules); schema freeze list ADR 0008 for DB-02 (approved deltas, or "none"); list of prompt amendments the human must apply to /docs/prompts/database.md.
+- Done when: every item in scope is decided or explicitly deferred; database.md matches the ADRs; DB-02 unblocked in writing. Brief: /docs/briefs/ARC-01.md.
+
+#### ARC-02: Shared contracts and API contract v0
+- Owner: architect. Branch: `arch/contracts-v0`. Depends on: DB-01, ARC-01.
+- Covers: FR-103, FR-801, FR-903, FR-609, FR-608, FR-701. TCs: TC-004, TC-065 (shape only).
+- Deliverables: `packages/shared` skeleton: `events.ts` (event types per ARC-01, severities, zod event and batch envelope with sequence and signature field, keystroke batch schema), permission-matrix type (routes to roles including a candidate pseudo-role), session state transition map from FSD section 3. `/docs/api-contract.md`: every endpoint in FSD section 4 plus the additions listed in Q-18/Q-19/Q-20/Q-22 (request/response shapes, RFC 7807 errors, pagination), WebSocket contract for /live and the candidate channel, internal worker-to-API endpoints (Q-21). ADR on contract ownership and OpenAPI generation (code-first from Nest, contract doc authoritative until BE-01 emits the spec).
+- Done when: frontend-engineer can generate a typed client and MSW handlers from it; backend-engineer can start BE-03 from the matrix skeleton; PR notes list every shared-type change.
+
+#### ARC-03: Security model ADRs
+- Owner: architect. Branch: `arch/adr-security-model`. Depends on: ARC-01.
+- Covers: FR-102, FR-104, FR-106, FR-601, FR-703, NFR-04. (Q-23 single-use link and resume, and Q-24 paused time, moved to ARC-01 ADR 0002 by D-08; ARC-03 applies them to token and key handling.) TCs informed: TC-005, TC-007, TC-021, TC-045, TC-047, TC-065, TC-071.
+- Deliverables: ADRs for staff token model and TOTP enrollment gate; candidate session JWT (binding, device fingerprint, refresh via heartbeat, Q-25); HMAC key lifecycle (creation time, storage, delivery, reload recovery, Q-02), canonical JSON and replay rules (Q-26); AES-256-GCM key handling; R2 key layout and presign policy for every object type (Q-19); env/secret inventory used to finalize .env.example.
+- Done when: BE-02, BE-07, BE-09, BE-10, FE-06 each have an unambiguous security spec.
+
+#### ARC-04: Worker and async integration ADR
+- Owner: architect. Branch: `arch/adr-worker-integration`. Depends on: ARC-01, ARC-03.
+- Covers: FR-403, FR-803, FR-805, NFR-01. TCs informed: TC-033, TC-074, TC-075, TC-076.
+- Deliverables: ADR on how the Python worker consumes BullMQ jobs (or alternative), how it reports results and state changes through an internal API (SessionStateService stays the only writer, Q-21, Q-22), service-to-service auth, DB access policy for the worker, worker scaffold layout, Python tooling (lint, type-check, pytest); source of AI reference solutions (Q-07). Face model is decided: InsightFace pretrained models under their non-commercial licence (D-05), so no licence check is needed.
+- Done when: BE-08 and BE-12 share one scaffold and one integration pattern.
+
+#### ARC-05: Deployment architecture and Judge0 host feasibility
+- Owner: architect. Branch: `arch/adr-deployment`. Depends on: none (needs a human-provisioned AWS x86 instance or CI runner for the spike).
+- Covers: NFR-03, NFR-04, NFR-09, FR-503. TCs informed: TC-042, TC-043, TC-044, TC-093.
+- Deliverables: Judge0 feasibility note on AWS (D-04: EC2 x86 instance type and OS image that run Judge0's sandbox, cgroup version, privileged containers; local dev on the developer's macOS machine versus a Linux runner) before BE-05; ADR for the AWS staging layout (whether web, Postgres and media storage move to AWS services or stay on Cloudflare Pages, Supabase/Neon and R2), whether the pilot gets its own stack (review A-14), Next.js middleware and CSP nonces, domain plan so the SameSite=Strict refresh cookie works across web and API origins (Q-44), secrets vault choice, managed Postgres role handling for `app_user` (Q-15).
+- Done when: BE-05 knows where its integration tests run; DEP-01 has a signed-off layout.
+
+#### QA-01A: Test matrix and manual scripts
+- Owner: qa-engineer. Branch: `qa/test-matrix`. Depends on: none (docs only). Parallel with: everything in Phase 0 and 1.
+- Covers: all 67 TCs. 
+- Deliverables: /docs/test-matrix.md (TC ID, level, planned test file, owner task, status) using the owner tasks in /docs/requirements-trace.md; /docs/manual-tests.md with exact steps for hardware or people cases (TC-036, TC-056, TC-057, TC-058, TC-059, TC-060, TC-064, TC-063 offline check, TC-034).
+- Done when: every TC ID appears once in the matrix with a level and owner; no application code touched.
+
+### Phase 1: Database track
+
+#### DB-01: Monorepo and local infrastructure
+- Owner: db-engineer. Branch: `db/step-1`. Depends on: none. Parallel with: ARC-01, QA-01A.
+- Covers: NFR-04 (secret placeholders), enabler for all. TCs: none.
+- Deliverables: pnpm workspace with apps/web, apps/api, apps/worker (Python placeholder), apps/lockdown (empty placeholder), packages/proctor-sdk, packages/shared, infra/ (docker-compose.yml, caddy/, judge0/ placeholders), prisma/ folder, .github/workflows/; each package builds. `infra/docker-compose.yml` with postgres:16 (named volume, healthcheck), redis:8.8 (healthcheck, `noeviction` policy for BullMQ; AGPLv3 option per ADR 0001), adminer. `.env.example` with DATABASE_URL, REDIS_URL and placeholders for every secret the docs imply. Root scripts `dev:infra`, `db:migrate`, `db:seed`, `db:reset`. PA-01 (pending approval): root `lint`, `typecheck`, `test` scripts, strict tsconfig base, ESLint with `no-explicit-any`, baseline CI workflow. `.gitignore` additions.
+- Done when: `pnpm install`, `pnpm -r build` pass; `pnpm dev:infra` shows all containers healthy; `psql $DATABASE_URL -c 'select 1'` works. Brief: /docs/briefs/DB-01.md.
+
+#### DB-02: Prisma schema
+- Owner: db-engineer. Branch: `db/step-2`. Depends on: DB-01, ARC-01. Gate: architect before start and at PR.
+- Covers: data model for all FRs; FR-105, FR-704 columns. TCs: none directly (DB-08 verifies).
+- Deliverables: `prisma/schema.prisma` matching /docs/database.md: 24 models, 13 enums, unique constraints, foreign keys with documented ON DELETE, indexes, snake_case mappings, native types. Only deltas approved in ARC-01's freeze list. A TODO list of DDL features Prisma cannot express, for DB-03.
+- Done when: `pnpm prisma validate` and `pnpm prisma format` pass; model, enum, index and FK counts checked against the DDL. Brief: /docs/briefs/DB-02.md.
+
+#### DB-03: Migrations
+- Owner: db-engineer. Branch: `db/step-3`. Depends on: DB-02. Gate: architect at PR.
+- Covers: FR-105 (append-only audit log), NFR-05, NFR-04. TCs: none in test-cases.md; verified in DB-08.
+- Deliverables: `init` migration (extensions first, 5 CHECK constraints, partial index on sessions(risk_band), users.updated_at trigger, identity-column decision); `audit_append_only` migration (role `app_user`, grants, REVOKE UPDATE/DELETE on audit_logs, Q-15).
+- Done when: `pnpm db:reset` applies both migrations; as `app_user`, `DELETE FROM audit_logs` fails with permission denied.
+
+#### DB-04: Seed data
+- Owner: db-engineer. Branch: `db/step-4`. Depends on: DB-03.
+- Covers: enabler; dev data for FR-201..FR-205, FR-301, FR-303, FR-801, FR-804, FR-902. TCs: none.
+- Deliverables: idempotent `prisma/seed.ts` per the prompt (1 org, 4 staff users with argon2id, 6 coding questions with 3 samples, 8 hidden tests and 3 variants each, 1 MCQ, 2 tests, 5 candidates with invitations in different states, 3 completed sessions with events, risk in each band, one completed review); guard that refuses to run the default password outside development (Q-28).
+- Done when: `pnpm db:seed` twice without errors; per-table counts printed. Note: reference solutions are unverified until BE-05 runs validation over the seed (added to BE-05 done-when).
+
+#### DB-05: Data-access helpers and org scoping
+- Owner: db-engineer. Branch: `db/step-5`. Depends on: DB-03. Gate: architect at PR. Parallel with: DB-04, DB-07.
+- Covers: NFR-04, FR-103. TCs: TC-008.
+- Deliverables: minimal NestJS module structure in apps/api if BE-01 has not run (Q-39); PrismaService; client extension enforcing org filter and throwing without org context; request-scoped OrgContext; unit tests proving org A cannot read org B (TC-008), including tables scoped through parent chain per the ARC-01 decision on Q-10.
+- Done when: tests pass and TC-008 is named in them.
+
+#### DB-06: Retention and erasure services
+- Owner: db-engineer. Branch: `db/step-6`. Depends on: DB-05. Gate: architect at PR.
+- Covers: FR-704, NFR-05, BR-13. TCs: TC-072, TC-094.
+- Deliverables: RetentionService (finds expired sessions, returns keys, nulls keys in one transaction after deletion, one audit_logs row per session), CandidateErasureService (removes personal data, keys and keystroke batches, keeps anonymized scores), storage interface injected and mocked. Scope of keys to delete follows ARC-01 (Q-11, Q-06).
+- Done when: unit tests for both services including TC-072 and TC-094.
+
+#### DB-07: Backups and restore
+- Owner: db-engineer. Branch: `db/step-7`. Depends on: DB-03. Parallel with: DB-04, DB-05.
+- Covers: NFR-03 (recoverability), BO-6. TCs: none.
+- Deliverables: `infra/scripts/backup.sh` (pg_dump custom format, gzip, upload to R2 bucket from env, prune backups older than 14 days), `infra/scripts/restore.sh`, scheduled nightly GitHub Actions workflow using repository secrets.
+- Done when: local backup then restore into a new database with matching row counts.
+
+#### DB-08: Database verification
+- Owner: db-engineer. Branch: `db/step-8`. Depends on: DB-03 (prompt order: DB-04..DB-07).
+- Covers: FR-105, NFR-05. TCs: none in test-cases.md (supports TC-002 audit, TC-072).
+- Deliverables: Jest + Testcontainers suite: migrations apply to a fresh container; every table, enum and index exists; CHECK constraints reject bad data (duration_minutes 1, window_end before window_start, risk_score 101); cascade deletes as documented; audit_logs append-only for `app_user`.
+- Done when: `pnpm test:db` passes locally and in CI. Merging DB-08 closes milestone M1.
+
+### Phase 2: core backend (backend-engineer lane)
+
+#### BE-01: API foundation
+- Owner: backend-engineer. Branch: `backend/step-1`. Depends on: DB-08.
+- Covers: NFR-01, NFR-04, NFR-09. TCs: none directly.
+- Deliverables: NestJS app with zod-validated config, pino logging with per-request trace ID, RFC 7807 exception filter, helmet, CORS limited to web origin, throttler (global, stricter on /auth and /candidate), Swagger at /api/docs (off in production), /health (Postgres, Redis), graceful shutdown, `/api/v1` prefix, Jest + Supertest + Testcontainers.
+- Done when: `pnpm --filter api test` passes; /health returns ok with infra up; OpenAPI spec generated.
+
+#### BE-02: Staff authentication
+- Owner: backend-engineer. Branch: `backend/step-2`. Depends on: BE-01, ARC-03. Parallel with: FE-02 (mocks).
+- Covers: FR-101, FR-102, FR-104. TCs: TC-001, TC-002, TC-003, TC-005.
+- Deliverables: POST /auth/login (argon2id, lockout 5 failures for 15 min, generic errors); TOTP enroll, verify, hashed recovery codes; enforce for SUPER_ADMIN and REVIEWER; 15 min access JWT; 7 day refresh cookie (httpOnly, Secure, SameSite=Strict), hashed, rotated, reuse revokes family; POST /auth/refresh, /auth/2fa/verify, /auth/logout.
+- Done when: the four TCs pass as named tests; no tokens or TOTP secrets in logs.
+
+#### BE-03: RBAC and audit logging
+- Owner: backend-engineer. Branch: `backend/step-3`. Depends on: BE-02, ARC-02.
+- Covers: FR-103, FR-105. TCs: TC-004, TC-006, TC-008.
+- Deliverables: `@Roles()`, `@Public()`, global RolesGuard deny-by-default; permission matrix in packages/shared plus a test that fails if any controller route is missing; AuditInterceptor with `@Audited(action, entityType)`; SUPER_ADMIN user management (invite, change role, deactivate).
+- Done when: TC-004, TC-006, TC-008 pass; matrix completeness test passes.
+
+#### BE-04: Question bank
+- Owner: backend-engineer. Branch: `backend/step-4`. Depends on: BE-03.
+- Covers: FR-201, FR-202, FR-203, FR-204, FR-205. TCs: TC-010, TC-011, TC-013, TC-014.
+- Deliverables: QuestionsModule CRUD, versioning with immutable published versions, test cases, variants with params schema and Mustache renderer, MCQ support (answer flow per Q-14), filters and pagination; candidate-facing serializer that never exposes hidden tests, reference solutions or variant params; POST /questions/:id/validate enqueuing a job against a stubbed execution interface.
+- Done when: the four TCs pass (TC-011 needs a candidate fetch endpoint, see Q-18).
+
+#### BE-05: Code execution with Judge0
+- Owner: backend-engineer. Branch: `backend/step-5`. Depends on: BE-04, ARC-05.
+- Covers: FR-503, FR-203 (publish gate), NFR-01. TCs: TC-042, TC-043, TC-044, TC-012.
+- Deliverables: Judge0 CE in infra/docker-compose.yml on an internal network with no egress; ExecutionService (language map, batch submit, poll with backoff, per-question limits, output normalization); validate job wired; publish requires passing validation.
+- Done when: TC-042/043/044 integration tests pass against local Judge0 (or the agreed Linux runner, R-01); TC-012 passes; validation run over all seeded questions passes (PM addition to catch bad seed data, R-11).
+
+#### BE-06: Tests, invitations and email
+- Owner: backend-engineer. Branch: `backend/step-6`. Depends on: BE-05 (real: BE-03, BE-04).
+- Covers: FR-301, FR-302, FR-303, FR-304, FR-305, FR-106 (token generation). TCs: TC-020, TC-022, TC-023, TC-024.
+- Deliverables: TestsModule (sections, fixed and random-pick rules, profile, pass score); InvitationsModule (32-byte token, SHA-256 hash stored, window, accommodations zod schema); bulk CSV with row report; BullMQ `email` queue with Resend provider behind an interface (invitation, reminder 24 h before window_end, OTP, results); expiry handling per Q-01.
+- Done when: the four TCs pass as named tests.
+
+#### BE-07: Candidate session and state machine
+- Owner: backend-engineer. Branch: `backend/step-7`. Depends on: BE-06, ARC-03. Gate: architect at PR.
+- Covers: FR-106, FR-401, FR-303, FR-305, FR-505, FR-609, FR-301 (assignment). TCs: TC-021, TC-030 (API side), TC-047, TC-007 (PM-assigned).
+- Deliverables: POST /candidate/session/start (token + email OTP 6 digits, 10 min, 5 attempts); candidate JWT; table-driven SessionStateService as the only writer of sessions.status; consent endpoint; on IN_PROGRESS: assign questions, pick variants, set deadline_at with accommodations, generate and encrypt HMAC key (per ARC-03), return once; heartbeat endpoint; repeatable job marking DISCONNECTED after 60 s.
+- Done when: TC-021, TC-030, TC-047, TC-007 pass and every allowed and forbidden transition has a unit test. Merging BE-07 closes milestone M2 for the backend lane.
+
+### Phase 3: candidate journey
+
+#### BE-09: Media storage (R2)
+- Owner: backend-engineer. Branch: `backend/step-9`. Depends on: BE-07, ARC-03. Gate: architect at PR. Parallel with: BE-10, FE-09.
+- Covers: FR-701, FR-703, FR-704 (scheduling), FR-404 (ROOM_SCAN storage). TCs: TC-070 (API side), TC-071, TC-072.
+- Deliverables: StorageService (AWS SDK v3 to R2, private buckets); POST /candidate/session/media/presign (PUT 60 s, content type and size enforced, media_chunks pending) and confirm call; staff playlist endpoint (GET signed URLs 15 min grouped by stream); presign for non-webm objects per ARC-03 (Q-19); daily BullMQ schedule for RetentionService.
+- Done when: TC-070 (API), TC-071, TC-072 pass.
+
+#### BE-10: Proctor events and keystroke ingestion
+- Owner: integrity-engineer. Branch: `backend/step-10`. Depends on: BE-07, ARC-02, ARC-03. Gate: architect at PR. Parallel with: BE-09.
+- Covers: FR-801, FR-601, FR-604, FR-608. TCs: TC-050 (API), TC-055 (API), TC-065.
+- Deliverables: POST /candidate/session/events (up to 100 events, shared zod schema, HMAC-SHA256 over canonical JSON, monotonic sequence, reject bad signature and replay); HIGH events to Redis `live:{orgId}`; state changes for FULLSCREEN_EXIT and SCREEN_SHARE_STOPPED with paused_ms and deadline handling per ARC-01 ADR 0002 (Q-24); POST /candidate/session/keystrokes with the same scheme into keystroke_batches.
+- Done when: TC-050, TC-055, TC-065 pass; no HMAC keys in logs.
+
+#### BE-11: Run, submit and grading
+- Owner: backend-engineer. Branch: `backend/step-11`. Depends on: BE-07 (and BE-05). Parallel with: BE-08, BE-10.
+- Covers: FR-502, FR-504, FR-505, FR-506, FR-205 (scoring, Q-14). TCs: TC-040, TC-041, TC-045, TC-046, TC-048, TC-014 (scoring half).
+- Deliverables: POST run (sample tests, Redis rate limit 1 per 5 s per session, RUN submission, autosave final_code); PUT draft; POST submit (hidden tests, weighted score); POST finish; scheduled auto-submit past deadline_at; on SUBMITTED enqueue grade-session then analyze-session; GRADED transition per ARC-04 (Q-22); server time only.
+- Done when: the five TCs pass as named tests.
+
+#### BE-08: Identity verification service
+- Owner: integrity-engineer. Branch: `backend/step-8`. Depends on: BE-07, BE-09, ARC-04. Parallel with: BE-11.
+- Covers: FR-403, FR-606 (FACE_MISMATCH re-check), FR-704 (embedding deletion). TCs: TC-033, TC-034 (PM-assigned, server half).
+- Deliverables: POST /candidate/session/identity (R2 keys, enqueues face-match, returns job ID) and GET status; worker scaffold (FastAPI, job consumer per ARC-04); face embedding with the model approved in ARC-04; configurable threshold; one retry then manual approval, never auto-reject; manual approval path per Q-12; embedding deletion in retention; fixture images under a permissive licence.
+- Done when: TC-033 passes with fixtures; ruff, type-check and pytest pass in apps/worker.
+
+#### BE-12: Integrity analysis worker
+- Owner: integrity-engineer. Branch: `backend/step-12`. Depends on: BE-08, BE-09, BE-10, BE-11, ARC-04. Gate: architect at PR.
+- Covers: FR-802, FR-803, FR-804, FR-805, FR-607 (server re-check). TCs: TC-061 (server side), TC-073, TC-074, TC-075, TC-076.
+- Deliverables: Silero VAD audio pass and speaker-change heuristic (source='SERVER'); keystroke timeline analytics (PASTE_BURST over 80 chars in 1 s, TYPING_ANOMALY, idle-then-complete); code normalization and winnowing fingerprints against other submissions and stored AI reference answers; risk score with org-configurable weights and bands and documented defaults (Q-09) in /docs/integrity-config.md; state change through the internal API; accommodations respected; unit tests with synthetic true and false positive data; thresholds configurable.
+- Done when: TC-061, TC-073, TC-074, TC-075, TC-076 pass; false-positive report handed to the PM. Merging BE-12 closes the backend part of M3.
+
+#### FE-09: Candidate pre-test flow
+- Owner: frontend-engineer. Branch: `frontend/step-9`. Depends on: BE-07, FE-01, FE-08. Parallel with: BE-09..BE-12.
+- Covers: FR-401, FR-402, FR-403, FR-404, FR-405, FR-406, FR-605 (start blocked), FR-106 (OTP step), NFR-06, NFR-07. TCs: TC-030, TC-031, TC-032 (PM-assigned), TC-033 (UI), TC-034, TC-035, TC-036 (PM-assigned).
+- Deliverables: stepper under /t/[token]: welcome and consent (no device access before consent), OTP, system check, identity with liveness, room scan, STRICT QR side camera, practice question, final checklist and Start; calm copy, fix-it hints, WCAG 2.1 AA.
+- Done when: Playwright tests for TC-030, TC-031, TC-032 pass; axe clean; consent-before-devices verified in network log.
+
+#### FE-10: Candidate test screen
+- Owner: frontend-engineer. Branch: `frontend/step-10`. Depends on: FE-09 (soft BE-10, BE-11). 
+- Covers: FR-501..FR-506 (UI), FR-601, FR-603, FR-608, FR-903 (candidate side). TCs: TC-040, TC-041, TC-046, TC-050, TC-051, TC-052; PM-assigned TC-045, TC-053, TC-054, TC-055, TC-062 (capture), TC-063.
+- Deliverables: question panel, Monaco editor with AI suggestions off, paste and drop disabled, output panel, navigator, server-synced timer; autosave every 10 s with indicator; Run cooldown, Submit, Finish; lock overlays (fullscreen exit, share stopped, focus lost, proctor pause); proctor message toast via the candidate channel (Q-20); warning counter; keystroke capture using the SDK signing API; MCQ answering (Q-14).
+- Done when: Playwright tests for the six TCs pass; MSW mocks replaced for merged endpoints. Merging FE-10 closes milestone M3 for the frontend lane.
+
+### Phase 2: staff web lane (frontend-engineer, runs alongside BE-01..BE-07)
+
+#### FE-01: Web app foundation
+- Owner: frontend-engineer. Branch: `frontend/step-1`. Depends on: DB-08, ARC-02.
+- Covers: NFR-04 (CSP), NFR-06. TCs: none directly.
+- Deliverables: Next.js App Router strict TS, Tailwind, shadcn/ui, light and dark theme; route groups (staff) /admin/*, (candidate) /t/[token]/*, (public); openapi-typescript + openapi-fetch client, TanStack Query, react-hook-form + zod from packages/shared, error boundary, toasts, MSW; CSP middleware with nonces (connect-src limited to API and R2 endpoint).
+- Done when: `pnpm --filter web build` passes; Lighthouse accessibility 95+ on the empty shell.
+
+#### FE-02: Staff authentication screens
+- Owner: frontend-engineer. Branch: `frontend/step-2`. Depends on: FE-01 (soft BE-02).
+- Covers: FR-101, FR-102, FR-104. TCs: TC-001, TC-002 (UI message), TC-003.
+- Deliverables: login, 2FA enrollment (QR, manual key, recovery codes download), 2FA verify, locked-account message, logout; access token in memory only; silent refresh via cookie; `useAuth`, `<RequireRole>`.
+- Done when: Playwright tests for the three TCs pass.
+
+#### FE-03: Staff shell and navigation
+- Owner: frontend-engineer. Branch: `frontend/step-3`. Depends on: FE-02.
+- Covers: FR-103, FR-804 (settings UI), FR-704 (retention setting), FR-401 (consent text version setting). TCs: none.
+- Deliverables: sidebar, top bar, breadcrumbs, role-based hiding from the shared matrix; SUPER_ADMIN settings (users, retention days, risk weights and thresholds, consent text version); one DataTable component.
+- Done when: axe clean; settings pages work against mocks or real endpoints (Q-16).
+
+#### FE-04: Question bank UI
+- Owner: frontend-engineer. Branch: `frontend/step-4`. Depends on: FE-03.
+- Covers: FR-201, FR-202, FR-203, FR-204, FR-205. TCs: TC-012 (UI), TC-010 (PM-assigned UI smoke).
+- Deliverables: list with filters and search; tabbed editor (statement with preview, languages and starter code, reference solution, test cases table, variants with schema-validated params and preview, limits); Validate with per-variant per-test results; Publish gated by passing validation; version history read-only.
+- Done when: Playwright for TC-012 passes.
+
+#### FE-05: Tests and invitations UI
+- Owner: frontend-engineer. Branch: `frontend/step-5`. Depends on: FE-04.
+- Covers: FR-301, FR-302, FR-303, FR-304, FR-305. TCs: TC-023 and TC-024 (PM-assigned UI).
+- Deliverables: test builder (sections drag reorder, fixed and random rules, duration, profile selector with plain-language explanations, pass score); invite dialog (single or CSV with row preview, window, accommodations); candidates page with status timeline following the state machine (needs endpoints from Q-18).
+- Done when: Playwright happy path for invite and CSV preview passes.
+
+### Phase 2: proctor SDK lane (proctor-sdk-engineer)
+
+#### FE-06: Proctor SDK, browser lock and event pipeline
+- Owner: proctor-sdk-engineer. Branch: `frontend/step-6`. Depends on: DB-08, ARC-02, ARC-03.
+- Covers: FR-601, FR-602, FR-603, FR-604, FR-605, FR-609, FR-610. TCs (PM-assigned, unit plus manual demo): TC-050, TC-051, TC-052, TC-053, TC-054, TC-055, TC-056, TC-064, TC-065 (client signing), TC-063 (heartbeat).
+- Deliverables: ProctorSession class with detector plug-ins; monitors (fullscreen, visibility/focus with durations, clipboard/drop/contextmenu blocking, shortcut blocking, devtools heuristic, multi-screen check with fallback, virtual camera by label, screen share with displaySurface check and ended watcher); EventQueue (5 s or 100 events, Web Crypto HMAC-SHA256, monotonic sequence, backoff, IndexedDB persistence); heartbeat every 10 s; public signing API also usable for keystroke batches (Q-26); capability flags for unsupported checks; /dev/proctor demo page.
+- Done when: Vitest passes; demo page shows each monitor; Chrome and Edge compatibility table in the PR.
+
+#### FE-07: Proctor SDK, recording pipeline
+- Owner: proctor-sdk-engineer. Branch: `frontend/step-7`. Depends on: FE-06.
+- Covers: FR-701, FR-702, NFR-08. TCs: TC-063 (manual, result documented in PR), TC-070 (client side, PM-assigned).
+- Deliverables: SCREEN, WEBCAM, AUDIO recorders (webm VP8/Opus, low bitrates), 10 s chunks, presign then PUT then confirm, IndexedDB buffer cap 200 MB with backoff and resume after reload, concurrency 2 with back-pressure, recorder health API.
+- Done when: offline test (TC-063) documented; no chunk loss on a 45 s drop.
+
+#### FE-08: Proctor SDK, in-browser AI detectors
+- Owner: proctor-sdk-engineer. Branch: `frontend/step-8`. Depends on: FE-07.
+- Covers: FR-606, FR-607, FR-305 (disabled detectors never run). TCs (PM-assigned; most are manual): TC-057, TC-058, TC-059, TC-060, TC-061 (client).
+- Deliverables: detectors in a Web Worker or OffscreenCanvas (face, gaze, COCO-SSD objects, periodic identity re-check via API, browser VAD), HIGH-event snapshots uploaded via presign with evidenceKey, configurable thresholds, self-hosted model files, calibration screen in /dev/proctor; CPU usage measured and reported.
+- Done when: threshold and debounce tests on fixtures pass; CPU figures in the PR; manual scripts from QA-01A exercised.
+
+### Phase 4: review, reporting, staging
+
+#### BE-13: Review and live proctoring API
+- Owner: backend-engineer. Branch: `backend/step-13`. Depends on: BE-12, BE-09, BE-10, BE-03, ARC-02.
+- Covers: FR-901, FR-902, FR-903, FR-904, FR-805 (queue). TCs: TC-078, TC-079, TC-080; TC-077, TC-062, TC-006, TC-008 re-verified on review endpoints.
+- Deliverables: GET /review/queue, GET /review/sessions/:id bundle, PATCH /review/flags/:id, POST /review/sessions/:id/verdict (every HIGH flag decided), appeals with signed link and different-reviewer assignment, Socket.IO /live gateway with staff JWT, Redis adapter, proctor:pause and proctor:message emitted to the candidate channel, audit on every review read.
+- Done when: TC-078, TC-079, TC-080 pass; scale-out test with two API instances.
+
+#### BE-14: Reports and integrations
+- Owner: backend-engineer. Branch: `backend/step-14`. Depends on: BE-13, BE-09.
+- Covers: FR-1001, FR-1002, FR-1003. TCs: TC-081.
+- Deliverables: server-side PDF report stored in R2 with signed link; dashboard metrics endpoint (SQL aggregates); org-configured webhooks (HMAC-signed, exponential backoff, delivery log, private-IP block deferred to BE-15A); CSV export; events session.completed and session.reviewed.
+- Done when: TC-081 passes (signed webhook delivered).
+
+#### FE-11: Review workspace
+- Owner: frontend-engineer. Branch: `frontend/step-11`. Depends on: FE-03, FE-10 (soft BE-13).
+- Covers: FR-901, FR-902, FR-608 (replay). TCs: TC-062, TC-077, TC-078.
+- Deliverables: queue with band badges and filters; synchronized screen, webcam and side-camera players on one master clock; events timeline with seek; keystroke replay 1x-16x with PASTE_BURST highlights; run diffs; test results; identity images; flag panel and verdict form gated on HIGH flags; keyboard navigation (j/k, space).
+- Done when: Playwright tests for the three TCs pass; replay reproduces final code exactly (TC-062).
+
+#### FE-12: Live proctoring
+- Owner: frontend-engineer. Branch: `frontend/step-12`. Depends on: FE-03, FE-10 (soft BE-13).
+- Covers: FR-903. TCs: TC-079.
+- Deliverables: /admin/live grid with thumbnails refreshed every 10 s, live feed, amber/red cards, side panel with message, pause, resume; Socket.IO auto-reconnect.
+- Done when: TC-079 passes end to end (overlay within 2 s).
+
+#### FE-13: Dashboard, reports and polish
+- Owner: frontend-engineer. Branch: `frontend/step-13`. Depends on: FE-09..FE-12, BE-14.
+- Covers: FR-1001, FR-1002, FR-1003 (CSV), NFR-06. TCs: TC-092.
+- Deliverables: Recharts dashboard; report download; CSV export; axe in Playwright on every page; keyboard-only and screen-reader walkthrough; end-to-end candidate journey suite on seeded staging; final MSW removal sweep.
+- Done when: TC-092 passes; no mocks remain for merged endpoints.
+
+#### DEP-01: Staging on AWS
+- Owner: TBD (proposed backend-engineer). Branch: `deploy/staging`. Depends on: ARC-05, BE-12, FE-10. Gate: architect at PR.
+- Covers: NFR-03, NFR-04, NFR-09, FR-703 (storage encryption settings), BO-5. TCs: none directly (supports TC-090, TC-093).
+- Deliverables: infra for the AWS EC2 x86 host (api, worker, redis, judge0 with its db and redis, caddy), Postgres, media buckets and web hosting as decided in ARC-05; GitHub Actions build, push to GHCR, SSH deploy with zero-downtime restart, `prisma migrate deploy`, smoke tests; Sentry; uptime checks on /health; /docs/runbook.md; seed guard verified (Q-28).
+- Done when: smoke tests green on staging; runbook steps exercised once.
+
+### Phase 5: hardening, QA, go-live
+
+#### BE-15A: Security review and fixes
+- Owner: backend-engineer (integrity-engineer for worker items). Branch: `backend/step-15a`. Depends on: BE-14. Gate: architect at PR.
+- Covers: NFR-01..NFR-09 review, NFR-04, NFR-05. TCs: TC-008 re-run; prepares TC-090, TC-091, TC-093.
+- Deliverables: /docs/security-review.md (finding and fix per item); dependency audit, CI secret scanning, input size limits, strict CORS, webhook SSRF protection, raw-SQL review, rate limits on every public route, log redaction; k6 scripts for 200 concurrent candidates (heartbeats, events, keystrokes, presign, runs) with the request mix from the real SDK cadence (R-02).
+- Done when: every finding closed or accepted in writing; k6 scripts run locally.
+
+#### BE-15B: Staging load tuning
+- Owner: backend-engineer. Branch: `backend/step-15b`. Depends on: BE-15A, DEP-01.
+- Covers: NFR-01, NFR-02. TCs: TC-090, TC-091.
+- Deliverables: tuning changes and k6 result reports on the staging VM until API p95 is under 300 ms for 200 candidates and code run p95 under 5 s for 50 concurrent runs.
+- Done when: TC-090 and TC-091 pass on staging.
+
+#### QA-01B: Automation, CI gate and scans
+- Owner: qa-engineer. Branch: `qa/automation-ci`. Depends on: BE-14, FE-13, DEP-01.
+- Covers: all TCs; NFR-04, NFR-06. TCs: fills every automatable gap; TC-092 re-run; TC-093 (PM-assigned, ZAP baseline on staging).
+- Deliverables: test-matrix statuses from real runs; missing P1 then P2 then P3 automated tests, each named with its TC ID; CI job that fails on any P1 failure and prints coverage per module; ZAP baseline result.
+- Done when: matrix shows a level, file and status for all 67 TCs; all 48 P1 TCs pass or have a signed manual result.
+
+#### QA-02: Red team of anti-cheating controls
+- Owner: qa-engineer. Branch: `qa/red-team`. Depends on: DEP-01, BE-15A, FE-13.
+- Covers: FR-601..FR-610, FR-801..FR-805. TCs: TC-036, TC-053, TC-054, TC-064, TC-065 re-attempted adversarially.
+- Deliverables: /docs/red-team-report.md (method, detected, event, proposed fix) and an issue per undetected method; includes forged batches, key extraction from the browser, SDK tampering, blocked uploads, clock edits.
+- Done when: every attempt recorded; architect has triaged undetected methods.
+
+#### DEP-02: Production readiness review
+- Owner: TBD (proposed qa-engineer with architect review). Branch: `deploy/go-live-checklist`. Depends on: BE-15B, QA-01B, QA-02, FE-13.
+- Covers: NFR-01..NFR-09, BRD section 7 and 10, BO-5, BO-6. TCs: none new.
+- Deliverables: /docs/go-live-checklist.md covering free-tier limits against 3-month usage, DPAs per provider, consent sign-off, retention verified, backup restore verified, load and security results, accessibility audit, incident contacts, and the list of human decisions. No production deploy.
+- Done when: checklist delivered to the human.
+
+#### FE-14: Lockdown desktop client (later phase, out of scope for this build)
+- Owner: TBD. Branch: `frontend/step-14`. Depends on: a later-phase go-ahead, new ADR on attestation, BE-07, FE-10. Not scheduled in this build (D-13, 2026-10-01).
+- Covers: FR-1101, FR-1102, FR-1103 (client half; the server challenge endpoint has no backend step), BR-11. TCs: none exist.
+- Deliverables per frontend.md Step 14 and /docs/lockdown.md with honest limitations.
+- Done when: not in this build. Q-41 closed by D-13.
+
+## 10. Change control
+
+- Scope beyond the docs goes to "Change requests" in /docs/status.md and waits for a human.
+- Contract changes (schema, packages/shared, OpenAPI) require an architect ADR and a note in the PR description.
+- Schema is frozen after ARC-01 and DB-03; a later schema change needs a new ADR and a forward-only migration.
