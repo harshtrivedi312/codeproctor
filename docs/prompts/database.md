@@ -14,7 +14,7 @@ Run these 8 prompts in order in Claude Code, one per step, and check each result
 Project: CodeProctor, a proctored coding assessment platform for hiring.
 Source of truth: /docs/brd.md, /docs/fsd.md, /docs/architecture.md, /docs/database.md, /docs/test-cases.md. Read the relevant doc before changing code. If code and docs disagree, stop and ask.
 
-Stack: pnpm monorepo. apps/web (Next.js App Router, TypeScript, Tailwind, shadcn/ui), apps/api (NestJS, Prisma, PostgreSQL 16, Redis + BullMQ, Socket.IO), apps/worker (Python 3.12, FastAPI), packages/proctor-sdk, packages/shared (types + zod schemas). Judge0 CE for code execution. Cloudflare R2 for media. Docker Compose for local and staging.
+Stack: pnpm monorepo. apps/web (Next.js App Router, TypeScript, Tailwind, shadcn/ui), apps/api (NestJS, Prisma, PostgreSQL 16, Redis + BullMQ, Socket.IO), apps/worker (Python 3.12, FastAPI), packages/proctor-sdk, packages/shared (types + zod schemas). Judge0 CE for code execution. Object storage behind one S3-compatible interface: staging uses Cloudflare R2 with synthetic data only; pilot and production use AWS S3; only configuration differs between environments. Docker Compose for local and staging.
 
 Rules:
 - TypeScript strict mode; no `any`.
@@ -38,11 +38,11 @@ Verify: `pnpm dev:infra` starts all containers healthy; `psql $DATABASE_URL -c '
 ## Step 2 — Prisma schema
 
 ```text
-Read /docs/database.md fully. Create prisma/schema.prisma that matches the reference DDL exactly: all 24 tables, all enums, all unique constraints, foreign keys with the same ON DELETE behavior, and all indexes.
+Read /docs/database.md fully, and /docs/adr/0008-schema-freeze-list.md. Create prisma/schema.prisma that matches the reference DDL exactly: all 31 tables, all 20 enums, all unique constraints (including the composite (id, org_id) ones), foreign keys with the same ON DELETE behavior (22 CASCADE, 1 SET NULL, 3 composite), and all indexes.
 Map names to snake_case with @@map and @map; use camelCase in the Prisma client.
-Use @db.Uuid, @db.Citext, @db.Inet, @db.Timestamptz(6), and Decimal with the same precision as the DDL.
-For the circular questions.current_version_id relation, model it as an optional relation with a named relation.
-Do not invent columns. List any DDL feature Prisma cannot express (CHECK constraints, partial indexes, extensions) in a TODO list for Step 3.
+Use @db.Uuid, @db.Citext, @db.Inet, @db.Timestamptz(6), Bytes for bytea, enum lists for pause_reason[], and Decimal with the same precision as the DDL.
+For the circular relations questions.current_version_id and organizations.current_consent_text_id, model each as an optional relation with a named relation.
+Do not invent columns. Tick every line of the freeze list. List any DDL feature Prisma cannot express (CHECK constraints, partial indexes, extensions, identity columns) in a TODO list for Step 3.
 Verify: `pnpm prisma validate` and `pnpm prisma format` pass.
 ```
 
@@ -50,21 +50,22 @@ Verify: `pnpm prisma validate` and `pnpm prisma format` pass.
 
 ```text
 Generate the initial migration with `prisma migrate dev --create-only --name init`.
-Then edit the generated SQL to add everything from your Step 2 TODO list: the pgcrypto and citext extensions (at the top), all CHECK constraints from /docs/database.md, the partial index on sessions(risk_band), and a trigger that sets users.updated_at on update.
-Create a second migration `audit_append_only` that creates a database role `app_user`, grants it SELECT/INSERT/UPDATE/DELETE on all tables, then REVOKEs UPDATE and DELETE on audit_logs from app_user.
-Verify: `pnpm db:reset` applies both migrations cleanly; as app_user, `DELETE FROM audit_logs` fails with permission denied.
+Then edit the generated SQL to add everything from your Step 2 TODO list: the pgcrypto and citext extensions (at the top), all 12 CHECK constraints from /docs/database.md, the partial indexes on sessions(risk_band) and sessions(retention_anchor_at), the GENERATED ALWAYS AS IDENTITY columns, and a trigger that sets users.updated_at on update.
+The database roles are created outside the migrations (ADR 0006): write infra/sql/roles.sql that creates `app_user` (password from env), and run it from the local compose Postgres init. Create a second migration `audit_append_only` that grants app_user SELECT/INSERT/UPDATE/DELETE on all tables and USAGE/SELECT on all sequences, sets ALTER DEFAULT PRIVILEGES for future tables, then REVOKEs UPDATE, DELETE and TRUNCATE on audit_logs from app_user. It must fail with a clear message if app_user does not exist. Migrations run with MIGRATION_DATABASE_URL (owner role); the app uses DATABASE_URL (app_user).
+Verify: `pnpm db:reset` applies both migrations cleanly; as app_user, `DELETE FROM audit_logs` and `TRUNCATE audit_logs` fail with permission denied.
 ```
 
 ## Step 4 — Seed data
 
 ```text
 Create prisma/seed.ts that inserts realistic development data:
-- 1 organization "Demo Corp" with retention_days 90.
-- 4 staff users, one per role, password "ChangeMe!2026" hashed with argon2id; print their emails at the end.
-- 6 coding questions (2 EASY, 3 MEDIUM, 1 HARD) with original problem statements (do not copy LeetCode), Python/JavaScript/Java starter code, a reference solution per language, 3 sample and 8 hidden test cases each, and 3 variants each with params.
-- 1 MCQ question.
-- 2 tests: "Backend Engineer Screen" (STANDARD, 60 min, 2 sections) and "Senior Engineer Screen" (STRICT, 90 min, random pick rules).
-- 5 candidates with invitations in different states, and 3 completed sessions with submissions, proctor events of mixed severity, a risk score in each band, and one completed review.
+- 1 organization "Demo Corp" with retention_days 90, and one consent text marked as a placeholder (body starts with "PLACEHOLDER - NOT APPROVED BY LEGAL", legal_approved_at NULL) set as the organization's current consent text.
+- 4 staff users, one per role, password "ChangeMe!2026" hashed with argon2id; print their emails at the end. Refuse to run with this password outside development (Q-28).
+- 6 coding questions (2 EASY, 3 MEDIUM, 1 HARD) with original problem statements (do not copy LeetCode), Python/JavaScript/Java starter code, a reference solution per language, 3 sample and 8 hidden test cases each, and 3 variants each with params. Where a variant's params change inputs or outputs, add its variant_test_cases rows (ADR 0007); statement and reference solution may use Mustache placeholders.
+- For each coding question, 6 AI reference solution rows (2 assistants x Python, JavaScript, Java), clearly labelled as synthetic seed data.
+- 1 MCQ question and 1 short-answer question (answer_spec with an answer and accepted variants).
+- 2 tests: "Backend Engineer Screen" (STANDARD, 60 min, 2 sections, one with a 20-minute limit) and "Senior Engineer Screen" (STRICT, 90 min, random pick rules). No LOCKDOWN profile exists.
+- 5 candidates with invitations and sessions in different states (INVITED, CONSENTED, EXPIRED, DECLINED, COMPLETED); every session row carries org_id. 3 completed sessions with signed consents (pdf_key NULL in seed), session_sections, submissions, proctor events of mixed severity with their event batches, a risk score in each band, and one completed review. Every refresh token has a family_id.
 The seed must be idempotent (safe to run twice).
 Verify: `pnpm db:seed` twice without errors; counts per table printed.
 ```
@@ -73,6 +74,7 @@ Verify: `pnpm db:seed` twice without errors; counts per table printed.
 
 ```text
 In apps/api create a PrismaService (NestJS) and a Prisma client extension that automatically adds `org_id` filtering for tables that have it, and throws if a query on an org-scoped model runs without an org context.
+For every model without org_id, declare a scope path to its nearest ancestor that has one (for example ProctorEvent -> session.orgId, TestCase -> questionVersion.question.orgId) and let the extension add that relation filter (ADR 0006). Add a test that fails if any model has neither org_id nor a scope path.
 Add a request-scoped OrgContext populated from the authenticated user.
 Write unit tests proving that a user from org A cannot read org B rows through any repository method (reference TC-008).
 Verify: tests pass.
@@ -82,16 +84,16 @@ Verify: tests pass.
 
 ```text
 Read FR-704 and NFR-05 in /docs/fsd.md and Data rules in /docs/database.md.
-Implement a RetentionService in apps/api that finds sessions older than their organization's retention_days, returns the R2 object keys to delete from media_chunks and identity_checks, nulls those keys in one transaction after deletion succeeds, and writes one audit_logs row per session.
-Implement CandidateErasureService for deletion on request: removes candidate personal data, media keys and keystroke batches, keeping anonymized scores for statistics.
-Do not call R2 here; take a storage interface as a dependency so it can be mocked.
-Verify: unit tests for both services, including TC-072 and TC-094.
+Implement a RetentionService in apps/api that follows the retention rules in Data rules (ADR 0004): it finds sessions whose retention_anchor_at + organization retention_days has passed (a NULL anchor means hold: never eligible), returns the object storage keys to delete (media_chunks, identity_checks ID and selfie, proctor_events evidence, sessions report), and after deletion succeeds nulls those keys (and sets media_chunks.deleted_at) and deletes keystroke_batches in one transaction, writing one audit_logs row per session. The consent record and its signed PDF are kept.
+Implement CandidateErasureService for deletion on request, following Data rules (D-19): the request sets candidates.erasure_requested_at; while any of the candidate's sessions has a review or appeal open and the org setting erasure.holdWhileReviewOrAppealOpen is true (default), erasure waits and the candidate is told; otherwise it deletes all objects (including consent PDFs), deletes media, identity, event and keystroke rows, blanks code and answers, removes free text about the candidate, and anonymizes the candidate, keeping only anonymized scores, risk and verdicts.
+Do not call object storage here; take a storage interface as a dependency so it can be mocked.
+Verify: unit tests for both services, including TC-072 and TC-094 (both the immediate case and the open-appeal hold).
 ```
 
 ## Step 7 — Backups and restore
 
 ```text
-Create infra/scripts/backup.sh that runs pg_dump in custom format, gzips it, uploads it to an R2 bucket named from env, and deletes backups older than 14 days. Create infra/scripts/restore.sh that restores a named backup into a fresh database.
+Create infra/scripts/backup.sh that runs pg_dump in custom format, gzips it, uploads it through the S3-compatible storage interface to a backup bucket named from env (Cloudflare R2 on staging; AWS S3 on pilot and production, so candidate data stays in AWS), and deletes backups older than 14 days. Create infra/scripts/restore.sh that restores a named backup into a fresh database.
 Add a GitHub Actions workflow (scheduled nightly) that runs the backup against staging using repository secrets.
 Verify: run backup then restore locally into a new database and compare row counts.
 ```
