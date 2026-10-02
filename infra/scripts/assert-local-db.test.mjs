@@ -1,109 +1,97 @@
-// Tests for the localhost guard (ADR 0009 section 4.4, review S4). Run with `pnpm test`.
-// The consent variable is only ever passed in memory to findProblems; no test puts it
-// into a real process environment.
+// Runs assert-local-db.mjs the way the root scripts do: working directory at the repository
+// root, relative path. Fail-closed check (review SF3): the guard must always run, so a
+// non-local URL exits 1 and a local one prints its success line. ADR 0009 section 4.4, NFR-04.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
-import { CONSENT_VAR, findProblems } from './assert-local-db.mjs';
+import { REPO_ROOT, createSandbox } from './test-support.mjs';
 
-const LOCAL = 'postgresql://owner:secret-pw@127.0.0.1:5432/codeproctor';
+const CLOSED = 'postgresql://x:y@127.0.0.1:1/none';
 
-function problemsFor(env, dotenv) {
-  return findProblems({ env, dotenv });
+function runGuard(extraEnv, args = []) {
+  const sandbox = createSandbox();
+  try {
+    const result = spawnSync(process.execPath, ['infra/scripts/assert-local-db.mjs', ...args], {
+      cwd: REPO_ROOT,
+      env: sandbox.env(extraEnv),
+      encoding: 'utf8',
+      input: '',
+    });
+    return { ...result, output: `${result.stdout}${result.stderr}` };
+  } finally {
+    sandbox.remove();
+  }
 }
 
-test('accepts localhost, 127.0.0.1 and ::1 for both URLs', () => {
-  for (const host of ['localhost', '127.0.0.1', '[::1]', 'LOCALHOST']) {
-    const url = `postgresql://u:p@${host}:5432/db`;
-    assert.deepEqual(problemsFor({ MIGRATION_DATABASE_URL: url, DATABASE_URL: url }), []);
-  }
+test('ADR-0009 4.4: runs from the repo root by relative path and accepts local URLs', () => {
+  const result = runGuard({ MIGRATION_DATABASE_URL: CLOSED, DATABASE_URL: CLOSED });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /database URLs point at this machine/);
 });
 
-test('DATABASE_URL may be unset, MIGRATION_DATABASE_URL may not', () => {
-  assert.deepEqual(problemsFor({ MIGRATION_DATABASE_URL: LOCAL }), []);
-  assert.equal(problemsFor({ DATABASE_URL: LOCAL }).length, 1);
-});
-
-test('refuses a non-local host and names only the host', () => {
-  const url = 'postgresql://owner:secret-pw@db.example.com:5432/codeproctor';
-  const [problem, ...rest] = problemsFor({ MIGRATION_DATABASE_URL: url });
-  assert.equal(rest.length, 0);
-  assert.match(problem ?? '', /db\.example\.com/);
-  assert.doesNotMatch(problem ?? '', /secret-pw|owner|codeproctor/);
-});
-
-test('applies the same check to DATABASE_URL', () => {
-  const problems = problemsFor({
-    MIGRATION_DATABASE_URL: LOCAL,
-    DATABASE_URL: 'postgresql://app_user:secret-pw@rds.example.com:5432/codeproctor',
-  });
-  assert.equal(problems.length, 1);
-  assert.match(problems[0] ?? '', /^DATABASE_URL points at host "rds\.example\.com"/);
-});
-
-test('refuses an empty or missing MIGRATION_DATABASE_URL', () => {
-  assert.equal(problemsFor({ MIGRATION_DATABASE_URL: '' }).length, 1);
-  assert.equal(problemsFor({ MIGRATION_DATABASE_URL: '   ' }).length, 1);
-  assert.equal(problemsFor({}).length, 1);
-});
-
-test('refuses host and hostaddr query parameters, in any letter case', () => {
-  for (const query of ['host=remote.example.com', 'hostaddr=10.0.0.5', 'HOST=remote.example.com']) {
-    const url = `postgresql://u:secret-pw@localhost:5432/db?${query}`;
-    const [problem] = problemsFor({ MIGRATION_DATABASE_URL: url });
-    assert.match(problem ?? '', /host or hostaddr query parameter/);
-    assert.doesNotMatch(problem ?? '', /secret-pw|remote\.example\.com|10\.0\.0\.5/);
-  }
-});
-
-test('refuses look-alike hosts and unparseable URLs without echoing them', () => {
-  for (const url of [
-    'postgresql://localhost:x@evil.example.com:5432/db',
-    'postgresql://u:p@localhost.evil.example.com/db',
-    'postgresql://u:p@localhost.:5432/db',
-    'postgresql://u:p@127.1:5432/db',
-    'postgresql://u:p@2130706433:5432/db',
-    'postgresql:///db',
-    'postgresql://u:secret-pw@localhost:5432,evil.example.com:5432/db',
-    'secret-pw is not a url',
-  ]) {
-    const problems = problemsFor({ MIGRATION_DATABASE_URL: url });
-    assert.equal(problems.length, 1, url);
-    assert.doesNotMatch(problems[0] ?? '', /secret-pw/);
-  }
-});
-
-test('refuses Prisma consent variable in the environment or in .env', () => {
-  const ok = { MIGRATION_DATABASE_URL: LOCAL };
-  assert.equal(problemsFor({ ...ok, [CONSENT_VAR]: 'x' }).length, 1);
-  assert.equal(problemsFor({ ...ok, [CONSENT_VAR]: '' }).length, 1);
-  assert.equal(problemsFor(ok, { [CONSENT_VAR]: 'x' }).length, 1);
-  assert.deepEqual(problemsFor(ok, { OTHER: 'x' }), []);
-});
-
-test('command line: refuses a non-local URL with exit 1 and prints only the host', () => {
-  const script = fileURLToPath(new URL('./assert-local-db.mjs', import.meta.url));
-  const run = (env) =>
-    spawnSync(process.execPath, [script], {
-      env: { PATH: process.env.PATH ?? '', ...env },
-      encoding: 'utf8',
-    });
-
-  const refused = run({
+test('NFR-04: refuses a non-local URL with exit 1, printing only the host', () => {
+  const result = runGuard({
     MIGRATION_DATABASE_URL: 'postgresql://owner:secret-pw@db.example.com:5432/codeproctor',
     DATABASE_URL: 'postgresql://app_user:secret-pw@db.example.com:5432/codeproctor',
   });
-  assert.equal(refused.status, 1);
-  assert.match(refused.stderr, /db\.example\.com/);
-  assert.doesNotMatch(refused.stderr + refused.stdout, /secret-pw|owner|app_user/);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /db\.example\.com/);
+  assert.doesNotMatch(result.output, /secret-pw|owner|app_user/);
+});
 
-  const empty = run({ MIGRATION_DATABASE_URL: '', DATABASE_URL: '' });
-  assert.equal(empty.status, 1);
+test('ADR-0009 4.4: refuses empty URLs with exit 1', () => {
+  assert.equal(runGuard({ MIGRATION_DATABASE_URL: '', DATABASE_URL: '' }).status, 1);
+});
 
-  const accepted = run({
-    MIGRATION_DATABASE_URL: 'postgresql://x:y@127.0.0.1:1/none',
-    DATABASE_URL: 'postgresql://x:y@127.0.0.1:1/none',
+test('NFR-04: refuses a libpq redirect variable in the environment', () => {
+  const result = runGuard({
+    MIGRATION_DATABASE_URL: CLOSED,
+    DATABASE_URL: CLOSED,
+    PGSERVICE: 'staging',
   });
-  assert.equal(accepted.status, 0);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /PGSERVICE is set/);
+});
+
+test('ADR-0009 4.4: refuses an unknown argument, so a typo cannot skip a check', () => {
+  const result = runGuard({ MIGRATION_DATABASE_URL: CLOSED, DATABASE_URL: CLOSED }, [
+    '--compose-prot',
+  ]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /unknown argument/);
+});
+
+test('ADR-0009 4.4 (D-37): --compose-port refuses when Compose is not running', () => {
+  const result = runGuard(
+    { MIGRATION_DATABASE_URL: CLOSED, DATABASE_URL: CLOSED, FAKE_COMPOSE_FAIL: '1' },
+    ['--compose-port'],
+  );
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /did not report a port/);
+});
+
+test('ADR-0009 4.4 (D-37): --compose-port passes only when the URL port is the Compose port', () => {
+  const ok = runGuard(
+    {
+      MIGRATION_DATABASE_URL: CLOSED,
+      DATABASE_URL: CLOSED,
+      FAKE_COMPOSE_PORT_OUTPUT: '127.0.0.1:1',
+    },
+    ['--compose-port'],
+  );
+  assert.equal(ok.status, 0);
+
+  const mismatch = runGuard(
+    {
+      MIGRATION_DATABASE_URL: CLOSED,
+      DATABASE_URL: CLOSED,
+      FAKE_COMPOSE_PORT_OUTPUT: '127.0.0.1:5432',
+    },
+    ['--compose-port'],
+  );
+  assert.equal(mismatch.status, 1);
+  assert.match(
+    mismatch.stderr,
+    /uses port 1, but the local Compose postgres is published on port 5432/,
+  );
 });

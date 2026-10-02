@@ -59,7 +59,7 @@ jobs:
 
       - name: Check Prisma's AI-consent variable appears only where ADR 0009 allows
         run: |
-          if git grep -n -e 'PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION' -- . ':!docs' ':!infra/scripts/db-reset' ':!infra/scripts/assert-local-db.mjs' ':!prisma.config.ts' ':!.github/workflows/ci.yml'; then
+          if git grep -n -e 'PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION' -- . ':!docs' ':!infra/scripts/db-reset' ':!infra/scripts/local-db-guard.mjs' ':!prisma.config.ts' ':!.github/workflows/ci.yml'; then
             echo "Prisma's consent variable must not appear here (ADR 0009 section 4.4)." >&2
             exit 1
           fi
