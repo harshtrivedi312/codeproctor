@@ -1,6 +1,6 @@
-# Follow-ups
+# Follow-ups: Database track
 
-Should-fix items and nits from code reviews. Under the session rules, only blockers stop a merge; everything else is recorded here. Each session appends under its own track, and the architecture hub triages items owned by other tracks.
+Should-fix items and nits from Database-track code reviews. Under the session rules, only blockers stop a merge; everything else is recorded here. Each track keeps its own file in `docs/followups/` (database, frontend, backend, proctor-sdk, integrity, qa, architecture). The **Owner** column names who is expected to act, which may be another track.
 
 Columns:
 - **Type:** should-fix or nit.
@@ -8,7 +8,7 @@ Columns:
 - **Target:** the task where it gets done.
 - **Status:** open or done (give the PR number when done).
 
-## Database track
+## Items
 
 | ID | Source | Type | Item | Owner | Target | Status |
 | --- | --- | --- | --- | --- | --- | --- |
