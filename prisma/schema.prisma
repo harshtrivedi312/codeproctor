@@ -220,13 +220,16 @@ model Organization {
   currentConsentTextId String?  @map("current_consent_text_id") @db.Uuid
   createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  users       User[]
-  auditLogs   AuditLog[]
-  questions   Question[]
-  tests       Test[]
-  candidates  Candidate[]
-  invitations Invitation[]
-  sessions    Session[]
+  currentConsentText ConsentText?      @relation("OrganizationCurrentConsentText", fields: [currentConsentTextId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_current_consent_text")
+  consentTexts       ConsentText[]     @relation("ConsentTextOrganization")
+  users              User[]
+  auditLogs          AuditLog[]
+  questions          Question[]
+  tests              Test[]
+  candidates         Candidate[]
+  invitations        Invitation[]
+  sessions           Session[]
+  webhookEndpoints   WebhookEndpoint[]
 
   @@map("organizations")
 }
@@ -257,6 +260,12 @@ model User {
   createdInvitations            Invitation[]
   collectedAiReferenceSolutions AiReferenceSolution[]
   scoredSessionQuestions        SessionQuestion[]
+  createdConsentTexts           ConsentText[]
+  reviewedIdentityChecks        IdentityCheck[]
+  sessionReviews                SessionReview[]
+  flagDecisions                 FlagDecision[]
+  assignedAppeals               Appeal[]
+  createdWebhookEndpoints       WebhookEndpoint[]
 
   @@index([orgId])
   @@map("users")
@@ -544,10 +553,18 @@ model Session {
   reportGeneratedAt DateTime?     @map("report_generated_at") @db.Timestamptz(6)
   createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  org        Organization      @relation(fields: [orgId], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  invitation Invitation        @relation(fields: [invitationId, orgId], references: [id, orgId], onDelete: NoAction, onUpdate: NoAction)
-  sections   SessionSection[]
-  questions  SessionQuestion[]
+  org                 Organization        @relation(fields: [orgId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  invitation          Invitation          @relation(fields: [invitationId, orgId], references: [id, orgId], onDelete: NoAction, onUpdate: NoAction)
+  sections            SessionSection[]
+  questions           SessionQuestion[]
+  consent             Consent?
+  identityChecks      IdentityCheck[]
+  mediaChunks         MediaChunk[]
+  proctorEventBatches ProctorEventBatch[]
+  proctorEvents       ProctorEvent[]
+  keystrokeBatches    KeystrokeBatch[]
+  review              SessionReview?
+  webhookDeliveries   WebhookDelivery[]
 
   @@index([status])
   @@index([orgId, status])
@@ -588,12 +605,13 @@ model SessionQuestion {
   finalLanguage     String?         @map("final_language")
   answer            Json?
 
-  session         Session          @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  testQuestion    TestQuestion     @relation(fields: [testQuestionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  questionVersion QuestionVersion  @relation(fields: [questionVersionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  variant         QuestionVariant? @relation(fields: [variantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  scoredBy        User?            @relation(fields: [scoredById], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  submissions     Submission[]
+  session          Session          @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  testQuestion     TestQuestion     @relation(fields: [testQuestionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  questionVersion  QuestionVersion  @relation(fields: [questionVersionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  variant          QuestionVariant? @relation(fields: [variantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  scoredBy         User?            @relation(fields: [scoredById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  submissions      Submission[]
+  keystrokeBatches KeystrokeBatch[]
 
   @@index([sessionId])
   @@map("session_questions")
@@ -615,4 +633,226 @@ model Submission {
 
   @@index([sessionQuestionId, createdAt])
   @@map("submissions")
+}
+
+// ---------- Proctoring ----------
+
+model ConsentText {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId           String    @map("org_id") @db.Uuid
+  version         String
+  bodyMd          String    @map("body_md")
+  legalApprovedAt DateTime? @map("legal_approved_at") @db.Timestamptz(6)
+  legalApprovedBy String?   @map("legal_approved_by")
+  createdById     String?   @map("created_by") @db.Uuid
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  org                     Organization   @relation("ConsentTextOrganization", fields: [orgId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  createdBy               User?          @relation(fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  currentForOrganizations Organization[] @relation("OrganizationCurrentConsentText")
+  consents                Consent[]
+
+  @@unique([orgId, version])
+  @@map("consent_texts")
+}
+
+model Consent {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId      String    @unique @map("session_id") @db.Uuid
+  consentTextId  String    @map("consent_text_id") @db.Uuid
+  signedName     String?   @map("signed_name")
+  signedAt       DateTime? @map("signed_at") @db.Timestamptz(6)
+  declinedAt     DateTime? @map("declined_at") @db.Timestamptz(6)
+  ip             String?   @db.Inet
+  userAgent      String?   @map("user_agent")
+  pdfKey         String?   @map("pdf_key")
+  pdfGeneratedAt DateTime? @map("pdf_generated_at") @db.Timestamptz(6)
+  copyEmailedAt  DateTime? @map("copy_emailed_at") @db.Timestamptz(6)
+
+  session     Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  consentText ConsentText @relation(fields: [consentTextId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("consents")
+}
+
+model IdentityCheck {
+  id             String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId      String                  @map("session_id") @db.Uuid
+  attempt        Int                     @default(1) @db.SmallInt
+  idImageKey     String?                 @map("id_image_key")
+  selfieKey      String?                 @map("selfie_key")
+  faceMatchScore Decimal?                @map("face_match_score") @db.Decimal(5, 4)
+  modelId        String?                 @map("model_id")
+  threshold      Decimal?                @db.Decimal(5, 4)
+  livenessPassed Boolean?                @map("liveness_passed")
+  status         IdentityCheckStatus     @default(PENDING)
+  reviewReason   IdentityReviewReason?   @map("review_reason")
+  manualDecision IdentityManualDecision? @map("manual_decision")
+  reviewedById   String?                 @map("reviewed_by") @db.Uuid
+  reviewedAt     DateTime?               @map("reviewed_at") @db.Timestamptz(6)
+  reviewNote     String?                 @map("review_note")
+  createdAt      DateTime                @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  session    Session @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  reviewedBy User?   @relation(fields: [reviewedById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([sessionId, attempt])
+  @@map("identity_checks")
+}
+
+model MediaChunk {
+  id         BigInt      @id @default(autoincrement())
+  sessionId  String      @map("session_id") @db.Uuid
+  stream     MediaStream
+  segment    Int         @default(0)
+  seq        Int
+  objectKey  String?     @map("object_key")
+  startedAt  DateTime    @map("started_at") @db.Timestamptz(6)
+  durationMs Int         @map("duration_ms")
+  sizeBytes  BigInt?     @map("size_bytes")
+  uploadedAt DateTime?   @map("uploaded_at") @db.Timestamptz(6)
+  deletedAt  DateTime?   @map("deleted_at") @db.Timestamptz(6)
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([sessionId, stream, seq])
+  @@map("media_chunks")
+}
+
+model ProctorEventBatch {
+  sessionId  String   @map("session_id") @db.Uuid
+  seq        Int
+  signature  Bytes
+  eventCount Int      @map("event_count") @db.SmallInt
+  receivedAt DateTime @default(now()) @map("received_at") @db.Timestamptz(6)
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([sessionId, seq])
+  @@map("proctor_event_batches")
+}
+
+model ProctorEvent {
+  id          BigInt      @id @default(autoincrement())
+  sessionId   String      @map("session_id") @db.Uuid
+  batchSeq    Int?        @map("batch_seq")
+  type        EventType
+  severity    Severity
+  source      EventSource @default(CLIENT)
+  occurredAt  DateTime    @map("occurred_at") @db.Timestamptz(6)
+  durationMs  Int?        @map("duration_ms")
+  confidence  Decimal?    @db.Decimal(5, 4)
+  payload     Json        @default("{}")
+  evidenceKey String?     @map("evidence_key")
+  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  session      Session       @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  flagDecision FlagDecision?
+
+  @@index([sessionId, occurredAt])
+  @@index([sessionId, severity])
+  @@map("proctor_events")
+}
+
+model KeystrokeBatch {
+  id                BigInt   @id @default(autoincrement())
+  sessionId         String   @map("session_id") @db.Uuid
+  sessionQuestionId String?  @map("session_question_id") @db.Uuid
+  seq               Int
+  signature         Bytes
+  startedAt         DateTime @map("started_at") @db.Timestamptz(6)
+  events            Json
+
+  session         Session          @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  sessionQuestion SessionQuestion? @relation(fields: [sessionQuestionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([sessionId, seq])
+  @@map("keystroke_batches")
+}
+
+// ---------- Review ----------
+
+model SessionReview {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId   String    @unique @map("session_id") @db.Uuid
+  reviewerId  String    @map("reviewer_id") @db.Uuid
+  verdict     Verdict?
+  notes       String?
+  startedAt   DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  completedAt DateTime? @map("completed_at") @db.Timestamptz(6)
+
+  session  Session @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  reviewer User    @relation(fields: [reviewerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  appeal   Appeal?
+
+  @@index([reviewerId])
+  @@map("session_reviews")
+}
+
+model FlagDecision {
+  id         String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId    BigInt            @unique @map("event_id")
+  reviewerId String            @map("reviewer_id") @db.Uuid
+  decision   FlagDecisionValue
+  note       String?
+  decidedAt  DateTime          @default(now()) @map("decided_at") @db.Timestamptz(6)
+
+  event    ProctorEvent @relation(fields: [eventId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  reviewer User         @relation(fields: [reviewerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("flag_decisions")
+}
+
+model Appeal {
+  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionReviewId String       @unique @map("session_review_id") @db.Uuid
+  reason          String
+  status          AppealStatus @default(OPEN)
+  newVerdict      Verdict?     @map("new_verdict")
+  assignedToId    String?      @map("assigned_to") @db.Uuid
+  resolutionNote  String?      @map("resolution_note")
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  resolvedAt      DateTime?    @map("resolved_at") @db.Timestamptz(6)
+
+  sessionReview SessionReview @relation(fields: [sessionReviewId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  assignedTo    User?         @relation(fields: [assignedToId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([assignedToId])
+  @@map("appeals")
+}
+
+// ---------- Integrations ----------
+
+model WebhookEndpoint {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId       String   @map("org_id") @db.Uuid
+  url         String
+  events      String[]
+  secretEnc   String   @map("secret_enc")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdById String?  @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  org        Organization      @relation(fields: [orgId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  createdBy  User?             @relation(fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  deliveries WebhookDelivery[]
+
+  @@map("webhook_endpoints")
+}
+
+model WebhookDelivery {
+  id         BigInt   @id @default(autoincrement())
+  endpointId String   @map("endpoint_id") @db.Uuid
+  event      String
+  sessionId  String?  @map("session_id") @db.Uuid
+  attempt    Int
+  statusCode Int?     @map("status_code")
+  error      String?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  endpoint WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  session  Session?        @relation(fields: [sessionId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@index([endpointId, createdAt(sort: Desc)])
+  @@map("webhook_deliveries")
 }
