@@ -95,7 +95,7 @@ sequenceDiagram
 codeproctor/
   apps/
     web/            Next.js (candidate + staff)
-    api/            NestJS API
+    api/            NestJS API; src/generated/prisma holds the generated Prisma client (git-ignored)
     worker/         Python analysis worker
     lockdown/       Electron client (Phase 3)
   packages/
@@ -105,10 +105,29 @@ codeproctor/
     docker-compose.yml
     caddy/
     judge0/
+    scripts/        Local-only database guard, db-reset and app_user password scripts (ADR 0009);
+                    backup and restore (DB-07)
   prisma/
     schema.prisma
     migrations/
     seed.ts
   docs/             BRD, FSD, architecture, test cases
   .github/workflows/
+  prisma.config.ts      Prisma CLI config: schema, migrations, seed, owner-role URL (ADR 0009)
+  tsconfig.base.json    Strict compiler options every package extends
+  tsconfig.json         Root type-check for prisma.config.ts and the root scripts
 ```
+
+## Toolchain
+
+Pinned versions and the reasons for them are in ADR 0009.
+
+| Tool | Version |
+| --- | --- |
+| Node.js | 24 LTS (`.nvmrc`); pnpm 12.8.1 through corepack |
+| TypeScript | ~6.0 (typescript-eslint supports versions below 6.1) |
+| Prisma | 7.10.x: `prisma.config.ts`, `prisma-client` generator, `@prisma/adapter-pg` |
+| Python | 3.12 |
+| PostgreSQL, Redis | 16; 8.8 (ADR 0001, D-09) |
+
+The `db:migrate`, `db:seed` and `db:reset` scripts work only against localhost. Only a human runs `db:reset` (ADR 0009 section 4.4).

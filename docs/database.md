@@ -1,8 +1,8 @@
 # Database design
 
-PostgreSQL 16 holds 31 tables in six groups: identity, content, delivery, proctoring, review and integrations, with 20 enum types. Large media lives in object storage (Cloudflare R2 on staging, AWS S3 on pilot and production, behind one S3-compatible interface); the database stores only object keys. Prisma is the ORM; the SQL below is the reference the Prisma schema must match.
+PostgreSQL 16 holds 31 tables in six groups: identity, content, delivery, proctoring, review and integrations, with 20 enum types. Large media lives in object storage (Cloudflare R2 on staging, AWS S3 on pilot and production, behind one S3-compatible interface); the database stores only object keys. Prisma 7 is the ORM (ADR 0009); the SQL below is the reference the Prisma schema must match.
 
-Updated 2026-10-01 by ARC-01 Phase B. The changes come from ADRs 0002 to 0007 (accepted by D-16) and decisions D-17 to D-23. /docs/adr/0008-schema-freeze-list.md lists every delta against the original design (commit 7f5c6b9).
+Updated 2026-10-01 by ARC-01 Phase B. The changes come from ADRs 0002 to 0007 (accepted by D-16) and decisions D-17 to D-23. /docs/adr/0008-schema-freeze-list.md lists every delta against the original design (commit 7f5c6b9). Updated 2026-10-02: the roles and grants comment follows D-35 (ADR 0006 section 7); no table, column or enum changed.
 
 ## Entity-relationship diagram
 
@@ -669,13 +669,18 @@ CREATE TABLE webhook_deliveries (
 );
 CREATE INDEX ON webhook_deliveries (endpoint_id, created_at DESC);
 
--- ---------- Roles and grants (ADR 0006) ----------
--- The roles are created outside the migrations by infra/sql/roles.sql, once per environment.
--- The audit_append_only migration only grants:
+-- ---------- Roles and grants (ADR 0006 section 7, D-35) ----------
+-- The audit_append_only migration creates app_user if it does not exist (LOGIN, no password;
+-- NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS), then grants. No migration holds a
+-- password: it is set outside migrations, per environment (ADR 0006 section 7.4).
+-- Exact SQL: ADR 0006 section 7.2. In summary:
+-- GRANT USAGE ON SCHEMA public TO app_user;
 -- GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;
 -- GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_user;
--- ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;
+-- ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;
+-- ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO app_user;
 -- REVOKE UPDATE, DELETE, TRUNCATE ON audit_logs FROM app_user;
+-- REVOKE ALL ON _prisma_migrations FROM app_user;
 ```
 
 ## Data rules

@@ -43,16 +43,17 @@ Map names to snake_case with @@map and @map; use camelCase in the Prisma client.
 Use @db.Uuid, @db.Citext, @db.Inet, @db.Timestamptz(6), Bytes for bytea, enum lists for pause_reason[], and Decimal with the same precision as the DDL.
 For the circular relations questions.current_version_id and organizations.current_consent_text_id, model each as an optional relation with a named relation.
 Do not invent columns. Tick every line of the freeze list. List any DDL feature Prisma cannot express (CHECK constraints, partial indexes, extensions, identity columns) in a TODO list for Step 3.
-Verify: `pnpm prisma validate` and `pnpm prisma format` pass.
+Prisma 7 (ADR 0009): the datasource block has only `provider = "postgresql"` and no `url`; the CLI URL lives in prisma.config.ts. Use the `prisma-client` generator with `output = "../apps/api/src/generated/prisma"` and `moduleFormat = "cjs"`, add `@prisma/client` and `@prisma/adapter-pg` (same exact version as the CLI) and `pg` to apps/api, a single client factory that passes a `PrismaPg` adapter, and a root `db:generate` script. For the SQL check use `prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script` (`--to-schema-datamodel` was removed).
+Verify: `pnpm prisma validate`, `pnpm prisma format` and `pnpm db:generate` pass.
 ```
 
 ## Step 3 — Migrations, including what Prisma cannot express
 
 ```text
-Generate the initial migration with `prisma migrate dev --create-only --name init`.
+Generate the initial migration with `pnpm db:migrate --create-only --name init` (localhost-guarded; Prisma 7's migrate dev no longer runs generate or seed, ADR 0009).
 Then edit the generated SQL to add everything from your Step 2 TODO list: the pgcrypto and citext extensions (at the top), all 12 CHECK constraints from /docs/database.md, the partial indexes on sessions(risk_band) and sessions(retention_anchor_at), the GENERATED ALWAYS AS IDENTITY columns, and a trigger that sets users.updated_at on update.
-The database roles are created outside the migrations (ADR 0006): write infra/sql/roles.sql that creates `app_user` (password from env), and run it from the local compose Postgres init. Create a second migration `audit_append_only` that grants app_user SELECT/INSERT/UPDATE/DELETE on all tables and USAGE/SELECT on all sequences, sets ALTER DEFAULT PRIVILEGES for future tables, then REVOKEs UPDATE, DELETE and TRUNCATE on audit_logs from app_user. It must fail with a clear message if app_user does not exist. Migrations run with MIGRATION_DATABASE_URL (owner role); the app uses DATABASE_URL (app_user).
-Verify: `pnpm db:reset` applies both migrations cleanly; as app_user, `DELETE FROM audit_logs` and `TRUNCATE audit_logs` fail with permission denied.
+The database role comes from a migration (ADR 0006 section 7, D-35); there is no roles.sql and no compose init script. Create a second migration `audit_append_only` (`pnpm db:migrate --create-only --name audit_append_only`) containing the SQL in ADR 0006 section 7.2: it creates `app_user` if it does not exist (no password in any migration), grants USAGE on schema public, SELECT/INSERT/UPDATE/DELETE on all tables and USAGE/SELECT on all sequences, sets default privileges for future tables and sequences, then REVOKEs UPDATE, DELETE and TRUNCATE on audit_logs and all access to _prisma_migrations. It fails with a clear message only where the migration role cannot create roles. Write infra/scripts/set-app-user-password.mjs, which sets app_user's local password from APP_USER_PASSWORD behind the localhost guard; staging, pilot and production set it at provisioning. Migrations run with MIGRATION_DATABASE_URL (owner role); the app uses DATABASE_URL (app_user).
+Verify: `pnpm db:migrate` applies both migrations on the existing local volume, and `prisma migrate deploy` applies them to a throwaway Postgres 16 container; as app_user, `DELETE FROM audit_logs` and `TRUNCATE audit_logs` fail with permission denied. Only a human runs `pnpm db:reset` (ADR 0009 section 4.4); never run it, `prisma migrate reset` or `db push` yourself.
 ```
 
 ## Step 4 — Seed data
@@ -73,7 +74,7 @@ Verify: `pnpm db:seed` twice without errors; counts per table printed.
 ## Step 5 — Data-access helpers and org scoping
 
 ```text
-In apps/api create a PrismaService (NestJS) and a Prisma client extension that automatically adds `org_id` filtering for tables that have it, and throws if a query on an org-scoped model runs without an org context.
+In apps/api create a PrismaService (NestJS) that builds its client with the factory from Step 2 (`@prisma/adapter-pg`, DATABASE_URL as app_user; ADR 0009), and a Prisma client extension (`$extends`; Prisma 7 removed `$use` middleware) that automatically adds `org_id` filtering for tables that have it, and throws if a query on an org-scoped model runs without an org context.
 For every model without org_id, declare a scope path to its nearest ancestor that has one (for example ProctorEvent -> session.orgId, TestCase -> questionVersion.question.orgId) and let the extension add that relation filter (ADR 0006). Add a test that fails if any model has neither org_id nor a scope path.
 Add a request-scoped OrgContext populated from the authenticated user.
 Write unit tests proving that a user from org A cannot read org B rows through any repository method (reference TC-008).
