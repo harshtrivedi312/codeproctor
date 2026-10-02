@@ -1,0 +1,25 @@
+#!/bin/sh
+# pnpm dev:infra:reset: stop the LOCAL compose stack and DELETE its volumes (review N14).
+# Destructive and local only: it removes the local Postgres and Redis data, including the
+# roles stored in that Postgres cluster. A human must type the confirmation at a terminal.
+set -eu
+cd "$(dirname "$0")/../.."
+
+if [ -n "${CI:-}" ]; then
+  echo "dev:infra:reset never runs in CI." >&2
+  exit 1
+fi
+if [ ! -t 0 ]; then
+  echo "dev:infra:reset needs a human at a terminal. AI agents: stop and ask the user to run 'pnpm dev:infra:reset' in their own terminal." >&2
+  exit 1
+fi
+
+echo "This stops the local containers and deletes the local Postgres and Redis volumes." >&2
+printf '%s' "Type 'delete local volumes' to continue: " >&2
+IFS= read -r answer
+if [ "$answer" != "delete local volumes" ]; then
+  echo "Cancelled." >&2
+  exit 1
+fi
+
+exec docker compose --env-file .env -f infra/docker-compose.yml down --volumes
