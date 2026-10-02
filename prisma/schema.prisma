@@ -1,0 +1,211 @@
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  RECRUITER
+  AUTHOR
+  REVIEWER
+
+  @@map("user_role")
+}
+
+enum Difficulty {
+  EASY
+  MEDIUM
+  HARD
+
+  @@map("difficulty")
+}
+
+enum QuestionType {
+  CODING
+  MCQ
+  SHORT_ANSWER
+
+  @@map("question_type")
+}
+
+enum ProctorProfile {
+  STANDARD
+  STRICT
+
+  @@map("proctor_profile")
+}
+
+enum SessionStatus {
+  INVITED
+  OPENED
+  CONSENTED
+  VERIFIED
+  IN_PROGRESS
+  PAUSED
+  SUBMITTED
+  GRADED
+  UNDER_REVIEW
+  COMPLETED
+  EXPIRED
+  APPEALED
+  DECLINED
+
+  @@map("session_status")
+}
+
+enum SubmissionKind {
+  RUN
+  SUBMIT
+
+  @@map("submission_kind")
+}
+
+enum MediaStream {
+  SCREEN
+  WEBCAM
+  AUDIO
+  SIDE_CAMERA
+  ROOM_SCAN
+
+  @@map("media_stream")
+}
+
+enum Severity {
+  LOW
+  MEDIUM
+  HIGH
+
+  @@map("severity")
+}
+
+enum RiskBand {
+  LOW
+  MEDIUM
+  HIGH
+
+  @@map("risk_band")
+}
+
+enum Verdict {
+  CLEAN
+  SUSPICIOUS
+  VIOLATION
+
+  @@map("verdict")
+}
+
+enum FlagDecisionValue {
+  CONFIRMED
+  DISMISSED
+
+  @@map("flag_decision")
+}
+
+enum AppealStatus {
+  OPEN
+  UPHELD
+  OVERTURNED
+
+  @@map("appeal_status")
+}
+
+enum EventType {
+  FULLSCREEN_EXIT
+  TAB_SWITCH
+  FOCUS_LOST
+  PASTE_ATTEMPT
+  COPY_ATTEMPT
+  RIGHT_CLICK
+  DEVTOOLS_OPEN
+  SCREEN_SHARE_STOPPED
+  MULTI_MONITOR
+  VIRTUAL_CAMERA
+  NO_FACE
+  MULTIPLE_FACES
+  FACE_MISMATCH
+  GAZE_AWAY
+  PHONE_DETECTED
+  BOOK_DETECTED
+  SPEECH_DETECTED
+  MULTIPLE_VOICES
+  DISCONNECTED
+  RECONNECTED
+  PASTE_BURST
+  TYPING_ANOMALY
+  CODE_SIMILARITY
+  AI_LIKENESS
+  PROCTOR_PAUSE
+  PROCTOR_MESSAGE
+  SIDE_CAMERA_DISCONNECTED
+  SIDE_CAMERA_RECONNECTED
+  DROP_ATTEMPT
+  CUT_ATTEMPT
+  SHORTCUT_BLOCKED
+  EXTENSION_INTERFERENCE
+  FULLSCREEN_RESTORED
+  SCREEN_SHARE_RESUMED
+  PROCTOR_RESUME
+  IDLE_THEN_COMPLETE
+  DETECTOR_UNAVAILABLE
+  IDENTITY_MANUAL_REVIEW
+  RESUME_OTP_FAILED
+
+  @@map("event_type")
+}
+
+enum PauseReason {
+  FULLSCREEN_EXIT
+  SCREEN_SHARE_STOPPED
+  SIDE_CAMERA_LOST
+  PROCTOR
+
+  @@map("pause_reason")
+}
+
+enum ClientKind {
+  WEB
+
+  @@map("client_kind")
+}
+
+enum EventSource {
+  CLIENT
+  SERVER
+
+  @@map("event_source")
+}
+
+enum IdentityCheckStatus {
+  PENDING
+  PASSED
+  LOW_CONFIDENCE
+  MANUAL_REVIEW
+  REVIEWED
+
+  @@map("identity_check_status")
+}
+
+enum IdentityReviewReason {
+  BELOW_THRESHOLD
+  NO_FACE
+  MULTIPLE_FACES
+  LIVENESS_NOT_CONFIRMED
+  MATCH_ERROR
+
+  @@map("identity_review_reason")
+}
+
+enum IdentityManualDecision {
+  MATCH
+  NO_MATCH
+  INCONCLUSIVE
+
+  @@map("identity_manual_decision")
+}
+
+enum QuestionScoring {
+  AUTO
+  MANUAL_PENDING
+  MANUAL
+
+  @@map("question_scoring")
+}
