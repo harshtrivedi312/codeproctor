@@ -1,0 +1,34 @@
+#!/bin/sh
+# pnpm db:reset: drop and rebuild the LOCAL database (ADR 0009 section 4.4; D-31; review S4).
+# Prisma's AI-agent check stays on. Its consent variable is set here only, for one command,
+# from a confirmation that a human types at a terminal. Never set it anywhere else.
+set -eu
+cd "$(dirname "$0")/../.."
+unset PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION
+
+if [ -n "${CI:-}" ]; then
+  echo "db:reset never runs in CI." >&2
+  exit 1
+fi
+
+# 1. Localhost guard (S4): exits non-zero unless every database URL points at this machine.
+node infra/scripts/assert-local-db.mjs
+
+# 2. A human must type the confirmation. Agents and CI have no terminal, so they stop here.
+if [ ! -t 0 ]; then
+  echo "db:reset needs a human at a terminal. AI agents: stop and ask the user to run 'pnpm db:reset' in their own terminal." >&2
+  exit 1
+fi
+echo "This deletes all data in the LOCAL database and re-applies every migration." >&2
+printf '%s' "Type 'reset local database' to continue: " >&2
+IFS= read -r answer
+if [ "$answer" != "reset local database" ]; then
+  echo "Reset cancelled." >&2
+  exit 1
+fi
+
+# 3. The human's typed text is the consent value, for this one command only.
+PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION="$answer" pnpm exec prisma migrate reset --force
+
+# 4. From DB-03: give app_user its local password again (idempotent; ADR 0006 section 7.4).
+# node infra/scripts/set-app-user-password.mjs

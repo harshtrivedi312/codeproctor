@@ -10,13 +10,13 @@
   "scripts": {
     "dev:infra": "docker compose --env-file .env -f infra/docker-compose.yml up -d --wait",
     "dev:infra:down": "docker compose --env-file .env -f infra/docker-compose.yml down",
-    "db:migrate": "prisma migrate dev",
-    "db:seed": "prisma db seed",
-    "db:reset": "prisma migrate reset --force",
+    "db:migrate": "node infra/scripts/assert-local-db.mjs && prisma migrate dev",
+    "db:seed": "node infra/scripts/assert-local-db.mjs && prisma db seed",
+    "db:reset": "sh infra/scripts/db-reset",
     "build": "pnpm -r build",
     "lint": "pnpm -r lint && eslint --no-error-on-unmatched-pattern prisma.config.ts prisma infra/scripts",
     "typecheck": "tsc -p tsconfig.json && pnpm -r typecheck",
-    "test": "pnpm -r test",
+    "test": "node --test \"infra/scripts/*.test.mjs\" && pnpm -r test",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
