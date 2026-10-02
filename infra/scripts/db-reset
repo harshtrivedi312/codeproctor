@@ -1,5 +1,5 @@
 #!/bin/sh
-# pnpm db:reset: drop and rebuild the LOCAL database (ADR 0009 section 4.4; D-31; review S4).
+# pnpm db:reset: drop and rebuild the LOCAL database (ADR 0009 section 4.4; D-31, D-37; review S4).
 # Prisma's AI-agent check stays on. Its consent variable is set here only, for one command,
 # from a confirmation that a human types at a terminal. Never set it anywhere else.
 set -eu
@@ -11,8 +11,31 @@ if [ -n "${CI:-}" ]; then
   exit 1
 fi
 
-# 1. Localhost guard (S4): exits non-zero unless every database URL points at this machine.
-node infra/scripts/assert-local-db.mjs
+# AI agents never reset a database (D-37). Refuse when any variable that Prisma uses to detect
+# an agent is set. Keep this list in step with ADR 0009 section 4.4.
+agent_marker=""
+for name in CLAUDECODE CODEX_THREAD_ID CODEX_CI CODEX_SANDBOX CODEX_SANDBOX_NETWORK_DISABLED \
+  GEMINI_CLI QWEN_CODE CURSOR_AGENT COPILOT_CLI OPENCODE OPENCODE_CLIENT CLINE_ACTIVE CRUSH \
+  AUGMENT_AGENT ANTIGRAVITY_AGENT AI_AGENT AGENT; do
+  if printenv "$name" >/dev/null 2>&1; then
+    agent_marker=$name
+    break
+  fi
+done
+if [ "${OR_APP_NAME:-}" = "Aider" ]; then
+  agent_marker=OR_APP_NAME
+fi
+case "${REPLIT_SESSION:-}" in
+  agent-*) agent_marker=REPLIT_SESSION ;;
+esac
+if [ -n "$agent_marker" ]; then
+  echo "db:reset never runs inside an AI agent ($agent_marker is set). AI agents: stop and ask the user to run 'pnpm db:reset' in their own terminal." >&2
+  exit 1
+fi
+
+# 1. Localhost guard (S4, D-37): exits non-zero unless every database URL points at this machine
+#    and uses the host port that Docker Compose publishes for the local postgres service.
+node infra/scripts/assert-local-db.mjs --compose-port
 
 # 2. A human must type the confirmation. Agents and CI have no terminal, so they stop here.
 if [ ! -t 0 ]; then

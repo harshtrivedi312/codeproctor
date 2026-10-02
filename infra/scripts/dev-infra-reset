@@ -1,5 +1,5 @@
 #!/bin/sh
-# pnpm dev:infra:reset: stop the LOCAL compose stack and DELETE its volumes (review N14).
+# pnpm dev:infra:reset: stop the LOCAL compose stack and DELETE its volumes (review N14, SF5).
 # Destructive and local only: it removes the local Postgres and Redis data, including the
 # roles stored in that Postgres cluster. A human must type the confirmation at a terminal.
 set -eu
@@ -9,6 +9,25 @@ if [ -n "${CI:-}" ]; then
   echo "dev:infra:reset never runs in CI." >&2
   exit 1
 fi
+
+# Only a Docker engine on this machine: DOCKER_HOST unset or a unix:// socket, and a current
+# Docker context whose endpoint is a unix:// socket (SF5). Anything else could be a remote host.
+case "${DOCKER_HOST:-unix://}" in
+  unix://*) ;;
+  *)
+    echo "dev:infra:reset only runs against a local Docker engine. DOCKER_HOST is not a unix:// socket." >&2
+    exit 1
+    ;;
+esac
+context_host=$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null) || context_host=""
+case "$context_host" in
+  unix://*) ;;
+  *)
+    echo "dev:infra:reset only runs against a local Docker engine. The current Docker context is not a unix:// socket." >&2
+    exit 1
+    ;;
+esac
+
 if [ ! -t 0 ]; then
   echo "dev:infra:reset needs a human at a terminal. AI agents: stop and ask the user to run 'pnpm dev:infra:reset' in their own terminal." >&2
   exit 1

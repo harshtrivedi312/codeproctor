@@ -15,7 +15,7 @@
     "db:seed": "node infra/scripts/assert-local-db.mjs && prisma db seed",
     "db:reset": "sh infra/scripts/db-reset",
     "build": "pnpm -r build",
-    "lint": "pnpm -r lint && eslint --no-error-on-unmatched-pattern prisma.config.ts prisma infra/scripts",
+    "lint": "pnpm -r lint && eslint --no-error-on-unmatched-pattern eslint.config.mjs prisma.config.ts prisma infra/scripts",
     "typecheck": "tsc -p tsconfig.json && pnpm -r typecheck",
     "test": "node --test \"infra/scripts/*.test.mjs\" && pnpm -r test",
     "format": "prettier --write .",

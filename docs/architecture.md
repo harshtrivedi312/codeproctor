@@ -105,8 +105,9 @@ codeproctor/
     docker-compose.yml
     caddy/
     judge0/
-    scripts/        Local-only database guard, db-reset and app_user password scripts (ADR 0009);
-                    backup and restore (DB-07)
+    scripts/        Local-only scripts and their tests (ADR 0009 section 4.4): the localhost guard
+                    (local-db-guard.mjs, assert-local-db.mjs), db-reset, dev-infra-reset and,
+                    from DB-03, db-migrate and set-app-user-password.mjs; backup and restore (DB-07)
   prisma/
     schema.prisma
     migrations/
@@ -115,7 +116,8 @@ codeproctor/
   .github/workflows/
   prisma.config.ts      Prisma CLI config: schema, migrations, seed, owner-role URL (ADR 0009)
   tsconfig.base.json    Strict compiler options every package extends
-  tsconfig.json         Root type-check for prisma.config.ts and the root scripts
+  tsconfig.json         Root type-check for prisma.config.ts and prisma/*.ts (the .mjs scripts are
+                        linted, not type-checked)
 ```
 
 ## Toolchain
@@ -130,4 +132,9 @@ Pinned versions and the reasons for them are in ADR 0009.
 | Python | 3.12 |
 | PostgreSQL, Redis | 16; 8.8 (ADR 0001, D-09) |
 
-The `db:migrate`, `db:seed` and `db:reset` scripts work only against localhost. Only a human runs `db:reset` (ADR 0009 section 4.4).
+**Local-only scripts (ADR 0009 section 4.4).** They are a policy backed by speed bumps, not a security boundary.
+- **Database scripts.** `db:migrate`, `db:seed` and `db:reset` refuse any database URL that does not point at this machine.
+- **`db:reset`.** It also refuses AI-agent sessions, and any port other than the one Docker Compose publishes for the local Postgres.
+- **`dev:infra:reset`.** It stops the local stack and deletes its volumes. It refuses a Docker engine that is not local: `DOCKER_HOST` and the current Docker context must both be `unix://` sockets.
+- **Who runs them.** Only a human runs `db:reset` and `dev:infra:reset`, at a terminal with a typed confirmation. Agents verify the refusals only through `pnpm test`.
+- **Shared environments.** Staging and pilot use their own Compose project names, and their database credentials never exist on developer machines or in agent sessions (D-38).

@@ -9,6 +9,8 @@ Rules:
 - TypeScript strict mode; no `any`.
 - Every API route has a DTO validated with class-validator or zod, a role guard, and an org-scope check.
 - Never log secrets, tokens, OTPs, or candidate media keys.
+- Staging and pilot database credentials never exist on developer machines or in agent sessions; they live only in GitHub Actions secrets and on the servers (ADR 0009).
+- Agents never run `pnpm db:reset`, `pnpm dev:infra:reset`, `prisma migrate reset` or `db push`; ask the human (ADR 0009).
 - Every feature ships with tests; reference FR and TC IDs from the docs in test names.
 - Small commits with conventional commit messages.
 - Prefer free and open-source tools.

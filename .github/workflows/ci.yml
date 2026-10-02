@@ -31,6 +31,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          # The pnpm store is cached below, after corepack is enabled.
+          package-manager-cache: false
 
       # pnpm version (and its integrity hash) comes from the packageManager field in package.json.
       # This runs after setup-node so the shim lands next to the Node that setup-node installed.
@@ -57,12 +59,32 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # The variable's name is built from two pieces so this file does not contain it.
+      # git grep exits 1 when nothing matches (pass), 0 on a match (fail) and 2 or more on an error.
       - name: Check Prisma's AI-consent variable appears only where ADR 0009 allows
         run: |
-          if git grep -n -e 'PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION' -- . ':!docs' ':!infra/scripts/db-reset' ':!infra/scripts/assert-local-db.mjs' ':!prisma.config.ts' ':!.github/workflows/ci.yml'; then
-            echo "Prisma's consent variable must not appear here (ADR 0009 section 4.4)." >&2
-            exit 1
-          fi
+          name="PRISMA_USER_CONSENT_FOR_""DANGEROUS_AI_ACTION"
+          status=0
+          git grep -n -e "$name" -- . ':!docs' ':!infra/scripts/db-reset' ':!infra/scripts/local-db-guard.mjs' ':!prisma.config.ts' || status=$?
+          case "$status" in
+            1) echo "The consent variable appears only where ADR 0009 allows." ;;
+            0)
+              echo "Prisma's consent variable must not appear here (ADR 0009 section 4.4)." >&2
+              exit 1
+              ;;
+            *)
+              echo "git grep failed with exit status $status." >&2
+              exit 1
+              ;;
+          esac
+
+      # Fails if prisma.config.ts has a syntax error or throws when loaded (for example a .env
+      # that defines the consent variable). `prisma version` needs no schema and no database.
+      - name: Load prisma.config.ts
+        run: pnpm exec prisma version
+
+      - name: Shellcheck the reset scripts
+        run: shellcheck infra/scripts/db-reset infra/scripts/dev-infra-reset
 
       - name: Validate the compose file
         run: docker compose -f infra/docker-compose.yml config -q
