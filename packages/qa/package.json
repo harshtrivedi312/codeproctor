@@ -1,0 +1,24 @@
+{
+  "name": "@codeproctor/qa",
+  "version": "0.0.0",
+  "private": true,
+  "description": "QA tooling: Playwright end-to-end and axe checks, k6 load scripts, test-matrix check",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:e2e:list": "playwright test --list",
+    "coverage:web": "vitest run --root ../../apps/web --coverage.enabled --coverage.provider=v8 --coverage.reporter=text-summary --coverage.reporter=text --coverage.include='src/**' --coverage.reportsDirectory=../../packages/qa/coverage",
+    "gate": "tsx src/p1-gate.ts"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.11.0",
+    "@codeproctor/shared": "workspace:^",
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^24.19.0",
+    "@vitest/coverage-v8": "^5.0.3",
+    "vitest": "^5.0.3"
+  }
+}
