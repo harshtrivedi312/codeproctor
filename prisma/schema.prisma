@@ -1,0 +1,930 @@
+// CodeProctor Prisma schema (DB-02).
+// Source of truth: the reference DDL in docs/database.md (31 tables, 20 enums), and the freeze list
+// docs/adr/0008-schema-freeze-list.md. Prisma 7 (ADR 0009): there is no datasource url in this
+// file. The CLI reads MIGRATION_DATABASE_URL from prisma.config.ts; the app connects as app_user
+// through the driver adapter (apps/api/src/database/create-prisma-client.ts).
+//
+// Conventions
+// - Models are PascalCase and fields camelCase. @@map and @map keep the snake_case DDL names.
+// - The flag_decision enum is FlagDecisionValue here, because the FlagDecision model owns that name.
+// - Every relation sets onDelete and onUpdate. The DDL has CASCADE on 22 foreign keys and SET NULL
+//   on 1; everything else is NO ACTION, which is not Prisma's default.
+// - users.updated_at has no @updatedAt: the DDL default plus the DB-03 trigger set it.
+// - Invitation.sessions is a list although sessions.invitation_id is UNIQUE (see the model).
+//
+// TODO for DB-03: DDL features Prisma cannot express.
+// `prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script` was loaded next to
+// the reference DDL and the two catalogs were diffed. Tables (31), columns (294), enums (20, with
+// values and order), primary keys (31), foreign keys (58, with ON DELETE and ON UPDATE), unique
+// indexes (20) and the 22 non-partial indexes match. The differences are exactly these:
+//
+//  1. Extensions. Prisma emits none. Put these first in the init migration, before any CITEXT column:
+//       CREATE EXTENSION IF NOT EXISTS pgcrypto;
+//       CREATE EXTENSION IF NOT EXISTS citext;
+//  2. 12 CHECK constraints (ADR 0008 section 5). Postgres names an unnamed inline CHECK as shown:
+//       organizations_retention_days_check  retention_days BETWEEN 7 AND 730
+//       users_check                         password_hash IS NOT NULL OR set_password_token_hash IS NOT NULL
+//       tests_duration_minutes_check        duration_minutes BETWEEN 5 AND 480
+//       test_questions_check                question_version_id IS NOT NULL OR random_rule IS NOT NULL
+//       invitations_check                   window_end > window_start
+//       sessions_risk_score_check           risk_score BETWEEN 0 AND 100
+//       session_questions_check             (scoring = 'MANUAL') = (scored_by IS NOT NULL AND scored_at IS NOT NULL)
+//       consents_check                      (signed_at IS NULL) <> (declined_at IS NULL)
+//       consents_check1                     signed_at IS NULL OR signed_name IS NOT NULL
+//       identity_checks_attempt_check       attempt BETWEEN 1 AND 2
+//       identity_checks_check               (status = 'REVIEWED') = (manual_decision IS NOT NULL AND
+//                                             reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL)
+//       appeals_check                       (status = 'OVERTURNED') = (new_verdict IS NOT NULL)
+//  3. 2 partial indexes (the other 22 indexes are declared below):
+//       sessions_risk_band_idx            ON sessions (risk_band) WHERE status IN ('GRADED','UNDER_REVIEW')
+//       sessions_retention_anchor_at_idx  ON sessions (retention_anchor_at) WHERE retention_anchor_at IS NOT NULL
+//  4. Trigger on users: set updated_at = now() before each UPDATE (function plus trigger; the
+//     reference DDL block does not contain it, prompts/database.md Step 3 and ADR 0008 section 1 do).
+//  5. Identity columns. Prisma's autoincrement emits BIGSERIAL (a sequence and a nextval default).
+//     The DDL has BIGINT GENERATED ALWAYS AS IDENTITY on audit_logs.id, media_chunks.id,
+//     proctor_events.id, keystroke_batches.id and webhook_deliveries.id. Convert them in the init
+//     SQL (architect to confirm, brief DB-02 item 9). GENERATED ALWAYS rejects an explicit id, so
+//     seeds and tests must not set one.
+//  6. NOT NULL on the 5 list columns. Prisma emits scalar lists as nullable (DEFAULT ARRAY[]::T[]
+//     where there is a default). The DDL has NOT NULL on users.recovery_code_hashes, questions.tags,
+//     question_versions.allowed_languages, sessions.pause_reasons and webhook_endpoints.events.
+//     Add ALTER COLUMN ... SET NOT NULL. Prisma Client makes list inputs optional, so a create
+//     that omits allowed_languages or events (no default) will fail on NOT NULL: services pass them.
+//  7. The audit_append_only migration (ADR 0006 section 7.2): app_user, grants, and the REVOKE of
+//     UPDATE, DELETE and TRUNCATE on audit_logs and of all access to _prisma_migrations.
+//
+// Differences that need no action (same behavior):
+// - Prisma writes timestamptz as TIMESTAMPTZ(6) (6 is the default precision) and now() as
+//   CURRENT_TIMESTAMP, and an empty array default as ARRAY[]::T[] instead of '{}'.
+// - Prisma creates the 20 UNIQUE constraints as unique indexes with the same names. Tests for them
+//   look at pg_index (indisunique), not pg_constraint. Foreign keys can reference them.
+// - The first line of the generated SQL is CREATE SCHEMA IF NOT EXISTS "public" (harmless).
+//
+// After editing the generated SQL, run `pnpm db:migrate` on the local volume and confirm Prisma
+// reports no drift. Prisma does not read CHECK constraints, triggers or partial index predicates
+// back, so check that it proposes no change for them (DB-03 verification).
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../apps/api/src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  RECRUITER
+  AUTHOR
+  REVIEWER
+
+  @@map("user_role")
+}
+
+enum Difficulty {
+  EASY
+  MEDIUM
+  HARD
+
+  @@map("difficulty")
+}
+
+enum QuestionType {
+  CODING
+  MCQ
+  SHORT_ANSWER
+
+  @@map("question_type")
+}
+
+enum ProctorProfile {
+  STANDARD
+  STRICT
+
+  @@map("proctor_profile")
+}
+
+enum SessionStatus {
+  INVITED
+  OPENED
+  CONSENTED
+  VERIFIED
+  IN_PROGRESS
+  PAUSED
+  SUBMITTED
+  GRADED
+  UNDER_REVIEW
+  COMPLETED
+  EXPIRED
+  APPEALED
+  DECLINED
+
+  @@map("session_status")
+}
+
+enum SubmissionKind {
+  RUN
+  SUBMIT
+
+  @@map("submission_kind")
+}
+
+enum MediaStream {
+  SCREEN
+  WEBCAM
+  AUDIO
+  SIDE_CAMERA
+  ROOM_SCAN
+
+  @@map("media_stream")
+}
+
+enum Severity {
+  LOW
+  MEDIUM
+  HIGH
+
+  @@map("severity")
+}
+
+enum RiskBand {
+  LOW
+  MEDIUM
+  HIGH
+
+  @@map("risk_band")
+}
+
+enum Verdict {
+  CLEAN
+  SUSPICIOUS
+  VIOLATION
+
+  @@map("verdict")
+}
+
+enum FlagDecisionValue {
+  CONFIRMED
+  DISMISSED
+
+  @@map("flag_decision")
+}
+
+enum AppealStatus {
+  OPEN
+  UPHELD
+  OVERTURNED
+
+  @@map("appeal_status")
+}
+
+enum EventType {
+  FULLSCREEN_EXIT
+  TAB_SWITCH
+  FOCUS_LOST
+  PASTE_ATTEMPT
+  COPY_ATTEMPT
+  RIGHT_CLICK
+  DEVTOOLS_OPEN
+  SCREEN_SHARE_STOPPED
+  MULTI_MONITOR
+  VIRTUAL_CAMERA
+  NO_FACE
+  MULTIPLE_FACES
+  FACE_MISMATCH
+  GAZE_AWAY
+  PHONE_DETECTED
+  BOOK_DETECTED
+  SPEECH_DETECTED
+  MULTIPLE_VOICES
+  DISCONNECTED
+  RECONNECTED
+  PASTE_BURST
+  TYPING_ANOMALY
+  CODE_SIMILARITY
+  AI_LIKENESS
+  PROCTOR_PAUSE
+  PROCTOR_MESSAGE
+  SIDE_CAMERA_DISCONNECTED
+  SIDE_CAMERA_RECONNECTED
+  DROP_ATTEMPT
+  CUT_ATTEMPT
+  SHORTCUT_BLOCKED
+  EXTENSION_INTERFERENCE
+  FULLSCREEN_RESTORED
+  SCREEN_SHARE_RESUMED
+  PROCTOR_RESUME
+  IDLE_THEN_COMPLETE
+  DETECTOR_UNAVAILABLE
+  IDENTITY_MANUAL_REVIEW
+  RESUME_OTP_FAILED
+
+  @@map("event_type")
+}
+
+enum PauseReason {
+  FULLSCREEN_EXIT
+  SCREEN_SHARE_STOPPED
+  SIDE_CAMERA_LOST
+  PROCTOR
+
+  @@map("pause_reason")
+}
+
+enum ClientKind {
+  WEB
+
+  @@map("client_kind")
+}
+
+enum EventSource {
+  CLIENT
+  SERVER
+
+  @@map("event_source")
+}
+
+enum IdentityCheckStatus {
+  PENDING
+  PASSED
+  LOW_CONFIDENCE
+  MANUAL_REVIEW
+  REVIEWED
+
+  @@map("identity_check_status")
+}
+
+enum IdentityReviewReason {
+  BELOW_THRESHOLD
+  NO_FACE
+  MULTIPLE_FACES
+  LIVENESS_NOT_CONFIRMED
+  MATCH_ERROR
+
+  @@map("identity_review_reason")
+}
+
+enum IdentityManualDecision {
+  MATCH
+  NO_MATCH
+  INCONCLUSIVE
+
+  @@map("identity_manual_decision")
+}
+
+enum QuestionScoring {
+  AUTO
+  MANUAL_PENDING
+  MANUAL
+
+  @@map("question_scoring")
+}
+
+// ---------- Identity ----------
+
+model Organization {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name                 String
+  retentionDays        Int      @default(90) @map("retention_days")
+  settings             Json     @default("{}")
+  currentConsentTextId String?  @map("current_consent_text_id") @db.Uuid
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  currentConsentText ConsentText?      @relation("OrganizationCurrentConsentText", fields: [currentConsentTextId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_current_consent_text")
+  consentTexts       ConsentText[]     @relation("ConsentTextOrganization")
+  users              User[]
+  auditLogs          AuditLog[]
+  questions          Question[]
+  tests              Test[]
+  candidates         Candidate[]
+  invitations        Invitation[]
+  sessions           Session[]
+  webhookEndpoints   WebhookEndpoint[]
+
+  @@map("organizations")
+}
+
+model User {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                String    @map("org_id") @db.Uuid
+  email                String    @unique @db.Citext
+  fullName             String    @map("full_name")
+  passwordHash         String?   @map("password_hash")
+  role                 UserRole
+  totpSecretEnc        String?   @map("totp_secret_enc")
+  totpEnabled          Boolean   @default(false) @map("totp_enabled")
+  recoveryCodeHashes   String[]  @default([]) @map("recovery_code_hashes")
+  setPasswordTokenHash String?   @unique @map("set_password_token_hash")
+  setPasswordExpiresAt DateTime? @map("set_password_expires_at") @db.Timestamptz(6)
+  failedLogins         Int       @default(0) @map("failed_logins")
+  lockedUntil          DateTime? @map("locked_until") @db.Timestamptz(6)
+  isActive             Boolean   @default(true) @map("is_active")
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  org                           Organization          @relation(fields: [orgId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  refreshTokens                 RefreshToken[]
+  auditLogs                     AuditLog[]
+  createdQuestions              Question[]
+  createdTests                  Test[]
+  createdInvitations            Invitation[]
+  collectedAiReferenceSolutions AiReferenceSolution[]
+  scoredSessionQuestions        SessionQuestion[]
+  createdConsentTexts           ConsentText[]
+  reviewedIdentityChecks        IdentityCheck[]
+  sessionReviews                SessionReview[]
+  flagDecisions                 FlagDecision[]
+  assignedAppeals               Appeal[]
+  createdWebhookEndpoints       WebhookEndpoint[]
+
+  @@index([orgId])
+  @@map("users")
+}
+
+model RefreshToken {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  familyId     String    @map("family_id") @db.Uuid
+  tokenHash    String    @unique @map("token_hash")
+  expiresAt    DateTime  @map("expires_at") @db.Timestamptz(6)
+  revokedAt    DateTime? @map("revoked_at") @db.Timestamptz(6)
+  replacedById String?   @map("replaced_by") @db.Uuid
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  replacedBy RefreshToken?  @relation("RefreshTokenReplacement", fields: [replacedById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  replaces   RefreshToken[] @relation("RefreshTokenReplacement")
+
+  @@index([userId])
+  @@index([familyId])
+  @@map("refresh_tokens")
+}
+
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  orgId      String   @map("org_id") @db.Uuid
+  actorId    String?  @map("actor_id") @db.Uuid
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String?  @map("entity_id")
+  ip         String?  @db.Inet
+  metadata   Json     @default("{}")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  org   Organization @relation(fields: [orgId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  actor User?        @relation(fields: [actorId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([orgId, createdAt(sort: Desc)])
+  @@map("audit_logs")
+}
+
+// ---------- Content ----------
+
+model Question {
+  id               String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId            String       @map("org_id") @db.Uuid
+  slug             String
+  type             QuestionType @default(CODING)
+  tags             String[]     @default([])
+  currentVersionId String?      @map("current_version_id") @db.Uuid
+  isArchived       Boolean      @default(false) @map("is_archived")
+  createdById      String?      @map("created_by") @db.Uuid
+  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  org            Organization      @relation(fields: [orgId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  createdBy      User?             @relation(fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  currentVersion QuestionVersion?  @relation("QuestionCurrentVersion", fields: [currentVersionId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_current_version")
+  versions       QuestionVersion[] @relation("QuestionVersions")
+
+  @@unique([orgId, slug])
+  @@map("questions")
+}
+
+model QuestionVersion {
+  id                String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  questionId        String     @map("question_id") @db.Uuid
+  version           Int
+  title             String
+  statementMd       String     @map("statement_md")
+  difficulty        Difficulty
+  allowedLanguages  String[]   @map("allowed_languages")
+  limits            Json       @default("{\"cpu_ms\":2000,\"wall_ms\":5000,\"memory_kb\":262144}")
+  starterCode       Json       @default("{}") @map("starter_code")
+  referenceSolution Json       @default("{}") @map("reference_solution")
+  answerSpec        Json?      @map("answer_spec")
+  isPublished       Boolean    @default(false) @map("is_published")
+  validatedAt       DateTime?  @map("validated_at") @db.Timestamptz(6)
+  validationReport  Json?      @map("validation_report")
+  createdAt         DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  question             Question              @relation("QuestionVersions", fields: [questionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  currentForQuestions  Question[]            @relation("QuestionCurrentVersion")
+  testCases            TestCase[]
+  variants             QuestionVariant[]
+  aiReferenceSolutions AiReferenceSolution[]
+  testQuestions        TestQuestion[]
+  sessionQuestions     SessionQuestion[]
+
+  @@unique([questionId, version])
+  @@map("question_versions")
+}
+
+model TestCase {
+  id                String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  questionVersionId String  @map("question_version_id") @db.Uuid
+  input             String
+  expectedOutput    String  @map("expected_output")
+  isHidden          Boolean @default(true) @map("is_hidden")
+  weight            Decimal @default(1) @db.Decimal(6, 2)
+  position          Int
+
+  questionVersion  QuestionVersion   @relation(fields: [questionVersionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  variantOverrides VariantTestCase[]
+
+  @@index([questionVersionId])
+  @@map("test_cases")
+}
+
+model QuestionVariant {
+  id                String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  questionVersionId String  @map("question_version_id") @db.Uuid
+  params            Json
+  renderedStatement String  @map("rendered_statement")
+  isActive          Boolean @default(true) @map("is_active")
+
+  questionVersion      QuestionVersion       @relation(fields: [questionVersionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  testCaseOverrides    VariantTestCase[]
+  aiReferenceSolutions AiReferenceSolution[]
+  sessionQuestions     SessionQuestion[]
+
+  @@index([questionVersionId])
+  @@map("question_variants")
+}
+
+model VariantTestCase {
+  variantId      String @map("variant_id") @db.Uuid
+  testCaseId     String @map("test_case_id") @db.Uuid
+  input          String
+  expectedOutput String @map("expected_output")
+
+  variant  QuestionVariant @relation(fields: [variantId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  testCase TestCase        @relation(fields: [testCaseId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([variantId, testCaseId])
+  @@index([testCaseId])
+  @@map("variant_test_cases")
+}
+
+model AiReferenceSolution {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  questionVersionId String    @map("question_version_id") @db.Uuid
+  variantId         String?   @map("variant_id") @db.Uuid
+  assistant         String
+  modelLabel        String    @map("model_label")
+  language          String
+  solutionCode      String    @map("solution_code")
+  promptText        String?   @map("prompt_text")
+  collectedAt       DateTime  @map("collected_at") @db.Timestamptz(6)
+  collectedById     String    @map("collected_by") @db.Uuid
+  supersededAt      DateTime? @map("superseded_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  questionVersion QuestionVersion  @relation(fields: [questionVersionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  variant         QuestionVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  collectedBy     User             @relation(fields: [collectedById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([questionVersionId])
+  @@map("ai_reference_solutions")
+}
+
+// ---------- Delivery ----------
+
+model Test {
+  id              String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId           String         @map("org_id") @db.Uuid
+  name            String
+  description     String?
+  durationMinutes Int            @map("duration_minutes")
+  profile         ProctorProfile @default(STANDARD)
+  passScore       Decimal?       @map("pass_score") @db.Decimal(6, 2)
+  settings        Json           @default("{}")
+  createdById     String?        @map("created_by") @db.Uuid
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  org         Organization  @relation(fields: [orgId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  createdBy   User?         @relation(fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  sections    TestSection[]
+  invitations Invitation[]
+
+  @@unique([id, orgId])
+  @@index([orgId])
+  @@map("tests")
+}
+
+model TestSection {
+  id           String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  testId       String @map("test_id") @db.Uuid
+  title        String
+  position     Int
+  timeLimitMin Int?   @map("time_limit_min")
+
+  test            Test             @relation(fields: [testId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  questions       TestQuestion[]
+  sessionSections SessionSection[]
+
+  @@index([testId])
+  @@map("test_sections")
+}
+
+model TestQuestion {
+  id                String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sectionId         String  @map("section_id") @db.Uuid
+  questionVersionId String? @map("question_version_id") @db.Uuid
+  randomRule        Json?   @map("random_rule")
+  points            Decimal @default(100) @db.Decimal(6, 2)
+  position          Int
+
+  section          TestSection       @relation(fields: [sectionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  questionVersion  QuestionVersion?  @relation(fields: [questionVersionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  sessionQuestions SessionQuestion[]
+
+  @@index([sectionId])
+  @@map("test_questions")
+}
+
+model Candidate {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId              String    @map("org_id") @db.Uuid
+  email              String    @db.Citext
+  fullName           String    @map("full_name")
+  externalRef        String?   @map("external_ref")
+  erasureRequestedAt DateTime? @map("erasure_requested_at") @db.Timestamptz(6)
+  erasedAt           DateTime? @map("erased_at") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  invitations Invitation[]
+
+  @@unique([orgId, email])
+  @@unique([id, orgId])
+  @@map("candidates")
+}
+
+model Invitation {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  testId         String    @map("test_id") @db.Uuid
+  candidateId    String    @map("candidate_id") @db.Uuid
+  tokenHash      String    @unique @map("token_hash")
+  windowStart    DateTime  @map("window_start") @db.Timestamptz(6)
+  windowEnd      DateTime  @map("window_end") @db.Timestamptz(6)
+  accommodations Json      @default("{}")
+  sentAt         DateTime? @map("sent_at") @db.Timestamptz(6)
+  usedAt         DateTime? @map("used_at") @db.Timestamptz(6)
+  createdById    String?   @map("created_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  org       Organization @relation(fields: [orgId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  test      Test         @relation(fields: [testId, orgId], references: [id, orgId], onDelete: NoAction, onUpdate: NoAction)
+  candidate Candidate    @relation(fields: [candidateId, orgId], references: [id, orgId], onDelete: NoAction, onUpdate: NoAction)
+  createdBy User?        @relation(fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  // At most one: sessions.invitation_id is UNIQUE. This is a list because Prisma cannot model a
+  // one-to-one over the composite FK (invitation_id, org_id) without an extra unique constraint,
+  // which the DDL does not have.
+  sessions  Session[]
+
+  @@unique([id, orgId])
+  @@index([testId])
+  @@index([candidateId])
+  @@map("invitations")
+}
+
+model Session {
+  id                String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String        @map("org_id") @db.Uuid
+  invitationId      String        @unique @map("invitation_id") @db.Uuid
+  status            SessionStatus @default(INVITED)
+  hmacKeyEnc        String?       @map("hmac_key_enc")
+  authEpoch         Int           @default(0) @map("auth_epoch")
+  deviceInfo        Json          @default("{}") @map("device_info")
+  clientKind        ClientKind    @default(WEB) @map("client_kind")
+  startedAt         DateTime?     @map("started_at") @db.Timestamptz(6)
+  deadlineAt        DateTime?     @map("deadline_at") @db.Timestamptz(6)
+  pausedMs          BigInt        @default(0) @map("paused_ms")
+  pauseReasons      PauseReason[] @default([]) @map("pause_reasons")
+  proctorPausedAt   DateTime?     @map("proctor_paused_at") @db.Timestamptz(6)
+  submittedAt       DateTime?     @map("submitted_at") @db.Timestamptz(6)
+  totalScore        Decimal?      @map("total_score") @db.Decimal(8, 2)
+  riskScore         Int?          @map("risk_score")
+  riskBand          RiskBand?     @map("risk_band")
+  lastHeartbeat     DateTime?     @map("last_heartbeat") @db.Timestamptz(6)
+  retentionAnchorAt DateTime?     @map("retention_anchor_at") @db.Timestamptz(6)
+  reportKey         String?       @map("report_key")
+  reportGeneratedAt DateTime?     @map("report_generated_at") @db.Timestamptz(6)
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  org                 Organization        @relation(fields: [orgId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  invitation          Invitation          @relation(fields: [invitationId, orgId], references: [id, orgId], onDelete: NoAction, onUpdate: NoAction)
+  sections            SessionSection[]
+  questions           SessionQuestion[]
+  consent             Consent?
+  identityChecks      IdentityCheck[]
+  mediaChunks         MediaChunk[]
+  proctorEventBatches ProctorEventBatch[]
+  proctorEvents       ProctorEvent[]
+  keystrokeBatches    KeystrokeBatch[]
+  review              SessionReview?
+  webhookDeliveries   WebhookDelivery[]
+
+  @@index([status])
+  @@index([orgId, status])
+  @@map("sessions")
+}
+
+model SessionSection {
+  sessionId   String    @map("session_id") @db.Uuid
+  sectionId   String    @map("section_id") @db.Uuid
+  position    Int
+  timeLimitMs BigInt?   @map("time_limit_ms")
+  startedAt   DateTime? @map("started_at") @db.Timestamptz(6)
+  deadlineAt  DateTime? @map("deadline_at") @db.Timestamptz(6)
+  endedAt     DateTime? @map("ended_at") @db.Timestamptz(6)
+
+  session Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  section TestSection @relation(fields: [sectionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([sessionId, sectionId])
+  @@unique([sessionId, position])
+  @@map("session_sections")
+}
+
+model SessionQuestion {
+  id                String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId         String          @map("session_id") @db.Uuid
+  testQuestionId    String          @map("test_question_id") @db.Uuid
+  questionVersionId String          @map("question_version_id") @db.Uuid
+  variantId         String?         @map("variant_id") @db.Uuid
+  position          Int
+  points            Decimal         @db.Decimal(6, 2)
+  score             Decimal?        @db.Decimal(6, 2)
+  scoring           QuestionScoring @default(AUTO)
+  scoredById        String?         @map("scored_by") @db.Uuid
+  scoredAt          DateTime?       @map("scored_at") @db.Timestamptz(6)
+  scoringNote       String?         @map("scoring_note")
+  finalCode         String?         @map("final_code")
+  finalLanguage     String?         @map("final_language")
+  answer            Json?
+
+  session          Session          @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  testQuestion     TestQuestion     @relation(fields: [testQuestionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  questionVersion  QuestionVersion  @relation(fields: [questionVersionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  variant          QuestionVariant? @relation(fields: [variantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  scoredBy         User?            @relation(fields: [scoredById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  submissions      Submission[]
+  keystrokeBatches KeystrokeBatch[]
+
+  @@index([sessionId])
+  @@map("session_questions")
+}
+
+model Submission {
+  id                String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionQuestionId String         @map("session_question_id") @db.Uuid
+  kind              SubmissionKind
+  language          String
+  sourceCode        String         @map("source_code")
+  results           Json           @default("[]")
+  passed            Int            @default(0)
+  total             Int            @default(0)
+  score             Decimal?       @db.Decimal(6, 2)
+  createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  sessionQuestion SessionQuestion @relation(fields: [sessionQuestionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([sessionQuestionId, createdAt])
+  @@map("submissions")
+}
+
+// ---------- Proctoring ----------
+
+model ConsentText {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId           String    @map("org_id") @db.Uuid
+  version         String
+  bodyMd          String    @map("body_md")
+  legalApprovedAt DateTime? @map("legal_approved_at") @db.Timestamptz(6)
+  legalApprovedBy String?   @map("legal_approved_by")
+  createdById     String?   @map("created_by") @db.Uuid
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  org                     Organization   @relation("ConsentTextOrganization", fields: [orgId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  createdBy               User?          @relation(fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  currentForOrganizations Organization[] @relation("OrganizationCurrentConsentText")
+  consents                Consent[]
+
+  @@unique([orgId, version])
+  @@map("consent_texts")
+}
+
+model Consent {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId      String    @unique @map("session_id") @db.Uuid
+  consentTextId  String    @map("consent_text_id") @db.Uuid
+  signedName     String?   @map("signed_name")
+  signedAt       DateTime? @map("signed_at") @db.Timestamptz(6)
+  declinedAt     DateTime? @map("declined_at") @db.Timestamptz(6)
+  ip             String?   @db.Inet
+  userAgent      String?   @map("user_agent")
+  pdfKey         String?   @map("pdf_key")
+  pdfGeneratedAt DateTime? @map("pdf_generated_at") @db.Timestamptz(6)
+  copyEmailedAt  DateTime? @map("copy_emailed_at") @db.Timestamptz(6)
+
+  session     Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  consentText ConsentText @relation(fields: [consentTextId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("consents")
+}
+
+model IdentityCheck {
+  id             String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId      String                  @map("session_id") @db.Uuid
+  attempt        Int                     @default(1) @db.SmallInt
+  idImageKey     String?                 @map("id_image_key")
+  selfieKey      String?                 @map("selfie_key")
+  faceMatchScore Decimal?                @map("face_match_score") @db.Decimal(5, 4)
+  modelId        String?                 @map("model_id")
+  threshold      Decimal?                @db.Decimal(5, 4)
+  livenessPassed Boolean?                @map("liveness_passed")
+  status         IdentityCheckStatus     @default(PENDING)
+  reviewReason   IdentityReviewReason?   @map("review_reason")
+  manualDecision IdentityManualDecision? @map("manual_decision")
+  reviewedById   String?                 @map("reviewed_by") @db.Uuid
+  reviewedAt     DateTime?               @map("reviewed_at") @db.Timestamptz(6)
+  reviewNote     String?                 @map("review_note")
+  createdAt      DateTime                @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  session    Session @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  reviewedBy User?   @relation(fields: [reviewedById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([sessionId, attempt])
+  @@map("identity_checks")
+}
+
+model MediaChunk {
+  id         BigInt      @id @default(autoincrement())
+  sessionId  String      @map("session_id") @db.Uuid
+  stream     MediaStream
+  segment    Int         @default(0)
+  seq        Int
+  objectKey  String?     @map("object_key")
+  startedAt  DateTime    @map("started_at") @db.Timestamptz(6)
+  durationMs Int         @map("duration_ms")
+  sizeBytes  BigInt?     @map("size_bytes")
+  uploadedAt DateTime?   @map("uploaded_at") @db.Timestamptz(6)
+  deletedAt  DateTime?   @map("deleted_at") @db.Timestamptz(6)
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([sessionId, stream, seq])
+  @@map("media_chunks")
+}
+
+model ProctorEventBatch {
+  sessionId  String   @map("session_id") @db.Uuid
+  seq        Int
+  signature  Bytes
+  eventCount Int      @map("event_count") @db.SmallInt
+  receivedAt DateTime @default(now()) @map("received_at") @db.Timestamptz(6)
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([sessionId, seq])
+  @@map("proctor_event_batches")
+}
+
+model ProctorEvent {
+  id          BigInt      @id @default(autoincrement())
+  sessionId   String      @map("session_id") @db.Uuid
+  batchSeq    Int?        @map("batch_seq")
+  type        EventType
+  severity    Severity
+  source      EventSource @default(CLIENT)
+  occurredAt  DateTime    @map("occurred_at") @db.Timestamptz(6)
+  durationMs  Int?        @map("duration_ms")
+  confidence  Decimal?    @db.Decimal(5, 4)
+  payload     Json        @default("{}")
+  evidenceKey String?     @map("evidence_key")
+  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  session      Session       @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  flagDecision FlagDecision?
+
+  @@index([sessionId, occurredAt])
+  @@index([sessionId, severity])
+  @@map("proctor_events")
+}
+
+model KeystrokeBatch {
+  id                BigInt   @id @default(autoincrement())
+  sessionId         String   @map("session_id") @db.Uuid
+  sessionQuestionId String?  @map("session_question_id") @db.Uuid
+  seq               Int
+  signature         Bytes
+  startedAt         DateTime @map("started_at") @db.Timestamptz(6)
+  events            Json
+
+  session         Session          @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  sessionQuestion SessionQuestion? @relation(fields: [sessionQuestionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([sessionId, seq])
+  @@map("keystroke_batches")
+}
+
+// ---------- Review ----------
+
+model SessionReview {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId   String    @unique @map("session_id") @db.Uuid
+  reviewerId  String    @map("reviewer_id") @db.Uuid
+  verdict     Verdict?
+  notes       String?
+  startedAt   DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  completedAt DateTime? @map("completed_at") @db.Timestamptz(6)
+
+  session  Session @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  reviewer User    @relation(fields: [reviewerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  appeal   Appeal?
+
+  @@index([reviewerId])
+  @@map("session_reviews")
+}
+
+model FlagDecision {
+  id         String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId    BigInt            @unique @map("event_id")
+  reviewerId String            @map("reviewer_id") @db.Uuid
+  decision   FlagDecisionValue
+  note       String?
+  decidedAt  DateTime          @default(now()) @map("decided_at") @db.Timestamptz(6)
+
+  event    ProctorEvent @relation(fields: [eventId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  reviewer User         @relation(fields: [reviewerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("flag_decisions")
+}
+
+model Appeal {
+  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionReviewId String       @unique @map("session_review_id") @db.Uuid
+  reason          String
+  status          AppealStatus @default(OPEN)
+  newVerdict      Verdict?     @map("new_verdict")
+  assignedToId    String?      @map("assigned_to") @db.Uuid
+  resolutionNote  String?      @map("resolution_note")
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  resolvedAt      DateTime?    @map("resolved_at") @db.Timestamptz(6)
+
+  sessionReview SessionReview @relation(fields: [sessionReviewId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  assignedTo    User?         @relation(fields: [assignedToId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([assignedToId])
+  @@map("appeals")
+}
+
+// ---------- Integrations ----------
+
+model WebhookEndpoint {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId       String   @map("org_id") @db.Uuid
+  url         String
+  events      String[]
+  secretEnc   String   @map("secret_enc")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdById String?  @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  org        Organization      @relation(fields: [orgId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  createdBy  User?             @relation(fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  deliveries WebhookDelivery[]
+
+  @@map("webhook_endpoints")
+}
+
+model WebhookDelivery {
+  id         BigInt   @id @default(autoincrement())
+  endpointId String   @map("endpoint_id") @db.Uuid
+  event      String
+  sessionId  String?  @map("session_id") @db.Uuid
+  attempt    Int
+  statusCode Int?     @map("status_code")
+  error      String?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  endpoint WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  session  Session?        @relation(fields: [sessionId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@index([endpointId, createdAt(sort: Desc)])
+  @@map("webhook_deliveries")
+}
