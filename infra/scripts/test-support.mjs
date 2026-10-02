@@ -5,6 +5,11 @@
 // the caller, so the real docker and pnpm can never be reached. The pnpm stand-in and every
 // unexpected docker call write to a log, and tests assert that the log stays empty: that proves a
 // script stopped before anything destructive.
+//
+// Tests of infra/scripts/db-migrate need a pnpm call that succeeds (FAKE_PNPM_EXIT=0) and a way
+// to see whether the password script was started. createSandbox({ stubPasswordScript: true })
+// replaces `node` with a shim: it logs a call to set-app-user-password.mjs and does not run it,
+// and it runs the real node for everything else, so the localhost guard still runs for real.
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,15 +35,32 @@ exit 99
 
 const PNPM_STUB = `#!/bin/sh
 echo "pnpm $*" >> "$STUB_LOG"
-exit 99
+exit "\${FAKE_PNPM_EXIT:-99}"
 `;
 
-/** @returns {{ dir: string, log: string, env: (extra?: Record<string, string>) => Record<string, string>, remove: () => void }} */
-export function createSandbox() {
+const nodeShim = (realNode) => `#!/bin/sh
+case "$1" in
+  infra/scripts/set-app-user-password.mjs)
+    echo "node $*" >> "$STUB_LOG"
+    exit "\${FAKE_PASSWORD_SCRIPT_EXIT:-0}"
+    ;;
+esac
+exec "${realNode}" "$@"
+`;
+
+/**
+ * @param {{ stubPasswordScript?: boolean }} [options]
+ * @returns {{ dir: string, log: string, env: (extra?: Record<string, string>) => Record<string, string>, remove: () => void }}
+ */
+export function createSandbox(options = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'codeproctor-script-test-'));
   const bin = join(dir, 'bin');
   mkdirSync(bin);
-  symlinkSync(process.execPath, join(bin, 'node'));
+  if (options.stubPasswordScript) {
+    writeFileSync(join(bin, 'node'), nodeShim(process.execPath), { mode: 0o755 });
+  } else {
+    symlinkSync(process.execPath, join(bin, 'node'));
+  }
   writeFileSync(join(bin, 'docker'), DOCKER_STUB, { mode: 0o755 });
   writeFileSync(join(bin, 'pnpm'), PNPM_STUB, { mode: 0o755 });
   const log = join(dir, 'stub.log');
