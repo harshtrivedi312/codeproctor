@@ -1,0 +1,223 @@
+openapi: 3.0.3
+info:
+  title: CodeProctor API (frontend mock contract)
+  version: 0.0.0-mock
+  description: |
+    Hand-written, minimal contract for the endpoints that apps/web calls through MSW mocks.
+    There is no backend OpenAPI spec yet. When the NestJS API publishes its generated spec, replace
+    this file with it, re-run `pnpm --filter @codeproctor/web gen:api`, and delete the matching
+    mocks in src/mocks. Paths and shapes below are placeholders, not the final API.
+servers:
+  - url: http://localhost:4000
+paths:
+  /v1/health:
+    get:
+      operationId: getHealth
+      summary: Liveness probe
+      responses:
+        '200':
+          description: API is up
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+  /v1/time:
+    get:
+      operationId: getServerTime
+      summary: Server clock, used to seed client countdown timers (FR-505)
+      responses:
+        '200':
+          description: Current server time
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [serverNow]
+                properties:
+                  serverNow: { type: string, format: date-time }
+  /v1/candidate/session:
+    get:
+      operationId: getCandidateSession
+      summary: The candidate's running session with the open section and its questions (FR-301, FR-505)
+      responses:
+        '200':
+          description: Session snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateSession'
+  /v1/candidate/questions/{questionId}/draft:
+    put:
+      operationId: saveDraft
+      summary: Autosave a code draft or an answer (FR-504)
+      parameters:
+        - $ref: '#/components/parameters/QuestionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DraftRequest'
+      responses:
+        '200':
+          description: Draft stored
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [savedAt]
+                properties:
+                  savedAt: { type: string, format: date-time }
+  /v1/candidate/questions/{questionId}/run:
+    post:
+      operationId: runSampleTests
+      summary: Run code against the sample tests (FR-502). One run per 5 seconds.
+      parameters:
+        - $ref: '#/components/parameters/QuestionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunRequest'
+      responses:
+        '200':
+          description: Sample test results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunResult'
+        '429':
+          description: Too many runs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [retryAfterSeconds]
+                properties:
+                  retryAfterSeconds: { type: integer }
+  /v1/candidate/sections/{sectionId}/finish:
+    post:
+      operationId: finishSection
+      summary: 'Finish the open section. Final, it cannot be reopened (ADR 0002 S-1).'
+      parameters:
+        - name: sectionId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Section closed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [finishedAt]
+                properties:
+                  finishedAt: { type: string, format: date-time }
+                  nextSectionId: { type: string, nullable: true }
+components:
+  parameters:
+    QuestionId:
+      name: questionId
+      in: path
+      required: true
+      schema: { type: string }
+  schemas:
+    Language:
+      type: string
+      enum: [python, javascript, java]
+    DraftRequest:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string, enum: [code, mcq] }
+        language: { $ref: '#/components/schemas/Language' }
+        code: { type: string }
+        selectedOptionId: { type: string, nullable: true }
+    RunRequest:
+      type: object
+      required: [language, code]
+      properties:
+        language: { $ref: '#/components/schemas/Language' }
+        code: { type: string }
+    SampleTestResult:
+      type: object
+      required: [id, name, status]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        status: { type: string, enum: [passed, failed] }
+        input: { type: string }
+        expectedOutput: { type: string }
+        actualOutput: { type: string }
+        durationMs: { type: integer }
+    RunResult:
+      type: object
+      required: [outcome, tests, stdout, stderr]
+      properties:
+        outcome:
+          type: string
+          enum: [completed, compile_error, runtime_error, time_limit_exceeded]
+        tests:
+          type: array
+          items: { $ref: '#/components/schemas/SampleTestResult' }
+        stdout: { type: string }
+        stderr: { type: string }
+    SampleTest:
+      type: object
+      required: [id, name, input, expectedOutput]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        input: { type: string }
+        expectedOutput: { type: string }
+    Question:
+      type: object
+      required: [id, type, title, points, statementMarkdown]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [coding, mcq] }
+        title: { type: string }
+        points: { type: integer }
+        statementMarkdown: { type: string }
+        languages:
+          type: array
+          items: { $ref: '#/components/schemas/Language' }
+        starterCode:
+          type: object
+          description: Starter code keyed by language
+          additionalProperties: { type: string }
+        sampleTests:
+          type: array
+          items: { $ref: '#/components/schemas/SampleTest' }
+        options:
+          type: array
+          items:
+            type: object
+            required: [id, label]
+            properties:
+              id: { type: string }
+              label: { type: string }
+    CandidateSession:
+      type: object
+      required: [testTitle, testDeadlineAt, section, questions]
+      properties:
+        testTitle: { type: string }
+        testDeadlineAt: { type: string, format: date-time }
+        section:
+          type: object
+          required: [id, position, totalSections, title, deadlineAt]
+          properties:
+            id: { type: string }
+            position: { type: integer }
+            totalSections: { type: integer }
+            title: { type: string }
+            deadlineAt: { type: string, format: date-time, nullable: true }
+        questions:
+          type: array
+          description: Questions of the open section only
+          items: { $ref: '#/components/schemas/Question' }
