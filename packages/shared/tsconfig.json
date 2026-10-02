@@ -3,7 +3,10 @@
   "compilerOptions": {
     "declaration": true,
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    // Node types only for the *.test.ts files (node:test); the build config drops them so
+    // browser consumers never see Node globals.
+    "types": ["node"]
   },
   "include": ["src"]
 }

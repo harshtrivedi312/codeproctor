@@ -2,13 +2,14 @@
   "name": "@codeproctor/shared",
   "version": "0.0.0",
   "private": true,
-  "description": "Shared types, zod schemas and constants (placeholder)",
+  "description": "Shared types, zod schemas and constants: events, keystrokes, permissions, auth, code run",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
   },
   "dependencies": {
     "zod": "^4.6.5"
