@@ -31,5 +31,5 @@ infra/pgdata/
 *.dump
 *.dump.gz
 backups/
-public/monaco/
+apps/web/public/monaco/
 next-env.d.ts
