@@ -1,6 +1,7 @@
 import { delay, http, HttpResponse } from 'msw';
 import { apiBaseUrl } from '@/lib/env';
 import type { Schemas } from '@/lib/api/client';
+import { createAuthHandlers } from './auth-handlers';
 import { mockSession } from './data';
 
 export interface MockOptions {
@@ -65,6 +66,7 @@ export function createHandlers(options: Partial<MockOptions> = {}) {
   let lastRunAt = 0;
 
   return [
+    ...createAuthHandlers(),
     http.get(`${base}/v1/health`, () => HttpResponse.json({ status: 'ok' as const })),
 
     // The mocked clock runs 90 seconds ahead of the browser, so the offset logic is visible.
