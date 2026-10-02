@@ -4,6 +4,7 @@ dist
 coverage
 pnpm-lock.yaml
 apps/worker
+apps/api/src/generated
 docs
 .claude
 CLAUDE.md
