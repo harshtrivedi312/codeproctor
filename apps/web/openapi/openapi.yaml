@@ -128,6 +128,7 @@ components:
       schema: { type: string }
   schemas:
     Language:
+      # Must match codeLanguageSchema in packages/shared/src/code-run.ts.
       type: string
       enum: [python, javascript, java]
     DraftRequest:
@@ -136,14 +137,14 @@ components:
       properties:
         kind: { type: string, enum: [code, mcq] }
         language: { $ref: '#/components/schemas/Language' }
-        code: { type: string }
+        code: { type: string, maxLength: 100000 } # MAX_SOURCE_CODE_LENGTH in packages/shared
         selectedOptionId: { type: string, nullable: true }
     RunRequest:
       type: object
       required: [language, code]
       properties:
         language: { $ref: '#/components/schemas/Language' }
-        code: { type: string }
+        code: { type: string, maxLength: 100000 } # MAX_SOURCE_CODE_LENGTH in packages/shared
     SampleTestResult:
       type: object
       required: [id, name, status]
