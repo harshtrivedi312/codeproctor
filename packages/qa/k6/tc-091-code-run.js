@@ -1,6 +1,9 @@
 /* global __ENV, __VU */
 // TC-091 (NFR-01): 50 concurrent code runs. Expected: p95 under 5 s.
 //
+// PLACEHOLDER PATH: the run endpoint path is a guess; replace it with the real one from the API
+// contract when BE-11 merges.
+//
 // Usage: k6 run -e API_URL=https://staging.example.com -e CANDIDATE_TOKENS=t1,t2,... packages/qa/k6/tc-091-code-run.js
 // Use 50 different candidate tokens: FR-502 allows only one run per 5 s per candidate.
 import http from 'k6/http';

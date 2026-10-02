@@ -84,11 +84,13 @@ for (const r of reports) {
   results.push(...load(r));
 }
 
-const state = new Map<string, { passed: number; failed: number }>();
+const state = new Map<string, { passed: number; failed: number; known: number }>();
 for (const res of results) {
   for (const id of new Set(res.title.match(/\bTC-\d{3}\b/g) ?? [])) {
-    const s = state.get(id) ?? { passed: 0, failed: 0 };
-    if (res.passed) s.passed++;
+    const s = state.get(id) ?? { passed: 0, failed: 0, known: 0 };
+    // Tests written with it.fails carry KNOWN DEFECT in the title and pass while the defect exists.
+    if (/KNOWN DEFECT/.test(res.title)) s.known++;
+    else if (res.passed) s.passed++;
     else s.failed++;
     state.set(id, s);
   }
@@ -107,6 +109,8 @@ for (const [id, p] of [...prio].sort()) {
   } else if (s.failed > 0) {
     line = `FAILED (${s.failed} failing, ${s.passed} passing)`;
     failures++;
+  } else if (s.known > 0) {
+    line = `KNOWN DEFECT open (${s.known} expected-fail test(s), ${s.passed} passing); not verified`;
   } else {
     line = `passed (${s.passed} tests; partial coverage is listed in docs/test-matrix.md)`;
   }

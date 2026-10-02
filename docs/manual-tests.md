@@ -30,7 +30,7 @@ Needs: a phone with a camera and a QR reader (the phone's own camera app).
 
 1. Start a STRICT test. At the setup step, scan the QR code on screen with the phone. Expected: the phone page opens, asks for camera access, and the laptop shows "side camera connected".
 2. Place the phone so it shows the desk and the candidate. Start the test.
-3. After about two minutes, close the phone browser tab (or lock the phone). Expected within 15 seconds: a SIDE_CAMERA disconnect event with severity HIGH appears on the staff side, and the test pauses with a message telling the candidate to reconnect.
+3. After about two minutes, close the phone browser tab (or lock the phone). Expected (observation: the 15 second figure is a QA expectation, not in the FSD; record the actual delay): a SIDE_CAMERA disconnect event with severity HIGH appears on the staff side, and the test pauses with a message telling the candidate to reconnect.
 4. Scan the QR code again. Expected: the test resumes, the paused time is accounted for as the FSD state machine says, and a reconnect event is logged.
 
 Pass: steps 3 and 4 behave as described and the timeline shows both events.
@@ -48,7 +48,7 @@ Pass: only "Entire screen" is accepted, in both browsers.
 ## TC-055 Stop sharing mid-test (FR-604, P1)
 
 1. Start a test with the entire screen shared. Type a few lines in the editor.
-2. Click the browser's "Stop sharing" bar button. Expected within 2 seconds: the test pauses, an overlay asks the candidate to share the screen again, and SCREEN_SHARE_STOPPED (HIGH) appears on the staff side.
+2. Click the browser's "Stop sharing" bar button. Expected: the test pauses (observation: the 2 second figure is a QA expectation, not in the FSD; record the actual delay and report it if it is over 5 seconds), an overlay asks the candidate to share the screen again, and SCREEN_SHARE_STOPPED (HIGH) appears on the staff side.
 3. Try typing. Expected: the editor is locked while paused.
 4. Share the entire screen again. Expected: the test resumes and the event timeline shows the stop and the resume.
 
@@ -59,7 +59,7 @@ Pass: pause, event and recovery as described; no code typed before the stop is l
 Needs: a second monitor and a cable, or a screen mirroring setup that adds a second display.
 
 1. With one screen only, open the invite link and go to the system check. Expected: the check passes the monitor item.
-2. Connect the second monitor in extended mode (not mirrored). Expected within 5 seconds: the start button is disabled and instructions say how to disconnect the extra screen.
+2. Connect the second monitor in extended mode (not mirrored). Expected: the start button is disabled (observation: the 5 second figure is a QA expectation, not in the FSD; record the actual delay) and instructions say how to disconnect the extra screen.
 3. Disconnect it. Expected: the start button works again.
 4. Start the test. Connect the second monitor mid-test. Expected: a multiple-monitors event is logged and shown on staff side.
 5. Repeat step 2 with the second monitor in mirror mode and note the result in the run record (the FSD does not say what must happen; report it to the architect if the app does not block).
@@ -100,10 +100,10 @@ Pass: steps 1 to 3 as described. False positives in step 4 go in the run record.
 
 ## TC-060 Gaze away (FR-606, P2, STANDARD)
 
-1. Start a test. Look at a fixed point well to the side of the screen (about 60 degrees to the right) for 7 seconds, keeping your head still.
+1. Start a test. Look at a fixed point well to the side of the screen (about 60 degrees to the right) for longer than the configured gaze threshold (default 5 s per FR-606; TC-060 uses 7 s), keeping your head still. Check the configured value in the org settings first and write it in the run record.
 2. Expected: GAZE_AWAY is logged once.
 3. Look back at the screen for 20 seconds. Expected: no more events.
-4. Look at the screen but glance away for 2 seconds, three times. Expected: no GAZE_AWAY events (below the 7 second rule).
+4. Look at the screen but glance away for 2 seconds, three times. Expected: no GAZE_AWAY events (below the configured threshold).
 5. Repeat step 1 wearing glasses and note the result.
 
 Pass: steps 1 to 4 as described.
@@ -127,7 +127,7 @@ The Playwright version uses browser offline mode. This script checks the real ne
 1. Start a test on Wi-Fi. Type code and wait for the saved indicator. Note the last code line and the time on the timer.
 2. Turn Wi-Fi off (not the browser's offline mode) and keep typing for 45 seconds.
 3. Turn Wi-Fi on. Expected: a "Reconnected" message, no error dialog.
-4. On the staff side: DISCONNECTED appears about 60 seconds after the last heartbeat (so only if the drop lasted longer than that; with a 45 second drop expect no DISCONNECTED), and RECONNECTED if DISCONNECTED was logged. Repeat steps 2 and 3 with a 90 second drop and expect both events.
+4. **Pending architect decision** (TC-063 expects DISCONNECTED/RECONNECTED after 45 s, but FR-609 logs DISCONNECTED after 60 s without a heartbeat; see docs/followups/qa.md). Until the architect decides, record what actually happens for both drops and do not mark this step pass or fail. Working assumption: on the staff side DISCONNECTED appears about 60 seconds after the last heartbeat (so only if the drop lasted longer than that; with a 45 second drop expect no DISCONNECTED), and RECONNECTED if DISCONNECTED was logged. Repeat steps 2 and 3 with a 90 second drop and expect both events.
 5. Check the recordings in the review page. Expected: no gap over 10 seconds in any stream after the upload buffer drains, and no missing chunk.
 6. Reload the page after the drop. Expected: the code typed during the drop is present.
 7. Check the timer. Expected: the server clock kept running; the timer did not pause or jump.
