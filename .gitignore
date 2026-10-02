@@ -2,3 +2,27 @@
 .claude/agents-generated-backup/
 node_modules/
 .env
+
+# Dependencies and build output
+dist/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+*.log
+
+# Environment files: only .env.example is tracked (NFR-04)
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Local database volumes and data directories
+pgdata/
+infra/data/
+infra/pgdata/

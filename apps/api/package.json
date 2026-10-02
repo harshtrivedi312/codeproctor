@@ -1,0 +1,11 @@
+{
+  "name": "@codeproctor/api",
+  "version": "0.0.0",
+  "private": true,
+  "description": "NestJS API (placeholder; NestJS is installed in DB-05 or BE-01, see Q-39)",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint ."
+  }
+}
