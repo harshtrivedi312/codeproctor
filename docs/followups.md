@@ -90,3 +90,23 @@ Built against MSW mocks; the paths below are placeholders like the rest of `apps
 - The `Field` helper renders the hint as a `div`; the password rule list sits inside it.
 - Next.js adds its own `role="alert"` route announcer, so Playwright selectors must exclude `#__next-route-announcer__`.
 - `pnpm --filter @codeproctor/web gen:api` output must be run through `prettier --ignore-path /dev/null --write` (the file is in `.prettierignore`) to keep diffs small; see the step-1 nit.
+
+### frontend/step-2 code-reviewer findings (verdict: no real blockers)
+
+The reviewer's only "blocker" was a possible Prettier failure it could not run; `pnpm format:check` passes. It read the code only and did not run build, lint or tests.
+
+#### Should-fix
+
+1. **[MUST-FIX before Step 3 (FE-03) adds deep-linked staff pages] `next` is lost after 2FA verify.** `apps/web/src/features/auth/two-factor-verify-form.tsx:38-41,51-53`. `signIn()` clears `pending`, so the page bounces to `/admin/login` after the `router.replace(next)`, and the login page then forwards to `/admin`. The 401 branch also loses `?reason=expired`. Fix with a `submittedRef` or a `status !== 'authenticated'` check, and add a test that `next=/admin/x` survives the 2FA step.
+2. **Multiple tabs and refresh-token rotation.** `lib/auth-session.ts:30-35`, `auth-provider.tsx:51`. Two tabs refreshing at once can look like refresh-token reuse (FR-104) and revoke the family. Share one refresh across tabs with `navigator.locks` or BroadcastChannel, or add a short server-side reuse grace window ([BE-02]).
+3. **A stale refresh can restore a session after sign-out.** `auth-session.ts:37-55`, `auth-provider.tsx:61-71`. Add a generation counter bumped by `signOut`, and drop results from an older generation.
+4. **Retry check hard-codes `/v1/auth/`.** `lib/api/client.ts:21`. Breaks when ARC-02 moves the API to `/api/v1` or `NEXT_PUBLIC_API_URL` has a path. Compare against the base path or tag auth calls explicitly.
+5. **A failed logout call leaves an unhandled rejection.** `auth-provider.tsx:63-70`. Add `catch {}`; local sign-out still happens.
+
+#### Nits
+
+- `require-role.tsx:33`: `next` drops the query string.
+- `two-factor-enroll.tsx:107-113`: the "could not start set-up" alert has no link back to login.
+- `two-factor-enroll.tsx:48`: the challenge token is in the React Query key; use a constant key.
+- `client.ts:18-23`: every authenticated request is cloned up front; watch for large code bodies (NFR-01).
+- `two-factor-verify-form.tsx:49`: the code is trimmed twice.
