@@ -14,6 +14,16 @@ const nextConfig: NextConfig = {
   headers() {
     return Promise.resolve([
       {
+        // Pages reached from an emailed single-use link (FR-107, ADR 0003 section 4): the token must
+        // never leave in a Referer header or be cached. Repeated on purpose so a change to the
+        // global policy cannot weaken it.
+        source: '/admin/:page(reset-password|set-password)',
+        headers: [
+          { key: 'Referrer-Policy', value: 'no-referrer' },
+          { key: 'Cache-Control', value: 'no-store' },
+        ],
+      },
+      {
         source: '/:path*',
         headers: [
           { key: 'X-Content-Type-Options', value: 'nosniff' },
