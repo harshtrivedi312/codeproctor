@@ -58,3 +58,35 @@ Verdict: approve after the blocker fixes below. Fixed on this branch: `RunReques
 - **Nit:** `z.string().email()` is deprecated in zod 4 in favour of `z.email()`; switch when the auth schemas grow.
 - **Nit:** `pnpm --filter @codeproctor/web gen:api` writes unformatted output while the committed `schema.d.ts` is prettier-formatted (and the file is in `.prettierignore`), so every regeneration shows a whole-file diff. Either append a prettier step to `gen:api` or commit the raw output.
 - **Nit:** `packages/shared` resolves to `dist/` for `tsc` but to `src/` for vitest; a new export can pass tests and fail typecheck until `shared` is rebuilt. Consider `exports` with a source condition or TS project references in ARC-02.
+
+## frontend/step-2 (staff authentication screens, FE-02)
+
+Built against MSW mocks; the paths below are placeholders like the rest of `apps/web/openapi/openapi.yaml`.
+
+### Needed shared and contract changes for ARC-02 (web used web-local copies)
+
+- **[ARC-02] Move `recoveryCodeSchema` and the 2FA verify body to `packages/shared`.** Web has them in `apps/web/src/features/auth/schemas.ts` (16 base32 characters, spaces and dashes ignored, upper-cased). `/auth/2fa/verify` takes a 6-digit code or a recovery code; the API must normalise the same way. See also the existing [BE-02] note on `otpCodeSchema`.
+- **[ARC-02] Add the password-reset and set-password schemas and the password policy to `packages/shared`.** No doc defines the strength rules. Web assumes at least 12 characters, one lower-case, one upper-case and one digit, at most `MAX_PASSWORD_LENGTH` (`PASSWORD_RULES` in `schemas.ts`). The architect must confirm or change the policy; the backend must enforce the same list.
+- **[ARC-02] Add `forgotPasswordRequestSchema` (email only) and `challengeToken` bodies** for `/auth/2fa/*`.
+- **[ARC-02] Add the staff auth endpoints to the API contract and fsd.md section 4.** Placeholders used: `POST /v1/auth/login` (200 `authenticated` or `two_factor_required` or `two_factor_enrollment_required`, 401, 423 with `lockedUntil`), `POST /v1/auth/2fa/enroll/start`, `POST /v1/auth/2fa/enroll/confirm` (returns the session and the 10 recovery codes once), `POST /v1/auth/2fa/verify`, `POST /v1/auth/refresh`, `POST /v1/auth/logout`, `POST /v1/auth/password/forgot` (202), `POST /v1/auth/password/reset` (204, or 400 with one message for unknown, expired and used tokens). fsd.md section 4 lists only login, 2fa/verify, refresh, forgot and reset; enrollment start/confirm and logout are missing.
+- **[ARC-02] Decide the shape of the 2FA challenge.** Web holds an opaque `challengeToken` (returned by login, sent to the 2FA calls) in memory. The API needs a short-lived, single-purpose token for this and must not issue an access token before enrollment is confirmed (TC-003). Document its lifetime.
+- **[ARC-02] Email links must carry the token in the URL fragment** (`/admin/reset-password#token=...`, `/admin/set-password#token=...`) so it never appears in server or proxy access logs. Web also accepts `?token=` and strips it, but a query token has already reached the server by then (ADR 0001 C-5, A-13). BE-06 templates `password-reset` and `staff-invite` should use the fragment.
+- **[ARC-02] Add `StaffRole` and a permission matrix to `packages/shared`.** `RequireRole` takes an explicit role list because no shared permission matrix exists yet; the OpenAPI `StaffRole` enum duplicates `UserRole` from prisma (same drift risk as `Language`).
+- **[ARC-02] Access token lifetime is unknown to the client.** Web refreshes on first load and after a 401 only. If the API returns `expiresIn`, add a timer to refresh just before expiry and avoid a failed first call.
+- **[ARC-02] Account-lock response.** Web reads `lockedUntil` from a 423 body; the API should also send `Retry-After`. A locked account refuses even the correct password (TC-002); the message should not reveal whether an email exists (web only shows lock text when the API says 423).
+
+### Should-fix
+
+1. **Production build can ship the mock auth state.** Same root cause as item 2 under frontend/step-1 (mock mode is not blocked in production). `apps/web/src/mocks/auth-handlers.ts` is only imported through `mocks/handlers.ts`, so it is dropped when mocking is off, but there is no hard stop.
+2. **Playwright runs against `next dev` only.** `apps/web/playwright.config.ts` uses `next dev` with mocks. CI wiring (browser install, port, a production-build variant) is not done: CI config was out of scope. The `Cache-Control: no-store` header was checked by hand against `next start` (it is overridden in dev), not by a test.
+3. **`/admin` guard is client-side.** `RequireRole` shows the page shell for a moment ("Checking your sign-in") before redirecting. A server-side check needs a cookie the web origin can read; revisit when the cookie domain is decided (ARC-03).
+4. **Roles and the mock.** The mock treats SUPER_ADMIN and REVIEWER as TOTP-mandatory and the others as no-2FA; optional TOTP for RECRUITER and AUTHOR (FR-102) has no enrollment entry point yet (Settings, FE-03).
+5. **No rate-limit message on login or forgot password.** A 429 shows the generic "could not sign in" or "wait a minute" text; once the API defines `Retry-After`, show the seconds.
+
+### Nits
+
+- QR code is generated in the browser with the `qrcode` package (MIT) from the otpauth URI the API returns; the secret therefore passes through the page. That is inherent to showing a manual key as well.
+- Recovery codes download uses a short-lived blob URL and a text file; there is no "copy" button.
+- The `Field` helper renders the hint as a `div`; the password rule list sits inside it.
+- Next.js adds its own `role="alert"` route announcer, so Playwright selectors must exclude `#__next-route-announcer__`.
+- `pnpm --filter @codeproctor/web gen:api` output must be run through `prettier --ignore-path /dev/null --write` (the file is in `.prettierignore`) to keep diffs small; see the step-1 nit.
