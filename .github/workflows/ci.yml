@@ -59,6 +59,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Prisma 7 never generates the client by itself (ADR 0009 section 4.3), and the generated
+      # client in apps/api/src/generated is git-ignored. Build, lint and typecheck need it.
+      # Needs no database.
+      - name: Generate the Prisma client
+        run: pnpm db:generate
+
       # The variable's name is built from two pieces so this file does not contain it.
       # git grep exits 1 when nothing matches (pass), 0 on a match (fail) and 2 or more on an error.
       - name: Check Prisma's AI-consent variable appears only where ADR 0009 allows
