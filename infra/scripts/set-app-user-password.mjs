@@ -12,6 +12,12 @@
 // command line, and it quotes the value with client.escapeLiteral. It prints only
 // "app_user password set". Failure messages never include the password or a URL.
 //
+// pg gets exactly the string the guard checked (FU-DB-23). The guard validates the trimmed URL,
+// and pg-connection-string treats a leading space, NBSP or BOM differently: it resolves the value
+// against a dummy host and sends the whole URL, password included, as the database name. So a
+// value that is not already trimmed is refused. As a second line of defence, the host the client
+// resolved is checked before connect().
+//
 // Staging, pilot and production never use this script. They set the password at provisioning,
 // from the vault (ADR 0006 section 7.4, D-38).
 import { existsSync, readFileSync } from 'node:fs';
@@ -46,6 +52,13 @@ if (problems.length > 0) {
   fail('refusing to run. This script only touches a local database.');
 }
 
+// The guard has validated MIGRATION_DATABASE_URL.trim(). Pass pg that exact string or nothing.
+// The message names the variable, never its value.
+const databaseUrl = process.env.MIGRATION_DATABASE_URL;
+if (databaseUrl === undefined || databaseUrl !== databaseUrl.trim()) {
+  fail('MIGRATION_DATABASE_URL has leading or trailing whitespace. Remove it.');
+}
+
 const password = process.env.APP_USER_PASSWORD;
 if (password === undefined || password === '') {
   fail('APP_USER_PASSWORD is not set in the shell or in .env.');
@@ -63,8 +76,14 @@ try {
 
 /** A message for a failure. It never uses the driver's own text, which could echo a value. */
 function describeFailure(error) {
+  // Raised while pg parses the URL, before any connection: for example a malformed %-sequence.
+  if (error instanceof URIError) {
+    return 'MIGRATION_DATABASE_URL could not be parsed. Check it for a malformed %-sequence.';
+  }
   const code = typeof error?.code === 'string' ? error.code : '';
   switch (code) {
+    case 'ENOENT':
+      return 'a file named in MIGRATION_DATABASE_URL (for example sslrootcert) was not found.';
     case 'ECONNREFUSED':
     case 'ETIMEDOUT':
       return 'could not connect to the local database. Is the local stack running (pnpm dev:infra)?';
@@ -82,19 +101,25 @@ function describeFailure(error) {
   }
 }
 
-// 3. Connect as the owner role and set the password.
-const client = new Client({
-  connectionString: process.env.MIGRATION_DATABASE_URL,
-  connectionTimeoutMillis: 10_000,
-});
+// 3. Connect as the owner role and set the password. The client is built inside the try, so a
+//    URL that pg cannot parse ends in our own message and never in a stack trace.
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+let client;
 let failure;
 try {
-  await client.connect();
-  await client.query(`ALTER ROLE app_user WITH PASSWORD ${client.escapeLiteral(password)}`);
+  client = new Client({ connectionString: databaseUrl, connectionTimeoutMillis: 10_000 });
+  // Whatever the guard saw, the host pg resolved must be this machine. No host is printed.
+  if (!LOOPBACK_HOSTS.has(String(client.host).toLowerCase())) {
+    failure =
+      'the database client resolved MIGRATION_DATABASE_URL to a host other than this machine. Refusing to connect.';
+  } else {
+    await client.connect();
+    await client.query(`ALTER ROLE app_user WITH PASSWORD ${client.escapeLiteral(password)}`);
+  }
 } catch (error) {
   failure = describeFailure(error);
 } finally {
-  await client.end().catch(() => undefined);
+  await client?.end().catch(() => undefined);
 }
 
 if (failure !== undefined) {
