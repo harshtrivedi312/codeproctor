@@ -11,6 +11,7 @@
     "dev:infra": "docker compose --env-file .env -f infra/docker-compose.yml up -d --wait",
     "dev:infra:down": "docker compose --env-file .env -f infra/docker-compose.yml down",
     "dev:infra:reset": "sh infra/scripts/dev-infra-reset",
+    "db:generate": "prisma generate",
     "db:migrate": "node infra/scripts/assert-local-db.mjs && prisma migrate dev",
     "db:seed": "node infra/scripts/assert-local-db.mjs && prisma db seed",
     "db:reset": "sh infra/scripts/db-reset",

@@ -11,6 +11,9 @@ coverage/
 *.tsbuildinfo
 *.log
 
+# Generated Prisma client (pnpm db:generate; ADR 0009 section 4.2)
+apps/api/src/generated/
+
 # Environment files: only .env.example is tracked (NFR-04)
 .env.*
 !.env.example
