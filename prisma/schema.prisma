@@ -1,3 +1,69 @@
+// CodeProctor Prisma schema (DB-02).
+// Source of truth: the reference DDL in docs/database.md (31 tables, 20 enums), and the freeze list
+// docs/adr/0008-schema-freeze-list.md. Prisma 7 (ADR 0009): there is no datasource url in this
+// file. The CLI reads MIGRATION_DATABASE_URL from prisma.config.ts; the app connects as app_user
+// through the driver adapter (apps/api/src/database/create-prisma-client.ts).
+//
+// Conventions
+// - Models are PascalCase and fields camelCase. @@map and @map keep the snake_case DDL names.
+// - The flag_decision enum is FlagDecisionValue here, because the FlagDecision model owns that name.
+// - Every relation sets onDelete and onUpdate. The DDL has CASCADE on 22 foreign keys and SET NULL
+//   on 1; everything else is NO ACTION, which is not Prisma's default.
+// - users.updated_at has no @updatedAt: the DDL default plus the DB-03 trigger set it.
+// - Invitation.sessions is a list although sessions.invitation_id is UNIQUE (see the model).
+//
+// TODO for DB-03: DDL features Prisma cannot express.
+// `prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script` was loaded next to
+// the reference DDL and the two catalogs were diffed. Tables (31), columns (294), enums (20, with
+// values and order), primary keys (31), foreign keys (58, with ON DELETE and ON UPDATE), unique
+// indexes (20) and the 22 non-partial indexes match. The differences are exactly these:
+//
+//  1. Extensions. Prisma emits none. Put these first in the init migration, before any CITEXT column:
+//       CREATE EXTENSION IF NOT EXISTS pgcrypto;
+//       CREATE EXTENSION IF NOT EXISTS citext;
+//  2. 12 CHECK constraints (ADR 0008 section 5). Postgres names an unnamed inline CHECK as shown:
+//       organizations_retention_days_check  retention_days BETWEEN 7 AND 730
+//       users_check                         password_hash IS NOT NULL OR set_password_token_hash IS NOT NULL
+//       tests_duration_minutes_check        duration_minutes BETWEEN 5 AND 480
+//       test_questions_check                question_version_id IS NOT NULL OR random_rule IS NOT NULL
+//       invitations_check                   window_end > window_start
+//       sessions_risk_score_check           risk_score BETWEEN 0 AND 100
+//       session_questions_check             (scoring = 'MANUAL') = (scored_by IS NOT NULL AND scored_at IS NOT NULL)
+//       consents_check                      (signed_at IS NULL) <> (declined_at IS NULL)
+//       consents_check1                     signed_at IS NULL OR signed_name IS NOT NULL
+//       identity_checks_attempt_check       attempt BETWEEN 1 AND 2
+//       identity_checks_check               (status = 'REVIEWED') = (manual_decision IS NOT NULL AND
+//                                             reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL)
+//       appeals_check                       (status = 'OVERTURNED') = (new_verdict IS NOT NULL)
+//  3. 2 partial indexes (the other 22 indexes are declared below):
+//       sessions_risk_band_idx            ON sessions (risk_band) WHERE status IN ('GRADED','UNDER_REVIEW')
+//       sessions_retention_anchor_at_idx  ON sessions (retention_anchor_at) WHERE retention_anchor_at IS NOT NULL
+//  4. Trigger on users: set updated_at = now() before each UPDATE (function plus trigger; the
+//     reference DDL block does not contain it, prompts/database.md Step 3 and ADR 0008 section 1 do).
+//  5. Identity columns. Prisma's autoincrement emits BIGSERIAL (a sequence and a nextval default).
+//     The DDL has BIGINT GENERATED ALWAYS AS IDENTITY on audit_logs.id, media_chunks.id,
+//     proctor_events.id, keystroke_batches.id and webhook_deliveries.id. Convert them in the init
+//     SQL (architect to confirm, brief DB-02 item 9). GENERATED ALWAYS rejects an explicit id, so
+//     seeds and tests must not set one.
+//  6. NOT NULL on the 5 list columns. Prisma emits scalar lists as nullable (DEFAULT ARRAY[]::T[]
+//     where there is a default). The DDL has NOT NULL on users.recovery_code_hashes, questions.tags,
+//     question_versions.allowed_languages, sessions.pause_reasons and webhook_endpoints.events.
+//     Add ALTER COLUMN ... SET NOT NULL. Prisma Client makes list inputs optional, so a create
+//     that omits allowed_languages or events (no default) will fail on NOT NULL: services pass them.
+//  7. The audit_append_only migration (ADR 0006 section 7.2): app_user, grants, and the REVOKE of
+//     UPDATE, DELETE and TRUNCATE on audit_logs and of all access to _prisma_migrations.
+//
+// Differences that need no action (same behavior):
+// - Prisma writes timestamptz as TIMESTAMPTZ(6) (6 is the default precision) and now() as
+//   CURRENT_TIMESTAMP, and an empty array default as ARRAY[]::T[] instead of '{}'.
+// - Prisma creates the 20 UNIQUE constraints as unique indexes with the same names. Tests for them
+//   look at pg_index (indisunique), not pg_constraint. Foreign keys can reference them.
+// - The first line of the generated SQL is CREATE SCHEMA IF NOT EXISTS "public" (harmless).
+//
+// After editing the generated SQL, run `pnpm db:migrate` on the local volume and confirm Prisma
+// reports no drift. Prisma does not read CHECK constraints, triggers or partial index predicates
+// back, so check that it proposes no change for them (DB-03 verification).
+
 datasource db {
   provider = "postgresql"
 }
