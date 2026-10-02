@@ -16,6 +16,14 @@
     "paths": { "@/*": ["./src/*"] },
     "types": ["node", "vitest/globals", "@testing-library/jest-dom"]
   },
-  "include": ["next-env.d.ts", "src", ".next/types/**/*.ts", "next.config.ts", "vitest.config.mts"],
+  "include": [
+    "next-env.d.ts",
+    "src",
+    "e2e",
+    "playwright.config.ts",
+    ".next/types/**/*.ts",
+    "next.config.ts",
+    "vitest.config.mts"
+  ],
   "exclude": ["node_modules"]
 }
