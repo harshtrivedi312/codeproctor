@@ -1,7 +1,11 @@
 packages:
   - 'apps/*'
   - 'packages/*'
+# Dependency install scripts are blocked unless listed here. One line per entry says why.
 allowBuilds:
+  # Postinstall fetches the Prisma engine binaries (schema engine) for this platform.
   '@prisma/engines': true
+  # Postinstall only validates and optimizes the binary; esbuild (pulled in by tsx) works without it.
   esbuild: false
+  # Preinstall stops with a clear message when the Node version is unsupported.
   prisma: true

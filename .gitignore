@@ -26,3 +26,8 @@ __pycache__/
 pgdata/
 infra/data/
 infra/pgdata/
+
+# Database backups and dumps (DB-07): never commit data
+*.dump
+*.dump.gz
+backups/

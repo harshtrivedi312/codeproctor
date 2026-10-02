@@ -167,7 +167,7 @@ flowchart LR
 | Neon free suspends after about 5 minutes idle; Supabase free pauses after 7 days | Secondary sources only |
 | Only the first MediaRecorder timeslice blob has the WebM header | Verified (W3C mediacapture-record) |
 | Model licences of MediaPipe, COCO-SSD, Silero VAD and vad-web | Checked 2026-10-01; results and flags in section 12 (COCO-SSD weights: **Not verified**) |
-| Managed Postgres offers PG 16, citext, pgcrypto and `CREATE ROLE`; CSP needs `'wasm-unsafe-eval'`; BullMQ's default retention of completed jobs; whether R2 and S3 enforce a signed Content-Length on presigned PUT | **Not verified** |
+| Managed Postgres offers PG 16, citext and pgcrypto (`CREATE ROLE` is now verified for RDS and Neon and partly verified for Supabase: ADR 0006 section 7); CSP needs `'wasm-unsafe-eval'`; BullMQ's default retention of completed jobs; whether R2 and S3 enforce a signed Content-Length on presigned PUT | **Not verified** |
 
 ## 9. Open issues (conflicts that affect the overall architecture)
 

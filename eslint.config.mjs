@@ -1,6 +1,8 @@
 // Base ESLint config for every TypeScript package in the monorepo (CLAUDE.md: no `any`).
+// Type-aware rules use the nearest tsconfig.json of each file (projectService).
 import js from '@eslint/js';
 import { defineConfig, globalIgnores } from 'eslint/config';
+import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 export default defineConfig(
@@ -12,11 +14,25 @@ export default defineConfig(
     'apps/worker/**',
   ]),
   js.configs.recommended,
-  tseslint.configs.recommended,
+  tseslint.configs.recommendedTypeChecked,
+  {
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+  },
   {
     files: ['**/*.ts', '**/*.tsx', '**/*.mts', '**/*.cts'],
     rules: {
       '@typescript-eslint/no-explicit-any': 'error',
     },
+  },
+  {
+    // Plain JavaScript (config files and infra/scripts) is not part of a TypeScript project.
+    files: ['**/*.{js,mjs,cjs}'],
+    extends: [tseslint.configs.disableTypeChecked],
+    languageOptions: { globals: globals.node },
   },
 );

@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Accepted** 2026-10-01 (D-16; ARC-01 Phase B). Gate for DB-02 and DB-03. |
+| Status | **Accepted** 2026-10-01 (D-16; ARC-01 Phase B). Gate for DB-02 and DB-03. Section 8 "Roles" amended 2026-10-02 (D-35, ADR 0006 section 7). |
 | Author | architect |
 | Base | The reference DDL in /docs/database.md at commit `7f5c6b9` (24 tables, 13 enums). |
 | Target | The reference DDL in /docs/database.md as updated on 2026-10-01 (31 tables, 20 enums). The target DDL is authoritative; this list is the checklist of every difference. |
@@ -207,6 +207,18 @@ DB-03 adds these in SQL, in addition to the base Step 3 list:
 - `REVOKE UPDATE, DELETE, TRUNCATE ON audit_logs FROM app_user`
 
 It fails with a clear message if `app_user` is missing. `DATABASE_URL` connects as `app_user`; `MIGRATION_DATABASE_URL` connects as the owner role.
+
+> **Amended 2026-10-02 (D-35; ADR 0006 section 7).** The roles paragraph above is replaced as follows.
+> - There is no `infra/sql/roles.sql` and no compose init script.
+> - The `audit_append_only` migration first creates `app_user` if it does not exist (LOGIN, no password), then grants. It also:
+>   - grants USAGE on schema `public`;
+>   - sets default privileges on sequences;
+>   - omits `FOR ROLE`;
+>   - revokes all access to `_prisma_migrations`.
+> - The exact SQL is in ADR 0006 section 7.2.
+> - The "clear message" now fires only where the migration role cannot create roles.
+> - The password is set outside migrations (ADR 0006 section 7.4).
+> - Nothing else in this list changes: the schema counts in section 1 are the same.
 
 **No triggers are added.** Immutability of published question versions, used consent texts and AI reference rows is enforced in services.
 

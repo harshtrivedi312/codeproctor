@@ -1,5 +1,5 @@
 # Local infrastructure for CodeProctor: PostgreSQL 16, Redis 8.8 and Adminer.
-# Judge0 is added in BE-05. The app role and its init script are added in DB-03.
+# Judge0 is added in BE-05. The app role is created by a DB-03 migration (ADR 0006 section 7); there is no init script.
 #
 # Run from the repository root (credentials come from .env, see .env.example):
 #   pnpm dev:infra
@@ -43,6 +43,8 @@ services:
       retries: 12
       start_period: 5s
 
+  # Adminer is for local development only. It never goes into the staging compose file
+  # or any shared environment.
   adminer:
     image: adminer:5
     restart: unless-stopped
