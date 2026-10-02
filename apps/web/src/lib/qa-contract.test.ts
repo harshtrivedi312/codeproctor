@@ -7,8 +7,7 @@ import { resolve } from 'node:path';
 import { loginRequestSchema, otpCodeSchema } from '@codeproctor/shared';
 import { describe, expect, it } from 'vitest';
 
-// Vitest runs with apps/web as the working directory.
-const spec = readFileSync(resolve(process.cwd(), 'openapi/openapi.yaml'), 'utf8');
+const spec = readFileSync(resolve(import.meta.dirname, '../../openapi/openapi.yaml'), 'utf8');
 
 function schemaBlock(name: string): string {
   const start = spec.indexOf(`\n    ${name}:\n`);

@@ -144,11 +144,6 @@ describe('TC-047 client clock tampering (FR-505), UI side', () => {
     expect(remainingMs(deadline, honestClient, honestOffset)).toBe(60 * 60_000);
     expect(remainingMs(deadline, tamperedClient, tamperedOffset)).toBe(60 * 60_000);
   });
-  it('TC-047 a clock moved after the offset was taken is a server-side check (see matrix)', () => {
-    // The browser cannot be trusted here: the API must compute the deadline from its own clock.
-    // This is covered by the API integration test planned for FR-505 (blocked on backend).
-    expect(true).toBe(true);
-  });
 });
 
 describe('TC-050 fullscreen exit (FR-601), UI side', () => {
