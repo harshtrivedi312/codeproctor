@@ -1,5 +1,6 @@
-# Baseline CI (PA-01, approved by D-25). Uses only GitHub's official actions pinned to a major
-# version and no repository secrets, so it is safe to run on pull requests from forks.
+# Baseline CI (PA-01, approved by D-25). Uses only GitHub's official actions, each pinned to a
+# full commit SHA with its version in a comment, and no repository secrets, so it is safe to run
+# on pull requests from forks. Node 24 (from .nvmrc) is the authoritative runtime for these checks.
 name: CI
 
 on:
@@ -12,34 +13,66 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   verify:
-    name: Lint, typecheck, test and build
-    runs-on: ubuntu-latest
+    name: Install, build, lint, typecheck, test
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      # Node version comes from .nvmrc.
-      - uses: actions/setup-node@v7
+      # Node version comes from .nvmrc. Node 24 bundles corepack.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
 
-      # pnpm version comes from the packageManager field in package.json.
+      # pnpm version (and its integrity hash) comes from the packageManager field in package.json.
+      # This runs after setup-node so the shim lands next to the Node that setup-node installed.
       - name: Enable pnpm through corepack
         run: corepack enable
 
+      - name: Locate the pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
+
       # apps/worker builds with python3.12 (see apps/worker/package.json).
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Check Prisma's AI-consent variable appears only where ADR 0009 allows
+        run: |
+          if git grep -n -e 'PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION' -- . ':!docs' ':!infra/scripts/db-reset' ':!infra/scripts/assert-local-db.mjs' ':!prisma.config.ts' ':!.github/workflows/ci.yml'; then
+            echo "Prisma's consent variable must not appear here (ADR 0009 section 4.4)." >&2
+            exit 1
+          fi
+
+      - name: Validate the compose file
+        run: docker compose -f infra/docker-compose.yml config -q
+
+      - name: Check formatting
+        run: pnpm format:check
+
+      # Build first: packages that depend on each other type-check against the built output.
+      - name: Build
+        run: pnpm build
 
       - name: Lint
         run: pnpm lint
@@ -49,6 +82,3 @@ jobs:
 
       - name: Test
         run: pnpm test
-
-      - name: Build
-        run: pnpm build
