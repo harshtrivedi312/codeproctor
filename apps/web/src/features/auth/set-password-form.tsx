@@ -26,9 +26,13 @@ function useLinkToken(): { token: string | null; ready: boolean } {
     const fromQuery = new URLSearchParams(window.location.search).get('token');
     const token = fromHash ?? fromQuery;
     if (token) window.history.replaceState(null, '', window.location.pathname);
-    // Reading the browser URL is the one thing an effect is for here.
+    // Reading the browser URL is the one thing an effect is for here. In React Strict Mode (dev)
+    // this runs twice and the second pass finds the URL already stripped, so keep what we have.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setState({ token: token && token.length > 0 ? token : null, ready: true });
+    setState((prev) => {
+      if (token) return { token, ready: true };
+      return prev.ready ? prev : { token: null, ready: true };
+    });
   }, []);
   return state;
 }

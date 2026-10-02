@@ -21,15 +21,19 @@ export function RequireRole({
   fallback,
   children,
 }: RequireRoleProps): React.JSX.Element | null {
-  const { status, role } = useAuth();
+  const { status, role, signedOutByUser } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
 
   React.useEffect(() => {
     if (status === 'unauthenticated') {
-      router.replace(`/admin/login?reason=expired&next=${encodeURIComponent(pathname)}`);
+      router.replace(
+        signedOutByUser
+          ? '/admin/login'
+          : `/admin/login?reason=expired&next=${encodeURIComponent(pathname)}`,
+      );
     }
-  }, [status, router, pathname]);
+  }, [status, signedOutByUser, router, pathname]);
 
   if (status === 'loading') {
     return (

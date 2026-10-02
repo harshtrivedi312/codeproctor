@@ -1,3 +1,4 @@
+import * as React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { axe } from 'vitest-axe';
@@ -84,6 +85,17 @@ describe('SetPasswordForm', () => {
     expect(JSON.stringify({ ...localStorage })).not.toContain(MOCK_RESET_TOKEN);
     expect(JSON.stringify({ ...sessionStorage })).not.toContain(MOCK_RESET_TOKEN);
     expect(JSON.stringify([...log.mock.calls, ...err.mock.calls])).not.toContain(MOCK_RESET_TOKEN);
+  });
+
+  it('FR-107: still finds the token when React Strict Mode runs the effect twice', async () => {
+    openLink(MOCK_RESET_TOKEN);
+    render(
+      <React.StrictMode>
+        <SetPasswordForm purpose="reset" />
+      </React.StrictMode>,
+    );
+    expect(await screen.findByLabelText('New password')).toBeInTheDocument();
+    expect(window.location.hash).toBe('');
   });
 
   it('FR-107: also accepts a ?token= link and still strips it', async () => {

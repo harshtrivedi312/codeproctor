@@ -25,6 +25,8 @@ interface AuthContextValue {
   user: AuthUser | null;
   role: StaffRole | null;
   pending: PendingChallenge | null;
+  /** True after the user chose Sign out, so the redirect to login does not say "session ended". */
+  signedOutByUser: boolean;
   setPending: (pending: PendingChallenge | null) => void;
   /** Called after a successful login, 2FA verify or enrollment. */
   signIn: (session: AuthSession) => void;
@@ -38,6 +40,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
   const [status, setStatus] = React.useState<AuthStatus>('loading');
   const [user, setUser] = React.useState<AuthUser | null>(null);
   const [pending, setPending] = React.useState<PendingChallenge | null>(null);
+  const [signedOutByUser, setSignedOutByUser] = React.useState(false);
 
   React.useEffect(() => {
     const off = onSessionChange((session) => {
@@ -51,10 +54,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
 
   const signIn = React.useCallback((session: AuthSession) => {
     setPending(null);
+    setSignedOutByUser(false);
     publishSession(session);
   }, []);
 
   const signOut = React.useCallback(async () => {
+    setSignedOutByUser(true);
     try {
       await api.POST('/v1/auth/logout');
     } finally {
@@ -66,8 +71,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
   }, [router]);
 
   const value = React.useMemo<AuthContextValue>(
-    () => ({ status, user, role: user?.role ?? null, pending, setPending, signIn, signOut }),
-    [status, user, pending, signIn, signOut],
+    () => ({
+      status,
+      user,
+      role: user?.role ?? null,
+      pending,
+      signedOutByUser,
+      setPending,
+      signIn,
+      signOut,
+    }),
+    [status, user, pending, signedOutByUser, signIn, signOut],
   );
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

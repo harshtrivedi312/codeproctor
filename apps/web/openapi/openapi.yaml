@@ -357,7 +357,11 @@ components:
       type: object
       required: [status]
       properties:
-        status: { type: string, enum: [authenticated, two_factor_required, two_factor_enrollment_required] }
+        status:
+          {
+            type: string,
+            enum: [authenticated, two_factor_required, two_factor_enrollment_required],
+          }
         session: { $ref: '#/components/schemas/AuthSession' }
         challengeToken: { type: string }
     ApiError:
