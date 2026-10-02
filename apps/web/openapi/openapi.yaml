@@ -119,6 +119,208 @@ paths:
                 properties:
                   finishedAt: { type: string, format: date-time }
                   nextSectionId: { type: string, nullable: true }
+  /v1/auth/login:
+    post:
+      operationId: login
+      summary: Staff password login (FR-101). Placeholder path, see fsd.md section 4 (/auth/login).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, maxLength: 254 }
+                password: { type: string, maxLength: 1024 }
+      responses:
+        '200':
+          description: Signed in, or a second step is needed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResult'
+        '401':
+          description: Wrong email or password
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '423':
+          description: Account locked for 15 minutes after 5 failed attempts (FR-101)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LockedError'
+  /v1/auth/2fa/enroll/start:
+    post:
+      operationId: startTwoFactorEnrollment
+      summary: Begin forced TOTP enrollment (FR-102). Needs the challenge token from login.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChallengeRequest'
+      responses:
+        '200':
+          description: Secret and otpauth URI for the QR code
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [manualKey, otpauthUri]
+                properties:
+                  manualKey: { type: string }
+                  otpauthUri: { type: string }
+        '401':
+          description: Challenge expired, sign in again
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /v1/auth/2fa/enroll/confirm:
+    post:
+      operationId: confirmTwoFactorEnrollment
+      summary: Confirm enrollment with a first code; returns the one-time recovery codes (ADR 0003 section 1)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [challengeToken, code]
+              properties:
+                challengeToken: { type: string }
+                code: { type: string, maxLength: 6 }
+      responses:
+        '200':
+          description: Enrolled and signed in
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session, recoveryCodes]
+                properties:
+                  session: { $ref: '#/components/schemas/AuthSession' }
+                  recoveryCodes:
+                    type: array
+                    items: { type: string }
+        '400':
+          description: Wrong code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Challenge expired, sign in again
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /v1/auth/2fa/verify:
+    post:
+      operationId: verifyTwoFactor
+      summary: Complete login with a 6-digit TOTP code or a recovery code (FR-102, ADR 0003 section 1)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [challengeToken, code]
+              properties:
+                challengeToken: { type: string }
+                code: { type: string, maxLength: 64 }
+      responses:
+        '200':
+          description: Signed in
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSession'
+        '400':
+          description: Wrong code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Challenge expired, sign in again
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /v1/auth/refresh:
+    post:
+      operationId: refreshSession
+      summary: Rotate the refresh cookie and return a new access token (FR-104). Cookie is httpOnly.
+      responses:
+        '200':
+          description: New access token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSession'
+        '401':
+          description: No valid refresh cookie
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /v1/auth/logout:
+    post:
+      operationId: logout
+      summary: Revoke the refresh-token family and clear the cookie
+      responses:
+        '204':
+          description: Signed out
+  /v1/auth/password/forgot:
+    post:
+      operationId: forgotPassword
+      summary: Request a reset link. Always 202 with the same body (FR-107, D-22).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, maxLength: 254 }
+      responses:
+        '202':
+          description: Accepted, whether or not the account exists
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [message]
+                properties:
+                  message: { type: string }
+  /v1/auth/password/reset:
+    post:
+      operationId: resetPassword
+      summary: Set a password with a single-use reset or invite token (FR-107, ADR 0003 section 4). Never signs in.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, newPassword]
+              properties:
+                token: { type: string, maxLength: 256 }
+                newPassword: { type: string, maxLength: 1024 }
+      responses:
+        '204':
+          description: Password set, token consumed
+        '400':
+          description: Token invalid, expired or already used (one message for all three)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
 components:
   parameters:
     QuestionId:
@@ -127,6 +329,50 @@ components:
       required: true
       schema: { type: string }
   schemas:
+    StaffRole:
+      # Must match UserRole in prisma/schema.prisma.
+      type: string
+      enum: [SUPER_ADMIN, RECRUITER, AUTHOR, REVIEWER]
+    AuthUser:
+      type: object
+      required: [id, email, name, role, orgName]
+      properties:
+        id: { type: string }
+        email: { type: string }
+        name: { type: string }
+        role: { $ref: '#/components/schemas/StaffRole' }
+        orgName: { type: string }
+    AuthSession:
+      type: object
+      required: [accessToken, user]
+      properties:
+        accessToken: { type: string }
+        user: { $ref: '#/components/schemas/AuthUser' }
+    ChallengeRequest:
+      type: object
+      required: [challengeToken]
+      properties:
+        challengeToken: { type: string }
+    LoginResult:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [authenticated, two_factor_required, two_factor_enrollment_required] }
+        session: { $ref: '#/components/schemas/AuthSession' }
+        challengeToken: { type: string }
+    ApiError:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+    LockedError:
+      type: object
+      required: [code, message, lockedUntil]
+      properties:
+        code: { type: string, enum: [account_locked] }
+        message: { type: string }
+        lockedUntil: { type: string, format: date-time }
     Language:
       # Must match codeLanguageSchema in packages/shared/src/code-run.ts.
       type: string
