@@ -1,0 +1,162 @@
+# QA-01: test suite gate. Fails when any test that names a P1 test case fails (packages/qa/src/p1-gate.ts)
+# and prints coverage per module. Uses the same pinned official actions as ci.yml and no secrets,
+# so it is safe on pull requests from forks. Load and security scans are manual dispatches against
+# a deployed environment (never production).
+name: QA
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'Base URL of the environment for the ZAP baseline scan or the k6 run (staging only)'
+        required: false
+        type: string
+      scan:
+        description: 'Which dispatch job to run'
+        required: false
+        type: choice
+        options: [none, zap-baseline, k6-load, k6-code-run]
+        default: none
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qa-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  p1-gate:
+    name: P1 gate (unit, e2e, a11y) and coverage per module
+    if: github.event_name != 'workflow_dispatch' || inputs.scan == 'none'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Enable pnpm through corepack
+        run: corepack enable
+
+      - name: Locate the pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate the Prisma client
+        run: pnpm db:generate
+
+      # The web app is built with mocked data so Playwright can drive /t/demo/test. Remove the
+      # mock build when the API contract is real (see docs/followups/qa.md).
+      - name: Build
+        run: pnpm build
+        env:
+          NEXT_PUBLIC_API_MOCKING: enabled
+
+      # Vitest in apps/web, with coverage per module in the log. The JSON files feed the gate.
+      - name: Unit tests and coverage per module (apps/web)
+        run: pnpm --filter @codeproctor/qa run coverage:web --reporter=default --reporter=json --outputFile.json=../../packages/qa/test-results/web.json
+
+      - name: Matrix check and QA package tests
+        run: pnpm --filter @codeproctor/qa exec vitest run --reporter=default --reporter=json --outputFile.json=test-results/qa.json
+
+      - name: Install the Playwright browser
+        run: pnpm --filter @codeproctor/qa exec playwright install --with-deps chromium
+
+      - name: End-to-end and axe tests
+        run: pnpm --filter @codeproctor/qa run test:e2e
+
+      # Fails when a test that names a P1 TC ID failed. Playwright runs above fail the job on their
+      # own as well; the gate makes the P1 verdict explicit and prints one line per P1 case.
+      - name: P1 gate
+        if: ${{ !cancelled() }}
+        run: pnpm --filter @codeproctor/qa run gate test-results/web.json test-results/qa.json test-results/e2e.json
+
+      - name: Upload test reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qa-reports
+          path: |
+            packages/qa/test-results
+            packages/qa/playwright-report
+            packages/qa/coverage
+          if-no-files-found: ignore
+
+  zap-baseline:
+    name: OWASP ZAP baseline (TC-093)
+    if: github.event_name == 'workflow_dispatch' && inputs.scan == 'zap-baseline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Refuse empty or production-looking targets
+        env:
+          TARGET: ${{ inputs.target_url }}
+        run: |
+          case "$TARGET" in
+            https://*) ;;
+            *) echo "Give an https staging URL." >&2; exit 1 ;;
+          esac
+      - name: Run the baseline scan
+        env:
+          TARGET: ${{ inputs.target_url }}
+        run: |
+          mkdir -p zap && chmod 777 zap
+          docker run --rm -v "$PWD/zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t "$TARGET" -J report.json -r report.html -I
+      # TC-093: no high findings. ZAP risk code 3 is High.
+      - name: Fail on high findings
+        run: |
+          high=$(jq '[.site[].alerts[] | select(.riskcode == "3")] | length' zap/report.json)
+          echo "High findings: $high"
+          test "$high" -eq 0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: zap-report
+          path: zap
+
+  k6:
+    name: k6 load (TC-090, TC-091)
+    if: github.event_name == 'workflow_dispatch' && (inputs.scan == 'k6-load' || inputs.scan == 'k6-code-run')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Candidate tokens for the seeded load sessions come from a repository secret that holds
+      # staging-only values. Add K6_CANDIDATE_TOKENS before the first run (docs/followups/qa.md).
+      - name: Run k6
+        env:
+          TARGET: ${{ inputs.target_url }}
+          SCRIPT: ${{ inputs.scan == 'k6-load' && 'tc-090-load.js' || 'tc-091-code-run.js' }}
+          K6_CANDIDATE_TOKENS: ${{ secrets.K6_CANDIDATE_TOKENS }}
+        run: |
+          docker run --rm -i -e API_URL="$TARGET" -e CANDIDATE_TOKENS="$K6_CANDIDATE_TOKENS" \
+            grafana/k6:latest run - < "packages/qa/k6/$SCRIPT"
