@@ -21,4 +21,4 @@ prisma/, prisma.config.ts, infra/docker-compose.yml (postgres, redis, adminer on
 - Follow the Database prompt steps in order; one step per branch (db/step-N).
 
 ## Definition of done
-`prisma validate` passes; `pnpm db:migrate` applies on the local volume and `prisma migrate deploy` applies to a throwaway container; never run `pnpm db:reset`, `prisma migrate reset` or `db push` (ADR 0009 §4.4). Tests pass (name tests with TC IDs), docs updated if anything changed. Report: files changed, commands run and their results, anything the architect or PM must know.
+`prisma validate` passes; `pnpm db:migrate` applies on the local volume and `prisma migrate deploy` applies to a throwaway container; never run `pnpm db:reset`, `pnpm dev:infra:reset`, `prisma migrate reset` or `db push` (ADR 0009 §4.4). Tests pass (name tests with TC IDs), docs updated if anything changed. Report: files changed, commands run and their results, anything the architect or PM must know.

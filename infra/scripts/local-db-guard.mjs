@@ -1,5 +1,6 @@
 // Checks behind the local-only database scripts (db:migrate, db:seed, db:reset).
-// ADR 0009 section 4.4, D-31, D-37, review S4. Pure functions, so tests can import them.
+// ADR 0009 section 4.4, D-31, D-37, review S4. Pure functions, so tests can import them;
+// readComposePort is the exception and runs `docker compose port`.
 // infra/scripts/assert-local-db.mjs runs them. Messages never contain a URL or credentials.
 import { execFileSync } from 'node:child_process';
 

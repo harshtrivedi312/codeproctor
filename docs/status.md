@@ -256,15 +256,17 @@ Status values: Not started, In progress, In review, Changes requested, Done (mer
 | D-39 | 2026-10-02 | Time-box: after this round the reset guard is done. Fix SF2 to SF8 and the cheap nits; no new hardening work on it unless the code-reviewer finds a blocker. | Harsh Trivedi |
 | D-40 | 2026-10-02 | Auto-fix stays off for pull requests. | Harsh Trivedi |
 | D-41 | 2026-10-02 | Merge only when the code-reviewer approves and CI is green. DB-01 is marked done when PR #2 merges. (PR #2 merged 2026-10-02 16:43 UTC with CI green and before this rule; the remaining review fixes go through PR #3 under this rule.) | Harsh Trivedi |
+| D-42 | 2026-10-02 | Code review round 3 on PR #3: APPROVE WITH NITS. Option (a): apply the four nits in one commit, then merge PR #3 once CI passes and start DB-02. CLAUDE.md gains the rule that agents never run `pnpm db:reset`, `pnpm dev:infra:reset`, `prisma migrate reset` or `db push`; the db-engineer definition of done adds `pnpm dev:infra:reset`. | Harsh Trivedi |
 
 ## 10. Next 3 tasks, blockers, decisions
 
-- **Next 3 tasks:** review and merge ARC-01 (`arch/adr-schema-gaps`, Phase B done 2026-10-01). DB-01 (db-engineer) can start now. DB-02 follows DB-01 against the accepted ADR 0008.
-- **Blockers:** B-03 to B-05 above. B-01 and B-02 are cleared.
+- **Next 3 tasks:**
+  1. Merge PR #3 (`db/step-1-fixes`): code-reviewer APPROVE WITH NITS, nits applied (D-42), merged once CI is green (D-41).
+  2. DB-02 (db-engineer, branch `db/step-2` from `main` after PR #3) against the accepted freeze list ADR 0008 and ADR 0009.
+  3. DB-03 (db-engineer) after DB-02. It includes the owner's one-time interactive `pnpm db:reset` with `pnpm dev:infra` running.
+  QA-01A and ARC-02, ARC-03 and ARC-05 can use idle slots.
+- **Blockers:** none for the build. B-05 (Legal pilot entry items) blocks only the pilot. B-01 to B-04 are cleared.
 - **Decisions still needed from a human:**
-  - approve PA-01..PA-06 and PA-08 (B-03);
-  - assign DEP-01, DEP-02 and DEP-03 owners (B-04);
-  - Legal pilot entry items (B-05, Q-43);
-  - licence flags F-2 and F-3 (ADR 0001 section 12);
-  - confirm the details the architect chose in ADRs 0002 to 0007 (each marked "detail chosen by architect; owner to confirm");
-  - domain plan (Q-44).
+  - Legal pilot entry items (B-05), including the actual consent-text owner (Q-43 has a placeholder, D-29);
+  - confirm the details the architect chose in ADRs 0002 to 0007 and 0009 (each marked "detail chosen by architect; owner to confirm");
+  - confirm the placeholder domains (D-30) before DEP-01.

@@ -207,7 +207,7 @@ PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION="$answer" pnpm exec prisma migrate r
    - `OR_APP_NAME=Aider`;
    - `REPLIT_SESSION` starting with `agent-`.
 
-   These are Prisma's environment markers. Prisma's `/opt/.devin` file check is not repeated here; Prisma still applies it. Keep the list in step with Prisma on every upgrade.
+   These are Prisma's environment markers. Prisma's `/opt/.devin` file check is not repeated here. Inside `db-reset` Prisma's own check cannot help, because the script always supplies the consent value; for an agent the script does not detect, only the terminal check and the typed phrase remain (see the accepted risks below). Prisma's check still protects direct `prisma migrate reset` runs outside the script. Keep the list in step with Prisma on every upgrade.
 3. Run the localhost guard with `--compose-port` (below).
 4. Refuse if stdin is not a terminal.
 5. Require the exact phrase `reset local database`.
@@ -216,7 +216,7 @@ PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION="$answer" pnpm exec prisma migrate r
 Arguments given to `pnpm db:reset` are ignored, so `--config` cannot reach Prisma. The script's comment "Agents and CI have no terminal" describes the usual case only; see the accepted risks below.
 
 **The localhost guard: `infra/scripts/local-db-guard.mjs` and `infra/scripts/assert-local-db.mjs`.**
-- **`local-db-guard.mjs`** holds the checks as pure functions (`findProblems`, `findPortProblems`, `parseComposePort`, `readComposePort`) and the constants `CONSENT_VAR` and `LIBPQ_REDIRECT_VARS`. It is the only script file that names the consent variable.
+- **`local-db-guard.mjs`** holds the checks as pure functions (`findProblems`, `findPortProblems`, `parseComposePort`), the `readComposePort` helper (which runs `docker compose port`), and the constants `CONSENT_VAR` and `LIBPQ_REDIRECT_VARS`. It is the only `.mjs` script that names the consent variable; `db-reset` names it too.
 - **`assert-local-db.mjs`** runs the checks every time it starts. There is no "run only when executed directly" test that could skip them.
   - It refuses unknown arguments.
   - `--compose-port` adds the port check.
@@ -273,7 +273,7 @@ It does not check agent markers; the policy covers it. Staging and pilot run Com
   - D-38 keeps shared credentials off the machine, so such a tunnel has nothing to log in with.
 - **Extra arguments before DB-03.** Until the DB-03 wrapper exists, `pnpm db:migrate --url …` or `--config …` reaches `prisma migrate dev`, and the guard has checked only the environment. `pnpm db:seed --config …` is similar. `migrate dev` never resets (it stops on drift), and D-38 applies. The DB-03 wrapper closes the `db:migrate` case.
 - **Direct Prisma commands.** Running `prisma migrate reset` or `db push --force-reset` directly bypasses these scripts. Only Prisma's own agent check remains, and a human can still run them. The policy is never to use them outside `db-reset`.
-- **Prisma's detection list.** It can change in a new Prisma version. Until `db-reset` is updated, a newly detected agent is caught only by Prisma's own check.
+- **Prisma's detection list.** It can change in a new Prisma version. Until `db-reset` is updated, a newly detected agent is not caught on the `db-reset` path: the script supplies the consent value, so Prisma's check passes, and only the terminal check and the typed phrase remain. Prisma's check still catches it on direct `prisma migrate reset` runs.
 - **`dev-infra-reset` and agents.** It has no agent-marker check. It refuses only on CI, a non-local Docker engine, a missing terminal or a wrong phrase.
 
 **Trade-off.**
