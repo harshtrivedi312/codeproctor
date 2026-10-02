@@ -1,6 +1,6 @@
 # Project status
 
-Owner: project-manager. As of 2026-10-01. Sources: /docs/build-plan.md, /docs/requirements-trace.md.
+Owner: project-manager. As of 2026-10-02. Sources: /docs/build-plan.md, /docs/requirements-trace.md.
 
 ## 1. Blocked and needs a human (read first)
 
@@ -14,16 +14,16 @@ Owner: project-manager. As of 2026-10-01. Sources: /docs/build-plan.md, /docs/re
 
 ## 2. Current phase and progress
 
-- **Current phase:** Phase 0, Kickoff and contracts. ARC-01 is in review: ADRs 0002 to 0008 accepted (D-16), database.md and the docs updated. No other task has started.
+- **Current phase:** Phase 1, Database track. ARC-01 merged 2026-10-01. DB-01 merged as PR #1 (scaffold, 2026-10-02 16:05 UTC) and PR #2 (review fixes, Node 24, ADR 0009 and guards; CI green on Node 24; merged 16:43 UTC). The second review round's fixes (SF1 to SF8) are in PR #3 on `db/step-1-fixes`; DB-02 starts only after PR #3 merges.
 - **Next milestone:** M0 (schema freeze list approved: done on 2026-10-01; contracts v0 published; first commit on main: done).
 
 | Measure | Value |
 | --- | --- |
-| Tasks started | 2 of 50 (ARC-01 merged 2026-10-01; DB-01 in progress) |
-| Tasks done (merged) | 1 of 50 (ARC-01) |
+| Tasks started | 2 of 50 (ARC-01, DB-01) |
+| Tasks done (merged) | 2 of 50 (ARC-01; DB-01 via PR #2, D-41; review follow-up PR #3 open) |
 | Test cases verified | 0 of 72 (0 of 51 P1) |
 | Requirements Done | 0 of 82 (15 BR, 58 FR, 9 NFR) |
-| Branches open | 1 (`arch/adr-schema-gaps`, uncommitted changes) |
+| Branches open | 1 (`db/step-1-fixes`, PR #3) |
 | Open questions | 21 open of 44 (section 6). Closed: Q-01..Q-17, Q-23, Q-24 (ADRs 0002 to 0007, D-16), Q-27 (D-05), Q-41 (D-13), Q-43 (D-29, placeholder name) and Q-44 (D-30, placeholder domains). Review findings A-01..A-31 in /docs/adr/review-2026-09-30-plan-and-schema.md: the schema findings routed to ARC-01 are decided in ADRs 0002 to 0008 |
 | Open risks | 15 (section 5) |
 
@@ -44,8 +44,8 @@ Owner: project-manager. As of 2026-10-01. Sources: /docs/build-plan.md, /docs/re
 
 ## 4. Next up
 
-1. Human: review and merge `arch/adr-schema-gaps` (ARC-01 Phase B). DB-01 (db-engineer) can start now; it does not depend on that merge.
-2. DB-02 (db-engineer) after DB-01 is merged, against the accepted freeze list ADR 0008.
+1. PR #3 (`db/step-1-fixes`): second-round review fixes SF1 to SF8 and the cheap nits. Merge only with code-reviewer approval and green CI (D-41).
+2. DB-02 (db-engineer) after PR #3 merges, against the accepted freeze list ADR 0008.
 3. QA-01A (qa-engineer, docs only; 72 TCs) and ARC-02, ARC-03, ARC-05 (architect) can use idle slots.
 
 ## 5. Risks
@@ -152,8 +152,8 @@ Status values: Not started, In progress, In review, Changes requested, Done (mer
 | ARC-03 | Security model ADRs | architect | Not started | ARC-01 | | |
 | ARC-04 | Worker and async integration ADR | architect | Not started | ARC-01, ARC-03 | | |
 | ARC-05 | Deployment and Judge0 host feasibility | architect | Not started | human-provisioned x86 host | | |
-| DB-01 | Monorepo and local infrastructure | db-engineer | In progress (from 2026-10-01, branch `db/step-1`) | none (B-01 cleared; was on hold for the ARC-01 ADRs, now accepted) | | |
-| DB-02 | Prisma schema | db-engineer | Not started | DB-01 (freeze list ADR 0008 accepted) | | |
+| DB-01 | Monorepo and local infrastructure | db-engineer | Done 2026-10-02 (PR #1 and PR #2 merged; D-41). Review follow-up PR #3 open | none | | |
+| DB-02 | Prisma schema | db-engineer | Not started | DB-01 review follow-up PR #3 merged (freeze list ADR 0008 accepted) | | |
 | DB-03 | Migrations | db-engineer | Not started | DB-02 | | |
 | DB-04 | Seed data | db-engineer | Not started | DB-03 | | |
 | DB-05 | Org scoping helpers | db-engineer | Not started | DB-03 | | |
@@ -250,6 +250,12 @@ Status values: Not started, In progress, In review, Changes requested, Done (mer
 | D-33 | 2026-10-02 | Agent commit credits stay as written (the db-engineer's commits name Claude Sonnet 5.5); no history rewrite. | Harsh Trivedi |
 | D-34 | 2026-10-02 | `db/step-1` is pushed and gets a PR so CI runs. It is merged only after CI is green and the owner approves. | Harsh Trivedi |
 | D-35 | 2026-10-02 | DB-03 applies database roles through a migration instead of a Docker init script, so it works on existing volumes. This replaces ADR 0006's "roles created outside migrations"; the architect amends ADR 0006. | Harsh Trivedi |
+| D-36 | 2026-10-02 | Review SF1: the db-engineer agent definition no longer requires `db:reset`; its definition of done uses `prisma validate`, `pnpm db:migrate` on the local volume and `prisma migrate deploy` to a throwaway container, and forbids `pnpm db:reset`, `prisma migrate reset` and `db push`. Its scope paths match ADR 0009. | Harsh Trivedi |
+| D-37 | 2026-10-02 | Review SF7: `db-reset` also refuses when an AI agent's environment variables are set, and allows only the local Compose Postgres port. | Harsh Trivedi |
+| D-38 | 2026-10-02 | Staging and pilot database credentials never exist on developer machines or in agent sessions; they live only in GitHub Actions secrets and on the servers. Recorded in ADR 0009 and CLAUDE.md. ADR 0009 is reworded as a policy backed by speed bumps; the remaining risks (agents in interactive terminals, local tunnels) are accepted. | Harsh Trivedi |
+| D-39 | 2026-10-02 | Time-box: after this round the reset guard is done. Fix SF2 to SF8 and the cheap nits; no new hardening work on it unless the code-reviewer finds a blocker. | Harsh Trivedi |
+| D-40 | 2026-10-02 | Auto-fix stays off for pull requests. | Harsh Trivedi |
+| D-41 | 2026-10-02 | Merge only when the code-reviewer approves and CI is green. DB-01 is marked done when PR #2 merges. (PR #2 merged 2026-10-02 16:43 UTC with CI green and before this rule; the remaining review fixes go through PR #3 under this rule.) | Harsh Trivedi |
 
 ## 10. Next 3 tasks, blockers, decisions
 
