@@ -54,4 +54,4 @@ fi
 PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION="$answer" pnpm exec prisma migrate reset --force
 
 # 4. From DB-03: give app_user its local password again (idempotent; ADR 0006 section 7.4).
-# node infra/scripts/set-app-user-password.mjs
+node infra/scripts/set-app-user-password.mjs
