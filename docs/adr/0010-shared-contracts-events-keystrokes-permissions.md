@@ -2,11 +2,11 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Proposed 2026-10-02 (ARC-02 part 1). Human to accept. |
+| Status | Accepted 2026-10-05 by the owner, with the changes recorded in §1, §3 and §6. |
 | Author | architect |
 | Serves | FR-103, FR-501, FR-601..FR-610, FR-608, FR-801, FR-802, FR-804, FR-903; NFR-04, NFR-05, NFR-08; TC-004, TC-053, TC-055, TC-062, TC-063, TC-065, TC-075, TC-097 |
 | Builds on | ADR 0001 (TB-1, C-2), ADR 0005 (taxonomy, defaults, replay), ADR 0007 §8 |
-| Leaves to | ARC-03: canonical JSON, HMAC transport and key lifecycle, evidence key layout. Rest of ARC-02: API contract v0 (paths, drafts, RunResult, error envelope). |
+| Leaves to | ARC-03: canonical JSON, HMAC transport and key lifecycle, evidence key layout, and how system-check events (MULTI_MONITOR, before the HMAC key is issued) are signed. Rest of ARC-02: API contract v0 (paths, drafts, RunResult, error envelope). |
 
 ## Context
 
@@ -20,12 +20,12 @@ BE-03, BE-10, FE-06/07 and the integrity worker need one typed source for event 
 
 ## Decision
 
-1. **Sources.** `CLIENT_EVENT_TYPES` (27) are the only types a signed batch accepts. Server-only: DISCONNECTED, RECONNECTED (heartbeat watchdog, FR-609), PASTE_BURST, TYPING_ANOMALY, IDLE_THEN_COMPLETE, CODE_SIMILARITY, AI_LIKENESS (worker), PROCTOR_PAUSE/MESSAGE/RESUME, IDENTITY_MANUAL_REVIEW, RESUME_OTP_FAILED. SPEECH_DETECTED, MULTIPLE_VOICES and SIDE_CAMERA_DISCONNECTED are both.
+1. **Sources.** `CLIENT_EVENT_TYPES` (27) are the only types a signed batch accepts. Server-only: DISCONNECTED, RECONNECTED (heartbeat watchdog, FR-609), PASTE_BURST, TYPING_ANOMALY, IDLE_THEN_COMPLETE, CODE_SIMILARITY, AI_LIKENESS (worker), PROCTOR_PAUSE/MESSAGE/RESUME, IDENTITY_MANUAL_REVIEW, RESUME_OTP_FAILED. SPEECH_DETECTED, MULTIPLE_VOICES and SIDE_CAMERA_DISCONNECTED are both. Why SPEECH_DETECTED and MULTIPLE_VOICES are also server-written: FSD M7/M8 and backend.md Step 12 specify a server-side audio check, where the worker runs voice activity detection on the recorded audio and emits these events with source SERVER. The browser detector emits them with source CLIENT; both are valid.
 2. **Envelope.** `{ type, occurredAt (UTC ISO), durationMs?, confidence? 0-1, evidenceKey?, payload }`, per backend.md Step 10. No session id (from the token), no severity (server assigns; unknown keys are stripped, so a client severity is ignored). No per-event id: idempotency is per batch `seq` (ADR 0005 §3). Batch: `{ seq: int 0..2^31-1, events: 1..100 }`. The signature is added by ARC-03.
-3. **Keystrokes.** Batch `{ seq, sessionQuestionId, startedAt, events: 1..1000 }`; events are `RESET` (whole model set: load, restore, reset, language switch), `EDIT` (offset, deleteLength, text) and `CURSOR` (offset, selectionLength). `t` is ms from `startedAt`, non-decreasing. Inserted text per batch is capped at `MAX_SOURCE_CODE_LENGTH`. No key codes or modifiers (NFR-05).
+3. **Keystrokes.** Batch `{ seq, sessionQuestionId, startedAt, events: 1..1000 }`; events are `RESET` (whole model set: load, restore, reset, language switch), `EDIT` (offset, deleteLength, text) and `CURSOR` (offset, selectionLength). `t` is ms from `startedAt`, non-decreasing. Inserted text from EDIT events is capped per batch at `MAX_SOURCE_CODE_LENGTH`. RESET is excluded from that cap and has its own limit of `MAX_SOURCE_CODE_LENGTH` (100,000 characters) per event, so a restore followed by typing fits in one batch. Replay orders batches by `seq`, not arrival time (NFR-08). No key codes or modifiers (NFR-05).
 4. **Payload privacy.** Payloads never carry clipboard content (only a length), OTPs or typed keys.
 5. **Defaults.** ADR 0005 §2 severities, weights, points and cap, the FR-804 band function and the forced-live list are exported constants.
-6. **Permissions.** `resource:action` strings for every fsd.md §4 action plus `ai_reference:*`, `user:manage` and `org_settings:manage`; roles from `user_role` plus CANDIDATE and SERVICE pseudo-roles; deny by default. This is a skeleton: BE-03 adds the route map and refines the role mapping.
+6. **Permissions.** `resource:action` strings for every fsd.md §4 action plus `ai_reference:*`, `user:manage` and `org_settings:manage`; roles from `user_role` plus CANDIDATE and SERVICE pseudo-roles; deny by default. This is a skeleton: BE-03 adds the route map and refines the role mapping. SUPER_ADMIN keeps review, verdict and live permissions (owner decision). FR-904 is enforced by person, not role: the appeal reviewer must be a different user from the reviewer who set the original verdict. BE-13 (and whichever step implements appeals) must check this on the user id. Not yet in the matrix, left to BE-03: candidate heartbeat (FR-609), appeals (FR-904), reports and webhooks.
 7. **Languages.** `CODE_LANGUAGES` is the single list; `codeLanguageSchema` and `AI_REFERENCE_LANGUAGES` derive from it.
 
 ## Consequences
