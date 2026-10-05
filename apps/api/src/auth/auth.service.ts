@@ -811,6 +811,8 @@ export class AuthService implements OnApplicationShutdown {
     }
 
     const next = newOpaqueToken();
+    // Signed before the rotation commits, like startSession (S1).
+    const body = this.authenticated(user);
     try {
       await this.prisma.client.$transaction(async (tx) => {
         // The new token exists only while the account is active and still has the password hash
@@ -854,7 +856,7 @@ export class AuthService implements OnApplicationShutdown {
       }
       throw e;
     }
-    return { body: this.authenticated(user), refreshToken: next };
+    return { body, refreshToken: next };
   }
 
   logout(rawToken: string | undefined, ctx: RequestContext): Promise<void> {
@@ -1227,6 +1229,11 @@ export class AuthService implements OnApplicationShutdown {
     boundTotpSecret?: string,
   ): Promise<SessionOutcome> {
     const refreshToken = newOpaqueToken();
+    // The access token is signed BEFORE the refresh family commits, so its iat can never be later
+    // than the time a concurrent 2FA disable, admin reset, role change or deactivation writes its
+    // tokens-valid-after marker after waiting for this insert (S1). It is returned only if the
+    // insert below succeeds.
+    const body = this.authenticated(user);
     // The token exists only if the password is still the one that was verified. FOR SHARE (not
     // FOR KEY SHARE, which does not conflict with a non-key UPDATE) locks the user row in this
     // statement: it waits for an in-flight reset, re-checks the WHERE against the new row version
@@ -1255,7 +1262,7 @@ export class AuthService implements OnApplicationShutdown {
     );
     if (inserted.length !== 1) throw new PasswordChangedSignal();
     await this.clearFailures(user, db);
-    return { body: this.authenticated(user), refreshToken };
+    return { body, refreshToken };
   }
 
   private session(user: UserWithOrg, accessToken: string): AuthSessionDto {

@@ -134,6 +134,18 @@ describe('JwtAuthGuard user re-check (FR-103, FR-104, FU-BE-19)', () => {
     ).rejects.toThrow(UnauthorizedException);
   });
 
+  it.each([
+    ['unknown user', null],
+    ['inactive user', { ...current, isActive: false }],
+    ['user without a password', { ...current, passwordHash: null }],
+    ['role changed', { ...current, role: UserRole.AUTHOR }],
+    ['password version changed', { ...current, passwordHash: HASH.replace('hash', 'other') }],
+  ])('FR-103, FR-104: %s is the same 401', async (_name, row) => {
+    await expect(
+      guardWith(jest.fn().mockResolvedValue(row)).canActivate(protectedContext()),
+    ).rejects.toThrow(new UnauthorizedException('Authentication required.'));
+  });
+
   it('FR-104: an access token with no iat claim is refused', async () => {
     const noIat = { ...claims } as Record<string, unknown>;
     delete noIat.iat;

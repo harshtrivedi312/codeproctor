@@ -27,6 +27,12 @@ export class TokenValidityService {
   async invalidateIssuedTokens(userId: string): Promise<void> {
     try {
       await ensureConnected(this.redis);
+      // The marker is the current second. Every sign-in (startSession, refresh) signs its access
+      // token BEFORE its refresh family commits, and a change that writes this marker first waits
+      // for that insert's row lock, so a racing token always has iat <= marker second and is
+      // refused (same-clock assumption: API instances NTP-synced to about a second, FU-BE-80).
+      // The marker is written before the audit insert and stays if the commit fails (it only
+      // forces a sign-in, so it fails safe).
       await this.redis.set(
         key(userId),
         String(Math.floor(Date.now() / 1000)),
