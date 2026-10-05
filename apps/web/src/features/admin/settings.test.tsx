@@ -9,6 +9,7 @@ import { MOCK_USERS } from '@/mocks/auth-handlers';
 import { server } from '@/mocks/server';
 import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav } from '@/test/nav-mock';
+import { findLoadedRow, findLoadedTable } from '@/test/table-utils';
 import { CandidatesPage } from './candidates-page';
 import { ConsentPage } from './consent-page';
 import { DataSettingsPage } from './data-settings-page';
@@ -26,7 +27,7 @@ beforeEach(() => {
   vi.mocked(toast.error).mockClear();
 });
 
-const findRow = (name: string) => screen.findByRole('row', { name: new RegExp(name) });
+const findRow = (name: string) => findLoadedRow(name);
 const rowOf = (name: string) => screen.getByRole('row', { name: new RegExp(name) });
 
 describe('Settings access (FR-103, TC-004)', () => {
@@ -190,7 +191,7 @@ describe('Users (FR-103)', () => {
       http.get('*/v1/admin/users', () => HttpResponse.json({ items: [], nextCursor: null })),
     );
     renderAsStaff(<UsersPage />, MOCK_USERS.admin);
-    await screen.findByTestId('table-empty');
+    await findLoadedTable();
     expect(screen.getAllByRole('button', { name: 'Invite a user' })).toHaveLength(1);
   });
 
