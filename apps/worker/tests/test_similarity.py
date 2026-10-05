@@ -16,6 +16,7 @@ from worker.similarity import (
     find_peer_similarity,
     normalize,
     prepare,
+    prepare_ai_context,
     winnow,
 )
 
@@ -377,3 +378,45 @@ def test_fr803_starter_kgrams_skipped_by_winnowing_do_not_leak_back_as_evidence(
     assert peer["a"][0].details["sharedFingerprints"] == new.shared
     ai = find_ai_likeness(sub("a", a), [AiReference("r", "python", b)], starter_code=starter)
     assert ai[0].details["sharedFingerprints"] == new.shared
+
+
+def _ai_equivalence_cases() -> list[tuple[Submission, list[AiReference], dict[CodeLanguage, str]]]:
+    refs = [
+        AiReference("py-base", "python", PY_A),
+        AiReference("py-variant", "python", PY_A, is_variant_match=True),  # tied with the base row
+        AiReference("py-other", "python", PY_A_OTHER),
+        AiReference("js", "javascript", JS_A),
+        AiReference("java", "java", JAVA_A),
+    ]
+    return [
+        (sub("a", PY_A), refs, {}),
+        (sub("b", JS_A, "javascript"), refs, {}),
+        (sub("c", JAVA_A, "java"), refs, {}),
+        (sub("d", PY_A_DISGUISED), refs, {"python": PY_A_OTHER}),
+        (sub("e", PY_A), refs, {"java": JAVA_SCAFFOLD}),  # starter for a different language only
+        (sub("f", PY_A_OTHER), refs, {"python": PY_A}),
+    ]
+
+
+def test_fr803_prepared_context_gives_identical_ai_results() -> None:
+    for s, refs, starter in _ai_equivalence_cases():
+        cfg = IntegrityConfig()
+        ctx = prepare_ai_context(refs, cfg, starter)
+        assert find_ai_likeness(s, refs, cfg, starter, context=ctx) == find_ai_likeness(
+            s, refs, cfg, starter
+        )
+
+
+def test_fr803_prepared_context_variant_row_wins_tie_like_the_direct_call() -> None:
+    s, refs, starter = _ai_equivalence_cases()[0]
+    ctx = prepare_ai_context(refs, None, starter)
+    out = find_ai_likeness(s, refs, None, starter, context=ctx)
+    assert out and out[0].payload["aiReferenceSolutionId"] == "py-variant"
+
+
+def test_fr305_prepared_context_respects_disabled_ai_likeness() -> None:
+    cfg = IntegrityConfig(disabled_event_types=frozenset({"AI_LIKENESS"}))
+    for s, refs, starter in _ai_equivalence_cases():
+        ctx = prepare_ai_context(refs, cfg, starter)
+        assert find_ai_likeness(s, refs, cfg, starter, context=ctx) == []
+        assert find_ai_likeness(s, refs, cfg, starter) == []
