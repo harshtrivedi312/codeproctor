@@ -14,6 +14,8 @@ export interface VisionMonitorOptions {
   /** Same-origin base of the self-hosted model files. */
   modelBaseUrl: string;
   config?: Partial<AiDetectorConfig>;
+  /** Give up on worker init after this long (default 30 s). */
+  initTimeoutMs?: number;
   evidenceApi?: EvidenceApi;
   recheckIdentity?: IdentityRechecker;
   /** Test seams. */
@@ -68,6 +70,7 @@ export class VisionMonitor implements Detector {
     task: InferenceTask,
     reason: 'MODEL_LOAD_FAILED' | 'PERMISSION_DENIED' | 'UNSUPPORTED' | 'RUNTIME_ERROR',
   ): void {
+    this.reported.add(task);
     ctx.setCapability({
       id: `vision-${task}`,
       status: reason === 'PERMISSION_DENIED' ? 'DENIED' : 'UNSUPPORTED',
@@ -77,6 +80,24 @@ export class VisionMonitor implements Detector {
   }
 
   async start(ctx: DetectorContext): Promise<void> {
+    try {
+      await this.startInner(ctx);
+    } catch {
+      // Cross-origin model base, video failure, anything unexpected: say so, never a silent pass.
+      this.client?.terminate();
+      this.client = null;
+      for (const t of ['face', 'gaze', 'objects'] as const) {
+        if (!ctx.isDisabled(TASK_TO_DETECTOR[t]) && !this.reported.has(t) && !this.tasks.has(t)) {
+          this.unavailable(ctx, t, 'MODEL_LOAD_FAILED');
+        }
+      }
+      this.tasks.clear();
+    }
+  }
+
+  private readonly reported = new Set<InferenceTask>();
+
+  private async startInner(ctx: DetectorContext): Promise<void> {
     this.ctx = ctx;
     this.cfg = { ...DEFAULT_AI_CONFIG, ...this.o.config };
     this.face = new FaceRules(this.cfg);
@@ -99,7 +120,7 @@ export class VisionMonitor implements Detector {
     }
 
     const urls = resolveModelUrls(this.o.modelBaseUrl);
-    this.client = new InferenceClient(this.o.createWorker);
+    this.client = new InferenceClient(this.o.createWorker, this.o.initTimeoutMs);
     const ready = await this.client.init({
       tasks: wanted,
       urls: {

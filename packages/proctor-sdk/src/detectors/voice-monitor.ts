@@ -26,6 +26,10 @@ export function createVadWebFactory(assetBase: string): VadFactory {
       baseAssetPath: assetBase,
       onnxWASMBasePath: assetBase,
       getStream: () => Promise.resolve(stream),
+      // The recorder owns these tracks and consent gating: vad-web must neither stop them on pause
+      // nor call getUserMedia itself on resume.
+      pauseStream: () => Promise.resolve(),
+      resumeStream: (s) => Promise.resolve(s),
       onSpeechRealStart: () => cb.onSpeechStart(),
       onSpeechEnd: () => cb.onSpeechEnd(),
     });

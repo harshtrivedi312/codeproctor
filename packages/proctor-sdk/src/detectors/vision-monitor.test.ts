@@ -129,7 +129,17 @@ describe('VisionMonitor accommodations and honesty (FR-106, FR-606)', () => {
   it('FR-606: refuses a cross-origin model base', async () => {
     const h = fakeContext();
     const { m } = setup({ modelBaseUrl: 'https://cdn.example.net/models' });
-    await expect(m.start(h.ctx)).rejects.toThrow(/same-origin/);
+    await m.start(h.ctx);
+    expect(h.events.map((e) => e.type)).toEqual([
+      'DETECTOR_UNAVAILABLE',
+      'DETECTOR_UNAVAILABLE',
+      'DETECTOR_UNAVAILABLE',
+    ]);
+    expect(h.events.map((e) => (e.payload as { reason: string }).reason)).toEqual([
+      'MODEL_LOAD_FAILED',
+      'MODEL_LOAD_FAILED',
+      'MODEL_LOAD_FAILED',
+    ]);
   });
 
   it('FR-606: three runtime failures in a row disable the task with RUNTIME_ERROR', async () => {
@@ -229,6 +239,42 @@ describe('VisionMonitor event flow with recorded fixtures (FR-606)', () => {
     );
     expect(asked).toEqual([true, false, true, false]);
     m.stop();
+  });
+});
+
+describe('worker that never answers (FR-606)', () => {
+  const silent: WorkerLike = {
+    postMessage: () => undefined,
+    terminate: vi.fn(),
+    onmessage: null,
+    onerror: null,
+  };
+  it('FR-606: InferenceClient.init resolves null after the timeout and terminates the worker', async () => {
+    vi.useFakeTimers();
+    const terminate = vi.fn();
+    const c = new InferenceClient(() => ({ ...silent, terminate }), 30_000);
+    const p = c.init({
+      tasks: ['face'],
+      urls: { faceDetector: '', faceLandmarker: '', mediapipeWasm: '', cocoSsd: '' },
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await p).toBeNull();
+    expect(terminate).toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+  it('FR-606: VisionMonitor.start finishes and reports DETECTOR_UNAVAILABLE for every wanted task', async () => {
+    vi.useFakeTimers();
+    const h = fakeContext();
+    const { m } = setup({ createWorker: () => ({ ...silent }), initTimeoutMs: 1000 });
+    const p = m.start(h.ctx);
+    await vi.advanceTimersByTimeAsync(1000);
+    await p;
+    expect(h.events.map((e) => (e.payload as { detector: string }).detector).sort()).toEqual([
+      'FACE',
+      'GAZE',
+      'OBJECT',
+    ]);
+    vi.useRealTimers();
   });
 });
 

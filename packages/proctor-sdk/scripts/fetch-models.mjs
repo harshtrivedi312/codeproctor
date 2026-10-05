@@ -32,4 +32,10 @@ await cp(join(tasksVision, 'wasm'), join(out, 'mediapipe/wasm'), { recursive: tr
 
 const vadDist = dirname(require.resolve('@ricky0123/vad-web/package.json'));
 await cp(join(vadDist, 'dist'), join(out, 'vad'), { recursive: true });
+// vad-web loads onnxruntime-web wasm/mjs from the same folder (onnxWASMBasePath).
+const ortDist = dirname(require.resolve('onnxruntime-web', { paths: [vadDist] }));
+await cp(ortDist, join(out, 'vad'), {
+  recursive: true,
+  filter: (src) => src === ortDist || /\.(wasm|mjs)$/.test(src),
+});
 console.log(`models written to ${out}`);

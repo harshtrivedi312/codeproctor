@@ -29,6 +29,16 @@ async function withDelegateFallback<T>(make: (delegate: 'GPU' | 'CPU') => Promis
 
 async function init(msg: InitMessage): Promise<void> {
   const loaded: Record<InferenceTask, boolean> = { face: false, gaze: false, objects: false };
+  try {
+    await load(msg, loaded);
+  } catch {
+    // Any load failure (wasm fetch, fileset) leaves the affected tasks false; always answer.
+    for (const t of msg.tasks) if (!loaded[t]) loaded[t] = false;
+  }
+  post({ type: 'ready', loaded });
+}
+
+async function load(msg: InitMessage, loaded: Record<InferenceTask, boolean>): Promise<void> {
   const wanted = new Set(msg.tasks);
   if (wanted.has('face') || wanted.has('gaze')) {
     const fileset = await FilesetResolver.forVisionTasks(msg.urls.mediapipeWasm);
@@ -74,7 +84,6 @@ async function init(msg: InitMessage): Promise<void> {
       loaded.objects = false;
     }
   }
-  post({ type: 'ready', loaded });
 }
 
 function post(m: FromWorker): void {

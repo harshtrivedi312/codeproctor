@@ -57,3 +57,8 @@ Non-blocking findings and open questions. Only blockers stop a merge.
 3. Inference is one frame in flight; on slow devices frames are skipped and counted (`getStats().skippedFrames`). Add a UI hint if the skip rate stays high.
 4. The vad-web ONNX runtime runs on the main thread plus an AudioWorklet, not in the inference worker; its CPU is covered by the main-thread metrics only.
 5. `FACE_MISMATCH` re-check sends a 640 px JPEG every 2 minutes; confirm with the privacy review that this selfie traffic is covered by the consent document (D-17, ADR 0004).
+
+### Review follow-ups for PR #23 (code-reviewer)
+- Fixed in this PR: worker init always answers `ready`; `InferenceClient.init` times out (30 s) and terminates the worker; heartbeat and page listeners start before detectors; `VisionMonitor.start` reports DETECTOR_UNAVAILABLE (MODEL_LOAD_FAILED) when it fails, including a cross-origin model base; vad-web gets no-op `pauseStream` and pass-through `resumeStream`; fetch-models copies onnxruntime-web wasm and mjs into `vad/`.
+- Still open: a hanging non-vision detector (custom plug-in) still delays later detectors because `start` is awaited in order; consider a per-detector start timeout in `ProctorSession`.
+- The reviewer's other should-fix and nit items were not forwarded to me in full; the coordinator should paste them here.

@@ -121,6 +121,16 @@ export class ProctorSession {
       isDisabled: (d) => disabled.has(d),
     };
 
+    // Heartbeat and page listeners first: a slow or hanging detector must not delay them (FR-609).
+    this.heartbeat = new Heartbeat(
+      () => config.transport.heartbeat(),
+      config.heartbeatIntervalMs ?? 10_000,
+      (online) => this.fire('connection', { online }),
+    );
+    this.heartbeat.start();
+    globalThis.addEventListener?.('pagehide', this.onPageHide);
+    globalThis.addEventListener?.('online', this.onOnline);
+
     for (const d of config.detectors) {
       if (d.accommodationId && disabled.has(d.accommodationId)) continue;
       this.started.push(d);
@@ -136,15 +146,6 @@ export class ProctorSession {
         }
       }
     }
-
-    this.heartbeat = new Heartbeat(
-      () => config.transport.heartbeat(),
-      config.heartbeatIntervalMs ?? 10_000,
-      (online) => this.fire('connection', { online }),
-    );
-    this.heartbeat.start();
-    globalThis.addEventListener?.('pagehide', this.onPageHide);
-    globalThis.addEventListener?.('online', this.onOnline);
   }
 
   private emit<T extends ClientEventType>(

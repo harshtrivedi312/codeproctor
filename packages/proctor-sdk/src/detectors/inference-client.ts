@@ -30,7 +30,11 @@ export class InferenceClient {
   frames = 0;
   private readonly startedAt = performance.now();
 
-  constructor(private readonly createWorker: () => WorkerLike) {}
+  constructor(
+    private readonly createWorker: () => WorkerLike,
+    /** Give up when the worker never answers `init` (hung wasm or model fetch). */
+    private readonly initTimeoutMs = 30_000,
+  ) {}
 
   /** Resolves with per-task load results, or null when the worker itself could not start. */
   init(msg: Omit<InitMessage, 'type'>): Promise<ReadyMessage | null> {
@@ -41,11 +45,17 @@ export class InferenceClient {
         resolve(null);
         return;
       }
-      this.ready = resolve;
+      const finish = (r: ReadyMessage | null): void => {
+        clearTimeout(timer);
+        this.ready = null;
+        if (r === null) this.terminate();
+        resolve(r);
+      };
+      this.ready = finish;
+      const timer = setTimeout(() => finish(null), this.initTimeoutMs);
       this.worker.onmessage = (e) => this.handle(e.data);
       this.worker.onerror = () => {
         this.ready?.(null);
-        this.ready = null;
         this.inFlight?.resolve(null);
         this.inFlight = null;
       };
