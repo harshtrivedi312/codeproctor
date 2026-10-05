@@ -1,6 +1,7 @@
 'use client';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, type Schemas } from '@/lib/api/client';
+import { getGeneration } from '@/lib/auth-session';
 
 /** An API answer that was not 2xx, carrying the status so screens can explain it. */
 export class ApiFailure extends Error {
@@ -84,7 +85,12 @@ export function useUpdateSettings() {
       if (!data) fail(response, error);
       return data;
     },
-    onSuccess: (data) => qc.setQueryData(adminKeys.settings, data),
+    // Remember which session sent the save. If the user changed while it was in flight, its answer
+    // belongs to someone else's org and must not be written into the new user's cache (FR-103).
+    onMutate: () => getGeneration(),
+    onSuccess: (data, _body, startedIn) => {
+      if (startedIn === getGeneration()) qc.setQueryData(adminKeys.settings, data);
+    },
   });
 }
 

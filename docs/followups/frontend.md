@@ -141,3 +141,18 @@ Items from the review of FE Step 3 that were not fixed in `frontend/step-3-fixes
 ## Must-fix before later steps merge
 
 - **[MUST-FIX before Step 10 merges] QA defect TC-047 / FR-505: a forward OS clock change shrinks the candidate's countdown.** `useServerClock` (`apps/web/src/features/candidate-test/use-clock.ts`) reads server time once and never re-syncs, so the remaining time follows the device clock afterwards. Fix: compute remaining time from the server deadline using a monotonic clock (`performance.now`) and re-sync with the server on every heartbeat. When it is fixed, tell QA so TC-047 becomes a normal test. Not fixed now; this is Step 10 work.
+
+## frontend/step-3 session follow-ups (for backend and later web work)
+
+- **[BE-02] `POST /v1/auth/logout` must be idempotent and revoke by the httpOnly refresh cookie alone.** Answer 204 when the cookie is missing, expired or already revoked, and do not require an access token: after a failed logout the web retries it on the next page load with no access token. Logout with a rotated or reused refresh token must revoke the WHOLE token family (TC-005 reuse detection); otherwise treating a 401 from logout as confirmed is unsafe, because a stolen older token could still be live. Web treats 204 and 401 as "confirmed" (a 401 means no valid session is left), and keeps a "sign-out pending" marker in localStorage for any other answer. If the API returned 5xx forever the marker would stay until the next sign-in.
+- **Refresh failures other than 401/403 sign the user out.** `doRefresh` in `apps/web/src/lib/auth-session.ts` publishes "signed out" on 429, 5xx and network errors too. Better: sign out on 401/403 only and retry the rest, but first-load needs a third state ("cannot reach the server, retry") so the staff layout does not show "Checking your sign-in" forever. Not done in this PR.
+
+### Playwright flake (observed while preparing the session-fixes PR)
+
+- **Should-fix:** about 2 failed runs out of roughly 12 on the staff e2e suite (`pnpm --filter @codeproctor/web test:e2e`): one `toBeVisible` timeout in a single test, not reproduced when run again and not identified. Capture a trace (`trace: 'retain-on-failure'`) before wiring Playwright into CI, so the flaky test can be found.
+
+### frontend/step-3-session-fixes: round 4 review (verdict: MERGE, no blockers)
+
+- **Should-fix (session, judged not a blocker: no data or action crosses identities):** a tab whose first-load refresh is still in flight (`currentUserId` null) ignores the `cp.sessionEpoch` event, so after Y signs in elsewhere it can end up showing X, whose cookie it sent, until its next 401. Fix: when an epoch arrives with a refresh in flight, `invalidateRefreshes()` and drop a refresh result whose user differs from the announced id; add a TC-005-tagged test. The late `Set-Cookie` overwriting Y's refresh cookie cannot be fixed client-side; needs a server-side follow-up [BE-02].
+- **Not introduced here:** tab A signing out as X while tab B signs in as Y sends a logout with the shared cookie, which may revoke Y's new session depending on server behaviour [BE-02].
+- **Nits:** stale comments in `auth-session.ts` (generation bumped on any user change; epoch holds `nonce|userId`); move `generation`/`inFlight` declarations above `publishSession`; comment the `inFlight` clear gap in `publishSession`; duplicate `getSessionUserId()` check in `auth-provider.tsx:129`; consider removing `cp.sessionEpoch` in `confirmSignedOut`; add a test for an in-flight settings save during a storage-event sign-out.

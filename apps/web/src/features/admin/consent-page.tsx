@@ -155,7 +155,7 @@ function ConsentContent(): React.JSX.Element {
             caption="Consent document versions"
             searchLabel="Search consent versions"
             columns={columns}
-            rows={texts.data?.items}
+            rows={texts.isError ? undefined : texts.data?.items}
             isLoading={texts.isLoading}
             error={
               texts.isError
