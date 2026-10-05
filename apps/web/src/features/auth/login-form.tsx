@@ -104,6 +104,7 @@ export function LoginForm(): React.JSX.Element {
             variant="outline"
             size="sm"
             className="mt-2"
+            disabled={isSubmitting}
             onClick={() => void retrySignOut()}
           >
             Retry sign-out

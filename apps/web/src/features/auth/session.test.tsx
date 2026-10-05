@@ -4,9 +4,14 @@ import * as React from 'react';
 import { http, HttpResponse } from 'msw';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, isAuthRequest } from '@/lib/api/client';
-import { refreshSession, resetInMemorySignOutFlagForTests } from '@/lib/auth-session';
+import {
+  REQUEST_TIMEOUT_MS,
+  refreshSession,
+  resetInMemorySignOutFlagForTests,
+  settleSession,
+} from '@/lib/auth-session';
 import { getAccessToken } from '@/lib/auth-token';
-import { MOCK_USERS } from '@/mocks/auth-handlers';
+import { MOCK_USERS, seedMockRefresh } from '@/mocks/auth-handlers';
 import { server } from '@/mocks/server';
 import { renderWithAuth, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav, router } from '@/test/nav-mock';
@@ -317,7 +322,12 @@ describe('session handling', () => {
     server.events.on('request:start', ({ request }) => {
       if (request.url.endsWith('/v1/auth/login')) loginStarted = true;
     });
-    renderWithAuth(<LoginForm />);
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <Who />
+      </>,
+    );
     await waitFor(() => expect(refreshes).toBe(1));
     const u = userEvent.setup();
     await u.type(screen.getByLabelText('Work email'), MOCK_USERS.recruiter.email);
@@ -327,6 +337,10 @@ describe('session handling', () => {
     expect(loginStarted).toBe(false);
     release();
     await waitFor(() => expect(loginStarted).toBe(true));
+    await waitFor(() => expect(getAccessToken()).not.toBe('old-session-token'));
+    await waitFor(() =>
+      expect(screen.getByTestId('who')).toHaveTextContent(MOCK_USERS.recruiter.email),
+    );
     server.events.removeAllListeners();
   });
 });
@@ -379,6 +393,101 @@ describe('requests from an earlier session', () => {
     expect(response.status).toBe(401);
     expect(seen).toHaveLength(1); // no replay
     expect(screen.getByTestId('who')).toHaveTextContent('AUTHOR');
+  });
+});
+
+describe('other tabs (shared refresh cookie)', () => {
+  it('FR-103 FR-104: a 401 in a tab whose cookie now belongs to another user is not replayed as that user', async () => {
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <Who />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
+    // Another tab signs in as the author: the shared cookie now belongs to them.
+    seedMockRefresh(MOCK_USERS.author.email);
+    const seen: (string | null)[] = [];
+    server.use(
+      http.get('*/v1/time', ({ request }) => {
+        seen.push(request.headers.get('authorization'));
+        return seen.length === 1
+          ? new HttpResponse(null, { status: 401 })
+          : HttpResponse.json({ serverNow: new Date().toISOString() });
+      }),
+    );
+    const { response } = await api.GET('/v1/time');
+    expect(response.status).toBe(401);
+    expect(seen).toHaveLength(1); // not replayed with the author's token
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('nobody'));
+    expect(getAccessToken()).toBeNull();
+  });
+
+  it('FR-103 FR-104: a sign-in in another tab makes this tab re-check, and sign out if the user differs', async () => {
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <Who />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
+    seedMockRefresh(MOCK_USERS.author.email);
+    act(() => {
+      window.dispatchEvent(new StorageEvent('storage', { key: 'cp.sessionEpoch', newValue: 'n1' }));
+    });
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('nobody'));
+  });
+
+  it('FR-104: a sign-in in another tab as the same user keeps this tab signed in', async () => {
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <Who />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
+    seedMockRefresh(MOCK_USERS.recruiter.email);
+    act(() => {
+      window.dispatchEvent(new StorageEvent('storage', { key: 'cp.sessionEpoch', newValue: 'n2' }));
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER');
+  });
+
+  it('FR-104: a sign-in writes a non-secret epoch for other tabs and no token', async () => {
+    renderWithAuth(<LoginForm />);
+    await signInAs(MOCK_USERS.recruiter);
+    await waitFor(() => expect(getAccessToken()).toBeTruthy());
+    const epoch = localStorage.getItem('cp.sessionEpoch');
+    expect(epoch).toBeTruthy();
+    expect(epoch).not.toContain(getAccessToken()!);
+  });
+
+  it('FR-104: when another tab confirms the sign-out, this tab drops the unconfirmed warning', async () => {
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <SignOutButton />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    server.use(http.post('*/v1/auth/logout', () => HttpResponse.error()));
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Sign out' }));
+    await screen.findByText('We could not confirm you were signed out');
+    localStorage.removeItem('cp.signOutPending');
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent('storage', { key: 'cp.signOutPending', newValue: null }),
+      );
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByText('We could not confirm you were signed out'),
+      ).not.toBeInTheDocument(),
+    );
   });
 });
 
@@ -542,6 +651,25 @@ describe('sign-out that the server did not confirm', () => {
     await userEvent.setup().click(await screen.findByRole('button', { name: 'Sign out' }));
     await waitFor(() => expect(localStorage.getItem('cp.signOutPending')).toBe('1'));
     expect(JSON.stringify({ ...localStorage })).not.toContain(token);
+  });
+});
+
+describe('settleSession limit', () => {
+  it('FR-101 FR-104: a stuck refresh cannot hold a sign-in for longer than the limit', async () => {
+    server.use(http.post('*/v1/auth/refresh', () => new Promise(() => undefined)));
+    void refreshSession();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      let done = false;
+      const waiting = settleSession().then(() => (done = true));
+      await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS - 1);
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(2);
+      await waiting;
+      expect(done).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

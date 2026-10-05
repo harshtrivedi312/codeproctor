@@ -19,7 +19,16 @@ export function onSessionChange(listener: SessionListener): () => void {
   return () => listeners.delete(listener);
 }
 
+// Who this tab is signed in as. Requests record it, and a refresh that returns someone else (the
+// refresh cookie is shared by all tabs) must not silently turn this tab into that person.
+let currentUserId: string | null = null;
+
+export function getSessionUserId(): string | null {
+  return currentUserId;
+}
+
 export function publishSession(session: AuthSession | null): void {
+  currentUserId = session ? session.user.id : null;
   setAccessToken(session ? session.accessToken : null);
   for (const listener of listeners) listener(session);
 }
@@ -38,7 +47,12 @@ export function invalidateRefreshes(): void {
   inFlight = null;
 }
 
+/** Longest a refresh or logout request may take, and the longest a sign-in waits for them. */
+export const REQUEST_TIMEOUT_MS = 10_000;
+
 const SIGN_OUT_MARKER = 'cp.signOutPending';
+/** Changes on every sign-in so other tabs re-check their session. A random nonce, never a token. */
+export const SESSION_EPOCH_KEY = 'cp.sessionEpoch';
 
 /*
  * "Sign-out pending" marker. A boolean only, never a token. It survives a reload so that a logout
@@ -85,8 +99,17 @@ export function trackLogout(call: Promise<unknown>): void {
 
 /** Resolves when any refresh and any logout call in flight have finished, whatever their result. */
 export async function settleSession(): Promise<void> {
-  await settleRefresh();
-  if (logoutInFlight) await logoutInFlight.then(noop, noop);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, REQUEST_TIMEOUT_MS);
+  });
+  const settled = (async () => {
+    await settleRefresh();
+    if (logoutInFlight) await logoutInFlight.then(noop, noop);
+  })();
+  // Never hang a sign-in on a stuck request.
+  await Promise.race([settled, limit]);
+  clearTimeout(timer);
 }
 
 /** Another tab signed out: forget the session here at once and ignore refreshes still running. */
@@ -131,6 +154,12 @@ export function beginSignOut(): Promise<void> {
 export function beginSession(): void {
   signingOut = false;
   writeMarker(false);
+  try {
+    // Tell other tabs a sign-in happened, so one still signed in as someone else re-checks.
+    window.localStorage.setItem(SESSION_EPOCH_KEY, crypto.randomUUID());
+  } catch {
+    // Storage blocked: other tabs find out on their next refresh (it returns a different user).
+  }
   invalidateRefreshes();
 }
 
@@ -156,6 +185,7 @@ async function doRefresh(): Promise<AuthSession | null> {
     const response = await fetch(`${apiBaseUrl}/v1/auth/refresh`, {
       method: 'POST',
       credentials: 'include',
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (startedIn !== generation) return null;
     if (!response.ok) {
@@ -164,6 +194,12 @@ async function doRefresh(): Promise<AuthSession | null> {
     }
     const session = (await response.json()) as AuthSession;
     if (startedIn !== generation) return null;
+    if (currentUserId && currentUserId !== session.user.id) {
+      // Another tab signed in as someone else through the shared cookie. Do not switch users
+      // silently: this tab signs out and goes to login (FR-103, FR-104).
+      publishSession(null);
+      return null;
+    }
     publishSession(session);
     return session;
   } catch {

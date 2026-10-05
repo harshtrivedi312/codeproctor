@@ -8,7 +8,11 @@ import {
   beginSignOut,
   confirmSignedOut,
   getGeneration,
+  getSessionUserId,
+  REQUEST_TIMEOUT_MS,
+  invalidateRefreshes,
   isSignOutPending,
+  SESSION_EPOCH_KEY,
   SIGN_OUT_MARKER_KEY,
   signedOutElsewhere,
   trackLogout,
@@ -65,7 +69,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     const startedIn = getGeneration();
     const call = (async (): Promise<boolean> => {
       try {
-        const { response } = await api.POST('/v1/auth/logout');
+        const { response } = await api.POST('/v1/auth/logout', {
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
         return response.ok || response.status === 401;
       } catch {
         return false;
@@ -117,6 +123,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       if (event.key === SIGN_OUT_MARKER_KEY && event.newValue === '1') {
         setSignedOutByUser(true);
         signedOutElsewhere();
+      } else if (event.key === SIGN_OUT_MARKER_KEY && event.newValue === null) {
+        // Another tab confirmed the sign-out (or signed in): nothing left to retry here.
+        setSignOutUnconfirmed(false);
+      } else if (event.key === SESSION_EPOCH_KEY && getSessionUserId()) {
+        // Another tab signed in. The refresh cookie is shared, so check that this tab's user is
+        // still the cookie's user; if not, the refresh signs this tab out.
+        invalidateRefreshes();
+        void refreshSession();
       }
     };
     window.addEventListener('storage', onStorage);
@@ -132,7 +146,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       setSignedOutByUser(false);
       setSignOutUnconfirmed(false);
       beginSession();
-      // Always start a new sign-in with an empty cache, even for the same user id (FR-103).
+      // The listener below clears on a user change; this clears when the same user id signs in
+      // again (for example after a sign-out that kept the page mounted), so nothing is reused.
       void queryClient.cancelQueries();
       queryClient.clear();
       publishSession(session);
