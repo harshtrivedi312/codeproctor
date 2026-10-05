@@ -3,8 +3,10 @@
 // Everything environment-specific comes from environment variables. No default points at a real
 // host, and nothing here is a secret.
 import { SharedArray } from 'k6/data';
+import { checkTarget } from './guard.js';
 
-export const API_BASE = (__ENV.API_BASE_URL || 'http://localhost:4000/api/v1').replace(/\/+$/, '');
+const RAW_API_BASE = (__ENV.API_BASE_URL || 'http://localhost:4000/api/v1').replace(/\/+$/, '');
+export const API_BASE = RAW_API_BASE;
 
 // Tags k6 attaches to every metric sample. 'url' is left out on purpose: the storage PUT URL is a
 // presigned URL (a bearer capability for its lifetime), and it would otherwise be a tag on
@@ -24,45 +26,13 @@ export const SYSTEM_TAGS = [
   'tls_version',
 ];
 
-// Host guard, an allow-list that fails closed. ALLOWED_HOSTS (comma separated, exact host names,
-// no scheme, port or path) is required; only localhost, 127.0.0.1 and host.docker.internal are
-// allowed without it (for the mock server). The deny-list below is an extra check that nothing
-// overrides: a host containing one of those words is refused even when it is in ALLOWED_HOSTS.
+// Host guard (lib/guard.js, tested by lib/guard.test.mjs): an allow-list that fails closed.
+// API_BASE_URL must match a strict whole-URL pattern; ALLOWED_HOSTS (comma separated, exact host
+// names) is required; only localhost, 127.0.0.1 and host.docker.internal are allowed without it.
+// A host containing prod, production or pilot is refused even when listed; nothing overrides that.
 // The CI job has its own allow-list (QA_STAGING_HOSTS); this is a second guard for local runs.
-const LOCAL_HOSTS = ['localhost', '127.0.0.1', 'host.docker.internal'];
-const DENY = ['prod', 'production', 'pilot'];
-
-export function targetHost() {
-  return API_BASE.toLowerCase()
-    .replace(/^https?:\/\//, '')
-    .replace(/^[^@/]*@/, '')
-    .split(/[/:?#]/)[0];
-}
-
 export function assertSafeTarget() {
-  const host = targetHost();
-  if (!host) {
-    throw new Error('Refusing to run: API_BASE_URL has no host.');
-  }
-  for (const bad of DENY) {
-    if (host.includes(bad)) {
-      throw new Error(
-        `Refusing to run: host name contains "${bad}". Load tests run against staging with ` +
-          'synthetic data only (DEP-01). This check cannot be overridden.',
-      );
-    }
-  }
-  const allowed = (__ENV.ALLOWED_HOSTS || '')
-    .toLowerCase()
-    .split(',')
-    .map((h) => h.trim())
-    .filter((h) => h !== '');
-  if (!LOCAL_HOSTS.includes(host) && !allowed.includes(host)) {
-    throw new Error(
-      `Refusing to run: host "${host}" is not in ALLOWED_HOSTS (exact names, comma separated). ` +
-        'Name the staging host explicitly.',
-    );
-  }
+  checkTarget(RAW_API_BASE, __ENV.ALLOWED_HOSTS);
 }
 
 // Run the guard in the init stage too, so a run with --no-setup or a script error before setup()
