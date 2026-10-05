@@ -10,9 +10,14 @@ inject `PrismaService` and use `prisma.client`, which runs every model query thr
   the org-scoped one. **New business modules must use it.**
 - `database/prisma.module.ts` is BE-02's interim client: an unscoped `PrismaClient` for auth
   bootstrap only. It stays until `auth.service.ts` moves onto `database/prisma.service.ts` inside
-  `runSystem('AUTH_BOOTSTRAP', ...)` (see the recipe below), and then it is deleted. A test
-  (`prisma-client-smoke.spec.ts`) fails if any file outside `src/auth/`, `src/database/` and
-  `app.module.ts` imports it.
+  `runSystem('AUTH_BOOTSTRAP', ...)` (see the recipe below), and then it is deleted (FU-DB-58).
+
+An import guard (`import-guard.spec.ts`) keeps three things out of new code, because each reaches
+Postgres around the org scope: `database/prisma.module`, `database/create-prisma-client`, and BE-01's
+`PG_POOL` token. It reads every non-test file under `src` for `from '...'`, `require('...')` and
+`import('...')`, with or without `.js`, and compares against an explicit per-file allowlist in the
+spec (not folders). A new legitimate user is added to that list in the same pull request, which is
+the review point.
 
 Nest injects by class reference, not by name, so the two never collide at runtime. Always import
 from the file named above, and check the import line when an editor offers an auto-import.
