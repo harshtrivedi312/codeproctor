@@ -24,7 +24,7 @@ Setup, disable and recovery-code regeneration require `currentPassword` in the b
 
 ## Consequences
 
-- API shape change (C-8): `ProblemDetails` gains an optional `code` member (RFC 7807 extension). Affects backend (problem filter), frontend (API client) and QA.
+- API shape change (C-8): `ProblemDetails` carries an optional `code` (already on main) member (RFC 7807 extension). Affects backend (problem filter), frontend (API client) and QA.
 - Shared response type: `AuthUserDto` gains `totpEnabled: boolean` (own account, authenticated responses only; see `docs/api-contract.md`). Affects backend, frontend and QA; not on main yet.
 - Backend PR #26 (on main) already returns 403 `REAUTH_FAILED` and 403 `TWO_FACTOR_REQUIRED_FOR_ROLE`. Backend PR #51 (open) implements the two follow-ups from C-21: disabling 2FA must revoke that user's refresh sessions (reset already does) and must require a current TOTP code.
 - Frontend: stop excluding the bearer-authenticated 2FA management routes from refresh-and-retry in `isAuthRequest`.
