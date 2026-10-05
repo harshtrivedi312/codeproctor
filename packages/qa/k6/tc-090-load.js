@@ -10,7 +10,8 @@
 //
 // Run it against staging only, with synthetic data (README). Configuration comes from environment
 // variables; nothing secret is in this file.
-//   k6 run -e API_BASE_URL=https://<staging-host>/api/v1 -e SESSIONS_FILE=/path/sessions.json \
+//   k6 run -e API_BASE_URL=https://<staging-host>/api/v1 -e ALLOWED_HOSTS=<staging-host> \
+//     -e SESSIONS_FILE=/absolute/path/sessions.json \
 //     packages/qa/k6/tc-090-load.js
 import { assertSafeTarget, requireSessions, intEnv, SYSTEM_TAGS } from './lib/config.js';
 import { candidateTick } from './lib/candidate.js';
@@ -35,6 +36,12 @@ function seconds(text) {
 const R = seconds(RAMP);
 const H = seconds(HOLD);
 const D = seconds(DOWN);
+if (VUS < 1) {
+  throw new Error('VUS must be at least 1.');
+}
+if (R + H + D <= 0) {
+  throw new Error('RAMP_UP + HOLD + RAMP_DOWN must be longer than zero.');
+}
 const EXPECTED_RATE = (1.4 * VUS * (R / 2 + H + D / 2)) / (R + H + D);
 
 export const options = {
@@ -72,7 +79,7 @@ export const options = {
     cp_duplicate_batches: ['count==0'],
     // Offered load: slots that ran more than half an interval late are counted and skipped ahead.
     cp_late_slots: ['rate<0.01'],
-    'http_reqs{kind:api}': ['rate>=' + (0.9 * EXPECTED_RATE).toFixed(1)],
+    'http_reqs{kind:api}': ['count>0', 'rate>=' + (0.9 * EXPECTED_RATE).toFixed(1)],
     cp_failures: ['count==0'],
     cp_setup_failures: ['count==0'],
     checks: ['rate==1'],

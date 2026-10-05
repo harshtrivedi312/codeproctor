@@ -57,6 +57,7 @@ function init() {
     media: {},
     due: {},
     ready: false,
+    runWindows: [], // [start, end] of recent inline code runs, to excuse the slots they delay
     dead: false,
   };
   STREAMS.forEach((s, i) => {
@@ -64,10 +65,10 @@ function init() {
     // Spread the three streams over the 10 s chunk interval, as separate recorders do.
     state.due['media:' + s] = now + 1000 + i * 3300;
   });
+  state.due.run = RUN_EVERY_MS > 0 ? now + Math.random() * RUN_EVERY_MS : Infinity;
   state.due.heartbeat = now + Math.random() * 10_000; // spread the VUs
   state.due.events = now + Math.random() * 5_000;
   state.due.keystrokes = now + Math.random() * 2_000;
-  state.due.run = RUN_EVERY_MS > 0 ? now + Math.random() * RUN_EVERY_MS : Infinity;
 }
 
 function api(path, body, endpoint, extraHeaders) {
@@ -179,6 +180,21 @@ function keystrokeBatch() {
   }
 }
 
+// Optional: STORAGE_ALLOWED_HOSTS (comma separated exact host names) restricts where chunks may be
+// PUT, so a wrong or hostile presign answer cannot send synthetic data elsewhere.
+const STORAGE_HOSTS = (__ENV.STORAGE_ALLOWED_HOSTS || '')
+  .toLowerCase()
+  .split(',')
+  .map((h) => h.trim())
+  .filter((h) => h !== '');
+function storageHostAllowed(url) {
+  if (STORAGE_HOSTS.length === 0) {
+    return true;
+  }
+  const m = /^https:\/\/([a-z0-9.-]+)(:\d{1,5})?\//i.exec(String(url));
+  return m !== null && STORAGE_HOSTS.includes(m[1].toLowerCase());
+}
+
 function mediaChunk(stream) {
   const m = state.media[stream];
   const isAudio = stream === 'AUDIO';
@@ -203,8 +219,14 @@ function mediaChunk(stream) {
     // of the 300 ms threshold (NFR-01 covers the API). The URL is never logged, and it is not a
     // metric tag (SYSTEM_TAGS in config.js has no 'url'). 412 means "already stored" (If-None-Match, ADR 0013
     // 5.5), so it is an expected status; only other non-2xx answers count as failed requests.
+    if (!storageHostAllowed(grant.url)) {
+      // The URL is not logged; only the fact is counted.
+      storageFailures.add(1, { status: 'blocked' });
+      return;
+    }
     const put = http.put(grant.url, isAudio ? payloads.audio : payloads.video, {
       headers: grant.headers || { 'Content-Type': contentType },
+      redirects: 0, // never follow a redirect with a presigned URL
       tags: { kind: 'storage', endpoint: 'media_put', name: 'media_put' },
       responseCallback: http.expectedStatuses({ min: 200, max: 299 }, 412),
     });
@@ -226,13 +248,31 @@ function mediaChunk(stream) {
   }
 }
 
+// Code runs happen inline in the tick (the k6 VU is blocked while Judge0 answers, up to 5 s at p95,
+// NFR-01). A real client does not block its other timers on a run, so a slot that was delayed by
+// a run of this same candidate is excused: it is not counted as late and is not skipped, it runs
+// as soon as the run returns (a short catch-up, as a browser's timers would).
 function codeRun() {
+  const t0 = Date.now();
   const res = api(
     `/candidate/answers/${state.entry.questionId}/run`,
     JSON.stringify({ language: 'python', code: RUN_CODE }),
     'run',
   );
   check(res, { 'run 200': (r) => r.status === 200 }, { endpoint: 'run' });
+  state.runWindows.push([t0, Date.now()]);
+  if (state.runWindows.length > 3) {
+    state.runWindows.shift();
+  }
+}
+
+// Milliseconds of [from, to] that lie inside one of this candidate's recent runs.
+function excusedMs(from, to) {
+  let total = 0;
+  for (const [a, b] of state.runWindows) {
+    total += Math.max(0, Math.min(to, b) - Math.max(from, a));
+  }
+  return total;
 }
 
 const SCHEDULE = [
@@ -260,16 +300,20 @@ export function candidateTick() {
       return;
     }
   }
-  const now = Date.now();
   for (const item of SCHEDULE) {
-    if (state.due[item.name] <= now) {
+    const now = Date.now(); // per item: an earlier item may have taken a while
+    const due = state.due[item.name];
+    if (due <= now) {
       item.fn();
       // Fixed-rate schedule: advance from the previous due time, so a slow response does not
-      // lower the offered load. If we fell far behind, skip ahead (do not burst).
-      const nextDue = state.due[item.name] + item.every;
-      const late = nextDue < now + item.every / 2;
-      lateSlots.add(late);
-      state.due[item.name] = late ? now + item.every / 2 : nextDue;
+      // lower the offered load. Time lost to this candidate's own code runs is excused. If we
+      // fell far behind for another reason, skip ahead (do not burst) and count the slot as late.
+      const lateBy = now - due - excusedMs(due, now);
+      const late = lateBy > item.every / 2;
+      if (item.name !== 'run') {
+        lateSlots.add(late);
+      }
+      state.due[item.name] = late ? now + item.every / 2 : due + item.every;
     }
   }
   const next = Math.min(...SCHEDULE.map((s) => state.due[s.name]));

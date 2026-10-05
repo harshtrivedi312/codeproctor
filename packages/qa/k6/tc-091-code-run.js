@@ -2,7 +2,8 @@
 // TC-091 (NFR-01, P2): 50 concurrent code runs. Expected: p95 under 5 s.
 // Each virtual user is one candidate with its own seeded session; FR-502 allows one run per 5 s per
 // candidate, so each user waits 5.5 s between runs. Judge0 is the part under test.
-//   k6 run -e API_BASE_URL=https://<staging-host>/api/v1 -e SESSIONS_FILE=/path/sessions.json \
+//   k6 run -e API_BASE_URL=https://<staging-host>/api/v1 -e ALLOWED_HOSTS=<staging-host> \
+//     -e SESSIONS_FILE=/absolute/path/sessions.json \
 //     packages/qa/k6/tc-091-code-run.js
 import http from 'k6/http';
 import { check, sleep } from 'k6';
@@ -19,6 +20,9 @@ import {
 const VUS = intEnv('VUS', 50);
 const ROUNDS = intEnv('ROUNDS', 6);
 const CODE = __ENV.RUN_CODE || 'import sys\nprint(sum(int(x) for x in sys.stdin.read().split()))\n';
+if (VUS < 1 || ROUNDS < 1) {
+  throw new Error('VUS and ROUNDS must be at least 1.');
+}
 const failures = new Counter('cp_failures');
 
 export const options = {
@@ -28,6 +32,7 @@ export const options = {
   },
   thresholds: {
     'http_req_duration{endpoint:run}': ['p(95)<5000'],
+    'http_reqs{endpoint:run}': ['count>0'],
     'http_req_failed{endpoint:run}': ['rate==0'],
     cp_failures: ['count==0'],
     checks: ['rate==1'],

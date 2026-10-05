@@ -2,7 +2,7 @@
 // correct (right routes, valid signatures, cadence under the ADR 0013 rate limits). It is NOT the
 // product and proves nothing about it. Synthetic tokens only; nothing is stored on disk.
 //   node packages/qa/k6/mock/server.mjs [port] [sessionCount]  -> writes mock/sessions.json
-// then: k6 run -e API_BASE_URL=http://localhost:4010/api/v1 -e SESSIONS_FILE=packages/qa/k6/mock/sessions.json ...
+// then: k6 run -e API_BASE_URL=http://localhost:4010/api/v1 -e SESSIONS_FILE=<absolute path to mock/sessions.json> ...
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -169,7 +169,10 @@ const server = http.createServer((req, res) => {
     }
     if (route === 'run') {
       if (!body.code || !body.language) return send(res, 400, {});
-      return setTimeout(() => send(res, 200, { results: [] }), 150 + Math.random() * 300);
+      return setTimeout(
+        () => send(res, 200, { results: [] }),
+        (Number(process.env.MOCK_RUN_MS) || 150) + Math.random() * 300,
+      );
     }
     return send(res, 404, {});
   });
