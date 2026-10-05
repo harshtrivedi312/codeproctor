@@ -211,16 +211,15 @@ async login(email: string, password: string) {
 
 ## Limits (read before relying on it)
 
-The extension looks only at the top-level model: its `where`, its `cursor`, and the `orgId` of a
-create or update. Everything reached through a relation is **not** looked at.
+The extension filters the top-level model: its `where`, its `cursor`, and the `orgId` of a create
+or update. A nested-write guard ("Nested writes" below) refuses what could change another org's
+rows through a relation. Everything else reached through a relation is **not** looked at.
 
-- **(a) Nested writes are passed through.** A parent-side `connect`, `set`, `connectOrCreate`,
-  nested `create` or nested `update` in `data` can change another org's rows. Example:
-  `organization.update({ where: { id: A }, data: { users: { connect: { id: userOfB } } } })` moves
-  B's user into A, and the filter on Organization does not see it. (The composite foreign keys of
-  ADR 0006 section 2 ii cover only the delivery chain.) Until a guard exists (FU-DB-63), **every id
-  in a nested write follows rule (i)**: load it through the scoped client first, and answer 404 on
-  a miss.
+- **(a) Ids written through a relation or a scalar foreign key.** A parent-side `connect`,
+  `connectOrCreate` or `set` is refused in an org scope, and so is a nested row of a model with its
+  own `org_id` that names another org (see "Nested writes"). A child-side `connect` is the same as
+  setting the scalar foreign key, and neither is checked: **every such id follows rule (i)**. Load
+  it through the scoped client first, and answer 404 on a miss.
 - **(b) Re-parenting.** An update that changes a path model's first-hop foreign key, for example
   `testSection.update({ data: { testId } })`, is the same as a path create: rule (i). A `create` on
   a `path` model cannot be stamped either (there is no `org_id` column), so the parent id in the
@@ -270,7 +269,28 @@ writing an id into any of these columns, load the row through the scoped client 
 miss.** Module tests and code review take their checklist from it, for example "every write of
 `session_questions.test_question_id` loads the test question first".
 
-The same table says which side of each relation holds the key.
+The same table says which side of each relation holds the key, which the nested-write guard needs
+(next section).
+
+## Nested writes
+
+In an org scope, `applyOrgScope` walks the `data` of `create`, `update`, `updateMany`, `upsert`
+(and their `*AndReturn` forms) at any depth. It visits relation fields only (the table above says
+which fields are relations), so it never descends into a Json column and leaves a scalar list's
+`{ set: [...] }` alone. It adds no query. It **refuses** with `OrgScopeViolationError` (the message
+names models and fields, never values):
+
+- `connect`, `connectOrCreate` and `set` on a **parent-side** relation (the key is on the related
+  model): they change rows the scope filter never selected. Example:
+  `organization.update({ where: { id: A }, data: { users: { connect: { id: userOfB } } } })`.
+- a nested `create`, `update`, `upsert` or `createMany` of a model with its own `org_id` that names
+  another org, through `orgId` or `org: { connect }`; a nested create of an organization; and a
+  nested operation the guard does not know.
+
+It **allows**: a child-side `connect` (the key is on this model: the same as setting the scalar
+foreign key, so it stays under rule (i)), and nested `create`, `update`, `delete` and `upsert` under
+an in-scope parent (they act inside that parent's subtree). A `createMany` of a path model is flat
+and is not walked.
 
 ## Writing queries inside the scope
 
@@ -309,17 +329,19 @@ which stays one statement, and be ready to retry on `P2002` elsewhere.
 
 ## Files
 
-| File                                           | What it holds                                                                               |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `create-prisma-client.ts`                      | The only `new PrismaClient` (ADR 0009 section 4.2)                                          |
-| `prisma.service.ts`, `database.module.ts`      | The Nest service (connect, disconnect) and the global module                                |
-| `org-scope-map.ts`                             | The scope map and `orgFilter`                                                               |
-| `org-scope-args.ts`                            | Pure argument rewriting per operation, and the operation coverage check                     |
-| `org-scope.extension.ts`                       | The `$extends` query extension and `OrgScopedPrismaClient`                                  |
-| `org-context.ts`, `org-context.interceptor.ts` | The AsyncLocalStorage context, its API, and the HTTP population point                       |
-| `prisma.module.ts`                             | BE-02's interim unscoped client for auth bootstrap only (not part of DB-05)                 |
-| `errors.ts`                                    | `OrgContextMissingError`, `OrgScopeViolationError`, `RawQueryNotAllowedError`               |
-| `testing/`                                     | Test helpers (excluded from the build): throwaway migrated Postgres, fixtures, scope checks |
+| File                                           | What it holds                                                                                                      |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `create-prisma-client.ts`                      | The only `new PrismaClient` (ADR 0009 section 4.2)                                                                 |
+| `prisma.service.ts`, `database.module.ts`      | The Nest service (connect, disconnect) and the global module                                                       |
+| `org-scope-map.ts`                             | The scope map and `orgFilter`                                                                                      |
+| `org-scope-args.ts`                            | Pure argument rewriting per operation, and the operation coverage check                                            |
+| `org-scope-nested.ts`                          | The nested-write guard: refuses parent-side connect, connectOrCreate and set, and nested rows naming another org   |
+| `org-scope-relations.ts`                       | Every foreign key classified (`FK_CLASSES`, `RULE_I_REFERENCES`) and the side of every relation that holds the key |
+| `org-scope.extension.ts`                       | The `$extends` query extension and `OrgScopedPrismaClient`                                                         |
+| `org-context.ts`, `org-context.interceptor.ts` | The AsyncLocalStorage context, its API, and the HTTP population point                                              |
+| `prisma.module.ts`                             | BE-02's interim unscoped client for auth bootstrap only (not part of DB-05)                                        |
+| `errors.ts`                                    | `OrgContextMissingError`, `OrgScopeViolationError`, `RawQueryNotAllowedError`                                      |
+| `testing/`                                     | Test helpers (excluded from the build): throwaway migrated Postgres, fixtures, scope checks                        |
 
 Tests (`*.spec.ts`) name TC-008 and NFR-04 or FR-103: the map completeness test and its failure
 cases, the argument rewriting for every operation and model, the context and interceptor, the

@@ -3,6 +3,7 @@
 // unit tested. The Prisma extension (org-scope.extension.ts) wraps this with the context lookup.
 import type { Prisma } from '../generated/prisma/client.js';
 import { OrgScopeViolationError } from './errors';
+import { assertNestedWritesScoped } from './org-scope-nested';
 import { orgFilter } from './org-scope-map';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
 
@@ -222,14 +223,20 @@ function namesOtherOrg(cursor: PlainObject, orgId: string): boolean {
  *   stamp, so the parent id in the payload must follow ADR 0006 section 2 rule (i).
  * - An unknown operation is refused.
  *
- * What it does NOT cover (README "Limits"). Only the top-level model, its `where`, its `cursor`
- * and its create/update `orgId` are looked at. Everything reached through a relation is not:
+ * Nested writes are walked by org-scope-nested.ts (FU-DB-63): in an org scope a parent-side
+ * `connect`, `connectOrCreate` or `set` is refused (it changes rows the filter never selected:
+ * `organization.update({ where: { id: A }, data: { users: { connect: { id: userOfB } } } })`), and
+ * so is a nested row of a model with its own org_id that names another org. A child-side `connect`
+ * and nested create, update, upsert and delete under an in-scope parent are allowed; the ids in
+ * them follow rule (i).
  *
- * (a) Nested writes. `connect`, `set`, `connectOrCreate` and nested `create` or `update` in `data`
- *     are passed through. A parent-side nested write can change another org's rows, for example
- *     `organization.update({ where: { id: A }, data: { users: { connect: { id: userOfB } } } })`
- *     moves B's user into A. Until FU-DB-63 adds a guard, every id in a nested write follows
- *     rule (i): load it through the scoped client first.
+ * What it does NOT cover (README "Limits"). Only the top-level model, its `where`, its `cursor`,
+ * its create/update `orgId` and the nested writes above are looked at. Everything else reached
+ * through a relation is not:
+ *
+ * (a) Ids written through a relation or scalar foreign key. A child-side `connect` is the same as
+ *     setting the scalar FK, and neither is checked: the id follows rule (i), load it through the
+ *     scoped client first.
  * (b) Re-parenting. An update that changes a path model's first-hop foreign key
  *     (`testSection.update({ data: { testId } })`) is the same as a path create: rule (i).
  * (c) Nested reads. `include`, `select`, the fluent API, relation filters, `orderBy` on a relation
@@ -294,9 +301,11 @@ function rewriteArgs(
     case 'updateMany':
     case 'updateManyAndReturn':
       assertTenancyKept(model, operation, rule, args.data, orgId);
+      assertNestedWritesScoped(model, operation, args.data, orgId);
       return { ...args, where: andWhere(model, operation, args.where, filter) };
 
     case 'create':
+      assertNestedWritesScoped(model, operation, args.data, orgId);
       return { ...args, data: stampCreateData(model, operation, rule, args.data, orgId) };
 
     case 'createMany':
@@ -310,6 +319,8 @@ function rewriteArgs(
 
     case 'upsert':
       assertTenancyKept(model, operation, rule, args.update, orgId);
+      assertNestedWritesScoped(model, operation, args.update, orgId);
+      assertNestedWritesScoped(model, operation, args.create, orgId);
       return {
         ...args,
         where: andWhere(model, operation, args.where, filter),
