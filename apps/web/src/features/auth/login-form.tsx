@@ -86,6 +86,7 @@ export function LoginForm(): React.JSX.Element {
 
   const expired = params.get('reason') === 'expired';
   const reset = params.get('reset') === 'done';
+  const twoFactorOff = params.get('reason') === 'two-factor-off';
 
   return (
     <form onSubmit={(e) => void handleSubmit(onSubmit)(e)} noValidate className="space-y-4">
@@ -93,6 +94,11 @@ export function LoginForm(): React.JSX.Element {
         <Alert tone="success" role="status" title="Password saved">
           Sign in with your new password. If your role uses an authenticator app, you will be asked
           for a code next.
+        </Alert>
+      ) : null}
+      {twoFactorOff ? (
+        <Alert tone="info" role="status">
+          Two-factor sign-in is turned off and you were signed out on all devices. Sign in again.
         </Alert>
       ) : null}
       {signOutUnconfirmed ? (

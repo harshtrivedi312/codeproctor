@@ -52,7 +52,7 @@ test.describe('FR-102 Security page', () => {
     await expect(page).toHaveURL(/\/admin\/security$/);
   });
 
-  test('FR-102: set up 2FA, download recovery codes, regenerate them, then disable', async ({
+  test('FR-102: set up 2FA, download recovery codes, regenerate them, then disable (signs out everywhere)', async ({
     page,
   }) => {
     await login(page, RECRUITER);
@@ -83,9 +83,31 @@ test.describe('FR-102 Security page', () => {
 
     await page.getByRole('button', { name: 'Disable 2FA' }).click();
     await dialog.getByLabel('Current password').fill(RECRUITER.password);
+    await expect(dialog.getByLabel('6-digit code')).toHaveAttribute(
+      'autocomplete',
+      'one-time-code',
+    );
+    await expectNoAxeViolations(page);
+    // A wrong code keeps the dialog open and the session.
+    await dialog.getByLabel('6-digit code').fill('000000');
     await dialog.getByRole('button', { name: 'Turn off 2FA' }).click();
-    await expect(page.getByRole('button', { name: 'Set up 2FA' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Disable 2FA' })).toHaveCount(0);
+    await expect(dialog.getByText('Password or code incorrect')).toBeVisible();
+    await dialog.getByLabel('Current password').fill(RECRUITER.password);
+    await dialog.getByLabel('6-digit code').fill(TOTP);
+    await dialog.getByRole('button', { name: 'Turn off 2FA' }).click();
+
+    // Turning 2FA off ends every session: back at login with a one-time notice.
+    await expect(page).toHaveURL(/\/admin\/login\?reason=two-factor-off/);
+    await expect(
+      page.getByText('Two-factor sign-in is turned off and you were signed out on all devices.'),
+    ).toBeVisible();
+    await expect(page.getByText('could not confirm you were signed out')).toHaveCount(0);
+    await expectNoAxeViolations(page);
+    // The session is really gone, and 2FA is off for the next sign-in.
+    await page.goto('/admin');
+    await expect(page).toHaveURL(/\/admin\/login\?reason=expired/);
+    await login(page, RECRUITER);
+    await expect(page).toHaveURL(/\/admin$/);
   });
 
   test('FR-102: Super Admin cannot disable 2FA and sees why', async ({ page }) => {

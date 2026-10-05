@@ -31,6 +31,10 @@ export interface PendingChallenge {
   challengeToken: string;
 }
 
+export const LOGIN_PATH = '/admin/login';
+/** Shown once on the login page after turning 2FA off. A fixed word, nothing about the user. */
+export const TWO_FACTOR_OFF_LOGIN_PATH = '/admin/login?reason=two-factor-off';
+
 export type AuthStatus = 'loading' | 'authenticated' | 'unauthenticated';
 
 interface AuthContextValue {
@@ -43,6 +47,15 @@ interface AuthContextValue {
   /** True when the server has not confirmed the last sign-out; the login screen offers a retry. */
   signOutUnconfirmed: boolean;
   retrySignOut: () => Promise<void>;
+  /** Where staff pages send a signed-out user: /admin/login, or with a notice after a server-side revoke. */
+  loginPath: string;
+  /**
+   * The server already ended every session of this user (turning 2FA off revokes all refresh
+   * tokens and clears the cookie): forget the session here without a refresh or a logout call, and
+   * go to login with a one-time notice. Nothing is left pending, so no "could not confirm sign-out"
+   * warning and no logout retry.
+   */
+  signOutRevoked: () => Promise<void>;
   setPending: (pending: PendingChallenge | null) => void;
   /** Called after a successful login, 2FA verify or enrollment. */
   signIn: (session: AuthSession) => void;
@@ -60,6 +73,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
   const [pending, setPending] = React.useState<PendingChallenge | null>(null);
   const [signedOutByUser, setSignedOutByUser] = React.useState(false);
   const [signOutUnconfirmed, setSignOutUnconfirmed] = React.useState(false);
+  const [loginPath, setLoginPath] = React.useState(LOGIN_PATH);
 
   /**
    * Asks the server to end the session. Success, or 401 (there is no valid session left, so
@@ -144,6 +158,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       setPending(null);
       setSignedOutByUser(false);
       setSignOutUnconfirmed(false);
+      setLoginPath(LOGIN_PATH);
       beginSession(session.user.id);
       // The listener below clears on a user change; this clears when the same user id signs in
       // again (for example after a sign-out that kept the page mounted), so nothing is reused.
@@ -156,6 +171,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
 
   const signOut = React.useCallback(async () => {
     setSignedOutByUser(true);
+    setLoginPath(LOGIN_PATH);
     // Waits for a refresh already running, then blocks new ones until the next sign-in.
     await beginSignOut();
     try {
@@ -171,6 +187,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     }
   }, [router, confirmLogout, queryClient]);
 
+  const signOutRevoked = React.useCallback(async () => {
+    setSignedOutByUser(true);
+    setLoginPath(TWO_FACTOR_OFF_LOGIN_PATH);
+    // Stops and ignores any refresh in flight, so nothing can bring the session back.
+    await beginSignOut();
+    // The server has already revoked the session: nothing to confirm, no logout to retry.
+    confirmSignedOut();
+    setSignOutUnconfirmed(false);
+    await queryClient.cancelQueries();
+    queryClient.clear();
+    publishSession(null);
+    setPending(null);
+    router.replace(TWO_FACTOR_OFF_LOGIN_PATH);
+  }, [router, queryClient]);
+
   const value = React.useMemo<AuthContextValue>(
     () => ({
       status,
@@ -180,11 +211,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       signedOutByUser,
       signOutUnconfirmed,
       retrySignOut: confirmLogout,
+      loginPath,
+      signOutRevoked,
       setPending,
       signIn,
       signOut,
     }),
-    [status, user, pending, signedOutByUser, signOutUnconfirmed, confirmLogout, signIn, signOut],
+    [
+      status,
+      user,
+      pending,
+      signedOutByUser,
+      signOutUnconfirmed,
+      confirmLogout,
+      loginPath,
+      signOutRevoked,
+      signIn,
+      signOut,
+    ],
   );
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

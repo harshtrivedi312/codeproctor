@@ -240,7 +240,7 @@ paths:
                   otpauthUri: { type: string }
                   qrDataUrl: { type: string }
         '400':
-          description: Missing or invalid currentPassword
+          description: Missing or invalid currentPassword or totpCode
           content:
             application/json:
               schema:
@@ -311,21 +311,28 @@ paths:
   /v1/auth/2fa/disable:
     post:
       operationId: disableTwoFactor
-      summary: Turn TOTP off. Not for Super Admin and Reviewer.
+      summary: Turn TOTP off. Needs password and TOTP code; revokes all refresh tokens and clears the cookie (backend PR #51). Not for Super Admin and Reviewer.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [currentPassword]
+              required: [currentPassword, totpCode]
               properties:
                 currentPassword: { type: string, minLength: 1, maxLength: 1024 }
+                totpCode:
+                  {
+                    type: string,
+                    minLength: 6,
+                    maxLength: 6,
+                    description: 6-digit TOTP code only; a recovery code is 400,
+                  }
       responses:
         '204':
-          description: Two-factor is off
+          description: Two-factor is off and every refresh token of the user is revoked (sign in again)
         '400':
-          description: Missing or invalid currentPassword
+          description: Missing or invalid currentPassword or totpCode
           content:
             application/json:
               schema:
@@ -337,13 +344,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/ProblemDetails'
         '403':
-          description: REAUTH_FAILED for a wrong password or locked account (checked first), otherwise TWO_FACTOR_REQUIRED_FOR_ROLE for Super Admin and Reviewer
+          description: REAUTH_FAILED for a wrong or locked password or a wrong or replayed code (one identical body), otherwise TWO_FACTOR_REQUIRED_FOR_ROLE for Super Admin and Reviewer (checked last)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ProblemDetails'
         '409':
           description: Two-factor is not on
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '503':
+          description: Temporary outage (for example the code store); no failure is counted, try again
           content:
             application/json:
               schema:
@@ -369,7 +382,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/RecoveryCodes'
         '400':
-          description: Missing or invalid currentPassword
+          description: Missing or invalid currentPassword or totpCode
           content:
             application/json:
               schema:

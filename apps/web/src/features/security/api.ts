@@ -23,6 +23,8 @@ export type Failure =
   | 'forbidden'
   /** 401 even after a refresh. */
   | 'session'
+  /** 503: try again in a moment (nothing was counted). */
+  | 'busy'
   | 'network'
   | 'unknown';
 
@@ -63,6 +65,7 @@ async function run<T>(send: () => Promise<Result<T>>, empty?: T): Promise<Outcom
     if (response.status === 400) return { ok: false, failure: 'code' };
     if (response.status === 409) return { ok: false, failure: 'conflict' };
     if (response.status === 401) return { ok: false, failure: 'session' };
+    if (response.status === 503) return { ok: false, failure: 'busy' };
     return { ok: false, failure: 'unknown' };
   } catch {
     return { ok: false, failure: 'network' };
@@ -84,10 +87,10 @@ export const confirmSetup = (currentPassword: string, code: string) =>
     api.POST('/v1/auth/2fa/setup/confirm', { body: { currentPassword, code } }),
   );
 
-export const disableTwoFactor = (currentPassword: string) =>
+export const disableTwoFactor = (currentPassword: string, totpCode: string) =>
   run<true>(async () => {
     const { error, response } = await api.POST('/v1/auth/2fa/disable', {
-      body: { currentPassword },
+      body: { currentPassword, totpCode },
     });
     return { data: undefined, error, response };
   }, true);

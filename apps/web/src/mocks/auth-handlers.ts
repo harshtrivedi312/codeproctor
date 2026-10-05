@@ -85,6 +85,8 @@ interface MockAuthState {
   totpOn: string[];
   /** Recovery-code set per user, bumped on every issue; older sets stop working. 0 = the seed set. */
   recoveryGen: Record<string, number>;
+  /** When a TOTP code was last accepted by disable, per user: the same code is refused again (replay). */
+  disableCodeAt: Record<string, number>;
 }
 
 const EMPTY: MockAuthState = {
@@ -96,6 +98,7 @@ const EMPTY: MockAuthState = {
   refreshFor: null,
   totpOn: [],
   recoveryGen: {},
+  disableCodeAt: {},
 };
 const COOKIE = 'mock_auth_state';
 let memory: MockAuthState = structuredClone(EMPTY);
@@ -231,6 +234,23 @@ function problem(
 }
 const REAUTH_DETAIL = 'The current password is incorrect.';
 
+/** One failure toward the lockout shared by login and every re-auth endpoint. Saves the state. */
+function countFailure(state: MockAuthState, key: string): void {
+  state.failed[key] = (state.failed[key] ?? 0) + 1;
+  if (state.failed[key] >= MAX_FAILED_LOGINS) {
+    state.failed[key] = 0;
+    state.lockExpiresAt[key] = Date.now() + LOCK_MS;
+  }
+  save(state);
+}
+/** A TOTP code accepted once is refused again for this long (the real window is about 30 s). */
+const TOTP_REPLAY_MS = 30_000;
+const reauthFailed = (request: Request) => problem(request, 403, REAUTH_DETAIL, 'REAUTH_FAILED');
+const totpCodeOnly = (body: Record<string, unknown>): string[] =>
+  typeof body.totpCode === 'string' && /^\d{6}$/.test(body.totpCode.trim())
+    ? []
+    : ['totpCode must be a 6-digit code'];
+
 /**
  * Shared checks of the four re-auth endpoints (FR-102, FU-BE-39), in the real API's order: a
  * signed-in user (401), a valid body (400), then the password. A wrong password and a locked
@@ -241,6 +261,8 @@ const REAUTH_DETAIL = 'The current password is incorrect.';
 async function reauth(
   request: Request,
   extra?: (body: Record<string, unknown>) => string[],
+  /** False when the caller still has a second factor to check and gives the attempt back itself. */
+  resetOnSuccess = true,
 ): Promise<{ user: MockUser; body: Record<string, unknown> } | Response> {
   const role = mockRoleFromToken(request.headers.get('Authorization'));
   const user = role ? Object.values<MockUser>(MOCK_USERS).find((u) => u.role === role) : undefined;
@@ -261,18 +283,13 @@ async function reauth(
   const key = user.email;
   const locked = (state.lockExpiresAt[key] ?? 0) > Date.now();
   if (locked || body.currentPassword !== user.password) {
-    if (!locked) {
-      state.failed[key] = (state.failed[key] ?? 0) + 1;
-      if (state.failed[key] >= MAX_FAILED_LOGINS) {
-        state.failed[key] = 0;
-        state.lockExpiresAt[key] = Date.now() + LOCK_MS;
-      }
-      save(state);
-    }
+    if (!locked) countFailure(state, key);
     return problem(request, 403, REAUTH_DETAIL, 'REAUTH_FAILED');
   }
-  state.failed[key] = 0;
-  save(state);
+  if (resetOnSuccess) {
+    state.failed[key] = 0;
+    save(state);
+  }
   return { user, body };
 }
 const conflict = (request: Request, detail: string) => problem(request, 409, detail);
@@ -420,11 +437,25 @@ export function createAuthHandlers() {
       return HttpResponse.json({ recoveryCodes: mockRecoveryCodesFor(user, gen) });
     }),
 
+    // Backend PR #51: needs the current password AND a 6-digit TOTP code (never a recovery code).
+    // Order: password, 409 if off, code, role refusal. Success revokes every refresh token.
     http.post(`${base}/2fa/disable`, async ({ request }) => {
-      const checked = await reauth(request);
+      const checked = await reauth(request, totpCodeOnly, false);
       if (checked instanceof Response) return checked;
-      const { user } = checked;
+      const { user, body } = checked;
+      const state = load();
+      if (!twoFactorOn(user, state)) return conflict(request, 'Two-factor is not on.');
+      const code = String(body.totpCode).trim();
+      const replayed = Date.now() - (state.disableCodeAt[user.email] ?? 0) < TOTP_REPLAY_MS;
+      if (code !== MOCK_TOTP_CODE || replayed) {
+        countFailure(state, user.email);
+        return reauthFailed(request);
+      }
+      // The code is spent even if the role then refuses the request.
+      state.disableCodeAt[user.email] = Date.now();
+      state.failed[user.email] = 0;
       if (isMandatory(user)) {
+        save(state);
         return problem(
           request,
           403,
@@ -432,9 +463,8 @@ export function createAuthHandlers() {
           'TWO_FACTOR_REQUIRED_FOR_ROLE',
         );
       }
-      const state = load();
-      if (!twoFactorOn(user, state)) return conflict(request, 'Two-factor is not on.');
       state.totpOn = state.totpOn.filter((email) => email !== user.email);
+      state.refreshFor = null;
       save(state);
       return new HttpResponse(null, { status: 204 });
     }),

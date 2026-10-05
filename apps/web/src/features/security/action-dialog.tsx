@@ -19,7 +19,9 @@ import {
 } from './api';
 import {
   codeFormSchema,
-  passwordFormSchema,
+  passwordStepSchema,
+  TOTP_CODE_MESSAGE,
+  REAUTH_FAILED_DISABLE_MESSAGE,
   REAUTH_FAILED_MESSAGE,
   type CodeFormValues,
   type PasswordFormValues,
@@ -38,7 +40,7 @@ const COPY: Record<SecurityAction, { title: string; description: string; submit:
   disable: {
     title: 'Turn off two-factor sign-in',
     description:
-      'After this, your password alone signs you in. Enter your current password to confirm.',
+      'After this, your password alone signs you in, and you are signed out on all devices. Enter your current password and the 6-digit code from your authenticator app. A recovery code does not work here.',
     submit: 'Turn off 2FA',
   },
   regenerate: {
@@ -53,6 +55,10 @@ const FAILURE_HINT: Record<
   Exclude<Failure, 'password' | 'code'>,
   { title: string; hint: string }
 > = {
+  busy: {
+    title: 'Please try again in a moment',
+    hint: 'The service is busy. Nothing was changed. Wait a few seconds, then submit again.',
+  },
   role: {
     title: 'Two-factor sign-in is required for your role',
     hint: 'Super Admins and Reviewers cannot turn it off. If you lost your phone, use a recovery code or ask a Super Admin.',
@@ -98,7 +104,7 @@ export function ActionDialog({
   onClose: () => void;
   onDone: (result: SecurityResult) => void;
 }): React.JSX.Element {
-  const { user } = useAuth();
+  const { user, signOutRevoked } = useAuth();
   // Who this dialog was opened by: the re-read below only runs for that same user.
   const stampRef = React.useRef(captureSessionStamp());
   const [stage, setStage] = React.useState<Stage>({ kind: 'password', passwordWrong: false });
@@ -123,10 +129,10 @@ export function ActionDialog({
       return 'ok';
     }
     if (action === 'disable') {
-      const out = await disableTwoFactor(values.currentPassword);
+      const out = await disableTwoFactor(values.currentPassword, values.totpCode ?? '');
       if (!out.ok) return fail(out.failure);
-      refreshStatus();
-      onDone('disabled');
+      // The server revoked every session of this user, this one included: no refresh, no logout.
+      await signOutRevoked();
       return 'ok';
     }
     const out = await regenerateRecoveryCodes(values.currentPassword);
@@ -196,6 +202,7 @@ export function ActionDialog({
             <PasswordStep
               submitLabel={copy.submit}
               destructive={action === 'disable'}
+              withCode={action === 'disable'}
               initialWrong={stage.passwordWrong}
               failure={failure}
               onSubmit={onPassword}
@@ -254,6 +261,7 @@ function FailureAlert({ failure }: { failure: Failure | null }): React.JSX.Eleme
 function PasswordStep({
   submitLabel,
   destructive,
+  withCode,
   initialWrong,
   failure,
   onSubmit,
@@ -261,6 +269,8 @@ function PasswordStep({
 }: {
   submitLabel: string;
   destructive: boolean;
+  /** Disable also asks for the 6-digit authenticator code. */
+  withCode: boolean;
   initialWrong: boolean;
   failure: Failure | null;
   onSubmit: (values: PasswordFormValues) => Promise<'wrong' | 'invalid' | 'failed' | 'ok'>;
@@ -274,8 +284,8 @@ function PasswordStep({
     setFocus,
     formState: { errors, isSubmitting },
   } = useForm<PasswordFormValues>({
-    resolver: zodResolver(passwordFormSchema),
-    defaultValues: { currentPassword: '' },
+    resolver: zodResolver(passwordStepSchema(withCode)),
+    defaultValues: { currentPassword: '', ...(withCode ? { totpCode: '' } : {}) },
   });
   React.useEffect(() => {
     if (initialWrong) setError('currentPassword', { message: REAUTH_FAILED_MESSAGE });
@@ -286,9 +296,16 @@ function PasswordStep({
     if (outcome === 'ok') return;
     // Never keep a password that did not work (or any password after a failure) in the field.
     setValue('currentPassword', '');
-    if (outcome === 'wrong') setError('currentPassword', { message: REAUTH_FAILED_MESSAGE });
-    if (outcome === 'invalid')
-      setError('currentPassword', { message: 'Enter your current password.' });
+    if (withCode) setValue('totpCode', '');
+    if (outcome === 'wrong') {
+      setError('currentPassword', {
+        message: withCode ? REAUTH_FAILED_DISABLE_MESSAGE : REAUTH_FAILED_MESSAGE,
+      });
+    }
+    if (outcome === 'invalid') {
+      if (withCode) setError('totpCode', { message: TOTP_CODE_MESSAGE });
+      else setError('currentPassword', { message: 'Enter your current password.' });
+    }
     setFocus('currentPassword');
   }
 
@@ -310,6 +327,23 @@ function PasswordStep({
           />
         )}
       </Field>
+      {withCode ? (
+        <Field
+          id="disable-code"
+          label="6-digit code"
+          hint="From your authenticator app."
+          error={errors.totpCode?.message}
+        >
+          {(aria) => (
+            <Input
+              {...aria}
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              {...register('totpCode')}
+            />
+          )}
+        </Field>
+      ) : null}
       <div className="flex justify-end gap-2">
         <Button type="button" variant="outline" onClick={onCancel}>
           Cancel

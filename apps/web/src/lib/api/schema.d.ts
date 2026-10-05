@@ -200,7 +200,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Turn TOTP off. Not for Super Admin and Reviewer. */
+    /** Turn TOTP off. Needs password and TOTP code; revokes all refresh tokens and clears the cookie (backend PR */
     post: operations['disableTwoFactor'];
     delete?: never;
     options?: never;
@@ -946,7 +946,7 @@ export interface operations {
           };
         };
       };
-      /** @description Missing or invalid currentPassword */
+      /** @description Missing or invalid currentPassword or totpCode */
       400: {
         headers: {
           [name: string]: unknown;
@@ -1058,18 +1058,20 @@ export interface operations {
       content: {
         'application/json': {
           currentPassword: string;
+          /** @description 6-digit TOTP code only; a recovery code is 400 */
+          totpCode: string;
         };
       };
     };
     responses: {
-      /** @description Two-factor is off */
+      /** @description Two-factor is off and every refresh token of the user is revoked (sign in again) */
       204: {
         headers: {
           [name: string]: unknown;
         };
         content?: never;
       };
-      /** @description Missing or invalid currentPassword */
+      /** @description Missing or invalid currentPassword or totpCode */
       400: {
         headers: {
           [name: string]: unknown;
@@ -1087,7 +1089,7 @@ export interface operations {
           'application/json': components['schemas']['ProblemDetails'];
         };
       };
-      /** @description REAUTH_FAILED for a wrong password or locked account (checked first), otherwise TWO_FACTOR_REQUIRED_FOR_ROLE for Super Admin and Reviewer */
+      /** @description REAUTH_FAILED for a wrong or locked password or a wrong or replayed code (one identical body), otherwise TWO_FACTOR_REQUIRED_FOR_ROLE for Super Admin and Reviewer (checked last) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -1098,6 +1100,15 @@ export interface operations {
       };
       /** @description Two-factor is not on */
       409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Temporary outage (for example the code store); no failure is counted, try again */
+      503: {
         headers: {
           [name: string]: unknown;
         };
@@ -1131,7 +1142,7 @@ export interface operations {
           'application/json': components['schemas']['RecoveryCodes'];
         };
       };
-      /** @description Missing or invalid currentPassword */
+      /** @description Missing or invalid currentPassword or totpCode */
       400: {
         headers: {
           [name: string]: unknown;
