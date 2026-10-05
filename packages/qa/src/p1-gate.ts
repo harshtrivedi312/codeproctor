@@ -128,17 +128,20 @@ for (const r of reports) {
   results.push(...load(r));
 }
 
-const state = new Map<string, { passed: number; failed: number; known: number }>();
+const state = new Map<string, { passed: number; failed: number; known: number; fixed: number }>();
 for (const res of results) {
   const find = (t: string): string[] => t.match(/(?<![A-Za-z0-9])TC-\d{3}(?!\d)/g) ?? [];
   const leaf = find(res.title);
   for (const id of new Set(leaf.length > 0 ? leaf : find(res.full ?? ''))) {
-    const s = state.get(id) ?? { passed: 0, failed: 0, known: 0 };
+    const s = state.get(id) ?? { passed: 0, failed: 0, known: 0, fixed: 0 };
     // Tests written with it.fails carry KNOWN DEFECT in the title and pass while the defect exists.
     // If such a test fails, the defect was fixed or the test broke: either way it is a failure.
     if (/KNOWN DEFECT/.test(res.full ?? res.title)) {
       if (res.passed) s.known++;
-      else s.failed++;
+      else {
+        s.failed++;
+        s.fixed++;
+      }
     } else if (res.passed) s.passed++;
     else s.failed++;
     state.set(id, s);
@@ -162,9 +165,11 @@ for (const [id, p] of [...prio].sort()) {
     }
   } else if (s.failed > 0) {
     line = `FAILED (${s.failed} failing, ${s.passed} passing)`;
+    if (s.fixed > 0)
+      line += `; ${s.fixed} KNOWN DEFECT test(s) no longer fail as expected: the defect is fixed (or decided by design) or the test broke; make it a plain test, drop the KNOWN DEFECT marker, update the matrix`;
     failures++;
   } else if (s.known > 0) {
-    line = `KNOWN DEFECT open (${s.known} expected-fail test(s), ${s.passed} passing); not verified`;
+    line = `KNOWN DEFECT open (${s.known} expected-fail test(s), ${s.passed} passing); not verified; matrix says: ${(status.get(id) ?? '').slice(0, 70)}`;
   } else {
     const st = status.get(id) ?? '';
     line = /^Verified/i.test(st)
