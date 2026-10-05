@@ -216,3 +216,13 @@ Nits
 - The `/dev/proctor` chunk still compiles into production bundles (the route 404s at runtime). Consider a prebuild guard that fails the build if `public/dev-proctor-models` exists, and excluding the route from production builds.
 - Root `eslint.config.mjs` `globalIgnores` for `apps/web/public/dev-proctor-models/**` (hub-owned; see above).
 - `api/media/put/[...key]/route.ts`: use a stricter full-key regex (stream, segment and seq shape) instead of matching only the session prefix.
+
+## /dev/proctor mocks aligned with ADR 0013 (Proposed, PR #39), provisional
+The mock handlers and the demo's injected adapters (`packages/proctor-sdk/src/demo/mount.ts`) follow the wire tables of ADR 0013 sections 2 to 5. SDK core is unchanged. Deferred SDK changes, to do only after the owner accepts ADR 0013:
+- `POST /candidate/session/proctor-key` flow: per-epoch key, non-extractable `CryptoKey` in IndexedDB, re-sign the outbox on a new epoch or `KEY_EPOCH_STALE`, counters seeded from the response. The mock still uses one demo key and base64 in the bundle.
+- RFC 7807 `code` mapping in `createFetchTransport` and `createFetchMediaApi` (today they map by status only; 409 and 422 mean different things by code). The demo's media adapter reads `code` itself.
+- Heartbeat body from SDK core (recorder and queue health) plus 409 `SESSION_NOT_ACTIVE` handling. The demo wraps the transport; per-stream `segment` and `lastSeq` are not exposed by `RecorderHealth`, so the demo sends 0 for them.
+- Media presign fields: `startedAt`, `durationMs`, exact `video/webm` or `audio/webm` content type (SDK sends `video/webm;codecs=vp8`), `alreadyUploaded`, `UPLOAD_MISMATCH` and `UPLOAD_NOT_FOUND` retry, never drop a segment's first chunk. Open question for the hub: the ADR makes `seq` unique per stream (`SEQ_CONFLICT` when the same seq exists in another segment) but the SDK restarts `seq` at 0 in every segment; the demo adapter sends `segment * 100000 + seq`.
+- Evidence presign `purpose` and `evidenceKey` (relative `evidence/<ULID>.jpg`); identity re-check as frame upload plus 202; SDK core must stop emitting client FACE_MISMATCH (the demo adapter reports `matched: true` to stop the relay).
+- `runSystemCheck()` and `POST /candidate/session/system-check`; SCREEN_SHARE detector value; `models:fetch` and `models:update` with `models.lock.json`.
+- Not modelled in the mock: key epochs, SESSION_NOT_ACTIVE, rate limits other than identity (1 per 60 s), org prefixes (fixed `demo`).

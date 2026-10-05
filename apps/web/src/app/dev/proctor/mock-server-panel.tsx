@@ -41,7 +41,10 @@ export function MockServerPanel({ sessionId }: { sessionId: string }) {
   return (
     <section aria-label="Mock server received" className="rounded border p-3 text-sm">
       <div className="flex items-center justify-between">
-        <h2 className="font-medium">Mock server received (session {sessionId.slice(0, 8)})</h2>
+        <h2 className="font-medium">
+          Mock server received (session {sessionId.slice(0, 8)}) - provisional, ADR 0013 (Proposed,
+          PR #39)
+        </h2>
         <button type="button" className="rounded border px-2 py-1" onClick={() => void reset()}>
           Reset server state
         </button>
@@ -53,11 +56,12 @@ export function MockServerPanel({ sessionId }: { sessionId: string }) {
       )}
       {s && (
         <dl className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1">
-          <dt>Heartbeats</dt>
+          <dt>Heartbeats (with recorder/queue health)</dt>
           <dd>
-            {s.heartbeats.count} (last {s.heartbeats.lastAt?.slice(11, 19) ?? '-'})
+            {s.heartbeats.count} ({s.heartbeats.withHealth}), last{' '}
+            {s.heartbeats.lastAt?.slice(11, 19) ?? '-'}
           </dd>
-          <dt>Event batches accepted / duplicate / conflict / rejected</dt>
+          <dt>Event batches accepted / duplicate / SEQ_CONFLICT / rejected</dt>
           <dd>
             {s.batches.accepted} / {s.batches.duplicate} / {s.batches.conflict} /{' '}
             {s.batches.rejected} ({s.batches.events} events)
@@ -77,9 +81,19 @@ export function MockServerPanel({ sessionId }: { sessionId: string }) {
               .map(([k, v]) => `${k} ${v}`)
               .join(', ') || '-'}
           </dd>
-          <dt>Evidence presigned / uploaded, identity checks</dt>
+          <dt>Evidence presigned / uploaded / unissued names dropped</dt>
           <dd>
-            {s.evidence.presigned} / {s.evidence.uploaded}, {s.identity.checks}
+            {s.evidence.presigned} / {s.evidence.uploaded} / {s.evidence.namesDropped}
+          </dd>
+          <dt>Identity re-checks accepted (202) / server-written FACE_MISMATCH</dt>
+          <dd>
+            {s.identity.accepted} / {s.identity.serverFaceMismatch}
+          </dd>
+          <dt>Error codes returned</dt>
+          <dd>
+            {Object.entries(s.errors)
+              .map(([k, v]) => `${k} ${v}`)
+              .join(', ') || '-'}
           </dd>
           <dt>Events by type</dt>
           <dd>
@@ -93,7 +107,7 @@ export function MockServerPanel({ sessionId }: { sessionId: string }) {
         <ol className="mt-2 text-xs">
           {s.recent.map((b, i) => (
             <li key={`${b.at}-${i}`}>
-              {b.at.slice(11, 23)} seq {b.seq ?? '?'} {b.status} ({b.events} events)
+              {b.at.slice(11, 23)} {b.route} seq {b.seq ?? '?'} {b.status} ({b.events} events)
             </li>
           ))}
         </ol>

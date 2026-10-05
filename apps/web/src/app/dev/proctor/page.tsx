@@ -11,8 +11,8 @@ export default function DevProctorPage() {
     <main id="main" className="mx-auto max-w-5xl space-y-6 p-6">
       <h1 className="text-xl font-semibold">Proctor SDK demo (dev only)</h1>
       <p className="text-sm text-muted-foreground">
-        Mock API only. Endpoints and wire formats are assumptions pending the architecture hub
-        (ARC-03). Not linked from any navigation.
+        Mock API only. Endpoints and wire formats are provisional, ADR 0013 (Proposed, PR #39), and
+        may change when the owner accepts or amends it. Not linked from any navigation.
       </p>
       <ProctorDemoClient />
     </main>

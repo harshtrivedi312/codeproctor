@@ -24,6 +24,6 @@ describe('/dev/proctor page (dev only)', () => {
     const { default: Page } = await import('./page');
     render(<Page />);
     expect(screen.getByText('demo client')).toBeInTheDocument();
-    expect(screen.getByText(/assumptions pending/i)).toBeInTheDocument();
+    expect(screen.getByText(/provisional, ADR 0013/i)).toBeInTheDocument();
   });
 });

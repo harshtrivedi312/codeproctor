@@ -1,54 +1,85 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  eventBatch,
+  MAX_CHUNKS_PER_SESSION,
+  MAX_SESSIONS,
+  batch,
   evidencePresign,
+  evidencePut,
   heartbeat,
   hmacHex,
   identityRecheck,
   mediaConfirm,
   mediaPresign,
   mediaPut,
+  chunkObjectPath,
   sessionIdFromAuth,
   sessionState,
   store,
   summarize,
+  ulid,
+  type SessionState,
 } from './api/_lib/mock-server';
 
+/**
+ * Mock handlers follow ADR 0013 (Proposed, PR #39); provisional.
+ */
+const enc = new TextEncoder();
 const ev = { type: 'TAB_SWITCH', occurredAt: '2026-01-01T00:00:00.000Z', payload: {} };
 const body = (seq: number, events: unknown[] = [ev]) => JSON.stringify({ events, seq });
-const send = (st: ReturnType<typeof sessionState>, seq: number, b = body(seq), sig = hmacHex(b)) =>
-  eventBatch(st, b, sig);
+const send = (
+  st: SessionState,
+  seq: number,
+  b = body(seq),
+  sig = hmacHex(enc.encode(b)),
+  route: 'events' | 'keystrokes' = 'events',
+  ct: string | null = 'application/json',
+) => batch(route, st, enc.encode(b), sig, ct);
+const code = (r: { body: unknown }) => (r.body as { code?: string }).code;
 
 let n = 0;
 const fresh = () => sessionState(`t-${++n}`);
-
 afterEach(() => vi.unstubAllEnvs());
 
-describe('mock event endpoint (TC-063, TC-065, FR-801)', () => {
-  it('TC-065: rejects a batch whose body was modified after signing', () => {
+describe('mock batch endpoints (TC-063, TC-065, FR-801)', () => {
+  it('TC-065: a body modified after signing is 403 SIGNATURE_INVALID', () => {
     const st = fresh();
-    const r = eventBatch(st, body(0, [{ ...ev, payload: { x: 1 } }]), hmacHex(body(0)));
-    expect(r.status).toBe(400);
-    expect(summarize(st).batches.rejected).toBe(1);
+    const r = batch(
+      'events',
+      st,
+      enc.encode(body(0, [{ ...ev, payload: { x: 1 } }])),
+      hmacHex(enc.encode(body(0))),
+      'application/json',
+    );
+    expect([r.status, code(r)]).toEqual([403, 'SIGNATURE_INVALID']);
     expect(st.accepted.size).toBe(0);
+    expect(summarize(st).batches.rejected).toBe(1);
   });
 
-  it('TC-065: same seq with a different signature is a conflict (409)', () => {
+  it('TC-065: signatures must be lowercase 64-char hex', () => {
+    const st = fresh();
+    const b = body(0);
+    expect(send(st, 0, b, hmacHex(enc.encode(b)).toUpperCase()).status).toBe(403);
+    expect(send(st, 0, b, 'abc').status).toBe(403);
+  });
+
+  it('TC-065: same seq with a different body is 409 SEQ_CONFLICT', () => {
     const st = fresh();
     send(st, 0);
     const other = body(0, [{ ...ev, occurredAt: '2026-01-01T00:00:01.000Z' }]);
-    expect(send(st, 0, other).status).toBe(409);
+    const r = send(st, 0, other);
+    expect([r.status, code(r)]).toEqual([409, 'SEQ_CONFLICT']);
     expect(summarize(st).batches.conflict).toBe(1);
   });
 
-  it('TC-063: same seq with the same signature is an idempotent duplicate (200)', () => {
+  it('TC-065: an identical replay is 200 duplicate:true and stores nothing twice', () => {
     const st = fresh();
-    send(st, 0);
-    expect(send(st, 0).body).toEqual({ ok: true, duplicate: true });
-    expect(summarize(st).batches).toMatchObject({ accepted: 1, duplicate: 1 });
+    send(st, 0, body(0, [ev, ev]));
+    const r = send(st, 0, body(0, [ev, ev]));
+    expect(r.body).toEqual({ seq: 0, duplicate: true });
+    expect(summarize(st).eventTypes).toEqual({ TAB_SWITCH: 2 });
   });
 
-  it('TC-063: shows a gap while batches are missing and none after they arrive late', () => {
+  it('TC-063: shows a gap while batches are missing and none once they arrive late', () => {
     const st = fresh();
     send(st, 0);
     send(st, 3);
@@ -59,110 +90,331 @@ describe('mock event endpoint (TC-063, TC-065, FR-801)', () => {
     expect(summarize(st).batches.accepted).toBe(4);
   });
 
-  it('FR-801: rejects server-only event types (schema from packages/shared)', () => {
+  it('FR-801: verifies the received bytes, not a canonical re-serialisation', () => {
     const st = fresh();
-    const b = body(0, [{ ...ev, type: 'PASTE_BURST', payload: {} }]);
-    expect(send(st, 0, b).status).toBe(400);
-    expect(summarize(st).batches.rejected).toBe(1);
+    const spaced = `{ "seq": 0,\n "events": [ ${JSON.stringify(ev)} ] }`;
+    expect(send(st, 0, spaced).status).toBe(200);
   });
 
-  it('FR-801: counts events by type', () => {
+  it('FR-801: server-only event types and invalid UTF-8 are 400 VALIDATION_FAILED', () => {
     const st = fresh();
-    send(st, 0, body(0, [ev, ev]));
-    expect(summarize(st).eventTypes).toEqual({ TAB_SWITCH: 2 });
+    const r = send(st, 0, body(0, [{ ...ev, type: 'PASTE_BURST', payload: {} }]));
+    expect([r.status, code(r)]).toEqual([400, 'VALIDATION_FAILED']);
+    const bad = new Uint8Array([0x7b, 0xff, 0xfe, 0x7d]);
+    expect(code(batch('events', st, bad, hmacHex(bad), 'application/json'))).toBe(
+      'VALIDATION_FAILED',
+    );
+  });
+
+  it('FR-801: 415 for a wrong content type, 413 above 256 KiB, never echoing values', () => {
+    const st = fresh();
+    expect(send(st, 0, body(0), undefined, 'events', 'text/plain').status).toBe(415);
+    const huge = body(0, [{ ...ev, payload: { pad: 'x'.repeat(300 * 1024) } }]);
+    const r = send(st, 0, huge);
+    expect([r.status, code(r)]).toEqual([413, 'PAYLOAD_TOO_LARGE']);
+    expect(JSON.stringify(r.body)).not.toContain('xxxx');
+  });
+
+  it('FR-801: errors are RFC 7807 problems with a code', () => {
+    const r = send(fresh(), 0, body(0), 'bad');
+    expect(r.headers?.['Content-Type']).toBe('application/problem+json');
+    expect(r.body).toMatchObject({ type: 'about:blank', status: 403, code: 'SIGNATURE_INVALID' });
+  });
+
+  it('FR-608/FR-801: keystroke batches use the same signing and their own schema and seq space', () => {
+    const st = fresh();
+    const ks = JSON.stringify({
+      events: [{ kind: 'RESET', language: 'python', t: 0, text: 'x = 1' }],
+      seq: 0,
+      sessionQuestionId: '8f14e45f-ceea-467a-9575-1b2a7c3d4e5f',
+      startedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const r = send(st, 0, ks, undefined, 'keystrokes');
+    expect(r.status).toBe(200);
+    expect(send(st, 0, ks, undefined, 'events').status).toBe(400); // wrong schema for events
+    expect(send(st, 0).status).toBe(200); // events seq 0 is separate from keystrokes seq 0
+  });
+
+  it('FR-801: counts evidence names that were never issued (the batch still succeeds)', () => {
+    const st = fresh();
+    const r = send(
+      st,
+      0,
+      body(0, [{ ...ev, evidenceKey: 'evidence/01ARZ3NDEKTSV4RRFFQ69G5FAV.jpg' }]),
+    );
+    expect(r.status).toBe(200);
+    expect(st.evidence.namesDropped).toBe(1);
   });
 });
 
 describe('mock media endpoints (FR-701, FR-702, TC-063)', () => {
-  const chunk = { stream: 'WEBCAM', segment: 0, seq: 4, bytes: 10, contentType: 'x' };
-  it('FR-701: presign, PUT, confirm in order marks the chunk confirmed with its bytes', () => {
+  const chunk = (o: Record<string, unknown> = {}) => ({
+    stream: 'WEBCAM',
+    segment: 0,
+    seq: 4,
+    bytes: 10,
+    contentType: 'video/webm',
+    startedAt: '2026-01-01T00:00:00.000Z',
+    durationMs: 10_000,
+    ...o,
+  });
+  const put = (
+    st: SessionState,
+    sid: string,
+    bytes: number,
+    ct = 'video/webm',
+    seg = 0,
+    seq = 4,
+    stream = 'WEBCAM',
+  ) => mediaPut(st, sid, chunkObjectPath(sid, stream, seg, seq), bytes, ct);
+  const confirm = (st: SessionState, seg = 0, seq = 4) =>
+    mediaConfirm(st, { stream: 'WEBCAM', segment: seg, seq });
+
+  it('FR-701: presign, PUT, confirm marks the chunk confirmed with its size', () => {
     const st = fresh();
-    const p = mediaPresign(st, 's', chunk);
-    expect((p.body as { url: string }).url).toContain('s/WEBCAM/0/4');
-    expect(mediaPut(st, 's/WEBCAM/0/4', 1234).status).toBe(200);
-    expect(mediaConfirm(st, 's', chunk).status).toBe(200);
+    const p = mediaPresign(st, 's1', chunk());
+    expect(p.body).toMatchObject({ method: 'PUT', headers: { 'Content-Type': 'video/webm' } });
+    expect((p.body as { url: string }).url).toContain(
+      'orgs/demo/sessions/s1/media/WEBCAM/000000/00000004.webm',
+    );
+    expect(put(st, 's1', 10).status).toBe(200);
+    expect(confirm(st).body).toEqual({ uploaded: true, sizeBytes: 10 });
+    expect(confirm(st).status).toBe(200); // idempotent
     expect(summarize(st).chunks).toMatchObject({
       presigned: 1,
       uploaded: 1,
       confirmed: 1,
-      bytes: { WEBCAM: 1234 },
+      bytes: { WEBCAM: 10 },
     });
   });
-  it('FR-702: confirm before the PUT is retryable (503), a PUT without presign is refused', () => {
+
+  it('FR-702: presign after confirm says alreadyUploaded', () => {
     const st = fresh();
-    mediaPresign(st, 's', chunk);
-    expect(mediaConfirm(st, 's', chunk).status).toBe(503);
-    expect(mediaPut(st, 's/AUDIO/0/0', 1).status).toBe(403);
+    mediaPresign(st, 's1', chunk());
+    put(st, 's1', 10);
+    confirm(st);
+    expect(mediaPresign(st, 's1', chunk()).body).toEqual({ alreadyUploaded: true });
   });
-  it('FR-702: a retry upserts the same chunk instead of counting it twice', () => {
+
+  it('FR-702: confirm before the PUT is 409 UPLOAD_NOT_FOUND; unknown chunk is 404 CHUNK_NOT_PRESIGNED', () => {
     const st = fresh();
-    mediaPresign(st, 's', chunk);
-    mediaPresign(st, 's', chunk);
+    mediaPresign(st, 's1', chunk());
+    expect(code(confirm(st))).toBe('UPLOAD_NOT_FOUND');
+    expect(code(confirm(st, 0, 99))).toBe('CHUNK_NOT_PRESIGNED');
+  });
+
+  it('FR-702: a size or type mismatch is 422 UPLOAD_MISMATCH, the object is discarded, a retry succeeds', () => {
+    const st = fresh();
+    mediaPresign(st, 's1', chunk());
+    put(st, 's1', 11);
+    expect(confirm(st).status).toBe(422);
+    expect(code(confirm(st))).toBe('UPLOAD_NOT_FOUND');
+    put(st, 's1', 10, 'video/webm;codecs=vp8');
+    expect(code(confirm(st))).toBe('UPLOAD_MISMATCH');
+    put(st, 's1', 10);
+    expect(confirm(st).status).toBe(200);
+  });
+
+  it('FR-701: a PUT that was never presigned is refused', () => {
+    expect(put(fresh(), 's1', 1).status).toBe(403);
+  });
+
+  it('FR-701: validates stream, content type (no codecs), bytes, durationMs and startedAt', () => {
+    const st = fresh();
+    const bad = [
+      chunk({ stream: 'EVIL' }),
+      chunk({ contentType: 'video/webm;codecs=vp8' }),
+      chunk({ contentType: 'image/png' }),
+      chunk({ bytes: 0 }),
+      chunk({ bytes: -1 }),
+      chunk({ durationMs: 0 }),
+      chunk({ durationMs: 60_001 }),
+      chunk({ seq: 1.5 }),
+      chunk({ segment: -1 }),
+      chunk({ startedAt: 'yesterday' }),
+      chunk({ stream: 'AUDIO', contentType: 'audio/webm', bytes: 5 * 1024 * 1024 }),
+      chunk({ bytes: 17 * 1024 * 1024 }),
+    ];
+    for (const b of bad) expect(mediaPresign(st, 's1', b).status).toBe(400);
+    expect(st.chunks.size).toBe(0);
+  });
+
+  it('FR-701: the same seq under another segment is 409 SEQ_CONFLICT (seq is unique per stream)', () => {
+    const st = fresh();
+    mediaPresign(st, 's1', chunk({ segment: 0, seq: 0 }));
+    const r = mediaPresign(st, 's1', chunk({ segment: 1, seq: 0 }));
+    expect([r.status, code(r)]).toEqual([409, 'SEQ_CONFLICT']);
+    expect(mediaPresign(st, 's1', chunk({ segment: 1, seq: 1 })).status).toBe(200);
+  });
+
+  it('FR-702: a retried presign upserts the same chunk', () => {
+    const st = fresh();
+    mediaPresign(st, 's1', chunk());
+    mediaPresign(st, 's1', chunk());
     expect(summarize(st).chunks.presigned).toBe(1);
   });
-  it('FR-701: refuses a malformed chunk description', () => {
-    expect(
-      mediaPresign(fresh(), 's', { stream: 'EVIL', segment: 0, seq: 0, bytes: 1 }).status,
-    ).toBe(400);
+
+  it('FR-702: chunks per session are capped so the mock cannot grow without bound', () => {
+    const st = fresh();
+    for (let i = 0; i < MAX_CHUNKS_PER_SESSION; i++) {
+      st.chunks.set(`WEBCAM/0/${i}`, {
+        stream: 'WEBCAM',
+        segment: 0,
+        seq: i,
+        declaredBytes: 1,
+        contentType: 'video/webm',
+        putBytes: null,
+        putType: null,
+        confirmed: false,
+      });
+    }
+    expect(code(mediaPresign(st, 's1', chunk({ seq: 99_999 })))).toBe('RATE_LIMITED');
   });
 });
 
-describe('other mock endpoints', () => {
-  it('FR-609: heartbeats are counted', () => {
+describe('mock evidence, identity and heartbeat (FR-606, FR-609, FR-801)', () => {
+  const ev1 = { purpose: 'EVENT', contentType: 'image/jpeg', bytes: 1000 };
+  const idc = { purpose: 'IDENTITY_RECHECK', contentType: 'image/jpeg', bytes: 1000 };
+
+  it('FR-801: evidence presign returns evidence/<ULID>.jpg that fits the shared key rules', () => {
     const st = fresh();
-    heartbeat(st);
-    heartbeat(st);
-    expect(summarize(st).heartbeats.count).toBe(2);
+    const r = evidencePresign(st, 's1', ev1).body as { evidenceKey: string; method: string };
+    expect(r.evidenceKey).toMatch(/^evidence\/[0-9A-HJKMNP-TV-Z]{26}\.jpg$/);
+    expect(r.evidenceKey).toMatch(/^[A-Za-z0-9][A-Za-z0-9/_.-]*$/);
+    expect(r.method).toBe('PUT');
+    expect(evidencePut(st).status).toBe(200);
+    // an issued name in an event is accepted, not counted as dropped
+    send(st, 0, body(0, [{ ...ev, evidenceKey: r.evidenceKey }]));
+    expect(st.evidence.namesDropped).toBe(0);
   });
-  it('FR-801: evidence presign returns a key that fits the shared key rules', () => {
-    const r = evidencePresign(fresh(), 'abc-123').body as { key: string };
-    expect(r.key).toMatch(/^[A-Za-z0-9][A-Za-z0-9/_.-]*$/);
-  });
-  it('FR-606: identity re-check is canned, every third check is a mismatch', () => {
+
+  it('FR-801: validates purpose, content type and size (1 byte to 1 MiB)', () => {
     const st = fresh();
-    const out = [1, 2, 3].map(() => (identityRecheck(st).body as { matched: boolean }).matched);
-    expect(out).toEqual([true, true, false]);
+    for (const b of [
+      { ...ev1, purpose: 'X' },
+      { ...ev1, contentType: 'image/png' },
+      { ...ev1, bytes: 0 },
+      { ...ev1, bytes: 1024 * 1024 + 1 },
+    ]) {
+      expect(evidencePresign(st, 's1', b).status).toBe(400);
+    }
   });
-  it('dev token: only demo tokens identify a session', () => {
+
+  it('FR-606: identity re-check is 202 with no result; wrong-purpose or unknown names are 400', () => {
+    const st = fresh();
+    const evName = (evidencePresign(st, 's1', ev1).body as { evidenceKey: string }).evidenceKey;
+    const idName = (evidencePresign(st, 's1', idc).body as { evidenceKey: string }).evidenceKey;
+    expect(identityRecheck(st, { evidenceKey: evName, capturedAt: 'x' }).status).toBe(400);
+    expect(identityRecheck(st, { evidenceKey: 'evidence/NOPE.jpg', capturedAt: 'x' }).status).toBe(
+      400,
+    );
+    const r = identityRecheck(st, { evidenceKey: idName, capturedAt: '2026-01-01T00:00:00Z' });
+    expect([r.status, r.body]).toEqual([202, { accepted: true }]);
+    expect(JSON.stringify(r.body)).not.toMatch(/match|similar|score/i);
+  });
+
+  it('FR-606: re-checks are limited to 1 per 60 s, and the server writes FACE_MISMATCH on every third', () => {
+    const st = fresh();
+    const name = () => (evidencePresign(st, 's1', idc).body as { evidenceKey: string }).evidenceKey;
+    let t = 1_000_000;
+    const check = () => identityRecheck(st, { evidenceKey: name(), capturedAt: 'x' }, t);
+    expect(check().status).toBe(202);
+    t += 30_000;
+    const limited = check();
+    expect([limited.status, code(limited), limited.headers?.['Retry-After']]).toEqual([
+      429,
+      'RATE_LIMITED',
+      '60',
+    ]);
+    for (let i = 0; i < 2; i++) {
+      t += 61_000;
+      expect(check().status).toBe(202);
+    }
+    expect(summarize(st).identity).toEqual({ accepted: 3, serverFaceMismatch: 1 });
+  });
+
+  it('FR-609: heartbeats are counted and recorder/queue health bodies are kept', () => {
+    const st = fresh();
+    expect(heartbeat(st, null).body).toMatchObject({ status: 'IN_PROGRESS', pauseReasons: [] });
+    heartbeat(st, { recorder: { streams: [] }, queue: { pendingEventBatches: 2 } });
+    const s = summarize(st).heartbeats;
+    expect([s.count, s.withHealth]).toEqual([2, 1]);
+    expect(s.lastQueue).toEqual({ pendingEventBatches: 2 });
+  });
+
+  it('ulid: 26 Crockford characters, time-ordered', () => {
+    const a = ulid(1_000_000);
+    const b = ulid(2_000_000);
+    expect(a).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+    expect(a.slice(0, 10) < b.slice(0, 10)).toBe(true);
+  });
+});
+
+describe('dev token and bounded state', () => {
+  it('only demo tokens identify a session', () => {
     expect(sessionIdFromAuth('Bearer demo-abc-123')).toBe('abc-123');
     expect(sessionIdFromAuth('Bearer eyJhbGciOi')).toBeNull();
     expect(sessionIdFromAuth(null)).toBeNull();
   });
-  it('state is per session', () => {
-    sessionState('one');
-    expect(store().has('one')).toBe(true);
-    expect(sessionState('two').heartbeats.count).toBe(0);
+  it('state is per session and the number of sessions is capped (oldest evicted)', () => {
+    store().clear();
+    for (let i = 0; i < MAX_SESSIONS + 5; i++) sessionState(`cap-${i}`);
+    expect(store().size).toBe(MAX_SESSIONS);
+    expect(store().has('cap-0')).toBe(false);
+    expect(store().has(`cap-${MAX_SESSIONS + 4}`)).toBe(true);
   });
 });
 
-describe('production lockout (dev-only routes)', () => {
+describe('production lockout and auth (dev-only routes)', () => {
+  const post = (auth = 'Bearer demo-abc') =>
+    new Request('http://x/y', {
+      method: 'POST',
+      headers: { authorization: auth, 'content-type': 'application/json' },
+      body: '{}',
+    });
+
   it('returns 404 from every handler in production', async () => {
     vi.stubEnv('NODE_ENV', 'production');
     const routes = await Promise.all([
       import('./api/heartbeat/route'),
       import('./api/events/route'),
+      import('./api/keystrokes/route'),
       import('./api/media/presign/route'),
       import('./api/media/confirm/route'),
       import('./api/evidence/presign/route'),
       import('./api/identity/recheck/route'),
     ]);
-    const req = () =>
-      new Request('http://x/y', {
-        method: 'POST',
-        headers: { authorization: 'Bearer demo-abc' },
-        body: '{}',
-      });
-    for (const r of routes) expect((await r.POST(req())).status).toBe(404);
-    const put = await import('./api/media/put/[...key]/route');
-    expect(
-      (
-        await put.PUT(new Request('http://x', { method: 'PUT', body: 'x' }), {
-          params: Promise.resolve({ key: ['a', 'b'] }),
-        })
-      ).status,
-    ).toBe(404);
+    for (const r of routes) expect((await r.POST(post())).status).toBe(404);
+    const putRoute = await import('./api/media/put/[...key]/route');
+    const res = await putRoute.PUT(new Request('http://x', { method: 'PUT', body: 'x' }), {
+      params: Promise.resolve({ key: ['a', 'b'] }),
+    });
+    expect(res.status).toBe(404);
     const state = await import('./api/state/route');
     expect(state.GET(new Request('http://x/s?session=abc')).status).toBe(404);
     expect(state.DELETE(new Request('http://x/s?session=abc')).status).toBe(404);
+  });
+
+  it('outside production a missing dev token is 401 problem+json', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    const { POST } = await import('./api/heartbeat/route');
+    const res = await POST(new Request('http://x/y', { method: 'POST', body: '{}' }));
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { code: string }).code).toBe('UNAUTHENTICATED');
+  });
+
+  it('the PUT target refuses a path that no presign issued', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    const { PUT } = await import('./api/media/put/[...key]/route');
+    const bad = await PUT(new Request('http://x', { method: 'PUT', body: 'x' }), {
+      params: Promise.resolve({
+        key: ['orgs', 'demo', 'sessions', 'zz', 'media', 'WEBCAM', '000000', '00000001.webm'],
+      }),
+    });
+    expect(bad.status).toBe(403);
+    const junk = await PUT(new Request('http://x', { method: 'PUT', body: 'x' }), {
+      params: Promise.resolve({ key: ['../etc/passwd'] }),
+    });
+    expect(junk.status).toBe(400);
   });
 });
