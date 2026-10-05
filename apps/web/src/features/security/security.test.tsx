@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { axe } from 'vitest-axe';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AuthProvider } from '@/features/auth/auth-provider';
+import { AuthProvider, useAuth } from '@/features/auth/auth-provider';
 import { LoginForm } from '@/features/auth/login-form';
 import { TwoFactorEnroll } from '@/features/auth/two-factor-enroll';
 import { UserMenu } from '@/features/staff/user-menu';
@@ -627,7 +627,8 @@ describe('Disable sign-out is airtight (FR-102, FR-103, TC-005)', () => {
     expect(tokens.every((t) => t === null)).toBe(true);
     expect(calls.refresh).toBe(refreshBefore);
     expect(calls.logout).toBe(0);
-    expect(usersCalls).toBeGreaterThanOrEqual(0);
+    // One staff call per cancelQueries call, each sent without a token.
+    expect(usersCalls).toBe(tokens.length);
   });
 
   it('FR-102: the query cache is emptied and other tabs are told (marker 1 then cleared)', async () => {
@@ -679,6 +680,26 @@ describe('Disable sign-out is airtight (FR-102, FR-103, TC-005)', () => {
     setItem.mockRestore();
   });
 
+  it('FR-103 TC-005: if another tab signed in and this tab was signed out while the 204 was in flight, the dialog closes with no marker and no redirect', async () => {
+    server.use(
+      http.post(`${base}/2fa/disable`, () => {
+        handleSignInElsewhere('nonce|user-author');
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    seedMockTwoFactor(MOCK_USERS.recruiter.email);
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    const client = renderOwnClient(MOCK_USERS.recruiter);
+    const u = await open(client);
+    setItem.mockClear();
+    await openAndSubmit(u, 'Disable 2FA', MOCK_USERS.recruiter.password);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(getSessionUserId()).toBeNull();
+    expect(setItem).not.toHaveBeenCalledWith('cp.signOutPending', '1');
+    expect(router.replace).not.toHaveBeenCalledWith(DISABLED_LOGIN);
+    setItem.mockRestore();
+  });
+
   it('FR-103 TC-005: a staff request still waiting when the 204 arrives is not replayed after its 401', async () => {
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => (release = resolve));
@@ -719,6 +740,77 @@ describe('Disable sign-out is airtight (FR-102, FR-103, TC-005)', () => {
     await openAndSubmit(u, 'Disable 2FA', MOCK_USERS.recruiter.password, ' 123456 ');
     await waitFor(() => expect(bodies).toHaveLength(1));
     expect(JSON.parse(bodies[0]!)).toMatchObject({ totpCode: '123456' });
+  });
+});
+
+describe('Normal sign-out forgets the session before the logout call (FR-104, TC-005)', () => {
+  function Capture({ out }: { out: { signOut?: () => Promise<void> } }) {
+    out.signOut = useAuth().signOut;
+    return <SecurityPage />;
+  }
+  function setup(user: { email: string }) {
+    seedMockRefresh(user.email);
+    const out: { signOut?: () => Promise<void> } = {};
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <AuthProvider>
+          <main>
+            <Capture out={out} />
+          </main>
+        </AuthProvider>
+      </QueryClientProvider>,
+    );
+    return out;
+  }
+
+  it('FR-104 TC-005: during a slow logout no staff request is sent with the old token', async () => {
+    let releaseLogout: () => void = () => undefined;
+    const logoutGate = new Promise<void>((resolve) => (releaseLogout = resolve));
+    const auths: (string | null)[] = [];
+    server.use(
+      http.post(`${base}/logout`, async () => {
+        await logoutGate;
+        return new HttpResponse(null, { status: 204 });
+      }),
+      http.get('*/v1/admin/users', ({ request }) => {
+        auths.push(request.headers.get('authorization'));
+        return HttpResponse.json({ items: [], nextCursor: null });
+      }),
+    );
+    const out = setup(MOCK_USERS.recruiter);
+    await screen.findByTestId('two-factor-status');
+    const signingOut = out.signOut!();
+    await waitFor(() => expect(getAccessToken()).toBeNull());
+    await api.GET('/v1/admin/users');
+    expect(auths).toEqual([null]);
+    releaseLogout();
+    await signingOut;
+    expect(isSignOutPending()).toBe(false);
+  });
+
+  it('FR-104 TC-005: after logout succeeded, a late 401 on a staff request is not replayed and starts no refresh', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let usersCalls = 0;
+    server.use(
+      http.get('*/v1/admin/users', async () => {
+        usersCalls += 1;
+        await gate;
+        return HttpResponse.json({ status: 401 }, { status: 401 });
+      }),
+    );
+    const calls = watchSessionCalls();
+    const out = setup(MOCK_USERS.recruiter);
+    await screen.findByTestId('two-factor-status');
+    const refreshBefore = calls.refresh;
+    const pending = api.GET('/v1/admin/users');
+    await out.signOut!();
+    expect(calls.logout).toBe(1);
+    release();
+    expect((await pending).response.status).toBe(401);
+    expect(usersCalls).toBe(1);
+    expect(calls.refresh).toBe(refreshBefore);
   });
 });
 
