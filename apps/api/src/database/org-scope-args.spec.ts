@@ -4,6 +4,7 @@ import { applyOrgScope, assertSystemScopeWrite, SCOPED_OPERATIONS } from './org-
 import type { ScopedOperation } from './org-scope-args';
 import { ORG_SCOPE, orgFilter } from './org-scope-map';
 import type { ModelName } from './org-scope-map';
+import { scopeHopColumn } from './org-scope-relations';
 
 const ORG_A = '11111111-1111-4111-8111-111111111111';
 const ORG_B = '22222222-2222-4222-8222-222222222222';
@@ -62,8 +63,11 @@ describe('org scope arguments (NFR-04, FR-103)', () => {
     it.each(Object.keys(ORG_SCOPE) as ModelName[])(
       'TC-008 adds the org filter to the where of %s',
       (model) => {
-        if (operation === 'upsert' && ORG_SCOPE[model].kind === 'self') {
-          // Replacing an organization is not possible inside an org scope.
+        if (
+          ['upsert', 'delete', 'deleteMany'].includes(operation) &&
+          ORG_SCOPE[model].kind === 'self'
+        ) {
+          // Replacing or deleting an organization is not possible inside an org scope.
           expect(() => scope(model, operation, { where: { id: 'x' }, ...data })).toThrow(
             OrgScopeViolationError,
           );
@@ -238,7 +242,7 @@ describe('org scope arguments (NFR-04, FR-103)', () => {
         name: 'T',
         orgId: ORG_A,
       });
-      // Even naming the caller's own org: services set orgId, or let the scope stamp it.
+      // Even naming the caller's own org: services set the scalar orgId.
       expect(() =>
         scope('Test', 'create', { data: { name: 'T', org: { connect: { id: ORG_A } } } }),
       ).toThrow(/nested relation write refused \(Test\.org\.connect\)/);
@@ -331,6 +335,24 @@ describe('org scope arguments (NFR-04, FR-103)', () => {
   });
 
   describe('models scoped through a parent path', () => {
+    it.each(['update', 'updateMany', 'updateManyAndReturn'])(
+      'TC-008 %s in an org scope does not refuse a first-hop key: re-parenting there is rule (i), the limit README (b) documents (FU-DB-107)',
+      (operation) => {
+        const result = scope('TestSection', operation, { where: {}, data: { testId: 'parent-1' } });
+        expect(result.data).toEqual({ testId: 'parent-1' });
+        expect(result.where).toEqual({ AND: [{ test: { orgId: ORG_A } }] });
+      },
+    );
+
+    it('TC-008 an upsert update branch in an org scope does not refuse a first-hop key either', () => {
+      const result = scope('ProctorEvent', 'upsert', {
+        where: { id: 1n },
+        create: { sessionId: 's1' },
+        update: { sessionId: 's2' },
+      });
+      expect(result.update).toEqual({ sessionId: 's2' });
+    });
+
     it.each(['create', 'createMany', 'createManyAndReturn'])(
       'TC-008 %s passes the data through: the parent id must have been loaded through the scoped client',
       (operation) => {
@@ -356,6 +378,22 @@ describe('org scope arguments (NFR-04, FR-103)', () => {
             where: { id: ORG_B },
           }),
         ).toThrow(OrgScopeViolationError);
+      },
+    );
+
+    it.each(['delete', 'deleteMany'])(
+      'TC-008 %s is refused inside an org scope: deleting a tenant is a system operation (FU-DB-68)',
+      (operation) => {
+        for (const args of [{ where: { id: ORG_A } }, { where: { id: ORG_B } }, {}, undefined]) {
+          expect(() => scope('Organization', operation, args)).toThrow(
+            /organizations are deleted only in system scope/,
+          );
+        }
+        // Other models are still deletable by their own org.
+        expect(scope('Test', operation, { where: { id: 'x' } }).where).toEqual({
+          id: 'x',
+          AND: [{ orgId: ORG_A }],
+        });
       },
     );
 
@@ -416,6 +454,10 @@ describe('system scope: a scalar orgId cannot move a row (ADR 0006 section 8; NF
     'WebhookEndpoint',
   ] as const;
 
+  const PATH = (Object.keys(ORG_SCOPE) as ModelName[]).filter(
+    (model) => ORG_SCOPE[model].kind === 'path',
+  );
+
   describe.each(UPDATES)('%s', (name, build) => {
     const operation = name.split(' ')[0] as string;
 
@@ -435,7 +477,9 @@ describe('system scope: a scalar orgId cannot move a row (ADR 0006 section 8; NF
         message = (error as Error).message;
       }
       expect(message).toContain(`User.${operation}`);
-      expect(message).toContain('orgId cannot be written by an update');
+      expect(message).toContain('orgId cannot be written by an update in system scope');
+      // Org scope does not refuse the key: an update may name the caller's own orgId there.
+      expect(message).not.toContain('or any other');
       expect(message).not.toContain(ORG_X);
     });
 
@@ -444,6 +488,60 @@ describe('system scope: a scalar orgId cannot move a row (ADR 0006 section 8; NF
         system(model, operation, build({ fullName: 'x', orgId: undefined })),
       ).not.toThrow();
       expect(() => system(model, operation, build({ name: 'x' }))).not.toThrow();
+    });
+
+    it.each(PATH)(
+      'TC-008 %s: its first-hop scope key is refused, whatever its value (FU-DB-107)',
+      (model) => {
+        const column = scopeHopColumn(model) as string;
+        for (const value of ['parent-1', null, '', 7n, { set: 'parent-1' }, { set: null }]) {
+          expect(() => system(model, operation, build({ [column]: value }))).toThrow(
+            OrgScopeViolationError,
+          );
+        }
+      },
+    );
+
+    it('TC-008 the first-hop message names the model, the operation and the column, and carries no value', () => {
+      let message = '';
+      try {
+        system('TestSection', operation, build({ testId: 'SECRET-PARENT-ID' }));
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toContain(`TestSection.${operation}`);
+      expect(message).toContain('testId cannot be written by an update in system scope');
+      expect(message).not.toContain('SECRET-PARENT-ID');
+    });
+
+    it.each(PATH)(
+      'TC-008 %s: an update without its first-hop key is allowed in system scope',
+      (model) => {
+        expect(() => system(model, operation, build({ note: 'x' }))).not.toThrow();
+        expect(() =>
+          system(model, operation, build({ [scopeHopColumn(model) as string]: undefined })),
+        ).not.toThrow();
+      },
+    );
+
+    it('TC-008 only the first hop is refused: the other foreign keys of a path model are rule (i), and allowed', () => {
+      const others: Array<[ModelName, string]> = [
+        ['SessionQuestion', 'testQuestionId'],
+        ['SessionQuestion', 'questionVersionId'],
+        ['SessionQuestion', 'variantId'],
+        ['SessionQuestion', 'scoredById'],
+        ['SessionSection', 'sectionId'],
+        ['TestQuestion', 'questionVersionId'],
+        ['Consent', 'consentTextId'],
+        ['KeystrokeBatch', 'sessionQuestionId'],
+        ['WebhookDelivery', 'sessionId'],
+        ['RefreshToken', 'replacedById'],
+        ['VariantTestCase', 'testCaseId'],
+        ['IdentityCheck', 'reviewedById'],
+      ];
+      for (const [model, column] of others) {
+        expect(() => system(model, operation, build({ [column]: 'x' }))).not.toThrow();
+      }
     });
 
     it('TC-008 a model without its own org_id has no orgId to refuse, and Organization keeps its id', () => {
@@ -472,6 +570,27 @@ describe('system scope: a scalar orgId cannot move a row (ADR 0006 section 8; NF
         update: { orgId: ORG_X },
       }),
     ).toThrow(OrgScopeViolationError);
+  });
+
+  it('TC-008 a system-scope create may name any parent (creates in system scope are review-only), and only the update branch of an upsert is refused', () => {
+    for (const model of PATH) {
+      const column = scopeHopColumn(model) as string;
+      system(model, 'create', { data: { [column]: 'parent-1' } });
+      system(model, 'createMany', { data: [{ [column]: 'parent-1' }] });
+      system(model, 'createManyAndReturn', { data: [{ [column]: 'parent-1' }] });
+      system(model, 'upsert', {
+        where: { id: 'x' },
+        create: { [column]: 'parent-1' },
+        update: {},
+      });
+      expect(() =>
+        system(model, 'upsert', {
+          where: { id: 'x' },
+          create: { [column]: 'parent-1' },
+          update: { [column]: 'parent-1' },
+        }),
+      ).toThrow(OrgScopeViolationError);
+    }
   });
 
   it('TC-008 reads and deletes carry no data and are untouched', () => {

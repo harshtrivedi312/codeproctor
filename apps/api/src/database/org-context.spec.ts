@@ -7,6 +7,7 @@ import {
   Get,
   INestApplication,
   Injectable,
+  Logger,
 } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
@@ -47,6 +48,65 @@ describe('OrgContextService (NFR-04, FR-103)', () => {
     expect(svc.current()).toBeUndefined();
     expect(() => svc.requireOrgId()).toThrow(OrgContextMissingError);
     expect(() => svc.requireUser()).toThrow(OrgContextMissingError);
+  });
+
+  it('TC-008 a service provided twice shares one context (the storage is module-level, FU-DB-83)', () => {
+    const other = new OrgContextService();
+    svc.runAsUser(USER_A, () => {
+      expect(other.current()?.scope).toEqual({ kind: 'org', orgId: ORG_A, user: USER_A });
+      expect(other.requireOrgId()).toBe(ORG_A);
+      // A scope entered through the other instance is seen by this one, and the nesting rules hold
+      // across instances: another org's scope cannot be entered from inside this one.
+      expect(() => other.runInOrg(ORG_B, () => undefined)).toThrow(OrgScopeViolationError);
+      other.runRawSql('a raw statement entered through the other instance', () => {
+        expect(svc.current()?.rawSqlReason).toBe(
+          'a raw statement entered through the other instance',
+        );
+      });
+    });
+    expect(other.current()).toBeUndefined();
+    expect(svc.current()).toBeUndefined();
+  });
+
+  it('TC-008 current() returns frozen objects: the store, the scope and the user cannot be mutated', () => {
+    svc.runAsUser(USER_A, () => {
+      const store = svc.current() as unknown as Record<string, unknown>;
+      expect(Object.isFrozen(store)).toBe(true);
+      const scope = store.scope as Record<string, unknown>;
+      expect(Object.isFrozen(scope)).toBe(true);
+      expect(Object.isFrozen(scope.user)).toBe(true);
+      // Strict mode (every TypeScript module): writing to a frozen object throws.
+      expect(() => {
+        scope.orgId = ORG_B;
+      }).toThrow(TypeError);
+      expect(() => {
+        (scope.user as Record<string, unknown>).role = 'SUPER_ADMIN';
+      }).toThrow(TypeError);
+      expect(() => {
+        store.rawSqlReason = 'a reason someone wrote in';
+      }).toThrow(TypeError);
+      expect(() => {
+        store.scope = { kind: 'system', reason: 'BACKGROUND_JOB' };
+      }).toThrow(TypeError);
+      expect(svc.requireOrgId()).toBe(ORG_A);
+      expect(svc.requireUser()).toEqual(USER_A);
+    });
+    svc.runSystem('BACKGROUND_JOB', () => {
+      svc.runRawSql('a reviewed raw statement, frozen too', () => {
+        expect(Object.isFrozen(svc.current())).toBe(true);
+        expect(Object.isFrozen(svc.current()?.scope)).toBe(true);
+      });
+    });
+  });
+
+  it('TC-008 changing the object passed to runAsUser afterwards does not change the context', () => {
+    const user = { ...USER_A };
+    svc.runAsUser(user, () => {
+      (user as { orgId: string }).orgId = ORG_B;
+      (user as { role: string }).role = 'SUPER_ADMIN';
+      expect(svc.requireOrgId()).toBe(ORG_A);
+      expect(svc.requireUser()).toEqual(USER_A);
+    });
   });
 
   it('TC-008 runAsUser sets the org and the user', () => {
@@ -161,6 +221,15 @@ describe('OrgContextService (NFR-04, FR-103)', () => {
         OrgScopeViolationError,
       );
     });
+  });
+
+  it('TC-008 BACKGROUND_JOB is described as scheduled discovery, not job processing (FU-DB-72)', () => {
+    const text = SYSTEM_SCOPE_REASONS.BACKGROUND_JOB;
+    expect(text).toContain('Scheduled cross-org discovery only');
+    expect(text).toContain('not for processing a job');
+    expect(text).toContain('orgId and sessionId');
+    expect(text).toContain('runInOrg(payload.orgId');
+    expect(text).toContain('poison job');
   });
 
   it('TC-008 runSystem accepts only the named reasons', () => {
@@ -454,9 +523,27 @@ describe('OrgContextInterceptor checks request.user itself (NFR-04, FR-103)', ()
     ['the context shape (userId, no id or kind)', { ...USER_A }],
     ['a string instead of an object', 'admin'],
   ])(
-    'TC-008 a request.user with %s is answered 401 and never reaches the handler',
+    'TC-008 a request.user with %s is answered 500 (a bug in the auth layer, FU-DB-65) and never reaches the handler',
     async (_name, user) => {
-      await send(user).expect(401);
+      const res = await send(user).expect(500);
+      // The generic server error only: nothing about the user or why it failed.
+      expect(res.body).toEqual({ statusCode: 500, message: 'Internal Server Error' });
     },
   );
+
+  it('TC-008 the error is logged without any value from request.user', async () => {
+    const logged: unknown[] = [];
+    const spy = jest.spyOn(Logger.prototype, 'error').mockImplementation((message: unknown) => {
+      logged.push(message);
+    });
+    try {
+      await send({ ...authUser, orgId: 'secret-org-value', id: 'secret-user-value' }).expect(500);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(logged).toHaveLength(1);
+    expect(String(logged[0])).toContain('request.user does not match AuthUser');
+    expect(String(logged[0])).not.toContain('secret-org-value');
+    expect(String(logged[0])).not.toContain('secret-user-value');
+  });
 });
