@@ -20,7 +20,11 @@ import {
 
 export interface ProctorSessionConfig {
   sessionId: string;
-  /** Per-session HMAC key issued by the API at IN_PROGRESS, base64. Held in memory only. */
+  /**
+   * Per-session HMAC key issued by the API at IN_PROGRESS, base64. Held in memory only.
+   * TODO(ARC-03): ADR 0010 leaves open how events sent before this key exists (system-check
+   * events such as MULTI_MONITOR) are signed. Not invented here: the SDK cannot start without a key.
+   */
   hmacKeyBase64: string;
   /** Scope of clipboard, drop and context-menu blocking. */
   root: HTMLElement;
