@@ -78,20 +78,20 @@ describe('Web OpenAPI contract against the real API (FR-101, FR-102, FR-104, FR-
   it('FR-104: the login session and the refresh response carry the user fields the web reads (id, email, name, role, orgName)', async () => {
     const u = await createUser(h);
     const res = await login(h, u.email).expect(200);
-    const user = sessionUser(res.body as Body);
+    const user = sessionUser(res.body, 'nested');
     const wanted = ['id', 'email', 'name', 'role', 'orgName'];
     expect(wanted.filter((f) => typeof user[f] !== 'string')).toEqual([]);
-    const refreshed = sessionUser((await refresh(h, refreshCookie(res)).expect(200)).body as Body);
+    const refreshed = sessionUser((await refresh(h, refreshCookie(res)).expect(200)).body, 'flat');
     expect(wanted.filter((f) => typeof refreshed[f] !== 'string')).toEqual([]);
   });
 
   it('FR-102: every session user (login, refresh) carries a boolean totpEnabled: false for a user without 2FA', async () => {
     const u = await createUser(h);
     const res = await login(h, u.email).expect(200);
-    const user = sessionUser(res.body as Body);
+    const user = sessionUser(res.body, 'nested');
     expect(typeof user.totpEnabled).toBe('boolean');
     expect(user.totpEnabled).toBe(false);
-    const refreshed = sessionUser((await refresh(h, refreshCookie(res)).expect(200)).body as Body);
+    const refreshed = sessionUser((await refresh(h, refreshCookie(res)).expect(200)).body, 'flat');
     expect(typeof refreshed.totpEnabled).toBe('boolean');
     expect(refreshed.totpEnabled).toBe(false);
   });
@@ -115,10 +115,10 @@ describe('Web OpenAPI contract against the real API (FR-101, FR-102, FR-104, FR-
         code: authenticator.generate(TOTP_SECRET),
       })
       .expect(200);
-    const vUser = sessionUser(verified.body as Body);
+    const vUser = sessionUser(verified.body, 'flat');
     expect(typeof vUser.totpEnabled).toBe('boolean');
     expect(vUser.totpEnabled).toBe(true);
-    const rUser = sessionUser((await refresh(h, refreshCookie(verified)).expect(200)).body as Body);
+    const rUser = sessionUser((await refresh(h, refreshCookie(verified)).expect(200)).body, 'flat');
     expect(typeof rUser.totpEnabled).toBe('boolean');
     expect(rUser.totpEnabled).toBe(true);
 
@@ -136,7 +136,7 @@ describe('Web OpenAPI contract against the real API (FR-101, FR-102, FR-104, FR-
     const done = await post('2fa/enroll/confirm')
       .send({ challengeToken, code: authenticator.generate(start.manualKey) })
       .expect(200);
-    const eUser = sessionUser(done.body as Body);
+    const eUser = sessionUser(done.body, 'nested');
     expect(typeof eUser.totpEnabled).toBe('boolean');
     expect(eUser.totpEnabled).toBe(true);
 

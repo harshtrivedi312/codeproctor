@@ -9,6 +9,7 @@ import {
   Body,
   boot,
   createUser,
+  expectNoTotpEnabled,
   expectReauthFailed,
   Harness,
   login,
@@ -16,8 +17,8 @@ import {
   refresh,
   refreshCookie,
   sessionUser,
-  expectNoTotpEnabled,
   signIn,
+  signInKeepingCookie,
   signInWithTotp,
   stableProblem,
   TOTP_SECRET,
@@ -87,14 +88,16 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
   it('TC-003: a correct code completes enrollment: session, 10 recovery codes stored only as hashes, an audit row, and the next login asks for the code', async () => {
     const u = await createUser(h, { role: UserRole.REVIEWER });
     const { challengeToken } = (await login(h, u.email).expect(200)).body as Body;
-    const start = (await post('2fa/enroll/start').send({ challengeToken }).expect(200))
-      .body as Body;
+    const startRes = await post('2fa/enroll/start').send({ challengeToken }).expect(200);
+    expectNoTotpEnabled(startRes);
+    expect((startRes.body as Body).session).toBeUndefined();
+    const start = startRes.body as Body;
     const done = await post('2fa/enroll/confirm')
       .send({ challengeToken, code: authenticator.generate(start.manualKey) })
       .expect(200);
     const body = done.body as Body;
     expect(body.session.accessToken).toEqual(expect.any(String));
-    expect(sessionUser(body).totpEnabled).toBe(true);
+    expect(sessionUser(body, 'nested').totpEnabled).toBe(true);
     expect(refreshCookie(done)).toMatch(/^cp_refresh=/);
     expect(body.recoveryCodes).toHaveLength(10);
     expect(new Set(body.recoveryCodes).size).toBe(10);
@@ -110,7 +113,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
     expect(((await login(h, u.email).expect(200)).body as Body).status).toBe('two_factor_required');
     // The session from enrollment works with the refresh token.
     const refreshed = await refresh(h, refreshCookie(done)).expect(200);
-    expect(sessionUser(refreshed.body as Body).totpEnabled).toBe(true);
+    expect(sessionUser(refreshed.body, 'flat').totpEnabled).toBe(true);
   });
 
   it('TC-003: once enrolled, the enrollment endpoints refuse to replace the secret', async () => {
@@ -127,7 +130,10 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       data: { recoveryCodeHashes: [sha256Hex(code)] },
     });
     const first = (await login(h, u.email).expect(200)).body as Body;
-    await post('2fa/verify').send({ challengeToken: first.challengeToken, code }).expect(200);
+    const used = await post('2fa/verify')
+      .send({ challengeToken: first.challengeToken, code })
+      .expect(200);
+    expect(sessionUser(used.body, 'flat').totpEnabled).toBe(true);
     // 2FA challenges are single-use, so the second attempt needs a fresh sign-in.
     const second = (await login(h, u.email).expect(200)).body as Body;
     expectNoTotpEnabled(
@@ -181,7 +187,12 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
 
   it('FR-102: AUTHOR and RECRUITER may turn 2FA on voluntarily with their current password, and it is then enforced', async () => {
     const u = await createUser(h, { role: UserRole.AUTHOR });
-    const auth = await signIn(h, u.email);
+    const signedIn = await signInKeepingCookie(h, u.email);
+    const auth = signedIn.auth;
+    // Refresh rotates the cookie, so keep the newest one.
+    const before = await refresh(h, signedIn.cookie).expect(200);
+    expect(sessionUser(before.body, 'flat').totpEnabled).toBe(false);
+    const cookie = refreshCookie(before);
     const start = (
       await post('2fa/setup/start').set(auth).send({ currentPassword: PASSWORD }).expect(200)
     ).body as Body;
@@ -194,7 +205,12 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       .send({ currentPassword: PASSWORD, code: authenticator.generate(start.manualKey) })
       .expect(200);
     expect((ok.body as Body).recoveryCodes).toHaveLength(10);
+    expect((ok.body as Body).session).toBeUndefined();
+    expectNoTotpEnabled(ok);
     expect(ok.headers['cache-control']).toContain('no-store');
+    // The refresh cookie from before the change must report the new state, not a cached one.
+    const afterOn = await refresh(h, cookie).expect(200);
+    expect(sessionUser(afterOn.body, 'flat').totpEnabled).toBe(true);
     const next = await login(h, u.email).expect(200);
     expect((next.body as Body).status).toBe('two_factor_required');
     expectNoTotpEnabled(next);
@@ -280,7 +296,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       })
       .expect(200);
     expect(verified.headers['cache-control']).toContain('no-store');
-    expect(sessionUser(verified.body as Body).totpEnabled).toBe(true);
+    expect(sessionUser(verified.body, 'flat').totpEnabled).toBe(true);
     expectNoTotpEnabled(step);
   });
 
@@ -291,7 +307,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
         where: { id: u.id },
         data: { recoveryCodeHashes: [sha256Hex('AAAAAAAAAAAAAAAA')] },
       });
-      const auth = await signInWithTotp(h, u.email);
+      const { auth, cookie } = await signInKeepingCookie(h, u.email, TOTP_SECRET);
       await post('2fa/disable').set(auth).send({}).expect(400);
       expectReauthFailed(
         await post('2fa/disable').set(auth).send({ currentPassword: 'Nope-Nope-1' }),
@@ -307,9 +323,13 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       expect(
         await h.owner.auditLog.count({ where: { actorId: u.id, action: 'AUTH_2FA_DISABLED' } }),
       ).toBe(1);
+      // Self-service disable does not revoke refresh families (only the admin reset does), so the
+      // pre-change cookie is still valid and must now report false.
+      const afterOff = await refresh(h, cookie).expect(200);
+      expect(sessionUser(afterOff.body, 'flat').totpEnabled).toBe(false);
       const after = await login(h, u.email).expect(200);
       expect((after.body as Body).session).toBeDefined();
-      expect(sessionUser(after.body as Body).totpEnabled).toBe(false);
+      expect(sessionUser(after.body, 'nested').totpEnabled).toBe(false);
       // Already off now.
       await post('2fa/disable').set(auth).send({ currentPassword: PASSWORD }).expect(409);
     });

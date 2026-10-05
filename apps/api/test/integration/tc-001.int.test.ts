@@ -56,9 +56,9 @@ describe('TC-001 (FR-101): valid staff login', () => {
       const body = res.body as Body;
       expect(body.status).toBe('authenticated');
       expect(body.challengeToken).toBeUndefined();
-      expect(sessionUser(body).totpEnabled).toBe(false);
+      expect(sessionUser(body, 'nested').totpEnabled).toBe(false);
       const refreshed = await refresh(h, refreshCookie(res)).expect(200);
-      expect(sessionUser(refreshed.body as Body).totpEnabled).toBe(false);
+      expect(sessionUser(refreshed.body, 'flat').totpEnabled).toBe(false);
     },
   );
 
@@ -82,9 +82,9 @@ describe('TC-001 (FR-101): valid staff login', () => {
       .send({ challengeToken: body.challengeToken, code: authenticator.generate(TOTP_SECRET) })
       .expect(200);
     expect((done.body as Body).accessToken).toEqual(expect.any(String));
-    expect(sessionUser(done.body as Body).totpEnabled).toBe(true);
+    expect(sessionUser(done.body, 'flat').totpEnabled).toBe(true);
     const again = await refresh(h, refreshCookie(done)).expect(200);
-    expect(sessionUser(again.body as Body).totpEnabled).toBe(true);
+    expect(sessionUser(again.body, 'flat').totpEnabled).toBe(true);
     expect(refreshCookie(done)).toMatch(/^cp_refresh=/);
   });
 
