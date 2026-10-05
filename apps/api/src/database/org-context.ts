@@ -41,8 +41,10 @@ export const SYSTEM_SCOPE_REASONS = {
     'set-password tokens, resolving a candidate token to its session. Switch to runAsUser or ' +
     'runInOrg as soon as the org is known.',
   BACKGROUND_JOB:
-    "Queue and worker jobs that find work across orgs before narrowing to the job's own org " +
-    '(ADR 0001 C-1).',
+    'Scheduled cross-org discovery only: a scheduler that finds which orgs or sessions have work ' +
+    'due. It is not for processing a job. A job payload carries orgId and sessionId, stamped by ' +
+    'the enqueuer from its own scope; the processor runs runInOrg(payload.orgId, ...), loads the ' +
+    'session inside it, and treats a miss as a poison job (ADR 0001 C-1).',
   RETENTION_ERASURE:
     'Retention and erasure sweeps (FR-704, NFR-05): they select sessions of every org by date.',
 } as const;

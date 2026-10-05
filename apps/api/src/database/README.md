@@ -154,7 +154,9 @@ cannot be filtered by the extension, so the SQL itself must filter by `org_id`. 
 
 `runSystem(reason, fn)` runs without an org filter, only for a reason in `SYSTEM_SCOPE_REASONS`
 (`AUTH_BOOTSTRAP`, `BACKGROUND_JOB`, `RETENTION_ERASURE`). A new reason is an architect-reviewed
-change. It cannot be entered from inside an org scope (work that has an org never widens to all
+change. `BACKGROUND_JOB` is for **scheduled cross-org discovery only**: job payloads carry `orgId`
+and `sessionId` (stamped by the enqueuer from its scope), and a processor runs
+`runInOrg(payload.orgId, ...)` and loads the session inside it; a miss is a poison job. It cannot be entered from inside an org scope (work that has an org never widens to all
 orgs), but code in a system scope may narrow to one org with `runInOrg`. An org scope cannot switch
 to another org either. `runRawSql` needs an active scope: **scope first, then `runRawSql`** (inside
 `runSystem`, `runAsUser` or `runInOrg`). Called with no scope it throws, so there is no other

@@ -164,6 +164,15 @@ describe('OrgContextService (NFR-04, FR-103)', () => {
     });
   });
 
+  it('TC-008 BACKGROUND_JOB is described as scheduled discovery, not job processing (FU-DB-72)', () => {
+    const text = SYSTEM_SCOPE_REASONS.BACKGROUND_JOB;
+    expect(text).toContain('Scheduled cross-org discovery only');
+    expect(text).toContain('not for processing a job');
+    expect(text).toContain('orgId and sessionId');
+    expect(text).toContain('runInOrg(payload.orgId');
+    expect(text).toContain('poison job');
+  });
+
   it('TC-008 runSystem accepts only the named reasons', () => {
     for (const reason of Object.keys(SYSTEM_SCOPE_REASONS) as SystemScopeReason[]) {
       expect(() => svc.runSystem(reason, () => undefined)).not.toThrow();
