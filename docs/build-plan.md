@@ -657,4 +657,6 @@ At most 2 sessions per track; exactly 1 architecture hub and 1 Delivery Lead. Ea
 | Architecture hub (1) | `arc/` | ADRs, `docs/{fsd,brd,architecture,test-cases,api-contract}.md`, `packages/shared/**`, CI workflows, root config | 1. #39 ADR 0013 (unblocks BE-07, BE-09, BE-10, FE-09). 2. ARC-05 Judge0 host and deployment (unblocks BE-05, DEP-01). 3. ARC-04 ADR 0014 worker contract (unblocks BE-08, BE-12). Then #41, #48, #49, the FSD C-28 text, TC IDs, CI changes (openapi-drift, the TC-008 report step, the draft-PR gate) | Owner: AWS host for the Judge0 spike |
 | Delivery Lead (1) | `dl/` | `docs/status.md`, `docs/build-plan.md`, `docs/requirements-trace.md`, `docs/compliance/**`, `docs/followups/` | Coordination | — |
 
+Follow-up files: each second session keeps its own file and ID prefix: docs/followups/backend-cand.md (FU-BEB), frontend-cand.md (FU-FEB), integrity-id.md (FU-INB), qa-ops.md (FU-QAB), db-ops.md (FU-DBB). The first sessions keep their existing files and prefixes.
+
 Shared-file rule: `apps/api/src/app.module.ts`, `apps/worker/src/worker/app.py` and `apps/web/src/lib/**` have one owner (Backend A, Integrity A, Frontend A). The second session adds only its own module registration line or router include, in a small commit announced to the owner, and resolves conflicts by keeping both sides.
