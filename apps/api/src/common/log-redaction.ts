@@ -1,4 +1,9 @@
-/** Field names that must never reach a log line, at any depth (FR-101, FR-102, NFR-04). */
+/**
+ * Field names that must never reach a log line (FR-101, FR-102, NFR-04). Redaction is bounded:
+ * each name is redacted at the top level and under up to three levels of containers (`*.`,
+ * `*.*.`, `*.*.*.`), which covers `req.body.x`, `req.body.nested.x` and `res.body.nested.x`.
+ * Deeper nesting is not covered; do not log request bodies.
+ */
 export const SECRET_FIELDS = [
   'currentPassword',
   'password',
@@ -13,6 +18,20 @@ export const SECRET_FIELDS = [
   'secret',
   'manualKey',
   'qrDataUrl',
+  'otpauthUri',
+  'otp',
+  'otpCode',
+  'candidateToken',
+  'invitationToken',
+  'inviteToken',
+  'accessCode',
+  'hmacKey',
+  // Media and object-store references and signed URLs (candidate media keys are never logged).
+  'mediaKey',
+  'objectKey',
+  's3Key',
+  'presignedUrl',
+  'signedUrl',
   // Sensitive column names, in case a row is ever logged.
   'passwordHash',
   'totpSecretEnc',
@@ -27,21 +46,7 @@ export const SECRET_FIELDS = [
  */
 const BODY_ONLY_FIELDS = ['code'] as const;
 
-const PREFIXES = [
-  '',
-  '*.',
-  '*.*.',
-  '*.*.*.',
-  '*.*.*.*.',
-  '*.*.*.*.*.',
-  'req.body.',
-  'req.body.*.',
-  'req.body.*.*.',
-  'body.',
-  'body.*.',
-  'res.body.',
-  'res.body.*.',
-];
+const PREFIXES = ['', '*.', '*.*.', '*.*.*.'];
 
 const BODY_PREFIXES = [
   'req.body.',

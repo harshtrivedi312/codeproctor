@@ -8,6 +8,22 @@ function capture(obj: object): string {
   return lines.join('');
 }
 
+const CRITICAL = [
+  'currentPassword',
+  'password',
+  'newPassword',
+  'totpCode',
+  'challengeToken',
+  'refreshToken',
+  'accessToken',
+  'manualKey',
+  'otpauthUri',
+  'qrDataUrl',
+  'recoveryCodes',
+  'candidateToken',
+  'objectKey',
+];
+
 describe('log redaction (FR-101, FR-102, NFR-04)', () => {
   it('FR-102: every secret field is redacted at top level, under req.body, and nested', () => {
     const secrets: Record<string, string> = {};
@@ -22,7 +38,7 @@ describe('log redaction (FR-101, FR-102, NFR-04)', () => {
       },
       body: { ...bodySecrets },
       a: { b: { ...secrets } },
-      d1: { d2: { d3: { d4: { ...secrets } } } },
+      d1: { d2: { d3: { ...secrets } } },
       res: {
         headers: { 'set-cookie': ['cp_refresh=SECRET-SETCOOKIE'] },
         body: { ...bodySecrets, nested: { ...bodySecrets } },
@@ -48,5 +64,14 @@ describe('log redaction (FR-101, FR-102, NFR-04)', () => {
     expect(out).not.toContain('SECRET-TOTP');
     expect(out).toContain('req-1234');
     expect(out).toContain('trace-1234');
+  });
+
+  it('FR-102: the critical secret names are all listed (catches a misspelled entry)', () => {
+    for (const name of CRITICAL) expect(SECRET_FIELDS).toContain(name);
+  });
+
+  it('FR-101: otpauthUri carries the TOTP secret and is redacted', () => {
+    const out = capture({ otpauthUri: 'otpauth://totp/x?secret=SECRET-B32' });
+    expect(out).not.toContain('SECRET-B32');
   });
 });
