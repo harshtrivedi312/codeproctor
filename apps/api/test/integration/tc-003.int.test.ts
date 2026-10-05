@@ -9,13 +9,16 @@ import {
   Body,
   boot,
   createUser,
+  expectNoTotpEnabled,
   expectReauthFailed,
   Harness,
   login,
   PASSWORD,
   refresh,
   refreshCookie,
+  sessionUser,
   signIn,
+  signInKeepingCookie,
   signInWithTotp,
   stableProblem,
   TOTP_SECRET,
@@ -43,6 +46,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       expect(body.session).toBeUndefined();
       expect(body.accessToken).toBeUndefined();
       expect(res.headers['set-cookie']).toBeUndefined();
+      expectNoTotpEnabled(res);
       expect(await h.owner.refreshToken.count({ where: { userId: u.id } })).toBe(0);
     },
   );
@@ -54,9 +58,10 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       .set('Authorization', `Bearer ${challengeToken}`)
       .send({ currentPassword: PASSWORD })
       .expect(401);
-    await post('refresh').expect(401);
+    expectNoTotpEnabled(await post('refresh').expect(401));
     const verify = await post('2fa/verify').send({ challengeToken, code: '123456' });
     expect([400, 401]).toContain(verify.status);
+    expectNoTotpEnabled(verify);
   });
 
   it('TC-003: enrollment shows a QR code and manual key, keeps the secret encrypted, and stays off until a valid code is confirmed', async () => {
@@ -83,14 +88,16 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
   it('TC-003: a correct code completes enrollment: session, 10 recovery codes stored only as hashes, an audit row, and the next login asks for the code', async () => {
     const u = await createUser(h, { role: UserRole.REVIEWER });
     const { challengeToken } = (await login(h, u.email).expect(200)).body as Body;
-    const start = (await post('2fa/enroll/start').send({ challengeToken }).expect(200))
-      .body as Body;
+    const startRes = await post('2fa/enroll/start').send({ challengeToken }).expect(200);
+    expectNoTotpEnabled(startRes);
+    expect((startRes.body as Body).session).toBeUndefined();
+    const start = startRes.body as Body;
     const done = await post('2fa/enroll/confirm')
       .send({ challengeToken, code: authenticator.generate(start.manualKey) })
       .expect(200);
     const body = done.body as Body;
     expect(body.session.accessToken).toEqual(expect.any(String));
-    expect(refreshCookie(done)).toMatch(/^cp_refresh=/);
+    expect(sessionUser(body, 'nested').totpEnabled).toBe(true);
     expect(body.recoveryCodes).toHaveLength(10);
     expect(new Set(body.recoveryCodes).size).toBe(10);
 
@@ -104,7 +111,8 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
 
     expect(((await login(h, u.email).expect(200)).body as Body).status).toBe('two_factor_required');
     // The session from enrollment works with the refresh token.
-    await refresh(h, refreshCookie(done)).expect(200);
+    const refreshed = await refresh(h, refreshCookie(done)).expect(200);
+    expect(sessionUser(refreshed.body, 'flat').totpEnabled).toBe(true);
   });
 
   it('TC-003: once enrolled, the enrollment endpoints refuse to replace the secret', async () => {
@@ -121,10 +129,15 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       data: { recoveryCodeHashes: [sha256Hex(code)] },
     });
     const first = (await login(h, u.email).expect(200)).body as Body;
-    await post('2fa/verify').send({ challengeToken: first.challengeToken, code }).expect(200);
+    const used = await post('2fa/verify')
+      .send({ challengeToken: first.challengeToken, code })
+      .expect(200);
+    expect(sessionUser(used.body, 'flat').totpEnabled).toBe(true);
     // 2FA challenges are single-use, so the second attempt needs a fresh sign-in.
     const second = (await login(h, u.email).expect(200)).body as Body;
-    await post('2fa/verify').send({ challengeToken: second.challengeToken, code }).expect(400);
+    expectNoTotpEnabled(
+      await post('2fa/verify').send({ challengeToken: second.challengeToken, code }).expect(400),
+    );
   });
 
   it('TC-003: a spent 2FA challenge cannot be used again, even with a correct code (single-use jti)', async () => {
@@ -173,7 +186,12 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
 
   it('FR-102: AUTHOR and RECRUITER may turn 2FA on voluntarily with their current password, and it is then enforced', async () => {
     const u = await createUser(h, { role: UserRole.AUTHOR });
-    const auth = await signIn(h, u.email);
+    const signedIn = await signInKeepingCookie(h, u.email);
+    const auth = signedIn.auth;
+    // Refresh rotates the cookie, so keep the newest one.
+    const before = await refresh(h, signedIn.cookie).expect(200);
+    expect(sessionUser(before.body, 'flat').totpEnabled).toBe(false);
+    const cookie = refreshCookie(before);
     const start = (
       await post('2fa/setup/start').set(auth).send({ currentPassword: PASSWORD }).expect(200)
     ).body as Body;
@@ -186,8 +204,15 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       .send({ currentPassword: PASSWORD, code: authenticator.generate(start.manualKey) })
       .expect(200);
     expect((ok.body as Body).recoveryCodes).toHaveLength(10);
+    expect((ok.body as Body).session).toBeUndefined();
+    expectNoTotpEnabled(ok);
     expect(ok.headers['cache-control']).toContain('no-store');
-    expect(((await login(h, u.email).expect(200)).body as Body).status).toBe('two_factor_required');
+    // The refresh cookie from before the change must report the new state, not a cached one.
+    const afterOn = await refresh(h, cookie).expect(200);
+    expect(sessionUser(afterOn.body, 'flat').totpEnabled).toBe(true);
+    const next = await login(h, u.email).expect(200);
+    expect((next.body as Body).status).toBe('two_factor_required');
+    expectNoTotpEnabled(next);
   });
 
   it('FR-102: setup/start and setup/confirm refuse a missing (400) or wrong (403 REAUTH_FAILED) current password and change nothing', async () => {
@@ -270,6 +295,8 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       })
       .expect(200);
     expect(verified.headers['cache-control']).toContain('no-store');
+    expect(sessionUser(verified.body, 'flat').totpEnabled).toBe(true);
+    expectNoTotpEnabled(step);
   });
 
   // A TOTP step is accepted once per user. These sign in with the previous step's code (inside
@@ -354,7 +381,12 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       expect(audit).toHaveLength(1);
       expect(audit[0]?.metadata).toEqual({ sessionsRevoked: 2 });
       expect(JSON.stringify(audit[0]?.metadata)).not.toContain(code);
-      expect(((await login(h, u.email).expect(200)).body as Body).session).toBeDefined();
+      // Freshness comes from a new sign-in (every old refresh family is revoked above).
+      const fresh = await login(h, u.email).expect(200);
+      expect((fresh.body as Body).status).toBe('authenticated');
+      expect(sessionUser(fresh.body, 'nested').totpEnabled).toBe(false);
+      const freshRefresh = await refresh(h, refreshCookie(fresh)).expect(200);
+      expect(sessionUser(freshRefresh.body, 'flat').totpEnabled).toBe(false);
     });
 
     it('TC-003: disable revokes a rotated token of the same family too, and a RECRUITER succeeds with a whitespace-padded code (the DTO trims it)', async () => {
