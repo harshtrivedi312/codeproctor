@@ -94,7 +94,7 @@ export function FinishSectionDialog({
   sectionTitle: string;
 }): React.JSX.Element {
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
       <DialogContent>
         <DialogTitle>Finish the {sectionTitle} section?</DialogTitle>
         <DialogDescription>
@@ -111,7 +111,7 @@ export function FinishSectionDialog({
           </p>
         )}
         <div className="mt-6 flex flex-wrap justify-end gap-3">
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
+          <Button variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>
             Keep working
           </Button>
           <Button variant="destructive" onClick={onConfirm} disabled={busy}>

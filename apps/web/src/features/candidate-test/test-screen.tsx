@@ -1,5 +1,5 @@
 'use client';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import dynamic from 'next/dynamic';
 import { CheckCircle2, Clock, Loader2, Play, RotateCcw, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
@@ -25,6 +25,7 @@ import { useServerClock } from './use-clock';
  * constant and drops the dynamic import, and with it demo-controls.tsx, from a production build.
  * Do not move this check behind a helper or a variable.
  */
+const IS_DEMO = process.env.NEXT_PUBLIC_API_MOCKING === 'enabled';
 const DemoBanner =
   process.env.NEXT_PUBLIC_API_MOCKING === 'enabled'
     ? React.lazy(() => import('./demo-controls').then((m) => ({ default: m.DemoBanner })))
@@ -112,6 +113,7 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
   const [results, setResults] = React.useState<Record<string, Schemas['RunResult']>>({});
   const [runErrors, setRunErrors] = React.useState<Record<string, string>>({});
 
+  const queryClient = useQueryClient();
   const clock = useServerClock();
   const testLeft = clock.remaining(session.testDeadlineAt);
   const sectionLeft = clock.remaining(section.deadlineAt);
@@ -121,7 +123,7 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
   const question = questions.find((q) => q.id === activeId) ?? questions[0];
   const language: CodeLanguage =
     (question && languages[question.id]) ?? question?.languages?.[0] ?? 'python';
-  const readOnly = isEditorReadOnly(lock, expired) || finished;
+  const readOnly = isEditorReadOnly(lock, expired) || finished || clock.unavailable;
 
   // Autosave every 10 s (FR-504). Compared by identity: any edit creates a new Drafts object.
   const lastSaved = React.useRef<Drafts>({ code: {}, mcq: {} });
@@ -165,7 +167,7 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
   const cooling = cooldownMs > 0;
   React.useEffect(() => {
     if (!cooling) return;
-    const id = window.setInterval(() => setNow(Date.now()), 250);
+    const id = window.setInterval(() => setNow(performance.now()), 250);
     return () => window.clearInterval(id);
   }, [cooling]);
 
@@ -208,7 +210,7 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
 
   const run = async () => {
     const questionId = question.id;
-    const started = Date.now();
+    const started = performance.now(); // monotonic: the OS clock cannot shorten the cooldown
     setLastRunAt(started);
     setNow(started);
     setRunning(true);
@@ -237,6 +239,34 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
   const finishSection = async () => {
     setFinishing(true);
     setFinishError(null);
+    const markFinished = () => {
+      setFinished(true);
+      setFinishOpen(false);
+    };
+    // After a failure we cannot tell whether the server finished the section. Re-read the session:
+    // if it now reports another section, the finish went through (ADR 0002: finishing is final).
+    const confirmOrExplain = async (fallback: string) => {
+      try {
+        const fresh = await queryClient.fetchQuery({
+          queryKey: ['candidate-session'],
+          staleTime: 0,
+          queryFn: async () => {
+            const { data } = await api.GET('/v1/candidate/session');
+            if (!data) throw new Error('session');
+            return data;
+          },
+        });
+        if (fresh.section.id !== section.id) {
+          markFinished();
+          return;
+        }
+        setFinishError(fallback);
+      } catch {
+        setFinishError(
+          'We could not confirm whether the section was finished. Check your connection and try again; if it was already finished, the screen will say so.',
+        );
+      }
+    };
     try {
       const saved = await autosave.flush();
       if (!saved) {
@@ -245,20 +275,20 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
         );
         return;
       }
-      const { response } = await api.POST('/v1/candidate/sections/{sectionId}/finish', {
+      const { data, response } = await api.POST('/v1/candidate/sections/{sectionId}/finish', {
         params: { path: { sectionId: section.id } },
       });
-      // ADR 0002: finishing is final. Only a confirmed OK response marks the section finished.
-      if (!response.ok) {
-        setFinishError(
-          'We could not finish the section, so nothing changed and you can keep working. Check your connection and try again.',
-        );
+      // ADR 0002: finishing is final. 409 means it was already finished; only that or an OK
+      // response with a body marks the section finished.
+      if (response.status === 409 || (response.ok && data)) {
+        markFinished();
         return;
       }
-      setFinished(true);
-      setFinishOpen(false);
+      await confirmOrExplain(
+        'We could not finish the section, so nothing changed and you can keep working. Check your connection and try again.',
+      );
     } catch {
-      setFinishError(
+      await confirmOrExplain(
         'We could not reach the server, so the section is not finished. Check your connection and try again.',
       );
     } finally {
@@ -312,9 +342,21 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
         {announcement}
       </p>
 
+      {clock.unavailable && (
+        <div role="alert" className="bg-destructive-soft px-4 py-2 text-sm text-destructive">
+          We cannot check the time with the server, so the editor is paused. Check your internet
+          connection, then{' '}
+          <button type="button" className="underline" onClick={clock.retry}>
+            try again
+          </button>
+          . Your time is not affected.
+        </div>
+      )}
+
       {expired && (
         <p role="alert" className="bg-destructive-soft px-4 py-2 text-sm text-destructive">
-          Time is up. In the real test your latest saved work is submitted automatically.
+          Time is up. {IS_DEMO ? 'In the real test your' : 'Your'} latest saved work is submitted
+          automatically.
         </p>
       )}
 
@@ -488,7 +530,14 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
       </div>
 
       <footer className="flex flex-wrap items-center gap-3 border-t bg-card px-4 py-2">
-        <Button variant="outline" onClick={() => setFinishOpen(true)} disabled={finished}>
+        <Button
+          variant="outline"
+          onClick={() => {
+            setFinishError(null);
+            setFinishOpen(true);
+          }}
+          disabled={finished}
+        >
           Finish section
         </Button>
         <span className="text-xs text-muted-foreground">Finishing a section is final.</span>
@@ -577,9 +626,11 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
             <CheckCircle2 className="mr-2 inline h-5 w-5 text-success" aria-hidden />
             The {section.title} section is finished and cannot be reopened.
           </p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Demo: the next section is not part of this preview.
-          </p>
+          {IS_DEMO && (
+            <p className="mt-1 text-sm text-muted-foreground">
+              Demo: the next section is not part of this preview.
+            </p>
+          )}
         </div>
       )}
     </div>

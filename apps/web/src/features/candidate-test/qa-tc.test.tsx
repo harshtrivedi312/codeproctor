@@ -8,6 +8,8 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { axe } from 'vitest-axe';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { http, HttpResponse } from 'msw';
+import { apiBaseUrl } from '@/lib/env';
 import { server } from '@/mocks/server';
 import { computeClockOffset, remainingMs } from './timer';
 import { initialLockState, isEditorReadOnly, lockReducer } from './lock-state';
@@ -168,6 +170,14 @@ describe('TC-047 clock moved after load (FR-505), UI side', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const wrapper = ({ children }: { children: React.ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    // The server clock does not move when the candidate changes the OS clock, so /v1/time keeps
+    // answering with real time while Date.now() in the browser is moved.
+    const realServerNow = Date.now.bind(Date);
+    server.use(
+      http.get(`${apiBaseUrl}/v1/time`, () =>
+        HttpResponse.json({ serverNow: new Date(realServerNow() + 90_000).toISOString() }),
+      ),
     );
     const { result } = renderHook(() => useServerClock(), { wrapper });
     await waitFor(() => expect(result.current.ready).toBe(true));

@@ -62,8 +62,8 @@ async function startDemo() {
   return user;
 }
 
-describe('TC-040 run error handling (FR-502)', () => {
-  it('TC-040 a network error on Run shows a fix-it message and the button works again', async () => {
+describe('FR-502 run error handling', () => {
+  it('FR-502 a network error on Run shows a fix-it message and the button works again', async () => {
     server.use(
       http.post(`${apiBaseUrl}/v1/candidate/questions/:questionId/run`, () => HttpResponse.error()),
     );
@@ -76,7 +76,7 @@ describe('TC-040 run error handling (FR-502)', () => {
     ).toBeInTheDocument();
   });
 
-  it('TC-041 a 429 on Run says to wait 5 seconds', async () => {
+  it('TC-041 FR-502 a 429 on Run says to wait 5 seconds', async () => {
     server.use(
       http.post(`${apiBaseUrl}/v1/candidate/questions/:questionId/run`, () =>
         HttpResponse.json({ retryAfterSeconds: 4 }, { status: 429 }),
@@ -88,7 +88,7 @@ describe('TC-040 run error handling (FR-502)', () => {
     expect(screen.queryByText('Running…')).not.toBeInTheDocument();
   });
 
-  it('TC-040 a 500 on Run is not treated as a result', async () => {
+  it('FR-502 a 500 on Run is not treated as a result', async () => {
     server.use(
       http.post(`${apiBaseUrl}/v1/candidate/questions/:questionId/run`, () =>
         HttpResponse.json({ message: 'boom' }, { status: 500 }),
@@ -100,7 +100,7 @@ describe('TC-040 run error handling (FR-502)', () => {
     expect(screen.queryByText(/sample tests passed/i)).not.toBeInTheDocument();
   });
 
-  it('TC-040 a run result stays with the question that was run, even if the candidate switches mid-run', async () => {
+  it('FR-502 a run result stays with the question that was run, even if the candidate switches mid-run', async () => {
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -134,13 +134,13 @@ describe('TC-040 run error handling (FR-502)', () => {
   });
 });
 
-describe('ADR 0002 finish section error handling (FR-503)', () => {
+describe('FR-301 ADR 0002 finish section error handling', () => {
   async function openFinishDialog(user: ReturnType<typeof userEvent.setup>) {
     await user.click(screen.getByRole('button', { name: 'Finish section' }));
     return screen.findByRole('dialog');
   }
 
-  it('ADR 0002 a failed finish (500) is not marked finished and can be retried', async () => {
+  it('FR-301 ADR 0002 a failed finish (500) is not marked finished and can be retried', async () => {
     let calls = 0;
     server.use(
       http.post(`${apiBaseUrl}/v1/candidate/sections/:sectionId/finish`, () => {
@@ -162,7 +162,7 @@ describe('ADR 0002 finish section error handling (FR-503)', () => {
     expect(calls).toBe(2);
   });
 
-  it('ADR 0002 a network error on finish keeps the section open and retryable', async () => {
+  it('FR-301 ADR 0002 a network error on finish keeps the section open and retryable', async () => {
     server.use(
       http.post(`${apiBaseUrl}/v1/candidate/sections/:sectionId/finish`, () =>
         HttpResponse.error(),
@@ -178,7 +178,53 @@ describe('ADR 0002 finish section error handling (FR-503)', () => {
     expect(within(dialog).getByRole('button', { name: /try again/i })).toBeEnabled();
   });
 
-  it('ADR 0002 FR-504 finish does not go ahead when the latest answers could not be saved', async () => {
+  it('FR-301 ADR 0002 a 409 on retry means the section was already finished', async () => {
+    let calls = 0;
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/sections/:sectionId/finish`, () => {
+        calls += 1;
+        return calls === 1
+          ? HttpResponse.error()
+          : HttpResponse.json({ message: 'already finished' }, { status: 409 });
+      }),
+    );
+    const user = await startDemo();
+    const dialog = await openFinishDialog(user);
+    await user.click(within(dialog).getByRole('button', { name: 'Finish section' }));
+    await user.click(await within(dialog).findByRole('button', { name: /try again/i }));
+    expect(await screen.findByText(/finished and cannot be reopened/i)).toBeInTheDocument();
+  });
+
+  it('FR-301 ADR 0002 when the status cannot be re-read the message says it could not confirm', async () => {
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/sections/:sectionId/finish`, () =>
+        HttpResponse.error(),
+      ),
+    );
+    const user = await startDemo();
+    const dialog = await openFinishDialog(user);
+    server.use(http.get(`${apiBaseUrl}/v1/candidate/session`, () => HttpResponse.error()));
+    await user.click(within(dialog).getByRole('button', { name: 'Finish section' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/could not confirm/i);
+    expect(screen.queryByText(/finished and cannot be reopened/i)).not.toBeInTheDocument();
+  });
+
+  it('FR-301 the error is cleared when the dialog is opened again', async () => {
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/sections/:sectionId/finish`, () =>
+        HttpResponse.json({ message: 'boom' }, { status: 500 }),
+      ),
+    );
+    const user = await startDemo();
+    const dialog = await openFinishDialog(user);
+    await user.click(within(dialog).getByRole('button', { name: 'Finish section' }));
+    await within(dialog).findByRole('alert');
+    await user.click(within(dialog).getByRole('button', { name: /keep working/i }));
+    const again = await openFinishDialog(user);
+    expect(within(again).queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('FR-301 ADR 0002 FR-504 finish does not go ahead when the latest answers could not be saved', async () => {
     let finishCalls = 0;
     server.use(
       http.put(`${apiBaseUrl}/v1/candidate/questions/:questionId/draft`, () =>
@@ -262,14 +308,22 @@ describe('TC-047 server clock re-sync (FR-505)', () => {
 
   it('TC-047 a server time seen in a response corrects the countdown offset', async () => {
     const { wrapper } = clockWrapper();
+    // The server's reading is chosen by the test; the assertions do not depend on the mock offset.
+    const serverAtLoad = Date.now() + 30_000;
+    server.use(
+      http.get(`${apiBaseUrl}/v1/time`, () =>
+        HttpResponse.json({ serverNow: new Date(serverAtLoad).toISOString() }),
+      ),
+    );
     const { result } = renderHook(() => useServerClock(), { wrapper });
     await waitFor(() => expect(result.current.ready).toBe(true));
-    const deadline = new Date(Date.now() + 10 * 60_000).toISOString();
+    const deadline = new Date(serverAtLoad + 10 * 60_000).toISOString();
     const before = result.current.remaining(deadline) ?? 0;
-    // The server says it is two minutes later than the first reading: two minutes less to go.
+    expect(before).toBeGreaterThan(9 * 60_000);
+    // A save response says the server is two minutes ahead of what we assumed.
     const t = performance.now();
     act(() => {
-      result.current.syncFromServer(new Date(Date.now() + 120_000 + 90_000).toISOString(), t, t);
+      result.current.syncFromServer(new Date(serverAtLoad + 120_000).toISOString(), t, t);
     });
     await waitFor(() =>
       expect(before - (result.current.remaining(deadline) ?? 0)).toBeGreaterThan(110_000),
@@ -294,5 +348,33 @@ describe('TC-047 server clock re-sync (FR-505)', () => {
     await waitFor(() =>
       expect(before - (result.current.remaining(deadline) ?? 0)).toBeGreaterThan(200_000),
     );
+  });
+
+  it('TC-047 FR-505 when /v1/time cannot be read the editor is paused with a fix-it message', async () => {
+    server.use(http.get(`${apiBaseUrl}/v1/time`, () => HttpResponse.error()));
+    await startDemo();
+    expect(await screen.findByText(/cannot check the time with the server/i)).toBeInTheDocument();
+    expect(screen.getByTestId('editor-region')).toHaveAttribute('data-readonly', 'true');
+  });
+
+  it('TC-047 an OS clock jump triggers an immediate /v1/time re-fetch', async () => {
+    const { wrapper } = clockWrapper();
+    let calls = 0;
+    server.use(
+      http.get(`${apiBaseUrl}/v1/time`, () => {
+        calls += 1;
+        return HttpResponse.json({ serverNow: new Date().toISOString() });
+      }),
+    );
+    const { result } = renderHook(() => useServerClock(), { wrapper });
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    const afterLoad = calls;
+    const realNow = Date.now.bind(Date);
+    const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 60 * 60_000);
+    try {
+      await waitFor(() => expect(calls).toBeGreaterThan(afterLoad), { timeout: 3_000 });
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
