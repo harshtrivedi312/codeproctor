@@ -53,4 +53,15 @@ export interface RecorderHealth {
   /** True when the last upload attempt failed (offline or server trouble). */
   degraded: boolean;
   bytesPendingByStream: Record<RecordingStream, number>;
+  /** IndexedDB could not be used (unavailable or failing); chunks wait in memory only. */
+  storageDegraded: boolean;
+  /** Bytes currently held only in memory (lost on reload). */
+  memoryBytes: number;
+}
+
+export type DeviceLossReason = 'TRACK_ENDED' | 'RECORDER_ERROR';
+/** A recorder stopped because its device or the MediaRecorder failed. Restart = new segment. */
+export interface DeviceLoss {
+  stream: RecordingStream;
+  reason: DeviceLossReason;
 }
