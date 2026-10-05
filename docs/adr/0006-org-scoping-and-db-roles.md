@@ -227,6 +227,7 @@ Roles belong to the whole Postgres cluster, not to one database. So the `IF NOT 
 
 **Status: Proposed amendment 2026-10-05, for the owner to accept. Decision id: pending D-xx**, assigned in status.md when the owner accepts.
 - Source: the DB-05 architect gate (PR #30) and the Delivery Lead.
+- **Today and planned.** "Today (PR #30)" means PR #30 as pushed at 769d8f5. "Planned" means work that is not built yet, with its follow-up in docs/followups/database.md on that branch (FU-DB-63 to FU-DB-88).
 - Until the owner accepts it, sections 1 to 7 stand as written.
 - Serves FR-103, FR-105, NFR-01 and NFR-04; TC-006 and TC-008.
 - Candidate session scope (from the candidate token to its session) is decided in ADR 0013 section 5.10 (proposed, PR #39), with ADR 0001 C-1. This section states only how it meets the org scope (8.4, 8.5).
@@ -246,14 +247,33 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 | Rule (i) references | 25 | **12 staff references:** `audit_logs.actor_id`, `questions.created_by`, `ai_reference_solutions.collected_by`, `tests.created_by`, `invitations.created_by`, `session_questions.scored_by`, `consent_texts.created_by`, `identity_checks.reviewed_by`, `session_reviews.reviewer_id`, `flag_decisions.reviewer_id`, `appeals.assigned_to`, `webhook_endpoints.created_by`. **13 cross-chain references:** `organizations.current_consent_text_id`, `refresh_tokens.replaced_by`, `questions.current_version_id`, `variant_test_cases.test_case_id`, `ai_reference_solutions.variant_id`, `test_questions.question_version_id`, `session_sections.section_id`, `session_questions.test_question_id`, `session_questions.question_version_id`, `session_questions.variant_id`, `consents.consent_text_id`, `keystroke_batches.session_question_id`, `webhook_deliveries.session_id` |
 
 - This replaces the shorter list at the end of section 2, which named only five staff columns and `test_questions.question_version_id`.
-- The rule (i) list lives in code as `RULE_I_REFERENCES` (FU-DB-64). A test fails on any foreign key that is in none of the three classes, so a new foreign key must be classified in the PR that adds it.
+- **Today (PR #30, FU-DB-64 done).**
+  - The classes are in code: `FK_CLASSES` and `RULE_I_REFERENCES` in `apps/api/src/database/org-scope-relations.ts`.
+  - `org-scope-relations.spec.ts` asserts `{ ORG_ID: 9, SCOPE_HOP: 21, COMPOSITE: 3, RULE_I: 25, total: 58 }`.
+  - It fails for a key that is missing, unclassified, classified twice or in the wrong class. So a new foreign key must be classified in the PR that adds it.
 - Rule (i) proves only that the target is in the same org. It does not prove that a cross-chain target belongs to the same parent: for example `variant_test_cases.test_case_id` and `variant_id` may point to different question versions. Tracked in docs/followups/architecture.md.
 
 ### 8.2 Write invariant (architect detail)
 
 - An org-scoped write changes only the rows its filter selected, or the rows it creates.
-- The extension refuses, on the parent side, a nested `connect`, `set`, `connectOrCreate`, or a nested create or update that names another org (FU-DB-63).
-- A child-side `connect` (the child holds the foreign key) stays under rule (i): load the target through the scoped client first, answer 404 on a miss.
+- **Nested-write guard (today, PR #30, FU-DB-63 done).** In an org scope, at any depth, with zero extra queries.
+  - It refuses:
+    - parent-side `connect`, `connectOrCreate` and `set`;
+    - a nested `create`, `update`, `upsert`, `createMany` or `updateMany` of a model with its own `org_id` that names another org;
+    - a nested `Organization` create or `id` change;
+    - an unknown nested operation;
+    - nesting deeper than 16 levels.
+  - It allows a child-side `connect` (rule (i)), and nested `create`, `update`, `delete`, `deleteMany`, `disconnect` and `upsert` under an in-scope parent.
+  - It is not applied in system scope.
+  - A flat `createMany` is not walked.
+- **Cursors (today, PR #30).**
+  - On a model with `org_id`, the cursor gets `orgId` added, and a cursor naming another org is refused.
+  - On `Organization`, the cursor must be the caller's own id.
+  - On a path model, a cursor is refused. Page with `where` plus `orderBy` (keyset paging) instead.
+- **What the extension does not check (rule (i), documented in the PR #30 README).**
+  - Child-side `connect`, scalar foreign-key writes and re-parenting stay under rule (i): load the target through the scoped client first, and answer 404 on a miss.
+  - Nested reads (`include`, `select`, the fluent API, relation filters, relation `orderBy`, `_count`) follow foreign keys without the org filter. One TC-008 test pins this behaviour (FU-DB-78).
+  - ADR 0013 CS-4 refuses nested reads in a CANDIDATE scope. In STAFF, plain org and SERVICE scopes they remain a rule (i) review item: select only the fields needed, and never `include` a user.
 - **Where these rules apply.**
   - In a CANDIDATE scope, ADR 0013 CS-4 is stricter: it refuses every nested write and every relation operation outright (`include` and `select` of relations, relation filters, `_count`).
   - The nested-write rules here, and those in 8.6, still apply to STAFF scopes, plain org scopes, SERVICE scopes and system scope.
@@ -286,7 +306,7 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 | None | `runAsSessionJob(A, S)` | Allowed (`SessionJobProcessor`) |
 | SYSTEM, reason R | `runAsUser` or `runInOrg(A)` | Allowed (narrows) |
 | SYSTEM, `BACKGROUND_JOB` | `runAsSessionJob(A, S)` | Allowed (narrows: the session-job path) |
-| SYSTEM, `AUTH_BOOTSTRAP` or `RETENTION_ERASURE` | `runAsSessionJob` | Refused. Retention enqueues per-session jobs instead. |
+| SYSTEM, `AUTH_BOOTSTRAP` or `RETENTION_ERASURE` | `runAsSessionJob` | Refused. Retention narrows with `runInOrg(orgId)` or enqueues per-session jobs instead. |
 | SYSTEM, any reason | `runAsCandidate` | Refused |
 | SYSTEM, reason R | `runSystem(R)` | Allowed, no change |
 | SYSTEM, reason R | `runSystem` with a different reason | Refused |
@@ -303,7 +323,8 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 | SERVICE | `runAsCandidate` | Refused |
 | CANDIDATE or SERVICE | `runAsUser`, `runSystem`, or any call that drops or changes S | Refused |
 
-PR #30 already refuses the org switch and the system-from-org case (`org-context.ts`, `enter`). The other rows are db-engineer work.
+**Today (PR #30):** the org switch and the system-from-org case are refused (`org-context.ts`, `enter`).
+**Planned:** the actor, both session entries and the other rows.
 
 No rule in this ADR depends on a plain org scope narrowing into a session scope. There is no `runInOrg(A, { sessionId })` entry: session scopes are entered only through the two CS-4 entries.
 
@@ -313,7 +334,7 @@ No rule in this ADR depends on a plain org scope narrowing into a session scope.
 | --- | --- |
 | `AUTH_BOOTSTRAP` | Lookups before the caller's org is known. On the staff side: login by email, refresh-token rotation and set-password tokens. On the candidate side: only the invitation-link and OTP exchange, before a candidate session JWT exists. Narrow to `runAsUser` or `runInOrg(A)` as soon as the org is known. It cannot enter a session scope. |
 | `BACKGROUND_JOB` | Scheduled discovery across orgs only. See the job rules below. |
-| `RETENTION_ERASURE` | Selecting what is due only. Deletion of each session runs as a per-session job (`runAsSessionJob`, entered from no scope), not directly from this scope. |
+| `RETENTION_ERASURE` | Selecting what is due only. Each session is then deleted in a plain `runInOrg(orgId)` (FU-DB-71) or by a per-session job. It never enters `runAsSessionJob` directly from this scope. |
 
 **Background jobs.**
 - The job payload carries `orgId`, and `sessionId` when the job concerns a session.
@@ -339,8 +360,8 @@ There is no org-provisioning reason (8.6, 8.9).
 
 - **Raw SQL needs `runRawSql` and a scope.**
   - Raw SQL is refused unless it runs inside `runRawSql(reason)`.
-  - `runRawSql` requires an active scope.
-  - **This changes PR #30 behaviour.** PR #30 currently allows `runRawSql` with no scope at all. The db-engineer makes that call throw.
+  - `runRawSql` requires an active scope. **Today (PR #30):** with no scope it throws `OrgContextMissingError`.
+  - **The hatch carries into nested scopes today (PR #30).** An open `runRawSql` stays open in a `runAsUser`, `runInOrg` or `runSystem` started inside it, so the README says to wrap only the single raw statement. **Planned:** an open hatch does not carry into any scope entered inside it, and never into a `sessionId` scope.
 - **What each scope allows:**
   - **System scope:** the raw SQL must serve the active system reason. An example is the `AUTH_BOOTSTRAP` failed-login counter.
   - **Org scope without a session:** the SQL itself must filter by `org_id`. A table without `org_id` must be joined along its 8.7 scope path.
@@ -348,7 +369,7 @@ There is no org-provisioning reason (8.6, 8.9).
 - **Never on organizations.** Raw SQL never writes `organizations`, in any scope.
 - Model queries inside `runRawSql` stay scoped.
 - The `runRawSql` reason stays free text for the reviewer.
-- **Call-site allow-list.** A test of every `runSystem`, `runInOrg`, `runAsCandidate`, `runAsSessionJob` and `runRawSql` call site lands with FU-DB-58 (BE-03).
+- **Call-site allow-list (planned, FU-DB-67).** A test lists every call site of `runSystem`, `runInOrg`, `runAsCandidate`, `runAsSessionJob` and `runRawSql`, by file and count. It also refuses `$queryRawUnsafe` and `$executeRawUnsafe` unless they are listed. It lands before BE-03, together with FU-DB-58.
   - For each raw call, the list records the pair (call site, system reason or org scope).
   - Only two call sites may enter a session scope: `runAsCandidate` in the `CandidateSessionGuard` file, and `runAsSessionJob` in the `SessionJobProcessor` base class.
   - A new call site updates the list, and code-reviewer checks it.
@@ -365,6 +386,10 @@ There is no org-provisioning reason (8.6, 8.9).
 - So when rule (i) loads an org through the scoped client, only the caller's own org can be found.
 
 **Operations on `Organization`: deny by default, in every scope.**
+- **Today (PR #30):** create is refused in an org scope.
+- **Planned:**
+  - refuse delete in an org scope (FU-DB-68);
+  - extend the full deny-by-default list below to every scope, system scope included.
 - Allowed:
   - reads: `findUnique`, `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `findMany`, `count`, `aggregate` and `groupBy`;
   - `update`, `updateMany` and `updateManyAndReturn`, but only in an org scope and only when the data does not contain `id`. `organizations.id` is immutable; a test covers it, and there is no trigger (8.3).
@@ -372,11 +397,19 @@ There is no org-provisioning reason (8.6, 8.9).
 - Any operation the extension does not recognise throws.
 
 **Nested writes.** A query extension sees only the top-level model, so the extension walks the `data` of every write at any depth. In a CANDIDATE scope, ADR 0013 CS-4 already refuses every nested write and relation operation. The rules below matter for STAFF, plain org, SERVICE and system scopes.
+
+- **Today (PR #30, 8.2):** nested `Organization` create and `id` change are refused, in an org scope only.
+- **Planned:**
+  - refuse every other nested `Organization` write listed below;
+  - apply the guard in system scope too.
 - On any relation whose target is `Organization` it refuses `create`, `createMany`, `connectOrCreate`, `upsert`, `update`, `updateMany`, `delete`, `deleteMany`, `set` and `disconnect`.
 - Org settings change only through a top-level `organization.update`, in the service that holds the authorization check for org settings.
 - Examples it refuses: `user.create({ data: { organization: { create: … } } })` and `test.update({ data: { organization: { update: { id } } } })`.
 
 **No write moves a row to another org.**
+
+- **Today (PR #30):** in an org scope this is covered for direct models (8.2).
+- **Planned:** the system-scope rule below, and `organization` `connectOrCreate` on any model.
 - At any depth, on `create`, `update` and `upsert` (both branches), the extension refuses:
   - a scalar `orgId` whose value is not `ctx.orgId`;
   - an `organization` `connect` or `connectOrCreate` whose id is not `ctx.orgId`.
@@ -399,7 +432,7 @@ Without that check, the exemption would be a bypass inside `apps/api`.
 
 ### 8.8 Runtime checks (architect detail)
 
-**Readiness role assertion (FU-DB-66, before DEP-01).** The readiness check asserts all of these:
+**Readiness role assertion (planned, FU-DB-66, before DEP-01; FU-DB-66 lists the first four checks, and this section adds the rest).** The readiness check asserts all of these:
 
 - `current_user = 'app_user'`;
 - the role has no SUPERUSER, BYPASSRLS, CREATEROLE, CREATEDB or REPLICATION;
@@ -420,7 +453,9 @@ How the check runs:
 
 **Interceptor (FU-DB-65).**
 
-- A malformed `request.user` reaches the interceptor only after the guard has passed. That makes it a server fault, so it answers 500, not 401.
+- A malformed `request.user` reaches the interceptor only after the guard has passed, so it is a server fault.
+- **Today (PR #30):** it answers 401, and the code, the tests and the README agree.
+- **Planned (FU-DB-65):** it answers 500.
 - The log names the fault. It never includes `request.user` content or the token.
 
 ### 8.9 Pilot org provisioning (FU-DB-76, ARC-05 and DEP-03)
@@ -487,14 +522,18 @@ How the check runs:
 - **Positive:** the scope rules are closed and testable (FK classification, call-site allow-list, readiness check), with no schema change before the pilot.
 - **Negative:**
   - Rule (i) stays a service-level guard for 25 foreign keys until RLS is revisited (FU-DB-77).
-  - Session jobs run in a `sessionId` scope, so they cannot use raw SQL (8.5). This is deliberate. It covers BE-12 risk scoring, BE-14 report generation and DB-06 per-session deletion, which must use the model API. If one of them needs raw SQL, that needs an amendment to this ADR.
+  - Session jobs run in a `sessionId` scope, so they cannot use raw SQL (8.5). This is deliberate. It covers BE-12 risk scoring, BE-14 report generation, and DB-06 per-session deletion when it runs as a session job. All of them must use the model API. If one of them needs raw SQL, that needs an amendment to this ADR.
 - **db-engineer:**
-  - 8.1: `RULE_I_REFERENCES` and its test.
-  - 8.2: FU-DB-63.
+  - 8.1 and 8.2 are done in PR #30 (FU-DB-63, FU-DB-64).
+  - Nested reads stay open (FU-DB-78).
+  - 8.5: the raw-SQL hatch does not carry into nested scopes.
+  - FU-DB-67: the call-site allow-list.
+  - FU-DB-68: refuse Organization delete in an org scope.
+  - FU-DB-71 and FU-DB-72: DB-06 and the job rules. Update FU-DB-72 so that session jobs use `runAsSessionJob`.
   - 8.4: the actor in the scope (STAFF, plain org, CANDIDATE, SERVICE, SYSTEM), set by the entry function.
   - 8.4: both session entries, `runAsCandidate` (guard only, from no scope) and `runAsSessionJob` (`SessionJobProcessor` only, from no scope or `BACKGROUND_JOB`), per ADR 0013 CS-4.
   - 8.4: the transition table, with one test per row.
-  - 8.5: `runRawSql` requires a scope, and is refused in a `sessionId` scope.
+  - 8.5: refuse raw SQL in a `sessionId` scope (the scope requirement is done).
   - 8.6: `Organization` deny by default, no nested `Organization` writes, no write that moves a row to another org, and a limit on importers of the raw factory client.
   - 8.8: FU-DB-65 and FU-DB-66, including the REPLICATION, membership and ownership checks.
   - 8.9: the provisioning CLI (org and first admin, placeholder hash, enqueue and re-issue, audit rows).
@@ -504,16 +543,19 @@ How the check runs:
   - Build the `set-password` job processor in 8.9: a conditional rotate, mail sent in process, no link in any queue or log.
   - Build `SessionJobProcessor`.
   - Run grading (`grade-answer`) and start-test (`start-session`) as session jobs (ADR 0013 CS-4).
-  - Retention deletes each session through a per-session job.
-  - Land the call-site allow-list with FU-DB-58 (BE-03).
+  - Retention deletes each session in `runInOrg(orgId)` (FU-DB-71) or through a per-session job.
+  - Move auth onto the scoped client (FU-DB-58) before BE-03, with the allow-list (FU-DB-67).
   - DB-06 and the retention job follow 8.4.
 - **Deploy (DEP-01, DEP-03):**
   - Poll readiness and roll back on a failed assertion (8.8).
   - Run the provisioning CLI per 8.9.
 - **code-reviewer checks:**
   - that every new foreign key is classified (8.1);
-  - every new `runSystem`, `runInOrg` and `runRawSql` call site;
+  - every new `runSystem`, `runInOrg`, `runAsCandidate`, `runAsSessionJob` and `runRawSql` call site;
+  - nested reads in STAFF, plain org and SERVICE scopes (FU-DB-78);
   - the path rule (8.7).
 - **qa:**
   - The TC-008 evidence lives in `apps/api/src/database/tc-008-org-isolation.spec.ts` (FU-DB-59).
-  - The P1 gate gap is in docs/followups/qa.md.
+  - The P1 gate does not see it yet (FU-DB-81).
+  - Real-route, `/live` and candidate-token cases are tracked as FU-DB-86 and FU-DB-87.
+  - The P1 gate gap is also recorded in docs/followups/qa.md section 7.6.
