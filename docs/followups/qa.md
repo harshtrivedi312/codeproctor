@@ -214,6 +214,24 @@ Source: docs/compliance/decisions.md (PR #44, branch dl/compliance-decisions). N
 
 Open dependencies for these cases: OQ-1 (consent record on erasure), OQ-2 (embeddings never stored), OQ-3 (fallback for a waived identity check) in decisions.md; the FAIR-01 ADR; the ADR 0013 gate interface.
 
+## 10. QA-04a (2026-10-05): staged BE-03 tests moved to the final contract
+
+Branch `qa/step-4a`. `apps/api/test/support/be03-routes.ts` and the dependent tests (tc-002-unlock, tc-002-lock-privacy, tc-004-rbac, tc-006-audit) follow the final BE-03 contract: `/admin/users` routes, `currentPassword` step-up on invite, PATCH and unlock (the `UNLOCK_NEEDS_REAUTH` switch is gone), audit actions, interceptor rows for the list reads, fake `MailPort` that records the method and all arguments. The route list is checked against the backend registry (`ROUTE_PERMISSIONS`, `listRoutes`, `matrixProblems`) through `loadBackendRegistry()`, loaded lazily so main compiles without those files. To switch everything on when BE-03 merges, change `BE03_DEFAULT` to `true` in be03-routes.ts (one line).
+
+Trial run with `BE03_READY=1` against `origin/backend/step-3` (4251cfb) in a temporary worktree: 198 passed, 0 failed, 41 BE-13 tests skipped, 3 todo. First run had 14 failures; all were test bugs (shared SUPER_ADMIN used up by wrong-password tests and locked, a pre-reset Nest class token, same-step TOTP reuse for a fresh sign-in, a wrong audit failure body assumption, `instance` echoing the caller's own URL, self-unlock of a locked admin).
+
+Product findings (owner backend-engineer):
+
+| ID | Sev | Finding |
+| --- | --- | --- |
+| QA-D-04 | low | Cold start: `ensureConnected()` (apps/api/src/infrastructure/redis-ready.ts) returns at once when the lazy client is `connecting`, the client has `enableOfflineQueue: false`, so parallel first requests that use Redis (2FA verify) answer 503. Reproduced on main: `tc-003-coldstart.int.test.ts` (`it.failing`, KNOWN DEFECT), 8 of 8 runs on a fresh boot, so it is near-deterministic and stays in the gated suite. The body throws only when every failure is the 503; any other failure, or no failure (fixed), turns it red on purpose. Backend fixes it in backend/redis-cold-start; QA flips it to a plain test afterwards |
+| QA-O-01 | doc | backend.md says an audit write failure gives "500, no body". The answer is a bare problem+json (type, title, status, instance, traceId) with no route data. Fix the wording or the code; the test accepts the bare problem |
+| QA-O-02 | observation | Each password-protected admin call reserves a password attempt on the shared lockout, so more than 5 parallel calls from one admin get 403 REAUTH_FAILED with the right password, and 5 wrong passwords lock the admin (AUTH_ACCOUNT_LOCKED). A locked admin cannot unlock themself (their own password check fails); another SUPER_ADMIN must. Probably by design; tell the frontend (no bulk parallel admin actions) |
+| QA-O-03 | observation | A token issued in the same second as a role change or reactivation is refused (marker in epoch seconds): a sign-in right after reactivation can get a dead token. Documented by backend; tests wait 1.1 s |
+
+Left for QA-04b: TC-065 follow-ups, compliance proposals g, h, i-m and the C-28 impact list, gate tests, re-checking the TC-002..008 and TC-098 matrix rows that existed only on qa/step-2b, the TC-008 gate reader.
+
+Review round on PR #54: lock mail recipients now exclude another org and a deactivated admin (one mail each); PASSWORD is an audit secret on the reauth routes; a captureLogs case checks passwords, invite token and access token are not logged; the fail-closed invite test checks no invite mail and restores the grant; unlock of a non-locked account pins a USER_UNLOCKED row with wasLocked false; the invalid-body test registers only for mutating routes with a body; the registry check takes BE-13 routes only when BE13_READY and rejects unknown matrix fields. Nits applied: alg:none in the 401 list, non-holder 403 is not REAUTH_FAILED, any race 403 is REAUTH_FAILED, 429 sends no mail and writes no row. Logged, not done: none.
 ## TC-003 disable freshness depends on backend PR #51
 
 The tc-003 "turn 2FA off" test proves `totpEnabled` is fresh after a disable through a new login and a refresh of that new session, not through the pre-disable cookie, because #51 revokes every refresh family on disable. The later "already off" check (409) still reuses the pre-disable access token; if BE-03 or #51 invalidates access tokens on disable, switch it to the new session's token. Owner: qa-engineer.

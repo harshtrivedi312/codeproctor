@@ -159,7 +159,7 @@ for (const res of results) {
       state.set(id, s);
       continue;
     }
-    // Tests written with it.fails carry KNOWN DEFECT in the title and pass while the defect exists.
+    // Tests written with it.fails (Vitest) or it.failing (Jest) carry KNOWN DEFECT in the title and pass while the defect exists.
     // If such a test fails, the defect was fixed or the test broke: either way it is a failure.
     if (/KNOWN DEFECT/.test(res.full ?? res.title)) {
       if (res.passed) s.known++;
