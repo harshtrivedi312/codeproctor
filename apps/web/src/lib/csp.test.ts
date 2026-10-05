@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildCsp, parseOrigins } from './csp';
+import { buildCsp, isCandidateTestPath, parseOrigins } from './csp';
 
 describe('CSP (NFR-04)', () => {
   const base = { nonce: 'abc123', apiOrigin: 'https://api.example.com/v1' };
@@ -37,5 +37,43 @@ describe('CSP (NFR-04)', () => {
     expect(csp).toContain("frame-ancestors 'none'");
     expect(csp).toContain("object-src 'none'");
     expect(csp).toContain("base-uri 'self'");
+  });
+
+  it('D-45 (P-05): script-src has no wasm-unsafe-eval unless asked for', () => {
+    expect(buildCsp(base)).not.toContain('wasm-unsafe-eval');
+    expect(buildCsp({ ...base, allowWasm: false })).not.toContain('wasm-unsafe-eval');
+  });
+  it("D-45 (P-05): allowWasm adds 'wasm-unsafe-eval' to script-src only, never 'unsafe-eval'", () => {
+    const csp = buildCsp({ ...base, allowWasm: true });
+    expect(csp).toContain("script-src 'self' 'nonce-abc123' 'strict-dynamic' 'wasm-unsafe-eval';");
+    expect(csp.match(/wasm-unsafe-eval/g)).toHaveLength(1);
+    expect(csp).not.toMatch(/(?<!wasm-)unsafe-eval/);
+    expect(csp).not.toMatch(/script-src[^;]*unsafe-inline/);
+    // Every other directive is identical to the strict policy.
+    const strip = (value: string) => value.replace(" 'wasm-unsafe-eval'", '');
+    expect(strip(csp)).toBe(buildCsp(base));
+  });
+  it('D-45 (P-05): only /t/[token]/test counts as the candidate test route', () => {
+    for (const path of ['/t/abc123/test', '/t/abc123/test/', '/t/demo/test']) {
+      expect(isCandidateTestPath(path)).toBe(true);
+    }
+    for (const path of [
+      '/',
+      '/admin',
+      '/admin/login',
+      '/admin/security',
+      '/t/abc123',
+      '/t/abc123/',
+      '/t/abc123/consent',
+      '/t/abc123/test/extra',
+      '/t//test',
+      '/t/a/b/test',
+      '/x/t/abc123/test',
+      '/t/abc123/testing',
+      '/errors/expired',
+      '/dev/proctor',
+    ]) {
+      expect(isCandidateTestPath(path)).toBe(false);
+    }
   });
 });
