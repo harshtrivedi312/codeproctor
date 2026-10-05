@@ -12,7 +12,6 @@ import { Client } from 'pg';
 import { encryptSecret, sha256Hex } from '../../src/auth/crypto.util';
 import { createPrismaClient } from '../../src/database/create-prisma-client';
 import { PrismaClient, UserRole } from '../../src/generated/prisma/client';
-import type { MailPort } from '../../src/mail/mail.port';
 import { applyEnv, applyMigrations, startInfra, TestInfra } from '../../src/test/containers';
 
 export const API = '/api/v1';
@@ -91,12 +90,20 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     owner = createPrismaClient(infra.postgres.getConnectionUri());
     orgId = (await owner.organization.create({ data: { name: 'QA Org A' } })).id;
 
-    const fakeMail: Pick<MailPort, 'sendPasswordReset'> = {
-      sendPasswordReset: (to, url) => {
-        mails.push({ to, url });
-        return Promise.resolve();
+    // Every MailPort send method (send*): records the recipient and the URL it carries, so the
+    // same fake serves password reset now and the staff invite and lock alert mails of BE-03.
+    const fakeMail = new Proxy(
+      {},
+      {
+        get: (_target, prop) =>
+          typeof prop === 'string' && prop.startsWith('send')
+            ? (to: string, url?: string) => {
+                mails.push({ to, url: url ?? '' });
+                return Promise.resolve();
+              }
+            : undefined,
       },
-    };
+    );
 
     jest.resetModules();
     const { AppModule } =
