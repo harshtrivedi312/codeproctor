@@ -36,6 +36,8 @@ export interface ValidationFailure {
   readonly verdict: TestVerdict | 'MISSING_REFERENCE';
   /** Capped actual output on a wrong answer, for the author; absent otherwise. */
   readonly actualOutput?: string;
+  /** Capped compiler output or stderr for a compile or runtime failure, for the author. */
+  readonly diagnostic?: string;
 }
 
 export interface ValidationCell {

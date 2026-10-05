@@ -56,7 +56,8 @@ function harness(opts: {
     const method = init.method ?? 'GET';
     calls.push({ method, url, init });
     if (method === 'POST') {
-      if (opts.postStatus && opts.postStatus >= 400) return Promise.resolve(json({}, opts.postStatus));
+      if (opts.postStatus && opts.postStatus >= 400)
+        return Promise.resolve(json({}, opts.postStatus));
       if (opts.postBody !== undefined) return Promise.resolve(json(opts.postBody));
       const n = (JSON.parse(init.body as string) as { submissions: unknown[] }).submissions.length;
       return Promise.resolve(json(Array.from({ length: n }, () => ({ token: tok(nextToken++) }))));
@@ -174,9 +175,9 @@ describe('HttpJudge0Client (FR-503)', () => {
   it('FR-503: one deadline covers the whole batch, not one per chunk', async () => {
     // 3 chunks of 1 that never finish: total sleeping must stay within one shared budget.
     const h = harness({ polls: [[pending]], pollDeadlineMs: 1000, maxBatchSize: 1 });
-    await expect(h.client.runBatch([sub('x', 1000), sub('x', 1000), sub('x', 1000)])).rejects.toThrow(
-      Judge0UnavailableError,
-    );
+    await expect(
+      h.client.runBatch([sub('x', 1000), sub('x', 1000), sub('x', 1000)]),
+    ).rejects.toThrow(Judge0UnavailableError);
     const budget = 1000 + Math.ceil(3 / 2) * 1000;
     expect(h.sleeps.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(budget);
     // The first chunk timed out, so later chunks were never submitted.
@@ -209,7 +210,8 @@ describe('HttpJudge0Client (FR-503)', () => {
       authToken: 'tok-123',
       requestTimeoutMs: 1000,
       pollDeadlineMs: 1000,
-      fetchFn: (() => Promise.reject(new Error('boom http://secret-host'))) as unknown as typeof fetch,
+      fetchFn: () =>
+        Promise.reject(new Error('boom http://secret-host')),
     });
     const err = await client.runBatch([sub()]).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(Judge0UnavailableError);

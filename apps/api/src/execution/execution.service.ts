@@ -6,9 +6,10 @@ import { InvalidLimitsError, resolveLimits } from './limits';
 import { outputsMatch, truncate } from './normalize';
 import type {
   ExecutionRequest,
+  CapturedExecutionResult,
+  CapturedTestRunResult,
   ExecutionResult,
   ExecutionTest,
-  TestRunResult,
   TestVerdict,
 } from './execution.types';
 
@@ -21,6 +22,7 @@ const MESSAGES: Record<Exclude<TestVerdict, 'PASSED' | 'FAILED'>, string> = {
   COMPILE_ERROR: 'The code did not compile.',
   TIME_LIMIT: 'Time limit exceeded.',
   MEMORY_LIMIT: 'Memory limit exceeded.',
+  OUTPUT_LIMIT: 'Output limit exceeded.',
   RUNTIME_ERROR: 'The program crashed while running.',
   INTERNAL_ERROR: 'The code could not be run. Try again.',
 };
@@ -31,11 +33,28 @@ export class ExecutionService {
 
   constructor(@Inject(JUDGE0_CLIENT) private readonly judge0: Judge0Client) {}
 
-  /** Runs one program against many tests (FR-502, FR-503). Never throws for runner failures. */
-  async run(
-    request: ExecutionRequest,
-    options: { readonly captureActualOutput?: boolean } = {},
-  ): Promise<ExecutionResult> {
+  /**
+   * Runs one program against many tests (FR-502, FR-503). Never throws for runner failures.
+   * Candidate-safe: the result never carries raw output or diagnostics of hidden tests.
+   */
+  async run(request: ExecutionRequest): Promise<ExecutionResult> {
+    const captured = await this.runCaptured(request);
+    return {
+      clampedLimits: captured.clampedLimits,
+      results: captured.results.map((r) => {
+        const { rawActualOutput: _output, diagnostic: _diagnostic, ...safe } = r;
+        void _output;
+        void _diagnostic;
+        return safe;
+      }),
+    };
+  }
+
+  /**
+   * Same run, but each result also carries the capped actual output and compiler or runtime
+   * diagnostics. For author-side reference validation only: never serialize it to a candidate.
+   */
+  async runCaptured(request: ExecutionRequest): Promise<CapturedExecutionResult> {
     // Invalid limits are a data error in the question, not a candidate error: let it throw.
     const limits = resolveLimits(request.limits);
     if (request.tests.length === 0) return { results: [], clampedLimits: limits.clamped };
@@ -69,12 +88,7 @@ export class ExecutionService {
     }
 
     const results = request.tests.map((test, i) =>
-      this.toResult(
-        test,
-        raws[i] as Judge0RawResult,
-        limits.memoryKb,
-        options.captureActualOutput === true,
-      ),
+      this.toResult(test, raws[i] as Judge0RawResult, limits.memoryKb),
     );
     return { results, clampedLimits: limits.clamped };
   }
@@ -83,8 +97,7 @@ export class ExecutionService {
     test: ExecutionTest,
     raw: Judge0RawResult,
     memoryLimitKb: number,
-    capture: boolean,
-  ): TestRunResult {
+  ): CapturedTestRunResult {
     const base = { testId: test.id, timeMs: raw.timeMs, memoryKb: raw.memoryKb };
     const verdict = this.classify(test, raw, memoryLimitKb);
     const stdout = truncate(raw.stdout ?? '', MAX_RETURNED_OUTPUT_CHARS);
@@ -95,25 +108,37 @@ export class ExecutionService {
         verdict,
         passed: verdict === 'PASSED',
         ...(test.reveal ? { stdout: stdout.text, stdoutTruncated: stdout.truncated } : {}),
-        ...(capture ? { rawActualOutput: stdout.text } : {}),
+        rawActualOutput: stdout.text,
       };
     }
 
     let message: string = MESSAGES[verdict];
-    if (test.reveal && (verdict === 'COMPILE_ERROR' || verdict === 'RUNTIME_ERROR')) {
+    let diagnostic: string | undefined;
+    if (verdict === 'COMPILE_ERROR' || verdict === 'RUNTIME_ERROR') {
       const detail = truncate(
         (verdict === 'COMPILE_ERROR' ? raw.compileOutput : raw.stderr) ?? '',
         MAX_DIAGNOSTIC_CHARS,
       ).text.trim();
-      if (detail) message = `${message}\n${detail}`;
+      if (detail) {
+        diagnostic = detail;
+        if (test.reveal) message = `${message}\n${detail}`;
+      }
     }
-    return { ...base, verdict, passed: false, message };
+    return {
+      ...base,
+      verdict,
+      passed: false,
+      message,
+      ...(diagnostic !== undefined ? { diagnostic } : {}),
+    };
   }
 
   private classify(test: ExecutionTest, raw: Judge0RawResult, memoryLimitKb: number): TestVerdict {
     const id = raw.statusId;
     if (id === JUDGE0_STATUS.COMPILATION_ERROR) return 'COMPILE_ERROR';
     if (id === JUDGE0_STATUS.TIME_LIMIT_EXCEEDED) return 'TIME_LIMIT';
+    // SIGXFSZ: the program wrote more than max_file_size.
+    if (id === JUDGE0_STATUS.RUNTIME_ERROR_SIGXFSZ) return 'OUTPUT_LIMIT';
     if (id >= JUDGE0_STATUS.RUNTIME_ERROR_SIGSEGV && id <= JUDGE0_STATUS.RUNTIME_ERROR_OTHER) {
       // Judge0 has no memory-limit status: an allocation past the limit shows up as a crash
       // (SIGSEGV, SIGABRT, non-zero exit) with peak memory at or near the limit.

@@ -114,6 +114,19 @@ describe('ReferenceValidationService (FR-203, TC-012)', () => {
     ]);
   });
 
+  it('FR-203: a compile error carries a capped diagnostic into the report', async () => {
+    const { service, fake } = setup();
+    fake.when('BROKEN', fakeResult({ statusId: 6, stdout: null, compileOutput: 'x'.repeat(2000) }));
+    const base = input();
+    const report = await service.validate({
+      ...base,
+      languages: ['python'],
+      variants: [{ ...base.variants[0]!, referenceSources: { python: 'BROKEN' } }],
+    });
+    expect(report.failures[0]).toMatchObject({ verdict: 'COMPILE_ERROR' });
+    expect(report.failures[0]?.diagnostic).toHaveLength(500);
+  });
+
   it('FR-203: validateAndRecord hands the report to the sink; without one it throws', async () => {
     const { service } = setup();
     await expect(service.validateAndRecord(input())).rejects.toThrow('ValidationReportSink');

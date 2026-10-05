@@ -6,6 +6,7 @@ export type TestVerdict =
   | 'COMPILE_ERROR'
   | 'TIME_LIMIT'
   | 'MEMORY_LIMIT'
+  | 'OUTPUT_LIMIT'
   | 'RUNTIME_ERROR'
   | 'INTERNAL_ERROR';
 
@@ -39,11 +40,22 @@ export interface TestRunResult {
   readonly stdoutTruncated?: boolean;
   /** Sanitized: a fixed sentence, plus capped compiler or runtime output when revealed. */
   readonly message?: string;
-  /** Only set when run() is called with captureActualOutput (author-side validation); never serialize to candidates. */
-  readonly rawActualOutput?: string;
 }
 
 export interface ExecutionResult {
   readonly results: readonly TestRunResult[];
+  readonly clampedLimits: boolean;
+}
+
+/** Author-side only (reference validation). Never serialize to a candidate. */
+export interface CapturedTestRunResult extends TestRunResult {
+  /** Capped actual stdout of a run that finished (PASSED or FAILED). */
+  readonly rawActualOutput?: string;
+  /** Capped compiler output or stderr for COMPILE_ERROR and RUNTIME_ERROR. */
+  readonly diagnostic?: string;
+}
+
+export interface CapturedExecutionResult {
+  readonly results: readonly CapturedTestRunResult[];
   readonly clampedLimits: boolean;
 }

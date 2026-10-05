@@ -51,6 +51,50 @@ describe('ExecutionService (FR-502, FR-503)', () => {
     expect(results[1]).toMatchObject({ verdict: 'FAILED', passed: false });
     expect(results[1]).not.toHaveProperty('stdout');
     expect(results[1]).not.toHaveProperty('rawActualOutput');
+    expect(results[0]).not.toHaveProperty('rawActualOutput');
+  });
+
+  it('FR-503: runCaptured adds capped output and diagnostics for author-side validation only', async () => {
+    const { fake, service } = setup();
+    fake.when(
+      'bad',
+      fakeResult({
+        statusId: JUDGE0_STATUS.COMPILATION_ERROR,
+        stdout: null,
+        compileOutput: 'e'.repeat(9000),
+      }),
+    );
+    fake.setDefault(() => fakeResult({ stdout: 'nope' }));
+    const req = (code: string) => ({
+      language: 'python' as const,
+      sourceCode: code,
+      limits,
+      tests: [test('a', 'yes', false)],
+    });
+    const ok = await service.runCaptured(req('fine'));
+    expect(ok.results[0]?.rawActualOutput).toBe('nope');
+    const bad = await service.runCaptured(req('bad'));
+    expect(bad.results[0]?.diagnostic).toHaveLength(2048);
+    expect(bad.results[0]?.message).toBe('The code did not compile.');
+    const plain = await service.run(req('bad'));
+    expect(plain.results[0]).not.toHaveProperty('diagnostic');
+  });
+
+  it('FR-503: SIGXFSZ is OUTPUT_LIMIT with a clear message', async () => {
+    const { fake, service } = setup();
+    fake.setDefault(() =>
+      fakeResult({ statusId: JUDGE0_STATUS.RUNTIME_ERROR_SIGXFSZ, stdout: null }),
+    );
+    const { results } = await service.run({
+      language: 'python',
+      sourceCode: 's',
+      limits,
+      tests: [test('a', '')],
+    });
+    expect(results[0]).toMatchObject({
+      verdict: 'OUTPUT_LIMIT',
+      message: 'Output limit exceeded.',
+    });
   });
 
   it('FR-503: compile error maps to a sanitized message (diagnostics only when revealed)', async () => {

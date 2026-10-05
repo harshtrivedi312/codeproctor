@@ -69,20 +69,17 @@ export class ReferenceValidationService {
           });
           continue;
         }
-        const run = await this.execution.run(
-          {
-            language,
-            sourceCode: source,
-            limits: input.limits,
-            tests: variant.tests.map((t) => ({
-              id: t.testCaseId,
-              input: t.input,
-              expectedOutput: t.expectedOutput,
-              reveal: false,
-            })),
-          },
-          { captureActualOutput: true },
-        );
+        const run = await this.execution.runCaptured({
+          language,
+          sourceCode: source,
+          limits: input.limits,
+          tests: variant.tests.map((t) => ({
+            id: t.testCaseId,
+            input: t.input,
+            expectedOutput: t.expectedOutput,
+            reveal: false,
+          })),
+        });
         let passedCount = 0;
         run.results.forEach((r, index) => {
           if (r.passed) {
@@ -98,6 +95,9 @@ export class ReferenceValidationService {
             verdict: r.verdict,
             ...(r.verdict === 'FAILED' && r.rawActualOutput !== undefined
               ? { actualOutput: r.rawActualOutput.slice(0, MAX_FAILURE_OUTPUT_CHARS) }
+              : {}),
+            ...(r.diagnostic !== undefined
+              ? { diagnostic: r.diagnostic.slice(0, MAX_FAILURE_OUTPUT_CHARS) }
               : {}),
           });
         });

@@ -58,9 +58,7 @@ suite('Judge0 sandbox integration', () => {
   it('TC-044 (FR-503): fork bomb and large allocation are killed by limits', async () => {
     const fork = await run('python', 'import os\nwhile True:\n    os.fork()');
     expect(fork?.passed).toBe(false);
-    expect(['TIME_LIMIT', 'RUNTIME_ERROR', 'MEMORY_LIMIT', 'INTERNAL_ERROR']).toContain(
-      fork?.verdict,
-    );
+    expect(['TIME_LIMIT', 'RUNTIME_ERROR', 'MEMORY_LIMIT']).toContain(fork?.verdict);
     const mem = await run('python', "x = bytearray(2 * 1024 * 1024 * 1024)\nprint('done')");
     expect(mem?.passed).toBe(false);
     const after = await run('python', "print('ok')", 'ok');

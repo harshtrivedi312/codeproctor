@@ -140,7 +140,8 @@ export class HttpJudge0Client implements Judge0Client {
       tokens.map((t) => this.send('DELETE', `/submissions/${t}?fields=token`)),
     );
     const failed = outcomes.filter((o) => o.status === 'rejected' || !o.value.ok).length;
-    if (failed > 0) this.logger.warn(`Judge0 could not delete ${failed} of ${tokens.length} submissions`);
+    if (failed > 0)
+      this.logger.warn(`Judge0 could not delete ${failed} of ${tokens.length} submissions`);
   }
 
   private decode(raw: RawJudge0Json, cap: number): Judge0RawResult {
@@ -171,7 +172,11 @@ export class HttpJudge0Client implements Judge0Client {
     };
   }
 
-  private async send(method: 'GET' | 'POST' | 'DELETE', path: string, body?: unknown): Promise<Response> {
+  private async send(
+    method: 'GET' | 'POST' | 'DELETE',
+    path: string,
+    body?: unknown,
+  ): Promise<Response> {
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (this.options.authToken) headers['X-Auth-Token'] = this.options.authToken;
