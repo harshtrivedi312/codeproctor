@@ -403,3 +403,11 @@ QA B made none of these changes. The exact diff is sent to the architecture hub,
 ### B.5 Retention clock-shift hook (for DB-06 and backend)
 
 M-05 steps 5, 5a and 6 need a way to run the retention job with a shifted clock, which the docs do not yet specify. Requirement from QA: the hook exists on staging only, is admin-gated (SUPER_ADMIN, audited, with a fresh password check), and is absent from pilot and production builds. M-05 includes a check that it is absent there. Owners: database-engineer (DB-06, the job and its clock input) and backend-engineer (any route that exposes it). Until the hook is specified, the clock steps rely on the integration tests for TC-072.
+
+## QA B (ops) (D-51)
+
+| ID | Sev | Owner | Item |
+| --- | --- | --- | --- |
+| FU-QAB-01 | should-fix | architecture hub | `.github/workflows/qa.yml` job `zap-baseline` (PR #80 review): (1) it counts High alerts with `jq` and passes on an empty report (unreachable target); (2) it has no `actions/checkout`, so `packages/qa/zap/baseline.conf` and `evaluate.mjs` are not on the runner; (3) it has no `-c baseline.conf`. Fix: add `actions/checkout` and `actions/setup-node` (`.nvmrc`), mount the conf, run `node packages/qa/zap/evaluate.mjs zap/report.json --target-host <host>`, and make a ZAP exit code of 3 (scan failure) fail the job. The ZAP image digest in `packages/qa/zap/README.md` must be bumped together with qa.yml. The full diff was sent to the hub. |
+| FU-QAB-02 | owner decision | owner | Red-team plan rule 2: may a tester use their own face on staging? Default is no (synthetic faces only, CLAUDE.md, architecture.md:22). A yes needs the owner's written approval, cited in the report. The volunteer consent form (D-18, C-11) does not cover it. |
+| FU-QAB-03 | nit | qa-engineer | RT-43, RT-44 and RT-67 rely on proposed ADR 0015; re-read them when the ADR is accepted or changed. |
