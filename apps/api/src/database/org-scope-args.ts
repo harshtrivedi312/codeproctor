@@ -223,12 +223,15 @@ function namesOtherOrg(cursor: PlainObject, orgId: string): boolean {
  *   stamp, so the parent id in the payload must follow ADR 0006 section 2 rule (i).
  * - An unknown operation is refused.
  *
- * Nested writes are walked by org-scope-nested.ts (FU-DB-63): in an org scope a parent-side
+ * Nested writes and nested cursors are walked by org-scope-nested.ts: in an org scope a parent-side
  * `connect`, `connectOrCreate` or `set` is refused (it changes rows the filter never selected:
  * `organization.update({ where: { id: A }, data: { users: { connect: { id: userOfB } } } })`), and
- * so is a nested row of a model with its own org_id that names another org. A child-side `connect`
- * and nested create, update, upsert and delete under an in-scope parent are allowed; the ids in
- * them follow rule (i).
+ * so are nested create, update, upsert, delete and connectOrCreate through a RULE_I relation on
+ * either side (the row on the other side can belong to another org), a nested row of a model with
+ * its own org_id that names another org, and a cursor nested in include or select. A child-side
+ * `connect` or `disconnect` is allowed (it sets or clears the scalar foreign key), and so are nested
+ * create, update, upsert and delete through a SCOPE_HOP, COMPOSITE or ORG_ID relation, where they
+ * act inside the parent's own subtree. The ids that remain follow rule (i).
  *
  * What it does NOT cover (README "Limits"). Only the top-level model, its `where`, its `cursor`,
  * its create/update `orgId` and the nested writes above are looked at. Everything else reached

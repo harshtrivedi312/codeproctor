@@ -14,16 +14,21 @@
 //                     SQL itself must filter by org_id, and the reason says why it is allowed.
 //
 // What it does not do. Only the top-level model, its `where`, its `cursor`, the `orgId` of a create
-// or update, and nested writes (org-scope-nested.ts, FU-DB-63) are looked at. Everything else
+// or update, and nested writes and nested cursors (org-scope-nested.ts) are looked at. Everything else
 // reached through a relation is not (README "Limits"):
 //
 // (a) Ids written through a relation or a scalar foreign key. In an org scope a parent-side
 //     `connect`, `connectOrCreate` or `set` is refused (it changes rows the filter never selected:
 //     `organization.update({ where: { id: A }, data: { users: { connect: { id: userOfB } } } })`),
-//     and so is a nested row of a model with its own org_id that names another org. A child-side
-//     `connect` is the same as setting the scalar foreign key and stays allowed, as do nested
-//     create, update, upsert and delete under an in-scope parent. The ids in all of them follow
-//     ADR 0006 section 2 rule (i): load each through the scoped client first, answer 404 on a miss.
+//     and so are nested create, update, upsert, delete and connectOrCreate through a RULE_I
+//     relation on either side (the row on the other side can belong to another org: `reviewer:
+//     { update: { passwordHash } }`), and a nested row of a model with its own org_id that names
+//     another org. A child-side `connect` or `disconnect` is the same as setting or clearing the
+//     scalar foreign key and stays allowed. Nested create, update, upsert and delete are allowed
+//     only through a SCOPE_HOP, COMPOSITE or ORG_ID relation, where they act inside the parent's own
+//     subtree. A cursor nested in include or select (and the fluent API) is refused. The ids that
+//     remain follow ADR 0006 section 2 rule (i): load each through the scoped client first, answer
+//     404 on a miss.
 // (b) An update that changes a path model's first-hop foreign key (re-parenting, for example
 //     `testSection.update({ data: { testId } })`) is the same as a path create: rule (i).
 // (c) Nested reads are not filtered. `include`, `select`, the fluent API, relation filters,

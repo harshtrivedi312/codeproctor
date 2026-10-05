@@ -150,9 +150,9 @@ cannot be filtered by the extension, so the SQL itself must filter by `org_id`. 
 (`AUTH_BOOTSTRAP`, `BACKGROUND_JOB`, `RETENTION_ERASURE`). A new reason is an architect-reviewed
 change. It cannot be entered from inside an org scope (work that has an org never widens to all
 orgs), but code in a system scope may narrow to one org with `runInOrg`. An org scope cannot switch
-to another org either. `runRawSql` nests inside `runSystem` and inside `runAsUser` or `runInOrg`, in
-either order, but it needs an active scope: with none it throws. Treat every `runSystem` and
-`runRawSql` in a pull request as a review flag.
+to another org either. `runRawSql` needs an active scope: **scope first, then `runRawSql`** (inside
+`runSystem`, `runAsUser` or `runInOrg`). Called with no scope it throws, so there is no other
+order. Treat every `runSystem` and `runRawSql` in a pull request as a review flag.
 
 ### Transactions
 
@@ -177,8 +177,8 @@ runs before the caller's org is known:
 1. **Pre-login lookups go inside `runSystem('AUTH_BOOTSTRAP', ...)`.** Inside it model queries are
    unfiltered, so the lookup by email or token hash works.
 2. **Raw SQL goes inside `runRawSql('<reason>', ...)`, inside that scope.** The lockout counter and
-   the recovery-code consume are examples. Either nesting order works. Outside `runRawSql`, raw SQL
-   is still refused, even in system scope.
+   the recovery-code consume are examples. The order is scope first, then `runRawSql`: it throws
+   with no scope. Outside `runRawSql`, raw SQL is still refused, even in system scope.
 3. **Once the user is known, switch to `runAsUser({ orgId, userId, role }, ...)`** (or
    `runInOrg(orgId, ...)` when there is no user). Narrowing from system scope to an org scope is
    allowed, so no `runInOrg` workaround is needed. Inside the inner scope queries are filtered, and
@@ -213,14 +213,16 @@ async login(email: string, password: string) {
 ## Limits (read before relying on it)
 
 The extension filters the top-level model: its `where`, its `cursor`, and the `orgId` of a create
-or update. A nested-write guard ("Nested writes" below) refuses what could change another org's
-rows through a relation. Everything else reached through a relation is **not** looked at.
+or update. A nested guard ("Nested writes and nested cursors" below) refuses the nested writes and
+nested cursors that could change or rank against another org's rows. Everything else reached
+through a relation is **not** looked at.
 
 - **(a) Ids written through a relation or a scalar foreign key.** A parent-side `connect`,
-  `connectOrCreate` or `set` is refused in an org scope, and so is a nested row of a model with its
-  own `org_id` that names another org (see "Nested writes"). A child-side `connect` is the same as
-  setting the scalar foreign key, and neither is checked: **every such id follows rule (i)**. Load
-  it through the scoped client first, and answer 404 on a miss.
+  `connectOrCreate` or `set`, nested writes through a `RULE_I` relation, and a nested row of a
+  model with its own `org_id` that names another org are refused in an org scope (see "Nested
+  writes and nested cursors"). A child-side `connect` is the same as setting the scalar foreign key,
+  and neither is checked: **every such id follows rule (i)**. Load it through the scoped client
+  first, and answer 404 on a miss.
 - **(b) Re-parenting.** An update that changes a path model's first-hop foreign key, for example
   `testSection.update({ data: { testId } })`, is the same as a path create: rule (i). A `create` on
   a `path` model cannot be stamped either (there is no `org_id` column), so the parent id in the
@@ -242,10 +244,12 @@ rows through a relation. Everything else reached through a relation is **not** l
 - **(e) An open `runRawSql` carries into nested scopes.** A `runAsUser`, `runInOrg` or `runSystem`
   started inside it keeps the hatch, so raw SQL there is not refused. Wrap only the single raw
   statement, never a block that also does model work.
-- **Cursors.** In an org scope a cursor is given the caller's org on models with `org_id`, accepted
-  only for the caller's own row on Organization, and **refused on models without `org_id`** (Prisma
-  finds the cursor row by its own fields, so there is no way to scope it). Page those with `where`
-  plus `orderBy`, for example `where: { id: { gt: lastId } }, orderBy: { id: 'asc' }`.
+- **Cursors.** In an org scope a top-level cursor is given the caller's org on models with
+  `org_id`, accepted only for the caller's own row on Organization, and **refused on models without
+  `org_id`** (Prisma finds the cursor row by its own fields, so there is no way to scope it). Page
+  those with `where` plus `orderBy`, for example `where: { id: { gt: lastId } }, orderBy: { id:
+'asc' }`. A cursor nested in `include`, `select` or the fluent API is refused on every model:
+  **page nested relations with `where`, `take` and `orderBy`** (see below).
 - Prisma queries are lazy. See "Writing queries inside the scope" below.
 - Prisma returns `BigInt` for the identity ids and `Decimal` for scores (FU-DB-06): serialise them
   before sending JSON.
@@ -274,28 +278,48 @@ id into any of these columns, load the row through the scoped client and answer 
 Module tests and code review take their checklist from it, for example "every write of
 `session_questions.test_question_id` loads the test question first".
 
-The same table says which side of each relation holds the key, which the nested-write guard needs
-(next section).
+The same table says which side of each relation holds the key, and its class, which the nested
+guard needs (next section).
 
-## Nested writes
+## Nested writes and nested cursors
 
 In an org scope, `applyOrgScope` walks the `data` of `create`, `update`, `updateMany`, `upsert`
-(and their `*AndReturn` forms) at any depth. It visits relation fields only (the table above says
-which fields are relations), so it never descends into a Json column and leaves a scalar list's
+(and their `*AndReturn` forms) at any depth, and the `include` and `select` of every operation. It
+visits relation fields only (the table above says which fields are relations and which class of
+foreign key each one is), so it never descends into a Json column and leaves a scalar list's
 `{ set: [...] }` alone. It adds no query. It **refuses** with `OrgScopeViolationError` (the message
 names models and fields, never values):
 
 - `connect`, `connectOrCreate` and `set` on a **parent-side** relation (the key is on the related
   model): they change rows the scope filter never selected. Example:
   `organization.update({ where: { id: A }, data: { users: { connect: { id: userOfB } } } })`.
+- `create`, `createMany`, `update`, `updateMany`, `upsert`, `delete`, `deleteMany` and
+  `connectOrCreate` **through a `RULE_I` relation, on either side** (and a parent-side
+  `disconnect`). The row on the other side of a `RULE_I` relation can belong to another org after
+  one rule (i) slip, so
+  `sessionReview.update({ data: { reviewer: { connect: { id: userOfB }, update: { passwordHash } } } })`
+  would take over that user, and `user.update({ data: { sessionReviews: { updateMany } } })` would
+  rewrite other orgs' reviews that name this user. Write those rows with their own scoped call.
 - a nested `create`, `update`, `upsert` or `createMany` of a model with its own `org_id` that names
   another org, through `orgId` or `org: { connect }`; a nested create of an organization; and a
   nested operation the guard does not know.
+- **a `cursor` anywhere inside `include` or `select`**, at any depth (and in `_count`). Prisma finds
+  a nested cursor row by its own fields too (shown on Prisma 7: `id >= (SELECT id FROM
+proctor_events WHERE id = $cursor)`), so it ranks the caller's rows against another org's row.
+  The fluent API (`session.findUnique(...).proctorEvents({ cursor })`) reaches the extension as a
+  `select` on the relation and is refused the same way. **Page nested relations with `where`,
+  `take` and `orderBy`.**
 
-It **allows**: a child-side `connect` (the key is on this model: the same as setting the scalar
-foreign key, so it stays under rule (i)), and nested `create`, `update`, `delete` and `upsert` under
-an in-scope parent (they act inside that parent's subtree). A `createMany` of a path model is flat
-and is not walked.
+It **allows**:
+
+- a **child-side `connect` or `disconnect`** through any relation (the key is on this model: the
+  same as setting or clearing the scalar foreign key, so it stays under rule (i));
+- nested `create`, `update`, `upsert` and `delete` through a **`SCOPE_HOP`, `COMPOSITE` or `ORG_ID`**
+  relation (`test.sections`, `candidate.invitations`, `organization.questions`). Only there does the
+  nested write act inside the parent's own subtree, in the parent's org by construction. That is
+  **not** true through a `RULE_I` relation, which is why those are refused above.
+
+A `createMany` of a path model is flat and is not walked.
 
 ## Writing queries inside the scope
 
@@ -340,7 +364,7 @@ which stays one statement, and be ready to retry on `P2002` elsewhere.
 | `prisma.service.ts`, `database.module.ts`      | The Nest service (connect, disconnect) and the global module                                                       |
 | `org-scope-map.ts`                             | The scope map and `orgFilter`                                                                                      |
 | `org-scope-args.ts`                            | Pure argument rewriting per operation, and the operation coverage check                                            |
-| `org-scope-nested.ts`                          | The nested-write guard: refuses parent-side connect, connectOrCreate and set, and nested rows naming another org   |
+| `org-scope-nested.ts`                          | The nested guards: nested writes that reach another org's rows, and nested cursors                                 |
 | `org-scope-relations.ts`                       | Every foreign key classified (`FK_CLASSES`, `RULE_I_REFERENCES`) and the side of every relation that holds the key |
 | `org-scope.extension.ts`                       | The `$extends` query extension and `OrgScopedPrismaClient`                                                         |
 | `org-context.ts`, `org-context.interceptor.ts` | The AsyncLocalStorage context, its API, and the HTTP population point                                              |
@@ -350,8 +374,9 @@ which stays one statement, and be ready to retry on `P2002` elsewhere.
 
 Tests (`*.spec.ts`) name TC-008 and NFR-04 or FR-103: the map completeness test and its failure
 cases, the argument rewriting for every operation and model, the context and interceptor, the
-extension without a database, the TC-008 matrix against a real Postgres (every operation as org A
-against org B's rows in all 31 models, with positive controls), and a smoke test that builds the API
+extension without a database, the TC-008 matrix against a real Postgres (all read operations and the
+update and delete operations as org A against org B's rows in all 31 models, with positive controls;
+upsert, create, cursors, nested writes and the HTTP path on chosen models), and a smoke test that builds the API
 and runs the compiled client and `DatabaseModule` on Node. `auth-bootstrap.spec.ts` covers what
 BE-02's auth needs: raw SQL and transactions inside system scope, and the statement counts
 (NFR-04, FR-104).
