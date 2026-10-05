@@ -10,8 +10,10 @@ import { defaultSettings } from '@/mocks/admin-handlers';
 import { MOCK_USERS, seedMockRefresh } from '@/mocks/auth-handlers';
 import { server } from '@/mocks/server';
 import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
+import { useQueryClient } from '@tanstack/react-query';
 import { CandidatesPage } from './candidates-page';
 import { DataSettingsPage } from './data-settings-page';
+import { adminKeys, useUpdateSettings } from './queries';
 
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
@@ -70,7 +72,9 @@ describe('cached API data does not cross users (FR-103, FR-104)', () => {
     expect(screen.queryByText('Ada Lovelace')).not.toBeInTheDocument();
     expect(screen.queryByText('Grace Hopper')).not.toBeInTheDocument();
     release();
-    await waitFor(() => expect(screen.queryByText('Ada Lovelace')).not.toBeInTheDocument());
+    // Org B has no candidates: its own empty state renders, and still none of org A's rows.
+    expect(await screen.findByTestId('table-empty')).toBeInTheDocument();
+    expect(screen.queryByText('Ada Lovelace')).not.toBeInTheDocument();
   });
 
   it('FR-103 FR-104: settings forms do not start from the previous org values', async () => {
@@ -106,5 +110,59 @@ describe('cached API data does not cross users (FR-103, FR-104)', () => {
     expect(await screen.findByLabelText('Keep recordings and ID images for (days)')).toHaveValue(
       30,
     );
+  });
+
+  it('FR-103 FR-104: a settings save still in flight when the user changes cannot write into the new cache', async () => {
+    const holder: {
+      save: ((retentionDays: number) => Promise<unknown>) | null;
+      read: (() => unknown) | null;
+    } = { save: null, read: null };
+    function Saver(): null {
+      const mutation = useUpdateSettings();
+      const qc = useQueryClient();
+      React.useEffect(() => {
+        holder.save = (retentionDays) => mutation.mutateAsync({ retentionDays });
+        holder.read = () => qc.getQueryData(adminKeys.settings);
+      });
+      return null;
+    }
+    renderAsStaff(
+      <>
+        <Capture />
+        <Saver />
+        <RequireRole>
+          <DataSettingsPage />
+        </RequireRole>
+      </>,
+      MOCK_USERS.admin,
+    );
+    await screen.findByLabelText('Keep recordings and ID images for (days)');
+
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    server.use(
+      http.patch('*/v1/admin/settings', async () => {
+        await gate;
+        return HttpResponse.json({ ...defaultSettings(), retentionDays: 45 }); // org A's value
+      }),
+    );
+    const saving = holder.save!(45);
+    await captured.auth!.signOut();
+    await waitFor(() =>
+      expect(screen.queryByLabelText('Keep recordings and ID images for (days)')).toBeNull(),
+    );
+    server.use(
+      http.get('*/v1/admin/settings', () =>
+        HttpResponse.json({ ...defaultSettings(), retentionDays: 30 }),
+      ),
+    );
+    await signInViaApi(MOCK_USERS.admin);
+    expect(await screen.findByLabelText('Keep recordings and ID images for (days)')).toHaveValue(
+      30,
+    );
+    release();
+    await saving;
+    expect((holder.read!() as { retentionDays: number }).retentionDays).toBe(30);
+    expect(screen.getByLabelText('Keep recordings and ID images for (days)')).toHaveValue(30);
   });
 });
