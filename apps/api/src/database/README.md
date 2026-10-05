@@ -409,6 +409,29 @@ else is rescued, so:
 - The run methods return a native `Promise` for a returned query, never a `PrismaPromise`
   (`Scoped<T>` in `org-context.ts`).
 
+## Errors and logging carry no argument values (FU-DB-70)
+
+Errors are logged (pino writes the message, the stack and own properties such as `meta`), and
+tokens, OTPs, hashes and media keys must never reach a log. Three rules:
+
+- **The factory sets `errorFormat: 'minimal'`** (no code frame with the calling source lines).
+- **Never enable query logging.** `log: ['query']` and `$on('query')` print every query with its
+  parameters. The factory passes no `log` option, and a test fails if any source file turns it on.
+- **The org-scoped client scrubs the values `minimal` leaves in** (`error-scrub.ts`). Shown on
+  Prisma 7: a validation error prints the rejected arguments; `invalid input syntax for type uuid:
+"<value>"` echoes the value (also from a failing raw query); a check or not-null violation lists
+  the whole failing row in `meta.driverAdapterError.cause.detail`; and that driver error's own
+  message, shown by `util.inspect`, repeats the database text. The scrub rewrites the error in place
+  (so `instanceof` and `error.code` still work): free text that can hold values becomes a fixed
+  sentence, the cause keeps only codes and names, a validation error keeps the names of the rejected
+  arguments, and the SQLSTATE stays. A unique, foreign key, not-found, check or not-null violation
+  keeps its message, which names a constraint or table and never a value. It sends no query.
+
+`error-hygiene.spec.ts` proves it against Postgres: a unique violation on a known token hash, an
+id that is not a uuid, a check and a foreign key violation, a record not found, validation errors, a
+failing raw query, an interactive and a batch transaction. The plain factory client (the seed, and
+BE-02's interim `PrismaModule` until FU-DB-58) does **not** scrub: do not log its errors as they are.
+
 ## `upsert` in an org scope is not a native upsert
 
 In system scope (and on the plain client) `upsert` is one `INSERT ... ON CONFLICT DO UPDATE`. In
@@ -445,6 +468,7 @@ which stays one statement, and be ready to retry on `P2002` elsewhere.
 | `org-context.ts`, `org-context.interceptor.ts` | The AsyncLocalStorage context, its API, and the HTTP population point                                              |
 | `prisma.module.ts`                             | BE-02's interim unscoped client for auth bootstrap only (not part of DB-05)                                        |
 | `errors.ts`                                    | `OrgContextMissingError`, `OrgScopeViolationError`, `RawQueryNotAllowedError`                                      |
+| `error-scrub.ts`                               | Keeps argument values out of the Prisma errors that are logged (FU-DB-70)                                          |
 | `testing/`                                     | Test helpers (excluded from the build): throwaway migrated Postgres, fixtures, scope checks                        |
 
 Tests (`*.spec.ts`) name TC-008 and NFR-04 or FR-103: the map completeness test and its failure

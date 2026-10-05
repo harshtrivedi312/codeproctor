@@ -52,6 +52,7 @@ import type { PrismaClient } from '../generated/prisma/client.js';
 import { OrgContextMissingError, OrgScopeViolationError, RawQueryNotAllowedError } from './errors';
 import type { ScopeSource } from './org-context';
 import { applyOrgScope, assertSystemScopeWrite } from './org-scope-args';
+import { scrubPrismaError } from './error-scrub';
 import { ORG_SCOPE } from './org-scope-map';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
 
@@ -60,6 +61,15 @@ interface HookArgs {
   readonly operation: string;
   readonly args: unknown;
   readonly query: (args: unknown) => Promise<unknown>;
+}
+
+/** Runs the query, and keeps argument values out of any Prisma error it throws (FU-DB-70). */
+async function execute(query: HookArgs['query'], args: unknown): Promise<unknown> {
+  try {
+    return await query(args);
+  } catch (error) {
+    throw scrubPrismaError(error);
+  }
 }
 
 function ruleFor(model: string): OrgScopeRule | undefined {
@@ -76,7 +86,7 @@ export function orgScopeExtension(source: ScopeSource) {
         // Raw queries and any other operation that is not tied to a model.
         if (model === undefined) {
           if (store?.rawSqlReason === undefined) throw new RawQueryNotAllowedError(operation);
-          return query(args);
+          return execute(query, args);
         }
 
         const rule = ruleFor(model);
@@ -85,7 +95,7 @@ export function orgScopeExtension(source: ScopeSource) {
             `${model} has no entry in ORG_SCOPE (apps/api/src/database/org-scope-map.ts).`,
           );
         }
-        if (rule.kind === 'unscoped') return query(args);
+        if (rule.kind === 'unscoped') return execute(query, args);
 
         const scope = store?.scope;
         if (scope === undefined) throw new OrgContextMissingError(`${model}.${operation}`);
@@ -93,10 +103,11 @@ export function orgScopeExtension(source: ScopeSource) {
           // System scope is unfiltered, but a nested relation write and an orgId in an update are
           // refused here too (a row is never moved to another org).
           assertSystemScopeWrite(model as ModelName, rule, operation, args);
-          return query(args);
+          return execute(query, args);
         }
 
-        return query(
+        return execute(
+          query,
           applyOrgScope({ model: model as ModelName, rule, operation, args, orgId: scope.orgId }),
         );
       },
