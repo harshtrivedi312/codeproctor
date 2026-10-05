@@ -25,31 +25,44 @@ export function publishSession(session: AuthSession | null): void {
 }
 
 let inFlight: Promise<AuthSession | null> | null = null;
+// Bumped on sign-out. A refresh that started before the bump must not restore the session.
+let generation = 0;
+
+/** Called by sign-out: refreshes already in flight are ignored when they finish. */
+export function invalidateRefreshes(): void {
+  generation += 1;
+  inFlight = null;
+}
 
 /** One refresh at a time; concurrent callers share the result. Returns null when it failed. */
 export function refreshSession(): Promise<AuthSession | null> {
-  inFlight ??= doRefresh().finally(() => {
-    inFlight = null;
+  if (inFlight) return inFlight;
+  const mine = doRefresh().finally(() => {
+    if (inFlight === mine) inFlight = null;
   });
-  return inFlight;
+  inFlight = mine;
+  return mine;
 }
 
 async function doRefresh(): Promise<AuthSession | null> {
+  const startedIn = generation;
   try {
     await mockingReady;
     const response = await fetch(`${apiBaseUrl}/v1/auth/refresh`, {
       method: 'POST',
       credentials: 'include',
     });
+    if (startedIn !== generation) return null;
     if (!response.ok) {
       publishSession(null);
       return null;
     }
     const session = (await response.json()) as AuthSession;
+    if (startedIn !== generation) return null;
     publishSession(session);
     return session;
   } catch {
-    publishSession(null);
+    if (startedIn === generation) publishSession(null);
     return null;
   }
 }
