@@ -255,6 +255,150 @@ describe('Security page: set up, disable, regenerate (FR-102)', () => {
   });
 });
 
+describe('Security page: PR #26 error contract (FR-102, FU-BE-39)', () => {
+  const post = (path: string, body: unknown, token: string | null = getAccessToken()) =>
+    fetch(`${base}/${path}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+  const stripVolatile = (b: object) => ({ ...b, instance: undefined, traceId: undefined });
+
+  it('FR-102: a wrong password is a 403 problem body with code REAUTH_FAILED and the exact detail', async () => {
+    await pageAs(MOCK_USERS.recruiter);
+    const res = await post('2fa/setup/start', { currentPassword: 'nope' });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({
+      status: 403,
+      title: 'Forbidden',
+      detail: 'The current password is incorrect.',
+      code: 'REAUTH_FAILED',
+    });
+  });
+
+  it('FR-102: a missing password is 400, no token is 401', async () => {
+    await pageAs(MOCK_USERS.recruiter);
+    expect((await post('2fa/setup/start', {})).status).toBe(400);
+    expect((await post('2fa/disable', {})).status).toBe(400);
+    expect((await post('2fa/setup/confirm', { currentPassword: 'x' })).status).toBe(400);
+    expect((await post('2fa/disable', { currentPassword: 'x' }, null)).status).toBe(401);
+  });
+
+  it('FR-102: 5 wrong passwords lock the account; the correct one is then refused with the identical 403 REAUTH_FAILED body', async () => {
+    await pageAs(MOCK_USERS.recruiter);
+    let lastWrong: object = {};
+    for (let i = 0; i < 5; i++) {
+      const res = await post('2fa/setup/start', { currentPassword: `wrong-${i}` });
+      expect(res.status).toBe(403);
+      lastWrong = (await res.json()) as object;
+    }
+    const locked = await post('2fa/setup/start', {
+      currentPassword: MOCK_USERS.recruiter.password,
+    });
+    expect(locked.status).toBe(403);
+    expect(stripVolatile((await locked.json()) as object)).toEqual(stripVolatile(lastWrong));
+    // The same lock stops a login: generic 401.
+    const login = await fetch(`${base}/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        email: MOCK_USERS.recruiter.email,
+        password: MOCK_USERS.recruiter.password,
+      }),
+    });
+    expect(login.status).toBe(401);
+  });
+
+  it('FR-102: failures from login and from re-auth share one counter, and a correct password resets it', async () => {
+    await pageAs(MOCK_USERS.recruiter);
+    for (let i = 0; i < 3; i++) {
+      await fetch(`${base}/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: MOCK_USERS.recruiter.email, password: 'bad-password-1' }),
+      });
+    }
+    for (let i = 0; i < 2; i++) await post('2fa/disable', { currentPassword: 'bad-password-1' });
+    expect(
+      (await post('2fa/setup/start', { currentPassword: MOCK_USERS.recruiter.password })).status,
+    ).toBe(403);
+  });
+
+  it('FR-102: disable as SUPER_ADMIN or REVIEWER with the right password is 403 TWO_FACTOR_REQUIRED_FOR_ROLE; a wrong password is REAUTH_FAILED first', async () => {
+    for (const user of [MOCK_USERS.admin, MOCK_USERS.reviewer]) {
+      resetAuthTestState();
+      await pageAs(user, { twoFactorOn: true });
+      const wrong = await post('2fa/disable', { currentPassword: 'nope' });
+      expect(((await wrong.json()) as { code: string }).code).toBe('REAUTH_FAILED');
+      const right = await post('2fa/disable', { currentPassword: user.password });
+      expect(right.status).toBe(403);
+      expect(await right.json()).toMatchObject({
+        detail: 'Two-factor authentication is required for your role.',
+        code: 'TWO_FACTOR_REQUIRED_FOR_ROLE',
+      });
+      document.body.innerHTML = '';
+    }
+  });
+
+  it('FR-102: disable and regenerate with 2FA off are 409', async () => {
+    await pageAs(MOCK_USERS.recruiter);
+    const pw = { currentPassword: MOCK_USERS.recruiter.password };
+    expect((await post('2fa/disable', pw)).status).toBe(409);
+    expect((await post('2fa/recovery-codes/regenerate', pw)).status).toBe(409);
+  });
+
+  it('FR-102: the dialog shows a clear role message for 403 TWO_FACTOR_REQUIRED_FOR_ROLE and stays signed in', async () => {
+    const calls = watchSessionCalls();
+    server.use(
+      http.post(`${base}/2fa/disable`, () =>
+        HttpResponse.json(
+          { status: 403, detail: 'x', code: 'TWO_FACTOR_REQUIRED_FOR_ROLE' },
+          { status: 403 },
+        ),
+      ),
+    );
+    const u = await pageAs(MOCK_USERS.author, { twoFactorOn: true });
+    await openAndSubmit(u, 'Disable 2FA', MOCK_USERS.author.password);
+    expect(
+      await within(dialog()).findByText('Two-factor sign-in is required for your role'),
+    ).toBeInTheDocument();
+    expect(within(dialog()).queryByText('Password incorrect')).not.toBeInTheDocument();
+    expect(calls.logout).toBe(0);
+    expect(getAccessToken()).not.toBeNull();
+  });
+
+  it('FR-102: a 400 on the password step shows a field message, a 409 a state-conflict message', async () => {
+    server.use(
+      http.post(`${base}/2fa/setup/start`, () =>
+        HttpResponse.json({ status: 400 }, { status: 400 }),
+      ),
+    );
+    const u = await pageAs(MOCK_USERS.recruiter);
+    await openAndSubmit(u, 'Set up 2FA', 'anything');
+    expect(await within(dialog()).findByText('Enter your current password.')).toBeInTheDocument();
+    await u.click(within(dialog()).getByRole('button', { name: 'Cancel' }));
+
+    server.use(
+      http.post(`${base}/2fa/setup/start`, () =>
+        HttpResponse.json({ status: 409 }, { status: 409 }),
+      ),
+    );
+    await openAndSubmit(u, 'Set up 2FA', 'anything');
+    expect(await within(dialog()).findByText('This changed in the meantime')).toBeInTheDocument();
+    expect(getAccessToken()).not.toBeNull();
+  });
+
+  it('FR-102: an empty password is stopped in the form before any request (400 never needed)', async () => {
+    const u = await pageAs(MOCK_USERS.recruiter);
+    await u.click(screen.getByRole('button', { name: 'Set up 2FA' }));
+    await u.click(within(dialog()).getByRole('button', { name: 'Continue' }));
+    expect(await within(dialog()).findByText('Enter your current password.')).toBeInTheDocument();
+  });
+});
+
 describe('Security page: entry point, forced enrollment, accessibility', () => {
   it.each(Object.values(MOCK_USERS))(
     'FR-102: the user menu links every staff role ($role) to /admin/security',

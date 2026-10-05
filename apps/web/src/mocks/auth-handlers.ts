@@ -1,4 +1,5 @@
 import { http, HttpResponse } from 'msw';
+import QRCode from 'qrcode';
 import type { Schemas } from '@/lib/api/client';
 import { apiBaseUrl } from '@/lib/env';
 
@@ -198,29 +199,90 @@ export function mockRecoveryCodesFor(user: { email: string; role: string }, gen:
   });
 }
 
-const unauthenticated = () =>
-  HttpResponse.json({ code: 'unauthenticated', message: 'Sign in again.' }, { status: 401 });
-const reauthFailed = () =>
-  HttpResponse.json({ code: 'REAUTH_FAILED', message: 'Password incorrect' }, { status: 403 });
-const conflict = (code: string, message: string) =>
-  HttpResponse.json({ code, message }, { status: 409 });
+/** RFC 7807 problem body as the real API's global filter sends it (backend PR #26). */
+function problem(
+  request: Request,
+  status: number,
+  detail: string,
+  code?: 'REAUTH_FAILED' | 'TWO_FACTOR_REQUIRED_FOR_ROLE',
+  errors?: string[],
+): Response {
+  const titles: Record<number, string> = {
+    400: 'Bad Request',
+    401: 'Unauthorized',
+    403: 'Forbidden',
+    409: 'Conflict',
+  };
+  return HttpResponse.json(
+    {
+      type: 'about:blank',
+      title: titles[status] ?? 'Error',
+      status,
+      detail,
+      instance: new URL(request.url).pathname,
+      traceId: 'mock-trace',
+      ...(errors ? { errors } : {}),
+      ...(code ? { code } : {}),
+    },
+    { status },
+  );
+}
+const REAUTH_DETAIL = 'The current password is incorrect.';
 
 /**
- * Shared checks of the four re-auth endpoints (FR-102, FU-BE-39): a signed-in user, a body with
- * `currentPassword`, and a password that matches. A wrong password is 403 REAUTH_FAILED, never 401.
- * The mock does not rate limit; that is the server's job.
+ * Shared checks of the four re-auth endpoints (FR-102, FU-BE-39), in the real API's order: a
+ * signed-in user (401), a valid body (400), then the password. A wrong password and a locked
+ * account give the identical 403 REAUTH_FAILED, never 401. Wrong attempts count toward the same
+ * 5-failure lockout as login; a correct one gives the attempt back. The mock does not rate limit
+ * requests; that is the server's job.
  */
 async function reauth(
   request: Request,
+  extra?: (body: Record<string, unknown>) => string[],
 ): Promise<{ user: MockUser; body: Record<string, unknown> } | Response> {
   const role = mockRoleFromToken(request.headers.get('Authorization'));
   const user = role ? Object.values<MockUser>(MOCK_USERS).find((u) => u.role === role) : undefined;
-  if (!user) return unauthenticated();
-  const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-  if (typeof body.currentPassword !== 'string' || body.currentPassword !== user.password) {
-    return reauthFailed();
+  if (!user) return problem(request, 401, 'Unauthorized');
+  const raw: unknown = await request.json().catch(() => ({}));
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  const errors = [
+    ...(typeof body.currentPassword === 'string' &&
+    body.currentPassword.length >= 1 &&
+    body.currentPassword.length <= 1024
+      ? []
+      : ['currentPassword must be longer than or equal to 1 characters']),
+    ...(extra ? extra(body) : []),
+  ];
+  if (errors.length > 0)
+    return problem(request, 400, 'Request validation failed', undefined, errors);
+  const state = load();
+  const key = user.email;
+  const locked = (state.lockExpiresAt[key] ?? 0) > Date.now();
+  if (locked || body.currentPassword !== user.password) {
+    if (!locked) {
+      state.failed[key] = (state.failed[key] ?? 0) + 1;
+      if (state.failed[key] >= MAX_FAILED_LOGINS) {
+        state.failed[key] = 0;
+        state.lockExpiresAt[key] = Date.now() + LOCK_MS;
+      }
+      save(state);
+    }
+    return problem(request, 403, REAUTH_DETAIL, 'REAUTH_FAILED');
   }
+  state.failed[key] = 0;
+  save(state);
   return { user, body };
+}
+const conflict = (request: Request, detail: string) => problem(request, 409, detail);
+const sixDigits = (body: Record<string, unknown>): string[] =>
+  typeof body.code === 'string' && /^\d{6}$/.test(body.code) ? [] : ['code must be 6 digits'];
+
+async function qrFor(uri: string): Promise<string> {
+  try {
+    return await QRCode.toDataURL(uri, { margin: 1, width: 192 });
+  } catch {
+    return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+  }
 }
 
 function userFromChallenge(token: string): MockUser | undefined {
@@ -331,31 +393,30 @@ export function createAuthHandlers() {
       const user = role
         ? Object.values<MockUser>(MOCK_USERS).find((u) => u.role === role)
         : undefined;
-      if (!user) return unauthenticated();
+      if (!user) return problem(request, 401, 'Unauthorized');
       return HttpResponse.json({ enabled: twoFactorOn(user, load()) });
     }),
 
     http.post(`${base}/2fa/setup/start`, async ({ request }) => {
       const checked = await reauth(request);
       if (checked instanceof Response) return checked;
-      if (twoFactorOn(checked.user, load())) return conflict('already_enabled', 'Already on.');
+      if (twoFactorOn(checked.user, load())) return conflict(request, 'Two-factor is already on.');
+      const otpauthUri = `otpauth://totp/CodeProctor:${encodeURIComponent(checked.user.email)}?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=CodeProctor`;
       return HttpResponse.json({
         manualKey: 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP',
-        otpauthUri: `otpauth://totp/CodeProctor:${encodeURIComponent(checked.user.email)}?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=CodeProctor`,
+        otpauthUri,
+        qrDataUrl: await qrFor(otpauthUri),
       });
     }),
 
     http.post(`${base}/2fa/setup/confirm`, async ({ request }) => {
-      const checked = await reauth(request);
+      const checked = await reauth(request, sixDigits);
       if (checked instanceof Response) return checked;
       const { user, body } = checked;
       const state = load();
-      if (twoFactorOn(user, state)) return conflict('already_enabled', 'Already on.');
+      if (twoFactorOn(user, state)) return conflict(request, 'Two-factor is already on.');
       if (body.code !== MOCK_TOTP_CODE) {
-        return HttpResponse.json(
-          { code: 'invalid_code', message: 'That code did not match.' },
-          { status: 400 },
-        );
+        return problem(request, 400, 'The code is not valid.');
       }
       // Mandatory roles are enrolled through the login flow; for them this just records it.
       if (isMandatory(user)) state.enrolled.push(user.email);
@@ -371,13 +432,15 @@ export function createAuthHandlers() {
       if (checked instanceof Response) return checked;
       const { user } = checked;
       if (isMandatory(user)) {
-        return HttpResponse.json(
-          { code: 'two_factor_mandatory', message: 'Two-factor is required for your role.' },
-          { status: 403 },
+        return problem(
+          request,
+          403,
+          'Two-factor authentication is required for your role.',
+          'TWO_FACTOR_REQUIRED_FOR_ROLE',
         );
       }
       const state = load();
-      if (!twoFactorOn(user, state)) return conflict('not_enabled', 'Two-factor is not on.');
+      if (!twoFactorOn(user, state)) return conflict(request, 'Two-factor is not on.');
       state.totpOn = state.totpOn.filter((email) => email !== user.email);
       save(state);
       return new HttpResponse(null, { status: 204 });
@@ -388,7 +451,7 @@ export function createAuthHandlers() {
       if (checked instanceof Response) return checked;
       const { user } = checked;
       const state = load();
-      if (!twoFactorOn(user, state)) return conflict('not_enabled', 'Two-factor is not on.');
+      if (!twoFactorOn(user, state)) return conflict(request, 'Two-factor is not on.');
       const gen = (state.recoveryGen[user.email] ?? 0) + 1;
       state.recoveryGen[user.email] = gen;
       save(state);

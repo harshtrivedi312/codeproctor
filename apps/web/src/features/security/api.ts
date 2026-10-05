@@ -1,6 +1,6 @@
 import { api, type Schemas } from '@/lib/api/client';
 import { refreshSession } from '@/lib/auth-session';
-import { REAUTH_FAILED_CODE } from './schemas';
+import { REAUTH_FAILED_CODE, ROLE_REQUIRED_CODE } from './schemas';
 
 /*
  * Calls for the Security page. None of them may sign the user out: a wrong password is HTTP 403
@@ -13,11 +13,13 @@ import { REAUTH_FAILED_CODE } from './schemas';
 export type Failure =
   /** Wrong current password (403 REAUTH_FAILED). */
   | 'password'
-  /** Wrong first code during set-up (400). */
+  /** 400: wrong first code during set-up, or a missing or invalid field. */
   | 'code'
   /** The state changed elsewhere (409), for example 2FA is already on. */
   | 'conflict'
-  /** Some other 403, for example the role may not do this. */
+  /** 403 TWO_FACTOR_REQUIRED_FOR_ROLE: Super Admin and Reviewer cannot turn 2FA off. */
+  | 'role'
+  /** Some other 403. */
   | 'forbidden'
   /** 401 even after a refresh. */
   | 'session'
@@ -28,7 +30,7 @@ export type Outcome<T> = { ok: true; data: T } | { ok: false; failure: Failure }
 
 interface Result<T> {
   data?: T | undefined;
-  error?: Schemas['ApiError'] | undefined;
+  error?: Schemas['ProblemDetails'] | Schemas['ApiError'] | undefined;
   response: Response;
 }
 
@@ -42,7 +44,16 @@ async function run<T>(send: () => Promise<Result<T>>, empty?: T): Promise<Outcom
       return data === undefined ? { ok: false, failure: 'unknown' } : { ok: true, data };
     }
     if (response.status === 403) {
-      return { ok: false, failure: error?.code === REAUTH_FAILED_CODE ? 'password' : 'forbidden' };
+      const code = error?.code;
+      return {
+        ok: false,
+        failure:
+          code === REAUTH_FAILED_CODE
+            ? 'password'
+            : code === ROLE_REQUIRED_CODE
+              ? 'role'
+              : 'forbidden',
+      };
     }
     if (response.status === 400) return { ok: false, failure: 'code' };
     if (response.status === 409) return { ok: false, failure: 'conflict' };
@@ -56,6 +67,8 @@ async function run<T>(send: () => Promise<Result<T>>, empty?: T): Promise<Outcom
 export interface SetupStart {
   manualKey: string;
   otpauthUri: string;
+  /** QR code as a PNG data URL, made by the server. */
+  qrDataUrl: string;
 }
 
 export const fetchTwoFactorStatus = async (): Promise<boolean> => {

@@ -1,6 +1,5 @@
 'use client';
 import { zodResolver } from '@hookform/resolvers/zod';
-import QRCode from 'qrcode';
 import * as React from 'react';
 import { useForm } from 'react-hook-form';
 import { Alert } from '@/components/ui/alert';
@@ -53,9 +52,13 @@ const FAILURE_HINT: Record<
   Exclude<Failure, 'password' | 'code'>,
   { title: string; hint: string }
 > = {
+  role: {
+    title: 'Two-factor sign-in is required for your role',
+    hint: 'Super Admins and Reviewers cannot turn it off. If you lost your phone, use a recovery code or ask a Super Admin.',
+  },
   conflict: {
     title: 'This changed in the meantime',
-    hint: 'Close this window and reload the page to see the current state.',
+    hint: 'Two-factor sign-in was already turned on or off somewhere else. Close this window and reload the page to see the current state.',
   },
   forbidden: {
     title: 'Your role cannot do this',
@@ -101,19 +104,16 @@ export function ActionDialog({
   const [failure, setFailure] = React.useState<Failure | null>(null);
   const copy = COPY[action];
 
-  async function onPassword(values: PasswordFormValues): Promise<'wrong' | 'failed' | 'ok'> {
+  async function onPassword(
+    values: PasswordFormValues,
+  ): Promise<'wrong' | 'invalid' | 'failed' | 'ok'> {
     setFailure(null);
     if (action === 'setup') {
       const out = await startSetup(values.currentPassword);
       if (!out.ok) return fail(out.failure);
-      try {
-        const qr = await QRCode.toDataURL(out.data.otpauthUri, { margin: 1, width: 192 });
-        setPassword(values.currentPassword);
-        setStage({ kind: 'confirm', manualKey: out.data.manualKey, qr });
-        return 'ok';
-      } catch {
-        return fail('unknown');
-      }
+      setPassword(values.currentPassword);
+      setStage({ kind: 'confirm', manualKey: out.data.manualKey, qr: out.data.qrDataUrl });
+      return 'ok';
     }
     if (action === 'disable') {
       const out = await disableTwoFactor(values.currentPassword);
@@ -127,9 +127,11 @@ export function ActionDialog({
     return 'ok';
   }
 
-  function fail(f: Failure): 'wrong' | 'failed' {
+  function fail(f: Failure): 'wrong' | 'invalid' | 'failed' {
     if (f === 'password') return 'wrong';
-    setFailure(f === 'code' ? 'unknown' : f);
+    // 400 here means the password field was missing or invalid.
+    if (f === 'code') return 'invalid';
+    setFailure(f);
     return 'failed';
   }
 
@@ -235,7 +237,7 @@ function PasswordStep({
   destructive: boolean;
   initialWrong: boolean;
   failure: Failure | null;
-  onSubmit: (values: PasswordFormValues) => Promise<'wrong' | 'failed' | 'ok'>;
+  onSubmit: (values: PasswordFormValues) => Promise<'wrong' | 'invalid' | 'failed' | 'ok'>;
   onCancel: () => void;
 }): React.JSX.Element {
   const {
@@ -259,6 +261,8 @@ function PasswordStep({
     // Never keep a password that did not work (or any password after a failure) in the field.
     setValue('currentPassword', '');
     if (outcome === 'wrong') setError('currentPassword', { message: REAUTH_FAILED_MESSAGE });
+    if (outcome === 'invalid')
+      setError('currentPassword', { message: 'Enter your current password.' });
     setFocus('currentPassword');
   }
 

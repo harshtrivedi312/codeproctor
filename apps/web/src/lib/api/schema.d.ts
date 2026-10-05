@@ -183,7 +183,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Begin optional TOTP set-up for a signed-in user. Re-asks the current password (FR-102, FU-BE-39). */
+    /** Signed-in user begins optional TOTP set-up. Mirrors backend PR */
     post: operations['startTwoFactorSetup'];
     delete?: never;
     options?: never;
@@ -217,7 +217,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Turn TOTP off. Refused (403, code two_factor_mandatory) for Super Admin and Reviewer. */
+    /** Turn TOTP off. Not for Super Admin and Reviewer. */
     post: operations['disableTwoFactor'];
     delete?: never;
     options?: never;
@@ -234,7 +234,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Issue a new set of recovery codes; the old set stops working */
+    /** Replace all recovery codes; the old set stops working */
     post: operations['regenerateRecoveryCodes'];
     delete?: never;
     options?: never;
@@ -478,6 +478,17 @@ export interface components {
     ApiError: {
       code: string;
       message: string;
+    };
+    ProblemDetails: {
+      type: string;
+      title: string;
+      status: number;
+      detail?: string;
+      instance: string;
+      traceId: string;
+      errors?: string[];
+      /** @enum {string} */
+      code?: 'REAUTH_FAILED' | 'TWO_FACTOR_REQUIRED_FOR_ROLE';
     };
     RecoveryCodes: {
       recoveryCodes: string[];
@@ -969,7 +980,7 @@ export interface operations {
       };
     };
     responses: {
-      /** @description Secret and otpauth URI for the QR code */
+      /** @description Secret, otpauth URI and QR code (PNG data URL) */
       200: {
         headers: {
           [name: string]: unknown;
@@ -978,34 +989,44 @@ export interface operations {
           'application/json': {
             manualKey: string;
             otpauthUri: string;
+            qrDataUrl: string;
           };
         };
       };
-      /** @description Not signed in */
+      /** @description Missing or invalid currentPassword */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Missing or invalid access token */
       401: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
-      /** @description Wrong current password (code REAUTH_FAILED), or the role may not do this. Never a sign-out. */
+      /** @description Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401). */
       403: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
-      /** @description Two-factor is already on */
+      /** @description Two-factor was turned on concurrently */
       409: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
     };
@@ -1035,40 +1056,40 @@ export interface operations {
           'application/json': components['schemas']['RecoveryCodes'];
         };
       };
-      /** @description Wrong code */
+      /** @description Wrong code, or missing or invalid body */
       400: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
-      /** @description Not signed in */
+      /** @description Missing or invalid access token */
       401: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
-      /** @description Wrong current password (code REAUTH_FAILED), or the role may not do this. Never a sign-out. */
+      /** @description Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401). */
       403: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
-      /** @description Two-factor is already on */
+      /** @description Two-factor state changed concurrently */
       409: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
     };
@@ -1095,22 +1116,31 @@ export interface operations {
         };
         content?: never;
       };
-      /** @description Not signed in */
+      /** @description Missing or invalid currentPassword */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Missing or invalid access token */
       401: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
-      /** @description Wrong current password (code REAUTH_FAILED), or the role may not do this. Never a sign-out. */
+      /** @description REAUTH_FAILED for a wrong password or locked account (checked first), otherwise TWO_FACTOR_REQUIRED_FOR_ROLE for Super Admin and Reviewer */
       403: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
       /** @description Two-factor is not on */
@@ -1119,7 +1149,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
     };
@@ -1148,22 +1178,31 @@ export interface operations {
           'application/json': components['schemas']['RecoveryCodes'];
         };
       };
-      /** @description Not signed in */
+      /** @description Missing or invalid currentPassword */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Missing or invalid access token */
       401: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
-      /** @description Wrong current password (code REAUTH_FAILED), or the role may not do this. Never a sign-out. */
+      /** @description Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401). */
       403: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
       /** @description Two-factor is not on */
@@ -1172,7 +1211,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
     };
