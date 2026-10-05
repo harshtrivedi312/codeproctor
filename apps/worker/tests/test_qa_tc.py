@@ -219,10 +219,11 @@ def test_TC_076_C28_queue_is_high_then_medium_then_low_whatever_the_scores_and_i
     None
 ):
     items = [
-        QueueItem("low-old", "LOW", 19.0, 1),  # a LOW session never jumps a higher band
-        QueueItem("med", "MEDIUM", 20.0, 5),
+        # Scores fall as the band rises on purpose: a sort by score alone would put LOW first.
+        QueueItem("low-old", "LOW", 70.0, 1),
+        QueueItem("med", "MEDIUM", 65.0, 5),
         QueueItem("high", "HIGH", 60.0, 9),
-        QueueItem("low-new", "LOW", 1.0, 8),
+        QueueItem("low-new", "LOW", 69.0, 8),
     ]
     for seed in range(5):
         shuffled = items[:]

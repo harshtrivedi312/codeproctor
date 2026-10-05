@@ -268,13 +268,13 @@ Branch `qa/step-4b`, off main after PR #54 and #55.
 
 ### 11.1 Done
 
-- PR #54 reviewer nits: the captureLogs test asserts the route path appears in the logs; the "no second mail" recount waits a `setImmediate`; the no-op USER_UNLOCKED row is checked with `findMany` length 1 plus actor and org; the registry test asserts every `COVERED_ELSEWHERE` key exists in `ROUTE_PERMISSIONS`; the vacuous `Wrong-Password-1` scan is dropped. The RECRUITER disable test in tc-003 is retitled and now checks the AUTH_2FA_DISABLED row.
+- PR #54 reviewer nits: the captureLogs test asserts the route path appears in the logs; deferred-mail assertions use `flushDeferred` (settle plus several event-loop turns) instead of one `setImmediate`; the no-op USER_UNLOCKED row is checked with `findMany` length 1 plus actor and org; the registry test asserts every `COVERED_ELSEWHERE` key exists in `ROUTE_PERMISSIONS`; the vacuous `Wrong-Password-1` scan is dropped. The RECRUITER disable test in tc-003 is retitled and now checks the AUTH_2FA_DISABLED row.
 - QA-D-04 (cold-start test, nit about matching `/2fa/verify` and the detail): left to the agent flipping it in backend PR #60 (branch qa/qa-d-04-flip); not touched here.
 - TC-065: matrix row now lists `stop-inflight.test.ts` and `finish-inflight.test.ts` (PR #47: stop and finish wait for a batch being signed). SDK suite: 171 passed. The batch-count question in proctor-sdk.md ("flush timer window") is a product decision for the hub, not a test gap.
-- Gate tests: `packages/qa/src/p1-gate.test.ts` runs the gate as CI does, on synthetic Jest and JUnit reports and a fake docs tree (`P1_GATE_ROOT`): failing P1 test, failing P2 note, Verified row with no run, crashed file, unknown TC id, KNOWN DEFECT passing and failing, staged tests with and without `--strict`, pytest `TC_901` names, missing report (exit 2), manual cases.
-- TC-008 gate reader: `.github/workflows/qa.yml` now runs the apps/api unit Jest config with `--json` and feeds `api-unit.json` to the gate, so TC-008 (`src/database/tc-008-org-isolation.spec.ts`, DB PR #30, not on main yet) is read like any P1 case once it merges. The matrix row stays Planned until then.
+- Gate tests: `packages/qa/src/p1-gate.test.ts` (24 tests) runs the gate as CI does, on synthetic Jest, Vitest, Playwright and JUnit reports and a fake docs tree (`P1_GATE_ROOT`): failing P1 test, failing P2 note, Verified row with no run or only staged tests, unknown TC id, id only in the describe block, KNOWN DEFECT passing, failing and only in the describe block, staged tests with and without `--strict`, `--strict` on an automated P1 case with no run, a failed file with only passing tests (afterAll, Jest `numRuntimeErrorTestSuites`, Vitest `success: false`), pytest `TC_901` names, `<error>` and `<skipped>`, a collection `<error>` with no TC id, Playwright nested suites, `ok:false` and all-skipped specs, missing report (exit 2), manual cases (exit 0). The gate itself now fails a test file that failed as a whole even when every recorded test passed, and a JUnit `<error>` with no TC id. `tsx` is a devDependency of packages/qa.
+- TC-008 gate reader: proposed to the hub in section 12 (a workflow step plus `api-unit.json` in the gate's report list); NOT applied (CI config goes through the hub). The matrix row stays Planned.
 - Matrix rows TC-002, TC-003, TC-004, TC-005, TC-006 and TC-098 (they existed only on qa/step-2b before #26) are on main and match the runs: integration suite 13 suites, 96 passed, 148 staged, 3 todo (BE03 off). TC-008 stays Planned.
-- C-28 (#55) re-check of the worker: TC-075 unchanged (53 worker tests pass); TC-076 matrix row rewritten to the C-28 expectation and two QA tests added (queue is HIGH, MEDIUM, LOW whatever the scores and input order; fast path only for LOW without a hold, `needs_review` always true).
+- C-28 (#55) re-check of the worker: TC-075 unchanged (`test_qa_tc.py` and `test_risk.py`: 55 tests pass; the whole worker suite: 166 passed, 1 skipped); TC-076 matrix row rewritten to the C-28 expectation and two QA tests added (queue is HIGH, MEDIUM, LOW even when a lower band has the higher score, in shuffled input order; fast path only for LOW without a hold, `needs_review` always true).
 
 ### 11.2 Not done, and why
 
@@ -292,7 +292,15 @@ Branch `qa/step-4b`, off main after PR #54 and #55.
 | New (P1) | none | Recruiters, exports and webhooks see no score or verdict before the reviewer signs off: GET results as RECRUITER before the verdict is 403 or has no result fields; after the verdict it works (BE-14, FR-1002, FR-1003) |
 | New (P2, FE-11, FE-13) | none | Fast-review UI: summary and one-click verdict, timeline reachable, axe clean |
 
-Questions for the integrity-engineer and hub (DL-18 as relayed): the worker's `queue_sort_key` orders by band, then score (high first), then age, then id. DL-18 says LOW is oldest first, and holds sit between HIGH and MEDIUM; `QueueItem` carries no hold flag, so the worker cannot place them. Is the ordering owned by the worker or by BE-13? QA tests the queue through the API once it exists; the current worker tests pin only the band order.
+Answered (DL-20): BE-13 (the API) owns the full review-queue order, because holds (identity not confirmed, manual scoring) are API state. The worker supplies only band, score and the fast or full path. BE-13 applies DL-18: HIGH, then holds, then MEDIUM, then LOW, oldest first within each tier. The worker tests keep only the band-order assertion. Planned BE-13 tests (go with TC-076, file `apps/api/test/integration/tc-076.int.test.ts`; no TC id invented):
+
+| Planned test | Level | Owner | Expected result |
+| --- | --- | --- | --- |
+| Queue endpoint ordering per tier | integration | backend-engineer (BE-13) | With sessions seeded in every tier (HIGH, a LOW with an identity hold, a MEDIUM with a manual short-answer hold, MEDIUM, LOW), the queue returns HIGH, then held sessions, then MEDIUM, then LOW, regardless of insertion order |
+| Ties by age | integration | backend-engineer (BE-13) | Within a tier, equal sessions come oldest first; a LOW queue is oldest first |
+| Hold flags come from API state | integration | backend-engineer (BE-13) | Confirming the identity or scoring the short answer by a reviewer removes the hold and moves the session to its band tier; the flags are not taken from the client or the worker request |
+| Fast path versus full review | integration | backend-engineer (BE-13) | A LOW session with no hold is marked fast-review; any hold, MEDIUM or HIGH is full review |
+| Nothing auto-clears | integration | backend-engineer (BE-12, BE-13) | After grading, a LOW clean session is UNDER_REVIEW, never COMPLETED, and appears in the queue; COMPLETED only after a verdict |
 
 ### 11.4 Proposed TC cases, compliance decisions C-17 to C-33
 
@@ -311,7 +319,7 @@ Same rule as section 9: no TC IDs are invented here; the hub assigns them and QA
 
 ## 12. Workflow step for TC-008 (hub request; CI config goes through the hub, CLAUDE.md rule 12)
 
-`packages/qa/src/p1-gate.ts` can already read the apps/api unit Jest JSON (`api-unit.json`). To make the P1 gate see the TC-008 spec (`apps/api/src/database/tc-008-org-isolation.spec.ts`, DB PR #30), `.github/workflows/qa.yml` needs one extra step before "P1 gate" and `test-results/api-unit.json` appended to the gate's report list. Land it together with, or after, DB PR #30. Exact change (a diff against main; QA did NOT apply it):
+The gate has no api-unit-specific code: the apps/api unit Jest JSON (`api-unit.json`) is ordinary Jest JSON, which it reads like any other Jest report. To make the P1 gate see the TC-008 spec (`apps/api/src/database/tc-008-org-isolation.spec.ts`, DB PR #30), `.github/workflows/qa.yml` needs one extra step before "P1 gate" and `test-results/api-unit.json` appended to the gate's report list. Land it together with, or after, DB PR #30. Exact change (a diff against main; QA did NOT apply it):
 
 ```diff
 @@ -113,6 +113,12 @@ jobs:

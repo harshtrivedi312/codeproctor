@@ -15,7 +15,7 @@ import {
   login,
   PASSWORD,
 } from '../support/harness';
-import { actor, Actor, call, tokenFromUrl } from '../support/be03-helpers';
+import { actor, Actor, call, flushDeferred, tokenFromUrl } from '../support/be03-helpers';
 import {
   ADMIN_USERS,
   BE03_READY,
@@ -300,7 +300,7 @@ auditSuite(
       ).body as Body;
       const id = invited.id as string;
       expect(invited.status).toBe('invited');
-      await h.settle();
+      await flushDeferred(h);
       const mail = h.mails.slice(mailsBefore).find((m) => m.method === 'sendStaffInvite');
       expect(mail?.to).toBe(email);
       expect(mail?.url).toMatch(/\/admin\/set-password#token=[^&]+$/);
@@ -359,8 +359,7 @@ auditSuite(
         expectNoDataProblem(invite);
         // No audit row, so no change either: no user row left behind, and no invite mail sent.
         expect(await h.owner.user.count({ where: { email } })).toBe(0);
-        await h.settle();
-        await new Promise((r) => setImmediate(r));
+        await flushDeferred(h);
         expect(h.mails.slice(mailsBefore).filter((m) => m.method === 'sendStaffInvite')).toEqual(
           [],
         );
@@ -410,7 +409,7 @@ auditSuite(
       await call(h, 'POST', `${ADMIN_USERS}/${target.id}/unlock`, admin.token, {
         currentPassword: PASSWORD,
       }).expect(204);
-      await h.settle();
+      await flushDeferred(h);
 
       const inviteMail = h.mails.find((m) => m.method === 'sendStaffInvite' && m.to === email);
       const inviteToken = tokenFromUrl(inviteMail?.url ?? '');

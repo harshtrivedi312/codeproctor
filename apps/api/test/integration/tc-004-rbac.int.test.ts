@@ -23,7 +23,7 @@ import {
   signIn,
   stableProblem,
 } from '../support/harness';
-import { actor, Actor, call } from '../support/be03-helpers';
+import { actor, Actor, call, flushDeferred } from '../support/be03-helpers';
 import {
   ADMIN_USERS,
   allowedRoles,
@@ -452,7 +452,7 @@ rbacSuite(
       created,
     );
     // The refused call sent no invite mail and wrote no USER_INVITED row beyond the created ones.
-    await h.settle();
+    await flushDeferred(h);
     expect(
       h.mails.filter((m) => m.method === 'sendStaffInvite' && m.to.startsWith('qa-rate-')),
     ).toHaveLength(created);
