@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Proposed** 2026-10-05; revised after review rounds 1, 2 and 3. The owner accepts or amends. "(owner decision C-xx)" marks what docs/compliance/decisions.md (PR #44) decides. "(DL decision under C-25)" marks the Delivery Lead's ruling on how C-25 applies. "(architect detail)" marks what this ADR adds, which the owner must confirm. Section 9 lists the owner questions. |
+| Status | **Proposed** 2026-10-05; revised after review rounds 1 to 4. The owner accepts or amends. "(owner decision C-xx)" marks what docs/compliance/decisions.md (PR #44) decides. "(interim default pending the owner, OQ-16)" marks the re-check rule the Delivery Lead recommends to the owner, which is not yet decided. "(architect detail)" marks what this ADR adds, which the owner must confirm. Section 9 lists the owner questions. |
 | Author | architecture hub |
 | Decides | How C-02 ("no face match"), C-19 and C-25 are built: the two accommodation settings, schema, shared contract, API, locking, audit, state machine, scoring and reporting |
 | Serves | FR-305, FR-403, FR-606, FR-105, FR-805, FR-901, FR-1001, FR-1003; BR-12; NFR-05 |
@@ -16,7 +16,9 @@
   > The invitation's accommodation carries the waiver reason. The identity check records a waived state. A "video ID check done: yes/no" field is recorded by the recruiter. All three write audit rows.
 - There are two separate accommodation settings with distinct meanings: "no identity check" (the verification step is waived, and C-19 applies) and "face detectors off" (the in-browser and server face detectors are off during the test) (owner decision C-25).
 - Biometrics rest on explicit consent (owner decisions C-02, C-29). A person reviews every session, and GRADED always goes to UNDER_REVIEW (owner decision C-28).
-- **Today the SDK couples the two settings:** disabling the FACE detector also disables the identity re-check. That cannot satisfy C-25. The identity re-check is therefore part of identity verification and is governed by "no identity check", not by the FACE detector (DL decision under C-25). ADR 0013 round 7 changes its `DETECTOR_DISABLED` refusal to match.
+- **The re-check is server face processing, and its rule is open.** The periodic identity re-check compares a webcam frame with the selfie on the server every 2 minutes. ADR 0013 (PR #39) records this as open owner question Q20, and here it is **OQ-16**. The Delivery Lead relayed it and recommends option B; at the time of writing it is not yet in decisions.md.
+  - **Interim default (option B, pending the owner, OQ-16):** the server refuses `IDENTITY_RECHECK` when **either** the identity check is waived **or** the FACE detector is off. "Face detectors off" therefore also stops the server re-check, which matches C-25's literal wording ("the in-browser and server face detectors are off"). A candidate who has FACE off, for example because of a facial difference, is not face-matched every 2 minutes and collects no FACE_MISMATCH.
+  - **Alternative (option A):** the re-check counts as part of identity verification and is governed only by "no identity check"; FACE off would not stop it. This is the narrower earlier reading, kept on record.
 
 ## 2. Options for where the waived state lives
 
@@ -34,7 +36,7 @@ The consistency invariant is: the waiver key is present exactly when a WAIVED ro
 
 | Setting | Stored as | What is off | What still runs |
 | --- | --- | --- | --- |
-| **Face detectors off** | `accommodations.disabledDetectors` contains `FACE` | In-browser NO_FACE and MULTIPLE_FACES, plus any server-side face-presence analysis (none exists today) | ID image, selfie, liveness, the initial face match **and the periodic identity re-check** (DL decision under C-25); GAZE unless it is also off |
+| **Face detectors off** | `accommodations.disabledDetectors` contains `FACE` | In-browser NO_FACE and MULTIPLE_FACES, and the server identity re-check, which is server face processing (interim default pending the owner, OQ-16) | ID image, selfie, liveness and the initial face match; GAZE unless it is also off. Under option A the re-check would also keep running |
 | **No identity check** | `accommodations.identityCheckWaiver` present | ID image, selfie, liveness, the initial face match and the identity re-check (no FACE_MISMATCH) | Room scan, recordings (WEBCAM and AUDIO), and every detector not disabled |
 
 How the two settings interact (refusal codes are architect detail):
@@ -42,12 +44,12 @@ How the two settings interact (refusal codes are architect detail):
 | FACE off | Waiver | ID and selfie step | Initial match | Browser face detection | Re-check (`IDENTITY_RECHECK` presign and `/identity/recheck`) |
 | --- | --- | --- | --- | --- | --- |
 | no | no | yes | yes | yes | runs |
-| yes | no | yes | yes | no | **runs**; not refused |
+| yes | no | yes | yes | no | 409 `DETECTOR_DISABLED` (interim default pending the owner, OQ-16; under option A it would run) |
 | no | yes | no: `ID_IMAGE` and `SELFIE` presigns and `POST /candidate/session/identity` get 409 `IDENTITY_CHECK_WAIVED` | no | yes | 409 `IDENTITY_CHECK_WAIVED` |
 | yes | yes | no | no | no | 409 `IDENTITY_CHECK_WAIVED` |
 
-- ADR 0013 5.6 no longer refuses a re-check with `DETECTOR_DISABLED` when FACE is off (round 7).
-- The SDK must capture re-check frames independently of the FACE detector. Today `vision-monitor.ts` runs the re-check only when the face task is loaded.
+- ADR 0013 5.6 refuses the re-check with `DETECTOR_DISABLED` when FACE is off, and with `IDENTITY_CHECK_WAIVED` when the identity check is waived. That matches the interim default; ADR 0013 Q20 and this ADR's OQ-16 are answered together.
+- In the SDK, the re-check runs only when the face task is loaded and the app passes `recheckIdentity`. That fits the interim default. Under option A, the SDK would have to capture re-check frames independently of the FACE detector.
 
 **Refusing biometric processing switches off every face-based detector (architect detail; owner question OQ-15).** When `reasonCode` is `REFUSED_BIOMETRIC_PROCESSING`, the server adds `FACE` and `GAZE` to `disabledDetectors` as it sets the waiver. GAZE uses face landmarks, which count as face geometry: a "scan of face geometry" is a biometric identifier under BIPA 740 ILCS 14/10 (flag for owner/Legal advice, not verified by the architect; the DPIA records it).
 - **Re-enabling is narrow.** While the reason is `REFUSED_BIOMETRIC_PROCESSING`, `FACE` or `GAZE` may be removed from `disabledDetectors` only while the session is INVITED, before the candidate has passed the OTP (in OPENED the candidate may already be reading the consent document). The request must also carry the explicit body flag `confirmFaceDetectorsOn: true`, and it writes the distinct audit action `ACCOMMODATION_LOCKED_DETECTORS_REENABLED`. Otherwise the server returns 409 `ACCOMMODATION_LOCKED`.
@@ -120,7 +122,7 @@ Paths are proposals; the final shape goes in api-contract.md (ADR 0012). Everyth
 | `POST /tests/:id/invitations` | `invitation:create`, **plus `invitation_accommodations:update` when the body carries `accommodations`** | A single invite may carry `identityCheckWaiver`. The writes and audit rows are listed under "Write shape" below. After commit, the route enqueues `verify-session` with ADR 0013's deduplicated job id. Bulk CSV rejects a waiver as a row error |
 | `GET /invitations/:id/accommodations` | `invitation_accommodations:read` (RECRUITER, SUPER_ADMIN) | Returns `invitationAccommodationsResponseSchema`. This is the **only** path that returns the reason. It writes `INVITATION_ACCOMMODATIONS_READ` (FR-105) and **fails closed**: if the audit insert fails, the response is 500 with no body. It returns an `ETag`. Response headers: `Cache-Control: no-store, private` |
 | `PATCH /invitations/:id/accommodations` | `invitation_accommodations:update` | Body `accommodationsPatchSchema`. **Requires `If-Match`**, otherwise 428; a mismatch returns 412. `Cache-Control: no-store, private`. The rules are listed below |
-| `PUT /sessions/:id/identity/video-check` | `identity_video_check:record` | Body `{ done }`. Allowed in any session state while a WAIVED row exists, and the value may be changed later. Without a WAIVED row: 409 `IDENTITY_NOT_WAIVED`. After erasure or R-10: 404. `video_check_by` comes only from the authenticated user |
+| `PUT /sessions/:id/identity/video-check` | `identity_video_check:record` | Body `{ done }`. Allowed in any session state while a WAIVED row exists, and the value may be changed later. After loading the session in scope, it writes with `updateMany({ where: { sessionId, status: 'WAIVED' } })`; if 0 rows change (no row, or a racing removal), it returns 409 `IDENTITY_NOT_WAIVED`, never a silent 200. After erasure or R-10: 404. `video_check_by` comes only from the authenticated user |
 | Candidate identity routes and presigns | CANDIDATE | 409 `IDENTITY_CHECK_WAIVED` (section 3) |
 
 RECRUITER may waive (owner decision C-02). SUPER_ADMIN may as well (architect detail).
@@ -130,7 +132,9 @@ RECRUITER may waive (owner decision C-02). SUPER_ADMIN may as well (architect de
 - **The `identityCheckWaiver` key is never removed by omission.** Omitting the key means "unchanged". Removal needs an explicit `identityCheckWaiver: null`. Every other key uses replace semantics.
 - **Removal under REFUSED_BIOMETRIC_PROCESSING** also needs `confirmBiometricWaiverRemoval: true`; without it the request gets 409 `ACCOMMODATION_LOCKED`. Removing the waiver turns the ID image, selfie, face match and re-check back on, so it is the most biometric-invasive change and the most guarded.
 - The server-only key `identityCheckWaived` (section 7) is rejected if a client sends it. PATCH returns 409 `ACCOMMODATION_LOCKED` once the session is erased or past R-10.
-- **A no-op PATCH** (deep-equal result) still writes `INVITATION_ACCOMMODATIONS_UPDATED` with `changedKeys: []`. A guessed body with a matching ETag therefore always leaves an audit row.
+- **A no-op PATCH** (deep-equal result) still writes `INVITATION_ACCOMMODATIONS_UPDATED` with `changedKeys: []`. A guessed body with a matching ETag therefore always leaves an audit row. Resending a stored waiver that is deep-equal to the current value (compared under the lenient stored schema) is such a no-op, not a "change" that gets 409.
+- **Which reason governs (S8).** The locked-detector and removal-confirm rules are evaluated against the **stored** `reasonCode`, read under the lock. A PATCH that both removes the waiver and re-enables FACE or GAZE needs both flags and writes both audit actions. Once the waiver is gone, changes to FACE and GAZE are ordinary accommodation changes. That is a deliberate choice: the protection is tied to the stored refusal.
+- **Feature flag, enforced on the server (S2).** While the flag `accommodations.biometricRefusalReason` is off, the server rejects `reasonCode: REFUSED_BIOMETRIC_PROCESSING` on **both** `POST /tests/:id/invitations` and the PATCH, with 422 `REASON_NOT_ENABLED`. The flag is global (system config), not per org. A UI-only flag does not satisfy the hard gate. Stored rows stay readable, and removal stays allowed, after the flag is turned off.
 
 **Windows.**
 
@@ -140,21 +144,34 @@ RECRUITER may waive (owner decision C-02). SUPER_ADMIN may as well (architect de
 | Remove the waiver (`null`, plus the confirm flag under REFUSED_BIOMETRIC_PROCESSING) | **INVITED only** | 409 `ACCOMMODATION_LOCKED` |
 | Re-enable FACE or GAZE under REFUSED_BIOMETRIC_PROCESSING (`confirmFaceDetectorsOn: true`) | **INVITED only** | 409 `ACCOMMODATION_LOCKED` |
 | Change a set waiver | Never. Remove it and set it again, both within the windows | 409 `ACCOMMODATION_LOCKED` |
+| **Redact the reason note** (`POST /invitations/:id/accommodations/redact-note`) | Any state before erasure | 409 `ACCOMMODATION_LOCKED` after erasure or R-10 |
 
-- OPENED is excluded because a candidate in OPENED has passed the OTP and may already be reading the consent document (fsd.md §3; consent is signed from OPENED, ADR 0013 CS-4.4a).
-- **The candidate client re-reads the projection after CONSENTED.** It fetches `AccommodationsService.projection()` again once the session is CONSENTED, and uses that fresh copy to decide whether to show the identity step and the "what still runs" text. A stale copy could otherwise skip the identity step, and the gate would then refuse forever.
+- OPENED is excluded because a candidate in OPENED has passed the OTP and may already be reading the consent document (fsd.md §3; consent is signed from OPENED, ADR 0013 CS-4.4a). That reason only matters under REFUSED_BIOMETRIC_PROCESSING; the owner may allow removal in OPENED for the other reasons (question 4).
+- **Recovering from a mistaken waiver after INVITED.** Revoke the invitation and send a new one; both steps are audited. This is the documented path.
+- **Redacting the reason note (B2).** Health data typed into `reasonNote` can be removed at any time before erasure (GDPR Art. 5(1)(c) and Art. 16).
+  - The operation sets `reasonNoteRemoved: true` and drops the note, which is the same marker R-4 uses.
+  - It leaves `reasonCode`, the WAIVED row and the gate untouched, so there is no race.
+  - It uses the same lock, `If-Match` and permission (`invitation_accommodations:update`) as the PATCH.
+  - It writes `IDENTITY_CHECK_WAIVER_NOTE_REDACTED`, with no text.
+- **The candidate client re-reads the projection (S4).** Removal is INVITED-only, so a stale copy can no longer skip the identity step. The live risk is the reverse: a waiver set in CONSENTED after the client last read the projection. The client would then show the identity step, and its uploads would get 409. So:
+  - the client fetches `AccommodationsService.projection()` again once the session is CONSENTED;
+  - **a 409 `IDENTITY_CHECK_WAIVED` from any identity presign or route makes the client re-read the projection and show the waived text.**
+- **Under REFUSED_BIOMETRIC_PROCESSING (N3),** an ID image or selfie that was uploaded in a race is deleted by the handler that answers 409. It does not wait for the ingest-close sweep.
 - Removing the waiver also deletes a video check recorded on the row before the test. The audit rows remain. The recruiter UI says so.
 
 **Lock mechanism (dependency: ADR 0006 §8, Proposed, PR #41).**
 - Scope: STAFF (`runAsUser`, entered by the interceptor). The whole PATCH runs in one **interactive transaction** at **READ COMMITTED**. REPEATABLE READ or SERIALIZABLE would turn the transitions' compare-and-set into serialization errors.
+- **Spike first (architect detail, not verified).** db-engineer confirms that the org-scope extension's raw-SQL hatch check and the AsyncLocalStorage scope both apply to `tx.$queryRaw` on the interactive-transaction client.
 - The first statement on the transaction client is `SessionStateService.lockForAccommodation(tx, sessionId)`.
 - **Chosen: raw SQL under ADR 0006 §8.5's hatch.**
   - `runRawSql('accommodation-lock', ...)` wraps only this single statement, so the hatch does not carry into nested scopes.
-  - The statement is a tagged `$queryRaw` (never `$queryRawUnsafe`): `` SELECT status FROM sessions WHERE id = ${sessionId} AND org_id = ${orgId} FOR UPDATE ``. The SQL filters `org_id` itself.
+  - The statement is a tagged `$queryRaw` (never `$queryRawUnsafe`): `` SELECT status FROM sessions WHERE id = ${sessionId} AND org_id = ${orgId} FOR NO KEY UPDATE ``. The SQL filters `org_id` itself.
+  - **`FOR NO KEY UPDATE`, not `FOR UPDATE`.** Plain `FOR UPDATE` conflicts with the `FOR KEY SHARE` lock that every child-table FK insert takes (`media_chunks`, `proctor_events`, `identity_checks`), so a mid-test PATCH such as extra time would stall all ingest. `FOR NO KEY UPDATE` still serialises against the transitions' `UPDATE`s, which take the same lock mode.
   - The call site is listed in FU-DB-67.
   - The row lock is held until the writes commit.
 - **Alternative considered:** a no-op `tx.session.updateMany({ where: { id, orgId }, data: { ... } })` also takes the row lock, with no raw SQL. It is not chosen: with empty `data`, Prisma may not issue an UPDATE (not verified), and writing a real column just to lock is misleading. db-engineer may switch to it if a spike shows Prisma emits the UPDATE.
 - The state rules are checked on the locked status. Each `SessionStateService.transition()` is a compare-and-set `UPDATE ... WHERE status = <expected>`, which waits on the row lock and re-evaluates after the PATCH commits.
+- **Lock order: `sessions` first, everywhere.** The PATCH locks `sessions` and then updates `invitations`. Every other path that writes both rows must do the same. In particular, start-session (VERIFIED → IN_PROGRESS, which sets `invitations.used_at`) and link resolution update the session row before the invitation. Deadlock (40P01) and serialisation failure (40001) are retried once; after that they map to 409 `ACCOMMODATION_LOCKED`, never 500.
 
 **Write shape (ADR 0006 §8.2: no nested writes, rule (i)).** Every write is a separate top-level scoped call on the transaction client.
 - **Invite:**
@@ -174,7 +191,10 @@ RECRUITER may waive (owner decision C-02). SUPER_ADMIN may as well (architect de
 - **Unique violations on `(session_id, attempt)`:**
   - the PATCH loses the race: 409 `ACCOMMODATION_LOCKED`, and the whole transaction, audit rows included, rolls back;
   - the candidate upload loses: 409 `IDENTITY_CHECK_WAIVED`, never a 500.
-- **Trigger.** A waiver set in CONSENTED has no identity route to enqueue `verify-session`. So after commit, both the PATCH and the invite path enqueue it with ADR 0013's deduplicated job id.
+- **Trigger (S1).** A waiver set in CONSENTED has no identity route to enqueue `verify-session`, so after commit both the PATCH and the invite path enqueue it.
+  - A deduplicated job id would not work. A room-scan job can read the state just before the PATCH commits; the PATCH's enqueue then lands inside the dedup TTL and is dropped, the first job refuses silently, and the session is stuck.
+  - The accommodations path therefore enqueues with **debounce or replace mode**, aligned with ADR 0013 round 9, which moves `verify-session` to debounce mode. If that mode is unavailable, it uses a fresh job id that bypasses deduplication.
+  - A failed enqueue (Redis down) raises an alert. The daily job also re-enqueues `verify-session` for any session that has sat in CONSENTED with a WAIVED row for more than 10 minutes.
 - **Only the accommodations path writes WAIVED.** Test: no SERVICE-scope writer (the match job, the outcome handlers, `verify-session`) can set `status = 'WAIVED'`.
 
 **Gate rule.** CONSENTED → VERIFIED refuses **silently** when no identity row exists. That is the ordinary state before the identity step, and `verify-session` is also enqueued by the system-check and room-scan routes. It refuses **and alerts** only on an inconsistency:
@@ -186,7 +206,7 @@ RECRUITER may waive (owner decision C-02). SUPER_ADMIN may as well (architect de
 **Why the lock exists.** A waiver must not wipe out a failed or low-confidence match. Once an attempt exists, the existing path applies: attempt 2, then MANUAL_REVIEW, and the candidate is never blocked (ADR 0004 §1). This is owner question 4, because C-02 says "case by case".
 
 **ETag (not an oracle).**
-- The ETag is `HMAC-SHA256(server key, invitationId || canonical jsonb)`, truncated and base64url-encoded. The key is a server secret held in the vault. Without the key, a caller cannot check a guessed body against it.
+- The ETag is `HMAC-SHA256(k, invitationId || canonical jsonb)`, truncated, base64url-encoded, and sent as a **strong, quoted** ETag (`"..."`). `k` is derived with HKDF from a vault secret under the dedicated label `codeproctor/accommodations-etag/v1`, and is shared with no other HMAC use. Rotating the key makes outstanding ETags fail with 412, so the client re-reads. Without the key, a caller cannot check a guessed body.
 - The no-op audit row above covers the remaining probe, where a PATCH sends a guessed body together with a valid ETag.
 - `ETag` and `If-Match` values are never logged.
 
@@ -202,10 +222,15 @@ RECRUITER may waive (owner decision C-02). SUPER_ADMIN may as well (architect de
 **Logging.**
 - The request and body loggers redact `accommodations.notes`, `accommodations.identityCheckWaiver.reasonNote` and `accommodations.identityCheckWaiver.reasonCode` (pino `redact` paths), with a test. These values are health-adjacent (CLAUDE.md logging rule).
 - `ETag` and `If-Match` are never logged.
+- **Validation errors never echo values (S7).** For the accommodations DTOs, zod and class-validator errors report the path and a code, never the received value (an enum mismatch or a too-long note would otherwise echo it into problem+json and logs).
+- Redact paths cover `req.body` for **both** `POST /tests/:id/invitations` and the PATCH, plus any response-body logging of the GET.
+- Test: a 400 for a bad `reasonNote` contains no part of the note, in the response or the logs.
 
 **Rate limits.** Per staff user: PATCH accommodations 30 a minute, PUT video-check 30 a minute, GET accommodations 120 a minute (NFR-04).
 
-**Audit rows.** Every audit row is written in the same transaction as its change. Metadata holds IDs and action names only (ADR 0001 C-3). The action names are neutral and never encode a reason.
+**Audit rows.** Every audit row is written in the same transaction as its change. Metadata holds IDs and action names only (ADR 0001 C-3). The action names are neutral.
+
+**Reason inference (S6).** `ACCOMMODATION_LOCKED_DETECTORS_REENABLED`, and a removal that needed `confirmBiometricWaiverRemoval`, occur only under REFUSED_BIOMETRIC_PROCESSING, so they reveal the reason class. Audit rows for invitation accommodations (every action in this table except the video-check rows) are therefore readable only by holders of `invitation_accommodations:read`. The confirm flag is not recorded in metadata.
 
 | Action | Entity | When | Marker |
 | --- | --- | --- | --- |
@@ -213,6 +238,7 @@ RECRUITER may waive (owner decision C-02). SUPER_ADMIN may as well (architect de
 | `ACCOMMODATION_LOCKED_DETECTORS_REENABLED` | invitation | FACE or GAZE switched back on under the locked-detector rule (INVITED only) | architect detail |
 | `IDENTITY_CHECK_WAIVED` | identity_check | Waiver set and WAIVED row written | owner decision C-19 |
 | `IDENTITY_CHECK_WAIVER_REMOVED` | invitation | Waiver removed (INVITED only); metadata holds the deleted row's `identityCheckId` | architect detail |
+| `IDENTITY_CHECK_WAIVER_NOTE_REDACTED` | invitation | Reason note redacted; no text | architect detail |
 | `IDENTITY_VIDEO_CHECK_DONE` / `IDENTITY_VIDEO_CHECK_NOT_DONE` | identity_check | Video check recorded or changed | owner decision C-19 |
 | `INVITATION_ACCOMMODATIONS_READ` | invitation | The audited GET (fails closed) | FR-105 |
 
@@ -223,7 +249,7 @@ RECRUITER may waive (owner decision C-02). SUPER_ADMIN may as well (architect de
 | CONSENTED → VERIFIED (ADR 0002 §2) | The identity condition becomes "PASSED, MANUAL_REVIEW or WAIVED", under the gate rule in section 6. VERIFIED keeps its meaning of "checks done" (ADR 0002 §6) | architect detail |
 | GRADED → UNDER_REVIEW | Always, as for every session (owner decision C-28), with the "Identity check waived" badge | owner decision C-28 |
 | Verdict gate (ADR 0002 §6) | Does not apply to WAIVED; a reviewer cannot change WAIVED into REVIEWED. The video check is advice, not a gate | "advised": owner decision C-19; gate: architect detail |
-| Risk (FR-804, ADR 0005) | No re-check for a waived session, so no FACE_MISMATCH and no IDENTITY_MANUAL_REVIEW. The waiver adds weight 0, and no event type is added. With FACE off but no waiver, the re-check still runs and scores as usual | architect detail; re-check rule: DL decision under C-25 |
+| Risk (FR-804, ADR 0005) | No re-check for a waived session, so no FACE_MISMATCH and no IDENTITY_MANUAL_REVIEW. The waiver adds weight 0, and no event type is added. With FACE off but no waiver, the re-check is also refused, so there is no FACE_MISMATCH (interim default pending the owner, OQ-16; under option A it would run and score as usual) | architect detail; re-check: interim default (OQ-16) |
 | Threshold review (ADR 0004 §2) | WAIVED rows are left out of false-match and false-non-match rates and counted separately | architect detail |
 | Report PDF, webhooks, CSV (FR-1001, FR-1003) | "Identity check waived" and the video-check status, never "accommodation". **The reason never appears in the PDF, webhooks or CSV, whoever receives them**; it is available only through the audited GET. Results go out only after the verdict (C-28) | owner decision C-28; wording: architect detail; owner question 5 |
 | Erasure and R-10 (ADR 0004 §9, PR #48) | Delete the `identity_checks` row, including the video check. In `invitations.accommodations`, `identityCheckWaiver` is replaced by `identityCheckWaived: true` (no reason), or the whole object is cleared if OQ-12 is answered yes. At R-4 (`retention_days`), `reasonNote` is removed and `reasonNoteRemoved: true` is set. Replace semantics never drop `identityCheckWaived` | architect detail |
@@ -235,11 +261,11 @@ RECRUITER may waive (owner decision C-02). SUPER_ADMIN may as well (architect de
 - **Candidate (FE-09):** the identity step is replaced by "No identity check is needed for this test. This was arranged with your recruiter." If FACE or GAZE is still on, the text continues: "Your webcam is still recorded, and the browser checks that a face is present [and where you are looking]. No face matching or identity check runs."
 
 **FR-305 wording proposal:**
-> **FR-305** Per-candidate accommodations: extra time percentage, disabled detectors ("face detectors off" among them), allowed assistive tools, and "no identity check". Every change to accommodations writes an audit row. With "no identity check", the recruiter must record a reason; the candidate uploads no ID image or selfie, no face match or identity re-check runs, and reviewers see "Identity check waived". The recruiter is advised to check the candidate's ID on a video call before any hiring decision, and records whether that was done (C-02, C-19, C-25). "Face detectors off" stops the in-browser and server face detectors during the test; the identity check and its periodic re-check still run.
+> **FR-305** Per-candidate accommodations: extra time percentage, disabled detectors ("face detectors off" among them), allowed assistive tools, and "no identity check". Every change to accommodations writes an audit row. With "no identity check", the recruiter must record a reason; the candidate uploads no ID image or selfie, no face match or identity re-check runs, and reviewers see "Identity check waived". The recruiter is advised to check the candidate's ID on a video call before any hiring decision, and records whether that was done (C-02, C-19, C-25). "Face detectors off" stops the in-browser and server face detectors during the test, including the periodic identity re-check (pending OQ-16); the initial identity check still runs.
 
 Also on acceptance:
 - FR-403 adds "unless waived by accommodation (FR-305)".
-- FR-606: the re-check does not run when the identity check is waived. Disabling FACE does not stop it.
+- FR-606: the re-check does not run when the identity check is waived or the FACE detector is off (interim default pending OQ-16).
 - fsd.md §3 VERIFIED row becomes "identity passed, sent to manual review, or waived".
 - fsd.md §4 adds the staff routes.
 
@@ -249,26 +275,28 @@ Also on acceptance:
 
 | Agent | Task | What to do after acceptance |
 | --- | --- | --- |
-| db-engineer | new DB step (the Delivery Lead schedules it) | Section 4 migrations (`--create-only`, split by hand, CHECKs by hand, stop on any reset prompt); `schema.prisma` (enum, fields, named relations, the `User` back-relation, header counts); `org-scope-relations.ts` (`video_check_by` as rule (i): RULE_I 25 → 26, total 58 → 59); CHECK tests |
-| backend-engineer | BE-06 | Schemas (write and lenient read); invite permission rule and write shape (top-level scoped calls, scalar ids, no nested writes); GET with HMAC ETag, `no-store` and a fail-closed audit; PATCH with check order, If-Match (428 and 412), omitted-key and `null` semantics, confirm flags, INVITED-only removal and re-enable, the `runRawSql` lock in a READ COMMITTED interactive transaction, `deleteMany` filtered on WAIVED, no-op audit, unique-violation mapping, and enqueueing `verify-session` after commit; staff allowlist DTOs; pino redact paths; rate limits; the feature flag |
-| backend-engineer | BE-07 | `lockForAccommodation` (FU-DB-67 call site); gate rule (silent refusal, alert only on an inconsistency); `verify-session` re-checks under the transition compare-and-set; `AccommodationsService.projection()` deriving `identityCheckWaived` from the WAIVED row, and its test; a test that no SERVICE writer sets WAIVED |
+| db-engineer | new DB step (the Delivery Lead schedules it) | The spike on `tx.$queryRaw` with the raw-SQL hatch and AsyncLocalStorage; section 4 migrations (`--create-only`, split by hand, CHECKs by hand, stop on any reset prompt); `schema.prisma` (enum, fields, named relations, the `User` back-relation, header counts); `org-scope-relations.ts` (`video_check_by` as rule (i): RULE_I 25 → 26, total 58 → 59); CHECK tests |
+| backend-engineer | BE-06 | Schemas (write and lenient read); server-side feature-flag check (422) on invite and PATCH; the redact-note operation; stored-reason evaluation for combined PATCHes; lock order sessions first and 40P01/40001 handling; `FOR NO KEY UPDATE`; debounce-mode enqueue with an alert on failure; non-echoing validation errors; audit-read restriction; invite permission rule and write shape (top-level scoped calls, scalar ids, no nested writes); GET with HMAC ETag, `no-store` and a fail-closed audit; PATCH with check order, If-Match (428 and 412), omitted-key and `null` semantics, confirm flags, INVITED-only removal and re-enable, the `runRawSql` lock in a READ COMMITTED interactive transaction, `deleteMany` filtered on WAIVED, no-op audit, unique-violation mapping, and enqueueing `verify-session` after commit; staff allowlist DTOs; pino redact paths; rate limits; the feature flag |
+| backend-engineer | BE-07 | `lockForAccommodation` (FU-DB-67 call site; spike on `tx.$queryRaw` and the hatch); start-session and link resolution lock `sessions` before `invitations`; gate rule (silent refusal, alert only on an inconsistency); `verify-session` re-checks under the transition compare-and-set; `AccommodationsService.projection()` deriving `identityCheckWaived` from the WAIVED row, and its test; a test that no SERVICE writer sets WAIVED |
 | integrity-engineer | BE-08 | Identity routes return 409 `IDENTITY_CHECK_WAIVED`, and no match job runs. Test: an upload is refused while a WAIVED row exists, so no attempt-2 row can sit next to a WAIVED attempt-1 |
-| backend-engineer | BE-09 | Refuse `ID_IMAGE`, `SELFIE` and `IDENTITY_RECHECK` presigns when waived, and no longer refuse a re-check because FACE is off (ADR 0013 5.6) |
-| integrity-engineer | BE-12 | No risk change; tests for a waived session and for a FACE-off session that is still re-checked; threshold metrics leave WAIVED out |
+| backend-engineer | BE-09 | Refuse `ID_IMAGE`, `SELFIE` and `IDENTITY_RECHECK` presigns when waived (409 `IDENTITY_CHECK_WAIVED`), and `IDENTITY_RECHECK` when FACE is off (409 `DETECTOR_DISABLED`; interim default pending OQ-16, ADR 0013 5.6). Delete a raced upload on the 409 under REFUSED_BIOMETRIC_PROCESSING |
+| integrity-engineer | BE-12 | No risk change; tests that a waived session and a FACE-off session (interim default, OQ-16) both get no re-check and no FACE_MISMATCH; threshold metrics leave WAIVED out |
 | backend-engineer | BE-13, BE-14 | Review projection by role; video-check route; no verdict gate for WAIVED; report, webhook and CSV wording with no reason |
-| frontend-engineer | FE-05, FE-09, FE-11 | Two controls, the reason, advice, the FACE and GAZE display and confirmations, the video-check control, ETag and If-Match handling, and the waiver key sent only when it changes; candidate text from a projection fetched fresh after CONSENTED; badge |
-| proctor-sdk-engineer | follow-up | **Decouple the re-check from the FACE detector**: capture re-check frames when the app passes `recheckIdentity`, whether or not the face task is loaded. With no `recheckIdentity` (waived), the re-check never starts. Tests for both |
-| QA | new TCs (QA assigns IDs) | Reason rules; waived session reaches VERIFIED and UNDER_REVIEW with the badge, and its presigns get 409; FACE off alone still runs the initial check and the re-check; REFUSED_BIOMETRIC_PROCESSING defaults FACE and GAZE off, and re-enabling or removing is refused after INVITED, and removal needs the confirm flag; **PATCH without the key keeps the waiver**; the If-Match probe (a guessed body with an ETag always leaves an audit row, and the ETag is keyed); a waiver set in CONSENTED enqueues `verify-session` and reaches VERIFIED; unique-violation mapping (409, not 500); log redaction of notes and the reason; the lenient read after R-4 note removal; the audited GET fails closed; **race: a PATCH removal concurrent with INVITED → OPENED, OPENED → CONSENTED and `verify-session` never yields VERIFIED with no identity row**; the gate refuses silently with no identity row, and alerts on an inconsistency; If-Match 412; invite permission rule; same-transaction audit rows with no reason text; staff DTOs, candidate scope and REVIEWER get no reason; video check 409, 404 across orgs and after erasure; bulk CSV row error; report, webhook and CSV carry no reason; invariant scoped to live sessions |
+| frontend-engineer | FE-05, FE-09, FE-11 | Two controls, the reason, advice, the FACE and GAZE display and confirmations, the video-check control, ETag and If-Match handling, and the waiver key sent only when it changes; candidate text from a projection fetched fresh after CONSENTED, and again on a 409 `IDENTITY_CHECK_WAIVED`; the redact-note action; badge |
+| proctor-sdk-engineer | follow-up | Interim default (OQ-16): keep the current coupling. The re-check runs only when the face task is loaded and `recheckIdentity` is passed; the app passes none when the check is waived or FACE is off. Tests for both. Only if the owner picks option A: decouple the re-check from the face task |
+| QA | new TCs (QA assigns IDs) | Reason rules; waived session reaches VERIFIED and UNDER_REVIEW with the badge, and its presigns get 409; FACE off alone still runs the initial check, and the re-check gets 409 `DETECTOR_DISABLED` (interim default, OQ-16); REFUSED_BIOMETRIC_PROCESSING defaults FACE and GAZE off, and re-enabling or removing is refused after INVITED, and removal needs the confirm flag; **PATCH without the key keeps the waiver**; the If-Match probe (a guessed body with an ETag always leaves an audit row, and the ETag is keyed); a waiver set in CONSENTED enqueues `verify-session` and reaches VERIFIED; unique-violation mapping (409, not 500); log redaction of notes and the reason; the lenient read after R-4 note removal; the audited GET fails closed; **the redact-note operation** works in any state before erasure and leaves the gate untouched; **the flag rejects REFUSED_BIOMETRIC_PROCESSING with 422 on both routes**; **a waiver set in CONSENTED after room scan still reaches VERIFIED, even when another `verify-session` job ran just before** (enqueue not swallowed); a client that gets 409 `IDENTITY_CHECK_WAIVED` re-reads the projection; a mid-test PATCH does not block ingest (`FOR NO KEY UPDATE`); no deadlock between the PATCH and start-session; a 400 for a bad note echoes nothing; a video check racing a removal gets 409; a combined PATCH needs both flags; the audit rows that reveal the reason are hidden from REVIEWER; **race: a PATCH removal concurrent with INVITED → OPENED, OPENED → CONSENTED and `verify-session` never yields VERIFIED with no identity row**; the gate refuses silently with no identity row, and alerts on an inconsistency; If-Match 412; invite permission rule; same-transaction audit rows with no reason text; staff DTOs, candidate scope and REVIEWER get no reason; video check 409, 404 across orgs and after erasure; bulk CSV row error; report, webhook and CSV carry no reason; invariant scoped to live sessions |
 | hub | on acceptance | database.md; ADR 0006 §8.1 list (12 → 13 staff references); fsd.md FR-305, FR-403, FR-606, §3, §4; ADR 0002 §2 and §6; ADR 0004 §2 and §5 (R-4 `reasonNote`; erasure and R-10 waiver reduction); ADR 0008 §11; ADR 0010 (section 5); ADR 0013 5.6 (refusal codes, round 7) and CS-4.4; api-contract.md |
-| Delivery Lead | docs | requirements-trace FR-305; build-plan migration step; the consent dependency (section 7); DPIA on OQ-15 and the GAZE classification |
+| Delivery Lead | docs | record OQ-16 in decisions.md (it is not there yet); requirements-trace FR-305; build-plan migration step; the consent dependency (section 7); DPIA on OQ-15 and the GAZE classification |
 
 ## 9. Owner questions
 
-Already decided since the first draft: two settings (C-25); every session is reviewed (C-28); the re-check belongs to identity verification (DL decision under C-25).
+Decided since the first draft: two settings (C-25), and every session is reviewed (C-28). Process note: on acceptance this ADR also needs the ADR 0008 §11 amendment and a database.md update; neither is in this PR.
 
-1. **OQ-13:** hide the reason from REVIEWER, so only RECRUITER and SUPER_ADMIN see it (proposed)?
+0. **OQ-16 (tied to ADR 0013 Q20): the identity re-check.** Interim default, option B (the Delivery Lead's recommendation): refuse the re-check when the identity check is waived **or** FACE is off. Option A: refuse it only when the identity check is waived. Which applies?
+
+1. **OQ-13:** hide the reason from REVIEWER, so only RECRUITER and SUPER_ADMIN see it (proposed)? Even then, a REVIEWER who sees "waived" with FACE and GAZE off can infer the refusal reason.
 2. **OQ-14, widened:** what about a candidate who cannot use the webcam **or the microphone**? The waiver still needs room scan and the WEBCAM and AUDIO streams. Is a separate accommodation needed (a separate ADR)?
 3. **OQ-15:** with REFUSED_BIOMETRIC_PROCESSING, FACE and GAZE are off. Should the narrow override (INVITED only, proposed) be allowed, or should they always be off with no override (decisions.md's suggestion)? This also covers **removing the waiver** under REFUSED_BIOMETRIC_PROCESSING (proposed: INVITED only, with an explicit confirmation).
-4. **Lock:** once an identity attempt exists, the waiver is refused and the candidate takes attempt 2 and then MANUAL_REVIEW. Given C-02's "case by case", is that enough?
+4. **Lock and recovery:** once an identity attempt exists, the waiver is refused and the candidate takes attempt 2 and then MANUAL_REVIEW. Given C-02's "case by case", is that enough? A mistaken waiver after INVITED is recovered by revoking and re-inviting (audited). Should removal also be allowed in OPENED for `OTHER` and `CANNOT_COMPLETE_ID_CHECK`? The consent-based exclusion only matters under REFUSED_BIOMETRIC_PROCESSING, and the CONSENTED re-read covers the gate.
 5. **Report wording:** "Identity check waived", without "accommodation", outside the recruiter view (proposed)?
 6. **Consent variant (section 7):** a waived-candidate consent version, or a note on the consent record?
