@@ -1066,7 +1066,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       const wrong = await login(withTotp.email, 'wrong-password-1').expect(401);
       const badCode = await request(app.getHttpServer())
         .post(`${API}/2fa/verify`)
-        .send({ challengeToken: (required.body as Body).challengeToken, code: '000000' })
+        .send({ challengeToken: (required.body as Body).challengeToken, code: 'ZZZZZZZZZZZZZZZZ' })
         .expect(400);
       for (const res of [required, enrol, wrong, badCode]) {
         expect(JSON.stringify(res.body)).not.toContain('totpEnabled');
@@ -1080,6 +1080,16 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       await request(app.getHttpServer())
         .post(`${API}/login`)
         .send({ email: u.email, password: PASSWORD, totpEnabled: true })
+        .expect(400);
+      const session = (await login(u.email).expect(200)).body as Body;
+      await request(app.getHttpServer())
+        .post(`${API}/2fa/verify`)
+        .send({ challengeToken: 'x', code: '123456', totpEnabled: true })
+        .expect(400);
+      await request(app.getHttpServer())
+        .post(`${API}/2fa/setup/confirm`)
+        .set('Authorization', `Bearer ${session.session.accessToken}`)
+        .send({ currentPassword: PASSWORD, code: '123456', totpEnabled: true })
         .expect(400);
     });
   });

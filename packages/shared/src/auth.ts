@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { userRoleSchema } from './permissions';
 
 /** RFC 5321 path limit for an email address. */
 export const MAX_EMAIL_LENGTH = 254;
@@ -38,7 +39,7 @@ export const authUserSchema = z.object({
   id: z.string(),
   email: z.string(),
   name: z.string(),
-  role: z.enum(['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'REVIEWER']),
+  role: userRoleSchema,
   orgName: z.string(),
   totpEnabled: z.boolean(),
 });
