@@ -1,6 +1,6 @@
 # CodeProctor build plan
 
-Owner: project-manager. Last updated: 2026-10-01 (ARC-01 Phase B: D-16..D-23 applied, DEP-03 added; D-24..D-30: PA-01..PA-08 approved, INT-01 added, DEP owners set). Status of every task: see /docs/status.md.
+Owner: Delivery Lead (from 2026-10-05). Last updated: 2026-10-05 (merge rule aligned with CLAUDE.md; sequencing decisions DL-01..DL-10 in status.md section 9b). Earlier: 2026-10-01 (ARC-01 Phase B: D-16..D-23 applied, DEP-03 added; D-24..D-30: PA-01..PA-08 approved, INT-01 added, DEP owners set). Status of every task: see /docs/status.md.
 
 Sources: CLAUDE.md, /docs/brd.md, /docs/fsd.md, /docs/architecture.md, /docs/database.md, /docs/test-cases.md, /docs/prompts/{database,backend,frontend,agents-qa-deploy}.md, .claude/agents/*.
 
@@ -208,9 +208,9 @@ BE-11 and BE-10 run beside BE-09/BE-08 and must merge before BE-12. DEP-01 must 
 
 **Architect at PR review** (in addition to code-reviewer): DB-02, DB-03, DB-05, DB-06, BE-02, BE-03, BE-07, BE-09, BE-10, BE-12, BE-15A, DEP-01, DEP-03, and any PR touching `prisma/` or `packages/shared`.
 
-**Code-reviewer:** runs on every branch before a human merges. Verdict APPROVE or APPROVE WITH NITS is required; REQUEST CHANGES sends the task back to its owner.
+**Code-reviewer:** runs on every branch before it merges. Verdict APPROVE or APPROVE WITH NITS is required; REQUEST CHANGES sends the task back to its owner.
 
-**Human merge:** humans merge in dependency order (agents never merge their own branches). The PM updates status.md and the trace only after the merge and a real test run.
+**Merge:** each session merges its own PR with an explicit `gh pr merge` once code-reviewer has no blockers and CI is green on the reviewed head, in dependency order; never auto-merge (CLAUDE.md "Working in parallel" rules 6, 8 and 9, which replace the earlier human-merge rule). The Delivery Lead updates status.md and the trace after the merge.
 
 ## 7. Global definition of done (applies to every task)
 

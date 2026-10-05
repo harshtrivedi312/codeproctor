@@ -1,6 +1,6 @@
 # Project status
 
-Owner: project-manager. As of 2026-10-02. Sources: /docs/build-plan.md, /docs/requirements-trace.md.
+Owner: Delivery Lead (from 2026-10-05; previously project-manager and the architecture hub). As of 2026-10-05 21:00 UTC. Sources: /docs/build-plan.md, /docs/requirements-trace.md, GitHub PRs and CI.
 
 ## 1. Blocked and needs a human (read first)
 
@@ -14,21 +14,21 @@ Owner: project-manager. As of 2026-10-02. Sources: /docs/build-plan.md, /docs/re
 
 ## 2. Current phase and progress
 
-- **Current phase:** Phase 1, Database track. ARC-01 merged 2026-10-01. DB-01 merged as PR #1 (scaffold, 2026-10-02 16:05 UTC) and PR #2 (review fixes, Node 24, ADR 0009 and guards; CI green on Node 24; merged 16:43 UTC). The second review round's fixes (SF1 to SF8) are in PR #3 on `db/step-1-fixes`; DB-02 starts only after PR #3 merges.
-- **Next milestone:** M0 (schema freeze list approved: done on 2026-10-01; contracts v0 published; first commit on main: done).
+- **Current phase:** Phases 1 to 3 run in parallel by track. Database is on DB-05. The backend critical path is at BE-02 hardening, with BE-03 next. Staff web is FE-03 done and FE-04 next. Proctor SDK has done FE-06 to FE-08. The integrity worker's analysis modules have merged; their API integration waits for BE-08 to BE-11 and ARC-04.
+- **Main CI (2026-10-05 21:00 UTC):** red, but not because of code. The runs after #25, #27 and #29 were cancelled without getting a runner, during a GitHub Actions major outage (githubstatus.com, incident "investigating"). The last real failure, the run after #28, was a web test flake in `settings.test.tsx` (FR-103 user list). Frontend is shipping the fix as its own PR (DL-03).
+- **Next milestone:** BE-03 (RBAC and audit), which unlocks BE-04 onward and TC-004, TC-006 and TC-008.
 
 | Measure | Value |
 | --- | --- |
-| Tasks started | 2 of 50 (ARC-01, DB-01) |
-| Tasks done (merged) | 2 of 50 (ARC-01; DB-01 via PR #2, D-41; review follow-up PR #3 open) |
-| Test cases verified | 0 of 72 (0 of 51 P1) |
-| Requirements Done | 0 of 82 (15 BR, 58 FR, 9 NFR) |
-| Branches open | 1 (`db/step-1-fixes`, PR #3) |
-| Open questions | 21 open of 44 (section 6). Closed: Q-01..Q-17, Q-23, Q-24 (ADRs 0002 to 0007, D-16), Q-27 (D-05), Q-41 (D-13), Q-43 (D-29, placeholder name) and Q-44 (D-30, placeholder domains). Review findings A-01..A-31 in /docs/adr/review-2026-09-30-plan-and-schema.md: the schema findings routed to ARC-01 are decided in ADRs 0002 to 0008 |
+| Tasks done (merged) | 14 of 50: ARC-01, DB-01, DB-02, DB-03, DB-04, BE-01, BE-02, FE-01, FE-02, FE-03, FE-06, FE-07, FE-08, QA-01A |
+| Tasks in progress | 5: ARC-02 (contract ADRs 0011 and 0012 open), ARC-03 (ADR 0013 pending), DB-05 (#30), BE-12 worker part (#32), QA-01B early automation (merged as #28) |
+| Open PRs | 9: #26 BE-02 hardening, #30 DB-05 (draft), #31 ADR 0011, #32 worker hardening, #33 ADR 0012, #34 CLAUDE.md (Delivery Lead owns status docs), #35 /dev/proctor (draft), #36 Security page, plus this docs PR |
+| Test cases verified | 5 of 72 (TC-002, TC-005, TC-075 fully; TC-001, TC-003 and TC-098 verified on the API with the UI mocked; see /docs/test-matrix.md) |
 | Open risks | 15 (section 5) |
 
 ## 3. Done this period
 
+- 2026-10-02 to 2026-10-05 (merged): #3 DB-01 review round 2; #5 DB-02; #6 ARC-02 shared contracts v0; #4 FE-01; #7 QA-01A; #8 FE-02; #9 DB-03; #10 BE-01; #12 allowBuilds decisions; #13 DB-04; #14 DB follow-ups; #11 per-track follow-up files; #15 BE-02; #16 ADR 0010 accepted; #17 FE-03; #18 FE-06; #19 and #24 keystroke cap; #20 and #27 worker analysis modules (FR-802..FR-805); #21 FE-07; #22 and #25 FE-03 follow-ups; #23 FE-08; #28 QA automated suites and gate; #29 CLAUDE.md parallel-work rules.
 - Read CLAUDE.md, all /docs files, all four prompt playbooks and all agent definitions.
 - Wrote /docs/build-plan.md (48 tasks, 7 phases, dependency graph, gates).
 - Wrote /docs/requirements-trace.md (81 requirements, 67 TCs, gap lists).
@@ -44,9 +44,15 @@ Owner: project-manager. As of 2026-10-02. Sources: /docs/build-plan.md, /docs/re
 
 ## 4. Next up
 
-1. PR #3 (`db/step-1-fixes`): second-round review fixes SF1 to SF8 and the cheap nits. Merge only with code-reviewer approval and green CI (D-41).
-2. DB-02 (db-engineer) after PR #3 merges, against the accepted freeze list ADR 0008.
-3. QA-01A (qa-engineer, docs only; 72 TCs) and ARC-02, ARC-03, ARC-05 (architect) can use idle slots.
+Sequencing set by the Delivery Lead (section 9b):
+
+1. **Database:** PR #30 (DB-05). It merges only after B1 (unscoped `cursor`) and FU-DB-63 (nested-write guard) are fixed in the PR, with the FU-DB-64 FK-classification test (DL-01). Then FU-DB-65/68/69, DB-06, DB-07 and DB-08.
+2. **Backend:** merge #26 when CI is green. BE-03 starts now against #30's interface, and it does not merge before #30 and FU-DB-58 (DL-02).
+3. **Frontend:** the admin-table flake fix as its own PR first (DL-03), then #36 after #26, then FE-04.
+4. **Proctor SDK:** #35 gets a full review. It merges after the frontend flake PR and #36, with the Frontend session's OK on its apps/web config changes (DL-04). Then the PR #21/#23 should-fix items. QA-D-01 needs no SDK change (hub, 2026-10-05).
+5. **Integrity:** merge #32, then the worker-side BE-08 face-matching module (DL-05).
+6. **QA:** TC-004 and TC-006 acceptance tests ahead of BE-03, plus matrix updates (DL-06).
+7. **Architecture hub queue (DL-07), in order:** QA-01 event shape, ADR 0013, ARC-03 candidate-session scope, ARC-04, the integrity starter-diff proposal, the DB-05 gate items, then small items.
 
 ## 5. Risks
 
@@ -148,50 +154,50 @@ Status values: Not started, In progress, In review, Changes requested, Done (mer
 | ID | Title | Owner | Status | Blocked by | Review | Merged |
 | --- | --- | --- | --- | --- | --- | --- |
 | ARC-01 | Schema readiness review (widened, D-03, D-08) | architect | Done (merged to main 2026-10-01) | ADRs 0002 to 0008 accepted (D-16) | | |
-| ARC-02 | Shared contracts and API contract v0 | architect | Not started | DB-01, ARC-01 | | |
-| ARC-03 | Security model ADRs | architect | Not started | ARC-01 | | |
+| ARC-02 | Shared contracts and API contract v0 | architect | In progress: shared contracts v0 merged (#6), ADR 0010 accepted (#16); ADR 0011 (#31) and ADR 0012 (#33) await owner acceptance | owner acceptance | | #6, #16 |
+| ARC-03 | Security model ADRs | architect | In progress: ADR 0013 (candidate API contract) pending; candidate-session scope to decide before BE-07 (DL-07) | | | |
 | ARC-04 | Worker and async integration ADR | architect | Not started | ARC-01, ARC-03 | | |
 | ARC-05 | Deployment and Judge0 host feasibility | architect | Not started | human-provisioned x86 host | | |
-| DB-01 | Monorepo and local infrastructure | db-engineer | Done 2026-10-02 (PR #1 and PR #2 merged; D-41). Review follow-up PR #3 open | none | | |
-| DB-02 | Prisma schema | db-engineer | Not started | DB-01 review follow-up PR #3 merged (freeze list ADR 0008 accepted) | | |
-| DB-03 | Migrations | db-engineer | Not started | DB-02 | | |
-| DB-04 | Seed data | db-engineer | Not started | DB-03 | | |
-| DB-05 | Org scoping helpers | db-engineer | Not started | DB-03 | | |
+| DB-01 | Monorepo and local infrastructure | db-engineer | Done (#1, #2, #3) | none | | 2026-10-02 |
+| DB-02 | Prisma schema | db-engineer | Done (#5) | | | 2026-10-02 |
+| DB-03 | Migrations | db-engineer | Done (#9) | | | 2026-10-05 |
+| DB-04 | Seed data | db-engineer | Done (#13, #14) | | | 2026-10-05 |
+| DB-05 | Org scoping helpers | db-engineer | In review (#30, draft): reviewer B1 plus FU-DB-63 must be fixed before merge (DL-01); architect gate approved with conditions | | code-reviewer REQUEST CHANGES | |
 | DB-06 | Retention and erasure services | db-engineer | Not started | DB-05 | | |
 | DB-07 | Backups and restore | db-engineer | Not started | DB-03 | | |
 | DB-08 | Database verification | db-engineer | Not started | DB-03..DB-07 | | |
-| BE-01 | API foundation | backend-engineer | Not started | DB-08 | | |
-| BE-02 | Staff authentication | backend-engineer | Not started | BE-01, ARC-03 | | |
-| BE-03 | RBAC and audit logging | backend-engineer | Not started | BE-02, ARC-02 | | |
+| BE-01 | API foundation | backend-engineer | Done (#10) | | | 2026-10-05 |
+| BE-02 | Staff authentication | backend-engineer | Done (#15); hardening and 2FA re-auth in review (#26) | CI (Actions outage) | code-reviewer no blockers | 2026-10-05 |
+| BE-03 | RBAC and audit logging | backend-engineer | Starting 2026-10-05 against #30's interface (DL-02) | merge waits on #30 and FU-DB-58 | | |
 | BE-04 | Question bank | backend-engineer | Not started | BE-03 | | |
 | BE-05 | Code execution with Judge0 | backend-engineer | Not started | BE-04, ARC-05 | | |
 | BE-06 | Tests, invitations and email | backend-engineer | Not started | BE-05 | | |
 | BE-07 | Candidate session and state machine | backend-engineer | Not started | BE-06, ARC-03 | | |
-| BE-08 | Identity verification service | integrity-engineer | Not started | BE-07, BE-09, ARC-04 | | |
+| BE-08 | Identity verification service | integrity-engineer | Worker-side face-match module starting after #32 (DL-05); API side waits | BE-07, BE-09, ARC-04 | | |
 | BE-09 | Media storage (S3-compatible) | backend-engineer | Not started | BE-07, ARC-03 | | |
 | BE-10 | Proctor events and keystroke ingestion | integrity-engineer | Not started | BE-07, ARC-02, ARC-03 | | |
 | BE-11 | Run, submit and grading | backend-engineer | Not started | BE-07 | | |
-| BE-12 | Integrity analysis worker | integrity-engineer | Not started | BE-08..BE-11, ARC-04 | | |
+| BE-12 | Integrity analysis worker | integrity-engineer | In progress: worker modules merged (#20, #27), hardening in review (#32); API integration waits on BE-08..BE-11 and ARC-04 | BE-08..BE-11, ARC-04 | | |
 | BE-13 | Review and live proctoring API | backend-engineer | Not started | BE-12, ARC-02 | | |
 | BE-14 | Reports and integrations | backend-engineer | Not started | BE-13 | | |
 | BE-15A | Security review and fixes | backend-engineer | Not started | BE-14 | | |
 | BE-15B | Staging load tuning | backend-engineer | Not started | BE-15A, DEP-01 | | |
-| FE-01 | Web app foundation | frontend-engineer | Not started | DB-08, ARC-02 | | |
-| FE-02 | Staff authentication screens | frontend-engineer | Not started | FE-01 | | |
-| FE-03 | Staff shell and navigation | frontend-engineer | Not started | FE-02 | | |
-| FE-04 | Question bank UI | frontend-engineer | Not started | FE-03 | | |
+| FE-01 | Web app foundation | frontend-engineer | Done (#4) | | | 2026-10-02 |
+| FE-02 | Staff authentication screens | frontend-engineer | Done (#8); Security page with 2FA re-auth in review (#36) | #26 | | 2026-10-05 |
+| FE-03 | Staff shell and navigation | frontend-engineer | Done (#17, follow-ups #22, #25) | | | 2026-10-05 |
+| FE-04 | Question bank UI | frontend-engineer | Next, after the flake PR and #36 | | | |
 | FE-05 | Tests and invitations UI | frontend-engineer | Not started | FE-04 | | |
-| FE-06 | Proctor SDK: browser lock and events | proctor-sdk-engineer | Not started | DB-08, ARC-02, ARC-03 | | |
-| FE-07 | Proctor SDK: recording pipeline | proctor-sdk-engineer | Not started | FE-06 | | |
-| FE-08 | Proctor SDK: in-browser AI detectors | proctor-sdk-engineer | Not started | FE-07 | | |
+| FE-06 | Proctor SDK: browser lock and events | proctor-sdk-engineer | Done (#18); QA-D-01 answered by the hub 2026-10-05: no SDK change, the server fills the EXIT duration on restore or at session end; QA rewords TC-050 | | | 2026-10-05 |
+| FE-07 | Proctor SDK: recording pipeline | proctor-sdk-engineer | Done (#21) | | | 2026-10-05 |
+| FE-08 | Proctor SDK: in-browser AI detectors | proctor-sdk-engineer | Done (#23); /dev/proctor demo page in review (#35, draft) | | | 2026-10-05 |
 | FE-09 | Candidate pre-test flow | frontend-engineer | Not started | BE-07, FE-01, FE-08 | | |
 | FE-10 | Candidate test screen | frontend-engineer | Not started | FE-09 | | |
 | FE-11 | Review workspace | frontend-engineer | Not started | FE-03, FE-10 | | |
 | FE-12 | Live proctoring | frontend-engineer | Not started | FE-03, FE-10 | | |
 | FE-13 | Dashboard, reports, polish | frontend-engineer | Not started | FE-09..FE-12, BE-14 | | |
 | FE-14 | Lockdown client (later phase) | TBD | Out of scope (D-13) | | | |
-| QA-01A | Test matrix and manual scripts | qa-engineer | Not started | none | | |
-| QA-01B | Automation, CI gate, scans | qa-engineer | Not started | BE-14, FE-13, DEP-01 | | |
+| QA-01A | Test matrix and manual scripts | qa-engineer | Done (#7) | | | 2026-10-02 |
+| QA-01B | Automation, CI gate, scans | qa-engineer | In progress: early suites and the P1 gate merged (#28, titled "QA-02" in the PR; it is QA-01B work); BE-03 acceptance tests next (DL-06) | BE-14, FE-13, DEP-01 for completion | | |
 | QA-02 | Red team | qa-engineer | Not started | DEP-01, BE-15A, FE-13 | | |
 | DEP-01 | Staging on AWS | backend-engineer (architect review, D-26) | Not started | ARC-05, BE-12, FE-10 | | |
 | DEP-02 | Production readiness review | backend-engineer (architect review, D-26) | Not started | BE-15B, QA-01B, QA-02 | | |
@@ -258,15 +264,35 @@ Status values: Not started, In progress, In review, Changes requested, Done (mer
 | D-41 | 2026-10-02 | Merge only when the code-reviewer approves and CI is green. DB-01 is marked done when PR #2 merges. (PR #2 merged 2026-10-02 16:43 UTC with CI green and before this rule; the remaining review fixes go through PR #3 under this rule.) | Harsh Trivedi |
 | D-42 | 2026-10-02 | Code review round 3 on PR #3: APPROVE WITH NITS. Option (a): apply the four nits in one commit, then merge PR #3 once CI passes and start DB-02. CLAUDE.md gains the rule that agents never run `pnpm db:reset`, `pnpm dev:infra:reset`, `prisma migrate reset` or `db push`; the db-engineer definition of done adds `pnpm dev:infra:reset`. | Harsh Trivedi |
 
+## 9b. Delivery Lead decision log
+
+Decisions taken by the Delivery Lead under the owner's delegation (order, priority, unblocking, implementation details where the docs are silent). None changes an accepted ADR, a requirement or the scope.
+
+| ID | Date | Decision | Reason |
+| --- | --- | --- | --- |
+| DL-01 | 2026-10-05 | FU-DB-63 (a parent-side nested `connect`/`set`/`connectOrCreate` can move another org's rows) is reclassified as a blocker for PR #30. It is fixed in the PR together with B1 and the FU-DB-64 FK-classification test that proves it. | CLAUDE.md "Working in parallel" rule 3: authorization weaknesses always block a merge |
+| DL-02 | 2026-10-05 | BE-03 development starts now against PR #30's `PrismaService`/`OrgContext` interface. FU-DB-58 (auth onto the scoped client, delete the interim module) lands inside BE-03. BE-03 merges only after #30 is merged and FU-DB-58 is in. | BE-03 is on the critical path; the interface is architect-approved and the open fixes do not change it |
+| DL-03 | 2026-10-05 | The frontend admin-table flake fix (`table-utils.ts`) moves out of #36 into its own PR, and merges first. | It caused the last real failure on main and affects every track's CI |
+| DL-04 | 2026-10-05 | PR #35 (/dev/proctor) gets a full review. It merges after the flake PR and #36, and only with the Frontend session's OK on its apps/web config changes. | Cross-track edits to apps/web (`next.config.ts`, `package.json`, vitest config) |
+| DL-05 | 2026-10-05 | Integrity starts the worker side of BE-08 (MediaPipe alignment and pinned AuraFace `glintr100.onnx` behind an interface; synthetic images only; no stored embeddings). The API side waits for BE-07, BE-09 and ARC-04. | Keeps an idle track on approved work that INT-01 needs |
+| DL-06 | 2026-10-05 | QA writes the TC-004 and TC-006 acceptance tests ahead of BE-03, staged as todo, and fixes the TC-008 path in the matrix (FU-DB-59). | Shortens BE-03's review loop |
+| DL-07 | 2026-10-05 | Hub priority order: QA-D-01 event shape, ADR 0013, ARC-03 candidate-session scope (before BE-07), ARC-04 worker contract and token, the integrity starter-diff proposal, the DB-05 gate items, then small items. | Ordered by which track is waiting |
+| DL-08 | 2026-10-05 | No Postgres RLS and no schema change for the build or the pilot; ADR 0006 stands. FU-DB-77 (revisit RLS) is a pre-production item for the hub under ARC-05/DEP-02. | No accepted ADR requires RLS; this keeps the current design |
+| DL-10 | 2026-10-05 | build-plan.md section 6 merge rule aligned with CLAUDE.md rules 6, 8 and 9: sessions merge their own PRs; humans no longer merge. | CLAUDE.md wins; the plan contradicted it |
+| DL-09 | 2026-10-05 | The main CI red from 20:12 UTC is the GitHub Actions outage. No code change; sessions re-run cancelled checks once Actions recovers. | Jobs were cancelled without getting a runner |
+
+### Parked for the owner
+
+| ID | Item | Why it is the owner's |
+| --- | --- | --- |
+| P-01 | Accept or reject ADR 0011 (2FA re-authentication, PR #31) and ADR 0012 (generated OpenAPI as the single source of truth, PR #33) | Accepting an ADR |
+| P-02 | PR #34: CLAUDE.md rules 16 and 18 (Delivery Lead owns the status docs) | Change to the shared rules |
+| P-03 | FU-BE-24: a known staff email can be kept locked out by 5 failed logins (FR-101 lockout as written). Changing this changes FR-101 | Requirement / security trade-off |
+| P-04 | B-05 Legal pilot entry items (unchanged) | Legal |
+| P-05 | Production CSP: allow `'wasm-unsafe-eval'` (never `'unsafe-eval'`), only on the candidate test route, so that MediaPipe, onnxruntime and the tfjs wasm backends run. Hub recommends yes, with a CSP test proving the directive is absent elsewhere | Security trade-off that loosens CSP |
+
 ## 10. Next 3 tasks, blockers, decisions
 
-- **Next 3 tasks:**
-  1. Merge PR #3 (`db/step-1-fixes`): code-reviewer APPROVE WITH NITS, nits applied (D-42), merged once CI is green (D-41).
-  2. DB-02 (db-engineer, branch `db/step-2` from `main` after PR #3) against the accepted freeze list ADR 0008 and ADR 0009.
-  3. DB-03 (db-engineer) after DB-02. It includes the owner's one-time interactive `pnpm db:reset` with `pnpm dev:infra` running.
-  QA-01A and ARC-02, ARC-03 and ARC-05 can use idle slots.
-- **Blockers:** none for the build. B-05 (Legal pilot entry items) blocks only the pilot. B-01 to B-04 are cleared.
-- **Decisions still needed from a human:**
-  - Legal pilot entry items (B-05), including the actual consent-text owner (Q-43 has a placeholder, D-29);
-  - confirm the details the architect chose in ADRs 0002 to 0007 and 0009 (each marked "detail chosen by architect; owner to confirm");
-  - confirm the placeholder domains (D-30) before DEP-01.
+- **Next 3 tasks on the critical path:** #26 merge (BE-02 hardening); #30 merge (DB-05, after DL-01 fixes); BE-03 (DL-02).
+- **Blockers:** GitHub Actions outage (external; affects every merge). B-05 blocks only the pilot.
+- **Decisions needed from the owner:** section 9b "Parked for the owner" (P-01 to P-05).
