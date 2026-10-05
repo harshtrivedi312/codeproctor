@@ -218,23 +218,20 @@ function namesOtherOrg(cursor: PlainObject, orgId: string): boolean {
  *   stamp, so the parent id in the payload must follow ADR 0006 section 2 rule (i).
  * - An unknown operation is refused.
  *
- * Nested writes and nested cursors are walked by org-scope-nested.ts: in an org scope a parent-side
- * `connect`, `connectOrCreate` or `set` is refused (it changes rows the filter never selected:
- * `organization.update({ where: { id: A }, data: { users: { connect: { id: userOfB } } } })`), and
- * so are nested create, update, upsert, delete and connectOrCreate through a RULE_I relation on
- * either side (the row on the other side can belong to another org), a nested row of a model with
- * its own org_id that names another org, and a cursor nested in include or select. A child-side
- * `connect` or `disconnect` is allowed (it sets or clears the scalar foreign key), and so are nested
- * create, update, upsert and delete through a SCOPE_HOP, COMPOSITE or ORG_ID relation, where they
- * act inside the parent's own subtree. The ids that remain follow rule (i).
+ * Nested relation writes are refused (org-scope-nested.ts, ADR 0006 section 8): every nested
+ * `connect`, `connectOrCreate`, `create`, `createMany`, `update`, `updateMany`, `upsert`, `delete`,
+ * `deleteMany`, `set` and `disconnect` in `data`, through every relation class and on both sides,
+ * `org: { connect }` included. A `connect` through a COMPOSITE relation rewrites org_id and one next
+ * to an `update` writes the connected row, so no shape is safe by class; services use scalar
+ * foreign keys (Prisma's unchecked inputs) and separate top-level calls. The exception list is empty.
+ * A `cursor` nested in include or select is refused too (the fluent API arrives as a select).
  *
  * What it does NOT cover (README "Limits"). Only the top-level model, its `where`, its `cursor`,
- * its create/update `orgId` and the nested writes above are looked at. Everything else reached
- * through a relation is not:
+ * its create/update `orgId`, nested relation writes and nested cursors are looked at. Everything
+ * else reached through a relation is not:
  *
- * (a) Ids written through a relation or scalar foreign key. A child-side `connect` is the same as
- *     setting the scalar FK, and neither is checked: the id follows rule (i), load it through the
- *     scoped client first.
+ * (a) Ids written as scalar foreign keys. Which id is written is not checked: Postgres checks the
+ *     composite keys, and every other id follows rule (i), load it through the scoped client first.
  * (b) Re-parenting. An update that changes a path model's first-hop foreign key
  *     (`testSection.update({ data: { testId } })`) is the same as a path create: rule (i).
  * (c) Nested reads. `include`, `select`, the fluent API, relation filters, `orderBy` on a relation

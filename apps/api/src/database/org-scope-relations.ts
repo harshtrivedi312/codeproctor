@@ -204,20 +204,19 @@ export const RULE_I_REFERENCES: readonly ForeignKey[] = FK_CLASSES.filter(
   (key) => key.fkClass === 'RULE_I',
 );
 
-/** One relation field of a model: what it points to, and whether this model holds the key. */
+/**
+ * One relation field of a model. The nested-write guard (deny by default) only asks whether a field
+ * is a relation; `holdsFk`, `fkClass` and `target` are checked against schema.prisma by the
+ * completeness test, so the table cannot drift, and are available to rule (i) reviews.
+ */
 export interface RelationSide {
   readonly target: ModelName;
   /**
    * True when the key column is on this model (a child-side relation: `session.invitation`). False
-   * when it is on the related model (a parent-side relation: `organization.users`), so connecting
-   * or setting through it changes rows of the related model.
+   * when it is on the related model (a parent-side relation: `organization.users`).
    */
   readonly holdsFk: boolean;
-  /**
-   * The class of the foreign key behind this relation (both sides carry it). The nested-write guard
-   * refuses nested writes through a RULE_I relation, because the row on the other side can belong
-   * to another org.
-   */
+  /** The class of the foreign key behind this relation (both sides carry it). */
   readonly fkClass: FkClass;
 }
 

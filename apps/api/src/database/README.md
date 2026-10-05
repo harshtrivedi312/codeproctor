@@ -213,16 +213,15 @@ async login(email: string, password: string) {
 ## Limits (read before relying on it)
 
 The extension filters the top-level model: its `where`, its `cursor`, and the `orgId` of a create
-or update. A nested guard ("Nested writes and nested cursors" below) refuses the nested writes and
-nested cursors that could change or rank against another org's rows. Everything else reached
-through a relation is **not** looked at.
+or update. Nested relation writes are **denied by default** ("Nested writes and nested cursors"
+below), and nested cursors are refused. Everything else reached through a relation is **not**
+looked at.
 
-- **(a) Ids written through a relation or a scalar foreign key.** A parent-side `connect`,
-  `connectOrCreate` or `set`, nested writes through a `RULE_I` relation, and a nested row of a
-  model with its own `org_id` that names another org are refused in an org scope (see "Nested
-  writes and nested cursors"). A child-side `connect` is the same as setting the scalar foreign key,
-  and neither is checked: **every such id follows rule (i)**. Load it through the scoped client
-  first, and answer 404 on a miss.
+- **(a) Ids written as scalar foreign keys.** Services relate rows with scalar foreign keys only
+  (`invitationId`, `testId`, `userId`). The extension does not check what id you write, and
+  Postgres checks only the composite keys (`invitations.test_id`, `invitations.candidate_id`,
+  `sessions.invitation_id`, which include `org_id`). **Every other id follows rule (i)**: load the
+  row through the scoped client first, and answer 404 on a miss.
 - **(b) Re-parenting.** An update that changes a path model's first-hop foreign key, for example
   `testSection.update({ data: { testId } })`, is the same as a path create: rule (i). A `create` on
   a `path` model cannot be stamped either (there is no `org_id` column), so the parent id in the
@@ -278,48 +277,105 @@ id into any of these columns, load the row through the scoped client and answer 
 Module tests and code review take their checklist from it, for example "every write of
 `session_questions.test_question_id` loads the test question first".
 
-The same table says which side of each relation holds the key, and its class, which the nested
-guard needs (next section).
+The same table lists every relation field (both sides of each foreign key), which the nested guard
+uses to tell a relation from a scalar.
 
 ## Nested writes and nested cursors
 
-In an org scope, `applyOrgScope` walks the `data` of `create`, `update`, `updateMany`, `upsert`
-(and their `*AndReturn` forms) at any depth, and the `include` and `select` of every operation. It
-visits relation fields only (the table above says which fields are relations and which class of
-foreign key each one is), so it never descends into a Json column and leaves a scalar list's
-`{ set: [...] }` alone. It adds no query. It **refuses** with `OrgScopeViolationError` (the message
-names models and fields, never values):
+### Nested relation writes are denied by default (ADR 0006 section 8)
 
-- `connect`, `connectOrCreate` and `set` on a **parent-side** relation (the key is on the related
-  model): they change rows the scope filter never selected. Example:
-  `organization.update({ where: { id: A }, data: { users: { connect: { id: userOfB } } } })`.
-- `create`, `createMany`, `update`, `updateMany`, `upsert`, `delete`, `deleteMany` and
-  `connectOrCreate` **through a `RULE_I` relation, on either side** (and a parent-side
-  `disconnect`). The row on the other side of a `RULE_I` relation can belong to another org after
-  one rule (i) slip, so
-  `sessionReview.update({ data: { reviewer: { connect: { id: userOfB }, update: { passwordHash } } } })`
-  would take over that user, and `user.update({ data: { sessionReviews: { updateMany } } })` would
-  rewrite other orgs' reviews that name this user. Write those rows with their own scoped call.
-- a nested `create`, `update`, `upsert` or `createMany` of a model with its own `org_id` that names
-  another org, through `orgId` or `org: { connect }`; a nested create of an organization; and a
-  nested operation the guard does not know.
-- **a `cursor` anywhere inside `include` or `select`**, at any depth (and in `_count`). Prisma finds
-  a nested cursor row by its own fields too (shown on Prisma 7: `id >= (SELECT id FROM
-proctor_events WHERE id = $cursor)`), so it ranks the caller's rows against another org's row.
-  The fluent API (`session.findUnique(...).proctorEvents({ cursor })`) reaches the extension as a
-  `select` on the relation and is refused the same way. **Page nested relations with `where`,
-  `take` and `orderBy`.**
+In **any scope the extension applies to** (an org scope, and system scope too), `applyOrgScope`
+refuses every nested relation write in the `data` of `create`, `update`, `updateMany`, `upsert`
+(and their `*AndReturn` forms): `connect`, `connectOrCreate`, `create`, `createMany`, `update`,
+`updateMany`, `upsert`, `delete`, `deleteMany`, `set` and `disconnect`, through every relation
+class (`ORG_ID`, `SCOPE_HOP`, `COMPOSITE`, `RULE_I`) and on both sides, including `org: { connect }`.
+It throws `OrgScopeViolationError`:
 
-It **allows**:
+```
+Organization.update: nested relation write refused (Organization.users.connect): write related rows
+with their own scoped call and scalar foreign keys (ADR 0006 §8, deny-by-default).
+```
 
-- a **child-side `connect` or `disconnect`** through any relation (the key is on this model: the
-  same as setting or clearing the scalar foreign key, so it stays under rule (i));
-- nested `create`, `update`, `upsert` and `delete` through a **`SCOPE_HOP`, `COMPOSITE` or `ORG_ID`**
-  relation (`test.sections`, `candidate.invitations`, `organization.questions`). Only there does the
-  nested write act inside the parent's own subtree, in the parent's org by construction. That is
-  **not** true through a `RULE_I` relation, which is why those are refused above.
+The message names the model, relation and operation, never a value. The check adds no query: it
+looks up each key of `data` in the relation table. It does **not** touch scalar fields (scalar
+foreign keys included), a scalar list's `{ set: [...] }`, Json columns, a flat top-level
+`createMany`, or nested reads (`include`/`select` without a cursor). With no scope active
+everything already throws.
 
-A `createMany` of a path model is flat and is not walked.
+**Why every shape, not a list of safe ones.** A nested write acts on rows the scope filter never
+selected, and each class had a hole, shown on Prisma 7 against Postgres:
+
+- **Parent side:** `organization.update({ data: { users: { connect: { id: userOfB } } } })` moves
+  B's user into A.
+- **`RULE_I`:** `sessionReview.update({ data: { reviewer: { update: { passwordHash } } } })` writes
+  the user the review names, who can belong to another org.
+- **`COMPOSITE`:** `connect` writes **every column of the key, `org_id` included**, from the
+  connected row. `session.update({ data: { invitation: { connect: { id: invitationOfB } } } })`
+  ran with org A's filter and left the session with `org_id` = B and B's `invitation_id`, with its
+  proctor events in org B. The composite foreign key is satisfied by the new values, so Postgres
+  accepts it. The scalar form `invitationId: <B's>` keeps `org_id` = A, and Postgres rejects it
+  (`sessions_invitation_id_org_id_fkey`).
+- **`connect` next to a write in one to-one input:** Prisma applies the `update` to the row that
+  was just connected. `refreshToken.update({ data: { user: { connect: { id: userOfB }, update: {
+passwordHash, email } } } })` rewrote B's user, through a `SCOPE_HOP` relation.
+
+A rule that lists the safe shapes would have to be re-proven on every Prisma release and schema
+change; refusing all of them cannot be wrong in this way. (`tc-008-org-isolation.spec.ts` records
+each of these on the plain client, and shows the refusal.)
+
+### Write with scalar foreign keys and separate calls
+
+**COMPOSITE keys (`invitations.test_id`, `invitations.candidate_id`, `sessions.invitation_id`) are
+written only as scalar foreign keys, never through `connect`**, and a nested to-one input never
+combines `connect` with a write. Postgres checks the composite keys on the scalar form.
+
+Prisma's relation inputs are the **checked** types (`XCreateInput`, `XUpdateInput`: `connect` and
+the rest). Scalar foreign keys are the **unchecked** types (`XUncheckedCreateInput`,
+`XUncheckedUpdateInput`), which Prisma picks by itself when the input has scalar keys and no
+relation. So the way to write related rows is the unchecked form, one top-level call per row:
+
+```ts
+// Refused: a checked input with a relation (deny by default).
+await prisma.client.invitation.create({
+  data: {
+    org: { connect: { id: orgId } },
+    test: { connect: { id: testId } },
+    candidate: { connect: { id: candidateId } },
+    tokenHash,
+    windowStart,
+    windowEnd,
+  },
+});
+
+// Allowed: the unchecked input, scalar foreign keys only. orgId is a scalar too (or let the scope stamp it).
+const invitation = await prisma.client.invitation.create({
+  data: { orgId, testId, candidateId, tokenHash, windowStart, windowEnd },
+});
+await prisma.client.session.create({ data: { orgId, invitationId: invitation.id } });
+
+// Several rows under one parent: separate top-level calls (or createMany), not a nested create.
+await prisma.client.testSection.createMany({ data: sections.map((s) => ({ testId, ...s })) });
+```
+
+Each id you write is a rule (i) id (`RULE_I_REFERENCES`): load the row first. The unchecked forms
+work through the extended client's types without casts (a test compiles the calls above).
+
+### Exceptions: `NESTED_WRITE_ALLOWLIST`
+
+`NESTED_WRITE_ALLOWLIST` in `org-scope-nested.ts` is the named exception list. **It is empty**: BE-02
+and BE-03 use scalar foreign keys and top-level calls only. To add an entry, give the model, the
+relation field and the nested operations, say why the shape cannot reach another org's row, and add
+a cross-org test for it to `tc-008-org-isolation.spec.ts`. A unit test fails while the list is not
+empty, so the addition is a reviewed change.
+
+### Nested cursors
+
+A **`cursor` anywhere inside `include` or `select`** is refused at any depth (and in `_count`).
+Prisma finds a nested cursor row by its own fields too (shown on Prisma 7: `id >= (SELECT id FROM
+proctor_events WHERE id = $cursor)`), so it ranks the caller's rows against another org's row. The
+fluent API (`session.findUnique(...).proctorEvents({ cursor })`) reaches the extension as a
+`select` on the relation and is refused the same way. **Page nested relations with `where`,
+`take` and `orderBy`.**
 
 ## Writing queries inside the scope
 
@@ -354,6 +410,9 @@ which stays one statement, and be ready to retry on `P2002` elsewhere.
 - Always pass `allowedLanguages` (question versions) and `events` (webhook endpoints) explicitly:
   the columns are NOT NULL with no database default, and Prisma treats list inputs as optional
   (FU-DB-07).
+- Relate rows with scalar foreign keys, through Prisma's unchecked inputs, one top-level call per
+  row; never `connect` and the other nested relation writes (see "Write with scalar foreign keys
+  and separate calls").
 - Connect as `app_user` (`DATABASE_URL`). `MIGRATION_DATABASE_URL` never appears in API code.
 
 ## Files

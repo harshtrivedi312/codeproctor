@@ -1488,6 +1488,106 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
   });
 
   describe('create', () => {
+    it('TC-008 the scalar-FK (unchecked) forms type-check through the extended client without casts, and write what they say', async () => {
+      // These are the calls the README shows. If the generated types or the extension's type stopped
+      // accepting them, `pnpm typecheck` would fail here: no `as` anywhere in this test.
+      const stamp = randomUUID();
+      const invitation = await asA(() =>
+        prisma.client.invitation.create({
+          data: {
+            orgId: A.orgId,
+            testId: A.rows.Test.filter.id as string,
+            candidateId: A.rows.Candidate.filter.id as string,
+            tokenHash: `unchecked-${stamp}`,
+            windowStart: new Date('2026-10-05T12:00:00Z'),
+            windowEnd: new Date('2026-10-06T12:00:00Z'),
+          },
+        }),
+      );
+      const session = await asA(() =>
+        prisma.client.session.create({ data: { orgId: A.orgId, invitationId: invitation.id } }),
+      );
+      expect({ orgId: session.orgId, invitationId: session.invitationId }).toEqual({
+        orgId: A.orgId,
+        invitationId: invitation.id,
+      });
+      const created = await asA(() =>
+        prisma.client.testSection.createMany({
+          data: [1, 2].map((n) => ({
+            testId: A.rows.Test.filter.id as string,
+            title: `unchecked ${stamp} ${n}`,
+            position: 30 + n,
+          })),
+        }),
+      );
+      expect(created.count).toBe(2);
+    });
+
+    it('TC-008 orgId is stamped on scalar-only (unchecked) input: create, createMany, createManyAndReturn and upsert.create', async () => {
+      const stamp = randomUUID();
+      const loose = <T>(op: string, model: ModelName, args: unknown): Promise<T> =>
+        asA(() => scoped(model)[op]?.(args) as Promise<T>);
+      const fk = {
+        testId: A.rows.Test.filter.id as string,
+        candidateId: A.rows.Candidate.filter.id as string,
+        windowStart: new Date('2026-10-05T12:00:00Z'),
+        windowEnd: new Date('2026-10-06T12:00:00Z'),
+      };
+
+      // create: scalar foreign keys (testId, candidateId), no orgId.
+      const one = await loose<{ orgId: string }>('create', 'Invitation', {
+        data: { ...fk, tokenHash: `stamp-create-${stamp}` },
+      });
+      expect(one.orgId).toBe(A.orgId);
+
+      // createMany: every row stamped.
+      const many = await loose<{ count: number }>('createMany', 'Invitation', {
+        data: [1, 2].map((n) => ({ ...fk, tokenHash: `stamp-many-${stamp}-${n}` })),
+      });
+      expect(many.count).toBe(2);
+
+      // createManyAndReturn: stamped, and returned.
+      const returned = await loose<Array<{ orgId: string }>>('createManyAndReturn', 'Invitation', {
+        data: [1, 2].map((n) => ({ ...fk, tokenHash: `stamp-return-${stamp}-${n}` })),
+      });
+      expect(returned.map((row) => row.orgId)).toEqual([A.orgId, A.orgId]);
+
+      // upsert: the create branch is stamped, the update branch is not touched.
+      const upserted = await loose<{ orgId: string }>('upsert', 'Invitation', {
+        where: { tokenHash: `stamp-upsert-${stamp}` },
+        create: { ...fk, tokenHash: `stamp-upsert-${stamp}` },
+        update: { sentAt: new Date('2026-10-05T13:00:00Z') },
+      });
+      expect(upserted.orgId).toBe(A.orgId);
+
+      // Everything created above belongs to org A in the database, and to nobody else.
+      const rows = await owner.invitation.findMany({ where: { tokenHash: { contains: stamp } } });
+      expect(rows).toHaveLength(6);
+      expect(new Set(rows.map((row) => row.orgId))).toEqual(new Set([A.orgId]));
+      expect(
+        await asB(() =>
+          prisma.client.invitation.count({ where: { tokenHash: { contains: stamp } } }),
+        ),
+      ).toBe(0);
+
+      // The same input naming another org's id is refused, on all four operations.
+      for (const [op, args] of [
+        ['create', { data: { ...fk, tokenHash: `x-${stamp}`, orgId: B.orgId } }],
+        ['createMany', { data: [{ ...fk, tokenHash: `y-${stamp}`, orgId: B.orgId }] }],
+        ['createManyAndReturn', { data: [{ ...fk, tokenHash: `z-${stamp}`, orgId: B.orgId }] }],
+        [
+          'upsert',
+          {
+            where: { tokenHash: `w-${stamp}` },
+            create: { ...fk, tokenHash: `w-${stamp}`, orgId: B.orgId },
+            update: {},
+          },
+        ],
+      ] as const) {
+        await expect(loose(op, 'Invitation', args)).rejects.toBeInstanceOf(OrgScopeViolationError);
+      }
+    });
+
     it("TC-008 create fills in the caller's org when the data has none", async () => {
       const row = await asA(
         () =>
