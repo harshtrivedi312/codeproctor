@@ -137,7 +137,7 @@ describe('foreign key classification checks can fail (NFR-04)', () => {
   const inputs = (over: Partial<RelationInputs> = {}): RelationInputs => ({
     fks: good,
     schema,
-    scope: scope as unknown as RelationInputs['scope'],
+    scope,
     relationOf: (model, f) => sides.get(`${model}.${f}`),
     relationKeys: [...sides.keys()],
     ...over,
