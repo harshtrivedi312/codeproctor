@@ -1,0 +1,185 @@
+// Shared setup for the QA integration tests. Starts throwaway Postgres 16 and Redis with
+// Testcontainers, applies prisma/migrations, and boots the real Nest app AS app_user, the
+// least-privileged role the product uses (ADR 0006), so a missing grant fails a test.
+// Fixtures are written with the container owner role. Nothing here reads the host environment's
+// database settings.
+import type { INestApplication } from '@nestjs/common';
+import { hash } from '@node-rs/argon2';
+import { randomBytes } from 'node:crypto';
+import request from 'supertest';
+import type { App } from 'supertest/types';
+import { Client } from 'pg';
+import { encryptSecret, sha256Hex } from '../../src/auth/crypto.util';
+import { createPrismaClient } from '../../src/database/create-prisma-client';
+import { PrismaClient, UserRole } from '../../src/generated/prisma/client';
+import type { MailPort } from '../../src/mail/mail.port';
+import { applyEnv, applyMigrations, startInfra, TestInfra } from '../../src/test/containers';
+
+export const API = '/api/v1';
+export const PASSWORD = 'Correct-Horse-9';
+export const TOTP_SECRET = 'JBSWY3DPEHPK3PXP';
+
+export interface SentMail {
+  to: string;
+  url: string;
+}
+
+export interface Harness {
+  infra: TestInfra;
+  app: INestApplication<App>;
+  /** Owner-role client: for fixtures and for reading what the API wrote. Not the API's own role. */
+  owner: PrismaClient;
+  appUserUrl: string;
+  orgId: string;
+  mails: SentMail[];
+  /** Everything the app wrote to stdout (request logs), when logs are on. */
+  logged: string[];
+  close(): Promise<void>;
+}
+
+export interface BootOptions {
+  env?: Record<string, string>;
+  /** Capture stdout so a test can prove that no secret reaches the logs. */
+  captureLogs?: boolean;
+}
+
+export async function boot(opts: BootOptions = {}): Promise<Harness> {
+  const logged: string[] = [];
+  const stdout = opts.captureLogs
+    ? jest.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
+        logged.push(String(chunk));
+        return true;
+      })
+    : undefined;
+
+  const infra = await startInfra();
+  await applyMigrations(infra);
+
+  // app_user is created by the audit_append_only migration without a password (ADR 0006 7.4).
+  const appPassword = randomBytes(18).toString('hex');
+  const admin = new Client({ connectionString: infra.postgres.getConnectionUri() });
+  await admin.connect();
+  await admin.query(`ALTER ROLE app_user PASSWORD '${appPassword}'`);
+  await admin.end();
+  const appUserUrl = `postgresql://app_user:${appPassword}@${infra.postgres.getHost()}:${infra.postgres.getMappedPort(5432)}/${infra.postgres.getDatabase()}`;
+
+  applyEnv(infra, {
+    DATABASE_URL: appUserUrl,
+    THROTTLE_AUTH_LIMIT: '100000',
+    LOG_LEVEL: opts.captureLogs ? 'info' : 'silent',
+    ...opts.env,
+  });
+  const owner = createPrismaClient(infra.postgres.getConnectionUri());
+  const orgId = (await owner.organization.create({ data: { name: 'QA Org A' } })).id;
+
+  const mails: SentMail[] = [];
+  const fakeMail: Pick<MailPort, 'sendPasswordReset'> = {
+    sendPasswordReset: (to, url) => {
+      mails.push({ to, url });
+      return Promise.resolve();
+    },
+  };
+
+  jest.resetModules();
+  const { AppModule } =
+    jest.requireActual<typeof import('../../src/app.module')>('../../src/app.module');
+  const { Test } = jest.requireActual<typeof import('@nestjs/testing')>('@nestjs/testing');
+  const { configureApp } =
+    jest.requireActual<typeof import('../../src/bootstrap')>('../../src/bootstrap');
+  const { MailPort: MailToken } = jest.requireActual<typeof import('../../src/mail/mail.port')>(
+    '../../src/mail/mail.port',
+  );
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+    .overrideProvider(MailToken)
+    .useValue(fakeMail)
+    .compile();
+  const app = moduleRef.createNestApplication<INestApplication<App>>();
+  configureApp(app);
+  await app.init();
+
+  return {
+    infra,
+    app,
+    owner,
+    appUserUrl,
+    orgId,
+    mails,
+    logged,
+    close: async () => {
+      stdout?.mockRestore();
+      await app.close();
+      await owner.$disconnect();
+      await infra.stop();
+    },
+  };
+}
+
+let seq = 0;
+
+export interface UserOptions {
+  role?: UserRole;
+  /** null creates a pending invite (no password yet). */
+  password?: string | null;
+  totp?: string;
+  orgId?: string;
+}
+
+export async function createUser(
+  h: Harness,
+  opts: UserOptions = {},
+): Promise<{ id: string; email: string }> {
+  const n = ++seq;
+  const email = `qa-user${n}@example.com`;
+  const key = Buffer.from(process.env.ENCRYPTION_KEY ?? '', 'base64');
+  const user = await h.owner.user.create({
+    data: {
+      orgId: opts.orgId ?? h.orgId,
+      email,
+      fullName: `QA User ${n}`,
+      role: opts.role ?? UserRole.RECRUITER,
+      passwordHash:
+        opts.password === null ? null : await hash(opts.password ?? PASSWORD, { algorithm: 2 }),
+      setPasswordTokenHash: opts.password === null ? sha256Hex(`invite-${n}`) : null,
+      totpSecretEnc: opts.totp ? encryptSecret(opts.totp, key) : null,
+      totpEnabled: opts.totp !== undefined,
+    },
+  });
+  return { id: user.id, email };
+}
+
+export const login = (h: Harness, email: string, password = PASSWORD): request.Test =>
+  request(h.app.getHttpServer()).post(`${API}/auth/login`).send({ email, password });
+
+export function refreshCookie(res: request.Response): string {
+  const header = res.headers['set-cookie'] as unknown as string[] | undefined;
+  const raw = (header ?? []).find((c) => c.startsWith('cp_refresh='));
+  if (!raw) throw new Error('no refresh cookie in the response');
+  return raw.split(';')[0] ?? '';
+}
+
+export const refresh = (h: Harness, cookie: string): request.Test =>
+  request(h.app.getHttpServer()).post(`${API}/auth/refresh`).set('Cookie', cookie);
+
+/** Loose view of the JSON bodies; each test reads only the fields it expects. */
+export interface Body {
+  status: string;
+  detail: string;
+  title: string;
+  challengeToken: string;
+  accessToken: string;
+  session: { accessToken: string; user: { email: string; role: string } };
+  manualKey: string;
+  otpauthUri: string;
+  qrDataUrl: string;
+  recoveryCodes: string[];
+  [key: string]: unknown;
+}
+
+export function claimsOf(jwt: string): { exp: number; iat: number; role: string; org: string } {
+  return JSON.parse(Buffer.from(jwt.split('.')[1] ?? '', 'base64url').toString()) as {
+    exp: number;
+    iat: number;
+    role: string;
+    org: string;
+  };
+}
