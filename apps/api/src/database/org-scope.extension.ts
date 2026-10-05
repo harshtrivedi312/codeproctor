@@ -13,9 +13,28 @@
 //                     OrgContextService.runRawSql(reason, fn). Raw SQL cannot be filtered, so the
 //                     SQL itself must filter by org_id, and the reason says why it is allowed.
 //
-// What it does not do: it does not look inside nested writes (`data: { children: { create } }`,
-// `connect`). Those rely on the composite foreign keys and on ADR 0006 section 2 rule (i): load
-// every foreign id through the scoped client first, and answer 404 on a miss. See the README.
+// What it does not do. Only the top-level model, its `where`, its `cursor` and the `orgId` of a
+// create or update are looked at. Everything reached through a relation is not (README "Limits"):
+//
+// (a) Nested writes are passed through. A parent-side `connect`, `set`, `connectOrCreate`, nested
+//     `create` or `update` can change another org's rows: for example
+//     `organization.update({ where: { id: A }, data: { users: { connect: { id: userOfB } } } })`
+//     moves B's user into A, and the filter on Organization does not see it. Until FU-DB-63 adds a
+//     guard, every id in a nested write follows ADR 0006 section 2 rule (i): load it through the
+//     scoped client first, and answer 404 on a miss.
+// (b) An update that changes a path model's first-hop foreign key (re-parenting, for example
+//     `testSection.update({ data: { testId } })`) is the same as a path create: rule (i).
+// (c) Nested reads are not filtered. `include`, `select`, the fluent API, relation filters,
+//     `orderBy` on a relation and `_count` follow foreign keys blindly, so any foreign key that
+//     crosses orgs leaks: `sessionReview.findUnique({ include: { reviewer: true } })` returns the
+//     reviewer user row of another org, password hash included, if reviewer_id points there.
+// (d) Rule (i) covers 25 foreign keys, not only the staff references and
+//     test_questions.question_version_id (FU-DB-64). The main cross-chain ones: session_questions
+//     to test_questions, question_versions and question_variants; session_sections to
+//     test_sections; consents to consent_texts; keystroke_batches to session_questions;
+//     webhook_deliveries to sessions; organizations to consent_texts.
+// (e) The raw SQL hatch is not reset by a nested scope: an open runRawSql stays open inside a
+//     runAsUser or runInOrg started within it. Wrap only the single raw statement.
 import { Prisma } from '../generated/prisma/client.js';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import { OrgContextMissingError, OrgScopeViolationError, RawQueryNotAllowedError } from './errors';
