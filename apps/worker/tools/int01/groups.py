@@ -2,8 +2,6 @@
 
 - Only volunteers who ticked box C (`consent_group_results`) are counted in any group. Everyone
   else stays in the overall totals only.
-- A group is counted in distinct volunteers, not pairs. A group with fewer than `min_group`
-  volunteers is hidden. The group of an impostor pair is the group of its probe volunteer.
 - A rate is shown only if at least `min_group` volunteers contribute to it: for FNMR, volunteers
   with a genuine pair; for FMR, volunteers with an impostor pair (a failed ID intake leaves a
   volunteer with no genuine pairs).
@@ -15,8 +13,11 @@
   individual's result.
 - Exact group sizes are never printed, only size bands. An impostor pair counts toward its
   probe's group only; the reference volunteer's demographics are not used.
-- Limit: two dimensions with nearly the same split could be subtracted from each other. The
-  dimension allow-list keeps this to the form's four questions.
+- One dimension per report. Cells from two dimensions can be differenced against each other
+  (for example two splits that differ by one volunteer), so a report covers exactly one
+  dimension and `group_report` refuses a second. Do not publish reports for several dimensions
+  from the same data without a new decision (FU-INB-07).
+- Group rates are printed to one decimal place, so group sizes cannot be recovered from them.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ MIN_GROUP = 10
 UNKNOWN = "prefer not to say"
 CONSENT_KEY = "consent_group_results"
 ALLOWED_DIMENSIONS = frozenset({"age_band", "gender", "skin_tone", "glasses"})  # form section 2
-_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 +<>/.\-]{0,23}$")
+_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 +/.\-]{0,23}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,15 +107,20 @@ def group_report(
     pairs: Sequence[ScoredPair],
     demographics: Mapping[str, SubjectDemo],
     threshold: float,
+    dimension: str,
     min_group: int = MIN_GROUP,
 ) -> list[DimensionReport]:
     if min_group < MIN_GROUP:
         raise ValueError(f"min_group must be at least {MIN_GROUP} (C-12)")
+    if dimension not in ALLOWED_DIMENSIONS:
+        raise ValueError("unknown demographic dimension")
     eligible = {s for s, d in demographics.items() if d.consent_group_results}
     kinds = ("genuine", "impostor")
     contrib_all = {k: {p.subject for p in pairs if p.kind == k} for k in kinds}
     scored_eligible = eligible & {p.subject for p in pairs}
-    dimensions = sorted({d for s in scored_eligible for d in demographics[s].values})
+    dimensions = (
+        [dimension] if any(dimension in demographics[s].values for s in scored_eligible) else []
+    )
     reports: list[DimensionReport] = []
     for dim in dimensions:
         by_group: dict[str, set[str]] = {}

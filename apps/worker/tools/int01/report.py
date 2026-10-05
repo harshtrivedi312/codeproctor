@@ -13,8 +13,8 @@ MODEL = (
 )
 
 
-def _pct(x: float) -> str:
-    return f"{x * 100:.3f}%"
+def _pct(x: float, places: int = 3) -> str:
+    return f"{x * 100:.{places}f}%"
 
 
 def render(
@@ -88,9 +88,8 @@ def render(
                 "|---|---|---|---|",
             ]
             for r in d.rows:
-                lines.append(
-                    f"| {r.group} | {r.size_band} | {_pct(r.point.fmr)} | {_pct(r.point.fnmr)} |"
-                )
+                fmr, fnmr = _pct(r.point.fmr, 1), _pct(r.point.fnmr, 1)
+                lines.append(f"| {r.group} | {r.size_band} | {fmr} | {fnmr} |")
             if d.hidden:
                 lines.append(
                     "\nSome groups are not shown: groups under "

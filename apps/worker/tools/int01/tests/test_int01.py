@@ -75,7 +75,7 @@ def _groups(
 def _rows(
     pairs: list[groups.ScoredPair], demo: dict[str, groups.SubjectDemo]
 ) -> tuple[list[str], bool]:
-    (dim,) = groups.group_report(pairs, demo, 0.5)
+    (dim,) = groups.group_report(pairs, demo, 0.5, "age_band")
     return [r.group for r in dim.rows], dim.hidden
 
 
@@ -96,12 +96,12 @@ def test_c12_nothing_hidden_when_every_group_has_ten() -> None:
     shown, hidden = _rows(*_groups(10, 10))
     assert shown == ["G0", "G1"] and not hidden
     with pytest.raises(ValueError):
-        groups.group_report(*_groups(10, 10), 0.5, min_group=5)
+        groups.group_report(*_groups(10, 10), 0.5, "age_band", min_group=5)
 
 
 def test_c12_rendered_report_gives_size_bands_only_never_exact_sizes() -> None:
     pairs, demo = _groups(23, 31, 9, 11)
-    (dim,) = groups.group_report(pairs, demo, 0.5)
+    (dim,) = groups.group_report(pairs, demo, 0.5, "age_band")
     rec = metrics.Recommendation(0.1, metrics.sweep([0.8], [0.1], [0.5])[0], "r")
     md = report.render(
         data_label="t", n_volunteers=74, points=[], rec=rec, groups=[dim], synthetic=True
@@ -119,14 +119,16 @@ def test_c12_only_volunteers_with_group_consent_count_in_groups() -> None:
     # G0 has 6 consenting volunteers and is hidden; with the 6 non-consenters the residual is 12,
     # which is safe, so G1 may be shown.
     assert hidden and shown == ["G1"]
-    assert groups.group_report(pairs, {}, 0.5) == []  # no consent entries: no group section
+    assert (
+        groups.group_report(pairs, {}, 0.5, "age_band") == []
+    )  # no consent entries: no group section
 
 
 def test_c12_demographics_file_is_strict(tmp_path: Path) -> None:
     for bad in (
         {"a": {"age_band": "30-44"}},  # consent flag missing
         {"a": {"consent_group_results": "yes", "age_band": "30-44"}},  # not a boolean
-        {"a": {"consent_group_results": True, "age_band": "<b>x</b>\n| evil |"}},  # markup
+        {"a": {"consent_group_results": True, "age_band": "a<b>x</b>\n| evil |"}},  # markup
         {"a": {"consent_group_results": True, "full_name": "Ada"}},  # not a form dimension
     ):
         with pytest.raises(ValueError):
@@ -273,7 +275,7 @@ def _mixed(
 
 def test_c12_one_non_consenter_cannot_be_derived_from_overall_totals() -> None:
     pairs, demo = _mixed([20, 20, 20], non_consenters=1)
-    (dim,) = groups.group_report(pairs, demo, 0.5)
+    (dim,) = groups.group_report(pairs, demo, 0.5, "age_band")
     shown = {r.group for r in dim.rows}
     rest = {p.subject for p in pairs} - {
         c for c, d in demo.items() if d.values["age_band"] in shown and d.consent_group_results
@@ -295,3 +297,39 @@ def test_c12_malformed_demographics_file_gives_clear_error(tmp_path: Path) -> No
     f.write_text("[1]")
     with pytest.raises(ValueError, match="per-volunteer"):
         evaluate.load_demographics(f)
+
+
+def test_c12_one_dimension_per_report_and_unknown_dimension_refused() -> None:
+    pairs, demo = _groups(20, 20)
+    with pytest.raises(ValueError):
+        groups.group_report(pairs, demo, 0.5, "full_name")
+    # The B5 construction: two splits differing by one volunteer cannot both be reported.
+    assert len(groups.group_report(pairs, demo, 0.5, "age_band")) == 1
+    assert groups.group_report(pairs, demo, 0.5, "gender") == []  # no such answers: nothing
+
+
+def test_c12_group_rates_have_one_decimal_so_sizes_cannot_be_recovered() -> None:
+    pairs, demo = _groups(23, 23)
+    (dim,) = groups.group_report(pairs, demo, 0.5, "age_band")
+    rec = metrics.Recommendation(0.1, metrics.sweep([0.8], [0.1], [0.5])[0], "r")
+    md = report.render(
+        data_label="t", n_volunteers=46, points=[], rec=rec, groups=[dim], synthetic=True
+    )
+    row = next(line for line in md.splitlines() if line.startswith("| G0 |"))
+    assert row.count(".") == 2 and "%" in row and "." not in row.split("|")[2]
+    # a withheld dimension says so
+    empty = groups.DimensionReport("age_band", (), True)
+    assert "Dimension withheld" in report.render(
+        data_label="t", n_volunteers=1, points=[], rec=rec, groups=[empty], synthetic=True
+    )
+
+
+def test_scores_csv_rejects_empty_subject_and_bad_number(tmp_path: Path) -> None:
+    f = tmp_path / "s.csv"
+    f.write_text("subject,kind,score\n,genuine,0.5\n")
+    with pytest.raises(ValueError, match="subject"):
+        evaluate.load_scores(f)
+    f.write_text("subject,kind,score\nx,genuine,secret\n")
+    with pytest.raises(ValueError, match="number") as ei:
+        evaluate.load_scores(f)
+    assert "secret" not in str(ei.value)

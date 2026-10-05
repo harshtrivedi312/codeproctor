@@ -33,7 +33,14 @@ def load_scores(path: Path) -> list[groups.ScoredPair]:
         for row in reader:
             if row["kind"] not in ("genuine", "impostor"):
                 raise ValueError("kind must be genuine or impostor")
-            pairs.append(groups.ScoredPair(row["subject"], row["kind"], float(row["score"])))
+            subject = (row["subject"] or "").strip()
+            try:
+                score = float(row["score"])
+            except (TypeError, ValueError):
+                raise ValueError("score must be a number") from None
+            if not subject:
+                raise ValueError("subject must not be empty")
+            pairs.append(groups.ScoredPair(subject, row["kind"], score))
     return pairs
 
 
@@ -52,14 +59,15 @@ def run(
     target_fmr: float,
     synthetic_data: bool,
     data_label: str,
+    dimension: str | None = None,
 ) -> str:
     g = [p.score for p in pairs if p.kind == "genuine"]
     i = [p.score for p in pairs if p.kind == "impostor"]
     points = metrics.sweep(g, i, metrics.default_thresholds())
     rec = metrics.recommend(points, target_fmr)
     grp = (
-        groups.group_report(pairs, demographics, rec.point.threshold)
-        if rec.point is not None and demographics
+        groups.group_report(pairs, demographics, rec.point.threshold, dimension)
+        if rec.point is not None and demographics and dimension
         else []
     )
     return report.render(
@@ -79,10 +87,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     src.add_argument("--scores", type=Path)
     ap.add_argument("--demographics", type=Path)
     ap.add_argument(
+        "--dimension",
+        choices=sorted(groups.ALLOWED_DIMENSIONS),
+        help="the one group dimension for this report (required with --demographics)",
+    )
+    ap.add_argument(
         "--target-fmr", type=float, default=None, help="default 0.001 (0.05 for --synthetic)"
     )
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args(argv)
+    if args.demographics and not args.dimension:
+        ap.error("--dimension is required with --demographics (one dimension per report)")
     if args.synthetic:
         pairs, demo = synthetic.synthetic_pairs()
         label = "synthetic scores (no real people)"
@@ -90,13 +105,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         pairs = load_scores(args.scores)
         demo = load_demographics(args.demographics) if args.demographics else {}
         label = "volunteer tuning set (scores only)"
-    target = args.target_fmr or (0.05 if args.synthetic else 0.001)
+    target = args.target_fmr if args.target_fmr is not None else (0.05 if args.synthetic else 0.001)
     scored = {p.subject for p in pairs}
     print(  # fixed-format counts only, never codes
         f"volunteers scored: {len(scored)}; without demographics: {len(scored - set(demo))}; "
         f"demographics without scores: {len(set(demo) - scored)}"
     )
-    args.out.write_text(run(pairs, demo, target, args.synthetic, label))
+    args.out.write_text(
+        run(
+            pairs,
+            demo,
+            target,
+            args.synthetic,
+            label,
+            args.dimension or ("age_band" if args.synthetic else None),
+        )
+    )
     return 0
 
 
