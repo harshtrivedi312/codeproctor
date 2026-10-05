@@ -46,7 +46,7 @@ Storage stays behind one S3-compatible interface, so only configuration differs 
 | ST-5 | On AWS S3, sign with the EC2 instance role, not static keys. | URLs signed with instance-role credentials expire when those credentials do (about 6 hours at most). That is fine for 60-second and 15-minute URLs, and it keeps long-lived keys out of the environment. |
 | ST-6 | Rely on bucket default encryption. Presign code sends no server-side-encryption headers. | AWS S3 encrypts every new object with SSE-S3 (AES-256) by default since 2023-01-05. R2 encrypts every object at rest with AES-256-GCM by default. ARC-05 decides SSE-S3 versus SSE-KMS; SSE-KMS adds KMS permissions to the signing role. |
 | ST-7 | Presigned URLs use the S3 API hostname, never a custom domain. The CSP `connect-src` and the bucket CORS rules are per environment. | R2 presigned URLs "cannot be used with custom domains". The browser PUTs cross-origin on both stores, so CORS is set in DEP-01 (staging) and in the pilot stack task (PA-07). |
-| ST-8 | Turn off S3 bucket versioning on media buckets, or expire noncurrent versions within days. | A versioned bucket keeps a deleted object as a noncurrent version, so the retention and erasure jobs (FR-704, NFR-05) would not really delete it. ARC-05 sets this with the other AWS S3 settings. |
+| ST-8 | Turn off S3 bucket versioning on media buckets, or expire noncurrent versions within days (*proposed amendment, ADR 0004 §9.2: within 1 day or less, checked by RetentionService*). | A versioned bucket keeps a deleted object as a noncurrent version, so the retention and erasure jobs (FR-704, NFR-05) would not really delete it. ARC-05 sets this with the other AWS S3 settings. |
 
 ## 3. Trust boundaries
 
