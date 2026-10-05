@@ -361,7 +361,7 @@ test('ADR-0006 7.4: when nothing listens on the port, it says so and prints no s
   assertNoSecrets(result);
 });
 
-test('NFR-04 (FU-DB-23): a URL with leading or trailing whitespace is refused before connecting', async () => {
+test('NFR-04 (FU-DB-23, FU-DB-31): a URL with leading or trailing whitespace, or a leading control character, is refused before connecting', async () => {
   const fake = await startFakePostgres();
   try {
     // trim() removes all of these, so the guard accepts them. pg-connection-string would resolve
@@ -388,6 +388,30 @@ test('NFR-04 (FU-DB-23): a URL with leading or trailing whitespace is refused be
       assertNoSecrets(result);
     }
     assert.equal(fake.state.connections, 0, 'the script connected with an untrimmed URL');
+    assert.deepEqual(fake.state.queries, []);
+
+    // FU-DB-31: a leading C0 control character gets past the guard and the trim check, so only the
+    // host check refuses these. The real guard runs here; nothing is bypassed.
+    const controlValues = {
+      'a C0 control character and a space': `\u0001 ${fake.url}`,
+      'a C0 control character and a bad %-sequence': `\u0001${fake.url.replace('@', '%zz@')}`,
+    };
+    for (const [label, value] of Object.entries(controlValues)) {
+      const result = await runScript({
+        MIGRATION_DATABASE_URL: value,
+        DATABASE_URL: fake.url,
+        APP_USER_PASSWORD: PASSWORD,
+      });
+      assert.equal(result.status, 1, `${label}: ${result.output}`);
+      assert.match(
+        result.stderr,
+        /to a host other than this machine\. Refusing to connect\./,
+        label,
+      );
+      assert.doesNotMatch(result.stderr, /leading or trailing whitespace|refusing to run/, label);
+      assertNoSecrets(result);
+    }
+    assert.equal(fake.state.connections, 0, 'the script dialled with a control-character URL');
     assert.deepEqual(fake.state.queries, []);
   } finally {
     await fake.close();

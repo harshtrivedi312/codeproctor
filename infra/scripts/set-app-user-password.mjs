@@ -21,8 +21,13 @@
 // pg gets exactly the string the guard checked (FU-DB-23). The guard validates the trimmed URL,
 // and pg-connection-string treats a leading space, NBSP or BOM differently: it resolves the value
 // against a dummy host and sends the whole URL, password included, as the database name. So a
-// value that is not already trimmed is refused. As a second line of defence, the host the client
-// resolved is checked before connect().
+// value that is not already trimmed is refused.
+//
+// That check does not cover every input. A URL that starts with a C0 control character such as
+// \u0001 and then has a space or a bad %-sequence passes both the guard (the URL parser strips the
+// control character) and the trim check (trim() does not remove it), and pg-connection-string still
+// resolves it against the dummy host. For that input the host check below, made on the host the
+// client resolved before connect(), is the only defence (FU-DB-31).
 //
 // Staging, pilot and production never use this script. They set the password at provisioning,
 // from the vault (ADR 0006 section 7.4, D-38).
