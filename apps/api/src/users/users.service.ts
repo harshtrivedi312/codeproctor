@@ -203,6 +203,63 @@ export class UsersService {
     return this.toDto(created);
   }
 
+  /**
+   * Re-issues the invite of a user who is still pending (no password yet, active), DL-23. A new
+   * 32-byte token replaces the stored hash with a fresh 72 hour expiry, so the old link stops
+   * working (the old hash is overwritten, single use). The target row is locked first and the write
+   * is bound to `password_hash IS NULL` and `is_active`, so a re-issue that races the invitee
+   * accepting cannot overwrite the new password or bring a link back: it finds the password set and
+   * is a 409. A user with a password or a deactivated one is a 409 as well, so this cannot be used
+   * to take over a live account. Same step-up, same rate limit as invite(). The audit row comes
+   * from the route's @Audited interceptor (metadata method and route only); the mail goes out
+   * after the commit and its failure is only logged by error name.
+   */
+  async reissueInvite(
+    actor: Actor,
+    rawTargetId: string,
+    currentPassword: string,
+    ctx: RequestContext,
+  ): Promise<StaffUserDto> {
+    const verified = await this.auth.verifyCurrentPassword(actor.id, currentPassword, ctx);
+    await this.takeInviteSlot(actor.orgId);
+    const targetId = rawTargetId.toLowerCase();
+    const token = newOpaqueToken();
+    const updated = await this.prisma.client.$transaction(async (tx) => {
+      await this.requireSameAdmin(tx, actor, verified.passwordHash);
+      const found = await this.raw('lock the target user row, same org only', () =>
+        tx.$queryRaw<{ id: string; is_active: boolean; has_password: boolean }[]>(Prisma.sql`
+          SELECT id, is_active, (password_hash IS NOT NULL) AS has_password FROM users
+          WHERE id = ${targetId}::uuid AND org_id = ${actor.orgId}::uuid
+          FOR NO KEY UPDATE`),
+      );
+      const target = found[0];
+      if (!target) throw new NotFoundException('User not found.');
+      if (target.has_password || !target.is_active) {
+        throw new ConflictException('Only a pending invitation can be re-issued.');
+      }
+      const done = await tx.user.updateMany({
+        where: { id: targetId, passwordHash: null, isActive: true },
+        data: {
+          setPasswordTokenHash: sha256Hex(token),
+          setPasswordExpiresAt: new Date(Date.now() + INVITE_TTL_MS),
+          updatedAt: new Date(),
+        },
+      });
+      if (done.count !== 1)
+        throw new ConflictException('Only a pending invitation can be re-issued.');
+      return tx.user.findUniqueOrThrow({ where: { id: targetId } });
+    });
+    try {
+      await this.mail.sendStaffInvite(
+        updated.email,
+        `${this.webOrigin}/admin/set-password#token=${token}`,
+      );
+    } catch (e) {
+      this.logger.error(`Staff invite email failed (${errorName(e)})`);
+    }
+    return this.toDto(updated);
+  }
+
   /** Fixed window per org and hour. Redis down is a 503 (fail closed), over the limit a 429. */
   private async takeInviteSlot(orgId: string): Promise<void> {
     const key = `invite:org:${orgId}:${Math.floor(Date.now() / (INVITE_WINDOW_SECONDS * 1000))}`;
