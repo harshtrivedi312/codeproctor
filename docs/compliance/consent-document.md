@@ -129,7 +129,7 @@ We record the document version, your typed name, the date and time from our serv
 5. **Section 7 transfer wording** uses SCCs, as the owner decided. If a processor relies on DPF instead, add it here.
 6. **The section 10 example questions** must match the FAIR-01 form once it is designed. Some categories (for example ethnicity) are special-category data under GDPR, and the separate consent covers them.
 7. **Job postings (C-14)** should carry a one-line notice, for example: "This role includes a proctored online coding assessment. Automated tools flag possible issues, and a person makes every decision."
+8. **Reading level.** The aim is plain language at about a US grade 8 reading level. A final readability pass is recommended after your edits.
 9. **Auto-clear of low-risk sessions (OQ-8).** The current design (ADR 0002, fsd.md §3) marks LOW-band sessions with confirmed identity as COMPLETED without a reviewer. Section 5 says so. If you want a person to look at every session, that is a design change.
 10. **Re-check frames** follow ADR 0013, which is still a proposal and changes FR-606 (from an in-browser check to a server check). Keep sections 3 and 4 in step with the accepted ADR.
 11. **Consent proof on erasure** (C-17) is stated in section 8.
-8. **Reading level.** The aim is plain language at about a US grade 8 reading level. A final readability pass is recommended after your edits.
