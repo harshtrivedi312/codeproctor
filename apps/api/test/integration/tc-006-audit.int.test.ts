@@ -216,12 +216,7 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
               expectReauthFailed(await call(h, route.method, t.path, outsider.token, wrong));
             }
             expect(await t.unchanged()).toBe(true);
-            // No row at all, so neither the right nor the wrong password can be in one.
-            const rows = await since(before);
-            expect(rows).toEqual([]);
-            expect(
-              JSON.stringify(rows, (_k, v: unknown) => (typeof v === 'bigint' ? String(v) : v)),
-            ).not.toMatch(/Wrong-Password-1|Correct-Horse-9/);
+            expect(await since(before)).toEqual([]); // no row, so no password can be in one
           });
         }
       } else {
@@ -422,6 +417,7 @@ auditSuite(
       expect(inviteToken.length).toBeGreaterThanOrEqual(20);
       const logs = h.logged.join('');
       expect(logs.length).toBeGreaterThan(0); // logging was really on
+      expect(logs).toContain('/admin/users'); // the calls themselves were logged
       for (const secret of [PASSWORD, wrong, inviteToken, admin.token]) {
         expect(logs).not.toContain(secret);
       }

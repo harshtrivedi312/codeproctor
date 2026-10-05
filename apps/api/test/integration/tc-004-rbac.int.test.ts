@@ -279,6 +279,9 @@ rbacSuite(
       const routes = listRoutes(h.app.get(ModulesContainer));
       expect(matrixProblems(routes)).toEqual([]);
 
+      // Every key QA says is covered elsewhere must really exist (a rename must not go unnoticed).
+      for (const key of Object.keys(COVERED_ELSEWHERE))
+        expect([key, key in ROUTE_PERMISSIONS]).toEqual([key, true]);
       // BE-13 routes count only once the BE-13 switch is on (they do not exist before).
       const listed = new Set(
         [...routesFor('BE-03'), ...(BE13_READY ? routesFor('BE-13') : [])].map(routeKey),

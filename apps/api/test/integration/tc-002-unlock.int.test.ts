@@ -89,6 +89,7 @@ import { ADMIN_USERS, BE03_READY, lockAlertsFor } from '../support/be03-routes';
       const count = lockMails.length;
       await login(h, u.email).expect(401);
       await h.settle();
+      await new Promise((r) => setImmediate(r)); // a wrongly sent second mail is deferred too
       expect(h.mails.filter((m) => m.method === 'sendStaffAccountLocked')).toHaveLength(count);
     });
 
@@ -130,11 +131,13 @@ import { ADMIN_USERS, BE03_READY, lockAlertsFor } from '../support/be03-routes';
       expect(await h.owner.auditLog.count({ where: { action: 'AUTH_ACCOUNT_LOCKED' } })).toBe(
         locksBefore,
       );
-      const row = await h.owner.auditLog.findFirst({
+      const rows = await h.owner.auditLog.findMany({
         where: { action: 'USER_UNLOCKED', entityId: u.id },
       });
+      expect(rows).toHaveLength(1);
+      const row = rows[0];
+      expect([row?.actorId, row?.orgId]).toEqual([admin.id, h.orgId]);
       // Contract (backend.md): USER_UNLOCKED carries wasLocked; for a no-op it says false.
-      expect(row).not.toBeNull();
       expect((row?.metadata as { wasLocked?: boolean } | null)?.wasLocked).toBe(false);
       await login(h, u.email).expect(200);
     });

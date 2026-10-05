@@ -2,7 +2,9 @@
 // (the client is lazy, enableOfflineQueue is off). Parallel 2FA sign-ins for different users must
 // all work; none may answer 503 "Verification is temporarily unavailable." while Redis is healthy.
 import { UserRole } from '../../src/generated/prisma/client';
-import { boot, createUser, Harness, signInWithTotp, TOTP_SECRET } from '../support/harness';
+import { authenticator } from 'otplib';
+import request from 'supertest';
+import { API, Body, boot, createUser, Harness, login, TOTP_SECRET } from '../support/harness';
 
 describe('TC-003 (FR-102): parallel 2FA sign-ins right after boot', () => {
   let h: Harness;
@@ -30,11 +32,27 @@ describe('TC-003 (FR-102): parallel 2FA sign-ins right after boot', () => {
     'TC-003 KNOWN DEFECT QA-D-04: five parallel 2FA sign-ins on a cold API all succeed (no 503 from the Redis connect race)',
     async () => {
       // No Redis command has run yet in this process: every sign-in below races the first connect.
-      const results = await Promise.allSettled(users.map((u) => signInWithTotp(h, u.email)));
-      const failures = results.flatMap((r) => (r.status === 'rejected' ? [String(r.reason)] : []));
-      const known = failures.filter((f) => /got 503 /.test(f));
-      if (failures.length > 0 && known.length === failures.length) {
-        throw new Error(`QA-D-04 reproduced: ${known.length} of 5 answered 503`);
+      // Raw calls, so the path and the problem detail are checked, not just a status.
+      const attempt = async (email: string): Promise<string | null> => {
+        const first = await login(h, email);
+        if (first.status !== 200) return `login ${first.status}`;
+        const res = await request(h.app.getHttpServer())
+          .post(`${API}/auth/2fa/verify`)
+          .send({
+            challengeToken: (first.body as Body).challengeToken,
+            code: authenticator.generate(TOTP_SECRET),
+          });
+        if (res.status === 200) return null;
+        const known =
+          res.status === 503 &&
+          (res.body as Body).detail === 'Verification is temporarily unavailable.';
+        return known ? 'KNOWN' : `verify ${res.status}`;
+      };
+      const outcomes = (await Promise.all(users.map((u) => attempt(u.email)))).filter(
+        (o): o is string => o !== null,
+      );
+      if (outcomes.length > 0 && outcomes.every((o) => o === 'KNOWN')) {
+        throw new Error(`QA-D-04 reproduced: ${outcomes.length} of 5 answered 503 on /2fa/verify`);
       }
     },
   );
