@@ -1,0 +1,312 @@
+import { act, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { http, HttpResponse } from 'msw';
+import { axe } from 'vitest-axe';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { LoginForm } from '@/features/auth/login-form';
+import { TwoFactorEnroll } from '@/features/auth/two-factor-enroll';
+import { UserMenu } from '@/features/staff/user-menu';
+import { getAccessToken } from '@/lib/auth-token';
+import { apiBaseUrl } from '@/lib/env';
+import {
+  MOCK_ADMIN_RECOVERY_CODE,
+  MOCK_TOTP_CODE,
+  MOCK_USERS,
+  seedMockTwoFactor,
+} from '@/mocks/auth-handlers';
+import { server } from '@/mocks/server';
+import { renderAsStaff, renderWithAuth, resetAuthTestState } from '@/test/auth-test-utils';
+import { router } from '@/test/nav-mock';
+import { SecurityPage } from './security-page';
+import { isTwoFactorMandatory, reauthBodySchema, setupConfirmBodySchema } from './schemas';
+
+vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
+vi.mock('qrcode', () => ({
+  default: { toDataURL: () => Promise.resolve('data:image/png;base64,AA==') },
+}));
+
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
+beforeEach(() => resetAuthTestState());
+
+const base = `${apiBaseUrl}/v1/auth`;
+
+/** Counts the calls that would sign a user out or restore a session. */
+function watchSessionCalls() {
+  const calls = { refresh: 0, logout: 0 };
+  server.events.on('request:start', ({ request }) => {
+    const { pathname } = new URL(request.url);
+    if (pathname.endsWith('/auth/refresh')) calls.refresh += 1;
+    if (pathname.endsWith('/auth/logout')) calls.logout += 1;
+  });
+  return calls;
+}
+
+async function pageAs(user: { email: string }, opts: { twoFactorOn?: boolean } = {}) {
+  if (opts.twoFactorOn) seedMockTwoFactor(user.email);
+  // The staff shell supplies the <main> landmark in the app.
+  renderAsStaff(
+    <main>
+      <SecurityPage />
+    </main>,
+    user,
+  );
+  await screen.findByTestId('two-factor-status');
+  return userEvent.setup();
+}
+const dialog = () => screen.getByRole('dialog');
+const passwordField = () => within(dialog()).getByLabelText('Current password');
+
+async function openAndSubmit(u: ReturnType<typeof userEvent.setup>, button: string, pw: string) {
+  await u.click(screen.getByRole('button', { name: button }));
+  await u.type(passwordField(), pw);
+  await u.click(
+    within(dialog()).getByRole('button', { name: /^(Continue|Turn off 2FA|Get new codes)$/ }),
+  );
+}
+
+describe('web-local schemas (FR-102)', () => {
+  it('FR-102: currentPassword is required on every body and the confirm body also needs a 6-digit code', () => {
+    expect(reauthBodySchema.safeParse({ currentPassword: '' }).success).toBe(false);
+    expect(reauthBodySchema.safeParse({ currentPassword: 'x' }).success).toBe(true);
+    expect(setupConfirmBodySchema.safeParse({ currentPassword: 'x', code: '12' }).success).toBe(
+      false,
+    );
+    expect(setupConfirmBodySchema.safeParse({ currentPassword: 'x', code: '123456' }).success).toBe(
+      true,
+    );
+    expect(isTwoFactorMandatory('SUPER_ADMIN')).toBe(true);
+    expect(isTwoFactorMandatory('REVIEWER')).toBe(true);
+    expect(isTwoFactorMandatory('RECRUITER')).toBe(false);
+    expect(isTwoFactorMandatory('AUTHOR')).toBe(false);
+  });
+});
+
+describe('Security page: wrong password (FR-102, FU-BE-39)', () => {
+  it('FR-102: a wrong password shows "Password incorrect", keeps the dialog open and keeps the user signed in', async () => {
+    const calls = watchSessionCalls();
+    const u = await pageAs(MOCK_USERS.recruiter);
+    const token = getAccessToken();
+    expect(token).not.toBeNull();
+    const refreshBefore = calls.refresh;
+
+    await openAndSubmit(u, 'Set up 2FA', 'not-my-password');
+
+    expect(await within(dialog()).findByText('Password incorrect')).toBeInTheDocument();
+    expect(within(dialog()).getByRole('alert')).toHaveTextContent(/^Password incorrect$/);
+    // Still open, field emptied for the retry, still signed in, no refresh, no logout, no redirect.
+    expect(passwordField()).toHaveValue('');
+    expect(getAccessToken()).toBe(token);
+    expect(calls.refresh).toBe(refreshBefore);
+    expect(calls.logout).toBe(0);
+    expect(router.replace).not.toHaveBeenCalled();
+
+    // The retry works in the same dialog.
+    await u.type(passwordField(), MOCK_USERS.recruiter.password);
+    await u.click(within(dialog()).getByRole('button', { name: 'Continue' }));
+    expect(await within(dialog()).findByTestId('manual-key')).toBeInTheDocument();
+  });
+
+  it('FR-102: the password field is type=password with autocomplete=current-password', async () => {
+    const u = await pageAs(MOCK_USERS.recruiter);
+    await u.click(screen.getByRole('button', { name: 'Set up 2FA' }));
+    expect(passwordField()).toHaveAttribute('type', 'password');
+    expect(passwordField()).toHaveAttribute('autocomplete', 'current-password');
+  });
+
+  it('FR-102: the password is cleared when the dialog closes', async () => {
+    const u = await pageAs(MOCK_USERS.recruiter);
+    await u.click(screen.getByRole('button', { name: 'Set up 2FA' }));
+    await u.type(passwordField(), 'half-typed-secret');
+    await u.click(within(dialog()).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    await u.click(screen.getByRole('button', { name: 'Set up 2FA' }));
+    expect(passwordField()).toHaveValue('');
+    expect(document.body.innerHTML).not.toContain('half-typed-secret');
+  });
+
+  it('FR-102: a network failure gets a fix-it hint and does not sign the user out', async () => {
+    const calls = watchSessionCalls();
+    server.use(http.post(`${base}/2fa/setup/start`, () => HttpResponse.error()));
+    const u = await pageAs(MOCK_USERS.recruiter);
+    await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
+    expect(await within(dialog()).findByText(/Check your connection/)).toBeInTheDocument();
+    expect(calls.logout).toBe(0);
+    expect(getAccessToken()).not.toBeNull();
+  });
+
+  it('FR-102: a 403 with another code is not shown as a password problem and does not sign out', async () => {
+    const calls = watchSessionCalls();
+    server.use(
+      http.post(`${base}/2fa/setup/start`, () =>
+        HttpResponse.json({ code: 'forbidden', message: 'No.' }, { status: 403 }),
+      ),
+    );
+    const u = await pageAs(MOCK_USERS.recruiter);
+    await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
+    expect(await within(dialog()).findByText('Your role cannot do this')).toBeInTheDocument();
+    expect(within(dialog()).queryByText('Password incorrect')).not.toBeInTheDocument();
+    expect(calls.logout).toBe(0);
+  });
+});
+
+describe('Security page: set up, disable, regenerate (FR-102)', () => {
+  it('FR-102: a recruiter sets up 2FA, sees the recovery codes once, and then Disable appears; disabling turns it off again', async () => {
+    const u = await pageAs(MOCK_USERS.recruiter);
+    expect(screen.queryByRole('button', { name: 'Disable 2FA' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Regenerate recovery codes' }),
+    ).not.toBeInTheDocument();
+
+    await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
+    expect(await within(dialog()).findByTestId('manual-key')).toBeInTheDocument();
+    expect(within(dialog()).getByAltText(/QR code/)).toBeInTheDocument();
+    // A wrong first code keeps the dialog on this step.
+    await u.type(within(dialog()).getByLabelText('6-digit code'), '000000');
+    await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
+    expect(await within(dialog()).findByText('That code did not match')).toBeInTheDocument();
+    await u.type(within(dialog()).getByLabelText('6-digit code'), MOCK_TOTP_CODE);
+    await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
+
+    const codes = await within(dialog()).findByTestId('recovery-codes');
+    expect(within(codes).getAllByRole('listitem')).toHaveLength(10);
+    expect(within(dialog()).getByRole('button', { name: 'Download recovery codes' })).toBeVisible();
+    const done = within(dialog()).getByRole('button', { name: 'Done' });
+    expect(done).toBeDisabled();
+    await u.click(within(dialog()).getByRole('checkbox'));
+    await u.click(done);
+
+    expect(await screen.findByRole('button', { name: 'Disable 2FA' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Regenerate recovery codes' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Set up 2FA' })).not.toBeInTheDocument();
+
+    await openAndSubmit(u, 'Disable 2FA', MOCK_USERS.recruiter.password);
+    expect(await screen.findByRole('button', { name: 'Set up 2FA' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Disable 2FA' })).not.toBeInTheDocument();
+  });
+
+  it('FR-102: an author can enable and then disable 2FA too', async () => {
+    const u = await pageAs(MOCK_USERS.author, { twoFactorOn: true });
+    expect(screen.getByRole('button', { name: 'Disable 2FA' })).toBeVisible();
+    await openAndSubmit(u, 'Disable 2FA', MOCK_USERS.author.password);
+    expect(await screen.findByRole('button', { name: 'Set up 2FA' })).toBeVisible();
+  });
+
+  it.each([
+    ['SUPER_ADMIN', MOCK_USERS.admin],
+    ['REVIEWER', MOCK_USERS.reviewer],
+  ])('FR-102: Disable 2FA is hidden for %s and the page explains why', async (_role, user) => {
+    await pageAs(user, { twoFactorOn: true });
+    expect(screen.queryByRole('button', { name: 'Disable 2FA' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Regenerate recovery codes' })).toBeVisible();
+    expect(screen.getByTestId('two-factor-required')).toHaveTextContent(
+      'Two-factor sign-in is required for your role',
+    );
+  });
+
+  it('FR-102: regenerating shows new codes once and the old codes stop working', async () => {
+    const u = await pageAs(MOCK_USERS.admin, { twoFactorOn: true });
+    const verify = (code: string) =>
+      fetch(`${base}/2fa/verify`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ challengeToken: `mock-challenge-${MOCK_USERS.admin.email}`, code }),
+      });
+
+    await openAndSubmit(u, 'Regenerate recovery codes', MOCK_USERS.admin.password);
+    const list = await within(dialog()).findByTestId('recovery-codes');
+    const fresh = within(list)
+      .getAllByRole('listitem')
+      .map((li) => li.textContent.replace(/-/g, ''));
+    expect(fresh).toHaveLength(10);
+    expect(fresh).not.toContain(MOCK_ADMIN_RECOVERY_CODE);
+    expect(screen.getByRole('dialog')).toHaveTextContent('Your old recovery codes no longer work');
+
+    // Esc does not dismiss the one-time codes.
+    await u.keyboard('{Escape}');
+    expect(screen.getByRole('dialog')).toBeVisible();
+
+    expect((await verify(MOCK_ADMIN_RECOVERY_CODE)).status).toBe(400);
+    expect((await verify(fresh[0]!)).status).toBe(200);
+    expect((await verify(fresh[0]!)).status).toBe(400); // each works once
+  });
+
+  it('FR-102: the mock refuses a wrong password with 403 REAUTH_FAILED on every endpoint', async () => {
+    renderAsStaff(<SecurityPage />, MOCK_USERS.recruiter);
+    await screen.findByTestId('two-factor-status');
+    for (const path of [
+      '2fa/setup/start',
+      '2fa/setup/confirm',
+      '2fa/disable',
+      '2fa/recovery-codes/regenerate',
+    ]) {
+      const res = await fetch(`${base}/${path}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${getAccessToken()}`,
+        },
+        body: JSON.stringify({ currentPassword: 'nope', code: MOCK_TOTP_CODE }),
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { code: string }).code).toBe('REAUTH_FAILED');
+    }
+  });
+});
+
+describe('Security page: entry point, forced enrollment, accessibility', () => {
+  it.each(Object.values(MOCK_USERS))(
+    'FR-102: the user menu links every staff role ($role) to /admin/security',
+    async (user) => {
+      renderAsStaff(<UserMenu />, user);
+      const u = userEvent.setup();
+      await u.click(await screen.findByTestId('user-menu'));
+      expect(await screen.findByRole('menuitem', { name: 'Security' })).toHaveAttribute(
+        'href',
+        '/admin/security',
+      );
+    },
+  );
+
+  it('FR-102: forced enrollment is unchanged and asks for no password', async () => {
+    const bodies: string[] = [];
+    server.events.on('request:start', ({ request }) => {
+      if (new URL(request.url).pathname.includes('/2fa/enroll/')) {
+        void request
+          .clone()
+          .text()
+          .then((t) => bodies.push(t));
+      }
+    });
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <TwoFactorEnroll />
+      </>,
+    );
+    const u = userEvent.setup();
+    await u.type(screen.getAllByLabelText('Work email')[0]!, MOCK_USERS.reviewer.email);
+    await u.type(screen.getByLabelText('Password'), MOCK_USERS.reviewer.password);
+    await u.click(screen.getByRole('button', { name: 'Sign in' }));
+    await screen.findByTestId('manual-key');
+    expect(screen.queryByLabelText('Current password')).not.toBeInTheDocument();
+    await u.type(screen.getByLabelText('6-digit code'), MOCK_TOTP_CODE);
+    await u.click(screen.getByRole('button', { name: 'Confirm and continue' }));
+    expect(await screen.findByTestId('recovery-codes')).toBeInTheDocument();
+    await waitFor(() => expect(bodies.length).toBeGreaterThanOrEqual(2));
+    expect(bodies.join('')).not.toContain('currentPassword');
+  });
+
+  it('FR-102: axe finds no violations on the page or on the open dialog', async () => {
+    const u = await pageAs(MOCK_USERS.recruiter);
+    expect(await axe(document.body)).toHaveNoViolations();
+    await u.click(screen.getByRole('button', { name: 'Set up 2FA' }));
+    await act(async () => {});
+    expect(await axe(document.body)).toHaveNoViolations();
+    await u.type(passwordField(), 'wrong-password-1');
+    await u.click(within(dialog()).getByRole('button', { name: 'Continue' }));
+    await within(dialog()).findByText('Password incorrect');
+    expect(await axe(document.body)).toHaveNoViolations();
+  });
+});

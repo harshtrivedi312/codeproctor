@@ -1,5 +1,6 @@
 'use client';
-import { ChevronDown, LogOut } from 'lucide-react';
+import { ChevronDown, LogOut, ShieldCheck } from 'lucide-react';
+import Link from 'next/link';
 import * as React from 'react';
 import {
   DropdownMenu,
@@ -36,6 +37,12 @@ export function UserMenu(): React.JSX.Element | null {
           <span className="block text-muted-foreground">{ROLE_LABELS[role]}</span>
         </DropdownMenuLabel>
         <DropdownMenuSeparator className="my-1 h-px bg-border" />
+        <DropdownMenuItem asChild>
+          <Link href="/admin/security">
+            <ShieldCheck className="size-4" aria-hidden="true" />
+            Security
+          </Link>
+        </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => void signOut()}>
           <LogOut className="size-4" aria-hidden="true" />
           Sign out
