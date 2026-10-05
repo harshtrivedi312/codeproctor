@@ -370,6 +370,12 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
       ),
       '1000000|false',
     );
+    // staff refresh tokens are revoked by the restore (a restore un-revokes and un-rotates them)
+    assert.equal(q('SELECT count(*) FROM refresh_tokens WHERE revoked_at IS NULL'), '0');
+    assert.equal(
+      pg.psql('source', 'SELECT count(*) FROM refresh_tokens WHERE revoked_at IS NULL'),
+      '1',
+    );
     // consent proof kept (C-17)
     assert.equal(
       q(

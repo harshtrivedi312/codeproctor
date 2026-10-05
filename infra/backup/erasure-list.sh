@@ -88,9 +88,9 @@ case "$cmd" in
         # The request entry goes first: if it fails the marker stays, and the next run retries.
         printf '%s\n' "$KEYS" | { grep -- "-$id\.json\$" || true; } > "$WORK/request-keys"
         while read -r key; do
-          s3api delete-object --bucket "$BUCKET" --key "$key" > /dev/null
+          s3api delete-object --bucket "$BUCKET" --key "$key" > /dev/null < /dev/null
         done < "$WORK/request-keys"
-        s3api delete-object --bucket "$BUCKET" --key "$COMPLETED_PREFIX$done_stamp-$id.json" > /dev/null
+        s3api delete-object --bucket "$BUCKET" --key "$COMPLETED_PREFIX$done_stamp-$id.json" > /dev/null < /dev/null
         log "pruned a completed erasure-list entry from $done_stamp."
       fi
     done < "$WORK/completed"

@@ -206,6 +206,8 @@ BEGIN
   INSERT INTO proctor_event_batches (session_id, seq, signature, event_count) VALUES (ses, 1, '\\x00', 1);
   INSERT INTO keystroke_batches (session_id, seq, signature, started_at, events) VALUES (ses, 1, '\\x00', now(), '[]');
 END $f$;
+INSERT INTO refresh_tokens (user_id, family_id, token_hash, expires_at) VALUES
+  ('aaaaaaaa-0000-4000-8000-000000000002', gen_random_uuid(), 'rt1', now() + interval '7 days');
 SELECT pg_temp.chain('${ERASED_ID}', 1);
 SELECT pg_temp.chain('${KEPT_ID}', 2);
 `;

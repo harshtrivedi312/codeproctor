@@ -134,9 +134,11 @@ fi
 # 4b. Session fence for every session, erased or not. The restore puts back the epochs of the backup
 #     time, and a device that lost its session to another device since then would get a valid token
 #     again. Every OTP success raises the epoch, so a jump of a million passes anything issued since.
-#     Candidates sign in again. (Sessions only; staff refresh tokens are not touched here.)
-psql --no-psqlrc -X -q -v ON_ERROR_STOP=1 -d "$target" -c 'UPDATE sessions SET auth_epoch = auth_epoch + 1000000' > /dev/null ||
-  die "could not raise the session epochs. Do not use database $target: old candidate tokens may work again."
+#     Candidates sign in again. Staff refresh tokens are revoked too: the restore un-revokes
+#     tokens revoked since the backup and un-rotates rotated ones, so a stolen old token would work.
+#     One transaction, all or nothing.
+psql --no-psqlrc -X -q -v ON_ERROR_STOP=1 -d "$target" -c 'BEGIN; UPDATE sessions SET auth_epoch = auth_epoch + 1000000; UPDATE refresh_tokens SET revoked_at = now() WHERE revoked_at IS NULL; COMMIT;' > /dev/null ||
+  die "could not fence the restored sessions and tokens. Do not use database $target: old tokens may work again."
 
 # 5. Re-apply the erasures (ADR 0004 R-7). Every entry on the list is applied, not just those
 #    after the backup stamp: re-applying one that is already in the backup changes nothing.

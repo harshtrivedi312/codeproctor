@@ -48,6 +48,8 @@ WHERE session_review_id IN (
 -- OTP success raises auth_epoch (ADR 0002, ADR 0013), so a token issued after the backup carries an
 -- epoch higher than the restored one. A +1 bump could land on exactly that value; jumping by a
 -- million puts the epoch past anything issued in the backup window. Applied on every run (harmless).
+-- restore.sh raises every restored session's epoch as well, so erased sessions end up 2,000,000 higher;
+-- the bump is kept here deliberately so this file is safe to run on its own.
 UPDATE sessions
 SET device_info = '{}',
     auth_epoch = auth_epoch + 1000000,
