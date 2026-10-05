@@ -72,6 +72,86 @@ describe('org scope extension without a database (NFR-04, FR-103)', () => {
     });
   });
 
+  describe('nested relation writes (ADR 0006 section 8): refused in system scope too', () => {
+    // The extension refuses before any SQL, so this needs no database.
+    const attempts: Array<[string, () => Promise<unknown>]> = [
+      [
+        'organization.update users.connect',
+        () =>
+          client.organization.update({
+            where: { id: ORG_A },
+            data: { users: { connect: { id: ORG_B } } },
+          }),
+      ],
+      [
+        'session.update invitation.connect (COMPOSITE)',
+        () =>
+          client.session.update({
+            where: { id: ORG_A },
+            data: { invitation: { connect: { id: ORG_B } } },
+          }),
+      ],
+      [
+        'refreshToken.update user connect + update',
+        () =>
+          client.refreshToken.update({
+            where: { id: ORG_A },
+            data: { user: { connect: { id: ORG_B }, update: { passwordHash: 'p' } } },
+          }),
+      ],
+      [
+        'sessionReview.update reviewer.update (RULE_I)',
+        () =>
+          client.sessionReview.update({
+            where: { id: ORG_A },
+            data: { reviewer: { update: { passwordHash: 'p' } } },
+          }),
+      ],
+      [
+        'test.create sections.create (SCOPE_HOP)',
+        () =>
+          client.test.create({
+            data: {
+              orgId: ORG_A,
+              name: 't',
+              durationMinutes: 30,
+              sections: { create: { title: 's', position: 0 } },
+            },
+          }),
+      ],
+      [
+        'test.upsert update branch',
+        () =>
+          client.test.upsert({
+            where: { id: ORG_A },
+            create: { orgId: ORG_A, name: 't', durationMinutes: 30 },
+            update: { sections: { deleteMany: {} } },
+          }),
+      ],
+    ];
+
+    it.each(attempts)('TC-008 %s is refused in system scope', async (_name, run) => {
+      await expect(orgContext.runSystem('BACKGROUND_JOB', run)).rejects.toThrow(
+        /nested relation write refused/,
+      );
+      await expect(orgContext.runSystem('BACKGROUND_JOB', run)).rejects.toBeInstanceOf(
+        OrgScopeViolationError,
+      );
+    });
+
+    it.each(attempts)('TC-008 %s is refused in an org scope too', async (_name, run) => {
+      await expect(orgContext.runInOrg(ORG_A, run)).rejects.toThrow(
+        /nested relation write refused/,
+      );
+    });
+
+    it('TC-008 with no scope at all everything still throws OrgContextMissingError (nothing changes)', async () => {
+      for (const [, run] of attempts) {
+        await expect(run()).rejects.toBeInstanceOf(OrgContextMissingError);
+      }
+    });
+  });
+
   describe('raw SQL', () => {
     const attempts: Array<[string, () => Promise<unknown>]> = [
       ['$queryRaw', () => client.$queryRaw`SELECT 1`],

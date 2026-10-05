@@ -20,7 +20,7 @@ export const RULES: readonly GuardRule[] = [
     name: 'database/prisma.module',
     module: 'database/prisma.module',
     why: "BE-02's interim unscoped client, for auth only (FU-DB-58). Inject PrismaService from database/prisma.service.ts.",
-    allowed: [], // deleted with FU-DB-58: auth runs on the scoped client
+    allowed: [], // deleted with FU-DB-58: auth and the guard run on the scoped client
   },
   {
     name: 'database/create-prisma-client',

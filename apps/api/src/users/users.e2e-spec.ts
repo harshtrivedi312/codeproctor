@@ -270,6 +270,26 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       await http().get(`${API}/admin/users`).set(admin.auth).expect(200);
     });
 
+    it('TC-008, FR-103: a validly signed token that claims another org for the user is 401 (the re-check runs in the claimed org)', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const stored = await owner.user.findUniqueOrThrow({ where: { id: admin.id } });
+      const wrongOrg = tokens.sign(
+        {
+          sub: admin.id,
+          org: orgB,
+          role: UserRole.SUPER_ADMIN,
+          kind: 'access',
+          pwv: passwordVersion(stored.passwordHash ?? ''),
+        },
+        900,
+      );
+      const res = await http()
+        .get(`${API}/admin/users`)
+        .set({ Authorization: `Bearer ${wrongOrg}` });
+      expect(res.status).toBe(401);
+      expect(JSON.stringify(res.body)).not.toContain(orgA);
+    });
+
     it('TC-004: no token and a forged token are 401 on the admin routes', async () => {
       await http().get(`${API}/admin/users`).expect(401);
       await http()

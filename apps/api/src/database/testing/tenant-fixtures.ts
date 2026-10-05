@@ -9,6 +9,7 @@
 // silently skip a new model.
 import { randomUUID } from 'node:crypto';
 import type { PrismaClient } from '../../generated/prisma/client.js';
+import type { UserRole } from '../../generated/prisma/enums.js';
 import type { ModelName } from '../org-scope-map';
 
 type Where = Record<string, unknown>;
@@ -20,10 +21,19 @@ export interface RowSelector {
   readonly filter: Where;
 }
 
+/**
+ * The staff user's password hash. JwtAuthGuard (BE-02) binds an access token to it through the
+ * `pwv` claim and re-reads it on every request, so tokens must be minted from the same value
+ * (testing/staff-token.ts).
+ */
+export const FIXTURE_PASSWORD_HASH = 'not-a-real-hash';
+
 export interface TenantFixture {
   readonly label: string;
   readonly orgId: string;
   readonly userId: string;
+  readonly userRole: UserRole;
+  readonly passwordHash: string;
   readonly rows: Record<ModelName, RowSelector>;
 }
 
@@ -40,7 +50,7 @@ export async function createTenant(client: PrismaClient, label: string): Promise
       orgId,
       email: `staff-${label}@example.test`,
       fullName: `Staff ${label}`,
-      passwordHash: 'not-a-real-hash',
+      passwordHash: FIXTURE_PASSWORD_HASH,
       role: 'RECRUITER',
     },
   });
@@ -205,6 +215,8 @@ export async function createTenant(client: PrismaClient, label: string): Promise
     label,
     orgId,
     userId: user.id,
+    userRole: 'RECRUITER',
+    passwordHash: FIXTURE_PASSWORD_HASH,
     rows: {
       Organization: byId(orgId),
       User: byId(user.id),

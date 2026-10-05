@@ -44,3 +44,30 @@ Verdict: approve after the blocker fixes below. Fixed on this branch: `RunReques
 ## Pointer
 
 The [ARC-02] items under "frontend/step-2" in docs/followups/frontend.md (staff auth schemas, endpoints, 2FA challenge, password policy, fragment tokens) are architecture-hub work and are tracked there.
+
+## CLAUDE.md "Working in parallel" (PR #29 review)
+
+### Should-fix
+1. Rules 6 and 7: a PR touching CLAUDE.md, `.claude/` or an ADR needs the owner to approve the merge of the reviewed head SHA, not only the draft. Add to rule 6 "unless the PR falls under rule 7".
+2. Rule 13: "keep both sides' content" on docs conflicts must not apply to CLAUDE.md, `.claude/` or ADRs; stop and ask the owner (rule 7).
+
+### Nits
+- Rule 9: re-run code-reviewer after any push after review, including a rebase.
+- Rule 1: "never force-push a branch you do not own" repeats "push only to your own branches".
+- Rule 14: list all four human-only commands (`db:reset`, `dev:infra:reset`, `prisma migrate reset`, `db push`) or none.
+
+### Owner decisions pending
+- Only the Database session runs `db:migrate` and `db:seed` on the shared local stack?
+- Full review for source-of-truth docs (fsd, database, test-cases, architecture)?
+- Escalation of docs-to-docs contradictions from the hub to the owner?
+
+## ADR 0011 re-authentication (PR #31 review)
+
+The six owner questions were answered by C-21 (2026-10-05, D-49) and are recorded in `docs/api-contract.md` section 1 ("Owner answers"). Two backend follow-ups come from them: (1) disabling 2FA must require a current TOTP code (`totpCode`) and revoke that user's refresh sessions: backend PR #51 (pending merge); (2) reset already revokes the target's sessions in #26. QA must update `apps/api/test/integration/tc-003.int.test.ts` for the new disable body. Also recorded: `totpEnabled` on the session user (api-contract.md section 1; backend-engineer, task to be assigned by the Delivery Lead). Should-fix (ARC-02 part 2): the other docs that still call ADR 0011/0012 proposed (`docs/status.md`, `docs/compliance/dpia.md`) are the Delivery Lead's to update.
+
+### Should-fix (ARC-02 part 2)
+- Add fsd.md §4 rows for `/auth/2fa/setup/*`, disable, regenerate and reset; ask QA for new TC IDs.
+- `reauth` body schema in packages/shared.
+- BE-02: a successful re-auth does not reset the failed-login counter on main (it only refunds its own reservation); confirm or change.
+- Backend follow-up: add `req.body.currentPassword`, `req.body.password`, `req.body.newPassword` (and `err` equivalents) to the pino redact list in `apps/api/src/app.module.ts` (no body paths on main today).
+- Backend follow-up: audit every re-auth failure and a successful `setup/start` (today only completed actions and the lock-triggering failure are audited).

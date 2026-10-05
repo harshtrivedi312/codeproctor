@@ -10,6 +10,9 @@ import type { TokenService } from './token.service';
 import type { TokenValidityService } from './token-validity.service';
 
 const orgContext = new OrgContextService();
+const ORG_1 = '11111111-1111-4111-8111-111111111111';
+const ORG_2 = '22222222-2222-4222-8222-222222222222';
+const USER_1 = '33333333-3333-4333-8333-333333333333';
 
 function contextFor(cls: new () => object, method: string): ExecutionContext {
   const handler = (cls.prototype as Record<string, () => void>)[method] as () => void;
@@ -81,8 +84,8 @@ class Protected {
 describe('JwtAuthGuard user re-check (FR-103, FR-104, FU-BE-19)', () => {
   const HASH = '$argon2id$v=19$m=19456,t=2,p=1$salt$hash';
   const claims = {
-    sub: 'user-1',
-    org: 'org-1',
+    sub: USER_1,
+    org: ORG_1,
     role: UserRole.RECRUITER,
     kind: 'access',
     pwv: passwordVersion(HASH),
@@ -111,7 +114,7 @@ describe('JwtAuthGuard user re-check (FR-103, FR-104, FU-BE-19)', () => {
       orgContext,
       validity,
     );
-  const current = { isActive: true, role: UserRole.RECRUITER, orgId: 'org-1', passwordHash: HASH };
+  const current = { isActive: true, role: UserRole.RECRUITER, orgId: ORG_1, passwordHash: HASH };
 
   it('FR-103: a user that still matches the token is let in', async () => {
     await expect(
@@ -146,8 +149,33 @@ describe('JwtAuthGuard user re-check (FR-103, FR-104, FU-BE-19)', () => {
     await expect(guard.canActivate(protectedContext())).rejects.toThrow(UnauthorizedException);
   });
 
+  it('FR-103: a malformed org claim is a 401, not a server error (FU-DB-102)', async () => {
+    const guard = new JwtAuthGuard(
+      new Reflector(),
+      { verify: () => ({ ...claims, org: 'not-a-uuid' }) } as unknown as TokenService,
+      { client: { user: { findUnique: jest.fn() } } } as unknown as PrismaService,
+      orgContext,
+      validity,
+    );
+    await expect(guard.canActivate(protectedContext())).rejects.toThrow(UnauthorizedException);
+  });
+
+  it('FR-103: the re-check runs in the claimed org scope and sends one lookup (FU-DB-102)', async () => {
+    let scope: string | undefined;
+    const findUnique = jest.fn().mockImplementation(() => {
+      const s = orgContext.current()?.scope;
+      scope = s?.kind === 'org' ? s.orgId : s?.kind;
+      return Promise.resolve(current);
+    });
+    await expect(guardWith(findUnique).canActivate(protectedContext())).resolves.toBe(true);
+    expect(scope).toBe(ORG_1);
+    expect(findUnique).toHaveBeenCalledTimes(1);
+    // The guard's scope has ended when it returns, before the interceptor enters its own.
+    expect(orgContext.current()?.scope).toBeUndefined();
+  });
+
   it('FR-103: a token whose user has since moved to another organization is refused', async () => {
-    const guard = guardWith(jest.fn().mockResolvedValue({ ...current, orgId: 'org-2' }));
+    const guard = guardWith(jest.fn().mockResolvedValue({ ...current, orgId: ORG_2 }));
     await expect(guard.canActivate(protectedContext())).rejects.toThrow(UnauthorizedException);
   });
 });

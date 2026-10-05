@@ -18,7 +18,6 @@ import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { Roles } from '../common/auth/decorators';
-import { passwordVersion } from '../auth/crypto.util';
 import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
 import { TokenModule, TokenService } from '../common/auth/token.service';
 import { TokenValidityService } from '../common/auth/token-validity.service';
@@ -32,6 +31,7 @@ import type { AuthenticatedUser } from './org-context';
 import { PrismaService } from './prisma.service';
 import { startMigratedDatabase } from './testing/migrated-postgres';
 import type { MigratedDatabase, StatementCount } from './testing/migrated-postgres';
+import { staffBearer } from './testing/staff-token';
 import { createTenant } from './testing/tenant-fixtures';
 import type { TenantFixture } from './testing/tenant-fixtures';
 
@@ -90,6 +90,7 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
           load: [() => ({ DATABASE_URL: db.appUserUrl, JWT_ACCESS_SECRET: JWT_SECRET })],
         }),
         TokenModule,
+        // BE-02's unscoped client: the real guard re-reads the user through it on every request.
         DatabaseModule,
       ],
       controllers: [ProbeController],
@@ -173,7 +174,7 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
       ).toEqual(['hash-2']);
     });
 
-    it('NFR-04 the nesting works in either order, but runRawSql needs an active scope', async () => {
+    it('NFR-04 runRawSql works inside a scope (system or org), scope first, and throws with no scope', async () => {
       const count = (): Promise<{ n: number }[]> =>
         scoped().$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM users`;
       expect((await system(() => rawSql(count)))[0]?.n).toBeGreaterThanOrEqual(2);
@@ -525,12 +526,11 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
           }),
       },
       {
-        name: 'nested write (test.update with sections.create): the guard walks data and sends nothing',
+        name: 'create of a path-scoped model with a scalar foreign key (the way a nested write is done now)',
         raw: false,
-        run: (c, orgId) =>
-          c.test.update({
-            where: { id: A.rows.Test.filter.id as string, ...and(orgId, direct) },
-            data: { name: 'nested', sections: { create: { title: 'n', position: 5 } } },
+        run: (c) =>
+          c.testSection.create({
+            data: { testId: A.rows.Test.filter.id as string, title: 'n', position: 5 },
           }),
       },
       {
@@ -640,39 +640,38 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
       expect(filtered[0]?.query).toContain('org_id');
     });
 
-    it("NFR-04 an authenticated HTTP request sends exactly two statements: the guard's user re-check, then the handler's one", async () => {
-      const token = app.get(TokenService).sign(
-        {
-          sub: A.userId,
-          org: A.orgId,
-          role: 'RECRUITER',
-          kind: 'access',
-          pwv: passwordVersion('not-a-real-hash'),
-        },
-        300,
-      );
+    it("NFR-04 an authenticated HTTP request sends two statements: the guard's user re-check, then the handler's one", async () => {
+      // BE-02's JwtAuthGuard re-reads the user on every request (FU-BE-19), now in the token's own
+      // org scope (FU-DB-102). Neither the interceptor nor the extension adds anything on top.
+      const bearer = staffBearer(app.get(TokenService), A);
       const get = (): Promise<unknown> =>
         request(app.getHttpServer())
           .get(`/probe/users/${A.userId}`)
-          .set('Authorization', `Bearer ${token}`)
+          .set('Authorization', bearer)
           .expect(200);
-      const bare = await measured(() =>
-        plain.user.findUnique({ where: { id: A.userId, AND: [{ orgId: A.orgId }] } }),
-      );
-      expect(bare).toHaveLength(1);
-      // The guard's own select (FU-BE-19), measured on the plain client with the same shape.
-      const guardSelect = await measured(() =>
+      // The guard's lookup, run alone on the plain client with the org filter written by hand.
+      const guardLookup = await measured(() =>
         plain.user.findUnique({
-          where: { id: A.userId },
+          where: { id: A.userId, AND: [{ orgId: A.orgId }] },
           select: { isActive: true, role: true, orgId: true, passwordHash: true },
         }),
       );
-      expect(guardSelect).toHaveLength(1);
-      // Entering the system scope for the guard and the org scope for the handler adds none.
-      const sent = await measured(get);
-      expect(sent).toHaveLength(2);
-      expect(sent[0]).toEqual(guardSelect[0]);
-      expect(sent[1]).toEqual(bare[0]);
+      // The handler's lookup, as the scoped client sends it: the same call with the filter by hand.
+      const handlerLookup = await measured(() =>
+        plain.user.findUnique({ where: { id: A.userId, AND: [{ orgId: A.orgId }] } }),
+      );
+      expect(guardLookup).toHaveLength(1);
+      expect(handlerLookup).toHaveLength(1);
+      expect(guardLookup[0]?.query).toContain('password_hash');
+      expect(guardLookup[0]?.query).not.toBe(handlerLookup[0]?.query);
+
+      const request2 = await measured(get);
+      expect(request2).toHaveLength(2);
+      expect(request2.reduce((total, row) => total + row.calls, 0)).toBe(2);
+      // Exactly the guard's lookup and the handler's lookup, each once, and nothing else.
+      expect(request2).toEqual(
+        [...guardLookup, ...handlerLookup].sort((x, y) => x.query.localeCompare(y.query)),
+      );
     });
 
     it('NFR-04 upsert is the one operation whose statements differ: native in system scope, SELECT then INSERT or UPDATE in an org scope', async () => {
@@ -701,6 +700,22 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
         expect(text).toContain(phase === 'insert' ? 'INSERT INTO' : 'UPDATE');
       }
       await owner.candidate.deleteMany({ where: { email } });
+    });
+
+    it('NFR-04 a refused nested relation write sends no statement, in an org scope, in system scope and with no scope', async () => {
+      const nested = (): Promise<unknown> =>
+        scoped().test.update({
+          where: { id: A.rows.Test.filter.id as string },
+          data: { sections: { create: { title: 'nested', position: 6 } } },
+        });
+      const inOrg = (): Promise<unknown> => orgContext.runInOrg(A.orgId, nested);
+      const inSystem = (): Promise<unknown> => system(nested);
+      await expect(inOrg()).rejects.toBeInstanceOf(OrgScopeViolationError);
+      await expect(inSystem()).rejects.toBeInstanceOf(OrgScopeViolationError);
+      await expect(nested()).rejects.toBeInstanceOf(OrgContextMissingError);
+      for (const run of [inOrg, inSystem, nested]) {
+        expect(await statementsOf(() => run().catch(() => undefined))).toEqual([]);
+      }
     });
 
     it('NFR-04 $connect sends no statement', async () => {

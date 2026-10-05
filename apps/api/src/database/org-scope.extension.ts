@@ -13,17 +13,25 @@
 //                     OrgContextService.runRawSql(reason, fn). Raw SQL cannot be filtered, so the
 //                     SQL itself must filter by org_id, and the reason says why it is allowed.
 //
-// What it does not do. Only the top-level model, its `where`, its `cursor`, the `orgId` of a create
-// or update, and nested writes (org-scope-nested.ts, FU-DB-63) are looked at. Everything else
-// reached through a relation is not (README "Limits"):
+// Nested relation writes are denied by default (ADR 0006 section 8): in any scope the extension
+// applies to, org scope and system scope, every nested relation write in `data` is refused
+// (connect, connectOrCreate, create, createMany, update, updateMany, upsert, delete, deleteMany,
+// set, disconnect), through every relation class and on both sides, `org: { connect }` included
+// (org-scope-nested.ts). `connect` through a COMPOSITE relation rewrites org_id, `connect` next to
+// an `update` writes the connected row, and the other classes reach rows the filter never selected,
+// so no shape is safe by class. Services write with scalar foreign keys (Prisma's unchecked
+// inputs) and separate top-level calls; Postgres checks the composite keys. The exception list
+// NESTED_WRITE_ALLOWLIST is empty, and an entry needs its own cross-org test. A cursor nested in
+// include or select (and the fluent API) is refused too.
 //
-// (a) Ids written through a relation or a scalar foreign key. In an org scope a parent-side
-//     `connect`, `connectOrCreate` or `set` is refused (it changes rows the filter never selected:
-//     `organization.update({ where: { id: A }, data: { users: { connect: { id: userOfB } } } })`),
-//     and so is a nested row of a model with its own org_id that names another org. A child-side
-//     `connect` is the same as setting the scalar foreign key and stays allowed, as do nested
-//     create, update, upsert and delete under an in-scope parent. The ids in all of them follow
-//     ADR 0006 section 2 rule (i): load each through the scoped client first, answer 404 on a miss.
+// What it does not do. Only the top-level model, its `where`, its `cursor`, the `orgId` of a create
+// or update, nested relation writes and nested cursors are looked at. Everything else reached
+// through a relation is not (README "Limits"):
+//
+// (a) Ids written as scalar foreign keys. The extension does not check which id is written; the
+//     composite keys (invitations.test_id, invitations.candidate_id, sessions.invitation_id) are
+//     checked by Postgres, and every other id follows ADR 0006 section 2 rule (i): load each
+//     through the scoped client first, answer 404 on a miss.
 // (b) An update that changes a path model's first-hop foreign key (re-parenting, for example
 //     `testSection.update({ data: { testId } })`) is the same as a path create: rule (i).
 // (c) Nested reads are not filtered. `include`, `select`, the fluent API, relation filters,
@@ -43,6 +51,7 @@ import type { PrismaClient } from '../generated/prisma/client.js';
 import { OrgContextMissingError, OrgScopeViolationError, RawQueryNotAllowedError } from './errors';
 import type { ScopeSource } from './org-context';
 import { applyOrgScope } from './org-scope-args';
+import { assertNoNestedWritesIn } from './org-scope-nested';
 import { ORG_SCOPE } from './org-scope-map';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
 
@@ -80,7 +89,11 @@ export function orgScopeExtension(source: ScopeSource) {
 
         const scope = store?.scope;
         if (scope === undefined) throw new OrgContextMissingError(`${model}.${operation}`);
-        if (scope.kind === 'system') return query(args);
+        if (scope.kind === 'system') {
+          // System scope is unfiltered, but a nested relation write is refused here too.
+          assertNoNestedWritesIn(model as ModelName, operation, args);
+          return query(args);
+        }
 
         return query(
           applyOrgScope({ model: model as ModelName, rule, operation, args, orgId: scope.orgId }),

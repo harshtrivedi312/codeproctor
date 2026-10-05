@@ -3,7 +3,7 @@
 import { ORG_SCOPE } from './org-scope-map';
 import type { ModelName } from './org-scope-map';
 import { FK_CLASSES, RULE_I_REFERENCES, relationKeys, relationOf } from './org-scope-relations';
-import type { FkClass, ForeignKey, RuleIKind } from './org-scope-relations';
+import type { FkClass, ForeignKey, RelationSide, RuleIKind } from './org-scope-relations';
 import { readSchemaModels } from './testing/data-model';
 import type { SchemaField } from './testing/data-model';
 import { countClasses, findRelationProblems, schemaForeignKeys } from './testing/relation-checks';
@@ -128,11 +128,11 @@ describe('foreign key classification checks can fail (NFR-04)', () => {
     fk('Child', 'org', 'Organization', 'children', 'ORG_ID'),
     fk('Child', 'owner', 'Parent', 'children', 'RULE_I', 'cross-chain'),
   ];
-  const sides = new Map<string, { target: ModelName; holdsFk: boolean }>([
-    ['Child.org', { target: asModel('Organization'), holdsFk: true }],
-    ['Organization.children', { target: asModel('Child'), holdsFk: false }],
-    ['Child.owner', { target: asModel('Parent'), holdsFk: true }],
-    ['Parent.children', { target: asModel('Child'), holdsFk: false }],
+  const sides = new Map<string, RelationSide>([
+    ['Child.org', { target: asModel('Organization'), holdsFk: true, fkClass: 'ORG_ID' }],
+    ['Organization.children', { target: asModel('Child'), holdsFk: false, fkClass: 'ORG_ID' }],
+    ['Child.owner', { target: asModel('Parent'), holdsFk: true, fkClass: 'RULE_I' }],
+    ['Parent.children', { target: asModel('Child'), holdsFk: false, fkClass: 'RULE_I' }],
   ]);
   const inputs = (over: Partial<RelationInputs> = {}): RelationInputs => ({
     fks: good,
@@ -169,8 +169,11 @@ describe('foreign key classification checks can fail (NFR-04)', () => {
       good[0] as ForeignKey,
       fk('Child', 'owner', 'Parent', 'children', 'SCOPE_HOP'),
     ];
+    // The side table (RULE_I) now disagrees with the entry too, which is reported as well.
     expect(findRelationProblems(inputs({ fks: wrongClass }))).toEqual([
       expect.stringContaining('Child.owner is classified SCOPE_HOP but its class is RULE_I'),
+      expect.stringContaining('Child.owner: the side table says class RULE_I'),
+      expect.stringContaining('Parent.children: the side table says class RULE_I'),
     ]);
     const wrongKind = [
       good[0] as ForeignKey,
@@ -199,6 +202,55 @@ describe('foreign key classification checks can fail (NFR-04)', () => {
     ]);
   });
 
+  it('TC-008 fails when a side of the side table carries the wrong class (the nested-write guard reads it)', () => {
+    const wrong = new Map(sides);
+    wrong.set('Parent.children', {
+      target: asModel('Child'),
+      holdsFk: false,
+      fkClass: 'SCOPE_HOP',
+    });
+    expect(findRelationProblems(inputs({ relationOf: (m, f) => wrong.get(`${m}.${f}`) }))).toEqual([
+      expect.stringContaining(
+        'Parent.children: the side table says class SCOPE_HOP, the foreign key is RULE_I',
+      ),
+    ]);
+    wrong.set('Child.owner', { target: asModel('Parent'), holdsFk: true, fkClass: 'ORG_ID' });
+    wrong.set('Parent.children', sides.get('Parent.children') as RelationSide);
+    expect(findRelationProblems(inputs({ relationOf: (m, f) => wrong.get(`${m}.${f}`) }))).toEqual([
+      expect.stringContaining(
+        'Child.owner: the side table says class ORG_ID, the foreign key is RULE_I',
+      ),
+    ]);
+  });
+
+  it('TC-008 a two-column key is COMPOSITE only when it includes orgId', () => {
+    const withKey = (columns: string[]): SchemaModels => ({
+      ...schema,
+      Child: {
+        ...(schema.Child as Record<string, SchemaField>),
+        owner: field('owner', 'Parent', columns),
+      },
+    });
+    // The side table agrees with the entry in both cases, so only the class rule is tested.
+    const asComposite = new Map(sides);
+    for (const key of ['Child.owner', 'Parent.children']) {
+      asComposite.set(key, { ...(sides.get(key) as RelationSide), fkClass: 'COMPOSITE' });
+    }
+    const check = (columns: string[]): string[] =>
+      findRelationProblems(
+        inputs({
+          schema: withKey(columns),
+          fks: [good[0] as ForeignKey, fk('Child', 'owner', 'Parent', 'children', 'COMPOSITE')],
+          relationOf: (m, f) => asComposite.get(`${m}.${f}`),
+        }),
+      );
+    // Two columns, neither the org: the database cannot refuse a parent in another org.
+    expect(check(['ownerId', 'kind'])).toEqual([
+      expect.stringContaining('Child.owner is classified COMPOSITE but its class is RULE_I'),
+    ]);
+    expect(check(['ownerId', 'orgId'])).toEqual([]);
+  });
+
   it('TC-008 fails when the side table has no entry, the wrong target, the wrong side, or an extra entry', () => {
     const without = new Map(sides);
     without.delete('Parent.children');
@@ -207,7 +259,11 @@ describe('foreign key classification checks can fail (NFR-04)', () => {
     ).toEqual([expect.stringContaining('Parent.children is a relation field with no entry')]);
 
     const flipped = new Map(sides);
-    flipped.set('Parent.children', { target: asModel('Child'), holdsFk: true });
+    flipped.set('Parent.children', {
+      target: asModel('Child'),
+      holdsFk: true,
+      fkClass: 'RULE_I',
+    });
     expect(
       findRelationProblems(inputs({ relationOf: (m, f) => flipped.get(`${m}.${f}`) })),
     ).toEqual([
@@ -215,7 +271,11 @@ describe('foreign key classification checks can fail (NFR-04)', () => {
     ]);
 
     const retargeted = new Map(sides);
-    retargeted.set('Parent.children', { target: asModel('Parent'), holdsFk: false });
+    retargeted.set('Parent.children', {
+      target: asModel('Parent'),
+      holdsFk: false,
+      fkClass: 'RULE_I',
+    });
     expect(
       findRelationProblems(inputs({ relationOf: (m, f) => retargeted.get(`${m}.${f}`) })),
     ).toEqual([

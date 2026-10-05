@@ -14,10 +14,14 @@
 //   - upsert (not generic): tried against B's row on three models only (Test, TestSection,
 //     TestCase), plus A's own row and the create branch on Test and Candidate.
 //   - Dedicated tests, on chosen models: create, createMany and createManyAndReturn, filters that
-//     try to widen the scope, cursors, deleting own rows, transactions, system scope, raw SQL, the
-//     app_user role and the HTTP path through the real guard.
-//   - Not covered, by design (README "Limits"): nested writes, re-parenting, and nested reads. One
-//     test pins that an include follows a cross-org foreign key.
+//     try to widen the scope, cursors (top-level, compound, nested and fluent), nested writes
+//     (parent-side connect, set and connectOrCreate, nested creates naming another org, and nested
+//     writes through a RULE_I relation, all refused; child-side connect and nested writes through
+//     SCOPE_HOP and COMPOSITE relations still work), deleting own rows, transactions, system scope,
+//     raw SQL, the app_user role and the HTTP path through the real guard.
+//   - Not covered, by design (README "Limits"): re-parenting, ids written through a child-side
+//     connect or a scalar foreign key (rule (i), the service's job), and nested reads. One test pins
+//     that an include follows a cross-org foreign key.
 import { Controller, Get, INestApplication, NotFoundException, Param, Query } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
@@ -26,7 +30,6 @@ import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 import request from 'supertest';
 import type { App } from 'supertest/types';
-import { passwordVersion } from '../auth/crypto.util';
 import { Public, Roles } from '../common/auth/decorators';
 import { ProblemFilter } from '../common/problem.filter';
 import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
@@ -42,6 +45,7 @@ import type { ModelName } from './org-scope-map';
 import { PrismaService } from './prisma.service';
 import { startMigratedDatabase } from './testing/migrated-postgres';
 import type { MigratedDatabase } from './testing/migrated-postgres';
+import { staffBearer } from './testing/staff-token';
 import { createTenant } from './testing/tenant-fixtures';
 import type { TenantFixture } from './testing/tenant-fixtures';
 
@@ -89,29 +93,31 @@ const ALL_ROLES = ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'REVIEWER'] as const;
 const JWT_SECRET = 'a-secret-for-the-tc-008-tests-only';
 
 // What a staff route does: look a row up by the id in the URL, answer 404 on a miss. BE-02's
-// JwtAuthGuard authenticates (deny by default: @Roles or @Public) and the interceptor sets the org.
+// JwtAuthGuard authenticates (deny by default: @Roles or @Public; both on one route is refused) and
+// the interceptor sets the org. Roles are declared per method, and the public route lives in its own
+// controller, because the merged guard refuses a @Public() method inside a @Roles() class.
 @Controller('probe')
 class ProbeController {
   constructor(private readonly prisma: PrismaService) {}
 
-  @Roles(...ALL_ROLES)
   @Get('sessions/:id')
+  @Roles(...ALL_ROLES)
   async session(@Param('id') id: string): Promise<{ id: string; orgId: string }> {
     const row = await this.prisma.client.session.findUnique({ where: { id } });
     if (row === null) throw new NotFoundException();
     return { id: row.id, orgId: row.orgId };
   }
 
-  @Roles(...ALL_ROLES)
   @Get('sessions')
+  @Roles(...ALL_ROLES)
   async sessions(@Query('id') id?: string): Promise<string[]> {
     const where = id === undefined ? undefined : { id };
     return (await this.prisma.client.session.findMany({ where })).map((s) => s.id);
   }
 
   // A filtered list on a model scoped through its parent chain.
-  @Roles(...ALL_ROLES)
   @Get('events')
+  @Roles(...ALL_ROLES)
   async events(@Query('sessionId') sessionId?: string): Promise<string[]> {
     const where = sessionId === undefined ? undefined : { sessionId };
     return (await this.prisma.client.proctorEvent.findMany({ where, orderBy: { id: 'asc' } })).map(
@@ -119,23 +125,28 @@ class ProbeController {
     );
   }
 
-  @Roles(...ALL_ROLES)
   @Get('events/:id')
+  @Roles(...ALL_ROLES)
   async event(@Param('id') id: string): Promise<{ id: string }> {
     const row = await this.prisma.client.proctorEvent.findUnique({ where: { id: BigInt(id) } });
     if (row === null) throw new NotFoundException();
     return { id: String(row.id) };
   }
 
-  @Roles(...ALL_ROLES)
   @Get('test-cases')
+  @Roles(...ALL_ROLES)
   async testCases(): Promise<string[]> {
     return (await this.prisma.client.testCase.findMany()).map((c) => c.id);
   }
+}
 
-  // A public route (no request.user, so no org context) that tries to read org data.
+// A public route (no request.user, so no org context) that tries to read org data.
+@Controller('probe')
+@Public()
+class PublicProbeController {
+  constructor(private readonly prisma: PrismaService) {}
+
   @Get('public-sessions')
-  @Public()
   async publicSessions(): Promise<string[]> {
     return (await this.prisma.client.session.findMany()).map((s) => s.id);
   }
@@ -161,9 +172,11 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
             load: [() => ({ DATABASE_URL: url, JWT_ACCESS_SECRET: JWT_SECRET })],
           }),
           TokenModule,
+          // BE-02's unscoped client: the real guard re-reads the user through it on every request
+          // (FU-DB-58 moves that to the scoped client in BE-03). DatabaseModule is the scoped one.
           DatabaseModule,
         ],
-        controllers: [ProbeController],
+        controllers: [ProbeController, PublicProbeController],
         // BE-02's guard. DatabaseModule registers the interceptor that runs after it.
         providers: [{ provide: APP_GUARD, useClass: JwtAuthGuard }],
       })
@@ -626,19 +639,164 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         );
       });
     });
+
+    it('TC-008 a compound own-org cursor ({ id_orgId } with the added top-level orgId) pages correctly (positive control)', async () => {
+      // Test has @@unique([id, orgId]), so { id_orgId: { id, orgId } } is a valid cursor.
+      for (let n = 0; n < 3; n++) {
+        await owner.test.create({
+          data: { orgId: E.orgId, name: `compound-${n}`, durationMinutes: 30 },
+        });
+      }
+      const sorted = (await owner.test.findMany({ where: { orgId: E.orgId }, orderBy: order })).map(
+        (t) => t.id,
+      );
+      expect(sorted.length).toBeGreaterThanOrEqual(4);
+      const middle = sorted[2] as string;
+      const paged = await asE(() =>
+        prisma.client.test.findMany({
+          cursor: { id_orgId: { id: middle, orgId: E.orgId } },
+          orderBy: order,
+        }),
+      );
+      expect(paged.map((t) => t.id)).toEqual(sorted.slice(2));
+      expect(
+        await asE(() =>
+          prisma.client.test.count({
+            cursor: { id_orgId: { id: middle, orgId: E.orgId } },
+            orderBy: order,
+          }),
+        ),
+      ).toBe(sorted.length - 2);
+      // The same compound key naming org F is refused, and F's test is never used as a cursor.
+      await expect(
+        asE(() =>
+          prisma.client.test.findMany({
+            cursor: { id_orgId: { id: F.rows.Test.filter.id as string, orgId: F.orgId } },
+            orderBy: order,
+          }),
+        ),
+      ).rejects.toBeInstanceOf(OrgScopeViolationError);
+    });
+
+    describe('a cursor nested in include or select (and the fluent API)', () => {
+      it("TC-008 left as it is, a nested cursor on org F's event ranks org E's events against it (why nested cursors are refused)", async () => {
+        const nested = await plain.session.findUnique({
+          where: { id: E.rows.Session.filter.id as string },
+          include: { proctorEvents: { cursor: { id: fEvent }, orderBy: order } },
+        });
+        // F's event sits between E's: E's later events come back, ranked against F's row.
+        expect(ids(nested?.proctorEvents ?? [])).toEqual([eEvents[1], eEvents[2]]);
+        const fluent = await plain.session
+          .findUnique({ where: { id: E.rows.Session.filter.id as string } })
+          .proctorEvents({ cursor: { id: fEvent }, orderBy: order });
+        expect(ids(fluent ?? [])).toEqual([eEvents[1], eEvents[2]]);
+      });
+
+      it("TC-008 org E's nested cursor, in include, select and the fluent API, is refused (any row, own or not)", async () => {
+        const where = { id: E.rows.Session.filter.id as string };
+        await asE(async () => {
+          const client = prisma.client;
+          for (const cursor of [{ id: fEvent }, { id: eEvents[0]! }]) {
+            const events = { cursor, orderBy: order };
+            await expect(
+              client.session.findUnique({ where, include: { proctorEvents: events } }),
+            ).rejects.toBeInstanceOf(OrgScopeViolationError);
+            await expect(
+              client.session.findUnique({
+                where,
+                select: { proctorEvents: { select: { id: true }, ...events } },
+              }),
+            ).rejects.toBeInstanceOf(OrgScopeViolationError);
+            await expect(
+              client.session.findUniqueOrThrow({ where, include: { proctorEvents: events } }),
+            ).rejects.toBeInstanceOf(OrgScopeViolationError);
+            await expect(
+              client.session.findMany({ where, include: { proctorEvents: events } }),
+            ).rejects.toBeInstanceOf(OrgScopeViolationError);
+            // The fluent API: session.findUnique(...).proctorEvents({ cursor }).
+            await expect(
+              client.session.findUnique({ where }).proctorEvents(events),
+            ).rejects.toBeInstanceOf(OrgScopeViolationError);
+            await expect(
+              client.session.findUniqueOrThrow({ where }).proctorEvents(events),
+            ).rejects.toBeInstanceOf(OrgScopeViolationError);
+            await expect(
+              client.session.findFirst({ where }).proctorEvents(events),
+            ).rejects.toBeInstanceOf(OrgScopeViolationError);
+          }
+          // Deeper: a cursor two levels down.
+          await expect(
+            client.test.findMany({
+              include: { sections: { include: { questions: { cursor: { id: 'x' } } } } },
+            }),
+          ).rejects.toBeInstanceOf(OrgScopeViolationError);
+        });
+      });
+
+      it("TC-008 a nested include with take and orderBy and no cursor returns org E's events (positive control)", async () => {
+        const where = { id: E.rows.Session.filter.id as string };
+        await asE(async () => {
+          const client = prisma.client;
+          const page = await client.session.findUnique({
+            where,
+            include: { proctorEvents: { orderBy: order, take: 2 } },
+          });
+          expect(ids(page?.proctorEvents ?? [])).toEqual([eEvents[0], eEvents[1]]);
+          const next = await client.session.findUnique({
+            where,
+            include: {
+              proctorEvents: { where: { id: { gt: eEvents[1]! } }, orderBy: order, take: 2 },
+            },
+          });
+          expect(ids(next?.proctorEvents ?? [])).toEqual([eEvents[2]]);
+          const selected = await client.session.findUnique({
+            where,
+            select: {
+              proctorEvents: { select: { id: true }, orderBy: { id: 'desc' }, skip: 1, take: 1 },
+            },
+          });
+          expect(selected?.proctorEvents.map((e) => e.id)).toEqual([eEvents[1]]);
+          // The fluent API pages the same way.
+          const fluent = await client.session
+            .findUnique({ where })
+            .proctorEvents({ orderBy: order, take: 2 });
+          expect(ids(fluent ?? [])).toEqual([eEvents[0], eEvents[1]]);
+        });
+      });
+    });
   });
 
-  describe("nested writes (FU-DB-63): a write through a relation cannot change another org's rows", () => {
+  describe("nested relation writes are denied by default (ADR 0006 section 8): a write through a relation cannot change another org's rows", () => {
     // H acts; I is the victim. Fresh tenants, so the refusals can be checked against untouched rows.
     let H: TenantFixture;
     let I: TenantFixture;
+    let plain: PrismaClient; // the factory client with no scope: it shows what the writes would do
     const asH = <T>(fn: () => Promise<T>): Promise<T> => orgContext.runInOrg(H.orgId, fn);
     const id = (tenant: TenantFixture, model: ModelName): string =>
       tenant.rows[model].filter.id as string;
+    /** An invitation of the tenant that has no session yet (sessions.invitation_id is unique). */
+    const freeInvitation = (tenant: TenantFixture) =>
+      owner.invitation.create({
+        data: {
+          orgId: tenant.orgId,
+          testId: id(tenant, 'Test'),
+          candidateId: id(tenant, 'Candidate'),
+          tokenHash: `free-${randomUUID()}`,
+          windowStart: new Date('2026-10-05T12:00:00Z'),
+          windowEnd: new Date('2026-10-06T12:00:00Z'),
+        },
+      });
+    const refusedByTheRule = (what: string): RegExp =>
+      new RegExp(`nested relation write refused \\(${what}\\)`);
 
     beforeAll(async () => {
+      plain = createPrismaClient(db.appUserUrl);
       H = await createTenant(owner, 'h');
       I = await createTenant(owner, 'i');
+    });
+
+    afterAll(async () => {
+      await plain?.$disconnect();
     });
 
     it("TC-008 organization.update users.connect of org I's user is refused, and the user stays in org I", async () => {
@@ -649,26 +807,23 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
             data: { users: { connect: { id: I.userId } } },
           }),
         ),
-      ).rejects.toBeInstanceOf(OrgScopeViolationError);
+      ).rejects.toThrow(refusedByTheRule('Organization\\.users\\.connect'));
       expect((await owner.user.findUniqueOrThrow({ where: { id: I.userId } })).orgId).toBe(I.orgId);
     });
 
-    it("TC-008 a parent-side set, connect and connectOrCreate are refused, and org I's rows are unchanged", async () => {
+    it("TC-008 a parent-side set, connect, connectOrCreate and a deep connect are refused, and org I's rows are unchanged", async () => {
       const before = await snapshot();
       const attempts: Array<() => Promise<unknown>> = [
-        // set: re-point org I's test question at org H's section
         () =>
           prisma.client.testSection.update({
             where: { id: id(H, 'TestSection') },
             data: { questions: { set: [{ id: id(I, 'TestQuestion') }] } },
           }),
-        // connect on a one-to-one whose key is on the related model
         () =>
           prisma.client.session.update({
             where: { id: id(H, 'Session') },
             data: { review: { connect: { id: id(I, 'SessionReview') } } },
           }),
-        // connectOrCreate on the same relation
         () =>
           prisma.client.session.update({
             where: { id: id(H, 'Session') },
@@ -681,7 +836,6 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
               },
             },
           }),
-        // connect on a to-many deep inside a nested update
         () =>
           prisma.client.test.update({
             where: { id: id(H, 'Test') },
@@ -702,43 +856,48 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
     });
 
     it('TC-008 a nested create that names another org is refused and creates nothing', async () => {
-      // user.createdQuestions: the parent is the staff user, and the question names its own org.
+      const loose = <T>(value: unknown): T => value as T;
+      type OrgData = Parameters<typeof prisma.client.organization.update>[0]['data'];
+      const nested = (questions: unknown): OrgData => loose<OrgData>({ questions });
+      const update = (data: OrgData) =>
+        asH(() => prisma.client.organization.update({ where: { id: H.orgId }, data }));
       const questions = await owner.question.count();
-      const create = (orgId: string, slug: string) =>
-        asH(() =>
-          prisma.client.user.update({
-            where: { id: H.userId },
-            data: { createdQuestions: { create: { orgId, slug } } },
-          }),
-        );
-      await expect(create(I.orgId, 'smuggled')).rejects.toBeInstanceOf(OrgScopeViolationError);
-      await expect(
-        asH(() =>
-          prisma.client.user.update({
-            where: { id: H.userId },
-            data: {
-              createdQuestions: { createMany: { data: [{ orgId: I.orgId, slug: 'many' }] } },
-            },
-          }),
-        ),
-      ).rejects.toBeInstanceOf(OrgScopeViolationError);
-      await expect(
-        asH(() =>
-          prisma.client.user.update({
-            where: { id: H.userId },
-            data: {
-              createdQuestions: { create: { org: { connect: { id: I.orgId } }, slug: 'via-org' } },
-            },
-          }),
-        ),
-      ).rejects.toBeInstanceOf(OrgScopeViolationError);
+      for (const data of [
+        nested({ create: { orgId: I.orgId, slug: 'smuggled' } }),
+        nested({ createMany: { data: [{ orgId: I.orgId, slug: 'many' }] } }),
+        nested({ create: { org: { connect: { id: I.orgId } }, slug: 'via-org' } }),
+        // Even naming the caller's own org: no nested relation write at all.
+        nested({ create: { slug: 'under-own-org' } }),
+      ]) {
+        await expect(update(data)).rejects.toBeInstanceOf(OrgScopeViolationError);
+      }
       expect(await owner.question.count()).toBe(questions);
-      // Positive control: the same create naming org H works.
-      await create(H.orgId, 'allowed');
-      expect(await owner.question.count()).toBe(questions + 1);
-      expect((await owner.question.findFirstOrThrow({ where: { slug: 'allowed' } })).orgId).toBe(
-        H.orgId,
+      // Positive control, scalar form: a top-level create stamps org H, or takes the scalar orgId.
+      const stamped = await asH(
+        () =>
+          (prisma.client as unknown as Record<string, Delegate>).question?.create?.({
+            data: { slug: 'stamped' },
+          }) as Promise<{ orgId: string }>,
       );
+      expect(stamped.orgId).toBe(H.orgId);
+      await asH(() => prisma.client.question.create({ data: { orgId: H.orgId, slug: 'scalar' } }));
+      expect(await owner.question.count()).toBe(questions + 2);
+    });
+
+    it('TC-008 org: { connect } on a direct model is refused, and the scalar orgId is the way', async () => {
+      await expect(
+        asH(() =>
+          prisma.client.test.create({
+            data: { org: { connect: { id: H.orgId } }, name: 't', durationMinutes: 30 },
+          }),
+        ),
+      ).rejects.toThrow(refusedByTheRule('Test\\.org\\.connect'));
+      const created = await asH(() =>
+        prisma.client.test.create({
+          data: { orgId: H.orgId, name: 'scalar org', durationMinutes: 30 },
+        }),
+      );
+      expect(created.orgId).toBe(H.orgId);
     });
 
     it('TC-008 the refusals carry no ids, org ids or other values', async () => {
@@ -749,67 +908,82 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         }),
       ).catch((e: unknown) => e as Error);
       expect(error).toBeInstanceOf(OrgScopeViolationError);
+      expect((error as Error).message).toBe(
+        'Organization.update: nested relation write refused (Organization.users.connect): write ' +
+          'related rows with their own scoped call and scalar foreign keys (ADR 0006 §8, ' +
+          'deny-by-default).',
+      );
       for (const secret of [I.userId, I.orgId, H.orgId, H.userId]) {
         expect((error as Error).message).not.toContain(secret);
       }
     });
 
-    it('TC-008 a child-side connect still works (rule (i) covers its id)', async () => {
+    it('TC-008 a child-side connect is refused too, and the scalar foreign key does the same job', async () => {
+      await expect(
+        asH(() =>
+          prisma.client.testQuestion.update({
+            where: { id: id(H, 'TestQuestion') },
+            data: { questionVersion: { connect: { id: id(H, 'QuestionVersion') } } },
+          }),
+        ),
+      ).rejects.toThrow(refusedByTheRule('TestQuestion\\.questionVersion\\.connect'));
       const updated = await asH(() =>
         prisma.client.testQuestion.update({
           where: { id: id(H, 'TestQuestion') },
-          data: { questionVersion: { connect: { id: id(H, 'QuestionVersion') } } },
+          data: { questionVersionId: id(H, 'QuestionVersion') },
         }),
       );
       expect(updated.questionVersionId).toBe(id(H, 'QuestionVersion'));
     });
 
-    it('TC-008 nested create, update and delete under an in-scope parent still work, and stay in org H', async () => {
-      const test = await asH(() =>
-        prisma.client.test.update({
-          where: { id: id(H, 'Test') },
-          data: {
-            sections: {
-              create: {
-                title: 'nested',
-                position: 11,
-                questions: { create: { position: 0, questionVersionId: id(H, 'QuestionVersion') } },
-              },
-            },
+    it('TC-008 nested create, update and delete under an in-scope parent are refused; separate top-level calls with scalar foreign keys work and stay in org H', async () => {
+      // The nested forms, through a SCOPE_HOP relation (test.sections).
+      const section = id(H, 'TestSection');
+      for (const data of [
+        { sections: { create: { title: 'nested', position: 11 } } },
+        { sections: { update: { where: { id: section }, data: { title: 'renamed' } } } },
+        { sections: { deleteMany: { title: 'x' } } },
+        { sections: { updateMany: { where: {}, data: { title: 'x' } } } },
+        {
+          sections: {
+            upsert: { where: { id: section }, create: { title: 'u', position: 1 }, update: {} },
           },
-          include: { sections: { include: { questions: true } } },
+        },
+        { sections: { delete: [{ id: section }] } },
+        { sections: { disconnect: [{ id: section }] } },
+      ]) {
+        await expect(
+          asH(() => prisma.client.test.update({ where: { id: id(H, 'Test') }, data: data })),
+        ).rejects.toBeInstanceOf(OrgScopeViolationError);
+      }
+      // The same work as separate calls, with scalar foreign keys.
+      const created = await asH(() =>
+        prisma.client.testSection.create({
+          data: { testId: id(H, 'Test'), title: 'scalar', position: 12 },
         }),
       );
-      const nested = test.sections.find((section) => section.title === 'nested');
-      expect(nested?.questions).toHaveLength(1);
-      // Visible to org H, invisible to org I.
-      expect(await asH(() => prisma.client.testSection.count({ where: { title: 'nested' } }))).toBe(
+      const question = await asH(() =>
+        prisma.client.testQuestion.create({
+          data: { sectionId: created.id, questionVersionId: id(H, 'QuestionVersion'), position: 0 },
+        }),
+      );
+      expect(await asH(() => prisma.client.testSection.count({ where: { title: 'scalar' } }))).toBe(
         1,
       );
       expect(
         await orgContext.runInOrg(I.orgId, () =>
-          prisma.client.testSection.count({ where: { title: 'nested' } }),
+          prisma.client.testSection.count({ where: { title: 'scalar' } }),
         ),
       ).toBe(0);
-      // Update and delete through the parent.
       await asH(() =>
-        prisma.client.test.update({
-          where: { id: id(H, 'Test') },
-          data: {
-            sections: { update: { where: { id: nested?.id ?? '' }, data: { title: 'renamed' } } },
-          },
-        }),
+        prisma.client.testSection.update({ where: { id: created.id }, data: { title: 'renamed' } }),
       );
-      expect(
-        (await owner.testSection.findUniqueOrThrow({ where: { id: nested?.id ?? '' } })).title,
-      ).toBe('renamed');
-      await asH(() =>
-        prisma.client.test.update({
-          where: { id: id(H, 'Test') },
-          data: { sections: { deleteMany: { title: 'renamed' } } },
-        }),
+      expect((await owner.testSection.findUniqueOrThrow({ where: { id: created.id } })).title).toBe(
+        'renamed',
       );
-      expect(await owner.testSection.count({ where: { title: 'renamed' } })).toBe(0);
+      await asH(() => prisma.client.testQuestion.delete({ where: { id: question.id } }));
+      await asH(() => prisma.client.testSection.delete({ where: { id: created.id } }));
+      expect(await owner.testSection.count({ where: { id: created.id } })).toBe(0);
     });
 
     it('TC-008 a Json column and a scalar list are never mistaken for a nested write', async () => {
@@ -831,17 +1005,391 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       ).toEqual(['a', 'b']);
     });
 
-    it('TC-008 in system scope nested writes are not walked (the guard is for org scopes)', async () => {
-      // System scope is for work with no org. The same connect that is refused above is allowed.
+    it('TC-008 nested relation writes are refused in system scope too, and scalar writes still work there', async () => {
       const J = await createTenant(owner, 'j');
       const K = await createTenant(owner, 'k');
-      await orgContext.runSystem('BACKGROUND_JOB', () =>
-        prisma.client.organization.update({
-          where: { id: J.orgId },
-          data: { users: { connect: { id: K.userId } } },
+      await expect(
+        orgContext.runSystem('BACKGROUND_JOB', () =>
+          prisma.client.organization.update({
+            where: { id: J.orgId },
+            data: { users: { connect: { id: K.userId } } },
+          }),
+        ),
+      ).rejects.toThrow(refusedByTheRule('Organization\\.users\\.connect'));
+      expect((await owner.user.findUniqueOrThrow({ where: { id: K.userId } })).orgId).toBe(K.orgId);
+      await expect(
+        orgContext.runSystem('BACKGROUND_JOB', () =>
+          prisma.client.session.update({
+            where: { id: id(J, 'Session') },
+            data: { invitation: { connect: { id: id(K, 'Invitation') } } },
+          }),
+        ),
+      ).rejects.toBeInstanceOf(OrgScopeViolationError);
+      // The scalar form in system scope is an ordinary write.
+      const renamed = await orgContext.runSystem('BACKGROUND_JOB', () =>
+        prisma.client.user.update({
+          where: { id: K.userId },
+          data: { fullName: 'Renamed in system' },
         }),
       );
-      expect((await owner.user.findUniqueOrThrow({ where: { id: K.userId } })).orgId).toBe(J.orgId);
+      expect(renamed.fullName).toBe('Renamed in system');
+    });
+
+    describe('B2(a): connect through a COMPOSITE relation rewrites org_id', () => {
+      it('TC-008 evidence, plain client with the org filter written by hand: connect moves a session into another org, and the scalar form is rejected by Postgres', async () => {
+        const P = await createTenant(owner, 'p');
+        const Q = await createTenant(owner, 'q');
+        const sessionP = id(P, 'Session');
+        const freeQ = await freeInvitation(Q);
+
+        // The scalar form keeps org_id = P, and the composite foreign key refuses it.
+        await expect(
+          plain.session.update({
+            where: { id: sessionP, orgId: P.orgId },
+            data: { invitationId: freeQ.id },
+          }),
+        ).rejects.toMatchObject({ code: 'P2003' });
+        expect((await owner.session.findUniqueOrThrow({ where: { id: sessionP } })).orgId).toBe(
+          P.orgId,
+        );
+
+        // connect writes every column of the key, org_id included, from the connected row.
+        await plain.session.update({
+          where: { id: sessionP, orgId: P.orgId },
+          data: { invitation: { connect: { id: freeQ.id } } },
+        });
+        const moved = await owner.session.findUniqueOrThrow({ where: { id: sessionP } });
+        expect({ orgId: moved.orgId, invitationId: moved.invitationId }).toEqual({
+          orgId: Q.orgId,
+          invitationId: freeQ.id,
+        });
+        // Its proctoring data went with it: the events are reachable from org Q now.
+        expect(
+          await owner.proctorEvent.count({
+            where: { sessionId: sessionP, session: { orgId: Q.orgId } },
+          }),
+        ).toBe(1);
+
+        // The same on create: org: connect R with invitation: connect Q ends up in org Q.
+        const R = await createTenant(owner, 'r');
+        const freeQ2 = await freeInvitation(Q);
+        const created = await plain.session.create({
+          data: {
+            org: { connect: { id: R.orgId } },
+            invitation: { connect: { id: freeQ2.id } },
+          } as never,
+        });
+        expect(created.orgId).toBe(Q.orgId);
+
+        // And an invitation moves when its test and candidate are both connected.
+        const S = await createTenant(owner, 's');
+        const freeS = await freeInvitation(S);
+        await plain.invitation.update({
+          where: { id: freeS.id, orgId: S.orgId },
+          data: {
+            test: { connect: { id: id(Q, 'Test') } },
+            candidate: { connect: { id: id(Q, 'Candidate') } },
+          },
+        });
+        expect((await owner.invitation.findUniqueOrThrow({ where: { id: freeS.id } })).orgId).toBe(
+          Q.orgId,
+        );
+      });
+
+      it("TC-008 as org H: session.update invitation.connect of org I's invitation is refused, and the session keeps its org and invitation", async () => {
+        const freeI = await freeInvitation(I);
+        const before = await owner.session.findUniqueOrThrow({ where: { id: id(H, 'Session') } });
+        for (const data of [
+          { invitation: { connect: { id: freeI.id } } },
+          { invitation: { connectOrCreate: { where: { id: freeI.id }, create: {} } } },
+        ]) {
+          await expect(
+            asH(() =>
+              prisma.client.session.update({
+                where: { id: id(H, 'Session') },
+                data: data as never,
+              }),
+            ),
+          ).rejects.toThrow(refusedByTheRule('Session\\.invitation\\.(connect|connectOrCreate)'));
+        }
+        // create: org connect with invitation connect
+        await expect(
+          asH(() =>
+            prisma.client.session.create({
+              data: {
+                org: { connect: { id: H.orgId } },
+                invitation: { connect: { id: freeI.id } },
+              },
+            }),
+          ),
+        ).rejects.toBeInstanceOf(OrgScopeViolationError);
+        // invitation.update: test and candidate connect
+        const freeH = await freeInvitation(H);
+        await expect(
+          asH(() =>
+            prisma.client.invitation.update({
+              where: { id: freeH.id },
+              data: {
+                test: { connect: { id: id(I, 'Test') } },
+                candidate: { connect: { id: id(I, 'Candidate') } },
+              },
+            }),
+          ),
+        ).rejects.toBeInstanceOf(OrgScopeViolationError);
+        const after = await owner.session.findUniqueOrThrow({ where: { id: id(H, 'Session') } });
+        expect({ orgId: after.orgId, invitationId: after.invitationId }).toEqual({
+          orgId: before.orgId,
+          invitationId: before.invitationId,
+        });
+        expect((await owner.invitation.findUniqueOrThrow({ where: { id: freeH.id } })).orgId).toBe(
+          H.orgId,
+        );
+      });
+
+      it("TC-008 as org H: the scalar invitationId of org I's invitation is rejected by the composite foreign key in Postgres, and the scalar form with H's own invitation works", async () => {
+        const freeI = await freeInvitation(I);
+        await expect(
+          asH(() =>
+            prisma.client.session.update({
+              where: { id: id(H, 'Session') },
+              data: { invitationId: freeI.id },
+            }),
+          ),
+        ).rejects.toMatchObject({ code: 'P2003' });
+        expect(
+          (await owner.session.findUniqueOrThrow({ where: { id: id(H, 'Session') } })).orgId,
+        ).toBe(H.orgId);
+
+        const freeH = await freeInvitation(H);
+        const updated = await asH(() =>
+          prisma.client.session.update({
+            where: { id: id(H, 'Session') },
+            data: { invitationId: freeH.id },
+          }),
+        );
+        expect({ orgId: updated.orgId, invitationId: updated.invitationId }).toEqual({
+          orgId: H.orgId,
+          invitationId: freeH.id,
+        });
+      });
+    });
+
+    describe('B2(b): connect plus a write in one to-one input writes the connected row', () => {
+      it("TC-008 evidence, plain client: refreshToken.update user connect + update writes the connected user (another org's)", async () => {
+        const T = await createTenant(owner, 't');
+        const U = await createTenant(owner, 'u');
+        const token = id(T, 'RefreshToken');
+        await plain.refreshToken.update({
+          where: { id: token },
+          data: {
+            user: {
+              connect: { id: U.userId },
+              update: { passwordHash: 'pwned', email: 'attacker-t@example.test' },
+            },
+          } as never,
+        });
+        // The token was re-parented, and the update hit the user it was just connected to.
+        expect((await owner.refreshToken.findUniqueOrThrow({ where: { id: token } })).userId).toBe(
+          U.userId,
+        );
+        const victim = await owner.user.findUniqueOrThrow({ where: { id: U.userId } });
+        expect({ passwordHash: victim.passwordHash, email: victim.email }).toEqual({
+          passwordHash: 'pwned',
+          email: 'attacker-t@example.test',
+        });
+        expect((await owner.user.findUniqueOrThrow({ where: { id: T.userId } })).passwordHash).toBe(
+          'not-a-real-hash',
+        );
+      });
+
+      it("TC-008 as org H: the same call, and the same shape on testSection.test, submission.sessionQuestion and session.invitation, is refused, and org I's user is unchanged", async () => {
+        const before = await snapshot();
+        const attempts: Array<() => Promise<unknown>> = [
+          () =>
+            prisma.client.refreshToken.update({
+              where: { id: id(H, 'RefreshToken') },
+              data: {
+                user: {
+                  connect: { id: I.userId },
+                  update: { passwordHash: 'pwned', email: 'a@x.test' },
+                },
+              },
+            }),
+          () =>
+            prisma.client.testSection.update({
+              where: { id: id(H, 'TestSection') },
+              data: {
+                test: { connect: { id: id(I, 'Test') }, update: { name: 'pwned' } },
+              },
+            }),
+          () =>
+            prisma.client.submission.update({
+              where: { id: id(H, 'Submission') },
+              data: {
+                sessionQuestion: {
+                  connect: { id: id(I, 'SessionQuestion') },
+                  update: { score: 1 },
+                },
+              },
+            }),
+          () =>
+            prisma.client.session.update({
+              where: { id: id(H, 'Session') },
+              data: {
+                invitation: {
+                  connect: { id: id(I, 'Invitation') },
+                  update: { sentAt: new Date() },
+                },
+              },
+            }),
+        ];
+        for (const attempt of attempts) {
+          await expect(asH(attempt)).rejects.toBeInstanceOf(OrgScopeViolationError);
+        }
+        const victim = await owner.user.findUniqueOrThrow({ where: { id: I.userId } });
+        expect({ passwordHash: victim.passwordHash, email: victim.email }).toEqual({
+          passwordHash: 'not-a-real-hash',
+          email: 'staff-i@example.test',
+        });
+        expect(await snapshot()).toEqual(before);
+      });
+    });
+
+    describe('through a RULE_I relation: the row on the other side can belong to another org', () => {
+      // L's review names org I's user as its reviewer (the database allows it: the foreign key is
+      // rule (i), not composite). Nested writes through that relation would reach org I's user.
+      let L: TenantFixture;
+      const asL = <T>(fn: () => Promise<T>): Promise<T> => orgContext.runInOrg(L.orgId, fn);
+      const reviewId = () => id(L, 'SessionReview');
+
+      beforeAll(async () => {
+        L = await createTenant(owner, 'l');
+        await owner.sessionReview.update({
+          where: { id: reviewId() },
+          data: { reviewerId: I.userId },
+        });
+      });
+
+      it("TC-008 sessionReview.update reviewer.update (and connect + update, delete, upsert) and the parent-side updateMany and deleteMany are refused, and org I's user is unchanged", async () => {
+        const before = await snapshot();
+        const attempts: Array<() => Promise<unknown>> = [
+          () =>
+            prisma.client.sessionReview.update({
+              where: { id: reviewId() },
+              data: { reviewer: { update: { passwordHash: 'pwned' } } },
+            }),
+          () =>
+            prisma.client.sessionReview.update({
+              where: { id: reviewId() },
+              data: { reviewer: { update: { data: { email: 'attacker@example.test' } } } },
+            }),
+          () =>
+            prisma.client.sessionReview.update({
+              where: { id: reviewId() },
+              data: {
+                reviewer: {
+                  connect: { id: I.userId },
+                  update: { email: 'attacker@example.test', passwordHash: 'pwned' },
+                },
+              },
+            }),
+          () =>
+            prisma.client.sessionReview.update({
+              where: { id: reviewId() },
+              data: { reviewer: { delete: true } as never },
+            }),
+          () =>
+            prisma.client.sessionReview.update({
+              where: { id: reviewId() },
+              data: {
+                reviewer: { upsert: { create: {}, update: { passwordHash: 'pwned' } } } as never,
+              },
+            }),
+          () =>
+            prisma.client.user.update({
+              where: { id: L.userId },
+              data: {
+                sessionReviews: { updateMany: { where: {}, data: { notes: 'overwritten' } } },
+              },
+            }),
+          () =>
+            prisma.client.user.update({
+              where: { id: L.userId },
+              data: { sessionReviews: { deleteMany: {} } },
+            }),
+        ];
+        for (const attempt of attempts) {
+          await expect(asL(attempt)).rejects.toBeInstanceOf(OrgScopeViolationError);
+        }
+        const victim = await owner.user.findUniqueOrThrow({ where: { id: I.userId } });
+        expect(victim.passwordHash).toBe('not-a-real-hash');
+        expect(victim.email).toBe('staff-i@example.test');
+        expect(await snapshot()).toEqual(before);
+      });
+
+      it('TC-008 a child-side connect and disconnect through the same relations are refused, and the scalar foreign keys work', async () => {
+        await expect(
+          asL(() =>
+            prisma.client.sessionReview.update({
+              where: { id: reviewId() },
+              data: { reviewer: { connect: { id: L.userId } } },
+            }),
+          ),
+        ).rejects.toThrow(refusedByTheRule('SessionReview\\.reviewer\\.connect'));
+        await expect(
+          asL(() =>
+            prisma.client.appeal.update({
+              where: { id: id(L, 'Appeal') },
+              data: { assignedTo: { disconnect: true } },
+            }),
+          ),
+        ).rejects.toThrow(refusedByTheRule('Appeal\\.assignedTo\\.disconnect'));
+        // Scalar foreign keys: the review back to L's own reviewer, and the nullable key set and cleared.
+        const reconnected = await asL(() =>
+          prisma.client.sessionReview.update({
+            where: { id: reviewId() },
+            data: { reviewerId: L.userId },
+          }),
+        );
+        expect(reconnected.reviewerId).toBe(L.userId);
+        await asL(() =>
+          prisma.client.appeal.update({
+            where: { id: id(L, 'Appeal') },
+            data: { assignedToId: L.userId },
+          }),
+        );
+        expect(
+          (await owner.appeal.findUniqueOrThrow({ where: { id: id(L, 'Appeal') } })).assignedToId,
+        ).toBe(L.userId);
+        await asL(() =>
+          prisma.client.appeal.update({
+            where: { id: id(L, 'Appeal') },
+            data: { assignedToId: null },
+          }),
+        );
+        expect(
+          (await owner.appeal.findUniqueOrThrow({ where: { id: id(L, 'Appeal') } })).assignedToId,
+        ).toBeNull();
+      });
+
+      it('TC-008 nested writes through COMPOSITE relations are refused, and the work is done with scalar foreign keys', async () => {
+        // candidate.invitations is COMPOSITE.
+        await expect(
+          asL(() =>
+            prisma.client.candidate.update({
+              where: { id: id(L, 'Candidate') },
+              data: { invitations: { updateMany: { where: {}, data: { sentAt: new Date() } } } },
+            }),
+          ),
+        ).rejects.toThrow(refusedByTheRule('Candidate\\.invitations\\.updateMany'));
+        const updated = await asL(() =>
+          prisma.client.invitation.updateMany({
+            where: { candidateId: id(L, 'Candidate') },
+            data: { sentAt: new Date('2026-10-07T00:00:00Z') },
+          }),
+        );
+        expect(updated.count).toBeGreaterThan(0);
+      });
     });
   });
 
@@ -945,6 +1493,111 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
   });
 
   describe('create', () => {
+    it('TC-008 the scalar-FK (unchecked) forms type-check through the extended client without casts, and write what they say', async () => {
+      // These are the calls the README shows. If the generated types or the extension's type stopped
+      // accepting them, `pnpm typecheck` would fail here: no `as` anywhere in this test.
+      const stamp = randomUUID();
+      const invitation = await asA(() =>
+        prisma.client.invitation.create({
+          data: {
+            orgId: A.orgId,
+            testId: A.rows.Test.filter.id as string,
+            candidateId: A.rows.Candidate.filter.id as string,
+            tokenHash: `unchecked-${stamp}`,
+            windowStart: new Date('2026-10-05T12:00:00Z'),
+            windowEnd: new Date('2026-10-06T12:00:00Z'),
+          },
+        }),
+      );
+      const session = await asA(() =>
+        prisma.client.session.create({ data: { orgId: A.orgId, invitationId: invitation.id } }),
+      );
+      expect({ orgId: session.orgId, invitationId: session.invitationId }).toEqual({
+        orgId: A.orgId,
+        invitationId: invitation.id,
+      });
+      const created = await asA(() =>
+        prisma.client.testSection.createMany({
+          data: [1, 2].map((n) => ({
+            testId: A.rows.Test.filter.id as string,
+            title: `unchecked ${stamp} ${n}`,
+            position: 30 + n,
+          })),
+        }),
+      );
+      expect(created.count).toBe(2);
+      // Leave org A as it was: later tests expect it to have exactly one session and one invitation.
+      await owner.session.delete({ where: { id: session.id } });
+      await owner.invitation.delete({ where: { id: invitation.id } });
+      await owner.testSection.deleteMany({ where: { title: { contains: stamp } } });
+    });
+
+    it('TC-008 orgId is stamped on scalar-only (unchecked) input: create, createMany, createManyAndReturn and upsert.create', async () => {
+      const stamp = randomUUID();
+      const loose = <T>(op: string, model: ModelName, args: unknown): Promise<T> =>
+        asA(() => scoped(model)[op]?.(args) as Promise<T>);
+      const fk = {
+        testId: A.rows.Test.filter.id as string,
+        candidateId: A.rows.Candidate.filter.id as string,
+        windowStart: new Date('2026-10-05T12:00:00Z'),
+        windowEnd: new Date('2026-10-06T12:00:00Z'),
+      };
+
+      // create: scalar foreign keys (testId, candidateId), no orgId.
+      const one = await loose<{ orgId: string }>('create', 'Invitation', {
+        data: { ...fk, tokenHash: `stamp-create-${stamp}` },
+      });
+      expect(one.orgId).toBe(A.orgId);
+
+      // createMany: every row stamped.
+      const many = await loose<{ count: number }>('createMany', 'Invitation', {
+        data: [1, 2].map((n) => ({ ...fk, tokenHash: `stamp-many-${stamp}-${n}` })),
+      });
+      expect(many.count).toBe(2);
+
+      // createManyAndReturn: stamped, and returned.
+      const returned = await loose<Array<{ orgId: string }>>('createManyAndReturn', 'Invitation', {
+        data: [1, 2].map((n) => ({ ...fk, tokenHash: `stamp-return-${stamp}-${n}` })),
+      });
+      expect(returned.map((row) => row.orgId)).toEqual([A.orgId, A.orgId]);
+
+      // upsert: the create branch is stamped, the update branch is not touched.
+      const upserted = await loose<{ orgId: string }>('upsert', 'Invitation', {
+        where: { tokenHash: `stamp-upsert-${stamp}` },
+        create: { ...fk, tokenHash: `stamp-upsert-${stamp}` },
+        update: { sentAt: new Date('2026-10-05T13:00:00Z') },
+      });
+      expect(upserted.orgId).toBe(A.orgId);
+
+      // Everything created above belongs to org A in the database, and to nobody else.
+      const rows = await owner.invitation.findMany({ where: { tokenHash: { contains: stamp } } });
+      expect(rows).toHaveLength(6);
+      expect(new Set(rows.map((row) => row.orgId))).toEqual(new Set([A.orgId]));
+      expect(
+        await asB(() =>
+          prisma.client.invitation.count({ where: { tokenHash: { contains: stamp } } }),
+        ),
+      ).toBe(0);
+
+      // The same input naming another org's id is refused, on all four operations.
+      for (const [op, args] of [
+        ['create', { data: { ...fk, tokenHash: `x-${stamp}`, orgId: B.orgId } }],
+        ['createMany', { data: [{ ...fk, tokenHash: `y-${stamp}`, orgId: B.orgId }] }],
+        ['createManyAndReturn', { data: [{ ...fk, tokenHash: `z-${stamp}`, orgId: B.orgId }] }],
+        [
+          'upsert',
+          {
+            where: { tokenHash: `w-${stamp}` },
+            create: { ...fk, tokenHash: `w-${stamp}`, orgId: B.orgId },
+            update: {},
+          },
+        ],
+      ] as const) {
+        await expect(loose(op, 'Invitation', args)).rejects.toBeInstanceOf(OrgScopeViolationError);
+      }
+      await owner.invitation.deleteMany({ where: { tokenHash: { contains: stamp } } });
+    });
+
     it("TC-008 create fills in the caller's org when the data has none", async () => {
       const row = await asA(
         () =>
@@ -1185,18 +1838,9 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
   });
 
   describe('staff routes: user from org A requests data of org B (TC-008)', () => {
-    // A real access token with the claims BE-02's AuthService signs: sub, org, role, kind.
-    const asUser = (tenant: TenantFixture): string =>
-      `Bearer ${app.get(TokenService).sign(
-        {
-          sub: tenant.userId,
-          org: tenant.orgId,
-          role: 'RECRUITER',
-          kind: 'access',
-          pwv: passwordVersion('not-a-real-hash'),
-        },
-        300,
-      )}`;
+    // A real access token with the claims BE-02's AuthService signs (sub, org, role, kind, pwv). The
+    // guard re-reads the user, so the fixture user's role, org and password hash back the token.
+    const asUser = (tenant: TenantFixture): string => staffBearer(app.get(TokenService), tenant);
 
     it("TC-008 GET another org's session is 404 and leaks nothing; own session is 200", async () => {
       const server = app.getHttpServer();
@@ -1249,7 +1893,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expect(casesA.body).toEqual([A.rows.TestCase.filter.id]);
     });
 
-    // ---- no existence oracle -------------------------------------------------------------------
+    // ---- the same response for another org's id and for an id that exists nowhere -------------
 
     /** The response headers without the named ones. */
     const headersWithout = (res: request.Response, names: string[]): Record<string, unknown> =>
@@ -1285,7 +1929,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expect(size(b) - size(a)).toBe(idB.length - idA.length);
     };
 
-    it("TC-008 no existence oracle: another org's session id and an id that exists nowhere get the same 404, field by field", async () => {
+    it("TC-008 same response: another org's session id and an id that exists nowhere get the same 404, field by field", async () => {
       const server = app.getHttpServer();
       const bSession = B.rows.Session.filter.id as string;
       const nowhere = randomUUID();
@@ -1331,7 +1975,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expect(JSON.stringify([denied.body, denied.headers])).not.toContain(B.orgId);
     });
 
-    it('TC-008 no existence oracle: the same holds for a model scoped through its parent chain (a proctor event)', async () => {
+    it('TC-008 same response: the same holds for a model scoped through its parent chain (a proctor event)', async () => {
       const server = app.getHttpServer();
       const bEvent = String(B.rows.ProctorEvent.filter.id);
       const nowhere = '9'.repeat(12); // an id no tenant has
@@ -1350,7 +1994,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expectSameSize(denied, missing, bEvent, nowhere);
     });
 
-    it("TC-008 no existence oracle: a filtered list for another org's id and for an id that exists nowhere have the same shape", async () => {
+    it("TC-008 same response: a filtered list for another org's id and for an id that exists nowhere have the same shape", async () => {
       const server = app.getHttpServer();
       const cases: Array<[string, string, string]> = [
         ['/probe/sessions?id=', B.rows.Session.filter.id as string, randomUUID()],
@@ -1366,11 +2010,8 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         // No id in the response, so every header but Date matches, ETag included.
         expect(headersWithout(denied, ['date'])).toEqual(headersWithout(missing, ['date']));
         // The same filter for an id that does exist in org A returns A's row: the filter works.
-        const own = await get(
-          path.includes('sessions?')
-            ? (A.rows.Session.filter.id as string)
-            : (A.rows.Session.filter.id as string),
-        );
+        // Both filters take org A's own session id (events are filtered by their session).
+        const own = await get(A.rows.Session.filter.id as string);
         expect((own.body as unknown[]).length).toBeGreaterThan(0);
       }
     });

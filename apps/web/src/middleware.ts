@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from 'next/server';
-import { buildCsp, generateNonce, parseOrigins } from '@/lib/csp';
+import { buildCsp, generateNonce, isCandidateTestPath, parseOrigins } from '@/lib/csp';
 
 /**
  * Sets a strict CSP with a per-request nonce on every page response (NFR-04). Next.js reads the
@@ -12,6 +12,9 @@ export function middleware(request: NextRequest): NextResponse {
     apiOrigin: process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000',
     uploadOrigins: parseOrigins(process.env.NEXT_PUBLIC_UPLOAD_ORIGINS),
     isDev: process.env.NODE_ENV === 'development',
+    // D-45 (P-05): WebAssembly compilation for the in-browser detectors on /t/[token]/test only.
+    // Matches the request path before any rewrite, so a future rewrite into the route fails closed.
+    allowWasm: isCandidateTestPath(request.nextUrl.pathname),
   });
 
   const requestHeaders = new Headers(request.headers);
@@ -26,7 +29,8 @@ export function middleware(request: NextRequest): NextResponse {
 export const config = {
   matcher: [
     {
-      // Skip static assets (Monaco, the MSW worker, Next static files). Prefetches keep the CSP.
+      // Skip static assets (Monaco, the MSW worker, Next static files) and router prefetches; the
+      // document keeps the CSP it was loaded with.
       source: '/((?!_next/static|_next/image|monaco/|mockServiceWorker\\.js|favicon\\.ico).*)',
       missing: [
         { type: 'header', key: 'next-router-prefetch' },
