@@ -372,7 +372,7 @@ The manual script is a secondary level for TCs that already have an automated le
 | TC-075, TC-076 | M-04 | manual (secondary) | P1 | C-28: every session reviewed; band LOW still goes to UNDER_REVIEW. The current text of TC-076 ("Session scores MEDIUM") and FR-805 predates C-28 (see B.3) |
 | TC-072, TC-094 | M-05 | manual (secondary) | P1/P2 | tiers C-26, C-27, C-35; consent proof kept (C-17); erasure waits for an open appeal (C-06) |
 | Compliance proposal (a) (section 9 above) | M-03 | manual (secondary) | P1 | waived identity check, two accommodation settings (C-25, C-34); TC ID pending from the hub |
-| C-30 (no proposal letter defined yet; section 9 covers only (a) to (f)) | M-01 | manual (secondary) | P1 | age confirmation; the hub assigns a TC ID |
+| C-30 (proposal (k), section 11.4) | M-01 | manual (secondary) | P1 | age confirmation; the hub assigns a TC ID |
 | Compliance proposal (b), (d) (section 9 above) | M-02, M-01 step 8 | manual (secondary) | P2 | decline contact, retention link; TC ID pending |
 | Compliance proposal (e) (section 9 above) | M-06 | manual (secondary) | P1 (privacy) | demographics, blocked until FAIR-01; TC ID pending |
 | TC-090 | packages/qa/k6 | load (k6) | P1 | script added by QA B (see B.2); status stays Planned until DEP-01 |
@@ -390,6 +390,8 @@ QA B has replaced the placeholder `packages/qa/k6/tc-090-load.js` and `tc-091-co
 2. FSD FR-401 has no age confirmation (C-30), and FR-305 has no "no identity check" or "face detectors off" accommodation (C-02, C-25).
 3. TC-094 still says "provisional, Legal to confirm"; C-06 made the erasure hold final.
 4. TC-063 (45 s) versus FR-609 (60 s) is still open (already listed above; ADR 0013 section 5.3 flags it as Q13).
+5. Proposal (m) in section 11.4 says that with "face detectors off" the identity re-check still runs and GAZE is off. C-34 refuses the re-check when either accommodation is on, ADR 0015 (proposed) is the same, and M-03 expects GAZE may still fire (OQ-15). Hub to reconcile; QA A owns that row.
+6. The face-tier clock reads "after the assessment is finished" in retention-schedule.md but "from capture or submission" in C-35. M-05 follows C-35; testers record the date the job used and do not file it as a new defect each run.
 
 ### B.4 CI changes needed (hub, rule 12; none made by QA B)
 
