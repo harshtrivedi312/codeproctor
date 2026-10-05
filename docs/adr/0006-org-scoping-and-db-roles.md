@@ -294,20 +294,22 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 - **DB-05 merge gate.** The guard in PR #30 conflicts with this rule:
   - it allows a child-side `connect` and nested writes;
   - it is off in system scope;
-  - a COMPOSITE `connect` copies `org_id`.
+  - a COMPOSITE `connect` copies `org_id`;
+  - nothing stops a system-scope update from setting a scalar `orgId`. `AUTH_BOOTSTRAP` writes sessions (INVITED → OPENED) and auth rows before it narrows.
 
-  Until all three of these land, PR #30 does not merge, and BE-03 and BE-06 write no invitation or session code:
+  Until all four of these land, PR #30 does not merge, and BE-03 and BE-06 write no invitation or session code:
   - the deny-by-default rule;
   - its application in system scope;
-  - the COMPOSITE `connect` test.
+  - the COMPOSITE `connect` test;
+  - the system-scope refusal of a scalar `orgId` in `update`, `updateMany` and the update branch of `upsert` (below).
 
 **No write moves a row to another org.**
 - With nested relation writes refused, the remaining path is a scalar `orgId`. On `create`, `update` and `upsert` (both branches), the extension refuses a scalar `orgId` whose value is not `ctx.orgId`.
-- In system scope there is no `ctx.orgId`. There, an update may not set `orgId`.
+- In system scope there is no `ctx.orgId`. There, the extension refuses any scalar `orgId` in `update`, `updateMany` and the update branch of `upsert`. Writes under `AUTH_BOOTSTRAP` should still narrow to `runInOrg` as soon as the org is known.
   - A create of a model with `org_id` should narrow to `runInOrg(orgId)` first, so the scalar rule applies.
   - A create left in system scope is review-only (rule (i)): the context does not track which org ids were loaded, and code-reviewer checks that the org was loaded first.
 - **Today (PR #30):** in an org scope, for direct models.
-- **Planned:** the system-scope rule.
+- **Planned:** the system-scope rule. It is part of the DB-05 merge gate above.
 
 **Cursors (today, PR #30).**
 - On a model with `org_id`, the cursor gets `orgId` added, and a cursor naming another org is refused.
@@ -425,7 +427,7 @@ There is no org-provisioning reason (8.6, 8.9).
 - **Leaving a scope.** `AsyncLocalStorage.exit()`, `enterWith()` and `disable()` would let code leave its scope and bypass every "only narrows" row. So:
   - The OrgContext `AsyncLocalStorage` instance stays private to `org-context.ts`. It is never exported, and never reachable through a getter.
   - The only way to leave a scope is `orgContext.detachForSessionJob(fn)`. Only the `SessionJobProcessor` base class calls it.
-    - It asserts an empty store, then runs `fn` in a fresh empty store. It throws on any scope, raw-SQL hatch or grant. Grants cannot exist outside a scope (as in ADR 0013).
+    - It asserts an empty store, then runs `fn` in a fresh empty store. It throws on any scope, raw-SQL hatch or grant. The grant check is redundant, because grants cannot exist outside a scope; it is kept as defence in depth (as in ADR 0013).
     - It is allowed from no scope only. It throws inside any org scope (STAFF, plain org, SERVICE and CANDIDATE), in system scope, and while a `runRawSql` hatch is open. So a candidate scope cannot leave itself, and nothing can reach a session scope in two steps.
     - Workers are built at module init, outside any scope. `SessionJobProcessor` asserts that there is no scope, and its handler runs only from the BullMQ worker callback. A discovery processor never calls a session handler inline; it enqueues the session job.
     - The 8.4 rows for `detachForSessionJob` each have a test.
@@ -435,10 +437,19 @@ There is no org-provisioning reason (8.6, 8.9).
     - the ten grant entry sites of ADR 0013 CS-4.4: `SessionStateService`, `KeyService`, `CandidateSessionGuard`, `DeviceInfoService`, `StorageService`, `OrgSettingsService`, `TestSettingsService`, `AccommodationsService`, `SectionGateService` and `ConsentService` (`consent_texts`: two ids);
     - the private candidate-facts setter for `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. Only `CandidateSessionGuard` may call it, once per scope, and the values are immutable afterwards.
   - The grant-entry API and the candidate-facts setter stay private to `org-context.ts` or the extension, like the store.
-  - **How grants work.**
-    - A grant carries a set of ids. The extension ANDs it into the query itself (`id IN grant.ids`).
-    - An empty set throws.
-    - Grants exist only inside a scope and end with it.
+  - **How grants work.** This is the normative grant spec; ADR 0013 uses the same wording.
+    - A grant names its model, its columns and its ids.
+    - It is entered as `withGrant(spec, fn)`, a nested AsyncLocalStorage run inside the current scope, and it ends when `fn` settles.
+    - The extension checks all three:
+      - the query is on the named model;
+      - only the named columns are read or written;
+      - the extension itself ANDs `id IN grant.ids` into the query.
+    - An empty id set throws.
+    - The ids are values read inside the same scope, never request input.
+    - Grants cannot exist outside a scope.
+    - Examples (ADR 0013):
+      - `SectionGateService` needs two grants. Step 1 uses the id set `{sessionQuestionId}` on `session_questions.test_question_id`. Step 2 uses `{test_question_id}`, the value read in step 1, on `test_questions`.
+      - `ConsentService` sets `consent_text_id` server-side to `organizations.current_consent_text_id`, never from the request body.
   - Any use outside those files fails the test or the lint rule.
   - The FU-DB-67 row in docs/followups/database.md (PR #30) still lists only `runSystem`, `runInOrg` and `runRawSql`. The db-engineer extends it to everything above.
   - A new call site updates the list, and code-reviewer checks it.
@@ -582,11 +593,11 @@ How the check runs:
 
 - **Positive:** the scope rules are closed and testable (FK classification, call-site allow-list, readiness check), with no schema change before the pilot.
 - **Negative:**
-  - Rule (i) stays a service-level guard for 25 foreign keys until RLS is revisited (FU-DB-77).
+  - Rule (i) stays a service-level guard for the `RULE_I` foreign keys listed in 8.1 until RLS is revisited (FU-DB-77).
   - Session jobs run in a `sessionId` scope, so they cannot use raw SQL (8.5). This is deliberate. It covers BE-12 risk scoring, BE-14 report generation, and DB-06 per-session deletion when it runs as a session job. All of them must use the model API. If one of them needs raw SQL, that needs an amendment to this ADR.
 - **db-engineer:**
   - 8.1 is done in PR #30 (FU-DB-64).
-  - 8.2 is a DB-05 merge gate: replace the per-class nested-write guard (FU-DB-63) with deny by default in every scope, with an empty named allowlist (relations told apart by DMMF `kind`). Apply it in system scope, accept unchecked scalar inputs, and add one test per operation and side plus the COMPOSITE `connect` case. PR #30 does not merge until this lands.
+  - 8.2 is a DB-05 merge gate: replace the per-class nested-write guard (FU-DB-63) with deny by default in every scope, with an empty named allowlist (relations told apart by DMMF `kind`). Apply it in system scope, accept unchecked scalar inputs, and add one test per operation and side plus the COMPOSITE `connect` case. Also refuse a scalar `orgId` in system-scope updates. PR #30 does not merge until this lands.
   - Nested reads stay open (FU-DB-78).
   - 8.5: the raw-SQL hatch does not carry into nested scopes.
   - FU-DB-67: the call-site allow-list.
@@ -597,6 +608,7 @@ How the check runs:
   - 8.5: keep the `AsyncLocalStorage` instance private.
   - 8.5: add `detachForSessionJob`, allowed from no scope only and refused in any org scope, in system scope and with an open hatch; it empties the store.
   - 8.5: make `SessionJobProcessor` assert there is no scope.
+  - 8.5: implement `withGrant(spec, fn)` per the grant spec (model, columns, ids; the extension checks all three).
   - 8.5: extend FU-DB-67 to `exit`, `enterWith`, `disable`, `detachForSessionJob`, the ten CS-4.4 grant entry sites (`ConsentService` included) and the candidate-facts setter, and update its row in docs/followups/database.md.
   - 8.4: the transition table, with one test per row.
   - 8.5: refuse raw SQL in a `sessionId` scope (the scope requirement is done).
