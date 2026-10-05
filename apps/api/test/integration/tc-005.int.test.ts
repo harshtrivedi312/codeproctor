@@ -85,7 +85,7 @@ describe('TC-005 (FR-104): refresh token rotation and reuse', () => {
     await h.owner.user.update({ where: { id: u.id }, data: { role: UserRole.RECRUITER } });
     const next = await refresh(h, c).expect(200);
     const claims = JSON.parse(
-      Buffer.from((next.body as Body).accessToken.split('.')[1] ?? '', 'base64url').toString(),
+      Buffer.from((next.body as Body).accessToken?.split('.')[1] ?? '', 'base64url').toString(),
     ) as { role: string };
     expect(claims.role).toBe('RECRUITER');
     await h.owner.user.update({ where: { id: u.id }, data: { isActive: false } });
