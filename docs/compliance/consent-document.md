@@ -10,7 +10,7 @@ The placeholder guard stays: pilot and production refuse to run until the owner 
 
 Document version [x.y] · [COMPANY LEGAL NAME]
 
-Please read this document to the end. It explains what happens during the assessment, what we record, how we check your identity, who sees the results, how long we keep your data, and your choices. At the end you sign by typing your full legal name. **Nothing is recorded, and your camera, microphone and screen are not touched, until you sign.**
+Please read this document to the end. It explains what happens during the assessment, what we record, how we check your identity, who sees the results, how long we keep your data, and your choices. At the end you sign by typing your full legal name. **Your camera, microphone and screen are not accessed, and nothing is recorded, until you sign.** (We already hold your email address and the details of your one-time code check.)
 
 ### 1. Who we are
 
@@ -28,7 +28,9 @@ The assessment is run by **[COMPANY LEGAL NAME]**, [address] ("we"), for the rol
 ### 3. What we record during the test
 
 - **Your screen:** a recording of your whole screen.
-- **Your webcam:** a video recording of you.
+- **Your webcam:** a video recording of you, and a short scan of your room before the test.
+- **[STRICT tests only] A second camera:** your phone, placed to show your desk and screen, recorded the same way.
+- **Live view:** a proctor may watch your session live and send you messages or pause the test.
 - **Your microphone:** an audio recording.
 - **Your typing and editing in the code editor:** keystroke timing, pastes, and how your code changes over time.
 - **Browser activity:** for example, leaving full-screen mode, switching tabs or windows, pasting, connecting a second screen, or using a virtual camera.
@@ -45,8 +47,8 @@ To confirm that you are the person taking the test, we:
 - re-check during the test that the same person is at the keyboard, by comparing **one small webcam frame (640 px) every 2 minutes** with your verified face. A frame that matches is discarded at once. A frame that does not match is kept as evidence for a human reviewer.
 
 Face images and face templates are **biometric data**. We use them **only to confirm your identity for this assessment.**
-- The face templates are calculated in memory and **never stored**.
-- The ID photo and selfie are deleted 90 days after the assessment is finished (section 8).
+- The face templates are calculated in the computer's working memory, held there only while your test runs, and **never saved**.
+- The ID photo and selfie are deleted [N] days after the assessment is finished (section 8).
 - We **never sell, rent or trade your biometric data, and never share it for profit.**
 
 If the faces don't match well enough, **a person compares them. You are never rejected automatically** by the face match.
@@ -62,7 +64,7 @@ During the test, software looks for signs that a test may not have been taken fa
 - code very similar to other submissions or to AI-generated answers;
 - leaving full-screen mode.
 
-**The software only raises flags. It never decides anything.** A trained reviewer looks at each flag together with the recording and decides what happened. **A person makes every decision about your assessment, and nothing rejects you automatically.**
+**The software only raises flags. It never decides anything against you.** If your test shows no significant flags, the system marks it as clear without a reviewer. If it shows significant flags, or your identity could not be confirmed, a trained reviewer looks at the flags together with the recording and decides what happened. **Nothing rejects you automatically, and a person makes the hiring decision.** [See drafting note 9.]
 
 Your code is also run against test cases to calculate a score. Your score, the reviewer's decision and a short report are shared with the hiring team for [role]. Together with your other application materials, they are used to decide whether to move your application forward.
 
@@ -74,7 +76,7 @@ Only these people and companies can see your data:
 - **Our staff with the Super Admin role** manage the system and handle requests about your data.
 - **Our service providers**, under contract and only on our instructions: Amazon Web Services (hosting and storage), Cloudflare (delivering the web pages), [email provider] (sending your invitation, one-time codes and a copy of this document) and [error monitoring provider, if used]. They may not use your data for their own purposes.
 
-Every time a staff member opens your recordings or images, it is logged. We don't share your data with anyone else unless the law requires it.
+Every time a staff member opens your recordings or images, it is logged. Your scores and status may also be sent to [our applicant tracking system] through an export or automatic notification. We don't share your data with anyone else unless the law requires it.
 
 ### 7. Where your data is stored
 
@@ -82,7 +84,7 @@ All your data is stored in the **United States**, in Amazon Web Services region 
 
 ### 8. How long we keep your data
 
-- Recordings, the ID photo, the selfie, re-check frames that didn't match, evidence images and keystroke data: deleted **90 days** after your assessment is finished.
+- Recordings, the room scan, the ID photo, the selfie, re-check frames that didn't match, evidence images and keystroke data: deleted **[N] days** after your assessment is finished (the organisation's setting, normally 90 days; [biometric items never more than 90 days, see OQ-5]).
 - Face templates: **never stored**.
 - This signed consent record (document version, your typed name, time of signing, IP address, browser and signed PDF): kept **3 years** to prove you consented, then deleted. We keep it for those 3 years even if you ask us to delete your data, because we may need it to show that you consented, for example if there is a legal claim.
 - Your scores, code and the reviewer's decision: [retention period, e.g. 2 years], then anonymised.
@@ -93,7 +95,7 @@ The full schedule, including how we destroy data, is here: **[link to the retent
 
 - **Ask for accommodations or an alternative.** If you need extra time, assistive technology, or changes to the monitoring (for example, if you can't use a webcam, microphone or ID check), contact [recruiter name, email] **before you start**. We handle each request individually. Accommodations may include extra time, turning specific detectors off, or an alternative to the face match. If the face match is waived, your recruiter records the reason and may check your ID with you on a short video call instead.
 - **Decline.** You may decline at the end of this document. Nothing will be recorded, the assessment will end, and you will see your recruiter's contact so you can discuss alternatives. [Declining is not treated as a failed assessment: see drafting note 2.]
-- **Withdraw your consent.** You can withdraw at any time before or during the test by ending the session. Recording stops at once. After the test, a withdrawal is handled as a request to delete your data (next point).
+- **Withdraw your consent.** You can withdraw at any time before or during the test by ending the session. Recording stops at once. After the test, a withdrawal is handled as a request to delete your data (next point). [What happens to data already collected depends on OQ-6.]
 - **Access, correct or delete your data.** Contact [EMAIL]. Deletion is completed within 30 days of your request, or within 30 days after an open review or appeal closes, whichever is later. If a review or appeal delays it, we tell you. We delete your recordings, images, keystroke data, code and answers, and keep only anonymised scores, plus the signed consent record for its 3 years (section 8).
 - **Appeal a decision.** If the reviewer finds a violation, you can appeal within 7 days, and a different reviewer looks at it.
 - **If you are in the EU or UK:** you also have the right to object, to restrict processing, to data portability, and to complain to your local data protection authority.
@@ -110,7 +112,7 @@ By typing your full legal name below and selecting **I agree and sign**, you con
 1. you agree to the recording of your screen, webcam, microphone and editor activity during this assessment, as described in sections 3 and 5;
 2. **you give your explicit consent and written release** for [COMPANY LEGAL NAME] to collect, use and store your biometric data (images of your face and face templates calculated from them) only to verify your identity for this assessment, and to keep and destroy it as described in section 8 and in the retention and destruction schedule;
 3. you understand that your data is stored in the United States (section 7);
-4. you understand that software only raises flags, and a person makes every decision (section 5).
+4. you understand that software only raises flags, that nothing rejects you automatically, and that a person makes the hiring decision (section 5).
 
 Full legal name: ______________________   [I agree and sign]   [I decline]
 
@@ -127,4 +129,7 @@ We record the document version, your typed name, the date and time from our serv
 5. **Section 7 transfer wording** uses SCCs, as the owner decided. If a processor relies on DPF instead, add it here.
 6. **The section 10 example questions** must match the FAIR-01 form once it is designed. Some categories (for example ethnicity) are special-category data under GDPR, and the separate consent covers them.
 7. **Job postings (C-14)** should carry a one-line notice, for example: "This role includes a proctored online coding assessment. Automated tools flag possible issues, and a person makes every decision."
+9. **Auto-clear of low-risk sessions (OQ-8).** The current design (ADR 0002, fsd.md §3) marks LOW-band sessions with confirmed identity as COMPLETED without a reviewer. Section 5 says so. If you want a person to look at every session, that is a design change.
+10. **Re-check frames** follow ADR 0013, which is still a proposal and changes FR-606 (from an in-browser check to a server check). Keep sections 3 and 4 in step with the accepted ADR.
+11. **Consent proof on erasure** (C-17) is stated in section 8.
 8. **Reading level.** The aim is plain language at about a US grade 8 reading level. A final readability pass is recommended after your edits.

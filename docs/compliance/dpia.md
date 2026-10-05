@@ -1,6 +1,6 @@
 # Data protection impact assessment: CodeProctor pilot
 
-Status: **DRAFT v0.1 for owner approval** (C-03a, C-14). Drafted 2026-10-05 by the Delivery Lead from the project documents (BRD, FSD, architecture, ADRs 0001 to 0013, compliance decisions C-01 to C-16). Approver: Harsh Trivedi. **This DPIA has not had professional legal review (C-15, R-17).** Statements about laws are a first-pass reading for planning and need verification, especially the items marked *verify*.
+Status: **DRAFT v0.1 for owner approval** (C-03a, C-14). Drafted 2026-10-05 by the Delivery Lead from the project documents (BRD, FSD, architecture, accepted ADRs 0001 to 0010, proposed ADRs 0011 to 0013, compliance decisions C-01 to C-16). Approver: Harsh Trivedi. **This DPIA has not had professional legal review (C-15, R-17).** Statements about laws are a first-pass reading for planning and need verification, especially the items marked *verify*.
 
 Approval of this DPIA is a pilot entry blocker for EU/UK candidates (C-03a; status.md B-05 item 5).
 
@@ -24,14 +24,14 @@ The GDPR and UK GDPR require a DPIA where processing is likely to result in a hi
 | Data flow | Browser to API (HTTPS); browser to object storage directly through short-lived presigned URLs, so media never passes through the API; API to Postgres; worker reads media from storage for analysis; Judge0 (self-hosted) runs code; reviewers watch through 15-minute signed playback URLs |
 | Where | One US AWS region for all data, EU/UK included (C-03). Web front end served by Cloudflare Pages. Processors: [processors.md](processors.md) |
 | Retention | [retention-schedule.md](retention-schedule.md): media and biometric data 90 days after the assessment is finished; consent records 3 years; results [OQ-4]; backups 14 days |
-| Who decides | A person makes every decision. Detectors and scores only produce flags and inputs (BRD §7, FR-805, C-14) |
+| Who decides | Nothing negative is decided automatically. LOW-band sessions with confirmed identity are marked clear without a reviewer (ADR 0002, fsd.md §3); every other session goes to a trained reviewer; a person makes every hiring decision (BRD §7, FR-805, FR-902, C-14; OQ-8 asks whether every session needs a person) |
 
 ## 3. Lawful basis
 
 | Processing | GDPR / UK GDPR basis | Notes |
 | --- | --- | --- |
 | Biometric identity check and re-checks | Art. 6(1)(a) consent and **Art. 9(2)(a) explicit consent** (C-02), given by signing the consent document | Consent must be freely given; see risk R5 and section 6 |
-| Recording, monitoring, integrity detection, scoring | Current design: consent, through the same signed document. **Alternative to consider (OQ-6):** Art. 6(1)(f) legitimate interests (a fair and secure assessment), or Art. 6(1)(b) (steps before entering a contract), with consent kept only for biometrics. Under consent, a candidate who withdraws mid-test stops all processing; under legitimate interests, the record of the attempt could be kept for integrity | Choose one basis per purpose and state it in the consent document and privacy notice |
+| Recording, monitoring, integrity detection, scoring | Current design: consent, through the same signed document. **Alternative to consider (OQ-6):** Art. 6(1)(f) legitimate interests (a fair and secure assessment), or Art. 6(1)(b) (steps before entering a contract), with consent kept only for biometrics. Under consent, withdrawal stops further processing (data already collected follows the retention schedule or is erased on request); under legitimate interests, the record of the attempt could be kept for integrity. The consent document's withdrawal text waits for this choice | Choose one basis per purpose and state it in the consent document and privacy notice |
 | Optional demographics (C-13) | Art. 9(2)(a) explicit consent, separate from the test consent | Aggregate reporting only, with a minimum group size of 10 |
 | Consent records kept 3 years | Art. 6(1)(c)/(f) and Art. 17(3)(e) (proving consent; legal claims) | OQ-1 decides what happens on erasure |
 
@@ -81,7 +81,7 @@ Likelihood and severity are before the measures. Residual risk is after them.
 | R7 | Function creep: recordings or biometric data used for other purposes (security, other hiring, training models) | Unlikely / severe | Purpose limitation in the consent document; no model training on candidate data; access logging; the retention schedule | Low |
 | R8 | EU/UK data stored in the US (government access, weaker remedies) | Possible / moderate | SCCs or DPF for every processor (C-03b); encryption; minimal retention; transfer-impact notes in section 8 | Medium |
 | R9 | Over-retention (results kept with no limit; organisation settings up to 730 days) | Likely / moderate | Decide OQ-4 (a results retention period) and OQ-5 (cap biometric items at 90 days) | Medium until decided, then low |
-| R10 | Automated decision-making in effect, because reviewers rubber-stamp the score or risk band | Possible / significant | A verdict requires a decision on every HIGH flag (FR-805); reviewer training; monitoring of how often reviewers agree with the risk band; appeals | Medium |
+| R10 | Automated decision-making in effect, because reviewers rubber-stamp the score or risk band | Possible / significant | A verdict requires a decision on every HIGH flag (ADR 0001 F7, FR-902); reviewer training; monitoring of how often reviewers agree with the risk band; appeals | Medium |
 | R11 | Under-18 candidates (for example, interns) | Unlikely / moderate | Add an age confirmation, or a parental-consent path, if minors can apply (OQ-7) | Low after OQ-7 |
 | R12 | Misuse of the optional demographic data, or re-identification from small groups | Unlikely / severe | Separate store; never visible to staff; never used in decisions; aggregate only with a minimum group of 10; deleted at 90 days (C-13) | Low |
 | R13 | Candidate data reaching third parties not listed (error tracking, fonts, model CDNs) | Possible / moderate | Processor register boundary; PII scrubbing; self-hosted fonts and model files (ADR 0013) | Low |
@@ -99,7 +99,7 @@ Likelihood and severity are before the measures. Residual risk is after them.
 
 ## 7. Automated-decision and AI laws (C-14)
 
-**Position:** automated detection only produces flags, and a person makes every decision; nothing rejects automatically. This lowers the exposure under every regime below, but it does not remove it, because several regimes cover tools that "substantially assist" a decision, or AI used to "evaluate" candidates.
+**Position:** automated detection only produces flags. Nothing negative is decided automatically: a session is only ever auto-cleared (LOW band, identity confirmed), never auto-failed. A person makes every hiring decision. This lowers the exposure under every regime below, but it does not remove it, because several regimes cover tools that "substantially assist" a decision, or AI used to "evaluate" candidates.
 
 ### GDPR / UK GDPR Art. 22
 

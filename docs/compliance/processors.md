@@ -17,6 +17,8 @@ C-03 requires a DPA with Standard Contractual Clauses (SCCs), or DPF certificati
 | Error tracking (**not chosen yet, P-10**) | Server and browser error reports | Should receive no personal data once scrubbing is on; in practice, IP addresses, browser details and anything that slips past scrubbing | Depends | Self-hosted GlitchTip on our AWS: no new processor. Sentry SaaS: DPA with SCCs; check DPF | Decide P-10; require PII, token and media-key scrubbing (CLAUDE.md) |
 | Cloudflare: Pages | Serving the web app to candidates and staff | IP addresses and request metadata of every visitor; no candidate media (uploads go straight to S3) | Global network | Cloudflare DPA with SCCs; Cloudflare DPF certification | Accept the Cloudflare DPA on the account; check the DPF entry |
 
+| Applicant tracking system (webhooks and CSV export, FR-1003) [if used] | Receiving results | Candidate name and email, status, scores and verdict | Depends | The ATS vendor is the company's own processor; check its DPA and SCCs | List the ATS used, or confirm none for the pilot |
+
 ## Services that must not receive candidate data
 
 These are listed so the boundary is explicit. If any of them starts receiving candidate data, it becomes a processor and needs a row above.
