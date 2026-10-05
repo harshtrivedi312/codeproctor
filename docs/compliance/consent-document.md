@@ -47,7 +47,6 @@ To confirm that you are the person taking the test, we:
 - re-check during the test that the same person is at the keyboard, by comparing **one small webcam frame (640 px) every 2 minutes** with your verified face. A frame that matches is discarded at once. A frame that does not match is kept as evidence for a human reviewer.
 
 Face images and face templates are **biometric data**. We use them **only to confirm your identity for this assessment.**
-
 - The face templates are calculated in the computer's working memory, held there only while your test runs, and **never saved**.
 - The ID photo and selfie are deleted [N] days after the assessment is finished (section 8).
 - We **never sell, rent or trade your biometric data, and never share it for profit.**
@@ -57,7 +56,6 @@ If the faces don't match well enough, **a person compares them. You are never re
 ### 5. Automated detection, and people making the decisions
 
 During the test, software looks for signs that a test may not have been taken fairly. Examples:
-
 - more than one face on camera;
 - looking away for long periods;
 - a phone or book in view;
@@ -79,7 +77,6 @@ Your code is also run against test cases to calculate a score. Your score, the r
 ### 6. Who can see your data
 
 Only these people and companies can see your data:
-
 - **Our staff with the Recruiter role** for this role see your invitation, status, scores and the final decision.
 - **Our staff with the Reviewer role** see the recordings, images, flags and your code, so they can review the assessment. Reviewers sign in with two-factor authentication.
 - **Our staff with the Super Admin role** manage the system and handle requests about your data.
@@ -124,7 +121,7 @@ By typing your full legal name below and selecting **I agree and sign**, you con
 4. you understand that your data is stored in the United States (section 7);
 5. you understand that software only raises flags, that a person reviews every assessment, and that a person makes every hiring decision (section 5).
 
-Full legal name: ______________________ [I agree and sign] [I decline]
+Full legal name: ______________________   [I agree and sign]   [I decline]
 
 We record the document version, your age confirmation, your typed name, the date and time from our server, your IP address and your browser. We generate a signed PDF of this document and email you a copy.
 

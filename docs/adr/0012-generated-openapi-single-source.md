@@ -1,12 +1,12 @@
 # ADR 0012: The API's generated OpenAPI is the single source of truth
 
-| Field     | Value                                                                                                                                       |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| Status    | Accepted 2026-10-05 (C-21, D-49). PR #36 (frontend) was allowed to merge ahead of the first sync PR under C-21, then moves in that sync PR. |
-| Author    | architecture hub                                                                                                                            |
-| Serves    | NFR-04; ARC-02 part 2; FE-01                                                                                                                |
-| Builds on | ADR 0001 C-8, C-9; ADR 0011                                                                                                                 |
-| Affects   | backend-engineer, frontend-engineer, qa-engineer, architecture hub (CI)                                                                     |
+| Field | Value |
+| --- | --- |
+| Status | Accepted 2026-10-05 (C-21, D-49). PR #36 (frontend) was allowed to merge ahead of the first sync PR under C-21, then moves in that sync PR. |
+| Author | architecture hub |
+| Serves | NFR-04; ARC-02 part 2; FE-01 |
+| Builds on | ADR 0001 C-8, C-9; ADR 0011 |
+| Affects | backend-engineer, frontend-engineer, qa-engineer, architecture hub (CI) |
 
 ## Context
 
@@ -23,7 +23,6 @@ The path prefix is `/api/v1` (the backend's `API_PREFIX`). Errors are RFC 7807 w
 ## Design
 
 **Export (backend).**
-
 - `pnpm --filter @codeproctor/api openapi:export` builds the Nest module graph without opening a database or Redis connection (`NestFactory.create(..., { preview: true })` or a test module with stubbed infrastructure; backend verifies which works) and writes the document regardless of `ENABLE_API_DOCS`. The runtime flag stays off in pilot and production.
 - Output is deterministic: sorted keys, no timestamps, no host-specific `servers` entry, 2-space JSON.
 - `openapi:check` regenerates to a temp file and diffs it against the committed file.
@@ -33,7 +32,6 @@ The path prefix is `/api/v1` (the backend's `API_PREFIX`). Errors are RFC 7807 w
 **CI (hub-owned, `.github/workflows/ci.yml`).** One job `openapi-drift` in `ci.yml`: install, run `openapi:check`, fail with "run `pnpm --filter @codeproctor/api openapi:export` and commit the result". CI config goes through the hub (CLAUDE.md rule 12), so the hub adds the job. The export and the check use fixed dummy environment values and no GitHub secrets. The job runs on `pull_request` (never `pull_request_target`), with a read-only token and no access to repository secrets, so a pull request cannot read a secret through the build it controls; later edits to the job must keep these three properties.
 
 **Frontend, gradual and isolated.** The backend has built only auth and health. The web app also needs admin and candidate routes that do not exist yet, so the placeholder cannot be dropped in one step.
-
 - `apps/web/openapi/pending.yaml` keeps the placeholder routes the backend has not built, renamed to `/api/v1`.
 - `apps/web/openapi/adopted-routes.txt` lists the route groups the frontend has switched to the generated spec.
 - A merge script builds the spec the types come from: generated spec for adopted routes, `pending.yaml` for the rest. CI fails if an adopted path is missing from the generated file, or if a path is both adopted and in `pending.yaml`. A non-failing report lists pending routes the backend now implements.
@@ -42,15 +40,15 @@ The path prefix is `/api/v1` (the backend's `API_PREFIX`). Errors are RFC 7807 w
 
 ## Steps and timing
 
-| #   | Who      | What                                                                                                                                                                   | When                                                                                     |
-| --- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| 0   | hub      | This ADR; prefix and error `code` decided in api-contract.md                                                                                                           | now                                                                                      |
-| 1   | backend  | `openapi:export`, `openapi:check`, completeness test, problem schema with `code`, bearer scheme; commit the first `openapi.json`                                       | one PR, straight after PR #26 merges, so the 2FA re-auth shapes land in the first export |
-| 2   | hub      | `openapi-drift` job in `ci.yml`                                                                                                                                        | same day as step 1 merges, one small PR                                                  |
-| 3   | frontend | Contract sync PR 1: adopt the auth group (login, 2FA, refresh, logout, password, health), rename `/v1` to `/api/v1`, handle problem `code`, typed MSW for those routes | after steps 1 and 2 merge                                                                |
-| 4   | frontend | Security page (2FA management with re-auth, ADR 0011) built on the adopted auth types                                                                                  | after step 3                                                                             |
-| 5   | frontend | Adopt each further group (admin users, settings, consent, candidates, candidate session) when its backend step merges                                                  | one small PR per group, in the backend's order                                           |
-| 6   | all      | Each backend PR that changes a route commits the regenerated `openapi.json`; the PR description names the web areas affected                                           | ongoing                                                                                  |
+| # | Who | What | When |
+| --- | --- | --- | --- |
+| 0 | hub | This ADR; prefix and error `code` decided in api-contract.md | now |
+| 1 | backend | `openapi:export`, `openapi:check`, completeness test, problem schema with `code`, bearer scheme; commit the first `openapi.json` | one PR, straight after PR #26 merges, so the 2FA re-auth shapes land in the first export |
+| 2 | hub | `openapi-drift` job in `ci.yml` | same day as step 1 merges, one small PR |
+| 3 | frontend | Contract sync PR 1: adopt the auth group (login, 2FA, refresh, logout, password, health), rename `/v1` to `/api/v1`, handle problem `code`, typed MSW for those routes | after steps 1 and 2 merge |
+| 4 | frontend | Security page (2FA management with re-auth, ADR 0011) built on the adopted auth types | after step 3 |
+| 5 | frontend | Adopt each further group (admin users, settings, consent, candidates, candidate session) when its backend step merges | one small PR per group, in the backend's order |
+| 6 | all | Each backend PR that changes a route commits the regenerated `openapi.json`; the PR description names the web areas affected | ongoing |
 
 Until a group is adopted its routes stay in `pending.yaml`, where the frontend keeps working against mocks as today.
 

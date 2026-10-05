@@ -148,39 +148,39 @@ erDiagram
 
 ## Table reference
 
-| Group        | Table                    | Purpose                                                                                                    |
-| ------------ | ------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| Identity     | organizations            | Tenant; retention days, settings, current consent document                                                 |
-| Identity     | users                    | Staff accounts, role, 2FA, recovery codes, invite and password-reset token                                 |
-| Identity     | refresh\_tokens          | Rotating refresh tokens grouped in families, revocation                                                    |
-| Identity     | audit\_logs              | Append-only log of staff actions (IDs only in metadata)                                                    |
-| Content      | questions                | Stable question identity                                                                                   |
-| Content      | question\_versions       | Immutable versions with statement, limits, starter code, reference solution, answer key, validation report |
-| Content      | test\_cases              | Test slots: sample or hidden, weight, default input and output                                             |
-| Content      | question\_variants       | Parameter sets producing equivalent variants                                                               |
-| Content      | variant\_test\_cases     | Per-variant input and expected output for a test slot                                                      |
-| Content      | ai\_reference\_solutions | AI assistant answers kept for similarity checks only, never grading                                        |
-| Delivery     | tests                    | Test templates and proctoring profile                                                                      |
-| Delivery     | test\_sections           | Timed sections inside a test, run in order                                                                 |
-| Delivery     | test\_questions          | Fixed question or random-pick rule per section                                                             |
-| Delivery     | candidates               | Candidate identity (no password); erasure state                                                            |
-| Delivery     | invitations              | One-time links, window, accommodations                                                                     |
-| Delivery     | sessions                 | One test attempt; status, timing, pauses, scores, risk, retention anchor                                   |
-| Delivery     | session\_sections        | Server-enforced start and deadline of each section in a session                                            |
-| Delivery     | session\_questions       | The exact question, variant and test question served; answer and scoring state                             |
-| Delivery     | submissions              | Every run and submit with results                                                                          |
-| Proctoring   | consent\_texts           | Versioned consent documents per organization, with Legal approval                                          |
-| Proctoring   | consents                 | One signed or declined consent document per session, with signed PDF key                                   |
-| Proctoring   | identity\_checks         | One row per ID and selfie attempt: keys, face match score, status, manual review                           |
-| Proctoring   | media\_chunks            | Recording chunk keys per stream and segment                                                                |
-| Proctoring   | proctor\_event\_batches  | Accepted signed event batches, for replay protection                                                       |
-| Proctoring   | proctor\_events          | Detected events with severity and evidence                                                                 |
-| Proctoring   | keystroke\_batches       | Signed editor event batches for replay                                                                     |
-| Review       | session\_reviews         | Reviewer, verdict, notes                                                                                   |
-| Review       | flag\_decisions          | Confirm or dismiss per event                                                                               |
-| Review       | appeals                  | Candidate appeal and its outcome                                                                           |
-| Integrations | webhook\_endpoints       | Org-configured webhook URLs with encrypted secrets                                                         |
-| Integrations | webhook\_deliveries      | Webhook delivery attempts (no payload stored)                                                              |
+| Group | Table | Purpose |
+| --- | --- | --- |
+| Identity | organizations | Tenant; retention days, settings, current consent document |
+| Identity | users | Staff accounts, role, 2FA, recovery codes, invite and password-reset token |
+| Identity | refresh\_tokens | Rotating refresh tokens grouped in families, revocation |
+| Identity | audit\_logs | Append-only log of staff actions (IDs only in metadata) |
+| Content | questions | Stable question identity |
+| Content | question\_versions | Immutable versions with statement, limits, starter code, reference solution, answer key, validation report |
+| Content | test\_cases | Test slots: sample or hidden, weight, default input and output |
+| Content | question\_variants | Parameter sets producing equivalent variants |
+| Content | variant\_test\_cases | Per-variant input and expected output for a test slot |
+| Content | ai\_reference\_solutions | AI assistant answers kept for similarity checks only, never grading |
+| Delivery | tests | Test templates and proctoring profile |
+| Delivery | test\_sections | Timed sections inside a test, run in order |
+| Delivery | test\_questions | Fixed question or random-pick rule per section |
+| Delivery | candidates | Candidate identity (no password); erasure state |
+| Delivery | invitations | One-time links, window, accommodations |
+| Delivery | sessions | One test attempt; status, timing, pauses, scores, risk, retention anchor |
+| Delivery | session\_sections | Server-enforced start and deadline of each section in a session |
+| Delivery | session\_questions | The exact question, variant and test question served; answer and scoring state |
+| Delivery | submissions | Every run and submit with results |
+| Proctoring | consent\_texts | Versioned consent documents per organization, with Legal approval |
+| Proctoring | consents | One signed or declined consent document per session, with signed PDF key |
+| Proctoring | identity\_checks | One row per ID and selfie attempt: keys, face match score, status, manual review |
+| Proctoring | media\_chunks | Recording chunk keys per stream and segment |
+| Proctoring | proctor\_event\_batches | Accepted signed event batches, for replay protection |
+| Proctoring | proctor\_events | Detected events with severity and evidence |
+| Proctoring | keystroke\_batches | Signed editor event batches for replay |
+| Review | session\_reviews | Reviewer, verdict, notes |
+| Review | flag\_decisions | Confirm or dismiss per event |
+| Review | appeals | Candidate appeal and its outcome |
+| Integrations | webhook\_endpoints | Org-configured webhook URLs with encrypted secrets |
+| Integrations | webhook\_deliveries | Webhook delivery attempts (no payload stored) |
 
 ## Reference DDL (PostgreSQL 16)
 
@@ -686,7 +686,6 @@ CREATE INDEX ON webhook_deliveries (endpoint_id, created_at DESC);
 ## Data rules
 
 **Org scoping (ADR 0006).**
-
 - These tables carry `org_id`: users, questions, tests, candidates, invitations, sessions, audit_logs, consent_texts and webhook_endpoints.
 - Every other table is scoped through a declared parent path to one of them, for example `proctor_events` through `sessions`.
 - Every API query filters by the caller's `org_id`.
@@ -694,7 +693,6 @@ CREATE INDEX ON webhook_deliveries (endpoint_id, created_at DESC);
 - Composite foreign keys keep invitations and sessions inside one organization.
 
 **Immutability.**
-
 - `question_versions` rows are immutable once `is_published` is true; edits create a new version.
 - `consent_texts` rows are immutable once a consent references them.
 - `ai_reference_solutions` rows are append-only; a refresh inserts rows and sets `superseded_at`.
@@ -702,7 +700,6 @@ CREATE INDEX ON webhook_deliveries (endpoint_id, created_at DESC);
 **Session state.** Only SessionStateService writes `sessions.status`, following the transition map in fsd.md section 3 (ADR 0002).
 
 **Consent (D-17).**
-
 - Each session has at most one `consents` row: a signed or a declined consent document.
 - The server sets `signed_at` or `declined_at` from its own clock.
 - Nothing touches camera, microphone or screen, and nothing uploads, before `signed_at` is set.
@@ -711,22 +708,20 @@ CREATE INDEX ON webhook_deliveries (endpoint_id, created_at DESC);
 **Biometrics (ADR 0004).** Face embeddings are never stored. Only the score, `model_id` and `threshold` are kept on `identity_checks`.
 
 **Retention job (ADR 0004).**
-
-- _Anchor._ `retention_anchor_at` is set when a session becomes COMPLETED, EXPIRED or DECLINED.
+- *Anchor.* `retention_anchor_at` is set when a session becomes COMPLETED, EXPIRED or DECLINED.
   - COMPLETED: the latest of `submitted_at`, the verdict time and, for a VIOLATION verdict, verdict time + 7 days.
   - EXPIRED or DECLINED: the time of that transition.
   - APPEALED sets it back to NULL; resolving the appeal sets it to the appeal's `resolved_at`.
-- _Hold._ A NULL anchor means hold: the session is never eligible.
-- _Eligible._ A session is eligible when anchor + `organizations.retention_days` ≤ now.
-- _Deletion._ For an eligible session, delete the stored objects first, then in one transaction:
+- *Hold.* A NULL anchor means hold: the session is never eligible.
+- *Eligible.* A session is eligible when anchor + `organizations.retention_days` ≤ now.
+- *Deletion.* For an eligible session, delete the stored objects first, then in one transaction:
   - null `media_chunks.object_key` and set its `deleted_at`;
   - null `identity_checks.id_image_key` and `selfie_key`, `proctor_events.evidence_key` and `sessions.report_key`;
   - delete the `keystroke_batches` rows;
   - write one `audit_logs` row per session.
-- _Kept._ The consent record and its signed PDF are kept as proof of consent until erasure.
+- *Kept.* The consent record and its signed PDF are kept as proof of consent until erasure.
 
 **Erasure on request (ADR 0004, D-19).**
-
 - A SUPER_ADMIN request sets `candidates.erasure_requested_at`.
 - While any of the candidate's sessions has a review or appeal open, erasure waits and the candidate is told. This hold is configurable: `settings.erasure.holdWhileReviewOrAppealOpen`, default true.
 - Erasure then runs at once, whatever the retention days:
@@ -740,7 +735,6 @@ CREATE INDEX ON webhook_deliveries (endpoint_id, created_at DESC);
 - Only anonymized scores, risk scores and verdicts remain.
 
 **Backups.**
-
 - Backups are kept 14 days.
 - After a restore, erasures made after the backup date are re-applied from the erasure list kept outside the database backup.
 

@@ -1,18 +1,17 @@
 # Review: build plan and database design against the source docs
 
-| Field     | Value                                                                                                                                               |
-| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Type      | Review note. This is not an ADR and decides nothing.                                                                                                |
-| Date      | 2026-09-30                                                                                                                                          |
-| Author    | architect                                                                                                                                           |
-| Reviewed  | /docs/build-plan.md, /docs/database.md, plus /docs/status.md (Q-01..Q-44, R-01..R-14, PA-01..PA-06), /docs/requirements-trace.md, /docs/briefs/*.md |
-| Against   | CLAUDE.md, /docs/brd.md, /docs/fsd.md, /docs/architecture.md, /docs/test-cases.md, /docs/prompts/_.md, .claude/agents/_.md                          |
-| Companion | /docs/adr/0001-overall-architecture.md (Proposed)                                                                                                   |
+| Field | Value |
+| --- | --- |
+| Type | Review note. This is not an ADR and decides nothing. |
+| Date | 2026-09-30 |
+| Author | architect |
+| Reviewed | /docs/build-plan.md, /docs/database.md, plus /docs/status.md (Q-01..Q-44, R-01..R-14, PA-01..PA-06), /docs/requirements-trace.md, /docs/briefs/*.md |
+| Against | CLAUDE.md, /docs/brd.md, /docs/fsd.md, /docs/architecture.md, /docs/test-cases.md, /docs/prompts/*.md, .claude/agents/*.md |
+| Companion | /docs/adr/0001-overall-architecture.md (Proposed) |
 
 CLAUDE.md says "If code and docs disagree, stop and ask". Nothing here is resolved. Each finding gives a recommendation for the human to decide on. I edited no source doc, plan, brief or prompt.
 
 **Severity scale**
-
 - **Blocker:** must be decided before DB-02 (schema freeze) or before the first wave. Otherwise the artifact is built wrong.
 - **Major:** must be decided before the owning task starts. Otherwise there will be rework, a failing P1 TC, or a security or privacy defect.
 - **Minor:** can be settled inside the owning task, or is doc hygiene.
@@ -38,7 +37,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 ### Blockers
 
 #### A-01 · Blocker · Variant-specific test data has no storage
-
 - **Conflict**
   - fsd.md FR-203 (L37): "variant parameters (for example array sizes, constants, entity names) ... The reference solution must pass all variants before publishing."
   - test-cases.md TC-012 (P1): "Publish question whose reference solution fails one variant | Publish blocked; failing variant shown".
@@ -56,7 +54,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner / tasks.** Architect and human (ARC-01, content ADR, renumbered 0007). Affects DB-02, DB-04, BE-04, BE-05, BE-11, FE-04, and PA-05.
 
 #### A-02 · Blocker · `media_chunks.object_key` is NOT NULL but retention must null it
-
 - **Conflict**
   - database.md L390: `object_key text NOT NULL`.
   - Data rules (L462): "delete R2 objects referenced by media_chunks and identity_checks, then null the keys".
@@ -70,7 +67,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner / tasks.** Architect (ARC-01, identity and retention ADR, renumbered 0004). Affects DB-02, DB-06, DB-08.
 
 #### A-03 · Blocker · A session has no per-section timing, and its questions have no link back to a section
-
 - **Conflict**
   - fsd.md FR-301 (L42): "with total duration and per-section time limits".
   - FR-505 (L63): "Server-side timer is the source of truth".
@@ -88,7 +84,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 ### Major
 
 #### A-04 · Major · Recording chunks cannot be played on their own, and restarts are not modelled
-
 - **Conflict**
   - fsd.md FR-701: "MediaRecorder in 10-second chunks".
   - frontend.md Step 7 (L73): "10-second chunks ... resume after reload".
@@ -109,7 +104,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner / tasks.** Architect (ARC-01 or ARC-03). Affects FE-07, BE-09, BE-12, FE-11.
 
 #### A-05 · Major · The candidate stepper puts consent before OTP, but the state machine and API put OTP first
-
 - **Conflict**
   - frontend.md Step 9 (L98-99): "1. Welcome + rules + what is recorded + retention period + consent checkbox ... 2. Email OTP."
   - fsd.md §3 (L118-119): "OPENED | Candidate opens link and passes OTP | CONSENTED" and "CONSENTED | Consent logged".
@@ -122,7 +116,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner / tasks.** Human (prompt amendment). Affects FE-09, BE-07.
 
 #### A-06 · Major · The state machine has gaps beyond Q-01 and Q-22
-
 - **Conflict**
   - **APPEALED.** fsd.md §3 (L126): "COMPLETED | Verdict set or auto-clean | APPEALED". There is no APPEALED row, so it has no entry condition and no next states. The enum (database.md L149) does include it.
   - **Dead ends.** CONSENTED can only move to VERIFIED, and VERIFIED only to IN_PROGRESS. EXPIRED can be reached only from INVITED or OPENED.
@@ -142,7 +135,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner / tasks.** Architect and human. Affects DB-02, BE-07, BE-13, FE-05, FE-10.
 
 #### A-07 · Major · Cross-tenant references are not constrained
-
 - **Conflict**
   - database.md Data rules (L460): "every API query filters by the caller's org_id".
   - The DDL allows `invitations.test_id` and `invitations.candidate_id` to point at different orgs.
@@ -158,7 +150,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner / tasks.** Architect. Affects DB-02, DB-05, BE-03 to BE-13.
 
 #### A-08 · Major · The append-only audit log cannot be erased, so PII in audit rows would defeat deletion on request
-
 - **Conflict**
   - architecture.md Security (L78): "Audit log is append-only; database role for the app cannot delete from it."
   - `audit_logs.entity_id text, metadata jsonb` (L198-208).
@@ -172,7 +163,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner / tasks.** Architect and human (legal). Affects BE-03, DB-06.
 
 #### A-09 · Major · Retention can delete evidence while a review or appeal is still open
-
 - **Conflict**
   - database.md L167: `retention_days ... CHECK (retention_days BETWEEN 7 AND 730)`.
   - L462: "for sessions older than organizations.retention_days, delete R2 objects".
@@ -188,7 +178,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner / tasks.** Architect and human (privacy). Affects DB-06, BE-09, BE-13.
 
 #### A-10 · Major · Replay protection for event batches has nowhere durable to store its state
-
 - **Conflict**
   - backend.md Step 10 (L109): "monotonic batch sequence; reject bad signatures and replayed sequences (TC-065)".
   - `keystroke_batches` has `UNIQUE (session_id, seq)`, but `proctor_events` stores single events with no batch sequence, and `sessions` has no last-sequence column.
@@ -202,7 +191,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner / tasks.** Architect. Affects DB-02, BE-10, FE-06.
 
 #### A-11 · Major · Schema gaps that Q-01..Q-17 do not cover
-
 - **Conflict**
   1. backend.md Step 3 (L37): "invite user". But `users.password_hash text NOT NULL` (L177), and there is no storage for an invite token.
   2. Step 14 (L158): "org-configured endpoints, HMAC-signed payloads, retries ..., delivery log". There is no table for endpoints, per-endpoint secrets or deliveries, and `organizations.settings jsonb` would hold the secrets in plain text.
@@ -219,7 +207,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner / tasks.** Architect. Affects DB-02, BE-03, BE-04, BE-05, BE-06, BE-14.
 
 #### A-12 · Major · IndexedDB buffering breaks the code-reviewer rule "no candidate data in client storage"
-
 - **Conflict**
   - code-reviewer.md (L15): "Privacy: nothing recorded before consent, retention respected, no candidate data in client storage."
   - FR-702 (L81): "buffered in IndexedDB up to 200 MB".
@@ -233,7 +220,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner / tasks.** Human, and architect (ARC-03). Affects FE-06, FE-07, code-reviewer.
 
 #### A-13 · Major · The invitation token in the URL path ends up in access logs and Referer headers
-
 - **Conflict**
   - frontend.md Step 1 (L14): "(candidate) for /t/[token]/*".
   - CLAUDE.md (L11): "Never log secrets, tokens, OTPs, or candidate media keys."
@@ -247,7 +233,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner / tasks.** Architect (ARC-03). Affects FE-01, FE-09, BE-01, BE-07, DEP-01.
 
 #### A-14 · Major · Staging is also the pilot environment
-
 - **Conflict**
   - architecture.md Deployment (L67): "Staging / pilot | One Oracle Cloud Always Free VM".
   - QA 2 (agents-qa-deploy.md L39): "Using the running staging environment, attempt every bypass".
@@ -263,7 +248,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner / tasks.** Human and architect (ARC-05). Affects DEP-01, DEP-02, QA-02, FE-13, DB-04.
 
 #### A-15 · Major · ADR number collision
-
 - **Conflict**
   - docs/briefs/ARC-01.md reserves 0001 to 0006 for the schema-gap ADRs and 0007 for the freeze list.
   - docs/briefs/DB-02.md gates on `/docs/adr/0007-schema-freeze-list.md`.
@@ -278,7 +262,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 ### Minor
 
 #### A-16 · Minor · Some security-relevant tasks have no architect review at PR
-
 - **Conflict**
   - build-plan.md §6 (L197) lists architect PR review only for DB-02, DB-03, DB-05, DB-06, BE-02, BE-03, BE-07, BE-09, BE-10, BE-12 and BE-15A.
   - architect.md owns "auth, session HMAC signing, storage access, sandbox isolation, data retention".
@@ -293,7 +276,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner.** PM.
 
 #### A-17 · Minor · Agent scopes do not match task assignments
-
 - **Conflict**
   - db-engineer.md (L13): scope is "prisma/, infra/docker-compose.yml (postgres, redis, adminer only), infra/scripts/backup.sh and restore.sh, apps/api/src/prisma/, retention and erasure services, database tests". But the DB-01 brief scopes it to every app, package and `.github/workflows/`, and DB-07 adds a GitHub Actions workflow.
   - BE-05 adds Judge0 to the same compose file that db-engineer owns.
@@ -306,7 +288,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner.** PM and human.
 
 #### A-18 · Minor · Gate order, and ADR 0001 is missing from the plan
-
 - **Conflict**
   - build-plan W1 (L168): "ARC-02 → ARC-03 → ...".
   - ARC-02's deliverable (L288) is the "batch envelope with sequence and signature field".
@@ -318,7 +299,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner.** PM.
 
 #### A-19 · Minor · `redis:7` is not OSI open source
-
 - **Conflict**
   - database prompt Step 1 (L33): "redis:7".
   - CLAUDE.md: "Prefer free and open-source tools."
@@ -327,7 +307,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner.** Human. Affects DB-01, DEP-01.
 
 #### A-20 · Minor · Presign details, R2 CORS and local storage
-
 - **Conflict**
   - backend.md Step 9 (L99): "presigned PUT URL valid 60 s ... content-type and max size enforced; records a media_chunks row as pending".
   - Verified: R2 does not support presigned POST ("POST ... is not currently supported"), so there is no `content-length-range` policy.
@@ -344,7 +323,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner.** Architect (ARC-03). Affects BE-09, FE-07, DEP-01.
 
 #### A-21 · Minor · Small inconsistencies across schema, FSD and prompts
-
 - **Conflict**
   1. FR-606 (L73) analyzes "every 1 second" for PHONE_DETECTED and BOOK_DETECTED. frontend.md Step 8 (L85) runs "COCO-SSD every 2 s". Affects FE-08.
   2. The room scan is stored in two places: `media_stream` has 'ROOM_SCAN' (L151), and there is also `identity_checks.room_scan_key`. Affects ADR 0004, BE-09, FE-09.
@@ -360,7 +338,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner.** Architect.
 
 #### A-22 · Minor · Foreign-key columns have no indexes
-
 - **Conflict**
   - database.md defines 6 non-unique indexes.
   - These columns have none: `invitations(test_id)`, `invitations(candidate_id)`, `session_questions(session_id)`, `identity_checks(session_id)`, `refresh_tokens(user_id)` (used for family revoke), `test_cases(question_version_id)`, `question_variants(question_version_id)`, `appeals(session_review_id)`, and the retention anchor.
@@ -370,7 +347,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner.** Architect. Affects DB-02, DB-03.
 
 #### A-23 · Minor · The score formula is ambiguous: points or weights
-
 - **Conflict**
   - FR-506 (L64): "sum of passed hidden test weights".
   - TC-048 (P1): "Score reflects passed weights exactly".
@@ -380,7 +356,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner.** Architect and human. Affects BE-11, FE-05.
 
 #### A-24 · Minor · API contract details disagree
-
 - **Conflict**
   - fsd.md §4 (L151) has `PATCH /review/flags/:id`, but backend.md Step 13 (L147) uses `:eventId`.
   - `/candidate/answers/:questionId` exposes stable question IDs across candidates, which weakens BR-08.
@@ -390,7 +365,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner.** Architect. Affects BE-08, BE-11, BE-13, FE-10, FE-11.
 
 #### A-25 · Minor · The test-naming rule does not fit Python or tasks without TCs
-
 - **Conflict**
   - CLAUDE.md: "reference FR and TC IDs from the docs in test names".
   - pytest names cannot contain hyphens.
@@ -399,7 +373,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner.** qa-engineer (QA-01A), integrity-engineer.
 
 #### A-26 · Minor · Strict CSP versus WASM and Web Worker detectors (not verified)
-
 - **Conflict**
   - frontend.md Step 1 (L16): "no inline scripts except Next nonces, connect-src limited to the API and the R2 upload endpoint".
   - Step 8 runs MediaPipe and TF.js in a Web Worker.
@@ -408,7 +381,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner.** frontend-engineer, proctor-sdk-engineer.
 
 #### A-27 · Minor · IP-based throttling will hit candidates who share a NAT
-
 - **Conflict**
   - backend.md Step 1 (L14): "stricter limits on /auth and /candidate".
   - NFR-02 requires 200 concurrent candidates.
@@ -417,7 +389,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner.** backend-engineer (BE-01, BE-15A).
 
 #### A-28 · Minor · Nothing produces the live-view thumbnails
-
 - **Conflict**
   - FR-903: "latest webcam thumbnail".
   - backend.md Step 13 (L149): "thumbnail keys".
@@ -427,7 +398,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner.** Architect. Affects FE-08, BE-13, FE-12.
 
 #### A-29 · Minor · architecture.md is missing its diagram and its external services
-
 - **Conflict**
   - architecture.md (L7): "[embedded content: CodeProctor system architecture · 3 clients, 1 API, 6 backing services]". The diagram is not in the repo.
   - These services are named only in the prompts: Resend/Brevo, Sentry, Supabase/Neon, Cloudflare Pages and GHCR. Doppler appears in architecture.md Security.
@@ -436,7 +406,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner.** Architect.
 
 #### A-30 · Minor · Lockdown attestation designs disagree, and LOCKDOWN can be selected with no client
-
 - **Conflict**
   - FR-1103 (L111): "attested with a per-session key".
   - frontend.md Step 14 (L154): "a build-time signing key". A key built into a distributed binary can be extracted.
@@ -445,7 +414,6 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 - **Owner.** Human, architect.
 
 #### A-31 · Minor · Secrets and PII rest outside Postgres
-
 - **Conflict**
   - backend.md Step 6 (L67): the `email` queue carries the invitation link and the OTP. The raw token exists only there, and Redis has append-only persistence on (DB-01 brief).
   - The default retention of completed BullMQ jobs is not verified.
@@ -461,87 +429,87 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 
 **Not assessed** (process, traceability or legal only): Q-29, Q-31, Q-32, Q-33, Q-37, Q-43, R-07, R-14.
 
-| ID                                 | Verdict               | Evidence and notes                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ---------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Q-01                               | **Refute** (headline) | Nothing in the DDL prevents creating the session row, with status 'INVITED', when the invitation is created. The ERD `invitations                                                                                                                                                                                                                                                                                                     |     | --  |     | sessions`even implies it, and the enum has INVITED and EXPIRED. The real conflict is the DDL default 'OPENED' (L321) and NOT NULL`hmac_key_enc`, which imply creation at open. So this is a decision, not an impossibility. Confirmed: no step has an expiry job. See also A-06. |
-| Q-02                               | Confirm               | backend.md L78, database.md L322 and architecture.md L74 hold as quoted. Also: pre-start events (FR-605 MULTI_MONITOR "blocks start", VIRTUAL_CAMERA in the system check) happen before any key exists, and DB-04 must seed `hmac_key_enc`.                                                                                                                                                                                           |
-| Q-03                               | Confirm               | backend.md L25 "recovery codes (hashed)"; `users` has no column for them.                                                                                                                                                                                                                                                                                                                                                             |
-| Q-04                               | Refine                | The OTP, attempt count and 30-minute block are short-lived and can live in Redis with a TTL, with no schema change. A durable record is needed only for the recruiter notice and audit. Confirmed: Step 6 has no recruiter-notification template.                                                                                                                                                                                     |
-| Q-05                               | Refine                | TC-005 can be met by walking the `replaced_by` chain with a recursive CTE. A `family_id` is simpler and indexable. This is a design choice, not a hard gap.                                                                                                                                                                                                                                                                           |
-| Q-06                               | Confirm               | backend.md Step 8 L88 and L90. Embeddings are biometric identifiers (BIPA, brd.md §7), so the consent text and retention must name them.                                                                                                                                                                                                                                                                                              |
-| Q-07                               | Confirm               | FR-803 L90. Generating AI reference solutions implies an LLM, which is a paid external dependency and needs an ADR (architect.md rule 2), or authors upload them by hand.                                                                                                                                                                                                                                                             |
-| Q-08                               | Confirm               | Enum L157-162. Also missing: CUT (frontend.md Step 6 blocks "cut"), blocked-shortcut attempts (FR-603 "each attempt is logged"; DEVTOOLS_OPEN is detection, not an attempt), PROCTOR_RESUME (FE-12), and identity or liveness failures.                                                                                                                                                                                               |
-| Q-09                               | Confirm               | FR-804 gives bands only; backend.md L136 cites defaults that do not exist.                                                                                                                                                                                                                                                                                                                                                            |
-| Q-10                               | Refine                | Confirmed as stated. Also add cross-parent tenant integrity (A-07) and the cost of multi-hop org joins on hot candidate routes (NFR-01). Options: `org_id` on `sessions` and hot child tables, or RLS.                                                                                                                                                                                                                                |
-| Q-11                               | Refine                | Also add A-02 (NOT NULL key) and A-09 (legal hold). Erasure mechanics: `invitations.candidate_id` and `sessions.invitation_id` are NO ACTION, so the candidate row must be anonymized in place. `appeals.session_review_id` has no ON DELETE, so deleting a session with an appeal fails. `consents.ip` and `user_agent` are PII.                                                                                                     |
-| Q-12                               | Confirm               | L381 is free text. See A-06 for the state-machine impact.                                                                                                                                                                                                                                                                                                                                                                             |
-| Q-13                               | Refine                | A static practice question needs no schema. But `submissions.session_question_id` is NOT NULL, the run endpoint is keyed by question, and practice happens before IN_PROGRESS (frontend.md L104). Run authorization and storage need a decision.                                                                                                                                                                                      |
-| Q-14                               | Confirm               | `submissions.language` and `source_code` are NOT NULL; `mcq_options` has no documented answer key.                                                                                                                                                                                                                                                                                                                                    |
-| Q-15                               | Refine                | Also: two connection URLs are needed (migration owner and `app_user`). A grant "on all tables" covers only tables that exist at that moment, so it needs `ALTER DEFAULT PRIVILEGES` or a re-grant in each migration. Role creation on Supabase or Neon is not verified.                                                                                                                                                               |
-| Q-16                               | Refine                | Also: the consent text itself, not just a version string, must be kept for each version as legal proof (brd.md §7 "Explicit, logged consent ... plain-language explanation").                                                                                                                                                                                                                                                         |
-| Q-17                               | Refine                | Also: the ERD cardinalities for invitations to sessions and sessions to consents (A-21 item 5). The DDL stays authoritative, as the DB-02 brief already says.                                                                                                                                                                                                                                                                         |
-| Q-18                               | Confirm               | Also missing: the FACE_MISMATCH re-check endpoint (frontend.md L86 "send a selfie frame ... via the API").                                                                                                                                                                                                                                                                                                                            |
-| Q-19                               | Refine                | Also: synchronous versus asynchronous (fsd.md "returns match result" against Step 8 "returns a job ID"). R2 has no presigned POST (verified), so every object type uses presigned PUT.                                                                                                                                                                                                                                                |
-| Q-20                               | Refine                | TC-079 needs the overlay "within 2 s", but the heartbeat runs every 10 s (FR-609). A heartbeat reply cannot meet that, so a push channel or polling at 2 s or faster is needed (adds to R-02).                                                                                                                                                                                                                                        |
-| Q-21                               | Refine                | Not a contradiction. BullMQ has an official Python client that works with Node queues but supports only a subset of features (verified). The real issue is that Prisma is Node-only, so a Python worker writing to the DB would be a second schema consumer.                                                                                                                                                                          |
-| Q-22                               | Confirm               | fsd.md L124 against backend.md L124 and L136.                                                                                                                                                                                                                                                                                                                                                                                         |
-| Q-23                               | Confirm               | FR-303 against TC-045 and TC-063; `invitations.used_at` has no documented semantics.                                                                                                                                                                                                                                                                                                                                                  |
-| Q-24                               | Refine                | FR-505 does not say that time keeps running during a pause. FR-609's "time continuing" is about disconnects, and TC-079 says "timer paused" for a proctor pause. Only candidate-caused pauses (fullscreen exit, share stopped) are open, and there Step 10 lets a candidate buy extra time.                                                                                                                                           |
-| Q-25                               | Refine                | A device fingerprint also blocks the STRICT phone (a second device, Q-42), and it is personal data that the consent text must cover (NFR-05).                                                                                                                                                                                                                                                                                         |
-| Q-26                               | Confirm               | architecture.md L74 "so forged event batches are rejected" overstates the protection. The threat model covers transport tampering, replay and third parties, not the candidate (R-04).                                                                                                                                                                                                                                                |
-| Q-27                               | Confirm               | Verified: the InsightFace README says the pretrained models are "for non-commercial research purposes only", and the code is MIT.                                                                                                                                                                                                                                                                                                     |
-| Q-28                               | Confirm               | database prompt L63. See A-14.                                                                                                                                                                                                                                                                                                                                                                                                        |
-| Q-30                               | Refine                | Propose mapping TC-065 to NFR-04 plus the ARC-03 signing ADR, so it has a requirement ID.                                                                                                                                                                                                                                                                                                                                             |
-| Q-34                               | Refine                | Monitoring "across groups" needs protected-attribute data. The schema has none, and collecting it conflicts with NFR-05 data minimization and may be special-category data under GDPR. Legal must decide. An option is a voluntary survey, consented separately and stored in aggregate outside candidate records.                                                                                                                    |
-| Q-35                               | Confirm               | NFR-09 per-session trace ID (see ADR 0001 C-9); FR-1103 has no server step.                                                                                                                                                                                                                                                                                                                                                           |
-| Q-36                               | Confirm               | The names differ. The ownership effects are covered in A-17.                                                                                                                                                                                                                                                                                                                                                                          |
-| Q-38                               | Confirm               | backend.md L9 "Steps 8–12 can run in parallel" hides the dependencies of Steps 8 and 12.                                                                                                                                                                                                                                                                                                                                              |
-| Q-39                               | Refine                | Approve PA-06 only if DB-05 stays inside `apps/api/src/prisma/` (db-engineer scope). BE-01 owns `main.ts` and the app module.                                                                                                                                                                                                                                                                                                         |
-| Q-40                               | Confirm               | DB-08 "passes in CI" and QA 1 both need a CI baseline.                                                                                                                                                                                                                                                                                                                                                                                |
-| Q-41                               | Refine                | Also covers the attestation design conflict and LOCKDOWN being selectable (A-30).                                                                                                                                                                                                                                                                                                                                                     |
-| Q-42                               | Refine                | Also: the phone needs its own auth, which conflicts with fingerprint binding (Q-25). Whether iOS Safari records WebM is not verified.                                                                                                                                                                                                                                                                                                 |
-| Q-44                               | Refine                | SameSite works by site (registrable domain), not by origin. `app.example.com` and `api.example.com` are same-site, so Strict works with custom domains. `*.pages.dev` is cross-site (Public Suffix List, not re-verified). R-08 may also move the web app off Pages.                                                                                                                                                                  |
-| R-01                               | Confirm               | Verified: Judge0's Ubuntu 22.04 guide requires `systemd.unified_cgroup_hierarchy=0` (cgroup v1). The Oracle free x86 shape is 1/8 OCPU with 1 GB, and A1 is ARM. So no free Oracle shape can host Judge0 together with the API and worker, which puts BO-5 at risk. GitHub-hosted runners are believed to use cgroup v2 (not verified), so the "agreed Linux runner" is probably self-hosted or the staging VM.                       |
-| R-02                               | Refine                | I get about 1.5 requests per second per candidate (presign 0.3, confirm 0.3, events 0.2, keystrokes 0.5, heartbeat 0.1, autosave 0.1), which is about 300 requests per second. On top of that come snapshots, thumbnails (A-28) and face re-checks. Also add the latency from the managed DB's location and Neon's compute suspend after about 5 minutes idle (secondary source), which causes a cold start when a test window opens. |
-| R-03                               | Confirm               | Verified: the free tier is 10 GB-month and 1M Class A operations. About 1,080 PUTs per session-hour is fine for the pilot. The storage figure is an unverified estimate.                                                                                                                                                                                                                                                              |
-| R-04, R-05, R-06, R-09, R-10, R-12 | Confirm               | Checked against the cited lines. For R-06, see also the Q-34 refinement.                                                                                                                                                                                                                                                                                                                                                              |
-| R-08                               | Refine                | Verified: `@cloudflare/next-on-pages` is deprecated, and OpenNext targets Workers, so "web on Cloudflare Pages" (architecture.md L67) is out of date. Alternative: run Next.js on the VM behind Caddy. That makes it same-site with the API (fixes Q-44), but adds load (R-13).                                                                                                                                                       |
-| R-11                               | Confirm               | PA-05 must be variant-aware (A-01).                                                                                                                                                                                                                                                                                                                                                                                                   |
-| R-13                               | Refine                | See R-01. Also: face re-checks every 2 minutes for 200 candidates give about 100 CPU face-match jobs per minute, which needs queue priority (ADR 0001 C-7).                                                                                                                                                                                                                                                                           |
-| PA-01                              | Confirm               | Recommend approving. `.github/workflows` ownership is covered in A-17.                                                                                                                                                                                                                                                                                                                                                                |
-| PA-02                              | Refine                | Approve with amendments: renumbering (A-15), ARC-01 scope expansion (section 5), ARC-03 before or with ARC-02 (A-18), and ADR 0001 added to Phase 0.                                                                                                                                                                                                                                                                                  |
-| PA-03, PA-04                       | Confirm               | Both are sound.                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| PA-05                              | Refine                | The validation must cover every variant, and it depends on A-01.                                                                                                                                                                                                                                                                                                                                                                      |
-| PA-06                              | Refine                | Approve with the constraint in the Q-39 note.                                                                                                                                                                                                                                                                                                                                                                                         |
+| ID | Verdict | Evidence and notes |
+| --- | --- | --- |
+| Q-01 | **Refute** (headline) | Nothing in the DDL prevents creating the session row, with status 'INVITED', when the invitation is created. The ERD `invitations ||--|| sessions` even implies it, and the enum has INVITED and EXPIRED. The real conflict is the DDL default 'OPENED' (L321) and NOT NULL `hmac_key_enc`, which imply creation at open. So this is a decision, not an impossibility. Confirmed: no step has an expiry job. See also A-06. |
+| Q-02 | Confirm | backend.md L78, database.md L322 and architecture.md L74 hold as quoted. Also: pre-start events (FR-605 MULTI_MONITOR "blocks start", VIRTUAL_CAMERA in the system check) happen before any key exists, and DB-04 must seed `hmac_key_enc`. |
+| Q-03 | Confirm | backend.md L25 "recovery codes (hashed)"; `users` has no column for them. |
+| Q-04 | Refine | The OTP, attempt count and 30-minute block are short-lived and can live in Redis with a TTL, with no schema change. A durable record is needed only for the recruiter notice and audit. Confirmed: Step 6 has no recruiter-notification template. |
+| Q-05 | Refine | TC-005 can be met by walking the `replaced_by` chain with a recursive CTE. A `family_id` is simpler and indexable. This is a design choice, not a hard gap. |
+| Q-06 | Confirm | backend.md Step 8 L88 and L90. Embeddings are biometric identifiers (BIPA, brd.md §7), so the consent text and retention must name them. |
+| Q-07 | Confirm | FR-803 L90. Generating AI reference solutions implies an LLM, which is a paid external dependency and needs an ADR (architect.md rule 2), or authors upload them by hand. |
+| Q-08 | Confirm | Enum L157-162. Also missing: CUT (frontend.md Step 6 blocks "cut"), blocked-shortcut attempts (FR-603 "each attempt is logged"; DEVTOOLS_OPEN is detection, not an attempt), PROCTOR_RESUME (FE-12), and identity or liveness failures. |
+| Q-09 | Confirm | FR-804 gives bands only; backend.md L136 cites defaults that do not exist. |
+| Q-10 | Refine | Confirmed as stated. Also add cross-parent tenant integrity (A-07) and the cost of multi-hop org joins on hot candidate routes (NFR-01). Options: `org_id` on `sessions` and hot child tables, or RLS. |
+| Q-11 | Refine | Also add A-02 (NOT NULL key) and A-09 (legal hold). Erasure mechanics: `invitations.candidate_id` and `sessions.invitation_id` are NO ACTION, so the candidate row must be anonymized in place. `appeals.session_review_id` has no ON DELETE, so deleting a session with an appeal fails. `consents.ip` and `user_agent` are PII. |
+| Q-12 | Confirm | L381 is free text. See A-06 for the state-machine impact. |
+| Q-13 | Refine | A static practice question needs no schema. But `submissions.session_question_id` is NOT NULL, the run endpoint is keyed by question, and practice happens before IN_PROGRESS (frontend.md L104). Run authorization and storage need a decision. |
+| Q-14 | Confirm | `submissions.language` and `source_code` are NOT NULL; `mcq_options` has no documented answer key. |
+| Q-15 | Refine | Also: two connection URLs are needed (migration owner and `app_user`). A grant "on all tables" covers only tables that exist at that moment, so it needs `ALTER DEFAULT PRIVILEGES` or a re-grant in each migration. Role creation on Supabase or Neon is not verified. |
+| Q-16 | Refine | Also: the consent text itself, not just a version string, must be kept for each version as legal proof (brd.md §7 "Explicit, logged consent ... plain-language explanation"). |
+| Q-17 | Refine | Also: the ERD cardinalities for invitations to sessions and sessions to consents (A-21 item 5). The DDL stays authoritative, as the DB-02 brief already says. |
+| Q-18 | Confirm | Also missing: the FACE_MISMATCH re-check endpoint (frontend.md L86 "send a selfie frame ... via the API"). |
+| Q-19 | Refine | Also: synchronous versus asynchronous (fsd.md "returns match result" against Step 8 "returns a job ID"). R2 has no presigned POST (verified), so every object type uses presigned PUT. |
+| Q-20 | Refine | TC-079 needs the overlay "within 2 s", but the heartbeat runs every 10 s (FR-609). A heartbeat reply cannot meet that, so a push channel or polling at 2 s or faster is needed (adds to R-02). |
+| Q-21 | Refine | Not a contradiction. BullMQ has an official Python client that works with Node queues but supports only a subset of features (verified). The real issue is that Prisma is Node-only, so a Python worker writing to the DB would be a second schema consumer. |
+| Q-22 | Confirm | fsd.md L124 against backend.md L124 and L136. |
+| Q-23 | Confirm | FR-303 against TC-045 and TC-063; `invitations.used_at` has no documented semantics. |
+| Q-24 | Refine | FR-505 does not say that time keeps running during a pause. FR-609's "time continuing" is about disconnects, and TC-079 says "timer paused" for a proctor pause. Only candidate-caused pauses (fullscreen exit, share stopped) are open, and there Step 10 lets a candidate buy extra time. |
+| Q-25 | Refine | A device fingerprint also blocks the STRICT phone (a second device, Q-42), and it is personal data that the consent text must cover (NFR-05). |
+| Q-26 | Confirm | architecture.md L74 "so forged event batches are rejected" overstates the protection. The threat model covers transport tampering, replay and third parties, not the candidate (R-04). |
+| Q-27 | Confirm | Verified: the InsightFace README says the pretrained models are "for non-commercial research purposes only", and the code is MIT. |
+| Q-28 | Confirm | database prompt L63. See A-14. |
+| Q-30 | Refine | Propose mapping TC-065 to NFR-04 plus the ARC-03 signing ADR, so it has a requirement ID. |
+| Q-34 | Refine | Monitoring "across groups" needs protected-attribute data. The schema has none, and collecting it conflicts with NFR-05 data minimization and may be special-category data under GDPR. Legal must decide. An option is a voluntary survey, consented separately and stored in aggregate outside candidate records. |
+| Q-35 | Confirm | NFR-09 per-session trace ID (see ADR 0001 C-9); FR-1103 has no server step. |
+| Q-36 | Confirm | The names differ. The ownership effects are covered in A-17. |
+| Q-38 | Confirm | backend.md L9 "Steps 8–12 can run in parallel" hides the dependencies of Steps 8 and 12. |
+| Q-39 | Refine | Approve PA-06 only if DB-05 stays inside `apps/api/src/prisma/` (db-engineer scope). BE-01 owns `main.ts` and the app module. |
+| Q-40 | Confirm | DB-08 "passes in CI" and QA 1 both need a CI baseline. |
+| Q-41 | Refine | Also covers the attestation design conflict and LOCKDOWN being selectable (A-30). |
+| Q-42 | Refine | Also: the phone needs its own auth, which conflicts with fingerprint binding (Q-25). Whether iOS Safari records WebM is not verified. |
+| Q-44 | Refine | SameSite works by site (registrable domain), not by origin. `app.example.com` and `api.example.com` are same-site, so Strict works with custom domains. `*.pages.dev` is cross-site (Public Suffix List, not re-verified). R-08 may also move the web app off Pages. |
+| R-01 | Confirm | Verified: Judge0's Ubuntu 22.04 guide requires `systemd.unified_cgroup_hierarchy=0` (cgroup v1). The Oracle free x86 shape is 1/8 OCPU with 1 GB, and A1 is ARM. So no free Oracle shape can host Judge0 together with the API and worker, which puts BO-5 at risk. GitHub-hosted runners are believed to use cgroup v2 (not verified), so the "agreed Linux runner" is probably self-hosted or the staging VM. |
+| R-02 | Refine | I get about 1.5 requests per second per candidate (presign 0.3, confirm 0.3, events 0.2, keystrokes 0.5, heartbeat 0.1, autosave 0.1), which is about 300 requests per second. On top of that come snapshots, thumbnails (A-28) and face re-checks. Also add the latency from the managed DB's location and Neon's compute suspend after about 5 minutes idle (secondary source), which causes a cold start when a test window opens. |
+| R-03 | Confirm | Verified: the free tier is 10 GB-month and 1M Class A operations. About 1,080 PUTs per session-hour is fine for the pilot. The storage figure is an unverified estimate. |
+| R-04, R-05, R-06, R-09, R-10, R-12 | Confirm | Checked against the cited lines. For R-06, see also the Q-34 refinement. |
+| R-08 | Refine | Verified: `@cloudflare/next-on-pages` is deprecated, and OpenNext targets Workers, so "web on Cloudflare Pages" (architecture.md L67) is out of date. Alternative: run Next.js on the VM behind Caddy. That makes it same-site with the API (fixes Q-44), but adds load (R-13). |
+| R-11 | Confirm | PA-05 must be variant-aware (A-01). |
+| R-13 | Refine | See R-01. Also: face re-checks every 2 minutes for 200 candidates give about 100 CPU face-match jobs per minute, which needs queue priority (ADR 0001 C-7). |
+| PA-01 | Confirm | Recommend approving. `.github/workflows` ownership is covered in A-17. |
+| PA-02 | Refine | Approve with amendments: renumbering (A-15), ARC-01 scope expansion (section 5), ARC-03 before or with ARC-02 (A-18), and ADR 0001 added to Phase 0. |
+| PA-03, PA-04 | Confirm | Both are sound. |
+| PA-05 | Refine | The validation must cover every variant, and it depends on A-01. |
+| PA-06 | Refine | Approve with the constraint in the Q-39 note. |
 
 ## 4. ADR renumbering impact (files not edited)
 
 **Target numbering**
 
-| New  | Old  | File                                    |
-| ---- | ---- | --------------------------------------- |
-| 0001 | new  | overall-architecture (written)          |
+| New | Old | File |
+| --- | --- | --- |
+| 0001 | new | overall-architecture (written) |
 | 0002 | 0001 | session-lifecycle-and-invitation-expiry |
-| 0003 | 0002 | credential-and-otp-storage              |
+| 0003 | 0002 | credential-and-otp-storage |
 | 0004 | 0003 | identity-biometrics-and-retention-scope |
-| 0005 | 0004 | integrity-event-taxonomy-and-defaults   |
-| 0006 | 0005 | org-scoping-and-db-roles                |
-| 0007 | 0006 | content-and-settings-model-gaps         |
-| 0008 | 0007 | schema-freeze-list                      |
+| 0005 | 0004 | integrity-event-taxonomy-and-defaults |
+| 0006 | 0005 | org-scoping-and-db-roles |
+| 0007 | 0006 | content-and-settings-model-gaps |
+| 0008 | 0007 | schema-freeze-list |
 
-| File                  | Line | Current text                                                      | Change to                |
-| --------------------- | ---- | ----------------------------------------------------------------- | ------------------------ |
-| docs/briefs/ARC-01.md | 65   | `0001-session-lifecycle-and-invitation-expiry.md`                 | `0002-...`               |
-| docs/briefs/ARC-01.md | 66   | `0002-credential-and-otp-storage.md`                              | `0003-...`               |
-| docs/briefs/ARC-01.md | 67   | `0003-identity-biometrics-and-retention-scope.md`                 | `0004-...`               |
-| docs/briefs/ARC-01.md | 68   | `0004-integrity-event-taxonomy-and-defaults.md`                   | `0005-...`               |
-| docs/briefs/ARC-01.md | 69   | `0005-org-scoping-and-db-roles.md`                                | `0006-...`               |
-| docs/briefs/ARC-01.md | 70   | `0006-content-and-settings-model-gaps.md`                         | `0007-...`               |
-| docs/briefs/ARC-01.md | 77   | `/docs/adr/0007-schema-freeze-list.md`                            | `0008-...`               |
-| docs/briefs/ARC-01.md | 95   | commit `propose schema gap decisions 0001-0006`                   | `0002-0007`              |
-| docs/briefs/ARC-01.md | 97   | commit `add schema freeze list 0007`                              | `0008`                   |
-| docs/briefs/DB-02.md  | 9    | `(/docs/adr/0007-schema-freeze-list.md)`                          | `0008-...`               |
-| docs/briefs/DB-02.md  | 23   | `0007-schema-freeze-list.md and the ADRs it cites (0001 to 0006)` | `0008`, `(0002 to 0007)` |
+| File | Line | Current text | Change to |
+| --- | --- | --- | --- |
+| docs/briefs/ARC-01.md | 65 | `0001-session-lifecycle-and-invitation-expiry.md` | `0002-...` |
+| docs/briefs/ARC-01.md | 66 | `0002-credential-and-otp-storage.md` | `0003-...` |
+| docs/briefs/ARC-01.md | 67 | `0003-identity-biometrics-and-retention-scope.md` | `0004-...` |
+| docs/briefs/ARC-01.md | 68 | `0004-integrity-event-taxonomy-and-defaults.md` | `0005-...` |
+| docs/briefs/ARC-01.md | 69 | `0005-org-scoping-and-db-roles.md` | `0006-...` |
+| docs/briefs/ARC-01.md | 70 | `0006-content-and-settings-model-gaps.md` | `0007-...` |
+| docs/briefs/ARC-01.md | 77 | `/docs/adr/0007-schema-freeze-list.md` | `0008-...` |
+| docs/briefs/ARC-01.md | 95 | commit `propose schema gap decisions 0001-0006` | `0002-0007` |
+| docs/briefs/ARC-01.md | 97 | commit `add schema freeze list 0007` | `0008` |
+| docs/briefs/DB-02.md | 9 | `(/docs/adr/0007-schema-freeze-list.md)` | `0008-...` |
+| docs/briefs/DB-02.md | 23 | `0007-schema-freeze-list.md and the ADRs it cites (0001 to 0006)` | `0008`, `(0002 to 0007)` |
 
 - **build-plan.md.** It contains **no numeric ADR references**; grep confirms this, so the premise that it reserves 0001 to 0007 does not hold. It names the freeze list only by name (L45, L282, L326) and "new ADR" for FE-14 (L195, L264, L576). No renumbering edit is needed, but the PM should add ADR 0001 as a Phase 0 item (A-18).
 - **status.md.** No numbers (L10, L17, L40 give the name only). Record ADR 0001 in section 9, the decision log, once it is approved.
@@ -550,15 +518,15 @@ Line numbers (`L`) refer to the files as of 2026-09-30.
 
 ## 5. Proposed routing of new schema findings into the planned ADRs (keeps the 0002 to 0008 set)
 
-| Planned ADR                          | Add                                                          |
-| ------------------------------------ | ------------------------------------------------------------ |
-| 0002 session lifecycle               | A-06, A-03 (session side)                                    |
-| 0003 credential and OTP storage      | A-11 item 1 (staff invites)                                  |
+| Planned ADR | Add |
+| --- | --- |
+| 0002 session lifecycle | A-06, A-03 (session side) |
+| 0003 credential and OTP storage | A-11 item 1 (staff invites) |
 | 0004 identity, biometrics, retention | A-02, A-04 (if a column is chosen), A-09, A-21 items 2 and 4 |
-| 0005 integrity event taxonomy        | A-10, the Q-08 additions                                     |
-| 0006 org scoping and DB roles        | A-07, the Q-15 default privileges                            |
-| 0007 content and settings            | A-01, A-03 (test side), A-11 items 2 to 5, A-23              |
-| 0008 freeze list                     | Every approved delta above, plus the A-22 indexes            |
+| 0005 integrity event taxonomy | A-10, the Q-08 additions |
+| 0006 org scoping and DB roles | A-07, the Q-15 default privileges |
+| 0007 content and settings | A-01, A-03 (test side), A-11 items 2 to 5, A-23 |
+| 0008 freeze list | Every approved delta above, plus the A-22 indexes |
 
 ## 6. Decisions needed from the human (priority order)
 
