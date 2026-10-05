@@ -304,13 +304,24 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
   - its application in system scope;
   - the COMPOSITE `connect` evidence.
 
-  Gate item 4, the system-scope refusal of a scalar `orgId` (below), lands in PR #30 before merge, so PR #30 meets all four gate items when it merges. Until then PR #30 does not merge, and BE-03 and BE-06 write no invitation or session code.
+  Gate item 4 lands in PR #30 before merge, so PR #30 meets all four gate items when it merges. It has two parts:
+  - the system-scope refusal of a scalar `orgId` in `update`, `updateMany`, `updateManyAndReturn` and `upsert.update`;
+  - an unrecognised write operation throwing in system scope.
+
+  *db-engineer:* both parts go into item 4 with a test each. Until they land, PR #30 does not merge, and BE-03 and BE-06 write no invitation or session code.
 
 **No write moves a row to another org.**
 - With nested relation writes refused, the remaining path is a scalar `orgId`.
-- **In an org scope** (built today, PR #30): on `create`, `update` and `upsert` (both branches) of a direct model, the extension stamps `orgId` when it is missing, and refuses a scalar `orgId` whose value is not `ctx.orgId`.
+- **Write operations covered.** Every create and update operation: `create`, `createMany`, `createManyAndReturn`, `update`, `updateMany`, `updateManyAndReturn`, and `upsert` (both branches). Any write operation the extension does not recognise throws, in every scope.
+- **In an org scope** (built today, PR #30), on a direct model:
+  - `create`, `createMany`, `createManyAndReturn` and the create branch of `upsert`: the extension stamps `orgId` when it is missing, and refuses a scalar `orgId` whose value is not `ctx.orgId`.
+  - `update`, `updateMany`, `updateManyAndReturn` and the update branch of `upsert`: it refuses a scalar `orgId` whose value is not `ctx.orgId`.
 - **In system scope** there is no `ctx.orgId`.
-  - **Gate item 4, landing in PR #30 before merge:** on direct models, the extension refuses any scalar `orgId` in `update`, `updateMany`, `updateManyAndReturn` and the update branch of `upsert`. A system-scope create may still set it. `AUTH_BOOTSTRAP` writes sessions (INVITED → OPENED) and auth rows before it narrows, so this check matters.
+  - **Gate item 4, landing in PR #30 before merge.** On direct models:
+    - The extension refuses any scalar `orgId` in `update`, `updateMany`, `updateManyAndReturn` and the update branch of `upsert`.
+    - An unrecognised write operation throws in system scope as well, as it does in an org scope.
+    - `AUTH_BOOTSTRAP` writes sessions (INVITED → OPENED) and auth rows before it narrows, so this check matters.
+  - `create`, `createMany`, `createManyAndReturn` and the create branch of `upsert` may still set `orgId` in system scope (see below).
   - Writes under `AUTH_BOOTSTRAP` should still narrow to `runInOrg` as soon as the org is known.
   - A create of a model with `org_id` should narrow to `runInOrg(orgId)` first, so the scalar rule applies.
   - A create left in system scope is review-only (rule (i)): the context does not track which org ids were loaded, and code-reviewer checks that the org was loaded first.
@@ -442,14 +453,21 @@ There is no org-provisioning reason (8.6, 8.9).
     - the private candidate-facts setter for `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. Only `CandidateSessionGuard` may call it, once per scope, and the values are immutable afterwards.
   - The grant-entry API and the candidate-facts setter stay private to `org-context.ts` or the extension, like the store.
   - **How grants work.** This is the normative grant spec; ADR 0013 uses the same wording.
-    - A grant names its model, its columns and its ids.
-    - It is entered as `withGrant(spec, fn)`, a nested AsyncLocalStorage run inside the current scope, and it ends when `fn` settles.
+    - A grant names its model, its columns and its ids. All three are mandatory: `withGrant({ model, columns, ids }, fn)`.
+      - Session-row grants use `ids: [ctx.sessionId]`.
+      - Org-settings grants use `ids: [ctx.orgId]`.
+      - Test-settings grants use `ids: [ctx.testId]`.
+    - It is entered as a nested AsyncLocalStorage run inside the current scope, and it ends when `fn` settles.
+    - **Lifetime is enforced.** AsyncLocalStorage keeps the store in async work that was started inside `fn` and not awaited: a promise, `setTimeout`, an emitter or a stream callback. Without a check, that work would keep the grant's columns unlocked after `fn` settles. So:
+      - the grant object carries an `active` flag, which is set to false in `finally` when `fn` settles;
+      - the extension refuses any query that runs under an inactive grant;
+      - a test checks that a detached query started inside `fn` throws once `fn` has resolved.
     - The extension checks all three:
       - the query is on the named model;
       - only the named columns are read or written;
       - the extension itself ANDs `id IN grant.ids` into the query.
     - An empty id set throws.
-    - The ids are values read inside the same scope, never request input.
+    - The ids are values read inside the same scope, never raw request input. An id that came from the request counts only after it has been resolved within the session through ADR 0013 CS-2 and CS-4.2. For example, `SectionGateService`'s step-1 id comes from the URL, after that resolution.
     - Grants cannot exist outside a scope.
     - Examples (ADR 0013):
       - `SectionGateService` needs two grants. Step 1 uses the id set `{sessionQuestionId}` on `session_questions.test_question_id`. Step 2 uses `{test_question_id}`, the value read in step 1, on `test_questions`.
@@ -602,7 +620,11 @@ How the check runs:
 - **db-engineer:**
   - 8.1 is done in PR #30 (FU-DB-64).
   - 8.2: deny by default is built at bcd9615 (FU-DB-94, FU-DB-98), in org and system scope, with an empty `NESTED_WRITE_ALLOWLIST` (FU-DB-101).
-  - 8.2, DB-05 gate item 4, landing in PR #30 before merge: refuse a scalar `orgId` in system-scope `update`, `updateMany`, `updateManyAndReturn` and `upsert.update` on direct models.
+  - 8.2, DB-05 gate item 4, landing in PR #30 before merge:
+    - refuse a scalar `orgId` in system-scope `update`, `updateMany`, `updateManyAndReturn` and `upsert.update` on direct models;
+    - make an unrecognised write operation throw in system scope.
+  - 8.5: build `withGrant` with mandatory ids and the `active` flag, plus the test for a detached query.
+  - **Second client.** A dedicated candidate-write datasource with `statement_timeout` (ADR 0013 S6, because `SET LOCAL` is raw SQL and is refused in session scopes) would be a second client. It must also carry the extension, and the FU-DB-67 importer test must cover it.
   - 8.2: the relation side table and its completeness test replace any use of Prisma's runtime data model in production code (FU-DB-103, FU-DB-61).
   - 8.2: add the `createMany` relation-key test.
   - Nested reads stay open (FU-DB-78).
