@@ -178,7 +178,7 @@ function UsersContent(): React.JSX.Element {
         caption="Staff users"
         searchLabel="Search staff users"
         columns={columns}
-        rows={users.data}
+        rows={users.isError ? undefined : users.data}
         isLoading={users.isLoading}
         error={
           users.isError

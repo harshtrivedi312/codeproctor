@@ -44,6 +44,8 @@ reformatting (format document), re-insertion of text deleted in the last `undoMe
 | commonFingerprintShare / commonMinCorpus | 0.5 / 5 | Fingerprints in over half of a corpus of >= 5 are idioms, ignored |
 | maxPeerMatches | 3 | Peer findings per session |
 
+MUST-FIX BEFORE PILOT: every starter k-gram is ignored, and identifiers normalize to ID, so generic code patterns in a large starter template are ignored too. With a large scaffold and one short fill-in, only about 48% of genuine copies are detected (measured; see docs/followups/integrity.md and tests/test_similarity_large_starter.py).
+
 Starter code (if passed) is ignored. Findings carry `matchedLines` (inclusive line ranges, pairs of
 start/end) in the candidate's own code. Confidence = similarity x a size factor (0.5 at minTokens
 to 1.0 at 4x). Peer matches cite `matchedSessionId`, AI matches `aiReferenceSolutionId`, never both.

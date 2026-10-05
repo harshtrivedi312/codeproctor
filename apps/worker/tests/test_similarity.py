@@ -10,6 +10,7 @@ from worker.similarity import (
     AiReference,
     Submission,
     Token,
+    all_kgram_hashes,
     compare,
     find_ai_likeness,
     find_peer_similarity,
@@ -362,8 +363,7 @@ def _fill(site: int, tag: str) -> str:
 
 def test_fr803_starter_kgrams_skipped_by_winnowing_do_not_leak_back_as_evidence() -> None:
     """Edits at different TODO sites make skipped starter k-grams selectable; ignore them all."""
-    from worker.similarity import all_kgram_hashes
-
+    assert len(normalize(MULTI_TODO, "python")) >= SC.min_tokens
     a, b = _fill(0, "p"), _fill(2, "q")
     pa, pb = prepare(a, "python", SC), prepare(b, "python", SC)
     winnowed = prepare(MULTI_TODO, "python", SC).hashes
@@ -377,4 +377,3 @@ def test_fr803_starter_kgrams_skipped_by_winnowing_do_not_leak_back_as_evidence(
     assert peer["a"][0].details["sharedFingerprints"] == new.shared
     ai = find_ai_likeness(sub("a", a), [AiReference("r", "python", b)], starter_code=starter)
     assert ai[0].details["sharedFingerprints"] == new.shared
-    assert len(normalize(MULTI_TODO, "python")) >= SC.min_tokens

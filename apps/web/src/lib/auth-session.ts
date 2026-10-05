@@ -19,7 +19,23 @@ export function onSessionChange(listener: SessionListener): () => void {
   return () => listeners.delete(listener);
 }
 
+// Who this tab is signed in as. Requests record it, and a refresh that returns someone else (the
+// refresh cookie is shared by all tabs) must not silently turn this tab into that person.
+let currentUserId: string | null = null;
+
+export function getSessionUserId(): string | null {
+  return currentUserId;
+}
+
 export function publishSession(session: AuthSession | null): void {
+  const nextUserId = session ? session.user.id : null;
+  if (nextUserId !== currentUserId) {
+    // The identity changed (including to "nobody"): everything started under the old identity,
+    // such as a request waiting for a 401 or a save in flight, must be dropped (FR-103, FR-104).
+    generation += 1;
+    inFlight = null;
+  }
+  currentUserId = nextUserId;
   setAccessToken(session ? session.accessToken : null);
   for (const listener of listeners) listener(session);
 }
@@ -38,7 +54,12 @@ export function invalidateRefreshes(): void {
   inFlight = null;
 }
 
+/** Longest a refresh or logout request may take, and the longest a sign-in waits for them. */
+export const REQUEST_TIMEOUT_MS = 10_000;
+
 const SIGN_OUT_MARKER = 'cp.signOutPending';
+/** Changes on every sign-in so other tabs re-check their session. A random nonce, never a token. */
+export const SESSION_EPOCH_KEY = 'cp.sessionEpoch';
 
 /*
  * "Sign-out pending" marker. A boolean only, never a token. It survives a reload so that a logout
@@ -71,6 +92,44 @@ export function confirmSignedOut(): void {
   writeMarker(false);
 }
 
+export const SIGN_OUT_MARKER_KEY = SIGN_OUT_MARKER;
+
+let logoutInFlight: Promise<unknown> | null = null;
+
+/** Records the logout call in flight so a sign-in can wait for it (it must not revoke the new login). */
+export function trackLogout(call: Promise<unknown>): void {
+  const mine = call.finally(() => {
+    if (logoutInFlight === mine) logoutInFlight = null;
+  });
+  logoutInFlight = mine;
+}
+
+/** Resolves when any refresh and any logout call in flight have finished, whatever their result. */
+export async function settleSession(): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, REQUEST_TIMEOUT_MS);
+  });
+  const settled = (async () => {
+    await settleRefresh();
+    if (logoutInFlight) await logoutInFlight.then(noop, noop);
+  })();
+  // Never hang a sign-in on a stuck request.
+  await Promise.race([settled, limit]);
+  clearTimeout(timer);
+}
+
+/** Another tab signed out: forget the session here at once and ignore refreshes still running. */
+export function signedOutElsewhere(): void {
+  invalidateRefreshes();
+  publishSession(null);
+}
+
+/** Test-only: simulates a page reload by forgetting the in-memory flag but not the stored marker. */
+export function resetInMemorySignOutFlagForTests(): void {
+  signingOut = false;
+}
+
 /** Resolves when any refresh in flight has finished, whatever its result. Never rejects. */
 export function settleRefresh(): Promise<void> {
   return inFlight ? inFlight.then(noop, noop) : Promise.resolve();
@@ -99,15 +158,52 @@ export function beginSignOut(): Promise<void> {
  * Called on a fresh login. Bumps the generation so a slow first-load refresh that ends in 401
  * cannot sign out the new session, and allows refreshes again.
  */
-export function beginSession(): void {
+export function beginSession(userId?: string): void {
   signingOut = false;
   writeMarker(false);
+  if (userId) announceSignIn(userId);
   invalidateRefreshes();
+}
+
+function makeNonce(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    // crypto.randomUUID needs a secure context; this only has to differ from the last value.
+    return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  }
+}
+
+/**
+ * Tells other tabs who just signed in: "nonce|userId", a user id and no token. They compare it
+ * with their own user locally and sign out on a mismatch, with no network call (a burst of
+ * refreshes from every tab with the same new cookie would look like token reuse, TC-005).
+ */
+function announceSignIn(userId: string): void {
+  try {
+    window.localStorage.setItem(SESSION_EPOCH_KEY, `${makeNonce()}|${userId}`);
+  } catch {
+    // Storage blocked: other tabs find out when one of their requests gets a 401 and the refresh
+    // returns a different user.
+  }
+}
+
+/** Another tab signed in as `userId` (the value of the epoch key). Signs this tab out if it is someone else. */
+export function handleSignInElsewhere(epochValue: string | null): void {
+  const announced = epochValue?.split('|')[1];
+  const mine = currentUserId;
+  if (!announced || !mine || announced === mine) return;
+  // publishSession bumps the generation, dropping work started as the old user.
+  publishSession(null);
 }
 
 /** One refresh at a time; concurrent callers share the result. Returns null when it failed. */
 export function refreshSession(): Promise<AuthSession | null> {
-  if (isSignOutPending()) return Promise.resolve(null);
+  if (isSignOutPending()) {
+    // Not signed in here (for example another tab signed out): show that, never restore.
+    publishSession(null);
+    return Promise.resolve(null);
+  }
   if (inFlight) return inFlight;
   const mine = doRefresh().finally(() => {
     if (inFlight === mine) inFlight = null;
@@ -123,6 +219,7 @@ async function doRefresh(): Promise<AuthSession | null> {
     const response = await fetch(`${apiBaseUrl}/v1/auth/refresh`, {
       method: 'POST',
       credentials: 'include',
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (startedIn !== generation) return null;
     if (!response.ok) {
@@ -131,6 +228,12 @@ async function doRefresh(): Promise<AuthSession | null> {
     }
     const session = (await response.json()) as AuthSession;
     if (startedIn !== generation) return null;
+    if (currentUserId && currentUserId !== session.user.id) {
+      // Another tab signed in as someone else through the shared cookie. Do not switch users
+      // silently: this tab signs out and goes to login (FR-103, FR-104).
+      publishSession(null);
+      return null;
+    }
     publishSession(session);
     return session;
   } catch {

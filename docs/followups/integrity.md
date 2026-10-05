@@ -26,6 +26,10 @@ Non-blocking findings. Only blockers stop a merge.
 
 - **[BE-12 / worker, FR-802] RESET can bypass paste-burst detection.** A client can send a RESET whose text is a finished solution ("restore after reload") and typing-speed or paste-burst analytics will not see it. The worker or API should compare RESET text with server-known state (starter code or the last saved draft) and, on a mismatch, emit evidence (PASTE_BURST or a new signal), never a verdict automatically.
 
+## From ARC-02 review of PR #19 (code-reviewer)
+
+- **[BE-10, security, must do in BE-10] Body limit on POST /candidate/session/keystrokes.** Set a per-route limit of `MAX_KEYSTROKE_BATCH_BODY_BYTES` (2 MiB; the NestJS/Express default of 100 KB would reject valid large batches). Apply it before the HMAC check and before parsing, measure the decompressed size (backend.md Step 10 allows HTTP compression; a zip bomb must not get past it), and add a test for the 413 response. Same for the events route (`MAX_EVENT_BATCH_BODY_BYTES`).
+
 ### Code-reviewer findings on PR #20 (should-fix and nits; the blocker and the regex fix are in the PR)
 - Peer compare: precompute fingerprints once and use an inverted index (O(n^2) today); routes are synchronous and block the event loop on large corpora.
 - Mirror drift from keystroke.ts: `MAX_KEYSTROKE_BATCH_TEXT` total-text check is missing, `sessionQuestionId` should be a UUID, `startedAt` should be timezone-aware (AwareDatetime). Extend `test_contracts.py` accordingly.
@@ -35,3 +39,18 @@ Non-blocking findings. Only blockers stop a merge.
 - Nits: `/risk` response drops the breakdown; `/docs` and `/openapi.json` are open; 422 responses echo input (candidate code); camelCase vs snake_case in route bodies; peer cap is applied one-sided; `deleted_chars` stat counts replaced text; `speaker_min_voiced_ms // 4` is a magic number; `test_contracts.py` has a hard-coded language set and a module-wide skipif that could hide drift.
 - Re-review nits: `compare` confidence `size_factor` uses raw token counts including starter code (should use non-ignored size). A stray unterminated `/*` hides the rest of the file from similarity, which a candidate could use to evade; consider falling back to line-based comment stripping.
 - Perf (NFR-01/02): `/analyze/similarity` re-prepares each AI reference and the starter code once per submission; prepare once per language per request (or cache by content hash). `session_question_id` in the keystroke mirror should be validated as a UUID like keystroke.ts.
+
+### MUST-FIX BEFORE PILOT: recall on questions with a large starter template (FR-803)
+Ignoring every starter k-gram (with identifiers normalized to ID) also ignores generic code patterns that occur in a large scaffold, and the `minFingerprints` gate then skips comparison when the candidate wrote little. Measured on synthetic data (`tests/test_similarity_large_starter.py`, 60 seeded pairs per row, scaffold about 780 tokens, 3 TODO sites; copies are light renaming/reformatting, independents use different fill-ins from the same statement pool):
+
+| candidate-written code | peer recall | peer FP | AI recall | AI FP |
+| --- | --- | --- | --- | --- |
+| 3 sites x 2 statements | 100% | 0% | 100% | 0% |
+| 3 sites x 1 statement | 98% | 0% | 98% | 0% |
+| 1 site x 2 statements | 97% | 2% | 97% | 2% |
+| 1 site x 1 statement | 48% | 3% | 48% | 0% |
+
+With a single short fill-in, MORE THAN HALF of genuine copies are missed. Not a bug in the current design (the gate is deliberate to avoid false alarms from the scaffold), but unacceptable recall for questions with large templates. Options to decide before the pilot: compare the candidate's diff against the starter (token-level diff, then fingerprint only the changed regions with a lower k), lower `minFingerprints`/`k` for the changed region, or require authors to keep starter code small. Detector behaviour is unchanged in this PR. Thresholds in the test are floors that record current behaviour; do not loosen them.
+
+### Other nits folded in
+- Per-request preparation (NFR-01/02): the starter ignore set and AI references are rebuilt per submission in `/analyze/similarity`; build once per language per request.
