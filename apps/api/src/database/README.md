@@ -244,6 +244,22 @@ create or update. Everything reached through a relation is **not** looked at.
 - Prisma returns `BigInt` for the identity ids and `Decimal` for scores (FU-DB-06): serialise them
   before sending JSON.
 
+## Writing queries inside the scope
+
+Prisma queries are lazy: `client.x.findMany()` sends nothing until something awaits it, and the
+scope that counts is the one active at that moment. The context methods start a query that is
+returned **directly** from the callback (`runInOrg(id, () => client.x.findMany())` works). Nothing
+else is rescued, so:
+
+- **`await` queries inside the callback.**
+- **Never return queries wrapped in an object or an array** (`() => ({ rows: client.x.findMany() })`):
+  they run when finally awaited, in whatever scope is active then, or with none (the call throws).
+- **Never build a `$transaction([...])` array in one scope and run it in another.** Its queries run
+  in the scope that is active when the batch runs: a batch built for org A and run in org B reads
+  org B's rows; run in system scope it is unfiltered.
+- The run methods return a native `Promise` for a returned query, never a `PrismaPromise`
+  (`Scoped<T>` in `org-context.ts`).
+
 ## Rules for services (from the follow-ups)
 
 - Look a session up from its invitation with
