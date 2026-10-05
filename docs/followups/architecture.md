@@ -17,7 +17,7 @@ Non-blocking review findings. Only blockers stop a merge.
 - `EXTENSION_INTERFERENCE.signal` should be an enum; treat `deviceLabel` as untrusted text in the review UI.
 - `hasPermission`: the `granted !== undefined` check is unreachable; accept a `string` principal or drop it.
 - List missing permissions (candidate heartbeat FR-609, appeals FR-904, reports, webhooks) in ADR "Leaves to".
-- ADR 0010 §3: replay orders keystroke batches by `seq`, not arrival (NFR-08).
+- ~~ADR 0010 §3: replay orders keystroke batches by `seq`, not arrival (NFR-08).~~ Resolved in ADR 0010 §3.
 - `matchedSessionId` may point to an erased session; review UI must handle 404.
 - Missing tests: SHORTCUT_BLOCKED regex, evidence key with leading `/` or `//`, DETECTOR_UNAVAILABLE payload, client-sent `sessionId` stripped.
 

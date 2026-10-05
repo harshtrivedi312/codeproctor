@@ -70,7 +70,7 @@ void describe('keystroke batch (FR-608)', () => {
       false,
     );
   });
-  void it('NFR-04: bounds event count and total inserted text', () => {
+  void it('FR-608, NFR-04: bounds event count and total inserted text', () => {
     const cursor = { kind: 'CURSOR', t: 0, offset: 0 };
     assert.equal(
       keystrokeBatchSchema.safeParse(
