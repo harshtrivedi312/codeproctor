@@ -60,3 +60,12 @@ The [ARC-02] items under "frontend/step-2" in docs/followups/frontend.md (staff 
 - Only the Database session runs `db:migrate` and `db:seed` on the shared local stack?
 - Full review for source-of-truth docs (fsd, database, test-cases, architecture)?
 - Escalation of docs-to-docs contradictions from the hub to the owner?
+
+## ADR 0011 re-authentication (PR #31 review)
+
+Owner questions are listed in `docs/api-contract.md` section 1 ("Open for the owner"): admin reset password, shared lockout, mandatory-2FA roles and disable, admin resetting admins, refresh-token revocation, TOTP on disable.
+
+### Should-fix (ARC-02 part 2)
+- Add fsd.md §4 rows for `/auth/2fa/setup/*`, disable, regenerate and reset; ask QA for new TC IDs.
+- `reauth` body schema in packages/shared.
+- Nit: say whether a successful re-auth resets the failed-login counter; schema validation (400) runs before the password check.
