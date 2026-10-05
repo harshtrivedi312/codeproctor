@@ -126,7 +126,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       expect(body.status).toBe('authenticated');
       expect(body.session.user).toMatchObject({ email: u.email, role: 'RECRUITER' });
       const claims = JSON.parse(
-        Buffer.from(body.session.accessToken.split('.')[1], 'base64url').toString(),
+        Buffer.from(body.session.accessToken.split('.')[1] ?? '', 'base64url').toString(),
       ) as { exp: number; iat: number };
       expect(claims.exp - claims.iat).toBe(900);
       const cookie = (res.headers['set-cookie'] as unknown as string[]).find((c) =>
