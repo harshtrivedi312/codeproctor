@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import time
 
 from helpers import num
 from worker.config import IntegrityConfig, SimilarityConfig
@@ -209,9 +210,7 @@ def test_fr803_javascript_and_java_copies_are_detected() -> None:
 
 def test_fr803_threshold_is_configurable() -> None:
     strict = IntegrityConfig.model_validate({"similarity": {"peerThreshold": 1.0}})
-    partial = PY_A_DISGUISED.replace("limit", "limit").replace(
-        "out.append(name)", "out.append(name.lower())"
-    )
+    partial = PY_A_DISGUISED.replace("out.append(name)", "out.append(name.lower())")
     res = find_peer_similarity([sub("s1", PY_A), sub("s2", partial)], strict)
     assert res == {}
 
@@ -293,7 +292,7 @@ def test_fr803_scaffold_fixture_is_long_enough_to_be_compared() -> None:
     assert len(normalize(JAVA_SCAFFOLD, "java")) >= SC.min_tokens
 
 
-def test_fr803_blocker_blank_scaffold_is_not_ai_likeness() -> None:
+def test_fr803_blank_scaffold_is_not_ai_likeness() -> None:
     refs = [AiReference("r", "java", JAVA_SCAFFOLD)]  # AI answer that is mostly the scaffold
     s = sub("s1", JAVA_SCAFFOLD, "java")
     assert find_ai_likeness(s, refs, starter_code=STARTER) == []
@@ -301,7 +300,7 @@ def test_fr803_blocker_blank_scaffold_is_not_ai_likeness() -> None:
     assert len(control) == 1 and control[0].type == "AI_LIKENESS"
 
 
-def test_fr803_blocker_starter_plus_same_one_liner_is_not_peer_similarity() -> None:
+def test_fr803_starter_plus_same_one_liner_is_not_peer_similarity() -> None:
     code = JAVA_SCAFFOLD.replace("// TODO", "int m = k;")
     subs = [sub("a", code, "java"), sub("b", code, "java")]
     assert find_peer_similarity(subs, starter_code=STARTER) == {}
@@ -316,10 +315,66 @@ def test_fr803_real_copy_on_top_of_starter_is_still_flagged() -> None:
 
 
 def test_nfr04_unterminated_block_comments_are_linear_time() -> None:
-    import time
-
     hostile = "/*a" * 30000  # never forms "*/": quadratic under the old pattern
     start = time.perf_counter()
     normalize(hostile, "java")
     normalize(hostile, "javascript")
     assert time.perf_counter() - start < 2.0
+
+
+_OPS = ["+", "-", "*", "%", "//", "**", "&", "|", "^", "<<", ">>", "+ 1 +", "- 2 -", "* 3 *"]
+_HELPERS = "\n".join(
+    f"def helper_{i}(v):\n    out = []\n    for j in range(len(v)):\n"
+    f"        if v[j] {op} len(v) > j {_OPS[(i + 3) % 14]} 1:\n            out.append(v[j] {op} j)\n"
+    f"    return out\n"
+    for i, op in enumerate(_OPS)
+)
+MULTI_TODO = (
+    _HELPERS
+    + """
+def process(items, limit):
+    cleaned = []
+    # TODO 1: filter the items
+    ranked = sorted(cleaned, key=lambda item: (item[1], item[0]))
+    # TODO 2: group the ranked items
+    groups = {}
+    for entry in ranked:
+        groups.setdefault(entry[0], []).append(entry[1])
+    # TODO 3: build the answer
+    answer = []
+    return answer[:limit]
+"""
+)
+TODO_SITES = (
+    "# TODO 1: filter the items",
+    "# TODO 2: group the ranked items",
+    "# TODO 3: build the answer",
+)
+
+
+def _fill(site: int, tag: str) -> str:
+    body = "\n    ".join(
+        f"{tag}{i} = items[{i}] {op} len(items) {_OPS[(i + 5) % 14]} {i}"
+        for i, op in enumerate(_OPS)
+    )
+    return MULTI_TODO.replace(TODO_SITES[site], body)
+
+
+def test_fr803_starter_kgrams_skipped_by_winnowing_do_not_leak_back_as_evidence() -> None:
+    """Edits at different TODO sites make skipped starter k-grams selectable; ignore them all."""
+    from worker.similarity import all_kgram_hashes
+
+    a, b = _fill(0, "p"), _fill(2, "q")
+    pa, pb = prepare(a, "python", SC), prepare(b, "python", SC)
+    winnowed = prepare(MULTI_TODO, "python", SC).hashes
+    every = all_kgram_hashes(MULTI_TODO, "python", SC.k)
+    old = compare(pa, pb, SC, winnowed)
+    new = compare(pa, pb, SC, every)
+    assert old is not None and new is not None
+    assert old.shared > new.shared  # precondition: starter k-grams leak under the old ignore set
+    starter: dict[CodeLanguage, str] = {"python": MULTI_TODO}
+    peer = find_peer_similarity([sub("a", a), sub("b", b)], starter_code=starter)
+    assert peer["a"][0].details["sharedFingerprints"] == new.shared
+    ai = find_ai_likeness(sub("a", a), [AiReference("r", "python", b)], starter_code=starter)
+    assert ai[0].details["sharedFingerprints"] == new.shared
+    assert len(normalize(MULTI_TODO, "python")) >= SC.min_tokens

@@ -216,10 +216,21 @@ def _flat(ranges: list[tuple[int, int]]) -> list[int]:
     return [n for r in ranges for n in r]
 
 
+def all_kgram_hashes(source: str, language: CodeLanguage, k: int) -> frozenset[int]:
+    """Every k-gram hash of `source`, not just the winnowed ones.
+
+    Used for starter code: a starter k-gram that winnowing skipped in the scaffold can be selected
+    in a submission once an edit changes its neighbours, so ignoring only the scaffold's own
+    fingerprints would leak starter text back in as shared evidence.
+    """
+    texts = [t.text for t in normalize(source, language)]
+    return frozenset(_hash(texts[i : i + k]) for i in range(len(texts) - k + 1))
+
+
 def _ignore_set(
-    corpus: Sequence[PreparedCode], boilerplate: PreparedCode | None, cfg: SimilarityConfig
+    corpus: Sequence[PreparedCode], boilerplate: frozenset[int] | None, cfg: SimilarityConfig
 ) -> frozenset[int]:
-    ignore: set[int] = set(boilerplate.hashes) if boilerplate else set()
+    ignore: set[int] = set(boilerplate) if boilerplate else set()
     if len(corpus) >= cfg.common_min_corpus:
         counts: dict[int, int] = {}
         for s in corpus:
@@ -251,7 +262,9 @@ def find_peer_similarity(
     for lang, subs in by_lang.items():
         prepared = [prepare(s.code, lang, sc) for s in subs]
         boiler = (
-            prepare(starter_code[lang], lang, sc) if starter_code and lang in starter_code else None
+            all_kgram_hashes(starter_code[lang], lang, sc.k)
+            if starter_code and lang in starter_code
+            else None
         )
         ignore = _ignore_set(prepared, boiler, sc)
         for i, (si, pi) in enumerate(zip(subs, prepared, strict=True)):
@@ -301,7 +314,7 @@ def find_ai_likeness(
     prep = prepare(submission.code, submission.language, sc)
     lang = submission.language
     ignore = (
-        prepare(starter_code[lang], lang, sc).hashes
+        all_kgram_hashes(starter_code[lang], lang, sc.k)
         if starter_code and lang in starter_code
         else frozenset()
     )

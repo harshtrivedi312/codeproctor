@@ -162,6 +162,7 @@ class KeystrokeEdit(BaseModel):
     """Remove `delete_length` chars at `offset`, then insert `text` (UTF-16 offsets in the SDK)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+    # Lengths here are Python code points; the SDK counts UTF-16 units (differs for emoji only).
     kind: Literal["EDIT"]
     t: _OffsetMs
     offset: _ModelOffset

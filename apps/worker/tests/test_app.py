@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from helpers import QID, T0, edit
 from worker.app import app
+from worker.events import MAX_SOURCE_CODE_LENGTH
 
 client = TestClient(app)
 AUTH = {"X-Internal-Token": "test-token"}
@@ -86,6 +87,23 @@ def test_fr803_similarity_route_passes_starter_code_to_ai_check() -> None:
     assert r.json()["findings_by_session"] == {}
 
 
-def test_nfr04_oversized_starter_code_is_422() -> None:
-    body = {"submissions": [], "starter_code": {"python": "x" * 100_001}}
-    assert client.post("/analyze/similarity", json=body, headers=AUTH).status_code == 422
+def _starter_body(n: int) -> dict[str, object]:
+    return {
+        "submissions": [
+            {"session_id": "a", "session_question_id": "qa", "language": "python", "code": "x = 1"}
+        ],
+        "starter_code": {"python": "x" * n},
+    }
+
+
+def test_nfr04_oversized_starter_code_is_422_on_starter_code() -> None:
+    r = client.post(
+        "/analyze/similarity", json=_starter_body(MAX_SOURCE_CODE_LENGTH + 1), headers=AUTH
+    )
+    assert r.status_code == 422
+    assert any("starter_code" in e["loc"] for e in r.json()["detail"])
+
+
+def test_nfr04_starter_code_at_exact_limit_is_accepted() -> None:
+    r = client.post("/analyze/similarity", json=_starter_body(MAX_SOURCE_CODE_LENGTH), headers=AUTH)
+    assert r.status_code == 200
