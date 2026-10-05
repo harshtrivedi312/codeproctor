@@ -6,11 +6,11 @@ Non-blocking review findings. Only blockers stop a merge.
 
 ### Should-fix
 1. `packages/shared/src/events.ts` CODE_SIMILARITY: require exactly one of `matchedSessionId` / `aiReferenceSolutionId` (FR-803, ADR 0005 AI-1), with a test.
-2. SPEECH_DETECTED and MULTIPLE_VOICES are listed as server-writable, but no doc supports a server-side audio re-check. Back with an FR/ADR reference or drop from `SERVER_EVENT_TYPES`.
-3. `keystroke.ts`: RESET text counts toward the per-batch text cap, so a large RESET plus an insert is rejected. Exclude RESET from the cap, or state in ADR 0010 that the SDK starts a new batch after a large RESET; add a test (TC-062).
+2. ~~SPEECH_DETECTED / MULTIPLE_VOICES server source~~ Resolved in ADR 0010 (owner decision: FSD M7/M8, backend.md Step 12).
+3. ~~RESET and the batch text cap~~ Resolved: RESET has its own 100,000-char limit.
 4. Test names missing FR/TC IDs: `events.test.ts` (3 tests), `keystroke.test.ts` (2), `permissions.test.ts` (1). `events.test.ts` misuses TC-065 (HMAC mismatch); use FR-801 or NFR-04.
-5. SUPER_ADMIN currently holds review, verdict and live pause/message permissions. Record the question in ADR 0010 for BE-03; FR-904 requires appeals go to a different reviewer.
-6. ADR 0010 is Proposed; the human must accept it.
+5. ~~SUPER_ADMIN~~ Resolved: keeps review/verdict/live; FR-904 enforced by person (appeal reviewer is a different user). BE-13 implements.
+6. ~~ADR 0010 acceptance~~ Accepted 2026-10-05.
 
 ### Nits
 - Unknown keys are stripped, so stored events differ from the signed raw body; document in the ADR or use strict objects.
