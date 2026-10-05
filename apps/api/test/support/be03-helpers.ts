@@ -1,10 +1,7 @@
-// Small local helpers for the BE-03 tests. The fuller settle/signIn/expectReauthFailed helpers live
-// on branch qa/step-2b (pending merge into backend PR #26). These are minimal equivalents; after
-// #26 lands, the rebase should dedupe them into harness.ts.
-import { authenticator } from 'otplib';
+// Small helpers for the BE-03 tests. Sign-in comes from harness.ts (signIn, signInWithTotp).
 import request from 'supertest';
 import { UserRole } from '../../src/generated/prisma/client';
-import { API, Body, createUser, Harness, login, TOTP_SECRET } from './harness';
+import { API, createUser, Harness, signIn, signInWithTotp, TOTP_SECRET } from './harness';
 
 export interface Actor {
   id: string;
@@ -18,20 +15,14 @@ export interface Actor {
 export async function actor(h: Harness, role: UserRole, orgId = h.orgId): Promise<Actor> {
   const needs2fa = role === UserRole.REVIEWER || role === UserRole.SUPER_ADMIN;
   const u = await createUser(h, { role, orgId, totp: needs2fa ? TOTP_SECRET : undefined });
-  const res = (await login(h, u.email).expect(200)).body as Body;
-  let token = res.session?.accessToken;
-  if (!token) {
-    const verified = (
-      await request(h.app.getHttpServer())
-        .post(`${API}/auth/2fa/verify`)
-        .send({ challengeToken: res.challengeToken, code: authenticator.generate(TOTP_SECRET) })
-        .expect(200)
-    ).body as Body;
-    // /auth/2fa/verify answers with a flat accessToken, login with { session: { accessToken } }.
-    token = verified.accessToken ?? verified.session?.accessToken;
-  }
-  if (!token) throw new Error('sign-in gave no access token');
-  return { id: u.id, email: u.email, role, orgId, token };
+  const auth = needs2fa ? await signInWithTotp(h, u.email) : await signIn(h, u.email);
+  return {
+    id: u.id,
+    email: u.email,
+    role,
+    orgId,
+    token: auth.Authorization.replace('Bearer ', ''),
+  };
 }
 
 export function call(
@@ -46,8 +37,18 @@ export function call(
   return body === undefined ? req : req.send(body as object);
 }
 
-/** The token in a set-password link such as https://app/set-password?token=abc (last path or query value). */
+/**
+ * The token in a set-password or reset link: the `token` of the URL fragment (the staff invite,
+ * `/admin/set-password#token=...`), else of the query string. Returns ''
+ * when the value is not a parseable URL, so a changed link format fails the test that expects a
+ * token, not an unrelated one.
+ */
 export function tokenFromUrl(url: string): string {
-  const u = new URL(url);
-  return u.searchParams.get('token') ?? u.pathname.split('/').filter(Boolean).pop() ?? '';
+  try {
+    const u = new URL(url);
+    const fromHash = new URLSearchParams(u.hash.replace(/^#/, '')).get('token');
+    return fromHash ?? u.searchParams.get('token') ?? '';
+  } catch {
+    return '';
+  }
 }
