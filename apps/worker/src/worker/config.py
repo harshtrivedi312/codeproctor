@@ -109,6 +109,24 @@ class VadConfig(_Base):
     f0_max_hz: _Pos = 400
 
 
+class FaceConfig(_Base):
+    """Face matching (FR-403, ADR 0004, D-05). Defaults in INTEGRITY-CONFIG.md section 7.
+
+    PLACEHOLDER THRESHOLD: `match_threshold` is NOT tuned. It waits for the demographically diverse
+    test set (INT-01, pilot entry criterion in ADR 0004 section 2). The default is deliberately high
+    so that doubt goes to a human (MANUAL_REVIEW); it never rejects anyone.
+    """
+
+    # Cosine similarity at or above which the pair is a MATCH; below goes to MANUAL_REVIEW.
+    match_threshold: Annotated[float, Field(ge=0.30, le=1.0)] = 0.75
+    # Detector confidence (when the detector reports one) below this is treated as no usable face.
+    min_detection_confidence: _Unit = 0.7
+    max_image_bytes: _Pos = 10 * 1024 * 1024
+    max_image_pixels: _Pos = 25_000_000
+    # Selfie embeddings kept in memory for FR-606 re-checks (ADR 0004 section 2); bounded LRU.
+    selfie_cache_max_sessions: _Pos = 256
+
+
 class RiskConfig(_Base):
     """FR-804 / ADR 0005 section 2."""
 
@@ -156,6 +174,7 @@ class IntegrityConfig(_Base):
     similarity: SimilarityConfig = Field(default_factory=SimilarityConfig)
     vad: VadConfig = Field(default_factory=VadConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
+    face: FaceConfig = Field(default_factory=FaceConfig)
     # Accommodations (FR-305): these types are never produced and never scored.
     disabled_event_types: frozenset[EventType] = frozenset()
 
