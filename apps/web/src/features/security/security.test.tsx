@@ -14,6 +14,7 @@ import {
   handleSignInElsewhere,
   isSignOutPending,
   publishSession,
+  refreshSession,
 } from '@/lib/auth-session';
 import { getAccessToken } from '@/lib/auth-token';
 import { apiBaseUrl } from '@/lib/env';
@@ -789,11 +790,17 @@ describe('Normal sign-out forgets the session before the logout call (FR-104, TC
     expect(isSignOutPending()).toBe(false);
   });
 
-  it('FR-104 TC-005: after logout succeeded, a late 401 on a staff request is not replayed and starts no refresh', async () => {
+  it('FR-104 TC-005: a staff request sent after sign-out starts, whose 401 arrives after logout succeeded, is not replayed and starts no refresh', async () => {
+    let releaseLogout: () => void = () => undefined;
+    const logoutGate = new Promise<void>((resolve) => (releaseLogout = resolve));
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => (release = resolve));
     let usersCalls = 0;
     server.use(
+      http.post(`${base}/logout`, async () => {
+        await logoutGate;
+        return new HttpResponse(null, { status: 204 });
+      }),
       http.get('*/v1/admin/users', async () => {
         usersCalls += 1;
         await gate;
@@ -804,13 +811,74 @@ describe('Normal sign-out forgets the session before the logout call (FR-104, TC
     const out = setup(MOCK_USERS.recruiter);
     await screen.findByTestId('two-factor-status');
     const refreshBefore = calls.refresh;
+    const signingOut = out.signOut!();
+    await waitFor(() => expect(getAccessToken()).toBeNull());
     const pending = api.GET('/v1/admin/users');
-    await out.signOut!();
+    releaseLogout();
+    await signingOut;
     expect(calls.logout).toBe(1);
     release();
     expect((await pending).response.status).toBe(401);
     expect(usersCalls).toBe(1);
     expect(calls.refresh).toBe(refreshBefore);
+  });
+
+  it('FR-104 TC-005: the old token is gone at once, even while a refresh is still in flight', async () => {
+    let releaseRefresh: () => void = () => undefined;
+    const refreshGate = new Promise<void>((resolve) => (releaseRefresh = resolve));
+    const out = setup(MOCK_USERS.recruiter);
+    await screen.findByTestId('two-factor-status');
+    server.use(
+      http.post(`${base}/refresh`, async () => {
+        await refreshGate;
+        return HttpResponse.json({ status: 401 }, { status: 401 });
+      }),
+    );
+    const refreshing = refreshSession();
+    const signingOut = out.signOut!();
+    // Before the refresh settles: the token must already be gone.
+    expect(getAccessToken()).toBeNull();
+    releaseRefresh();
+    await refreshing;
+    await signingOut;
+  });
+
+  it('FR-104 TC-005: another tab signing in while a failing logout is in flight leaves no "could not confirm" warning and no Retry button', async () => {
+    let releaseLogout: () => void = () => undefined;
+    const logoutGate = new Promise<void>((resolve) => (releaseLogout = resolve));
+    server.use(
+      http.post(`${base}/logout`, async () => {
+        await logoutGate;
+        return new HttpResponse(null, { status: 500 });
+      }),
+    );
+    seedMockRefresh(MOCK_USERS.recruiter.email);
+    const out: { signOut?: () => Promise<void> } = {};
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <AuthProvider>
+          <main>
+            <Capture out={out} />
+            <LoginForm />
+          </main>
+        </AuthProvider>
+      </QueryClientProvider>,
+    );
+    await screen.findByTestId('two-factor-status');
+    const signingOut = out.signOut!();
+    await waitFor(() => expect(getAccessToken()).toBeNull());
+    // Another tab signs in as someone else: this tab hears it through the storage event.
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent('storage', { key: 'cp.sessionEpoch', newValue: 'nonce|user-author' }),
+      );
+    });
+    releaseLogout();
+    await signingOut;
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByText(/could not confirm you were signed out/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry sign-out' })).not.toBeInTheDocument();
   });
 });
 
@@ -884,7 +952,7 @@ describe('Security page: recovery codes are shown once (FR-102)', () => {
     expect(calls.refresh).toBe(before);
   });
 
-  it('FR-102: an older session without totpEnabled shows a neutral checking state and no actions, without crashing', async () => {
+  it('FR-102: an older session without totpEnabled shows that the status is not available and offers no actions, without crashing', async () => {
     server.use(
       http.post(`${base}/refresh`, () =>
         HttpResponse.json({
@@ -907,7 +975,7 @@ describe('Security page: recovery codes are shown once (FR-102)', () => {
       MOCK_USERS.recruiter,
     );
     expect(
-      await screen.findByText(/We cannot tell yet whether two-factor sign-in is on/),
+      await screen.findByText(/Your two-factor status is not available yet/),
     ).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /2FA|recovery/i })).not.toBeInTheDocument();
   });

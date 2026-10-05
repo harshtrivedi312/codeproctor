@@ -11,6 +11,7 @@ import {
   getSessionUserId,
   REQUEST_TIMEOUT_MS,
   handleSignInElsewhere,
+  invalidateRefreshes,
   isSignOutPending,
   SESSION_EPOCH_KEY,
   SIGN_OUT_MARKER_KEY,
@@ -145,6 +146,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
         // Another tab signed in. Compare user ids locally: no network call, so a burst of
         // refreshes from every tab cannot look like token reuse (TC-005).
         handleSignInElsewhere(event.newValue);
+      } else if (event.key === SESSION_EPOCH_KEY && isSignOutPending()) {
+        // This tab already forgot its session and its logout call is still in flight, but another
+        // tab has signed in (the shared cookie is now theirs). Supersede the logout: its late
+        // answer must not show "could not confirm" or offer a retry that would revoke the new
+        // session (TC-005).
+        invalidateRefreshes();
+        setSignOutUnconfirmed(false);
       }
     };
     window.addEventListener('storage', onStorage);
@@ -173,15 +181,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
   const signOut = React.useCallback(async () => {
     setSignedOutByUser(true);
     setLoginPath(LOGIN_PATH);
-    // Waits for a refresh already running, then blocks new ones until the next sign-in.
-    await beginSignOut();
-    // Logout works from the httpOnly cookie alone, so forget the session first: during a slow
-    // logout no staff request goes out with the old token, and a late 401 cannot start a refresh.
+    // Blocks new refreshes at once and forgets the session at once: a refresh already running
+    // may take seconds, and until it settles the old token must not be used. Logout works from
+    // the httpOnly cookie alone, so a slow logout sends no staff request with the old token and a
+    // late 401 cannot start a refresh.
+    const settled = beginSignOut();
     publishSession(null);
+    await settled;
     try {
+      // The session listener also cancels and clears on the user change; this is explicit so the
+      // cache is empty even if the user id did not change.
       await queryClient.cancelQueries();
       queryClient.clear();
       setPending(null);
+    } catch {
+      // Nothing to do: the logout call below must still run.
+    }
+    try {
       await confirmLogout();
     } finally {
       // Whatever the server said, this browser has forgotten the session. If the server did not

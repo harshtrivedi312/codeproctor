@@ -42,9 +42,8 @@ export function SecurityPage(): React.JSX.Element {
         </h2>
         {!known ? (
           <p role="status" className="text-sm text-muted-foreground">
-            We cannot tell yet whether two-factor sign-in is on for your account, so no changes are
-            offered here. Sign out and sign in again to refresh it. If this keeps happening, contact
-            your administrator.
+            Your two-factor status is not available yet, so no changes are offered here. If this
+            keeps happening, contact your administrator.
           </p>
         ) : (
           <>
