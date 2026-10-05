@@ -320,9 +320,9 @@ Org scoping (ADR 0006, C-1) does not stop one candidate from reading another can
 - **Rule CS-3.** Object keys, Redis keys (`rl:`, `pkey:`, `evidence:`, `rec:`), HMAC keys and jobs are built from `ctx.sessionId` and `ctx.orgId`, never from client input.
 - **Rule CS-4: enforcement (DB-05 gate; architect detail, owner to confirm).** Two options were considered:
   - (a) Session checks written in the BE-07 and BE-10 services only.
-  - (b) The org scope also carries `sessionId` for candidate units of work, and the db-engineer's org-scope Prisma extension (PR #30, ADR 0006) applies it.
+  - (b) The org scope also carries `sessionId` for candidate units of work. The db-engineer's org-scope Prisma extension (PR #30; ADR 0006 §8.2 as amended in PR #41) filters reads, updates, deletes and upserts by it, and creates take `session_id` from the context.
   - **Recommended: (b) as the structural control, plus (a) as explicit service-level checks for defence in depth.**
-  - **What (b) must cover.** The extension adds the session filter to every operation, not only reads:
+  - **What (b) must cover.** The session filter applies to writes as well as reads, the same way ADR 0006 §8.2 applies `org_id`:
     - `find*`, `count`, `aggregate`, `update`, `updateMany`, `delete`, `deleteMany` and the `where` of `upsert` all get the filter;
     - `create`, `createMany` and the create branch of `upsert` take `session_id` from the context, and reject a different value supplied by the caller.
   - **Filter per table:**
@@ -334,8 +334,8 @@ Org scoping (ADR 0006, C-1) does not stop one candidate from reading another can
     | `submissions` (no `session_id` column; database.md) | relation filter `session_question: { session_id: ctx.sessionId }` on reads, updates and deletes; creates must reference a `session_question_id` already resolved inside the context |
 
   - **Unique lookups.** `findUnique` and `update` by `id` use Prisma's extended unique `where` (non-unique fields allowed alongside the unique one); `findFirst` is the fallback. BE-07 and DB-05 choose.
-  - **No raw SQL** (`$queryRaw`, `$executeRaw`) inside a candidate unit of work; a test enforces it.
-  - **Scope nesting (PR #41 §8.4).** A scope only narrows. A nested scope can neither drop `sessionId` nor change it to another value; trying to do either throws.
+  - **Raw SQL (PR #41 §8.5).** Raw SQL (`$queryRaw`, `$executeRaw`) in a scope that carries `sessionId` must filter `session_id` (or `sessions.id`) explicitly, as well as `org_id`, because the extension cannot rewrite it. Prefer the query API in candidate units of work. Every raw statement there gets a cross-candidate test.
+  - **Scope nesting (PR #41 §8.4).** A scope only narrows. A nested scope can neither drop `sessionId` nor change it to another value; trying to do either throws. A staff or system scope cannot be opened inside a candidate scope to widen it.
   - Candidate service methods take `CandidateContext` as a required parameter.
   - A test fails if a candidate unit of work runs a session-path query without the session filter.
 - **Rule CS-5: sockets and storage.**
@@ -463,7 +463,7 @@ CI and deploy:
 | --- | --- |
 | proctor-sdk | Accept a CryptoKey (or base64), persist it non-extractable in IndexedDB, re-sign the outbox on a new epoch or `KEY_EPOCH_STALE`, and seed counters from `proctor-key` (max with local). Map status codes as in 5.2: stop and purge on `SESSION_NOT_ACTIVE` and on 401 `SESSION_TAKEN_OVER`; at most 3 retries on `TOKEN_EXPIRED`, then raise `reauthRequired`; never retry a 401 forever. Add the heartbeat body and its 409 handling. For media: send `startedAt` and `durationMs`, send the `If-None-Match` header when the presign returns it, treat 412 as already stored, handle `alreadyUploaded`, `UPLOAD_MISMATCH` and `UPLOAD_NOT_FOUND`, and never drop a segment's first chunk. Evidence presign gets `purpose`; each name is used once and only for its purpose. Re-check becomes upload plus 202, and client FACE_MISMATCH emission is removed. Add a `runSystemCheck()` helper. Replace `fetch-models.mjs` with lock scripts. Purge the key and outbox at finish. Never log URLs. |
 | backend BE-07 | Candidate-session scope first (5.10: pinned HS256 with `iss` and `aud`, `CandidateSessionGuard` on AsyncLocalStorage, CS-1 to CS-5, `SESSION_TAKEN_OVER`, cross-candidate tests); then the master key with AAD and `kid`, epoch derivation, the issue marker with TTL until deadline + grace, system-check gates on CONSENTED → VERIFIED and on start, the `proctor-key` route, system-check route and start gate (TC-056), heartbeat and watchdog, key destruction at ingest close and on erasure |
-| db-engineer (DB-05, PR #30) | Let the org-scope context carry an optional `sessionId` for candidate units of work and apply it to every operation, with the per-table filters, create defaults, no raw SQL and narrow-only nesting (5.10 CS-4 option (b)) |
+| db-engineer (DB-05, PR #30) | Let the org-scope context carry an optional `sessionId` for candidate units of work and apply it to every operation, with the per-table filters, create defaults, the raw-SQL rule (PR #41 §8.5) and narrow-only nesting (5.10 CS-4 option (b)) |
 | backend BE-09 | Key layout 5.7; presign and confirm 5.5, with the HEAD check, ETag recording, the `If-None-Match` spike for R2 and S3, and per-session caps; evidence presign 5.6 with single-purpose, single-use names, quotas, the FACE-disabled refusal and the `evidence-expire` job; the ingest-close sweep; review GET URLs with response-type and disposition overrides; prefix deletion in retention and erasure, consent PDF prefix |
 | integrity BE-10 | Raw-body verification order (section 2); fullscreen pairing by `occurred_at` and the duration rule (5.9); duplicate check (stored signature first, then the 8-epoch window); invariant test that CLIENT rows from batches have `batch_seq`; error codes, evidence-name resolution, grace window, per-session limits, a `rejected` metric with no body |
 | integrity BE-12 | Score from server `duration_ms` only (5.9); `face-recheck` job with the 1 MiB and 1920 × 1920 refusals before decoding, frame deletion on every non-mismatch outcome including failure, and outcome hand-off (API writes the event; OI-1 mechanism in ARC-04), hole-tolerant segment concatenation, worker `models.lock.json` |
