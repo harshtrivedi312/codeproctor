@@ -2,16 +2,48 @@
   "name": "@codeproctor/api",
   "version": "0.0.0",
   "private": true,
-  "description": "NestJS API (placeholder; NestJS is installed in DB-05 or BE-01, see Q-39)",
+  "description": "CodeProctor NestJS API",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "dev": "pnpm build && node --env-file-if-exists=../../.env dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "jest --runInBand --forceExit"
   },
   "dependencies": {
+    "@nestjs/common": "^11.2.7",
+    "@nestjs/config": "^4.0.4",
+    "@nestjs/core": "^11.2.7",
+    "@nestjs/platform-express": "^11.2.7",
+    "@nestjs/swagger": "^11.4.7",
+    "@nestjs/throttler": "^6.7.1",
     "@node-rs/argon2": "^2.2.1",
     "@prisma/adapter-pg": "7.10.0",
     "@prisma/client": "7.10.0",
-    "pg": "^8.16.3"
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
+    "helmet": "^8.3.0",
+    "ioredis": "^6.0.0",
+    "nestjs-pino": "^5.2.1",
+    "pg": "^8.16.3",
+    "pino": "^10.3.1",
+    "pino-http": "^11.0.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@nestjs/testing": "^11.2.7",
+    "@testcontainers/postgresql": "^12.2.0",
+    "@testcontainers/redis": "^12.2.0",
+    "@types/express": "^5.0.6",
+    "@types/jest": "^30.0.0",
+    "@types/pg": "^8.23.1",
+    "@types/supertest": "^7.2.1",
+    "jest": "^30.5.2",
+    "supertest": "^7.3.0",
+    "testcontainers": "^12.2.0",
+    "ts-jest": "^29.4.14"
   }
 }
