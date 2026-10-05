@@ -167,6 +167,7 @@ def test_nfr01_fr803_request_with_many_submissions_and_large_starter_is_fast_eno
     r = client.post("/analyze/similarity", json=body, headers=AUTH)
     elapsed = time.perf_counter() - start
     assert r.status_code == 200
-    # Gross-slowdown guard only (measured about 1.2 s on a laptop). The call-count test above is
-    # what catches per-submission re-preparation.
-    assert elapsed < 10.0, f"{elapsed:.2f}s for 120 submissions"
+    # Hang/runaway guard only. Measured about 1.2 s on a laptop but 10.9 s on a shared CI runner,
+    # so the bound is deliberately loose; the call-count test above is what catches
+    # per-submission re-preparation.
+    assert elapsed < 60.0, f"{elapsed:.2f}s for 120 submissions"
