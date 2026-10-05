@@ -4,6 +4,7 @@ import { ProctorSession } from '../core/session';
 import { TEST_KEY_B64 } from '../test/helpers';
 import { fakeContext } from '../test/helpers';
 import { NO_FACE_SEQUENCE, PHONE_STRONG, secondsOf } from './__fixtures__/samples';
+import { IDENTITY_RECHECK_INTERVAL_MS } from './config';
 import { uploadEvidence, needsEvidence, type EvidenceApi } from './evidence';
 import { IdentityScheduler } from './identity';
 import { InferenceClient, type WorkerLike } from './inference-client';
@@ -326,7 +327,7 @@ describe('identity re-check (FR-606, ADR 0004)', () => {
     ];
     let calls = 0;
     const s = new IdentityScheduler(
-      120_000,
+      IDENTITY_RECHECK_INTERVAL_MS,
       () => Promise.resolve(new Blob(['f'])),
       () => {
         calls++;
@@ -350,7 +351,7 @@ describe('identity re-check (FR-606, ADR 0004)', () => {
       captureSnapshot: () => Promise.resolve(new Blob(['f'])),
     });
     await m.start(h.ctx);
-    await vi.advanceTimersByTimeAsync(120_000);
+    await vi.advanceTimersByTimeAsync(IDENTITY_RECHECK_INTERVAL_MS);
     expect(h.events.find((e) => e.type === 'FACE_MISMATCH')?.payload).toEqual({ similarity: 0.2 });
     m.stop();
     vi.useRealTimers();
