@@ -96,19 +96,55 @@ void describe('keystroke batch (FR-608)', () => {
       false,
     );
   });
-});
 
-void it('FR-608, TC-062: a maximum-size RESET does not count toward the per-batch EDIT text cap', () => {
-  const full = 'a'.repeat(MAX_SOURCE_CODE_LENGTH);
-  const ok = keystrokeBatchSchema.safeParse(
-    batch([
-      { kind: 'RESET', t: 0, language: 'python', text: full },
-      { kind: 'EDIT', t: 1, offset: 0, deleteLength: 0, text: 'x' },
-    ]),
-  );
-  assert.equal(ok.success, true);
-  const tooBig = keystrokeBatchSchema.safeParse(
-    batch([{ kind: 'RESET', t: 0, language: 'python', text: full + 'b' }]),
-  );
-  assert.equal(tooBig.success, false);
+  void it('FR-608, NFR-04: a maximum-size RESET does not count toward the EDIT text cap', () => {
+    const full = 'a'.repeat(MAX_SOURCE_CODE_LENGTH);
+    const edit = (text: string): KeystrokeEvent => ({
+      kind: 'EDIT',
+      t: 1,
+      offset: 0,
+      deleteLength: 0,
+      text,
+    });
+    const reset = (text: string): KeystrokeEvent => ({
+      kind: 'RESET',
+      t: 0,
+      language: 'python',
+      text,
+    });
+    assert.equal(
+      keystrokeBatchSchema.safeParse(batch([reset(full), edit(full)])).success,
+      true,
+      'maximum RESET plus a full 100,000 characters of EDIT text fits',
+    );
+    assert.equal(
+      keystrokeBatchSchema.safeParse(batch([reset(full), edit(full + 'b')])).success,
+      false,
+      'EDIT text over 100,000 is rejected',
+    );
+    assert.equal(
+      keystrokeBatchSchema.safeParse(batch([reset(full + 'b')])).success,
+      false,
+      'a RESET over 100,000 is rejected',
+    );
+  });
+
+  void it('FR-608, NFR-04: many maximum-size RESET events are rejected by the batch total', () => {
+    const full = 'a'.repeat(MAX_SOURCE_CODE_LENGTH);
+    const resets = Array.from({ length: 3 }, (_, i) => ({
+      kind: 'RESET',
+      t: i,
+      language: 'python',
+      text: full,
+    }));
+    assert.equal(keystrokeBatchSchema.safeParse(batch(resets)).success, false);
+    assert.equal(keystrokeBatchSchema.safeParse(batch(resets.slice(0, 2))).success, true);
+    const thousand = Array.from({ length: MAX_KEYSTROKE_EVENTS_PER_BATCH }, (_, i) => ({
+      kind: 'RESET',
+      t: i,
+      language: 'python',
+      text: full,
+    }));
+    assert.equal(keystrokeBatchSchema.safeParse(batch(thousand)).success, false);
+  });
 });
