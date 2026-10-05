@@ -15,14 +15,14 @@ Owner: Delivery Lead (CLAUDE.md rules 16 and 18, merged in #34 on 2026-10-05; pr
 ## 2. Current phase and progress
 
 - **Current phase:** Phases 1 to 3 run in parallel by track. Database is on DB-05. The backend critical path is at BE-02 hardening, with BE-03 next. Staff web is FE-03 done and FE-04 next. Proctor SDK has done FE-06 to FE-08. The integrity worker's analysis modules have merged; their API integration waits for BE-08 to BE-11 and ARC-04.
-- **Main CI (2026-10-05 21:00 UTC):** red, but not because of code. The runs after #25, #27 and #29 were cancelled without getting a runner, during a GitHub Actions major outage (githubstatus.com, incident "investigating"). The last real failure, the run after #28, was a web test flake in `settings.test.tsx` (FR-103 user list). Frontend is shipping the fix as its own PR (DL-03).
+- **Main CI (2026-10-05, late):** green again on f4f20bc (CI and QA). The red runs after #25, #27 and #29 were cancelled for lack of runners during the GitHub Actions outage; newer green runs supersede them. The TC-065 flake fix (#46) merged; the web admin-table flake fix (#40) is next.
 - **Next milestone:** BE-03 (RBAC and audit), which unlocks BE-04 onward and TC-004, TC-006 and TC-008.
 
 | Measure | Value |
 | --- | --- |
 | Tasks done (merged) | 14 of 52: ARC-01, DB-01, DB-02, DB-03, DB-04, BE-01, BE-02, FE-01, FE-02, FE-03, FE-06, FE-07, FE-08, QA-01A (COMP-01 and FAIR-01 added 2026-10-05, D-47) |
 | Tasks in progress | 5: ARC-02 (contract ADRs 0011 and 0012 open), ARC-03 (ADR 0013 pending), DB-05 (#30, in review), BE-12 worker part (#32), QA-01B early automation (merged as #28) |
-| Open PRs (2026-10-05 evening) | 16: #26 BE-02 hardening, #30 DB-05, #31 ADR 0011, #32 worker hardening, #33 ADR 0012, #35 /dev/proctor, #36 Security page, #38 this docs PR, #39 ADR 0013, #40 web admin-table flake fix, #41 ADR 0006 §8, #42 QA-03, #43 SDK review fixes, #44 compliance decisions and drafts, #45 CSP wasm-unsafe-eval (D-45), #46 TC-065 flake fix. Merged since cycle 1: #34 (CLAUDE.md rules 16 and 18), #37 (dev-proctor-models ignore) |
+| Open PRs (2026-10-05 evening) | 16 (15 listed plus #47): #26 BE-02 hardening, #30 DB-05, #31 ADR 0011, #32 worker hardening, #33 ADR 0012, #35 /dev/proctor, #36 Security page, #38 this docs PR, #39 ADR 0013, #40 web admin-table flake fix, #41 ADR 0006 §8, #42 QA-03, #43 SDK review fixes, #44 compliance decisions and drafts, #45 CSP wasm-unsafe-eval (D-45), #47 SDK stop() in-flight proof. Merged since cycle 1: #34 (CLAUDE.md rules 16 and 18), #37 (dev-proctor-models ignore), #46 (TC-065 flake fix) |
 | Test cases verified | 6 of 72 marked Verified in /docs/test-matrix.md (TC-002, TC-005, TC-075 fully; TC-001, TC-003 and TC-098 on the API with the UI mocked) |
 | Open risks | 17 open (R-01..R-19 less accepted R-15 and R-16; section 5) |
 
