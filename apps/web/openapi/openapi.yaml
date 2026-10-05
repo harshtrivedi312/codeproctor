@@ -214,6 +214,185 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /v1/auth/2fa/status:
+    get:
+      operationId: getTwoFactorStatus
+      summary: Whether the signed-in user has TOTP turned on (placeholder, see ARC-02 note in docs/followups/frontend.md)
+      responses:
+        '200':
+          description: Current status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled]
+                properties:
+                  enabled: { type: boolean }
+        '401':
+          description: Not signed in
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /v1/auth/2fa/setup/start:
+    post:
+      operationId: startTwoFactorSetup
+      summary: Begin optional TOTP set-up for a signed-in user. Re-asks the current password (FR-102, FU-BE-39).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword]
+              properties:
+                currentPassword: { type: string, maxLength: 1024 }
+      responses:
+        '200':
+          description: Secret and otpauth URI for the QR code
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [manualKey, otpauthUri]
+                properties:
+                  manualKey: { type: string }
+                  otpauthUri: { type: string }
+        '401':
+          description: Not signed in
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Wrong current password (code REAUTH_FAILED), or the role may not do this. Never a sign-out.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Two-factor is already on
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /v1/auth/2fa/setup/confirm:
+    post:
+      operationId: confirmTwoFactorSetup
+      summary: Confirm optional set-up with a first code; returns the one-time recovery codes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, code]
+              properties:
+                currentPassword: { type: string, maxLength: 1024 }
+                code: { type: string, maxLength: 6 }
+      responses:
+        '200':
+          description: Two-factor is on
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecoveryCodes'
+        '400':
+          description: Wrong code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Not signed in
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Wrong current password (code REAUTH_FAILED), or the role may not do this. Never a sign-out.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Two-factor is already on
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /v1/auth/2fa/disable:
+    post:
+      operationId: disableTwoFactor
+      summary: Turn TOTP off. Refused (403, code two_factor_mandatory) for Super Admin and Reviewer.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword]
+              properties:
+                currentPassword: { type: string, maxLength: 1024 }
+      responses:
+        '204':
+          description: Two-factor is off
+        '401':
+          description: Not signed in
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Wrong current password (code REAUTH_FAILED), or the role may not do this. Never a sign-out.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Two-factor is not on
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /v1/auth/2fa/recovery-codes/regenerate:
+    post:
+      operationId: regenerateRecoveryCodes
+      summary: Issue a new set of recovery codes; the old set stops working
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword]
+              properties:
+                currentPassword: { type: string, maxLength: 1024 }
+      responses:
+        '200':
+          description: The new codes, shown once
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecoveryCodes'
+        '401':
+          description: Not signed in
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Wrong current password (code REAUTH_FAILED), or the role may not do this. Never a sign-out.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Two-factor is not on
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /v1/auth/2fa/verify:
     post:
       operationId: verifyTwoFactor
@@ -595,8 +774,16 @@ components:
       type: object
       required: [code, message]
       properties:
+        # A wrong current password on a re-auth endpoint is HTTP 403 with code REAUTH_FAILED.
         code: { type: string }
         message: { type: string }
+    RecoveryCodes:
+      type: object
+      required: [recoveryCodes]
+      properties:
+        recoveryCodes:
+          type: array
+          items: { type: string }
     Language:
       # Must match codeLanguageSchema in packages/shared/src/code-run.ts.
       type: string

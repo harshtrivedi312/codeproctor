@@ -80,6 +80,10 @@ interface MockAuthState {
   usedRecovery: string[];
   usedTokens: string[];
   refreshFor: string | null;
+  /** Users with optional roles (recruiter, author) who turned 2FA on from the Security page. */
+  totpOn: string[];
+  /** Recovery-code set per user, bumped on every issue; older sets stop working. 0 = the seed set. */
+  recoveryGen: Record<string, number>;
 }
 
 const EMPTY: MockAuthState = {
@@ -89,6 +93,8 @@ const EMPTY: MockAuthState = {
   usedRecovery: [],
   usedTokens: [],
   refreshFor: null,
+  totpOn: [],
+  recoveryGen: {},
 };
 const COOKIE = 'mock_auth_state';
 let memory: MockAuthState = structuredClone(EMPTY);
@@ -138,6 +144,16 @@ export function seedMockRefresh(email: string): void {
   save(state);
 }
 
+/** Tests and demos: marks 2FA as already on for this user (as if set up earlier). */
+export function seedMockTwoFactor(email: string): void {
+  const user = findUser(email);
+  if (!user) return;
+  const state = load();
+  const list = isMandatory(user) ? state.enrolled : state.totpOn;
+  if (!list.includes(user.email)) list.push(user.email);
+  save(state);
+}
+
 function sessionFor(user: MockUser): Schemas['AuthSession'] {
   return {
     accessToken: `mock-access-${user.role}-${Math.random().toString(36).slice(2)}`,
@@ -150,6 +166,63 @@ function sessionFor(user: MockUser): Schemas['AuthSession'] {
     },
   };
 }
+/** FR-102: mandatory for these roles, so the API refuses to turn it off. */
+function isMandatory(user: MockUser): boolean {
+  return user.role === 'SUPER_ADMIN' || user.role === 'REVIEWER';
+}
+function twoFactorOn(user: MockUser, state: MockAuthState): boolean {
+  return isMandatory(user)
+    ? user.totp || state.enrolled.includes(user.email)
+    : state.totpOn.includes(user.email);
+}
+
+function seedRecoveryCodes(user: MockUser): string[] {
+  return user.role === 'SUPER_ADMIN'
+    ? [MOCK_ADMIN_RECOVERY_CODE, ...MOCK_RECOVERY_CODES]
+    : MOCK_RECOVERY_CODES;
+}
+const BASE32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+/** Deterministic fake codes for set number `gen` (never real secrets), 16 base32 characters each. */
+export function mockRecoveryCodesFor(user: { email: string; role: string }, gen: number): string[] {
+  if (gen === 0) return seedRecoveryCodes(user as MockUser);
+  return Array.from({ length: 10 }, (_, i) => {
+    let h = 2166136261;
+    for (const ch of `${user.email}:${gen}:${i}`)
+      h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
+    let code = '';
+    for (let n = 0; n < 16; n++) {
+      h = (Math.imul(h, 1664525) + 1013904223) >>> 0;
+      code += BASE32[(h >>> 24) % 32];
+    }
+    return code;
+  });
+}
+
+const unauthenticated = () =>
+  HttpResponse.json({ code: 'unauthenticated', message: 'Sign in again.' }, { status: 401 });
+const reauthFailed = () =>
+  HttpResponse.json({ code: 'REAUTH_FAILED', message: 'Password incorrect' }, { status: 403 });
+const conflict = (code: string, message: string) =>
+  HttpResponse.json({ code, message }, { status: 409 });
+
+/**
+ * Shared checks of the four re-auth endpoints (FR-102, FU-BE-39): a signed-in user, a body with
+ * `currentPassword`, and a password that matches. A wrong password is 403 REAUTH_FAILED, never 401.
+ * The mock does not rate limit; that is the server's job.
+ */
+async function reauth(
+  request: Request,
+): Promise<{ user: MockUser; body: Record<string, unknown> } | Response> {
+  const role = mockRoleFromToken(request.headers.get('Authorization'));
+  const user = role ? Object.values<MockUser>(MOCK_USERS).find((u) => u.role === role) : undefined;
+  if (!user) return unauthenticated();
+  const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+  if (typeof body.currentPassword !== 'string' || body.currentPassword !== user.password) {
+    return reauthFailed();
+  }
+  return { user, body };
+}
+
 function userFromChallenge(token: string): MockUser | undefined {
   return token.startsWith('mock-challenge-')
     ? findUser(token.slice('mock-challenge-'.length))
@@ -190,8 +263,8 @@ export function createAuthHandlers() {
       }
       state.failed[key] = 0;
       const challengeToken = `mock-challenge-${user.email}`;
-      if (user.role === 'SUPER_ADMIN' || user.role === 'REVIEWER') {
-        const enrolled = user.totp || state.enrolled.includes(user.email);
+      if (isMandatory(user) || twoFactorOn(user, state)) {
+        const enrolled = twoFactorOn(user, state);
         save(state);
         return HttpResponse.json({
           status: enrolled
@@ -238,10 +311,7 @@ export function createAuthHandlers() {
       if (!user) return expired();
       const state = load();
       const recovery = body.code.replace(/[\s-]/g, '').toUpperCase();
-      const knownRecovery =
-        user.role === 'SUPER_ADMIN'
-          ? [MOCK_ADMIN_RECOVERY_CODE, ...MOCK_RECOVERY_CODES]
-          : MOCK_RECOVERY_CODES;
+      const knownRecovery = mockRecoveryCodesFor(user, state.recoveryGen[user.email] ?? 0);
       const recoveryOk = knownRecovery.includes(recovery) && !state.usedRecovery.includes(recovery);
       if (body.code.trim() !== MOCK_TOTP_CODE && !recoveryOk) {
         return HttpResponse.json(
@@ -253,6 +323,76 @@ export function createAuthHandlers() {
       state.refreshFor = user.email;
       save(state);
       return HttpResponse.json(sessionFor(user));
+    }),
+
+    // Signed-in 2FA management (FR-102). Every call re-asks the current password.
+    http.get(`${base}/2fa/status`, ({ request }) => {
+      const role = mockRoleFromToken(request.headers.get('Authorization'));
+      const user = role
+        ? Object.values<MockUser>(MOCK_USERS).find((u) => u.role === role)
+        : undefined;
+      if (!user) return unauthenticated();
+      return HttpResponse.json({ enabled: twoFactorOn(user, load()) });
+    }),
+
+    http.post(`${base}/2fa/setup/start`, async ({ request }) => {
+      const checked = await reauth(request);
+      if (checked instanceof Response) return checked;
+      if (twoFactorOn(checked.user, load())) return conflict('already_enabled', 'Already on.');
+      return HttpResponse.json({
+        manualKey: 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP',
+        otpauthUri: `otpauth://totp/CodeProctor:${encodeURIComponent(checked.user.email)}?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=CodeProctor`,
+      });
+    }),
+
+    http.post(`${base}/2fa/setup/confirm`, async ({ request }) => {
+      const checked = await reauth(request);
+      if (checked instanceof Response) return checked;
+      const { user, body } = checked;
+      const state = load();
+      if (twoFactorOn(user, state)) return conflict('already_enabled', 'Already on.');
+      if (body.code !== MOCK_TOTP_CODE) {
+        return HttpResponse.json(
+          { code: 'invalid_code', message: 'That code did not match.' },
+          { status: 400 },
+        );
+      }
+      // Mandatory roles are enrolled through the login flow; for them this just records it.
+      if (isMandatory(user)) state.enrolled.push(user.email);
+      else state.totpOn.push(user.email);
+      const gen = (state.recoveryGen[user.email] ?? 0) + 1;
+      state.recoveryGen[user.email] = gen;
+      save(state);
+      return HttpResponse.json({ recoveryCodes: mockRecoveryCodesFor(user, gen) });
+    }),
+
+    http.post(`${base}/2fa/disable`, async ({ request }) => {
+      const checked = await reauth(request);
+      if (checked instanceof Response) return checked;
+      const { user } = checked;
+      if (isMandatory(user)) {
+        return HttpResponse.json(
+          { code: 'two_factor_mandatory', message: 'Two-factor is required for your role.' },
+          { status: 403 },
+        );
+      }
+      const state = load();
+      if (!twoFactorOn(user, state)) return conflict('not_enabled', 'Two-factor is not on.');
+      state.totpOn = state.totpOn.filter((email) => email !== user.email);
+      save(state);
+      return new HttpResponse(null, { status: 204 });
+    }),
+
+    http.post(`${base}/2fa/recovery-codes/regenerate`, async ({ request }) => {
+      const checked = await reauth(request);
+      if (checked instanceof Response) return checked;
+      const { user } = checked;
+      const state = load();
+      if (!twoFactorOn(user, state)) return conflict('not_enabled', 'Two-factor is not on.');
+      const gen = (state.recoveryGen[user.email] ?? 0) + 1;
+      state.recoveryGen[user.email] = gen;
+      save(state);
+      return HttpResponse.json({ recoveryCodes: mockRecoveryCodesFor(user, gen) });
     }),
 
     http.post(`${base}/refresh`, () => {
