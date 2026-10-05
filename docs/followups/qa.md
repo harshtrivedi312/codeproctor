@@ -90,7 +90,7 @@ Added: `apps/api/test/` (harness, Jest config, 9 integration files), `packages/p
 
 | ID | Severity | Owner | Defect |
 | --- | --- | --- | --- |
-| QA-D-01 | medium | proctor-sdk-engineer (architect to confirm the intended event shape) | TC-050 expects "FULLSCREEN_EXIT logged with duration". `FullscreenMonitor` emits FULLSCREEN_EXIT with no duration and puts the duration on FULLSCREEN_RESTORED. A candidate who never returns leaves no duration at all. Repro: `packages/proctor-sdk/src/qa/qa-tc.test.ts`, test "TC-050 KNOWN DEFECT QA-D-01" (`it.fails`). Expected: the exit is recorded with its duration (for example the SDK also emits a closing event or the server computes it, and test-cases.md says which). Actual: EXIT has no `durationMs`. Switch the test to `it` when decided |
+| QA-D-01 (decided by design 2026-10-05, pending ADR 0013 acceptance; see section 8) | medium | proctor-sdk-engineer (architect to confirm the intended event shape) | TC-050 expects "FULLSCREEN_EXIT logged with duration". `FullscreenMonitor` emits FULLSCREEN_EXIT with no duration and puts the duration on FULLSCREEN_RESTORED. A candidate who never returns leaves no duration at all. Repro: `packages/proctor-sdk/src/qa/qa-tc.test.ts`, test "TC-050 KNOWN DEFECT QA-D-01" (`it.fails`). Expected: the exit is recorded with its duration (for example the SDK also emits a closing event or the server computes it, and test-cases.md says which). Actual: EXIT has no `durationMs`. Switch the test to `it` when decided |
 | QA-D-02 | medium (blocks every browser-to-API run) | frontend-engineer (config) and backend-engineer (prefix) | The web client calls `/v1/auth/*` on `NEXT_PUBLIC_API_URL`, whose default and `.env.example` value is `http://localhost:4000`. The API serves `/api/v1/*` only, so `POST /v1/auth/login` is 404. Repro: `apps/api/test/integration/web-contract.int.test.ts`. Expected: the example value and the web default end in `/api`, or the web paths carry it |
 | QA-D-03 | low | frontend-engineer, architect | `apps/web/openapi/openapi.yaml` declares the error body as `{ code, message }` (and the MSW mocks return it). The real API returns RFC 7807 problem JSON (`type, title, status, detail, instance, traceId`), per ADR 0001 C-9. The web reads only HTTP status today, so nothing breaks, but the mocks hide the real shape. Update the schema and mocks to the problem shape before any screen reads `code` |
 | FU-QA-01 | should-fix | frontend-engineer | Still open: TC-047 client clock (see 6.1). The `it.fails` test still passes as expected, so the defect is not fixed and the marker stays |
@@ -137,3 +137,34 @@ Root cause was in the test, not the SDK: it assumed one batch per paste and wait
 
 Observation for proctor-sdk-engineer (low, not a data-loss defect; NFR-08 holds): `EventQueue.retryNow()` does nothing while a drain is already running. If the browser `online` event arrives during a send that is about to fail, the next attempt waits for the exponential backoff (up to 30 s) instead of starting at once. Suggested: remember that a retry was requested and run another drain pass when the current one ends in RETRY.
 
+
+## 8. QA-03 round (2026-10-05): BE-03 acceptance tests staged
+
+### 8.1 What was added
+
+- `apps/api/test/support/be03-routes.ts`: the single list of BE-03 (and BE-13 review) routes with permission, audit action, sample body and fixtures, plus the switches `BE03_READY` and `BE13_READY` (also `BE03_READY=1` / `BE13_READY=1` in the environment for a trial run). Every guessed name is marked `// ASSUMED`. To swap in Backend's route registry, edit this file only.
+- `apps/api/test/integration/tc-004-rbac.int.test.ts`, `tc-006-audit.int.test.ts`, `tc-002-unlock.int.test.ts` (P-03: alert on lock, audited admin unlock). Titles carry `[BE-03 pending]` or `[BE-13 pending]`; they are skipped until the switch is on. A few matrix-only checks run now.
+- `apps/api/test/support/be03-helpers.ts`: minimal local `actor` (create and sign in, with TOTP) and `call`. The fuller settle/signIn/expectReauthFailed helpers are on qa/step-2b (pending merge into backend PR #26); the rebase after #26 should dedupe.
+- The route list imports the permission matrix by relative path (`packages/shared/src/permissions`) because apps/api does not depend on `@codeproctor/shared`; if Backend adds that dependency, switch to the package import.
+- A trial run with `BE03_READY=1` against today's API ran the setup (users, sign-in with TOTP, org B) and failed only on the missing routes (404), so the bodies exercise real code paths.
+
+### 8.2 Assumptions to confirm with Backend (all marked ASSUMED)
+
+Routes: GET /users, POST /users/invite, PATCH /users/:id/role, POST /users/:id/deactivate, POST /users/:id/unlock; permission `user:manage` (SUPER_ADMIN only) for all. Audit actions: USER_INVITED, USER_ROLE_CHANGED, USER_DEACTIVATED, USER_UNLOCKED (entity type `user`, entity id the target user); review: REVIEW_SESSION_VIEWED (session), REVIEW_FLAG_DECIDED (proctor_event, flag id = event id), REVIEW_VERDICT_SET (session). User list and review queue are not audited. A refused call (401, 403, 404, 400) writes no audit row. Success codes 200 or 201 or 204. Alert on lock observed as an audit row `ADMIN_ALERT_ACCOUNT_LOCKED` (change `lockAlertsFor`). A deactivated user and a demoted user are refused on the next call (guard reads the database, not only the token).
+
+### 8.3 TC-008 coverage review (PR #30, branch db/step-5)
+
+Strong: 31 models, every read, write and delete as org A against org B, positive controls, filter widening, transactions, raw SQL, `app_user` grants. Gaps: (1) the HTTP cases use a test `ProbeController`, not a real route; (2) the 404 body shape (RFC 7807) and sameness of missing versus cross-org ids (no existence oracle) are not asserted; (3) a public route that reads org data answers 500, which the test accepts; the real contract should be a clean 4xx; (4) no WebSocket /live case and no candidate-token cross-org case; (5) the file runs under the apps/api unit Jest config, so the QA gate (which reads the integration run) does not see TC-008; add it to the gate input or move a thin wrapper to `test/integration`. FU-DB-59: the matrix points at that file as planned (PR #30), not Verified.
+
+### 8.4 TC-050 and QA-D-01 (pending ADR 0013 acceptance)
+
+Hub decision: FULLSCREEN_EXIT is emitted at once without `durationMs`; FULLSCREEN_RESTORED carries `durationMs`; the server fills `duration_ms` on the open FULLSCREEN_EXIT when RESTORED arrives or at session end. The p1-gate now handles both states: while the `it.fails` test exists it prints KNOWN DEFECT open with the matrix status; once it is replaced by plain tests it prints them as passing, not verified; if the `it.fails` test starts failing it prints a message that the defect was fixed or decided and the test must become a plain test (still a failure, on purpose). Checked with synthetic reports for all three cases.
+
+Proposed TC-050 wording for test-cases.md (not edited here; the hub carries it in ADR 0013's PR #39): Expected result: "Editor locked, overlay shown; FULLSCREEN_EXIT logged when the candidate leaves; on return FULLSCREEN_RESTORED logged with the time spent out; the server stores that duration on the FULLSCREEN_EXIT (also when the session ends while still out)."
+
+Planned (BE-10): `apps/api/test/integration/tc-050.int.test.ts`: duration_ms filled on the open FULLSCREEN_EXIT when RESTORED arrives, and at session end when it never does.
+
+### 8.5 Follow-ups to pick up
+
+- After merge: #32 (worker hardening), #30 (DB-05, TC-008), #26 (dedupe harness helpers), ADR 0013 (TC-050), BE-03 (flip the switches, fix assumed names, run, update the matrix from the run).
+- #25 and #27 added tests tagged TC-005 and TC-074; the matrix check passes with them.
