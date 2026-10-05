@@ -325,7 +325,14 @@ Each environment has its own bucket (D-10, D-11), so keys carry no environment. 
   | --- | --- | --- | --- |
   | Face (C-27) | anchor + LEAST(`retention_days`, 90) | `identity/**` and `evidence/sealed/**` | `identity_checks.id_image_key`, `selfie_key`; `proctor_events.evidence_key` of FACE_MISMATCH rows |
   | Media (R-4) | anchor + `retention_days` | everything under `orgs/{orgId}/sessions/{sessionId}/` **except `reports/`** (also the final backstop for orphans) | the R-4 columns except `sessions.report_key` |
-  | Results (R-10, C-26) | anchor + 1 year | `reports/` | `sessions.report_key` |
+  | Results (R-10, C-26) | anchor + 1 year | first the face and media tiers, if they have not completed; then `reports/` | `sessions.report_key`; R-10 also deletes the `submissions` rows (proposed ADR 0004 section 9) |
+
+  - **Tiers are selected by session, not by database keys.** A session is visited by a tier when it is anchor-eligible and has no completion marker for that tier. The marker is that tier's per-session audit row.
+    - The prefix listing then finds every object, including those with no DB reference:
+      - `live/` thumbnails;
+      - `identity/**/sealed/` frames the sweep missed after their key was nulled;
+      - media of a session whose `media_chunks` rows R-10 already deleted.
+  - **Nothing in this ADR reads `submissions` after the results clock.** Grading, review and the sweep all run long before it. A job that finds no `submissions` rows after R-10 treats the session as past its results clock and does nothing.
 
 - **Erasure (R-6)** deletes the whole session prefix, including `reports/`, and nulls `report_key`. `orgs/{orgId}/consents/{sessionId}/` is kept until its 3-year limit (C-17) and is deleted by the R-9 consent job (proposed ADR 0004 section 9.3, PR #48), objects first, then the row.
 - **Media chunk keys are deterministic**, so a retried presign targets the pending object. A confirmed chunk is protected by 5.5 controls 3 and 4.
