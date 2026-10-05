@@ -94,6 +94,18 @@ describe('LoginForm', () => {
     expect(lockedCorrect.response.headers.get('retry-after')).toBeNull();
   });
 
+  it('TC-002 FR-101: an unknown email and a wrong password show the identical message', async () => {
+    const first = renderWithAuth(<LoginForm />);
+    await signIn('nobody@example.test', 'whatever-123456');
+    const unknown = (await screen.findByRole('alert')).textContent;
+    first.unmount();
+    renderWithAuth(<LoginForm />);
+    await signIn(MOCK_USERS.recruiter.email, 'wrong-password');
+    const wrong = (await screen.findByRole('alert')).textContent;
+    expect(unknown).toBe(SIGN_IN_FAILED_MESSAGE);
+    expect(wrong).toBe(unknown);
+  });
+
   it('FR-101: a network failure says what to do', async () => {
     const { http, HttpResponse } = await import('msw');
     server.use(http.post('*/v1/auth/login', () => HttpResponse.error()));

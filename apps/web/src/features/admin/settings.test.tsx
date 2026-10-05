@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
+import { toast } from 'sonner';
 import { axe } from 'vitest-axe';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetMockAdminState } from '@/mocks/admin-handlers';
@@ -14,12 +15,16 @@ import { DataSettingsPage } from './data-settings-page';
 import { RiskSettingsPage } from './risk-settings-page';
 import { UsersPage } from './users-page';
 
+vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
 
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
-beforeEach(() => resetAuthTestState());
+beforeEach(() => {
+  resetAuthTestState();
+  vi.mocked(toast.error).mockClear();
+});
 
 const findRow = (name: string) => screen.findByRole('row', { name: new RegExp(name) });
 const rowOf = (name: string) => screen.getByRole('row', { name: new RegExp(name) });
@@ -112,6 +117,45 @@ describe('Users (FR-103)', () => {
     );
     expect(patches.count()).toBe(1);
     patches.stop();
+  });
+
+  it('FR-103: a 409 on a role change shows neutral copy and keeps the old role', async () => {
+    server.use(
+      http.patch('*/v1/admin/users/:id', () =>
+        HttpResponse.json({ code: 'conflict', message: 'x' }, { status: 409 }),
+      ),
+    );
+    const u = userEvent.setup();
+    renderAsStaff(<UsersPage />, MOCK_USERS.admin);
+    await findRow('Casey Newhire');
+    await u.selectOptions(screen.getByLabelText('Role for Avery Author'), 'RECRUITER');
+    await u.click(
+      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Change role' }),
+    );
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    const message = String(vi.mocked(toast.error).mock.calls[0]?.[0]);
+    expect(message).toContain('This role change is not allowed');
+    expect(message).toContain('last Super Admin');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.getByLabelText('Role for Avery Author')).toHaveValue('AUTHOR');
+  });
+
+  it('FR-103: a network error on a role change says what to do and keeps the old role', async () => {
+    server.use(http.patch('*/v1/admin/users/:id', () => HttpResponse.error()));
+    const u = userEvent.setup();
+    renderAsStaff(<UsersPage />, MOCK_USERS.admin);
+    await findRow('Casey Newhire');
+    await u.selectOptions(screen.getByLabelText('Role for Avery Author'), 'RECRUITER');
+    await u.click(
+      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Change role' }),
+    );
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        expect.stringContaining('Could not change the role. Check your connection'),
+      ),
+    );
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.getByLabelText('Role for Avery Author')).toHaveValue('AUTHOR');
   });
 
   it('FR-103: cancelling the role confirmation sends nothing and keeps the role', async () => {

@@ -62,7 +62,7 @@ function UsersContent(): React.JSX.Element {
         onError: (e) =>
           toast.error(
             e instanceof ApiFailure && e.status === 409
-              ? 'You cannot change your own role. Ask another Super Admin.'
+              ? 'This role change is not allowed. You cannot change your own role, and the last Super Admin cannot be changed. Ask another Super Admin if you need this.'
               : 'Could not change the role. Check your connection and try again.',
           ),
         onSettled: () => setRoleChange(null),
