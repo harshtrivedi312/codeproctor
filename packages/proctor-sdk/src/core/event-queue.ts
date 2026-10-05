@@ -6,6 +6,7 @@ import {
 import { canonicalJson } from './canonical';
 import { signHex } from './hmac';
 import { IdbStore, STORES, padSeq } from './idb';
+import { SessionTouch, sweepStaleSessions } from './sweep';
 
 /** What goes on the wire: `body` is the exact signed string, `signature` is hex HMAC-SHA256. */
 export interface SignedBatch {
@@ -36,6 +37,8 @@ export interface EventQueueOptions {
   backoffMaxMs?: number;
   /** 0..1 jitter share; tests set 0 for determinism. */
   jitter?: number;
+  /** Other sessions' leftovers older than this are deleted on start (default 24 h). */
+  staleAfterMs?: number;
 }
 
 export interface EventQueueStats {
@@ -69,6 +72,7 @@ export class EventQueue {
   private draining = false;
   private chain: Promise<void> = Promise.resolve();
   private started = false;
+  private readonly touch: SessionTouch;
   private sent = 0;
   private rejected = 0;
   private invalid = 0;
@@ -79,6 +83,7 @@ export class EventQueue {
     this.backoffBaseMs = opts.backoffBaseMs ?? 1000;
     this.backoffMaxMs = opts.backoffMaxMs ?? 30_000;
     this.jitter = opts.jitter ?? 0.2;
+    this.touch = new SessionTouch(opts.store, opts.sessionId);
   }
 
   private metaKey(): string {
@@ -95,6 +100,12 @@ export class EventQueue {
     const stored = (await this.opts.store.get<number>(STORES.meta, this.metaKey())) ?? 0;
     const maxSaved = this.outbox.reduce((m, b) => Math.max(m, b.seq + 1), 0);
     this.nextSeq = Math.max(stored, maxSaved);
+    await sweepStaleSessions(
+      this.opts.store,
+      this.opts.sessionId,
+      Date.now(),
+      this.opts.staleAfterMs,
+    );
     this.started = true;
     if (this.outbox.length > 0) void this.drain();
   }
@@ -139,6 +150,7 @@ export class EventQueue {
       );
       await this.opts.store.put(STORES.meta, this.metaKey(), this.nextSeq);
       this.outbox.push(batch);
+      void this.touch.touch();
     }
   }
 
@@ -203,6 +215,35 @@ export class EventQueue {
       droppedInvalidEvents: this.invalid,
       nextSeq: this.nextSeq,
     };
+  }
+
+  /**
+   * End of session (FR-702): flush, wait up to `drainTimeoutMs` for the outbox to empty, then delete
+   * every stored batch of this session from IndexedDB. Batches that did not get through are
+   * returned as `lostBatches` (and are gone: signed batches must not linger on the candidate's
+   * disk). The `nextEventSeq` counter is KEPT: it is a small integer, not candidate data, and a
+   * new queue for the same session after a reload must continue at the next seq; restarting at 0
+   * would make the server acknowledge and discard new batches that reuse an old seq. The stale
+   * sweep removes the counter later. Keystroke batches use the same store layout when that queue exists.
+   */
+  async finish(drainTimeoutMs = 15_000): Promise<{ lostBatches: number }> {
+    await this.flush();
+    const deadline = Date.now() + drainTimeoutMs;
+    while (this.outbox.length > 0 && Date.now() < deadline) {
+      this.retryNow();
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const lostBatches = this.outbox.length;
+    this.outbox = [];
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.started = false;
+    try {
+      await this.opts.store.deletePrefix(STORES.eventBatches, `${this.opts.sessionId}:`);
+    } catch {
+      // best effort
+    }
+    return { lostBatches };
   }
 
   /** Final flush, then stop timers. Unsent batches stay in IndexedDB for the next page load. */

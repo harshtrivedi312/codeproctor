@@ -54,3 +54,28 @@ Verdict: approve after the blocker fixes below. Fixed on this branch: `RunReques
 ## Pointer
 
 The [ARC-02] items under "frontend/step-2" in docs/followups/frontend.md (staff auth schemas, endpoints, 2FA challenge, password policy, fragment tokens) are architecture-hub work and are tracked there.
+
+## CLAUDE.md "Working in parallel" (PR #29 review)
+
+### Should-fix
+1. Rules 6 and 7: a PR touching CLAUDE.md, `.claude/` or an ADR needs the owner to approve the merge of the reviewed head SHA, not only the draft. Add to rule 6 "unless the PR falls under rule 7".
+2. Rule 13: "keep both sides' content" on docs conflicts must not apply to CLAUDE.md, `.claude/` or ADRs; stop and ask the owner (rule 7).
+
+### Nits
+- Rule 9: re-run code-reviewer after any push after review, including a rebase.
+- Rule 1: "never force-push a branch you do not own" repeats "push only to your own branches".
+- Rule 14: list all four human-only commands (`db:reset`, `dev:infra:reset`, `prisma migrate reset`, `db push`) or none.
+
+### Owner decisions pending
+- Only the Database session runs `db:migrate` and `db:seed` on the shared local stack?
+- Full review for source-of-truth docs (fsd, database, test-cases, architecture)?
+- Escalation of docs-to-docs contradictions from the hub to the owner?
+
+## ADR 0011 re-authentication (PR #31 review)
+
+Owner questions are listed in `docs/api-contract.md` section 1 ("Open for the owner"): admin reset password, shared lockout, mandatory-2FA roles and disable, admin resetting admins, refresh-token revocation, TOTP on disable.
+
+### Should-fix (ARC-02 part 2)
+- Add fsd.md §4 rows for `/auth/2fa/setup/*`, disable, regenerate and reset; ask QA for new TC IDs.
+- `reauth` body schema in packages/shared.
+- BE-02: decide and document whether a successful re-auth resets the failed-login counter, as a login does.
