@@ -6,11 +6,12 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 /** Start gate: shown before the demo test begins (the real flow uses the Step 9 system check). */
 export function StartGate({
   onEnter,
-  onContinueWithout,
+  demoAction,
   fullscreenFailed,
 }: {
   onEnter: () => void;
-  onContinueWithout: () => void;
+  /** Demo-only escape hatch; never passed in a real session. */
+  demoAction?: React.ReactNode;
   fullscreenFailed: boolean;
 }): React.JSX.Element {
   return (
@@ -36,9 +37,7 @@ export function StartGate({
           <Button size="lg" onClick={onEnter}>
             <Maximize className="h-5 w-5" aria-hidden /> Enter fullscreen and start
           </Button>
-          <Button variant="ghost" onClick={onContinueWithout}>
-            Continue without fullscreen (demo only)
-          </Button>
+          {demoAction}
         </div>
       </DialogContent>
     </Dialog>
@@ -84,12 +83,14 @@ export function FinishSectionDialog({
   onOpenChange,
   onConfirm,
   busy,
+  error,
   sectionTitle,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
   busy: boolean;
+  error?: string | null;
   sectionTitle: string;
 }): React.JSX.Element {
   return (
@@ -101,12 +102,20 @@ export function FinishSectionDialog({
           left. Your latest saved answers are submitted. Make sure you are done with every question
           in it.
         </DialogDescription>
+        {error && (
+          <p
+            role="alert"
+            className="mt-3 rounded-md bg-destructive-soft p-3 text-sm text-destructive"
+          >
+            {error}
+          </p>
+        )}
         <div className="mt-6 flex flex-wrap justify-end gap-3">
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Keep working
           </Button>
           <Button variant="destructive" onClick={onConfirm} disabled={busy}>
-            {busy ? 'Finishing…' : 'Finish section'}
+            {busy ? 'Finishing…' : error ? 'Try again' : 'Finish section'}
           </Button>
         </div>
       </DialogContent>
