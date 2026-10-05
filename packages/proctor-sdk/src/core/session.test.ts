@@ -108,4 +108,15 @@ describe('ProctorSession', () => {
     expect(locks).toEqual([true, false]);
     await s.stop();
   });
+
+  it('FR-609: the heartbeat starts before detectors, so a hanging detector cannot block it', async () => {
+    const { cfg, heartbeat } = config({
+      detectors: [
+        { id: 'hang', start: () => new Promise<void>(() => undefined), stop: () => undefined },
+      ],
+    });
+    const s = new ProctorSession();
+    void s.start(cfg);
+    await vi.waitFor(() => expect(heartbeat).toHaveBeenCalled());
+  });
 });

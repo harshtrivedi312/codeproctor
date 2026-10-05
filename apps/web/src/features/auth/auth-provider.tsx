@@ -3,7 +3,10 @@ import { useRouter } from 'next/navigation';
 import * as React from 'react';
 import { api, type Schemas } from '@/lib/api/client';
 import {
-  invalidateRefreshes,
+  beginSession,
+  beginSignOut,
+  confirmSignedOut,
+  isSignOutPending,
   onSessionChange,
   publishSession,
   refreshSession,
@@ -28,6 +31,9 @@ interface AuthContextValue {
   pending: PendingChallenge | null;
   /** True after the user chose Sign out, so the redirect to login does not say "session ended". */
   signedOutByUser: boolean;
+  /** True when the server has not confirmed the last sign-out; the login screen offers a retry. */
+  signOutUnconfirmed: boolean;
+  retrySignOut: () => Promise<void>;
   setPending: (pending: PendingChallenge | null) => void;
   /** Called after a successful login, 2FA verify or enrollment. */
   signIn: (session: AuthSession) => void;
@@ -42,39 +48,65 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
   const [user, setUser] = React.useState<AuthUser | null>(null);
   const [pending, setPending] = React.useState<PendingChallenge | null>(null);
   const [signedOutByUser, setSignedOutByUser] = React.useState(false);
+  const [signOutUnconfirmed, setSignOutUnconfirmed] = React.useState(false);
+
+  /** Asks the server to end the session. Only a success clears the pending marker. */
+  const confirmLogout = React.useCallback(async () => {
+    let ok: boolean;
+    try {
+      ok = (await api.POST('/v1/auth/logout')).response.ok;
+    } catch {
+      ok = false;
+    }
+    if (ok) confirmSignedOut();
+    setSignOutUnconfirmed(!ok);
+  }, []);
 
   React.useEffect(() => {
     const off = onSessionChange((session) => {
       setUser(session ? session.user : null);
       setStatus(session ? 'authenticated' : 'unauthenticated');
     });
-    // Silent refresh on first load: the httpOnly cookie restores the session without a login.
-    void refreshSession();
+    // Runs after the effect body (the marker lives in localStorage, so it cannot be read during
+    // render without a hydration mismatch).
+    const start = async (): Promise<void> => {
+      await Promise.resolve();
+      if (isSignOutPending()) {
+        // The last sign-out was never confirmed. Do not restore a session; try the logout again.
+        setSignedOutByUser(true);
+        publishSession(null);
+        await confirmLogout();
+      } else {
+        // Silent refresh on first load: the httpOnly cookie restores the session without a login.
+        await refreshSession();
+      }
+    };
+    void start();
     return off;
-  }, []);
+  }, [confirmLogout]);
 
   const signIn = React.useCallback((session: AuthSession) => {
     setPending(null);
     setSignedOutByUser(false);
+    setSignOutUnconfirmed(false);
+    beginSession();
     publishSession(session);
   }, []);
 
   const signOut = React.useCallback(async () => {
     setSignedOutByUser(true);
-    // A refresh that is still in flight must not bring the session back after this.
-    invalidateRefreshes();
+    // Waits for a refresh already running, then blocks new ones until the next sign-in.
+    await beginSignOut();
     try {
-      await api.POST('/v1/auth/logout');
-    } catch {
-      // Offline or server error: the local sign-out below still happens; the refresh cookie
-      // expires on its own (FR-104).
+      await confirmLogout();
     } finally {
-      // Whatever the server said, this browser forgets the session.
+      // Whatever the server said, this browser forgets the session. If the server did not confirm,
+      // the pending marker stays set so a reload does not restore it (FR-104).
       publishSession(null);
       setPending(null);
       router.replace('/admin/login');
     }
-  }, [router]);
+  }, [router, confirmLogout]);
 
   const value = React.useMemo<AuthContextValue>(
     () => ({
@@ -83,11 +115,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       role: user?.role ?? null,
       pending,
       signedOutByUser,
+      signOutUnconfirmed,
+      retrySignOut: confirmLogout,
       setPending,
       signIn,
       signOut,
     }),
-    [status, user, pending, signedOutByUser, signIn, signOut],
+    [status, user, pending, signedOutByUser, signOutUnconfirmed, confirmLogout, signIn, signOut],
   );
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
