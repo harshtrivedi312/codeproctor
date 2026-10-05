@@ -31,7 +31,8 @@
 //     crosses orgs leaks: `sessionReview.findUnique({ include: { reviewer: true } })` returns the
 //     reviewer user row of another org, password hash included, if reviewer_id points there.
 // (d) Rule (i) covers 25 foreign keys, not only the staff references and
-//     test_questions.question_version_id (FU-DB-64). The main cross-chain ones: session_questions
+//     test_questions.question_version_id (RULE_I_REFERENCES in org-scope-relations.ts, 25 keys: 12
+//     staff and 13 cross-chain). The main cross-chain ones: session_questions
 //     to test_questions, question_versions and question_variants; session_sections to
 //     test_sections; consents to consent_texts; keystroke_batches to session_questions;
 //     webhook_deliveries to sessions; organizations to consent_texts.

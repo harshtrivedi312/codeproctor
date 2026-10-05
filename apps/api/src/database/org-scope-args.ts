@@ -245,7 +245,8 @@ function namesOtherOrg(cursor: PlainObject, orgId: string): boolean {
  *     user row of another org, password hash included, if reviewer_id points there.
  * (d) The foreign keys that rule (i) has to cover are many more than the staff references
  *     (`created_by`, `reviewer_id`, `assigned_to`, `collected_by`) and
- *     `test_questions.question_version_id`: FU-DB-64 lists 25, among them the cross-chain ones
+ *     `test_questions.question_version_id`: RULE_I_REFERENCES (org-scope-relations.ts) lists the
+ *     25 (12 staff, 13 cross-chain), among them the cross-chain ones
  *     (session_questions to test_questions, question_versions and variants; session_sections to
  *     test_sections; consents to consent_texts; keystroke_batches to session_questions).
  * (e) The raw SQL hatch (OrgContextService.runRawSql) stays open inside a scope started within
