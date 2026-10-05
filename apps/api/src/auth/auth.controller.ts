@@ -1,10 +1,22 @@
-import { Body, Controller, HttpCode, Post, Req, Res } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Header,
+  HttpCode,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Req,
+  Res,
+} from '@nestjs/common';
 import {
   ApiAcceptedResponse,
   ApiBadRequestResponse,
   ApiBearerAuth,
   ApiConflictResponse,
   ApiCookieAuth,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
   ApiNoContentResponse,
   ApiOkResponse,
   ApiOperation,
@@ -23,16 +35,21 @@ import {
   AuthSessionDto,
   ChallengeCodeDto,
   ChallengeDto,
+  CurrentPasswordDto,
   EnrollmentConfirmedDto,
   ForgotPasswordDto,
   LoginDto,
   LoginResultDto,
+  RecoveryCodesDto,
   ResetPasswordDto,
-  TotpCodeDto,
+  SetupConfirmDto,
+  SetupStartDto,
   TotpEnrollmentDto,
 } from './dto/auth.dto';
 
 export const REFRESH_COOKIE = 'cp_refresh';
+// Responses that carry a TOTP secret, QR code, recovery codes or a bearer token are never cached.
+const NO_STORE = 'no-store';
 const ALL_STAFF = [UserRole.SUPER_ADMIN, UserRole.RECRUITER, UserRole.AUTHOR, UserRole.REVIEWER];
 
 const cookieOptions: CookieOptions = {
@@ -67,6 +84,7 @@ export class AuthController {
   @Public()
   @Post('login')
   @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Staff password login; may return a 2FA challenge (FR-101, FR-102)' })
   @ApiOkResponse({ type: LoginResultDto })
   @ApiUnauthorizedResponse({ description: 'Wrong email or password (one message for all causes)' })
@@ -83,16 +101,19 @@ export class AuthController {
   @Public()
   @Post('2fa/enroll/start')
   @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Begin forced TOTP enrollment with the login challenge (FR-102)' })
   @ApiOkResponse({ type: TotpEnrollmentDto })
   @ApiUnauthorizedResponse({ description: 'Challenge expired' })
-  enrollStart(@Body() dto: ChallengeDto): Promise<TotpEnrollmentDto> {
-    return this.auth.startEnrollment(this.auth.resolveChallenge(dto.challengeToken));
+  async enrollStart(@Body() dto: ChallengeDto): Promise<TotpEnrollmentDto> {
+    const challenge = await this.auth.resolveChallenge(dto.challengeToken);
+    return this.auth.startEnrollment(challenge.userId);
   }
 
   @Public()
   @Post('2fa/enroll/confirm')
   @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Confirm forced enrollment; returns session and recovery codes once' })
   @ApiOkResponse({ type: EnrollmentConfirmedDto })
   @ApiBadRequestResponse({ description: 'Wrong code' })
@@ -102,15 +123,21 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<EnrollmentConfirmedDto> {
-    const userId = this.auth.resolveChallenge(dto.challengeToken);
-    const result = await this.auth.confirmEnrollment(userId, dto.code, ctxOf(req), true);
-    if (result.session) setRefreshCookie(res, result.session);
-    return { session: result.session?.body.session, recoveryCodes: result.recoveryCodes };
+    const challenge = await this.auth.resolveChallenge(dto.challengeToken);
+    const result = await this.auth.confirmEnrollmentWithChallenge(
+      challenge.userId,
+      dto.code,
+      ctxOf(req),
+      challenge,
+    );
+    setRefreshCookie(res, result.session);
+    return { session: result.session.body.session, recoveryCodes: result.recoveryCodes };
   }
 
   @Public()
   @Post('2fa/verify')
   @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Complete login with a TOTP code or a recovery code (FR-102)' })
   @ApiOkResponse({ type: AuthSessionDto })
   @ApiBadRequestResponse({ description: 'Wrong code' })
@@ -120,8 +147,13 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<AuthSessionDto | undefined> {
-    const userId = this.auth.resolveChallenge(dto.challengeToken);
-    const outcome = await this.auth.completeLogin(userId, dto.code, ctxOf(req));
+    const challenge = await this.auth.resolveChallenge(dto.challengeToken);
+    const outcome = await this.auth.completeLogin(
+      challenge.userId,
+      dto.code,
+      ctxOf(req),
+      challenge,
+    );
     setRefreshCookie(res, outcome);
     return outcome.body.session;
   }
@@ -131,30 +163,109 @@ export class AuthController {
   @ApiBearerAuth()
   @Post('2fa/setup/start')
   @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Signed-in user begins optional TOTP enrollment (FR-102)' })
   @ApiOkResponse({ type: TotpEnrollmentDto })
-  setupStart(@Req() req: AuthedRequest): Promise<TotpEnrollmentDto> {
-    return this.auth.startEnrollment(this.userId(req));
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
+  @ApiForbiddenResponse({
+    description:
+      "Wrong current password or locked account: one generic body with code 'REAUTH_FAILED' (not a session expiry)",
+  })
+  setupStart(@Body() dto: SetupStartDto, @Req() req: AuthedRequest): Promise<TotpEnrollmentDto> {
+    return this.auth.startSetup(this.userId(req), dto.currentPassword, ctxOf(req));
   }
 
   @Roles(...ALL_STAFF)
   @ApiBearerAuth()
   @Post('2fa/setup/confirm')
   @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Signed-in user confirms optional TOTP; returns recovery codes once' })
   @ApiOkResponse({ type: EnrollmentConfirmedDto })
   @ApiBadRequestResponse({ description: 'Wrong code' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
+  @ApiForbiddenResponse({
+    description:
+      "Wrong current password or locked account: one generic body with code 'REAUTH_FAILED' (not a session expiry)",
+  })
   async setupConfirm(
-    @Body() dto: TotpCodeDto,
+    @Body() dto: SetupConfirmDto,
     @Req() req: AuthedRequest,
   ): Promise<EnrollmentConfirmedDto> {
-    const result = await this.auth.confirmEnrollment(this.userId(req), dto.code, ctxOf(req), false);
+    const result = await this.auth.confirmEnrollment(
+      this.userId(req),
+      dto.currentPassword,
+      dto.code,
+      ctxOf(req),
+    );
     return { recoveryCodes: result.recoveryCodes };
+  }
+
+  @Roles(...ALL_STAFF)
+  @ApiBearerAuth()
+  @Post('2fa/disable')
+  @HttpCode(204)
+  @ApiOperation({ summary: 'Turn 2FA off; needs the current password; not for 2FA-required roles' })
+  @ApiNoContentResponse()
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
+  @ApiForbiddenResponse({
+    description:
+      "Wrong or locked current password: code 'REAUTH_FAILED' (not a session expiry). 2FA required for this role: code 'TWO_FACTOR_REQUIRED_FOR_ROLE', checked after the password",
+  })
+  @ApiConflictResponse({ description: '2FA is not on' })
+  async disable(@Body() dto: CurrentPasswordDto, @Req() req: AuthedRequest): Promise<void> {
+    await this.auth.disableTwoFactor(this.userId(req), dto.currentPassword, ctxOf(req));
+  }
+
+  @Roles(...ALL_STAFF)
+  @ApiBearerAuth()
+  @Post('2fa/recovery-codes/regenerate')
+  @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
+  @ApiOperation({ summary: 'Replace all recovery codes; needs the current password (FR-102)' })
+  @ApiOkResponse({ type: RecoveryCodesDto })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
+  @ApiForbiddenResponse({
+    description:
+      "Wrong current password or locked account: one generic body with code 'REAUTH_FAILED' (not a session expiry)",
+  })
+  @ApiConflictResponse({ description: '2FA is not on' })
+  regenerateRecoveryCodes(
+    @Body() dto: CurrentPasswordDto,
+    @Req() req: AuthedRequest,
+  ): Promise<RecoveryCodesDto> {
+    return this.auth.regenerateRecoveryCodes(this.userId(req), dto.currentPassword, ctxOf(req));
+  }
+
+  @Roles(UserRole.SUPER_ADMIN)
+  @ApiBearerAuth()
+  @Post('2fa/reset/:userId')
+  @HttpCode(204)
+  @ApiOperation({
+    summary:
+      "Super admin clears another user's 2FA and revokes their refresh sessions; needs the admin's own current password (FR-102). Access tokens already issued expire within 15 minutes; this is not an immediate compromise response.",
+  })
+  @ApiNoContentResponse()
+  @ApiBadRequestResponse({ description: 'Not a UUID, or the caller targeted themselves' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
+  @ApiForbiddenResponse({
+    description:
+      "Caller is not a super admin, or the admin's own current password is wrong or locked (code 'REAUTH_FAILED')",
+  })
+  @ApiNotFoundResponse({ description: 'No such user in your organization' })
+  async resetTwoFactor(
+    @Param('userId', new ParseUUIDPipe()) userId: string,
+    @Body() dto: CurrentPasswordDto,
+    @Req() req: AuthedRequest,
+  ): Promise<void> {
+    if (!req.user) throw new Error('Guard did not attach a user');
+    await this.auth.resetTwoFactorOf(req.user, userId, dto.currentPassword, ctxOf(req));
   }
 
   @Public()
   @Post('refresh')
   @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Rotate the refresh cookie and return a new access token (FR-104)' })
   @ApiCookieAuth()
   @ApiOkResponse({ type: AuthSessionDto })

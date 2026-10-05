@@ -8,7 +8,9 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
+import { PrismaService } from '../../database/prisma.module';
 import { UserRole } from '../../generated/prisma/client';
+import { passwordVersion } from '../../auth/crypto.util';
 import type { AuthedRequest, AuthUser, TokenKind } from './auth.types';
 import { IS_PUBLIC, ROLES } from './decorators';
 import { TokenService } from './token.service';
@@ -18,6 +20,7 @@ interface StaffClaims {
   org: string;
   role: UserRole;
   kind: TokenKind;
+  pwv?: unknown;
 }
 
 function isClaims(v: unknown): v is StaffClaims {
@@ -37,11 +40,17 @@ export class JwtAuthGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly tokens: TokenService,
+    private readonly prisma: PrismaService,
   ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const targets = [context.getHandler(), context.getClass()];
-    if (this.reflector.getAllAndOverride<boolean | undefined>(IS_PUBLIC, targets)) return true;
+    const isPublic = targets.some((t) => this.reflector.get<boolean | undefined>(IS_PUBLIC, t));
+    const hasRoles = targets.some((t) => this.reflector.get<UserRole[] | undefined>(ROLES, t));
+    // @Public() and @Roles() on one route is a coding mistake. A class-level @Public() must never
+    // silently open a method that declares roles, so refuse the route outright (FU-BE-35).
+    if (isPublic && hasRoles) throw new ForbiddenException('Forbidden.');
+    if (isPublic) return true;
 
     const req = context.switchToHttp().getRequest<AuthedRequest>();
     const header = req.headers.authorization;
@@ -58,8 +67,25 @@ export class JwtAuthGuard implements CanActivate {
     // A 2FA challenge token is never a session.
     if (claims.kind !== 'access') throw new UnauthorizedException('Authentication required.');
 
+    // The token alone is not enough: re-read the user so a deactivation, role change or password
+    // reset takes effect at once instead of after the 15 minute token lifetime (FU-BE-19).
+    // One primary-key lookup; any database error propagates and the request is refused.
+    const current = await this.prisma.client.user.findUnique({
+      where: { id: claims.sub },
+      select: { isActive: true, role: true, orgId: true, passwordHash: true },
+    });
+    if (
+      !current?.isActive ||
+      !current.passwordHash ||
+      current.role !== claims.role ||
+      current.orgId !== claims.org ||
+      claims.pwv !== passwordVersion(current.passwordHash)
+    ) {
+      throw new UnauthorizedException('Authentication required.');
+    }
+
     const roles = this.reflector.getAllAndOverride<UserRole[] | undefined>(ROLES, targets);
-    if (!roles || !roles.includes(claims.role)) throw new ForbiddenException('Forbidden.');
+    if (!roles || !roles.includes(current.role)) throw new ForbiddenException('Forbidden.');
 
     const user: AuthUser = {
       id: claims.sub,
