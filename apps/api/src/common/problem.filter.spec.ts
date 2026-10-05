@@ -49,3 +49,28 @@ describe('ProblemFilter code extension (ADR 0001 C-9)', () => {
     expect(run(new HttpException('down', 503)).body.code).toBeUndefined();
   });
 });
+
+describe('ProblemFilter org-scope failure (FR-103, TC-008)', () => {
+  it('TC-008: a query without an org context is a fixed 403 that leaks nothing', () => {
+    const { OrgContextMissingError } =
+      jest.requireActual<typeof import('../database/errors')>('../database/errors');
+    const { status, body } = run(new OrgContextMissingError('Session.findMany'));
+    expect(status).toBe(403);
+    expect(body).toEqual({
+      type: 'about:blank',
+      title: 'Forbidden',
+      status: 403,
+      detail: 'Access denied.',
+      instance: '/api/v1/x',
+      traceId: 'trace-1',
+    });
+    const text = JSON.stringify(body);
+    expect(text).not.toMatch(/Session|findMany|OrgContext|runAsUser|README/);
+  });
+
+  it('TC-008: other org-scope errors stay a generic 500', () => {
+    const { OrgScopeViolationError } =
+      jest.requireActual<typeof import('../database/errors')>('../database/errors');
+    expect(run(new OrgScopeViolationError('x')).status).toBe(500);
+  });
+});

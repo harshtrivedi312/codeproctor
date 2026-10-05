@@ -17,6 +17,7 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { Public, Roles } from '../common/auth/decorators';
 import { passwordVersion } from '../auth/crypto.util';
+import { ProblemFilter } from '../common/problem.filter';
 import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
 import { TokenModule, TokenService } from '../common/auth/token.service';
 import type { PrismaClient } from '../generated/prisma/client.js';
@@ -178,6 +179,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
     B = await createTenant(owner, 'b');
     moduleRef = await compileApp(db.appUserUrl);
     app = moduleRef.createNestApplication<INestApplication<App>>({ logger: false });
+    app.useGlobalFilters(new ProblemFilter());
     await app.listen(0);
     prisma = app.get(PrismaService);
     orgContext = app.get(OrgContextService);
@@ -738,9 +740,10 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expect(casesA.body).toEqual([A.rows.TestCase.filter.id]);
     });
 
-    it('TC-008 a staff route without a token is 401 (the guard), and a public route cannot read org data (500, nothing leaked)', async () => {
+    it('TC-008 a staff route without a token is 401 (the guard), and a public route cannot read org data (403 Access denied, nothing leaked)', async () => {
       await request(app.getHttpServer()).get('/probe/sessions').expect(401);
-      const res = await request(app.getHttpServer()).get('/probe/public-sessions').expect(500);
+      const res = await request(app.getHttpServer()).get('/probe/public-sessions').expect(403);
+      expect((res.body as { detail?: string }).detail).toBe('Access denied.');
       expect(JSON.stringify(res.body)).not.toContain('Session');
       expect(JSON.stringify(res.body)).not.toContain(A.orgId);
     });
