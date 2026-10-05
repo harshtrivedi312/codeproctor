@@ -7,12 +7,20 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { REPO_ROOT, createSandbox } from './test-support.mjs';
+import { REPO_ROOT, createSandbox, readCalls } from './test-support.mjs';
 
 const CLOSED = 'postgresql://x:y@127.0.0.1:1/none';
-const PASSWORD_SCRIPT_CALL = 'node infra/scripts/set-app-user-password.mjs';
+// Each stand-in call is { command, args }, one argument per entry (test-support.mjs).
+const PASSWORD_STEP = {
+  command: 'node',
+  args: ['infra/scripts/set-app-user-password.mjs', '--if-role-exists'],
+};
+const migrateDev = (...args) => ({
+  command: 'pnpm',
+  args: ['exec', 'prisma', 'migrate', 'dev', ...args],
+});
 
-/** Runs db-migrate with stdin closed. `log` holds every call the stand-ins received. */
+/** Runs db-migrate with stdin closed. `calls` holds every call the stand-ins received. */
 function runDbMigrate(args = [], extraEnv = {}) {
   const sandbox = createSandbox({ stubPasswordScript: true });
   try {
@@ -26,10 +34,8 @@ function runDbMigrate(args = [], extraEnv = {}) {
       encoding: 'utf8',
       input: '',
     });
-    const log = existsSync(sandbox.log)
-      ? readFileSync(sandbox.log, 'utf8').split('\n').filter(Boolean)
-      : [];
-    return { ...result, output: `${result.stdout}${result.stderr}`, log };
+    const calls = existsSync(sandbox.log) ? readCalls(readFileSync(sandbox.log, 'utf8')) : [];
+    return { ...result, output: `${result.stdout}${result.stderr}`, calls };
   } finally {
     sandbox.remove();
   }
@@ -38,7 +44,7 @@ function runDbMigrate(args = [], extraEnv = {}) {
 function assertRefused(result, messagePattern) {
   assert.equal(result.status, 1, result.output);
   assert.match(result.stderr, messagePattern);
-  assert.deepEqual(result.log, [], 'pnpm or the password script was called');
+  assert.deepEqual(result.calls, [], 'pnpm or the password script was called');
 }
 
 test('ADR-0009 5 (P17): --config and --url are refused in both forms, before the guard runs', () => {
@@ -63,7 +69,7 @@ test('ADR-0009 5 (P17): --config and --url are refused in both forms, before the
 test('ADR-0009 5 (P17): similar flags are not mistaken for --config or --url', () => {
   const result = runDbMigrate(['--name', 'config', '--create-only'], { FAKE_PNPM_EXIT: '0' });
   assert.equal(result.status, 0, result.output);
-  assert.deepEqual(result.log, ['pnpm exec prisma migrate dev --name config --create-only']);
+  assert.deepEqual(result.calls, [migrateDev('--name', 'config', '--create-only'), PASSWORD_STEP]);
 });
 
 test('NFR-04: a non-local URL is refused before pnpm is called, naming the host and no secret', () => {
@@ -84,33 +90,47 @@ test('NFR-04: a libpq redirect variable and a host override in the URL are refus
   );
 });
 
-test('ADR-0006 7.4: --create-only runs migrate dev with the arguments and does not run the password script', () => {
-  const result = runDbMigrate(['--create-only', '--name', 'audit_append_only'], {
-    FAKE_PNPM_EXIT: '0',
-  });
+test('FU-DB-27: an argument with a space, a quote or a glob character reaches prisma as one argument', () => {
+  // The stand-in logs one line per argument, so splitting "two words" in two (an unquoted $@ or $*)
+  // would show up as two entries.
+  const args = ['--name', 'two words', "--name=it's", '*', '  padded  '];
+  const result = runDbMigrate(args, { FAKE_PNPM_EXIT: '0' });
   assert.equal(result.status, 0, result.output);
-  assert.match(result.stdout, /database URLs point at this machine/, 'the guard ran first');
-  assert.deepEqual(result.log, [
-    'pnpm exec prisma migrate dev --create-only --name audit_append_only',
-  ]);
+  assert.deepEqual(result.calls, [migrateDev(...args), PASSWORD_STEP]);
+  assert.equal(result.calls[0].args.length, 4 + args.length);
+});
+
+test('FU-DB-26: with --create-only, in any spelling, the password step still runs after migrate dev', () => {
+  // Prisma applies pending migrations before it creates the new one, so app_user can exist by then.
+  // The step runs for every argument list and skips quietly while the role does not exist.
+  for (const args of [
+    ['--create-only', '--name', 'audit_append_only'],
+    ['--create-only=true', '--name', 'x'],
+    ['--name', 'x', '--create-only', '--skip-seed'],
+  ]) {
+    const result = runDbMigrate(args, { FAKE_PNPM_EXIT: '0' });
+    assert.equal(result.status, 0, result.output);
+    assert.match(result.stdout, /database URLs point at this machine/, 'the guard ran first');
+    assert.deepEqual(result.calls, [migrateDev(...args), PASSWORD_STEP]);
+  }
 });
 
 test('ADR-0006 7.4: without --create-only the password script runs once, after migrate dev', () => {
   const result = runDbMigrate([], { FAKE_PNPM_EXIT: '0' });
   assert.equal(result.status, 0, result.output);
-  assert.deepEqual(result.log, ['pnpm exec prisma migrate dev', PASSWORD_SCRIPT_CALL]);
+  assert.deepEqual(result.calls, [migrateDev(), PASSWORD_STEP]);
 });
 
 test('ADR-0006 7.4: a failing migrate dev stops the script before the password step', () => {
   const result = runDbMigrate([], { FAKE_PNPM_EXIT: '1' });
   assert.equal(result.status, 1, result.output);
-  assert.deepEqual(result.log, ['pnpm exec prisma migrate dev']);
+  assert.deepEqual(result.calls, [migrateDev()]);
 });
 
 test('ADR-0006 7.4: a failing password script fails the run', () => {
   const result = runDbMigrate([], { FAKE_PNPM_EXIT: '0', FAKE_PASSWORD_SCRIPT_EXIT: '1' });
   assert.equal(result.status, 1, result.output);
-  assert.deepEqual(result.log, ['pnpm exec prisma migrate dev', PASSWORD_SCRIPT_CALL]);
+  assert.deepEqual(result.calls, [migrateDev(), PASSWORD_STEP]);
 });
 
 test('ADR-0009 4.4: pnpm db:migrate is wired to the wrapper, and db:reset runs the password script last', () => {

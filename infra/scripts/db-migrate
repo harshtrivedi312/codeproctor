@@ -3,21 +3,20 @@
 # password (ADR 0009 section 4.4, ADR 0006 section 7.4, brief DB-03). Arguments go to
 # `prisma migrate dev`, for example `pnpm db:migrate --create-only --name <name>`.
 # It never resets a database: `migrate dev` stops on drift and asks the human to run pnpm db:reset.
+# The password step runs after every successful `migrate dev`, `--create-only` or not: Prisma
+# applies pending migrations before it creates the new one, so app_user can have been created even
+# then (FU-DB-26). The step skips quietly while the role does not exist yet.
 set -eu
 cd "$(dirname "$0")/../.."
 
 # 1. Refuse --config and --url before anything else, in both forms (--flag value, --flag=value).
 #    Prisma 7.10.0 `migrate dev` accepts both, and either could point it at a config file or a
 #    database URL that the guard below never checked (ADR 0009 section 5, P17).
-create_only=""
 for arg in "$@"; do
   case "$arg" in
     --config | --config=* | --url | --url=*)
       echo "db:migrate does not accept --config or --url. The database comes from MIGRATION_DATABASE_URL in .env, and the localhost guard checks that." >&2
       exit 1
-      ;;
-    --create-only)
-      create_only=1
       ;;
   esac
 done
@@ -29,7 +28,5 @@ node infra/scripts/assert-local-db.mjs
 pnpm exec prisma migrate dev "$@"
 
 # 4. app_user is created by the audit_append_only migration without a password. Give it the local
-#    one, unless this run only created a migration file.
-if [ -z "$create_only" ]; then
-  node infra/scripts/set-app-user-password.mjs
-fi
+#    one whenever the role exists.
+node infra/scripts/set-app-user-password.mjs --if-role-exists

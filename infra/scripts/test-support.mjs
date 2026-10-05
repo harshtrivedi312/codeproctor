@@ -6,6 +6,10 @@
 // unexpected docker call write to a log, and tests assert that the log stays empty: that proves a
 // script stopped before anything destructive.
 //
+// A stand-in logs one line with the command, then one line per argument, each starting with a tab
+// (see LOG_CALL and readCalls). An argument that contains a space stays one line, so a test can tell
+// `--name "two words"` from `--name two words` and catch a regression of the "$@" quoting.
+//
 // Tests of infra/scripts/db-migrate need a pnpm call that succeeds (FAKE_PNPM_EXIT=0) and a way
 // to see whether the password script was started. createSandbox({ stubPasswordScript: true })
 // replaces `node` with a shim: it logs a call to set-app-user-password.mjs and does not run it,
@@ -16,6 +20,27 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
+
+/** Shell lines that append one call to the log: the command, then one tab-indented line per argument. */
+const LOG_CALL = (command) => `{
+  printf '%s\\n' "${command}"
+  for arg in "$@"; do printf '\\t%s\\n' "$arg"; done
+} >> "$STUB_LOG"`;
+
+/**
+ * Reads the log a stand-in wrote: one entry per call.
+ * @param {string} text the contents of the log file
+ * @returns {{ command: string, args: string[] }[]}
+ */
+export function readCalls(text) {
+  const calls = [];
+  for (const line of text.split('\n')) {
+    if (line === '') continue;
+    if (line.startsWith('\t')) calls.at(-1)?.args.push(line.slice(1));
+    else calls.push({ command: line, args: [] });
+  }
+  return calls;
+}
 
 // Behaviour comes from FAKE_* variables that the test puts into the spawned environment.
 const DOCKER_STUB = `#!/bin/sh
@@ -29,19 +54,19 @@ if [ "$*" = "compose -f infra/docker-compose.yml port postgres 5432" ]; then
   echo "\${FAKE_COMPOSE_PORT_OUTPUT:-}"
   exit 0
 fi
-echo "docker $*" >> "$STUB_LOG"
+${LOG_CALL('docker')}
 exit 99
 `;
 
 const PNPM_STUB = `#!/bin/sh
-echo "pnpm $*" >> "$STUB_LOG"
+${LOG_CALL('pnpm')}
 exit "\${FAKE_PNPM_EXIT:-99}"
 `;
 
 const nodeShim = (realNode) => `#!/bin/sh
 case "$1" in
   infra/scripts/set-app-user-password.mjs)
-    echo "node $*" >> "$STUB_LOG"
+    ${LOG_CALL('node')}
     exit "\${FAKE_PASSWORD_SCRIPT_EXIT:-0}"
     ;;
 esac

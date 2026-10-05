@@ -22,12 +22,30 @@ const int32 = (value) => {
 const message = (type, body) => Buffer.concat([Buffer.from(type), int32(body.length + 4), body]);
 const cstring = (text) => Buffer.from(`${text}\0`);
 const READY = message('Z', Buffer.from('I'));
+// One int4 column named "x", and one row holding 1: the answer to the pg_roles lookup.
+const ROW_DESCRIPTION = message(
+  'T',
+  Buffer.concat([
+    Buffer.from([0, 1]),
+    cstring('x'),
+    int32(0),
+    Buffer.from([0, 0]),
+    int32(23),
+    Buffer.from([0, 4]),
+    int32(-1),
+    Buffer.from([0, 0]),
+  ]),
+);
+const DATA_ROW = message('D', Buffer.concat([Buffer.from([0, 1]), int32(1), Buffer.from('1')]));
+const LOOKUP_QUERY = "SELECT 1 FROM pg_roles WHERE rolname = 'app_user'";
 
 /**
  * Starts a stand-in Postgres server on 127.0.0.1. It counts connections and records each simple
- * query. `failWith` makes the query fail with that SQLSTATE and a message that echoes `leak`.
+ * query. A SELECT (the pg_roles lookup) finds one row, or none when `roleExists` is false. `failWith`
+ * makes the ALTER ROLE fail with that SQLSTATE and a message that echoes `leak`. `idleError` follows
+ * a successful ALTER ROLE with a fatal error while no query is running.
  */
-async function startFakePostgres({ failWith, leak } = {}) {
+async function startFakePostgres({ failWith, leak, roleExists = true, idleError = false } = {}) {
   const state = { connections: 0, queries: [] };
   const server = net.createServer((socket) => {
     state.connections += 1;
@@ -51,9 +69,14 @@ async function startFakePostgres({ failWith, leak } = {}) {
         const body = buffer.subarray(5, end);
         buffer = buffer.subarray(end);
         if (type === 'Q') {
-          state.queries.push(body.toString('utf8').replace(/\0$/, ''));
-          const reply =
-            failWith === undefined
+          const text = body.toString('utf8').replace(/\0$/, '');
+          state.queries.push(text);
+          const isLookup = /^SELECT/i.test(text);
+          const reply = isLookup
+            ? roleExists
+              ? Buffer.concat([ROW_DESCRIPTION, DATA_ROW, message('C', cstring('SELECT 1'))])
+              : message('C', cstring('SELECT 0'))
+            : failWith === undefined
               ? message('C', cstring('ALTER ROLE'))
               : message(
                   'E',
@@ -67,7 +90,23 @@ async function startFakePostgres({ failWith, leak } = {}) {
                     Buffer.from([0]),
                   ]),
                 );
-          socket.write(Buffer.concat([reply, READY]));
+          // A fatal error that arrives after the query finished: the client is idle by then.
+          const tail =
+            idleError && !isLookup && failWith === undefined
+              ? message(
+                  'E',
+                  Buffer.concat([
+                    Buffer.from('S'),
+                    cstring('FATAL'),
+                    Buffer.from('C'),
+                    cstring('57P01'),
+                    Buffer.from('M'),
+                    cstring('terminating connection due to administrator command'),
+                    Buffer.from([0]),
+                  ]),
+                )
+              : Buffer.alloc(0);
+          socket.write(Buffer.concat([reply, READY, tail]));
         } else if (type === 'X') {
           socket.end();
         }
@@ -200,19 +239,71 @@ test('ADR-0006 7.4: a missing or empty APP_USER_PASSWORD is refused before conne
   }
 });
 
-test('ADR-0006 7.4: it takes no arguments', async () => {
+test('ADR-0006 7.4: it takes no arguments except --if-role-exists', async () => {
   const fake = await startFakePostgres();
   try {
-    const result = await runScript(
-      { MIGRATION_DATABASE_URL: fake.url, DATABASE_URL: fake.url, APP_USER_PASSWORD: PASSWORD },
+    const env = {
+      MIGRATION_DATABASE_URL: fake.url,
+      DATABASE_URL: fake.url,
+      APP_USER_PASSWORD: PASSWORD,
+    };
+    for (const args of [
       ['--password', PASSWORD],
-    );
-    assert.equal(result.status, 1, result.output);
-    assert.match(result.stderr, /takes no arguments/);
-    assertNoSecrets(result);
+      ['--if-role-exists', '--password', PASSWORD],
+      ['--if-role-exists=true'],
+    ]) {
+      const result = await runScript(env, args);
+      assert.equal(result.status, 1, result.output);
+      assert.match(result.stderr, /takes no arguments except --if-role-exists/);
+      assertNoSecrets(result);
+    }
     assert.equal(fake.state.connections, 0);
   } finally {
     await fake.close();
+  }
+});
+
+test('FU-DB-26: a missing role is an error, and the password statement is never sent', async () => {
+  const fake = await startFakePostgres({ roleExists: false });
+  try {
+    const result = await runScript({
+      MIGRATION_DATABASE_URL: fake.url,
+      DATABASE_URL: fake.url,
+      APP_USER_PASSWORD: PASSWORD,
+    });
+    assert.equal(result.status, 1, result.output);
+    assert.match(result.stderr, /the app_user role does not exist yet\. Run the migrations first/);
+    assert.doesNotMatch(result.stdout, /password set/);
+    assertNoSecrets(result);
+    // Only the lookup reached the server, so a failed ALTER ROLE cannot put the cleartext in its log.
+    assert.deepEqual(fake.state.queries, [LOOKUP_QUERY]);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('FU-DB-26: with --if-role-exists a missing role is skipped with exit 0, and an existing role gets its password', async () => {
+  const missing = await startFakePostgres({ roleExists: false });
+  const present = await startFakePostgres();
+  try {
+    for (const [fake, expected] of [
+      [missing, 'app_user does not exist yet, so no password was set\n'],
+      [present, 'app_user password set\n'],
+    ]) {
+      const result = await runScript(
+        { MIGRATION_DATABASE_URL: fake.url, DATABASE_URL: fake.url, APP_USER_PASSWORD: PASSWORD },
+        ['--if-role-exists'],
+      );
+      assert.equal(result.status, 0, result.output);
+      assert.equal(result.stdout, expected);
+      assertNoSecrets(result);
+    }
+    assert.deepEqual(missing.state.queries, [LOOKUP_QUERY]);
+    assert.equal(present.state.queries.length, 2);
+    assert.match(present.state.queries[1], /^ALTER ROLE app_user WITH PASSWORD /);
+  } finally {
+    await missing.close();
+    await present.close();
   }
 });
 
@@ -229,6 +320,7 @@ test('ADR-0006 7.4: it sets the password with a quoted literal and prints only "
     assert.equal(result.stderr, '');
     // client.escapeLiteral doubles the single quote in the value.
     assert.deepEqual(fake.state.queries, [
+      LOOKUP_QUERY,
       "ALTER ROLE app_user WITH PASSWORD 'app-secret-it''s-pw'",
     ]);
   } finally {
@@ -246,8 +338,9 @@ test('ADR-0006 7.4: it is idempotent: a second run sets the password again', asy
     };
     assert.equal((await runScript(env)).status, 0);
     assert.equal((await runScript(env)).status, 0);
-    assert.equal(fake.state.queries.length, 2);
-    assert.equal(fake.state.queries[0], fake.state.queries[1]);
+    // Each run looks the role up, then sets the password.
+    assert.equal(fake.state.queries.length, 4);
+    assert.deepEqual(fake.state.queries.slice(0, 2), fake.state.queries.slice(2));
   } finally {
     await fake.close();
   }
@@ -271,6 +364,51 @@ test('ADR-0006 7.4: when the database refuses, the message is ours and never ech
   }
 });
 
+test('FU-DB-33: an error code is printed only if it looks like a code', async () => {
+  const cases = [
+    // [what the server sends as the SQLSTATE, what the script may print]
+    ['99999', /failed \(99999\)\./],
+    ['XX000', /failed \(XX000\)\./],
+    ['not a code: owner-secret-pw', /failed \(no error code\)\./],
+    ['lowercase', /failed \(no error code\)\./],
+    ['A'.repeat(41), /failed \(no error code\)\./],
+  ];
+  for (const [code, expected] of cases) {
+    const fake = await startFakePostgres({ failWith: code });
+    try {
+      const result = await runScript({
+        MIGRATION_DATABASE_URL: fake.url,
+        DATABASE_URL: fake.url,
+        APP_USER_PASSWORD: PASSWORD,
+      });
+      assert.equal(result.status, 1, `${code}: ${result.output}`);
+      assert.match(result.stderr, expected, code);
+      assert.doesNotMatch(result.output, /not a code|lowercase|AAAAAAAA/);
+      assertNoSecrets(result);
+    } finally {
+      await fake.close();
+    }
+  }
+});
+
+test("FU-DB-33: an error on an idle connection ends in the script's own output, not a stack trace", async () => {
+  // The server reports success and then a fatal error while the client is idle. Without a listener
+  // for the client's error event, Node would throw it from the event emitter.
+  const fake = await startFakePostgres({ idleError: true });
+  try {
+    const result = await runScript({
+      MIGRATION_DATABASE_URL: fake.url,
+      DATABASE_URL: fake.url,
+      APP_USER_PASSWORD: PASSWORD,
+    });
+    assert.equal(result.status, 0, result.output);
+    assert.equal(result.stdout, 'app_user password set\n');
+    assert.equal(result.stderr, '');
+  } finally {
+    await fake.close();
+  }
+});
+
 test('ADR-0006 7.4: when nothing listens on the port, it says so and prints no secret', async () => {
   const fake = await startFakePostgres();
   const { url } = fake;
@@ -285,7 +423,7 @@ test('ADR-0006 7.4: when nothing listens on the port, it says so and prints no s
   assertNoSecrets(result);
 });
 
-test('NFR-04 (FU-DB-23): a URL with leading or trailing whitespace is refused before connecting', async () => {
+test('NFR-04 (FU-DB-23, FU-DB-31): a URL with leading or trailing whitespace, or a leading control character, is refused before connecting', async () => {
   const fake = await startFakePostgres();
   try {
     // trim() removes all of these, so the guard accepts them. pg-connection-string would resolve
@@ -313,6 +451,30 @@ test('NFR-04 (FU-DB-23): a URL with leading or trailing whitespace is refused be
     }
     assert.equal(fake.state.connections, 0, 'the script connected with an untrimmed URL');
     assert.deepEqual(fake.state.queries, []);
+
+    // FU-DB-31: a leading C0 control character gets past the guard and the trim check, so only the
+    // host check refuses these. The real guard runs here; nothing is bypassed.
+    const controlValues = {
+      'a C0 control character and a space': `\u0001 ${fake.url}`,
+      'a C0 control character and a bad %-sequence': `\u0001${fake.url.replace('@', '%zz@')}`,
+    };
+    for (const [label, value] of Object.entries(controlValues)) {
+      const result = await runScript({
+        MIGRATION_DATABASE_URL: value,
+        DATABASE_URL: fake.url,
+        APP_USER_PASSWORD: PASSWORD,
+      });
+      assert.equal(result.status, 1, `${label}: ${result.output}`);
+      assert.match(
+        result.stderr,
+        /to a host other than this machine\. Refusing to connect\./,
+        label,
+      );
+      assert.doesNotMatch(result.stderr, /leading or trailing whitespace|refusing to run/, label);
+      assertNoSecrets(result);
+    }
+    assert.equal(fake.state.connections, 0, 'the script dialled with a control-character URL');
+    assert.deepEqual(fake.state.queries, []);
   } finally {
     await fake.close();
   }
@@ -328,16 +490,21 @@ test('NFR-04 (FU-DB-23): the resolved client host must be this machine, even if 
     assert.equal(control.status, 0, control.output);
     assert.equal(fake.state.connections, 1);
 
-    // 0.0.0.0 would reach the listener on this machine if the script dialled it.
+    // 0.0.0.0 would reach the listener on this machine if the script dialled it. The second host
+    // is under .invalid (RFC 2606), which never resolves, so a mutated script cannot make a real
+    // DNS or TCP call from CI (FU-DB-32).
     const refused = [
       `postgresql://owner:${SECRET}@0.0.0.0:${fake.port}/codeproctor`,
-      `postgresql://owner:${SECRET}@db.example.com:${fake.port}/codeproctor`,
+      `postgresql://owner:${SECRET}@db.example.invalid:${fake.port}/codeproctor`,
     ];
     for (const url of refused) {
       const result = await runScriptWithoutGuard({ ...env, MIGRATION_DATABASE_URL: url });
       assert.equal(result.status, 1, result.output);
       assert.match(result.stderr, /to a host other than this machine\. Refusing to connect\./);
-      assert.doesNotMatch(result.output, /could not connect|failed \(|db\.example\.com|0\.0\.0\.0/);
+      assert.doesNotMatch(
+        result.output,
+        /could not connect|failed \(|db\.example\.invalid|0\.0\.0\.0/,
+      );
       assertNoSecrets(result);
     }
     assert.equal(fake.state.connections, 1, 'the script dialled a host that is not loopback');
