@@ -35,9 +35,12 @@
 //       identity_checks_check               (status = 'REVIEWED') = (manual_decision IS NOT NULL AND
 //                                             reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL)
 //       appeals_check                       (status = 'OVERTURNED') = (new_verdict IS NOT NULL)
-//  3. 2 partial indexes (the other 22 indexes are declared below):
+//  3. 3 partial indexes (the other 22 indexes are declared below):
 //       sessions_risk_band_idx            ON sessions (risk_band) WHERE status IN ('GRADED','UNDER_REVIEW')
 //       sessions_retention_anchor_at_idx  ON sessions (retention_anchor_at) WHERE retention_anchor_at IS NOT NULL
+//       audit_logs_retention_marker_idx   ON audit_logs (action, entity_id) WHERE action IN
+//                                           ('RETENTION_FACE_DONE','RETENTION_MEDIA_DONE','RETENTION_RESULTS_DONE')
+//                                           (ADR 0004 section 9.2, proposed; its own migration, item 8)
 //  4. Trigger on users: set updated_at = now() before each UPDATE (function plus trigger; the
 //     reference DDL block does not contain it, prompts/database.md Step 3 and ADR 0008 section 1 do).
 //  5. Identity columns. Prisma's autoincrement emits BIGSERIAL (a sequence and a nextval default).
@@ -52,6 +55,17 @@
 //     that omits allowed_languages or events (no default) will fail on NOT NULL: services pass them.
 //  7. The audit_append_only migration (ADR 0006 section 7.2): app_user, grants, and the REVOKE of
 //     UPDATE, DELETE and TRUNCATE on audit_logs and of all access to _prisma_migrations.
+//  8. ADR 0004 section 9 (proposed; builds on the reviewed text until the owner accepts it). Three
+//     migrations after audit_append_only. docs/database.md does not have them yet (the hub applies
+//     ADR 0004 section 9.9 rows 4 and 22 on acceptance):
+//       - session_status gains ERASED and appeal_status gains CLOSED_ERASED, each last in its enum and
+//         each in its own migration (Postgres cannot use a new enum value in the transaction that adds
+//         it). Both are declared in the enums below, so the "20 enums, with values and order" match
+//         above holds up to these two values.
+//       - the partial index audit_logs_retention_marker_idx (item 3).
+//       - REVOKE DELETE, TRUNCATE ON sessions FROM app_user (ADR 0006 section 7.2 grants delta), so no
+//         retention, results or erasure job can delete a sessions row and cascade away the consent
+//         record (ADR 0004 section 9.3).
 //
 // Differences that need no action (same behavior):
 // - Prisma writes timestamptz as TIMESTAMPTZ(6) (6 is the default precision) and now() as
