@@ -3,7 +3,7 @@
 // unit tested. The Prisma extension (org-scope.extension.ts) wraps this with the context lookup.
 import type { Prisma } from '../generated/prisma/client.js';
 import { OrgScopeViolationError } from './errors';
-import { assertNestedWritesScoped } from './org-scope-nested';
+import { assertNestedWritesScoped, assertNoNestedCursor } from './org-scope-nested';
 import { orgFilter } from './org-scope-map';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
 
@@ -271,6 +271,8 @@ export function applyOrgScope(input: OrgScopeInput): PlainObject {
   }
   const args = asArgs(model, operation, input.args);
   const rewritten = rewriteArgs(model, rule, operation, args, filter, orgId);
+  // A cursor nested in include or select is resolved by its own fields too (any operation).
+  assertNoNestedCursor(model, operation, args);
   // A cursor never goes through unscoped, whichever operation carries it.
   return args.cursor === undefined
     ? rewritten
