@@ -80,6 +80,8 @@ export interface SchemaField {
   readonly isList: boolean;
   readonly isOptional: boolean;
   readonly holdsForeignKey: boolean;
+  /** The scalar columns of the foreign key, from `@relation(fields: [...])`. Empty on the other side. */
+  readonly foreignKeyFields: readonly string[];
   readonly dbName?: string;
 }
 
@@ -110,12 +112,19 @@ export function readSchemaModels(): Record<string, Record<string, SchemaField>> 
       continue;
     const attributes = field[5] ?? '';
     const dbName = /@map\("([^"]+)"\)/.exec(attributes)?.[1];
+    const foreignKeyFields = (
+      /@relation\([^)]*\bfields:\s*\[([^\]]*)\]/.exec(attributes)?.[1] ?? ''
+    )
+      .split(',')
+      .map((name) => name.trim())
+      .filter((name) => name !== '');
     current[field[1]] = {
       name: field[1],
       type: field[2],
       isList: field[3] !== undefined,
       isOptional: field[4] !== undefined,
-      holdsForeignKey: /@relation\([^)]*\bfields:\s*\[/.test(attributes),
+      holdsForeignKey: foreignKeyFields.length > 0,
+      foreignKeyFields,
       ...(dbName === undefined ? {} : { dbName }),
     };
   }
