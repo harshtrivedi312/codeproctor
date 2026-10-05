@@ -3,7 +3,13 @@
 // This script runs after `prisma migrate dev` (infra/scripts/db-migrate) and after
 // `prisma migrate reset` (infra/scripts/db-reset). It is idempotent.
 //
-//   node infra/scripts/set-app-user-password.mjs
+//   node infra/scripts/set-app-user-password.mjs [--if-role-exists]
+//
+// It checks pg_roles first, so a missing role never reaches the server as an ALTER ROLE statement
+// that carries the password (the server could log it). A missing role is an error, unless
+// --if-role-exists is given: then the script says so and exits 0. db-migrate passes the flag,
+// because `prisma migrate dev --create-only` can run before the audit_append_only migration has
+// created the role (FU-DB-26).
 //
 // Local only. It runs the localhost guard first and refuses on any problem. It reads
 // APP_USER_PASSWORD from the shell or from the repository-root .env, in the same order as
@@ -32,8 +38,10 @@ function fail(message) {
   process.exit(1);
 }
 
-if (process.argv.length > 2) {
-  fail('takes no arguments.');
+const args = process.argv.slice(2);
+const ifRoleExists = args.length === 1 && args[0] === '--if-role-exists';
+if (args.length > 0 && !ifRoleExists) {
+  fail('takes no arguments except --if-role-exists.');
 }
 
 // Same .env handling as assert-local-db.mjs and prisma.config.ts: shell values win.
@@ -74,6 +82,9 @@ try {
   fail('the pg package is not installed. Run pnpm install.');
 }
 
+const ROLE_MISSING =
+  'the app_user role does not exist yet. Run the migrations first (pnpm db:migrate).';
+
 /** A message for a failure. It never uses the driver's own text, which could echo a value. */
 function describeFailure(error) {
   // Raised while pg parses the URL, before any connection: for example a malformed %-sequence.
@@ -93,7 +104,7 @@ function describeFailure(error) {
     case '3D000':
       return 'the database in MIGRATION_DATABASE_URL does not exist.';
     case '42704':
-      return 'the app_user role does not exist yet. Run the migrations first (pnpm db:migrate).';
+      return ROLE_MISSING;
     case '42501':
       return 'the owner role may not change app_user. MIGRATION_DATABASE_URL must be the owner role.';
     default:
@@ -106,6 +117,7 @@ function describeFailure(error) {
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
 let client;
 let failure;
+let skipped = false;
 try {
   client = new Client({ connectionString: databaseUrl, connectionTimeoutMillis: 10_000 });
   // Whatever the guard saw, the host pg resolved must be this machine. No host is printed.
@@ -114,7 +126,13 @@ try {
       'the database client resolved MIGRATION_DATABASE_URL to a host other than this machine. Refusing to connect.';
   } else {
     await client.connect();
-    await client.query(`ALTER ROLE app_user WITH PASSWORD ${client.escapeLiteral(password)}`);
+    const found = await client.query("SELECT 1 FROM pg_roles WHERE rolname = 'app_user'");
+    if (found.rowCount === 0) {
+      if (ifRoleExists) skipped = true;
+      else failure = ROLE_MISSING;
+    } else {
+      await client.query(`ALTER ROLE app_user WITH PASSWORD ${client.escapeLiteral(password)}`);
+    }
   }
 } catch (error) {
   failure = describeFailure(error);
@@ -125,4 +143,6 @@ try {
 if (failure !== undefined) {
   fail(failure);
 }
-console.log('app_user password set');
+console.log(
+  skipped ? 'app_user does not exist yet, so no password was set' : 'app_user password set',
+);

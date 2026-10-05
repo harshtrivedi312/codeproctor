@@ -22,12 +22,29 @@ const int32 = (value) => {
 const message = (type, body) => Buffer.concat([Buffer.from(type), int32(body.length + 4), body]);
 const cstring = (text) => Buffer.from(`${text}\0`);
 const READY = message('Z', Buffer.from('I'));
+// One int4 column named "x", and one row holding 1: the answer to the pg_roles lookup.
+const ROW_DESCRIPTION = message(
+  'T',
+  Buffer.concat([
+    Buffer.from([0, 1]),
+    cstring('x'),
+    int32(0),
+    Buffer.from([0, 0]),
+    int32(23),
+    Buffer.from([0, 4]),
+    int32(-1),
+    Buffer.from([0, 0]),
+  ]),
+);
+const DATA_ROW = message('D', Buffer.concat([Buffer.from([0, 1]), int32(1), Buffer.from('1')]));
+const LOOKUP_QUERY = "SELECT 1 FROM pg_roles WHERE rolname = 'app_user'";
 
 /**
  * Starts a stand-in Postgres server on 127.0.0.1. It counts connections and records each simple
- * query. `failWith` makes the query fail with that SQLSTATE and a message that echoes `leak`.
+ * query. A SELECT (the pg_roles lookup) finds one row, or none when `roleExists` is false. `failWith`
+ * makes the ALTER ROLE fail with that SQLSTATE and a message that echoes `leak`.
  */
-async function startFakePostgres({ failWith, leak } = {}) {
+async function startFakePostgres({ failWith, leak, roleExists = true } = {}) {
   const state = { connections: 0, queries: [] };
   const server = net.createServer((socket) => {
     state.connections += 1;
@@ -51,9 +68,14 @@ async function startFakePostgres({ failWith, leak } = {}) {
         const body = buffer.subarray(5, end);
         buffer = buffer.subarray(end);
         if (type === 'Q') {
-          state.queries.push(body.toString('utf8').replace(/\0$/, ''));
-          const reply =
-            failWith === undefined
+          const text = body.toString('utf8').replace(/\0$/, '');
+          state.queries.push(text);
+          const isLookup = /^SELECT/i.test(text);
+          const reply = isLookup
+            ? roleExists
+              ? Buffer.concat([ROW_DESCRIPTION, DATA_ROW, message('C', cstring('SELECT 1'))])
+              : message('C', cstring('SELECT 0'))
+            : failWith === undefined
               ? message('C', cstring('ALTER ROLE'))
               : message(
                   'E',
@@ -200,19 +222,71 @@ test('ADR-0006 7.4: a missing or empty APP_USER_PASSWORD is refused before conne
   }
 });
 
-test('ADR-0006 7.4: it takes no arguments', async () => {
+test('ADR-0006 7.4: it takes no arguments except --if-role-exists', async () => {
   const fake = await startFakePostgres();
   try {
-    const result = await runScript(
-      { MIGRATION_DATABASE_URL: fake.url, DATABASE_URL: fake.url, APP_USER_PASSWORD: PASSWORD },
+    const env = {
+      MIGRATION_DATABASE_URL: fake.url,
+      DATABASE_URL: fake.url,
+      APP_USER_PASSWORD: PASSWORD,
+    };
+    for (const args of [
       ['--password', PASSWORD],
-    );
-    assert.equal(result.status, 1, result.output);
-    assert.match(result.stderr, /takes no arguments/);
-    assertNoSecrets(result);
+      ['--if-role-exists', '--password', PASSWORD],
+      ['--if-role-exists=true'],
+    ]) {
+      const result = await runScript(env, args);
+      assert.equal(result.status, 1, result.output);
+      assert.match(result.stderr, /takes no arguments except --if-role-exists/);
+      assertNoSecrets(result);
+    }
     assert.equal(fake.state.connections, 0);
   } finally {
     await fake.close();
+  }
+});
+
+test('FU-DB-26: a missing role is an error, and the password statement is never sent', async () => {
+  const fake = await startFakePostgres({ roleExists: false });
+  try {
+    const result = await runScript({
+      MIGRATION_DATABASE_URL: fake.url,
+      DATABASE_URL: fake.url,
+      APP_USER_PASSWORD: PASSWORD,
+    });
+    assert.equal(result.status, 1, result.output);
+    assert.match(result.stderr, /the app_user role does not exist yet\. Run the migrations first/);
+    assert.doesNotMatch(result.stdout, /password set/);
+    assertNoSecrets(result);
+    // Only the lookup reached the server, so a failed ALTER ROLE cannot put the cleartext in its log.
+    assert.deepEqual(fake.state.queries, [LOOKUP_QUERY]);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('FU-DB-26: with --if-role-exists a missing role is skipped with exit 0, and an existing role gets its password', async () => {
+  const missing = await startFakePostgres({ roleExists: false });
+  const present = await startFakePostgres();
+  try {
+    for (const [fake, expected] of [
+      [missing, 'app_user does not exist yet, so no password was set\n'],
+      [present, 'app_user password set\n'],
+    ]) {
+      const result = await runScript(
+        { MIGRATION_DATABASE_URL: fake.url, DATABASE_URL: fake.url, APP_USER_PASSWORD: PASSWORD },
+        ['--if-role-exists'],
+      );
+      assert.equal(result.status, 0, result.output);
+      assert.equal(result.stdout, expected);
+      assertNoSecrets(result);
+    }
+    assert.deepEqual(missing.state.queries, [LOOKUP_QUERY]);
+    assert.equal(present.state.queries.length, 2);
+    assert.match(present.state.queries[1], /^ALTER ROLE app_user WITH PASSWORD /);
+  } finally {
+    await missing.close();
+    await present.close();
   }
 });
 
@@ -229,6 +303,7 @@ test('ADR-0006 7.4: it sets the password with a quoted literal and prints only "
     assert.equal(result.stderr, '');
     // client.escapeLiteral doubles the single quote in the value.
     assert.deepEqual(fake.state.queries, [
+      LOOKUP_QUERY,
       "ALTER ROLE app_user WITH PASSWORD 'app-secret-it''s-pw'",
     ]);
   } finally {
@@ -246,8 +321,9 @@ test('ADR-0006 7.4: it is idempotent: a second run sets the password again', asy
     };
     assert.equal((await runScript(env)).status, 0);
     assert.equal((await runScript(env)).status, 0);
-    assert.equal(fake.state.queries.length, 2);
-    assert.equal(fake.state.queries[0], fake.state.queries[1]);
+    // Each run looks the role up, then sets the password.
+    assert.equal(fake.state.queries.length, 4);
+    assert.deepEqual(fake.state.queries.slice(0, 2), fake.state.queries.slice(2));
   } finally {
     await fake.close();
   }

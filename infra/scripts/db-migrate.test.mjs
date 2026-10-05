@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import { REPO_ROOT, createSandbox } from './test-support.mjs';
 
 const CLOSED = 'postgresql://x:y@127.0.0.1:1/none';
-const PASSWORD_SCRIPT_CALL = 'node infra/scripts/set-app-user-password.mjs';
+const PASSWORD_SCRIPT_CALL = 'node infra/scripts/set-app-user-password.mjs --if-role-exists';
 
 /** Runs db-migrate with stdin closed. `log` holds every call the stand-ins received. */
 function runDbMigrate(args = [], extraEnv = {}) {
@@ -63,7 +63,10 @@ test('ADR-0009 5 (P17): --config and --url are refused in both forms, before the
 test('ADR-0009 5 (P17): similar flags are not mistaken for --config or --url', () => {
   const result = runDbMigrate(['--name', 'config', '--create-only'], { FAKE_PNPM_EXIT: '0' });
   assert.equal(result.status, 0, result.output);
-  assert.deepEqual(result.log, ['pnpm exec prisma migrate dev --name config --create-only']);
+  assert.deepEqual(result.log, [
+    'pnpm exec prisma migrate dev --name config --create-only',
+    PASSWORD_SCRIPT_CALL,
+  ]);
 });
 
 test('NFR-04: a non-local URL is refused before pnpm is called, naming the host and no secret', () => {
@@ -84,15 +87,22 @@ test('NFR-04: a libpq redirect variable and a host override in the URL are refus
   );
 });
 
-test('ADR-0006 7.4: --create-only runs migrate dev with the arguments and does not run the password script', () => {
-  const result = runDbMigrate(['--create-only', '--name', 'audit_append_only'], {
-    FAKE_PNPM_EXIT: '0',
-  });
-  assert.equal(result.status, 0, result.output);
-  assert.match(result.stdout, /database URLs point at this machine/, 'the guard ran first');
-  assert.deepEqual(result.log, [
-    'pnpm exec prisma migrate dev --create-only --name audit_append_only',
-  ]);
+test('FU-DB-26: with --create-only, in any spelling, the password step still runs after migrate dev', () => {
+  // Prisma applies pending migrations before it creates the new one, so app_user can exist by then.
+  // The step runs for every argument list and skips quietly while the role does not exist.
+  for (const args of [
+    ['--create-only', '--name', 'audit_append_only'],
+    ['--create-only=true', '--name', 'x'],
+    ['--name', 'x', '--create-only', '--skip-seed'],
+  ]) {
+    const result = runDbMigrate(args, { FAKE_PNPM_EXIT: '0' });
+    assert.equal(result.status, 0, result.output);
+    assert.match(result.stdout, /database URLs point at this machine/, 'the guard ran first');
+    assert.deepEqual(result.log, [
+      `pnpm exec prisma migrate dev ${args.join(' ')}`,
+      PASSWORD_SCRIPT_CALL,
+    ]);
+  }
 });
 
 test('ADR-0006 7.4: without --create-only the password script runs once, after migrate dev', () => {
