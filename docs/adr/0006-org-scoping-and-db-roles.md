@@ -227,7 +227,7 @@ Roles belong to the whole Postgres cluster, not to one database. So the `IF NOT 
 
 **Status: Proposed amendment 2026-10-05, for the owner to accept. Decision id: pending D-xx**, assigned in status.md when the owner accepts.
 - Source: the DB-05 architect gate (PR #30) and the Delivery Lead.
-- **Today and planned.** "Today (PR #30)" means PR #30 as pushed at 769d8f5. "Planned" means work that is not built yet, with its follow-up in docs/followups/database.md on that branch (FU-DB-63 to FU-DB-88).
+- **Built and planned.** "Built" means present in main at 7c5d2e0, where PR #30 (DB-05) is merged. "Planned" means work that is not built yet, with its follow-up in docs/followups/database.md. Section 8.0 lists each item.
 - Until the owner accepts it, sections 1 to 7 stand as written.
 - Serves FR-103, FR-105, NFR-01 and NFR-04; TC-006 and TC-008.
 - Candidate session scope (from the candidate token to its session) is decided in ADR 0013 section 5.10 (proposed, PR #39), with ADR 0001 C-1. This section states only how it meets the org scope (8.4, 8.5).
@@ -235,6 +235,34 @@ Roles belong to the whole Postgres cluster, not to one database. So the `IF NOT 
 Each item is tagged:
 - **(owner decision)** when the owner or the Delivery Lead decided it. The Delivery Lead's three decisions are also pending a D-xx id: nested writes denied by default (8.2), no schema change (8.3), and provisioning by CLI (8.9).
 - **(architect detail)** when the architect chose it for the owner to confirm.
+
+### 8.0 As built in main and planned
+
+DB-05 (PR #30) is merged into main at 7c5d2e0. The code, the README (`apps/api/src/database/README.md`) and the error messages cite this section. "Built" below means present in main at 7c5d2e0. "Planned" means not built yet; the follow-up is in docs/followups/database.md. When the code differs from a rule here, the row says "as built" and lists the delta for the db-engineer, rather than changing the rule silently (FU-DB-105).
+
+| Item | Status in main (7c5d2e0) |
+| --- | --- |
+| Foreign-key classification, 8.1 (`FK_CLASSES` 58: ORG_ID 9, SCOPE_HOP 21, COMPOSITE 3, RULE_I 25; `RULE_I_REFERENCES`) and the relation side table with its completeness test against `schema.prisma` (FU-DB-64, FU-DB-103) | Built |
+| Nested relation writes denied by default, in org scope and system scope, with an empty `NESTED_WRITE_ALLOWLIST` and a unit test that fails while it is not empty (8.2; FU-DB-94, FU-DB-98, FU-DB-101) | Built |
+| Nested cursors refused; top-level cursors scoped (8.2; FU-DB-93) | Built |
+| Scalar `orgId` rule in an org scope, on every create and update operation (8.2) | Built |
+| System scope: any `orgId` refused in `update`, `updateMany`, `updateManyAndReturn` and `upsert.update` on a direct model; an Organization keeps its id in every scope (8.2; FU-DB-104) | Built |
+| System scope: an unrecognised write operation throws | **Planned.** As built, system scope checks only the known writes and then runs the query; an unknown operation passes through. Delta for the db-engineer: refuse it, as the org scope already does (fail closed, with `OPERATION_COVERAGE`). |
+| `createMany` and `createManyAndReturn` rows are not walked; Prisma rejects relation keys there | As built. The test is planned (FU-DB-106). |
+| Three closed system reasons; `runSystem` refused inside an org scope; org switch refused (8.4) | Built |
+| Actor in the scope, `runAsCandidate`, `runAsSessionJob`, `detachForSessionJob`, the candidate-facts setter and the full 8.4 transition table | Planned (ADR 0013 CS-4; BE-07, BE-08) |
+| `runRawSql` requires a scope (8.5) | Built |
+| An open `runRawSql` hatch carries into nested scopes (8.5) | **As built**, and documented in the README as limit (e). Planned: the hatch does not carry into nested scopes, and never into a session scope. |
+| Raw SQL refused in a `sessionId` scope; the advisory-lock call site; `withGrant`; `guardLive`; `lockForAccommodation` (8.5) | Planned (no session scopes exist yet) |
+| FU-DB-67 call-site allow-list (`runSystem`, `runInOrg`, `runRawSql`, the session entries, the store methods, the grant sites) | Planned |
+| Importer guard (`import-guard.spec.ts`) | **Built**, for `create-prisma-client` (only `prisma.service.ts` and the interim `prisma.module.ts`), `prisma.module` and `PG_POOL`. It scans `apps/api/src` only, so the seed and a CLI outside it are not covered. Planned: add the provisioning CLI and the candidate-write client (8.6). |
+| `Organization`: create refused in an org scope | Built |
+| `Organization`: delete refused in an org scope (FU-DB-68); full deny by default in every scope; updates only in a STAFF scope (8.6) | Planned. As built, an org scope may delete its own organization row, and system scope may create, upsert or delete one. |
+| Candidate-write client with pool options on `PrismaPg` and the widened factory `createPrismaClient(connectionString, poolOptions?)` (8.6) | Planned. As built, the factory takes only a connection string. |
+| Readiness role assertion on each pool (8.8; FU-DB-66) | Planned |
+| Interceptor answers 500 for a malformed `request.user` (8.8; FU-DB-65) | Planned. As built, it answers 401. |
+| `errorFormat: 'minimal'` in the factory (ADR 0009 section 4.2; FU-DB-70) | Planned. As built, the factory does not set it. |
+| Pilot provisioning CLI (8.9; FU-DB-76) | Planned |
 
 ### 8.1 Foreign-key classification (architect detail)
 
@@ -247,7 +275,7 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 | Rule (i) references | 25 | **12 staff references:** `audit_logs.actor_id`, `questions.created_by`, `ai_reference_solutions.collected_by`, `tests.created_by`, `invitations.created_by`, `session_questions.scored_by`, `consent_texts.created_by`, `identity_checks.reviewed_by`, `session_reviews.reviewer_id`, `flag_decisions.reviewer_id`, `appeals.assigned_to`, `webhook_endpoints.created_by`. **13 cross-chain references:** `organizations.current_consent_text_id`, `refresh_tokens.replaced_by`, `questions.current_version_id`, `variant_test_cases.test_case_id`, `ai_reference_solutions.variant_id`, `test_questions.question_version_id`, `session_sections.section_id`, `session_questions.test_question_id`, `session_questions.question_version_id`, `session_questions.variant_id`, `consents.consent_text_id`, `keystroke_batches.session_question_id`, `webhook_deliveries.session_id` |
 
 - This replaces the shorter list at the end of section 2, which named only five staff columns and `test_questions.question_version_id`.
-- **Today (PR #30, FU-DB-64 done).**
+- **Built in main (FU-DB-64).**
   - The classes are in code: `FK_CLASSES` and `RULE_I_REFERENCES` in `apps/api/src/database/org-scope-relations.ts`.
   - `org-scope-relations.spec.ts` asserts `{ ORG_ID: 9, SCOPE_HOP: 21, COMPOSITE: 3, RULE_I: 25, total: 58 }`.
   - It fails for a key that is missing, unclassified, classified twice or in the wrong class. So a new foreign key must be classified in the PR that adds it.
@@ -258,13 +286,14 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 
 - An org-scoped write changes only the rows its filter selected, or the rows it creates.
 
-**Nested writes are denied by default.** This is the Delivery Lead's decision (DL-14). It is built in PR #30 at bcd9615, whose code, README and error messages cite this section ("ADR 0006 §8, deny-by-default").
+**Nested writes are denied by default.** This is the Delivery Lead's decision (DL-14). It is built in main (7c5d2e0), whose code, README and error messages cite this section ("ADR 0006 §8, deny-by-default").
 - **Scopes:** every scope the extension applies to: org scopes (STAFF, plain org, SERVICE, CANDIDATE) and system scope.
   - ADR 0013 CS-4.5 uses this same list for CANDIDATE scope.
   - *For the Delivery Lead:* the DL-14 text in docs/status.md says "every org scope". The code and this ADR also cover system scope, so DL-14 should be aligned. The architect does not edit status.md.
 - **What is refused:** every nested relation write inside the `data` of `create`, `update`, `updateMany` and `upsert` (and their `*AndReturn` forms). It is refused at the first level, which blocks any deeper nesting.
   - Operations: `connect`, `connectOrCreate`, `create`, `createMany`, `update`, `updateMany`, `upsert`, `delete`, `deleteMany`, `set` and `disconnect`.
   - Relations: every relation class (`ORG_ID`, `SCOPE_HOP`, `COMPOSITE`, `RULE_I`), on both sides, including `org: { connect }`. A relation key whose value is `null` or `{}` is refused too.
+  - As built, the guard looks only at the first level of `data` (`assertNoNestedWrites` in `org-scope-nested.ts`). Any relation key there is refused, so nothing deeper can be reached.
   - The error, `OrgScopeViolationError`, names the model, relation and operation, never a value.
   - The check adds no query. It looks up each key of `data` in the relation side table in `apps/api/src/database/org-scope-relations.ts` (FU-DB-103).
     - That table covers 116 relation fields, on both sides of the 58 foreign keys.
@@ -278,8 +307,8 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 - **How services write instead:**
   - They write scalar foreign keys through Prisma's unchecked inputs (`XUncheckedCreateInput`, `XUncheckedUpdateInput`), one top-level scoped call per row.
   - The COMPOSITE keys (`invitations.test_id`, `invitations.candidate_id`, `sessions.invitation_id`) are written only as scalars. The composite foreign key then rejects another org's parent with P2003.
-- **`createMany`:** the guard does not walk its rows. Prisma's own validation rejects relation keys there. A test of that is a follow-up.
-- **Why:** each relation class had a hole, shown on Prisma 7 against Postgres (PR #30 README and `tc-008-org-isolation.spec.ts`):
+- **`createMany` and `createManyAndReturn`:** the guard does not walk their rows (as built). Prisma's own validation rejects relation keys there. The test is planned (FU-DB-106).
+- **Why:** each relation class had a hole, shown on Prisma 7 against Postgres (the database README and `tc-008-org-isolation.spec.ts`):
   - a parent-side `connect` moves another org's row in;
   - a `RULE_I` nested `update` writes a user in another org;
   - a COMPOSITE `connect` copies `org_id` from the connected row, which moves the row across orgs;
@@ -294,33 +323,30 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
   - nested reads without a cursor (FU-DB-78, below);
   - nested cursors refused, and top-level cursors scoped;
   - the 58-key foreign-key classification, kept as the rule (i) checklist.
-- **Today (PR #30):**
-  - Deny by default is built, in org scope and in system scope (FU-DB-94, FU-DB-98), with an empty allowlist.
-  - An `Organization`'s `id` cannot change, in any scope.
-  - In system scope, `orgId` cannot change on update. This is gate item 4, which lands in PR #30 before merge (below).
-- **Planned:** the `createMany` relation-key test.
-- **DB-05 merge gate.** Of the gate items, these are now built at bcd9615:
+- **Built in main (7c5d2e0):**
+  - deny by default, in org scope and in system scope (FU-DB-94, FU-DB-98), with an empty allowlist;
+  - an `Organization`'s `id` cannot change, in any scope;
+  - in system scope, `orgId` cannot change on update (FU-DB-104).
+- **Planned:**
+  - the `createMany` relation-key test (FU-DB-106);
+  - an unrecognised write operation throwing in system scope (below).
+- **DB-05 merge gate: satisfied in 7c5d2e0.** All four items are built:
   - deny by default;
   - its application in system scope;
-  - the COMPOSITE `connect` evidence.
+  - the COMPOSITE `connect` test;
+  - the system-scope refusal of `orgId` in `update`, `updateMany`, `updateManyAndReturn` and `upsert.update`.
 
-  Gate item 4 lands in PR #30 before merge, so PR #30 meets all four gate items when it merges. It has two parts:
-  - the system-scope refusal of a scalar `orgId` in `update`, `updateMany`, `updateManyAndReturn` and `upsert.update`;
-  - an unrecognised write operation throwing in system scope.
-
-  *db-engineer:* both parts go into item 4 with a test each. Until they land, PR #30 does not merge, and BE-03 and BE-06 write no invitation or session code.
+  BE-03 and BE-06 may write invitation and session code.
 
 **No write moves a row to another org.**
 - With nested relation writes refused, the remaining path is a scalar `orgId`.
-- **Write operations covered.** Every create and update operation: `create`, `createMany`, `createManyAndReturn`, `update`, `updateMany`, `updateManyAndReturn`, and `upsert` (both branches). Any write operation the extension does not recognise throws, in every scope.
-- **In an org scope** (built today, PR #30), on a direct model:
+- **Write operations covered.** Every create and update operation: `create`, `createMany`, `createManyAndReturn`, `update`, `updateMany`, `updateManyAndReturn`, and `upsert` (both branches). Any write operation the extension does not recognise throws, in every scope. As built, this holds in an org scope only (fail closed, with `OPERATION_COVERAGE`). In system scope it is planned (8.0).
+- **In an org scope** (built), on a direct model:
   - `create`, `createMany`, `createManyAndReturn` and the create branch of `upsert`: the extension stamps `orgId` when it is missing, and refuses a scalar `orgId` whose value is not `ctx.orgId`.
   - `update`, `updateMany`, `updateManyAndReturn` and the update branch of `upsert`: it refuses a scalar `orgId` whose value is not `ctx.orgId`.
 - **In system scope** there is no `ctx.orgId`.
-  - **Gate item 4, landing in PR #30 before merge.** On direct models:
-    - The extension refuses any scalar `orgId` in `update`, `updateMany`, `updateManyAndReturn` and the update branch of `upsert`.
-    - An unrecognised write operation throws in system scope as well, as it does in an org scope.
-    - `AUTH_BOOTSTRAP` writes sessions (INVITED → OPENED) and auth rows before it narrows, so this check matters.
+  - **Built (FU-DB-104).** On direct models, any `orgId` key, whatever its value (the `{ set }` form too), is refused in `update`, `updateMany`, `updateManyAndReturn` and the update branch of `upsert`. An Organization keeps its id. `AUTH_BOOTSTRAP` writes sessions (INVITED → OPENED) and auth rows before it narrows, so this check matters.
+  - **Planned:** an unrecognised write operation throws in system scope as well, as it does in an org scope.
   - `create`, `createMany`, `createManyAndReturn` and the create branch of `upsert` may still set `orgId` in system scope (see below).
   - Writes under `AUTH_BOOTSTRAP` should still narrow to `runInOrg` as soon as the org is known.
   - A create of a model with `org_id` should narrow to `runInOrg(orgId)` first, so the scalar rule applies.
@@ -333,7 +359,7 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 - Creates take `session_id` from the scope.
 - CANDIDATE scope follows the stricter ADR 0013 CS-4 rules.
 
-**Cursors (today, PR #30).**
+**Cursors (built).**
 - On a model with `org_id`, the cursor gets `orgId` added, and a cursor naming another org is refused.
 - On `Organization`, the cursor must be the caller's own id.
 - On a path model, a cursor is refused; page with `where` plus `orderBy` (keyset paging) instead.
@@ -394,8 +420,8 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 | SERVICE | `runAsCandidate` | Refused |
 | CANDIDATE or SERVICE | `runAsUser`, `runSystem`, or any call that drops or changes S | Refused |
 
-**Today (PR #30):** the org switch and the system-from-org case are refused (`org-context.ts`, `enter`).
-**Planned:** the actor, both session entries and the other rows.
+**Built:** the org switch and the system-from-org case are refused (`org-context.ts`, `enter`), and the three system reasons are closed.
+**Planned:** the actor, both session entries and the other rows (ADR 0013 CS-4).
 
 No rule in this ADR depends on a plain org scope narrowing into a session scope. There is no `runInOrg(A, { sessionId })` entry: session scopes are entered only through the two CS-4 entries.
 
@@ -434,8 +460,8 @@ There is no org-provisioning reason (8.6, 8.9).
 
 - **Raw SQL needs `runRawSql` and a scope.**
   - Raw SQL is refused unless it runs inside `runRawSql(reason)`.
-  - `runRawSql` requires an active scope. **Today (PR #30):** with no scope it throws `OrgContextMissingError`.
-  - **The hatch carries into nested scopes today (PR #30).** An open `runRawSql` stays open in a `runAsUser`, `runInOrg` or `runSystem` started inside it, so the README says to wrap only the single raw statement. **Planned:** an open hatch does not carry into any scope entered inside it, and never into a `sessionId` scope.
+  - `runRawSql` requires an active scope. **Built:** with no scope it throws `OrgContextMissingError`.
+  - **As built, the hatch carries into nested scopes** (README limit (e)). An open `runRawSql` stays open in a `runAsUser`, `runInOrg` or `runSystem` started inside it, so the README says to wrap only the single raw statement. **Planned:** an open hatch does not carry into any scope entered inside it, and never into a `sessionId` scope.
 - **What each scope allows:**
   - **System scope:** the raw SQL must serve the active system reason. An example is the `AUTH_BOOTSTRAP` failed-login counter.
   - **Org scope without a session:** the SQL itself must filter by `org_id`. A table without `org_id` must be joined along its 8.7 scope path.
@@ -508,7 +534,7 @@ There is no org-provisioning reason (8.6, 8.9).
       - `[ctx.orgId]` for org settings;
       - `[ctx.testId]` for test settings.
   - Any use outside those files fails the test or the lint rule.
-  - The FU-DB-67 row in docs/followups/database.md (PR #30) still lists only `runSystem`, `runInOrg` and `runRawSql`. The db-engineer extends it to everything above.
+  - The FU-DB-67 row in docs/followups/database.md still lists only `runSystem`, `runInOrg` and `runRawSql`. The db-engineer extends it to everything above.
   - A new call site updates the list, and code-reviewer checks it.
 
 ### 8.6 Organization (architect detail)
@@ -523,10 +549,12 @@ There is no org-provisioning reason (8.6, 8.9).
 - So when rule (i) loads an org through the scoped client, only the caller's own org can be found.
 
 **Operations on `Organization`: deny by default, in every scope.**
-- **Today (PR #30):** create is refused in an org scope.
-- **Planned:**
-  - refuse delete in an org scope (FU-DB-68);
-  - extend the full deny-by-default list below to every scope, system scope included.
+- **Built:** create is refused in an org scope; the id never changes, in any scope.
+- **As built (delta):**
+  - an org scope may still delete its own organization row (FU-DB-68);
+  - system scope may create, upsert or delete one;
+  - an update is not limited to a STAFF scope.
+- **Planned:** the full deny-by-default list below, in every scope.
 - Allowed:
   - reads: `findUnique`, `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `findMany`, `count`, `aggregate` and `groupBy`;
   - `update`, `updateMany` and `updateManyAndReturn`, but only in a STAFF scope (the org-settings service), never in a plain org, SERVICE or CANDIDATE scope, and only when the data does not contain `id`. `organizations.id` is immutable; a test covers it, and there is no trigger (8.3).
@@ -537,11 +565,11 @@ There is no org-provisioning reason (8.6, 8.9).
 - Every nested write on a relation to `Organization` is refused, in every scope: `create`, `connect`, `connectOrCreate`, `update` (including one that sets `id`), `upsert`, `delete`, `set` and `disconnect`.
 - Examples: `user.create({ data: { organization: { create: … } } })` and `test.update({ data: { organization: { update: { id } } } })`.
 - Org settings change only through a top-level `organization.update`, in the service that holds the authorization check for org settings.
-- **Today (PR #30):** built, as part of the general rule in 8.2, in org and system scope. An `Organization`'s `id` cannot change in any scope.
+- **Built**, as part of the general rule in 8.2, in org and system scope. An `Organization`'s `id` cannot change in any scope.
 
 **No write moves a row to another org.** This is the scalar `orgId` rule in 8.2.
 
-**The raw client.** The raw, unextended factory client is the 8.9 exemption. A lint rule or test ensures that only these files import `createPrismaClient`:
+**The raw client.** The raw, unextended factory client is the 8.9 exemption. As built, `import-guard.spec.ts` allows `create-prisma-client` only in `prisma.service.ts` and the interim `prisma.module.ts`, and it scans `apps/api/src` only. The rule is that only these may import `createPrismaClient`:
 - `prisma.service.ts`, which extends it;
 - the seed;
 - the provisioning CLI;
@@ -594,7 +622,7 @@ How the check runs:
 **Interceptor (FU-DB-65).**
 
 - A malformed `request.user` reaches the interceptor only after the guard has passed, so it is a server fault.
-- **Today (PR #30):** it answers 401, and the code, the tests and the README agree.
+- **As built:** it answers 401, and the code, the tests and the README agree.
 - **Planned (FU-DB-65):** it answers 500.
 - The log names the fault. It never includes `request.user` content or the token.
 
@@ -659,42 +687,56 @@ How the check runs:
 
 ### 8.10 Consequences and agents affected
 
-- **Positive:** the scope rules are closed and testable (FK classification, call-site allow-list, readiness check), with no schema change before the pilot.
+- **Positive:** the DB-05 merge gate is satisfied in main (7c5d2e0). The scope rules are closed and testable (FK classification, call-site allow-list, readiness check), with no schema change before the pilot.
 - **Negative:**
   - Rule (i) stays a service-level guard for the `RULE_I` foreign keys listed in 8.1 until RLS is revisited (FU-DB-77).
   - Session jobs run in a `sessionId` scope, so they cannot use raw SQL (8.5). This is deliberate. It covers BE-12 risk scoring, BE-14 report generation, and DB-06 per-session deletion when it runs as a session job. All of them must use the model API. If one of them needs raw SQL, that needs an amendment to this ADR.
-- **db-engineer:**
-  - 8.1 is done in PR #30 (FU-DB-64).
-  - 8.2: deny by default is built at bcd9615 (FU-DB-94, FU-DB-98), in org and system scope, with an empty `NESTED_WRITE_ALLOWLIST` (FU-DB-101).
-  - 8.2, DB-05 gate item 4, landing in PR #30 before merge:
-    - refuse a scalar `orgId` in system-scope `update`, `updateMany`, `updateManyAndReturn` and `upsert.update` on direct models;
-    - make an unrecognised write operation throw in system scope.
-  - 8.5: build `withGrant({ model, columns, ids }, fn)` per the grant spec: mandatory ids, the extension adds `id IN ids`, and the `active` flag, plus the test for a detached query.
-  - **Second client.** Build the candidate-write datasource with the same extension and pool options on `PrismaPg` (`max`, `connectionTimeoutMillis: 2000`, `statement_timeout: 3000`), through the widened factory `createPrismaClient(connectionString, poolOptions?)`. The BE-07 spike confirms the options.
-    - List it as an allowed importer in the FU-DB-67 importer test (8.6, "The raw client").
-    - Add the test that it throws `OrgContextMissingError` with no scope and applies the CS-4 filters in CANDIDATE scope.
-    - Run the readiness role assertion on its pool too (8.8).
-  - 8.2: in SERVICE session scope, refuse an update that changes `session_id` or `session_question_id`.
-  - 8.5: list the advisory-lock raw call site (ADR 0004 section 9.4) on FU-DB-67. SERVICE writers use `guardLive` instead.
-  - 8.5: put `guardLive` and `lockForAccommodation` (ADR 0015) on the FU-DB-67 call-site list, each limited to its writers, with the lock order advisory lock, then `sessions`, then `invitations`.
-  - 8.2: the relation side table and its completeness test replace any use of Prisma's runtime data model in production code (FU-DB-103, FU-DB-61).
-  - 8.2: add the `createMany` relation-key test.
-  - Nested reads stay open (FU-DB-78).
-  - 8.5: the raw-SQL hatch does not carry into nested scopes.
-  - FU-DB-67: the call-site allow-list.
-  - FU-DB-68: refuse Organization delete in an org scope.
-  - FU-DB-71 and FU-DB-72: DB-06 and the job rules. Update FU-DB-72 so that session jobs use `runAsSessionJob`.
-  - 8.4: the actor in the scope (STAFF, plain org, CANDIDATE, SERVICE, SYSTEM), set by the entry function.
-  - 8.4: both session entries, `runAsCandidate` (guard only, from no scope) and `runAsSessionJob` (`SessionJobProcessor` only, from no scope only, after `detachForSessionJob`), per ADR 0013 CS-4.
-  - 8.5: keep the `AsyncLocalStorage` instance private.
-  - 8.5: add `detachForSessionJob`, allowed from no scope only and refused in any org scope, in system scope and with an open hatch; it empties the store.
-  - 8.5: make `SessionJobProcessor` assert there is no scope.
-  - 8.5: extend FU-DB-67 to `exit`, `enterWith`, `disable`, `detachForSessionJob`, the eleven CS-4.4 grant sites (with the candidate-facts setter), and update its row in docs/followups/database.md.
-  - 8.4: the transition table, with one test per row.
-  - 8.5: refuse raw SQL in a `sessionId` scope (the scope requirement is done).
-  - 8.6: deny by default for `Organization` operations (its nested writes are covered by 8.2), the scalar `orgId` rule in system scope, and a limit on importers of the raw factory client.
-  - 8.8: FU-DB-65 and FU-DB-66, including the REPLICATION, membership and ownership checks.
-  - 8.9: the provisioning CLI (org and first admin, placeholder hash, enqueue and re-issue, audit rows).
+- **db-engineer.** Status as built is in 8.0.
+  - **Done in main (7c5d2e0):**
+    - 8.1, the classification and the relation side table (FU-DB-64, FU-DB-103);
+    - 8.2, deny by default in org and system scope with an empty `NESTED_WRITE_ALLOWLIST` (FU-DB-94, FU-DB-98, FU-DB-101);
+    - nested cursors (FU-DB-93);
+    - the scalar `orgId` rule, in org scope and on system-scope updates (FU-DB-104);
+    - `runRawSql` requiring a scope;
+    - the importer guard for `create-prisma-client`.
+  - **Deltas between the code and this ADR, to build next:**
+    - 8.2: an unrecognised write operation throws in system scope.
+    - 8.2: the `createMany` relation-key test (FU-DB-106).
+    - 8.5: the raw-SQL hatch does not carry into nested scopes.
+    - 8.6: refuse Organization delete in an org scope (FU-DB-68), then full deny by default in every scope, with updates only in a STAFF scope.
+    - 8.8: FU-DB-65 (500), FU-DB-66 (the readiness checks, including REPLICATION, membership and ownership, on each pool), and FU-DB-70 (`errorFormat`).
+  - **Planned with the session scopes (ADR 0013 CS-4; BE-07, BE-08):**
+    - 8.4: the actor in the scope (STAFF, plain org, CANDIDATE, SERVICE, SYSTEM), set by the entry function.
+    - 8.4: `runAsCandidate` (guard only, from no scope) and `runAsSessionJob` (`SessionJobProcessor` only, from no scope, after `detachForSessionJob`).
+    - 8.4: the transition table, with one test per row.
+    - 8.5: keep the `AsyncLocalStorage` instance private.
+    - 8.5: `detachForSessionJob`, allowed from no scope only. It throws in any org scope, in system scope, and with an open hatch or a grant.
+    - 8.5: `SessionJobProcessor` asserts that there is no scope.
+    - 8.5: refuse raw SQL in a `sessionId` scope.
+    - 8.5: `withGrant({ model, columns, ids }, fn)`, with mandatory ids and the `active` flag.
+    - 8.5: `guardLive` and `lockForAccommodation`.
+    - 8.2: in SERVICE session scope, refuse an update that changes `session_id` or `session_question_id`.
+  - **FU-DB-67, the call-site allow-list.** It covers:
+    - `runSystem`, `runInOrg` and `runRawSql`;
+    - the two session entries;
+    - `exit`, `enterWith`, `disable` and `detachForSessionJob`;
+    - the eleven CS-4.4 grant sites, with the candidate-facts setter;
+    - the advisory-lock raw call site;
+    - `guardLive` and `lockForAccommodation`, each limited to its writers, with the lock order: advisory lock, then `sessions`, then `invitations`.
+
+    Update the FU-DB-67 row in docs/followups/database.md to match.
+  - **Second client.** Build the candidate-write datasource:
+    - pool options on `PrismaPg`: `max`, `connectionTimeoutMillis: 2000`, `statement_timeout: 3000`;
+    - the widened factory `createPrismaClient(connectionString, poolOptions?)`;
+    - the same extension, with a test that it throws `OrgContextMissingError` with no scope and applies the CS-4 filters in CANDIDATE scope;
+    - an entry in the importer guard;
+    - readiness on its pool.
+
+    The BE-07 spike confirms the options.
+  - **Still open:**
+    - nested reads (FU-DB-78);
+    - FU-DB-71 and FU-DB-72, DB-06 and the job rules (update FU-DB-72 so that session jobs use `runAsSessionJob`);
+    - 8.9, the provisioning CLI (the org and its first admin, the placeholder hash, enqueue and re-issue, audit rows), to be added to the importer guard.
 - **backend-engineer:**
   - Use only the three reasons in 8.4.
   - Build job payloads and processors per `BACKGROUND_JOB` in 8.4.
