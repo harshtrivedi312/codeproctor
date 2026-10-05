@@ -371,14 +371,14 @@ The manual script is a secondary level for TCs that already have an automated le
 | TC-096 | M-02 | manual (secondary) | P1 | decline screen shows the recruiter contact (C-02) |
 | TC-075, TC-076 | M-04 | manual (secondary) | P1 | C-28: every session reviewed; band LOW still goes to UNDER_REVIEW. The current text of TC-076 ("Session scores MEDIUM") and FR-805 predates C-28 (see B.3) |
 | TC-072, TC-094 | M-05 | manual (secondary) | P1/P2 | tiers C-26, C-27, C-35; consent proof kept (C-17); erasure waits for an open appeal (C-06) |
-| Compliance proposal (a), (h), (m) | M-03 | manual (secondary) | P1 | waived identity check, two accommodation settings; TC ID pending from the hub |
-| Compliance proposal (k) | M-01 | manual (secondary) | P1 | age confirmation; TC ID pending |
-| Compliance proposal (b), (d) | M-02, M-01 step 9 | manual (secondary) | P2 | decline contact, retention link; TC ID pending |
-| Compliance proposal (e) | M-06 | manual (secondary) | P1 (privacy) | demographics, blocked until FAIR-01; TC ID pending |
+| Compliance proposal (a) (section 9 above) | M-03 | manual (secondary) | P1 | waived identity check, two accommodation settings (C-25, C-34); TC ID pending from the hub |
+| C-30 (no proposal letter defined yet; section 9 covers only (a) to (f)) | M-01 | manual (secondary) | P1 | age confirmation; the hub assigns a TC ID |
+| Compliance proposal (b), (d) (section 9 above) | M-02, M-01 step 8 | manual (secondary) | P2 | decline contact, retention link; TC ID pending |
+| Compliance proposal (e) (section 9 above) | M-06 | manual (secondary) | P1 (privacy) | demographics, blocked until FAIR-01; TC ID pending |
 | TC-090 | packages/qa/k6 | load (k6) | P1 | script added by QA B (see B.2); status stays Planned until DEP-01 |
 | TC-091 | packages/qa/k6 | load (k6) | P2 | same |
 | TC-093 | packages/qa/zap | scan (ZAP) | P1 | config added by QA B; status stays Planned until DEP-01 |
-| TC-065, TC-053, TC-054, TC-056, TC-064, TC-036 | docs/qa/redteam-plan.md | manual / red team | P1/P2 | QA-02 adversarial re-attempts; report goes to docs/red-team-report.md after DEP-01 |
+| TC-065, TC-053, TC-054, TC-056, TC-064, TC-036 | docs/qa/redteam-plan.md (in PR #80) | manual / red team | P1/P2 | QA-02 adversarial re-attempts; report goes to docs/red-team-report.md after DEP-01 |
 
 ### B.2 Notes on the existing k6 scripts (packages/qa/k6, QA A)
 
@@ -393,4 +393,11 @@ QA B has replaced the placeholder `packages/qa/k6/tc-090-load.js` and `tc-091-co
 
 ### B.4 CI changes needed (hub, rule 12; none made by QA B)
 
-Listed after the load and ZAP PRs below.
+QA B made none of these changes. The exact diff is sent to the architecture hub, who apply it to `.github/workflows/qa.yml`. Summary:
+
+- k6 job: mount `packages/qa/k6` at `/k6` and run with `-w /k6`; set `API_BASE_URL=<target>/api/v1`; map the secret `K6_CANDIDATE_TOKENS` to `K6_SESSIONS_JSON` and pass it into the container as `docker -e SESSIONS_JSON`; add `--summary-export` and upload the summary as an artifact.
+- ZAP job: copy `packages/qa/zap/baseline.conf` and pass it with `-c`; replace the `jq` check with `node packages/qa/zap/evaluate.mjs`; optionally run a second scan against `api_url`.
+
+### B.5 Retention clock-shift hook (for DB-06 and backend)
+
+M-05 steps 5, 5a and 6 need a way to run the retention job with a shifted clock, which the docs do not yet specify. Requirement from QA: the hook exists on staging only, is admin-gated (SUPER_ADMIN, audited, with a fresh password check), and is absent from pilot and production builds. M-05 includes a check that it is absent there. Owners: database-engineer (DB-06, the job and its clock input) and backend-engineer (any route that exposes it). Until the hook is specified, the clock steps rely on the integration tests for TC-072.
