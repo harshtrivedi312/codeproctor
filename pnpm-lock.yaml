@@ -203,7 +203,7 @@ importers:
   apps/api:
     dependencies:
       '@codeproctor/shared':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../packages/shared
       '@nestjs/common':
         specifier: ^11.2.7
