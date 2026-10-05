@@ -8,6 +8,9 @@ export default defineConfig({
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
       // Tests read the shared package from source so they do not depend on a prior build.
+      '@codeproctor/proctor-sdk': fileURLToPath(
+        new URL('../../packages/proctor-sdk/src/index.ts', import.meta.url),
+      ),
       '@codeproctor/shared': fileURLToPath(
         new URL('../../packages/shared/src/index.ts', import.meta.url),
       ),

@@ -1,6 +1,6 @@
 import createClient, { type Middleware } from 'openapi-fetch';
 import { getAccessToken } from '@/lib/auth-token';
-import { getGeneration, getSessionUserId, refreshSession } from '@/lib/auth-session';
+import { captureSessionStamp, refreshForReplay, type SessionStamp } from '@/lib/auth-session';
 import { apiBaseUrl } from '@/lib/env';
 import { mockingReady } from '@/lib/mock-ready';
 import type { components, paths } from './schema';
@@ -30,29 +30,21 @@ export function isAuthRequest(url: string): boolean {
 // the refresh fails, auth-session publishes "signed out" and the staff layout goes to login.
 // The copy is tagged with the session generation it was sent under. A 401 that arrives after the
 // user signed out (and maybe someone else signed in) must not be replayed with the new token.
-const retryCopies = new WeakMap<
-  Request,
-  { copy: Request; generation: number; userId: string | null }
->();
+const retryCopies = new WeakMap<Request, { copy: Request; stamp: SessionStamp }>();
 const refreshMiddleware: Middleware = {
   onRequest({ request }) {
     if (getAccessToken() && !isAuthRequest(request.url)) {
-      retryCopies.set(request, {
-        copy: request.clone(),
-        generation: getGeneration(),
-        userId: getSessionUserId(),
-      });
+      retryCopies.set(request, { copy: request.clone(), stamp: captureSessionStamp() });
     }
     return undefined;
   },
   async onResponse({ request, response }) {
     const sent = retryCopies.get(request);
     if (response.status !== 401 || !sent) return undefined;
-    const { copy, generation, userId } = sent;
-    if (generation !== getGeneration()) return undefined;
-    const session = await refreshSession();
+    const { copy, stamp } = sent;
     // The refresh cookie is shared by all tabs: only replay for the same person (FR-103).
-    if (!session || generation !== getGeneration() || session.user.id !== userId) return undefined;
+    const session = await refreshForReplay(stamp);
+    if (!session) return undefined;
     copy.headers.set('Authorization', `Bearer ${session.accessToken}`);
     return fetch(copy);
   },

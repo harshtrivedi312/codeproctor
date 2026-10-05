@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/input';
 import { api } from '@/lib/api/client';
 import type { AuthSession } from '@/lib/auth-session';
 import { useAuth } from './auth-provider';
-import { downloadTextFile, formatRecoveryCode, recoveryCodesFileText } from './recovery-codes';
+import { RecoveryCodesPanel } from './recovery-codes-panel';
 import { safeNextPath } from './schemas';
 
 const formSchema = z.object({ code: otpCodeSchema });
@@ -198,7 +198,6 @@ function RecoveryCodesStep({
   onContinue: () => void;
 }): React.JSX.Element {
   const [saved, setSaved] = React.useState(false);
-  const [downloaded, setDownloaded] = React.useState(false);
   return (
     <div className="space-y-4">
       <Alert tone="success" role="status" title="Two-factor sign-in is on">
@@ -209,30 +208,7 @@ function RecoveryCodesStep({
         If you lose your phone you can sign in with one of these instead of the 6-digit code. Each
         works once.
       </p>
-      <ul
-        aria-label="Recovery codes"
-        data-testid="recovery-codes"
-        className="grid grid-cols-1 gap-2 rounded bg-muted p-3 font-mono text-sm sm:grid-cols-2"
-      >
-        {codes.map((code) => (
-          <li key={code}>{formatRecoveryCode(code)}</li>
-        ))}
-      </ul>
-      <Button
-        type="button"
-        variant="outline"
-        onClick={() => {
-          downloadTextFile('codeproctor-recovery-codes.txt', recoveryCodesFileText(email, codes));
-          setDownloaded(true);
-        }}
-      >
-        Download recovery codes
-      </Button>
-      {downloaded ? (
-        <p role="status" className="text-sm text-muted-foreground">
-          Downloaded. Move the file somewhere private, such as a password manager.
-        </p>
-      ) : null}
+      <RecoveryCodesPanel email={email} codes={codes} />
       <label className="flex items-start gap-2 text-sm">
         <input
           type="checkbox"
