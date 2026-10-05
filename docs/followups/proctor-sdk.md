@@ -95,3 +95,6 @@ Nits
 - `inference-client.ts` `onerror` after `ready` keeps a dead worker, so `analyze()` hangs silently. Terminate it and emit RUNTIME_ERROR, or add a per-frame timeout.
 - `voice-monitor.ts`: `MicVAD.new` has no init timeout (same hang risk as the worker init).
 - `core/event-queue.ts` `stop()`: unsent event and keystroke batches stay in IndexedDB after the session ends; needs the FR-702 purge (see the Step 6 note).
+
+## QA-D-01 (TC-050): closed, by design
+FULLSCREEN_EXIT carries no duration from the SDK; FULLSCREEN_RESTORED carries the time away. Hub decision: the API fills `duration_ms` on the open FULLSCREEN_EXIT when FULLSCREEN_RESTORED arrives, or at session end; this goes to BE-10/BE-12 and ADR 0013. `qa-tc.test.ts` now asserts the two behaviours (EXIT immediate and without `durationMs`, RESTORED with the time away) instead of the expected-failure test. Not edited here: `docs/test-cases.md`, `docs/test-matrix.md`, `docs/followups/qa.md` and `packages/qa/src/p1-gate.ts` still mention QA-D-01 (QA-owned).
