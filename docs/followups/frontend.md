@@ -193,3 +193,7 @@ Built against MSW mocks; paths are placeholders like the rest of `apps/web/opena
 
 - **Accepted risk, decide under R-08 / ARC-05:** requests carrying `Purpose: prefetch` (or `next-router-prefetch`) skip the CSP middleware, so a document fetched that way has no CSP header or nonce. This is Next's documented matcher pattern and was already in place before D-45; the app emits no document prefetch links, Next's own RSC prefetches are not documents, and Chrome sends `Sec-Purpose` (which still runs the middleware). Either drop the `purpose` rule so every document gets a CSP (cost: one nonce per prefetch) or keep it as an accepted risk.
 - **Nits:** mention browser Back/Forward in the `isCandidateTestPath` comment (a popstate navigation may keep the previous page's allowance, negligible); add TC IDs to the CSP tests if `docs/test-cases.md` gains CSP cases; add an assertion that `{ purpose: 'other' }` still runs the middleware. The step-1 nit about the "Prefetches keep the CSP" comment is resolved.
+
+### Playwright flake: staff-shell loading state (seen once, FE-03)
+
+- `e2e/staff-shell.spec.ts` "shows a loading state before the rows arrive" failed once in a full run and passed on the rerun (25 of 25). Not reproduced; likely a race between the mock's response and the assertion on the skeleton rows. Capture a trace on failure before wiring Playwright into CI, and make the test hold the response with a gated handler instead of relying on timing.
