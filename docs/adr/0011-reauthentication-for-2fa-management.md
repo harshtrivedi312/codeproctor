@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Accepted 2026-10-05 for the owner's decision (currentPassword on setup, disable and recovery-code regeneration; 403 REAUTH_FAILED; forced enrolment unchanged). Detail rules added by the architecture hub are marked in `docs/api-contract.md` and await owner confirmation. |
+| Status | Accepted 2026-10-05 (C-21, D-49): the owner's decision (currentPassword on setup, disable and recovery-code regeneration; 403 `REAUTH_FAILED`; forced enrolment unchanged) and the six answers recorded in `docs/api-contract.md`. |
 | Author | architecture hub |
 | Serves | FR-101, FR-102, FR-104; NFR-04; TC-002, TC-003 |
 | Builds on | ADR 0003 (credential storage), ADR 0001 TB-1 |
@@ -25,7 +25,7 @@ Setup, disable and recovery-code regeneration require `currentPassword` in the b
 ## Consequences
 
 - API shape change (C-8): `ProblemDetails` gains an optional `code` member (RFC 7807 extension). Affects backend (problem filter), frontend (API client) and QA.
-- PR #26 currently returns 401 for a wrong password on these routes; BE changes it to 403 `REAUTH_FAILED` before PR #26 merges.
+- Backend PR #26 (on main) already returns 403 `REAUTH_FAILED` and 403 `TWO_FACTOR_REQUIRED_FOR_ROLE`. Two backend follow-ups remain from C-21: disabling 2FA must revoke that user's refresh sessions (reset already does) and must require a current TOTP code.
 - Frontend: stop excluding the bearer-authenticated 2FA management routes from refresh-and-retry in `isAuthRequest`.
 - A `reauth` body schema in packages/shared is wanted (ARC-02 part 2).
 - QA assigns new TC IDs for re-auth; TC-002 and TC-003 are not reused for it.
