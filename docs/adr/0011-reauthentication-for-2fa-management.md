@@ -14,7 +14,7 @@ Changing a second factor with only an access token lets a stolen token take over
 
 ## Decision
 
-Setup, disable and recovery-code regeneration require `currentPassword` in the body (owner decision). A wrong password returns `403` with problem `code: "REAUTH_FAILED"`, not 401 (owner decision). Disabling 2FA also requires a current TOTP code (`totpCode`, C-21 answer 6) and revokes the user's sessions (answer 5; backend PR #51). Architect details (covered by C-21's acceptance of this ADR): the SUPER_ADMIN reset takes the admin's own password; failures share login's lockout and a locked account returns the same 403; all attempts are audited. Forced enrolment during login is unchanged. Full rules, the endpoint table and the frontend behaviour are in `docs/api-contract.md` section 1.
+Setup, disable and recovery-code regeneration require `currentPassword` in the body (owner decision). A wrong password returns `403` with problem `code: "REAUTH_FAILED"`, not 401 (owner decision). Disabling 2FA also requires a current TOTP code (`totpCode`, C-21 answer 6) and revokes the user's sessions (answer 5): both are **pending backend PR #51** and not on main yet. Architect details (covered by C-21's acceptance of this ADR): the SUPER_ADMIN reset takes the admin's own password; failures share login's lockout and a locked account returns the same 403; all attempts are audited. Forced enrolment during login is unchanged. Full rules, the endpoint table and the frontend behaviour are in `docs/api-contract.md` section 1.
 
 ## Options considered
 

@@ -69,4 +69,5 @@ The six owner questions were answered by C-21 (2026-10-05, D-49) and are recorde
 - Add fsd.md §4 rows for `/auth/2fa/setup/*`, disable, regenerate and reset; ask QA for new TC IDs.
 - `reauth` body schema in packages/shared.
 - BE-02: a successful re-auth does not reset the failed-login counter on main (it only refunds its own reservation); confirm or change.
+- Backend follow-up: add `req.body.currentPassword`, `req.body.password`, `req.body.newPassword` (and `err` equivalents) to the pino redact list in `apps/api/src/app.module.ts` (no body paths on main today).
 - Backend follow-up: audit every re-auth failure and a successful `setup/start` (today only completed actions and the lock-triggering failure are audited).
