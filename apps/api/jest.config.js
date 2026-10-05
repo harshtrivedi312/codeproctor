@@ -1,3 +1,5 @@
+// Fresh checkout: run `pnpm --filter @codeproctor/shared build` or `pnpm --filter @codeproctor/api... build` first:
+// shared main/types point at the git-ignored dist.
 /** @type {import('jest').Config} */
 module.exports = {
   rootDir: 'src',
