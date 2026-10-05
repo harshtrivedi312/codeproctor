@@ -119,4 +119,3 @@ The job `k6` in `.github/workflows/qa.yml` runs `packages/qa/k6/<script>` throug
 2. Replace the secret `K6_CANDIDATE_TOKENS` with `K6_SESSIONS_JSON` (the JSON list above) in the `staging` environment.
 3. Keep the `QA_STAGING_HOSTS` allow-list step; add `-e` for `API_BASE_URL` from the already-validated target.
 4. Upload the k6 summary (`--summary-export`) as an artefact so the result report for BE-15B and the matrix has numbers.
-5. Remove `packages/qa/k6/` (placeholder paths) once the workflow is changed.
