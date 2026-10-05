@@ -25,6 +25,9 @@ export class InferenceClient {
   private nextId = 1;
   private inFlight: { id: number; resolve: (r: ResultMessage | null) => void } | null = null;
   private ready: ((r: ReadyMessage | null) => void) | null = null;
+  /** Called once if the worker dies after `ready` (error event or repeated frame timeouts). */
+  onDead: (() => void) | null = null;
+  private consecutiveTimeouts = 0;
   skippedFrames = 0;
   busyMs = 0;
   frames = 0;
@@ -34,7 +37,15 @@ export class InferenceClient {
     private readonly createWorker: () => WorkerLike,
     /** Give up when the worker never answers `init` (hung wasm or model fetch). */
     private readonly initTimeoutMs = 30_000,
+    /** A frame the worker never answers is abandoned after this long (default 10 s). */
+    private readonly frameTimeoutMs = 10_000,
   ) {}
+
+  private die(): void {
+    if (!this.worker) return;
+    this.terminate();
+    this.onDead?.();
+  }
 
   /** Resolves with per-task load results, or null when the worker itself could not start. */
   init(msg: Omit<InitMessage, 'type'>): Promise<ReadyMessage | null> {
@@ -55,9 +66,12 @@ export class InferenceClient {
       const timer = setTimeout(() => finish(null), this.initTimeoutMs);
       this.worker.onmessage = (e) => this.handle(e.data);
       this.worker.onerror = () => {
-        this.ready?.(null);
-        this.inFlight?.resolve(null);
-        this.inFlight = null;
+        if (this.ready) {
+          this.ready(null);
+          return;
+        }
+        // Dead worker after ready: do not keep it, a frame would wait forever.
+        this.die();
       };
       this.worker.postMessage({ type: 'init', ...msg });
     });
@@ -72,6 +86,7 @@ export class InferenceClient {
     this.busyMs += m.busyMs;
     this.frames++;
     if (this.inFlight?.id === m.id) {
+      this.consecutiveTimeouts = 0;
       this.inFlight.resolve(m);
       this.inFlight = null;
     }
@@ -86,7 +101,19 @@ export class InferenceClient {
     }
     const id = this.nextId++;
     return new Promise((resolve) => {
-      this.inFlight = { id, resolve };
+      const timer = setTimeout(() => {
+        if (this.inFlight?.id !== id) return;
+        this.inFlight = null;
+        resolve(null);
+        if (++this.consecutiveTimeouts >= 3) this.die();
+      }, this.frameTimeoutMs);
+      this.inFlight = {
+        id,
+        resolve: (r) => {
+          clearTimeout(timer);
+          resolve(r);
+        },
+      };
       this.worker?.postMessage({ type: 'frame', id, bitmap, tasks }, [bitmap]);
     });
   }
@@ -97,6 +124,10 @@ export class InferenceClient {
   }
 
   terminate(): void {
+    // An init still waiting for `ready` settles at once instead of hanging until its timeout.
+    const pendingReady = this.ready;
+    this.ready = null;
+    pendingReady?.(null);
     this.worker?.terminate();
     this.worker = null;
     this.inFlight?.resolve(null);

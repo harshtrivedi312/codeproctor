@@ -295,36 +295,61 @@ def find_peer_similarity(
     return out
 
 
+@dataclass(frozen=True, slots=True)
+class AiContext:
+    """AI reference rows and starter ignore sets prepared once per request (NFR-01/02).
+
+    References are grouped by language with variant rows first (AI-2); `ignore` holds every starter
+    k-gram hash per language.
+    """
+
+    refs: Mapping[CodeLanguage, tuple[tuple[AiReference, PreparedCode], ...]]
+    ignore: Mapping[CodeLanguage, frozenset[int]]
+
+
+def prepare_ai_context(
+    references: Sequence[AiReference],
+    config: IntegrityConfig | None = None,
+    starter_code: Mapping[CodeLanguage, str] | None = None,
+) -> AiContext:
+    """Prepare references and starter ignore sets once; pass the result as `context=`."""
+    sc = (config or IntegrityConfig()).similarity
+    grouped: dict[CodeLanguage, list[tuple[AiReference, PreparedCode]]] = {}
+    for r in sorted(references, key=lambda r: not r.is_variant_match):
+        grouped.setdefault(r.language, []).append((r, prepare(r.code, r.language, sc)))
+    refs = {lang: tuple(rows) for lang, rows in grouped.items()}
+    ignore = {
+        lang: all_kgram_hashes(code, lang, sc.k) for lang, code in (starter_code or {}).items()
+    }
+    return AiContext(refs, ignore)
+
+
 def find_ai_likeness(
     submission: Submission,
     references: Sequence[AiReference],
     config: IntegrityConfig | None = None,
     starter_code: Mapping[CodeLanguage, str] | None = None,
+    context: AiContext | None = None,
 ) -> list[Finding]:
     """AI_LIKENESS: the best match against stored AI reference solutions (AI-1, AI-2).
 
     Compares only references in the submission's language, variant rows first, and cites the
     best-matching row. Never used for grading (AI-3). One finding at most, so a question with many
-    reference rows cannot flood the timeline.
+    reference rows cannot flood the timeline. Pass `context` (from `prepare_ai_context`) when
+    checking many submissions so references and starter code are prepared once, not per call; when
+    `context` is given, `references` and `starter_code` are ignored.
     """
     cfg = config or IntegrityConfig()
     if not cfg.is_enabled("AI_LIKENESS"):
         return []
     sc = cfg.similarity
-    prep = prepare(submission.code, submission.language, sc)
+    ctx = context or prepare_ai_context(references, cfg, starter_code)
     lang = submission.language
-    ignore = (
-        all_kgram_hashes(starter_code[lang], lang, sc.k)
-        if starter_code and lang in starter_code
-        else frozenset()
-    )
-    ordered = sorted(
-        (r for r in references if r.language == submission.language),
-        key=lambda r: not r.is_variant_match,
-    )
+    prep = prepare(submission.code, lang, sc)
+    ignore = ctx.ignore.get(lang, frozenset())
     best: tuple[Comparison, AiReference] | None = None
-    for ref in ordered:
-        c = compare(prep, prepare(ref.code, ref.language, sc), sc, ignore)
+    for ref, ref_prep in ctx.refs.get(lang, ()):
+        c = compare(prep, ref_prep, sc, ignore)
         if c is not None and (best is None or c.similarity > best[0].similarity):
             best = (c, ref)
     if best is None or best[0].similarity < sc.ai_threshold:

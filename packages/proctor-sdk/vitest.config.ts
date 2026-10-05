@@ -8,5 +8,5 @@ export default defineConfig({
       '@codeproctor/shared': fileURLToPath(new URL('../shared/src/index.ts', import.meta.url)),
     },
   },
-  test: { environment: 'jsdom', include: ['src/**/*.test.ts'] },
+  test: { environment: 'jsdom', include: ['src/**/*.test.ts', 'scripts/**/*.test.mjs'] },
 });

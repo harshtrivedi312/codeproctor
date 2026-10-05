@@ -80,14 +80,54 @@ export class VisionMonitor implements Detector {
   }
 
   async start(ctx: DetectorContext): Promise<void> {
+    await this.run(ctx);
+  }
+
+  /**
+   * Webcam stream that arrived after start() (for example `pipeline.recordWebcam()` ran later).
+   * If the monitor reported PERMISSION_DENIED for lack of a stream, it initialises now; the earlier
+   * DETECTOR_UNAVAILABLE stays in the log, which is truthful about that period.
+   */
+  async attachStream(stream: MediaStream): Promise<void> {
+    this.attached = stream;
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (this.video) {
+      // Already running (for example the webcam was restarted after a device loss): follow the
+      // new stream instead of sampling a dead one.
+      this.video.srcObject = stream;
+      await this.video.play().catch(() => undefined);
+      return;
+    }
+    if (this.tasks.size > 0 || this.client) return;
+    this.reported.clear();
+    await this.run(ctx);
+  }
+
+  private attached: MediaStream | null = null;
+  /** Bumped by stop() and by a start timeout so a late startInner() can tell it was abandoned. */
+  private generation = 0;
+
+  reportStartTimeout(ctx: DetectorContext): void {
+    for (const t of ['face', 'gaze', 'objects'] as const) {
+      if (!ctx.isDisabled(TASK_TO_DETECTOR[t])) this.unavailable(ctx, t, 'RUNTIME_ERROR');
+    }
+  }
+
+  private async run(ctx: DetectorContext): Promise<void> {
+    const gen = this.generation;
     try {
       await this.startInner(ctx);
     } catch {
+      // Abandoned (stop() or a start timeout bumped the generation): a later run may own the
+      // shared state now, so touch nothing.
+      if (gen !== this.generation) return;
       // Cross-origin model base, video failure, anything unexpected: say so, never a silent pass.
+      // Tasks that already reported SUPPORTED are included; their capability flag is reset too.
       this.client?.terminate();
       this.client = null;
       for (const t of ['face', 'gaze', 'objects'] as const) {
-        if (!ctx.isDisabled(TASK_TO_DETECTOR[t]) && !this.reported.has(t) && !this.tasks.has(t)) {
+        if (!ctx.isDisabled(TASK_TO_DETECTOR[t]) && !this.reported.has(t)) {
           this.unavailable(ctx, t, 'MODEL_LOAD_FAILED');
         }
       }
@@ -98,6 +138,7 @@ export class VisionMonitor implements Detector {
   private readonly reported = new Set<InferenceTask>();
 
   private async startInner(ctx: DetectorContext): Promise<void> {
+    const gen = this.generation;
     this.ctx = ctx;
     this.cfg = { ...DEFAULT_AI_CONFIG, ...this.o.config };
     this.face = new FaceRules(this.cfg);
@@ -109,7 +150,7 @@ export class VisionMonitor implements Detector {
     );
     if (wanted.length === 0) return; // everything disabled by accommodations: nothing loads
 
-    const stream = this.o.getWebcamStream();
+    const stream = this.o.getWebcamStream() ?? this.attached;
     if (!stream) {
       for (const t of wanted) this.unavailable(ctx, t, 'PERMISSION_DENIED');
       return;
@@ -120,8 +161,19 @@ export class VisionMonitor implements Detector {
     }
 
     const urls = resolveModelUrls(this.o.modelBaseUrl);
-    this.client = new InferenceClient(this.o.createWorker, this.o.initTimeoutMs);
-    const ready = await this.client.init({
+    const client = new InferenceClient(this.o.createWorker, this.o.initTimeoutMs);
+    this.client = client;
+    client.onDead = () => {
+      if (gen !== this.generation) return;
+      // The worker died after it was ready: stop sampling and say so.
+      if (this.timer) clearInterval(this.timer);
+      this.timer = null;
+      for (const t of [...this.tasks]) this.unavailable(ctx, t, 'RUNTIME_ERROR');
+      this.tasks.clear();
+      this.identity?.stop();
+      this.identity = null;
+    };
+    const ready = await client.init({
       tasks: wanted,
       urls: {
         faceDetector: urls.faceDetector,
@@ -130,9 +182,15 @@ export class VisionMonitor implements Detector {
         cocoSsd: urls.cocoSsd,
       },
     });
+    if (gen !== this.generation) {
+      // Abandoned while the models were loading: release only OUR worker; a later run of this
+      // instance owns this.client and this.tasks now.
+      client.terminate();
+      return;
+    }
     if (!ready) {
       for (const t of wanted) this.unavailable(ctx, t, 'UNSUPPORTED');
-      this.client.terminate();
+      client.terminate();
       this.client = null;
       return;
     }
@@ -145,7 +203,7 @@ export class VisionMonitor implements Detector {
       }
     }
     if (this.tasks.size === 0) {
-      this.client.terminate();
+      client.terminate();
       this.client = null;
       return;
     }
@@ -154,7 +212,21 @@ export class VisionMonitor implements Detector {
     video.muted = true;
     video.playsInline = true;
     video.srcObject = stream;
-    await video.play().catch(() => undefined);
+    // play() can hang (autoplay policy, no frames); do not let it hold start() open.
+    let playTimer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      video.play().catch(() => undefined),
+      new Promise<void>((r) => {
+        playTimer = setTimeout(r, 5000);
+      }),
+    ]);
+    clearTimeout(playTimer);
+    if (gen !== this.generation) {
+      // Abandoned while waiting for the first frame: release our own resources only.
+      video.srcObject = null;
+      client.terminate();
+      return;
+    }
     this.video = video;
 
     if (this.o.recheckIdentity && this.tasks.has('face')) {
@@ -305,6 +377,7 @@ export class VisionMonitor implements Detector {
   }
 
   stop(): void {
+    this.generation++;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.identity?.stop();
