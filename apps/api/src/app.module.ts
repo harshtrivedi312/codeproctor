@@ -9,6 +9,7 @@ import { API_PREFIX } from './bootstrap';
 import { validateEnv } from './config/env';
 import type { Env } from './config/env';
 import { AuthModule } from './auth/auth.module';
+import { CandidateModule } from './candidate/candidate.module';
 import { JwtAuthGuard } from './common/auth/jwt-auth.guard';
 import { buildPinoHttpOptions } from './common/pino-http.config';
 import { TokenModule } from './common/auth/token.service';
@@ -78,6 +79,7 @@ function areaOf(context: ExecutionContext): Area {
     MailModule,
     TokenModule,
     AuthModule,
+    CandidateModule,
     HealthModule,
     ExecutionModule,
   ],
