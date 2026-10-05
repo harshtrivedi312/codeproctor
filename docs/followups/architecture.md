@@ -44,3 +44,18 @@ Verdict: approve after the blocker fixes below. Fixed on this branch: `RunReques
 ## Pointer
 
 The [ARC-02] items under "frontend/step-2" in docs/followups/frontend.md (staff auth schemas, endpoints, 2FA challenge, password policy, fragment tokens) are architecture-hub work and are tracked there.
+
+## Compliance amendments to ADR 0004 and ADR 0001 (C-04, C-06, C-10, C-17, C-18; branch arc/compliance-adr-amendments)
+
+Proposed; the owner accepts. Apply these once the ADR 0004 §9 and ADR 0001 §12.4 amendments are accepted. Full list: ADR 0004 §9.6.
+
+- [hub] database.md Data rules: replace the retention *Kept.* bullet and the two erasure bullets on the consent PDF and consent record; add R-9 (consent records deleted 3 years after `signed_at`) and the post-erasure access rule; comment on `consents.pdf_key`.
+- [hub] fsd.md FR-401 and FR-704: consent record kept 3 years after signing, then deleted, also after erasure (C-04, C-17). NFR-05: C-06 wording, drop "Provisional".
+- [hub] test-cases.md TC-094: erasure keeps the consent record and PDF; drop "provisional, Legal to confirm". QA adds a TC for the 3-year consent clock.
+- [hub] prompts/database.md Step 6: RetentionService adds R-9; CandidateErasureService stops deleting consent PDFs and blanking the consent record.
+- [hub, PR #39] ADR 0013 5.7: consent PDF row reason ("kept 3 years after signing, through erasure") and the erasure bullet (session prefix only; R-9 deletes the consent prefix). Owner question 16 then closes.
+- [hub, PR #39] ADR 0013 licence gate: overrides for AuraFace and COCO-SSD cite D-28 (updated by C-10) in status.md §9, or the gate also reads docs/compliance/decisions.md.
+- [database] DB-06: implement R-9 and the amended R-6 (tests: TC-072, TC-094, new consent-clock TC).
+- [backend] BE-09: erasure deletes only the session prefix. BE-06: erasure confirmation email says the consent record is kept until its 3-year date.
+- [frontend] FE-03: erase confirmation text mentions the kept consent record.
+- [owner] ADR 0004 §9.7 questions: litigation hold; declined consents on the 3-year clock; erasure clears `invitations.accommodations`.
