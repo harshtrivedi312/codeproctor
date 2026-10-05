@@ -67,6 +67,39 @@ describe('route permission matrix (FR-103, TC-004)', () => {
   });
 });
 
+describe('matrix edge cases (FR-103, FR-105)', () => {
+  it('FR-105: a candidate-data route that is not audited is reported', () => {
+    const real = Object.entries(ROUTE_PERMISSIONS).filter(([, a]) => a !== 'public')[0];
+    const key = 'GET /review/sessions/:id';
+    const saved = ROUTE_PERMISSIONS[key];
+    (ROUTE_PERMISSIONS as Record<string, unknown>)[key] = {
+      roles: ['REVIEWER'],
+      permission: 'review_session:read',
+      candidateData: true,
+    };
+    try {
+      const routes: RegisteredRoute[] = [
+        { key, handler: 'R.read', isPublic: false, roles: ['REVIEWER'], audited: false },
+      ];
+      expect(real).toBeDefined();
+      expect(matrixProblems(routes).join('\n')).toContain(
+        'GET /review/sessions/:id touches candidate data but is not audited (FR-105)',
+      );
+    } finally {
+      if (saved === undefined) delete (ROUTE_PERMISSIONS as Record<string, unknown>)[key];
+    }
+  });
+
+  it('FR-103: the same key served by two handlers is reported', () => {
+    const [first] = everyRoute();
+    const problems = matrixProblems([
+      ...everyRoute(),
+      { ...(first as RegisteredRoute), handler: 'Other.dup' },
+    ]);
+    expect(problems.join('\n')).toContain('is served by more than one handler');
+  });
+});
+
 describe('route registry walk (FR-103, FR-105)', () => {
   class BaseController {
     @Get('inherited')

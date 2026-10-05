@@ -240,7 +240,7 @@ export class AuthController {
   @HttpCode(204)
   @ApiOperation({
     summary:
-      "Super admin clears another user's 2FA and revokes their refresh sessions; needs the admin's own current password (FR-102). Access tokens already issued expire within 15 minutes; this is not an immediate compromise response.",
+      "Super admin clears another user's 2FA and revokes their refresh sessions; needs the admin's own current password (FR-102). The target's access tokens issued so far end at once (Redis marker; 503 and no change if Redis is down).",
   })
   @ApiNoContentResponse()
   @ApiBadRequestResponse({ description: 'Not a UUID, or the caller targeted themselves' })

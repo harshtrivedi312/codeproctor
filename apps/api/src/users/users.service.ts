@@ -38,7 +38,6 @@ import { Prisma, UserRole } from '../generated/prisma/client';
 import type { User } from '../generated/prisma/client';
 import type { OrgScopedPrismaClient } from '../database/org-scope.extension';
 
-type OrgScopedTx = Pick<OrgScopedPrismaClient, 'user'>;
 import { MailPort } from '../mail/mail.port';
 import type {
   InviteStaffUserDto,
@@ -57,6 +56,8 @@ export interface Actor {
 
 /** The most rows a list can skip: deep offsets are refused (400) instead of scanning the table. */
 export const MAX_LIST_OFFSET = 10_000;
+type OrgScopedTx = Pick<OrgScopedPrismaClient, 'user'>;
+
 const INVITE_WINDOW_SECONDS = 60 * 60;
 
 interface AdminRow {
@@ -208,8 +209,10 @@ export class UsersService {
     let count: number;
     try {
       await ensureConnected(this.redis);
+      // SET NX EX creates the key with its expiry in one command, so no counter is ever left
+      // without a TTL; INCR then keeps that TTL.
+      await this.redis.set(key, '0', 'EX', INVITE_WINDOW_SECONDS, 'NX');
       count = await this.redis.incr(key);
-      if (count === 1) await this.redis.expire(key, INVITE_WINDOW_SECONDS);
     } catch {
       throw new ServiceUnavailableException('Verification is temporarily unavailable.');
     }
@@ -227,7 +230,7 @@ export class UsersService {
    * cannot deadlock); a change in between is the same REAUTH_FAILED.
    */
   private async requireSameAdmin(
-    tx: Pick<OrgScopedTx, 'user'>,
+    tx: OrgScopedTx,
     actor: Actor,
     verifiedHash: string,
   ): Promise<void> {

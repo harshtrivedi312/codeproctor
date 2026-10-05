@@ -131,6 +131,21 @@ describe('JwtAuthGuard user re-check (FR-103, FR-104, FU-BE-19)', () => {
     ).rejects.toThrow(UnauthorizedException);
   });
 
+  it('FR-104: an access token with no iat claim is refused', async () => {
+    const noIat = { ...claims } as Record<string, unknown>;
+    delete noIat.iat;
+    const guard = new JwtAuthGuard(
+      new Reflector(),
+      { verify: () => noIat } as unknown as TokenService,
+      {
+        client: { user: { findUnique: jest.fn().mockResolvedValue(current) } },
+      } as unknown as PrismaService,
+      orgContext,
+      validity,
+    );
+    await expect(guard.canActivate(protectedContext())).rejects.toThrow(UnauthorizedException);
+  });
+
   it('FR-103: a token whose user has since moved to another organization is refused', async () => {
     const guard = guardWith(jest.fn().mockResolvedValue({ ...current, orgId: 'org-2' }));
     await expect(guard.canActivate(protectedContext())).rejects.toThrow(UnauthorizedException);

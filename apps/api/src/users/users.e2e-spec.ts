@@ -710,7 +710,7 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       expect(await auditRows('USER_UNLOCKED', victim.id)).toHaveLength(0);
     });
 
-    it('TC-002: a refused step-up costs the same statements for a wrong and a locked admin password, and for any target (invite, unlock, role)', async () => {
+    it('TC-002: a refused step-up costs the same statements for a wrong and a locked admin password and for a real and a missing target (invite, role, deactivate, unlock)', async () => {
       const wrongAdmin = await make(UserRole.SUPER_ADMIN);
       const lockedAdmin = await make(UserRole.SUPER_ADMIN);
       await owner.user.update({
@@ -719,27 +719,31 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       });
       const victim = await make(UserRole.RECRUITER);
       const ghost = '00000000-0000-4000-8000-000000000043';
-      for (const target of [victim.id, ghost]) {
+      const names = ['invite', 'role', 'deactivate', 'unlock'] as const;
+      const measure = async (admin: Made, target: string): Promise<number[]> => {
         // Keep the wrong-password admin below the lock threshold: the 5th failure writes more.
         await owner.user.update({ where: { id: wrongAdmin.id }, data: { failedLogins: 0 } });
+        const c = calls(admin.auth, target, { currentPassword: 'nope-nope-nope-1' });
         const counts: number[] = [];
-        const statuses: number[] = [];
-        for (const admin of [wrongAdmin, lockedAdmin]) {
-          const c = calls(admin.auth, target, { currentPassword: 'nope-nope-nope-1' });
-          for (const name of ['invite', 'role', 'unlock'] as const) {
-            let res: request.Response | undefined;
-            counts.push(
-              await statementsDuring(async () => {
-                res = await c[name]();
-              }),
-            );
-            statuses.push(res?.status ?? 0);
-          }
+        for (const name of names) {
+          let res: request.Response | undefined;
+          counts.push(
+            await statementsDuring(async () => {
+              res = await c[name]();
+            }),
+          );
+          expect([name, res?.status]).toEqual([name, 403]);
         }
-        expect(statuses.every((s) => s === 403)).toBe(true);
-        // [invite, role, unlock] for the wrong admin equals the same for the locked one.
-        expect(counts.slice(0, 3)).toEqual(counts.slice(3));
-      }
+        return counts;
+      };
+      const wrongVictim = await measure(wrongAdmin, victim.id);
+      const wrongGhost = await measure(wrongAdmin, ghost);
+      const lockedVictim = await measure(lockedAdmin, victim.id);
+      const lockedGhost = await measure(lockedAdmin, ghost);
+      expect(wrongVictim.every((n) => n > 2)).toBe(true);
+      expect(wrongGhost).toEqual(wrongVictim);
+      expect(lockedVictim).toEqual(wrongVictim);
+      expect(lockedGhost).toEqual(wrongVictim);
     });
 
     it('FR-103: with the right password everything works; the password check precedes the 404', async () => {
@@ -860,6 +864,38 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       }
     });
 
+    it('FR-102, FR-104: an admin 2FA reset ends the target access tokens at once, and rolls back with 503 if the marker cannot be written', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const user = await make(UserRole.RECRUITER);
+      const { REDIS_CLIENT } = jest.requireActual<
+        typeof import('../infrastructure/infrastructure.module')
+      >('../infrastructure/infrastructure.module');
+      const redis = app.get<import('ioredis').Redis>(REDIS_CLIENT);
+      await owner.user.update({
+        where: { id: user.id },
+        data: { totpEnabled: true, totpSecretEnc: 'x' },
+      });
+      const reset = (): request.Test =>
+        http()
+          .post(`${API}/auth/2fa/reset/${user.id}`)
+          .set(admin.auth)
+          .send({ currentPassword: PASSWORD });
+      const set = jest.spyOn(redis, 'set').mockRejectedValue(new Error('redis down'));
+      try {
+        expect((await reset()).status).toBe(503);
+      } finally {
+        set.mockRestore();
+      }
+      expect((await owner.user.findUniqueOrThrow({ where: { id: user.id } })).totpEnabled).toBe(
+        true,
+      );
+      const probe = (): request.Test =>
+        http().post(`${API}/auth/2fa/disable`).set(user.auth).send({ currentPassword: PASSWORD });
+      expect((await probe()).status).not.toBe(401);
+      await reset().expect(204);
+      expect((await probe()).status).toBe(401);
+    });
+
     it('FR-104: if the marker cannot be written the role change rolls back (503), nothing half-done', async () => {
       const admin = await make(UserRole.SUPER_ADMIN);
       const user = await make(UserRole.RECRUITER);
@@ -925,9 +961,18 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       }
     });
 
-    it('FR-103: the default limit comes from INVITE_RATE_LIMIT_PER_ORG_HOUR (20)', () => {
+    it('FR-103: the limit comes from INVITE_RATE_LIMIT_PER_ORG_HOUR, default 20', () => {
       const { validateEnv } = jest.requireActual<typeof import('../config/env')>('../config/env');
-      expect(validateEnv({ ...process.env }).INVITE_RATE_LIMIT_PER_ORG_HOUR).toBe(20);
+      const saved = process.env.INVITE_RATE_LIMIT_PER_ORG_HOUR;
+      try {
+        delete process.env.INVITE_RATE_LIMIT_PER_ORG_HOUR;
+        expect(validateEnv({ ...process.env }).INVITE_RATE_LIMIT_PER_ORG_HOUR).toBe(20);
+        process.env.INVITE_RATE_LIMIT_PER_ORG_HOUR = '3';
+        expect(validateEnv({ ...process.env }).INVITE_RATE_LIMIT_PER_ORG_HOUR).toBe(3);
+      } finally {
+        if (saved === undefined) delete process.env.INVITE_RATE_LIMIT_PER_ORG_HOUR;
+        else process.env.INVITE_RATE_LIMIT_PER_ORG_HOUR = saved;
+      }
     });
   });
 

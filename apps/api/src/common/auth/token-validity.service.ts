@@ -4,15 +4,18 @@
 // or the user is deactivated, `auth:tokens-valid-after:{userId}` is set to the change time (epoch
 // seconds) with a TTL a little longer than the access-token lifetime, and the guard refuses any
 // access token whose `iat` is at or before it. A token issued in the same second as the change is
-// refused too (the user signs in again): no schema column is needed. Redis down means the check
+// refused too (the user signs in again): no schema column is needed. Clock assumption: the marker
+// time and the token `iat` both come from API server clocks, so API instances must be NTP-synced
+// to within about a second (single instance today). Redis down means the check
 // cannot run, so the request is refused with a 503 (fail closed).
 import { Inject, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { Redis } from 'ioredis';
 import { REDIS_CLIENT } from '../../infrastructure/infrastructure.module';
 import { ensureConnected } from '../../infrastructure/redis-ready';
+import { ACCESS_TTL_SECONDS } from './access-ttl';
 
-export const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
-const MARKER_TTL_SECONDS = ACCESS_TOKEN_TTL_SECONDS + 5 * 60;
+/** The marker outlives any token issued before it: the access lifetime plus a margin. */
+export const MARKER_TTL_SECONDS = ACCESS_TTL_SECONDS + 5 * 60;
 
 const key = (userId: string): string => `auth:tokens-valid-after:${userId.toLowerCase()}`;
 

@@ -36,14 +36,16 @@ import {
 } from './crypto.util';
 import type { RequestContext } from '../common/request-context';
 import { errorName } from '../common/request-context';
+import { ACCESS_TTL_SECONDS } from '../common/auth/access-ttl';
 import { TokenService } from '../common/auth/token.service';
+import { TokenValidityService } from '../common/auth/token-validity.service';
 import { CodedForbiddenException, reauthFailed } from '../common/coded.exception';
 import { PasswordService } from './password.service';
 import { TotpService } from './totp.service';
 
 export const MAX_FAILED_LOGINS = 5;
 export const LOCKOUT_MINUTES = 15;
-export const ACCESS_TTL_SECONDS = 15 * 60;
+export { ACCESS_TTL_SECONDS };
 export const REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const RESET_TTL_MS = 30 * 60 * 1000;
 const CHALLENGE_TTL_SECONDS = 5 * 60;
@@ -100,6 +102,7 @@ export class AuthService implements OnApplicationShutdown {
     private readonly prisma: PrismaService,
     private readonly orgContext: OrgContextService,
     private readonly tokens: TokenService,
+    private readonly validity: TokenValidityService,
     private readonly passwords: PasswordService,
     private readonly totp: TotpService,
     private readonly mail: MailPort,
@@ -660,9 +663,9 @@ export class AuthService implements OnApplicationShutdown {
    * refresh()'s FOR SHARE, but not with the FOR KEY SHARE the audit insert takes on the actor row
    * through audit_logs.actor_id, so two admins resetting each other cannot deadlock). Then
    * refresh_tokens, same order as a password reset. A session being opened from the old second
-   * factor is refused by startSession's bound secret. Access tokens already issued stay valid
-   * until they expire (15 minutes): the guard keys on the password version, which this does not
-   * change; the refresh families are all revoked, so none renews. A role that requires 2FA is
+   * factor is refused by startSession's bound secret. Access tokens already issued end at once
+   * through the Redis tokens-valid-after marker (the password version does not change); the refresh
+   * families are all revoked, so none renews. A role that requires 2FA is
    * sent through forced enrollment at the next login (FR-102).
    */
   async resetTwoFactorOf(
@@ -715,6 +718,8 @@ export class AuthService implements OnApplicationShutdown {
         where: { userId: targetId, revokedAt: null },
         data: { revokedAt: new Date() },
       });
+      // Access tokens issued so far end too (Redis marker; a Redis outage rolls this back, 503).
+      await this.validity.invalidateIssuedTokens(targetId);
       await tx.auditLog.create({
         data: {
           orgId: actor.orgId,

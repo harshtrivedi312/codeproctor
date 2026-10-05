@@ -81,6 +81,9 @@ export function matrixProblems(routes: readonly RegisteredRoute[]): string[] {
   const problems: string[] = [];
   const seen = new Set<string>();
   for (const route of routes) {
+    if (seen.has(route.key)) {
+      problems.push(`${route.key} (${route.handler}) is served by more than one handler`);
+    }
     seen.add(route.key);
     const entry = Object.hasOwn(ROUTE_PERMISSIONS, route.key)
       ? ROUTE_PERMISSIONS[route.key]
