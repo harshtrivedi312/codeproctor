@@ -108,7 +108,7 @@ export class AuthController {
       challenge.userId,
       dto.code,
       ctxOf(req),
-      challenge.jti,
+      challenge,
     );
     setRefreshCookie(res, result.session);
     return { session: result.session.body.session, recoveryCodes: result.recoveryCodes };
@@ -131,7 +131,7 @@ export class AuthController {
       challenge.userId,
       dto.code,
       ctxOf(req),
-      challenge.jti,
+      challenge,
     );
     setRefreshCookie(res, outcome);
     return outcome.body.session;

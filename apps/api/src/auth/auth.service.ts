@@ -65,6 +65,8 @@ export interface SessionOutcome {
 
 class RefreshReuseSignal extends Error {}
 class AlreadyEnrolledSignal extends Error {}
+/** The password changed after it was verified: no session may be opened (FR-104, FR-107). */
+class PasswordChangedSignal extends Error {}
 
 /** A reservation is granted, or refused (locked, window full, or a stuck window just locked). */
 type Reservation = 'granted' | 'denied';
@@ -103,7 +105,7 @@ export class AuthService implements OnApplicationShutdown {
     if (!user?.isActive || !user.passwordHash) {
       // Unknown, deactivated and pending-invite accounts run the same statements as a wrong
       // password, against a nil id, so the work done does not reveal the account (FU-BE-22/30).
-      return this.rejectWithSameWork(null, password, ctx);
+      return this.rejectWithSameWork(password, ctx);
     }
     // The attempt is reserved atomically before the password is verified, so parallel guesses
     // cannot exceed the limit (FU-BE-26). A locked account gets the same answer and the same
@@ -132,16 +134,18 @@ export class AuthService implements OnApplicationShutdown {
         },
       };
     }
-    return this.startSession(user);
+    try {
+      return await this.startSession(user);
+    } catch (e) {
+      // A reset landed while the password was being verified: the sign-in is refused.
+      if (e instanceof PasswordChangedSignal) throw this.invalid();
+      throw e;
+    }
   }
 
   /** Unknown or ineligible account: reserve, burn and register against the nil id. */
-  private async rejectWithSameWork(
-    user: User | null,
-    password: string,
-    ctx: RequestContext,
-  ): Promise<never> {
-    await this.reserveAttempt(user, ctx);
+  private async rejectWithSameWork(password: string, ctx: RequestContext): Promise<never> {
+    await this.reserveAttempt(null, ctx);
     return this.burnAndFail(password, ctx);
   }
 
@@ -158,7 +162,7 @@ export class AuthService implements OnApplicationShutdown {
    * Validates a 2FA challenge token and returns the user and its single-use id. The challenge is
    * bound to the password it was issued under, so a reset invalidates it (FU-BE-27).
    */
-  async resolveChallenge(token: string): Promise<{ userId: string; jti: string }> {
+  async resolveChallenge(token: string): Promise<{ userId: string; jti: string; pwv: string }> {
     let claims: { sub?: unknown; kind?: unknown; jti?: unknown; pwv?: unknown };
     try {
       claims = this.tokens.verify(token) as typeof claims;
@@ -181,7 +185,7 @@ export class AuthService implements OnApplicationShutdown {
     ) {
       throw this.challengeExpired();
     }
-    return { userId: user.id, jti: claims.jti };
+    return { userId: user.id, jti: claims.jti, pwv: claims.pwv };
   }
 
   private challengeExpired(): UnauthorizedException {
@@ -192,7 +196,8 @@ export class AuthService implements OnApplicationShutdown {
    * Runs `fn` with the challenge marked used (Redis SET NX), so one challenge cannot mint two
    * sessions. A Redis outage is a 503 (nothing is reserved or counted yet). The mark is released
    * only when `fn` ends in a wrong code or an outage, so a retry stays possible; once state may
-   * have changed the challenge stays spent.
+   * have changed the challenge stays spent. If releasing the mark also fails (Redis
+   * still down), the challenge stays spent until its TTL: the user signs in again.
    */
   private async withChallengeUse<T>(jti: string, fn: () => Promise<T>): Promise<T> {
     const key = `auth:challenge:used:${jti}`;
@@ -244,10 +249,10 @@ export class AuthService implements OnApplicationShutdown {
     userId: string,
     code: string,
     ctx: RequestContext,
-    challengeJti: string,
+    challenge: { jti: string; pwv: string },
   ): Promise<{ session: SessionOutcome; recoveryCodes: string[] }> {
-    return this.withChallengeUse(challengeJti, async () => {
-      const done = await this.doConfirmEnrollment(userId, code, ctx, true);
+    return this.withChallengeUse(challenge.jti, async () => {
+      const done = await this.doConfirmEnrollment(userId, code, ctx, true, challenge.pwv);
       if (!done.session) throw new Error('Enrollment finished without a session');
       return { session: done.session, recoveryCodes: done.recoveryCodes };
     });
@@ -262,14 +267,15 @@ export class AuthService implements OnApplicationShutdown {
     code: string,
     ctx: RequestContext,
     openSession: boolean,
+    challengePwv?: string,
   ): Promise<{ session?: SessionOutcome; recoveryCodes: string[] }> {
     const user = await this.loadActive(userId);
+    if (challengePwv !== undefined) this.requireChallengePassword(user, challengePwv);
     if (user.totpEnabled) throw new ConflictException('Two-factor authentication is already on.');
     // A locked account looks exactly like a wrong code (FU-BE-22, FU-BE-34).
     if ((await this.reserveAttempt(user, ctx)) !== 'granted') throw this.invalidCode();
-    const valid = user.totpSecretEnc
-      ? await this.verifyTotp(user, user.totpSecretEnc, code)
-      : false;
+    const checkedSecret = user.totpSecretEnc;
+    const valid = checkedSecret ? await this.verifyTotp(user, checkedSecret, code) : false;
     if (!valid) {
       await this.registerFailure(user, ctx);
       throw this.invalidCode();
@@ -278,7 +284,8 @@ export class AuthService implements OnApplicationShutdown {
     try {
       const session = await this.prisma.client.$transaction(async (tx) => {
         const enabled = await tx.user.updateMany({
-          where: { id: user.id, totpEnabled: false },
+          // The secret must still be the one the code was checked against.
+          where: { id: user.id, totpEnabled: false, totpSecretEnc: checkedSecret },
           data: { totpEnabled: true, recoveryCodeHashes: codes.map((c) => sha256Hex(c)) },
         });
         if (enabled.count === 0) throw new AlreadyEnrolledSignal();
@@ -294,8 +301,9 @@ export class AuthService implements OnApplicationShutdown {
       // The code was right, so the reservation is not a failed guess.
       await this.refundAttempt(user.id).catch(() => undefined);
       if (e instanceof AlreadyEnrolledSignal) {
-        throw new ConflictException('Two-factor authentication is already on.');
+        throw new ConflictException('Two-factor authentication could not be turned on. Try again.');
       }
+      if (e instanceof PasswordChangedSignal) throw this.challengeExpired();
       throw e;
     }
   }
@@ -318,17 +326,21 @@ export class AuthService implements OnApplicationShutdown {
     userId: string,
     code: string,
     ctx: RequestContext,
-    challengeJti: string,
+    challenge: { jti: string; pwv: string },
   ): Promise<SessionOutcome> {
-    return this.withChallengeUse(challengeJti, () => this.doCompleteLogin(userId, code, ctx));
+    return this.withChallengeUse(challenge.jti, () =>
+      this.doCompleteLogin(userId, code, ctx, challenge.pwv),
+    );
   }
 
   private async doCompleteLogin(
     userId: string,
     code: string,
     ctx: RequestContext,
+    challengePwv: string,
   ): Promise<SessionOutcome> {
     const user = await this.loadActive(userId);
+    this.requireChallengePassword(user, challengePwv);
     if (!user.totpEnabled || !user.totpSecretEnc) throw this.challengeExpired();
     // Same status and message as a wrong code, so a locked account is indistinguishable.
     if ((await this.reserveAttempt(user, ctx)) !== 'granted') throw this.invalidCode();
@@ -344,7 +356,19 @@ export class AuthService implements OnApplicationShutdown {
       if (used !== 1) return this.failCode(user, ctx);
       await this.audit(user, 'AUTH_RECOVERY_CODE_USED', ctx);
     }
-    return this.startSession(user);
+    try {
+      return await this.startSession(user);
+    } catch (e) {
+      if (e instanceof PasswordChangedSignal) throw this.challengeExpired();
+      throw e;
+    }
+  }
+
+  /** The user row just loaded must still carry the password the challenge was issued under. */
+  private requireChallengePassword(user: User, challengePwv: string): void {
+    if (!user.passwordHash || passwordVersion(user.passwordHash) !== challengePwv) {
+      throw this.challengeExpired();
+    }
   }
 
   private async failCode(user: UserWithOrg, ctx: RequestContext): Promise<never> {
@@ -430,7 +454,11 @@ export class AuthService implements OnApplicationShutdown {
     }
     const emailCount = await this.hit(`pwreset:email:${sha256Hex(email.toLowerCase())}`);
     // Over the per-email limit (or Redis down): answer the same, send nothing.
-    if (ipCount === null || emailCount === null || emailCount > FORGOT_PER_EMAIL) return;
+    if (ipCount === null || emailCount === null) {
+      this.logger.warn('reset limiter unavailable');
+      return;
+    }
+    if (emailCount > FORGOT_PER_EMAIL) return;
 
     // Everything that depends on the account happens after this method has returned, so the
     // response is the same for a real, pending, deactivated or unknown account (FU-BE-31).
@@ -449,7 +477,8 @@ export class AuthService implements OnApplicationShutdown {
   private defer(work: () => Promise<void>): void {
     const task: Promise<void> = new Promise<void>((resolve) => {
       setImmediate(() => {
-        work()
+        Promise.resolve()
+          .then(work)
           .catch((e: unknown) => {
             // Name only: the error may carry an address, a token or a query value.
             this.logger.error(`Deferred password-reset work failed (${errorName(e)})`);
@@ -688,16 +717,19 @@ export class AuthService implements OnApplicationShutdown {
     user: UserWithOrg,
     db: Prisma.TransactionClient = this.prisma.client,
   ): Promise<SessionOutcome> {
-    await this.clearFailures(user.id, db);
     const refreshToken = newOpaqueToken();
-    await db.refreshToken.create({
-      data: {
-        userId: user.id,
-        familyId: randomUUID(),
-        tokenHash: sha256Hex(refreshToken),
-        expiresAt: new Date(Date.now() + REFRESH_TTL_MS),
-      },
-    });
+    // The token exists only if the password is still the one that was verified. A reset that
+    // committed meanwhile (and revoked the tokens it could see) leaves no row to insert, so a
+    // family can never outlive the reset (FR-104, FR-107).
+    const inserted = await db.$queryRaw<{ id: string }[]>(Prisma.sql`
+      INSERT INTO refresh_tokens (user_id, family_id, token_hash, expires_at)
+      SELECT u.id, ${randomUUID()}::uuid, ${sha256Hex(refreshToken)},
+             ${new Date(Date.now() + REFRESH_TTL_MS)}::timestamptz
+      FROM users u
+      WHERE u.id = ${user.id}::uuid AND u.is_active AND u.password_hash = ${user.passwordHash ?? ''}
+      RETURNING id`);
+    if (inserted.length !== 1) throw new PasswordChangedSignal();
+    await this.clearFailures(user.id, db);
     return { body: this.authenticated(user), refreshToken };
   }
 

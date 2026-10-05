@@ -420,9 +420,10 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         await gate;
         return false;
       });
+      const inFlight: Promise<request.Response>[] = [];
       try {
-        const inFlight = Array.from({ length: 5 }, (_, i) =>
-          login(u.email, `slow-wrong-${i}`).then((r) => r),
+        inFlight.push(
+          ...Array.from({ length: 5 }, (_, i) => login(u.email, `slow-wrong-${i}`).then((r) => r)),
         );
         const deadline = Date.now() + 10_000;
         while (
@@ -455,6 +456,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         expect(done.every((r) => r.status === 401)).toBe(true);
       } finally {
         release();
+        await Promise.allSettled(inFlight);
         passwordVerify.mockImplementation(realPasswordVerify);
       }
       expect(
@@ -1078,6 +1080,166 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         .post(`${API}/password/reset`)
         .send({ token: 'x'.repeat(30), newPassword: 'short' })
         .expect(400);
+    });
+  });
+
+  describe('FR-104 / FR-107: a password reset racing a sign-in', () => {
+    const NEW_PASSWORD = 'A-Brand-New-Passphrase-1';
+    const post = (path: string, body: object): request.Test =>
+      request(app.getHttpServer()).post(`${API}/${path}`).send(body);
+
+    async function resetPasswordOf(userId: string): Promise<void> {
+      const token = `race-reset-${userId}-padding-padding`;
+      await prisma.user.update({
+        where: { id: userId },
+        data: {
+          setPasswordTokenHash: sha256Hex(token),
+          setPasswordExpiresAt: new Date(Date.now() + 600_000),
+        },
+      });
+      await request(app.getHttpServer())
+        .post(`${API}/password/reset`)
+        .send({ token, newPassword: NEW_PASSWORD })
+        .expect(204);
+    }
+
+    function makeGate(): { wait: Promise<void>; open: () => void } {
+      let open: () => void = () => undefined;
+      const wait = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      return { wait, open };
+    }
+
+    async function until(cond: () => boolean): Promise<void> {
+      const deadline = Date.now() + 10_000;
+      while (!cond()) {
+        if (Date.now() > deadline) throw new Error('condition not reached');
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+
+    it('TC-001: a login whose password check overlaps a reset is refused with no cookie and no refresh token (FR-104, FR-107)', async () => {
+      const u = await createUser();
+      const stored = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      const gate = makeGate();
+      passwordVerify.mockImplementation(async (hash: string, password: string) => {
+        const ok = await realPasswordVerify(hash, password);
+        if (hash === stored.passwordHash) await gate.wait;
+        return ok;
+      });
+      const inFlight: Promise<request.Response>[] = [];
+      try {
+        inFlight.push(login(u.email).then((r) => r));
+        await until(() =>
+          passwordVerify.mock.calls.some((c: unknown[]) => c[0] === stored.passwordHash),
+        );
+        await resetPasswordOf(u.id);
+        gate.open();
+        const res = await inFlight[0];
+        expect(res?.status).toBe(401);
+        expect(res?.headers['set-cookie']).toBeUndefined();
+      } finally {
+        gate.open();
+        await Promise.allSettled(inFlight);
+        passwordVerify.mockImplementation(realPasswordVerify);
+      }
+      expect(await prisma.refreshToken.count({ where: { userId: u.id } })).toBe(0);
+    });
+
+    it('TC-003: a 2FA completion that overlaps a reset is refused with no cookie and no refresh token (FR-102, FR-104)', async () => {
+      const u = await createUser({ role: UserRole.REVIEWER, totp: 'JBSWY3DPEHPK3PXP' });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      const gate = makeGate();
+      let reached = false;
+      totpVerify.mockImplementationOnce(async () => {
+        reached = true;
+        await gate.wait;
+        return true;
+      });
+      const inFlight: Promise<request.Response>[] = [];
+      try {
+        inFlight.push(post('2fa/verify', { challengeToken, code: '123456' }).then((r) => r));
+        await until(() => reached);
+        await resetPasswordOf(u.id);
+        gate.open();
+        const res = await inFlight[0];
+        expect(res?.status).toBe(401);
+        expect(res?.headers['set-cookie']).toBeUndefined();
+      } finally {
+        gate.open();
+        await Promise.allSettled(inFlight);
+      }
+      expect(await prisma.refreshToken.count({ where: { userId: u.id } })).toBe(0);
+    });
+
+    it('TC-003: a forced enrolment confirm that overlaps a reset is refused, enables nothing and opens no session (FR-102, FR-104)', async () => {
+      const u = await createUser({ role: UserRole.SUPER_ADMIN });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      await post('2fa/enroll/start', { challengeToken }).expect(200);
+      const gate = makeGate();
+      let reached = false;
+      totpVerify.mockImplementationOnce(async () => {
+        reached = true;
+        await gate.wait;
+        return true;
+      });
+      const inFlight: Promise<request.Response>[] = [];
+      try {
+        inFlight.push(
+          post('2fa/enroll/confirm', { challengeToken, code: '123456' }).then((r) => r),
+        );
+        await until(() => reached);
+        await resetPasswordOf(u.id);
+        gate.open();
+        const res = await inFlight[0];
+        expect(res?.status).toBe(401);
+        expect(res?.headers['set-cookie']).toBeUndefined();
+      } finally {
+        gate.open();
+        await Promise.allSettled(inFlight);
+      }
+      const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      expect(row.totpEnabled).toBe(false);
+      expect(await prisma.refreshToken.count({ where: { userId: u.id } })).toBe(0);
+    });
+
+    it('TC-003: enrolment is refused with a 409 and the attempt refunded when the secret changed after the code was checked (FR-102)', async () => {
+      const u = await createUser({ role: UserRole.SUPER_ADMIN });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      await post('2fa/enroll/start', { challengeToken }).expect(200);
+      totpVerify.mockImplementationOnce(async () => {
+        await prisma.user.update({
+          where: { id: u.id },
+          data: { totpSecretEnc: 'changed-secret' },
+        });
+        return true;
+      });
+      await post('2fa/enroll/confirm', { challengeToken, code: '123456' }).expect(409);
+      const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      expect(row.totpEnabled).toBe(false);
+      expect(row.failedLogins).toBe(0);
+      expect(row.recoveryCodeHashes).toEqual([]);
+      expect(await prisma.refreshToken.count({ where: { userId: u.id } })).toBe(0);
+    });
+
+    it('TC-098: forgot-password logs a fixed warning, without the email, when the limiter store is down', async () => {
+      const u = await createUser();
+      const redis = app.get<import('ioredis').Redis>(
+        jest.requireActual<typeof import('../infrastructure/infrastructure.module')>(
+          '../infrastructure/infrastructure.module',
+        ).REDIS_CLIENT,
+      );
+      const incr = jest.spyOn(redis, 'incr').mockRejectedValue(new Error(`down ${u.email}`));
+      logged.length = 0;
+      try {
+        await authService.forgotPassword(u.email, { ip: '203.0.113.77' });
+        await authService.settleDeferred();
+      } finally {
+        incr.mockRestore();
+      }
+      expect(logged.join('')).toContain('reset limiter unavailable');
+      expect(logged.join('')).not.toContain(u.email);
     });
   });
 
