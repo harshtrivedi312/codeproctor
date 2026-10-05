@@ -12,7 +12,7 @@
 
 - (a) **Accepted.** Put `org_id` on the two hub tables of the candidate path: `sessions.org_id uuid NOT NULL REFERENCES organizations(id)` and `invitations.org_id uuid NOT NULL REFERENCES organizations(id)`.
   - New tables from ADRs 0002 to 0007 follow the same rule. `consent_texts` and `webhook_endpoints` carry `org_id`. `session_sections`, `variant_test_cases`, `ai_reference_solutions`, `proctor_event_batches` and `webhook_deliveries` declare scope paths.
-  - Every other table without `org_id` declares a scope path to its nearest ancestor that has one (for example ProctorEvent → session.orgId, TestCase → questionVersion.question.orgId).
+  - Every other table without `org_id` declares a scope path along its composition parent chain to an ancestor that has one (section 8.7; for example ProctorEvent → session.orgId, TestCase → questionVersion.question.orgId). *Wording amended 2026-10-05 (proposed, owner to accept): was "to its nearest ancestor".*
   - DB-05's Prisma extension adds the filter from that map.
   - A test fails if any model has neither `org_id` nor a scope path, like the permission-matrix test.
   - Candidate routes scope through the token's session, and jobs through the job's session (ADR 0001 C-1).
@@ -34,7 +34,7 @@ ALTER TABLE invitations ADD UNIQUE (id, org_id);
 -- sessions:    FOREIGN KEY (invitation_id, org_id) REFERENCES invitations (id, org_id)
 ```
 
-Staff references (`reviewer_id`, `assigned_to`, `created_by`, `reviewed_by`, `collected_by`) and `test_questions.question_version_id` rely on rule (i).
+Staff references (`reviewer_id`, `assigned_to`, `created_by`, `reviewed_by`, `collected_by`) and `test_questions.question_version_id` rely on rule (i). (Superseded by section 8.1, proposed 2026-10-05.)
 
 Alternative: rule (i) only, with no composite foreign keys.
 
@@ -227,7 +227,9 @@ Roles belong to the whole Postgres cluster, not to one database. So the `IF NOT 
 
 **Status: Proposed amendment 2026-10-05, for the owner to accept.** It comes from the DB-05 architect gate (PR #30) and the Delivery Lead. Until the owner accepts it, sections 1 to 7 stand as written. Serves FR-103, FR-105, NFR-01 and NFR-04; TC-006 and TC-008. Candidate session scope (token to session to `runInOrg`) is not decided here: ADR 0013 covers it (proposed, PR #39), with ADR 0001 C-1.
 
-### 8.1 Foreign-key classification
+Each item is tagged **(owner decision)** when the owner or the Delivery Lead decided it, or **(architect detail)** when the architect chose it for the owner to confirm.
+
+### 8.1 Foreign-key classification (architect detail)
 
 The init migration has 58 foreign keys. Nine are the `org_id` columns of the `direct` tables. The other 49 fall into three classes:
 
@@ -239,68 +241,125 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 
 - This replaces the shorter list at the end of section 2, which named only five staff columns and `test_questions.question_version_id`.
 - The rule (i) list lives in code as `RULE_I_REFERENCES` (FU-DB-64). A test fails on any foreign key that is in none of the three classes, so a new foreign key must be classified in the PR that adds it.
+- Rule (i) proves only that the target is in the same org. It does not prove that a cross-chain target belongs to the same parent: for example `variant_test_cases.test_case_id` and `variant_id` may point to different question versions. Tracked in docs/followups/architecture.md.
 
-### 8.2 Write invariant
+### 8.2 Write invariant (architect detail)
 
 - An org-scoped write changes only the rows its filter selected, or the rows it creates.
 - The extension refuses, on the parent side, a nested `connect`, `set`, `connectOrCreate`, or a nested create or update that names another org (FU-DB-63).
 - A child-side `connect` (the child holds the foreign key) stays under rule (i): load the target through the scoped client first, answer 404 on a miss.
 
-### 8.3 Schema and row-level security
+### 8.3 Schema and row-level security (owner decision: Delivery Lead)
 
-- No schema change for the build or the pilot (Delivery Lead decision).
+- No schema change for the build or the pilot.
 - FU-DB-77 stays open as a pre-production item for ARC-05 and DEP-02: revisit Postgres RLS on `org_id` (section 1, option b).
 
-### 8.4 System scope
+### 8.4 Scopes inside the API (architect detail)
 
-Three closed reasons. A new reason needs an amendment to this ADR.
+**A scope only narrows.**
+
+- Inside an org scope, entering a different org is refused, and so is entering system scope.
+- From system scope, entering one org (`runInOrg`, `runAsUser`) is allowed.
+- When ADR 0013 adds `sessionId` to the scope, a nested scope can neither drop nor change it.
+- Tests cover each case. PR #30 already refuses switching orgs and entering system scope from an org scope (`org-context.ts`, `enter`).
+
+**System scope has three closed reasons.** A new reason needs an amendment to this ADR.
 
 | Reason | Allowed for |
 | --- | --- |
-| `AUTH_BOOTSTRAP` | Staff lookups before login, and resolving a candidate token. Narrow to `runAsUser` or `runInOrg` as soon as the org is known. |
-| `BACKGROUND_JOB` | Scheduled discovery across orgs only. Job payloads carry `orgId` and `sessionId`, and the processor runs the work inside `runInOrg`. |
+| `AUTH_BOOTSTRAP` | Lookups before the caller's org is known: staff login by email, refresh-token rotation, set-password tokens, and resolving a candidate token to its session. Narrow to `runAsUser` or `runInOrg` as soon as the org is known. |
+| `BACKGROUND_JOB` | Scheduled discovery across orgs only. The job payload carries `orgId`, and `sessionId` when the job concerns a session. The processor loads its target inside `runInOrg(orgId)` and drops the job on a miss, so a tampered Redis payload cannot reach another org's row. |
 | `RETENTION_ERASURE` | Selecting what is due only. DB-06 deletes each session inside `runInOrg`. |
 
-- `runSystem` is refused inside an org scope. Narrowing from system scope to an org scope is allowed.
-- There is no org-provisioning reason (8.9).
+There is no org-provisioning reason (8.9).
 
-### 8.5 Raw SQL
+### 8.5 Raw SQL (architect detail)
 
-- Raw SQL is refused unless it runs inside `runRawSql(reason)`, and `runRawSql` requires an active scope (system or org).
-- Model queries inside `runRawSql` stay scoped.
+- Raw SQL is refused unless it runs inside `runRawSql(reason)`, and `runRawSql` requires an active scope (org or system).
+- In system scope, raw SQL is allowed only under the scope's own 8.4 reason. An example is the `AUTH_BOOTSTRAP` failed-login counter.
 - In an org scope, the SQL itself must filter by `org_id`.
+- Model queries inside `runRawSql` stay scoped.
+- The `runRawSql` reason stays free text, written for the reviewer.
+- **This changes PR #30 behaviour.** PR #30 currently allows `runRawSql` with no scope at all. The db-engineer makes that call throw.
 - An allow-list test of every `runSystem`, `runInOrg` and `runRawSql` call site lands with FU-DB-58 (BE-03). A new call site updates the list, and code-reviewer checks it.
 
-### 8.6 Organization
+### 8.6 Organization (architect detail)
 
-- `organizations` rows are created and deleted only in system scope.
+- `organizations` rows are created and deleted only in system scope inside the API, or by the provisioning CLI (8.9).
 - `organizations.id` is immutable.
 
-### 8.7 Path rule
+### 8.7 Path rule (architect detail)
 
-- A scope path follows the composition parent, the owner in the database.md ERD.
+- A scope path follows the composition parent chain, with the owner taken from the database.md ERD. Section 1 and database prompt Step 5 point here.
 - It never follows a staff or cross-chain reference, and it is not chosen by hop count.
 - Example: `AiReferenceSolution` is scoped through its question version (`questionVersion.question.orgId`), not through `collectedBy`.
 
-### 8.8 Runtime checks
+### 8.8 Runtime checks (architect detail)
 
-- **Readiness role assertion (FU-DB-66, before DEP-01).**
-  - The readiness check asserts `current_user = 'app_user'`, and that the role has no SUPERUSER, BYPASSRLS, CREATEROLE or CREATEDB and does not own schema `public`.
-  - It is a readiness check, not a blocking startup query.
-  - It logs which flags failed, never the connection URL.
-- **Interceptor (FU-DB-65).** A malformed `request.user` (it reaches the interceptor only after the guard has passed) is a server fault and answers 500, not 401.
+**Readiness role assertion (FU-DB-66, before DEP-01).** The readiness check asserts that:
+
+- `current_user = 'app_user'`;
+- the role has no SUPERUSER, BYPASSRLS, CREATEROLE or CREATEDB;
+- it does not own schema `public`;
+- it is a member of no role in `pg_auth_members`. At the least, it is a member of none on this deny-list: the owner role, `rds_superuser`, `neon_superuser` and `pg_write_all_data`.
+
+How the check runs:
+
+- It is a readiness check, not a blocking startup query.
+- It logs which assertion failed, never the connection URL.
+- The DEP-01 and DEP-03 deploy jobs poll readiness, and fail or roll back when an assertion fails.
+
+**Interceptor (FU-DB-65).**
+
+- A malformed `request.user` reaches the interceptor only after the guard has passed. That makes it a server fault, so it answers 500, not 401.
+- The log names the fault. It never includes `request.user` content or the token.
 
 ### 8.9 Pilot org provisioning (FU-DB-76, ARC-05 and DEP-03)
 
-- Pilot orgs are created outside the API by a CLI built on the client factory, like the seed.
-- There is no API route and no system-scope reason for it.
-- If self-serve or platform-admin org creation is ever needed, add `ORG_PROVISIONING` through an amendment to this ADR.
+**The decision (owner decision: Delivery Lead).**
+
+- Pilot orgs are created outside the API by a provisioning CLI built on the client factory, like the seed.
+- There is no API route for it.
+
+**How the CLI runs (architect detail).**
+
+- **Where it runs:**
+  - only on the pilot host or in a GitHub Actions job;
+  - never from a developer machine or an agent session (ADR 0009, D-38).
+- **How it connects:**
+  - as `app_user` through `DATABASE_URL`;
+  - with no `MIGRATION_DATABASE_URL` fallback;
+  - without reusing the seed's localhost guard or URL fallback.
+- **Why 8.4 does not apply:** the CLI uses the raw factory client in its own process, outside the API. So it needs no system-scope reason, and it is not an exception to 8.4 inside the API.
+- **Audit and logging:**
+  - it writes an `audit_logs` row for each org it creates;
+  - it never prints a connection string.
+- **Later:** if self-serve or platform-admin org creation is ever needed inside the API, add `ORG_PROVISIONING` through an amendment to this ADR.
 
 ### 8.10 Consequences and agents affected
 
 - **Positive:** the scope rules are closed and testable (FK classification, call-site allow-list, readiness check), with no schema change before the pilot.
 - **Negative:** rule (i) stays a service-level guard for 25 foreign keys until RLS is revisited (FU-DB-77).
-- **db-engineer:** DB-05 or its follow-ups implement 8.1 (`RULE_I_REFERENCES` and its test), 8.2 (FU-DB-63), 8.5 (`runRawSql` requires a scope), 8.6, 8.8 (FU-DB-65, FU-DB-66) and the pilot CLI in 8.9.
-- **backend-engineer:** uses only the three reasons in 8.4; jobs carry `orgId` and `sessionId`; lands the call-site allow-list with FU-DB-58 (BE-03); DB-06 and the retention job follow 8.4.
-- **code-reviewer:** checks 8.1 classification for every new foreign key, every new `runSystem`, `runInOrg` and `runRawSql` call site, and the path rule in 8.7.
-- **qa:** TC-008 evidence lives in `apps/api/src/database/tc-008-org-isolation.spec.ts` (FU-DB-59); see docs/followups/qa.md for the P1 gate gap.
+- **db-engineer:**
+  - 8.1: `RULE_I_REFERENCES` and its test.
+  - 8.2: FU-DB-63.
+  - 8.4: the narrowing tests.
+  - 8.5: `runRawSql` requires a scope.
+  - 8.6.
+  - 8.8: FU-DB-65 and FU-DB-66, including the membership check.
+  - 8.9: the provisioning CLI.
+- **backend-engineer:**
+  - Use only the three reasons in 8.4.
+  - Build job payloads and processors per `BACKGROUND_JOB` in 8.4.
+  - Land the call-site allow-list with FU-DB-58 (BE-03).
+  - DB-06 and the retention job follow 8.4.
+- **Deploy (DEP-01, DEP-03):**
+  - Poll readiness and roll back on a failed assertion (8.8).
+  - Run the provisioning CLI per 8.9.
+- **code-reviewer checks:**
+  - that every new foreign key is classified (8.1);
+  - every new `runSystem`, `runInOrg` and `runRawSql` call site;
+  - the path rule (8.7).
+- **qa:**
+  - The TC-008 evidence lives in `apps/api/src/database/tc-008-org-isolation.spec.ts` (FU-DB-59).
+  - The P1 gate gap is in docs/followups/qa.md.
