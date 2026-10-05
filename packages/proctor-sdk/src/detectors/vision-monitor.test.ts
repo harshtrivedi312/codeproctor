@@ -663,21 +663,29 @@ describe('review blockers: abandoned start, bounded play, stream swap (FR-606, F
     expect(destroys).toEqual([1, 2]);
   });
 
-  it('FR-606: an abandoned first run cannot tear down a later run of the same instance (generation guard, own client only)', async () => {
+  it('FR-606: an old run resuming from video.play() after a new run started cannot tear that run down', async () => {
     const workerA = new FakeWorker();
-    workerA.postMessage = () => undefined; // run 1: models never load, init never answered
     const workerB = new FakeWorker();
     const workers = [workerA, workerB];
+    let releasePlay!: () => void;
+    const video1 = {
+      ...fakeVideo(),
+      play: () =>
+        new Promise<void>((r) => {
+          releasePlay = r;
+        }),
+    };
+    const video2 = fakeVideo();
+    const videos = [video1, video2];
     const vision = new VisionMonitor({
       getWebcamStream: () => stream,
       createWorker: () => workers.shift() as FakeWorker,
       modelBaseUrl: '/models/proctor',
       grabFrame: () => Promise.resolve(bitmap()),
-      createVideo: fakeVideo,
-      initTimeoutMs: 60_000,
+      createVideo: () => videos.shift() as HTMLVideoElement,
       autoStart: false,
     });
-    const cfg = (id: string) => ({
+    const cfg = (id: string, startTimeout: number) => ({
       sessionId: id,
       hmacKeyBase64: TEST_KEY_B64,
       root: document.createElement('div'),
@@ -687,25 +695,77 @@ describe('review blockers: abandoned start, bounded play, stream swap (FR-606, F
         heartbeat: () => Promise.resolve(true),
       },
       detectors: [vision],
-      detectorStartTimeoutMs: 30,
+      detectorStartTimeoutMs: startTimeout,
     });
     const s1 = new ProctorSession();
-    await s1.start(cfg('run1')); // times out, vision is stopped
-    expect(workerA.terminated).toBe(true); // terminate() settled the pending init at once
+    await s1.start(cfg('run1', 30)); // run 1 sits in video.play(); the session abandons it
     const s2 = new ProctorSession();
-    const caps: string[] = [];
-    s2.on('capability', (c) => caps.push(`${c.id}:${c.status}`));
-    const s2cfg = cfg('run2');
-    s2cfg.detectorStartTimeoutMs = 5000;
-    await s2.start(s2cfg); // same instance, new session, worker B loads
-    await new Promise((r) => setTimeout(r, 20)); // run 1's init has long settled
+    await s2.start(cfg('run2', 5000)); // same instance, new session, worker B and video 2
     expect(vision.getStats().tasks.sort()).toEqual(['face', 'gaze', 'objects']);
+    releasePlay(); // run 1's play() finally resolves, after run 2 started
+    await new Promise((r) => setTimeout(r, 20));
+    expect(video1.srcObject).toBeNull(); // run 1 released only its own video
+    expect(video2.srcObject).toBe(stream); // run 2's video is intact
     expect(workerB.terminated).toBe(false);
-    expect(caps.filter((c) => c.startsWith('vision-')).every((c) => c.endsWith('SUPPORTED'))).toBe(
-      true,
-    );
+    expect(vision.getStats().tasks.sort()).toEqual(['face', 'gaze', 'objects']);
     await vision.tick(); // run 2 can still sample
     expect(workerB.frames.length).toBeGreaterThan(0);
+    await s2.stop();
+    await s1.stop();
+  });
+
+  it('TC-070 FR-606: a reused instance whose second start fails reports DETECTOR_UNAVAILABLE for every task, not a silent pass', async () => {
+    const workerA = new FakeWorker();
+    workerA.postMessage = () => undefined; // run 1: init never answered, session times out
+    const workerB = new FakeWorker();
+    const workers = [workerA, workerB];
+    let calls = 0;
+    const vision = new VisionMonitor({
+      getWebcamStream: () => stream,
+      createWorker: () => workers.shift() as FakeWorker,
+      modelBaseUrl: '/models/proctor',
+      grabFrame: () => Promise.resolve(bitmap()),
+      createVideo: () => {
+        calls++;
+        throw new Error('no video'); // run 2 fails after the models loaded
+      },
+      initTimeoutMs: 60_000,
+      autoStart: false,
+    });
+    const cfg = (id: string, startTimeout: number) => ({
+      sessionId: id,
+      hmacKeyBase64: TEST_KEY_B64,
+      root: document.createElement('div'),
+      consent: { recordedAt: '2026-01-01T00:00:00Z' },
+      transport: {
+        sendBatch: () => Promise.resolve('OK' as const),
+        heartbeat: () => Promise.resolve(true),
+      },
+      detectors: [vision],
+      detectorStartTimeoutMs: startTimeout,
+    });
+    const s1 = new ProctorSession();
+    await s1.start(cfg('sfc1', 30));
+    const s2 = new ProctorSession();
+    const events: string[] = [];
+    const caps: string[] = [];
+    s2.on('event', (e) =>
+      events.push(`${e.type}:${(e.payload as { detector?: string }).detector ?? ''}`),
+    );
+    s2.on('capability', (c) => caps.push(`${c.id}:${c.status}`));
+    await s2.start(cfg('sfc2', 5000));
+    expect(calls).toBe(1);
+    expect(events.sort()).toEqual([
+      'DETECTOR_UNAVAILABLE:FACE',
+      'DETECTOR_UNAVAILABLE:GAZE',
+      'DETECTOR_UNAVAILABLE:OBJECT',
+    ]);
+    // SUPPORTED flags set before the failure are reset to UNSUPPORTED
+    for (const t of ['face', 'gaze', 'objects']) {
+      expect(caps.filter((c) => c.startsWith(`vision-${t}:`)).at(-1)).toBe(
+        `vision-${t}:UNSUPPORTED`,
+      );
+    }
     await s2.stop();
     await s1.stop();
   });

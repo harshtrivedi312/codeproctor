@@ -116,6 +116,9 @@ export class VisionMonitor implements Detector {
 
   private async run(ctx: DetectorContext): Promise<void> {
     const gen = this.generation;
+    // A reused instance starts clean: stale per-run state would hide a later failure (a silent pass).
+    this.reported.clear();
+    this.failures.clear();
     try {
       await this.startInner(ctx);
     } catch {
@@ -378,6 +381,8 @@ export class VisionMonitor implements Detector {
 
   stop(): void {
     this.generation++;
+    this.reported.clear();
+    this.failures.clear();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.identity?.stop();
