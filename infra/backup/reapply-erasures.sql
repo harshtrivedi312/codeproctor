@@ -5,7 +5,7 @@
 --
 -- It mirrors the database part of erasure (docs/database.md "Erasure on request", C-17). Objects
 -- are not touched: those deleted at erasure time stay deleted. The consent record is KEPT (C-17).
--- docs/followups/db-ops.md FU-DBB-01: keep this in step with DB-06's erasure service.
+-- docs/followups/database.md FU-DBB-01: keep this in step with DB-06's erasure service.
 \set ON_ERROR_STOP on
 BEGIN;
 
