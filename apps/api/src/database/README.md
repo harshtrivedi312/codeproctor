@@ -58,9 +58,10 @@ The interceptor checks it (`kind` must be `access`, `id` and `orgId` must be uui
 role), maps `id` to `userId`, and runs the handler inside `runAsUser({ orgId, userId, role })`.
 `AuthenticatedUser` (`{ orgId, userId, role }`) is the shape inside the context. `orgId` comes from
 the verified token, never from the body, a header or the query string. A `request.user` that does
-not match is answered **401** and the handler does not run (FU-DB-65 changes this to 500 in a
-later PR). A `@Public()` route has no `request.user`
-(the guard returns early), so it runs with no context and a query on org data from it throws.
+not match is answered **500** and the handler does not run: the guard accepted the token, so a
+user that fails this check is a bug in the auth layer, not a bad credential from the client. The
+error is logged without any value. A `@Public()` route has no `request.user` (the guard returns
+early), so it runs with no context and a query on org data from it throws.
 Guards run before interceptors, so `request.user` is always set by the time the interceptor reads
 it (tested with the real `JwtAuthGuard` and real tokens).
 

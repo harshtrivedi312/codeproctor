@@ -7,6 +7,7 @@ import {
   Get,
   INestApplication,
   Injectable,
+  Logger,
 } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
@@ -454,9 +455,27 @@ describe('OrgContextInterceptor checks request.user itself (NFR-04, FR-103)', ()
     ['the context shape (userId, no id or kind)', { ...USER_A }],
     ['a string instead of an object', 'admin'],
   ])(
-    'TC-008 a request.user with %s is answered 401 and never reaches the handler',
+    'TC-008 a request.user with %s is answered 500 (a bug in the auth layer, FU-DB-65) and never reaches the handler',
     async (_name, user) => {
-      await send(user).expect(401);
+      const res = await send(user).expect(500);
+      // The generic server error only: nothing about the user or why it failed.
+      expect(res.body).toEqual({ statusCode: 500, message: 'Internal Server Error' });
     },
   );
+
+  it('TC-008 the error is logged without any value from request.user', async () => {
+    const logged: unknown[] = [];
+    const spy = jest.spyOn(Logger.prototype, 'error').mockImplementation((message: unknown) => {
+      logged.push(message);
+    });
+    try {
+      await send({ ...authUser, orgId: 'secret-org-value', id: 'secret-user-value' }).expect(500);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(logged).toHaveLength(1);
+    expect(String(logged[0])).toContain('request.user does not match AuthUser');
+    expect(String(logged[0])).not.toContain('secret-org-value');
+    expect(String(logged[0])).not.toContain('secret-user-value');
+  });
 });
