@@ -52,7 +52,7 @@ void describe('keystroke batch (FR-608)', () => {
       'text',
     ]);
   });
-  void it('rejects unknown kinds, no-op edits and out-of-order timestamps', () => {
+  void it('FR-608, NFR-04: rejects unknown kinds, no-op edits and out-of-order timestamps', () => {
     assert.equal(keystrokeBatchSchema.safeParse(batch([{ kind: 'KEYDOWN', t: 0 }])).success, false);
     assert.equal(
       keystrokeBatchSchema.safeParse(
@@ -70,7 +70,7 @@ void describe('keystroke batch (FR-608)', () => {
       false,
     );
   });
-  void it('NFR-04: bounds event count and total inserted text', () => {
+  void it('FR-608, NFR-04: bounds event count and total inserted text', () => {
     const cursor = { kind: 'CURSOR', t: 0, offset: 0 };
     assert.equal(
       keystrokeBatchSchema.safeParse(
@@ -89,7 +89,7 @@ void describe('keystroke batch (FR-608)', () => {
       false,
     );
   });
-  void it('rejects a language outside CODE_LANGUAGES in RESET', () => {
+  void it('FR-608, NFR-04: rejects a language outside CODE_LANGUAGES in RESET', () => {
     assert.equal(
       keystrokeBatchSchema.safeParse(batch([{ kind: 'RESET', t: 0, language: 'ruby', text: '' }]))
         .success,
@@ -117,10 +117,11 @@ void describe('keystroke batch (FR-608)', () => {
       true,
       'maximum RESET plus a full 100,000 characters of EDIT text fits',
     );
-    assert.equal(
-      keystrokeBatchSchema.safeParse(batch([reset(full), edit(full + 'b')])).success,
-      false,
-      'EDIT text over 100,000 is rejected',
+    const half = 'x'.repeat(MAX_SOURCE_CODE_LENGTH / 2 + 1);
+    const overEdit = keystrokeBatchSchema.safeParse(batch([reset(full), edit(half), edit(half)]));
+    assert.equal(overEdit.success, false, 'EDIT text over 100,000 in total is rejected');
+    assert.ok(
+      overEdit.error?.issues.some((i) => i.message === 'Too much inserted text in one batch.'),
     );
     assert.equal(
       keystrokeBatchSchema.safeParse(batch([reset(full + 'b')])).success,
@@ -137,7 +138,17 @@ void describe('keystroke batch (FR-608)', () => {
       language: 'python',
       text: full,
     }));
-    assert.equal(keystrokeBatchSchema.safeParse(batch(resets)).success, false);
+    const three = keystrokeBatchSchema.safeParse(batch(resets));
+    assert.equal(three.success, false);
+    assert.ok(
+      three.error?.issues.some(
+        (i) => i.message === 'Too much text (resets and edits) in one batch.',
+      ),
+    );
+    const tight = keystrokeBatchSchema.safeParse(
+      batch([resets[0], resets[1], { kind: 'EDIT', t: 5, offset: 0, deleteLength: 0, text: 'x' }]),
+    );
+    assert.equal(tight.success, false, '200,001 total is rejected by the total cap alone');
     assert.equal(keystrokeBatchSchema.safeParse(batch(resets.slice(0, 2))).success, true);
     const thousand = Array.from({ length: MAX_KEYSTROKE_EVENTS_PER_BATCH }, (_, i) => ({
       kind: 'RESET',
