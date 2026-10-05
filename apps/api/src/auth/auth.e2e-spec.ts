@@ -988,6 +988,102 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
     });
   });
 
+  describe('TC-003 (FR-102): totpEnabled on the session user', () => {
+    type UserBody = { user: { totpEnabled?: boolean } };
+    const SECRET = 'JBSWY3DPEHPK3PXP';
+
+    it('TC-003: login without 2FA reports totpEnabled false, and refresh keeps reporting the real state', async () => {
+      const u = await createUser();
+      const res = await login(u.email).expect(200);
+      expect((res.body as Body).session.user).toMatchObject({ totpEnabled: false });
+      const next = await refresh(refreshCookie(res)).expect(200);
+      expect((next.body as UserBody).user.totpEnabled).toBe(false);
+    });
+
+    it('TC-003: 2fa/verify reports true; refresh reports false after 2FA is disabled', async () => {
+      const u = await createUser({ totp: SECRET });
+      const first = (await login(u.email).expect(200)).body as Body;
+      const verified = await request(app.getHttpServer())
+        .post(`${API}/2fa/verify`)
+        .send({ challengeToken: first.challengeToken, code: authenticator.generate(SECRET) })
+        .expect(200);
+      expect((verified.body as UserBody).user.totpEnabled).toBe(true);
+      const cookie = refreshCookie(verified);
+      const same = await refresh(cookie).expect(200);
+      expect((same.body as UserBody).user.totpEnabled).toBe(true);
+
+      const token = (same.body as Body).accessToken;
+      await request(app.getHttpServer())
+        .post(`${API}/2fa/disable`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ currentPassword: PASSWORD })
+        .expect(204);
+      const after = await refresh(refreshCookie(same)).expect(200);
+      expect((after.body as UserBody).user.totpEnabled).toBe(false);
+    });
+
+    it('TC-003: after setup/confirm the very next refresh reports totpEnabled true', async () => {
+      const u = await createUser();
+      const res = await login(u.email).expect(200);
+      const auth = { Authorization: `Bearer ${(res.body as Body).session.accessToken}` };
+      const start = (
+        await request(app.getHttpServer())
+          .post(`${API}/2fa/setup/start`)
+          .set(auth)
+          .send({ currentPassword: PASSWORD })
+          .expect(200)
+      ).body as Body;
+      await request(app.getHttpServer())
+        .post(`${API}/2fa/setup/confirm`)
+        .set(auth)
+        .send({ currentPassword: PASSWORD, code: authenticator.generate(start.manualKey) })
+        .expect(200);
+      const again = await refresh(refreshCookie(res)).expect(200);
+      expect((again.body as UserBody).user.totpEnabled).toBe(true);
+    });
+
+    it('TC-003: enroll/confirm reports totpEnabled true in the session it opens', async () => {
+      const u = await createUser({ role: UserRole.REVIEWER });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      const start = (
+        await request(app.getHttpServer())
+          .post(`${API}/2fa/enroll/start`)
+          .send({ challengeToken })
+          .expect(200)
+      ).body as Body;
+      const done = await request(app.getHttpServer())
+        .post(`${API}/2fa/enroll/confirm`)
+        .send({ challengeToken, code: authenticator.generate(start.manualKey) })
+        .expect(200);
+      expect((done.body as Body).session.user).toMatchObject({ totpEnabled: true });
+    });
+
+    it('TC-003: challenge and failed responses carry no session user and no totpEnabled', async () => {
+      const withTotp = await createUser({ totp: SECRET });
+      const required = await login(withTotp.email).expect(200);
+      const enforced = await createUser({ role: UserRole.REVIEWER });
+      const enrol = await login(enforced.email).expect(200);
+      const wrong = await login(withTotp.email, 'wrong-password-1').expect(401);
+      const badCode = await request(app.getHttpServer())
+        .post(`${API}/2fa/verify`)
+        .send({ challengeToken: (required.body as Body).challengeToken, code: '000000' })
+        .expect(400);
+      for (const res of [required, enrol, wrong, badCode]) {
+        expect(JSON.stringify(res.body)).not.toContain('totpEnabled');
+      }
+      expect((required.body as Body).session).toBeUndefined();
+      expect((enrol.body as Body).session).toBeUndefined();
+    });
+
+    it('TC-003: totpEnabled is read-only; sending it in a request body is refused with 400', async () => {
+      const u = await createUser();
+      await request(app.getHttpServer())
+        .post(`${API}/login`)
+        .send({ email: u.email, password: PASSWORD, totpEnabled: true })
+        .expect(400);
+    });
+  });
+
   describe('TC-005 (FR-104): refresh token rotation and reuse', () => {
     it('TC-005: the second use of a refresh token is rejected and the whole family is revoked', async () => {
       const u = await createUser();

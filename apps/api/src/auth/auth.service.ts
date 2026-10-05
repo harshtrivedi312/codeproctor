@@ -387,7 +387,8 @@ export class AuthService implements OnApplicationShutdown {
           await this.clearFailures(user.id, tx);
           return undefined;
         }
-        return this.startSession(user, tx);
+        // The row was loaded before the update above, so report the state just written.
+        return this.startSession({ ...user, totpEnabled: true }, tx);
       });
       return { session, recoveryCodes: codes };
     } catch (e) {
@@ -1018,6 +1019,7 @@ export class AuthService implements OnApplicationShutdown {
         name: user.fullName,
         role: user.role,
         orgName: user.org.name,
+        totpEnabled: user.totpEnabled,
       },
     };
   }

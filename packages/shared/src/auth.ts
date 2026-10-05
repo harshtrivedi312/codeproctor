@@ -28,3 +28,18 @@ export const otpCodeSchema = z
   .string()
   .trim()
   .regex(/^\d{6}$/, 'Enter the 6-digit code.');
+
+/**
+ * The signed-in staff user returned with every authenticated session (login, 2FA verify, enrolment
+ * confirm, refresh). `totpEnabled` is the caller's own current 2FA state, read-only, server-set
+ * (FR-102); it never appears on pre-2FA, challenge or other-user responses.
+ */
+export const authUserSchema = z.object({
+  id: z.string(),
+  email: z.string(),
+  name: z.string(),
+  role: z.enum(['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'REVIEWER']),
+  orgName: z.string(),
+  totpEnabled: z.boolean(),
+});
+export type AuthUser = z.infer<typeof authUserSchema>;
