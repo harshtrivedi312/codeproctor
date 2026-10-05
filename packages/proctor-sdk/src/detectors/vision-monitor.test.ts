@@ -159,7 +159,7 @@ describe('VisionMonitor accommodations and honesty (FR-106, FR-606)', () => {
 });
 
 describe('VisionMonitor event flow with recorded fixtures (FR-606)', () => {
-  it('FR-606: replays the NO_FACE fixture and emits one NO_FACE with its duration, no evidence', async () => {
+  it('TC-057: replays the NO_FACE fixture and emits one NO_FACE with its duration, no evidence', async () => {
     const h = fakeContext();
     const presign = vi.fn();
     const evidenceApi: EvidenceApi = { presign };
@@ -177,7 +177,7 @@ describe('VisionMonitor event flow with recorded fixtures (FR-606)', () => {
     m.stop();
   });
 
-  it('FR-801: a HIGH event (phone) carries an evidenceKey from the snapshot upload', async () => {
+  it('TC-059: a phone (HIGH event) carries an evidenceKey from the snapshot upload', async () => {
     const h = fakeContext();
     const evidenceApi: EvidenceApi = {
       presign: vi.fn(() =>
@@ -206,7 +206,7 @@ describe('VisionMonitor event flow with recorded fixtures (FR-606)', () => {
     m.stop();
   });
 
-  it('FR-801: if the snapshot cannot be uploaded the event is still sent, without evidence', async () => {
+  it('TC-058: if the MULTIPLE_FACES snapshot cannot be uploaded the event is still sent, without evidence', async () => {
     const h = fakeContext();
     const evidenceApi: EvidenceApi = { presign: () => Promise.reject(new Error('down')) };
     const { m, worker, advance } = setup({
@@ -400,5 +400,164 @@ describe('VoiceMonitor (FR-607, TC-061)', () => {
     expect(h.events[0]).toMatchObject({
       payload: { detector: 'VOICE', reason: 'PERMISSION_DENIED' },
     });
+  });
+});
+
+describe('review fixes: late stream, failure reporting, dead worker (FR-606)', () => {
+  it('FR-606: a webcam stream attached after start() brings the detectors up', async () => {
+    const h = fakeContext();
+    let current: MediaStream | null = null;
+    const { m, worker } = setup({ getWebcamStream: () => current });
+    await m.start(h.ctx);
+    expect(h.events.map((e) => (e.payload as { reason: string }).reason)).toEqual([
+      'PERMISSION_DENIED',
+      'PERMISSION_DENIED',
+      'PERMISSION_DENIED',
+    ]);
+    current = null;
+    await m.attachStream(stream);
+    expect(worker.initTasks.sort()).toEqual(['face', 'gaze', 'objects']);
+    expect(m.getStats().tasks.sort()).toEqual(['face', 'gaze', 'objects']);
+    expect(h.capabilities.at(-1)?.status).toBe('SUPPORTED');
+    m.stop();
+  });
+
+  it('FR-606: if start fails after some tasks were SUPPORTED, those tasks are reported unavailable too', async () => {
+    const h = fakeContext();
+    const { m } = setup({
+      createVideo: () => {
+        throw new Error('no video');
+      },
+    });
+    await m.start(h.ctx);
+    const unavailable = h.events.filter((e) => e.type === 'DETECTOR_UNAVAILABLE');
+    expect(unavailable.map((e) => (e.payload as { detector: string }).detector).sort()).toEqual([
+      'FACE',
+      'GAZE',
+      'OBJECT',
+    ]);
+    expect(h.capabilities.filter((c) => c.status === 'UNSUPPORTED')).toHaveLength(3);
+    expect(m.getStats().tasks).toEqual([]);
+  });
+
+  it('FR-606: a worker that errors after ready is terminated and RUNTIME_ERROR is emitted', async () => {
+    const h = fakeContext();
+    const { m, worker } = setup();
+    await m.start(h.ctx);
+    worker.onerror?.({});
+    expect(worker.terminated).toBe(true);
+    expect(
+      h.events
+        .filter((e) => e.type === 'DETECTOR_UNAVAILABLE')
+        .map((e) => (e.payload as { reason: string }).reason),
+    ).toEqual(['RUNTIME_ERROR', 'RUNTIME_ERROR', 'RUNTIME_ERROR']);
+    expect(m.getStats().tasks).toEqual([]);
+    m.stop();
+  });
+
+  it('FR-606: frames the worker never answers time out; three in a row kill the worker', async () => {
+    vi.useFakeTimers();
+    const w = new FakeWorker();
+    const orig = w.postMessage.bind(w);
+    w.postMessage = (msg) => {
+      if (msg.type === 'init') orig(msg);
+    };
+    const c = new InferenceClient(() => w, 30_000, 1000);
+    const init = c.init({
+      tasks: ['face'],
+      urls: { faceDetector: '', faceLandmarker: '', mediapipeWasm: '', cocoSsd: '' },
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    await init;
+    const dead = vi.fn();
+    c.onDead = dead;
+    for (let i = 0; i < 3; i++) {
+      const p = c.analyze(bitmap(), ['face']);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await p).toBeNull();
+    }
+    expect(dead).toHaveBeenCalledTimes(1);
+    expect(w.terminated).toBe(true);
+    vi.useRealTimers();
+  });
+});
+
+describe('review fixes: voice (FR-607, TC-061)', () => {
+  it('FR-607: MicVAD.new that never finishes is abandoned after the timeout with DETECTOR_UNAVAILABLE', async () => {
+    vi.useFakeTimers();
+    const h = fakeContext();
+    const destroy = vi.fn();
+    let resolveLate!: (v: { start: () => void; destroy: () => void }) => void;
+    const m = new VoiceMonitor({
+      getStream: () => stream,
+      initTimeoutMs: 1000,
+      createVad: () => new Promise((r) => (resolveLate = r)),
+    });
+    const p = m.start(h.ctx);
+    await vi.advanceTimersByTimeAsync(1000);
+    await p;
+    expect(h.events[0]).toMatchObject({
+      payload: { detector: 'VOICE', reason: 'MODEL_LOAD_FAILED' },
+    });
+    resolveLate({ start: vi.fn(), destroy });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(destroy).toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it('TC-061: speech inside the cooldown is merged into the next event instead of dropped', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const h = fakeContext();
+    let cb!: VadCallbacks;
+    let t = 1_000_000;
+    const m = new VoiceMonitor({
+      getStream: () => stream,
+      now: () => t,
+      createVad: (_s, c) => {
+        cb = c;
+        return Promise.resolve({ start: vi.fn(), destroy: vi.fn() });
+      },
+    });
+    await m.start(h.ctx);
+    const speak = (ms: number) => {
+      cb.onSpeechStart();
+      t += ms;
+      cb.onSpeechEnd();
+    };
+    speak(5000);
+    t += 1000;
+    speak(2000);
+    t += 1000;
+    speak(3000);
+    expect(h.events).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.events).toHaveLength(2);
+    expect(h.events[1]?.options).toMatchObject({ durationMs: 5000 });
+    await m.stop();
+    vi.useRealTimers();
+  });
+
+  it('TC-061: stop() reports speech still held back by the cooldown', async () => {
+    const h = fakeContext();
+    let cb!: VadCallbacks;
+    let t = 5_000_000;
+    const m = new VoiceMonitor({
+      getStream: () => stream,
+      now: () => t,
+      createVad: (_s, c) => {
+        cb = c;
+        return Promise.resolve({ start: vi.fn(), destroy: vi.fn() });
+      },
+    });
+    await m.start(h.ctx);
+    cb.onSpeechStart();
+    t += 2000;
+    cb.onSpeechEnd();
+    t += 500;
+    cb.onSpeechStart();
+    t += 1500;
+    cb.onSpeechEnd();
+    await m.stop();
+    expect(h.events.map((e) => e.options?.durationMs)).toEqual([2000, 1500]);
   });
 });

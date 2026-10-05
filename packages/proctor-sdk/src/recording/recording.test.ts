@@ -374,4 +374,119 @@ describe('RecordingPipeline', () => {
     expect(h.droppedChunks).toBe(0);
     expect(await store.keys('chunks', 's:')).toHaveLength(0);
   });
+
+  it('FR-702: when IndexedDB writes fail, chunks still upload from memory and the failure is flagged', async () => {
+    const store = newStore();
+    vi.spyOn(store, 'put').mockRejectedValue(new Error('QuotaExceededError'));
+    const caps: string[] = [];
+    const { api, calls } = fakeApi();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const q = new UploadQueue({
+      sessionId: 's',
+      api,
+      store,
+      put: () => Promise.resolve(200),
+      onStorageDegraded: (r) => caps.push(r),
+    });
+    await q.start();
+    await q.add(ref(0, 100), bytes(100));
+    expect(q.health()).toMatchObject({ storageDegraded: true, memoryBytes: 100, degraded: true });
+    await run(300);
+    expect(calls.confirm).toEqual([0]);
+    expect(q.health()).toMatchObject({ chunksPending: 0, memoryBytes: 0, droppedChunks: 0 });
+    expect(caps).toEqual(['WRITE_FAILED']);
+    vi.useRealTimers();
+  });
+
+  it('FR-702: past the memory cap with IndexedDB down, chunks are counted as dropped, never silent', async () => {
+    const store = newStore();
+    vi.spyOn(store, 'put').mockRejectedValue(new Error('down'));
+    const { api } = fakeApi();
+    const q = new UploadQueue({
+      sessionId: 's',
+      api,
+      store,
+      maxMemoryBytes: 250,
+      concurrency: 0,
+      put: () => Promise.reject(new Error('offline')),
+    });
+    await q.start();
+    for (let i = 0; i < 4; i++) await q.add(ref(i, 100), bytes(100));
+    expect(q.health()).toMatchObject({ chunksPending: 2, droppedChunks: 2, droppedBytes: 200 });
+  });
+
+  it('FR-702: if IndexedDB cannot be opened the queue starts in memory-only mode and says so', async () => {
+    const store = newStore();
+    vi.spyOn(store, 'keys').mockRejectedValue(new Error('open failed'));
+    const reasons: string[] = [];
+    const { api } = fakeApi();
+    const q = new UploadQueue({
+      sessionId: 's',
+      api,
+      store,
+      put: () => Promise.resolve(200),
+      onStorageDegraded: (r) => reasons.push(r),
+    });
+    await q.start();
+    expect(reasons).toEqual(['OPEN_FAILED']);
+    expect(q.health().storageDegraded).toBe(true);
+  });
+
+  it('FR-702: start() sweeps other sessions older than the retention window', async () => {
+    const store = newStore();
+    await store.put('chunks', 'other:WEBCAM:0000000000:0000000000:5:x', { data: bytes(5) });
+    await store.put('meta', 'lastseen:other', Date.now() - 3 * 24 * 60 * 60 * 1000);
+    const { api } = fakeApi();
+    const q = new UploadQueue({ sessionId: 's', api, store, put: () => Promise.resolve(200) });
+    await q.start();
+    expect(await store.keys('chunks', 'other:')).toEqual([]);
+  });
+
+  it('FR-701: a webcam track that ends is flushed, reported as device lost, and restart opens a new segment', async () => {
+    const ended: Array<() => void> = [];
+    const track = {
+      addEventListener: (_n: string, f: () => void) => ended.push(f),
+      stop: vi.fn(),
+    };
+    const media = {
+      getTracks: () => [track],
+      getVideoTracks: () => [track],
+    } as unknown as MediaStream;
+    const lost: unknown[] = [];
+    const caps: string[] = [];
+    const segs: number[] = [];
+    const spy = vi.spyOn(UploadQueue.prototype, 'add').mockImplementation((c) => {
+      segs.push(c.segment);
+      return Promise.resolve();
+    });
+    const { p } = make({
+      mediaDevices: { getUserMedia: () => Promise.resolve(media) },
+      onDeviceLost: (l) => lost.push(l),
+      onCapability: (f) => caps.push(`${f.id}:${f.status}`),
+    });
+    await p.recordWebcam();
+    ended[0]?.();
+    await vi.waitFor(() => expect(lost).toEqual([{ stream: 'WEBCAM', reason: 'TRACK_ENDED' }]));
+    expect(caps).toContain('record-webcam:UNVERIFIABLE');
+    await p.recordWebcam();
+    await p.stop();
+    expect(segs).toEqual([0, 1]);
+    spy.mockRestore();
+  });
+
+  it('FR-701: a MediaRecorder error is surfaced as device lost, not swallowed', async () => {
+    const lost: unknown[] = [];
+    const recs: FakeRecorder[] = [];
+    const { p } = make({
+      onDeviceLost: (l) => lost.push(l),
+      recorderFactory: () => {
+        const r = new FakeRecorder();
+        recs.push(r);
+        return r;
+      },
+    });
+    await p.recordWebcam();
+    recs[0]?.onerror?.();
+    await vi.waitFor(() => expect(lost).toEqual([{ stream: 'WEBCAM', reason: 'RECORDER_ERROR' }]));
+  });
 });

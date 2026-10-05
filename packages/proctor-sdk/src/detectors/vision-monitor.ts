@@ -80,14 +80,34 @@ export class VisionMonitor implements Detector {
   }
 
   async start(ctx: DetectorContext): Promise<void> {
+    await this.run(ctx);
+  }
+
+  /**
+   * Webcam stream that arrived after start() (for example `pipeline.recordWebcam()` ran later).
+   * If the monitor reported PERMISSION_DENIED for lack of a stream, it initialises now; the earlier
+   * DETECTOR_UNAVAILABLE stays in the log, which is truthful about that period.
+   */
+  async attachStream(stream: MediaStream): Promise<void> {
+    this.attached = stream;
+    const ctx = this.ctx;
+    if (!ctx || this.tasks.size > 0 || this.client) return;
+    this.reported.clear();
+    await this.run(ctx);
+  }
+
+  private attached: MediaStream | null = null;
+
+  private async run(ctx: DetectorContext): Promise<void> {
     try {
       await this.startInner(ctx);
     } catch {
       // Cross-origin model base, video failure, anything unexpected: say so, never a silent pass.
+      // Tasks that already reported SUPPORTED are included; their capability flag is reset too.
       this.client?.terminate();
       this.client = null;
       for (const t of ['face', 'gaze', 'objects'] as const) {
-        if (!ctx.isDisabled(TASK_TO_DETECTOR[t]) && !this.reported.has(t) && !this.tasks.has(t)) {
+        if (!ctx.isDisabled(TASK_TO_DETECTOR[t]) && !this.reported.has(t)) {
           this.unavailable(ctx, t, 'MODEL_LOAD_FAILED');
         }
       }
@@ -109,7 +129,7 @@ export class VisionMonitor implements Detector {
     );
     if (wanted.length === 0) return; // everything disabled by accommodations: nothing loads
 
-    const stream = this.o.getWebcamStream();
+    const stream = this.o.getWebcamStream() ?? this.attached;
     if (!stream) {
       for (const t of wanted) this.unavailable(ctx, t, 'PERMISSION_DENIED');
       return;
@@ -121,6 +141,15 @@ export class VisionMonitor implements Detector {
 
     const urls = resolveModelUrls(this.o.modelBaseUrl);
     this.client = new InferenceClient(this.o.createWorker, this.o.initTimeoutMs);
+    this.client.onDead = () => {
+      // The worker died after it was ready: stop sampling and say so.
+      if (this.timer) clearInterval(this.timer);
+      this.timer = null;
+      for (const t of [...this.tasks]) this.unavailable(ctx, t, 'RUNTIME_ERROR');
+      this.tasks.clear();
+      this.identity?.stop();
+      this.identity = null;
+    };
     const ready = await this.client.init({
       tasks: wanted,
       urls: {

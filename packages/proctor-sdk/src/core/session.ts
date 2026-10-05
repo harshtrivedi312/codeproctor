@@ -38,6 +38,8 @@ export interface ProctorSessionConfig {
   flushIntervalMs?: number;
   heartbeatIntervalMs?: number;
   backoffBaseMs?: number;
+  /** A detector whose start() takes longer than this is abandoned (default 45 s). */
+  detectorStartTimeoutMs?: number;
 }
 
 export interface SessionEvents {
@@ -52,6 +54,17 @@ type Handler<K extends keyof SessionEvents> = (payload: SessionEvents[K]) => voi
  * Entry point of the SDK. start() wires detectors (plug-ins) to the signed event queue and the
  * heartbeat; on() lets the UI react (pause the editor on a lock, show a capability notice).
  */
+class StartTimeoutError extends Error {}
+
+/** Rejects with StartTimeoutError when `p` has not settled in `ms`. */
+function withTimeout<T>(p: Promise<T> | T, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new StartTimeoutError('detector start timed out')), ms);
+  });
+  return Promise.race([Promise.resolve(p), timeout]).finally(() => clearTimeout(timer));
+}
+
 export class ProctorSession {
   private handlers: { [K in keyof SessionEvents]: Set<Handler<K>> } = {
     event: new Set(),
@@ -135,7 +148,7 @@ export class ProctorSession {
       if (d.accommodationId && disabled.has(d.accommodationId)) continue;
       this.started.push(d);
       try {
-        await d.start(ctx);
+        await withTimeout(d.start(ctx), config.detectorStartTimeoutMs ?? 45_000);
       } catch {
         // One broken detector must not stop the others; say so instead of passing silently.
         if (d.accommodationId) {
@@ -177,7 +190,19 @@ export class ProctorSession {
     return this.queue?.stats() ?? null;
   }
 
+  /**
+   * Stop and purge: flushes the event queue (bounded), then deletes this session's batches and
+   * counter from IndexedDB (FR-702). Call at the end of a test; stop() keeps batches for a reload.
+   */
+  async finish(drainTimeoutMs = 15_000): Promise<{ lostBatches: number }> {
+    return this.shutdown(drainTimeoutMs);
+  }
+
   async stop(): Promise<void> {
+    await this.shutdown(null);
+  }
+
+  private async shutdown(purgeDrainMs: number | null): Promise<{ lostBatches: number }> {
     globalThis.removeEventListener?.('pagehide', this.onPageHide);
     globalThis.removeEventListener?.('online', this.onOnline);
     this.heartbeat?.stop();
@@ -189,9 +214,12 @@ export class ProctorSession {
       }
     }
     this.started = [];
-    await this.queue?.stop();
+    let lostBatches = 0;
+    if (purgeDrainMs === null) await this.queue?.stop();
+    else lostBatches = (await this.queue?.finish(purgeDrainMs))?.lostBatches ?? 0;
     this.metrics?.stop();
     this.queue = null;
     this.config = null;
+    return { lostBatches };
   }
 }

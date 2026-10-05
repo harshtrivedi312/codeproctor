@@ -98,3 +98,22 @@ Nits
 
 ## QA-D-01 (TC-050): closed, by design
 FULLSCREEN_EXIT carries no duration from the SDK; FULLSCREEN_RESTORED carries the time away. Hub decision: the API fills `duration_ms` on the open FULLSCREEN_EXIT when FULLSCREEN_RESTORED arrives, or at session end; this goes to BE-10/BE-12 and ADR 0013. `qa-tc.test.ts` now asserts the two behaviours (EXIT immediate and without `durationMs`, RESTORED with the time away) instead of the expected-failure test. Not edited here: `docs/test-cases.md`, `docs/test-matrix.md`, `docs/followups/qa.md` and `packages/qa/src/p1-gate.ts` still mention QA-D-01 (QA-owned).
+
+## Status of review should-fix items (PR fe/sdk-review-followups)
+Done (with tests):
+- PR #21 (1): IndexedDB put or open failure is counted or buffered in memory (32 MiB cap, drops counted), `storageDegraded` and `memoryBytes` in `RecorderHealth`, capability `recording-storage`.
+- PR #21 (2): track `ended` and MediaRecorder `error` flush the stream and call `onDeviceLost({ stream, reason })` plus a capability flag; calling `recordWebcam`, `recordAudio` or `recordScreen` again starts a new segment.
+- PR #21 (3): `sweepStaleSessions` on queue start deletes chunks, event batches and meta of other sessions last seen over 24 h ago (`staleAfterMs`); data without a mark gets a grace period.
+- PR #23 (4): `VisionMonitor.attachStream()` for a webcam stream that arrives after `start()`.
+- PR #23 (5): SpeechRules merges cooldown-suppressed speech into the next event; a timer and `stop()` flush it.
+- Reviewer non-blockers: start-failure now reports tasks that were already SUPPORTED; a worker error after ready terminates it and emits RUNTIME_ERROR; frames get a 10 s timeout and three in a row kill the worker; MicVAD init timeout (30 s); per-detector start timeout in `ProctorSession` (`detectorStartTimeoutMs`, 45 s); `EventQueue.finish()` and `ProctorSession.finish()` purge the event-batch store and sequence counter (FR-702). Test names for NO_FACE, MULTIPLE_FACES and phone use TC-057, TC-058, TC-059.
+
+Partly done:
+- PR #23 (6) SHA-256 pinning: `scripts/lock.mjs` (hash, verify, update, keeps hand-edited licence and status) is in the shape proposed by ADR 0013 section 6, with tests. It is not wired into `fetch-models.mjs` yet, and `models.lock.json` is not generated, because the PR #35 branch changes `fetch-models.mjs` (COCO download, safe path check). Wire it after #35 merges, as the `models:fetch` / `models:update` scripts. COCO-SSD licence stays `unverified` (ADR 0013 F-3).
+- Per-detector start timeout only emits DETECTOR_UNAVAILABLE for detectors that declare an `accommodationId`.
+- Keystroke batch purge: there is no keystroke queue in the SDK yet; it must reuse `finish()` when it exists.
+
+Left as filed: PR #21 nits (cap with in-flight chunks, https-only presign URLs), PR #23 (7) FACE_MISMATCH relay (hub: server-side in ADR 0013, no SDK change until accepted), evidence key org overrides, 3 s evidence wait lost on stop, identity/FACE coupling note, config.ts comment, unreachable SPEECH_DETECTED case, object confidence carry.
+
+## Deferred until ADR 0013 (Proposed) is accepted
+`POST /candidate/session/proctor-key` flow (per-epoch non-extractable key in IndexedDB, re-sign outbox on KEY_EPOCH_STALE, counters seeding), RFC 7807 `code` mapping in the transports, heartbeat body and 409 handling, `runSystemCheck()`, media presign fields (`startedAt`, `durationMs`, exact `video/webm` content type, `alreadyUploaded`, UPLOAD_MISMATCH/UPLOAD_NOT_FOUND retry, never drop a segment's first chunk), evidence presign `purpose` and relative names, identity re-check as upload plus 202 (stop emitting FACE_MISMATCH), SCREEN_SHARE detector value, `models:fetch`/`models:update` replacing `fetch-models.mjs`. No SDK-core change for any of these in this PR.
