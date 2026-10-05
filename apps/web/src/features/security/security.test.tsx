@@ -906,7 +906,9 @@ describe('Security page: recovery codes are shown once (FR-102)', () => {
       </main>,
       MOCK_USERS.recruiter,
     );
-    expect(await screen.findByText('Checking your two-factor status…')).toBeInTheDocument();
+    expect(
+      await screen.findByText(/We cannot tell yet whether two-factor sign-in is on/),
+    ).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /2FA|recovery/i })).not.toBeInTheDocument();
   });
 });
