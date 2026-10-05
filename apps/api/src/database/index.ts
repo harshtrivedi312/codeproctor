@@ -11,3 +11,5 @@ export {
   RawQueryNotAllowedError,
 } from './errors';
 export type { OrgScopedPrismaClient } from './org-scope.extension';
+// For the log boundary: scrub a Prisma or driver error before it is logged (FU-DB-70, FU-DB-112).
+export { scrubPrismaError } from './error-scrub';
