@@ -17,6 +17,8 @@ import { IS_PUBLIC, ROLES } from './decorators';
 import { TokenService } from './token.service';
 import { TokenValidityService } from './token-validity.service';
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 interface StaffClaims {
   sub: string;
   org: string;
@@ -75,10 +77,14 @@ export class JwtAuthGuard implements CanActivate {
     // The token alone is not enough: re-read the user so a deactivation, role change or password
     // reset takes effect at once instead of after the 15 minute token lifetime (FU-BE-19).
     // One primary-key lookup; any database error propagates and the request is refused.
-    // Guards run before the interceptor that sets the org context, and the token's org is exactly
-    // what this lookup verifies, so it runs in the auth bootstrap system scope (FU-DB-58).
+    // The org is known from the verified token, so the re-check runs in that org's scope, not in
+    // an unfiltered one (FU-DB-102): another org's user is simply not found. The scope ends here,
+    // before OrgContextInterceptor enters runAsUser. A malformed org claim is a 401, not a 500.
     const userId = claims.sub;
-    const current = await this.orgContext.runSystem('AUTH_BOOTSTRAP', () =>
+    if (!UUID.test(claims.org) || !UUID.test(userId)) {
+      throw new UnauthorizedException('Authentication required.');
+    }
+    const current = await this.orgContext.runInOrg(claims.org, () =>
       this.prisma.client.user.findUnique({
         where: { id: userId },
         select: { isActive: true, role: true, orgId: true, passwordHash: true },
