@@ -259,7 +259,7 @@ describe('session handling', () => {
     expect(screen.getByTestId('who')).toHaveTextContent('nobody');
   });
 
-  it('FR-101: a slow first-load refresh that ends in 401 cannot sign out a fresh login', async () => {
+  it('FR-104: a slow first-load refresh that ends in 401 cannot sign out a fresh login', async () => {
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => (release = resolve));
     let refreshes = 0;
@@ -270,19 +270,59 @@ describe('session handling', () => {
         return new HttpResponse(null, { status: 401 });
       }),
     );
+    let auth: ReturnType<typeof useAuth> | null = null;
+    function Capture() {
+      auth = useAuth();
+      return null;
+    }
     renderWithAuth(
       <>
-        <LoginForm />
+        <Capture />
         <Who />
       </>,
     );
     await waitFor(() => expect(refreshes).toBe(1));
-    await signInAs(MOCK_USERS.recruiter);
+    const login = await api.POST('/v1/auth/login', {
+      body: { email: MOCK_USERS.recruiter.email, password: MOCK_USERS.recruiter.password },
+    });
+    if (login.data?.status !== 'authenticated' || !login.data.session) throw new Error('login');
+    auth!.signIn(login.data.session);
     await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
     release();
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER');
     expect(getAccessToken()).toBeTruthy();
+  });
+
+  it('FR-101 FR-104: sign-in waits for a slow first-load refresh, so a late 200 cannot overwrite the login cookie', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let refreshes = 0;
+    let loginStarted = false;
+    server.use(
+      http.post('*/v1/auth/refresh', async () => {
+        refreshes++;
+        await gate;
+        return HttpResponse.json({
+          accessToken: 'old-session-token',
+          user: { id: 'o', email: 'old@example.test', name: 'Old', role: 'AUTHOR', orgName: 'x' },
+        });
+      }),
+    );
+    server.events.on('request:start', ({ request }) => {
+      if (request.url.endsWith('/v1/auth/login')) loginStarted = true;
+    });
+    renderWithAuth(<LoginForm />);
+    await waitFor(() => expect(refreshes).toBe(1));
+    const u = userEvent.setup();
+    await u.type(screen.getByLabelText('Work email'), MOCK_USERS.recruiter.email);
+    await u.type(screen.getByLabelText('Password'), MOCK_USERS.recruiter.password);
+    await u.click(screen.getByRole('button', { name: 'Sign in' }));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(loginStarted).toBe(false);
+    release();
+    await waitFor(() => expect(loginStarted).toBe(true));
+    server.events.removeAllListeners();
   });
 });
 
