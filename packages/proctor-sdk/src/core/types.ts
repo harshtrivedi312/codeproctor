@@ -58,6 +58,12 @@ export interface Detector {
   /** Set when an accommodation can switch this detector off (FR-106); a disabled detector never starts. */
   readonly accommodationId?: ProctorDetector;
   start(ctx: DetectorContext): void | Promise<void>;
+  /**
+   * Called by the session when start() did not finish in time and the detector is abandoned.
+   * Report what can no longer be trusted (DETECTOR_UNAVAILABLE, capability flags). stop() is
+   * called right after; a late start() must then do nothing.
+   */
+  reportStartTimeout?(ctx: DetectorContext): void;
   stop(): void | Promise<void>;
 }
 

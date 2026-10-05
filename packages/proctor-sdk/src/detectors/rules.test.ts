@@ -34,7 +34,7 @@ function runFace(seq: number[], rules = new FaceRules(cfg)): { t: number; e: Rul
   return out;
 }
 
-describe('NO_FACE debouncing (FR-606)', () => {
+describe('NO_FACE debouncing (FR-606, TC-057)', () => {
   it('FR-606: fires once after 5 s without a face and ignores the shorter 3 s absence', () => {
     const got = runFace(NO_FACE_SEQUENCE).filter((x) => x.e.type === 'NO_FACE');
     expect(got).toHaveLength(1);
@@ -70,7 +70,7 @@ describe('NO_FACE debouncing (FR-606)', () => {
   });
 });
 
-describe('MULTIPLE_FACES (FR-606)', () => {
+describe('MULTIPLE_FACES (FR-606, TC-058)', () => {
   it('FR-606: needs two consecutive samples with 2+ faces', () => {
     const got = runFace([1, 2, 1, 2, 2, 1]).filter((x) => x.e.type === 'MULTIPLE_FACES');
     expect(got).toHaveLength(1);
@@ -184,7 +184,7 @@ describe('pose maths (FR-606)', () => {
   });
 });
 
-describe('objects (FR-606)', () => {
+describe('objects (FR-606, TC-059)', () => {
   const run = (frames: Parameters<ObjectRules['process']>[0][], c = cfg) => {
     const rules = new ObjectRules(c);
     return frames.flatMap((f, i) => rules.process(f, T0 + i * 2000));
@@ -219,6 +219,27 @@ describe('speech (FR-607, TC-061)', () => {
     expect(r.onSegment(T0 + 1000, T0 + 3000)).toHaveLength(1);
     expect(r.onSegment(T0 + 4000, T0 + 6000)).toHaveLength(0);
     expect(r.onSegment(T0 + 20_000, T0 + 22_000)).toHaveLength(1);
+  });
+});
+
+describe('speech cooldown merging (FR-607, TC-061)', () => {
+  it('TC-061: segments held back by the cooldown add their duration to the next event', () => {
+    const r = new SpeechRules(cfg);
+    expect(r.onSegment(T0, T0 + 5000)).toHaveLength(1);
+    expect(r.onSegment(T0 + 6000, T0 + 8000)).toEqual([]);
+    expect(r.hasPending).toBe(true);
+    const next = r.onSegment(T0 + 20_000, T0 + 22_000);
+    expect(next).toEqual([{ type: 'SPEECH_DETECTED', startedAtMs: T0 + 6000, durationMs: 4000 }]);
+    expect(r.hasPending).toBe(false);
+  });
+  it('TC-061: flush() reports held-back speech once', () => {
+    const r = new SpeechRules(cfg);
+    r.onSegment(T0, T0 + 5000);
+    r.onSegment(T0 + 6000, T0 + 8000);
+    expect(r.flush(T0 + 9000)).toEqual([
+      { type: 'SPEECH_DETECTED', startedAtMs: T0 + 6000, durationMs: 2000 },
+    ]);
+    expect(r.flush(T0 + 9000)).toEqual([]);
   });
 });
 
