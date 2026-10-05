@@ -22,7 +22,7 @@ Owner: Delivery Lead (from 2026-10-05, owner-requested CLAUDE.md change in PR #3
 | --- | --- |
 | Tasks done (merged) | 14 of 50: ARC-01, DB-01, DB-02, DB-03, DB-04, BE-01, BE-02, FE-01, FE-02, FE-03, FE-06, FE-07, FE-08, QA-01A |
 | Tasks in progress | 5: ARC-02 (contract ADRs 0011 and 0012 open), ARC-03 (ADR 0013 pending), DB-05 (#30, in review), BE-12 worker part (#32), QA-01B early automation (merged as #28) |
-| Open PRs | 9: #26 BE-02 hardening, #30 DB-05 (draft), #31 ADR 0011, #32 worker hardening, #33 ADR 0012, #34 CLAUDE.md (Delivery Lead owns status docs), #35 /dev/proctor (draft), #36 Security page, plus this docs PR |
+| Open PRs | 12: #39 ADR 0013, #40 web admin-table flake fix, the eslint-ignore config PR, #26 BE-02 hardening, #30 DB-05 (draft), #31 ADR 0011, #32 worker hardening, #33 ADR 0012, #34 CLAUDE.md (Delivery Lead owns status docs), #35 /dev/proctor (draft), #36 Security page, plus this docs PR |
 | Test cases verified | 6 of 72 marked Verified in /docs/test-matrix.md (TC-002, TC-005, TC-075 fully; TC-001, TC-003 and TC-098 on the API with the UI mocked) |
 | Open risks | 15 (section 5) |
 
@@ -260,9 +260,13 @@ Status values: Not started, In progress, In review, Changes requested, Done (mer
 | D-37 | 2026-10-02 | Review SF7: `db-reset` also refuses when an AI agent's environment variables are set, and allows only the local Compose Postgres port. | Harsh Trivedi |
 | D-38 | 2026-10-02 | Staging and pilot database credentials never exist on developer machines or in agent sessions; they live only in GitHub Actions secrets and on the servers. Recorded in ADR 0009 and CLAUDE.md. ADR 0009 is reworded as a policy backed by speed bumps; the remaining risks (agents in interactive terminals, local tunnels) are accepted. | Harsh Trivedi |
 | D-39 | 2026-10-02 | Time-box: after this round the reset guard is done. Fix SF2 to SF8 and the cheap nits; no new hardening work on it unless the code-reviewer finds a blocker. | Harsh Trivedi |
-| D-40 | 2026-10-02 | Auto-fix stays off for pull requests. | Harsh Trivedi |
+| D-40 | 2026-10-02 | Auto-fix stays off for pull requests. **Superseded 2026-10-05 by D-46.** | Harsh Trivedi |
 | D-41 | 2026-10-02 | Merge only when the code-reviewer approves and CI is green. DB-01 is marked done when PR #2 merges. (PR #2 merged 2026-10-02 16:43 UTC with CI green and before this rule; the remaining review fixes go through PR #3 under this rule.) | Harsh Trivedi |
 | D-42 | 2026-10-02 | Code review round 3 on PR #3: APPROVE WITH NITS. Option (a): apply the four nits in one commit, then merge PR #3 once CI passes and start DB-02. CLAUDE.md gains the rule that agents never run `pnpm db:reset`, `pnpm dev:infra:reset`, `prisma migrate reset` or `db push`; the db-engineer definition of done adds `pnpm dev:infra:reset`. | Harsh Trivedi |
+| D-43 | 2026-10-05 | P-02: PR #34 approved (Delivery Lead owns docs/status.md, docs/build-plan.md and docs/requirements-trace.md); the hub merges it on green. | Harsh Trivedi |
+| D-44 | 2026-10-05 | P-03 / FU-BE-24: FR-101 lockout stays as written for the pilot. Added: an admin alert when a staff account is locked, and an audited admin unlock action (BE-03 and the admin Users page). Pre-production follow-up: per-IP or progressive lockout before production. | Harsh Trivedi |
+| D-45 | 2026-10-05 | P-05: the CSP allows `'wasm-unsafe-eval'` on the candidate test route only, with a code comment explaining why; every other route and directive stays strict. | Harsh Trivedi |
+| D-46 | 2026-10-05 | P-06: auto-fix is on for all sessions; CLAUDE.md rule 4 supersedes D-40. | Harsh Trivedi |
 
 ## 9b. Delivery Lead decision log
 
@@ -286,11 +290,11 @@ Decisions taken by the Delivery Lead under the owner's delegation (order, priori
 | ID | Item | Why it is the owner's |
 | --- | --- | --- |
 | P-01 | Accept or reject ADR 0011 (2FA re-authentication, PR #31) and ADR 0012 (generated OpenAPI as the single source of truth, PR #33) | Accepting an ADR |
-| P-02 | PR #34: CLAUDE.md rules 16 and 18 (Delivery Lead owns the status docs). **Owner requested it directly in the hub session; the hub merges it on green (reviewed head c558a6f). No owner action needed.** | Change to the shared rules (already approved) |
-| P-03 | FU-BE-24: a known staff email can be kept locked out by 5 failed logins (FR-101 lockout as written). Changing this changes FR-101 | Requirement / security trade-off |
-| P-04 | B-05 Legal pilot entry items (unchanged) | Legal |
-| P-05 | Production CSP: allow `'wasm-unsafe-eval'` (never `'unsafe-eval'`), only on the candidate test route, so that MediaPipe, onnxruntime and the tfjs wasm backends run. Hub recommends yes, with a CSP test proving the directive is absent elsewhere | Security trade-off that loosens CSP |
-| P-06 | Auto-fix on PRs: D-40 (2026-10-02) says it stays off; CLAUDE.md rule 4 (2026-10-05) says switch it on. Sessions follow CLAUDE.md (it is newer and says it wins); the DB session switched it on for #30. Confirm, or say which one should change | Shared rules / owner decision conflict |
+| P-02 | Decided: D-43 | |
+| P-03 | Decided: D-44 (alert and unlock in BE-03; per-IP or progressive lockout before production) | |
+| P-04 | B-05 Legal pilot entry items. The owner takes a one-page brief (prepared 2026-10-05 by the Delivery Lead) to Legal | Legal |
+| P-05 | Decided: D-45 (Frontend implements, with a test that the directive is absent elsewhere) | |
+| P-06 | Decided: D-46 | |
 | P-07 | May the Integrity session download AuraFace `glintr100.onnx` (fal/AuraFace-v1, pinned SHA-256, Apache 2.0 per D-05) for a local, opt-in real-model test run? Until then the face-match PR ships with a fake backend only | File download from an external source |
 | P-08 | Accept ADR 0013 (ARC-03 part 1: HMAC key lifecycle, candidate API wire tables, candidate-session scope CS-1..CS-5, model-file lock; PR #39) and answer its section 9 owner questions. The main ones: lost key means OTP resume vs re-issue; 300 s ingest grace after submit; unsigned system-check findings unscored; consent covering a 640 px re-check frame every 2 min, kept only on mismatch; repeated FACE_MISMATCH goes to manual review; SCREEN_SHARE weight; COCO-SSD for the pilot (override after Legal, deploy without object detection, or swap the detector); the sessionId scope control. Code on the key and media routes waits for acceptance; mocks may follow the tables | Accepting an ADR; consent and licensing questions |
 
@@ -298,4 +302,4 @@ Decisions taken by the Delivery Lead under the owner's delegation (order, priori
 
 - **Next 3 tasks on the critical path:** #26 merge (BE-02 hardening); #30 merge (DB-05, after DL-01 fixes); BE-03 (DL-02).
 - **Blockers:** GitHub Actions outage (external; affects every merge). B-05 blocks only the pilot.
-- **Decisions needed from the owner:** section 9b "Parked for the owner" (P-01 to P-08).
+- **Decisions needed from the owner:** section 9b "Parked for the owner" (open: P-01, P-04, P-07, P-08).
