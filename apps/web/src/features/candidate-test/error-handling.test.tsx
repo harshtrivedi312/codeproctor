@@ -10,6 +10,7 @@ import * as React from 'react';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { apiBaseUrl } from '@/lib/env';
 import { server } from '@/mocks/server';
+import { mockSession } from '@/mocks/data';
 import { TestScreen } from './test-screen';
 import { useAutosave } from './use-autosave';
 import { useServerClock } from './use-clock';
@@ -178,24 +179,39 @@ describe('FR-301 ADR 0002 finish section error handling', () => {
     expect(within(dialog).getByRole('button', { name: /try again/i })).toBeEnabled();
   });
 
-  it('FR-301 ADR 0002 a 409 on retry means the section was already finished', async () => {
-    let calls = 0;
+  it('FR-301 ADR 0002 a 409 SESSION_PAUSED is not shown as finished', async () => {
     server.use(
-      http.post(`${apiBaseUrl}/v1/candidate/sections/:sectionId/finish`, () => {
-        calls += 1;
-        return calls === 1
-          ? HttpResponse.error()
-          : HttpResponse.json({ message: 'already finished' }, { status: 409 });
-      }),
+      http.post(`${apiBaseUrl}/v1/candidate/sections/:sectionId/finish`, () =>
+        HttpResponse.json({ code: 'SESSION_PAUSED' }, { status: 409 }),
+      ),
     );
     const user = await startDemo();
     const dialog = await openFinishDialog(user);
     await user.click(within(dialog).getByRole('button', { name: 'Finish section' }));
-    await user.click(await within(dialog).findByRole('button', { name: /try again/i }));
-    expect(await screen.findByText(/finished and cannot be reopened/i)).toBeInTheDocument();
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/paused|nothing changed/i);
+    expect(screen.queryByText(/finished and cannot be reopened/i)).not.toBeInTheDocument();
+    expect(screen.getByTestId('editor-region')).toHaveAttribute('data-readonly', 'false');
   });
 
-  it('FR-301 ADR 0002 when the status cannot be re-read the message says it could not confirm', async () => {
+  it('FR-301 ADR 0002 a failed re-read keeps the test on screen with the editor and drafts', async () => {
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/sections/:sectionId/finish`, () =>
+        HttpResponse.error(),
+      ),
+    );
+    const user = await startDemo();
+    await user.type(screen.getByLabelText('Code editor'), 'KEEPME');
+    const dialog = await openFinishDialog(user);
+    server.use(http.get(`${apiBaseUrl}/v1/candidate/session`, () => HttpResponse.error()));
+    await user.click(within(dialog).getByRole('button', { name: 'Finish section' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/could not confirm/i);
+    expect(screen.queryByText(/we could not load your test/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/backend engineer screening/i)).toBeInTheDocument();
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Code editor').value).toContain('KEEPME');
+    expect(screen.getByTestId('editor-region')).toHaveAttribute('data-readonly', 'false');
+  });
+
+  it('FR-301 ADR 0002 a confirmed finish shows the banner first and opens the next section only on Continue', async () => {
     server.use(
       http.post(`${apiBaseUrl}/v1/candidate/sections/:sectionId/finish`, () =>
         HttpResponse.error(),
@@ -203,10 +219,24 @@ describe('FR-301 ADR 0002 finish section error handling', () => {
     );
     const user = await startDemo();
     const dialog = await openFinishDialog(user);
-    server.use(http.get(`${apiBaseUrl}/v1/candidate/session`, () => HttpResponse.error()));
+    server.use(
+      http.get(`${apiBaseUrl}/v1/candidate/session`, () =>
+        HttpResponse.json({
+          ...mockSession,
+          section: { ...mockSession.section, id: 'sec-2', title: 'Next part', position: 2 },
+        }),
+      ),
+    );
     await user.click(within(dialog).getByRole('button', { name: 'Finish section' }));
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/could not confirm/i);
+    expect(
+      await screen.findByText(/Coding section is finished and cannot be reopened/i),
+    ).toBeInTheDocument();
+    // Still the finished section, read-only; the next section is not open yet.
+    expect(screen.getByTestId('editor-region')).toHaveAttribute('data-readonly', 'true');
+    await user.click(screen.getByRole('button', { name: /continue to the next section/i }));
+    expect(await screen.findByText(/Section 2 of 2: Next part/i)).toBeInTheDocument();
     expect(screen.queryByText(/finished and cannot be reopened/i)).not.toBeInTheDocument();
+    expect(screen.getByTestId('editor-region')).toHaveAttribute('data-readonly', 'false');
   });
 
   it('FR-301 the error is cleared when the dialog is opened again', async () => {

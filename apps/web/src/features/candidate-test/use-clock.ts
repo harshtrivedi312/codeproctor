@@ -21,13 +21,13 @@ const monotonicNow = (): number => performance.now();
 export function useServerClock(): {
   ready: boolean;
   remaining: (deadlineIso: string | null | undefined) => number | null;
+  /** True when the server time could not be read at all: the screen must not run unchecked. */
+  unavailable: boolean;
+  retry: () => void;
   /**
    * Re-sync from a server timestamp seen in a response (for example the draft save's `savedAt`).
    * Pass `performance.now()` taken just before the request and just after the response.
    */
-  /** True when the server time could not be read at all: the screen must not run unchecked. */
-  unavailable: boolean;
-  retry: () => void;
   syncFromServer: (serverNowIso: string, requestStart: number, responseEnd: number) => void;
 } {
   const queryClient = useQueryClient();

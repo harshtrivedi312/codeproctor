@@ -11,7 +11,13 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { api, type Schemas } from '@/lib/api/client';
 import { cooldownRemainingMs, cooldownSeconds } from './cooldown';
 import { LANGUAGE_LABELS } from './keywords';
-import { initialLockState, isEditorReadOnly, lockReducer } from './lock-state';
+import {
+  initialLockState,
+  isEditorReadOnly,
+  lockReducer,
+  type LockEvent,
+  type LockState,
+} from './lock-state';
 import { Markdown } from './markdown';
 import { OutputPanel } from './output-panel';
 import { FinishSectionDialog, FullscreenLockOverlay, StartGate } from './overlays';
@@ -62,7 +68,17 @@ function omit<T>(record: Record<string, T>, key: string): Record<string, T> {
 
 const codeKey = (questionId: string, language: CodeLanguage) => `${questionId}:${language}`;
 
+/** A section the server has finished. Kept outside the per-section screen (ADR 0002). */
+interface FinishedSection {
+  sectionId: string;
+  title: string;
+  nextSectionId: string | null;
+  /** The session as re-read from the server, when the finish was confirmed that way. */
+  next?: Schemas['CandidateSession'];
+}
+
 export function TestScreen(): React.JSX.Element {
+  const queryClient = useQueryClient();
   const session = useQuery({
     queryKey: ['candidate-session'],
     staleTime: Infinity,
@@ -72,11 +88,17 @@ export function TestScreen(): React.JSX.Element {
       return data;
     },
   });
+  // The lock state (fullscreen, warnings) belongs to the whole test, not to one section.
+  const [lock, dispatchLock] = React.useReducer(lockReducer, initialLockState);
+  const [finishedSection, setFinishedSection] = React.useState<FinishedSection | null>(null);
+  const [advancing, setAdvancing] = React.useState(false);
 
+  // Show the load error only when there is nothing to show: a failed background refetch must
+  // never replace a running test (it would drop unsaved drafts and the lock state).
   if (session.isPending) {
     return <p className="p-8 text-center text-muted-foreground">Loading your test…</p>;
   }
-  if (session.isError) {
+  if (!session.data) {
     return (
       <div role="alert" className="mx-auto my-24 max-w-md text-center">
         <h1 className="text-lg font-semibold">We could not load your test</h1>
@@ -89,20 +111,78 @@ export function TestScreen(): React.JSX.Element {
       </div>
     );
   }
-  return <TestScreenInner session={session.data} />;
+  const current = session.data;
+  const finishedHere = finishedSection?.sectionId === current.section.id ? finishedSection : null;
+
+  const advance = async () => {
+    if (!finishedSection) return;
+    setAdvancing(true);
+    try {
+      if (finishedSection.next)
+        queryClient.setQueryData(['candidate-session'], finishedSection.next);
+      else await session.refetch();
+    } finally {
+      setAdvancing(false);
+    }
+  };
+
+  return (
+    <>
+      <TestScreenInner
+        key={current.section.id}
+        session={current}
+        lock={lock}
+        dispatchLock={dispatchLock}
+        finished={finishedHere !== null}
+        onFinished={setFinishedSection}
+      />
+      {finishedHere && (
+        <div
+          role="status"
+          className="fixed inset-x-0 bottom-16 z-40 mx-auto w-fit rounded-lg border bg-card p-4 shadow-lg"
+        >
+          <p className="font-medium">
+            <CheckCircle2 className="mr-2 inline h-5 w-5 text-success" aria-hidden />
+            The {finishedHere.title} section is finished and cannot be reopened.
+          </p>
+          {finishedHere.nextSectionId || finishedHere.next ? (
+            <Button className="mt-3" onClick={() => void advance()} disabled={advancing}>
+              Continue to the next section
+            </Button>
+          ) : (
+            IS_DEMO && (
+              <p className="mt-1 text-sm text-muted-foreground">
+                Demo: the next section is not part of this preview.
+              </p>
+            )
+          )}
+        </div>
+      )}
+    </>
+  );
 }
 
-function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }): React.JSX.Element {
+function TestScreenInner({
+  session,
+  lock,
+  dispatchLock,
+  finished,
+  onFinished,
+}: {
+  session: Schemas['CandidateSession'];
+  lock: LockState;
+  dispatchLock: React.Dispatch<LockEvent>;
+  finished: boolean;
+  onFinished: (info: FinishedSection) => void;
+}): React.JSX.Element {
   const { questions, section } = session;
   const [activeId, setActiveId] = React.useState(questions[0]?.id ?? '');
   const [languages, setLanguages] = React.useState<Record<string, CodeLanguage>>({});
   const [drafts, setDrafts] = React.useState<Drafts>({ code: {}, mcq: {} });
-  const [lock, dispatchLock] = React.useReducer(lockReducer, initialLockState);
   const [fsFailed, setFsFailed] = React.useState(false);
   const [finishOpen, setFinishOpen] = React.useState(false);
   const [finishing, setFinishing] = React.useState(false);
   const [finishError, setFinishError] = React.useState<string | null>(null);
-  const [finished, setFinished] = React.useState(false);
   const [resetOpen, setResetOpen] = React.useState(false);
 
   const [running, setRunning] = React.useState(false);
@@ -113,7 +193,6 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
   const [results, setResults] = React.useState<Record<string, Schemas['RunResult']>>({});
   const [runErrors, setRunErrors] = React.useState<Record<string, string>>({});
 
-  const queryClient = useQueryClient();
   const clock = useServerClock();
   const testLeft = clock.remaining(session.testDeadlineAt);
   const sectionLeft = clock.remaining(section.deadlineAt);
@@ -181,7 +260,7 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
       );
     document.addEventListener('fullscreenchange', onChange);
     return () => document.removeEventListener('fullscreenchange', onChange);
-  }, []);
+  }, [dispatchLock]);
 
   const requestFullscreen = async (): Promise<boolean> => {
     try {
@@ -239,25 +318,20 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
   const finishSection = async () => {
     setFinishing(true);
     setFinishError(null);
-    const markFinished = () => {
-      setFinished(true);
+    const markFinished = (nextSectionId: string | null, next?: Schemas['CandidateSession']) => {
+      onFinished({ sectionId: section.id, title: section.title, nextSectionId, next });
       setFinishOpen(false);
     };
-    // After a failure we cannot tell whether the server finished the section. Re-read the session:
-    // if it now reports another section, the finish went through (ADR 0002: finishing is final).
+    // After a failure, or a 409 (which can also mean a paused or inactive session), we cannot tell
+    // whether the server finished the section. Re-read the session with a plain request that does
+    // not touch the query cache: if it now reports another section, the finish went through
+    // (ADR 0002: finishing is final). The cache is only updated when the candidate continues.
     const confirmOrExplain = async (fallback: string) => {
       try {
-        const fresh = await queryClient.fetchQuery({
-          queryKey: ['candidate-session'],
-          staleTime: 0,
-          queryFn: async () => {
-            const { data } = await api.GET('/v1/candidate/session');
-            if (!data) throw new Error('session');
-            return data;
-          },
-        });
+        const { data: fresh } = await api.GET('/v1/candidate/session');
+        if (!fresh) throw new Error('session');
         if (fresh.section.id !== section.id) {
-          markFinished();
+          markFinished(fresh.section.id, fresh);
           return;
         }
         setFinishError(fallback);
@@ -278,10 +352,17 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
       const { data, response } = await api.POST('/v1/candidate/sections/{sectionId}/finish', {
         params: { path: { sectionId: section.id } },
       });
-      // ADR 0002: finishing is final. 409 means it was already finished; only that or an OK
-      // response with a body marks the section finished.
-      if (response.status === 409 || (response.ok && data)) {
-        markFinished();
+      // ADR 0002: finishing is final. Only an OK response with a body marks it finished. A 409 is
+      // not trusted by itself (the contract does not say which conflict it is); it goes through
+      // the verified re-read below.
+      if (response.ok && data) {
+        markFinished(data.nextSectionId ?? null);
+        return;
+      }
+      if (response.status === 409) {
+        await confirmOrExplain(
+          'The server could not finish the section right now (your session may be paused). Nothing changed and you can keep working. Try again in a moment, or tell the person running the test.',
+        );
         return;
       }
       await confirmOrExplain(
@@ -616,23 +697,6 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
           </div>
         </DialogContent>
       </Dialog>
-
-      {finished && (
-        <div
-          role="status"
-          className="fixed inset-x-0 bottom-16 z-40 mx-auto w-fit rounded-lg border bg-card p-4 shadow-lg"
-        >
-          <p className="font-medium">
-            <CheckCircle2 className="mr-2 inline h-5 w-5 text-success" aria-hidden />
-            The {section.title} section is finished and cannot be reopened.
-          </p>
-          {IS_DEMO && (
-            <p className="mt-1 text-sm text-muted-foreground">
-              Demo: the next section is not part of this preview.
-            </p>
-          )}
-        </div>
-      )}
     </div>
   );
 }
