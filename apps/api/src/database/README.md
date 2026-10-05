@@ -4,6 +4,19 @@ Everything in this folder serves one rule: **a query can only see or change rows
 org** (ADR 0006, NFR-04, FR-103, TC-008). Services never build a Prisma client of their own. They
 inject `PrismaService` and use `prisma.client`, which runs every model query through the org scope.
 
+**Which `PrismaService`.** There are two classes with that name, in different files:
+
+- `database/prisma.service.ts` (exported from `database/index.ts`, provided by `DatabaseModule`) is
+  the org-scoped one. **New business modules must use it.**
+- `database/prisma.module.ts` is BE-02's interim client: an unscoped `PrismaClient` for auth
+  bootstrap only. It stays until `auth.service.ts` moves onto `database/prisma.service.ts` inside
+  `runSystem('AUTH_BOOTSTRAP', ...)` (see the recipe below), and then it is deleted. A test
+  (`prisma-client-smoke.spec.ts`) fails if any file outside `src/auth/`, `src/database/` and
+  `app.module.ts` imports it.
+
+Nest injects by class reference, not by name, so the two never collide at runtime. Always import
+from the file named above, and check the import line when an editor offers an auto-import.
+
 Developer notes:
 
 - A fresh clone needs `pnpm db:generate` before `typecheck`, `build`, typed `lint` or the tests
@@ -29,16 +42,21 @@ The org comes from the context, never from a parameter:
 
 | Where the code runs                       | Who sets the context                                                                           |
 | ----------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Staff HTTP route                          | `OrgContextInterceptor`, from `request.user` (the auth guard, BE-02, fills it)                 |
+| Staff HTTP route                          | `OrgContextInterceptor`, from `request.user` (BE-02's `JwtAuthGuard` sets an `AuthUser`)       |
 | Candidate route (token, then its session) | the candidate guard or interceptor calls `orgContext.runInOrg(session.orgId, ...)` (BE-07)     |
 | BullMQ job, Socket.IO event               | the processor or gateway calls `runInOrg(job's session org, ...)` or `runAsUser(...)` (BE-08+) |
 | Login, refresh, token lookups, cross-org  | `orgContext.runSystem(reason, ...)` with a reason from `SYSTEM_SCOPE_REASONS`, outside any org |
 | A reviewed raw SQL query                  | `orgContext.runRawSql('why', ...)`                                                             |
 
-`request.user` must be `{ orgId, userId, role }` (`AuthenticatedUser`). `orgId` comes from the
-verified token or the user row, never from the body, a header or the query string. A `request.user`
-that does not match is answered 401 and the handler does not run. A route with no `request.user`
-(health, login) runs with no context, so a query on org data from it throws.
+`request.user` is BE-02's `AuthUser` (`common/auth/auth.types.ts`): `{ id, orgId, role, kind }`.
+The interceptor checks it (`kind` must be `access`, `id` and `orgId` must be uuids, `role` a known
+role), maps `id` to `userId`, and runs the handler inside `runAsUser({ orgId, userId, role })`.
+`AuthenticatedUser` (`{ orgId, userId, role }`) is the shape inside the context. `orgId` comes from
+the verified token, never from the body, a header or the query string. A `request.user` that does
+not match is answered 401 and the handler does not run. A `@Public()` route has no `request.user`
+(the guard returns early), so it runs with no context and a query on org data from it throws.
+Guards run before interceptors, so `request.user` is always set by the time the interceptor reads
+it (tested with the real `JwtAuthGuard` and real tokens).
 
 ### Why AsyncLocalStorage, not Nest request scope
 
@@ -126,7 +144,63 @@ cannot be filtered by the extension, so the SQL itself must filter by `org_id`. 
 (`AUTH_BOOTSTRAP`, `BACKGROUND_JOB`, `RETENTION_ERASURE`). A new reason is an architect-reviewed
 change. It cannot be entered from inside an org scope (work that has an org never widens to all
 orgs), but code in a system scope may narrow to one org with `runInOrg`. An org scope cannot switch
-to another org either. Treat every `runSystem` and `runRawSql` in a pull request as a review flag.
+to another org either. `runRawSql` nests inside `runSystem` and inside `runAsUser` or `runInOrg`, in
+either order, and also works with no scope at all. Treat every `runSystem` and `runRawSql` in a pull
+request as a review flag.
+
+### Transactions
+
+`$transaction(async (tx) => ...)` and `$transaction([...])` run in the scope that was active when
+they were called, and keep it: in system scope they are unfiltered, in an org scope every query in
+them is filtered. Raw SQL inside a transaction needs `runRawSql` (around the `$transaction` call, or
+inside its callback) like anywhere else, and rolls back with the transaction.
+
+### No SQL of its own
+
+Entering a scope (`runSystem`, `runAsUser`, `runInOrg`, `runRawSql`) sends no statement, and the
+extension never adds a query: it only rewrites arguments. `auth-bootstrap.spec.ts` proves it with
+`pg_stat_statements`, which counts what Postgres received: the statements for each operation are
+identical to the plain client's, and in an org scope identical to the plain client with the filter
+written by hand.
+
+## Auth bootstrap recipe
+
+For BE-02's `AuthService` (login, forgot, reset, refresh, 2FA completion) and any other code that
+runs before the caller's org is known:
+
+1. **Pre-login lookups go inside `runSystem('AUTH_BOOTSTRAP', ...)`.** Inside it model queries are
+   unfiltered, so the lookup by email or token hash works.
+2. **Raw SQL goes inside `runRawSql('<reason>', ...)`, inside that scope.** The lockout counter and
+   the recovery-code consume are examples. Either nesting order works. Outside `runRawSql`, raw SQL
+   is still refused, even in system scope.
+3. **Once the user is known, switch to `runAsUser({ orgId, userId, role }, ...)`** (or
+   `runInOrg(orgId, ...)` when there is no user). Narrowing from system scope to an org scope is
+   allowed, so no `runInOrg` workaround is needed. Inside the inner scope queries are filtered and
+   raw SQL needs `runRawSql` again; when it ends you are back in system scope. The reverse is
+   refused: `runSystem` inside an org scope throws.
+4. **Transactions work in system scope** (interactive and batch), keep the scope, and accept raw SQL
+   through `runRawSql`.
+5. **`runSystem`, `runAsUser`, `runInOrg` and `runRawSql` add no queries**, and the extension never
+   adds one, so equal-work timing tests (unknown, wrong and locked logins) are unaffected.
+
+```ts
+// A sketch of the shape, not BE-02's code.
+async login(email: string, password: string) {
+  return this.orgContext.runSystem('AUTH_BOOTSTRAP', async () => {
+    const user = await this.prisma.client.user.findUnique({ where: { email } }); // unfiltered
+    if (!user || !(await this.passwords.verify(user, password))) {
+      await this.orgContext.runRawSql('atomic failed-login counter and lockout (TC-002)', () =>
+        this.prisma.client.$queryRaw(Prisma.sql`UPDATE users SET ... RETURNING failed_logins`),
+      );
+      throw new UnauthorizedException('Invalid email or password.');
+    }
+    // The user is known: from here on, work as that user in that org.
+    return this.orgContext.runAsUser({ orgId: user.orgId, userId: user.id, role: user.role }, () =>
+      this.startSession(user),
+    );
+  });
+}
+```
 
 ## Limits (read before relying on it)
 
@@ -160,6 +234,7 @@ to another org either. Treat every `runSystem` and `runRawSql` in a pull request
 | `org-scope-args.ts`                            | Pure argument rewriting per operation, and the operation coverage check                     |
 | `org-scope.extension.ts`                       | The `$extends` query extension and `OrgScopedPrismaClient`                                  |
 | `org-context.ts`, `org-context.interceptor.ts` | The AsyncLocalStorage context, its API, and the HTTP population point                       |
+| `prisma.module.ts`                             | BE-02's interim unscoped client for auth bootstrap only (not part of DB-05)                 |
 | `errors.ts`                                    | `OrgContextMissingError`, `OrgScopeViolationError`, `RawQueryNotAllowedError`               |
 | `testing/`                                     | Test helpers (excluded from the build): throwaway migrated Postgres, fixtures, scope checks |
 
@@ -167,4 +242,6 @@ Tests (`*.spec.ts`) name TC-008 and NFR-04 or FR-103: the map completeness test 
 cases, the argument rewriting for every operation and model, the context and interceptor, the
 extension without a database, the TC-008 matrix against a real Postgres (every operation as org A
 against org B's rows in all 31 models, with positive controls), and a smoke test that builds the API
-and runs the compiled client and `DatabaseModule` on Node.
+and runs the compiled client and `DatabaseModule` on Node. `auth-bootstrap.spec.ts` covers what
+BE-02's auth needs: raw SQL and transactions inside system scope, and the statement counts
+(NFR-04, FR-104).
