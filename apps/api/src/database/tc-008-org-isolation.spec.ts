@@ -1521,6 +1521,10 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         }),
       );
       expect(created.count).toBe(2);
+      // Leave org A as it was: later tests expect it to have exactly one session and one invitation.
+      await owner.session.delete({ where: { id: session.id } });
+      await owner.invitation.delete({ where: { id: invitation.id } });
+      await owner.testSection.deleteMany({ where: { title: { contains: stamp } } });
     });
 
     it('TC-008 orgId is stamped on scalar-only (unchecked) input: create, createMany, createManyAndReturn and upsert.create', async () => {
@@ -1586,6 +1590,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       ] as const) {
         await expect(loose(op, 'Invitation', args)).rejects.toBeInstanceOf(OrgScopeViolationError);
       }
+      await owner.invitation.deleteMany({ where: { tokenHash: { contains: stamp } } });
     });
 
     it("TC-008 create fills in the caller's org when the data has none", async () => {
