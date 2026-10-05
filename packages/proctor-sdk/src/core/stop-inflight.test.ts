@@ -59,7 +59,7 @@ async function rig(outcome: SendResult) {
       entered();
       await gate;
     }
-    return realSign(...(args as Parameters<typeof realSign>));
+    return realSign(...args);
   });
   return { q, store, sent, attempted, release, inSign };
 }
