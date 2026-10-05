@@ -3,20 +3,26 @@
 Every path ends in MATCH or MANUAL_REVIEW. There is no reject. Problems with the images or the
 model are MANUAL_REVIEW with MATCH_ERROR, never a failure of the candidate. Embeddings stay in
 memory: the only retained one is the selfie embedding in a small LRU cache, cleared at session end.
-Logs carry fixed codes only (never vectors, paths, keys or image bytes).
+Logs carry exception type names and fixed codes only (never vectors, paths, keys, image bytes or
+session ids). Detail codes are prefixed with the image role: ID_, SELFIE_ or FRAME_.
 """
 
 from __future__ import annotations
 
 import io
 import logging
+import threading
 from collections import OrderedDict
+from typing import Final, Literal
 
 import numpy as np
+from PIL import Image as PILImage
+from PIL import ImageOps, UnidentifiedImageError
 
 from worker.config import FaceConfig
 from worker.face.align import align_face
-from worker.face.embedding import MODEL_ID, ModelLoadError, cosine
+from worker.face.embedding import MODEL_ID, cosine
+from worker.face.modelfile import ModelLoadError
 from worker.face.types import (
     AlignedFace,
     DetectedFace,
@@ -31,6 +37,16 @@ from worker.face.types import (
 )
 
 log = logging.getLogger(__name__)
+
+Role = Literal["ID", "SELFIE", "FRAME"]
+
+# Pillow's decompression-bomb guard, set once at import (not per call) from the default limit; the
+# configured limit is enforced explicitly in decode_image.
+PILImage.MAX_IMAGE_PIXELS = FaceConfig().max_image_pixels
+PILImage.init()
+# Pillow opens phone MPO files (multi-picture JPEG) through its JPEG opener, so "JPEG" admits them;
+# `im.format` then reads "MPO" and frame 0 is used. "MPO" is not itself a key in `formats`.
+_ALLOWED_FORMATS: Final = ["JPEG", "PNG"]
 
 
 class ImageError(ValueError):
@@ -49,61 +65,75 @@ class _ReviewNeeded(Exception):
 
 
 def decode_image(data: bytes, cfg: FaceConfig) -> Image:
-    """Decode JPEG/PNG bytes to RGB uint8 with size and pixel limits (decompression-bomb guard)."""
+    """Decode JPEG/PNG/MPO bytes to upright RGB uint8 with size and pixel limits.
+
+    MPO uses its first frame. The EXIF orientation is applied AFTER the pixel-count check, so a
+    rotated phone photo reaches the detector upright and a huge image is never transposed.
+    """
     if not data or len(data) > cfg.max_image_bytes:
         raise ImageError("IMAGE_SIZE")
-    from PIL import Image as PILImage
-
     try:
-        PILImage.MAX_IMAGE_PIXELS = cfg.max_image_pixels
-        with PILImage.open(io.BytesIO(data)) as im:
-            if im.format not in ("JPEG", "PNG"):
-                raise ImageError("IMAGE_FORMAT")
+        with PILImage.open(io.BytesIO(data), formats=_ALLOWED_FORMATS) as im:
             if im.width * im.height > cfg.max_image_pixels:
                 raise ImageError("IMAGE_SIZE")
-            arr = np.asarray(im.convert("RGB"), dtype=np.uint8)
+            upright = ImageOps.exif_transpose(im)
+            arr = np.asarray(upright.convert("RGB"), dtype=np.uint8)
     except ImageError:
         raise
     except PILImage.DecompressionBombError:
         raise ImageError("IMAGE_SIZE") from None
+    except UnidentifiedImageError:
+        raise ImageError("IMAGE_FORMAT_OR_CORRUPT") from None
     except Exception:
         raise ImageError("IMAGE_CORRUPT") from None
     return arr
 
 
 class SelfieCache:
-    """Bounded LRU of selfie embeddings keyed by session id (ADR 0004 section 2). Memory only."""
+    """Bounded, thread-safe LRU of selfie embeddings keyed by session id (ADR 0004 section 2)."""
 
     def __init__(self, max_sessions: int) -> None:
         if max_sessions < 1:
             raise ValueError("max_sessions must be at least 1.")
         self._max = max_sessions
         self._items: OrderedDict[str, Embedding] = OrderedDict()
+        self._lock = threading.Lock()
 
     def put(self, session_id: str, emb: Embedding) -> None:
-        self._items[session_id] = emb
-        self._items.move_to_end(session_id)
-        while len(self._items) > self._max:
-            self._items.popitem(last=False)
+        with self._lock:
+            self._items[session_id] = emb
+            self._items.move_to_end(session_id)
+            while len(self._items) > self._max:
+                self._items.popitem(last=False)
 
     def get(self, session_id: str) -> Embedding | None:
-        emb = self._items.get(session_id)
-        if emb is not None:
-            self._items.move_to_end(session_id)
-        return emb
+        with self._lock:
+            emb = self._items.get(session_id)
+            if emb is not None:
+                self._items.move_to_end(session_id)
+            return emb
 
     def clear_session(self, session_id: str) -> None:
         """Call when the session ends (submitted, expired, erased)."""
-        self._items.pop(session_id, None)
+        with self._lock:
+            self._items.pop(session_id, None)
 
     def clear(self) -> None:
-        self._items.clear()
+        with self._lock:
+            self._items.clear()
 
     def __len__(self) -> int:
-        return len(self._items)
+        with self._lock:
+            return len(self._items)
 
     def __repr__(self) -> str:
-        return f"SelfieCache(size={len(self._items)}, redacted)"
+        return f"SelfieCache(size={len(self)}, redacted)"
+
+
+def _size(face: DetectedFace) -> float:
+    """Face size from its landmarks: the larger side of their bounding box."""
+    pts = face.landmarks
+    return float(max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1])))
 
 
 class FaceMatcher:
@@ -143,22 +173,22 @@ class FaceMatcher:
         session_id: str | None = None,
         liveness_confirmed: bool = True,
     ) -> MatchResult:
-        """ID photo vs selfie. The ID embedding is dropped as soon as the score is computed."""
+        """ID photo vs selfie. The ID embedding is dropped as soon as the score is computed.
+
+        The ID photo may hold a small secondary portrait (ghost image); the selfie must hold exactly
+        one face. The selfie embedding is cached only after the comparison succeeded.
+        """
         try:
             if not liveness_confirmed:
                 raise _ReviewNeeded(ReviewReason.LIVENESS_NOT_CONFIRMED, "LIVENESS")
-            id_emb = self._embed_single(id_image)
-            selfie_emb = self._embed_single(selfie_image)
+            id_emb = self._embed_single(id_image, "ID")
+            selfie_emb = self._embed_single(selfie_image, "SELFIE")
+            score = self.compare(id_emb, selfie_emb)
             if session_id is not None:
                 self.selfie_cache.put(session_id, selfie_emb)
-            return self._decide(self.compare(id_emb, selfie_emb))
-        except _ReviewNeeded as r:
-            return self._review(r.reason, r.detail)
-        except (ImageError, EmbeddingError) as e:
-            return self._review(ReviewReason.MATCH_ERROR, e.code)
-        except Exception:
-            log.warning("face match failed: UNEXPECTED")
-            return self._review(ReviewReason.MATCH_ERROR, "UNEXPECTED")
+            return self._decide(score)
+        except Exception as e:
+            return self._failure(e, "match")
 
     def recheck(self, session_id: str, frame_image: bytes) -> MatchResult:
         """FR-606 periodic re-check against the cached selfie. A miss is MATCH_ERROR/CACHE_MISS;
@@ -167,34 +197,59 @@ class FaceMatcher:
             selfie_emb = self.selfie_cache.get(session_id)
             if selfie_emb is None:
                 raise _ReviewNeeded(ReviewReason.MATCH_ERROR, "CACHE_MISS")
-            return self._decide(self.compare(self._embed_single(frame_image), selfie_emb))
-        except _ReviewNeeded as r:
-            return self._review(r.reason, r.detail)
-        except (ImageError, EmbeddingError) as e:
-            return self._review(ReviewReason.MATCH_ERROR, e.code)
-        except Exception:
-            log.warning("face recheck failed: UNEXPECTED")
-            return self._review(ReviewReason.MATCH_ERROR, "UNEXPECTED")
+            frame_emb = self._embed_single(frame_image, "FRAME")
+            return self._decide(self.compare(frame_emb, selfie_emb))
+        except Exception as e:
+            return self._failure(e, "recheck")
 
     def end_session(self, session_id: str) -> None:
         self.selfie_cache.clear_session(session_id)
 
     # --- internals ---
 
+    def _failure(self, e: Exception, op: str) -> MatchResult:
+        if isinstance(e, _ReviewNeeded):
+            return self._review(e.reason, e.detail)
+        if isinstance(e, ImageError | EmbeddingError | ModelLoadError):
+            return self._review(ReviewReason.MATCH_ERROR, e.code)
+        log.warning("face %s failed: %s", op, type(e).__name__)
+        return self._review(ReviewReason.MATCH_ERROR, "UNEXPECTED")
+
     def _usable(self, faces: list[DetectedFace]) -> list[DetectedFace]:
         floor = self.config.min_detection_confidence
         return [f for f in faces if f.confidence is None or f.confidence >= floor]
 
-    def _embed_single(self, data: bytes) -> Embedding:
-        image = decode_image(data, self.config)
-        faces = self._detector.detect(image)
-        usable = self._usable(faces)
-        if len(usable) > 1:
-            raise _ReviewNeeded(ReviewReason.MULTIPLE_FACES, "MULTIPLE_FACES")
-        if not usable:
-            detail = "LOW_DETECTION_CONFIDENCE" if faces else "NO_FACE"
-            raise _ReviewNeeded(ReviewReason.NO_FACE, detail)
-        return self.embed(align_face(image, usable[0].landmarks))
+    def _embed_single(self, data: bytes, role: Role) -> Embedding:
+        """Decode, find exactly one face, align and embed. Failures carry a role-prefixed code."""
+        try:
+            image = decode_image(data, self.config)
+            faces = self._detector.detect(image)
+            usable = self._usable(faces)
+            if role == "ID" and len(usable) > 1:
+                # Keep the largest face; smaller ones (ghost portrait) are ignored, but a second
+                # face of comparable size is still MULTIPLE_FACES.
+                usable.sort(key=_size, reverse=True)
+                floor = self.config.id_secondary_face_ratio * _size(usable[0])
+                usable = [f for f in usable if _size(f) >= floor]
+            if len(usable) > 1:
+                raise _ReviewNeeded(ReviewReason.MULTIPLE_FACES, f"{role}_MULTIPLE_FACES")
+            if not usable:
+                detail = "LOW_DETECTION_CONFIDENCE" if faces else "NO_FACE"
+                raise _ReviewNeeded(ReviewReason.NO_FACE, f"{role}_{detail}")
+            try:
+                aligned = align_face(image, usable[0].landmarks)
+            except ValueError:
+                raise _ReviewNeeded(
+                    ReviewReason.MATCH_ERROR, f"{role}_DEGENERATE_LANDMARKS"
+                ) from None
+            return self.embed(aligned)
+        except _ReviewNeeded:
+            raise
+        except (ImageError, EmbeddingError) as e:
+            raise _ReviewNeeded(ReviewReason.MATCH_ERROR, f"{role}_{e.code}") from None
+        except Exception as e:
+            log.warning("face %s step failed: %s", role, type(e).__name__)
+            raise _ReviewNeeded(ReviewReason.MATCH_ERROR, f"{role}_UNEXPECTED") from None
 
     def _decide(self, score: float) -> MatchResult:
         if not np.isfinite(score):
