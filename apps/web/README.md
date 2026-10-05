@@ -105,6 +105,18 @@ Tests: `pnpm --filter @codeproctor/web test` (Vitest) and `pnpm --filter @codepr
 (Playwright, needs Chromium: `npx playwright install chromium`). The e2e specs run axe-core on each
 auth page.
 
+## Security page (FR-102, mock mode)
+
+`/admin/security` (user menu, "Security"), open to every staff role. Set up 2FA (QR, manual key, first
+code, one-time recovery codes with download), Disable 2FA (hidden for SUPER_ADMIN and REVIEWER, who
+get an explanation), and Regenerate recovery codes. Each action opens one shared dialog that first asks
+for the current password and sends it as `currentPassword`. A wrong password is 403 `REAUTH_FAILED`
+and shows "Password incorrect" in the dialog without signing out. Try it as `recruiter@example.test`
+(`Recruiter-Pass-1`) or `author@example.test`: set up with code `123456`, then sign out and in again
+to see the code prompt, and disable. `admin@example.test` and an enrolled reviewer see Regenerate only.
+The mock keeps this state in the same `mock_auth_state` cookie. Code: `src/features/security`.
+Playwright: `e2e/security.spec.ts`.
+
 ## Staff shell and Settings (FE-03, mock mode)
 
 Sign in as above, then use the sidebar. Every route lives under `(staff)/admin/(app)`.

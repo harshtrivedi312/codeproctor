@@ -138,6 +138,34 @@ Root cause was in the test, not the SDK: it assumed one batch per paste and wait
 Observation for proctor-sdk-engineer (low, not a data-loss defect; NFR-08 holds): `EventQueue.retryNow()` does nothing while a drain is already running. If the browser `online` event arrives during a send that is about to fail, the next attempt waits for the exponential backoff (up to 30 s) instead of starting at once. Suggested: remember that a retry was requested and run another drain pass when the current one ends in RETRY.
 
 
+## Architecture hub: TC-050 follow-through (ADR 0013 section 5.9, PR #39)
+
+- [ ] Rewrite `TC-050 KNOWN DEFECT QA-D-01` (`it.fails` in `packages/proctor-sdk/src/qa/qa-tc.test.ts`) as plain tests: FULLSCREEN_EXIT has no `durationMs`, FULLSCREEN_RESTORED has one.
+- [ ] Add the BE-10 API test for the server-filled `duration_ms`, including the close at session end.
+- [ ] Remove TC-050 from the known-defect list in `docs/test-matrix.md` (line 15) once both tests pass.
+- [ ] TC-063: the test drops the network for 45 s but expects DISCONNECTED, while FR-609 logs it only after 60 s (ADR 0013 Q13).
+- [ ] Owner: qa-engineer. Section gate (ADR 0013 CS-4.6): read, Run, draft, answer and submit outside the open section get 409; fail-closed with Redis flushed; after the section deadline and after the session deadline, with the close job delayed, draft and submit get 409 and a late SUBMIT is never graded; writes during a PROCTOR pause get 409 `SESSION_PAUSED`.
+- [ ] Owner: qa-engineer. The re-check matrix per owner decision C-34 (waiver; face detectors off; both; neither): refused with 409 `IDENTITY_CHECK_WAIVED` (waiver) or `DETECTOR_DISABLED` (face detectors off) when either is set, allowed only when neither is.
+- [ ] Owner: qa-engineer. Face tier per C-27 and C-35: ID images, selfies and sealed mismatch frames are deleted at face clock + LEAST(`retention_days`, 90), where face clock = COALESCE(`submitted_at`, the latest identity capture, the terminal transition time, `created_at`), even while a review hold is open; `retention_days` = 30 deletes them at 30 days.
+- [ ] Owner: qa-engineer. Retention markers (ADR 0004 section 9): a marker is written only after a complete listing, no DeleteObjects errors and an empty re-listing; erasure writes no markers, fences a live session first, and its re-run deletes a late PUT; R-10 deletes the whole session prefix.
+- [ ] Owner: qa-engineer. Tiered retention clocks (face, media, results, consent), see row (c) in section 9.
+- [ ] Owner: qa-engineer. Close-section and grading order: `grade-session` runs only after every `close-section` child completes; the graded row is the SUBMIT whose `created_at` equals the section's `ended_at` (two matches fail loudly, none scores 0); a failed `close-section` can be re-enqueued; closing the last section moves the session to SUBMITTED.
+- [ ] Owner: qa-engineer. Per-section pause credit (ADR 0013 effectiveDeadline): (1) the deadline variant closes section k while PAUSED past the cap, and k+1 gets no credit for the earlier pause time; (2) a section-finish clicked during a PROCTOR pause does not give k+1 extra time.
+- [ ] Owner: qa-engineer. Erasure serialisation: a `close-section` run interleaved with erasure does not re-insert code (guardLive); a fence after a status read is still seen.
+- [ ] Owner: qa-engineer. A session past its deadline with a lost auto-submit job is submitted by the reconciler.
+- [ ] Owner: qa-engineer. DeviceInfoService fencing: concurrent writers lose no update; a skip sets resync and the next heartbeat asks for full capabilities; the first write fences on `{}`.
+- [ ] Owner: qa-engineer. `detachForSessionJob` refusals: in any scope, with a raw-SQL hatch open, with a grant present; a discovery processor cannot run a session handler inline.
+- [ ] Owner: qa-engineer. Section finished by the button: the latest saved code is graded (close-section is the only writer of `ended_at`, ADR 0013 5.11).
+- [ ] Owner: qa-engineer. A PROCTOR pause spanning a section deadline does not close the section, which closes at the credited deadline + 5 s (TC-079, ADR 0002 P-3/P-4).
+- [ ] Owner: qa-engineer. A failed `close-section` child does not strand `grade-session` (`failParentOnFailure`), and the grading reconciler re-creates a lost flow.
+- [ ] Owner: qa-engineer. A session with no work at all is graded with score 0 and is not mistaken for one past R-10.
+- [ ] Owner: qa-engineer. DL-17: writes during a PROCTOR, SCREEN_SHARE_STOPPED or SIDE_CAMERA_LOST pause get 409 `SESSION_PAUSED` (an unmodified client cannot keep editing with the share stopped; against a modified client, recording-gap detection applies); FULLSCREEN_EXIT does not block autosave; the client keeps the draft and saves it after resume.
+- [ ] Owner: qa-engineer. close-section concurrency: finish and deadline variants run together produce one close, one snapshot set and one next-section opening; the final variant never opens a section; a retry after a failed post-commit enqueue still enqueues the next deadline job.
+- [ ] Owner: qa-engineer. effectiveDeadline: during an active PROCTOR pause the gate, the heartbeat deadline and the deadline jobs use the credited deadline; the deadline job re-delays to a future time (no hot loop); past the cap the section closes and the session auto-submits even while PAUSED.
+- [ ] Owner: qa-engineer. Grants: a query detached from `fn` (not awaited) after `fn` resolves throws; a grant without `ids` cannot be created.
+- [ ] Owner: qa-engineer. Erasure of a live session starts no grading, analysis, webhook or reconciler run.
+- [ ] Owner: qa-engineer. Assign TC IDs to the ADR 0013 CS-4.8 suite (DMMF model sweep, the six relation vectors, column allowlists including where/orderBy/groupBy, write-column refusals, SERVER-event invisibility, injected filters, actor crossing, raw SQL refusal) and to the cross-candidate route suite (5.10), then add them to test-cases.md and test-matrix.md.
+
 ## 8. QA step 2b (2026-10-05): BE-02 security hardening contract changes
 
 Branch `qa/step-2b`, on top of backend PR #26. API integration suite: 9 suites, 77 passed, 3 todo, 0 failed (was 11 failing against the new contract). API unit suite 124 passed; lint and typecheck clean; the P1 gate over all reports shows no failing P1 case.
@@ -158,6 +186,7 @@ Branch `qa/step-2b`, on top of backend PR #26. API integration suite: 9 suites, 
 ### 8.3 Defects
 
 None confirmed. Observation for backend-engineer (nit): the Redis client has no command timeout, so an unreachable but not closed Redis (paused container, network black hole) holds a request open until the HTTP layer gives up instead of returning the documented 503.
+
 ## 8. QA-03 round (2026-10-05): BE-03 acceptance tests staged
 
 ### 8.1 What was added
@@ -207,10 +236,10 @@ Source: docs/compliance/decisions.md (PR #44, branch dl/compliance-decisions). N
 | --- | --- | --- | --- | --- | --- | --- |
 | (a) C-02, FR-305 | "No face match / no identity check" accommodation, and audited accommodation changes | integration (plus e2e for the UI) | backend-engineer (BE-06), integrity-engineer (BE-08 skip), frontend-engineer (FE-05) | P1 | A recruiter sets the accommodation on an invitation; the candidate session skips the face match and the identity re-check and is not rejected; the review screen shows "identity check waived by accommodation" (OQ-3) with the recruiter's reason. Every change of an accommodation (set, change, clear) writes exactly one audit row with org, actor (recruiter), invitation id, IP and no secrets; a role without `invitation:create` gets 403; another org gets 404. Without the accommodation the face match still runs for every candidate. | `apps/api/test/integration/tc-XXX.int.test.ts` (API, audit); `packages/qa/e2e/tc-XXX.spec.ts` (UI) |
 | (b) C-02, FR-401 | Decline screen shows the recruiter contact | e2e | frontend-engineer (FE-09), backend-engineer (BE-07) | P2 | Declining consent ends the session with no recording and shows the recruiter's contact (name and e-mail from the invitation); no media request was made; the contact is the invitation's recruiter, not another org's. | `packages/qa/e2e/tc-XXX.spec.ts` |
-| (c) C-04, ADR 0004 §5 | Retention clocks differ: consent records 3 years, recordings, ID images, selfies, evidence and keystrokes 90 days | integration | database-engineer (DB-06), backend-engineer | P1 | With a session aged 91 days, media, ID images, selfies, evidence keys and keystroke batches are deleted and the consent record (document version, signed name, timestamp, IP, user agent, signed PDF) remains; at 3 years plus one day the consent record is deleted; nothing is deleted while a review or appeal is open; `retention_days` configuration changes the 90-day clock only; face embeddings are never stored (OQ-2). Erasure request (OQ-1) behaviour is added once decided. Extends TC-072. | `apps/api/test/integration/tc-XXX.int.test.ts` (next to TC-072) |
+| (c) C-04, C-26, C-27, ADR 0004 §5 and §9 (PR #48), ADR 0013 5.7 | Retention is tiered: face 90 days, media `retention_days`, results 1 year, consent 3 years | integration | database-engineer (DB-06), backend-engineer | P1 | Face tier: `identity/**` and `evidence/sealed/**` deleted at LEAST(`retention_days`, 90) and their keys nulled. Media tier: the session prefix except `reports/` deleted at `retention_days`, and keystroke batches deleted. Results tier: `reports/` deleted and `report_key` nulled at 1 year. Consent record and PDF kept to 3 years, also through erasure (C-17). Nothing deleted while a review or appeal is open. Face embeddings never stored (C-18). The exact clock starts are open in ADR 0013 owner questions. Extends TC-072. | `apps/api/test/integration/tc-XXX.int.test.ts` (next to TC-072) |
 | (d) C-05 | Retention schedule link on the consent step and the candidate portal | e2e plus a11y | frontend-engineer (FE-09) | P2 | The consent document and the candidate portal both show a link to the published retention and destruction schedule; the link resolves (200) and is keyboard reachable; axe finds no violation on the consent step. | `packages/qa/e2e/tc-XXX.spec.ts` |
 | (e) C-13, new FR (FAIR-01) | Optional demographics: separate consent, hidden from staff, not used in scoring, aggregate only (min group 10), deleted with the session | integration (API and database) plus e2e for the form, a11y for the form | database-engineer, backend-engineer, frontend-engineer (FAIR-01) | P1 (privacy) | The form appears after the test, with its own explicit consent and a "prefer not to say" option, and the test works without answering. Stored separately from the session. No staff role (SUPER_ADMIN, RECRUITER, AUTHOR, REVIEWER) can read an individual answer by any route (403 or 404, tested per role and per route, plus a schema check that no staff-visible serializer includes the fields). Changing a demographic answer changes no score, risk score, band or review queue entry (same session scored with and without). The aggregate report returns a group only when it has at least 10 members (9 hidden, 10 shown; a group of 10 where one is deleted becomes hidden), and never a per-candidate row. Deleting the session deletes its demographics. Needs the FAIR-01 ADR for the storage and access design before the exact checks are fixed. | `apps/api/test/integration/tc-XXX.int.test.ts`; `packages/qa/e2e/tc-XXX.spec.ts` |
-| (f) C-10, ADR 0013 | Model licence gate passes only the two accepted model files | unit (script) plus CI | integrity-engineer, backend-engineer (DEP-01/03) | P1 | The gate passes exactly the AuraFace and COCO-SSD files pinned by SHA-256 (citing C-10); the same file with one byte changed is blocked; any other model file without a verified licence is blocked; the gate fails the deploy job on a block. | `infra/scripts/tc-XXX.test.mjs` (node:test, run by root `pnpm test`) or the gate's own test directory, as ADR 0013 defines it |
+| (f) D-28, C-10, ADR 0013 | Model licence gate passes only the files listed under D-28 in docs/status.md section 9 | unit (script) plus CI | integrity-engineer, backend-engineer (DEP-01/03) | P1 | The gate passes an `unverified` model only when every one of its files (AuraFace `glintr100.onnx`; COCO-SSD `model.json` and each weight shard) is listed by `name@sha256` in the `licence-acceptances` block of docs/status.md section 9 under decision D-28 (as extended by C-10); a missing or duplicated block fails pilot and production; the same file with one byte changed is blocked; any other model file without a verified licence is blocked; the gate fails the deploy job on a block. | `infra/scripts/tc-XXX.test.mjs` (node:test, run by root `pnpm test`) or the gate's own test directory, as ADR 0013 defines it |
 
 Open dependencies for these cases: OQ-1 (consent record on erasure), OQ-2 (embeddings never stored), OQ-3 (fallback for a waived identity check) in decisions.md; the FAIR-01 ADR; the ADR 0013 gate interface.
 
@@ -229,6 +258,92 @@ Product findings (owner backend-engineer):
 | QA-O-02 | observation | Each password-protected admin call reserves a password attempt on the shared lockout, so more than 5 parallel calls from one admin get 403 REAUTH_FAILED with the right password, and 5 wrong passwords lock the admin (AUTH_ACCOUNT_LOCKED). A locked admin cannot unlock themself (their own password check fails); another SUPER_ADMIN must. Probably by design; tell the frontend (no bulk parallel admin actions) |
 | QA-O-03 | observation | A token issued in the same second as a role change or reactivation is refused (marker in epoch seconds): a sign-in right after reactivation can get a dead token. Documented by backend; tests wait 1.1 s |
 
-Left for QA-04b: TC-065 follow-ups, compliance proposals g, h, i-m and the C-28 impact list, gate tests, re-checking the TC-002..008 and TC-098 matrix rows that existed only on qa/step-2b, the TC-008 gate reader.
+Done in QA-04b (section 11): TC-065 follow-ups, compliance proposals g, h, i-m and the C-28 impact list, gate tests, re-checking the TC-002..008 and TC-098 matrix rows that existed only on qa/step-2b, the TC-008 gate reader.
 
 Review round on PR #54: lock mail recipients now exclude another org and a deactivated admin (one mail each); PASSWORD is an audit secret on the reauth routes; a captureLogs case checks passwords, invite token and access token are not logged; the fail-closed invite test checks no invite mail and restores the grant; unlock of a non-locked account pins a USER_UNLOCKED row with wasLocked false; the invalid-body test registers only for mutating routes with a body; the registry check takes BE-13 routes only when BE13_READY and rejects unknown matrix fields. Nits applied: alg:none in the 401 list, non-holder 403 is not REAUTH_FAILED, any race 403 is REAUTH_FAILED, 429 sends no mail and writes no row. Logged, not done: none.
+
+## 11. QA-04b (2026-10-05)
+
+Branch `qa/step-4b`, off main after PR #54 and #55.
+
+### 11.1 Done
+
+- PR #54 reviewer nits: the captureLogs test asserts the route path appears in the logs; deferred-mail assertions use `flushDeferred` (settle plus several event-loop turns) instead of one `setImmediate`; the no-op USER_UNLOCKED row is checked with `findMany` length 1 plus actor and org; the registry test asserts every `COVERED_ELSEWHERE` key exists in `ROUTE_PERMISSIONS`; the vacuous `Wrong-Password-1` scan is dropped. The RECRUITER disable test in tc-003 is retitled and now checks the AUTH_2FA_DISABLED row.
+- QA-D-04 (cold-start test, nit about matching `/2fa/verify` and the detail): left to the agent flipping it in backend PR #60 (branch qa/qa-d-04-flip); not touched here.
+- TC-065: matrix row now lists `stop-inflight.test.ts` and `finish-inflight.test.ts` (PR #47: stop and finish wait for a batch being signed). SDK suite: 171 passed. The batch-count question in proctor-sdk.md ("flush timer window") is a product decision for the hub, not a test gap.
+- Gate tests: `packages/qa/src/p1-gate.test.ts` (24 tests) runs the gate as CI does, on synthetic Jest, Vitest, Playwright and JUnit reports and a fake docs tree (`P1_GATE_ROOT`): failing P1 test, failing P2 note, Verified row with no run or only staged tests, unknown TC id, id only in the describe block, KNOWN DEFECT passing, failing and only in the describe block, staged tests with and without `--strict`, `--strict` on an automated P1 case with no run, a failed file with only passing tests (afterAll, Jest `numRuntimeErrorTestSuites`, Vitest `success: false`), pytest `TC_901` names, `<error>` and `<skipped>`, a collection `<error>` with no TC id, Playwright nested suites, `ok:false` and all-skipped specs, missing report (exit 2), manual cases (exit 0). The gate itself now fails a test file that failed as a whole even when every recorded test passed, and a JUnit `<error>` with no TC id. `tsx` is a devDependency of packages/qa.
+- TC-008 gate reader: proposed to the hub in section 12 (a workflow step plus `api-unit.json` in the gate's report list); NOT applied (CI config goes through the hub). The matrix row stays Planned.
+- Matrix rows TC-002, TC-003, TC-004, TC-005, TC-006 and TC-098 (they existed only on qa/step-2b before #26) are on main and match the runs: integration suite 13 suites, 96 passed, 148 staged, 3 todo (BE03 off). TC-008 stays Planned.
+- C-28 (#55) re-check of the worker: TC-075 unchanged (`test_qa_tc.py` and `test_risk.py`: 55 tests pass; the whole worker suite: 166 passed, 1 skipped); TC-076 matrix row rewritten to the C-28 expectation and two QA tests added (queue is HIGH, MEDIUM, LOW even when a lower band has the higher score, in shuffled input order; fast path only for LOW without a hold, `needs_review` always true).
+
+### 11.2 Not done, and why
+
+- The stale "already off 409" sentence and the "PR #51 is merged" heading are not in qa.md on main (they are on another branch), and `signInKeepingCookie` is not in the main harness (qa/tc001-totp-resolved @04b6107, going into backend #58). Nothing to change on main; redo after #58 merges.
+- `be03-routes.ts` is unchanged (BE-03 contract unchanged) and `BE03_DEFAULT` stays false: BE-03 is not on main.
+
+### 11.3 C-28 impact (decisions.md C-28; fsd.md section 3 and FR-805 still describe auto-clear, hub owns them)
+
+| Case | Today | Under C-28 |
+| --- | --- | --- |
+| TC-076 (P1) | "Session scores MEDIUM; appears in review queue" | Proposed: "Sessions of every band (LOW, MEDIUM, HIGH) reach UNDER_REVIEW and the queue; none is COMPLETED automatically. Queue order: HIGH, sessions with an identity or short-answer hold, MEDIUM, LOW (oldest first) (DL-18). A LOW session without a hold opens the fast review (summary, one-click verdict, timeline available); with a hold it opens the full review." Test: `apps/api/test/integration/tc-076.int.test.ts` (BE-12, BE-13) |
+| GRADED to COMPLETED | fsd.md state table: GRADED goes to UNDER_REVIEW or COMPLETED; COMPLETED "verdict set or auto-clean" | Only UNDER_REVIEW follows GRADED; COMPLETED only after a verdict. Add an API test: after grading a LOW, clean session the status is UNDER_REVIEW, never COMPLETED, and no `session.completed` is sent |
+| TC-081 (P3) webhook | "Complete a session: session.completed delivered, signed" | The event is sent after the verdict only, never at grading; add "no webhook before the verdict" |
+| TC-078, TC-080 | Verdict required, appeal routing | Unchanged, but their fixtures must reach COMPLETED through a verdict, not by auto-clean |
+| New (P1) | none | Recruiters, exports and webhooks see no score or verdict before the reviewer signs off: GET results as RECRUITER before the verdict is 403 or has no result fields; after the verdict it works (BE-14, FR-1002, FR-1003) |
+| New (P2, FE-11, FE-13) | none | Fast-review UI: summary and one-click verdict, timeline reachable, axe clean |
+
+Answered (DL-20): BE-13 (the API) owns the full review-queue order, because holds (identity not confirmed, manual scoring) are API state. The worker supplies only band, score and the fast or full path. BE-13 applies DL-18: HIGH, then holds, then MEDIUM, then LOW, oldest first within each tier. The worker tests keep only the band-order assertion. Planned BE-13 tests (go with TC-076, file `apps/api/test/integration/tc-076.int.test.ts`; no TC id invented):
+
+| Planned test | Level | Owner | Expected result |
+| --- | --- | --- | --- |
+| Queue endpoint ordering per tier | integration | backend-engineer (BE-13) | With sessions seeded in every tier (HIGH, a LOW with an identity hold, a MEDIUM with a manual short-answer hold, MEDIUM, LOW), the queue returns HIGH, then held sessions, then MEDIUM, then LOW, regardless of insertion order |
+| Ties by age | integration | backend-engineer (BE-13) | Within a tier, equal sessions come oldest first; a LOW queue is oldest first |
+| Hold flags come from API state | integration | backend-engineer (BE-13) | Confirming the identity or scoring the short answer by a reviewer removes the hold and moves the session to its band tier; the flags are not taken from the client or the worker request |
+| Fast path versus full review | integration | backend-engineer (BE-13) | A LOW session with no hold is marked fast-review; any hold, MEDIUM or HIGH is full review |
+| Nothing auto-clears | integration | backend-engineer (BE-12, BE-13) | After grading, a LOW clean session is UNDER_REVIEW, never COMPLETED, and appears in the queue; COMPLETED only after a verdict |
+
+### 11.4 Proposed TC cases, compliance decisions C-17 to C-33
+
+Same rule as section 9: no TC IDs are invented here; the hub assigns them and QA then adds matrix rows and tests. Items with no automated case: C-18 (existing design, covered by TC-072 and the "no embeddings stored" checks of BE-08), C-20, C-21 (done in TC-003), C-22 to C-24, C-29, C-33 (process).
+
+| Ref | Title | Level | Owner | Pri | Expected result | Planned test file |
+| --- | --- | --- | --- | --- | --- | --- |
+| (g) C-17 | Erasure keeps only the consent proof until 3 years | integration | database-engineer (DB-06), backend-engineer | P1 | After an erasure request everything is erased at once (recordings, ID image, selfie, evidence, keystrokes, code, results per C-26) except the signed consent record (version, name, timestamp, IP, user agent, signed PDF), which stays until 3 years after signing, then is deleted. The confirmation tells the candidate this. Extends (c) and TC-072. | `apps/api/test/integration/tc-XXX.int.test.ts` |
+| (h) C-19 | Waived identity check: reason, "identity check waived", video ID check, all audited | integration plus e2e | backend-engineer (BE-06, BE-13), integrity-engineer (BE-08), frontend-engineer (FE-05, FE-11) | P1 | Waiving needs a reason (400 without); the identity check records a waived state; the recruiter can record "video ID check done: yes/no"; the review screen shows "identity check waived" and the reason; each of the three writes one audit row (org, actor, invitation, IP, no secrets); another org 404, wrong role 403. Extends (a). | `apps/api/test/integration/tc-XXX.int.test.ts`, `packages/qa/e2e/tc-XXX.spec.ts` |
+| (i) C-26 | Results kept 1 year, then only anonymised statistics | integration | database-engineer (DB-06) | P1 | A session's scores, verdicts, reviewer notes and reports are deleted 1 year after the test (clock moved); anonymised aggregates remain and carry no candidate id; media still goes at 90 days and consent at 3 years. | next to TC-072 |
+| (j) C-27 | Face images capped at 90 days whatever the setting | integration | database-engineer (DB-06) | P1 | `retention_days` of 7 shortens ID image, selfie and mismatch frames to 7 days; a setting of 365 leaves them at 90 days (never longer); other media follow the setting. | next to TC-072 |
+| (k) C-30 | Age 18 confirmation required and stored | integration plus e2e | backend-engineer (BE-07), frontend-engineer (FE-09) | P1 | The consent step cannot be completed without the 18-or-older confirmation (400, UI blocks); the confirmation is stored with the consent record; a candidate who does not confirm cannot continue and no media is requested. | `apps/api/test/integration/tc-XXX.int.test.ts`, `packages/qa/e2e/tc-XXX.spec.ts` |
+| (l) C-32 | Client-error endpoint: DTO, rate limit, scrubbing | integration | backend-engineer | P2 | A browser error is accepted with a valid body (400 otherwise), rate limited per client (429), email addresses, tokens and URLs with tokens are scrubbed before logging, and nothing reaches a third party. C-31 (SES): the mail adapter sends only through the MailPort; covered by the BE-06 adapter tests, plus a check that no `resend` or `sentry` dependency remains (`pnpm why`). | `apps/api/test/integration/tc-XXX.int.test.ts` |
+| (m) C-25, OQ-15 | Two accommodation settings: "no identity check" and "face detectors off" | integration (API and worker) plus unit (SDK) | backend-engineer, integrity-engineer, proctor-sdk-engineer | P1 | "No identity check" skips the verification step only (C-19 applies) and the face detectors still run; "face detectors off" turns off the in-browser and server face detectors (FACE, GAZE) and the server answers 409 DETECTOR_DISABLED for their events, and the identity re-check still runs; each combination tested; refusing biometrics switches off every face-based detector (OQ-15). Known gap: the SDK has one FACE id today (proctor-sdk.md). | `apps/api/test/integration/tc-XXX.int.test.ts`, `packages/proctor-sdk/src/qa/qa-tc.test.ts`, worker tests |
+
+
+## 12. Workflow step for TC-008 (hub request; CI config goes through the hub, CLAUDE.md rule 12)
+
+The gate has no api-unit-specific code: the apps/api unit Jest JSON (`api-unit.json`) is ordinary Jest JSON, which it reads like any other Jest report. To make the P1 gate see the TC-008 spec (`apps/api/src/database/tc-008-org-isolation.spec.ts`, DB PR #30), `.github/workflows/qa.yml` needs one extra step before "P1 gate" and `test-results/api-unit.json` appended to the gate's report list. Land it together with, or after, DB PR #30. Exact change (a diff against main; QA did NOT apply it):
+
+```diff
+@@ -113,6 +113,12 @@ jobs:
+         if: ${{ !cancelled() }}
+         run: pnpm --filter @codeproctor/api exec node --experimental-vm-modules node_modules/jest/bin/jest.js -c test/jest.integration.config.js --runInBand --forceExit --json --outputFile=../../packages/qa/test-results/api-int.json
+ 
++      # The apps/api unit config also holds TC-008 (org isolation, src/database/tc-008-org-isolation.spec.ts
++      # once DB PR #30 is on main). Its JSON goes to the gate so TC-008 is read like any other P1 case.
++      - name: API unit and org-isolation tests (TC-008)
++        if: ${{ !cancelled() }}
++        run: pnpm --filter @codeproctor/api exec node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --forceExit --json --outputFile=../../packages/qa/test-results/api-unit.json
++
+       - name: Install the Playwright browser
+         if: ${{ !cancelled() }}
+         run: pnpm --filter @codeproctor/qa exec playwright install --with-deps chromium
+@@ -125,7 +131,7 @@ jobs:
+       # own as well; the gate makes the P1 verdict explicit and prints one line per P1 case.
+       - name: P1 gate
+         if: ${{ !cancelled() }}
+-        run: pnpm --filter @codeproctor/qa run gate test-results/web.json test-results/qa.json test-results/sdk.json test-results/shared.xml test-results/worker.xml test-results/api-int.json test-results/e2e.json
++        run: pnpm --filter @codeproctor/qa run gate test-results/web.json test-results/qa.json test-results/sdk.json test-results/shared.xml test-results/worker.xml test-results/api-int.json test-results/api-unit.json test-results/e2e.json
+ 
+       - name: Upload test reports
+         if: ${{ !cancelled() }}
+```
+
+Until it lands the gate does not read `api-unit.json` and TC-008 stays Planned in the matrix.

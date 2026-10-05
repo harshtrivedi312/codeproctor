@@ -210,6 +210,7 @@ describe('session handling', () => {
             name: 'R',
             role: 'RECRUITER',
             orgName: 'x',
+            totpEnabled: false,
           },
         });
       }),
@@ -254,6 +255,7 @@ describe('session handling', () => {
             name: 'R',
             role: 'RECRUITER',
             orgName: 'x',
+            totpEnabled: false,
           },
         });
       }),
@@ -317,7 +319,14 @@ describe('session handling', () => {
         await gate;
         return HttpResponse.json({
           accessToken: 'old-session-token',
-          user: { id: 'o', email: 'old@example.test', name: 'Old', role: 'AUTHOR', orgName: 'x' },
+          user: {
+            id: 'o',
+            email: 'old@example.test',
+            name: 'Old',
+            role: 'AUTHOR',
+            orgName: 'x',
+            totpEnabled: false,
+          },
         });
       }),
     );

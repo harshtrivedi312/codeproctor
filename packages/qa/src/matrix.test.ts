@@ -57,7 +57,14 @@ describe('test matrix (QA-01)', () => {
       { cwd: root, encoding: 'utf8' },
     )
       .split('\n')
-      .filter((f) => f !== '' && !f.startsWith('docs/') && !f.includes('matrix.test.ts'));
+      .filter(
+        (f) =>
+          f !== '' &&
+          !f.startsWith('docs/') &&
+          !f.includes('matrix.test.ts') &&
+          !f.includes('p1-gate.test.ts'),
+      );
+    // p1-gate.test.ts uses fake TC-9xx ids in a fixture docs tree on purpose.
     const known = new Set(cases);
     for (const f of files) {
       for (const m of read(f).matchAll(/(?<![A-Za-z0-9])TC[-_]?(\d{3})(?!\d)/gi)) {

@@ -157,6 +157,74 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v1/auth/2fa/setup/start': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Signed-in user begins optional TOTP set-up. Mirrors backend PR */
+    post: operations['startTwoFactorSetup'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/auth/2fa/setup/confirm': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Confirm optional set-up with a first code; returns the one-time recovery codes */
+    post: operations['confirmTwoFactorSetup'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/auth/2fa/disable': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Turn TOTP off. Needs password and TOTP code; revokes all refresh tokens and clears the cookie (backend PR */
+    post: operations['disableTwoFactor'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/auth/2fa/recovery-codes/regenerate': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Replace all recovery codes; the old set stops working */
+    post: operations['regenerateRecoveryCodes'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/v1/auth/2fa/verify': {
     parameters: {
       query?: never;
@@ -376,6 +444,7 @@ export interface components {
       name: string;
       role: components['schemas']['StaffRole'];
       orgName: string;
+      totpEnabled: boolean;
     };
     AuthSession: {
       accessToken: string;
@@ -393,6 +462,20 @@ export interface components {
     ApiError: {
       code: string;
       message: string;
+    };
+    ProblemDetails: {
+      type: string;
+      title: string;
+      status: number;
+      detail?: string;
+      instance: string;
+      traceId: string;
+      errors?: string[];
+      /** @enum {string} */
+      code?: 'REAUTH_FAILED' | 'TWO_FACTOR_REQUIRED_FOR_ROLE';
+    };
+    RecoveryCodes: {
+      recoveryCodes: string[];
     };
     /** @enum {string} */
     Language: 'python' | 'javascript' | 'java';
@@ -831,6 +914,268 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ApiError'];
+        };
+      };
+    };
+  };
+  startTwoFactorSetup: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          currentPassword: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Secret, otpauth URI and QR code (PNG data URL) */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            manualKey: string;
+            otpauthUri: string;
+            qrDataUrl: string;
+          };
+        };
+      };
+      /** @description Missing or invalid currentPassword or totpCode */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Missing or invalid access token */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401). */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Two-factor was turned on concurrently */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+    };
+  };
+  confirmTwoFactorSetup: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          currentPassword: string;
+          code: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Two-factor is on */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RecoveryCodes'];
+        };
+      };
+      /** @description Wrong code, or missing or invalid body */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Missing or invalid access token */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401). */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Two-factor state changed concurrently */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+    };
+  };
+  disableTwoFactor: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          currentPassword: string;
+          /** @description 6-digit TOTP code only; a recovery code is 400 */
+          totpCode: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Two-factor is off and every refresh token of the user is revoked (sign in again) */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Missing or invalid currentPassword or totpCode */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Missing or invalid access token */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description REAUTH_FAILED for a wrong or locked password or a wrong or replayed code (one identical body), otherwise TWO_FACTOR_REQUIRED_FOR_ROLE for Super Admin and Reviewer (checked last) */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Two-factor is not on */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Temporary outage (for example the code store); no failure is counted, try again */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+    };
+  };
+  regenerateRecoveryCodes: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          currentPassword: string;
+        };
+      };
+    };
+    responses: {
+      /** @description The new codes, shown once */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RecoveryCodes'];
+        };
+      };
+      /** @description Missing or invalid currentPassword or totpCode */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Missing or invalid access token */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401). */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Two-factor is not on */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
     };

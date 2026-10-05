@@ -16,7 +16,7 @@ import {
   PASSWORD,
   stableProblem,
 } from '../support/harness';
-import { actor, Actor, call } from '../support/be03-helpers';
+import { actor, Actor, call, flushDeferred } from '../support/be03-helpers';
 import { ADMIN_USERS, BE03_READY, lockAlertsFor } from '../support/be03-routes';
 
 (BE03_READY ? describe : describe.skip)(
@@ -69,8 +69,7 @@ import { ADMIN_USERS, BE03_READY, lockAlertsFor } from '../support/be03-routes';
       await h.owner.user.update({ where: { id: gone.id }, data: { isActive: false } });
       h.mails.length = 0;
       await lock(u.email);
-      await h.settle();
-      await new Promise((r) => setImmediate(r)); // the mail is deferred until after the response
+      await flushDeferred(h);
       const lockMails = h.mails.filter((m) => m.method === 'sendStaffAccountLocked');
       expect(lockMails.map((m) => m.to)).toEqual(expect.arrayContaining([a1.email, a2.email]));
       const recipients = lockMails.map((m) => m.to);
@@ -88,7 +87,7 @@ import { ADMIN_USERS, BE03_READY, lockAlertsFor } from '../support/be03-routes';
       // One lock, one mail per admin: further failures while locked send nothing more.
       const count = lockMails.length;
       await login(h, u.email).expect(401);
-      await h.settle();
+      await flushDeferred(h);
       expect(h.mails.filter((m) => m.method === 'sendStaffAccountLocked')).toHaveLength(count);
     });
 
@@ -130,11 +129,13 @@ import { ADMIN_USERS, BE03_READY, lockAlertsFor } from '../support/be03-routes';
       expect(await h.owner.auditLog.count({ where: { action: 'AUTH_ACCOUNT_LOCKED' } })).toBe(
         locksBefore,
       );
-      const row = await h.owner.auditLog.findFirst({
+      const rows = await h.owner.auditLog.findMany({
         where: { action: 'USER_UNLOCKED', entityId: u.id },
       });
+      expect(rows).toHaveLength(1);
+      const row = rows[0];
+      expect([row?.actorId, row?.orgId]).toEqual([admin.id, h.orgId]);
       // Contract (backend.md): USER_UNLOCKED carries wasLocked; for a no-op it says false.
-      expect(row).not.toBeNull();
       expect((row?.metadata as { wasLocked?: boolean } | null)?.wasLocked).toBe(false);
       await login(h, u.email).expect(200);
     });

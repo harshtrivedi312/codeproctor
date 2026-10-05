@@ -15,7 +15,7 @@ import {
   login,
   PASSWORD,
 } from '../support/harness';
-import { actor, Actor, call, tokenFromUrl } from '../support/be03-helpers';
+import { actor, Actor, call, flushDeferred, tokenFromUrl } from '../support/be03-helpers';
 import {
   ADMIN_USERS,
   BE03_READY,
@@ -216,12 +216,7 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
               expectReauthFailed(await call(h, route.method, t.path, outsider.token, wrong));
             }
             expect(await t.unchanged()).toBe(true);
-            // No row at all, so neither the right nor the wrong password can be in one.
-            const rows = await since(before);
-            expect(rows).toEqual([]);
-            expect(
-              JSON.stringify(rows, (_k, v: unknown) => (typeof v === 'bigint' ? String(v) : v)),
-            ).not.toMatch(/Wrong-Password-1|Correct-Horse-9/);
+            expect(await since(before)).toEqual([]); // no row, so no password can be in one
           });
         }
       } else {
@@ -305,7 +300,7 @@ auditSuite(
       ).body as Body;
       const id = invited.id as string;
       expect(invited.status).toBe('invited');
-      await h.settle();
+      await flushDeferred(h);
       const mail = h.mails.slice(mailsBefore).find((m) => m.method === 'sendStaffInvite');
       expect(mail?.to).toBe(email);
       expect(mail?.url).toMatch(/\/admin\/set-password#token=[^&]+$/);
@@ -364,8 +359,7 @@ auditSuite(
         expectNoDataProblem(invite);
         // No audit row, so no change either: no user row left behind, and no invite mail sent.
         expect(await h.owner.user.count({ where: { email } })).toBe(0);
-        await h.settle();
-        await new Promise((r) => setImmediate(r));
+        await flushDeferred(h);
         expect(h.mails.slice(mailsBefore).filter((m) => m.method === 'sendStaffInvite')).toEqual(
           [],
         );
@@ -415,13 +409,14 @@ auditSuite(
       await call(h, 'POST', `${ADMIN_USERS}/${target.id}/unlock`, admin.token, {
         currentPassword: PASSWORD,
       }).expect(204);
-      await h.settle();
+      await flushDeferred(h);
 
       const inviteMail = h.mails.find((m) => m.method === 'sendStaffInvite' && m.to === email);
       const inviteToken = tokenFromUrl(inviteMail?.url ?? '');
       expect(inviteToken.length).toBeGreaterThanOrEqual(20);
       const logs = h.logged.join('');
       expect(logs.length).toBeGreaterThan(0); // logging was really on
+      expect(logs).toContain('/admin/users'); // the calls themselves were logged
       for (const secret of [PASSWORD, wrong, inviteToken, admin.token]) {
         expect(logs).not.toContain(secret);
       }

@@ -13,7 +13,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-const root = resolve(import.meta.dirname, '../../..');
+// P1_GATE_ROOT lets the gate's own tests point it at a fixture tree with a fake docs folder.
+const root = process.env.P1_GATE_ROOT ?? resolve(import.meta.dirname, '../../..');
 const args = process.argv.slice(2);
 const strict = args.includes('--strict');
 const reports = args.filter((a) => !a.startsWith('--'));
@@ -26,6 +27,10 @@ interface Result {
   passed: boolean;
   /** Skipped, pending or todo: written but switched off (staged). Not evidence, but counted. */
   staged?: boolean;
+  /** JUnit <error> (collection or setup error): fails the gate even when its name has no TC id. */
+  error?: boolean;
+  /** Report file the result came from, for messages. */
+  source?: string;
 }
 
 /** Test files that failed as a whole with no assertion results (compile error, crash). */
@@ -59,6 +64,10 @@ function levels(): Map<string, string> {
 }
 
 interface VitestReport {
+  /** Vitest: false when anything failed, including a suite error. */
+  success?: boolean;
+  /** Jest: number of test files that failed to run or in a hook. */
+  numRuntimeErrorTestSuites?: number;
   testResults?: {
     name?: string;
     testFilePath?: string;
@@ -101,6 +110,7 @@ function loadJunit(xml: string): Result[] {
       full: `${norm(attr(m[1] ?? '', 'classname'))} ${name}`,
       passed: !/<(failure|error)\b/.test(body),
       staged: /<skipped\b/.test(body),
+      error: /<error\b/.test(body),
     });
   }
   return out;
@@ -113,8 +123,10 @@ function load(file: string): Result[] {
   if (json.testResults) {
     for (const f of json.testResults) {
       const asserts = f.assertionResults ?? [];
-      // A file that failed to run (compile error, crash) has a failed status and no assertions.
-      if (asserts.length === 0 && f.status === 'failed') {
+      // A file that failed as a whole while every test it recorded passed or was skipped (compile
+      // error, crash, a failing afterAll hook, a Vitest suite error) fails the gate by name.
+      const anyFailed = asserts.some((a) => a.status === 'failed');
+      if (f.status === 'failed' && !anyFailed) {
         suiteFailures.push(f.name ?? f.testFilePath ?? '(unnamed test file)');
       }
       for (const a of asserts) {
@@ -127,6 +139,13 @@ function load(file: string): Result[] {
         });
       }
     }
+    const anyFailedTest = out.some((r) => !r.passed);
+    if ((json.numRuntimeErrorTestSuites ?? 0) > 0 && suiteFailures.length === 0 && !anyFailedTest) {
+      suiteFailures.push(`${file} (numRuntimeErrorTestSuites ${json.numRuntimeErrorTestSuites})`);
+    }
+    if (json.success === false && suiteFailures.length === 0 && !anyFailedTest) {
+      suiteFailures.push(`${file} (success: false with no failed test)`);
+    }
   } else {
     walkPlaywright(json, out);
   }
@@ -137,12 +156,13 @@ const prio = priorities();
 const level = levels();
 const status = statuses();
 const results: Result[] = [];
+if (process.env.P1_GATE_ROOT) console.log(`(P1_GATE_ROOT override in use: ${root})`);
 for (const r of reports) {
   if (!existsSync(resolve(r))) {
     console.error(`Report not found: ${r}`);
     process.exit(2);
   }
-  results.push(...load(r));
+  results.push(...load(r).map((x) => ({ ...x, source: r })));
 }
 
 const state = new Map<
@@ -202,10 +222,7 @@ for (const [id, p] of [...prio].sort()) {
     line = /^Verified/i.test(st)
       ? `passed (${s.passed} tests); matrix: verified`
       : `${s.passed} test(s) passing; NOT verified, matrix says: ${st.slice(0, 70)}`;
-    if (s.staged > 0)
-      line =
-        line.replace(/^(passed \(|)(\d+)/, '$1$2') +
-        `; ${s.passed} passing, ${s.staged} staged (skipped)`;
+    if (s.staged > 0) line = line + `; ${s.passed} passing, ${s.staged} staged (skipped)`;
   }
   // Staged tests mean the case is not fully covered yet; --strict refuses that for P1.
   if (strict && s && s.staged > 0) {
@@ -215,8 +232,17 @@ for (const [id, p] of [...prio].sort()) {
   console.log(`  ${id}  ${line}`);
 }
 for (const f of suiteFailures) {
-  console.error(`Test file failed to run (no assertion results): ${f}`);
+  console.error(
+    `Test file failed with no failed test recorded (compile error, crash or hook failure): ${f}`,
+  );
   failures++;
+}
+for (const res of results) {
+  const named = [...res.title.matchAll(/TC-\d{3}/g), ...(res.full ?? '').matchAll(/TC-\d{3}/g)];
+  if (res.error && named.length === 0) {
+    console.error(`Test error with no TC id (collection or setup): ${res.source} ${res.title}`);
+    failures++;
+  }
 }
 for (const [id, s] of state) {
   if (!prio.has(id)) {

@@ -241,3 +241,27 @@ async function doRefresh(): Promise<AuthSession | null> {
     return null;
   }
 }
+
+/** Who and which session generation a request was sent under. */
+export interface SessionStamp {
+  generation: number;
+  userId: string | null;
+}
+
+export function captureSessionStamp(): SessionStamp {
+  return { generation, userId: currentUserId };
+}
+
+/**
+ * The one guard for "a request got 401, refresh and send it again". Returns the refreshed session
+ * only when replaying is safe: the request was sent by a signed-in user, nothing changed identity
+ * since (no sign-out, no other tab signing in), and the refresh returned that same user. Anything
+ * else returns null and the caller must not send again. The refresh cookie is shared by all tabs,
+ * so without this a request made as X could be replayed as Y (FR-103, TC-005).
+ */
+export async function refreshForReplay(stamp: SessionStamp): Promise<AuthSession | null> {
+  if (stamp.userId === null || stamp.generation !== generation) return null;
+  const session = await refreshSession();
+  if (!session || stamp.generation !== generation || session.user.id !== stamp.userId) return null;
+  return session;
+}

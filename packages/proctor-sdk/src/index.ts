@@ -38,7 +38,7 @@ export function createDefaultMonitors() {
     screenShare: new ScreenShareMonitor(),
   };
 }
-export { mountProctorDemo, type DemoHandle } from './demo/mount';
+export { mountProctorDemo, type DemoHandle, type DemoOptions } from './demo/mount';
 
 export * from './recording/types';
 export * from './recording/upload-queue';

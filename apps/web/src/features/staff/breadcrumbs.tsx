@@ -11,6 +11,7 @@ const LABELS: Record<string, string> = {
   live: 'Live',
   reports: 'Reports',
   settings: 'Settings',
+  security: 'Security',
   users: 'Users',
   data: 'Data and privacy',
   risk: 'Risk scoring',
