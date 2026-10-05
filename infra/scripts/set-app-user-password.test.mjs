@@ -428,16 +428,21 @@ test('NFR-04 (FU-DB-23): the resolved client host must be this machine, even if 
     assert.equal(control.status, 0, control.output);
     assert.equal(fake.state.connections, 1);
 
-    // 0.0.0.0 would reach the listener on this machine if the script dialled it.
+    // 0.0.0.0 would reach the listener on this machine if the script dialled it. The second host
+    // is under .invalid (RFC 2606), which never resolves, so a mutated script cannot make a real
+    // DNS or TCP call from CI (FU-DB-32).
     const refused = [
       `postgresql://owner:${SECRET}@0.0.0.0:${fake.port}/codeproctor`,
-      `postgresql://owner:${SECRET}@db.example.com:${fake.port}/codeproctor`,
+      `postgresql://owner:${SECRET}@db.example.invalid:${fake.port}/codeproctor`,
     ];
     for (const url of refused) {
       const result = await runScriptWithoutGuard({ ...env, MIGRATION_DATABASE_URL: url });
       assert.equal(result.status, 1, result.output);
       assert.match(result.stderr, /to a host other than this machine\. Refusing to connect\./);
-      assert.doesNotMatch(result.output, /could not connect|failed \(|db\.example\.com|0\.0\.0\.0/);
+      assert.doesNotMatch(
+        result.output,
+        /could not connect|failed \(|db\.example\.invalid|0\.0\.0\.0/,
+      );
       assertNoSecrets(result);
     }
     assert.equal(fake.state.connections, 1, 'the script dialled a host that is not loopback');
