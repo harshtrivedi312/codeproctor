@@ -38,6 +38,8 @@ export interface ProctorSessionConfig {
   flushIntervalMs?: number;
   heartbeatIntervalMs?: number;
   backoffBaseMs?: number;
+  /** A detector whose start() takes longer than this is abandoned (default 45 s). */
+  detectorStartTimeoutMs?: number;
 }
 
 export interface SessionEvents {
@@ -47,6 +49,18 @@ export interface SessionEvents {
   connection: { online: boolean };
 }
 type Handler<K extends keyof SessionEvents> = (payload: SessionEvents[K]) => void;
+
+/** Thrown by withTimeout when a detector's start() does not settle in time. */
+class StartTimeoutError extends Error {}
+
+/** Rejects with StartTimeoutError when `p` has not settled in `ms`. */
+function withTimeout<T>(p: Promise<T> | T, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new StartTimeoutError('detector start timed out')), ms);
+  });
+  return Promise.race([Promise.resolve(p), timeout]).finally(() => clearTimeout(timer));
+}
 
 /**
  * Entry point of the SDK. start() wires detectors (plug-ins) to the signed event queue and the
@@ -134,9 +148,41 @@ export class ProctorSession {
     for (const d of config.detectors) {
       if (d.accommodationId && disabled.has(d.accommodationId)) continue;
       this.started.push(d);
+      // A per-detector context that goes silent if the detector is abandoned, so a late start()
+      // cannot emit events or flags after DETECTOR_UNAVAILABLE was reported.
+      let abandoned = false;
+      const dctx: DetectorContext = {
+        ...ctx,
+        emit: (type, payload, o) => {
+          if (!abandoned) ctx.emit(type, payload, o);
+        },
+        setCapability: (f) => {
+          if (!abandoned) ctx.setCapability(f);
+        },
+        setLock: (l) => {
+          if (!abandoned) ctx.setLock(l);
+        },
+      };
       try {
-        await d.start(ctx);
-      } catch {
+        await withTimeout(d.start(dctx), config.detectorStartTimeoutMs ?? 45_000);
+      } catch (err) {
+        if (err instanceof StartTimeoutError) {
+          abandoned = true;
+          // Abandon cleanly: report, stop best-effort and forget it, so no half-started detector
+          // keeps timers or streams alive.
+          try {
+            if (d.reportStartTimeout) d.reportStartTimeout(ctx);
+            else ctx.setCapability({ id: d.id, status: 'UNVERIFIABLE', detail: 'start timed out' });
+          } catch {
+            // ignore
+          }
+          try {
+            await d.stop();
+          } catch {
+            // best effort
+          }
+          this.started = this.started.filter((x) => x !== d);
+        }
         // One broken detector must not stop the others; say so instead of passing silently.
         if (d.accommodationId) {
           this.emit('DETECTOR_UNAVAILABLE', {
@@ -177,7 +223,20 @@ export class ProctorSession {
     return this.queue?.stats() ?? null;
   }
 
+  /**
+   * Stop and purge: flushes the event queue (bounded), then deletes this session's batches from
+   * IndexedDB (FR-702). The `nextEventSeq` counter is kept so a reload continues the sequence.
+   * Call at the end of a test; stop() keeps unsent batches for a reload.
+   */
+  async finish(drainTimeoutMs = 15_000): Promise<{ lostBatches: number }> {
+    return this.shutdown(drainTimeoutMs);
+  }
+
   async stop(): Promise<void> {
+    await this.shutdown(null);
+  }
+
+  private async shutdown(purgeDrainMs: number | null): Promise<{ lostBatches: number }> {
     globalThis.removeEventListener?.('pagehide', this.onPageHide);
     globalThis.removeEventListener?.('online', this.onOnline);
     this.heartbeat?.stop();
@@ -189,9 +248,12 @@ export class ProctorSession {
       }
     }
     this.started = [];
-    await this.queue?.stop();
+    let lostBatches = 0;
+    if (purgeDrainMs === null) await this.queue?.stop();
+    else lostBatches = (await this.queue?.finish(purgeDrainMs))?.lostBatches ?? 0;
     this.metrics?.stop();
     this.queue = null;
     this.config = null;
+    return { lostBatches };
   }
 }
