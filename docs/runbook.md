@@ -7,7 +7,7 @@ need them run in GitHub Actions or on the server.
 ## Database backups and restore
 
 Owner: Database B (ops) track. Serves NFR-03, FR-704 and ADR 0004 R-7. Files: `infra/backup/`,
-`.github/workflows/backup-nightly.yml`. Tests: `infra/scripts/verify-backup.test.mjs`.
+the nightly workflow (below). Tests: `infra/scripts/verify-backup.test.mjs`.
 
 ### What runs
 
@@ -16,7 +16,7 @@ Owner: Database B (ops) track. Serves NFR-03, FR-704 and ADR 0004 R-7. Files: `i
 | `infra/backup/backup.sh` | `pg_dump` (custom format) piped through gzip. It checks that the gzip and the dump are readable and that every table has a data entry. It uploads `dumps/codeproctor-<UTC stamp>.dump.gz`, `.sha256` and `.counts.tsv` to the backup bucket, checks the stored size, then deletes dumps older than 14 days and erasure-list entries that no remaining backup needs. The newest dump is never pruned. |
 | `infra/backup/restore.sh` | Downloads a named backup (or the latest), verifies the checksum, restores into a **new** database, compares row counts with the counts taken at backup time, then re-applies the erasure list. Never restores over an existing database and never drops one. |
 | `infra/backup/erasure-list.sh` | The erased-candidate list kept outside the database and its backups (see below). |
-| `.github/workflows/backup-nightly.yml` | 02:17 UTC every night: backs up staging with repository secrets, then restores the new backup into a throwaway Postgres 16 service container and compares counts. |
+| Nightly workflow (proposed to the architecture hub, which owns CI config; not in this PR) | 02:17 UTC every night: backs up staging with repository secrets, then restores the new backup into a throwaway Postgres 16 service container and compares counts. Until it lands, nothing schedules the backup (FU-DBB-07). |
 
 Settings (names match `.env.example`): `PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE`,
 `S3_BACKUP_BUCKET S3_ENDPOINT S3_REGION S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY S3_FORCE_PATH_STYLE`,
