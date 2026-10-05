@@ -11,7 +11,14 @@
 import { hasPermission, PRINCIPALS, USER_ROLES } from '../../../../packages/shared/src/permissions';
 import type { Permission, Principal } from '../../../../packages/shared/src/permissions';
 import { UserRole } from '../../src/generated/prisma/client';
-import { Harness } from './harness';
+import { Harness, PASSWORD } from './harness';
+
+/**
+ * ASSUMED, undecided by Backend: whether unlock needs the admin's `currentPassword` (403
+ * REAUTH_FAILED when wrong or missing). Flip to true if it does; the unlock tests then send it and
+ * a test checks that a missing or wrong password is refused with nothing changed.
+ */
+export const UNLOCK_NEEDS_REAUTH = false; // ASSUMED
 
 const BE03_DEFAULT = false; // flip to true when BE-03 is merged
 const BE13_DEFAULT = false; // flip to true when BE-13 is merged
@@ -187,7 +194,7 @@ export const BE03_ROUTES: Be03Route[] = [
     step: 'BE-03',
     method: 'POST',
     template: '/users/:id/unlock', // ASSUMED path
-    takesBody: false,
+    takesBody: UNLOCK_NEEDS_REAUTH, // ASSUMED, see the switch above
     permission: 'user:manage', // ASSUMED: SUPER_ADMIN only (the matrix has no separate unlock permission)
     audit: { action: 'USER_UNLOCKED', entityType: 'user' }, // ASSUMED action name
     mutating: true,
@@ -200,6 +207,7 @@ export const BE03_ROUTES: Be03Route[] = [
       });
       return {
         path: `/users/${u.id}/unlock`,
+        body: UNLOCK_NEEDS_REAUTH ? { currentPassword: PASSWORD } : undefined, // ASSUMED
         entityId: u.id,
         secrets: [],
         unchanged: async () =>
@@ -293,12 +301,20 @@ export const routesFor = (step: Be03Route['step']): Be03Route[] =>
   BE03_ROUTES.filter((r) => r.step === step);
 
 /**
- * How the admin alert on account lock (P-03) is observed. ASSUMED: the alert is an audit row
- * `ADMIN_ALERT_ACCOUNT_LOCKED` in the locked user's org. If Backend uses MailPort or a notification
- * table instead, change this one function (the TC-002 test only calls it).
+ * How the admin alert on account lock (P-03) is observed. Backend (2026-10-05): no schema change, so
+ * the in-app alert is the existing AUTH_ACCOUNT_LOCKED audit row (written at lock), listed for
+ * SUPER_ADMIN only and org-scoped, plus `locked` / `lockedUntil` on GET /users for SUPER_ADMIN only;
+ * email via MailPort 'staff-account-locked' (no-op until BE-06). There is NO ADMIN_ALERT row.
  */
 export async function lockAlertsFor(h: Harness, orgId: string, userId: string): Promise<unknown[]> {
   return h.owner.auditLog.findMany({
-    where: { orgId, action: 'ADMIN_ALERT_ACCOUNT_LOCKED', entityId: userId }, // ASSUMED
+    where: {
+      orgId,
+      action: 'AUTH_ACCOUNT_LOCKED',
+      OR: [{ actorId: userId }, { entityId: userId }],
+    },
   });
 }
+
+/** ASSUMED: path of the SUPER_ADMIN-only list of recent lock events (final name not sent yet). */
+export const lockEventsPath = '/users/lock-events'; // ASSUMED

@@ -4,8 +4,9 @@
 // alert mechanism are ASSUMED (see be03-routes.ts: users-unlock and lockAlertsFor).
 import { UserRole } from '../../src/generated/prisma/client';
 import { boot, createUser, Harness, login } from '../support/harness';
+import { PASSWORD } from '../support/harness';
 import { actor, call } from '../support/be03-helpers';
-import { BE03_READY, lockAlertsFor } from '../support/be03-routes';
+import { BE03_READY, lockAlertsFor, UNLOCK_NEEDS_REAUTH } from '../support/be03-routes';
 
 (BE03_READY ? describe : describe.skip)(
   'TC-002 [BE-03 pending]: admin alert and admin unlock',
@@ -22,7 +23,7 @@ import { BE03_READY, lockAlertsFor } from '../support/be03-routes';
       for (let i = 0; i < 5; i++) await login(h, email, `wrong-password-${i}`).expect(401);
     }
 
-    it('TC-002 [BE-03 pending]: the 5th failure raises exactly one admin alert, and further attempts raise none', async () => {
+    it('TC-002 [BE-03 pending]: the 5th failure leaves exactly one AUTH_ACCOUNT_LOCKED event for the admin alert, and further attempts raise none', async () => {
       const u = await createUser(h);
       await lock(u.email);
       expect(await lockAlertsFor(h, h.orgId, u.id)).toHaveLength(1);
@@ -35,7 +36,13 @@ import { BE03_READY, lockAlertsFor } from '../support/be03-routes';
       const u = await createUser(h, { role: UserRole.RECRUITER });
       await lock(u.email);
       await login(h, u.email).expect(401); // locked
-      const res = await call(h, 'POST', `/users/${u.id}/unlock`, admin.token); // ASSUMED path
+      const res = await call(
+        h,
+        'POST',
+        `/users/${u.id}/unlock`,
+        admin.token,
+        UNLOCK_NEEDS_REAUTH ? { currentPassword: PASSWORD } : undefined,
+      ); // ASSUMED path
       expect([200, 204]).toContain(res.status);
       const row = await h.owner.user.findUniqueOrThrow({ where: { id: u.id } });
       expect(row.failedLogins).toBe(0);
@@ -57,10 +64,30 @@ import { BE03_READY, lockAlertsFor } from '../support/be03-routes';
     it('TC-002 [BE-03 pending]: unlocking an account that is not locked is a harmless no-op that writes no misleading lock row', async () => {
       const admin = await actor(h, UserRole.SUPER_ADMIN);
       const u = await createUser(h);
-      const res = await call(h, 'POST', `/users/${u.id}/unlock`, admin.token);
+      const res = await call(
+        h,
+        'POST',
+        `/users/${u.id}/unlock`,
+        admin.token,
+        UNLOCK_NEEDS_REAUTH ? { currentPassword: PASSWORD } : undefined,
+      );
       // ASSUMED: 200/204 (idempotent) or 409; never 5xx, and the account stays usable.
       expect([200, 204, 409]).toContain(res.status);
       await login(h, u.email).expect(200);
     });
+
+    (UNLOCK_NEEDS_REAUTH ? it : it.skip)(
+      'TC-002 [BE-03 pending]: unlock without the admin currentPassword, or with a wrong one, is 403 REAUTH_FAILED and the account stays locked (ASSUMED switch UNLOCK_NEEDS_REAUTH)',
+      async () => {
+        const admin = await actor(h, UserRole.SUPER_ADMIN);
+        const u = await createUser(h);
+        await lock(u.email);
+        for (const body of [undefined, { currentPassword: 'wrong-password' }]) {
+          const res = await call(h, 'POST', `/users/${u.id}/unlock`, admin.token, body).expect(403);
+          expect(JSON.stringify(res.body)).toContain('REAUTH_FAILED');
+        }
+        await login(h, u.email).expect(401);
+      },
+    );
   },
 );
