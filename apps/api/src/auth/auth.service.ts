@@ -65,6 +65,7 @@ export interface SessionOutcome {
 
 class RefreshReuseSignal extends Error {}
 class AlreadyEnrolledSignal extends Error {}
+class WrongRecoveryCodeSignal extends Error {}
 /** The password changed after it was verified: no session may be opened (FR-104, FR-107). */
 class PasswordChangedSignal extends Error {}
 
@@ -137,8 +138,12 @@ export class AuthService implements OnApplicationShutdown {
     try {
       return await this.startSession(user);
     } catch (e) {
-      // A reset landed while the password was being verified: the sign-in is refused.
-      if (e instanceof PasswordChangedSignal) throw this.invalid();
+      // A reset landed while the password was being verified: the sign-in is refused and the
+      // reserved attempt is given back, as the password was right when it was checked.
+      if (e instanceof PasswordChangedSignal) {
+        await this.refundAttempt(user.id).catch(() => undefined);
+        throw this.invalid();
+      }
       throw e;
     }
   }
@@ -344,22 +349,32 @@ export class AuthService implements OnApplicationShutdown {
     if (!user.totpEnabled || !user.totpSecretEnc) throw this.challengeExpired();
     // Same status and message as a wrong code, so a locked account is indistinguishable.
     if ((await this.reserveAttempt(user, ctx)) !== 'granted') throw this.invalidCode();
-    if (/^\d{6}$/.test(code)) {
-      if (!(await this.verifyTotp(user, user.totpSecretEnc, code))) return this.failCode(user, ctx);
-    } else {
-      const hash = sha256Hex(normalizeRecoveryCode(code));
-      // The check and the removal are one statement, so two concurrent uses cannot both win.
-      const used = await this.prisma.client.$executeRaw`
-        UPDATE users SET recovery_code_hashes = array_remove(recovery_code_hashes, ${hash}),
-                         updated_at = now()
-        WHERE id = ${user.id}::uuid AND ${hash} = ANY(recovery_code_hashes)`;
-      if (used !== 1) return this.failCode(user, ctx);
-      await this.audit(user, 'AUTH_RECOVERY_CODE_USED', ctx);
-    }
     try {
-      return await this.startSession(user);
+      if (/^\d{6}$/.test(code)) {
+        if (!(await this.verifyTotp(user, user.totpSecretEnc, code))) {
+          return await this.failCode(user, ctx);
+        }
+        return await this.startSession(user);
+      }
+      const hash = sha256Hex(normalizeRecoveryCode(code));
+      // Removing the code and opening the session are one transaction, so a password change that
+      // refuses the session also puts the code back.
+      return await this.prisma.client.$transaction(async (tx) => {
+        // The check and the removal are one statement, so two concurrent uses cannot both win.
+        const used = await tx.$executeRaw`
+          UPDATE users SET recovery_code_hashes = array_remove(recovery_code_hashes, ${hash}),
+                           updated_at = now()
+          WHERE id = ${user.id}::uuid AND ${hash} = ANY(recovery_code_hashes)`;
+        if (used !== 1) throw new WrongRecoveryCodeSignal();
+        await this.audit(user, 'AUTH_RECOVERY_CODE_USED', ctx, {}, tx);
+        return this.startSession(user, tx);
+      });
     } catch (e) {
-      if (e instanceof PasswordChangedSignal) throw this.challengeExpired();
+      if (e instanceof WrongRecoveryCodeSignal) return this.failCode(user, ctx);
+      if (e instanceof PasswordChangedSignal) {
+        await this.refundAttempt(user.id).catch(() => undefined);
+        throw this.challengeExpired();
+      }
       throw e;
     }
   }
@@ -407,22 +422,34 @@ export class AuthService implements OnApplicationShutdown {
     const next = newOpaqueToken();
     try {
       await this.prisma.client.$transaction(async (tx) => {
-        const created = await tx.refreshToken.create({
-          data: {
-            userId: user.id,
-            familyId: existing.familyId,
-            tokenHash: sha256Hex(next),
-            expiresAt: new Date(Date.now() + REFRESH_TTL_MS),
-          },
-        });
+        // The new token exists only while the account is active and still has the password hash
+        // loaded above. FOR SHARE locks the user row: a reset in flight is waited for (then the
+        // WHERE fails), and a reset arriving later waits for this commit and revokes the new
+        // token too. This also closes the race with deactivation (FR-104, FR-107).
+        // `?? ''` is deliberate: an empty hash can never match, so nothing is inserted.
+        const created = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+          INSERT INTO refresh_tokens (user_id, family_id, token_hash, expires_at)
+          SELECT u.id, ${existing.familyId}::uuid, ${sha256Hex(next)},
+                 ${new Date(Date.now() + REFRESH_TTL_MS)}::timestamptz
+          FROM users u
+          WHERE u.id = ${user.id}::uuid AND u.is_active
+            AND u.password_hash = ${user.passwordHash ?? ''}
+          FOR SHARE OF u
+          RETURNING id`);
+        const createdId = created[0]?.id;
+        if (created.length !== 1 || !createdId) throw new PasswordChangedSignal();
         // Only one caller can flip revokedAt from null; a concurrent second use loses here.
         const flipped = await tx.refreshToken.updateMany({
           where: { id: existing.id, revokedAt: null },
-          data: { revokedAt: new Date(), replacedById: created.id },
+          data: { revokedAt: new Date(), replacedById: createdId },
         });
         if (flipped.count !== 1) throw new RefreshReuseSignal();
       });
     } catch (e) {
+      if (e instanceof PasswordChangedSignal) {
+        await this.revokeFamily(existing.familyId);
+        throw new UnauthorizedException('Authentication required.');
+      }
       if (e instanceof RefreshReuseSignal) {
         await this.revokeFamily(existing.familyId);
         await this.audit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
@@ -718,15 +745,19 @@ export class AuthService implements OnApplicationShutdown {
     db: Prisma.TransactionClient = this.prisma.client,
   ): Promise<SessionOutcome> {
     const refreshToken = newOpaqueToken();
-    // The token exists only if the password is still the one that was verified. A reset that
-    // committed meanwhile (and revoked the tokens it could see) leaves no row to insert, so a
-    // family can never outlive the reset (FR-104, FR-107).
+    // The token exists only if the password is still the one that was verified. FOR SHARE (not
+    // FOR KEY SHARE, which does not conflict with a non-key UPDATE) locks the user row in this
+    // statement: it waits for an in-flight reset, re-checks the WHERE against the new row version
+    // and inserts nothing; a reset arriving later waits for this commit, so its revoke-all sees
+    // the token. A family can never outlive a reset (FR-104, FR-107).
+    // `?? ''` is deliberate: an empty hash can never equal a stored hash, so it inserts nothing.
     const inserted = await db.$queryRaw<{ id: string }[]>(Prisma.sql`
       INSERT INTO refresh_tokens (user_id, family_id, token_hash, expires_at)
       SELECT u.id, ${randomUUID()}::uuid, ${sha256Hex(refreshToken)},
              ${new Date(Date.now() + REFRESH_TTL_MS)}::timestamptz
       FROM users u
       WHERE u.id = ${user.id}::uuid AND u.is_active AND u.password_hash = ${user.passwordHash ?? ''}
+      FOR SHARE OF u
       RETURNING id`);
     if (inserted.length !== 1) throw new PasswordChangedSignal();
     await this.clearFailures(user.id, db);

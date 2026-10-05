@@ -1145,6 +1145,8 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         passwordVerify.mockImplementation(realPasswordVerify);
       }
       expect(await prisma.refreshToken.count({ where: { userId: u.id } })).toBe(0);
+      // The password was right when checked: the reserved attempt is given back.
+      expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).failedLogins).toBe(0);
     });
 
     it('TC-003: a 2FA completion that overlaps a reset is refused with no cookie and no refresh token (FR-102, FR-104)', async () => {
@@ -1171,6 +1173,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         await Promise.allSettled(inFlight);
       }
       expect(await prisma.refreshToken.count({ where: { userId: u.id } })).toBe(0);
+      expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).failedLogins).toBe(0);
     });
 
     it('TC-003: a forced enrolment confirm that overlaps a reset is refused, enables nothing and opens no session (FR-102, FR-104)', async () => {
@@ -1221,6 +1224,263 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       expect(row.failedLogins).toBe(0);
       expect(row.recoveryCodeHashes).toEqual([]);
       expect(await prisma.refreshToken.count({ where: { userId: u.id } })).toBe(0);
+    });
+
+    // ---- uncommitted-reset interleavings (READ COMMITTED), driven by row locks -----------------
+
+    /** True once some backend is waiting on a lock (the statement under test is blocked). */
+    async function lockWaiters(): Promise<number> {
+      const rows = await prisma.$queryRaw<{ n: bigint }[]>`
+        SELECT count(*) AS n FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock' AND datname = current_database()`;
+      return Number(rows[0]?.n ?? 0);
+    }
+
+    async function untilLockWaiter(): Promise<void> {
+      const deadline = Date.now() + 10_000;
+      while ((await lockWaiters()) === 0) {
+        if (Date.now() > deadline) throw new Error('no statement is waiting on a lock');
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+
+    /**
+     * A reset as the real one runs it, held open: new password, then revoke-all, then wait for the
+     * commit signal. Nothing is visible to other sessions until commit().
+     */
+    async function openReset(userId: string): Promise<{
+      updated: Promise<void>;
+      commit: () => void;
+      done: Promise<void>;
+    }> {
+      const newHash = await hash(NEW_PASSWORD, ARGON2_OPTIONS);
+      const commitGate = makeGate();
+      let ready: () => void = () => undefined;
+      const updated = new Promise<void>((resolve) => {
+        ready = resolve;
+      });
+      const done = prisma.$transaction(
+        async (tx) => {
+          await tx.user.update({ where: { id: userId }, data: { passwordHash: newHash } });
+          await tx.refreshToken.updateMany({
+            where: { userId, revokedAt: null },
+            data: { revokedAt: new Date() },
+          });
+          ready();
+          await commitGate.wait;
+        },
+        { timeout: 30_000 },
+      );
+      return { updated, commit: commitGate.open, done };
+    }
+
+    const liveTokens = (userId: string): Promise<number> =>
+      prisma.refreshToken.count({ where: { userId, revokedAt: null } });
+
+    type TxFn = (cb: (tx: unknown) => Promise<unknown>, opts?: unknown) => Promise<unknown>;
+    function serviceClient(): { $transaction: TxFn } {
+      return (authService as unknown as { prisma: { client: { $transaction: TxFn } } }).prisma
+        .client;
+    }
+
+    it('TC-098: a login whose session insert meets an uncommitted reset waits, is refused, and leaves no live refresh token (FR-104, FR-107)', async () => {
+      const u = await createUser();
+      const stored = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      const gate = makeGate();
+      passwordVerify.mockImplementation(async (h: string, password: string) => {
+        const ok = await realPasswordVerify(h, password);
+        if (h === stored.passwordHash) await gate.wait;
+        return ok;
+      });
+      let reset: Awaited<ReturnType<typeof openReset>> | undefined;
+      try {
+        const inFlight = login(u.email).then((r) => r);
+        await until(() =>
+          passwordVerify.mock.calls.some((c: unknown[]) => c[0] === stored.passwordHash),
+        );
+        reset = await openReset(u.id);
+        await reset.updated;
+        gate.open();
+        // With FOR SHARE the insert blocks on the reset's row lock; without it, it would finish
+        // at once and leave a live token the reset never saw.
+        await Promise.race([inFlight, untilLockWaiter()]);
+        reset.commit();
+        await reset.done;
+        const res = await inFlight;
+        expect(res.status).toBe(401);
+        expect(res.headers['set-cookie']).toBeUndefined();
+      } finally {
+        gate.open();
+        reset?.commit();
+        await reset?.done.catch(() => undefined);
+        passwordVerify.mockImplementation(realPasswordVerify);
+      }
+      expect(await liveTokens(u.id)).toBe(0);
+      expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).failedLogins).toBe(0);
+    });
+
+    it('TC-003: a 2FA verify whose session insert meets an uncommitted reset waits, is refused, and leaves no live refresh token (FR-102, FR-104)', async () => {
+      const u = await createUser({ role: UserRole.REVIEWER, totp: 'JBSWY3DPEHPK3PXP' });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      const gate = makeGate();
+      let reached = false;
+      totpVerify.mockImplementationOnce(async () => {
+        reached = true;
+        await gate.wait;
+        return true;
+      });
+      let reset: Awaited<ReturnType<typeof openReset>> | undefined;
+      try {
+        const inFlight = post('2fa/verify', { challengeToken, code: '123456' }).then((r) => r);
+        await until(() => reached);
+        reset = await openReset(u.id);
+        await reset.updated;
+        gate.open();
+        await Promise.race([inFlight, untilLockWaiter()]);
+        reset.commit();
+        await reset.done;
+        const res = await inFlight;
+        expect(res.status).toBe(401);
+        expect(res.headers['set-cookie']).toBeUndefined();
+      } finally {
+        gate.open();
+        reset?.commit();
+        await reset?.done.catch(() => undefined);
+      }
+      expect(await liveTokens(u.id)).toBe(0);
+      expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).failedLogins).toBe(0);
+    });
+
+    it('TC-098: a refresh that meets an uncommitted reset is refused and leaves no live refresh token (FR-104, FR-107)', async () => {
+      // Safe with or without FOR SHARE (the old row's lock also catches it); kept as the plain
+      // refused-refresh case. The rotation-first order below is the one FOR SHARE decides.
+      const u = await createUser();
+      const cookie = refreshCookie(await login(u.email).expect(200));
+      const reset = await openReset(u.id);
+      await reset.updated;
+      const inFlight = refresh(cookie).then((r) => r);
+      try {
+        await Promise.race([inFlight, untilLockWaiter()]);
+      } finally {
+        reset.commit();
+        await reset.done;
+      }
+      expect((await inFlight).status).toBe(401);
+      expect(await liveTokens(u.id)).toBe(0);
+    });
+
+    it('TC-098: a refresh rotation that is mid-transaction when the reset arrives is waited for, and the reset revokes the rotated token (FR-104, FR-107)', async () => {
+      const u = await createUser();
+      const cookie = refreshCookie(await login(u.email).expect(200));
+      const token = `rotation-reset-${u.id}-padding-padding`;
+      await prisma.user.update({
+        where: { id: u.id },
+        data: {
+          setPasswordTokenHash: sha256Hex(token),
+          setPasswordExpiresAt: new Date(Date.now() + 600_000),
+        },
+      });
+      const client = serviceClient();
+      const original = client.$transaction.bind(client);
+      const release = makeGate();
+      let paused = false;
+      const spy = jest
+        .spyOn(client, '$transaction')
+        .mockImplementationOnce((cb, opts) =>
+          original(async (tx) => {
+            const result = await cb(tx);
+            // Token inserted and old row flipped, nothing committed yet.
+            paused = true;
+            await release.wait;
+            return result;
+          }, opts),
+        );
+      try {
+        const rotation = refresh(cookie).then((r) => r);
+        await until(() => paused);
+        const resetting = request(app.getHttpServer())
+          .post(`${API}/password/reset`)
+          .send({ token, newPassword: NEW_PASSWORD })
+          .then((r) => r);
+        // The reset is stuck behind the rotation's lock (FOR SHARE on the user row, or, without
+        // it, the flipped old row).
+        await untilLockWaiter();
+        release.open();
+        expect((await rotation).status).toBe(200);
+        expect((await resetting).status).toBe(204);
+      } finally {
+        release.open();
+        spy.mockRestore();
+      }
+      expect(await liveTokens(u.id)).toBe(0);
+    });
+
+    it('TC-098: a refresh rotation that is mid-transaction when a non-key password update and revoke-all arrive is waited for, and the rotated token is revoked (FR-104, FR-107)', async () => {
+      const u = await createUser();
+      const cookie = refreshCookie(await login(u.email).expect(200));
+      const client = serviceClient();
+      const original = client.$transaction.bind(client);
+      const release = makeGate();
+      let paused = false;
+      const spy = jest
+        .spyOn(client, '$transaction')
+        .mockImplementationOnce((cb, opts) =>
+          original(async (tx) => {
+            const result = await cb(tx);
+            // Token inserted and old row flipped, nothing committed yet.
+            paused = true;
+            await release.wait;
+            return result;
+          }, opts),
+        );
+      try {
+        const rotation = refresh(cookie).then((r) => r);
+        await until(() => paused);
+        // Only non-key columns change here (the real route also clears an indexed column, whose
+        // lock the insert's foreign key already conflicts with). Without FOR SHARE the UPDATE
+        // passes and the revoke-all cannot see the uncommitted rotated token.
+        const reset = await openReset(u.id);
+        reset.commit();
+        await untilLockWaiter();
+        release.open();
+        expect((await rotation).status).toBe(200);
+        await reset.done;
+      } finally {
+        release.open();
+        spy.mockRestore();
+      }
+      expect(await liveTokens(u.id)).toBe(0);
+    });
+
+    it('TC-003: a recovery-code login refused because the password changed puts the code back and refunds the attempt (FR-102, FR-104)', async () => {
+      const u = await createUser({ role: UserRole.REVIEWER, totp: 'JBSWY3DPEHPK3PXP' });
+      const code = 'ABCDEFGHJKLMNPQR';
+      const other = 'STUVWXYZ23456723';
+      const hashes = [sha256Hex(code), sha256Hex(other)];
+      await prisma.user.update({ where: { id: u.id }, data: { recoveryCodeHashes: hashes } });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      const client = serviceClient();
+      const original = client.$transaction.bind(client);
+      // The reset lands after the challenge checks and before the session transaction starts.
+      const spy = jest.spyOn(client, '$transaction').mockImplementationOnce(async (cb, opts) => {
+        await resetPasswordOf(u.id);
+        return original(cb, opts);
+      });
+      let res: request.Response;
+      try {
+        res = await post('2fa/verify', { challengeToken, code });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(res.status).toBe(401);
+      expect(res.headers['set-cookie']).toBeUndefined();
+      const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      expect([...row.recoveryCodeHashes].sort()).toEqual([...hashes].sort());
+      expect(row.failedLogins).toBe(0);
+      expect(await prisma.refreshToken.count({ where: { userId: u.id } })).toBe(0);
+      expect(
+        await prisma.auditLog.count({ where: { actorId: u.id, action: 'AUTH_RECOVERY_CODE_USED' } }),
+      ).toBe(0);
     });
 
     it('TC-098: forgot-password logs a fixed warning, without the email, when the limiter store is down', async () => {
