@@ -265,6 +265,15 @@ else is rescued, so:
 - The run methods return a native `Promise` for a returned query, never a `PrismaPromise`
   (`Scoped<T>` in `org-context.ts`).
 
+## `upsert` in an org scope is not a native upsert
+
+In system scope (and on the plain client) `upsert` is one `INSERT ... ON CONFLICT DO UPDATE`. In
+an org scope the org filter on `where` stops Prisma using it: it becomes `BEGIN`, a `SELECT`, an
+`INSERT` or an `UPDATE`, a re-read `SELECT` and `COMMIT` (5 or 6 statements), and two concurrent
+upserts of a missing row can raise `P2002`. `auth-bootstrap.spec.ts` pins the difference. Hot
+ingest paths (events, keystroke batches, media chunks) should use `createMany({ skipDuplicates: true })`,
+which stays one statement, and be ready to retry on `P2002` elsewhere.
+
 ## Rules for services (from the follow-ups)
 
 - Look a session up from its invitation with

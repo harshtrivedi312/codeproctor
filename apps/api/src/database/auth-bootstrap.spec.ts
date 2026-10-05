@@ -641,6 +641,34 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
       expect(await measured(get)).toEqual(bare);
     });
 
+    it('NFR-04 upsert is the one operation whose statements differ: native in system scope, SELECT then INSERT or UPDATE in an org scope', async () => {
+      // The org filter on the where stops Prisma using INSERT ... ON CONFLICT. This is expected, and
+      // documented in the README (S5): more statements, and a possible P2002 under concurrency.
+      const email = 'upsert-statements@example.test';
+      const upsert = (c: PrismaClient): Promise<unknown> =>
+        c.candidate.upsert({
+          where: { orgId_email: { orgId: A.orgId, email } },
+          create: { orgId: A.orgId, email, fullName: 'Created' },
+          update: { fullName: 'Updated' },
+        });
+      const native = await statementsOf(() => system(() => upsert(scoped())));
+      expect(native).toHaveLength(1);
+      expect(native[0]?.query).toContain('ON CONFLICT');
+      // The row now exists. First an insert (row removed), then an update.
+      for (const phase of ['insert', 'update']) {
+        if (phase === 'insert') await owner.candidate.deleteMany({ where: { email } });
+        const inOrg = await statementsOf(() =>
+          orgContext.runInOrg(A.orgId, () => upsert(scoped())),
+        );
+        const text = inOrg.map((s) => s.query).join('\n');
+        expect({ phase, native: text.includes('ON CONFLICT') }).toEqual({ phase, native: false });
+        expect(inOrg.length).toBeGreaterThan(native.length);
+        expect(text).toContain('SELECT');
+        expect(text).toContain(phase === 'insert' ? 'INSERT INTO' : 'UPDATE');
+      }
+      await owner.candidate.deleteMany({ where: { email } });
+    });
+
     it('NFR-04 $connect sends no statement', async () => {
       const fresh = createPrismaClient(db.appUserUrl);
       try {
