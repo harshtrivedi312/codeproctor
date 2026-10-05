@@ -286,7 +286,7 @@ Decisions taken by the Delivery Lead under the owner's delegation (order, priori
 | ID | Item | Why it is the owner's |
 | --- | --- | --- |
 | P-01 | Accept or reject ADR 0011 (2FA re-authentication, PR #31) and ADR 0012 (generated OpenAPI as the single source of truth, PR #33) | Accepting an ADR |
-| P-02 | PR #34: CLAUDE.md rules 16 and 18 (Delivery Lead owns the status docs) | Change to the shared rules |
+| P-02 | PR #34: CLAUDE.md rules 16 and 18 (Delivery Lead owns the status docs). **Owner requested it directly in the hub session; the hub merges it on green (reviewed head c558a6f). No owner action needed.** | Change to the shared rules (already approved) |
 | P-03 | FU-BE-24: a known staff email can be kept locked out by 5 failed logins (FR-101 lockout as written). Changing this changes FR-101 | Requirement / security trade-off |
 | P-04 | B-05 Legal pilot entry items (unchanged) | Legal |
 | P-05 | Production CSP: allow `'wasm-unsafe-eval'` (never `'unsafe-eval'`), only on the candidate test route, so that MediaPipe, onnxruntime and the tfjs wasm backends run. Hub recommends yes, with a CSP test proving the directive is absent elsewhere | Security trade-off that loosens CSP |
