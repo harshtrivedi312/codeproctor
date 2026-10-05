@@ -2,12 +2,12 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Proposed** 2026-10-05. The owner accepts or amends. "(owner decision C-xx / D-xx)" marks what docs/compliance/decisions.md or status.md section 9 already decides. "(architect detail)" marks what this ADR adds, which the owner must confirm. "**Not verified**" marks external facts the architect could not confirm; section 10.1 lists what was checked and how. Owner questions are in section 11. |
+| Status | **Proposed** 2026-10-05. The owner accepts or amends. "(owner decision C-xx / D-xx)" marks what docs/compliance/decisions.md or status.md section 9 already decides. "(architect detail)" marks what this ADR adds, which the owner must confirm. "**Not verified**" marks external facts the architect could not confirm; section 10.1 lists what was checked and how. Owner questions are in section 13. Revised 2026-10-05 after review round 1 (blockers B1 to B4: host IAM and access, CI runner rules, egress, API-to-Judge0 TLS). |
 | Author | architecture hub (task ARC-05, Judge0 part) |
 | Decides | Where Judge0 CE runs in each environment and on what host; its network isolation, limits, authentication, secrets and patching; how long Judge0 keeps candidate code and test input; the load and security spike with pass/fail criteria; the interface BE-05 builds against |
 | Does not decide | The rest of ARC-05 (the AWS layout ADR): RDS versus Postgres on EC2, S3 bucket settings, backups, Cloudflare Pages and CSP (R-08), the cookie domain (Q-44), the vault, the egress path of the AWS subnets. Those stay open in ADR 0001 OI-5 |
-| Serves | FR-502, FR-503, FR-203, FR-506; NFR-01, NFR-02, NFR-03, NFR-04, NFR-05, NFR-09; TC-040..TC-044, TC-012, TC-091, TC-093, TC-094 |
-| Builds on | ADR 0001 (TB-4, F3, C-4, C-5, C-11, section 7 "Judge0 host", OI-5), ADR 0004 section 9 (C-06, C-26, C-27), ADR 0009 (no staging or pilot credentials on developer machines, D-38), ADR 0013 (5.11 submit, CS-4.6 gate, CS-4.7 jobs, grading reconciler; owner question Q23 on branch `arc/adr-0013-proctor-transport`) |
+| Serves | FR-502, FR-503, FR-203, FR-506; NFR-01, NFR-02, NFR-03, NFR-04, NFR-05, NFR-09; TC-040..TC-044, TC-012, TC-091, TC-094. (TC-093, the OWASP scan of staging, is not served here: Judge0 is never internet-facing) |
+| Builds on | ADR 0001 (TB-4, F3, C-4, C-5, C-11, section 7 "Judge0 host", OI-5), ADR 0004 section 9 (C-06, C-26, C-27), ADR 0009 (no staging or pilot credentials on developer machines, D-38), ADR 0013 (**Proposed**; owner decision C-23 accepts it once the hub reports a clean security review: 5.11 submit, CS-4.6 gate, CS-4.7 jobs, grading reconciler; owner question Q23 is on branch `arc/adr-0013-proctor-transport`, not yet on main). Where this ADR relies on ADR 0013, it relies on the Proposed text and changes with it |
 | Amends (on acceptance) | PA-07 / DEP-03 scope and architecture.md Deployment (dedicated Judge0 host, section 3); ADR 0001 OI-5 (Judge0 part decided); the placeholder `RunResult` contract (section 8.3, through a hub PR to packages/shared) |
 
 ## 1. Context
@@ -28,11 +28,13 @@
 | 3 | Pilot and production host | A **dedicated Judge0 EC2 instance** in us-east-1, separate from the app host, with no IAM role holding data access. Current-generation x86 compute-optimized class (c7i, c6i or c7a); start at 8 vCPU / 16 GiB and size from the spike | D-04, C-03 (owner); dedicated host: architect detail, **owner question 1** |
 | 4 | Staging | Same topology as the pilot, on smaller instances (recommended). Fallback: Judge0 on the staging VM, same Compose networks | D-10, D-11 (owner); topology: **owner question 2** |
 | 5 | Local dev and CI | No Judge0 on the Macs. Unit tests use a fake Judge0. Real-Judge0 tests (TC-042..TC-044, TC-012) run on an owner-provisioned x86 host registered as a self-hosted CI runner (`judge0-x86`), which is also the spike host | architect detail, **owner question 6** |
-| 6 | Network | The Judge0 workers sit on a Compose network with `internal: true`, so they have no route out. Only the Judge0 server is reachable, only on port 2358, only from apps/api. Networking inside the sandbox is off and cannot be turned on per request | TB-4 (ADR 0001); details: architect detail |
+| 6 | Network | The Judge0 workers sit on a Compose network with `internal: true`, so they have no route out. Only a TLS terminator in front of the Judge0 server is reachable, only from apps/api. Networking inside the sandbox is off and cannot be turned on per request. The Judge0 security group denies outbound by default; patching goes through an allowlisting proxy or a rebuilt AMI. No data-store security group admits the Judge0 security group (section 3.7, binding on the layout ADR) | TB-4 (ADR 0001); details: architect detail |
+| 6a | Transport | apps/api reaches Judge0 over **TLS 1.2+** only: Caddy on the Judge0 host terminates TLS with a per-environment certificate from a private CA, and apps/api pins that CA and checks the hostname (section 4.3) | NFR-04; option: architect detail |
+| 6b | Host IAM and access | No instance profile on the Judge0 host. Admin access through EC2 Instance Connect Endpoint. If SSM is ever needed, a custom least-privilege policy with explicit denies replaces `AmazonSSMManagedInstanceCore`. No secret ever goes through EC2 user-data (section 3.5) | architect detail |
 | 7 | Auth | `AUTHN_TOKEN` on every call (`X-Auth-Token`), and `AUTHZ_TOKEN` (`X-Auth-User`) for DELETE. Per environment, from the vault or GitHub Actions secrets, never on developer machines or in agent sessions | D-38, ADR 0009 (owner); tokens: architect detail |
 | 8 | Data retention | Expected output is never sent to Judge0. apps/api deletes each Judge0 submission right after reading its result. A purge on the Judge0 host removes anything older than 1 hour. Judge0's database is never backed up | architect detail; answers ADR 0013 Q23 as recommended, **owner question 3** |
 | 9 | Interface | Async batch submit and poll with backoff, no callbacks and no `wait=true`. One Judge0 submission per test case. apps/api compares output itself | architect detail |
-| 10 | Failure mode | Run answers 503 `EXECUTION_UNAVAILABLE` and does not use up the rate limit. Submit never calls Judge0 (ADR 0013 5.11). Grading retries; an infrastructure error never scores a test as failed | ADR 0013 (accepted); rest: architect detail |
+| 10 | Failure mode | Run answers 503 `EXECUTION_UNAVAILABLE`. The run slot is given back only when the breaker refuses the run before any Judge0 call (an FR-502 deviation, **owner question 9**). Submit never calls Judge0 (ADR 0013 5.11). Grading retries a bounded number of times, then sends the question to manual review with an alert; an infrastructure error never scores a test as failed | ADR 0013 (Proposed, C-23); rest: architect detail |
 
 ## 3. Where Judge0 runs
 
@@ -50,9 +52,9 @@
 | Environment | Where | Instance class | OS and kernel | Data | Marker |
 | --- | --- | --- | --- | --- | --- |
 | Local (Apple silicon) | **No Judge0.** apps/api unit and contract tests use a fake Judge0 HTTP server that BE-05 writes (section 8.4) | — | — | — | architect detail |
-| CI and spike | Owner-provisioned EC2 x86 host `judge0-x86` in us-east-1: a self-hosted GitHub Actions runner plus Judge0. Stopped when idle | 4 vCPU / 8 GiB compute-optimized (c7i.xlarge class); upsized for the load spike | Ubuntu 22.04, cgroup v1, pinned kernel | Synthetic only. Its tokens are CI-only values | architect detail; owner question 6 |
+| CI and spike | Owner-provisioned EC2 x86 host `judge0-x86` in us-east-1: a self-hosted GitHub Actions runner plus Judge0, under the runner rules in section 3.6. Stopped when idle | 4 vCPU / 8 GiB compute-optimized (c7i.xlarge class); upsized for the load spike | Ubuntu 22.04, cgroup v1, pinned kernel | Synthetic only. Its tokens are CI-only values | architect detail; owner question 6 |
 | Staging | Recommended: its own Judge0 instance beside the staging VM, so the red team (QA-02) attacks the pilot topology. Fallback: on the staging VM | 2 vCPU / 4 GiB (c7i.large class) | as above | Synthetic only (D-10) | D-10 (owner); topology: owner question 2 |
-| Pilot | Dedicated Judge0 instance in the pilot VPC, us-east-1 | Start at c7i.2xlarge class (8 vCPU / 16 GiB); the spike picks between that and 16 vCPU | as above | Real candidate code, deleted per section 6 | C-03 (owner); size: architect detail |
+| Pilot | Dedicated Judge0 instance in the pilot VPC, us-east-1 | Start at c7i.2xlarge class (8 vCPU / 16 GiB); the spike picks between that and 16 vCPU | as above | Real candidate code, deleted per section 6. The pilot-size instance used for spike S5 is never promoted as it is: the pilot Judge0 host is built fresh from a clean AMI with pilot-only secrets before any real data (D-10: no staging or spike state is reused) | C-03, D-10 (owner); size and rebuild: architect detail |
 | Production | Same as the pilot. More capacity means a bigger instance first; more than one Judge0 host needs a later ADR, because each host has its own queue and database | from pilot measurements | as above | as pilot | architect detail |
 
 ### 3.3 Options rejected for local dev (Apple silicon)
@@ -62,7 +64,7 @@
 | Docker Desktop with amd64 emulation | Docker Desktop's Linux VM runs cgroup v2, and Judge0 1.13.1 needs v1. Judge0 says it "has only been tested on Linux", and the same failure is reported on WSL2 (cgroup v2 only). Also slow under emulation. **Not tried on the owner's machine**; expected to fail |
 | Colima or UTM with a full x86 Ubuntu 22.04 VM | Works in principle, but full emulation is 5 to 20 times slower, so timing tests (TC-043, TLE) are unreliable. Optional for the owner; not required by any task |
 | GitHub-hosted `ubuntu-22.04` runners | Reported to boot with cgroup v2, and boot parameters cannot be changed there (**not verified**; the spike confirms it in one short job, S0 below) |
-| isolate 2.x (cgroup v2) or a community Judge0 fork | isolate 2.0 (2024-02-28) runs only on cgroup v2, but Judge0 1.13.1 bundles the v1-era isolate, and Judge0's cgroup v2 issue has been open since 2023-08-23. A fork would be ours to audit and patch. Revisit before production (section 9, R-new-3) |
+| isolate 2.x (cgroup v2) or a community Judge0 fork | isolate 2.0 (2024-02-28) runs only on cgroup v2, but Judge0 1.13.1 bundles the v1-era isolate, and Judge0's cgroup v2 issue has been open since 2023-08-23. A fork would be ours to audit and patch. Revisit before production (section 11, R-new-3) |
 
 ### 3.4 OS choices
 
@@ -78,14 +80,40 @@
 | Requirement | Value |
 | --- | --- |
 | Boot | `systemd.unified_cgroup_hierarchy=0` in `GRUB_CMDLINE_LINUX`, then reboot. A boot check (systemd unit or deploy step) refuses to start Judge0 unless `/sys/fs/cgroup/memory/memory.use_hierarchy` exists and `stat -fc %T /sys/fs/cgroup` is `tmpfs` (cgroup v1) |
-| Kernel | Pinned with `apt-mark hold` to the version that passed the spike. A kernel change re-runs spike stages S1 to S3 on the CI host first |
+| Kernel | Pinned with `apt-mark hold` to the version that passed the spike. A kernel change re-runs spike stages S1 to S3 on the CI host first. **Patch deadline:** after a kernel security notice (Ubuntu USN) for the pinned line, S1 to S3 run on the CI host within 3 working days, and the new kernel reaches staging and then the pilot outside test windows within 7 days of the notice (14 days for low severity). If S1 to S3 fail, the owner decides between running unpatched with the CVE recorded, or pausing test windows |
+| Other packages | `unattended-upgrades` stays on for security updates of everything except the held kernel and the pinned Docker Engine |
 | Docker Engine | Pinned version. Docker Engine 29 deprecated cgroup v1 but supports it until at least May 2029 on a maintained branch |
 | Privileged | `privileged: true` on the Judge0 worker containers, as upstream ships it. Upstream also marks the server privileged; the spike tests the server without it (S1), and the flag is dropped if that works |
-| IMDS | IMDSv2 required, hop limit 1, so containers cannot reach instance metadata. **No instance profile** with S3, KMS, SES or Secrets access on the Judge0 host. If SSM Session Manager or the CloudWatch agent need a role, it holds only those permissions |
+| IMDS | IMDSv2 required, hop limit 1, so containers cannot reach instance metadata |
+| IAM | **No instance profile** on the Judge0 host (the default). The AWS-managed `AmazonSSMManagedInstanceCore` policy is **not** used: it allows `ssm:GetParameter` and `ssm:GetParameters` on `Resource: "*"` (verified, section 10.1), so an escape could read every SSM parameter in the account. If SSM or the CloudWatch agent is ever needed, a custom policy grants only the `ssmmessages:*`, `ec2messages:*` and `ssm:UpdateInstanceInformation` actions it needs (plus `logs:PutLogEvents` on the one log group) and **explicitly denies** `ssm:GetParameter*`, `secretsmanager:*`, `kms:Decrypt`, `s3:*` and `ses:*`. That policy is an owner-approved change, reviewed by the architect |
+| Admin access | EC2 Instance Connect Endpoint (no public IP, no SSM role, short-lived keys pushed per session). The owner or DEP uses it; agents never do |
+| Secrets delivery | **No secret ever goes through EC2 user-data** (Judge0 tokens, the TLS key, the Judge0 Postgres and Redis passwords): any root process on the host, including one that escaped the sandbox, can read user-data from IMDS. The deploy job writes `judge0.conf` and the TLS key over the admin path, mode 0600, owner root |
 | Disk | EBS encrypted at rest. The Judge0 Postgres volume is excluded from every snapshot and backup plan |
-| Inbound | Security group: TCP 2358 only from the app host's security group. No public inbound. Administrative access through the same path DEP-01 picks for the app host |
-| Outbound (host) | Only what patching and image pulls need, through the egress path the layout ADR picks. Judge0 itself needs no outbound: callbacks and telemetry are off (section 4) |
+| Inbound | Security group: the TLS port (section 4.3) only from the app host's security group, plus the EC2 Instance Connect Endpoint's security group on 22. No public inbound |
+| Outbound (host) | Deny by default (section 3.7). Judge0 itself needs no outbound: callbacks and telemetry are off (section 4) |
 | Clock | NTP (chrony), as ADR 0013 requires for every host |
+
+### 3.6 Rules for the `judge0-x86` self-hosted runner (architect detail; binding on QA-01B and DEP-01)
+
+| Rule | Detail |
+| --- | --- |
+| Dedicated label and group | The runner carries only the label `judge0-x86` and sits in its own runner group. That group is limited to **one workflow file**, the real-Judge0 test workflow (TC-042..TC-044, TC-012, BE-05 integration). No other workflow can schedule on it |
+| No deploy or environment secrets | The workflow uses no GitHub environment. No staging, pilot or production secret, no deploy key, no AWS credential and no `MIGRATION_DATABASE_URL` is ever available to it (ADR 0009, D-38). It holds only the CI-only Judge0 tokens and the CI TLS material |
+| Deploy workflows never target it | Deploy jobs (DEP-01, DEP-03) run on GitHub-hosted runners or their own path, never on `judge0-x86` |
+| Never fork PRs | The workflow runs on `push` to branches of this repository and on `pull_request` only when the head repository is this repository, **whatever the repository's visibility**. Fork PRs never reach the runner |
+| Ephemeral | Just-in-time or `--ephemeral` registration, one job per registration. The host is rebuilt from a clean AMI at least weekly, and at once if any test shows a sign of sandbox escape |
+| No AWS role | Same IAM rules as section 3.5: no instance profile |
+| Network | Same egress rules as section 3.7. It never sits in the staging or pilot VPC |
+
+### 3.7 Egress and data-store isolation (architect detail; binding on the layout ADR)
+
+| Rule | Detail |
+| --- | --- |
+| Outbound deny by default | The Judge0 host's security group has **no** default `0.0.0.0/0` outbound rule. It allows only DNS and NTP to the VPC resolver and time service, and the patch path below |
+| Patch path, option 1 (default) | An allowlisting forward proxy (for example Squid or a managed equivalent, chosen in the layout ADR) that allows only named hosts: the Ubuntu archive and security mirrors, the container registry that serves the pinned Judge0 and Caddy images, and the Docker apt repository. Everything else is refused and logged |
+| Patch path, option 2 | No internet at all: patch by building a new AMI elsewhere and replacing the instance. DEP-03 may choose it for the pilot |
+| Data stores never admit Judge0 | The RDS (or EC2 Postgres), app-host, Redis and VPC-endpoint security groups **never** list the Judge0 security group as a source. A sandbox escape on the Judge0 host has no network path to any data store or AWS API endpoint |
+| Binding | The layout ADR (rest of ARC-05) must keep these rules; changing them needs an amendment of this ADR |
 
 ## 4. Network isolation and Judge0 configuration
 
@@ -94,9 +122,9 @@
 | Network | Members | Property |
 | --- | --- | --- |
 | `judge0-internal` | judge0 server, judge0 workers, judge0 db, judge0 redis | `internal: true`: no route outside the network, no published ports |
-| `judge0-edge` | judge0 server only (dedicated host), or judge0 server plus `api` (co-located fallback) | The server publishes 2358 on the host's **private** IP only (dedicated host). Workers are never on it, so a sandbox escape into a worker container cannot reach the API |
+| `judge0-edge` | judge0 server and `judge0-tls` (Caddy); in the co-located fallback also `api` | Port 2358 is never published. Only `judge0-tls` publishes its TLS port, on the host's **private** IP (dedicated host). Workers are never on this network, so a sandbox escape into a worker container cannot reach the API |
 
-Defence in depth for TC-042 has three layers: (1) the sandbox has no network namespace access (`ENABLE_NETWORK=false`, `ALLOW_ENABLE_NETWORK=false`); (2) workers are on an internal network; (3) the host security group allows no outbound to the internet from the Judge0 host except patching. The Python worker never calls Judge0; only apps/api does (HTTP routes and its BullMQ Node consumers) (TB-4, owner-accepted ADR 0001).
+Defence in depth for TC-042 has three layers: (1) the sandbox has no network namespace access (`ENABLE_NETWORK=false`, `ALLOW_ENABLE_NETWORK=false`); (2) workers are on an internal network; (3) the host security group denies outbound by default (section 3.7). The Python worker never calls Judge0; only apps/api does (HTTP routes and its BullMQ Node consumers) (TB-4, owner-accepted ADR 0001).
 
 ### 4.2 `judge0.conf` settings
 
@@ -108,7 +136,7 @@ Rendered on the host at deploy time from secrets; the file is mode 0600 and neve
 | `ENABLE_CALLBACKS` | true | **false** | Judge0 never makes outbound requests (SSRF surface) |
 | `ENABLE_WAIT_RESULT` | true | **false** | `wait=true` ties up server threads; we poll |
 | `ENABLE_SUBMISSION_DELETE` | false | **true** | Delete after read (section 6) |
-| `AUTHN_TOKEN` / `AUTHZ_TOKEN` | empty (off) | set, 32+ random bytes each, per environment | Section 5 |
+| `AUTHN_TOKEN` / `AUTHZ_TOKEN` | empty (off) | set per environment (format in section 4.4) | Section 5 |
 | `ENABLE_COMPILER_OPTIONS` / `ENABLE_COMMAND_LINE_ARGUMENTS` | true / true | **false / false** | We never use them; less attack surface |
 | `JUDGE0_TELEMETRY_ENABLE` | true | **false** | No instance id or version leaves the host (TELEMETRY.md) |
 | `CPU_TIME_LIMIT` / `MAX_CPU_TIME_LIMIT` (s) | 5 / 15 | 2 / 10 | Per-question value is sent on every submission (section 7) |
@@ -121,9 +149,29 @@ Rendered on the host at deploy time from secrets; the file is mode 0600 and neve
 | `ENABLE_BATCHED_SUBMISSIONS` / `MAX_SUBMISSION_BATCH_SIZE` | true / 20 | true / 20 | One batch per question run |
 | `COUNT` (workers) | 2 × nproc | nproc to start; the spike compares nproc and 2 × nproc | Timing stability under load |
 | `MAX_QUEUE_SIZE` | 100 | 500 to start; set from the spike | Judge0 answers 503 when full |
-| `ALLOW_IP` | empty | the app host's private IP (dedicated host) | Second check behind the security group |
+| `ALLOW_IP` | empty | the fixed address of `judge0-tls` on `judge0-edge` | Only Caddy may call the server. Caddy itself accepts only the app host's private IP (the `api` container's fixed address in the co-located fallback) through its `remote_ip` matcher, behind the security group |
 | `REDIS_PASSWORD` / `POSTGRES_PASSWORD` | must be set | random per environment | CVE-2024-29021 relied on a default password |
 | `USE_DOCS_AS_HOMEPAGE` | false | false | |
+
+### 4.3 Transport between apps/api and Judge0 (NFR-04: TLS 1.2+)
+
+Judge0 serves plain HTTP on 2358, and every call carries the auth token, candidate code and hidden-test stdin.
+
+| Option | For | Against | Verdict |
+| --- | --- | --- | --- |
+| a. **Caddy TLS terminator on the Judge0 host, private CA pinned by apps/api** | Works on any instance type and in the co-located fallback; one code path; we control it; Caddy is already in the stack (Apache 2.0) | A private CA and certificate per environment to issue and rotate | **Chosen** |
+| b. Nitro in-transit encryption between instance types that support it | No certificates to manage | Holds only when **both** the app host and the Judge0 host are in supported families, in the same VPC, and never across the co-located fallback or a proxy. That support list and its exact conditions are **not verified**. It is invisible to apps/api, so nothing fails if an unsupported type is chosen later | Rejected as the control; may be kept as an extra layer |
+| c. Plain HTTP inside the VPC | Simplest | Fails NFR-04 | Rejected |
+
+Rules for option a (architect detail):
+- A private CA per environment (staging, pilot, production, CI), created by the owner or DEP outside any agent session. The CA private key never sits on the Judge0 host or the app host; only the leaf certificate and key are on the Judge0 host (mode 0600), and only the CA certificate is in apps/api.
+- Caddy listens on 8443 on the private IP, accepts TLS 1.2 and 1.3 only, and proxies to `server:2358` on `judge0-edge`.
+- apps/api uses an HTTP client with `ca` set to the environment's CA certificate (the system trust store is not used for this client) and checks the hostname (`judge0.internal` or the host's private DNS name). `JUDGE0_URL` is `https://…:8443`; plain `http://` is refused at startup outside local tests.
+- Leaf certificates last at most 1 year and are rotated by the deploy job; the CA certificate is valid for 5 years.
+
+### 4.4 Token format
+
+`AUTHN_TOKEN` and `AUTHZ_TOKEN` are each 32 random bytes from a CSPRNG, encoded as 64 lowercase hex characters (header-safe). Whether Judge0 compares tokens in constant time is **not verified** (section 10.1). TLS and the private network are the main protection against a network-level guessing attack; Judge0 only ever listens behind Caddy.
 
 ## 5. Authentication and secrets
 
@@ -132,12 +180,14 @@ Rendered on the host at deploy time from secrets; the file is mode 0600 and neve
 | `JUDGE0_AUTH_TOKEN` (Judge0 `AUTHN_TOKEN`) | apps/api and the Judge0 host | Vault or GitHub Actions secrets; rendered into env on the hosts at deploy | architect detail |
 | `JUDGE0_AUTHZ_TOKEN` (Judge0 `AUTHZ_TOKEN`, for DELETE) | apps/api and the Judge0 host | as above | architect detail |
 | Judge0 Postgres and Redis passwords | Judge0 host only | as above; never in apps/api | architect detail |
+| TLS leaf key and certificate (section 4.3) | Judge0 host only; apps/api holds only the CA certificate (not a secret) | as above; the CA private key stays offline with the owner | architect detail |
 | Staging and pilot values of all of the above | never on developer machines or in agent sessions | GitHub Actions secrets and the servers | D-38, ADR 0009 (owner) |
 | CI-host values | CI runner host only | GitHub Actions secrets of the CI job | architect detail |
 | Local values | not needed (no local Judge0) | `.env.example` gets `JUDGE0_URL`, `JUDGE0_AUTH_TOKEN`, `JUDGE0_AUTHZ_TOKEN` as empty placeholders | architect detail |
 
 - Tokens go only in headers, never in the URL (Judge0 docs say the same).
 - Never log the tokens, source code, stdin, stdout of hidden tests, or Judge0 submission tokens (CLAUDE.md, ADR 0001 C-5). pino redaction covers `x-auth-token` and `x-auth-user`.
+- The Judge0 HTTP client's error serialiser strips request headers and request and response bodies. A failed call logs only the method, the path without query string, the HTTP status, the Judge0 status id and the duration. Judge0 response bodies are never logged, and neither are BullMQ `failedReason` values built from them (ADR 0013 CS-4.7).
 - Rotation: generate a new value, deploy it to Judge0 and apps/api in the same deploy, then restart both. Whether `AUTHN_TOKEN` accepts several values for a no-downtime rotation is **not verified**; until it is, rotate outside test windows.
 
 ## 6. Judge0's own data: retention and erasure (answers ADR 0013 Q23)
@@ -160,7 +210,7 @@ Rendered on the host at deploy time from secrets; the file is mode 0600 and neve
 | Purge backstop | A cron container on the Judge0 host runs every 10 minutes: `DELETE FROM submissions WHERE created_at < now() - interval '1 hour'` against Judge0's own database. Table and column names are checked in the spike (S4) |
 | Bound | Code and test input stay in Judge0 for seconds normally, and **at most 1 hour plus 10 minutes** |
 | Backups | Judge0's Postgres and Redis are never backed up or snapshotted. Upstream runs its Redis with `--appendonly no` |
-| Logs | Judge0 container logs never go to CloudWatch (C-32 covers our logs only). On the host they use the `local` driver with a small size cap. If the spike finds code or stdin in them (S4), the server's logging driver becomes `none` |
+| Logs | Judge0 container logs never go to CloudWatch (C-32 covers our logs only). The Judge0 server and worker containers use the Docker logging driver **`none`** by default. Only after spike S4 proves that neither writes request bodies, code, stdin or output may they move to the `local` driver with a small size cap. Health comes from the probe and apps/api metrics, not from Judge0 logs |
 | Disk residue | Deleted Postgres rows stay in data pages until autovacuum reuses them. The volume is encrypted (EBS) and never backed up. Recorded as a known limit, not a breach of the bound |
 
 **Effect on the clocks.** The C-06 erasure deadline (30 days), the C-26 results clock (1 year) and the C-27 face-image cap (90 days) need no Judge0 step: every Judge0 row is gone within about 70 minutes. Our own copy of the code (`submissions.source_code`, `session_questions.final_code`) is governed by ADR 0004 R-6 and R-10, unchanged (owner decisions C-06, C-26).
@@ -175,7 +225,7 @@ Rendered on the host at deploy time from secrets; the file is mode 0600 and neve
 | Processes and threads | 60 | section 4.2 |
 | Output | `MAX_FILE_SIZE` 1 MiB in the box; apps/api truncates each stream to 64 KiB before showing a Run result | architect detail |
 | Sample tests per Run | at most 10, one batch | architect detail |
-| Run rate | 1 per 5 s per session (Redis `SET NX PX 5000`), checked before anything else. A run that ends in 503 releases it | FR-502; release: architect detail |
+| Run rate | 1 per 5 s per session (Redis `SET NX PX 5000`). FR-502 says "per candidate"; a candidate has one live session at a time, so per session enforces it. Checked after the role, session and org guards and the open-section gate (ADR 0013 CS-4.6), and before any Judge0 call. The slot is released **only** when the breaker refuses the run before any Judge0 call. Once a batch was sent to Judge0, a 503 still uses up the slot, so a failing Judge0 cannot be hammered | FR-502; the release is an FR-502 deviation, architect detail, **owner question 9** |
 | In flight to Judge0 | A Redis counter caps executions in flight. Run may use the whole cap; grading and validation (FR-203) together use at most 25 % of it, so Run latency comes first during test windows | architect detail |
 | Poll | `GET /submissions/batch?tokens=…&base64_encoded=true&fields=token,status,stdout,stderr,compile_output,time,wall_time,memory,exit_code,exit_signal`, backoff 100 ms doubling to 1 s. Deadline: 15 s for Run, 120 s per batch for grading | architect detail |
 
@@ -195,7 +245,8 @@ interface ExecCase { id: string; stdin: string }
 interface ExecLimits { cpuMs: number; wallMs: number; memoryKb: number }
 interface CaseResult {
   caseId: string; outcome: CaseOutcome;
-  stdout?: string; stderr?: string; compileOutput?: string; // RUN and VALIDATE only, truncated
+  stdout?: string;        // every purpose, in memory only; see the rules below
+  stderr?: string; compileOutput?: string; // RUN and VALIDATE only, truncated
   timeMs: number | null; wallMs: number | null; memoryKb: number | null;
 }
 interface ExecutionService {
@@ -205,10 +256,12 @@ interface ExecutionService {
 ```
 
 - The caller decides `passed`: normalise both sides (trim trailing whitespace on each line and at the end, as backend.md Step 5 says) and compare with the expected output. Only `ok` can pass.
-- Language ids are read from `GET /languages` at startup and matched by name: Python 3.8.1, JavaScript (Node.js 12.14.0), Java (OpenJDK 13.0.1) on 1.13.1. Ids are not hard-coded, because the public ce.judge0.com service lists newer runtimes with other ids than the self-hosted 1.13.1 image. Startup fails if any of the three is missing.
+- **`stdout` handling.** For `GRADE`, `stdout` exists only in memory for that comparison and is dropped right after. It is never persisted (the ADR 0013 `SUBMIT` results shape is unchanged), never logged, and never put in a BullMQ return value or `failedReason`. For `RUN`, only sample-test output reaches the candidate, truncated (section 7). For `VALIDATE`, the validation report keeps pass/fail per variant and test, not output.
+- Language ids are read from `GET /languages` and matched by name: Python 3.8.1, JavaScript (Node.js 12.14.0), Java (OpenJDK 13.0.1) on 1.13.1. Ids are not hard-coded, because the public ce.judge0.com service lists newer runtimes with other ids than the self-hosted 1.13.1 image. The lookup is **lazy**, behind the breaker (section 9), and cached once it succeeds. apps/api **never fails to start** because Judge0 is unreachable: only Run, grading and validation fail, as section 9 describes. If Judge0 answers but one of the three languages is missing, that is a hard configuration error: the breaker stays open, every execution fails, and an alarm fires.
 - `source` and `stdin` are sent base64-encoded (`base64_encoded=true`).
 - No transaction is held while Judge0 runs (ADR 0013 "short transactions"). The `RUN` row (ADR 0013 CS-4.4) is written after the result.
 - **Grading** (`grade-session`, ADR 0013 CS-4.7): any `internal_error` is retried once for that case. If it fails again, the job throws and writes nothing; recovery follows ADR 0013 (the grading reconciler re-creates the flow for SUBMITTED sessions older than 10 minutes, every 5 minutes). A case is never scored as failed because of an infrastructure error. A `time_limit_exceeded` whose CPU time is below half the limit (wall-clock time out under contention) is also retried once.
+- **Retry cap for status 13 and 14.** Judge0 down (breaker open, timeouts, 5xx) is retried without limit, because the reconciler covers it. Status 13 (Internal Error) or 14 (Exec Format Error) on the **same** case, while Judge0 is otherwise healthy, can be deterministic, so it is capped: after 3 grading runs that end that way (counted in Redis per session question, TTL 7 days), `grade-session` stops running that question. It sets `scoring = 'MANUAL_PENDING'`, `score` NULL and a `scoring_note` saying execution failed, and fires an alarm. The session then grades normally and goes to UNDER_REVIEW (C-28), and the verdict is blocked until a person scores the question (ADR 0007 §5, as for short answers). Using MANUAL_PENDING for a coding question is new, with no schema change (**owner question 10**).
 
 ### 8.2 Judge0 status mapping (ids verified against `/statuses`)
 
@@ -237,9 +290,9 @@ BE-05 writes a fake that implements only the endpoints in use (`POST /submission
 
 | Failure | Behaviour | Marker |
 | --- | --- | --- |
-| Judge0 down or unreachable | A health probe (`GET /about`, 1 s timeout, every 15 s) sets a Redis breaker. While it is open, Run answers 503 `EXECUTION_UNAVAILABLE` at once. The candidate sees "The code runner is temporarily unavailable. Your code is saved and will be graded." Autosave, draft and submit keep working (submit never needs Judge0) | architect detail |
+| Judge0 down or unreachable | A health probe (`GET /about` over TLS, with `X-Auth-Token`, 1 s timeout, every 15 s) sets a Redis breaker; the probe also performs the lazy language lookup (8.1). While the breaker is open, Run answers 503 `EXECUTION_UNAVAILABLE` at once and gives the run slot back (section 7). The candidate sees "The code runner is temporarily unavailable. Your code is saved and will be graded." Autosave, draft and submit keep working (submit never needs Judge0) | architect detail |
 | Judge0 queue full (HTTP 503 from Judge0) | Same as down, for that request only | architect detail |
-| Grading during an outage | `grade-session` throws without writing scores. The grading reconciler re-creates the flow for SUBMITTED sessions older than 10 minutes, every 5 minutes, so grading resumes when Judge0 is back. A session stuck more than 1 hour raises the existing alert (ADR 0013, ADR 0004 9.4). While the breaker is open, the job may re-delay itself instead of failing (architect detail) | ADR 0013 (accepted) |
+| Grading during an outage | `grade-session` throws without writing scores. The grading reconciler re-creates the flow for SUBMITTED sessions older than 10 minutes, every 5 minutes, so grading resumes when Judge0 is back. A session stuck more than 1 hour raises the existing alert (ADR 0013, ADR 0004 9.4). While the breaker is open, the job may re-delay itself instead of failing (architect detail). Repeated status 13 or 14 on one case follows the cap in 8.1 | ADR 0013 (Proposed, C-23) |
 | End-of-window grading burst | Grading may run behind; it is not latency-bound. S5 sets the pass bound | architect detail |
 | Worker hang or one bad submission | The wall-time limit stops it; Judge0 restarts the worker container (`restart: always`) | upstream |
 | Cgroup or kernel drift after patching | The boot check (section 3.5) keeps Judge0 down, which looks like "Judge0 down" above. The CloudWatch alarm fires | architect detail |
@@ -249,15 +302,15 @@ Time lost to an outage is not credited automatically (owner question 7).
 
 ## 10. Spike plan (on `judge0-x86`, then on the pilot-size instance)
 
-Owner provisions the host; DEP runs the stages; the architect reviews results. Synthetic code and data only.
+Owner provisions the host; DEP runs the stages; the architect reviews results. Synthetic code and data only. The pilot-size instance used for S5 is discarded afterwards; the pilot Judge0 host is built fresh (section 3.2).
 
 | Stage | What | Pass criteria |
 | --- | --- | --- |
 | S0 | One job on a GitHub-hosted `ubuntu-22.04` runner: start Judge0, run hello world | Record the result only. If it works, CI may use hosted runners and owner question 6 shrinks |
 | S1 Bring-up | Ubuntu 22.04, cgroup v1, Judge0 1.13.1 by digest, section 4.2 settings. Hello world, stdin echo and a 1 s CPU loop in all three languages. Server tried without `privileged` | Cgroup v1 and `memory.use_hierarchy` present; 3/3 languages `Accepted`; `uname -r` recorded; per-language floor values recorded |
-| S2 Config | Request without a token; with a wrong token; with `enable_network: true`; with `callback_url`; with `wait=true`; DELETE without `X-Auth-User`; port 2358 probed from outside the VPC | 401, 401, network still off, callback never made, 400, 403, port closed |
+| S2 Config | Request without a token; with a wrong token; with `enable_network: true`; with `callback_url`; with `wait=true`; DELETE without `X-Auth-User`; ports 2358 and 8443 probed from outside the VPC and from a non-app host inside it; plain HTTP to 8443; TLS 1.1 to 8443; a certificate from another environment's CA presented to apps/api; from the host shell, HTTPS to a host not on the proxy allowlist; from the host and a worker container, TCP to the app host, the database and an AWS API endpoint | 401, 401, network still off, callback never made, 400, 403, ports closed, refused, refused, apps/api refuses, refused, all refused (section 3.7) |
 | S3 Abuse | The checklist below, each case run while a canary submission runs at the same time | Every expected result met; the canary's verdict is unchanged and its time is within 2 × idle; no host OOM-killer entries outside the box (`dmesg`); host stays responsive |
-| S4 Retention | Submit runs containing a marker string in the code and stdin; read; DELETE; wait for the purge | Judge0 `submissions` row count 0 after DELETE (or after the purge for undeletable ones); marker not found in Judge0 container logs or Redis keys; table and column names for the purge confirmed |
+| S4 Retention | Submit runs containing a marker string in the code and stdin; read; DELETE; wait for the purge | Judge0 `submissions` row count 0 after DELETE (or after the purge for undeletable ones); with the `local` driver switched on for this test only, marker not found in Judge0 container logs (server and workers), Redis keys, or the isolate box directories inside the worker containers after the run (the box root path is recorded in S1); table and column names for the purge confirmed. Only if all pass may the logging driver move from `none` to `local` (section 6.2) |
 | S4b (optional) | Judge0 Postgres on tmpfs; restart the stack | Judge0 starts with an empty database and passes S1 |
 | S5 Load | k6 (scripts shared with BE-15A) against the API's Run route and directly against Judge0: profile of section 7 for 30 minutes at 200 virtual candidates; TC-091 burst of 50 concurrent runs; then 200 sessions submitted at once and graded (4 coding questions, 10 hidden tests each); then a ramp until p95 passes 5 s | Run p95 < 5 s end to end (NFR-01) and TC-091 p95 < 5 s; 0 `internal_error`; reference solutions give the same verdicts under load as at idle; Judge0 host CPU < 80 % sustained and memory headroom > 25 %; API p95 for other routes < 300 ms; grading backlog drained within 30 minutes; the ramp's knee recorded and used to size the pilot instance |
 
@@ -291,13 +344,18 @@ Owner provisions the host; DEP runs the stages; the architect reviews results. S
 | Judge0 cgroup v2 issue open since 2023-08-23; issue #554 (24.04, kernel 6.11) | Verified (search results and the issue page) |
 | isolate 2.0 (2024-02-28) needs cgroup v2 | Verified (isolate NEWS, via search) |
 | systemd 258 removed cgroup v1; Docker Engine 29 deprecated v1, supported until at least May 2029 | Verified (systemd v258 release notes, Docker release notes, via search) |
+| AWS-managed `AmazonSSMManagedInstanceCore` (policy v2) allows `ssm:GetParameter` and `ssm:GetParameters` on `Resource: "*"` | Verified (AWS Managed Policy Reference, policy JSON read directly) |
+| EC2 Instance Connect Endpoint gives SSH to instances without a public IP or an instance role | **Not rechecked today** (AWS feature since 2023) |
+| Nitro in-transit encryption: which instance families support it, and under what conditions | **Not verified**; not relied on (section 4.3) |
+| Judge0 compares `AUTHN_TOKEN` and `AUTHZ_TOKEN` in constant time | **Not verified** (section 4.4) |
 | Ubuntu 22.04 standard support ends April 2027 | **Not rechecked today** |
 | Docker Desktop on Apple silicon cannot run the sandbox; GitHub-hosted runners boot cgroup v2 | **Not verified** (S0 checks the second) |
 | `AUTHN_TOKEN` accepts several tokens; Judge0 recreates its schema on an empty database; server works unprivileged; SIGXFSZ for output over the limit; memory heuristic; Judge0 logs contain request bodies; the purge's table and columns; the Java floor; instance prices | **Not verified**; each is a spike stage |
 
 ## 11. Consequences
 
-- **Positive.** A sandbox escape on the pilot reaches a host with no candidate media, no app secrets and no data-access role. Judge0 keeps candidate code for minutes, not forever, and never sees expected outputs. Submit and autosave keep working when Judge0 is down. BE-05 can start now against the fake.
+- **Positive.** A sandbox escape on the pilot reaches a host with no stored candidate media, no app secrets, no IAM role and no network path to any data store. Judge0 keeps candidate code for minutes, not forever, and never sees expected outputs. Submit and autosave keep working when Judge0 is down. BE-05 can start now against the fake.
+- **Residual risk (R-new-5).** The Judge0 host still holds candidate data and question-bank data while it works: in-flight candidate code and hidden-test stdin, normally for seconds and at most about 70 minutes (section 6.2), plus the Postgres disk residue. An escape could read them, and through the Judge0 tokens and TLS key on the host it could read or delete other in-flight submissions. It cannot reach stored media, the database or the app secrets. Accepted for the pilot, for the owner to confirm with question 1.
 - **Negative and risks** (for the Delivery Lead to register):
   - R-new-1: one more instance per environment, and its patching.
   - R-new-2: Judge0 has had no release since April 2024. Its runtimes are end-of-life (Python 3.8, Node 12, OpenJDK 13), which limits language features for candidates (FU-DB-39 already writes seeds for them) and means unpatched runtime bugs inside the sandbox.
@@ -311,14 +369,14 @@ Owner provisions the host; DEP runs the stages; the architect reviews results. S
 | --- | --- |
 | backend-engineer BE-05 | ExecutionService (8.1), status mapping (8.2), fake Judge0 (8.4), delete-after-read, admission counter, breaker, language lookup by name; Judge0 in `infra/docker-compose.yml` under a Compose profile `judge0` with the networks of 4.1 (not started by `pnpm dev:infra`; Linux x86 only); `infra/judge0/` conf template with placeholders only; validate job (FR-203, TC-012); TC-042..TC-044 on `judge0-x86` |
 | backend-engineer BE-04 | The limit caps in section 7 in the question DTO |
-| backend-engineer BE-07, BE-11 | Run route: 503 `EXECUTION_UNAVAILABLE`, rate-limit release, `RUN` row after the result; `grade-session` retry rules (8.1) |
+| backend-engineer BE-07, BE-11 | Run route: 503 `EXECUTION_UNAVAILABLE`, slot release only on a breaker short-circuit, `RUN` row after the result; `grade-session` retry rules and the status 13/14 cap with MANUAL_PENDING (8.1); in-memory-only `stdout` for grading |
 | backend-engineer BE-15A | k6 scripts for S5 |
-| backend-engineer DEP-01, DEP-03 (architect review, D-26) | Hosts per 3.2 and 3.5, `judge0.conf` per 4.2 rendered from secrets, purge cron, logging, boot check, alarms (section 9), runbook pages: kernel hold, cgroup check, Judge0 patching, token rotation. DEP-01 still needs the layout ADR for the other ARC-05 items |
+| backend-engineer DEP-01, DEP-03 (architect review, D-26) Hosts per 3.2 and 3.5 (no instance profile, EC2 Instance Connect Endpoint, no secrets in user-data), egress per 3.7, Caddy TLS and the private CA per 4.3, `judge0.conf` per 4.2 rendered from secrets, purge cron, `none` logging driver, boot check, alarms (section 9), runbook pages: kernel hold and patch deadline, cgroup check, Judge0 patching, token and certificate rotation. DEP-01 still needs the layout ADR for the other ARC-05 items, and that ADR must keep section 3.7 |
 | backend-engineer DEP-02 | Checklist: spike results, R-new-2 and R-new-3, Judge0 data bound |
-| qa-engineer QA-01B, QA-02 | S3 checklist in the red team; TC-091 in the load run; propose TCs for `output_limit_exceeded`, 503 on Run and "never scored as failed on internal error" |
+| qa-engineer QA-01B, QA-02 | The real-Judge0 workflow under the runner rules of 3.6 (with the owner, who changes the runner group settings); S3 checklist in the red team; TC-091 in the load run; propose TCs for `output_limit_exceeded`, 503 on Run and "never scored as failed on internal error" |
 | frontend-engineer | Run panel shows the new outcomes and the 503 message (after the shared change) |
 | architecture hub | After acceptance: `RunResult` change in packages/shared and the generated contract; architecture.md Deployment rows; ADR 0001 OI-5 (Judge0 part decided); ADR 0013 Q23 answered; the layout ADR (rest of ARC-05) |
-| Delivery Lead | status.md R-01 mitigation and R-new-1..4; build-plan ARC-05 split (this ADR, then the layout ADR); PA-07 scope wording if owner question 1 is accepted |
+| Delivery Lead | status.md R-01 mitigation and R-new-1..5; build-plan ARC-05 split (this ADR, then the layout ADR); PA-07 scope wording if owner question 1 is accepted. **retention-schedule.md (C-05) and dpia.md** list the transient copy of candidate code and test input in Judge0 (seconds, at most about 70 minutes, never backed up) and the Postgres disk residue (section 6.2), for owner approval |
 | db-engineer, integrity-engineer | No change. No schema change |
 
 ## 13. Owner questions
@@ -328,6 +386,8 @@ Owner provisions the host; DEP runs the stages; the architect reviews results. S
 3. **ADR 0013 Q23**: delete Judge0 submissions right after reading, purge at 1 hour, never back up (recommended), instead of keeping them with the 1-year results tier?
 4. **Runtimes**: are Python 3.8.1, Node.js 12.14.0 and OpenJDK 13.0.1 acceptable for the pilot? The alternative is a custom compilers image (new ADR, our maintenance).
 5. **Before production**: Ubuntu Pro (ESM) after April 2027, or plan the move to a cgroup v2 sandbox (R-new-3)?
-6. **CI and spike host**: please provision one EC2 x86 instance in us-east-1 (Ubuntu 22.04 amd64, about 4 vCPU / 8 GiB, no instance profile with data access, IMDSv2 hop limit 1) and register it as a self-hosted runner for this repository only. Is the repository private? If it is public, the runner must never run pull requests from forks. No credentials go into any agent session; DEP and the owner do this.
+6. **CI and spike host**: please provision one EC2 x86 instance in us-east-1 (Ubuntu 22.04 amd64, about 4 vCPU / 8 GiB, **no instance profile**, IMDSv2 hop limit 1, egress per section 3.7, access through EC2 Instance Connect Endpoint) and register it as an ephemeral self-hosted runner under the rules in section 3.6: its own label and runner group limited to the real-Judge0 workflow, no environment or deploy secrets, never fork PRs whatever the repository's visibility, rebuilt from a clean AMI at least weekly. No credentials go into any agent session; DEP and the owner do this.
+9. **FR-502 deviation**: give the run slot back when the breaker refuses a run before any Judge0 call (recommended, so an outage does not also cost the candidate 5 s per attempt), or keep FR-502 strict? A run that reached Judge0 always uses the slot.
+10. **Persistent execution errors in grading**: after 3 grading runs end with Judge0 status 13 or 14 on the same question, send that coding question to MANUAL_PENDING with an alarm (recommended, section 8.1), instead of retrying forever?
 7. **Outage during a live test**: no automatic time credit (recommended; the recruiter can re-invite), or should the server pause the session while Judge0 is down?
 8. **Load profile**: confirm the assumptions in section 7 (one run per minute, 3 sample tests, the language mix), or give better numbers.
