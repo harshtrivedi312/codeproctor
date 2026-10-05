@@ -1,6 +1,6 @@
 # Consent document: proctored coding assessment
 
-Status: **DRAFT v0.1 for owner approval** (C-09, with C-02, C-04, C-05, C-07, C-08, C-13, C-14). Drafted 2026-10-05 by the Delivery Lead. Approver: Harsh Trivedi. This text has not had professional legal review (C-15).
+Status: **DRAFT v0.2 for owner approval** (owner fill-ins and C-17..C-19 applied 2026-10-05) (C-09, with C-02, C-04, C-05, C-07, C-08, C-13, C-14). Drafted 2026-10-05 by the Delivery Lead. Approver: Harsh Trivedi. This text has not had professional legal review (C-15).
 
 The placeholder guard stays: pilot and production refuse to run until the owner approves a final version, and that version is loaded with its own version number (C-09, FR-401). Items in [square brackets] are filled in per organisation or before approval. The drafting notes at the end are not shown to candidates.
 
@@ -8,13 +8,13 @@ The placeholder guard stays: pilot and production refuse to run until the owner 
 
 ## Your consent for this proctored coding assessment
 
-Document version [x.y] · [Company legal name]
+Document version [x.y] · [COMPANY LEGAL NAME]
 
 Please read this document to the end. It explains what happens during the assessment, what we record, how we check your identity, who sees the results, how long we keep your data, and your choices. At the end you sign by typing your full legal name. **Nothing is recorded, and your camera, microphone and screen are not touched, until you sign.**
 
 ### 1. Who we are
 
-The assessment is run by **[Company legal name]**, [address] ("we"), for the role of [role]. We are responsible for your data (the "controller"). Our contact for privacy questions is [privacy contact, email]. Your recruiter is [recruiter name, email].
+The assessment is run by **[COMPANY LEGAL NAME]**, [address] ("we"), for the role of [role]. We are responsible for your data (the "controller"). Our contact for privacy questions is [EMAIL]. Your recruiter is [recruiter name, email] (filled in per invitation).
 
 ### 2. What happens during the assessment
 
@@ -40,7 +40,7 @@ We record this to check that the test was taken fairly and by the right person.
 
 To confirm that you are the person taking the test, we:
 
-- take a photo of your government ID and a live selfie, with a short liveness check (for example, turning your head);
+- take a photo of your government ID and one live selfie, with a short liveness check (for example, turning your head);
 - compare the faces using face-matching software, which calculates measurements of your face (a "face template");
 - re-check during the test that the same person is at the keyboard, by comparing **one small webcam frame (640 px) every 2 minutes** with your verified face. A frame that matches is discarded at once. A frame that does not match is kept as evidence for a human reviewer.
 
@@ -68,32 +68,33 @@ Your code is also run against test cases to calculate a score. Your score, the r
 
 ### 6. Who can see your data
 
-- **Recruiters** for this role see your invitation, status, scores and the final decision.
-- **Reviewers** see the recordings, images, flags and your code, so they can review the assessment. Reviewers sign in with two-factor authentication, and every time someone opens your data it is logged.
-- **Administrators** manage the system and handle requests about your data.
-- **Service providers** that host and run the system for us, under contract and only on our instructions: [Amazon Web Services (hosting and storage)], [Cloudflare (delivering the web pages)], [email provider (sending your invitation and copy of this document)], [error monitoring provider, if used]. They may not use your data for their own purposes.
+Only these people and companies can see your data:
+- **Our staff with the Recruiter role** for this role see your invitation, status, scores and the final decision.
+- **Our staff with the Reviewer role** see the recordings, images, flags and your code, so they can review the assessment. Reviewers sign in with two-factor authentication.
+- **Our staff with the Super Admin role** manage the system and handle requests about your data.
+- **Our service providers**, under contract and only on our instructions: Amazon Web Services (hosting and storage), Cloudflare (delivering the web pages), [email provider] (sending your invitation, one-time codes and a copy of this document) and [error monitoring provider, if used]. They may not use your data for their own purposes.
 
-We don't share your data with anyone else unless the law requires it.
+Every time a staff member opens your recordings or images, it is logged. We don't share your data with anyone else unless the law requires it.
 
 ### 7. Where your data is stored
 
-All your data is stored in the **United States**, in [AWS region]. If you are in the European Union or the United Kingdom, your data is transferred to the United States. We protect that transfer with [the European Commission's Standard Contractual Clauses (and the UK Addendum) / the EU–US Data Privacy Framework and its UK extension], and we apply the same protections described here wherever you are.
+All your data is stored in the **United States**, in Amazon Web Services region [AWS REGION, e.g. us-east-1]. If you are in the European Union or the United Kingdom, your data is transferred to the United States. That transfer is protected by the European Commission's Standard Contractual Clauses (and, for the UK, the UK Addendum) in our service providers' data processing agreements. We apply the same protections described here wherever you are.
 
 ### 8. How long we keep your data
 
 - Recordings, the ID photo, the selfie, re-check frames that didn't match, evidence images and keystroke data: deleted **90 days** after your assessment is finished.
 - Face templates: **never stored**.
-- This signed consent record (document version, your typed name, time of signing, IP address, browser and signed PDF): kept **3 years** to prove you consented, then deleted.
+- This signed consent record (document version, your typed name, time of signing, IP address, browser and signed PDF): kept **3 years** to prove you consented, then deleted. We keep it for those 3 years even if you ask us to delete your data, because we may need it to show that you consented, for example if there is a legal claim.
 - Your scores, code and the reviewer's decision: [retention period, e.g. 2 years], then anonymised.
 
 The full schedule, including how we destroy data, is here: **[link to the retention and destruction schedule]**.
 
 ### 9. Your rights and choices
 
-- **Ask for accommodations or an alternative.** If you need extra time, assistive technology, or changes to the monitoring (for example, if you can't use a webcam, microphone or ID check), contact [recruiter name, email] **before you start**. We handle each request individually. Accommodations may include extra time, turning specific detectors off, or an alternative to the face match.
+- **Ask for accommodations or an alternative.** If you need extra time, assistive technology, or changes to the monitoring (for example, if you can't use a webcam, microphone or ID check), contact [recruiter name, email] **before you start**. We handle each request individually. Accommodations may include extra time, turning specific detectors off, or an alternative to the face match. If the face match is waived, your recruiter records the reason and may check your ID with you on a short video call instead.
 - **Decline.** You may decline at the end of this document. Nothing will be recorded, the assessment will end, and you will see your recruiter's contact so you can discuss alternatives. [Declining is not treated as a failed assessment: see drafting note 2.]
-- **Withdraw your consent.** You can stop at any time by ending the test. Recording stops at once. Data already collected is kept as described in section 8 unless you ask us to delete it.
-- **Access, correct or delete your data.** Contact [privacy contact]. Deletion is completed within 30 days of your request, or within 30 days after an open review or appeal closes, whichever is later. If a review or appeal delays it, we tell you.
+- **Withdraw your consent.** You can withdraw at any time before or during the test by ending the session. Recording stops at once. After the test, a withdrawal is handled as a request to delete your data (next point).
+- **Access, correct or delete your data.** Contact [EMAIL]. Deletion is completed within 30 days of your request, or within 30 days after an open review or appeal closes, whichever is later. If a review or appeal delays it, we tell you. We delete your recordings, images, keystroke data, code and answers, and keep only anonymised scores, plus the signed consent record for its 3 years (section 8).
 - **Appeal a decision.** If the reviewer finds a violation, you can appeal within 7 days, and a different reviewer looks at it.
 - **If you are in the EU or UK:** you also have the right to object, to restrict processing, to data portability, and to complain to your local data protection authority.
 - **If you are in California:** you have the rights to know, delete and correct your personal information, and to limit the use of sensitive personal information. We don't sell or share your personal information for advertising.
@@ -107,7 +108,7 @@ After the test, you may be asked optional questions about yourself (for example,
 By typing your full legal name below and selecting **I agree and sign**, you confirm that you have read this document and that:
 
 1. you agree to the recording of your screen, webcam, microphone and editor activity during this assessment, as described in sections 3 and 5;
-2. **you give your explicit consent and written release** for [Company legal name] to collect, use and store your biometric data (images of your face and face templates calculated from them) only to verify your identity for this assessment, and to keep and destroy it as described in section 8 and in the retention and destruction schedule;
+2. **you give your explicit consent and written release** for [COMPANY LEGAL NAME] to collect, use and store your biometric data (images of your face and face templates calculated from them) only to verify your identity for this assessment, and to keep and destroy it as described in section 8 and in the retention and destruction schedule;
 3. you understand that your data is stored in the United States (section 7);
 4. you understand that software only raises flags, and a person makes every decision (section 5).
 
@@ -122,8 +123,8 @@ We record the document version, your typed name, the date and time from our serv
 1. **One signature or separate tick boxes?** FR-401 and C-07 specify one typed-name signature. Under BIPA a written release must be specific, and GDPR explicit consent should be clearly separate from other terms. Item 2 of section 11 keeps biometric consent as its own explicit statement. A separate required tick box for item 2 would make it stronger. It would be a small FR-401 change. Your call.
 2. **"Declining is not treated as a failed assessment."** If you can commit to this, keep the sentence: it helps show consent is freely given (R-18). If you can't, replace it with "You can discuss alternatives with your recruiter."
 3. **Results retention** (section 8, last bullet) depends on OQ-4.
-4. **Section 6 processors** must match the processor register (processors.md) and the P-10 choice (email and error tracker).
-5. **Section 7 transfer wording** depends on which mechanism each processor offers (C-03).
+4. **Section 6 processors** must match the processor register (processors.md) and the P-10 choice (email and error tracker). Owner fill-ins applied 2026-10-05: company name, privacy email and region are still placeholders; access by role; one selfie; 30-day erasure with the C-06 hold; withdrawal before or during the test by ending the session, and after the test as an erasure request; SCC transfer wording; consent proof kept 3 years (C-17).
+5. **Section 7 transfer wording** uses SCCs, as the owner decided. If a processor relies on DPF instead, add it here.
 6. **The section 10 example questions** must match the FAIR-01 form once it is designed. Some categories (for example ethnicity) are special-category data under GDPR, and the separate consent covers them.
 7. **Job postings (C-14)** should carry a one-line notice, for example: "This role includes a proctored online coding assessment. Automated tools flag possible issues, and a person makes every decision."
 8. **Reading level.** The aim is plain language at about a US grade 8 reading level. A final readability pass is recommended after your edits.
