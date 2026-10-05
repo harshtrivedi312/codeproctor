@@ -258,13 +258,18 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 - An org-scoped write changes only the rows its filter selected, or the rows it creates.
 
 **Nested writes are denied by default.** This is the Delivery Lead's decision.
-- **Scopes:** every scope the extension applies to: STAFF, plain org, SERVICE and system scope. ADR 0013 CS-4 already does the same for CANDIDATE scope.
+- **Scopes:** every scope the extension applies to: STAFF, plain org, SERVICE, CANDIDATE and system scope. ADR 0013 CS-4.5 uses this same list for CANDIDATE scope: one list, every depth, both sides.
 - **What is refused:** every nested relation write inside `data`, at every depth, through every relation class, on both sides of the relation:
   - `connect`, `connectOrCreate`, `create`, `createMany`, `update`, `updateMany`, `upsert`, `delete`, `deleteMany`, `set` and `disconnect`;
   - this includes `org: { connect }`.
+  - The guard tells relation fields from scalar-list fields by the DMMF field `kind` (`object` versus `scalar` or `enum` with `isList`). So a scalar-list `{ set }` stays allowed and a relation `set` is refused.
 - **How services write instead:**
   - They use scalar foreign keys and separate top-level scoped calls.
   - The COMPOSITE keys (`invitations.test_id`, `invitations.candidate_id`, `sessions.invitation_id`) are written only as scalars, so the composite foreign key in Postgres checks the org.
+  - Scalar-only creation works:
+    - Prisma's unchecked create and update inputs accept `orgId`, `testId`, `candidateId` and `invitationId` as scalars.
+    - The scalar rule `orgId == ctx.orgId` (below), together with the composite foreign key in Postgres, checks the org.
+    - The guard must accept these unchecked scalar inputs.
 - **Allowlist:** a named list of nested-write patterns.
   - It starts empty. BE-02 (on main) and BE-03 (`backend/step-3`) use no nested relation writes today.
   - Every entry needs its own cross-org test.
@@ -285,10 +290,21 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
   - replace the per-class guard with the deny-by-default rule and the empty allowlist;
   - apply it in system scope too;
   - add one test per operation, both sides of a relation, and the COMPOSITE `connect` case.
+- **DB-05 merge gate.** The guard in PR #30 conflicts with this rule:
+  - it allows a child-side `connect` and nested writes;
+  - it is off in system scope;
+  - a COMPOSITE `connect` copies `org_id`.
+
+  Until all three of these land, PR #30 does not merge, and BE-03 and BE-06 write no invitation or session code:
+  - the deny-by-default rule;
+  - its application in system scope;
+  - the COMPOSITE `connect` test.
 
 **No write moves a row to another org.**
 - With nested relation writes refused, the remaining path is a scalar `orgId`. On `create`, `update` and `upsert` (both branches), the extension refuses a scalar `orgId` whose value is not `ctx.orgId`.
-- In system scope there is no `ctx.orgId`. There, an update may not set `orgId`, and a create may name only an org already loaded in the same unit of work (rule (i)).
+- In system scope there is no `ctx.orgId`. There, an update may not set `orgId`.
+  - A create of a model with `org_id` should narrow to `runInOrg(orgId)` first, so the scalar rule applies.
+  - A create left in system scope is review-only (rule (i)): the context does not track which org ids were loaded, and code-reviewer checks that the org was loaded first.
 - **Today (PR #30):** in an org scope, for direct models.
 - **Planned:** the system-scope rule.
 
@@ -408,7 +424,7 @@ There is no org-provisioning reason (8.6, 8.9).
 - **Leaving a scope.** `AsyncLocalStorage.exit()`, `enterWith()` and `disable()` would let code leave its scope and bypass every "only narrows" row. So:
   - The OrgContext `AsyncLocalStorage` instance stays private to `org-context.ts`. It is never exported, and never reachable through a getter.
   - The only way to leave a scope is `orgContext.detachForSessionJob(fn)`. Only the `SessionJobProcessor` base class calls it.
-    - It empties the whole store, including any `runRawSql` hatch and any system reason, and runs `fn` with an empty store.
+    - It asserts an empty store, then runs `fn` in a fresh empty store. No hatch, system reason or grant carries over, and grants cannot exist outside a scope (as in ADR 0013).
     - It is allowed from no scope only. It throws inside any org scope (STAFF, plain org, SERVICE and CANDIDATE), in system scope, and while a `runRawSql` hatch is open. So a candidate scope cannot leave itself, and nothing can reach a session scope in two steps.
     - Workers are built at module init, outside any scope. `SessionJobProcessor` asserts that there is no scope, and its handler runs only from the BullMQ worker callback. A discovery processor never calls a session handler inline; it enqueues the session job.
     - The 8.4 rows for `detachForSessionJob` each have a test.
@@ -416,7 +432,8 @@ There is no org-provisioning reason (8.6, 8.9).
     - `exit`, `enterWith` and `disable` on the OrgContext store;
     - `detachForSessionJob`;
     - the per-column grant entry sites of ADR 0013 CS-4.4: `SessionStateService`, `KeyService`, `CandidateSessionGuard`, `DeviceInfoService`, `StorageService`, `OrgSettingsService`, `TestSettingsService`, `AccommodationsService` and `SectionGateService`.
-  - The grant-entry API stays private to `org-context.ts` or the extension, like the store.
+    - the private candidate-context setter for `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. Only `CandidateSessionGuard` may call it, once per scope, and the values are immutable afterwards.
+  - The grant-entry API and the candidate-context setter stay private to `org-context.ts` or the extension, like the store.
   - Any use outside those files fails the test or the lint rule.
   - The FU-DB-67 row in docs/followups/database.md (PR #30) still lists only `runSystem`, `runInOrg` and `runRawSql`. The db-engineer extends it to everything above.
   - A new call site updates the list, and code-reviewer checks it.
@@ -564,7 +581,7 @@ How the check runs:
   - Session jobs run in a `sessionId` scope, so they cannot use raw SQL (8.5). This is deliberate. It covers BE-12 risk scoring, BE-14 report generation, and DB-06 per-session deletion when it runs as a session job. All of them must use the model API. If one of them needs raw SQL, that needs an amendment to this ADR.
 - **db-engineer:**
   - 8.1 is done in PR #30 (FU-DB-64).
-  - 8.2: replace the per-class nested-write guard (FU-DB-63) with deny by default in every scope, with an empty named allowlist, apply it in system scope, and add one test per operation and side plus the COMPOSITE `connect` case.
+  - 8.2 is a DB-05 merge gate: replace the per-class nested-write guard (FU-DB-63) with deny by default in every scope, with an empty named allowlist (relations told apart by DMMF `kind`). Apply it in system scope, accept unchecked scalar inputs, and add one test per operation and side plus the COMPOSITE `connect` case. PR #30 does not merge until this lands.
   - Nested reads stay open (FU-DB-78).
   - 8.5: the raw-SQL hatch does not carry into nested scopes.
   - FU-DB-67: the call-site allow-list.
@@ -575,7 +592,7 @@ How the check runs:
   - 8.5: keep the `AsyncLocalStorage` instance private.
   - 8.5: add `detachForSessionJob`, allowed from no scope only and refused in any org scope, in system scope and with an open hatch; it empties the store.
   - 8.5: make `SessionJobProcessor` assert there is no scope.
-  - 8.5: extend FU-DB-67 to `exit`, `enterWith`, `disable`, `detachForSessionJob` and the CS-4.4 grant entry sites, and update its row in docs/followups/database.md.
+  - 8.5: extend FU-DB-67 to `exit`, `enterWith`, `disable`, `detachForSessionJob`, the CS-4.4 grant entry sites and the candidate-context setter, and update its row in docs/followups/database.md.
   - 8.4: the transition table, with one test per row.
   - 8.5: refuse raw SQL in a `sessionId` scope (the scope requirement is done).
   - 8.6: deny by default for `Organization` operations (its nested writes are covered by 8.2), the scalar `orgId` rule in system scope, and a limit on importers of the raw factory client.
