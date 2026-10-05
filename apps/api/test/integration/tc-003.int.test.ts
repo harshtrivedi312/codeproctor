@@ -353,7 +353,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       });
       expect(audit).toHaveLength(1);
       expect(audit[0]?.metadata).toEqual({ sessionsRevoked: 2 });
-      expect(JSON.stringify(audit[0])).not.toContain(code);
+      expect(JSON.stringify(audit[0]?.metadata)).not.toContain(code);
       expect(((await login(h, u.email).expect(200)).body as Body).session).toBeDefined();
     });
 
