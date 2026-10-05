@@ -1,5 +1,6 @@
 import { INestApplication } from '@nestjs/common';
 import { hash } from '@node-rs/argon2';
+import { ARGON2_OPTIONS } from './password.service';
 import { authenticator } from 'otplib';
 import request from 'supertest';
 import type { App } from 'supertest/types';
@@ -94,7 +95,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         fullName: `User ${seq}`,
         role: opts.role ?? UserRole.RECRUITER,
         passwordHash:
-          opts.password === null ? null : await hash(opts.password ?? PASSWORD, { algorithm: 2 }),
+          opts.password === null ? null : await hash(opts.password ?? PASSWORD, ARGON2_OPTIONS),
         // A pending invite must carry a set-password token (schema CHECK).
         setPasswordTokenHash: opts.password === null ? sha256Hex(`invite-${seq}`) : null,
         totpSecretEnc: opts.totp ? encryptSecret(opts.totp, key) : null,
