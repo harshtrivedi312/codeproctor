@@ -68,3 +68,15 @@ With a single short fill-in, MORE THAN HALF of genuine copies are missed. Not a 
 - `packages/shared` has no routing mirror today, so no change was needed there; if the API contract exposes `reviewPath` or `queueRank` later, mirror them in events.ts or a new schema (ARC).
 - **Non-finite scores.** `calculate_risk` only sums finite configured points, so a NaN or inf score cannot occur today; if weights or points ever come from untrusted input, `risk_band_for_score` and `queue_sort_key` (which negates the score) would misbehave on NaN. Config validation should reject non-finite weights and points (currently `ge=0.0` still admits `inf`).
 - **Fail-closed gate (PR #59 review).** `match()` requires `liveness_confirmed` (keyword, no default); `FaceMatcher` and `review_for_model_error` default to `FaceConfig.from_env()`; `cosine` raises on a non-finite score before clamping; `prime_selfie` recomputes only the selfie after a cache miss; model files have size caps from the ADR byte counts. The API integration (ARC-04) must pass the client-reported liveness explicitly and call `prime_selfie` then `recheck` on `CACHE_MISS`.
+=======
+
+## Integrity B (identity) (D-51)
+
+From PR #72 (INT-01 tooling).
+- **FU-INB-01 [qa/hub, should-fix, before volunteer collection]** `apps/worker/tools/int01/tests` is outside pytest `testpaths`, mypy `mypy_path` and coverage, so CI does not run them, and Pillow is not a declared dependency (the crop-and-delete tests import it). Needs a `pyproject.toml` change (Integrity A / hub): add the path to `testpaths`, include `tools` in mypy and ruff, and Pillow in the dev extra (PR #59 adds it).
+- **FU-INB-02 [integrity B, after #59]** Image-to-score mode (calls the worker's face interface with the pinned AuraFace model from `~/.cache/codeproctor/models`, C-22, embeddings in memory only) and the adapter from the worker's detector to `intake.FaceLocator`. `evaluate.py` takes a precomputed scores.csv until then.
+- **FU-INB-03 [integrity B]** Confirm the score range of the #59 matcher; the threshold sweep assumes 0.00 to 1.00 in steps of 0.01.
+- **FU-INB-04 [hub, doc]** The volunteer form's drafting note 4 says the report should say which groups were merged or left out. The tool deliberately does not name hidden groups (naming one reveals that a group under 10 exists). Owner/hub to confirm and amend the note. Merging small groups (for example a `--merge` option) is not built.
+- **FU-INB-05 [integrity B]** The ID intake margin (35%) can pull in nearby printed text on a real ID, and a ghost portrait gives MULTIPLE_FACES; the volunteer form's template must cover both. Check on the first real intake.
+- **FU-INB-06 [integrity B]** Overwrite-before-unlink is best effort on SSDs; keep originals on an encrypted volume (form section 5).
+>>>>>>> 9a5788e (docs(followups): Integrity B follow-ups FU-INB-01..06)
