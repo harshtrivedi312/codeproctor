@@ -135,6 +135,8 @@ export class VisionMonitor implements Detector {
     // backstop for callers that start a reused instance without calling stop() first.
     this.reported.clear();
     this.failures.clear();
+    // Down until a run succeeds; a missing stream sets NO_STREAM (the only retryable reason).
+    this.down = 'FAILED';
     try {
       await this.startInner(ctx);
     } catch {
@@ -391,6 +393,7 @@ export class VisionMonitor implements Detector {
     this.generation++;
     this.reported.clear();
     this.failures.clear();
+    this.down = null;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.identity?.stop();

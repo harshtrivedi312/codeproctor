@@ -40,6 +40,8 @@ export interface ProctorSessionConfig {
   backoffBaseMs?: number;
   /** A detector whose start() takes longer than this is abandoned (default 45 s). */
   detectorStartTimeoutMs?: number;
+  /** After a start timeout, stop() of the abandoned detector is given this long (default 5 s). */
+  detectorStopTimeoutMs?: number;
 }
 
 export interface SessionEvents {
@@ -111,6 +113,15 @@ export class ProctorSession {
       store: config.store ?? new IdbStore(),
       ...(config.flushIntervalMs === undefined ? {} : { flushIntervalMs: config.flushIntervalMs }),
       ...(config.backoffBaseMs === undefined ? {} : { backoffBaseMs: config.backoffBaseMs }),
+      onSeqUntrusted: () =>
+        this.fire('capability', {
+          id: 'event-seq',
+          status: 'UNVERIFIABLE',
+          detail:
+            'The batch counter could not be read; sequence numbers jump ahead (holes, no collisions).',
+        }),
+      onStorageRecovered: () =>
+        this.fire('capability', { id: 'event-storage', status: 'SUPPORTED' }),
       onStorageDegraded: (reason) =>
         this.fire('capability', {
           id: 'event-storage',
@@ -186,7 +197,7 @@ export class ProctorSession {
             // ignore
           }
           try {
-            await withTimeout(d.stop(), 5000);
+            await withTimeout(d.stop(), config.detectorStopTimeoutMs ?? 5000);
           } catch {
             // best effort (a stop() that hangs must not block the session start)
           }

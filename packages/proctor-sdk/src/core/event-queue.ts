@@ -41,6 +41,12 @@ export interface EventQueueOptions {
   staleAfterMs?: number;
   /** Called once when IndexedDB stops working and the queue continues in memory only. */
   onStorageDegraded?: (reason: 'OPEN_FAILED' | 'WRITE_FAILED') => void;
+  /** Called when IndexedDB works again after a degraded period. */
+  onStorageRecovered?: () => void;
+  /** Called when the sequence counter could not be read and the queue seeded it high (holes, no collisions). */
+  onSeqUntrusted?: () => void;
+  /** While degraded, try IndexedDB again at most this often (default 30 s). */
+  storageProbeMs?: number;
 }
 
 export interface EventQueueStats {
@@ -78,6 +84,7 @@ export class EventQueue {
   private started = false;
   private finished = false;
   private storageDegraded = false;
+  private lastProbe = -Infinity;
   private readonly touch: SessionTouch;
   private sent = 0;
   private rejected = 0;
@@ -100,19 +107,68 @@ export class EventQueue {
   private degrade(reason: 'OPEN_FAILED' | 'WRITE_FAILED'): void {
     if (this.storageDegraded) return;
     this.storageDegraded = true;
+    this.lastProbe = Date.now();
     this.opts.onStorageDegraded?.(reason);
   }
 
+  /** Backup of the sequence counter outside IndexedDB (a small integer, not candidate data). */
+  private backupKey(): string {
+    return `codeproctor:eventseq:${this.opts.sessionId}`;
+  }
+  private readBackup(): number {
+    try {
+      return Number(globalThis.localStorage?.getItem(this.backupKey()) ?? 0) || 0;
+    } catch {
+      return 0;
+    }
+  }
+  private writeBackup(): void {
+    try {
+      globalThis.localStorage?.setItem(this.backupKey(), String(this.nextSeq));
+    } catch {
+      // storage disabled
+    }
+  }
+
+  /**
+   * Fail closed when the sequence counter cannot be trusted (IndexedDB unreadable and no backup).
+   * Reusing an acknowledged seq makes the server answer 409 SEQ_CONFLICT and drop every later
+   * batch, which is silent evidence loss. A seed far above any plausible earlier value (seconds
+   * since 2026-01-01, always below the schema limit) can only leave holes in the sequence, which
+   * review shows as holes, never as collisions. Until ADR 0013 server counters exist.
+   */
+  private seqSeed(): number {
+    return Math.max(1, Math.floor((Date.now() - Date.UTC(2026, 0, 1)) / 1000));
+  }
+
   async start(): Promise<void> {
+    let maxSaved = 0;
+    let stored: number | null = null;
+    let readFailed = false;
     try {
       const saved = await this.opts.store.entries<SignedBatch>(
         STORES.eventBatches,
         `${this.opts.sessionId}:`,
       );
       this.outbox = saved.map((e) => e.value).sort((a, b) => a.seq - b.seq);
-      const stored = (await this.opts.store.get<number>(STORES.meta, this.metaKey())) ?? 0;
-      const maxSaved = this.outbox.reduce((m, b) => Math.max(m, b.seq + 1), 0);
-      this.nextSeq = Math.max(stored, maxSaved);
+      maxSaved = this.outbox.reduce((m, b) => Math.max(m, b.seq + 1), 0);
+    } catch {
+      readFailed = true;
+      this.degrade('OPEN_FAILED');
+    }
+    try {
+      stored = (await this.opts.store.get<number>(STORES.meta, this.metaKey())) ?? 0;
+    } catch {
+      readFailed = true; // the saved batches (if any) still count, see maxSaved
+    }
+    const backup = this.readBackup();
+    this.nextSeq = Math.max(maxSaved, stored ?? 0, backup);
+    if (readFailed && backup === 0 && stored === null) {
+      // The counter is unknowable: seed above anything plausible and say so.
+      this.nextSeq = Math.max(this.nextSeq, this.seqSeed());
+      this.opts.onSeqUntrusted?.();
+    }
+    try {
       await sweepStaleSessions(
         this.opts.store,
         this.opts.sessionId,
@@ -120,9 +176,7 @@ export class EventQueue {
         this.opts.staleAfterMs,
       );
     } catch {
-      // IndexedDB cannot be opened: carry on in memory (events are still signed and sent, but a
-      // reload loses unsent batches and the sequence restarts at 0).
-      this.degrade('OPEN_FAILED');
+      // ignore
     }
     this.started = true;
     if (this.outbox.length > 0) void this.drain();
@@ -165,18 +219,29 @@ export class EventQueue {
       const signature = await signHex(this.opts.key, body);
       const batch: SignedBatch = { seq, body, signature };
       // Persist before sending: if the tab dies mid-request the batch is replayed (idempotent seq).
-      if (!this.storageDegraded) {
+      const now = Date.now();
+      const probe =
+        this.storageDegraded && now - this.lastProbe >= (this.opts.storageProbeMs ?? 30_000);
+      if (!this.storageDegraded || probe) {
+        if (probe) this.lastProbe = now;
         try {
           await this.opts.store.put(
             STORES.eventBatches,
             `${this.opts.sessionId}:${padSeq(seq)}`,
             batch,
           );
-          await this.opts.store.put(STORES.meta, this.metaKey(), this.nextSeq);
+          if (this.storageDegraded) {
+            this.storageDegraded = false;
+            this.opts.onStorageRecovered?.();
+          }
         } catch {
           this.degrade('WRITE_FAILED'); // keep going: the batch is still sent from memory
         }
       }
+      // The counter is written on EVERY cut, also while degraded (best effort, in IndexedDB and in
+      // a localStorage backup), so a reload never restarts below an acknowledged seq.
+      await this.opts.store.put(STORES.meta, this.metaKey(), this.nextSeq).catch(() => undefined);
+      this.writeBackup();
       this.outbox.push(batch);
       void this.touch.touch();
     }

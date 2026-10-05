@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { UploadQueue } from '../recording/upload-queue';
-import type { MediaApi } from '../recording/types';
+import { MediaApiError, type MediaApi } from '../recording/types';
 import { TEST_KEY_B64 } from '../test/helpers';
 import { EventQueue, type SendResult, type SignedBatch } from './event-queue';
 import { importSessionKey } from './hmac';
@@ -16,6 +16,7 @@ const ev = () => ({
   payload: {},
 });
 afterEach(() => {
+  localStorage.clear();
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -87,6 +88,99 @@ describe('EventQueue IndexedDB failures (S3, NFR-08, TC-063)', () => {
   });
 });
 
+describe('EventQueue sequence safety after storage failures (B1, TC-065, NFR-08)', () => {
+  it('TC-065 NFR-08: batches sent while IndexedDB writes failed are never reused as seq after a reload with IndexedDB working', async () => {
+    const store = newStore();
+    const realPut = store.put.bind(store);
+    vi.spyOn(store, 'put').mockImplementation((name, key, value) =>
+      name === 'chunks' || name === 'meta' || name === 'eventBatches'
+        ? Promise.reject(new Error('quota'))
+        : realPut(name, key, value),
+    );
+    const first = await queue(store, 'OK');
+    await first.q.start();
+    for (let i = 0; i < 3; i++) {
+      first.q.enqueue(ev());
+      await first.q.flush();
+    }
+    expect(first.attempts.map((b) => b.seq)).toEqual([0, 1, 2]); // all acknowledged
+    vi.restoreAllMocks(); // IndexedDB works again after the reload
+    const second = await queue(store, 'OK');
+    await second.q.start();
+    second.q.enqueue(ev());
+    await second.q.flush();
+    expect(second.attempts.map((b) => b.seq)).toEqual([3]); // continues, no SEQ_CONFLICT
+  });
+
+  it('TC-065 NFR-08: an unreadable counter with no backup seeds the sequence high and raises a flag, never restarts at 0', async () => {
+    const store = newStore();
+    vi.spyOn(store, 'entries').mockRejectedValue(new Error('open failed'));
+    vi.spyOn(store, 'get').mockRejectedValue(new Error('open failed'));
+    const flags: string[] = [];
+    const { q, attempts } = await queue(store, 'OK', { onSeqUntrusted: () => flags.push('seq') });
+    await q.start();
+    q.enqueue(ev());
+    await q.flush();
+    expect(flags).toEqual(['seq']);
+    expect(attempts[0]?.seq).toBeGreaterThan(1_000_000);
+    expect(attempts[0]?.seq).toBeLessThan(2_147_483_647);
+  });
+
+  it('TC-065 NFR-08: entries() works but the counter read throws: nextSeq is not left at 0 below saved batches', async () => {
+    const store = newStore();
+    await store.put('eventBatches', 's:0000000004', { seq: 4, body: '{}', signature: 'x' });
+    vi.spyOn(store, 'get').mockRejectedValue(new Error('meta unreadable'));
+    const { q } = await queue(store, 'RETRY');
+    await q.start();
+    q.enqueue(ev());
+    await q.flush();
+    expect(q.stats().nextSeq).toBeGreaterThan(5); // above the saved seq 4 (seeded: counter unknown)
+  });
+
+  it('NFR-08: the counter backup survives a reload where IndexedDB is unreadable', async () => {
+    const store = newStore();
+    const a = await queue(store, 'OK');
+    await a.q.start();
+    for (let i = 0; i < 2; i++) {
+      a.q.enqueue(ev());
+      await a.q.flush();
+    }
+    vi.spyOn(store, 'entries').mockRejectedValue(new Error('open failed'));
+    vi.spyOn(store, 'get').mockRejectedValue(new Error('open failed'));
+    const b = await queue(store, 'OK');
+    await b.q.start();
+    b.q.enqueue(ev());
+    await b.q.flush();
+    expect(b.attempts.map((x) => x.seq)).toEqual([2]); // from the backup, not 0 and not a jump
+  });
+
+  it('NFR-08: after a transient write failure the queue probes IndexedDB again and recovers', async () => {
+    const store = newStore();
+    const realPut = store.put.bind(store);
+    let failed = false;
+    vi.spyOn(store, 'put').mockImplementation((name, key, value) => {
+      if (name === 'eventBatches' && !failed) {
+        failed = true;
+        return Promise.reject(new Error('quota'));
+      }
+      return realPut(name, key, value);
+    });
+    const events: string[] = [];
+    const { q } = await queue(store, 'RETRY', {
+      storageProbeMs: 0,
+      onStorageDegraded: () => events.push('degraded'),
+      onStorageRecovered: () => events.push('recovered'),
+    });
+    await q.start();
+    q.enqueue(ev());
+    await q.flush();
+    q.enqueue(ev());
+    await q.flush();
+    expect(events).toEqual(['degraded', 'recovered']);
+    expect(await store.keys('eventBatches', 's:')).toHaveLength(1); // the second batch persisted
+  });
+});
+
 describe('EventQueue.finish() drain (S2, NFR-08)', () => {
   it('NFR-08: during a 5xx outage finish() sends a handful of requests, not hundreds, and does not retry after it returned', async () => {
     const { q, attempts } = await queue(newStore(), 'RETRY');
@@ -147,11 +241,16 @@ describe('EventQueue.finish() drain (S2, NFR-08)', () => {
   });
 });
 
-describe('ProctorSession start timeout (SF5)', () => {
-  it('FR-609: a detector whose stop() hangs after a start timeout does not block the session start', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+describe('ProctorSession start timeout (SF5, FR-609)', () => {
+  it('FR-609: a detector that hangs in start() is abandoned after the timeout, stop() is called (bounded), the flag is emitted and it is not stopped again', async () => {
+    const store = newStore();
     const s = new ProctorSession();
-    const started = s.start({
+    const caps: string[] = [];
+    s.on('capability', (c) => caps.push(`${c.id}:${c.status}`));
+    let entered!: () => void;
+    const inStart = new Promise<void>((r) => (entered = r));
+    const stop = vi.fn(() => new Promise<void>(() => undefined)); // stop() hangs too
+    const startPromise = s.start({
       sessionId: 's',
       hmacKeyBase64: TEST_KEY_B64,
       root: document.createElement('div'),
@@ -160,21 +259,23 @@ describe('ProctorSession start timeout (SF5)', () => {
       detectors: [
         {
           id: 'hang',
-          start: () => new Promise<void>(() => undefined),
-          stop: () => new Promise<void>(() => undefined),
+          start: () => {
+            entered();
+            return new Promise<void>(() => undefined);
+          },
+          stop,
         },
       ],
-      store: newStore(),
-      detectorStartTimeoutMs: 100,
+      store,
+      detectorStartTimeoutMs: 50,
+      detectorStopTimeoutMs: 50,
     });
-    // start timeout, then the 5 s stop bound; fake-indexeddb needs real ticks between steps
-    for (let t = 0; t < 5400; t += 100) {
-      await vi.advanceTimersByTimeAsync(100);
-      for (let i = 0; i < 3; i++) await new Promise<void>((r) => setImmediate(r));
-    }
-    await started;
-    vi.useRealTimers();
-    await s.stop();
+    await inStart; // real WebCrypto and IndexedDB have finished: start() is now awaited
+    await startPromise; // resolves after the 50 ms start timeout and the 50 ms stop bound
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(caps).toContain('hang:UNVERIFIABLE');
+    await s.stop(); // the abandoned detector is no longer in the started list
+    expect(stop).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -223,7 +324,7 @@ describe('UploadQueue storage recovery and memory counter (S6, FR-702)', () => {
     expect(await store.keys('chunks', 's:')).toHaveLength(1); // only the second chunk is persisted
   });
 
-  it('FR-702: the memory byte counter follows adds, uploads and purge without rescanning', async () => {
+  it('FR-702: the memory byte counter follows adds and purge (no upload runs here, concurrency 0)', async () => {
     const store = newStore();
     vi.spyOn(store, 'put').mockRejectedValue(new Error('down'));
     const q = new UploadQueue({
@@ -239,5 +340,33 @@ describe('UploadQueue storage recovery and memory counter (S6, FR-702)', () => {
     expect(q.health().memoryBytes).toBe(20);
     await q.purge();
     expect(q.health().memoryBytes).toBe(0);
+  });
+
+  it('FR-702: confirm and a FATAL answer both decrement the memory counter', async () => {
+    const store = newStore();
+    vi.spyOn(store, 'put').mockRejectedValue(new Error('down'));
+    let fatal = false;
+    const mixedApi: MediaApi = {
+      presign: () =>
+        fatal
+          ? Promise.reject(new MediaApiError('FATAL', 'session ended'))
+          : Promise.resolve({ url: 'https://store.invalid/x' }),
+      confirm: () => Promise.resolve(),
+    };
+    const q = new UploadQueue({
+      sessionId: 's',
+      api: mixedApi,
+      store,
+      put: () => Promise.resolve(200),
+    });
+    await q.start();
+    await q.add(chunk(0), new ArrayBuffer(10));
+    await vi.waitFor(() => expect(q.health().chunksPending).toBe(0)); // uploaded and confirmed
+    expect(q.health().memoryBytes).toBe(0);
+    fatal = true;
+    await q.add(chunk(1), new ArrayBuffer(10));
+    await vi.waitFor(() => expect(q.health().droppedChunks).toBe(1)); // FATAL: dropped
+    expect(q.health().memoryBytes).toBe(0);
+    q.stop();
   });
 });

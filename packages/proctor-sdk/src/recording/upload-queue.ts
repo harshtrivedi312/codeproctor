@@ -283,6 +283,7 @@ export class UploadQueue {
     } catch (err) {
       if (err instanceof MediaApiError && err.kind === 'FATAL') {
         // The server will never take this chunk (session over, chunk not allowed).
+        this.dropMemory(key);
         await this.o.store.delete(STORES.chunks, key).catch(() => undefined);
         if (ref) this.drop(ref);
         this.pending.delete(key);

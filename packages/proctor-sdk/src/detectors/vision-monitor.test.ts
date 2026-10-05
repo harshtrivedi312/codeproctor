@@ -570,7 +570,10 @@ describe('review fixes: voice (FR-607, TC-061)', () => {
   });
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 describe('review blockers: abandoned start, bounded play, stream swap (FR-606, FR-607)', () => {
   it('FR-606: a vision start that completes after the session timeout is stopped, silent and leaks nothing', async () => {
@@ -917,5 +920,91 @@ describe('should-fix round (FR-606, FR-607)', () => {
     await m.start(h.ctx); // restart on the same instance
     expect(order.at(-1)).toBe('create');
     await m.stop();
+  });
+});
+
+describe('voice: exactly one live VAD (B2, FR-607)', () => {
+  function vadRig(delayMs = 0) {
+    let live = 0;
+    let maxLive = 0;
+    const callbacks: VadCallbacks[] = [];
+    const createVad = async (_s: MediaStream, c: VadCallbacks) => {
+      callbacks.push(c);
+      if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+      live++;
+      maxLive = Math.max(maxLive, live);
+      return {
+        start: vi.fn(),
+        destroy: () => {
+          live--;
+        },
+      };
+    };
+    return { createVad, live: () => live, maxLive: () => maxLive, callbacks };
+  }
+
+  it('FR-607: attachStream during a slow start ends with exactly one live handle', async () => {
+    const h = fakeContext();
+    const r = vadRig(30);
+    const m = new VoiceMonitor({ getStream: () => stream, createVad: r.createVad });
+    const starting = m.start(h.ctx);
+    const attaching = m.attachStream({} as MediaStream); // arrives while the first VAD is loading
+    await Promise.all([starting, attaching]);
+    expect(r.live()).toBe(1);
+    expect(r.maxLive()).toBe(1);
+    await m.stop();
+    expect(r.live()).toBe(0);
+  });
+
+  it('FR-607: stop() then start() with an attach queued before the stop leaves one live handle and no duplicate SPEECH_DETECTED', async () => {
+    const h = fakeContext();
+    let t = 1_000_000;
+    const r = vadRig(20);
+    const m = new VoiceMonitor({ getStream: () => stream, createVad: r.createVad, now: () => t });
+    const first = m.start(h.ctx);
+    const staleAttach = m.attachStream({} as MediaStream); // queued under the old generation
+    await m.stop();
+    const second = m.start(h.ctx);
+    await Promise.all([first, staleAttach, second]);
+    expect(r.live()).toBe(1);
+    // every callback set but the newest is ignored: one segment yields one event
+    for (const cb of r.callbacks) {
+      cb.onSpeechStart();
+      t += 2000;
+      cb.onSpeechEnd();
+    }
+    expect(h.events.filter((e) => e.type === 'SPEECH_DETECTED')).toHaveLength(1);
+    await m.stop();
+  });
+
+  it('FR-607: start() on a running monitor replaces the VAD instead of adding a second one', async () => {
+    const h = fakeContext();
+    const r = vadRig();
+    const m = new VoiceMonitor({ getStream: () => stream, createVad: r.createVad });
+    await m.start(h.ctx);
+    await m.start(h.ctx);
+    expect(r.live()).toBe(1);
+    await m.stop();
+  });
+});
+
+describe('vision: down state (S5, FR-606)', () => {
+  it('FR-606: NO_STREAM then attach that fails to load: a further attach does not re-run or re-emit', async () => {
+    const h = fakeContext();
+    let current: MediaStream | null = null;
+    const { m, createWorker } = setup(
+      { getWebcamStream: () => current },
+      { face: false, gaze: false, objects: false },
+    );
+    await m.start(h.ctx); // no stream: PERMISSION_DENIED x3, down for lack of a stream
+    expect(createWorker).not.toHaveBeenCalled();
+    await m.attachStream(stream); // loads, every model fails: now down for FAILED
+    expect(createWorker).toHaveBeenCalledTimes(1);
+    const emitted = h.events.length;
+    await m.attachStream(stream);
+    expect(createWorker).toHaveBeenCalledTimes(1);
+    expect(h.events).toHaveLength(emitted);
+    current = null;
+    m.stop();
   });
 });
