@@ -273,48 +273,174 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
   });
 
   describe('FR-102: disable and recovery-code regeneration', () => {
-    it('TC-003: an AUTHOR with 2FA on can turn it off with the current password: 204, secret and codes cleared, audit row, next login needs no code', async () => {
+    // A TOTP step is accepted once per user. These sign in with the previous step's code (inside
+    // the accepted drift window), so the current step is still unused for the disable call.
+    const stepCode = (offsetMs = 0): string =>
+      authenticator.clone({ epoch: Date.now() + offsetMs }).generate(TOTP_SECRET);
+    const goodCode = (): string => stepCode();
+    const badCode = (): string => stepCode(10 * 60_000); // far outside the accepted window
+    const disable = (auth: { Authorization: string }, body: object): request.Test =>
+      post('2fa/disable').set(auth).send(body);
+    async function signInPrevStep(
+      email: string,
+    ): Promise<{ auth: { Authorization: string }; cookie: string }> {
+      const { challengeToken } = (await login(h, email).expect(200)).body as Body;
+      const res = await post('2fa/verify')
+        .send({ challengeToken, code: stepCode(-30_000) })
+        .expect(200);
+      return {
+        auth: { Authorization: `Bearer ${(res.body as Body).accessToken}` },
+        cookie: refreshCookie(res),
+      };
+    }
+    const twoFactorOn = async (id: string): Promise<boolean> =>
+      (await h.owner.user.findUniqueOrThrow({ where: { id } })).totpEnabled;
+
+    it('TC-003: an AUTHOR with 2FA on can turn it off with password and TOTP code: 204, cookie cleared, every refresh family revoked, secret and codes cleared, audit row with sessionsRevoked, next login needs no code', async () => {
       const u = await createUser(h, { role: UserRole.AUTHOR, totp: TOTP_SECRET });
       await h.owner.user.update({
         where: { id: u.id },
         data: { recoveryCodeHashes: [sha256Hex('AAAAAAAAAAAAAAAA')] },
       });
-      const auth = await signInWithTotp(h, u.email);
-      await post('2fa/disable').set(auth).send({}).expect(400);
-      expectReauthFailed(
-        await post('2fa/disable').set(auth).send({ currentPassword: 'Nope-Nope-1' }),
+      const { auth, cookie } = await signInPrevStep(u.email);
+      const liveBefore = await h.owner.refreshToken.count({
+        where: { userId: u.id, revokedAt: null },
+      });
+      expect(liveBefore).toBeGreaterThanOrEqual(1);
+
+      const res = await disable(auth, { currentPassword: PASSWORD, totpCode: goodCode() }).expect(
+        204,
       );
-      expect((await h.owner.user.findUniqueOrThrow({ where: { id: u.id } })).totpEnabled).toBe(
-        true,
+      const cleared = ((res.headers['set-cookie'] as unknown as string[] | undefined) ?? []).find(
+        (c) => c.startsWith('cp_refresh='),
       );
-      await post('2fa/disable').set(auth).send({ currentPassword: PASSWORD }).expect(204);
+      expect(cleared).toBeDefined();
+      expect(cleared).toMatch(/cp_refresh=;|Max-Age=0|Expires=Thu, 01 Jan 1970/i);
+
       const row = await h.owner.user.findUniqueOrThrow({ where: { id: u.id } });
       expect(row.totpEnabled).toBe(false);
       expect(row.totpSecretEnc).toBeNull();
       expect(row.recoveryCodeHashes).toEqual([]);
-      expect(
-        await h.owner.auditLog.count({ where: { actorId: u.id, action: 'AUTH_2FA_DISABLED' } }),
-      ).toBe(1);
+      expect(await h.owner.refreshToken.count({ where: { userId: u.id, revokedAt: null } })).toBe(
+        0,
+      );
+      await refresh(h, cookie).expect(401);
+      const audit = await h.owner.auditLog.findMany({
+        where: { actorId: u.id, action: 'AUTH_2FA_DISABLED' },
+      });
+      expect(audit).toHaveLength(1);
+      const meta = audit[0]?.metadata as { sessionsRevoked?: number } | null;
+      expect(meta?.sessionsRevoked).toBeGreaterThanOrEqual(1);
+      expect(JSON.stringify(audit[0]?.metadata)).not.toContain(goodCode());
       expect(((await login(h, u.email).expect(200)).body as Body).session).toBeDefined();
-      // Already off now.
-      await post('2fa/disable').set(auth).send({ currentPassword: PASSWORD }).expect(409);
+    });
+
+    it('TC-003: disable revokes the refresh families of every session of the user, not only the caller', async () => {
+      const u = await createUser(h, { role: UserRole.AUTHOR, totp: TOTP_SECRET });
+      const first = await signInPrevStep(u.email);
+      // A rotated token of the same family, plus a second family seeded for the same user.
+      const rotated = await refresh(h, first.cookie).expect(200);
+      const rotatedCookie = refreshCookie(rotated);
+      await disable(first.auth, { currentPassword: PASSWORD, totpCode: goodCode() }).expect(204);
+      await refresh(h, rotatedCookie).expect(401);
+      expect(await h.owner.refreshToken.count({ where: { userId: u.id, revokedAt: null } })).toBe(
+        0,
+      );
+    });
+
+    it('TC-003: disable refuses a missing or malformed totpCode (and a recovery code) with 400 and changes nothing', async () => {
+      const u = await createUser(h, { role: UserRole.AUTHOR, totp: TOTP_SECRET });
+      await h.owner.user.update({
+        where: { id: u.id },
+        data: { recoveryCodeHashes: [sha256Hex('AAAAAAAAAAAAAAAA')] },
+      });
+      const { auth } = await signInPrevStep(u.email);
+      await disable(auth, {}).expect(400);
+      await disable(auth, { currentPassword: PASSWORD }).expect(400);
+      await disable(auth, { totpCode: goodCode() }).expect(400);
+      for (const totpCode of ['AAAAAAAAAAAAAAAA', '12345', '1234567', 'abcdef', 123456, null, '']) {
+        await disable(auth, { currentPassword: PASSWORD, totpCode }).expect(400);
+      }
+      expect(await twoFactorOn(u.id)).toBe(true);
+      expect(await h.owner.user.findUniqueOrThrow({ where: { id: u.id } })).toMatchObject({
+        recoveryCodeHashes: [sha256Hex('AAAAAAAAAAAAAAAA')],
+      });
+    });
+
+    it('TC-003: a wrong password or a wrong code is the same 403 REAUTH_FAILED body, a replayed code too, and 2FA stays on', async () => {
+      const u = await createUser(h, { role: UserRole.AUTHOR, totp: TOTP_SECRET });
+      const { auth } = await signInPrevStep(u.email);
+      const wrongPw = await disable(auth, { currentPassword: 'Nope-Nope-1', totpCode: goodCode() });
+      expectReauthFailed(wrongPw);
+      const wrongCode = await disable(auth, { currentPassword: PASSWORD, totpCode: badCode() });
+      expectReauthFailed(wrongCode);
+      expect(stableProblem(wrongCode)).toEqual(stableProblem(wrongPw));
+      expect(wrongCode.headers['set-cookie']).toBeUndefined();
+      expect(await twoFactorOn(u.id)).toBe(true);
+    });
+
+    it('TC-003: a TOTP code already used (here to sign in, same step) cannot disable 2FA: 403 REAUTH_FAILED, identical body', async () => {
+      const u = await createUser(h, { role: UserRole.AUTHOR, totp: TOTP_SECRET });
+      const wrongPw = await (async (): Promise<Record<string, unknown>> => {
+        const { auth } = await signInPrevStep(u.email);
+        const r = await disable(auth, { currentPassword: 'Nope-Nope-1', totpCode: goodCode() });
+        expectReauthFailed(r);
+        return stableProblem(r);
+      })();
+      const { challengeToken } = (await login(h, u.email).expect(200)).body as Body;
+      const code = goodCode();
+      const done = await post('2fa/verify').send({ challengeToken, code }).expect(200);
+      const auth = { Authorization: `Bearer ${(done.body as Body).accessToken}` };
+      const replay = await disable(auth, { currentPassword: PASSWORD, totpCode: code });
+      expectReauthFailed(replay);
+      expect(stableProblem(replay)).toEqual(wrongPw);
+      expect(await twoFactorOn(u.id)).toBe(true);
+    });
+
+    it('TC-003: with 2FA already off, disable is 409 after the password check (wrong password is REAUTH_FAILED), before the code is looked at', async () => {
+      const u = await createUser(h, { role: UserRole.AUTHOR });
+      const auth = await signIn(h, u.email);
+      expectReauthFailed(
+        await disable(auth, { currentPassword: 'Nope-Nope-1', totpCode: goodCode() }),
+      );
+      await disable(auth, { currentPassword: PASSWORD, totpCode: goodCode() }).expect(409);
+      await disable(auth, { currentPassword: PASSWORD, totpCode: '000000' }).expect(409);
+    });
+
+    it('TC-003: wrong password and wrong code attempts share one lockout: 5 failures lock, then even correct factors are REAUTH_FAILED', async () => {
+      const u = await createUser(h, { role: UserRole.AUTHOR, totp: TOTP_SECRET });
+      const { auth } = await signInPrevStep(u.email);
+      for (let i = 0; i < 5; i++) {
+        const body =
+          i % 2 === 0
+            ? { currentPassword: 'Nope-Nope-1', totpCode: goodCode() }
+            : { currentPassword: PASSWORD, totpCode: badCode() };
+        expectReauthFailed(await disable(auth, body));
+      }
+      expectReauthFailed(await disable(auth, { currentPassword: PASSWORD, totpCode: goodCode() }));
+      expect(await twoFactorOn(u.id)).toBe(true);
+      await login(h, u.email).expect(401);
     });
 
     it.each([UserRole.SUPER_ADMIN, UserRole.REVIEWER])(
-      'TC-003: a %s cannot disable 2FA: 403 TWO_FACTOR_REQUIRED_FOR_ROLE after the password check (wrong password is REAUTH_FAILED), 2FA stays on',
+      'TC-003: a %s cannot disable 2FA: 403 TWO_FACTOR_REQUIRED_FOR_ROLE only with BOTH factors correct (a wrong factor is REAUTH_FAILED), 2FA and sessions stay',
       async (role) => {
         const u = await createUser(h, { role, totp: TOTP_SECRET });
-        const auth = await signInWithTotp(h, u.email);
+        const { auth, cookie } = await signInPrevStep(u.email);
         expectReauthFailed(
-          await post('2fa/disable').set(auth).send({ currentPassword: 'Nope-Nope-1' }),
+          await disable(auth, { currentPassword: 'Nope-Nope-1', totpCode: goodCode() }),
         );
-        await post('2fa/disable').set(auth).send({}).expect(400);
-        const res = await post('2fa/disable').set(auth).send({ currentPassword: PASSWORD });
+        expectReauthFailed(await disable(auth, { currentPassword: PASSWORD, totpCode: badCode() }));
+        await disable(auth, {}).expect(400);
+        await disable(auth, { currentPassword: PASSWORD }).expect(400);
+        const res = await disable(auth, { currentPassword: PASSWORD, totpCode: goodCode() });
         expect(res.status).toBe(403);
         expect((res.body as Body).code).toBe('TWO_FACTOR_REQUIRED_FOR_ROLE');
-        expect((await h.owner.user.findUniqueOrThrow({ where: { id: u.id } })).totpEnabled).toBe(
-          true,
-        );
+        expect(await twoFactorOn(u.id)).toBe(true);
+        expect(
+          await h.owner.auditLog.count({ where: { actorId: u.id, action: 'AUTH_2FA_DISABLED' } }),
+        ).toBe(0);
+        await refresh(h, cookie).expect(200); // the refusal revoked nothing
       },
     );
 
@@ -361,7 +487,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
         .send({ currentPassword: PASSWORD })
         .expect(409);
       await post('2fa/recovery-codes/regenerate').send({ currentPassword: PASSWORD }).expect(401);
-      await post('2fa/disable').send({ currentPassword: PASSWORD }).expect(401);
+      await post('2fa/disable').send({ currentPassword: PASSWORD, totpCode: '123456' }).expect(401);
     });
   });
 
@@ -408,7 +534,10 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       const auth = await signInWithTotp(h, admin.email);
       const routes = [
         (pw: string): request.Test => resetOf(target.id).set(auth).send({ currentPassword: pw }),
-        (pw: string): request.Test => post('2fa/disable').set(auth).send({ currentPassword: pw }),
+        (pw: string): request.Test =>
+          post('2fa/disable')
+            .set(auth)
+            .send({ currentPassword: pw, totpCode: authenticator.generate(TOTP_SECRET) }),
         (pw: string): request.Test =>
           post('2fa/recovery-codes/regenerate').set(auth).send({ currentPassword: pw }),
       ];
@@ -489,10 +618,29 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
   // Last in the file on purpose: the Redis container is stopped for good (a restart would change
   // its mapped port). A paused container is not usable here, the client just waits.
   describe('FR-102: replay store outage', () => {
-    it('TC-003: with Redis down, /2fa/verify answers 503 "temporarily unavailable" (not 500) and issues no session', async () => {
+    it('TC-003: with Redis down, /2fa/verify and /2fa/disable answer 503 "temporarily unavailable" (not 500) and issues no session', async () => {
       const u = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
       const { challengeToken } = (await login(h, u.email).expect(200)).body as Body;
+      const d = await createUser(h, { role: UserRole.AUTHOR, totp: TOTP_SECRET });
+      const dChallenge = ((await login(h, d.email).expect(200)).body as Body).challengeToken;
+      const dSession = await post('2fa/verify')
+        .send({
+          challengeToken: dChallenge,
+          code: authenticator.clone({ epoch: Date.now() - 30_000 }).generate(TOTP_SECRET),
+        })
+        .expect(200);
       await h.infra.redis.stop();
+      // Disable with correct factors: the replay store is down, so 503 and nothing changes.
+      const dis = await post('2fa/disable')
+        .set({ Authorization: `Bearer ${(dSession.body as Body).accessToken}` })
+        .send({ currentPassword: PASSWORD, totpCode: authenticator.generate(TOTP_SECRET) })
+        .timeout({ response: 30000, deadline: 40000 });
+      expect(dis.status).toBe(503);
+      expect(JSON.stringify(dis.body)).toContain('temporarily unavailable');
+      expect(dis.headers['set-cookie']).toBeUndefined();
+      expect((await h.owner.user.findUniqueOrThrow({ where: { id: d.id } })).totpEnabled).toBe(
+        true,
+      );
       const res = await post('2fa/verify')
         .send({ challengeToken, code: authenticator.generate(TOTP_SECRET) })
         .timeout({ response: 30000, deadline: 40000 });
