@@ -256,9 +256,9 @@ export class AuthService implements OnApplicationShutdown {
     ctx: RequestContext,
   ): Promise<TotpEnrollmentDto> {
     const user = await this.requireCurrentPassword(userId, password, ctx);
+    if (user.totpEnabled) throw new ConflictException('Two-factor authentication is already on.');
     const startHash = user.passwordHash ?? '';
     const enrollment = await this.totp.createEnrollment(user.email);
-    if (user.totpEnabled) throw new ConflictException('Two-factor authentication is already on.');
     // The secret is stored only while the verified password is still current.
     const stored = await this.prisma.client.user.updateMany({
       where: { id: user.id, passwordHash: startHash, totpEnabled: false },
@@ -491,7 +491,7 @@ export class AuthService implements OnApplicationShutdown {
         },
         data: { totpEnabled: false, totpSecretEnc: null, recoveryCodeHashes: [] },
       });
-      if (updated.count !== 1) await this.explainRefusedChange(tx, user);
+      if (updated.count !== 1) await this.explainRefusedChange(tx, user, true);
       await this.audit(user, 'AUTH_2FA_DISABLED', ctx, {}, tx);
     });
   }
@@ -510,17 +510,23 @@ export class AuthService implements OnApplicationShutdown {
         where: { id: user.id, passwordHash: user.passwordHash ?? '', totpEnabled: true },
         data: { recoveryCodeHashes: codes.map((c) => sha256Hex(c)) },
       });
-      if (updated.count !== 1) await this.explainRefusedChange(tx, user);
+      if (updated.count !== 1) await this.explainRefusedChange(tx, user, false);
       await this.audit(user, 'AUTH_RECOVERY_CODES_REGENERATED', ctx, {}, tx);
     });
     return { recoveryCodes: codes };
   }
 
   /** Why a bound write matched nothing: password changed (401), or the 2FA state moved (409). */
-  private async explainRefusedChange(tx: Prisma.TransactionClient, user: User): Promise<never> {
+  private async explainRefusedChange(
+    tx: Prisma.TransactionClient,
+    user: User,
+    fromDisable: boolean,
+  ): Promise<never> {
     const now = await tx.user.findUnique({ where: { id: user.id } });
     if (now?.passwordHash !== user.passwordHash) throw this.invalid();
-    if (now && TOTP_REQUIRED_ROLES.includes(now.role)) throw this.twoFactorRequiredForRole();
+    // The enforced-role refusal only applies to disable; a regenerate race is a plain 409.
+    if (fromDisable && now && TOTP_REQUIRED_ROLES.includes(now.role))
+      throw this.twoFactorRequiredForRole();
     throw new ConflictException('Two-factor authentication changed. Try again.');
   }
 
@@ -529,28 +535,47 @@ export class AuthService implements OnApplicationShutdown {
   }
 
   /**
-   * A SUPER_ADMIN clears another user's 2FA (lost device and recovery codes). Same organisation
-   * only: another org's user is a 404, like a missing one. The password is not touched. The users
-   * row is locked first, then refresh_tokens (same order as a password reset). A session being
-   * opened from the old second factor is refused by startSession's bound secret. Access tokens
-   * already issued stay valid until they expire (15 minutes): the guard keys on the password
-   * version, which this does not change; the refresh families are all revoked, so none renews.
-   * A role that requires 2FA is sent through forced enrollment at the next login (FR-102).
+   * A SUPER_ADMIN clears another user's 2FA (lost device and recovery codes). The admin's own
+   * current password is verified first, outside the transaction, on the same reserve, equal-work
+   * and lockout path as login (a stolen access token alone cannot reset anyone). Same organisation
+   * only: another org's user is a 404, like a missing one. The target's password is not touched.
+   * The target row is locked FOR NO KEY UPDATE (it still conflicts with startSession's and
+   * refresh()'s FOR SHARE, but not with the FOR KEY SHARE the audit insert takes on the actor row
+   * through audit_logs.actor_id, so two admins resetting each other cannot deadlock). Then
+   * refresh_tokens, same order as a password reset. A session being opened from the old second
+   * factor is refused by startSession's bound secret. Access tokens already issued stay valid
+   * until they expire (15 minutes): the guard keys on the password version, which this does not
+   * change; the refresh families are all revoked, so none renews. A role that requires 2FA is
+   * sent through forced enrollment at the next login (FR-102).
    */
   async resetTwoFactorOf(
     actor: { id: string; orgId: string },
     targetId: string,
+    adminPassword: string,
     ctx: RequestContext,
   ): Promise<void> {
     if (actor.id === targetId) {
       throw new BadRequestException('Use your own security settings to change your 2FA.');
     }
+    const verified = await this.requireCurrentPassword(actor.id, adminPassword, ctx);
     await this.prisma.client.$transaction(async (tx) => {
       const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
         SELECT id FROM users
         WHERE id = ${targetId}::uuid AND org_id = ${actor.orgId}::uuid
-        FOR UPDATE`);
+        FOR NO KEY UPDATE`);
       if (locked.length !== 1) throw new NotFoundException('User not found.');
+      // The final write is bound to the verified admin: same password, still a super admin.
+      const stillAdmin = await tx.user.count({
+        where: {
+          id: actor.id,
+          orgId: actor.orgId,
+          passwordHash: verified.passwordHash ?? '',
+          role: UserRole.SUPER_ADMIN,
+          isActive: true,
+        },
+      });
+      if (stillAdmin !== 1) throw this.invalid();
+      const target = await tx.user.findUniqueOrThrow({ where: { id: targetId } });
       await tx.user.update({
         where: { id: targetId },
         data: { totpEnabled: false, totpSecretEnc: null, recoveryCodeHashes: [] },
@@ -567,7 +592,11 @@ export class AuthService implements OnApplicationShutdown {
           entityType: 'user',
           entityId: targetId,
           ip: ctx.ip ?? null,
-          metadata: { targetUserId: targetId, sessionsRevoked: revoked.count },
+          metadata: {
+            previouslyEnabled: target.totpEnabled,
+            targetRole: target.role,
+            sessionsRevoked: revoked.count,
+          },
         },
       });
     });

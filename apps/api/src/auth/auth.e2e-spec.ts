@@ -1787,7 +1787,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           challengeToken: c2.challengeToken,
           code: codes[0] ?? '',
         }).expect(200);
-        expect(logged.join('')).not.toContain(codes[1] ?? 'x');
+        for (const code of codes) expect(logged.join('')).not.toContain(code);
       });
 
       it('TC-003: a missing or wrong password is refused with no state change, a stolen access token alone cannot regenerate, a locked account gets the generic 401', async () => {
@@ -1824,23 +1824,118 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       });
     });
 
+    describe('a change racing the password check (explainRefusedChange)', () => {
+      /** Runs `mutate` right after the next password verify succeeds, before the bound write. */
+      function afterNextVerify(mutate: () => Promise<unknown>): void {
+        passwordVerify.mockImplementationOnce(async (h: string, p: string) => {
+          const ok = await realPasswordVerify(h, p);
+          await mutate();
+          return ok;
+        });
+      }
+      const newPassword = (): Promise<string> => hash('Another-Pass-77', ARGON2_OPTIONS);
+
+      it('TC-003: disable and regenerate that race a password change are a 401 and change nothing', async () => {
+        for (const route of ['2fa/disable', '2fa/recovery-codes/regenerate']) {
+          const u = await createUser({ totp: SECRET });
+          await withRecoveryCodes(u.id, ['ABCDEFGHJKLMNPQR']);
+          const token = await accessFor(u.id);
+          const changed = await newPassword();
+          afterNextVerify(() =>
+            prisma.user.update({ where: { id: u.id }, data: { passwordHash: changed } }),
+          );
+          await post(route, token, { currentPassword: PASSWORD }).expect(401);
+          const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+          expect(row.totpEnabled).toBe(true);
+          expect(row.recoveryCodeHashes).toEqual([sha256Hex('ABCDEFGHJKLMNPQR')]);
+        }
+      });
+
+      it('TC-003: regenerate racing a 2FA turn-off is a 409, also for an enforced role (not a 403)', async () => {
+        const u = await createUser({ role: UserRole.REVIEWER, totp: SECRET });
+        const token = await accessFor(u.id);
+        afterNextVerify(() =>
+          prisma.user.update({
+            where: { id: u.id },
+            data: { totpEnabled: false, totpSecretEnc: null },
+          }),
+        );
+        await post('2fa/recovery-codes/regenerate', token, { currentPassword: PASSWORD }).expect(
+          409,
+        );
+      });
+
+      it('TC-003: disable racing a 2FA turn-off is a 409, and racing a promotion to an enforced role is a 403', async () => {
+        const u = await createUser({ totp: SECRET });
+        const token = await accessFor(u.id);
+        afterNextVerify(() =>
+          prisma.user.update({
+            where: { id: u.id },
+            data: { totpEnabled: false, totpSecretEnc: null },
+          }),
+        );
+        await post('2fa/disable', token, { currentPassword: PASSWORD }).expect(409);
+        const v = await createUser({ totp: SECRET });
+        afterNextVerify(() =>
+          prisma.user.update({ where: { id: v.id }, data: { role: UserRole.REVIEWER } }),
+        );
+        await post('2fa/disable', await accessFor(v.id), { currentPassword: PASSWORD }).expect(403);
+        expect((await prisma.user.findUniqueOrThrow({ where: { id: v.id } })).totpEnabled).toBe(
+          true,
+        );
+      });
+    });
+
+    describe('secret-bearing responses are not cacheable', () => {
+      it('TC-003: enrolment, setup, confirm and regenerate responses carry Cache-Control: no-store', async () => {
+        const u = await createUser();
+        const token = await accessFor(u.id);
+        const start = await post('2fa/setup/start', token, { currentPassword: PASSWORD }).expect(
+          200,
+        );
+        expect(start.headers['cache-control']).toBe('no-store');
+        const key = (start.body as { manualKey: string }).manualKey;
+        const confirm = await post('2fa/setup/confirm', token, {
+          currentPassword: PASSWORD,
+          code: authenticator.generate(key),
+        }).expect(200);
+        expect(confirm.headers['cache-control']).toBe('no-store');
+        const regen = await post('2fa/recovery-codes/regenerate', token, {
+          currentPassword: PASSWORD,
+        }).expect(200);
+        expect(regen.headers['cache-control']).toBe('no-store');
+
+        const r = await createUser({ role: UserRole.REVIEWER });
+        const { challengeToken } = (await login(r.email).expect(200)).body as Body;
+        const enrol = await post('2fa/enroll/start', null, { challengeToken }).expect(200);
+        expect(enrol.headers['cache-control']).toBe('no-store');
+        const ekey = (enrol.body as { manualKey: string }).manualKey;
+        const done = await post('2fa/enroll/confirm', null, {
+          challengeToken,
+          code: authenticator.generate(ekey),
+        }).expect(200);
+        expect(done.headers['cache-control']).toBe('no-store');
+      });
+    });
+
     describe('POST /auth/2fa/reset/:userId (super admin)', () => {
+      const OK = { currentPassword: PASSWORD };
       async function admin(): Promise<{ id: string; token: string }> {
         const a = await createUser({ role: UserRole.SUPER_ADMIN, totp: SECRET });
         return { id: a.id, token: await accessFor(a.id) };
       }
 
-      it('FR-102: a non-super-admin is refused with 403 and nothing changes', async () => {
+      it('TC-003: a non-super-admin is refused with 403 and nothing changes', async () => {
         const target = await createUser({ role: UserRole.REVIEWER, totp: SECRET });
         const recruiter = await createUser();
-        await post(`2fa/reset/${target.id}`, await accessFor(recruiter.id)).expect(403);
-        await post(`2fa/reset/${target.id}`, null).expect(401);
+        await post(`2fa/reset/${target.id}`, await accessFor(recruiter.id), OK).expect(403);
+        await post(`2fa/reset/${target.id}`, null, OK).expect(401);
         expect(
           (await prisma.user.findUniqueOrThrow({ where: { id: target.id } })).totpEnabled,
         ).toBe(true);
       });
 
-      it('FR-102: a user in another organization is a 404, the same as a missing one; a bad id is 400; self is refused', async () => {
+      it('TC-003: a user in another organization is a 404, the same as a missing one; a bad id is 400; self is refused', async () => {
         const a = await admin();
         const otherOrg = await prisma.organization.create({ data: { name: 'Other Org' } });
         const foreign = await prisma.user.create({
@@ -1857,23 +1952,24 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
             totpEnabled: true,
           },
         });
-        const cross = await post(`2fa/reset/${foreign.id}`, a.token).expect(404);
+        const cross = await post(`2fa/reset/${foreign.id}`, a.token, OK).expect(404);
         const missing = await post(
           '2fa/reset/00000000-0000-4000-8000-000000000001',
           a.token,
+          OK,
         ).expect(404);
         expect((cross.body as Body).detail).toBe((missing.body as Body).detail);
         expect(
           (await prisma.user.findUniqueOrThrow({ where: { id: foreign.id } })).totpEnabled,
         ).toBe(true);
-        await post('2fa/reset/not-a-uuid', a.token).expect(400);
-        await post(`2fa/reset/${a.id}`, a.token).expect(400);
+        await post('2fa/reset/not-a-uuid', a.token, OK).expect(400);
+        await post(`2fa/reset/${a.id}`, a.token, OK).expect(400);
         expect((await prisma.user.findUniqueOrThrow({ where: { id: a.id } })).totpEnabled).toBe(
           true,
         );
       });
 
-      it('FR-102: a reset clears 2FA, revokes every family, writes an audit row with actor and target, keeps the password, and a reviewer must re-enrol at next login', async () => {
+      it('TC-003: a reset clears 2FA, revokes every family, writes an audit row with actor and target, keeps the password, and a reviewer must re-enrol at next login', async () => {
         const a = await admin();
         const target = await createUser({ role: UserRole.REVIEWER, totp: SECRET });
         await withRecoveryCodes(target.id, ['ABCDEFGHJKLMNPQR']);
@@ -1891,7 +1987,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
             },
           });
         }
-        await post(`2fa/reset/${target.id}`, a.token).expect(204);
+        await post(`2fa/reset/${target.id}`, a.token, OK).expect(204);
         const row = await prisma.user.findUniqueOrThrow({ where: { id: target.id } });
         expect(row.totpEnabled).toBe(false);
         expect(row.totpSecretEnc).toBeNull();
@@ -1906,19 +2002,24 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         expect(audit).toHaveLength(1);
         expect(audit[0]?.actorId).toBe(a.id);
         expect(audit[0]?.orgId).toBe(orgId);
+        expect(audit[0]?.metadata).toEqual({
+          previouslyEnabled: true,
+          targetRole: 'REVIEWER',
+          sessionsRevoked: 2,
+        });
         const next = (await login(target.email).expect(200)).body as Body;
         expect(next.status).toBe('two_factor_enrollment_required');
         expect(next.session).toBeUndefined();
       });
 
-      it('FR-102: a recruiter with optional 2FA is reset and then signs in with the password alone', async () => {
+      it('TC-003: a recruiter with optional 2FA is reset and then signs in with the password alone', async () => {
         const a = await admin();
         const target = await createUser({ totp: SECRET });
-        await post(`2fa/reset/${target.id}`, a.token).expect(204);
+        await post(`2fa/reset/${target.id}`, a.token, OK).expect(204);
         expect(((await login(target.email).expect(200)).body as Body).status).toBe('authenticated');
       });
 
-      it('FR-102, FR-104: a 2FA completion that overlaps an admin reset is refused and leaves no live refresh token', async () => {
+      it('TC-003: a 2FA completion that overlaps an admin reset is refused and leaves no live refresh token', async () => {
         const a = await admin();
         const target = await createUser({ role: UserRole.REVIEWER, totp: SECRET });
         const { challengeToken } = (await login(target.email).expect(200)).body as Body;
@@ -1937,7 +2038,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           const deadline = Date.now() + 10_000;
           while (!reached && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
           expect(reached).toBe(true);
-          await post(`2fa/reset/${target.id}`, a.token).expect(204);
+          await post(`2fa/reset/${target.id}`, a.token, OK).expect(204);
           gate.open();
           const res = await inFlight[0];
           expect(res?.status).toBe(401);
@@ -1952,7 +2053,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         expect(await prisma.refreshToken.count({ where: { userId: target.id } })).toBe(0);
       });
 
-      it('FR-102, FR-104: a 2FA verify whose session insert meets an uncommitted admin reset waits, is refused, and leaves no live family', async () => {
+      it('TC-003: a 2FA verify whose session insert meets an uncommitted admin reset waits, is refused, and leaves no live family', async () => {
         const a = await admin();
         const target = await createUser({ role: UserRole.REVIEWER, totp: SECRET });
         const { challengeToken } = (await login(target.email).expect(200)).body as Body;
@@ -1963,31 +2064,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           await gate.wait;
           return true;
         });
-        // Hold the reset's row lock the way the route takes it, then let the verify run into it.
-        let commit: () => void = () => undefined;
-        const hold = new Promise<void>((resolve) => {
-          commit = resolve;
-        });
-        let locked: () => void = () => undefined;
-        const gotLock = new Promise<void>((resolve) => {
-          locked = resolve;
-        });
-        const resetTx = prisma.$transaction(
-          async (tx) => {
-            await tx.$queryRaw`SELECT id FROM users WHERE id = ${target.id}::uuid FOR UPDATE`;
-            await tx.user.update({
-              where: { id: target.id },
-              data: { totpEnabled: false, totpSecretEnc: null, recoveryCodeHashes: [] },
-            });
-            locked();
-            await hold;
-            await tx.refreshToken.updateMany({
-              where: { userId: target.id, revokedAt: null },
-              data: { revokedAt: new Date() },
-            });
-          },
-          { timeout: 20_000 },
-        );
+        const held = holdResetLock(a.id, target.id);
         let res: request.Response | undefined;
         try {
           const inFlight = post('2fa/verify', null, { challengeToken, code: '123456' }).then(
@@ -1995,25 +2072,188 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           );
           const deadline = Date.now() + 10_000;
           while (!reached && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
-          await gotLock;
+          await held.gotLock;
           gate.open();
           await new Promise((r) => setTimeout(r, 500));
-          commit();
-          await resetTx;
+          held.commit();
+          await held.resetTx;
           res = await inFlight;
         } finally {
           gate.open();
-          commit();
-          await resetTx.catch(() => undefined);
+          held.commit();
+          await held.resetTx.catch(() => undefined);
         }
         expect(res?.status).toBe(401);
         expect(res?.headers['set-cookie']).toBeUndefined();
         expect(
           await prisma.refreshToken.count({ where: { userId: target.id, revokedAt: null } }),
         ).toBe(0);
-        expect(a.id).toBeDefined();
+      });
+      it('TC-003: a recovery-code verify that overlaps an uncommitted admin reset waits, is refused, and leaves no live family', async () => {
+        const a = await admin();
+        const target = await createUser({ role: UserRole.REVIEWER, totp: SECRET });
+        await withRecoveryCodes(target.id, ['ABCDEFGHJKLMNPQR']);
+        const { challengeToken } = (await login(target.email).expect(200)).body as Body;
+        const held = holdResetLock(a.id, target.id);
+        let res: request.Response | undefined;
+        try {
+          await held.gotLock;
+          const inFlight = post('2fa/verify', null, {
+            challengeToken,
+            code: 'ABCDEFGHJKLMNPQR',
+          }).then((r) => r);
+          await new Promise((r) => setTimeout(r, 500));
+          held.commit();
+          await held.resetTx;
+          res = await inFlight;
+        } finally {
+          held.commit();
+          await held.resetTx.catch(() => undefined);
+        }
+        expect(res?.status).toBe(400);
+        expect(res?.headers['set-cookie']).toBeUndefined();
+        expect(
+          await prisma.refreshToken.count({ where: { userId: target.id, revokedAt: null } }),
+        ).toBe(0);
+      });
+
+      it('TC-003: a missing or wrong admin password is refused and changes nothing; a stolen admin access token alone cannot reset', async () => {
+        const a = await admin();
+        const target = await createUser({ role: UserRole.REVIEWER, totp: SECRET });
+        await prisma.refreshToken.create({
+          data: {
+            userId: target.id,
+            familyId: '44444444-4444-4444-8444-444444444444',
+            tokenHash: sha256Hex(`live-${target.id}`),
+            expiresAt: new Date(Date.now() + 600_000),
+          },
+        });
+        await post(`2fa/reset/${target.id}`, a.token, {}).expect(400);
+        await post(`2fa/reset/${target.id}`, a.token).expect(400);
+        await post(`2fa/reset/${target.id}`, a.token, { currentPassword: 'wrong-pass-1' }).expect(
+          401,
+        );
+        const row = await prisma.user.findUniqueOrThrow({ where: { id: target.id } });
+        expect(row.totpEnabled).toBe(true);
+        expect(row.totpSecretEnc).not.toBeNull();
+        expect(
+          await prisma.refreshToken.count({ where: { userId: target.id, revokedAt: null } }),
+        ).toBe(1);
+        expect(
+          await prisma.auditLog.count({
+            where: { action: 'AUTH_2FA_RESET_BY_ADMIN', entityId: target.id },
+          }),
+        ).toBe(0);
+        expect((await prisma.user.findUniqueOrThrow({ where: { id: a.id } })).failedLogins).toBe(1);
+      });
+
+      it('TC-003: a locked admin gets the same generic 401 as a wrong password, even with the right one, and nothing changes', async () => {
+        const a = await admin();
+        const target = await createUser({ role: UserRole.REVIEWER, totp: SECRET });
+        for (let i = 0; i < 5; i++) {
+          await post(`2fa/reset/${target.id}`, a.token, { currentPassword: 'wrong-pass-1' }).expect(
+            401,
+          );
+        }
+        const wrong = await post(`2fa/reset/${target.id}`, a.token, {
+          currentPassword: 'wrong-pass-1',
+        });
+        const locked = await post(`2fa/reset/${target.id}`, a.token, OK);
+        expect(locked.status).toBe(401);
+        expect((locked.body as Body).detail).toBe((wrong.body as Body).detail);
+        expect(
+          (await prisma.user.findUniqueOrThrow({ where: { id: target.id } })).totpEnabled,
+        ).toBe(true);
+        expect(
+          await prisma.auditLog.count({
+            where: { action: 'AUTH_2FA_RESET_BY_ADMIN', entityId: target.id },
+          }),
+        ).toBe(0);
+      });
+
+      it('TC-003: an admin whose password changes between the check and the write is refused and nothing changes', async () => {
+        const a = await admin();
+        const target = await createUser({ role: UserRole.REVIEWER, totp: SECRET });
+        const newHash = await hash('Another-Pass-77', ARGON2_OPTIONS);
+        passwordVerify.mockImplementationOnce(async (h: string, p: string) => {
+          const ok = await realPasswordVerify(h, p);
+          await prisma.user.update({ where: { id: a.id }, data: { passwordHash: newHash } });
+          return ok;
+        });
+        await post(`2fa/reset/${target.id}`, a.token, OK).expect(401);
+        expect(
+          (await prisma.user.findUniqueOrThrow({ where: { id: target.id } })).totpEnabled,
+        ).toBe(true);
+        expect(
+          await prisma.auditLog.count({
+            where: { action: 'AUTH_2FA_RESET_BY_ADMIN', entityId: target.id },
+          }),
+        ).toBe(0);
+      });
+
+      it('TC-003: two admins resetting each other at the same time both finish with no deadlock or 500', async () => {
+        for (let round = 0; round < 5; round++) {
+          const a = await admin();
+          const b = await admin();
+          const [ra, rb] = await Promise.all([
+            post(`2fa/reset/${b.id}`, a.token, OK),
+            post(`2fa/reset/${a.id}`, b.token, OK),
+          ]);
+          expect(ra.status).toBe(204);
+          expect(rb.status).toBe(204);
+          expect(
+            await prisma.auditLog.count({
+              where: { action: 'AUTH_2FA_RESET_BY_ADMIN', entityId: { in: [a.id, b.id] } },
+            }),
+          ).toBe(2);
+        }
       });
     });
+
+    /**
+     * Holds an admin reset open the way the route runs it: target row lock, writes, then the audit
+     * insert (actor FK), so the lock order matches. Nothing commits until commit() is called.
+     */
+    function holdResetLock(
+      actorId: string,
+      targetId: string,
+    ): { gotLock: Promise<void>; commit: () => void; resetTx: Promise<void> } {
+      let commit: () => void = () => undefined;
+      const hold = new Promise<void>((resolve) => {
+        commit = resolve;
+      });
+      let locked: () => void = () => undefined;
+      const gotLock = new Promise<void>((resolve) => {
+        locked = resolve;
+      });
+      const resetTx = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT id FROM users WHERE id = ${targetId}::uuid FOR NO KEY UPDATE`;
+          await tx.user.update({
+            where: { id: targetId },
+            data: { totpEnabled: false, totpSecretEnc: null, recoveryCodeHashes: [] },
+          });
+          await tx.auditLog.create({
+            data: {
+              orgId,
+              actorId,
+              action: 'AUTH_2FA_RESET_BY_ADMIN',
+              entityType: 'user',
+              entityId: targetId,
+              metadata: {},
+            },
+          });
+          locked();
+          await hold;
+          await tx.refreshToken.updateMany({
+            where: { userId: targetId, revokedAt: null },
+            data: { revokedAt: new Date() },
+          });
+        },
+        { timeout: 20_000 },
+      );
+      return { gotLock, commit, resetTx };
+    }
 
     function makeGateLocal(): { wait: Promise<void>; open: () => void } {
       let open: () => void = () => undefined;

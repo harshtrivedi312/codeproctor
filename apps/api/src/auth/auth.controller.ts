@@ -1,4 +1,14 @@
-import { Body, Controller, HttpCode, Param, ParseUUIDPipe, Post, Req, Res } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Header,
+  HttpCode,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Req,
+  Res,
+} from '@nestjs/common';
 import {
   ApiAcceptedResponse,
   ApiBadRequestResponse,
@@ -38,6 +48,8 @@ import {
 } from './dto/auth.dto';
 
 export const REFRESH_COOKIE = 'cp_refresh';
+// Responses that carry a TOTP secret, QR code or recovery codes must never be cached.
+const NO_STORE = 'no-store';
 const ALL_STAFF = [UserRole.SUPER_ADMIN, UserRole.RECRUITER, UserRole.AUTHOR, UserRole.REVIEWER];
 
 const cookieOptions: CookieOptions = {
@@ -88,6 +100,7 @@ export class AuthController {
   @Public()
   @Post('2fa/enroll/start')
   @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Begin forced TOTP enrollment with the login challenge (FR-102)' })
   @ApiOkResponse({ type: TotpEnrollmentDto })
   @ApiUnauthorizedResponse({ description: 'Challenge expired' })
@@ -99,6 +112,7 @@ export class AuthController {
   @Public()
   @Post('2fa/enroll/confirm')
   @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Confirm forced enrollment; returns session and recovery codes once' })
   @ApiOkResponse({ type: EnrollmentConfirmedDto })
   @ApiBadRequestResponse({ description: 'Wrong code' })
@@ -147,6 +161,7 @@ export class AuthController {
   @ApiBearerAuth()
   @Post('2fa/setup/start')
   @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Signed-in user begins optional TOTP enrollment (FR-102)' })
   @ApiOkResponse({ type: TotpEnrollmentDto })
   @ApiUnauthorizedResponse({ description: 'Missing token, or wrong current password (or locked)' })
@@ -158,6 +173,7 @@ export class AuthController {
   @ApiBearerAuth()
   @Post('2fa/setup/confirm')
   @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Signed-in user confirms optional TOTP; returns recovery codes once' })
   @ApiOkResponse({ type: EnrollmentConfirmedDto })
   @ApiBadRequestResponse({ description: 'Wrong code' })
@@ -192,6 +208,7 @@ export class AuthController {
   @ApiBearerAuth()
   @Post('2fa/recovery-codes/regenerate')
   @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Replace all recovery codes; needs the current password (FR-102)' })
   @ApiOkResponse({ type: RecoveryCodesDto })
   @ApiUnauthorizedResponse({ description: 'Missing token, or wrong current password (or locked)' })
@@ -207,18 +224,24 @@ export class AuthController {
   @ApiBearerAuth()
   @Post('2fa/reset/:userId')
   @HttpCode(204)
-  @ApiOperation({ summary: "Super admin clears another user's 2FA and sessions (FR-102)" })
+  @ApiOperation({
+    summary:
+      "Super admin clears another user's 2FA and revokes their refresh sessions; needs the admin's own current password (FR-102). Access tokens already issued expire within 15 minutes; this is not an immediate compromise response.",
+  })
   @ApiNoContentResponse()
   @ApiBadRequestResponse({ description: 'Not a UUID, or the caller targeted themselves' })
-  @ApiUnauthorizedResponse({ description: 'Missing or invalid token' })
+  @ApiUnauthorizedResponse({
+    description: 'Missing token, or wrong current password of the admin (or locked)',
+  })
   @ApiForbiddenResponse({ description: 'Caller is not a super admin' })
   @ApiNotFoundResponse({ description: 'No such user in your organization' })
   async resetTwoFactor(
     @Param('userId', new ParseUUIDPipe()) userId: string,
+    @Body() dto: CurrentPasswordDto,
     @Req() req: AuthedRequest,
   ): Promise<void> {
     if (!req.user) throw new Error('Guard did not attach a user');
-    await this.auth.resetTwoFactorOf(req.user, userId, ctxOf(req));
+    await this.auth.resetTwoFactorOf(req.user, userId, dto.currentPassword, ctxOf(req));
   }
 
   @Public()
