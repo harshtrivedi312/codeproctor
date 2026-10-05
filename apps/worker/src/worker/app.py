@@ -16,9 +16,15 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from worker.config import IntegrityConfig
-from worker.events import MAX_SOURCE_CODE_LENGTH, CodeLanguage, Finding, KeystrokeBatch
+from worker.events import (
+    MAX_SOURCE_CODE_LENGTH,
+    CodeLanguage,
+    Finding,
+    KeystrokeBatch,
+    RiskBand,
+)
 from worker.keystrokes import analyze_keystrokes
-from worker.risk import RiskResult, ScoredEvent, calculate_risk
+from worker.risk import ReviewPath, RiskResult, ScoredEvent, calculate_risk, route_for_review
 from worker.similarity import (
     AiReference,
     Submission,
@@ -79,7 +85,12 @@ class AiRef(BaseModel):
 class RiskResultOut(BaseModel):
     score: float
     raw_score: float
-    band: str
+    band: RiskBand
+    # C-28: every session is reviewed; the band picks the path and orders the queue.
+    needs_review: bool
+    review_path: ReviewPath
+    queue_rank: int
+    review_reasons: list[str]
 
 
 class SimilarityRequest(_Req):
@@ -96,6 +107,8 @@ class SimilarityResult(BaseModel):
 
 class RiskRequest(_Req):
     events: list[ScoredEvent] = Field(max_length=100_000)
+    identity_review_pending: bool = False
+    short_answer_pending: bool = False
 
 
 @app.get("/health")
@@ -131,4 +144,15 @@ def analyze_similarity_route(req: SimilarityRequest) -> SimilarityResult:
 @app.post("/risk", dependencies=[Internal])
 def risk_route(req: RiskRequest) -> RiskResultOut:
     r: RiskResult = calculate_risk(req.events, req.config)
-    return RiskResultOut(score=r.score, band=r.band, raw_score=r.raw_score)
+    routing = route_for_review(
+        r.band, req.identity_review_pending, req.short_answer_pending, req.config
+    )
+    return RiskResultOut(
+        score=r.score,
+        band=r.band,
+        raw_score=r.raw_score,
+        needs_review=routing.needs_review,
+        review_path=routing.review_path,
+        queue_rank=routing.queue_rank,
+        review_reasons=routing.reasons,
+    )
