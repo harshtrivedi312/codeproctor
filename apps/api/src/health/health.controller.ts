@@ -5,13 +5,15 @@ import {
   ApiServiceUnavailableResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import { Public } from '../common/auth/decorators';
 import { SkipThrottle } from '@nestjs/throttler';
 import { HealthService } from './health.service';
 import type { HealthReport } from './health.service';
 
 // Public liveness/readiness probe for uptime alerts (NFR-09). It exposes only up/down per
-// dependency, never hostnames, versions or error text. Step 3 marks it @Public() in the matrix.
+// dependency, never hostnames, versions or error text. It is explicitly @Public() (FU-BE-04).
 @ApiTags('health')
+@Public()
 @Controller('health')
 @SkipThrottle()
 export class HealthController {
