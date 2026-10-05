@@ -1,0 +1,64 @@
+'use client';
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
+import * as React from 'react';
+
+const LABELS: Record<string, string> = {
+  questions: 'Questions',
+  tests: 'Tests',
+  candidates: 'Candidates',
+  review: 'Review queue',
+  live: 'Live',
+  reports: 'Reports',
+  settings: 'Settings',
+  users: 'Users',
+  data: 'Data and privacy',
+  risk: 'Risk scoring',
+  consent: 'Consent',
+};
+
+export interface Crumb {
+  href: string;
+  label: string;
+}
+
+/** /admin/settings/users becomes Dashboard / Settings / Users. Unknown segments (IDs) show as-is. */
+export function crumbsFor(pathname: string): Crumb[] {
+  const segments = pathname.split('/').filter(Boolean);
+  const crumbs: Crumb[] = [{ href: '/admin', label: 'Dashboard' }];
+  let href = '/admin';
+  for (const segment of segments.slice(1)) {
+    href += `/${segment}`;
+    crumbs.push({ href, label: LABELS[segment] ?? decodeURIComponent(segment) });
+  }
+  return crumbs;
+}
+
+export function Breadcrumbs(): React.JSX.Element | null {
+  const pathname = usePathname();
+  const crumbs = crumbsFor(pathname);
+  if (crumbs.length < 2) return null;
+  return (
+    <nav aria-label="Breadcrumb" className="mb-3 text-sm">
+      <ol className="flex flex-wrap items-center gap-1 text-muted-foreground">
+        {crumbs.map((crumb, i) => {
+          const last = i === crumbs.length - 1;
+          return (
+            <li key={crumb.href} className="flex items-center gap-1">
+              {i > 0 ? <span aria-hidden="true">/</span> : null}
+              {last ? (
+                <span aria-current="page" className="font-medium text-foreground">
+                  {crumb.label}
+                </span>
+              ) : (
+                <Link href={crumb.href} className="underline-offset-4 hover:underline">
+                  {crumb.label}
+                </Link>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </nav>
+  );
+}
