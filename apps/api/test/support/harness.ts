@@ -233,6 +233,18 @@ export async function signInWithTotp(
   };
 }
 
+/** The session user of a login, 2fa/verify, enroll/confirm or refresh body (nested or flat). */
+export function sessionUser(body: Body): Record<string, unknown> {
+  const user = (body.session as { user?: unknown } | undefined)?.user ?? body.user;
+  if (typeof user !== 'object' || user === null) throw new Error('no session user in the body');
+  return user as Record<string, unknown>;
+}
+
+/** FR-102: the caller's own 2FA state is on session users only, never on challenge or error bodies. */
+export function expectNoTotpEnabled(res: request.Response): void {
+  expect(JSON.stringify(res.body)).not.toContain('totpEnabled');
+}
+
 /** Loose view of the JSON bodies; each test reads only the fields it expects. */
 export interface Body {
   status: string;
@@ -245,6 +257,7 @@ export interface Body {
   otpauthUri: string;
   qrDataUrl: string;
   recoveryCodes: string[];
+  user: { email: string; role: string; totpEnabled: boolean };
   [key: string]: unknown;
 }
 

@@ -4,8 +4,22 @@
 // reads. Cases: FR-101, FR-102, FR-104, FR-107 (the TC-001, TC-003, TC-098 browser flows depend on it).
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { authenticator } from 'otplib';
 import request from 'supertest';
-import { Body, boot, createUser, Harness, login } from '../support/harness';
+import { UserRole } from '../../src/generated/prisma/client';
+import {
+  API,
+  Body,
+  boot,
+  createUser,
+  expectNoTotpEnabled,
+  Harness,
+  login,
+  refresh,
+  refreshCookie,
+  sessionUser,
+  TOTP_SECRET,
+} from '../support/harness';
 
 function webAuthRoutes(): { method: string; path: string }[] {
   const yaml = readFileSync(resolve(__dirname, '../../../web/openapi/openapi.yaml'), 'utf8').split(
@@ -64,8 +78,70 @@ describe('Web OpenAPI contract against the real API (FR-101, FR-102, FR-104, FR-
   it('FR-104: the login session and the refresh response carry the user fields the web reads (id, email, name, role, orgName)', async () => {
     const u = await createUser(h);
     const res = await login(h, u.email).expect(200);
-    const user = (res.body as Body).session.user as unknown as Record<string, unknown>;
+    const user = sessionUser(res.body as Body);
     const wanted = ['id', 'email', 'name', 'role', 'orgName'];
     expect(wanted.filter((f) => typeof user[f] !== 'string')).toEqual([]);
+    const refreshed = sessionUser((await refresh(h, refreshCookie(res)).expect(200)).body as Body);
+    expect(wanted.filter((f) => typeof refreshed[f] !== 'string')).toEqual([]);
+  });
+
+  it('FR-102: every session user (login, refresh) carries a boolean totpEnabled: false for a user without 2FA', async () => {
+    const u = await createUser(h);
+    const res = await login(h, u.email).expect(200);
+    const user = sessionUser(res.body as Body);
+    expect(typeof user.totpEnabled).toBe('boolean');
+    expect(user.totpEnabled).toBe(false);
+    const refreshed = sessionUser((await refresh(h, refreshCookie(res)).expect(200)).body as Body);
+    expect(typeof refreshed.totpEnabled).toBe('boolean');
+    expect(refreshed.totpEnabled).toBe(false);
+  });
+
+  it('FR-102: 2fa/verify, enroll/confirm and refresh carry totpEnabled: true; challenge and error bodies never carry it', async () => {
+    const post = (path: string): request.Test =>
+      request(h.app.getHttpServer()).post(`${API}/auth/${path}`);
+
+    // Existing TOTP user: challenge has none, verify and refresh say true.
+    const t = await createUser(h, { role: UserRole.AUTHOR, totp: TOTP_SECRET });
+    const challenge = await login(h, t.email).expect(200);
+    expect((challenge.body as Body).status).toBe('two_factor_required');
+    expectNoTotpEnabled(challenge);
+    const wrong = await post('2fa/verify')
+      .send({ challengeToken: (challenge.body as Body).challengeToken, code: '000000' })
+      .expect(400);
+    expectNoTotpEnabled(wrong);
+    const verified = await post('2fa/verify')
+      .send({
+        challengeToken: (challenge.body as Body).challengeToken,
+        code: authenticator.generate(TOTP_SECRET),
+      })
+      .expect(200);
+    const vUser = sessionUser(verified.body as Body);
+    expect(typeof vUser.totpEnabled).toBe('boolean');
+    expect(vUser.totpEnabled).toBe(true);
+    const rUser = sessionUser((await refresh(h, refreshCookie(verified)).expect(200)).body as Body);
+    expect(typeof rUser.totpEnabled).toBe('boolean');
+    expect(rUser.totpEnabled).toBe(true);
+
+    // Forced enrolment: challenge has none, confirm says true (the row was just updated).
+    const r = await createUser(h, { role: UserRole.REVIEWER });
+    const enrol = await login(h, r.email).expect(200);
+    expect((enrol.body as Body).status).toBe('two_factor_enrollment_required');
+    expectNoTotpEnabled(enrol);
+    const challengeToken = (enrol.body as Body).challengeToken;
+    const start = (await post('2fa/enroll/start').send({ challengeToken }).expect(200))
+      .body as Body;
+    expectNoTotpEnabled(
+      await post('2fa/enroll/confirm').send({ challengeToken, code: '000000' }).expect(400),
+    );
+    const done = await post('2fa/enroll/confirm')
+      .send({ challengeToken, code: authenticator.generate(start.manualKey) })
+      .expect(200);
+    const eUser = sessionUser(done.body as Body);
+    expect(typeof eUser.totpEnabled).toBe('boolean');
+    expect(eUser.totpEnabled).toBe(true);
+
+    // Error bodies.
+    expectNoTotpEnabled(await login(h, t.email, 'wrong-password-1').expect(401));
+    expectNoTotpEnabled(await post('refresh').expect(401));
   });
 });
