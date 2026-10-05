@@ -80,7 +80,7 @@ Only these people and companies can see your data:
 - **Our staff with the Recruiter role** for this role see your invitation, status, scores and the final decision.
 - **Our staff with the Reviewer role** see the recordings, images, flags and your code, so they can review the assessment. Reviewers sign in with two-factor authentication.
 - **Our staff with the Super Admin role** manage the system and handle requests about your data.
-- **Our service providers**, under contract and only on our instructions: Amazon Web Services (hosting, storage, email and system logs), Cloudflare (delivering the web pages), including Amazon Simple Email Service (sending your invitation, one-time codes and a copy of this document) and Amazon CloudWatch (system logs, which never contain your recordings, images, codes or passwords). They may not use your data for their own purposes.
+- **Our service providers**, under contract and only on our instructions: Amazon Web Services (hosting and storage, plus Amazon Simple Email Service for sending your invitation, one-time codes and a copy of this document, and Amazon CloudWatch for system logs, which never contain your recordings, images, codes or passwords), and Cloudflare (delivering the web pages). They may not use your data for their own purposes.
 
 Every time a staff member opens your recordings or images, it is logged. Your scores and status may also be sent to [our applicant tracking system] through an export or automatic notification. We don't share your data with anyone else unless the law requires it.
 
@@ -131,8 +131,8 @@ We record the document version, your age confirmation, your typed name, the date
 
 1. **One signature or separate tick boxes?** FR-401 and C-07 specify one typed-name signature. Under BIPA a written release must be specific, and GDPR explicit consent should be clearly separate from other terms. Item 2 of section 11 keeps biometric consent as its own explicit statement. A separate required tick box for item 2 would make it stronger. It would be a small FR-401 change. Your call.
 2. **"Declining is not treated as a failed assessment."** If you can commit to this, keep the sentence: it helps show consent is freely given (R-18). If you can't, replace it with "You can discuss alternatives with your recruiter."
-3. **Results retention** (section 8, last bullet) depends on OQ-4.
-4. **Section 6 processors** must match the processor register (processors.md) and the P-10 choice (email and error tracker). Owner fill-ins applied 2026-10-05: company name, privacy email and region are still placeholders; access by role; one selfie; 30-day erasure with the C-06 hold; withdrawal before or during the test by ending the session, and after the test as an erasure request; SCC transfer wording; consent proof kept 3 years (C-17).
+3. **Results retention:** 1 year (C-26), stated in section 8.
+4. **Section 6 processors** match the processor register (processors.md): AWS (including SES and CloudWatch, C-31 and C-32), Cloudflare, and an ATS if one is used. Owner fill-ins applied 2026-10-05: company name, privacy email and region are still placeholders; access by role; one selfie; 30-day erasure with the C-06 hold; withdrawal before or during the test by ending the session, and after the test as an erasure request; SCC transfer wording; consent proof kept 3 years (C-17).
 5. **Section 7 transfer wording** uses SCCs, as the owner decided. If a processor relies on DPF instead, add it here.
 6. **The section 10 example questions** must match the FAIR-01 form once it is designed. Some categories (for example ethnicity) are special-category data under GDPR, and the separate consent covers them.
 7. **Job postings (C-14)** should carry a one-line notice, for example: "This role includes a proctored online coding assessment. Automated tools flag possible issues; nothing is rejected automatically, and a person makes every hiring decision."

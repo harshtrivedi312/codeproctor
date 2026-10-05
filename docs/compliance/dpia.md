@@ -23,7 +23,7 @@ The GDPR and UK GDPR require a DPIA where processing is likely to result in a hi
 | Data | Identity: name, email, invitation details. Identity check: ID image, selfie, liveness result, match score (face templates are calculated in memory and **never stored**, ADR 0004). Monitoring: screen, webcam and microphone recordings, room scan, identity re-check frames (kept only on mismatch, C-08), evidence snapshots, browser and integrity events, keystroke timing and edits, IP address, device details. Results: code, answers, scores, risk score and band, reviewer decisions and notes, appeals. Consent record: version, typed name, timestamp, IP, user agent, signed PDF. Optional demographics (C-13), separate and aggregate only |
 | Data flow | Browser to API (HTTPS); browser to object storage directly through short-lived presigned URLs, so media never passes through the API; API to Postgres; worker reads media from storage for analysis; Judge0 (self-hosted) runs code; reviewers watch through 15-minute signed playback URLs |
 | Where | One US AWS region for all data, EU/UK included (C-03). Web front end served by Cloudflare Pages. Processors: [processors.md](processors.md) |
-| Retention | [retention-schedule.md](retention-schedule.md): media and biometric data [N] days after the assessment is finished (the organisation's setting, default 90; biometric items capped at 90 if OQ-5 is decided as proposed); consent records 3 years, also after erasure (C-17); consent records 3 years; results [OQ-4]; backups 14 days |
+| Retention | [retention-schedule.md](retention-schedule.md): media [N] days after the assessment is finished (the organisation's setting, default 90); face images (ID image, selfie, mismatch frames) never more than 90 days (C-27); results 1 year (C-26); consent records 3 years, also after erasure (C-17); system logs [30] days (OQ-9); backups 14 days |
 | Who decides | A trained reviewer reviews **every** session; nothing is cleared or rejected automatically, and results can't be used for hiring until the reviewer signs off (C-28). A person makes every hiring decision (BRD §7, FR-805, FR-902, C-14) |
 
 ## 3. Lawful basis
@@ -45,7 +45,7 @@ US laws:
 | Test | Assessment |
 | --- | --- |
 | **Purpose:** is there a legitimate interest? | Yes. A hiring assessment is only useful if it is fair and was taken by the right person without outside help. Candidates who prepare honestly benefit from that too. |
-| **Necessity:** is the processing needed for it, and is there a less intrusive way? | Remote assessments can't be supervised in person. Screen, webcam, audio and keystroke monitoring is the least intrusive way we know to give similar assurance. It is limited to the test window, starts only after the candidate has read the document, keeps media for [N] days (default 90), keeps face images at most 90 days, and stores no face templates. In-person or video-supervised alternatives are offered as accommodations (C-02, C-19). |
+| **Necessity:** is the processing needed for it, and is there a less intrusive way? | Remote assessments can't be supervised in person. Screen, webcam, audio and keystroke monitoring is the least intrusive way we know to give similar assurance. It is limited to the test window, starts only after the candidate has read the document, keeps media for [N] days (default 90), keeps face images at most 90 days, and stores no face templates. Accommodations adjust the monitoring for candidates who need it (C-02), and a waived identity check comes with an advised ID video call (C-19). |
 | **Balancing:** do the candidate's interests override ours? | The intrusion is significant: the home environment, voice and behaviour. It is mitigated by: notice before anything is recorded; a candidate-initiated room scan; a person reviewing every session (C-28); no automatic rejection; appeals; short retention; access logging; accommodations; and the right to object. Candidates expect proctoring for remote technical assessments, and it is disclosed in job postings (C-14). **Conclusion: the balance favours processing, with these safeguards.** |
 | **Device access (ePrivacy Art. 5(3))** | Turning on the camera, microphone and screen sharing goes through browser permission prompts the candidate grants. It is strictly necessary for the service the candidate asked for, the assessment (*verify*). |
 
@@ -59,8 +59,8 @@ US laws:
   - The ID photo is used only for the identity check (FR-403).
 - **Retention limits:**
   - automatic daily deletion jobs;
-  - [N] days for media and biometrics (default 90; the cap for biometric items is OQ-5);
-  - a proposed cap that stops organisations from extending biometric retention (OQ-5);
+  - [N] days for media (default 90), and a hard 90-day cap on face images that organisations can't extend (C-27);
+  - results deleted after 1 year, leaving anonymised statistics (C-26);
   - erasure on request within the approved timeline (C-06).
 - **Transparency:** a plain-language consent document read to the end before anything is recorded (FR-401, C-09), the public retention schedule, and notices in job postings (C-14).
 - **Alternatives:** audited per-invitation accommodations, including disabled detectors or no face match, handled case by case by the recruiter (C-02).
@@ -89,7 +89,7 @@ Likelihood and severity are before the measures. Residual risk is after them.
 | R6 | Inferring special-category data from video or audio (health, religion, ethnicity) | Possible / significant | No such processing; reviewer guidance not to note such observations; free-text notes erased on erasure | Low |
 | R7 | Function creep: recordings or biometric data used for other purposes (security, other hiring, training models) | Unlikely / severe | Purpose limitation in the consent document; no model training on candidate data; access logging; the retention schedule | Low |
 | R8 | EU/UK data stored in the US (government access, weaker remedies) | Possible / moderate | SCCs or DPF for every processor (C-03b); encryption; minimal retention; transfer-impact notes in section 8 | Medium |
-| R9 | Over-retention (results kept with no limit; organisation settings up to 730 days) | Likely / moderate | Decide OQ-4 (a results retention period) and OQ-5 (cap biometric items at 90 days) | Medium until decided, then low |
+| R9 | Over-retention (results kept with no limit; organisation settings up to 730 days) | Likely / moderate | Results limited to 1 year (C-26); face images capped at 90 days (C-27); a legal hold for open claims (OQ-10) | Low |
 | R10 | Automated decision-making in effect, because reviewers rubber-stamp the score or risk band (more likely now that every session, including low-risk ones, is reviewed through a fast path) | Possible / significant | A verdict requires a decision on every HIGH flag (ADR 0001 F7, FR-902); reviewer training; monitoring of how often reviewers agree with the risk band; appeals | Medium |
 | R11 | Under-18 candidates | Unlikely / moderate | A required 18+ confirmation in the consent step; no confirmation, no test (C-30) | Low |
 | R12 | Misuse of the optional demographic data, or re-identification from small groups | Unlikely / severe | Separate store; never visible to staff; never used in decisions; aggregate only with a minimum group of 10; deleted with the recordings after [N] days (default 90; C-13) | Low |
@@ -179,5 +179,5 @@ Art. 22 covers decisions based **solely** on automated processing. Because a per
 
 | ID | Question | Suggested answer |
 | --- | --- | --- |
-| OQ-6 | Is the lawful basis for the non-biometric recording and monitoring consent (current design), or legitimate interests or pre-contract steps, with consent kept only for biometrics? | Legitimate interests for proctoring and scoring, explicit consent for biometrics. This keeps the integrity record if a candidate withdraws, and lowers the "freely given" risk |
-| OQ-7 | Can candidates under 18 apply (for example, for internships)? | If not, add an 18+ confirmation to the invitation flow. If yes, a parental-consent path is needed |
+| OQ-6 | **Answered by C-29 (legitimate interests; consent for biometrics).** Is the lawful basis for the non-biometric recording and monitoring consent (current design), or legitimate interests or pre-contract steps, with consent kept only for biometrics? | Legitimate interests for proctoring and scoring, explicit consent for biometrics. This keeps the integrity record if a candidate withdraws, and lowers the "freely given" risk |
+| OQ-7 | **Answered by C-30 (minimum age 18).** Can candidates under 18 apply (for example, for internships)? | If not, add an 18+ confirmation to the invitation flow. If yes, a parental-consent path is needed |
