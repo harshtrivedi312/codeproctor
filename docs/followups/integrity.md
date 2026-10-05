@@ -26,6 +26,10 @@ Non-blocking findings. Only blockers stop a merge.
 
 - **[BE-12 / worker, FR-802] RESET can bypass paste-burst detection.** A client can send a RESET whose text is a finished solution ("restore after reload") and typing-speed or paste-burst analytics will not see it. The worker or API should compare RESET text with server-known state (starter code or the last saved draft) and, on a mismatch, emit evidence (PASTE_BURST or a new signal), never a verdict automatically.
 
+## From ARC-02 review of PR #19 (code-reviewer)
+
+- **[BE-10, security, must do in BE-10] Body limit on POST /candidate/session/keystrokes.** Set a per-route limit of `MAX_KEYSTROKE_BATCH_BODY_BYTES` (2 MiB; the NestJS/Express default of 100 KB would reject valid large batches). Apply it before the HMAC check and before parsing, measure the decompressed size (backend.md Step 10 allows HTTP compression; a zip bomb must not get past it), and add a test for the 413 response. Same for the events route (`MAX_EVENT_BATCH_BODY_BYTES`).
+
 ### Code-reviewer findings on PR #20 (should-fix and nits; the blocker and the regex fix are in the PR)
 - Peer compare: precompute fingerprints once and use an inverted index (O(n^2) today); routes are synchronous and block the event loop on large corpora.
 - Mirror drift from keystroke.ts: `MAX_KEYSTROKE_BATCH_TEXT` total-text check is missing, `sessionQuestionId` should be a UUID, `startedAt` should be timezone-aware (AwareDatetime). Extend `test_contracts.py` accordingly.

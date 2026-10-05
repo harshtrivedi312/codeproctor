@@ -394,13 +394,6 @@ export interface components {
       code: string;
       message: string;
     };
-    LockedError: {
-      /** @enum {string} */
-      code: 'account_locked';
-      message: string;
-      /** Format: date-time */
-      lockedUntil: string;
-    };
     /** @enum {string} */
     Language: 'python' | 'javascript' | 'java';
     DraftRequest: {
@@ -747,22 +740,13 @@ export interface operations {
           'application/json': components['schemas']['LoginResult'];
         };
       };
-      /** @description Wrong email or password */
+      /** @description Sign-in failed. One generic answer for a wrong password, an unknown email and a locked account (15 minutes after 5 failed attempts, FR-101); the API never reveals which. */
       401: {
         headers: {
           [name: string]: unknown;
         };
         content: {
           'application/json': components['schemas']['ApiError'];
-        };
-      };
-      /** @description Account locked for 15 minutes after 5 failed attempts (FR-101) */
-      423: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['LockedError'];
         };
       };
     };

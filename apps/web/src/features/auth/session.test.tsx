@@ -1,5 +1,6 @@
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import * as React from 'react';
 import { http, HttpResponse } from 'msw';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, isAuthRequest } from '@/lib/api/client';
@@ -209,11 +210,238 @@ describe('session handling', () => {
     const pending = refreshSession();
     const u = userEvent.setup();
     await u.click(screen.getByRole('button', { name: 'Sign out' }));
-    await waitFor(() => expect(getAccessToken()).toBeNull());
+    // Sign-out waits for the refresh to settle before it calls logout.
     release();
     expect(await pending).toBeNull();
+    await waitFor(() => expect(getAccessToken()).toBeNull());
     expect(getAccessToken()).toBeNull();
     expect(screen.getByTestId('who')).toHaveTextContent('nobody');
+  });
+
+  it('FR-104: a refresh triggered by a 401 while logout is in flight cannot sign the user back in', async () => {
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <SignOutButton />
+        <Who />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let lateRefresh: Promise<unknown> = Promise.resolve();
+    server.use(
+      http.post('*/v1/auth/logout', () => {
+        // Another request got a 401 meanwhile, and its handler asks for a refresh.
+        lateRefresh = refreshSession();
+        return new HttpResponse(null, { status: 204 });
+      }),
+      http.post('*/v1/auth/refresh', async () => {
+        await gate;
+        return HttpResponse.json({
+          accessToken: 'resurrected-token',
+          user: {
+            id: 'u',
+            email: 'recruiter@example.test',
+            name: 'R',
+            role: 'RECRUITER',
+            orgName: 'x',
+          },
+        });
+      }),
+    );
+    const u = userEvent.setup();
+    await u.click(screen.getByRole('button', { name: 'Sign out' }));
+    await waitFor(() => expect(router.replace).toHaveBeenLastCalledWith('/admin/login'));
+    release();
+    await lateRefresh;
+    expect(getAccessToken()).toBeNull();
+    expect(screen.getByTestId('who')).toHaveTextContent('nobody');
+  });
+
+  it('FR-104: a slow first-load refresh that ends in 401 cannot sign out a fresh login', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let refreshes = 0;
+    server.use(
+      http.post('*/v1/auth/refresh', async () => {
+        refreshes++;
+        await gate;
+        return new HttpResponse(null, { status: 401 });
+      }),
+    );
+    const captured: { auth: ReturnType<typeof useAuth> | null } = { auth: null };
+    function Capture() {
+      const value = useAuth();
+      React.useEffect(() => {
+        captured.auth = value;
+      });
+      return null;
+    }
+    renderWithAuth(
+      <>
+        <Capture />
+        <Who />
+      </>,
+    );
+    await waitFor(() => expect(refreshes).toBe(1));
+    const login = await api.POST('/v1/auth/login', {
+      body: { email: MOCK_USERS.recruiter.email, password: MOCK_USERS.recruiter.password },
+    });
+    if (login.data?.status !== 'authenticated' || !login.data.session) throw new Error('login');
+    captured.auth!.signIn(login.data.session);
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
+    release();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER');
+    expect(getAccessToken()).toBeTruthy();
+  });
+
+  it('FR-101 FR-104: sign-in waits for a slow first-load refresh, so a late 200 cannot overwrite the login cookie', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let refreshes = 0;
+    let loginStarted = false;
+    server.use(
+      http.post('*/v1/auth/refresh', async () => {
+        refreshes++;
+        await gate;
+        return HttpResponse.json({
+          accessToken: 'old-session-token',
+          user: { id: 'o', email: 'old@example.test', name: 'Old', role: 'AUTHOR', orgName: 'x' },
+        });
+      }),
+    );
+    server.events.on('request:start', ({ request }) => {
+      if (request.url.endsWith('/v1/auth/login')) loginStarted = true;
+    });
+    renderWithAuth(<LoginForm />);
+    await waitFor(() => expect(refreshes).toBe(1));
+    const u = userEvent.setup();
+    await u.type(screen.getByLabelText('Work email'), MOCK_USERS.recruiter.email);
+    await u.type(screen.getByLabelText('Password'), MOCK_USERS.recruiter.password);
+    await u.click(screen.getByRole('button', { name: 'Sign in' }));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(loginStarted).toBe(false);
+    release();
+    await waitFor(() => expect(loginStarted).toBe(true));
+    server.events.removeAllListeners();
+  });
+});
+
+describe('requests from an earlier session', () => {
+  it('FR-104 FR-103: a 401 for user X that arrives after Y signed in is not replayed with Y token', async () => {
+    const captured: { auth: ReturnType<typeof useAuth> | null } = { auth: null };
+    function Capture() {
+      const value = useAuth();
+      React.useEffect(() => {
+        captured.auth = value;
+      });
+      return null;
+    }
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <SignOutButton />
+        <Capture />
+        <Who />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
+
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const seen: (string | null)[] = [];
+    server.use(
+      http.get('*/v1/time', async ({ request }) => {
+        seen.push(request.headers.get('authorization'));
+        await gate;
+        return new HttpResponse(null, { status: 401 });
+      }),
+    );
+    const inFlight = api.GET('/v1/time'); // sent as X (recruiter)
+    await waitFor(() => expect(seen).toHaveLength(1));
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Sign out' }));
+    await waitFor(() => expect(getAccessToken()).toBeNull());
+    const login = await api.POST('/v1/auth/login', {
+      body: { email: MOCK_USERS.author.email, password: MOCK_USERS.author.password },
+    });
+    if (login.data?.status !== 'authenticated' || !login.data.session) throw new Error('login');
+    captured.auth!.signIn(login.data.session);
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('AUTHOR'));
+
+    release();
+    const { response } = await inFlight;
+    expect(response.status).toBe(401);
+    expect(seen).toHaveLength(1); // no replay
+    expect(screen.getByTestId('who')).toHaveTextContent('AUTHOR');
+  });
+});
+
+describe('sign-out that the server did not confirm', () => {
+  it('FR-104: after a failed logout, a reload does not restore the session and retries the logout', async () => {
+    const first = renderWithAuth(
+      <>
+        <LoginForm />
+        <SignOutButton />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    server.use(http.post('*/v1/auth/logout', () => HttpResponse.error()));
+    const u = userEvent.setup();
+    await u.click(await screen.findByRole('button', { name: 'Sign out' }));
+    expect(await screen.findByText('We could not confirm you were signed out')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry sign-out' })).toBeInTheDocument();
+    first.unmount();
+
+    // "Reload": a fresh provider. The refresh cookie is still valid on the mock server.
+    server.resetHandlers();
+    let refreshCalls = 0;
+    let logoutCalls = 0;
+    server.use(
+      http.post('*/v1/auth/refresh', () => {
+        refreshCalls++;
+        return new HttpResponse(null, { status: 401 });
+      }),
+      http.post('*/v1/auth/logout', () => {
+        logoutCalls++;
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <Who />
+      </>,
+    );
+    await waitFor(() => expect(logoutCalls).toBe(1));
+    expect(refreshCalls).toBe(0);
+    expect(screen.getByTestId('who')).toHaveTextContent('nobody');
+    expect(getAccessToken()).toBeNull();
+    await waitFor(() =>
+      expect(
+        screen.queryByText('We could not confirm you were signed out'),
+      ).not.toBeInTheDocument(),
+    );
+    expect(localStorage.getItem('cp.signOutPending')).toBeNull();
+  });
+
+  it('FR-104: the pending marker holds no token', async () => {
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <SignOutButton />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    const token = getAccessToken()!;
+    server.use(http.post('*/v1/auth/logout', () => HttpResponse.error()));
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Sign out' }));
+    await waitFor(() => expect(localStorage.getItem('cp.signOutPending')).toBe('1'));
+    expect(JSON.stringify({ ...localStorage })).not.toContain(token);
   });
 });
 

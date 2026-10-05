@@ -39,3 +39,20 @@ export function createDefaultMonitors() {
   };
 }
 export { mountProctorDemo, type DemoHandle } from './demo/mount';
+
+export * from './recording/types';
+export * from './recording/upload-queue';
+export * from './recording/recorder';
+export * from './recording/media-api';
+export * from './recording/pipeline';
+
+export * from './detectors/config';
+export * from './detectors/rules';
+export * from './detectors/protocol';
+export * from './detectors/inference-client';
+export * from './detectors/default-worker';
+export * from './detectors/evidence';
+export * from './detectors/identity';
+export * from './detectors/voice-monitor';
+export * from './detectors/vision-monitor';
+export { mountCalibrationPanel } from './demo/calibration';
