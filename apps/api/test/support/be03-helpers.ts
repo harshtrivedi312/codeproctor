@@ -52,3 +52,15 @@ export function tokenFromUrl(url: string): string {
     return '';
   }
 }
+
+/**
+ * Waits for mail the API defers until after the response (lock alerts, invites, forgot-password):
+ * the API's own pending work first, then a few event-loop turns so a send queued by a callback
+ * that has just run is also seen. Use before asserting that a mail was, or was not, sent.
+ */
+export async function flushDeferred(h: Harness): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    await h.settle();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
