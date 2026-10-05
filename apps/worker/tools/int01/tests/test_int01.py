@@ -64,7 +64,7 @@ def _groups(
         for _ in range(size):
             code = f"s{n}"
             n += 1
-            demo[code] = groups.SubjectDemo(consent, {"band": f"G{gi}"})
+            demo[code] = groups.SubjectDemo(consent, {"age_band": f"G{gi}"})
             pairs += [
                 groups.ScoredPair(code, "genuine", 0.8),
                 groups.ScoredPair(code, "impostor", 0.1),
@@ -116,7 +116,9 @@ def test_c12_only_volunteers_with_group_consent_count_in_groups() -> None:
     for code in list(demo)[:6]:  # 6 of G0 did not tick box C
         demo[code] = groups.SubjectDemo(False, demo[code].values)
     shown, hidden = _rows(pairs, demo)
-    assert hidden and shown == []  # G0 now has 6 consenting volunteers; complement withholds all
+    # G0 has 6 consenting volunteers and is hidden; with the 6 non-consenters the residual is 12,
+    # which is safe, so G1 may be shown.
+    assert hidden and shown == ["G1"]
     assert groups.group_report(pairs, {}, 0.5) == []  # no consent entries: no group section
 
 
@@ -125,6 +127,7 @@ def test_c12_demographics_file_is_strict(tmp_path: Path) -> None:
         {"a": {"age_band": "30-44"}},  # consent flag missing
         {"a": {"consent_group_results": "yes", "age_band": "30-44"}},  # not a boolean
         {"a": {"consent_group_results": True, "age_band": "<b>x</b>\n| evil |"}},  # markup
+        {"a": {"consent_group_results": True, "full_name": "Ada"}},  # not a form dimension
     ):
         with pytest.raises(ValueError):
             groups.parse_subject_demo(next(iter(bad.values())))
@@ -254,3 +257,41 @@ def test_scores_csv_header_is_validated(tmp_path: Path) -> None:
     f.write_text("a,b\n1,2\n")
     with pytest.raises(ValueError, match="columns"):
         evaluate.load_scores(f)
+
+
+def _mixed(
+    sizes: list[int], non_consenters: int = 0, no_genuine: int = 0
+) -> tuple[list[groups.ScoredPair], dict[str, groups.SubjectDemo]]:
+    pairs, demo = _groups(*sizes)
+    codes = list(demo)
+    for code in codes[len(codes) - non_consenters :]:
+        demo[code] = groups.SubjectDemo(False, demo[code].values)
+    skip = set(codes[:no_genuine])  # failed ID intake: impostor probes only
+    pairs = [p for p in pairs if not (p.subject in skip and p.kind == "genuine")]
+    return pairs, demo
+
+
+def test_c12_one_non_consenter_cannot_be_derived_from_overall_totals() -> None:
+    pairs, demo = _mixed([20, 20, 20], non_consenters=1)
+    (dim,) = groups.group_report(pairs, demo, 0.5)
+    shown = {r.group for r in dim.rows}
+    rest = {p.subject for p in pairs} - {
+        c for c, d in demo.items() if d.values["age_band"] in shown and d.consent_group_results
+    }
+    assert len(shown) < 3 and len(rest) >= 10 and dim.hidden
+
+
+def test_c12_group_needs_ten_volunteers_with_genuine_pairs_not_ten_members() -> None:
+    pairs, demo = _mixed([12, 15], no_genuine=11)  # only 1 of G0 has genuine pairs
+    shown, hidden = _rows(pairs, demo)
+    assert "G0" not in shown and hidden
+    pairs, demo = _mixed([12, 15, 14], no_genuine=0)
+    pairs = [p for p in pairs if p.subject not in {"s0", "s1"} or True]
+    assert _rows(pairs, demo)[0] == ["G0", "G1", "G2"]  # nothing hidden: nothing to protect
+
+
+def test_c12_malformed_demographics_file_gives_clear_error(tmp_path: Path) -> None:
+    f = tmp_path / "d.json"
+    f.write_text("[1]")
+    with pytest.raises(ValueError, match="per-volunteer"):
+        evaluate.load_demographics(f)

@@ -41,6 +41,8 @@ def load_demographics(path: Path) -> dict[str, groups.SubjectDemo]:
     if inside_git_tree(path):
         raise ValueError("demographics must be stored outside the repository")
     data = json.loads(path.read_text())
+    if not isinstance(data, dict) or not all(isinstance(v, dict) for v in data.values()):
+        raise ValueError("demographics must be an object of per-volunteer objects")
     return {str(k): groups.parse_subject_demo(v) for k, v in data.items()}
 
 
@@ -89,6 +91,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         demo = load_demographics(args.demographics) if args.demographics else {}
         label = "volunteer tuning set (scores only)"
     target = args.target_fmr or (0.05 if args.synthetic else 0.001)
+    scored = {p.subject for p in pairs}
+    print(  # fixed-format counts only, never codes
+        f"volunteers scored: {len(scored)}; without demographics: {len(scored - set(demo))}; "
+        f"demographics without scores: {len(set(demo) - scored)}"
+    )
     args.out.write_text(run(pairs, demo, target, args.synthetic, label))
     return 0
 

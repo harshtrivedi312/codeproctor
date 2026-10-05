@@ -79,10 +79,11 @@ def render(
             "complementary suppression, and sizes are given as bands only."
         )
         for d in groups:
+            lines += ["", f"### {d.dimension}", ""]
+            if not d.rows:
+                lines.append("Dimension withheld (C-12): no group met the minimum safely.")
+                continue
             lines += [
-                "",
-                f"### {d.dimension}",
-                "",
                 "| Group | Volunteers (band) | FMR | FNMR |",
                 "|---|---|---|---|",
             ]
