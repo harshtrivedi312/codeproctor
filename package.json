@@ -14,7 +14,7 @@
     "dev:web": "pnpm --filter @codeproctor/web dev",
     "dev:web:mock": "pnpm --filter @codeproctor/web dev:mock",
     "db:generate": "prisma generate",
-    "db:migrate": "node infra/scripts/assert-local-db.mjs && prisma migrate dev",
+    "db:migrate": "sh infra/scripts/db-migrate",
     "db:seed": "node infra/scripts/assert-local-db.mjs && prisma db seed",
     "db:reset": "sh infra/scripts/db-reset",
     "build": "pnpm -r build",
