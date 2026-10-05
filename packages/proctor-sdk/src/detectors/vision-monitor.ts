@@ -115,9 +115,13 @@ export class VisionMonitor implements Detector {
   }
 
   private async run(ctx: DetectorContext): Promise<void> {
+    const gen = this.generation;
     try {
       await this.startInner(ctx);
     } catch {
+      // Abandoned (stop() or a start timeout bumped the generation): a later run may own the
+      // shared state now, so touch nothing.
+      if (gen !== this.generation) return;
       // Cross-origin model base, video failure, anything unexpected: say so, never a silent pass.
       // Tasks that already reported SUPPORTED are included; their capability flag is reset too.
       this.client?.terminate();
@@ -157,8 +161,10 @@ export class VisionMonitor implements Detector {
     }
 
     const urls = resolveModelUrls(this.o.modelBaseUrl);
-    this.client = new InferenceClient(this.o.createWorker, this.o.initTimeoutMs);
-    this.client.onDead = () => {
+    const client = new InferenceClient(this.o.createWorker, this.o.initTimeoutMs);
+    this.client = client;
+    client.onDead = () => {
+      if (gen !== this.generation) return;
       // The worker died after it was ready: stop sampling and say so.
       if (this.timer) clearInterval(this.timer);
       this.timer = null;
@@ -167,7 +173,7 @@ export class VisionMonitor implements Detector {
       this.identity?.stop();
       this.identity = null;
     };
-    const ready = await this.client.init({
+    const ready = await client.init({
       tasks: wanted,
       urls: {
         faceDetector: urls.faceDetector,
@@ -177,14 +183,14 @@ export class VisionMonitor implements Detector {
       },
     });
     if (gen !== this.generation) {
-      // Abandoned while the models were loading: release the worker and do nothing else.
-      this.client?.terminate();
-      this.client = null;
+      // Abandoned while the models were loading: release only OUR worker; a later run of this
+      // instance owns this.client and this.tasks now.
+      client.terminate();
       return;
     }
     if (!ready) {
       for (const t of wanted) this.unavailable(ctx, t, 'UNSUPPORTED');
-      this.client.terminate();
+      client.terminate();
       this.client = null;
       return;
     }
@@ -197,7 +203,7 @@ export class VisionMonitor implements Detector {
       }
     }
     if (this.tasks.size === 0) {
-      this.client.terminate();
+      client.terminate();
       this.client = null;
       return;
     }
@@ -216,10 +222,9 @@ export class VisionMonitor implements Detector {
     ]);
     clearTimeout(playTimer);
     if (gen !== this.generation) {
+      // Abandoned while waiting for the first frame: release our own resources only.
       video.srcObject = null;
-      this.client?.terminate();
-      this.client = null;
-      this.tasks.clear();
+      client.terminate();
       return;
     }
     this.video = video;

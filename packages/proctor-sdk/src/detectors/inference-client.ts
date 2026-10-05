@@ -124,6 +124,10 @@ export class InferenceClient {
   }
 
   terminate(): void {
+    // An init still waiting for `ready` settles at once instead of hanging until its timeout.
+    const pendingReady = this.ready;
+    this.ready = null;
+    pendingReady?.(null);
     this.worker?.terminate();
     this.worker = null;
     this.inFlight?.resolve(null);

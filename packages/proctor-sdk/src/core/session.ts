@@ -224,8 +224,9 @@ export class ProctorSession {
   }
 
   /**
-   * Stop and purge: flushes the event queue (bounded), then deletes this session's batches and
-   * counter from IndexedDB (FR-702). Call at the end of a test; stop() keeps batches for a reload.
+   * Stop and purge: flushes the event queue (bounded), then deletes this session's batches from
+   * IndexedDB (FR-702). The `nextEventSeq` counter is kept so a reload continues the sequence.
+   * Call at the end of a test; stop() keeps unsent batches for a reload.
    */
   async finish(drainTimeoutMs = 15_000): Promise<{ lostBatches: number }> {
     return this.shutdown(drainTimeoutMs);

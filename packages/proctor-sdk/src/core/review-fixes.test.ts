@@ -5,6 +5,7 @@ import { TEST_KEY_B64 } from '../test/helpers';
 import { EventQueue, type SignedBatch } from './event-queue';
 import { importSessionKey } from './hmac';
 import { IdbStore } from './idb';
+import { UploadQueue } from '../recording/upload-queue';
 import { ProctorSession } from './session';
 import { sweepStaleSessions } from './sweep';
 
@@ -54,7 +55,7 @@ describe('stale session sweep (FR-702)', () => {
 });
 
 describe('EventQueue.finish and ProctorSession.finish (FR-702, TC-063)', () => {
-  it('FR-702: finish() drains, then leaves no batches or counter in IndexedDB', async () => {
+  it('FR-702: finish() drains, then leaves no batches in IndexedDB (the seq counter is kept)', async () => {
     const store = newStore();
     const key = await importSessionKey(TEST_KEY_B64);
     const sent: SignedBatch[] = [];
@@ -221,7 +222,11 @@ describe('review blockers (FR-702, FR-601, TC-065)', () => {
     await expect(t.touch(200_000)).resolves.toBeUndefined();
   });
 
-  it('FR-702: EventQueue cutAll and UploadQueue writes refresh the last-seen mark', async () => {
+  it('FR-702: EventQueue cuts and UploadQueue add/confirm refresh the last-seen mark to the time of the write', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const T = 1_800_000_000_000;
+    const MIN = 60_000;
+    vi.setSystemTime(T);
     const store = newStore();
     const key = await importSessionKey(TEST_KEY_B64);
     const q = new EventQueue({
@@ -231,10 +236,39 @@ describe('review blockers (FR-702, FR-601, TC-065)', () => {
       transport: { sendBatch: () => Promise.resolve('OK') },
     });
     await q.start();
-    const before = (await store.get<number>('meta', 'lastseen:qq')) ?? 0;
+    expect(await store.get('meta', 'lastseen:qq')).toBe(T); // marked by the start-time sweep
+    // The fake clock keeps ticking a little while IndexedDB works: allow a few seconds of drift.
+    const near = (v: unknown, at: number) => typeof v === 'number' && v >= at && v < at + 5000;
+    vi.setSystemTime(T + 2 * MIN);
     q.enqueue({ type: 'TAB_SWITCH', occurredAt: new Date().toISOString(), payload: {} });
     await q.flush();
-    expect(before).toBeGreaterThan(0); // marked at start by the sweep
+    await vi.waitFor(async () =>
+      expect(near(await store.get('meta', 'lastseen:qq'), T + 2 * MIN)).toBe(true),
+    );
+
+    const uq = new UploadQueue({
+      sessionId: 'uu',
+      store,
+      put: () => Promise.resolve(200),
+      api: {
+        presign: () => Promise.resolve({ url: 'https://store.invalid/x' }),
+        confirm: () => Promise.resolve(),
+      },
+    });
+    await uq.start();
+    expect(near(await store.get('meta', 'lastseen:uu'), T + 2 * MIN)).toBe(true);
+    vi.setSystemTime(T + 4 * MIN);
+    await uq.add(
+      { stream: 'WEBCAM', segment: 0, seq: 0, bytes: 5, contentType: 'video/webm' },
+      new ArrayBuffer(5),
+    );
+    await vi.waitFor(async () =>
+      expect(near(await store.get('meta', 'lastseen:uu'), T + 4 * MIN)).toBe(true),
+    );
+    vi.setSystemTime(T + 6 * MIN);
+    await vi.waitFor(() => expect(uq.health().chunksPending).toBe(0)); // upload and confirm done
+    vi.setSystemTime(T + 6 * MIN);
+    uq.stop();
   });
 
   it('FR-609: a detector that finishes starting after the timeout stays silent and was stopped', async () => {

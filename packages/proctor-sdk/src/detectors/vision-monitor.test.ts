@@ -662,4 +662,51 @@ describe('review blockers: abandoned start, bounded play, stream swap (FR-606, F
     await m.stop();
     expect(destroys).toEqual([1, 2]);
   });
+
+  it('FR-606: an abandoned first run cannot tear down a later run of the same instance (generation guard, own client only)', async () => {
+    const workerA = new FakeWorker();
+    workerA.postMessage = () => undefined; // run 1: models never load, init never answered
+    const workerB = new FakeWorker();
+    const workers = [workerA, workerB];
+    const vision = new VisionMonitor({
+      getWebcamStream: () => stream,
+      createWorker: () => workers.shift() as FakeWorker,
+      modelBaseUrl: '/models/proctor',
+      grabFrame: () => Promise.resolve(bitmap()),
+      createVideo: fakeVideo,
+      initTimeoutMs: 60_000,
+      autoStart: false,
+    });
+    const cfg = (id: string) => ({
+      sessionId: id,
+      hmacKeyBase64: TEST_KEY_B64,
+      root: document.createElement('div'),
+      consent: { recordedAt: '2026-01-01T00:00:00Z' },
+      transport: {
+        sendBatch: () => Promise.resolve('OK' as const),
+        heartbeat: () => Promise.resolve(true),
+      },
+      detectors: [vision],
+      detectorStartTimeoutMs: 30,
+    });
+    const s1 = new ProctorSession();
+    await s1.start(cfg('run1')); // times out, vision is stopped
+    expect(workerA.terminated).toBe(true); // terminate() settled the pending init at once
+    const s2 = new ProctorSession();
+    const caps: string[] = [];
+    s2.on('capability', (c) => caps.push(`${c.id}:${c.status}`));
+    const s2cfg = cfg('run2');
+    s2cfg.detectorStartTimeoutMs = 5000;
+    await s2.start(s2cfg); // same instance, new session, worker B loads
+    await new Promise((r) => setTimeout(r, 20)); // run 1's init has long settled
+    expect(vision.getStats().tasks.sort()).toEqual(['face', 'gaze', 'objects']);
+    expect(workerB.terminated).toBe(false);
+    expect(caps.filter((c) => c.startsWith('vision-')).every((c) => c.endsWith('SUPPORTED'))).toBe(
+      true,
+    );
+    await vision.tick(); // run 2 can still sample
+    expect(workerB.frames.length).toBeGreaterThan(0);
+    await s2.stop();
+    await s1.stop();
+  });
 });
