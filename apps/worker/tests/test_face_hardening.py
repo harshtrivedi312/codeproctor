@@ -122,14 +122,14 @@ def ghost_on_id_only(small_factor: float) -> FakeDetector:
 def test_fr403_s7_id_photo_with_a_small_ghost_portrait_uses_the_largest_face() -> None:
     cap = Capture()
     m = FaceMatcher(ghost_on_id_only(0.3), cap)
-    r = m.match(ID_A, ID_A)
+    r = m.match(ID_A, ID_A, liveness_confirmed=True)
     assert r.decision is FaceDecision.MATCH
     expected = align_face(to_array(ID_A), LANDMARKS).pixels
     assert np.array_equal(cap.crops[0], expected)  # the large face, not the ghost listed first
 
 
 def test_fr403_s7_id_photo_with_two_comparable_faces_is_multiple_faces() -> None:
-    r = FaceMatcher(two_faces(0.8), FakeEmbedder()).match(ID_A, ID_A)
+    r = FaceMatcher(two_faces(0.8), FakeEmbedder()).match(ID_A, ID_A, liveness_confirmed=True)
     assert r.decision is FaceDecision.MANUAL_REVIEW
     assert r.reason is ReviewReason.MULTIPLE_FACES and r.detail == "ID_MULTIPLE_FACES"
 
@@ -148,7 +148,7 @@ def test_fr403_s7_selfie_and_recheck_frames_stay_strictly_single_face() -> None:
             return [DetectedFace(scaled(0.3, -70), 0.9), DetectedFace(LANDMARKS.copy(), 0.99)]
 
     m = FaceMatcher(FakeDetector(PerImage()), FakeEmbedder())
-    r = m.match(ID_A, ID_A, session_id="s")
+    r = m.match(ID_A, ID_A, session_id="s", liveness_confirmed=True)
     assert r.reason is ReviewReason.MULTIPLE_FACES and r.detail == "SELFIE_MULTIPLE_FACES"
     m.selfie_cache.put("s", Embedding(np.ones(512, dtype=np.float32)))
     rc = m.recheck("s", ID_A)
@@ -157,7 +157,9 @@ def test_fr403_s7_selfie_and_recheck_frames_stay_strictly_single_face() -> None:
 
 def test_fr403_s7_ratio_is_configurable() -> None:
     strict = FaceConfig(id_secondary_face_ratio=0.2)
-    r = FaceMatcher(ghost_on_id_only(0.3), FakeEmbedder(), strict).match(ID_A, ID_A)
+    r = FaceMatcher(ghost_on_id_only(0.3), FakeEmbedder(), strict).match(
+        ID_A, ID_A, liveness_confirmed=True
+    )
     assert r.reason is ReviewReason.MULTIPLE_FACES
 
 
@@ -166,13 +168,15 @@ def test_fr403_s7_ratio_is_configurable() -> None:
 
 def test_fr403_n1_detail_codes_name_the_image_role() -> None:
     m = FaceMatcher(FakeDetector([]), FakeEmbedder())
-    assert m.match(ID_A, ID_B).detail == "ID_NO_FACE"
+    assert m.match(ID_A, ID_B, liveness_confirmed=True).detail == "ID_NO_FACE"
     selfie_only_bad = FaceMatcher(FakeDetector(_ok_then_empty()), FakeEmbedder())
-    assert selfie_only_bad.match(ID_A, ID_B).detail == "SELFIE_NO_FACE"
-    assert m.match(ID_A, b"x" * 20).detail == "ID_NO_FACE"  # ID is checked first
-    assert FaceMatcher(FakeDetector(), FakeEmbedder()).match(ID_A, b"junk").detail == (
-        "SELFIE_IMAGE_FORMAT_OR_CORRUPT"
-    )
+    assert selfie_only_bad.match(ID_A, ID_B, liveness_confirmed=True).detail == "SELFIE_NO_FACE"
+    assert (
+        m.match(ID_A, b"x" * 20, liveness_confirmed=True).detail == "ID_NO_FACE"
+    )  # ID is checked first
+    assert FaceMatcher(FakeDetector(), FakeEmbedder()).match(
+        ID_A, b"junk", liveness_confirmed=True
+    ).detail == ("SELFIE_IMAGE_FORMAT_OR_CORRUPT")
 
 
 def _ok_then_empty() -> Any:
@@ -190,7 +194,7 @@ def test_fr403_n2_degenerate_landmarks_get_a_fixed_code_and_log_only_the_type(
 ) -> None:
     flat = np.ones((5, 2), dtype=np.float32) * 7.5
     m = FaceMatcher(FakeDetector([DetectedFace(flat, 0.99)]), FakeEmbedder())
-    r = m.match(ID_A, ID_B)
+    r = m.match(ID_A, ID_B, liveness_confirmed=True)
     assert r.reason is ReviewReason.MATCH_ERROR and r.detail == "ID_DEGENERATE_LANDMARKS"
     assert "7.5" not in caplog.text
 
@@ -204,10 +208,13 @@ def test_adr0004_n6_aligned_face_cannot_be_pickled_or_copied() -> None:
 
 def test_fr606_n7_selfie_is_cached_only_after_a_successful_compare() -> None:
     m = FaceMatcher(FakeDetector(), FixedEmbedder([[1.0, 2.0], [1.0, 2.0, 3.0]]))
-    assert m.match(ID_A, ID_B, session_id="s").detail == "DIM_MISMATCH"
+    assert m.match(ID_A, ID_B, session_id="s", liveness_confirmed=True).detail == "DIM_MISMATCH"
     assert len(m.selfie_cache) == 0
     ok = FaceMatcher(FakeDetector(), FixedEmbedder([[1.0, 0.0], [0.0, 1.0]]))
-    assert ok.match(ID_A, ID_B, session_id="s").decision is FaceDecision.MANUAL_REVIEW
+    assert (
+        ok.match(ID_A, ID_B, session_id="s", liveness_confirmed=True).decision
+        is FaceDecision.MANUAL_REVIEW
+    )
     assert len(ok.selfie_cache) == 1  # a below-threshold score is still a successful compare
 
 
@@ -292,7 +299,7 @@ def test_fr403_s6_hash_mismatch_wrong_name_and_unset_env_never_reach_the_landmar
         det.MediaPipeDetector.from_file(wrong, 0.7, fake_factory(rec))
     monkeypatch.delenv(det.LANDMARKER_PATH_ENV, raising=False)
     with pytest.raises(ModelLoadError, match="MODEL_PATH_NOT_SET"):
-        det.MediaPipeDetector.from_env(0.7, fake_factory(rec))
+        det.MediaPipeDetector.from_config(FaceConfig(), fake_factory(rec))
     assert rec == {}
     r = review_for_model_error(e.value)  # the candidate is routed to a human, not failed
     assert r.decision is FaceDecision.MANUAL_REVIEW and r.reason is ReviewReason.MATCH_ERROR
@@ -303,7 +310,7 @@ def test_fr403_s6_from_env_and_factory_failure(
 ) -> None:
     monkeypatch.setenv(det.LANDMARKER_PATH_ENV, str(landmarker_file))
     assert (
-        det.MediaPipeDetector.from_env(0.7, fake_factory({})).detect(
+        det.MediaPipeDetector.from_config(FaceConfig(), fake_factory({})).detect(
             np.zeros((10, 10, 3), dtype=np.uint8)
         )
         == []
@@ -380,7 +387,7 @@ def test_fr403_failure_outside_the_image_steps_is_unexpected_and_logs_only_the_t
         raise RuntimeError("secret vector [9.87654321]")
 
     monkeypatch.setattr(m, "compare", boom)
-    r = m.match(ID_A, ID_B)
+    r = m.match(ID_A, ID_B, liveness_confirmed=True)
     assert r.decision is FaceDecision.MANUAL_REVIEW and r.detail == "UNEXPECTED"
     assert "9.87654321" not in caplog.text and "RuntimeError" in caplog.text
 
@@ -394,4 +401,4 @@ def test_fr403_model_load_error_inside_a_flow_is_match_error_with_its_code(
         raise ModelLoadError("MODEL_HASH_MISMATCH")
 
     monkeypatch.setattr(m, "compare", refuse)
-    assert m.match(ID_A, ID_B).detail == "MODEL_HASH_MISMATCH"
+    assert m.match(ID_A, ID_B, liveness_confirmed=True).detail == "MODEL_HASH_MISMATCH"

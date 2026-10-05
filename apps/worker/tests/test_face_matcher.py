@@ -77,7 +77,7 @@ def failure_modes() -> list[tuple[str, FaceMatcher, bytes, bytes]]:
 @pytest.mark.parametrize("idx", range(10))
 def test_fr403_tc033_every_failure_mode_is_manual_review_with_a_reason(idx: int) -> None:
     name, m, a, b = failure_modes()[idx]
-    r = m.match(a, b)
+    r = m.match(a, b, liveness_confirmed=True)
     assert r.decision is FaceDecision.MANUAL_REVIEW, name
     assert r.reason is not None, name
     assert r.model_id and r.threshold == m.config.match_threshold
@@ -90,8 +90,14 @@ def test_fr403_hash_mismatch_maps_to_manual_review_match_error() -> None:
     assert r.model_id == MODEL_ID and r.score is None
 
 
-def test_fr403_reason_codes_for_each_case() -> None:
-    reasons = {n: (m.match(a, b).reason, m.match(a, b).detail) for n, m, a, b in failure_modes()}
+def test_fr403_tc033_reason_codes_for_each_case() -> None:
+    reasons = {
+        n: (
+            m.match(a, b, liveness_confirmed=True).reason,
+            m.match(a, b, liveness_confirmed=True).detail,
+        )
+        for n, m, a, b in failure_modes()
+    }
     assert reasons["no face"] == (ReviewReason.NO_FACE, "ID_NO_FACE")
     assert reasons["two faces"][0] is ReviewReason.MULTIPLE_FACES
     assert reasons["low confidence"] == (ReviewReason.NO_FACE, "ID_LOW_DETECTION_CONFIDENCE")
@@ -122,25 +128,29 @@ def test_fr403_tc034_failed_liveness_never_matches_and_never_rejects() -> None:
 # ---------- matching and threshold ----------
 
 
-def test_fr403_same_identity_matches_different_identity_goes_to_review() -> None:
+def test_fr403_tc033_same_identity_matches_different_identity_goes_to_review() -> None:
     m = matcher()
-    same = m.match(ID_A, synthetic_png(0))
+    same = m.match(ID_A, synthetic_png(0), liveness_confirmed=True)
     assert same.decision is FaceDecision.MATCH and same.score == pytest.approx(1.0)
     assert same.reason is None and same.model_id == "fake:1"
-    other = m.match(ID_A, ID_B)
+    other = m.match(ID_A, ID_B, liveness_confirmed=True)
     assert other.decision is FaceDecision.MANUAL_REVIEW
     assert other.reason is ReviewReason.BELOW_THRESHOLD and other.score is not None
 
 
-def test_fr403_threshold_boundary_at_or_above_matches_just_below_reviews() -> None:
+def test_fr403_tc033_threshold_boundary_at_or_above_matches_just_below_reviews() -> None:
     vecs = [[1.0, 0.0, 0.0], [0.6, 0.8, 0.0]]
-    probe = matcher(embedder=FixedEmbedder(vecs)).match(ID_A, ID_B)
+    probe = matcher(embedder=FixedEmbedder(vecs)).match(ID_A, ID_B, liveness_confirmed=True)
     score = probe.score
     assert score is not None
-    at = matcher(embedder=FixedEmbedder(vecs), matchThreshold=score).match(ID_A, ID_B)
+    at = matcher(embedder=FixedEmbedder(vecs), matchThreshold=score).match(
+        ID_A, ID_B, liveness_confirmed=True
+    )
     assert at.decision is FaceDecision.MATCH
     above = float(np.nextafter(score, 1.0))
-    just = matcher(embedder=FixedEmbedder(vecs), matchThreshold=above).match(ID_A, ID_B)
+    just = matcher(embedder=FixedEmbedder(vecs), matchThreshold=above).match(
+        ID_A, ID_B, liveness_confirmed=True
+    )
     assert just.decision is FaceDecision.MANUAL_REVIEW
     assert just.reason is ReviewReason.BELOW_THRESHOLD
 
@@ -154,15 +164,17 @@ class _BadEmbedder(FixedEmbedder):
         return Embedding(np.asarray(self._bad, dtype=np.float32))
 
 
-def test_fr403_zero_norm_or_nan_embedding_is_match_error_not_a_crash() -> None:
+def test_fr403_tc033_zero_norm_or_nan_embedding_is_match_error_not_a_crash() -> None:
     for bad in ([0.0, 0.0], [float("nan"), 1.0]):
-        r = matcher(embedder=_BadEmbedder(bad)).match(ID_A, ID_B)
+        r = matcher(embedder=_BadEmbedder(bad)).match(ID_A, ID_B, liveness_confirmed=True)
         assert r.decision is FaceDecision.MANUAL_REVIEW and r.reason is ReviewReason.MATCH_ERROR
         assert r.detail in {"ID_ZERO_NORM", "ID_NON_FINITE"}
 
 
-def test_fr403_embedding_dimension_mismatch_is_match_error() -> None:
-    r = matcher(embedder=FixedEmbedder([[1.0, 2.0], [1.0, 2.0, 3.0]])).match(ID_A, ID_B)
+def test_fr403_tc033_embedding_dimension_mismatch_is_match_error() -> None:
+    r = matcher(embedder=FixedEmbedder([[1.0, 2.0], [1.0, 2.0, 3.0]])).match(
+        ID_A, ID_B, liveness_confirmed=True
+    )
     assert r.reason is ReviewReason.MATCH_ERROR and r.detail == "DIM_MISMATCH"
 
 
@@ -173,16 +185,19 @@ def test_fr403_non_finite_score_is_match_error() -> None:
 
 def test_fr403_detector_confidence_none_is_accepted_and_floor_applies_when_reported() -> None:
     ok = matcher(FakeDetector([DetectedFace(LANDMARKS, None)]))
-    assert ok.match(ID_A, ID_A).decision is FaceDecision.MATCH
+    assert ok.match(ID_A, ID_A, liveness_confirmed=True).decision is FaceDecision.MATCH
     low = matcher(FakeDetector([DetectedFace(LANDMARKS, 0.69)]), minDetectionConfidence=0.7)
-    assert low.match(ID_A, ID_A).reason is ReviewReason.NO_FACE
+    assert low.match(ID_A, ID_A, liveness_confirmed=True).reason is ReviewReason.NO_FACE
     edge = matcher(FakeDetector([DetectedFace(LANDMARKS, 0.7)]), minDetectionConfidence=0.7)
-    assert edge.match(ID_A, ID_A).decision is FaceDecision.MATCH
+    assert edge.match(ID_A, ID_A, liveness_confirmed=True).decision is FaceDecision.MATCH
 
 
 def test_fr403_one_good_face_among_low_confidence_ones_is_used() -> None:
     faces = [DetectedFace(LANDMARKS, 0.99), DetectedFace(LANDMARKS, 0.1)]
-    assert matcher(FakeDetector(faces)).match(ID_A, ID_A).decision is FaceDecision.MATCH
+    assert (
+        matcher(FakeDetector(faces)).match(ID_A, ID_A, liveness_confirmed=True).decision
+        is FaceDecision.MATCH
+    )
 
 
 # ---------- D-05 interface ----------
@@ -214,7 +229,7 @@ def test_fr403_decode_accepts_png_and_jpeg_and_rejects_other_formats(tmp_path: P
     assert decode_image(buf.getvalue(), cfg).shape == (20, 30, 3)
     gif = io.BytesIO()
     PILImage.new("RGB", (8, 8)).save(gif, format="GIF")
-    r = matcher().match(gif.getvalue(), ID_B)
+    r = matcher().match(gif.getvalue(), ID_B, liveness_confirmed=True)
     assert r.reason is ReviewReason.MATCH_ERROR and r.detail == "ID_IMAGE_FORMAT_OR_CORRUPT"
     rgba = io.BytesIO()
     PILImage.new("RGBA", (8, 8), (1, 2, 3, 4)).save(rgba, format="PNG")
@@ -226,7 +241,7 @@ def test_fr403_decode_accepts_png_and_jpeg_and_rejects_other_formats(tmp_path: P
 
 def test_fr606_selfie_cache_keeps_only_the_selfie_and_is_cleared_at_session_end() -> None:
     m = matcher()
-    m.match(ID_A, ID_B, session_id="s1")
+    m.match(ID_A, ID_B, session_id="s1", liveness_confirmed=True)
     assert len(m.selfie_cache) == 1  # the ID embedding is never kept
     cached = m.selfie_cache.get("s1")
     assert cached is not None
@@ -238,7 +253,7 @@ def test_fr606_selfie_cache_keeps_only_the_selfie_and_is_cleared_at_session_end(
 
 def test_fr606_match_without_session_id_caches_nothing() -> None:
     m = matcher()
-    m.match(ID_A, ID_B)
+    m.match(ID_A, ID_B, liveness_confirmed=True)
     assert len(m.selfie_cache) == 0
 
 
@@ -259,14 +274,14 @@ def test_fr606_cache_is_a_bounded_lru() -> None:
 def test_fr606_matcher_cache_size_comes_from_config() -> None:
     m = matcher(selfieCacheMaxSessions=2)
     for i in range(5):
-        m.match(ID_A, ID_B, session_id=f"s{i}")
+        m.match(ID_A, ID_B, session_id=f"s{i}", liveness_confirmed=True)
     assert len(m.selfie_cache) == 2
 
 
 def test_fr606_recheck_matches_same_person_reviews_other_and_miss_asks_for_recompute() -> None:
     m = matcher()
     assert m.recheck("s1", ID_B).detail == "CACHE_MISS"
-    m.match(ID_A, ID_B, session_id="s1")
+    m.match(ID_A, ID_B, session_id="s1", liveness_confirmed=True)
     assert m.recheck("s1", synthetic_png(1)).decision is FaceDecision.MATCH
     other = m.recheck("s1", ID_A)
     assert (
@@ -287,8 +302,12 @@ def test_adr0004_embeddings_never_appear_in_repr_str_or_results() -> None:
     e = m.embed(m.detect_and_align(to_array(ID_A))[0])
     digits = f"{float(e.vector[0]):.4f}"[:6]
     texts = [repr(e), str(e), repr(m.selfie_cache), repr(AlignedFace(to_array(ID_A)[:112, :112]))]
-    m.match(ID_A, ID_B, session_id="s1")
-    texts += [repr(m.selfie_cache), repr(m.match(ID_A, ID_B)), repr(m.selfie_cache.get("s1"))]
+    m.match(ID_A, ID_B, session_id="s1", liveness_confirmed=True)
+    texts += [
+        repr(m.selfie_cache),
+        repr(m.match(ID_A, ID_B, liveness_confirmed=True)),
+        repr(m.selfie_cache.get("s1")),
+    ]
     for t in texts:
         assert digits not in t and "array(" not in t
     assert repr(e) == "Embedding(dim=512, redacted)"
@@ -311,9 +330,9 @@ def test_adr0004_error_messages_and_logs_carry_no_vector_values(
             raise RuntimeError(f"vector was [{secret}]")
 
     with caplog.at_level(logging.DEBUG):
-        r = matcher(embedder=Leaky()).match(ID_A, ID_B, session_id="s1")
+        r = matcher(embedder=Leaky()).match(ID_A, ID_B, session_id="s1", liveness_confirmed=True)
         m = matcher()
-        m.match(ID_A, ID_B, session_id="s2")
+        m.match(ID_A, ID_B, session_id="s2", liveness_confirmed=True)
     assert secret not in repr(r) and r.detail == "ID_UNEXPECTED"
     assert secret not in caplog.text
     assert "s1" not in caplog.text  # session ids are not logged either
@@ -333,7 +352,7 @@ def test_adr0004_nothing_is_written_to_disk(
 
     monkeypatch.setattr(builtins, "open", guarded)
     m = matcher()
-    m.match(ID_A, ID_B, session_id="s1")
+    m.match(ID_A, ID_B, session_id="s1", liveness_confirmed=True)
     m.recheck("s1", ID_A)
     m.end_session("s1")
     assert writes == [] and list(tmp_path.iterdir()) == []
