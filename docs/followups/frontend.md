@@ -165,3 +165,8 @@ Items from the review of FE Step 3 that were not fixed in `frontend/step-3-fixes
 ### Test flake: admin tables (seen once in CI)
 
 - `apps/web/src/features/admin/settings.test.tsx` ("FR-103: lists staff users sorted by name with status and role") timed out under CI load while the table was still loading (the CI run after PR #28 merged). Fixed by awaiting the loaded state, with a 30 s `testTimeout` in `vitest.config.mts` so the wait is not cut short by Vitest's default 5 s per-test limit (`findLoadedTable` / `findLoadedRow` in `src/test/table-utils.ts`: table not `aria-busy`, no skeleton rows, or the empty state) instead of relying on a time limit; applied to the users, candidates and consent tests and to `cross-user-cache.test.tsx`.
+
+### frontend/csp-wasm-candidate-test delta review (verdict: MERGE, no blockers)
+
+- **Accepted risk, decide under R-08 / ARC-05:** requests carrying `Purpose: prefetch` (or `next-router-prefetch`) skip the CSP middleware, so a document fetched that way has no CSP header or nonce. This is Next's documented matcher pattern and was already in place before D-45; the app emits no document prefetch links, Next's own RSC prefetches are not documents, and Chrome sends `Sec-Purpose` (which still runs the middleware). Either drop the `purpose` rule so every document gets a CSP (cost: one nonce per prefetch) or keep it as an accepted risk.
+- **Nits:** mention browser Back/Forward in the `isCandidateTestPath` comment (a popstate navigation may keep the previous page's allowance, negligible); add TC IDs to the CSP tests if `docs/test-cases.md` gains CSP cases; add an assertion that `{ purpose: 'other' }` still runs the middleware. The step-1 nit about the "Prefetches keep the CSP" comment is resolved.
