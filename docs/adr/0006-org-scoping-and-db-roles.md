@@ -258,64 +258,61 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 
 - An org-scoped write changes only the rows its filter selected, or the rows it creates.
 
-**Nested writes are denied by default.** This is the Delivery Lead's decision.
-- **Scopes:** every scope the extension applies to: STAFF, plain org, SERVICE, CANDIDATE and system scope. ADR 0013 CS-4.5 uses this same list for CANDIDATE scope: one list, every depth, both sides.
-- **What is refused:** every nested relation write inside `data`, at every depth, through every relation class, on both sides of the relation:
-  - `connect`, `connectOrCreate`, `create`, `createMany`, `update`, `updateMany`, `upsert`, `delete`, `deleteMany`, `set` and `disconnect`;
-  - this includes `org: { connect }`.
-  - The guard tells relation fields from scalar-list fields by the DMMF field `kind` (`object` versus `scalar` or `enum` with `isList`). So a scalar-list `{ set }` stays allowed and a relation `set` is refused.
+**Nested writes are denied by default.** This is the Delivery Lead's decision (DL-14). It is built in PR #30 at bcd9615, whose code, README and error messages cite this section ("ADR 0006 §8, deny-by-default").
+- **Scopes:** every scope the extension applies to: org scopes (STAFF, plain org, SERVICE, CANDIDATE) and system scope.
+  - ADR 0013 CS-4.5 uses this same list for CANDIDATE scope.
+  - *For the Delivery Lead:* the DL-14 text in docs/status.md says "every org scope". The code and this ADR also cover system scope, so DL-14 should be aligned. The architect does not edit status.md.
+- **What is refused:** every nested relation write inside the `data` of `create`, `update`, `updateMany` and `upsert` (and their `*AndReturn` forms). It is refused at the first level, which blocks any deeper nesting.
+  - Operations: `connect`, `connectOrCreate`, `create`, `createMany`, `update`, `updateMany`, `upsert`, `delete`, `deleteMany`, `set` and `disconnect`.
+  - Relations: every relation class (`ORG_ID`, `SCOPE_HOP`, `COMPOSITE`, `RULE_I`), on both sides, including `org: { connect }`. A relation key whose value is `null` or `{}` is refused too.
+  - The error, `OrgScopeViolationError`, names the model, relation and operation, never a value.
+  - The check adds no query: it looks up each key of `data` in the relation table, so scalar-list `{ set }` and Json columns are not relation writes.
+- **Allowlist:** `NESTED_WRITE_ALLOWLIST` starts empty. Adding an entry needs all of the following (FU-DB-101):
+  - a named pattern (model, relation field, operations and reason);
+  - its own cross-org Postgres test;
+  - code-reviewer plus architect review.
 - **How services write instead:**
-  - They use scalar foreign keys and separate top-level scoped calls.
-  - The COMPOSITE keys (`invitations.test_id`, `invitations.candidate_id`, `sessions.invitation_id`) are written only as scalars, so the composite foreign key in Postgres checks the org.
-  - Scalar-only creation works:
-    - Prisma's unchecked create and update inputs accept `orgId`, `testId`, `candidateId` and `invitationId` as scalars.
-    - The scalar rule `orgId == ctx.orgId` (below), together with the composite foreign key in Postgres, checks the org.
-    - The guard must accept these unchecked scalar inputs.
-- **Allowlist:** a named list of nested-write patterns.
-  - It starts empty. BE-02 (on main) and BE-03 (`backend/step-3`) use no nested relation writes today.
-  - Every entry needs its own cross-org test.
-- **Why:**
-  - Through a COMPOSITE relation, a `connect` makes Prisma copy `org_id` from the connected row, which moves the row across orgs.
-  - A to-one `connect` combined with `update` can write a row in another org.
-  - Both belong to the same class as FU-DB-63. Deny by default closes the class at zero query cost.
+  - They write scalar foreign keys through Prisma's unchecked inputs (`XUncheckedCreateInput`, `XUncheckedUpdateInput`), one top-level scoped call per row.
+  - The COMPOSITE keys (`invitations.test_id`, `invitations.candidate_id`, `sessions.invitation_id`) are written only as scalars. The composite foreign key then rejects another org's parent with P2003.
+- **`createMany`:** the guard does not walk its rows. Prisma's own validation rejects relation keys there. A test of that is a follow-up.
+- **Why:** each relation class had a hole, shown on Prisma 7 against Postgres (PR #30 README and `tc-008-org-isolation.spec.ts`):
+  - a parent-side `connect` moves another org's row in;
+  - a `RULE_I` nested `update` writes a user in another org;
+  - a COMPOSITE `connect` copies `org_id` from the connected row, which moves the row across orgs;
+  - a to-one `connect` combined with a write rewrites another org's row.
+
+  Denying every shape closes the whole class at zero query cost, and it does not have to be re-proven on every Prisma release.
 - **Unchanged:**
   - scalar fields and scalar foreign keys;
   - scalar-list `{ set }`;
   - Json columns;
-  - flat `createMany`.
-- **Today (PR #30, FU-DB-63):** the guard decides per relation class, and only in an org scope, at any depth.
-  - It refuses parent-side `connect`, `connectOrCreate` and `set`; nested rows of a direct model that name another org; nested `Organization` create or `id` change; unknown nested operations; and nesting deeper than 16 levels.
-  - It allows a child-side `connect`, and nested `create`, `update`, `delete`, `deleteMany`, `disconnect` and `upsert` under an in-scope parent.
-  - It is not applied in system scope.
-- **Planned (db-engineer):**
-  - replace the per-class guard with the deny-by-default rule and the empty allowlist;
-  - apply it in system scope too;
-  - add one test per operation, both sides of a relation, and the COMPOSITE `connect` case.
-- **DB-05 merge gate.** The guard in PR #30 conflicts with this rule:
-  - it allows a child-side `connect` and nested writes;
-  - it is off in system scope;
-  - a COMPOSITE `connect` copies `org_id`;
-  - nothing stops a system-scope update from setting a scalar `orgId`. `AUTH_BOOTSTRAP` writes sessions (INVITED → OPENED) and auth rows before it narrows.
-
-  Until all four of these land, PR #30 does not merge, and BE-03 and BE-06 write no invitation or session code:
-  - the deny-by-default rule;
+  - flat `createMany`;
+  - nested reads without a cursor (FU-DB-78, below);
+  - nested cursors refused, and top-level cursors scoped;
+  - the 58-key foreign-key classification, kept as the rule (i) checklist.
+- **Today (PR #30 at bcd9615):** all of the above is built, in org scope and in system scope (FU-DB-94, FU-DB-98).
+- **Planned:** the `createMany` relation-key test.
+- **DB-05 merge gate.** Of the gate items, these are now built at bcd9615:
+  - deny by default;
   - its application in system scope;
-  - the COMPOSITE `connect` test;
-  - the system-scope refusal of a scalar `orgId` in `update`, `updateMany` and the update branch of `upsert` (below).
+  - the COMPOSITE `connect` evidence.
+
+  Still planned, and still gating: the system-scope refusal of a scalar `orgId` (below). Until it lands, PR #30 does not merge, and BE-03 and BE-06 write no invitation or session code.
 
 **No write moves a row to another org.**
-- With nested relation writes refused, the remaining path is a scalar `orgId`. On `create`, `update` and `upsert` (both branches), the extension refuses a scalar `orgId` whose value is not `ctx.orgId`.
-- In system scope there is no `ctx.orgId`. There, the extension refuses any scalar `orgId` in `update`, `updateMany` and the update branch of `upsert`. Writes under `AUTH_BOOTSTRAP` should still narrow to `runInOrg` as soon as the org is known.
+- With nested relation writes refused, the remaining path is a scalar `orgId`.
+- **In an org scope** (built today, PR #30): on `create`, `update` and `upsert` (both branches) of a direct model, the extension stamps `orgId` when it is missing, and refuses a scalar `orgId` whose value is not `ctx.orgId`.
+- **In system scope** there is no `ctx.orgId`.
+  - **Planned, and part of the DB-05 merge gate:** the extension refuses any scalar `orgId` in `update`, `updateMany` and the update branch of `upsert`. Today, system scope runs unfiltered apart from the nested-write refusal. `AUTH_BOOTSTRAP` writes sessions (INVITED → OPENED) and auth rows before it narrows, so this check matters.
+  - Writes under `AUTH_BOOTSTRAP` should still narrow to `runInOrg` as soon as the org is known.
   - A create of a model with `org_id` should narrow to `runInOrg(orgId)` first, so the scalar rule applies.
   - A create left in system scope is review-only (rule (i)): the context does not track which org ids were loaded, and code-reviewer checks that the org was loaded first.
-- **Today (PR #30):** in an org scope, for direct models.
-- **Planned:** the system-scope rule. It is part of the DB-05 merge gate above.
 
 **Cursors (today, PR #30).**
 - On a model with `org_id`, the cursor gets `orgId` added, and a cursor naming another org is refused.
 - On `Organization`, the cursor must be the caller's own id.
 - On a path model, a cursor is refused; page with `where` plus `orderBy` (keyset paging) instead.
-- Nested cursors are refused.
+- A cursor nested in `include`, `select`, `_count` or a fluent relation call is refused (FU-DB-93).
 
 **What the extension does not check (rule (i)).**
 - Scalar foreign-key writes and re-parenting stay under rule (i): load the target through the scoped client first, and answer 404 on a miss. The 58-key classification (`FK_CLASSES`, `RULE_I_REFERENCES`, 8.1) is the review checklist for this.
@@ -480,7 +477,7 @@ There is no org-provisioning reason (8.6, 8.9).
 - Every nested write on a relation to `Organization` is refused, in every scope: `create`, `connect`, `connectOrCreate`, `update` (including one that sets `id`), `upsert`, `delete`, `set` and `disconnect`.
 - Examples: `user.create({ data: { organization: { create: … } } })` and `test.update({ data: { organization: { update: { id } } } })`.
 - Org settings change only through a top-level `organization.update`, in the service that holds the authorization check for org settings.
-- **Today (PR #30):** only a nested `Organization` create or `id` change is refused, and only in an org scope.
+- **Today (PR #30 at bcd9615):** built, as part of the general rule in 8.2, in org and system scope.
 
 **No write moves a row to another org.** This is the scalar `orgId` rule in 8.2.
 
@@ -597,7 +594,9 @@ How the check runs:
   - Session jobs run in a `sessionId` scope, so they cannot use raw SQL (8.5). This is deliberate. It covers BE-12 risk scoring, BE-14 report generation, and DB-06 per-session deletion when it runs as a session job. All of them must use the model API. If one of them needs raw SQL, that needs an amendment to this ADR.
 - **db-engineer:**
   - 8.1 is done in PR #30 (FU-DB-64).
-  - 8.2 is a DB-05 merge gate: replace the per-class nested-write guard (FU-DB-63) with deny by default in every scope, with an empty named allowlist (relations told apart by DMMF `kind`). Apply it in system scope, accept unchecked scalar inputs, and add one test per operation and side plus the COMPOSITE `connect` case. Also refuse a scalar `orgId` in system-scope updates. PR #30 does not merge until this lands.
+  - 8.2: deny by default is built at bcd9615 (FU-DB-94, FU-DB-98), in org and system scope, with an empty `NESTED_WRITE_ALLOWLIST` (FU-DB-101).
+  - 8.2, still a DB-05 merge gate: refuse a scalar `orgId` in system-scope updates; PR #30 does not merge until this lands.
+  - 8.2: add the `createMany` relation-key test.
   - Nested reads stay open (FU-DB-78).
   - 8.5: the raw-SQL hatch does not carry into nested scopes.
   - FU-DB-67: the call-site allow-list.
