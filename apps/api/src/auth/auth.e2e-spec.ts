@@ -20,6 +20,9 @@ const PASSWORD = 'Correct-Horse-9';
 // [$queryRaw, $executeRaw] calls for a refused setup/start (reserve and failure register).
 const EXPECTED_SETUP_REFUSED_COUNTS = [2, 0];
 
+// login, password/reset, 2fa/disable, 2fa/verify probe requests.
+const EXPECTED_STATUSES = [401, 400, 401, 400];
+
 /** A re-auth refusal: 403 with the machine code, never a 401 (FU-BE-39). */
 function reauthRefused(res: request.Response): void {
   expect(res.status).toBe(403);
@@ -1032,10 +1035,31 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       const claims = JSON.parse(
         Buffer.from(body.session.accessToken.split('.')[1] ?? '', 'base64url').toString(),
       ) as Record<string, unknown>;
-      expect(claims).not.toHaveProperty('totpEnabled');
+      expect(Object.keys(claims).join(',')).not.toMatch(/totp|twoFactor/i);
     });
 
-    it('NFR-04: probe values sent as password, currentPassword, newPassword, code and totpCode never reach the request logs', async () => {
+    it("NFR-04: the running app's logger redacts secret fields (proves LOG_REDACT is wired into the live pinoHttp config)", () => {
+      const { Logger } = jest.requireActual<typeof import('nestjs-pino')>('nestjs-pino');
+      const live = app.get(Logger);
+      logged.length = 0;
+      live.log(
+        {
+          // The request serializer needs a url; it drops the body, so the body is also probed bare.
+          req: { id: 'probe-req', method: 'POST', url: '/probe' },
+          body: { password: 'ProbeX-11aa', nested: { totpCode: 'ProbeY-22bb' } },
+          wrapper: { a: { b: { secret: 'ProbeZ-33cc', otpauthUri: 'ProbeW-44dd' } } },
+        },
+        'live-logger-probe',
+      );
+      const output = logged.join('');
+      expect(output).toContain('live-logger-probe');
+      expect(output).toContain('[Redacted]');
+      for (const probe of ['ProbeX-11aa', 'ProbeY-22bb', 'ProbeZ-33cc', 'ProbeW-44dd']) {
+        expect(output).not.toContain(probe);
+      }
+    });
+
+    it('NFR-04: the request serializer keeps bodies and headers out of the request logs (probes sent to login, reset, disable and verify)', async () => {
       const probes = {
         password: 'ProbePassword-91ab',
         currentPassword: 'ProbeCurrent-82cd',
@@ -1046,26 +1070,55 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         challengeToken: 'ProbeChallenge-37dd',
       };
       const u = await createUser({ totp: SECRET });
-      const token = await (async (): Promise<string> => {
-        const r = (await login(u.email).expect(200)).body as Body;
-        return r.challengeToken;
-      })();
-      const auth = { Authorization: `Bearer ${token}` };
-      await login(u.email, probes.password);
-      await request(app.getHttpServer()).post(`${API}/password/reset`).send({
-        token: probes.token,
-        newPassword: probes.newPassword,
-      });
-      await request(app.getHttpServer())
-        .post(`${API}/2fa/disable`)
-        .set(auth)
-        .send({ currentPassword: probes.currentPassword, totpCode: probes.totpCode });
-      await request(app.getHttpServer())
-        .post(`${API}/2fa/verify`)
-        .send({ challengeToken: probes.challengeToken, code: probes.code });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      logged.length = 0;
+      const auth = { Authorization: `Bearer ${challengeToken}` };
+      const statuses = [
+        (await login(u.email, probes.password)).status,
+        (
+          await request(app.getHttpServer()).post(`${API}/password/reset`).send({
+            token: probes.token,
+            newPassword: probes.newPassword,
+          })
+        ).status,
+        (
+          await request(app.getHttpServer())
+            .post(`${API}/2fa/disable`)
+            .set(auth)
+            .send({ currentPassword: probes.currentPassword, totpCode: probes.totpCode })
+        ).status,
+        (
+          await request(app.getHttpServer())
+            .post(`${API}/2fa/verify`)
+            .send({ challengeToken: probes.challengeToken, code: probes.code })
+        ).status,
+      ];
+      expect(statuses).toEqual(EXPECTED_STATUSES);
       const output = logged.join('');
-      expect(output).toContain('"req"');
+      for (const path of ['/auth/login', '/password/reset', '/2fa/disable', '/2fa/verify']) {
+        expect(output).toContain(path);
+      }
       for (const value of Object.values(probes)) expect(output).not.toContain(value);
+    });
+
+    it('NFR-04: real response secrets (refresh cookie, access token, manualKey, otpauthUri) never appear in the logs', async () => {
+      const u = await createUser();
+      logged.length = 0;
+      const res = await login(u.email).expect(200);
+      const cookieValue = refreshCookie(res).split('=')[1] ?? '';
+      const accessToken = (res.body as Body).session.accessToken;
+      const start = (
+        await request(app.getHttpServer())
+          .post(`${API}/2fa/setup/start`)
+          .set({ Authorization: `Bearer ${accessToken}` })
+          .send({ currentPassword: PASSWORD })
+          .expect(200)
+      ).body as Body;
+      const secrets = [cookieValue, accessToken, start.manualKey, start.otpauthUri];
+      for (const value of secrets) expect(value.length).toBeGreaterThan(10);
+      const output = logged.join('');
+      expect(output).toContain('/auth/login');
+      for (const value of secrets) expect(output).not.toContain(value);
     });
 
     it('FR-102: after setup/confirm the very next refresh reports totpEnabled true', async () => {
