@@ -3,20 +3,31 @@
 // by `prisma migrate deploy`. The code under test connects as app_user through the real client
 // factory, so the real grants are in force. Fixtures and checks use the owner role.
 //
-// Two tenants (A and B) hold one row in each of the 31 models. Every operation is tried as A against
-// B's rows, for every model, including the models that have no org_id and are scoped only through a
-// parent chain (for example proctor_events through its session, test_cases through their question
-// version and question). A positive control proves A still sees and changes its own rows, so a
-// filter that simply returns nothing cannot pass.
-import { Controller, Get, INestApplication, NotFoundException, Param } from '@nestjs/common';
+// Two tenants (A and B) hold one row in each of the 31 models, including the models that have no
+// org_id and are scoped only through a parent chain (proctor_events through their session,
+// test_cases through their question version and question). What is covered:
+//   - For every one of the 31 models, as A against B's row: findMany, findFirst, findFirstOrThrow,
+//     findUnique, findUniqueOrThrow, count, aggregate and groupBy find nothing; update, updateMany,
+//     updateManyAndReturn, delete and deleteMany change nothing (B's rows are compared before and
+//     after). Positive controls prove A still reads and updates its own row, and that A and B
+//     between them see every row exactly once, so a filter that returns nothing cannot pass.
+//   - upsert (not generic): tried against B's row on three models only (Test, TestSection,
+//     TestCase), plus A's own row and the create branch on Test and Candidate.
+//   - Dedicated tests, on chosen models: create, createMany and createManyAndReturn, filters that
+//     try to widen the scope, cursors, deleting own rows, transactions, system scope, raw SQL, the
+//     app_user role and the HTTP path through the real guard.
+//   - Not covered, by design (README "Limits"): nested writes, re-parenting, and nested reads. One
+//     test pins that an include follows a cross-org foreign key.
+import { Controller, Get, INestApplication, NotFoundException, Param, Query } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
+import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 import request from 'supertest';
 import type { App } from 'supertest/types';
-import { Public, Roles } from '../common/auth/decorators';
 import { passwordVersion } from '../auth/crypto.util';
+import { Public, Roles } from '../common/auth/decorators';
 import { ProblemFilter } from '../common/problem.filter';
 import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
 import { TokenModule, TokenService } from '../common/auth/token.service';
@@ -92,8 +103,19 @@ class ProbeController {
 
   @Roles(...ALL_ROLES)
   @Get('sessions')
-  async sessions(): Promise<string[]> {
-    return (await this.prisma.client.session.findMany()).map((s) => s.id);
+  async sessions(@Query('id') id?: string): Promise<string[]> {
+    const where = id === undefined ? undefined : { id };
+    return (await this.prisma.client.session.findMany({ where })).map((s) => s.id);
+  }
+
+  // A filtered list on a model scoped through its parent chain.
+  @Roles(...ALL_ROLES)
+  @Get('events')
+  async events(@Query('sessionId') sessionId?: string): Promise<string[]> {
+    const where = sessionId === undefined ? undefined : { sessionId };
+    return (await this.prisma.client.proctorEvent.findMany({ where, orderBy: { id: 'asc' } })).map(
+      (e) => String(e.id),
+    );
   }
 
   @Roles(...ALL_ROLES)
@@ -173,12 +195,14 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
   }
 
   beforeAll(async () => {
-    db = await startMigratedDatabase();
+    // pg_stat_statements lets the HTTP tests prove that a refused request sent no query.
+    db = await startMigratedDatabase({ statementStats: true });
     owner = createPrismaClient(db.ownerUrl);
     A = await createTenant(owner, 'a');
     B = await createTenant(owner, 'b');
     moduleRef = await compileApp(db.appUserUrl);
     app = moduleRef.createNestApplication<INestApplication<App>>({ logger: false });
+    // The filter BE-01 registers in bootstrap.ts: every error leaves as RFC 7807 problem JSON.
     app.useGlobalFilters(new ProblemFilter());
     await app.listen(0);
     prisma = app.get(PrismaService);
@@ -329,7 +353,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       });
     });
 
-    it("TC-008 select and include return only org A's rows, through every relation", async () => {
+    it("TC-008 select and include on a filtered parent return only org A's rows (the parent is filtered; relations are followed as they are)", async () => {
       const sessions = await asA(() =>
         prisma.client.session.findMany({
           include: {
@@ -345,6 +369,30 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expect(sessions[0]?.questions[0]?.submissions).toHaveLength(1);
     });
 
+    it("TC-008 KNOWN LIMIT (pinned, not a fix): an include follows a foreign key into another org and returns that org's row", async () => {
+      // The scope filters the top-level model only. If a foreign key crosses orgs (here a review
+      // whose reviewer is org B's user, which the database allows), the include returns B's user,
+      // password hash included. README "Limits" (c): every id written follows rule (i).
+      const G = await createTenant(owner, 'g');
+      const reviewId = G.rows.SessionReview.filter.id as string;
+      await owner.sessionReview.update({ where: { id: reviewId }, data: { reviewerId: B.userId } });
+      const review = await orgContext.runInOrg(G.orgId, () =>
+        prisma.client.sessionReview.findUnique({
+          where: { id: reviewId },
+          include: { reviewer: true },
+        }),
+      );
+      expect(review?.reviewer.id).toBe(B.userId);
+      expect(review?.reviewer.orgId).toBe(B.orgId);
+      expect(review?.reviewer.passwordHash).toBe('not-a-real-hash');
+      // Reading that user directly is still scoped: org G does not see it.
+      expect(
+        await orgContext.runInOrg(G.orgId, () =>
+          prisma.client.user.findUnique({ where: { id: B.userId } }),
+        ),
+      ).toBeNull();
+    });
+
     it('TC-008 findUnique calls of both orgs in the same tick are not mixed up by batching', async () => {
       const sessionA = A.rows.Session.filter.id as string;
       const results = await Promise.all([
@@ -354,6 +402,439 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         asB(() => prisma.client.session.findUnique({ where: { id: sessionA } })),
       ]);
       expect(results.map((r) => r?.id ?? null)).toEqual([sessionA, null, sessionA, null]);
+    });
+  });
+
+  describe('cursor paging (Prisma finds the cursor row by its own fields, not by where)', () => {
+    // Tenants E and F get rows in an interleaved order, so the ids (sequential BigInt identity
+    // values) of E's rows sit on both sides of F's: a cursor on F's row ranks E's rows against it.
+    let E: TenantFixture;
+    let F: TenantFixture;
+    let plain: PrismaClient; // the factory client with no scope, to show the hazard
+    let eAudit: bigint[];
+    let fAudit: bigint;
+    let eEvents: bigint[];
+    let fEvent: bigint;
+
+    beforeAll(async () => {
+      plain = createPrismaClient(db.appUserUrl);
+      E = await createTenant(owner, 'e');
+      F = await createTenant(owner, 'f');
+      const audit = (org: TenantFixture, n: number): Promise<{ id: bigint }> =>
+        owner.auditLog.create({
+          data: { orgId: org.orgId, action: `cursor-${n}`, entityType: 'test' },
+          select: { id: true },
+        });
+      const event = (org: TenantFixture, n: number): Promise<{ id: bigint }> =>
+        owner.proctorEvent.create({
+          data: {
+            sessionId: org.rows.Session.filter.id as string,
+            type: 'TAB_SWITCH',
+            severity: 'LOW',
+            occurredAt: new Date(),
+            durationMs: n,
+          },
+          select: { id: true },
+        });
+      // Fixture rows exist already (E first, then F). E gets two more after F's.
+      eAudit = [
+        E.rows.AuditLog.filter.id as bigint,
+        (await audit(E, 2)).id,
+        (await audit(E, 3)).id,
+      ];
+      fAudit = F.rows.AuditLog.filter.id as bigint;
+      eEvents = [
+        E.rows.ProctorEvent.filter.id as bigint,
+        (await event(E, 2)).id,
+        (await event(E, 3)).id,
+      ];
+      fEvent = F.rows.ProctorEvent.filter.id as bigint;
+    });
+
+    afterAll(async () => {
+      await plain?.$disconnect();
+    });
+
+    const asE = <T>(fn: () => Promise<T>): Promise<T> => orgContext.runInOrg(E.orgId, fn);
+    const ids = (rows: Array<{ id: bigint }>): bigint[] => rows.map((r) => r.id);
+    const order = { id: 'asc' } as const;
+
+    it("TC-008 left as it is, a cursor on org F's row ranks org E's rows against it (why the scope handles cursors)", async () => {
+      // The ids are sequential, so E's rows 2 and 3 come after F's row: they are returned.
+      expect(fAudit > eAudit[0]! && fAudit < eAudit[1]!).toBe(true);
+      const leaked = await plain.auditLog.findMany({
+        where: { orgId: E.orgId },
+        cursor: { id: fAudit },
+        orderBy: order,
+      });
+      expect(ids(leaked)).toEqual([eAudit[1], eAudit[2]]);
+      expect(
+        await plain.auditLog.count({
+          where: { orgId: E.orgId },
+          cursor: { id: fAudit },
+          orderBy: order,
+        }),
+      ).toBe(2);
+    });
+
+    it("TC-008 org E cannot rank its rows against org F's row: findMany, findFirst, findFirstOrThrow, count and aggregate see nothing", async () => {
+      const cursor = { id: fAudit };
+      await asE(async () => {
+        const client = prisma.client;
+        expect(await client.auditLog.findMany({ cursor, orderBy: order })).toEqual([]);
+        expect(
+          await client.auditLog.findMany({
+            where: { orgId: E.orgId },
+            cursor,
+            orderBy: order,
+            take: 2,
+          }),
+        ).toEqual([]);
+        expect(await client.auditLog.findFirst({ cursor, orderBy: order })).toBeNull();
+        await expect(
+          client.auditLog.findFirstOrThrow({ cursor, orderBy: order }),
+        ).rejects.toMatchObject({ code: 'P2025' });
+        expect(await client.auditLog.count({ cursor, orderBy: order })).toBe(0);
+        expect(await client.auditLog.aggregate({ cursor, orderBy: order, _count: true })).toEqual({
+          _count: 0,
+        });
+      });
+    });
+
+    it('TC-008 a cursor that names another org (orgId, or a compound key) is refused for every operation that takes a cursor', async () => {
+      await asE(async () => {
+        const client = prisma.client;
+        const test = F.rows.Test.filter.id as string;
+        const cursors = [{ id: test, orgId: F.orgId }, { id_orgId: { id: test, orgId: F.orgId } }];
+        for (const cursor of cursors) {
+          const args = { cursor, orderBy: order };
+          await expect(client.test.findMany(args)).rejects.toBeInstanceOf(OrgScopeViolationError);
+          await expect(client.test.findFirst(args)).rejects.toBeInstanceOf(OrgScopeViolationError);
+          await expect(client.test.findFirstOrThrow(args)).rejects.toBeInstanceOf(
+            OrgScopeViolationError,
+          );
+          await expect(client.test.count(args)).rejects.toBeInstanceOf(OrgScopeViolationError);
+          await expect(client.test.aggregate({ ...args, _count: true })).rejects.toBeInstanceOf(
+            OrgScopeViolationError,
+          );
+        }
+      });
+    });
+
+    it('TC-008 org E pages through its own rows with its own cursor (positive control)', async () => {
+      await asE(async () => {
+        const client = prisma.client;
+        const from = (cursor: bigint) => ({ cursor: { id: cursor }, orderBy: order });
+        expect(ids(await client.auditLog.findMany(from(eAudit[0]!)))).toEqual(eAudit);
+        expect(ids(await client.auditLog.findMany(from(eAudit[1]!)))).toEqual([
+          eAudit[1],
+          eAudit[2],
+        ]);
+        expect(ids(await client.auditLog.findMany({ ...from(eAudit[0]!), take: 2 }))).toEqual([
+          eAudit[0],
+          eAudit[1],
+        ]);
+        expect(
+          ids(await client.auditLog.findMany({ ...from(eAudit[0]!), skip: 1, take: 1 })),
+        ).toEqual([eAudit[1]]);
+        expect(ids(await client.auditLog.findMany({ ...from(eAudit[2]!), take: -2 }))).toEqual([
+          eAudit[1],
+          eAudit[2],
+        ]);
+        expect((await client.auditLog.findFirst(from(eAudit[1]!)))?.id).toBe(eAudit[1]);
+        expect((await client.auditLog.findFirstOrThrow(from(eAudit[2]!))).id).toBe(eAudit[2]);
+        expect(await client.auditLog.count(from(eAudit[0]!))).toBe(3);
+        expect(await client.auditLog.count(from(eAudit[1]!))).toBe(2);
+        expect(await client.auditLog.aggregate({ ...from(eAudit[0]!), _count: true })).toEqual({
+          _count: 3,
+        });
+        // Naming its own org in the cursor is fine.
+        expect(
+          ids(
+            await client.auditLog.findMany({
+              cursor: { id: eAudit[1]!, orgId: E.orgId },
+              orderBy: order,
+            }),
+          ),
+        ).toEqual([eAudit[1], eAudit[2]]);
+      });
+    });
+
+    it('TC-008 a model without org_id takes no cursor in an org scope, and where plus orderBy pages it instead', async () => {
+      await asE(async () => {
+        const client = prisma.client;
+        for (const cursor of [{ id: fEvent }, { id: eEvents[0]! }]) {
+          const args = { cursor, orderBy: order };
+          await expect(client.proctorEvent.findMany(args)).rejects.toThrow(
+            /Page with where plus orderBy/,
+          );
+          await expect(client.proctorEvent.findFirst(args)).rejects.toBeInstanceOf(
+            OrgScopeViolationError,
+          );
+          await expect(client.proctorEvent.findFirstOrThrow(args)).rejects.toBeInstanceOf(
+            OrgScopeViolationError,
+          );
+          await expect(client.proctorEvent.count(args)).rejects.toBeInstanceOf(
+            OrgScopeViolationError,
+          );
+          await expect(
+            client.proctorEvent.aggregate({ ...args, _count: true }),
+          ).rejects.toBeInstanceOf(OrgScopeViolationError);
+        }
+        // Keyset paging with where: only E's events, in order, never F's.
+        const firstPage = await client.proctorEvent.findMany({ orderBy: order, take: 2 });
+        expect(ids(firstPage)).toEqual([eEvents[0], eEvents[1]]);
+        const secondPage = await client.proctorEvent.findMany({
+          where: { id: { gt: firstPage.at(-1)!.id } },
+          orderBy: order,
+          take: 2,
+        });
+        expect(ids(secondPage)).toEqual([eEvents[2]]);
+        // A where that starts from F's id still sees only E's rows after it.
+        const afterF = await client.proctorEvent.findMany({
+          where: { id: { gte: fEvent } },
+          orderBy: order,
+        });
+        expect(ids(afterF)).toEqual([eEvents[1], eEvents[2]]);
+      });
+    });
+
+    it('TC-008 the organization row takes only its own id as the cursor', async () => {
+      await asE(async () => {
+        const client = prisma.client;
+        await expect(
+          client.organization.findMany({ cursor: { id: F.orgId } }),
+        ).rejects.toBeInstanceOf(OrgScopeViolationError);
+        await expect(
+          client.organization.findFirst({ cursor: { id: F.orgId }, orderBy: order }),
+        ).rejects.toBeInstanceOf(OrgScopeViolationError);
+        await expect(
+          client.organization.count({ cursor: { id: F.orgId }, orderBy: order }),
+        ).rejects.toBeInstanceOf(OrgScopeViolationError);
+        expect(
+          (await client.organization.findMany({ cursor: { id: E.orgId } })).map((o) => o.id),
+        ).toEqual([E.orgId]);
+        expect(await client.organization.count({ cursor: { id: E.orgId }, orderBy: order })).toBe(
+          1,
+        );
+      });
+    });
+  });
+
+  describe("nested writes (FU-DB-63): a write through a relation cannot change another org's rows", () => {
+    // H acts; I is the victim. Fresh tenants, so the refusals can be checked against untouched rows.
+    let H: TenantFixture;
+    let I: TenantFixture;
+    const asH = <T>(fn: () => Promise<T>): Promise<T> => orgContext.runInOrg(H.orgId, fn);
+    const id = (tenant: TenantFixture, model: ModelName): string =>
+      tenant.rows[model].filter.id as string;
+
+    beforeAll(async () => {
+      H = await createTenant(owner, 'h');
+      I = await createTenant(owner, 'i');
+    });
+
+    it("TC-008 organization.update users.connect of org I's user is refused, and the user stays in org I", async () => {
+      await expect(
+        asH(() =>
+          prisma.client.organization.update({
+            where: { id: H.orgId },
+            data: { users: { connect: { id: I.userId } } },
+          }),
+        ),
+      ).rejects.toBeInstanceOf(OrgScopeViolationError);
+      expect((await owner.user.findUniqueOrThrow({ where: { id: I.userId } })).orgId).toBe(I.orgId);
+    });
+
+    it("TC-008 a parent-side set, connect and connectOrCreate are refused, and org I's rows are unchanged", async () => {
+      const before = await snapshot();
+      const attempts: Array<() => Promise<unknown>> = [
+        // set: re-point org I's test question at org H's section
+        () =>
+          prisma.client.testSection.update({
+            where: { id: id(H, 'TestSection') },
+            data: { questions: { set: [{ id: id(I, 'TestQuestion') }] } },
+          }),
+        // connect on a one-to-one whose key is on the related model
+        () =>
+          prisma.client.session.update({
+            where: { id: id(H, 'Session') },
+            data: { review: { connect: { id: id(I, 'SessionReview') } } },
+          }),
+        // connectOrCreate on the same relation
+        () =>
+          prisma.client.session.update({
+            where: { id: id(H, 'Session') },
+            data: {
+              review: {
+                connectOrCreate: {
+                  where: { id: id(I, 'SessionReview') },
+                  create: { reviewerId: H.userId },
+                },
+              },
+            },
+          }),
+        // connect on a to-many deep inside a nested update
+        () =>
+          prisma.client.test.update({
+            where: { id: id(H, 'Test') },
+            data: {
+              sections: {
+                update: {
+                  where: { id: id(H, 'TestSection') },
+                  data: { questions: { connect: { id: id(I, 'TestQuestion') } } },
+                },
+              },
+            },
+          }),
+      ];
+      for (const attempt of attempts) {
+        await expect(asH(attempt)).rejects.toBeInstanceOf(OrgScopeViolationError);
+      }
+      expect(await snapshot()).toEqual(before);
+    });
+
+    it('TC-008 a nested create that names another org is refused and creates nothing', async () => {
+      // user.createdQuestions: the parent is the staff user, and the question names its own org.
+      const questions = await owner.question.count();
+      const create = (orgId: string, slug: string) =>
+        asH(() =>
+          prisma.client.user.update({
+            where: { id: H.userId },
+            data: { createdQuestions: { create: { orgId, slug } } },
+          }),
+        );
+      await expect(create(I.orgId, 'smuggled')).rejects.toBeInstanceOf(OrgScopeViolationError);
+      await expect(
+        asH(() =>
+          prisma.client.user.update({
+            where: { id: H.userId },
+            data: {
+              createdQuestions: { createMany: { data: [{ orgId: I.orgId, slug: 'many' }] } },
+            },
+          }),
+        ),
+      ).rejects.toBeInstanceOf(OrgScopeViolationError);
+      await expect(
+        asH(() =>
+          prisma.client.user.update({
+            where: { id: H.userId },
+            data: {
+              createdQuestions: { create: { org: { connect: { id: I.orgId } }, slug: 'via-org' } },
+            },
+          }),
+        ),
+      ).rejects.toBeInstanceOf(OrgScopeViolationError);
+      expect(await owner.question.count()).toBe(questions);
+      // Positive control: the same create naming org H works.
+      await create(H.orgId, 'allowed');
+      expect(await owner.question.count()).toBe(questions + 1);
+      expect((await owner.question.findFirstOrThrow({ where: { slug: 'allowed' } })).orgId).toBe(
+        H.orgId,
+      );
+    });
+
+    it('TC-008 the refusals carry no ids, org ids or other values', async () => {
+      const error = await asH(() =>
+        prisma.client.organization.update({
+          where: { id: H.orgId },
+          data: { users: { connect: { id: I.userId } } },
+        }),
+      ).catch((e: unknown) => e as Error);
+      expect(error).toBeInstanceOf(OrgScopeViolationError);
+      for (const secret of [I.userId, I.orgId, H.orgId, H.userId]) {
+        expect((error as Error).message).not.toContain(secret);
+      }
+    });
+
+    it('TC-008 a child-side connect still works (rule (i) covers its id)', async () => {
+      const updated = await asH(() =>
+        prisma.client.testQuestion.update({
+          where: { id: id(H, 'TestQuestion') },
+          data: { questionVersion: { connect: { id: id(H, 'QuestionVersion') } } },
+        }),
+      );
+      expect(updated.questionVersionId).toBe(id(H, 'QuestionVersion'));
+    });
+
+    it('TC-008 nested create, update and delete under an in-scope parent still work, and stay in org H', async () => {
+      const test = await asH(() =>
+        prisma.client.test.update({
+          where: { id: id(H, 'Test') },
+          data: {
+            sections: {
+              create: {
+                title: 'nested',
+                position: 11,
+                questions: { create: { position: 0, questionVersionId: id(H, 'QuestionVersion') } },
+              },
+            },
+          },
+          include: { sections: { include: { questions: true } } },
+        }),
+      );
+      const nested = test.sections.find((section) => section.title === 'nested');
+      expect(nested?.questions).toHaveLength(1);
+      // Visible to org H, invisible to org I.
+      expect(await asH(() => prisma.client.testSection.count({ where: { title: 'nested' } }))).toBe(
+        1,
+      );
+      expect(
+        await orgContext.runInOrg(I.orgId, () =>
+          prisma.client.testSection.count({ where: { title: 'nested' } }),
+        ),
+      ).toBe(0);
+      // Update and delete through the parent.
+      await asH(() =>
+        prisma.client.test.update({
+          where: { id: id(H, 'Test') },
+          data: {
+            sections: { update: { where: { id: nested?.id ?? '' }, data: { title: 'renamed' } } },
+          },
+        }),
+      );
+      expect(
+        (await owner.testSection.findUniqueOrThrow({ where: { id: nested?.id ?? '' } })).title,
+      ).toBe('renamed');
+      await asH(() =>
+        prisma.client.test.update({
+          where: { id: id(H, 'Test') },
+          data: { sections: { deleteMany: { title: 'renamed' } } },
+        }),
+      );
+      expect(await owner.testSection.count({ where: { title: 'renamed' } })).toBe(0);
+    });
+
+    it('TC-008 a Json column and a scalar list are never mistaken for a nested write', async () => {
+      const lookalike = { users: { connect: { id: I.userId } }, sections: { set: [{ id: 'x' }] } };
+      await asH(() =>
+        prisma.client.test.update({ where: { id: id(H, 'Test') }, data: { settings: lookalike } }),
+      );
+      expect(
+        (await owner.test.findUniqueOrThrow({ where: { id: id(H, 'Test') } })).settings,
+      ).toEqual(lookalike);
+      await asH(() =>
+        prisma.client.question.update({
+          where: { id: id(H, 'Question') },
+          data: { tags: { set: ['a', 'b'] } },
+        }),
+      );
+      expect(
+        (await owner.question.findUniqueOrThrow({ where: { id: id(H, 'Question') } })).tags,
+      ).toEqual(['a', 'b']);
+    });
+
+    it('TC-008 in system scope nested writes are not walked (the guard is for org scopes)', async () => {
+      // System scope is for work with no org. The same connect that is refused above is allowed.
+      const J = await createTenant(owner, 'j');
+      const K = await createTenant(owner, 'k');
+      await orgContext.runSystem('BACKGROUND_JOB', () =>
+        prisma.client.organization.update({
+          where: { id: J.orgId },
+          data: { users: { connect: { id: K.userId } } },
+        }),
+      );
+      expect((await owner.user.findUniqueOrThrow({ where: { id: K.userId } })).orgId).toBe(J.orgId);
     });
   });
 
@@ -424,7 +905,18 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       });
     });
 
-    it("TC-008 upsert that creates fills in org A's id, and refuses another org's", async () => {
+    it("TC-008 upsert's create branch gets org A's id when it has none, and a create for another org is refused", async () => {
+      // No orgId in the create branch: the scope fills it in.
+      const filled = await asA(
+        () =>
+          scoped('Candidate').upsert?.({
+            where: { orgId_email: { orgId: A.orgId, email: 'filled-upsert@example.test' } },
+            create: { email: 'filled-upsert@example.test', fullName: 'Filled' },
+            update: {},
+          }) as Promise<{ orgId: string }>,
+      );
+      expect(filled.orgId).toBe(A.orgId);
+      // The caller's own orgId is accepted as it is.
       const created = await asA(() =>
         prisma.client.candidate.upsert({
           where: { orgId_email: { orgId: A.orgId, email: 'new-upsert@example.test' } },
@@ -627,6 +1119,16 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expect(other).toEqual([]);
     });
 
+    it('TC-008 a batch built in one scope and run in another runs with the scope it runs in', async () => {
+      // The queries are lazy, so the scope that counts is the one active when the batch runs. This
+      // is why a batch must be built and run in the same scope (README "Writing queries").
+      const builtInA = orgContext.runInOrg(A.orgId, () => [prisma.client.test.findMany()]);
+      const results = await orgContext.runInOrg(B.orgId, () =>
+        prisma.client.$transaction(builtInA),
+      );
+      expect(new Set((results[0] ?? []).map((t) => t.orgId))).toEqual(new Set([B.orgId]));
+    });
+
     it('TC-008 a transaction with no org context throws before it starts', async () => {
       await expect(
         prisma.client.$transaction(async (tx) => tx.test.findMany()),
@@ -678,16 +1180,18 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
   describe('staff routes: user from org A requests data of org B (TC-008)', () => {
     // A real access token with the claims BE-02's AuthService signs: sub, org, role, kind.
     const asUser = (tenant: TenantFixture): string =>
-      `Bearer ${app.get(TokenService).sign(
-        {
-          sub: tenant.userId,
-          org: tenant.orgId,
-          role: 'RECRUITER',
-          kind: 'access',
-          pwv: passwordVersion('not-a-real-hash'),
-        },
-        300,
-      )}`;
+      `Bearer ${app
+        .get(TokenService)
+        .sign(
+          {
+            sub: tenant.userId,
+            org: tenant.orgId,
+            role: 'RECRUITER',
+            kind: 'access',
+            pwv: passwordVersion('not-a-real-hash'),
+          },
+          300,
+        )}`;
 
     it("TC-008 GET another org's session is 404 and leaks nothing; own session is 200", async () => {
       const server = app.getHttpServer();
@@ -740,12 +1244,197 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expect(casesA.body).toEqual([A.rows.TestCase.filter.id]);
     });
 
-    it('TC-008 a staff route without a token is 401 (the guard), and a public route cannot read org data (403 Access denied, nothing leaked)', async () => {
-      await request(app.getHttpServer()).get('/probe/sessions').expect(401);
-      const res = await request(app.getHttpServer()).get('/probe/public-sessions').expect(403);
-      expect((res.body as { detail?: string }).detail).toBe('Access denied.');
-      expect(JSON.stringify(res.body)).not.toContain('Session');
-      expect(JSON.stringify(res.body)).not.toContain(A.orgId);
+    // ---- no existence oracle -------------------------------------------------------------------
+
+    /** The response headers without the named ones. */
+    const headersWithout = (res: request.Response, names: string[]): Record<string, unknown> =>
+      Object.fromEntries(Object.entries(res.headers).filter(([name]) => !names.includes(name)));
+
+    /** The response as an observer sees it, with what legitimately differs per request set aside. */
+    const observed = (res: request.Response, requestedId: string, trace: string) => {
+      const all = res.headers as Record<string, string | undefined>;
+      const headers = headersWithout(res, ['date', 'etag', 'content-length']);
+      const body = res.body as Record<string, unknown>;
+      return {
+        status: res.status,
+        headers,
+        hasEtag: all.etag !== undefined,
+        keys: Object.keys(body).sort(),
+        // instance carries the requested path and traceId the trace header; nothing else may differ.
+        body: {
+          ...body,
+          instance: String(body.instance).replace(requestedId, ':id'),
+          traceId: body.traceId === trace ? '<trace>' : body.traceId,
+        },
+      };
+    };
+
+    /** The two bodies differ in length by exactly the difference between the two requested ids. */
+    const expectSameSize = (
+      a: request.Response,
+      b: request.Response,
+      idA: string,
+      idB: string,
+    ): void => {
+      const size = (res: request.Response): number => Number(res.headers['content-length']);
+      expect(size(b) - size(a)).toBe(idB.length - idA.length);
+    };
+
+    it("TC-008 no existence oracle: another org's session id and an id that exists nowhere get the same 404, field by field", async () => {
+      const server = app.getHttpServer();
+      const bSession = B.rows.Session.filter.id as string;
+      const nowhere = randomUUID();
+      const get = (id: string, trace: string) =>
+        request(server)
+          .get(`/probe/sessions/${id}`)
+          .set('Authorization', asUser(A))
+          .set('x-request-id', trace);
+      const denied = await get(bSession, 'trace-oracle-aaa');
+      const missing = await get(nowhere, 'trace-oracle-bbb');
+
+      expect(denied.status).toBe(404);
+      expect(missing.status).toBe(404);
+      // The problem body, field by field, as ProblemFilter emits it for a NotFoundException.
+      for (const [res, id, trace] of [
+        [denied, bSession, 'trace-oracle-aaa'],
+        [missing, nowhere, 'trace-oracle-bbb'],
+      ] as const) {
+        const body = res.body as Record<string, unknown>;
+        expect(Object.keys(body).sort()).toEqual([
+          'detail',
+          'instance',
+          'status',
+          'title',
+          'traceId',
+          'type',
+        ]);
+        expect(body.type).toBe('about:blank');
+        expect(body.title).toBe('Not Found');
+        expect(body.status).toBe(404);
+        expect(body.detail).toBe('Not Found');
+        expect(body.instance).toBe(`/probe/sessions/${id}`);
+        expect(body.traceId).toBe(trace);
+        expect(res.headers['content-type']).toMatch(/^application\/problem\+json/);
+      }
+      // Everything that is not the requested id or the trace value is identical: status, every
+      // header except Date (and ETag, which hashes the body that holds those two values), and body.
+      expect(observed(denied, bSession, 'trace-oracle-aaa')).toEqual(
+        observed(missing, nowhere, 'trace-oracle-bbb'),
+      );
+      expectSameSize(denied, missing, bSession, nowhere);
+      // Nothing about org B is in the response.
+      expect(JSON.stringify([denied.body, denied.headers])).not.toContain(B.orgId);
+    });
+
+    it('TC-008 no existence oracle: the same holds for a model scoped through its parent chain (a proctor event)', async () => {
+      const server = app.getHttpServer();
+      const bEvent = String(B.rows.ProctorEvent.filter.id);
+      const nowhere = '9'.repeat(12); // an id no tenant has
+      const get = (id: string, trace: string) =>
+        request(server)
+          .get(`/probe/events/${id}`)
+          .set('Authorization', asUser(A))
+          .set('x-request-id', trace);
+      const denied = await get(bEvent, 'trace-oracle-ccc');
+      const missing = await get(nowhere, 'trace-oracle-ddd');
+      expect([denied.status, missing.status]).toEqual([404, 404]);
+      expect((denied.body as Record<string, unknown>).detail).toBe('Not Found');
+      expect(observed(denied, bEvent, 'trace-oracle-ccc')).toEqual(
+        observed(missing, nowhere, 'trace-oracle-ddd'),
+      );
+      expectSameSize(denied, missing, bEvent, nowhere);
+    });
+
+    it("TC-008 no existence oracle: a filtered list for another org's id and for an id that exists nowhere have the same shape", async () => {
+      const server = app.getHttpServer();
+      const cases: Array<[string, string, string]> = [
+        ['/probe/sessions?id=', B.rows.Session.filter.id as string, randomUUID()],
+        ['/probe/events?sessionId=', B.rows.Session.filter.id as string, randomUUID()],
+      ];
+      for (const [path, bId, nowhere] of cases) {
+        const get = (id: string) =>
+          request(server).get(`${path}${id}`).set('Authorization', asUser(A));
+        const denied = await get(bId);
+        const missing = await get(nowhere);
+        expect([denied.status, missing.status]).toEqual([200, 200]);
+        expect([denied.body, missing.body]).toEqual([[], []]);
+        // No id in the response, so every header but Date matches, ETag included.
+        expect(headersWithout(denied, ['date'])).toEqual(headersWithout(missing, ['date']));
+        // The same filter for an id that does exist in org A returns A's row: the filter works.
+        const own = await get(
+          path.includes('sessions?')
+            ? (A.rows.Session.filter.id as string)
+            : (A.rows.Session.filter.id as string),
+        );
+        expect((own.body as unknown[]).length).toBeGreaterThan(0);
+      }
+    });
+
+    // ---- a public route with no org scope fails closed -----------------------------------------
+
+    it('TC-008 a staff route without a token is 401 from the guard, and the handler never runs', async () => {
+      await db.statements.reset();
+      const res = await request(app.getHttpServer()).get('/probe/sessions');
+      expect(res.status).toBe(401);
+      expect(await db.statements.read()).toEqual([]);
+    });
+
+    it('TC-008 a public route that reads org data fails closed: exactly the defined 403 problem, nothing leaked, no query sent', async () => {
+      await db.statements.reset();
+      const res = await request(app.getHttpServer())
+        .get('/probe/public-sessions')
+        .set('x-request-id', 'trace-public-1');
+
+      // Exactly the defined status and shape (ProblemFilter, an unhandled error), field by field.
+      expect(res.status).toBe(403);
+      expect(res.headers['content-type']).toMatch(/^application\/problem\+json/);
+      const body = res.body as Record<string, unknown>;
+      expect(Object.keys(body).sort()).toEqual([
+        'detail',
+        'instance',
+        'status',
+        'title',
+        'traceId',
+        'type',
+      ]);
+      expect(body.type).toBe('about:blank');
+      expect(body.title).toBe('Forbidden');
+      expect(body.detail).toBe('Access denied.');
+      expect(body.status).toBe(403);
+      expect(body.instance).toBe('/probe/public-sessions');
+      expect(body.traceId).toBe('trace-public-1');
+      expect(body).not.toHaveProperty('errors');
+
+      // No row data, ids, org names or error internals anywhere in the response.
+      const everything = JSON.stringify([res.body, res.headers, res.text]);
+      const secrets = [
+        A.orgId,
+        B.orgId,
+        A.userId,
+        B.userId,
+        A.rows.Session.filter.id as string,
+        B.rows.Session.filter.id as string,
+        'Org a',
+        'Org b',
+        'staff-a@',
+        'staff-b@',
+        'OrgContextMissingError',
+        'needs an org context',
+        'org context',
+        'OrgScope',
+        'Prisma',
+        'prisma',
+        'stack',
+        'node_modules',
+        '.ts:',
+        'runInOrg',
+        'runSystem',
+      ];
+      for (const secret of secrets) expect(everything).not.toContain(secret);
+      expect(everything).not.toMatch(/\bat \S+ \(/); // no stack frame
+
+      // The handler threw before any query: Postgres saw nothing from this request.
+      expect(await db.statements.read()).toEqual([]);
     });
 
     it("TC-008 concurrent requests from both orgs never see each other's rows", async () => {

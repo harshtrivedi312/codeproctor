@@ -25,7 +25,7 @@ import { Prisma } from '../generated/prisma/client.js';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import { createPrismaClient } from './create-prisma-client';
 import { DatabaseModule } from './database.module';
-import { OrgScopeViolationError, RawQueryNotAllowedError } from './errors';
+import { OrgContextMissingError, OrgScopeViolationError, RawQueryNotAllowedError } from './errors';
 import { OrgContextService } from './org-context';
 import type { AuthenticatedUser } from './org-context';
 import { PrismaService } from './prisma.service';
@@ -168,12 +168,15 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
       ).toEqual(['hash-2']);
     });
 
-    it('NFR-04 the nesting works in either order, and with no scope at all', async () => {
+    it('NFR-04 the nesting works in either order, but runRawSql needs an active scope', async () => {
       const count = (): Promise<{ n: number }[]> =>
         scoped().$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM users`;
       expect((await system(() => rawSql(count)))[0]?.n).toBeGreaterThanOrEqual(2);
-      expect((await rawSql(() => system(count)))[0]?.n).toBeGreaterThanOrEqual(2);
-      expect((await rawSql(count))[0]?.n).toBeGreaterThanOrEqual(2);
+      // The hatch alone is not a scope.
+      expect(() => rawSql(count)).toThrow(OrgContextMissingError);
+      expect(
+        (await orgContext.runInOrg(A.orgId, () => rawSql(count)))[0]?.n,
+      ).toBeGreaterThanOrEqual(2);
     });
 
     it('NFR-04 runRawSql works nested inside runAsUser and runInOrg, and model queries there stay scoped', async () => {
@@ -441,7 +444,7 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
         ['runSystem', () => system(async () => Promise.resolve())],
         ['runAsUser', () => orgContext.runAsUser(userA, async () => Promise.resolve())],
         ['runInOrg', () => orgContext.runInOrg(A.orgId, async () => Promise.resolve())],
-        ['runRawSql', () => rawSql(async () => Promise.resolve())],
+        ['runRawSql (inside a scope)', () => system(() => rawSql(async () => Promise.resolve()))],
         [
           'runSystem > runRawSql > runInOrg',
           () =>
@@ -466,8 +469,6 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
       readonly name: string;
       /** Needs runRawSql. */
       readonly raw: boolean;
-      /** Raw SQL only, no model query: it can also run with runRawSql and no scope at all. */
-      readonly pureRaw?: boolean;
       readonly run: (c: PrismaClient, orgId?: string) => Promise<unknown>;
     }
     const and = (
@@ -519,6 +520,15 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
           }),
       },
       {
+        name: 'nested write (test.update with sections.create): the guard walks data and sends nothing',
+        raw: false,
+        run: (c, orgId) =>
+          c.test.update({
+            where: { id: A.rows.Test.filter.id as string, ...and(orgId, direct) },
+            data: { name: 'nested', sections: { create: { title: 'n', position: 5 } } },
+          }),
+      },
+      {
         name: 'audit log insert',
         raw: false,
         run: (c) =>
@@ -563,7 +573,6 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
       {
         name: 'raw lockout counter ($queryRaw)',
         raw: true,
-        pureRaw: true,
         run: (c) =>
           c.$queryRaw(
             Prisma.sql`UPDATE users SET failed_logins = failed_logins + 1 WHERE id = ${A.userId}::uuid RETURNING failed_logins`,
@@ -572,7 +581,6 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
       {
         name: 'raw recovery-code consume ($executeRaw)',
         raw: true,
-        pureRaw: true,
         run: (c) =>
           c.$executeRaw`UPDATE users SET recovery_code_hashes = array_remove(recovery_code_hashes, ${'nope'}) WHERE id = ${A.userId}::uuid AND ${'nope'} = ANY(recovery_code_hashes)`,
       },
@@ -613,13 +621,6 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
         expect(asUser).toEqual(bare);
         expect(inOrg).toEqual(bare);
       });
-
-      if (op.pureRaw) {
-        it('NFR-04 sends the same statements with runRawSql alone, outside any scope', async () => {
-          const bare = await measured(() => op.run(plain));
-          expect(await measured(() => rawSql(() => op.run(scoped())))).toEqual(bare);
-        });
-      }
     });
 
     it('NFR-04 an org filter changes the text of a statement, not the number of statements', async () => {
@@ -634,17 +635,19 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
       expect(filtered[0]?.query).toContain('org_id');
     });
 
-    it("NFR-04 an authenticated HTTP request (guard, interceptor, handler) sends only the handler's one statement", async () => {
-      const token = app.get(TokenService).sign(
-        {
-          sub: A.userId,
-          org: A.orgId,
-          role: 'RECRUITER',
-          kind: 'access',
-          pwv: passwordVersion('not-a-real-hash'),
-        },
-        300,
-      );
+    it("NFR-04 an authenticated HTTP request sends exactly two statements: the guard's user re-check, then the handler's one", async () => {
+      const token = app
+        .get(TokenService)
+        .sign(
+          {
+            sub: A.userId,
+            org: A.orgId,
+            role: 'RECRUITER',
+            kind: 'access',
+            pwv: passwordVersion('not-a-real-hash'),
+          },
+          300,
+        );
       const get = (): Promise<unknown> =>
         request(app.getHttpServer())
           .get(`/probe/users/${A.userId}`)
@@ -654,14 +657,50 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
         plain.user.findUnique({ where: { id: A.userId, AND: [{ orgId: A.orgId }] } }),
       );
       expect(bare).toHaveLength(1);
-      // Two statements: the guard's per-request user re-check (FU-BE-19) and the handler's own.
+      // The guard's own select (FU-BE-19), measured on the plain client with the same shape.
+      const guardSelect = await measured(() =>
+        plain.user.findUnique({
+          where: { id: A.userId },
+          select: { isActive: true, role: true, orgId: true, passwordHash: true },
+        }),
+      );
+      expect(guardSelect).toHaveLength(1);
       // Entering the system scope for the guard and the org scope for the handler adds none.
       const sent = await measured(get);
       expect(sent).toHaveLength(2);
+      expect(sent[0]).toEqual(guardSelect[0]);
       expect(sent[1]).toEqual(bare[0]);
     });
 
-    it('NFR-04 connecting and the first scoped query send no statement besides the query', async () => {
+    it('NFR-04 upsert is the one operation whose statements differ: native in system scope, SELECT then INSERT or UPDATE in an org scope', async () => {
+      // The org filter on the where stops Prisma using INSERT ... ON CONFLICT. This is expected, and
+      // documented in the README (S5): more statements, and a possible P2002 under concurrency.
+      const email = 'upsert-statements@example.test';
+      const upsert = (c: PrismaClient): Promise<unknown> =>
+        c.candidate.upsert({
+          where: { orgId_email: { orgId: A.orgId, email } },
+          create: { orgId: A.orgId, email, fullName: 'Created' },
+          update: { fullName: 'Updated' },
+        });
+      const native = await statementsOf(() => system(() => upsert(scoped())));
+      expect(native).toHaveLength(1);
+      expect(native[0]?.query).toContain('ON CONFLICT');
+      // The row now exists. First an insert (row removed), then an update.
+      for (const phase of ['insert', 'update']) {
+        if (phase === 'insert') await owner.candidate.deleteMany({ where: { email } });
+        const inOrg = await statementsOf(() =>
+          orgContext.runInOrg(A.orgId, () => upsert(scoped())),
+        );
+        const text = inOrg.map((s) => s.query).join('\n');
+        expect({ phase, native: text.includes('ON CONFLICT') }).toEqual({ phase, native: false });
+        expect(inOrg.length).toBeGreaterThan(native.length);
+        expect(text).toContain('SELECT');
+        expect(text).toContain(phase === 'insert' ? 'INSERT INTO' : 'UPDATE');
+      }
+      await owner.candidate.deleteMany({ where: { email } });
+    });
+
+    it('NFR-04 $connect sends no statement', async () => {
       const fresh = createPrismaClient(db.appUserUrl);
       try {
         expect(await statementsOf(() => fresh.$connect())).toEqual([]);

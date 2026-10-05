@@ -73,6 +73,13 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
   );
 }
 
+/**
+ * What the run methods return. A Prisma query is a lazy thenable (a PrismaPromise); the service
+ * starts it inside the scope and hands back a native Promise, so the type says Promise, not
+ * PrismaPromise. Anything that is not a thenable is returned as it is.
+ */
+export type Scoped<T> = T extends PromiseLike<infer U> ? Promise<U> : T;
+
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MIN_RAW_REASON_LENGTH = 10;
 
@@ -85,12 +92,12 @@ export class OrgContextService implements ScopeSource {
   }
 
   /** Run `fn` as a signed-in staff member. The interceptor calls this for staff routes. */
-  runAsUser<T>(user: AuthenticatedUser, fn: () => T): T {
+  runAsUser<T>(user: AuthenticatedUser, fn: () => T): Scoped<T> {
     return this.enter({ kind: 'org', orgId: user.orgId, user }, fn);
   }
 
   /** Run `fn` for one org without a staff user: candidate routes (the token's session) and jobs. */
-  runInOrg<T>(orgId: string, fn: () => T): T {
+  runInOrg<T>(orgId: string, fn: () => T): Scoped<T> {
     return this.enter({ kind: 'org', orgId }, fn);
   }
 
@@ -101,7 +108,7 @@ export class OrgContextService implements ScopeSource {
    * (a staff request, a candidate request, a job already narrowed to one org): work that has an
    * org never widens to all orgs.
    */
-  runSystem<T>(reason: SystemScopeReason, fn: () => T): T {
+  runSystem<T>(reason: SystemScopeReason, fn: () => T): Scoped<T> {
     if (!Object.hasOwn(SYSTEM_SCOPE_REASONS, reason)) {
       throw new OrgScopeViolationError(
         'runSystem needs one of the reasons in SYSTEM_SCOPE_REASONS.',
@@ -113,16 +120,24 @@ export class OrgContextService implements ScopeSource {
   /**
    * Allow raw SQL ($queryRaw, $executeRaw and their Unsafe forms) inside `fn`. Raw SQL cannot be
    * filtered by the extension, so the SQL itself must filter by org_id. The reason is free text,
-   * for the reviewer: say what the query does and why the model API cannot. The org scope that is
-   * active stays in force for model queries inside `fn`.
+   * for the reviewer: say what the query does and why the model API cannot. It needs an active
+   * scope (org or system) and throws without one. The scope that is active stays in force for
+   * model queries inside `fn`.
+   *
+   * The hatch stays open for the whole of `fn`, including any runAsUser, runInOrg or runSystem
+   * started inside it (a nested scope keeps the outer hatch). So wrap only the single raw
+   * statement, never a block that also does model work.
    */
-  runRawSql<T>(reason: string, fn: () => T): T {
+  runRawSql<T>(reason: string, fn: () => T): Scoped<T> {
     if (reason.trim().length < MIN_RAW_REASON_LENGTH) {
       throw new OrgScopeViolationError(
         'runRawSql needs a written reason (at least 10 characters).',
       );
     }
     const current = this.storage.getStore();
+    // The hatch is not a scope. With no org or system scope the model queries inside would throw
+    // anyway, and a raw query alone would run with nobody accountable for the org.
+    if (current?.scope === undefined) throw new OrgContextMissingError('runRawSql');
     return this.runWith({ ...current, rawSqlReason: reason }, fn);
   }
 
@@ -142,7 +157,7 @@ export class OrgContextService implements ScopeSource {
     return scope.user;
   }
 
-  private enter<T>(scope: OrgScope, fn: () => T): T {
+  private enter<T>(scope: OrgScope, fn: () => T): Scoped<T> {
     const current = this.storage.getStore();
     if (scope.kind === 'org') {
       if (!GUID.test(scope.orgId)) {
@@ -166,13 +181,17 @@ export class OrgContextService implements ScopeSource {
    * Prisma queries are lazy: `client.session.findMany()` sends nothing until something calls its
    * `.then()`. A callback like `() => client.session.findMany()` returns that unstarted query, and
    * the caller would start it after the context is gone. So a thenable result is started here,
-   * inside the context. (A native Promise is returned for a Prisma query, which is what every
-   * caller awaits.)
+   * inside the context, and a native Promise is returned.
+   *
+   * Only a result that is itself a thenable is handled. A query wrapped in an object or an array
+   * (`() => ({ rows: client.x.findMany() })`) is not started here: it runs when it is finally
+   * awaited, in whatever scope is active then, or with none (fail closed). Await queries inside
+   * the callback.
    */
-  private runWith<T>(store: ScopeStore, fn: () => T): T {
+  private runWith<T>(store: ScopeStore, fn: () => T): Scoped<T> {
     return this.storage.run(store, () => {
       const result = fn();
-      return isThenable(result) ? (Promise.resolve(result) as T) : result;
+      return (isThenable(result) ? Promise.resolve(result) : result) as Scoped<T>;
     });
   }
 }

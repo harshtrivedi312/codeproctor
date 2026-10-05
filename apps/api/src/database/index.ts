@@ -2,7 +2,7 @@
 export { DatabaseModule } from './database.module';
 export { PrismaService } from './prisma.service';
 export { OrgContextService, SYSTEM_SCOPE_REASONS } from './org-context';
-export type { AuthenticatedUser, OrgScope, SystemScopeReason } from './org-context';
+export type { AuthenticatedUser, OrgScope, Scoped, SystemScopeReason } from './org-context';
 export { OrgContextInterceptor } from './org-context.interceptor';
 export {
   OrgContextMissingError,

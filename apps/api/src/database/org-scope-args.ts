@@ -3,6 +3,7 @@
 // unit tested. The Prisma extension (org-scope.extension.ts) wraps this with the context lookup.
 import type { Prisma } from '../generated/prisma/client.js';
 import { OrgScopeViolationError } from './errors';
+import { assertNestedWritesScoped } from './org-scope-nested';
 import { orgFilter } from './org-scope-map';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
 
@@ -157,17 +158,99 @@ function assertTenancyKept(
 }
 
 /**
+ * A cursor, scoped. Prisma finds the cursor row with the cursor's own fields only: the query's
+ * `where` is not applied to that lookup, so in org A's scope `cursor: { id: <B's id> }` would rank
+ * A's rows against B's row (leaking its values and whether the id exists). So:
+ *
+ * - `direct`: the caller's org is added to the cursor (`{ id, orgId }` is a valid cursor and the
+ *   lookup then includes `org_id`), and a cursor that names another org is refused.
+ * - `self` (Organization): the cursor must be the caller's own organization.
+ * - `path`: refused. A cursor takes no relation filter and no AND, so there is no way to scope
+ *   it. Page with `where` plus `orderBy` (for example `where: { id: { gt: lastId } }`), which the
+ *   scope does filter.
+ */
+function scopeCursor(
+  model: string,
+  operation: string,
+  rule: OrgScopeRule,
+  cursor: unknown,
+  orgId: string,
+): unknown {
+  if (cursor === undefined || cursor === null) return cursor;
+  if (!isPlainObject(cursor)) {
+    throw violation(model, operation, 'cursor is not an object.');
+  }
+  switch (rule.kind) {
+    case 'direct':
+      if (namesOtherOrg(cursor, orgId)) {
+        throw violation(model, operation, "the cursor names another org's row.");
+      }
+      return { ...cursor, orgId };
+    case 'self':
+      if (cursor.id !== orgId) {
+        throw violation(model, operation, "the cursor is not the caller's own organization.");
+      }
+      return cursor;
+    case 'path':
+      throw violation(
+        model,
+        operation,
+        'a cursor cannot be scoped on a model without org_id (Prisma finds the cursor row by its ' +
+          "own fields, so a cursor on another org's row would rank this org's rows against it). " +
+          'Page with where plus orderBy instead, for example where: { id: { gt: lastId } }.',
+      );
+    case 'unscoped':
+      return cursor;
+  }
+}
+
+/** True when the cursor, or a compound key inside it, has an orgId that is not `orgId`. */
+function namesOtherOrg(cursor: PlainObject, orgId: string): boolean {
+  return Object.entries(cursor).some(([key, value]) =>
+    key === 'orgId' ? value !== orgId : isPlainObject(value) && namesOtherOrg(value, orgId),
+  );
+}
+
+/**
  * Arguments for a query on a scoped model, for the org `orgId`.
  *
  * - Reads, updates, deletes, counts, aggregates and group-bys get the org filter ANDed into
  *   `where`, so a row of another org is simply not found.
+ * - A `cursor` (findMany, findFirst, findFirstOrThrow, count, aggregate) is scoped too, or refused
+ *   on a model without org_id; see scopeCursor.
  * - Creates on a model with its own org_id get that org added, or are refused when they name
  *   another org. Creates on a path-scoped model are passed through: there is no org_id column to
- *   stamp, and the parent id in the payload must have been loaded through the scoped client first
- *   (ADR 0006 section 2, rule (i)).
+ *   stamp, so the parent id in the payload must follow ADR 0006 section 2 rule (i).
  * - An unknown operation is refused.
  *
- * Nested writes (`create`, `connect` inside `data`) are not inspected; see the README.
+ * Nested writes are walked by org-scope-nested.ts (FU-DB-63): in an org scope a parent-side
+ * `connect`, `connectOrCreate` or `set` is refused (it changes rows the filter never selected:
+ * `organization.update({ where: { id: A }, data: { users: { connect: { id: userOfB } } } })`), and
+ * so is a nested row of a model with its own org_id that names another org. A child-side `connect`
+ * and nested create, update, upsert and delete under an in-scope parent are allowed; the ids in
+ * them follow rule (i).
+ *
+ * What it does NOT cover (README "Limits"). Only the top-level model, its `where`, its `cursor`,
+ * its create/update `orgId` and the nested writes above are looked at. Everything else reached
+ * through a relation is not:
+ *
+ * (a) Ids written through a relation or scalar foreign key. A child-side `connect` is the same as
+ *     setting the scalar FK, and neither is checked: the id follows rule (i), load it through the
+ *     scoped client first.
+ * (b) Re-parenting. An update that changes a path model's first-hop foreign key
+ *     (`testSection.update({ data: { testId } })`) is the same as a path create: rule (i).
+ * (c) Nested reads. `include`, `select`, the fluent API, relation filters, `orderBy` on a relation
+ *     and `_count` follow foreign keys blindly and are not filtered. Any foreign key that crosses
+ *     orgs leaks: `sessionReview.findUnique({ include: { reviewer: true } })` returns the reviewer
+ *     user row of another org, password hash included, if reviewer_id points there.
+ * (d) The foreign keys that rule (i) has to cover are many more than the staff references
+ *     (`created_by`, `reviewer_id`, `assigned_to`, `collected_by`) and
+ *     `test_questions.question_version_id`: RULE_I_REFERENCES (org-scope-relations.ts) lists the
+ *     25 (12 staff, 13 cross-chain), among them the cross-chain ones
+ *     (session_questions to test_questions, question_versions and variants; session_sections to
+ *     test_sections; consents to consent_texts; keystroke_batches to session_questions).
+ * (e) The raw SQL hatch (OrgContextService.runRawSql) stays open inside a scope started within
+ *     it; see its JSDoc.
  */
 export function applyOrgScope(input: OrgScopeInput): PlainObject {
   const { model, rule, operation, orgId } = input;
@@ -187,7 +270,21 @@ export function applyOrgScope(input: OrgScopeInput): PlainObject {
     );
   }
   const args = asArgs(model, operation, input.args);
+  const rewritten = rewriteArgs(model, rule, operation, args, filter, orgId);
+  // A cursor never goes through unscoped, whichever operation carries it.
+  return args.cursor === undefined
+    ? rewritten
+    : { ...rewritten, cursor: scopeCursor(model, operation, rule, args.cursor, orgId) };
+}
 
+function rewriteArgs(
+  model: ModelName,
+  rule: OrgScopeRule,
+  operation: ScopedOperation,
+  args: PlainObject,
+  filter: PlainObject,
+  orgId: string,
+): PlainObject {
   switch (operation) {
     case 'findUnique':
     case 'findUniqueOrThrow':
@@ -205,9 +302,11 @@ export function applyOrgScope(input: OrgScopeInput): PlainObject {
     case 'updateMany':
     case 'updateManyAndReturn':
       assertTenancyKept(model, operation, rule, args.data, orgId);
+      assertNestedWritesScoped(model, operation, args.data, orgId);
       return { ...args, where: andWhere(model, operation, args.where, filter) };
 
     case 'create':
+      assertNestedWritesScoped(model, operation, args.data, orgId);
       return { ...args, data: stampCreateData(model, operation, rule, args.data, orgId) };
 
     case 'createMany':
@@ -221,6 +320,8 @@ export function applyOrgScope(input: OrgScopeInput): PlainObject {
 
     case 'upsert':
       assertTenancyKept(model, operation, rule, args.update, orgId);
+      assertNestedWritesScoped(model, operation, args.update, orgId);
+      assertNestedWritesScoped(model, operation, args.create, orgId);
       return {
         ...args,
         where: andWhere(model, operation, args.where, filter),

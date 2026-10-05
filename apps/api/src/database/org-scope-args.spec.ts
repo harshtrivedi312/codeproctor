@@ -118,13 +118,110 @@ describe('org scope arguments (NFR-04, FR-103)', () => {
       orderBy: { createdAt: 'desc' },
       take: 5,
       skip: 1,
-      cursor: { id: 'c' },
       by: ['status'],
       _count: true,
     };
     expect(scope('Session', 'groupBy', args)).toEqual({
       ...args,
       where: { status: 'GRADED', AND: [{ orgId: ORG_A }] },
+    });
+  });
+
+  describe('cursor (Prisma finds the cursor row by its own fields, not by where)', () => {
+    // Every operation that accepts a cursor on a model delegate.
+    const CURSOR_OPERATIONS = ['findMany', 'findFirst', 'findFirstOrThrow', 'count', 'aggregate'];
+
+    it.each(CURSOR_OPERATIONS)(
+      "TC-008 %s: a direct model's cursor gets the caller's org, next to the filtered where",
+      (operation) => {
+        const result = scope('AuditLog', operation, {
+          where: { action: 'x' },
+          cursor: { id: 7n },
+          orderBy: { id: 'asc' },
+          take: 3,
+        });
+        expect(result).toEqual({
+          where: { action: 'x', AND: [{ orgId: ORG_A }] },
+          cursor: { id: 7n, orgId: ORG_A },
+          orderBy: { id: 'asc' },
+          take: 3,
+        });
+      },
+    );
+
+    it.each(CURSOR_OPERATIONS)(
+      'TC-008 %s: a cursor that names another org is refused, also inside a compound key',
+      (operation) => {
+        expect(() => scope('Test', operation, { cursor: { id: 'x', orgId: ORG_B } })).toThrow(
+          OrgScopeViolationError,
+        );
+        expect(() =>
+          scope('Test', operation, { cursor: { id_orgId: { id: 'x', orgId: ORG_B } } }),
+        ).toThrow(OrgScopeViolationError);
+        // Naming its own org is fine, and is not added twice.
+        expect(scope('Test', operation, { cursor: { id: 'x', orgId: ORG_A } }).cursor).toEqual({
+          id: 'x',
+          orgId: ORG_A,
+        });
+        expect(
+          scope('Test', operation, { cursor: { id_orgId: { id: 'x', orgId: ORG_A } } }).cursor,
+        ).toEqual({ id_orgId: { id: 'x', orgId: ORG_A }, orgId: ORG_A });
+      },
+    );
+
+    it.each(CURSOR_OPERATIONS)(
+      'TC-008 %s: a cursor on a model without org_id is refused, with the way to page instead',
+      (operation) => {
+        for (const model of [
+          'ProctorEvent',
+          'TestCase',
+          'Submission',
+          'WebhookDelivery',
+        ] as const) {
+          expect(() => scope(model, operation, { cursor: { id: 1 }, take: 5 })).toThrow(
+            /Page with where plus orderBy/,
+          );
+        }
+        // The same call without a cursor is fine: paging by where and orderBy is scoped.
+        expect(
+          scope('ProctorEvent', operation, { where: { id: { gt: 5 } }, orderBy: { id: 'asc' } })
+            .where,
+        ).toEqual({ id: { gt: 5 }, AND: [{ session: { orgId: ORG_A } }] });
+      },
+    );
+
+    it.each(CURSOR_OPERATIONS)(
+      'TC-008 %s: the organization row accepts only its own id as the cursor',
+      (operation) => {
+        expect(scope('Organization', operation, { cursor: { id: ORG_A } }).cursor).toEqual({
+          id: ORG_A,
+        });
+        expect(() => scope('Organization', operation, { cursor: { id: ORG_B } })).toThrow(
+          OrgScopeViolationError,
+        );
+        expect(() => scope('Organization', operation, { cursor: {} })).toThrow(
+          OrgScopeViolationError,
+        );
+      },
+    );
+
+    it('TC-008 no operation lets a cursor through unscoped, including ones Prisma would reject', () => {
+      // Prisma refuses a cursor on these, but the scope does not depend on that.
+      for (const operation of SCOPED_OPERATIONS) {
+        if (CURSOR_OPERATIONS.includes(operation)) continue;
+        const args = { where: { id: 'x' }, data: {}, create: {}, update: {}, cursor: { id: 'x' } };
+        expect(() => scope('ProctorEvent', operation, args)).toThrow(OrgScopeViolationError);
+        const direct = scope('Test', operation, args);
+        expect(direct.cursor).toEqual({ id: 'x', orgId: ORG_A });
+      }
+    });
+
+    it('TC-008 an absent or null cursor is left alone, and the arguments are not changed', () => {
+      expect(scope('ProctorEvent', 'findMany', { take: 2 })).not.toHaveProperty('cursor');
+      const args = { cursor: { id: 'x' }, take: 1 };
+      scope('Test', 'findMany', args);
+      expect(args).toEqual({ cursor: { id: 'x' }, take: 1 });
+      expect(() => scope('Test', 'findMany', { cursor: 'x' })).toThrow(OrgScopeViolationError);
     });
   });
 

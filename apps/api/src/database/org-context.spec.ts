@@ -95,11 +95,13 @@ describe('OrgContextService (NFR-04, FR-103)', () => {
       svc.runAsUser(USER_B, () => lazyQuery as unknown as Promise<string>),
     ).resolves.toBe(ORG_B);
     await expect(
-      svc.runRawSql(
-        'a reviewed raw query for the test',
-        () => lazyQuery as unknown as Promise<string>,
+      svc.runInOrg(ORG_A, () =>
+        svc.runRawSql(
+          'a reviewed raw query for the test',
+          () => lazyQuery as unknown as Promise<string>,
+        ),
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(ORG_A);
   });
 
   it('TC-008 concurrent units of work keep separate contexts', async () => {
@@ -173,9 +175,40 @@ describe('OrgContextService (NFR-04, FR-103)', () => {
     );
   });
 
+  it('TC-008 an open runRawSql carries into a nested scope (so wrap only the single statement)', () => {
+    const reason = 'one reviewed raw statement, nothing else';
+    svc.runSystem('BACKGROUND_JOB', () => {
+      svc.runRawSql(reason, () => {
+        svc.runInOrg(ORG_A, () => {
+          expect(svc.current()?.rawSqlReason).toBe(reason);
+        });
+        svc.runAsUser(USER_A, () => {
+          expect(svc.current()?.rawSqlReason).toBe(reason);
+        });
+      });
+      // Outside the block the hatch is closed again.
+      svc.runInOrg(ORG_A, () => {
+        expect(svc.current()?.rawSqlReason).toBeUndefined();
+      });
+    });
+  });
+
+  it('TC-008 runRawSql needs an active scope: with none it throws, and the hatch alone is not a scope', () => {
+    const reason = 'a reviewed raw statement for the test';
+    expect(() => svc.runRawSql(reason, () => undefined)).toThrow(OrgContextMissingError);
+    svc.runSystem('BACKGROUND_JOB', () => {
+      expect(() => svc.runRawSql(reason, () => undefined)).not.toThrow();
+    });
+    svc.runInOrg(ORG_A, () => {
+      expect(() => svc.runRawSql(reason, () => undefined)).not.toThrow();
+    });
+  });
+
   it('TC-008 runRawSql needs a written reason, and keeps the org scope that is active', () => {
-    expect(() => svc.runRawSql('', () => undefined)).toThrow(OrgScopeViolationError);
-    expect(() => svc.runRawSql('short', () => undefined)).toThrow(OrgScopeViolationError);
+    svc.runInOrg(ORG_A, () => {
+      expect(() => svc.runRawSql('', () => undefined)).toThrow(OrgScopeViolationError);
+      expect(() => svc.runRawSql('short', () => undefined)).toThrow(OrgScopeViolationError);
+    });
     svc.runInOrg(ORG_A, () => {
       svc.runRawSql('count sessions per day for the dashboard', () => {
         expect(svc.current()?.rawSqlReason).toBe('count sessions per day for the dashboard');
@@ -246,7 +279,7 @@ describe('OrgContextInterceptor with the real JwtAuthGuard (BE-02, NFR-04, FR-10
       controllers: [ProbeController],
       providers: [
         OrgContextService,
-        // The guard re-reads the user on every request (FU-BE-19); answer from the users the
+        // The guard re-reads the user on every request (FU-BE-19): answer from the users the
         // test has minted tokens for.
         {
           provide: PrismaService,

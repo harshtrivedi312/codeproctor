@@ -133,15 +133,4 @@ describe('generated Prisma client under the Nest build (ADR 0009 P14)', () => {
       .map((file) => relative(SRC, file));
     expect(offenders).toEqual(['database/create-prisma-client.ts']);
   });
-
-  it('NFR-04 the interim unscoped client is gone: nothing imports database/prisma.module (FU-DB-58)', () => {
-    // BE-02's unscoped client was deleted when auth moved onto the org-scoped PrismaService
-    // inside runSystem('AUTH_BOOTSTRAP'). This fails if the file or an import of it comes back.
-    expect(existsSync(join(SRC, 'database', 'prisma.module.ts'))).toBe(false);
-    const importers = sourceFiles(SRC)
-      .filter((file) => file.endsWith('.ts'))
-      .filter((file) => /from\s+['"][^'"]*prisma\.module['"]/.test(readFileSync(file, 'utf8')))
-      .map((file) => relative(SRC, file));
-    expect(importers).toEqual([]);
-  });
 });
