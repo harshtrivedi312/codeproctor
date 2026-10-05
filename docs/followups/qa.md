@@ -131,3 +131,9 @@ Backend-owned nits (backend-engineer):
 2. The config module reads `.env` through `envFilePath`; in tests it should use `ignoreEnvFile` so a developer's `.env` can never leak into an integration run.
 3. Add a `test:integration` script (see 7.2 item 3).
 
+### 7.5 TC-063 CI flake (2026-10-05)
+
+Root cause was in the test, not the SDK: it assumed one batch per paste and waited a fixed amount of fake time. On a slow host a slow flush lets the next paste join the pending batch (8 batches, not 9), and IndexedDB needs real turns. The test now sends the browser `online` event (the documented reconnect trigger), polls in real time with a 30 s deadline while advancing fake time, counts delivered events instead of batches, and asserts seq runs 0..n-1 in order. It passed 30 of 30 runs with 16 busy loops and `--pool=forks`, where it failed about 1 in 3 before.
+
+Observation for proctor-sdk-engineer (low, not a data-loss defect; NFR-08 holds): `EventQueue.retryNow()` does nothing while a drain is already running. If the browser `online` event arrives during a send that is about to fail, the next attempt waits for the exponential backoff (up to 30 s) instead of starting at once. Suggested: remember that a retry was requested and run another drain pass when the current one ends in RETRY.
+

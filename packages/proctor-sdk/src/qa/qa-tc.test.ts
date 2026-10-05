@@ -312,15 +312,25 @@ describe('TC-063 (FR-609, NFR-08): network drop', () => {
       await vi.advanceTimersByTimeAsync(5000); // one batch per 5 s window
     }
     online = true;
-    // Allow the retry backoff (capped at 30 s) plus the IndexedDB writes under fake timers.
-    // IndexedDB runs on real timers, so give it real turns between fake seconds and stop as soon
-    // as everything arrived. 600 fake seconds is far beyond the 30 s backoff cap.
-    for (let i = 0; i < 600 && sent.length < 9; i++) {
-      await vi.advanceTimersByTimeAsync(1000);
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-    expect(sent).toHaveLength(9);
-    expect(sent.map((b) => b.seq)).toEqual([...sent.map((b) => b.seq)].sort((a, b) => a - b));
+    // The browser's `online` event is the documented reconnect trigger (retryNow): it drains at
+    // once instead of waiting for the backoff timer, so the test does not depend on host speed.
+    window.dispatchEvent(new Event('online'));
+    // The SDK needs real wall-clock turns for IndexedDB writes and fake time for its backoff, so
+    // poll in real time (30 s deadline) and advance fake time per poll until all arrived.
+    // How many pastes end up in one batch depends on host speed (a slow flush lets the next paste
+    // join the pending batch), so count delivered events, not batches.
+    const eventsSent = (): number =>
+      sent.reduce((n, b) => n + (JSON.parse(b.body) as ProctorEventBatch).events.length, 0);
+    await vi.waitFor(
+      async () => {
+        // 5 fake seconds per poll: six polls cross the 30 s backoff cap even on a slow host.
+        await vi.advanceTimersByTimeAsync(5000);
+        expect(eventsSent()).toBe(9);
+      },
+      { timeout: 30_000, interval: 5 },
+    );
+    // No gap and no reordering: seq runs 0..n-1 in order.
+    expect(sent.map((b) => b.seq)).toEqual(sent.map((_, i) => i));
     const lengths = sent.flatMap((b) =>
       (JSON.parse(b.body) as ProctorEventBatch).events.map(
         (e) => (e.payload as { length: number }).length,
@@ -329,7 +339,7 @@ describe('TC-063 (FR-609, NFR-08): network drop', () => {
     expect(lengths.sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     for (const b of sent) expect(verifies(b)).toBe(true);
     await r.session.stop();
-  });
+  }, 40_000);
 });
 
 describe('TC-065 (security): forged events', () => {
