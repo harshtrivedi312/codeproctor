@@ -8,11 +8,16 @@ import {
   INestApplication,
   Injectable,
 } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import type { Request } from 'express';
 import request from 'supertest';
 import type { App } from 'supertest/types';
+import { Public, Roles } from '../common/auth/decorators';
+import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
+import { TokenModule, TokenService } from '../common/auth/token.service';
+import type { UserRole } from '../generated/prisma/enums.js';
 import { OrgContextMissingError, OrgScopeViolationError } from './errors';
 import { OrgContextService, SYSTEM_SCOPE_REASONS } from './org-context';
 import type { AuthenticatedUser, SystemScopeReason } from './org-context';
@@ -179,8 +184,142 @@ describe('OrgContextService (NFR-04, FR-103)', () => {
   });
 });
 
-// Stand-in for the BE-02 auth guard: it sets request.user from a header, the way the real guard
-// sets it from a verified token.
+// What a handler sees of the context, as JSON.
+interface Seen {
+  before?: string;
+  after?: string;
+  userId?: string;
+  role?: string;
+}
+
+const ALL_ROLES: UserRole[] = ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'REVIEWER'];
+
+function readContext(svc: OrgContextService): Seen {
+  const scope = svc.current()?.scope;
+  if (scope?.kind !== 'org') return {};
+  return {
+    before: scope.orgId,
+    ...(scope.user ? { userId: scope.user.userId, role: scope.user.role } : {}),
+  };
+}
+
+// A staff route and a public route, as BE-02 declares them (deny by default: @Roles or @Public).
+@Controller('probe')
+class ProbeController {
+  constructor(private readonly orgContext: OrgContextService) {}
+
+  @Get()
+  @Roles(...ALL_ROLES)
+  async staff(): Promise<Seen> {
+    const seen = readContext(this.orgContext);
+    await sleep(25);
+    const scope = this.orgContext.current()?.scope;
+    return { ...seen, ...(scope?.kind === 'org' ? { after: scope.orgId } : {}) };
+  }
+
+  @Get('public')
+  @Public()
+  open(): { scope: 'none' | 'org' | 'system' } {
+    return { scope: this.orgContext.current()?.scope?.kind ?? 'none' };
+  }
+}
+
+const SECRET = 'a-secret-for-the-interceptor-tests-only';
+
+describe('OrgContextInterceptor with the real JwtAuthGuard (BE-02, NFR-04, FR-103)', () => {
+  let app: INestApplication<App>;
+  let tokens: TokenService;
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [
+        ConfigModule.forRoot({
+          isGlobal: true,
+          ignoreEnvFile: true,
+          load: [() => ({ JWT_ACCESS_SECRET: SECRET })],
+        }),
+        TokenModule,
+      ],
+      controllers: [ProbeController],
+      providers: [
+        OrgContextService,
+        // The same order as AppModule: the guard authenticates, then the interceptor reads the user.
+        { provide: APP_GUARD, useClass: JwtAuthGuard },
+        { provide: APP_INTERCEPTOR, useClass: OrgContextInterceptor },
+      ],
+    }).compile();
+    app = moduleRef.createNestApplication<INestApplication<App>>({ logger: false });
+    await app.listen(0);
+    tokens = app.get(TokenService);
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  /** A real staff token, with the claims BE-02's AuthService signs. */
+  const bearer = (user: AuthenticatedUser, kind: 'access' | 'challenge' = 'access'): string =>
+    `Bearer ${tokens.sign({ sub: user.userId, org: user.orgId, role: user.role, kind }, 60)}`;
+
+  it('TC-008 guards run before interceptors: the handler runs in the org the guard put on request.user', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/probe')
+      .set('Authorization', bearer(USER_A))
+      .expect(200);
+    expect(res.body).toEqual({
+      before: ORG_A,
+      after: ORG_A,
+      userId: USER_A.userId,
+      role: 'RECRUITER',
+    });
+  });
+
+  it('TC-008 AuthUser.id becomes the context user id, and the role is carried over', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/probe')
+      .set('Authorization', bearer(USER_B))
+      .expect(200);
+    expect(res.body).toMatchObject({ before: ORG_B, userId: USER_B.userId, role: 'REVIEWER' });
+  });
+
+  it('TC-008 a @Public() route has no request.user, so it runs with no org context', async () => {
+    const res = await request(app.getHttpServer()).get('/probe/public').expect(200);
+    expect(res.body).toEqual({ scope: 'none' });
+    // Even with a valid token: the guard returns early on a public route and sets no user.
+    const withToken = await request(app.getHttpServer())
+      .get('/probe/public')
+      .set('Authorization', bearer(USER_A))
+      .expect(200);
+    expect(withToken.body).toEqual({ scope: 'none' });
+  });
+
+  it('TC-008 a staff route without a token, with a bad token, or with a 2FA challenge token is 401 and never runs', async () => {
+    const server = app.getHttpServer();
+    await request(server).get('/probe').expect(401);
+    await request(server).get('/probe').set('Authorization', 'Bearer not-a-token').expect(401);
+    await request(server)
+      .get('/probe')
+      .set('Authorization', bearer(USER_A, 'challenge'))
+      .expect(401);
+  });
+
+  it("TC-008 concurrent requests from two orgs never see each other's context", async () => {
+    const server = app.getHttpServer();
+    const calls = Array.from({ length: 24 }, (_, i) => {
+      const user = i % 2 === 0 ? USER_A : USER_B;
+      return request(server)
+        .get('/probe')
+        .set('Authorization', bearer(user))
+        .then((res) => ({ expected: user.orgId, body: res.body as Seen }));
+    });
+    for (const { expected, body } of await Promise.all(calls)) {
+      expect(body).toMatchObject({ before: expected, after: expected });
+    }
+  });
+});
+
+// Stand-in guard that sets request.user from a header, to feed the interceptor shapes the real
+// guard never produces. The interceptor checks request.user itself and fails closed.
 @Injectable()
 class FakeAuthGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
@@ -191,29 +330,22 @@ class FakeAuthGuard implements CanActivate {
   }
 }
 
-@Controller('probe')
-class ProbeController {
+@Controller('fake')
+class FakeProbeController {
   constructor(private readonly orgContext: OrgContextService) {}
 
   @Get()
-  async probe(): Promise<{ before?: string; after?: string; scope: string }> {
-    const read = (): string | undefined => {
-      const scope = this.orgContext.current()?.scope;
-      return scope?.kind === 'org' ? scope.orgId : undefined;
-    };
-    const before = read();
-    await sleep(25);
-    const after = read();
-    return { ...(before ? { before } : {}), ...(after ? { after } : {}), scope: String(before) };
+  probe(): Seen {
+    return readContext(this.orgContext);
   }
 }
 
-describe('OrgContextInterceptor (NFR-04, FR-103)', () => {
+describe('OrgContextInterceptor checks request.user itself (NFR-04, FR-103)', () => {
   let app: INestApplication<App>;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
-      controllers: [ProbeController],
+      controllers: [FakeProbeController],
       providers: [
         OrgContextService,
         { provide: APP_GUARD, useClass: FakeAuthGuard },
@@ -228,57 +360,35 @@ describe('OrgContextInterceptor (NFR-04, FR-103)', () => {
     await app.close();
   });
 
-  const asUser = (user: unknown): string => JSON.stringify(user);
+  // BE-02's AuthUser.
+  const authUser = { id: USER_A.userId, orgId: ORG_A, role: 'RECRUITER', kind: 'access' };
+  const send = (user: unknown): request.Test =>
+    request(app.getHttpServer()).get('/fake').set('x-test-user', JSON.stringify(user));
 
-  it('TC-008 runs the handler in the org of request.user, before and after an await', async () => {
-    const res = await request(app.getHttpServer())
-      .get('/probe')
-      .set('x-test-user', asUser(USER_A))
-      .expect(200);
-    expect(res.body).toEqual({ before: ORG_A, after: ORG_A, scope: ORG_A });
+  it('TC-008 a valid AuthUser sets the context, and extra claims are ignored', async () => {
+    const res = await send({ ...authUser, email: 'a@example.test', exp: 1 }).expect(200);
+    expect(res.body).toEqual({ before: ORG_A, userId: USER_A.userId, role: 'RECRUITER' });
   });
 
-  it('TC-008 a route with no authenticated user runs with no org context', async () => {
-    const res = await request(app.getHttpServer()).get('/probe').expect(200);
-    expect(res.body).toEqual({ scope: 'undefined' });
-  });
-
-  it('TC-008 extra claims on request.user are ignored', async () => {
-    const res = await request(app.getHttpServer())
-      .get('/probe')
-      .set('x-test-user', asUser({ ...USER_B, email: 'b@example.test', exp: 1 }))
-      .expect(200);
-    expect(res.body).toEqual({ before: ORG_B, after: ORG_B, scope: ORG_B });
+  it('TC-008 no request.user at all runs with no context', async () => {
+    const res = await request(app.getHttpServer()).get('/fake').expect(200);
+    expect(res.body).toEqual({});
   });
 
   it.each([
-    ['no orgId', { userId: USER_A.userId, role: 'RECRUITER' }],
-    ['an empty orgId', { ...USER_A, orgId: '' }],
-    ['an orgId that is not a uuid', { ...USER_A, orgId: 'org-1' }],
-    ['no userId', { orgId: ORG_A, role: 'RECRUITER' }],
-    ['an unknown role', { ...USER_A, role: 'ROOT' }],
+    ['no orgId', { id: USER_A.userId, role: 'RECRUITER', kind: 'access' }],
+    ['an empty orgId', { ...authUser, orgId: '' }],
+    ['an orgId that is not a uuid', { ...authUser, orgId: 'org-1' }],
+    ['no id', { orgId: ORG_A, role: 'RECRUITER', kind: 'access' }],
+    ['an unknown role', { ...authUser, role: 'ROOT' }],
+    ['a 2FA challenge kind', { ...authUser, kind: 'challenge' }],
+    ['no kind', { id: USER_A.userId, orgId: ORG_A, role: 'RECRUITER' }],
+    ['the context shape (userId, no id or kind)', { ...USER_A }],
     ['a string instead of an object', 'admin'],
   ])(
     'TC-008 a request.user with %s is answered 401 and never reaches the handler',
     async (_name, user) => {
-      await request(app.getHttpServer()).get('/probe').set('x-test-user', asUser(user)).expect(401);
+      await send(user).expect(401);
     },
   );
-
-  it("TC-008 concurrent requests from two orgs never see each other's context", async () => {
-    const server = app.getHttpServer();
-    const calls = Array.from({ length: 24 }, (_, i) => {
-      const user = i % 2 === 0 ? USER_A : USER_B;
-      return request(server)
-        .get('/probe')
-        .set('x-test-user', asUser(user))
-        .then((res) => ({
-          expected: user.orgId,
-          body: res.body as { before?: string; after?: string },
-        }));
-    });
-    for (const { expected, body } of await Promise.all(calls)) {
-      expect(body).toMatchObject({ before: expected, after: expected });
-    }
-  });
 });
