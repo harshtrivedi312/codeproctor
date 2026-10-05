@@ -20,8 +20,14 @@ export const PASSWORD = 'Correct-Horse-9';
 export const TOTP_SECRET = 'JBSWY3DPEHPK3PXP';
 
 export interface SentMail {
+  /** MailPort method that was called, e.g. 'sendStaffInvite' (template staff-invite). */
+  method: string;
+  /** First argument when it is a string (the recipient); '' otherwise. */
   to: string;
+  /** First argument that is an http(s) URL string, wherever it sits; '' when the mail has none. */
   url: string;
+  /** Every argument as passed, for tests that read other fields (for example the lock mail). */
+  args: unknown[];
 }
 
 export interface Harness {
@@ -94,15 +100,24 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     owner = createPrismaClient(infra.postgres.getConnectionUri());
     orgId = (await owner.organization.create({ data: { name: 'QA Org A' } })).id;
 
-    // Every MailPort send method (send*): records the recipient and the URL it carries, so the
-    // same fake serves password reset now and the staff invite and lock alert mails of BE-03.
+    // Every MailPort send method (send*): records the method name and ALL arguments, so one fake
+    // serves password reset, staff invite and staff-account-locked. It does not assume a call shape
+    // such as (to, url): the URL is the first http(s) string among the arguments.
     const fakeMail = new Proxy(
       {},
       {
         get: (_target, prop) =>
           typeof prop === 'string' && prop.startsWith('send')
-            ? (to: string, url?: string) => {
-                mails.push({ to, url: url ?? '' });
+            ? (...args: unknown[]) => {
+                const url = args.find(
+                  (a): a is string => typeof a === 'string' && /^https?:\/\//.test(a),
+                );
+                mails.push({
+                  method: prop,
+                  to: typeof args[0] === 'string' ? args[0] : '',
+                  url: url ?? '',
+                  args,
+                });
                 return Promise.resolve();
               }
             : undefined,
