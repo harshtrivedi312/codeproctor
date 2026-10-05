@@ -128,7 +128,7 @@ function CandidatesContent(): React.JSX.Element {
         caption="Candidates"
         searchLabel="Search candidates"
         columns={columns}
-        rows={candidates.data}
+        rows={candidates.isError ? undefined : candidates.data}
         isLoading={candidates.isLoading}
         error={
           candidates.isError

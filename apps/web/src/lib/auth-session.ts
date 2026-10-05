@@ -71,6 +71,35 @@ export function confirmSignedOut(): void {
   writeMarker(false);
 }
 
+export const SIGN_OUT_MARKER_KEY = SIGN_OUT_MARKER;
+
+let logoutInFlight: Promise<unknown> | null = null;
+
+/** Records the logout call in flight so a sign-in can wait for it (it must not revoke the new login). */
+export function trackLogout(call: Promise<unknown>): void {
+  const mine = call.finally(() => {
+    if (logoutInFlight === mine) logoutInFlight = null;
+  });
+  logoutInFlight = mine;
+}
+
+/** Resolves when any refresh and any logout call in flight have finished, whatever their result. */
+export async function settleSession(): Promise<void> {
+  await settleRefresh();
+  if (logoutInFlight) await logoutInFlight.then(noop, noop);
+}
+
+/** Another tab signed out: forget the session here at once and ignore refreshes still running. */
+export function signedOutElsewhere(): void {
+  invalidateRefreshes();
+  publishSession(null);
+}
+
+/** Test-only: simulates a page reload by forgetting the in-memory flag but not the stored marker. */
+export function resetInMemorySignOutFlagForTests(): void {
+  signingOut = false;
+}
+
 /** Resolves when any refresh in flight has finished, whatever its result. Never rejects. */
 export function settleRefresh(): Promise<void> {
   return inFlight ? inFlight.then(noop, noop) : Promise.resolve();
@@ -107,7 +136,11 @@ export function beginSession(): void {
 
 /** One refresh at a time; concurrent callers share the result. Returns null when it failed. */
 export function refreshSession(): Promise<AuthSession | null> {
-  if (isSignOutPending()) return Promise.resolve(null);
+  if (isSignOutPending()) {
+    // Not signed in here (for example another tab signed out): show that, never restore.
+    publishSession(null);
+    return Promise.resolve(null);
+  }
   if (inFlight) return inFlight;
   const mine = doRefresh().finally(() => {
     if (inFlight === mine) inFlight = null;

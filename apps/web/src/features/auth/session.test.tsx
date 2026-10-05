@@ -1,10 +1,10 @@
-import { screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import * as React from 'react';
 import { http, HttpResponse } from 'msw';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, isAuthRequest } from '@/lib/api/client';
-import { refreshSession } from '@/lib/auth-session';
+import { refreshSession, resetInMemorySignOutFlagForTests } from '@/lib/auth-session';
 import { getAccessToken } from '@/lib/auth-token';
 import { MOCK_USERS } from '@/mocks/auth-handlers';
 import { server } from '@/mocks/server';
@@ -286,6 +286,7 @@ describe('session handling', () => {
       </>,
     );
     await waitFor(() => expect(refreshes).toBe(1));
+    const firstLoadRefresh = refreshSession(); // the same promise the provider is waiting on
     const login = await api.POST('/v1/auth/login', {
       body: { email: MOCK_USERS.recruiter.email, password: MOCK_USERS.recruiter.password },
     });
@@ -293,7 +294,7 @@ describe('session handling', () => {
     captured.auth!.signIn(login.data.session);
     await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
     release();
-    await new Promise((r) => setTimeout(r, 50));
+    expect(await firstLoadRefresh).toBeNull();
     expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER');
     expect(getAccessToken()).toBeTruthy();
   });
@@ -396,6 +397,8 @@ describe('sign-out that the server did not confirm', () => {
     expect(await screen.findByText('We could not confirm you were signed out')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Retry sign-out' })).toBeInTheDocument();
     first.unmount();
+    // A real reload loses module state; only the stored marker can stop the silent refresh.
+    resetInMemorySignOutFlagForTests();
 
     // "Reload": a fresh provider. The refresh cookie is still valid on the mock server.
     server.resetHandlers();
@@ -427,6 +430,103 @@ describe('sign-out that the server did not confirm', () => {
       ).not.toBeInTheDocument(),
     );
     expect(localStorage.getItem('cp.signOutPending')).toBeNull();
+  });
+
+  async function failLogoutAndReload(): Promise<void> {
+    const first = renderWithAuth(
+      <>
+        <LoginForm />
+        <SignOutButton />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    server.use(http.post('*/v1/auth/logout', () => HttpResponse.error()));
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Sign out' }));
+    await screen.findByText('We could not confirm you were signed out');
+    first.unmount();
+    resetInMemorySignOutFlagForTests();
+    server.resetHandlers();
+  }
+
+  it('FR-101 FR-104: a login right after a reload waits for the logout retry, and the old warning does not come back', async () => {
+    await failLogoutAndReload();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let loginStarted = false;
+    server.use(
+      http.post('*/v1/auth/logout', async () => {
+        await gate;
+        return new HttpResponse(null, { status: 500 });
+      }),
+    );
+    server.events.on('request:start', ({ request }) => {
+      if (request.url.endsWith('/v1/auth/login')) loginStarted = true;
+    });
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <Who />
+      </>,
+    );
+    const u = userEvent.setup();
+    await u.type(screen.getByLabelText('Work email'), MOCK_USERS.recruiter.email);
+    await u.type(screen.getByLabelText('Password'), MOCK_USERS.recruiter.password);
+    await u.click(screen.getByRole('button', { name: 'Sign in' }));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(loginStarted).toBe(false);
+    release();
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
+    expect(screen.queryByText('We could not confirm you were signed out')).not.toBeInTheDocument();
+    expect(localStorage.getItem('cp.signOutPending')).toBeNull();
+    server.events.removeAllListeners();
+  });
+
+  it('FR-104: a 401 from logout counts as confirmed, so the marker cannot stick', async () => {
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <SignOutButton />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    server.use(http.post('*/v1/auth/logout', () => new HttpResponse(null, { status: 401 })));
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Sign out' }));
+    await waitFor(() => expect(router.replace).toHaveBeenLastCalledWith('/admin/login'));
+    expect(localStorage.getItem('cp.signOutPending')).toBeNull();
+    expect(screen.queryByText('We could not confirm you were signed out')).not.toBeInTheDocument();
+  });
+
+  it('FR-104: signing out in another tab signs this tab out at once', async () => {
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <Who />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent('storage', { key: 'cp.signOutPending', newValue: '1' }),
+      );
+    });
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('nobody'));
+    expect(getAccessToken()).toBeNull();
+  });
+
+  it('FR-104: with the marker set, a refresh signs this tab out instead of leaving it signed in', async () => {
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <Who />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
+    localStorage.setItem('cp.signOutPending', '1');
+    expect(await refreshSession()).toBeNull();
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('nobody'));
+    expect(getAccessToken()).toBeNull();
   });
 
   it('FR-104: the pending marker holds no token', async () => {

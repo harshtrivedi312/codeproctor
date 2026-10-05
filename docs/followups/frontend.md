@@ -141,3 +141,12 @@ Items from the review of FE Step 3 that were not fixed in `frontend/step-3-fixes
 ## Must-fix before later steps merge
 
 - **[MUST-FIX before Step 10 merges] QA defect TC-047 / FR-505: a forward OS clock change shrinks the candidate's countdown.** `useServerClock` (`apps/web/src/features/candidate-test/use-clock.ts`) reads server time once and never re-syncs, so the remaining time follows the device clock afterwards. Fix: compute remaining time from the server deadline using a monotonic clock (`performance.now`) and re-sync with the server on every heartbeat. When it is fixed, tell QA so TC-047 becomes a normal test. Not fixed now; this is Step 10 work.
+
+## frontend/step-3 session follow-ups (for backend and later web work)
+
+- **[BE-02] `POST /v1/auth/logout` must be idempotent and revoke by the httpOnly refresh cookie alone.** Answer 204 when the cookie is missing, expired or already revoked, and do not require an access token: after a failed logout the web retries it on the next page load with no access token. Web treats 204 and 401 as "confirmed" (a 401 means no valid session is left), and keeps a "sign-out pending" marker in localStorage for any other answer. If the API returned 5xx forever the marker would stay until the next sign-in.
+- **Refresh failures other than 401/403 sign the user out.** `doRefresh` in `apps/web/src/lib/auth-session.ts` publishes "signed out" on 429, 5xx and network errors too. Better: sign out on 401/403 only and retry the rest, but first-load needs a third state ("cannot reach the server, retry") so the staff layout does not show "Checking your sign-in" forever. Not done in this PR.
+
+### Playwright flake (observed while preparing the session-fixes PR)
+
+- **Should-fix:** about 2 failed runs out of roughly 12 on the staff e2e suite (`pnpm --filter @codeproctor/web test:e2e`): one `toBeVisible` timeout in a single test, not reproduced when run again and not identified. Capture a trace (`trace: 'retain-on-failure'`) before wiring Playwright into CI, so the flaky test can be found.

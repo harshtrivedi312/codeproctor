@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { api } from '@/lib/api/client';
-import { settleRefresh } from '@/lib/auth-session';
+import { settleSession } from '@/lib/auth-session';
 import { useAuth } from './auth-provider';
 import { safeNextPath } from './schemas';
 
@@ -52,9 +52,9 @@ export function LoginForm(): React.JSX.Element {
     setBanner(null);
     let result;
     try {
-      // A silent refresh from first load may still be running. Let it finish first, so it cannot
-      // overwrite the refresh cookie this login is about to set (FR-101, FR-104).
-      await settleRefresh();
+      // A silent refresh or a logout retry from first load may still be running. Let it finish
+      // first, so it cannot overwrite or revoke the refresh cookie this login is about to set (FR-101, FR-104).
+      await settleSession();
       result = await api.POST('/v1/auth/login', { body: values });
     } catch {
       setBanner({ kind: 'network' });
