@@ -698,6 +698,8 @@ describe('review blockers: abandoned start, bounded play, stream swap (FR-606, F
       detectorStartTimeoutMs: startTimeout,
     });
     const s1 = new ProctorSession();
+    // (workerA.terminated is not asserted: the session's stop() of the abandoned run already
+    // terminates it, so it would be true with or without the generation guard.)
     await s1.start(cfg('run1', 30)); // run 1 sits in video.play(); the session abandons it
     const s2 = new ProctorSession();
     await s2.start(cfg('run2', 5000)); // same instance, new session, worker B and video 2
@@ -714,7 +716,7 @@ describe('review blockers: abandoned start, bounded play, stream swap (FR-606, F
     await s1.stop();
   });
 
-  it('TC-070 FR-606: a reused instance whose second start fails reports DETECTOR_UNAVAILABLE for every task, not a silent pass', async () => {
+  it('FR-606: a reused instance whose second start fails reports DETECTOR_UNAVAILABLE for every task, not a silent pass', async () => {
     const workerA = new FakeWorker();
     workerA.postMessage = () => undefined; // run 1: init never answered, session times out
     const workerB = new FakeWorker();
