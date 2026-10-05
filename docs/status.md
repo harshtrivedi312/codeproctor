@@ -302,7 +302,7 @@ Decisions taken by the Delivery Lead under the owner's delegation (order, priori
 | P-01 | Accept or reject ADR 0011 (2FA re-authentication, PR #31) and ADR 0012 (generated OpenAPI as the single source of truth, PR #33) | Accepting an ADR |
 | P-02 | Decided: D-43; #34 merged 2026-10-05 | |
 | P-03 | Decided: D-44 (alert and unlock in BE-03; per-IP or progressive lockout before production) | |
-| P-04 | Decided: C-01..C-16 (D-47). OQ-1..OQ-3 answered by C-17..C-19 (D-48); open: OQ-4 (results retention), OQ-5 (90-day cap on biometrics), OQ-6 (lawful basis for non-biometric processing), OQ-7 (minimum age) | Legal, privacy |
+| P-04 | Decided: C-01..C-16 (D-47). OQ-1..OQ-3 answered by C-17..C-19 (D-48); open: OQ-4 (results retention), OQ-5 (90-day cap on biometrics), OQ-6 (lawful basis for non-biometric processing), OQ-7 (minimum age), OQ-8 (auto-clear of LOW-band sessions vs "a human makes every decision") | Legal, privacy |
 | P-05 | Decided: D-45 (Frontend implements, with a test that the directive is absent elsewhere) | |
 | P-06 | Decided: D-46 | |
 | P-07 | May the Integrity session download AuraFace `glintr100.onnx` (fal/AuraFace-v1, pinned SHA-256, Apache 2.0 per D-05) for a local, opt-in real-model test run? Until then the face-match PR ships with a fake backend only | File download from an external source |
@@ -315,4 +315,4 @@ Decisions taken by the Delivery Lead under the owner's delegation (order, priori
 
 - **Next 3 tasks on the critical path:** #26 merge (BE-02 hardening); #30 merge (DB-05, after DL-01 fixes); BE-03 (DL-02).
 - **Blockers:** GitHub Actions outage (external; affects every merge). B-05 blocks only the pilot.
-- **Decisions needed from the owner:** section 9b "Parked for the owner" (open: P-01, P-07, P-08, P-09, P-10, P-11, and OQ-4..OQ-7 in /docs/compliance/decisions.md (PR #44)).
+- **Decisions needed from the owner:** section 9b "Parked for the owner" (open: P-01, P-07, P-08, P-09, P-10, P-11, and OQ-4..OQ-8 in /docs/compliance/decisions.md (PR #44)).
