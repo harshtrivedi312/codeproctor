@@ -375,11 +375,15 @@ describe('TC-065 (security): forged events', () => {
     for (let i = 0; i < 3; i++) {
       fire(editor, 'paste', { clipboardData: { getData: () => 'a'.repeat(i + 1) } });
       await vi.advanceTimersByTimeAsync(5000);
+      // Signing uses WebCrypto, which runs outside the faked timers. Wait in real time (30 s
+      // deadline) until this batch has been delivered, so the next paste cannot join it and stop()
+      // cannot run while a batch is still being signed. Independent of host speed.
+      await vi.waitFor(() => expect(r.sent).toHaveLength(i + 1), { timeout: 30_000, interval: 5 });
     }
     await r.session.stop();
     expect(r.sent.map((b) => b.seq)).toEqual([0, 1, 2]);
     expect(new Set(r.sent.map((b) => b.signature)).size).toBe(3);
-  });
+  }, 40_000);
 
   it('TC-065: the client refuses to build batches with server-only event types (RESUME_OTP_FAILED, risk or similarity events) or malformed payloads', async () => {
     const sent: SignedBatch[] = [];
