@@ -8,7 +8,12 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { useAuth } from '@/features/auth/auth-provider';
-import { captureSessionStamp, refreshForReplay } from '@/lib/auth-session';
+import {
+  captureSessionStamp,
+  getGeneration,
+  getSessionUserId,
+  refreshForReplay,
+} from '@/lib/auth-session';
 import { RecoveryCodesPanel } from '@/features/auth/recovery-codes-panel';
 import {
   confirmSetup,
@@ -28,7 +33,7 @@ import {
 } from './schemas';
 
 export type SecurityAction = 'setup' | 'disable' | 'regenerate';
-export type SecurityResult = 'enabled' | 'disabled' | 'regenerated';
+export type SecurityResult = 'enabled' | 'regenerated';
 
 const COPY: Record<SecurityAction, { title: string; description: string; submit: string }> = {
   setup: {
@@ -105,8 +110,8 @@ export function ActionDialog({
   onDone: (result: SecurityResult) => void;
 }): React.JSX.Element {
   const { user, signOutRevoked } = useAuth();
-  // Who this dialog was opened by: the re-read below only runs for that same user.
-  const stampRef = React.useRef(captureSessionStamp());
+  // Who this dialog was opened by: sign-out and the re-read below only run for that same session.
+  const [stamp] = React.useState(captureSessionStamp);
   const [stage, setStage] = React.useState<Stage>({ kind: 'password', passwordWrong: false });
   // The password sits in this component state between set-up start and set-up confirm because
   // the confirm call needs it again. It is cleared once confirm succeeds or fails on the password,
@@ -129,26 +134,32 @@ export function ActionDialog({
       return 'ok';
     }
     if (action === 'disable') {
-      const out = await disableTwoFactor(values.currentPassword, values.totpCode ?? '');
+      const out = await disableTwoFactor(values.currentPassword, (values.totpCode ?? '').trim());
       if (!out.ok) return fail(out.failure);
+      // Another tab signed in as someone else (or this tab already signed out) while the call
+      // was in flight: that session is not ours to end. Just close.
+      if (stamp.generation !== getGeneration() || stamp.userId !== getSessionUserId()) {
+        onClose();
+        return 'ok';
+      }
       // The server revoked every session of this user, this one included: no refresh, no logout.
       await signOutRevoked();
       return 'ok';
     }
     const out = await regenerateRecoveryCodes(values.currentPassword);
     if (!out.ok) return fail(out.failure);
-    refreshStatus();
+    // totpEnabled does not change here, so there is nothing to re-read.
     setStage({ kind: 'codes', codes: out.data.recoveryCodes });
     return 'ok';
   }
 
   /**
-   * 2FA state changed on the server: re-read the session user (it carries `totpEnabled`) through
-   * the shared silent-refresh guard at once, not only when the dialog closes. It never runs for
-   * a different user than the one who opened the dialog.
+   * Set-up turned 2FA on: re-read the session user (it carries `totpEnabled`) through the shared
+   * silent-refresh guard. Only runs after the recovery codes were acknowledged (Done): a failing
+   * refresh signs the user out and would unmount the one-time codes. Never runs for another user.
    */
   function refreshStatus(): void {
-    void refreshForReplay(stampRef.current);
+    void refreshForReplay(stamp);
   }
 
   function fail(f: Failure): 'wrong' | 'invalid' | 'failed' {
@@ -164,7 +175,6 @@ export function ActionDialog({
     const out = await confirmSetup(password, values.code);
     if (out.ok) {
       setPassword('');
-      refreshStatus();
       setStage({ kind: 'codes', codes: out.data.recoveryCodes });
       return 'ok';
     }
@@ -239,7 +249,10 @@ export function ActionDialog({
             <CodesStep
               email={user?.email ?? ''}
               codes={stage.codes}
-              onDone={() => onDone(action === 'setup' ? 'enabled' : 'regenerated')}
+              onDone={() => {
+                if (action === 'setup') refreshStatus();
+                onDone(action === 'setup' ? 'enabled' : 'regenerated');
+              }}
             />
           </>
         ) : null}

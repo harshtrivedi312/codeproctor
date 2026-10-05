@@ -9,7 +9,6 @@ import { isTwoFactorMandatory } from './schemas';
 
 const NOTICES: Record<SecurityResult, string> = {
   enabled: 'Two-factor sign-in is now on. Next time you sign in you will be asked for a code.',
-  disabled: 'Two-factor sign-in is now off.',
   regenerated: 'New recovery codes are ready. Your old recovery codes no longer work.',
 };
 
@@ -50,7 +49,9 @@ export function SecurityPage(): React.JSX.Element {
             <p className="text-sm" data-testid="two-factor-status">
               {enabled
                 ? 'Two-factor sign-in is on for your account.'
-                : 'Two-factor sign-in is off. It is optional for your role, and adds protection if your password leaks.'}
+                : mandatory
+                  ? 'Two-factor sign-in is off, but your role requires it. Set it up now.'
+                  : 'Two-factor sign-in is off. It is optional for your role, and adds protection if your password leaks.'}
             </p>
             <div className="flex flex-wrap gap-2">
               {!enabled ? (

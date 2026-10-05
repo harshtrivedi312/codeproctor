@@ -96,7 +96,7 @@ export function LoginForm(): React.JSX.Element {
           for a code next.
         </Alert>
       ) : null}
-      {twoFactorOff ? (
+      {twoFactorOff && !banner ? (
         <Alert tone="info" role="status">
           Two-factor sign-in is turned off and you were signed out on all devices. Sign in again.
         </Alert>

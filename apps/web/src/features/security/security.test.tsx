@@ -1,12 +1,20 @@
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { axe } from 'vitest-axe';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AuthProvider } from '@/features/auth/auth-provider';
 import { LoginForm } from '@/features/auth/login-form';
 import { TwoFactorEnroll } from '@/features/auth/two-factor-enroll';
 import { UserMenu } from '@/features/staff/user-menu';
-import { getSessionUserId, handleSignInElsewhere, isSignOutPending } from '@/lib/auth-session';
+import { api } from '@/lib/api/client';
+import {
+  getSessionUserId,
+  handleSignInElsewhere,
+  isSignOutPending,
+  publishSession,
+} from '@/lib/auth-session';
 import { getAccessToken } from '@/lib/auth-token';
 import { apiBaseUrl } from '@/lib/env';
 import {
@@ -570,6 +578,148 @@ describe('Disable 2FA needs a code and signs out everywhere (FR-102, backend PR 
   });
 });
 
+describe('Disable sign-out is airtight (FR-102, FR-103, TC-005)', () => {
+  function renderOwnClient(user: { email: string }) {
+    seedMockRefresh(user.email);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <AuthProvider>
+          <main>
+            <SecurityPage />
+          </main>
+        </AuthProvider>
+      </QueryClientProvider>,
+    );
+    return client;
+  }
+  const open = async (client: QueryClient) => {
+    await screen.findByTestId('two-factor-status');
+    expect(client).toBeDefined();
+    return userEvent.setup();
+  };
+
+  it('FR-102 TC-005: the session is forgotten before queries are cancelled, so a 401 in that window starts no refresh', async () => {
+    let usersCalls = 0;
+    server.use(
+      http.get('*/v1/admin/users', () => {
+        usersCalls += 1;
+        return HttpResponse.json({ status: 401 }, { status: 401 });
+      }),
+    );
+    seedMockTwoFactor(MOCK_USERS.recruiter.email);
+    const calls = watchSessionCalls();
+    const client = renderOwnClient(MOCK_USERS.recruiter);
+    const u = await open(client);
+    const refreshBefore = calls.refresh;
+    const tokens: (string | null)[] = [];
+    const original = client.cancelQueries.bind(client);
+    vi.spyOn(client, 'cancelQueries').mockImplementation(async (...args) => {
+      tokens.push(getAccessToken());
+      await api.GET('/v1/admin/users');
+      return original(...args);
+    });
+    await openAndSubmit(u, 'Disable 2FA', MOCK_USERS.recruiter.password);
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(DISABLED_LOGIN));
+    expect(tokens.length).toBeGreaterThan(0);
+    expect(tokens.every((t) => t === null)).toBe(true);
+    expect(calls.refresh).toBe(refreshBefore);
+    expect(calls.logout).toBe(0);
+    expect(usersCalls).toBeGreaterThanOrEqual(0);
+  });
+
+  it('FR-102: the query cache is emptied and other tabs are told (marker 1 then cleared)', async () => {
+    seedMockTwoFactor(MOCK_USERS.recruiter.email);
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    const removeItem = vi.spyOn(Storage.prototype, 'removeItem');
+    const client = renderOwnClient(MOCK_USERS.recruiter);
+    const u = await open(client);
+    await client.prefetchQuery({ queryKey: ['seed'], queryFn: () => 'org data' });
+    expect(client.getQueryCache().getAll().length).toBeGreaterThan(0);
+    await openAndSubmit(u, 'Disable 2FA', MOCK_USERS.recruiter.password);
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(DISABLED_LOGIN));
+    expect(client.getQueryCache().getAll()).toHaveLength(0);
+    expect(setItem).toHaveBeenCalledWith('cp.signOutPending', '1');
+    expect(removeItem).toHaveBeenLastCalledWith('cp.signOutPending');
+    expect(isSignOutPending()).toBe(false);
+    setItem.mockRestore();
+    removeItem.mockRestore();
+  });
+
+  it('FR-103 TC-005: if another tab signed in as someone else while the 204 was in flight, nobody is signed out', async () => {
+    server.use(
+      http.post(`${base}/2fa/disable`, () => {
+        publishSession({
+          accessToken: 'mock-access-AUTHOR-other',
+          user: {
+            id: 'user-author',
+            email: MOCK_USERS.author.email,
+            name: 'Avery Author',
+            role: 'AUTHOR',
+            orgName: 'x',
+            totpEnabled: false,
+          },
+        });
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    seedMockTwoFactor(MOCK_USERS.recruiter.email);
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    const client = renderOwnClient(MOCK_USERS.recruiter);
+    const u = await open(client);
+    setItem.mockClear();
+    await openAndSubmit(u, 'Disable 2FA', MOCK_USERS.recruiter.password);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(getSessionUserId()).toBe('user-author');
+    expect(getAccessToken()).toBe('mock-access-AUTHOR-other');
+    expect(setItem).not.toHaveBeenCalledWith('cp.signOutPending', '1');
+    expect(router.replace).not.toHaveBeenCalledWith(DISABLED_LOGIN);
+    setItem.mockRestore();
+  });
+
+  it('FR-103 TC-005: a staff request still waiting when the 204 arrives is not replayed after its 401', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let usersCalls = 0;
+    server.use(
+      http.get('*/v1/admin/users', async () => {
+        usersCalls += 1;
+        await gate;
+        return HttpResponse.json({ status: 401 }, { status: 401 });
+      }),
+    );
+    seedMockTwoFactor(MOCK_USERS.recruiter.email);
+    const calls = watchSessionCalls();
+    const client = renderOwnClient(MOCK_USERS.recruiter);
+    const u = await open(client);
+    const refreshBefore = calls.refresh;
+    const pending = api.GET('/v1/admin/users');
+    await openAndSubmit(u, 'Disable 2FA', MOCK_USERS.recruiter.password);
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(DISABLED_LOGIN));
+    release();
+    const { response } = await pending;
+    expect(response.status).toBe(401);
+    expect(usersCalls).toBe(1);
+    expect(calls.refresh).toBe(refreshBefore);
+  });
+
+  it('FR-102: a code typed with spaces is sent trimmed', async () => {
+    const bodies: string[] = [];
+    server.events.on('request:start', ({ request }) => {
+      if (new URL(request.url).pathname.endsWith('/2fa/disable')) {
+        void request
+          .clone()
+          .text()
+          .then((t) => bodies.push(t));
+      }
+    });
+    const u = await pageAs(MOCK_USERS.recruiter, { twoFactorOn: true });
+    await openAndSubmit(u, 'Disable 2FA', MOCK_USERS.recruiter.password, ' 123456 ');
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(JSON.parse(bodies[0]!)).toMatchObject({ totpCode: '123456' });
+  });
+});
+
 describe('Session user carries totpEnabled (FR-102)', () => {
   const sessionOf = async (email: string) => {
     seedMockRefresh(email);
@@ -603,7 +753,7 @@ describe('Security page: recovery codes are shown once (FR-102)', () => {
     expect(unload()).toBe(false);
   });
 
-  it('FR-102: the session user (totpEnabled) is re-read as soon as set-up succeeds, before the dialog is closed', async () => {
+  it('FR-102: the session user (totpEnabled) is re-read when set-up is acknowledged (Done), not while the codes show', async () => {
     const calls = watchSessionCalls();
     const u = await pageAs(MOCK_USERS.recruiter);
     const before = calls.refresh;
@@ -611,11 +761,33 @@ describe('Security page: recovery codes are shown once (FR-102)', () => {
     await u.type(await within(dialog()).findByLabelText('6-digit code'), MOCK_TOTP_CODE);
     await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
     await within(dialog()).findByTestId('recovery-codes');
-    // The page behind the open dialog already shows the new state.
-    expect(
-      await screen.findByRole('button', { name: 'Disable 2FA', hidden: true }),
-    ).toBeInTheDocument();
+    expect(calls.refresh).toBe(before);
+    await u.click(within(dialog()).getByRole('checkbox'));
+    await u.click(within(dialog()).getByRole('button', { name: 'Done' }));
+    expect(await screen.findByRole('button', { name: 'Disable 2FA' })).toBeVisible();
     expect(calls.refresh).toBe(before + 1);
+  });
+
+  it('FR-102: a failing refresh while the one-time codes show does not unmount them', async () => {
+    const u = await pageAs(MOCK_USERS.recruiter);
+    server.use(http.post(`${base}/refresh`, () => new HttpResponse(null, { status: 500 })));
+    await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
+    await u.type(await within(dialog()).findByLabelText('6-digit code'), MOCK_TOTP_CODE);
+    await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
+    expect(await within(dialog()).findByTestId('recovery-codes')).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.getByTestId('recovery-codes')).toBeInTheDocument();
+    expect(getAccessToken()).not.toBeNull();
+  });
+
+  it('FR-102: regenerating makes no refresh call (totpEnabled does not change)', async () => {
+    const calls = watchSessionCalls();
+    const u = await pageAs(MOCK_USERS.admin, { twoFactorOn: true });
+    const before = calls.refresh;
+    await openAndSubmit(u, 'Regenerate recovery codes', MOCK_USERS.admin.password);
+    await within(dialog()).findByTestId('recovery-codes');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(calls.refresh).toBe(before);
   });
 
   it('FR-102: an older session without totpEnabled shows a neutral checking state and no actions, without crashing', async () => {

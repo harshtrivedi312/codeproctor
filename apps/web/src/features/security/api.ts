@@ -90,7 +90,7 @@ export const confirmSetup = (currentPassword: string, code: string) =>
 export const disableTwoFactor = (currentPassword: string, totpCode: string) =>
   run<true>(async () => {
     const { error, response } = await api.POST('/v1/auth/2fa/disable', {
-      body: { currentPassword, totpCode },
+      body: { currentPassword, totpCode: totpCode.trim() },
     });
     return { data: undefined, error, response };
   }, true);

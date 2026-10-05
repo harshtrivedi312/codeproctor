@@ -52,8 +52,9 @@ interface AuthContextValue {
   /**
    * The server already ended every session of this user (turning 2FA off revokes all refresh
    * tokens and clears the cookie): forget the session here without a refresh or a logout call, and
-   * go to login with a one-time notice. Nothing is left pending, so no "could not confirm sign-out"
-   * warning and no logout retry.
+   * go to login with a one-time notice. Nothing is left pending afterwards, so no "could not
+   * confirm sign-out" warning and no logout retry. The sign-out marker is set briefly as a
+   * cross-tab broadcast (other tabs sign out) and cleared last.
    */
   signOutRevoked: () => Promise<void>;
   setPending: (pending: PendingChallenge | null) => void;
@@ -179,9 +180,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     } finally {
       // Whatever the server said, this browser forgets the session. If the server did not confirm,
       // the pending marker stays set so a reload does not restore it (FR-104).
+      // Forget the session first: no window with a token set while queries are being cancelled.
+      publishSession(null);
       await queryClient.cancelQueries();
       queryClient.clear();
-      publishSession(null);
       setPending(null);
       router.replace('/admin/login');
     }
@@ -190,15 +192,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
   const signOutRevoked = React.useCallback(async () => {
     setSignedOutByUser(true);
     setLoginPath(TWO_FACTOR_OFF_LOGIN_PATH);
-    // Stops and ignores any refresh in flight, so nothing can bring the session back.
-    await beginSignOut();
-    // The server has already revoked the session: nothing to confirm, no logout to retry.
-    confirmSignedOut();
-    setSignOutUnconfirmed(false);
+    // Synchronously blocks every new refresh (and tells other tabs through the marker, which is
+    // set briefly on purpose as a cross-tab broadcast: do not optimise it away), then forget the
+    // session at once. A request that gets a 401 from here on cannot start a refresh against a
+    // family the server just revoked (that would look like token reuse, TC-005).
+    const settled = beginSignOut();
+    publishSession(null);
+    await settled;
     await queryClient.cancelQueries();
     queryClient.clear();
-    publishSession(null);
     setPending(null);
+    setSignOutUnconfirmed(false);
+    // The server already revoked the session: nothing to confirm, no logout to retry. Cleared last.
+    confirmSignedOut();
     router.replace(TWO_FACTOR_OFF_LOGIN_PATH);
   }, [router, queryClient]);
 
