@@ -326,6 +326,11 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
   - A create of a model with `org_id` should narrow to `runInOrg(orgId)` first, so the scalar rule applies.
   - A create left in system scope is review-only (rule (i)): the context does not track which org ids were loaded, and code-reviewer checks that the org was loaded first.
 
+**No write moves a row to another session (ADR 0013 CS-4).** In a SERVICE session scope, an update on a session-path model may not change `session_id` or `session_question_id`. This mirrors the scalar `orgId` rule above.
+- It covers `update`, `updateMany`, `updateManyAndReturn` and the update branch of `upsert`.
+- Creates take `session_id` from the scope.
+- CANDIDATE scope follows the stricter ADR 0013 CS-4 rules.
+
 **Cursors (today, PR #30).**
 - On a model with `org_id`, the cursor gets `orgId` added, and a cursor naming another org is refused.
 - On `Organization`, the cursor must be the caller's own id.
@@ -432,7 +437,14 @@ There is no org-provisioning reason (8.6, 8.9).
 - **What each scope allows:**
   - **System scope:** the raw SQL must serve the active system reason. An example is the `AUTH_BOOTSTRAP` failed-login counter.
   - **Org scope without a session:** the SQL itself must filter by `org_id`. A table without `org_id` must be joined along its 8.7 scope path.
+    - **One exception: the advisory lock (ADR 0004 section 9.4, PR #48).** `SELECT pg_advisory_xact_lock(...)` reads no table, so it cannot filter by `org_id`.
+      - It is allowed in an org scope without a session, as a named raw call site on the FU-DB-67 list.
+      - Its key is derived only from ids already read in the scope.
+      - It is refused in any `sessionId` scope, like all raw SQL.
   - **Any scope carrying a `sessionId`:** raw SQL is refused, for actor CANDIDATE (`runAsCandidate`) and actor SERVICE (`runAsSessionJob`) alike. A session job that needs raw SQL needs an amendment to this ADR; a named call site alone is not enough. ADR 0013 CS-4 must say the same.
+- **Per-session write lock for SERVICE writers: `guardLive` (ADR 0004 section 9.5; ADR 0013).**
+  - SERVICE writers do not use the advisory lock. They take the lock through the model API with `guardLive`: an `updateMany` on `sessions` that writes `status` to its current value, filtered by the session's live status.
+  - This locks the session row without raw SQL. A count of 0 means the session is no longer live, and the writer stops.
 - **Never on organizations.** Raw SQL never writes `organizations`, in any scope.
 - Model queries inside `runRawSql` stay scoped.
 - The `runRawSql` reason stays free text for the reviewer.
@@ -515,7 +527,11 @@ There is no org-provisioning reason (8.6, 8.9).
 - BE-02's interim `prisma.module.ts`, until FU-DB-58 deletes it;
 - the candidate-write datasource (ADR 0013): a second client with `pool_timeout=2` and `options=-c statement_timeout=3000`. It exists because `SET LOCAL` is raw SQL and is refused in session scopes, and it must carry the same extension.
 
-This list is part of the FU-DB-67 importer test. Without that check, the exemption would be a bypass inside `apps/api`.
+This list is part of the FU-DB-67 importer test. That test proves only who calls `createPrismaClient`, not that the extension is applied, so a second test checks the candidate-write client itself:
+- with no scope, a query on it throws `OrgContextMissingError`;
+- in a CANDIDATE scope, it applies the CS-4 filters.
+
+ Without that check, the exemption would be a bypass inside `apps/api`.
 
 ### 8.7 Path rule (architect detail)
 
@@ -544,6 +560,7 @@ This list is part of the FU-DB-67 importer test. Without that check, the exempti
 
 How the check runs:
 
+- It runs on each pool: the main client and the candidate-write client. A misconfigured candidate-write URL that points at a privileged role would otherwise go unnoticed.
 - It is a readiness check, not a blocking startup query.
 - It logs which assertion failed, never the connection URL.
 - The DEP-01 and DEP-03 deploy jobs poll readiness, and fail or roll back when an assertion fails.
@@ -627,7 +644,12 @@ How the check runs:
     - refuse a scalar `orgId` in system-scope `update`, `updateMany`, `updateManyAndReturn` and `upsert.update` on direct models;
     - make an unrecognised write operation throw in system scope.
   - 8.5: build `withGrant({ model, columns, ids }, fn)` per the grant spec: mandatory ids, the extension adds `id IN ids`, and the `active` flag, plus the test for a detached query.
-  - **Second client.** Build the candidate-write datasource (`pool_timeout=2`, `options=-c statement_timeout=3000`; ADR 0013) with the same extension, and list it as an allowed importer in the FU-DB-67 importer test (8.6, "The raw client").
+  - **Second client.** Build the candidate-write datasource (`pool_timeout=2`, `options=-c statement_timeout=3000`; ADR 0013) with the same extension.
+    - List it as an allowed importer in the FU-DB-67 importer test (8.6, "The raw client").
+    - Add the test that it throws `OrgContextMissingError` with no scope and applies the CS-4 filters in CANDIDATE scope.
+    - Run the readiness role assertion on its pool too (8.8).
+  - 8.2: in SERVICE session scope, refuse an update that changes `session_id` or `session_question_id`.
+  - 8.5: list the advisory-lock raw call site (ADR 0004 section 9.4) on FU-DB-67. SERVICE writers use `guardLive` instead.
   - 8.2: the relation side table and its completeness test replace any use of Prisma's runtime data model in production code (FU-DB-103, FU-DB-61).
   - 8.2: add the `createMany` relation-key test.
   - Nested reads stay open (FU-DB-78).

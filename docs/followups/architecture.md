@@ -50,7 +50,7 @@ Verdict: approve after the blocker fixes below. Fixed on this branch: `RunReques
 - **[db-engineer] Scope exits and grant sites (FU-DB-67, ADR 0006 section 8.5).** The FU-DB-67 allow-list must also cover `exit`, `enterWith` and `disable` on the OrgContext store, `detachForSessionJob` (allowed from no scope only), the eleven ADR 0013 CS-4.4 grant sites (with the candidate-facts setter), and the candidate-write datasource as an allowed client importer. Its row in docs/followups/database.md still lists only `runSystem`, `runInOrg` and `runRawSql`.
 - **[db-engineer, Delivery Lead] Nested writes are denied by default (ADR 0006 section 8.2, DL-14).**
   - Built in PR #30 at bcd9615, in org and system scope. The `NESTED_WRITE_ALLOWLIST` is empty (FU-DB-101).
-  - Gate item 4 (the system-scope refusal of a scalar `orgId` in updates) lands in PR #30 before merge. BE-03 and BE-06 invitation and session code waits for that merge.
+  - Gate item 4 lands in PR #30 before merge. It has two parts: the system-scope refusal of a scalar `orgId` in `update`, `updateMany`, `updateManyAndReturn` and `upsert.update`; and an unrecognised write operation throwing in system scope. BE-03 and BE-06 invitation and session code waits for that merge.
   - The Delivery Lead should align the DL-14 wording in docs/status.md ("every org scope") to include system scope.
 - **[Delivery Lead] build-plan.md DB-05 still says "request-scoped OrgContext".** ADR 0001 C-1 and database prompt Step 5 now say "an OrgContext per unit of work on AsyncLocalStorage, not a Nest REQUEST-scoped provider". The architect may not edit build-plan.md in parallel work, so the Delivery Lead aligns it.
 
