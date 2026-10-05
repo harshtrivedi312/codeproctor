@@ -36,7 +36,11 @@ export function expectedClass(
   if (field.name === 'org' && field.type === 'Organization' && rule?.kind === 'direct') {
     return { fkClass: 'ORG_ID' };
   }
-  if (field.foreignKeyFields.length > 1) return { fkClass: 'COMPOSITE' };
+  // A composite key is (id, org_id): it has to include the org, or the database cannot refuse a
+  // parent in another org. Any other multi-column key is not COMPOSITE.
+  if (field.foreignKeyFields.length > 1 && field.foreignKeyFields.includes('orgId')) {
+    return { fkClass: 'COMPOSITE' };
+  }
   if (rule?.kind === 'path' && rule.path[0] === field.name) return { fkClass: 'SCOPE_HOP' };
   return { fkClass: 'RULE_I', ruleI: field.type === 'User' ? 'staff' : 'cross-chain' };
 }
@@ -114,6 +118,17 @@ export function findRelationProblems(input: RelationInputs): string[] {
       }
       if (side.target !== field.type) {
         problems.push(`${id}: the side table says ${side.target}, the schema says ${field.type}.`);
+      }
+      // Both sides of a relation carry the class of its foreign key.
+      const key = fks.find((k) =>
+        field.holdsForeignKey
+          ? k.model === model && k.field === field.name
+          : k.target === model && k.back === field.name,
+      );
+      if (key !== undefined && side.fkClass !== key.fkClass) {
+        problems.push(
+          `${id}: the side table says class ${side.fkClass}, the foreign key is ${key.fkClass}.`,
+        );
       }
       if (side.holdsFk !== field.holdsForeignKey) {
         problems.push(

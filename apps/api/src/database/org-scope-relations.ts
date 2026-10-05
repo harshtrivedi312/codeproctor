@@ -213,12 +213,26 @@ export interface RelationSide {
    * or setting through it changes rows of the related model.
    */
   readonly holdsFk: boolean;
+  /**
+   * The class of the foreign key behind this relation (both sides carry it). The nested-write guard
+   * refuses nested writes through a RULE_I relation, because the row on the other side can belong
+   * to another org.
+   */
+  readonly fkClass: FkClass;
 }
 
 const SIDES = new Map<string, RelationSide>();
 for (const key of FK_CLASSES) {
-  SIDES.set(`${key.model}.${key.field}`, { target: key.target, holdsFk: true });
-  SIDES.set(`${key.target}.${key.back}`, { target: key.model, holdsFk: false });
+  SIDES.set(`${key.model}.${key.field}`, {
+    target: key.target,
+    holdsFk: true,
+    fkClass: key.fkClass,
+  });
+  SIDES.set(`${key.target}.${key.back}`, {
+    target: key.model,
+    holdsFk: false,
+    fkClass: key.fkClass,
+  });
 }
 
 /** The relation field `field` of `model`, or `undefined` when it is a scalar, Json or list column. */
