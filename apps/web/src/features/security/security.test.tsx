@@ -868,8 +868,13 @@ describe('Normal sign-out forgets the session before the logout call (FR-104, TC
     await screen.findByTestId('two-factor-status');
     const signingOut = out.signOut!();
     await waitFor(() => expect(getAccessToken()).toBeNull());
-    // Another tab signs in as someone else: this tab hears it through the storage event.
+    // Another tab signs in as someone else. In a real browser it clears the marker first, then
+    // announces the new sign-in; this tab hears both through storage events, in that order.
+    localStorage.removeItem('cp.signOutPending');
     act(() => {
+      window.dispatchEvent(
+        new StorageEvent('storage', { key: 'cp.signOutPending', newValue: null }),
+      );
       window.dispatchEvent(
         new StorageEvent('storage', { key: 'cp.sessionEpoch', newValue: 'nonce|user-author' }),
       );

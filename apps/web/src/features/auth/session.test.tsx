@@ -597,6 +597,71 @@ describe('sign-out that the server did not confirm', () => {
     server.resetHandlers();
   }
 
+  it('FR-104 TC-005: after a reload, another tab signing in (marker cleared first, then the epoch event) supersedes the failing logout retry: no warning, no Retry, no second logout', async () => {
+    await failLogoutAndReload();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let logoutCalls = 0;
+    server.use(
+      http.post('*/v1/auth/logout', async () => {
+        logoutCalls++;
+        await gate;
+        return new HttpResponse(null, { status: 500 });
+      }),
+    );
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <Who />
+      </>,
+    );
+    await waitFor(() => expect(logoutCalls).toBe(1));
+    // The real browser order: the other tab writes the marker removal, then announces its sign-in.
+    localStorage.removeItem('cp.signOutPending');
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent('storage', { key: 'cp.signOutPending', newValue: null }),
+      );
+      window.dispatchEvent(
+        new StorageEvent('storage', { key: 'cp.sessionEpoch', newValue: 'nonce|user-author' }),
+      );
+    });
+    release();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(screen.queryByText('We could not confirm you were signed out')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry sign-out' })).not.toBeInTheDocument();
+    expect(logoutCalls).toBe(1);
+    expect(screen.getByTestId('who')).toHaveTextContent('nobody');
+  });
+
+  it('FR-104 TC-005: Retry sign-out sends nothing when the marker is gone (another sign-in happened)', async () => {
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <SignOutButton />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    let logoutCalls = 0;
+    server.use(
+      http.post('*/v1/auth/logout', () => {
+        logoutCalls++;
+        return HttpResponse.error();
+      }),
+    );
+    const u = userEvent.setup();
+    await u.click(await screen.findByRole('button', { name: 'Sign out' }));
+    const retry = await screen.findByRole('button', { name: 'Retry sign-out' });
+    expect(logoutCalls).toBe(1);
+    // Another tab signed in: the marker is gone, but this click still got through somehow.
+    localStorage.removeItem('cp.signOutPending');
+    await u.click(retry);
+    expect(logoutCalls).toBe(1);
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Retry sign-out' })).not.toBeInTheDocument(),
+    );
+  });
+
   it('FR-101 FR-104: a login right after a reload waits for the logout retry, and the old warning does not come back', async () => {
     await failLogoutAndReload();
     let release: () => void = () => undefined;

@@ -81,6 +81,11 @@ function writeMarker(on: boolean): void {
   }
 }
 
+/** True while the shared sign-out marker is set in storage (another tab clears it when it signs in). */
+export function isSignOutMarkerSet(): boolean {
+  return markerSet();
+}
+
 /** True while a sign-out has not been confirmed by the server (survives reloads). */
 export function isSignOutPending(): boolean {
   return signingOut || markerSet();
