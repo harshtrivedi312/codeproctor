@@ -586,6 +586,16 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
     const forgot = (email: string): request.Test =>
       request(app.getHttpServer()).post(`${API}/password/forgot`).send({ email });
 
+    // The per-IP budget is shared by every test in this file; start the rate-limit test fresh.
+    async function resetForgotBudget(): Promise<void> {
+      const { REDIS_CLIENT } = jest.requireActual<
+        typeof import('../infrastructure/infrastructure.module')
+      >('../infrastructure/infrastructure.module');
+      const redis = app.get<import('ioredis').Redis>(REDIS_CLIENT);
+      const keys = await redis.keys('pwreset:*');
+      if (keys.length > 0) await redis.del(...keys);
+    }
+
     function tokenFrom(mail: SentMail | undefined): string {
       const match = /#token=([^&]+)$/.exec(mail?.url ?? '');
       if (!match?.[1]) throw new Error('no token in mail');
@@ -680,8 +690,41 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       expect(mails).toHaveLength(0);
     });
 
+    it('TC-098: a pending invite gets the same 202 but no email, and its invite token is untouched (FU-BE-32)', async () => {
+      const pending = await createUser({ password: null });
+      const before = await prisma.user.findUniqueOrThrow({ where: { id: pending.id } });
+      mails.length = 0;
+      const res = await forgot(pending.email).expect(202);
+      const unknown = await forgot('nobody-pending@example.com').expect(202);
+      expect(res.body).toEqual(unknown.body);
+      expect(mails).toHaveLength(0);
+      const after = await prisma.user.findUniqueOrThrow({ where: { id: pending.id } });
+      expect(after.setPasswordTokenHash).toBe(before.setPasswordTokenHash);
+      expect(after.setPasswordExpiresAt).toEqual(before.setPasswordExpiresAt);
+      expect(after.passwordHash).toBeNull();
+    });
+
+    it('TC-098: forgot-password runs the same single UPDATE for a real and an unknown account (FU-BE-31)', async () => {
+      const u = await createUser();
+      const { PrismaService: Prisma } =
+        jest.requireActual<typeof import('../database/prisma.module')>('../database/prisma.module');
+      const appPrisma = app.get(Prisma).client;
+      const spy = jest.spyOn(appPrisma.user, 'updateMany');
+      try {
+        await forgot(u.email).expect(202);
+        const real = spy.mock.calls.length;
+        spy.mockClear();
+        await forgot('nobody-equal-work@example.com').expect(202);
+        expect(real).toBe(1);
+        expect(spy.mock.calls.length).toBe(1);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('TC-098: requests are rate limited per email (silently) and per IP (429)', async () => {
       const u = await createUser();
+      await resetForgotBudget();
       mails.length = 0;
       for (let i = 0; i < 6; i++) await forgot(u.email).expect(202);
       expect(mails).toHaveLength(3);

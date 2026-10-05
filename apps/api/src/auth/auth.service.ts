@@ -34,6 +34,8 @@ const RECOVERY_CODE_COUNT = 10;
 const FORGOT_PER_EMAIL = 3;
 const FORGOT_PER_IP = 10;
 const FORGOT_WINDOW_SECONDS = 60 * 60;
+/** Matches no user; used so unknown accounts run the same UPDATE as real ones. */
+const NO_USER_ID = '00000000-0000-0000-0000-000000000000';
 
 /** Roles that must use TOTP (FR-102). */
 const TOTP_REQUIRED_ROLES: readonly UserRole[] = [UserRole.SUPER_ADMIN, UserRole.REVIEWER];
@@ -356,18 +358,24 @@ export class AuthService {
     if (ipCount === null || emailCount === null || emailCount > FORGOT_PER_EMAIL) return;
 
     const user = await this.prisma.client.user.findUnique({ where: { email } });
-    if (!user?.isActive) return;
+    // Only an active account that already has a password may reset it. A pending invite keeps its
+    // 72-hour invite token and gets nothing (FU-BE-32).
+    const eligible = user?.isActive === true && user.passwordHash !== null;
 
+    // Every account, real or not, costs the same: one token, one UPDATE statement. For anything
+    // ineligible the UPDATE matches no row, so response timing does not reveal the account
+    // (FU-BE-31).
     const token = newOpaqueToken();
-    await this.prisma.client.user.update({
-      where: { id: user.id },
+    await this.prisma.client.user.updateMany({
+      where: { id: eligible ? user.id : NO_USER_ID },
       data: {
         setPasswordTokenHash: sha256Hex(token),
         setPasswordExpiresAt: new Date(Date.now() + RESET_TTL_MS),
       },
     });
+    if (!eligible) return;
     const url = `${this.webOrigin}/admin/reset-password#token=${token}`;
-    // Not awaited, so response time does not reveal whether the account exists.
+    // Not awaited, so mail latency does not reveal whether the account exists.
     void this.mail.sendPasswordReset(user.email, url).catch(() => undefined);
   }
 
