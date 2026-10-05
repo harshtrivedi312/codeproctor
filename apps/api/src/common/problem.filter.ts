@@ -18,6 +18,8 @@ export interface ProblemDetails {
   instance: string;
   traceId: string;
   errors?: string[];
+  /** Stable machine code, present only where a route defines one (e.g. REAUTH_FAILED). */
+  code?: string;
 }
 
 const TITLES: Record<number, string> = {
@@ -60,7 +62,8 @@ export class ProblemFilter implements ExceptionFilter {
       if (typeof body === 'string') {
         problem.detail = body;
       } else if (typeof body === 'object' && body !== null) {
-        const { message } = body as { message?: unknown };
+        const { message, code } = body as { message?: unknown; code?: unknown };
+        if (typeof code === 'string') problem.code = code;
         if (Array.isArray(message)) {
           problem.detail = 'Request validation failed';
           problem.errors = message.map(String);

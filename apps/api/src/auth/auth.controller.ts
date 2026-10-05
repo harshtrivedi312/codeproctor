@@ -166,7 +166,11 @@ export class AuthController {
   @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Signed-in user begins optional TOTP enrollment (FR-102)' })
   @ApiOkResponse({ type: TotpEnrollmentDto })
-  @ApiUnauthorizedResponse({ description: 'Missing token, or wrong current password (or locked)' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
+  @ApiForbiddenResponse({
+    description:
+      "Wrong current password or locked account: one generic body with code 'REAUTH_FAILED' (not a session expiry)",
+  })
   setupStart(@Body() dto: SetupStartDto, @Req() req: AuthedRequest): Promise<TotpEnrollmentDto> {
     return this.auth.startSetup(this.userId(req), dto.currentPassword, ctxOf(req));
   }
@@ -179,7 +183,11 @@ export class AuthController {
   @ApiOperation({ summary: 'Signed-in user confirms optional TOTP; returns recovery codes once' })
   @ApiOkResponse({ type: EnrollmentConfirmedDto })
   @ApiBadRequestResponse({ description: 'Wrong code' })
-  @ApiUnauthorizedResponse({ description: 'Missing token, or wrong current password (or locked)' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
+  @ApiForbiddenResponse({
+    description:
+      "Wrong current password or locked account: one generic body with code 'REAUTH_FAILED' (not a session expiry)",
+  })
   async setupConfirm(
     @Body() dto: SetupConfirmDto,
     @Req() req: AuthedRequest,
@@ -199,8 +207,11 @@ export class AuthController {
   @HttpCode(204)
   @ApiOperation({ summary: 'Turn 2FA off; needs the current password; not for 2FA-required roles' })
   @ApiNoContentResponse()
-  @ApiUnauthorizedResponse({ description: 'Missing token, or wrong current password (or locked)' })
-  @ApiForbiddenResponse({ description: 'Two-factor authentication is required for this role' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
+  @ApiForbiddenResponse({
+    description:
+      "Wrong or locked current password: code 'REAUTH_FAILED' (not a session expiry). 2FA required for this role: code 'TWO_FACTOR_REQUIRED_FOR_ROLE', checked after the password",
+  })
   @ApiConflictResponse({ description: '2FA is not on' })
   async disable(@Body() dto: CurrentPasswordDto, @Req() req: AuthedRequest): Promise<void> {
     await this.auth.disableTwoFactor(this.userId(req), dto.currentPassword, ctxOf(req));
@@ -213,7 +224,11 @@ export class AuthController {
   @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Replace all recovery codes; needs the current password (FR-102)' })
   @ApiOkResponse({ type: RecoveryCodesDto })
-  @ApiUnauthorizedResponse({ description: 'Missing token, or wrong current password (or locked)' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
+  @ApiForbiddenResponse({
+    description:
+      "Wrong current password or locked account: one generic body with code 'REAUTH_FAILED' (not a session expiry)",
+  })
   @ApiConflictResponse({ description: '2FA is not on' })
   regenerateRecoveryCodes(
     @Body() dto: CurrentPasswordDto,
@@ -232,10 +247,11 @@ export class AuthController {
   })
   @ApiNoContentResponse()
   @ApiBadRequestResponse({ description: 'Not a UUID, or the caller targeted themselves' })
-  @ApiUnauthorizedResponse({
-    description: 'Missing token, or wrong current password of the admin (or locked)',
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
+  @ApiForbiddenResponse({
+    description:
+      "Caller is not a super admin, or the admin's own current password is wrong or locked (code 'REAUTH_FAILED')",
   })
-  @ApiForbiddenResponse({ description: 'Caller is not a super admin' })
   @ApiNotFoundResponse({ description: 'No such user in your organization' })
   async resetTwoFactor(
     @Param('userId', new ParseUUIDPipe()) userId: string,
