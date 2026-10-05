@@ -18,6 +18,9 @@ import type { SignedBatch } from '../core/event-queue';
 import { IdbStore } from '../core/idb';
 import { ProctorSession, type ProctorSessionConfig } from '../core/session';
 import type { Detector } from '../core/types';
+import { DEFAULT_AI_CONFIG } from '../detectors/config';
+import { PHONE_STRONG, PHONE_WEAK, NOTHING } from '../detectors/__fixtures__/samples';
+import { FaceRules, ObjectRules } from '../detectors/rules';
 import { ClipboardMonitor } from '../monitors/clipboard';
 import { FullscreenMonitor } from '../monitors/fullscreen';
 import { MultiScreenMonitor } from '../monitors/multi-screen';
@@ -396,5 +399,53 @@ describe('TC-065 (security): forged events', () => {
     await session.stop();
     expect(sent).toHaveLength(0);
     expect(session.getQueueStats()).toBeNull();
+  });
+});
+
+describe('TC-057 / TC-058 / TC-059 (FR-606): vision rules on 1 s samples', () => {
+  const T = 5_000_000;
+  const face = (counts: number[]) => {
+    const rules = new FaceRules(DEFAULT_AI_CONFIG);
+    return counts.flatMap((n, i) =>
+      rules.process({ faceCount: n }, T + i * 1000).map((e) => ({ at: i, e })),
+    );
+  };
+
+  it('TC-057: leaving the camera view for 10 s raises one NO_FACE after 5 s, with the 5 s duration, not at the first missing frame', () => {
+    const got = face([1, 1, ...Array<number>(10).fill(0), 1]);
+    expect(got).toHaveLength(1);
+    expect(got[0]?.e.type).toBe('NO_FACE');
+    expect(got[0]?.at).toBe(2 + 5); // two present seconds, then the fifth absent second
+    expect(got[0]?.e.durationMs).toBe(5000);
+  });
+
+  it('TC-057: stepping out for 3 s only (shorter than 5 s) raises nothing', () => {
+    expect(face([1, 0, 0, 0, 1, 1, 1])).toEqual([]);
+  });
+
+  it('TC-058: a second person entering the frame raises MULTIPLE_FACES after two samples, with HIGH severity in the taxonomy', () => {
+    const got = face([1, 1, 2, 2, 2]);
+    expect(got.map((g) => g.e.type)).toEqual(['MULTIPLE_FACES']);
+    expect(got[0]?.e.faceCount).toBe(2);
+    expect(DEFAULT_EVENT_SEVERITY.MULTIPLE_FACES).toBe('HIGH');
+  });
+
+  it('TC-058: one noisy frame with two faces is not an event', () => {
+    expect(face([1, 2, 1, 1, 2, 1])).toEqual([]);
+  });
+
+  it('TC-059: a phone held up to the camera raises PHONE_DETECTED (confidence kept), a weak guess or other objects do not', () => {
+    const rules = new ObjectRules(DEFAULT_AI_CONFIG);
+    const frames = [PHONE_STRONG, PHONE_STRONG, PHONE_STRONG, PHONE_STRONG];
+    const got = frames.flatMap((d, i) => rules.process(d, T + i * 2000));
+    expect(got.map((e) => e.type)).toEqual(['PHONE_DETECTED']);
+    expect(got[0]?.confidence).toBeGreaterThan(0.5);
+    expect(DEFAULT_EVENT_SEVERITY.PHONE_DETECTED).toBe('HIGH');
+
+    const quiet = new ObjectRules(DEFAULT_AI_CONFIG);
+    const none = [PHONE_WEAK, NOTHING, PHONE_WEAK, NOTHING, PHONE_WEAK].flatMap((d, i) =>
+      quiet.process(d, T + i * 2000),
+    );
+    expect(none).toEqual([]);
   });
 });

@@ -10,7 +10,11 @@ Owner: qa-engineer. Written 2026-10-02 (QA-01). Items are tagged **must-fix** (b
 | Coverage per module (apps/web) | `pnpm --filter @codeproctor/qa run coverage:web` | v8 provider; prints a table per folder |
 | Matrix check | `pnpm --filter @codeproctor/qa test` | Fails when test-cases.md and test-matrix.md disagree |
 | Playwright and axe | `pnpm --filter @codeproctor/web build` with `NEXT_PUBLIC_API_MOCKING=enabled`, then `pnpm --filter @codeproctor/qa run test:e2e` | Serves the production build with `next start` on port 3100 (never the dev server). First time: `pnpm --filter @codeproctor/qa exec playwright install chromium` |
-| P1 gate | `pnpm --filter @codeproctor/qa run gate <report.json>...` | Used by .github/workflows/qa.yml. `--strict` also fails P1 cases with an automated level and no passing test; turn it on when BE-15A/QA-01B finish |
+| API integration tests (Testcontainers) | `pnpm --filter @codeproctor/api exec node --experimental-vm-modules node_modules/jest/bin/jest.js -c test/jest.integration.config.js --runInBand --forceExit` | Needs Docker. Throwaway Postgres 16 and Redis per file; the app runs as `app_user`; never touches the dev stack. Add `--json --outputFile=<file>` for the gate |
+| Proctor SDK tests | `pnpm --filter @codeproctor/proctor-sdk test` | QA suite: `packages/proctor-sdk/src/qa/qa-tc.test.ts` |
+| Worker tests | `cd apps/worker && python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]' && .venv/bin/python -m pytest --junitxml=<file>` | QA file: `tests/test_qa_tc.py`. Test names write the ID as `TC_073`; the gate reads it as TC-073 |
+| Shared contract tests | `pnpm --filter @codeproctor/shared test` | node:test; for the gate add `--test-reporter=junit --test-reporter-destination=<file>` |
+| P1 gate | `pnpm --filter @codeproctor/qa run gate <report.json\|report.xml>...` | Used by .github/workflows/qa.yml. `--strict` also fails P1 cases with an automated level and no passing test; turn it on when BE-15A/QA-01B finish |
 | Load and ZAP | Actions tab, workflow "QA", Run workflow, pick the scan and give the staging URL | Staging only; needs the `K6_CANDIDATE_TOKENS` secret for k6 |
 
 ## 2. Changes needed outside QA's file scope (architecture hub, root files)
@@ -45,7 +49,7 @@ No product defect was confirmed this round: the merged code is a mocked demo, an
 
 ## 5. Not done in QA-01 (blocked)
 
-- Testcontainers integration tests for every server-side TC: apps/api has only a Prisma client factory, and DB-03 migrations do not exist.
+- Testcontainers integration tests: done for staff auth, audit append-only and seed (QA-02, section 7). Still blocked: every TC that needs BE-03 to BE-14 routes.
 - Playwright tests against the real candidate flow: FE-09 and BE-07 not merged.
 - TC-093 ZAP and TC-090/091 k6 runs: no staging environment (DEP-01).
 - QA 2 (red team, /docs/red-team-report.md): needs staging and the proctor SDK. Not started.
@@ -77,3 +81,43 @@ Setup needed from a human: create the GitHub environment `staging` (with the sec
 | FU-QA-10 | nit | qa-engineer | TC-045 is listed at level e2e in the matrix but the passing tests are hook-level unit tests. Re-level to unit plus e2e once BE-11 and FE-10 give a real reopen test. |
 | FU-QA-11 | nit | qa-engineer | The k6 comment in TC-091 says "stay under one run per 5 s": it sleeps 5.5 s; keep the number and the comment in step. |
 | FU-QA-12 | nit | qa-engineer | Playwright has only a Chromium project. Add a Firefox project for TC-031 (unsupported browser) when FE-09 merges. |
+
+## 7. QA-02 round (2026-10-05): staff auth, audit, seed, SDK, worker
+
+Added: `apps/api/test/` (harness, Jest config, 9 integration files), `packages/proctor-sdk/src/qa/qa-tc.test.ts`, `apps/worker/tests/test_qa_tc.py`, `packages/qa/e2e/tc-004-rbac.spec.ts`, a `web-staff` Playwright project that runs the frontend's `apps/web/e2e` specs against the production build, JUnit and Jest support in the gate, and the new CI steps in `.github/workflows/qa.yml` (every test step runs even after a failure, then the gate prints one line per P1 case and fails the job on any failing P1 test). The matrix check now also fails when a Verified or Partial row lists a test file that does not exist.
+
+### 7.1 Defects
+
+| ID | Severity | Owner | Defect |
+| --- | --- | --- | --- |
+| QA-D-01 | medium | proctor-sdk-engineer (architect to confirm the intended event shape) | TC-050 expects "FULLSCREEN_EXIT logged with duration". `FullscreenMonitor` emits FULLSCREEN_EXIT with no duration and puts the duration on FULLSCREEN_RESTORED. A candidate who never returns leaves no duration at all. Repro: `packages/proctor-sdk/src/qa/qa-tc.test.ts`, test "TC-050 KNOWN DEFECT QA-D-01" (`it.fails`). Expected: the exit is recorded with its duration (for example the SDK also emits a closing event or the server computes it, and test-cases.md says which). Actual: EXIT has no `durationMs`. Switch the test to `it` when decided |
+| QA-D-02 | medium (blocks every browser-to-API run) | frontend-engineer (config) and backend-engineer (prefix) | The web client calls `/v1/auth/*` on `NEXT_PUBLIC_API_URL`, whose default and `.env.example` value is `http://localhost:4000`. The API serves `/api/v1/*` only, so `POST /v1/auth/login` is 404. Repro: `apps/api/test/integration/web-contract.int.test.ts`. Expected: the example value and the web default end in `/api`, or the web paths carry it |
+| QA-D-03 | low | frontend-engineer, architect | `apps/web/openapi/openapi.yaml` declares the error body as `{ code, message }` (and the MSW mocks return it). The real API returns RFC 7807 problem JSON (`type, title, status, detail, instance, traceId`), per ADR 0001 C-9. The web reads only HTTP status today, so nothing breaks, but the mocks hide the real shape. Update the schema and mocks to the problem shape before any screen reads `code` |
+| FU-QA-01 | should-fix | frontend-engineer | Still open: TC-047 client clock (see 6.1). The `it.fails` test still passes as expected, so the defect is not fixed and the marker stays |
+
+### 7.2 Observations (not defects)
+
+1. The pre-existing API tests (`apps/api/src/**/*.e2e-spec.ts`) run the app as the container superuser, so the `app_user` grants are never exercised. The QA harness runs the app as `app_user`; all auth flows pass that way, so the grants are sufficient for BE-02.
+2. `apps/worker` has no `test` script, so root `pnpm test` and ci.yml never run its 136 pytest tests; only the QA workflow does now. Architect: add `"test"` to `apps/worker/package.json` (python3.12 -m pytest) so CI covers it too.
+3. `apps/api` has no `test:integration` script and its tsconfig includes only `src`; `apps/api/test/tsconfig.json` and `test/jest.integration.config.js` are QA's. Backend-engineer: optionally add a `test:integration` script that runs the command in section 1.
+4. `apps/api/src/test/containers.ts` (backend) is reused by the QA harness. The DB-engineer's wish for `apps/api/test/support/postgres.ts` (section 2 item 7) is met by `apps/api/test/support/harness.ts`; it applies the migration SQL files directly, not `prisma migrate deploy`, so `_prisma_migrations` is absent in tests.
+5. The mock auth state in the web app lives in a cookie, so `web-staff` specs are independent per browser context. They ran 22 of 22 in the production build, not only in `next dev`.
+6. TC-075 is implemented in `apps/worker/src/worker/risk.py` (with the constants in packages/shared), not in `apps/api/src/risk`. The matrix points at the worker tests.
+7. Seeded `TC-xxx` naming: the `web` settings tests tag the admin consent page with TC-096; that is the admin side only, so TC-096 stays Planned.
+
+### 7.3 Blocked, by step
+
+| Blocked TCs | Waiting for |
+| --- | --- |
+| TC-008 | DB-05 (org scope), BE-03 (guards), BE-13 (review routes) |
+| TC-004 (403 on PATCH /questions/:id), TC-006 (review audit) | BE-03, BE-04, BE-13 |
+| TC-010..013, TC-011 (endpoint), TC-012 | BE-04, BE-05 |
+| TC-020..024 | BE-06, BE-07 |
+| TC-030..033, TC-095, TC-096, TC-007, TC-097 | BE-07, BE-08, FE-09 |
+| TC-040..048, TC-041 (server) | BE-05, BE-11, FE-10 (Judge0 on Linux x86 for TC-042..044) |
+| TC-065 (server side), TC-062/063/070 end to end | BE-09, BE-10, FE-10, FE-11 |
+| TC-071, TC-072, TC-094 | BE-09, DB-06 |
+| TC-076, TC-074 (API), TC-078..081 | BE-12, BE-13, BE-14 |
+| TC-090, TC-091, TC-093 | staging (DEP-01), BE-15B |
+| Manual: TC-054..056, 058, 059, 034, 036, 060, 061, 064 | a person with the right hardware; scripts in docs/manual-tests.md |
+

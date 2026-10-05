@@ -34,7 +34,7 @@ describe('TC-001 (FR-101): valid staff login', () => {
     expect(body.session.user).toEqual({
       id: u.id,
       email: u.email,
-      name: expect.any(String),
+      name: expect.any(String) as string,
       role: 'RECRUITER',
       orgName: 'QA Org A',
     });

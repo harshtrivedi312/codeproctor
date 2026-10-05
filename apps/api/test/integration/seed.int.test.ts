@@ -11,7 +11,7 @@ import { buildSeedPlan } from '../../../../prisma/seed/plan';
 import { createPrismaClient } from '../../src/database/create-prisma-client';
 import { API, Body, boot, Harness } from '../support/harness';
 
-describe('DB-04 seed (supports TC-001, TC-003, TC-010, TC-075)', () => {
+describe('DB-04 seed (supports TC-001, TC-003; seeded data for FR-201, FR-804)', () => {
   let h: Harness;
   let appClient: ReturnType<typeof createPrismaClient>;
   const plan = buildSeedPlan(new Date());
@@ -60,7 +60,7 @@ describe('DB-04 seed (supports TC-001, TC-003, TC-010, TC-075)', () => {
     }
   });
 
-  it('TC-010: every seeded coding question has a current version with 3 sample and 8 hidden test cases and 3 variants (FR-201, FR-203)', async () => {
+  it('FR-201: every seeded coding question has a current version with 3 sample and 8 hidden test cases and 3 variants (FR-201, FR-203)', async () => {
     const questions = await appClient.question.findMany({ where: { type: 'CODING' } });
     expect(questions).toHaveLength(6);
     for (const q of questions) {
@@ -75,7 +75,7 @@ describe('DB-04 seed (supports TC-001, TC-003, TC-010, TC-075)', () => {
     }
   });
 
-  it('TC-075: every stored session risk band matches its score under FR-804 (0-29 LOW, 30-59 MEDIUM, 60-100 HIGH)', async () => {
+  it('FR-804: every stored session risk band matches its score under FR-804 (0-29 LOW, 30-59 MEDIUM, 60-100 HIGH)', async () => {
     const sessions = await appClient.session.findMany({ where: { riskScore: { not: null } } });
     expect(sessions.length).toBeGreaterThanOrEqual(3);
     const bands = new Set<string>();
