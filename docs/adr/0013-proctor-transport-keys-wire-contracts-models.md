@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Proposed** 2026-10-05. The owner accepts or amends. Items marked **(architect detail, owner to confirm)** are not owner decisions; section 9 lists the questions. |
+| Status | **Proposed** 2026-10-05. Acceptance is pending the owner: C-23 (docs/compliance/decisions.md, PR #44) accepts it with the Delivery Lead's recommended answers once the hub reports a clean security review. Items marked **(architect detail, owner to confirm)** are not owner decisions; section 9 lists the questions. |
 | Author | architecture hub |
 | Decides | OI-3 (key lifecycle, canonical JSON, threat model), OI-9 (key layout, segment reassembly rules), the key half of OI-10, the ARC-03 items ADR 0010 "Leaves to", and every "Open for the architecture hub" item in docs/followups/proctor-sdk.md |
 | Serves | FR-403, FR-601, FR-604, FR-605, FR-606, FR-607, FR-609, FR-610, FR-701, FR-702, FR-704, FR-801; NFR-01, NFR-02, NFR-04, NFR-05, NFR-08; TC-008, TC-050, TC-056, TC-058, TC-059, TC-063, TC-065, TC-070, TC-072 |
@@ -61,7 +61,7 @@ The SDK (FE-06..FE-08, merged) signs event batches, uploads media and evidence, 
 - **Same device, new epoch.** The SDK re-signs its unsent outbox with the new key. It stores the exact body, so only the signature changes.
 - **Different device.** Batches still queued on the old device are lost: its token is dead, and it purges on `SESSION_TAKEN_OVER`. Server-side gap detection (section 5.8) shows the hole to the reviewer.
 - **Ingest close.** Ingestion closes at `submitted_at + PROCTOR_INGEST_GRACE_SECONDS` (default 300). The same close, with the same grace, runs for every other terminal exit ADR 0002 allows from IN_PROGRESS or PAUSED, measured from that transition's server time (today SUBMITTED by finish, last section or auto-submit). All of these go through one named method, `SessionStateService.closeIngest(sessionId, reason)`, which any terminated or invalidated status added later must also call. EXPIRED sessions never received a key (EXPIRED applies only before start), but still get the storage sweep. The close job then sets `hmac_key_enc = NULL` (key destruction) and runs the storage sweep (section 5.7). After that, stored signatures cannot be re-verified, which is acceptable because they serve idempotency only. **(architect detail, owner to confirm; ARC-04 delays `analyze-session` by the same grace.)**
-- **Erasure (R-6) of a live session** also nulls `hmac_key_enc` and deletes the `pkey:` markers.
+- **Erasure (R-6) of a live session** also nulls `hmac_key_enc` and deletes the session's Redis keys: `pkey:`, `qview:`, `evidence:`, `etag:` and `rec:`.
 
 **Canonical JSON and transport: the SDK's scheme is confirmed.**
 - Signed string `S = canonicalJson({ seq, events })` for events, and `canonicalJson({ seq, sessionQuestionId, startedAt, events })` for keystrokes (the ADR 0010 batch shapes, unchanged). Canonical means RFC 8785 (JCS) as the SDK implements it: object keys sorted by UTF-16 code units, no whitespace, ECMAScript number and string serialisation, `undefined` members dropped, non-finite numbers refused, UTF-8 bytes.
@@ -196,7 +196,7 @@ Decision: **unsigned, token-authenticated, advisory input, flagged as unsigned**
 Server behaviour:
 - Each beat sets `last_heartbeat = now()` with one UPDATE by primary key. About 20 writes per second at 200 candidates; target p95 below 50 ms.
 - If a DISCONNECTED was logged since the last beat (Redis flag), the beat enqueues a `server-event` session job that writes RECONNECTED (SERVER), because candidate scope cannot write SERVER rows (CS-4.4).
-- A repeatable discovery job every 15 s, under `BACKGROUND_JOB`, finds IN_PROGRESS and PAUSED sessions silent for more than 60 s. It enqueues one session job per session, which writes DISCONNECTED `{ lastHeartbeatAt }` (FR-609, CS-4.7).
+- A repeatable discovery job every 15 s, under `BACKGROUND_JOB`, finds IN_PROGRESS and PAUSED sessions silent for more than 60 s. It only enqueues one SERVICE job per session (it never enters a session scope itself); each job runs in `runAsSessionJob` from no scope and writes DISCONNECTED `{ lastHeartbeatAt }` (FR-609, CS-4.7).
   - **Flag for QA and the owner:** TC-063 drops the network for 45 s yet expects DISCONNECTED, while FR-609 sets the threshold at 60 s, so a 45 s drop logs nothing. Either TC-063 uses more than 60 s or FR-609 changes (Q13; QA already noted it in docs/followups/qa.md).
 - `recorder` and `queue` go to Redis `rec:{sessionId}`. The final snapshot is copied to `device_info.recorder` at SUBMITTED.
 - The proctor push channel (OI-2, Q-20) is not decided here.
@@ -301,7 +301,7 @@ Each environment has its own bucket (D-10, D-11), so keys carry no environment. 
 | Evidence snapshot, re-check frame | `orgs/{orgId}/sessions/{sessionId}/evidence/{ULID}.jpg` (wire name `evidence/{ULID}.jpg`) | browser | `proctor_events.evidence_key` (EVENT) |
 | Sealed re-check frame | `orgs/{orgId}/sessions/{sessionId}/evidence/sealed/{ULID}.jpg` | API (CopyObject); never presigned for PUT | `proctor_events.evidence_key` (FACE_MISMATCH) |
 | Report PDF | `orgs/{orgId}/sessions/{sessionId}/reports/{ULID}.pdf` | API | `sessions.report_key` |
-| Signed consent PDF | `orgs/{orgId}/consents/{sessionId}/{ULID}.pdf` (**outside** the session prefix, because it is kept until erasure, D-17; this fills in ADR 0004 §8, owner to confirm, Q16) | API | `consents.pdf_key` |
+| Signed consent PDF | `orgs/{orgId}/consents/{sessionId}/{ULID}.pdf` (**outside** the session prefix, because the consent proof keeps its own 3-year clock from `signed_at`, **through an erasure request**: C-17 and C-04, proposed ADR 0004 R-9 in PR #48; this fills in ADR 0004 §8) | API | `consents.pdf_key` |
 | Live thumbnail (BE-13, if stored) | `orgs/{orgId}/sessions/{sessionId}/live/{ULID}.jpg` | browser | none (transient) |
 
 - **Ingest-close sweep (BE-09).** S3 authenticates a request when it starts, so a 16 MiB PUT can finish after its URL expires. The sweep therefore allows a margin:
@@ -314,7 +314,7 @@ Each environment has its own bucket (D-10, D-11), so keys carry no environment. 
   - **identity images:** delete objects not referenced by `identity_checks`, or over 5 MiB, or not JPEG;
   - **counts** go to `device_info.storageSweep` for the reviewer (counts only, never keys).
 - **Retention (R-4)** deletes the whole prefix `orgs/{orgId}/sessions/{sessionId}/` with ListObjectsV2 and DeleteObjects, then nulls the columns. This is the final backstop for orphans.
-- **Erasure (R-6)** deletes the session prefix and `orgs/{orgId}/consents/{sessionId}/`.
+- **Erasure (R-6)** deletes the session prefix only. `orgs/{orgId}/consents/{sessionId}/` is kept until its 3-year limit (C-17) and is deleted by the R-9 consent job (proposed ADR 0004 §9.2, PR #48), objects first, then the row.
 - **Media chunk keys are deterministic**, so a retried presign targets the pending object. A confirmed chunk is protected by 5.5 controls 3 and 4.
 - **Review GET URLs** (15 min, FR-703) always set `response-content-type` to the expected type (`video/webm`, `audio/webm`, `image/jpeg` or `application/pdf`) and `response-content-disposition: attachment`. A file uploaded as HTML can then never render as a page from the storage host. `<video>` and `<img>` ignore the disposition, so playback still works.
 
@@ -369,8 +369,9 @@ Org scoping (ADR 0006, C-1) does not stop one candidate from reading another can
   - `sessionQuestionId` in keystroke batches;
   - section ids;
   - evidence names (5.2, 5.6);
-  - identity attempts.
-- **Rule CS-3.** Object keys, Redis keys (`rl:`, `pkey:`, `evidence:`, `rec:`), HMAC keys and job payloads are built from `ctx.sessionId` and `ctx.orgId`, never from client input.
+  - identity attempts, and the ID and selfie images: `POST /candidate/session/identity` takes single-use `ID_IMAGE` and `SELFIE` names issued to this session (5.6, the same state machine as 5.2), never a client-sent object key. The server derives `id_image_key` and `selfie_key` from the names.
+  - **Question reads are limited to the open section** (ADR 0002 S-1, S-5; FR-301): see CS-4.6.
+- **Rule CS-3.** Object keys (including identity image keys), Redis keys (`rl:`, `pkey:`, `evidence:`, `rec:`, `qview:`, `etag:`), HMAC keys and job payloads are built from `ctx.sessionId` and `ctx.orgId`, never from client input.
 - **Rule CS-4: actor model and enforcement (DB-05 gate; architect detail, owner to confirm).** This ADR is the one place that defines the actor model, and ADR 0006 section 8.4 references it (requests at the end of section 7). Section 5.10 depends on PR #41 merging first.
   - **Options.** (a) Session checks written in the services only. (b) Session-carrying scopes enforced by the org-scope Prisma extension (PR #30). **Recommended: (b) as the structural control, plus (a) as service-level checks for defence in depth.**
 
@@ -381,7 +382,7 @@ The entry function sets the actor; callers cannot pass it in, so it cannot be fo
 | Entry | Actor | Entered by | Allowed from | Rules |
 | --- | --- | --- | --- | --- |
 | `runAsCandidate(oid, sid)` | `CANDIDATE` | `CandidateSessionGuard` only | no scope | CS-4.3 to CS-4.6 |
-| `runAsSessionJob(oid, sid)` | `SERVICE` | `SessionJobProcessor` (the one session-job base class), from the job payload; target loaded in scope and the job dropped on a mismatch (ADR 0006 job rules) | no scope, or system `BACKGROUND_JOB` | ADR 0006 org filter on every model, plus the session filter on session-path models (CS-4.2). No allowlist and no column limits. |
+| `runAsSessionJob(oid, sid)` | `SERVICE` | `SessionJobProcessor` (the one session-job base class), from the job payload; target loaded in scope and the job dropped on a mismatch (ADR 0006 job rules) | **no scope only** (any system scope, `BACKGROUND_JOB` included, is refused; `SessionJobProcessor` calls `AsyncLocalStorage.exit()` first) | ADR 0006 org filter on every model, plus the session filter on session-path models (CS-4.2). No allowlist and no column limits. |
 
 - **Inherited context.** `SessionJobProcessor` calls `AsyncLocalStorage.exit()` before `runAsSessionJob`, so it never inherits the enqueuer's context.
 - **Nesting.**
@@ -428,14 +429,14 @@ Any model not listed throws. Within one org, the org filter alone would expose o
 - Reading any other column throws. The default select is narrowed with `omit`, so a new column stays hidden until it is listed.
 - The read list also governs `where`, `orderBy`, `distinct`, `groupBy.by`, `_count`, `_sum`, `_avg`, `_min` and `_max`. A filter or sort on a hidden column (for example a JSON-path `where`) throws, so it cannot act as a boolean oracle.
 - Writing any other column throws.
-- **Explicit-only** columns are excluded from the default select. They may be selected only by the named service shown; a lint rule enforces that.
+- **Explicit-only** columns are excluded from the default select. They are enforced **at runtime**: the extension refuses them unless a per-column grant is present on AsyncLocalStorage. Only the named service method shown enters that grant, and each grant site is listed in the FU-DB-67 call-site allow-list. A lint rule is an extra check, not the control.
 
 | Model | Read | Write | Extra row filter |
 | --- | --- | --- | --- |
-| `sessions` | `id`, `status`, `started_at`, `deadline_at`, `pause_reasons`, `submitted_at`, `auth_epoch`. Explicit-only: `hmac_key_enc` (KeyService) | `last_heartbeat`, `device_info`; `status`, `pause_reasons`, `submitted_at` only from `SessionStateService` (lint) | — |
-| `session_sections` | all columns | `started_at`, `deadline_at`, `ended_at`, only from `SessionStateService` (lint) | — |
+| `sessions` | `id`, `status`, `started_at`, `deadline_at`, `pause_reasons`, `submitted_at`, `auth_epoch`. Explicit-only: `hmac_key_enc` (KeyService), `invitation_id` (CandidateSessionGuard), `device_info` (DeviceInfoService) | `last_heartbeat`; `device_info` only through DeviceInfoService (grant, below); `status`, `pause_reasons`, `submitted_at` only under the SessionStateService grant (CS-4.4a) | — |
+| `session_sections` | all columns | `started_at`, `deadline_at`, `ended_at`, only under the SessionStateService grant (CS-4.4a) | — |
 | `session_questions` | `id`, `session_id`, `position`, `points`, `final_code`, `final_language`, `answer` | `final_code`, `final_language`, `answer` | — |
-| `submissions` | `id`, `session_question_id`, `kind`, `language`, `created_at`; plus `results`, `passed`, `total` with the extra filter | create only: `session_question_id`, `kind` (`RUN` or `SUBMIT`), `language`, `source_code`; and `results`, `passed`, `total` on `RUN` rows | `results`, `passed` and `total` are readable only where `kind = 'RUN'` (sample tests). **`score` is never readable.** |
+| `submissions` | `id`, `session_question_id`, `kind`, `language`, `created_at`; plus `results`, `passed`, `total` under the extra filter | create only: `session_question_id`, `kind` (`RUN` or `SUBMIT`), `language`, `source_code`; and `results`, `passed`, `total` on `RUN` rows | **Mechanism:** whenever `results`, `passed` or `total` appears anywhere in `select`, `where`, `orderBy`, `groupBy` or an aggregate, the extension ANDs `kind: 'RUN'` into the query, so `count({ where: { kind: 'SUBMIT', passed: N } })` returns 0. **`score` is never readable.** |
 | `identity_checks` | `id`, `attempt`, `status`, `created_at` | create only: `attempt`, `id_image_key`, `selfie_key`, `liveness_passed` | — |
 | `media_chunks` | `id`, `stream`, `segment`, `seq`, `size_bytes`, `uploaded_at`. Explicit-only: `object_key` (StorageService) | `stream`, `segment`, `seq`, `started_at`, `duration_ms`, `size_bytes`, `uploaded_at`, `object_key` | — |
 | `proctor_event_batches`, `keystroke_batches` | `seq`, `signature`, `event_count` / `started_at` | create only | — |
@@ -443,13 +444,30 @@ Any model not listed throws. Within one org, the org filter alone would expose o
 | `consents` | `id`, `consent_text_id`, `signed_at`, `declined_at` | `consent_text_id`, `signed_name`, `signed_at`, `declined_at`, `ip`, `user_agent` (`pdf_key` is written by the consent-PDF job) | — |
 | `organizations` | `id`, `name`, `retention_days`, `current_consent_text_id`. Explicit-only: `settings` (OrgSettingsService) | — | — |
 | `candidates` | `id`, `full_name`, `email` | — | — |
-| `invitations` | `id`, `test_id`, `candidate_id`, `window_start`, `window_end`, `accommodations`, `used_at` | — | — |
+| `invitations` | `id`, `test_id`, `candidate_id`, `window_start`, `window_end`, `used_at`. **Not `accommodations`:** it is explicit-only for `AccommodationsService.projection()`, which returns only `{ extraTimePct, disabledDetectors, allowedAssistiveTools, identityCheckWaived }`, never `reasonCode`, `reasonNote` or `notes` (PR #49) | — | — |
 | `tests` | `id`, `name`, `description`, `duration_minutes`, `profile`. Explicit-only: `settings` (TestSettingsService) | — | — |
 | `consent_texts` | `id`, `version`, `body_md`, `legal_approved_at` | — | — |
 | `test_sections` | `id`, `title`, `position`, `time_limit_min` | — | — |
 | `questions` | `id`, `type` | — | — |
 
-- **SERVER events and status changes** come only from SERVICE scope: the outcome handlers, the watchdog and `server-event` jobs (CS-4.7). A candidate route that needs one (RECONNECTED on a heartbeat) enqueues a job.
+- **SERVER events** come only from SERVICE scope: the outcome handlers, the watchdog and `server-event` jobs (CS-4.7). A candidate route that needs one (RECONNECTED on a heartbeat) enqueues a job.
+- **CS-4.4a Status changes.** CANDIDATE scope writes status columns only through `SessionStateService.transition()`. That method enters an AsyncLocalStorage grant for the state columns; without the grant the extension refuses them (runtime, not lint only). In CANDIDATE scope the method allows only these:
+
+  | Transition or change | Candidate route |
+  | --- | --- |
+  | OPENED → CONSENTED | consent sign |
+  | OPENED → DECLINED | consent decline |
+  | IN_PROGRESS or PAUSED → SUBMITTED | finish |
+  | close the open section, open the next | section finish |
+  | add or remove `FULLSCREEN_EXIT`, `SCREEN_SHARE_STOPPED`, `SIDE_CAMERA_LOST` in `pause_reasons` | event batches (ADR 0002 P-1) |
+
+  - **A candidate scope can never add or remove the `PROCTOR` pause reason.** The method refuses any change that touches it, and refuses every other transition.
+  - The others run in SERVICE scope:
+    - CONSENTED → VERIFIED: a `verify-session` job, enqueued by the system-check, identity and room-scan routes;
+    - VERIFIED → IN_PROGRESS: `start-session`;
+    - deadline auto-submit, grading and review transitions: their jobs.
+  - INVITED → OPENED and the EXPIRED check on link resolve run before the JWT exists, under `AUTH_BOOTSTRAP` (ADR 0006 section 8.4).
+- **`device_info` writers.** Heartbeat capabilities, the system check and the sweep all write through `DeviceInfoService`. It reads the column under its grant, merges in memory and writes back, holding a Redis lock `lock:device-info:{sid}` (`SET NX PX 2000`, up to 3 retries). That avoids lost updates, which matters because raw `jsonb_set` is refused in session scopes.
 - **Settings reaching the browser.** `CandidateOrgSettingsView` sends only the detector thresholds and `consentDeclineContact`. Risk points, caps, bands, weights, erasure and `aiReferences` keys never leave the server. `CandidateTestSettingsView` is deny-by-default until BE-06 defines the `tests.settings` keys. BE-10 reads severity overrides server-side through OrgSettingsService.
 - **`submissions.results` shape (pinned).** For `SUBMIT` rows (written by `grade-session`), the shape is `{ testCaseId, passed, status, timeMs, memoryKb }[]`, with no stdin, stdout, expected output or variant data, so even a serialiser bug cannot leak case data. `RUN` rows hold sample results only.
 
@@ -464,7 +482,7 @@ A Prisma query extension sees only the top-level model, so CS-4 refuses all six 
 | 3 | relation filters in `where` (`some`, `every`, `none`, `is`, `isNot`) | the extension throws |
 | 4 | relation fields in `orderBy` | the extension throws |
 | 5 | relation `_count` | the extension throws |
-| 6 | the fluent API (`findUnique(…).questionVersion()`, which Prisma runs on the parent model with an internal data path) | the extension throws when the call carries a relation data path. Whether a query extension can see that path in Prisma 7 is **not verified**, so a lint rule also bans chaining a relation call on a model query in candidate-scope code (`apps/api/src/candidate/**`), and a test asserts the fluent access below fails |
+| 6 | the fluent API (`findUnique(…).questionVersion()`, which Prisma runs on the parent model with an internal data path) | the extension throws when the call carries a relation data path. Whether a query extension can see that path in Prisma 7 is **not verified**, so a lint rule also bans fluent relation calls across **all of `apps/api`**, because candidate-scope code also runs in shared services (SessionStateService, KeyService, StorageService, OrgSettingsService, DeviceInfoService, the guard). A test asserts the fluent access below fails. **If that test cannot pass on Prisma 7, the CANDIDATE client is a wrapper that exposes no fluent methods** |
 
 - **Nested writes** (`create`, `connect`, `connectOrCreate`, `update`, `upsert`, `delete`, `set`, `disconnect`) also throw.
 - Only the filters the extension injects itself (CS-4.2, CS-4.3) may use relations. Services load each model separately.
@@ -478,20 +496,28 @@ The candidate needs these and nothing more:
 - the sample tests.
 
 All of it comes from one projection:
-- `render-question` is a session job (SERVICE, jobId `render-question:{sessionQuestionId}`). It reads `question_versions`, `question_variants`, `test_cases`, `variant_test_cases` and `answer_spec`, and returns `{ sessionQuestionId, type, title, statementMd, languages, limits, starterCode, samples: [{ input, expectedOutput }], mcq?: { multiple, options: [{ id, text }] } }`.
-- The `start-session` job builds every projection.
+- `render-question` is a session job (SERVICE, jobId `render-question:{sid}:{sessionQuestionId}`). It reads `question_versions`, `question_variants`, `test_cases`, `variant_test_cases` and `answer_spec`, and returns `{ sessionQuestionId, type, title, statementMd, languages, limits, starterCode, samples: [{ input, expectedOutput }], mcq?: { multiple, options: [{ id, text }] } }`.
+  - The zod schema is `.strict()`, so no extra field can slip through.
+  - MCQ option ids are opaque per session: `opt_` + the first 10 base32 characters of `HMAC(QUESTION_OPTION_ID_SECRET, sessionId + ":" + optionId)`. `grade-session` recomputes the mapping, so nothing is stored.
+  - Options keep the author's order, so neither ids nor positions are derived from the key.
+- **Open section only (ADR 0002 S-1, S-5; FR-301).** `GET /candidate/questions/:sessionQuestionId` serves a question only if it belongs to the **open section**: its `session_sections` row has `started_at` set and `ended_at` NULL. Otherwise it answers 409 `SECTION_NOT_OPEN`.
+  - Finished sections are refused by default. Whether a candidate may re-read finished sections is owner question Q19.
+  - The route resolves the id through CS-2 and checks the open section **before** any cache lookup or enqueue.
+  - `start-session` builds the projections for section 1 only. Opening the next section (SessionStateService) enqueues that section's `render-question` jobs.
 - They are cached in Redis as `qview:{sessionId}:{sessionQuestionId}`, with TTL until `deadline_at` + grace (re-set on extension).
 - On a cache miss, the candidate route enqueues the job and waits up to 5 s; on timeout it answers 503 with `Retry-After`.
 - Run (sample tests only) uses the cached samples.
+- Run (sample tests) applies the same open-section check (ADR 0002 S-5).
 - **Hidden-content rule (TC-011):** these never reach the candidate scope or a projection: hidden test cases and their variant overrides, `reference_solution`, `validation_report`, the MCQ correct option ids and the short-answer accepted answers.
-- **Minimal alternative (owner decision, Q22):** a candidate-safe snapshot column (for example `session_questions.prompt jsonb`, written by `start-session`) survives a Redis flush. It is a schema change under ADR 0008, so it is not chosen for the pilot.
+- **Minimal alternative (owner decision, Q18):** a candidate-safe snapshot column (for example `session_questions.prompt jsonb`, written by `start-session`) survives a Redis flush. It is a schema change under ADR 0008, so it is not chosen for the pilot.
 
 #### CS-4.7 Jobs (actor, jobId for dedupe)
 
 | Job | Actor | jobId |
 | --- | --- | --- |
 | `start-session` (assign questions, sections, key, projections, VERIFIED → IN_PROGRESS); the route waits up to 10 s, else 503 with `Retry-After`; idempotent | SERVICE | `start-session:{sid}` |
-| `render-question` | SERVICE | `render-question:{sessionQuestionId}` |
+| `render-question` | SERVICE | `render-question:{sid}:{sessionQuestionId}` |
+| `verify-session` (CONSENTED → VERIFIED when all checks are done) | SERVICE | `verify-session:{sid}` |
 | `grade-session` (hidden tests through Judge0, MCQ and short-answer scoring per ADR 0007 §5, D-23) | SERVICE | `grade-session:{sid}` |
 | `analyze-session` | org scope (cross-session similarity); per-session writes through SessionStateService with service checks | `analyze-session:{sid}` |
 | ingest close (key destruction, sweep pass 1) and sweep pass 2 | SERVICE | `ingest-close:{sid}`, `sweep-2:{sid}` |
@@ -499,11 +525,12 @@ All of it comes from one projection:
 | `face-recheck` (worker) and its outcome handler | SERVICE | `face-recheck:{name}` |
 | `evidence-expire` | SERVICE | `evidence-expire:{name}:{attempt}` |
 | `server-event` (RECONNECTED and similar) | SERVICE | `server-event:{sid}:{type}:{heartbeatAt}` |
-| disconnect watchdog: discovery under `BACKGROUND_JOB`, then one job per silent session that writes DISCONNECTED | discovery: system; per session: SERVICE | `disconnected:{sid}:{lastHeartbeat}` |
+| disconnect watchdog: discovery under `BACKGROUND_JOB` enqueues one SERVICE job per silent session; that job (no scope → `runAsSessionJob`) writes DISCONNECTED | discovery: system; per session: SERVICE | `disconnected:{sid}:{lastHeartbeat}` |
 
 - BullMQ `returnvalue` and `failedReason` never carry case data, stdout, keys, URLs or answer keys.
 - `render-question`'s return value is the candidate-safe projection by construction.
-- Jobs with sensitive inputs use `removeOnComplete`.
+- `removeOnComplete` and `removeOnFail` are set explicitly on `start-session`, `render-question`, `grade-session`, `face-recheck` and `server-event`.
+- **Spike (BE-07):** whether BullMQ accepts `:` in custom jobIds is **not verified** (the same pattern appears in ADR 0006 section 8.9). If it does not, the separator becomes `_`.
 
 #### CS-4.8 Tests (DB-05, BE-07; TC IDs assigned by QA, tracked in docs/followups/qa.md)
 
@@ -528,11 +555,16 @@ All of it comes from one projection:
 ### 5.11 Submit and grading (keeps ADR 0007 §5)
 
 - **`POST /candidate/answers/:questionId/submit`** stores a `SUBMIT` row with the code and language and returns **200 `{ accepted: true, submissionId }`. Nothing else is returned**: no per-test result, weight or score. Hidden tests and answers therefore cannot be used as an oracle.
-- **Limits** (architect detail): one submit per 10 s per session, and at most 20 `SUBMIT` rows per question. 429 with `Retry-After`; 409 `SUBMIT_LIMIT_REACHED`. Grading uses the latest `SUBMIT` row.
+- **Limits** (architect detail), checked atomically **before** any insert:
+  - Redis `SET NX PX 10000` on `rl:submit:{sid}` gives one submit per 10 s per session; on failure, 429 with `Retry-After`.
+  - Redis `INCR submits:{sid}:{sqid}` returns the new count. Above 20, the route `DECR`s and answers 409 `SUBMIT_LIMIT_REACHED`.
+- **What is graded (consistent with ADR 0002 S-5 and backend.md Step 11).** Section close and auto-submit write a `SUBMIT` row from `session_questions.final_code` and `final_language`, exempt from the cap, whenever `final_code` differs from the latest `SUBMIT`. `grade-session` grades the latest `SUBMIT` row per coding question.
+  - Later saved work is therefore always graded.
+  - A coding question with no `SUBMIT` row and no saved code scores 0 without a Judge0 run.
 - MCQ and short answers are not submitted. `session_questions.answer` is autosaved through the draft route and final at SUBMITTED (ADR 0007 §5).
 - **Grading.** `grade-session` (SERVICE) runs after the session is SUBMITTED, as ADR 0007 §5 and backend.md Step 11 already say ("On SUBMITTED, enqueue grade-session"). It covers hidden tests through Judge0 with the variant data, MCQ by key, and short answers by normalised match or MANUAL_PENDING (D-23).
 - **Run** (sample tests, FR-502, one per 5 s) still returns sample results.
-- **What the candidate sees after the test** (score, pass/fail or nothing) is an owner decision (Q21). No FR authorises showing scores or hidden results today, so the default is a "submitted" page only.
+- **What the candidate sees after the test** (score, pass/fail or nothing) is an owner decision (Q17). No FR authorises showing scores or hidden results today, so the default is a "submitted" page only.
 
 ## 6. ML model files (decision 4)
 
@@ -591,26 +623,25 @@ CI and deploy:
   | Environment | `blocked` entry | `unverified` entry |
   | --- | --- | --- |
   | staging (synthetic data only) | fails | warning |
-  | pilot, production | fails | fails, unless covered by an owner override |
+  | pilot, production | fails | fails, unless every file of that model is listed in the accepted-risk list below |
 
-  - **Override format.** A list of `<name>@<sha256>=<decision-id>` entries in the GitHub Environment variable `MODEL_LICENCE_OVERRIDES` of the `pilot` or `production` environment.
-    - The override names the exact hash, so swapped weights invalidate it.
-    - The gate cross-checks every decision id against the decision log (`docs/status.md` §9, hub-owned). An id that is not there, or not recorded as a licence acceptance for that file, fails the gate.
-    - The gate prints which overrides it applied.
-- **What actually protects the gate (B1).** Nothing in CLAUDE.md or ADR 0009 stops an agent from setting this variable:
-  - agents run with the owner's `gh` login, so `gh variable set --env pilot` works;
-  - an Environment's required reviewer gates deployments, not edits to its variables;
-  - and in a PR an agent can change `status` in `models.lock.json`, the gate script or the workflow that calls it.
+  - **Accepted-risk list (D-28, C-10).** The gate reads exactly one list: a fenced block tagged `licence-acceptances` in `docs/status.md` section 9, which the Delivery Lead owns. Each line is `<decision-id> <model> <file-name>@<sha256>`.
+    - A model counts as one named model, but **every file of it must be listed**. COCO-SSD's `model.json` and each weight shard appear on separate lines under the one model.
+    - The gate fails if any file of an `unverified` model is missing, if a hash differs, or if the decision id is not a row of section 9.
+    - **Requested entry** (Delivery Lead): D-28, as extended by C-10, listing AuraFace `glintr100.onnx` (worker lock) and COCO-SSD `ssdlite_mobilenet_v2` (`model.json` plus every shard, proctor-sdk lock), with exact hashes taken from the lock files once they exist.
+    - Every other file without a verified licence still fails.
+    - The gate prints the entries it applied. There is no GitHub Environment variable override any more.
+- **What actually protects the gate.** Agents run with the owner's `gh` login, which is a repository admin. In a PR an agent can change `status` in a lock file, the accepted-risk list in `docs/status.md`, the gate script or the workflow that calls it.
 
   The gate is therefore only as strong as the following controls, none of which exists yet:
 
   | # | Control | Kind |
   | --- | --- | --- |
-  | 0 | **Separate agent identity.** Agents run under **a separate bot account (or a GitHub App)**, with a token issued for that account and **never a token of the owner's account**. A fine-grained PAT on the owner's account still acts as the owner. The identity gets **Write, not Admin**, and with no Variables, Secrets, Environments or Administration permission. The owner's `gh` login is not available in agent sessions. **Every other control depends on this one.** | owner action |
+  | 0 | **Separate agent identity.** Agents run under **a separate bot account (or a GitHub App)**, with a token issued for that account and **never a token of the owner's account**. A fine-grained PAT on the owner's account still acts as the owner. The identity gets **Write, not Admin**, and with no Variables, Secrets, Environments or Administration permission. The owner's `gh` login is not available in agent sessions. **Every other control depends on this one.** | recommended; **not adopted** (C-33, relayed by the Delivery Lead, pending the owner's own confirmation) |
   | 1 | `CODEOWNERS` naming the owner for `packages/proctor-sdk/models.lock.json`, `apps/worker/models.lock.json`, `packages/proctor-sdk/package.json` (it defines the `models:licence-gate` script, and `"models:licence-gate": "true"` would neutralise the gate), the gate itself (self-contained under `packages/proctor-sdk/scripts/models/**`, importing nothing outside that folder, so CODEOWNERS covers all of it), the future worker gate (`apps/worker/scripts/models/**` and `apps/worker/pyproject.toml`), `.github/workflows/**`, `.github/CODEOWNERS`, `docs/status.md` (the Delivery Lead's decision log, which control 3 reads), and every file that can neutralise the gate at install or run time: root `package.json`, `pnpm-workspace.yaml`, `.npmrc`, `.pnpmfile.cjs`, `patches/**` and `pnpm-lock.yaml`. Branch protection or a ruleset on `main` requires code-owner review, with **bypass disallowed / "include administrators" on** | owner action (the hub drafts the CODEOWNERS file; the owner sets the protection) |
   | 1b | **Deployment branch policy** on the `pilot` and `production` Environments: `main` only. A workflow pushed to another branch must not be able to target them, because CODEOWNERS applies only at merge | owner action |
   | 2 | CI check: a PR that changes `licence` or `status` in a lock file fails unless the PR has the owner's approving review. It re-runs on `pull_request_review` events as well as on pushes. **It only works if control 1 covers `.github/workflows/**` and cannot be bypassed**, since otherwise the check can be edited away in the same PR. `models:update` diffs can then only touch `sha256`, `bytes` and `version` | architect detail, owner to confirm |
-  | 3 | Override decision ids are recorded in the decision log (`docs/status.md` §9, under control 1) and cross-checked by the gate | architect detail, owner to confirm |
+  | 3 | The accepted-risk list lives only in `docs/status.md` section 9 (under control 1), and the gate cross-checks it against the lock hashes | decided (D-28, C-10); mechanism: architect detail |
   | 4 | Deny patterns in the agents' permission settings: `gh variable *`, `gh secret *`, `gh api */environments*`, `gh auth token`, `gh api */branches/*/protection*`, `gh api */rulesets*`, `gh pr merge --admin*`. **Best effort only.** Bash deny patterns match command text, so an agent with the token can call the REST API through `curl` or another spelling. Recommendation only: the hub does not edit `.claude/` or any settings file (its own operating rules; agent configuration is the owner's decision) | owner action |
 
   **Plain statement.** While agents use the owner's `gh` login, which is a repository admin, controls 1 to 4 do not stop an agent:
@@ -619,7 +650,14 @@ CI and deploy:
   - it can read the token (`gh auth token`) and call the API with `curl`, which bypasses any `gh` deny pattern;
   - required code-owner review cannot tell the owner and an agent apart on one account. And because an author cannot approve their own PR, the owner would routinely need admin bypass, which defeats control 1.
 
-  **Until control 0 exists, the gate is not protected.** It catches mistakes, not a determined change. Until then, the owner checks `MODEL_LICENCE_OVERRIDES`, the lock-file diff and the gate workflow before each pilot or production deploy.
+  **Until control 0 exists, the gate is not protected.** It catches mistakes, not a determined change.
+
+  **If control 0 is not adopted (C-33): accepted risk (status.md R-20).**
+  - CODEOWNERS, branch protection, rulesets and the deployment branch policy (controls 1, 1b, 2) can all be bypassed with the shared admin login. They still catch accidental changes.
+  - The remaining controls are:
+    - the C-33 merge comment on every PR ("Merged by <session name> session after review and green CI"), for traceability;
+    - the owner checking the lock-file diff, the `docs/status.md` accepted-risk list and the gate workflow before each pilot or production deploy.
+  - The licence gate, the CODEOWNERS file and the CI check are still built. They are cheap, and they become real controls if control 0 is adopted later.
 - **Deploying without the object detector.** The owner can instead deploy with `PROCTOR_EXCLUDE_COMPONENTS=OBJECT`. This needs SDK support: an `excludeComponents` option that never starts the detector and emits no DETECTOR_UNAVAILABLE.
   - The fetch skips the OBJECT files.
   - The SDK does not start the object detector and reports capability `object: UNSUPPORTED`, with no DETECTOR_UNAVAILABLE events, so candidates are not penalised for a deployment choice.
@@ -655,15 +693,15 @@ CI and deploy:
 - **ADR 0005 §3 and database.md (`proctor_events.batch_seq`, around line 586).** The comment "NULL for SERVER events" becomes "NULL for SERVER events and unsigned system-check findings". `batch_seq` is already nullable, so there is no schema change.
 - **ADR 0006 section 8.4 (PR #41), requested:**
   - reference the actor model in 5.10 CS-4 instead of defining session scopes itself;
-  - split the `runInOrg(A, { sessionId })` rows into `runAsCandidate(oid, sid)` (guard only, from no scope) and `runAsSessionJob(oid, sid)` (`SessionJobProcessor` only, from no scope or `BACKGROUND_JOB`);
+  - split the `runInOrg(A, { sessionId })` rows into `runAsCandidate(oid, sid)` (guard only, from no scope) and `runAsSessionJob(oid, sid)` (`SessionJobProcessor` only, from no scope only; any system reason refused);
   - add rows refusing CANDIDATE → SERVICE, SERVICE → CANDIDATE, and `runSystem` from either;
   - keep "Org A with S → `runInOrg(A)`: S stays", and state that the actor stays too;
   - no new system reason is needed: start-test, `render-question` and grading are session jobs;
   - name the candidate `AUTH_BOOTSTRAP` routes as the three pre-JWT routes: link resolve, OTP send, OTP verify;
   - the six relation vectors: point to ADR 0013 CS-4.5 as the CANDIDATE enforcement (all refused, with the fluent API also linted);
   - state that SERVICE scope's session filter is top-level only, and nested reads stay under rule (i) review (defence in depth);
-  - the disconnect watchdog runs as `BACKGROUND_JOB` discovery that enqueues per-session SERVICE jobs.
-- **FR-502 and backend.md Step 11.** "Submit runs hidden tests" becomes "Submit records the final code; hidden tests run in `grade-session` after SUBMITTED". The submit response carries no results (5.11). FR-502 is an owner decision (Q21).
+  - the disconnect watchdog runs as `BACKGROUND_JOB` discovery that enqueues per-session SERVICE jobs; `runAsSessionJob` is entered from no scope only (as PR #41 f5f89ad now says).
+- **FR-502 and backend.md Step 11.** "Submit runs hidden tests" becomes "Submit records the final code; hidden tests run in `grade-session` after SUBMITTED". The submit response carries no results (5.11). FR-502 is an owner decision (Q17).
 - **backend.md Step 7:**
   - the key is delivered by `proctor-key`, not in the start response;
   - start-test runs as the awaited `start-session` job;
@@ -680,14 +718,14 @@ CI and deploy:
 | Agent | Must do |
 | --- | --- |
 | proctor-sdk | Key hooks `setKey`, `loadStoredKey`, `onKeyStale`, `onReauthRequired` and `onToken` (section 2; the app fetches the key, the SDK stores it non-extractable), outbox re-sign, counter seeding, purge rules and the stale sweep; status mapping by problem `code` (5.1, 5.2), with no endless 401 retries. Heartbeat: a `getHealth()` provider and 409 handling. Media: one per-stream `seq` across segments (replacing the per-segment restart in `recorder.ts`), `startedAt` and `durationMs`, `contentType` normalised to its essence, `If-None-Match` and 412, the `alreadyUploaded` union with no URL, and protected first chunks with the cap rule (5.5). Evidence `purpose` and single-use names; re-check as upload plus 202, with client FACE_MISMATCH removed. New: `runSystemCheck()`, a ROOM_SCAN recording stream, the `excludeComponents` option. Models: `scripts/lock.mjs` under `scripts/models/`, `resolveModelUrls` on lock names with the versioned base, the plain onnxruntime variant confirmed in a browser. Never log URLs. |
-| backend BE-07 | Candidate-session scope first (5.10: pinned HS256 with `iss` and `aud`, `CandidateSessionGuard` on AsyncLocalStorage, CS-1 to CS-5, `SESSION_TAKEN_OVER`, cross-candidate tests); then the master key with AAD and `kid`, epoch derivation, the issue marker with TTL until deadline + grace, system-check gates on CONSENTED → VERIFIED and on start, the `proctor-key` route, system-check route and start gate (TC-056), heartbeat and watchdog, key destruction at ingest close and on erasure |
+| backend BE-07 | Open-section check on question reads and Run (CS-4.6); `SessionStateService.transition()` with the CS-4.4a list and runtime grant; `verify-session`; DeviceInfoService with its lock; AccommodationsService projection; the BullMQ jobId spike; candidate-session scope first (5.10: pinned HS256 with `iss` and `aud`, `CandidateSessionGuard` on AsyncLocalStorage, CS-1 to CS-5, `SESSION_TAKEN_OVER`, cross-candidate tests); then the master key with AAD and `kid`, epoch derivation, the issue marker with TTL until deadline + grace, system-check gates on CONSENTED → VERIFIED and on start, the `proctor-key` route, system-check route and start gate (TC-056), heartbeat and watchdog, key destruction at ingest close and on erasure |
 | db-engineer (DB-05, PR #30) | Implement `runAsCandidate` and `runAsSessionJob` with a non-forgeable actor and `AsyncLocalStorage.exit()` in `SessionJobProcessor`; the CS-4.3 allowlist with its injected filters; the CS-4.4 read and write column allowlists, also applied to `where`, `orderBy`, `distinct`, `groupBy.by` and aggregates, with explicit-only columns; refusal of all six relation vectors and nested writes (CS-4.5, with the fluent-API lint); the session filter for both actors on every operation (Prisma 7 operations included), raw SQL refused in a `sessionId` scope, and the actor-crossing refusals. Tests as listed in 5.10 CS-4, including the DMMF sweep. |
-| backend BE-09 | Key layout 5.7; presign and confirm 5.5, with the HEAD check, ETag recording, the `If-None-Match` spike for R2 and S3, and per-session caps; evidence presign 5.6 with single-purpose, single-use names, quotas, the FACE-disabled refusal and the `evidence-expire` job; the ingest-close sweep; review GET URLs with response-type and disposition overrides; prefix deletion in retention and erasure, consent PDF prefix |
+| backend BE-09 | Key layout 5.7; presign and confirm 5.5, with the HEAD check, ETag recording, the `If-None-Match` spike for R2 and S3, and per-session caps; evidence presign 5.6 with single-purpose, single-use names, quotas, the FACE-disabled refusal and the `evidence-expire` job; the ingest-close sweep; review GET URLs with response-type and disposition overrides; prefix deletion in retention and erasure; the consent PDF prefix outside it, kept through erasure until its 3-year limit and deleted by the R-9 job (C-17) |
 | integrity BE-10 | Raw-body verification order (section 2); fullscreen pairing by `occurred_at` and the duration rule (5.9); duplicate check (stored signature first, then the 8-epoch window); invariant test that CLIENT rows from batches have `batch_seq`; error codes, evidence-name resolution, grace window, per-session limits, a `rejected` metric with no body |
 | integrity BE-12 | Score from server `duration_ms` only (5.9); the `face-recheck` outcome handler as a SERVICE job that writes FACE_MISMATCH with the sealed key; `face-recheck` job with the 1 MiB and 1920 × 1920 refusals before decoding, frame deletion on every non-mismatch outcome including failure, and outcome hand-off (API writes the event; OI-1 mechanism in ARC-04), hole-tolerant segment concatenation, worker `models.lock.json` |
 | backend BE-11 and BE-13 | Submit per 5.11 (`{ accepted, submissionId }` only, with the limits); `grade-session` as a SERVICE session job after SUBMITTED, writing the pinned `SUBMIT` results shape; `render-question` and its projection cache (CS-4.6); jobs and jobIds per CS-4.7; `SessionStateService.closeIngest` and the close of open FULLSCREEN_EXIT rows at session end (5.9). BE-11: the frontend flushes the SDK (bounded) before `/finish`; `analyze-session` (org scope, cross-session) is delayed by the grace (with ARC-04). BE-13: review bundle with recording gaps, batch-seq holes, recorder health, the unsigned label and server FACE_MISMATCH evidence. |
 | frontend | Own the key fetch and the OTP and token refresh, passing results to the SDK hooks (section 2). Inject `NEXT_PUBLIC_PROCTOR_MODEL_BASE`; retire `public/dev-proctor-models/` in favour of `public/models/proctor/`. Check IndexedDB first, then call `proctor-key` after start and after OTP resume, inside a Web Lock; when the key is missing or `KEY_ALREADY_ISSUED`, run the OTP resume; handle `reauthRequired`. Build the system-check call. Pages `_headers` and CSP for models. Sentry scrubbing. Review UI labels and gap panel. `/dev/proctor` uses the lock-served path. |
-| QA | TC-050 reworded (done in this PR; 5.9). Follow-through: rewrite the SDK test `TC-050 KNOWN DEFECT QA-D-01` (`it.fails` in `packages/proctor-sdk/src/qa/qa-tc.test.ts`) as plain tests (EXIT has no `durationMs`, RESTORED has one); add a BE-10 API-level test of the server-filled `duration_ms`, including the close at session end; remove TC-050 from the known-defect list in `docs/test-matrix.md` (line 15). Then: TC-063 45 s against the 60 s FR-609 threshold (Q13); cross-candidate scope tests including presign and confirm (5.10); B2: oversize PUT deleted by confirm or the sweep, re-PUT after confirm blocked (412) or caught by the sweep, review URLs carry the response overrides; B3: re-check presign refused when FACE is disabled, the re-check route's HEAD/copy/compare-and-set order and its failure cases, a re-PUT to the original key after a FACE_MISMATCH cannot change the sealed evidence, concurrent batches cannot both take one evidence name, a reused name is rejected, an EVENT name sent to re-check gets 400, a RECHECK name in an event is dropped, an unused frame is deleted within 10 min, a frame whose job failed is deleted, a MATCH frame is deleted, and the sweep removes unreferenced re-check frames; licence gate fails on an override id missing from the decision log; submit returns only `{ accepted, submissionId }` and enforces its limits; a SERVER FACE_MISMATCH is never visible through any candidate route; the CS-4.8 suite (tracked in docs/followups/qa.md with an owner); TC-065 (tamper → 403, identical replay → 200 duplicate, same seq with a different body → 409, other-session key → 403); TC-063 with an epoch change mid-outage; TC-070 with a synthetic hole; TC-056 server gate. New TCs: key issued once per epoch, cross-session evidence name dropped, server-written FACE_MISMATCH, prefix retention removes orphans, licence gate fails on unverified without override. k6 signer through `k6/crypto`. |
+| QA | TC-050 reworded (done in this PR; 5.9). Follow-through: rewrite the SDK test `TC-050 KNOWN DEFECT QA-D-01` (`it.fails` in `packages/proctor-sdk/src/qa/qa-tc.test.ts`) as plain tests (EXIT has no `durationMs`, RESTORED has one); add a BE-10 API-level test of the server-filled `duration_ms`, including the close at session end; remove TC-050 from the known-defect list in `docs/test-matrix.md` (line 15). Then: TC-063 45 s against the 60 s FR-609 threshold (Q13); cross-candidate scope tests including presign and confirm (5.10); B2: oversize PUT deleted by confirm or the sweep, re-PUT after confirm blocked (412) or caught by the sweep, review URLs carry the response overrides; B3: re-check presign refused when FACE is disabled, the re-check route's HEAD/copy/compare-and-set order and its failure cases, a re-PUT to the original key after a FACE_MISMATCH cannot change the sealed evidence, concurrent batches cannot both take one evidence name, a reused name is rejected, an EVENT name sent to re-check gets 400, a RECHECK name in an event is dropped, an unused frame is deleted within 10 min, a frame whose job failed is deleted, a MATCH frame is deleted, and the sweep removes unreferenced re-check frames; licence gate fails on an override id missing from the decision log; submit returns only `{ accepted, submissionId }` and enforces its atomic limits; a later-section question read (and Run) answers 409 `SECTION_NOT_OPEN`; a candidate-scope route can never add or remove the PROCTOR pause reason; no candidate-scope read ever returns `reasonCode`, `reasonNote` or `notes` from accommodations; identity uses names, never client keys; a SERVER FACE_MISMATCH is never visible through any candidate route; the CS-4.8 suite (tracked in docs/followups/qa.md with an owner); TC-065 (tamper → 403, identical replay → 200 duplicate, same seq with a different body → 409, other-session key → 403); TC-063 with an epoch change mid-outage; TC-070 with a synthetic hole; TC-056 server gate. New TCs: key issued once per epoch, cross-session evidence name dropped, server-written FACE_MISMATCH, prefix retention removes orphans, licence gate fails on unverified without override. k6 signer through `k6/crypto`. |
 | deploy (QA track) | `models:fetch` and the licence gate in the DEP-01, DEP-03 and production workflows; protected environments; controls 0 to 4 (with 1b) of section 6 tracked as owner actions; bucket CORS (PUT with Content-Type) per ST-7 |
 | hub, on acceptance | fsd.md §4 rows; api-contract.md error codes (after #31 and #33 merge); database.md comments (`batch_seq`, `hmac_key_enc`, `device_info`); architecture.md Security bullet; ADR 0010, 0004 §8 and 0005 §3 amendments; FR-606 wording if Q15 is yes; ADR 0001 OI-3 and OI-9 marked decided; the `ci.yml` model job and the lock licence-diff check; `CODEOWNERS` file |
 
@@ -702,29 +740,29 @@ CI and deploy:
 5. **Repeated server FACE_MISMATCH**: should, for example, 2 consecutive mismatches route the session to the identity manual-review gate? That needs a schema and shared change.
 6. **Missing re-checks, recording gaps, sweep deletions and tamper signals** (`SEQ_CONFLICT`, `SIGNATURE_INVALID`): should the server log events a reviewer sees, and should they carry risk weight? Either needs an ADR 0010 amendment.
 7. **`SCREEN_SHARE` detector value**: add it (recommended), decide its weight, and confirm it is never an accommodation.
-8. **COCO-SSD (F-3) for the pilot**: (a) an override after Legal review (B-05), (b) deploy without object detection, or (c) a swap after a licence check.
-9. **Gate protection (section 6, controls 0 to 4).** All of these are owner decisions:
+8. **COCO-SSD (F-3) for the pilot. Answered by C-10:** object detection stays on as an accepted risk. The gate admits exactly the pinned files listed under D-28 in `docs/status.md` (section 6).
+9. **Gate protection (section 6, controls 0 to 4).** All of these are owner decisions. Control 0 is **not adopted** by C-33, pending your own confirmation; the accepted-risk paragraph in section 6 applies.
    - a separate bot account (or a GitHub App) for agents, with a token issued for that account and never a token of your account, holding Write, not Admin, and no Variables, Secrets, Environments or Administration permission;
    - branch protection or rulesets on `main` with bypass disallowed and administrators included;
    - a deployment branch policy (`main` only) on `pilot` and `production`;
    - `CODEOWNERS` covering both lock files, `packages/proctor-sdk/package.json`, the self-contained gate folders, `.github/workflows/**`, `.github/CODEOWNERS` and `docs/status.md`;
    - the best-effort deny patterns of control 4 in the agents' permission settings (the owner changes those, not the hub).
 
-   Until a separate identity exists, even controls 1 to 4 do not stop an agent that uses your credentials.
+   Until a separate identity exists, even controls 1 to 4 do not stop an agent that uses your credentials. CODEOWNERS and branch protection alone can be bypassed with the shared admin login.
 10. **Per-IP throttle on candidate routes**: replace the per-IP throttle (FU-BE-18) with per-session limits on the routes in this ADR (recommended, for test centres behind NAT), or keep both?
 11. **Serving models from Cloudflare Pages** (25 MiB per-file limit, same origin as the app), with object storage behind the same origin kept as the fallback?
 12. **Flagged schema changes**: approve separate ADRs for a durable key-issue marker and `media_chunks.etag`, or accept the Redis fail-open risks described in sections 2 and 5.5?
 13. **TC-063 against FR-609**: the test drops the network for 45 s but expects DISCONNECTED, which FR-609 logs only after 60 s. Change the test duration (recommended) or the FR?
 14. **The fullscreen duration** after an outage (5.9) uses the client-reported `occurredAt` difference. Accept that, knowing it is client-influenced?
 15. **FR-606 change**: FACE_MISMATCH moves from a browser check every second to a server re-check every 2 minutes, which is new server-side biometric processing.
-16. **Consent PDF outside the session prefix** (5.7), amending ADR 0004 §8.
-
-21. **What the candidate sees after the test, and FR-502.** The submit response now carries no results (5.11), and hidden tests are graded after SUBMITTED. After the test, should the candidate see nothing beyond "submitted" (the default), a score, or pass/fail? Should FR-502's "Submit runs hidden tests" be reworded to match?
-22. **Candidate-safe question snapshot.** Keep the Redis projection for the pilot (recommended, no schema change), or add a `session_questions.prompt jsonb` snapshot column through an ADR 0008 schema change?
+16. **Consent PDF outside the session prefix** (5.7), amending ADR 0004 §8. The 3-year retention, kept through erasure, is decided by C-17; only the layout is asked here.
+17. **What the candidate sees after the test, and FR-502.** The submit response now carries no results (5.11), and hidden tests are graded after SUBMITTED. After the test, should the candidate see nothing beyond "submitted" (the default), a score, or pass/fail? Should FR-502's "Submit runs hidden tests" be reworded to match?
+18. **Candidate-safe question snapshot.** Keep the Redis projection for the pilot (recommended, no schema change), or add a `session_questions.prompt jsonb` snapshot column through an ADR 0008 schema change?
+19. **Reading finished sections.** May a candidate re-read the questions of a finished section? The default refuses with 409 `SECTION_NOT_OPEN` (CS-4.6).
 
 **Architect details to confirm**
 
-17. Names and limits: `SESSION_KEY_ENC_KEY_<kid>`, `PROCTOR_INGEST_GRACE_SECONDS`, per-route limits and quotas, 16 MiB per chunk, 1 MiB and 1920 × 1920 per image, the 15-minute freshness of the system check, JWT `iss` and `aud`.
-18. Candidate-session enforcement (5.10 CS-4): the actor model, the CANDIDATE model and column allowlists, all six relation vectors refused, the `render-question` projection, and start-test as an awaited session job.
-19. The onnxruntime variant: the plain wasm only, with object storage as the fallback if vad-web needs jsep (section 6).
-20. Media `seq` per stream across segments, following ADR 0004 (the SDK changes, not the schema).
+20. Names and limits: `SESSION_KEY_ENC_KEY_<kid>`, `PROCTOR_INGEST_GRACE_SECONDS`, per-route limits and quotas, 16 MiB per chunk, 1 MiB and 1920 × 1920 per image, the 15-minute freshness of the system check, JWT `iss` and `aud`.
+21. Candidate-session enforcement (5.10 CS-4): the actor model, the CANDIDATE model and column allowlists, all six relation vectors refused, the `render-question` projection, and start-test as an awaited session job.
+22. The onnxruntime variant: the plain wasm only, with object storage as the fallback if vad-web needs jsep (section 6).
+23. Media `seq` per stream across segments, following ADR 0004 (the SDK changes, not the schema).
