@@ -175,16 +175,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     setLoginPath(LOGIN_PATH);
     // Waits for a refresh already running, then blocks new ones until the next sign-in.
     await beginSignOut();
+    // Logout works from the httpOnly cookie alone, so forget the session first: during a slow
+    // logout no staff request goes out with the old token, and a late 401 cannot start a refresh.
+    publishSession(null);
     try {
-      await confirmLogout();
-    } finally {
-      // Whatever the server said, this browser forgets the session. If the server did not confirm,
-      // the pending marker stays set so a reload does not restore it (FR-104).
-      // Forget the session first: no window with a token set while queries are being cancelled.
-      publishSession(null);
       await queryClient.cancelQueries();
       queryClient.clear();
       setPending(null);
+      await confirmLogout();
+    } finally {
+      // Whatever the server said, this browser has forgotten the session. If the server did not
+      // confirm, the pending marker stays set so a reload does not restore it (FR-104).
       router.replace('/admin/login');
     }
   }, [router, confirmLogout, queryClient]);
