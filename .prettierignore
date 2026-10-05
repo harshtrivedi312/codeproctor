@@ -11,4 +11,5 @@ CLAUDE.md
 apps/web/src/lib/api/schema.d.ts
 apps/web/public/mockServiceWorker.js
 apps/web/public/monaco
+apps/web/public/dev-proctor-models
 apps/web/next-env.d.ts

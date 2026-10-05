@@ -35,6 +35,7 @@ infra/pgdata/
 *.dump.gz
 backups/
 apps/web/public/monaco/
+apps/web/public/dev-proctor-models/
 next-env.d.ts
 
 # Files `next dev` auto-generates in apps/web (the root CLAUDE.md is tracked and must stay)
