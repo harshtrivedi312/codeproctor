@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Accepted** 2026-10-01 (D-16): every recommendation as proposed. No amendment from D-17..D-23 beyond the tables they add, which carry or inherit `org_id` (section 1). Applied to database.md; deltas in ADR 0008. **Amended 2026-10-02 (D-35):** section 7 replaces "roles are created outside the migrations" in section 3; the rest of section 3 stands. **Proposed amendment 2026-10-05 (DB-05 review):** section 8, for the owner to accept. |
+| Status | **Accepted** 2026-10-01 (D-16): every recommendation as proposed. No amendment from D-17..D-23 beyond the tables they add, which carry or inherit `org_id` (section 1). Applied to database.md; deltas in ADR 0008. **Amended 2026-10-02 (D-35):** section 7 replaces "roles are created outside the migrations" in section 3; the rest of section 3 stands. **Proposed amendment 2026-10-05 (DB-05 review):** section 8, for the owner to accept (pending D-xx). |
 | Author | architect |
 | Decides | Q-10, Q-15, A-07, A-22 (index list for the freeze list), Q-17 (doc hygiene) |
 | Serves | FR-103, FR-105; NFR-01, NFR-04; TC-006, TC-008 |
@@ -225,9 +225,15 @@ Roles belong to the whole Postgres cluster, not to one database. So the `IF NOT 
 
 ## 8. DB-05 review decisions
 
-**Status: Proposed amendment 2026-10-05, for the owner to accept.** It comes from the DB-05 architect gate (PR #30) and the Delivery Lead. Until the owner accepts it, sections 1 to 7 stand as written. Serves FR-103, FR-105, NFR-01 and NFR-04; TC-006 and TC-008. Candidate session scope (token to session to `runInOrg`) is not decided here: ADR 0013 covers it (proposed, PR #39), with ADR 0001 C-1.
+**Status: Proposed amendment 2026-10-05, for the owner to accept. Decision id: pending D-xx**, assigned in status.md when the owner accepts.
+- Source: the DB-05 architect gate (PR #30) and the Delivery Lead.
+- Until the owner accepts it, sections 1 to 7 stand as written.
+- Serves FR-103, FR-105, NFR-01 and NFR-04; TC-006 and TC-008.
+- Candidate session scope (from the candidate token to its session) is decided in ADR 0013 section 5.10 (proposed, PR #39), with ADR 0001 C-1. This section states only how it meets the org scope (8.4, 8.5).
 
-Each item is tagged **(owner decision)** when the owner or the Delivery Lead decided it, or **(architect detail)** when the architect chose it for the owner to confirm.
+Each item is tagged:
+- **(owner decision)** when the owner or the Delivery Lead decided it. The Delivery Lead's two decisions (8.3, and provisioning by CLI in 8.9) are also pending a D-xx id.
+- **(architect detail)** when the architect chose it for the owner to confirm.
 
 ### 8.1 Foreign-key classification (architect detail)
 
@@ -256,37 +262,67 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 
 ### 8.4 Scopes inside the API (architect detail)
 
-**A scope only narrows.**
+**A scope only narrows.** Tests cover each case below.
 
-- Inside an org scope, entering a different org is refused, and so is entering system scope.
-- From system scope, entering one org (`runInOrg`, `runAsUser`) is allowed.
-- When ADR 0013 adds `sessionId` to the scope, a nested scope can neither drop nor change it.
-- Tests cover each case. PR #30 already refuses switching orgs and entering system scope from an org scope (`org-context.ts`, `enter`).
+| Current scope | Entering | Result |
+| --- | --- | --- |
+| None (start of a unit of work) | `runInOrg`, `runAsUser` or `runSystem(reason)` | Allowed |
+| System, reason R | `runInOrg` or `runAsUser` for one org | Allowed (narrows) |
+| System, reason R | `runSystem(R)` | Allowed (no change) |
+| System, reason R | `runSystem` with a different reason | Refused |
+| Org A | Org B, through `runInOrg` or `runAsUser` | Refused |
+| Org A | `runSystem` | Refused |
+| Org A as user U | `runInOrg(A)` | Allowed, and user U stays in the context |
+| Org A as user U | `runAsUser` naming another user | Refused |
+| Org A with `sessionId` S (ADR 0013) | Any scope that drops or changes S | Refused |
+
+PR #30 already refuses the org switch and the system-from-org case (`org-context.ts`, `enter`). The other rows are db-engineer work. In particular, `runInOrg` inside `runAsUser` must keep the user.
 
 **System scope has three closed reasons.** A new reason needs an amendment to this ADR.
 
 | Reason | Allowed for |
 | --- | --- |
-| `AUTH_BOOTSTRAP` | Lookups before the caller's org is known: staff login by email, refresh-token rotation, set-password tokens, and resolving a candidate token to its session. Narrow to `runAsUser` or `runInOrg` as soon as the org is known. |
-| `BACKGROUND_JOB` | Scheduled discovery across orgs only. The job payload carries `orgId`, and `sessionId` when the job concerns a session. The processor loads its target inside `runInOrg(orgId)` and drops the job on a miss, so a tampered Redis payload cannot reach another org's row. |
+| `AUTH_BOOTSTRAP` | Lookups before the caller's org is known. On the staff side: login by email, refresh-token rotation and set-password tokens. On the candidate side: only the invitation-link and OTP exchange, before a candidate session JWT exists. Narrow to `runAsUser` or `runInOrg` as soon as the org is known. |
+| `BACKGROUND_JOB` | Scheduled discovery across orgs only. See the job rules below. |
 | `RETENTION_ERASURE` | Selecting what is due only. DB-06 deletes each session inside `runInOrg`. |
 
-There is no org-provisioning reason (8.9).
+**Background jobs.**
+- The job payload carries `orgId`, and `sessionId` when the job concerns a session.
+- The processor loads its target inside `runInOrg(orgId)`. If the target is missing, or the payload's `sessionId` does not belong to its `orgId`, the job is dropped.
+- That check catches a mismatched payload. It does not stop an attacker who can write both fields, so the trust boundary is Redis access control and network isolation (ADR 0001 C-7). Signed job payloads are an option if the owner wants more.
+- Once ADR 0013 lands, a session job runs in `runInOrg(orgId)` with `sessionId` in the scope.
+
+**Candidate routes use no system scope.**
+- `CandidateSessionGuard` (ADR 0013 section 5.10) enters `runInOrg(oid)` from the verified candidate JWT.
+- It loads the session with `id = sid`, and checks `auth_epoch` against the token's `epoch`. A session in another org is simply not found, which answers 401.
+
+There is no org-provisioning reason (8.6, 8.9).
 
 ### 8.5 Raw SQL (architect detail)
 
-- Raw SQL is refused unless it runs inside `runRawSql(reason)`, and `runRawSql` requires an active scope (org or system).
-- In system scope, raw SQL is allowed only under the scope's own 8.4 reason. An example is the `AUTH_BOOTSTRAP` failed-login counter.
-- In an org scope, the SQL itself must filter by `org_id`.
+- **Raw SQL needs `runRawSql` and a scope.**
+  - Raw SQL is refused unless it runs inside `runRawSql(reason)`.
+  - `runRawSql` requires an active scope, org or system.
+  - **This changes PR #30 behaviour.** PR #30 currently allows `runRawSql` with no scope at all. The db-engineer makes that call throw.
+- **What each scope allows:**
+  - **System scope:** raw SQL is allowed only under that scope's own 8.4 reason. An example is the `AUTH_BOOTSTRAP` failed-login counter.
+  - **Org scope:** the SQL itself must filter by `org_id`. A table without `org_id` must be joined along its 8.7 scope path.
+  - **Scope carrying a `sessionId` (candidate units of work, ADR 0013 CS-4):** raw SQL is refused.
 - Model queries inside `runRawSql` stay scoped.
-- The `runRawSql` reason stays free text, written for the reviewer.
-- **This changes PR #30 behaviour.** PR #30 currently allows `runRawSql` with no scope at all. The db-engineer makes that call throw.
-- An allow-list test of every `runSystem`, `runInOrg` and `runRawSql` call site lands with FU-DB-58 (BE-03). A new call site updates the list, and code-reviewer checks it.
+- The `runRawSql` reason stays free text for the reviewer.
+- **Call-site allow-list.** A test of every `runSystem`, `runInOrg` and `runRawSql` call site lands with FU-DB-58 (BE-03).
+  - For each raw call, the list records which system reason or org scope it runs under.
+  - A new call site updates the list, and code-reviewer checks it.
 
 ### 8.6 Organization (architect detail)
 
-- `organizations` rows are created and deleted only in system scope inside the API, or by the provisioning CLI (8.9).
-- `organizations.id` is immutable.
+- Org rows are created only by the provisioning CLI (8.9).
+- No 8.4 reason creates or deletes them inside the API. The extension refuses `create`, `createMany`, `upsert`, `delete` and `deleteMany` on `Organization` in every scope. Allowing them needs `ORG_PROVISIONING`, added through an amendment.
+- Deleting an org is out of scope for the pilot.
+- `organizations.id` is immutable:
+  - the extension refuses `id` in the data of `update`, `updateMany` and the update branch of `upsert` on `Organization`, in every scope;
+  - a test covers it;
+  - a database trigger is not added (8.3: no schema change).
 
 ### 8.7 Path rule (architect detail)
 
@@ -296,12 +332,14 @@ There is no org-provisioning reason (8.9).
 
 ### 8.8 Runtime checks (architect detail)
 
-**Readiness role assertion (FU-DB-66, before DEP-01).** The readiness check asserts that:
+**Readiness role assertion (FU-DB-66, before DEP-01).** The readiness check asserts all of these:
 
 - `current_user = 'app_user'`;
 - the role has no SUPERUSER, BYPASSRLS, CREATEROLE or CREATEDB;
-- it does not own schema `public`;
-- it is a member of no role in `pg_auth_members`. At the least, it is a member of none on this deny-list: the owner role, `rds_superuser`, `neon_superuser` and `pg_write_all_data`.
+- **it is a member of no role.** `SELECT 1 FROM pg_auth_members WHERE member = 'app_user'::regrole` returns no rows.
+  - The query filters on the `member` column only. In PG 16 a CREATEROLE creator, such as the RDS master or the Neon owner, gets a row with `roleid = app_user`. A two-way query would therefore fail on those hosts.
+  - Being a member of no role directly also rules out indirect memberships, such as `pg_read_all_data`, `pg_write_all_data`, `rds_superuser`, `neon_superuser` or the owner role.
+- **it owns nothing.** It owns no schema (`pg_namespace.nspowner`), and no relation in `public` (`pg_class.relowner`).
 
 How the check runs:
 
@@ -316,23 +354,33 @@ How the check runs:
 
 ### 8.9 Pilot org provisioning (FU-DB-76, ARC-05 and DEP-03)
 
-**The decision (owner decision: Delivery Lead).**
+**The decision (owner decision: Delivery Lead, pending D-xx).**
 
 - Pilot orgs are created outside the API by a provisioning CLI built on the client factory, like the seed.
 - There is no API route for it.
 
-**How the CLI runs (architect detail).**
+**How the CLI works (architect detail).**
 
+- **What it creates, in one transaction:**
+  - one `organizations` row (name, `retention_days`);
+  - its first SUPER_ADMIN user, with no password.
+
+  It creates no consent text or other content; the admin adds those in the app. The admin's set-password link goes by email only. The CLI enqueues the API's email job, or uses the same mail provider. The link or token is never printed, never written to a file, and never in a GitHub Actions log.
 - **Where it runs:**
-  - only on the pilot host or in a GitHub Actions job;
-  - never from a developer machine or an agent session (ADR 0009, D-38).
+  - only on the pilot host, over SSH from a GitHub Actions job, or on a self-hosted runner inside the pilot network;
+  - never from a developer machine or an agent session (ADR 0009, D-38);
+  - a GitHub-hosted runner never connects straight to the pilot database, because Postgres is not exposed to the internet.
+- **Inputs.**
+  - The org name and the admin email come from a file on the pilot host or from a secret, not from plain `workflow_dispatch` inputs.
+  - If inputs are ever used, they are masked with `::add-mask::` before any step logs them. Inputs stay visible to repository readers in the run metadata.
 - **How it connects:**
   - as `app_user` through `DATABASE_URL`;
   - with no `MIGRATION_DATABASE_URL` fallback;
   - without reusing the seed's localhost guard or URL fallback.
-- **Why 8.4 does not apply:** the CLI uses the raw factory client in its own process, outside the API. So it needs no system-scope reason, and it is not an exception to 8.4 inside the API.
+- **Why 8.4 does not apply:** the CLI uses the raw factory client in its own process, outside the API. So it needs no system-scope reason, and the 8.6 refusal in the extension does not touch it.
 - **Audit and logging:**
-  - it writes an `audit_logs` row for each org it creates;
+  - it writes one `audit_logs` row per org it creates, with `actor_id` NULL;
+  - the row's metadata holds the job run id and the new ids only, never the email (ADR 0001 C-3);
   - it never prints a connection string.
 - **Later:** if self-serve or platform-admin org creation is ever needed inside the API, add `ORG_PROVISIONING` through an amendment to this ADR.
 
@@ -343,11 +391,11 @@ How the check runs:
 - **db-engineer:**
   - 8.1: `RULE_I_REFERENCES` and its test.
   - 8.2: FU-DB-63.
-  - 8.4: the narrowing tests.
-  - 8.5: `runRawSql` requires a scope.
-  - 8.6.
-  - 8.8: FU-DB-65 and FU-DB-66, including the membership check.
-  - 8.9: the provisioning CLI.
+  - 8.4: the narrowing table and its tests (`runInOrg` inside `runAsUser` keeps the user; system to system with another reason is refused).
+  - 8.5: `runRawSql` requires a scope, and is refused in a `sessionId` scope.
+  - 8.6: refuse `Organization` create and delete in every scope, and refuse `id` in updates.
+  - 8.8: FU-DB-65 and FU-DB-66, including the membership and ownership checks.
+  - 8.9: the provisioning CLI (org and first admin, emailed set-password link, audit row).
 - **backend-engineer:**
   - Use only the three reasons in 8.4.
   - Build job payloads and processors per `BACKGROUND_JOB` in 8.4.
