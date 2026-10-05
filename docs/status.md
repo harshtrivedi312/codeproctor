@@ -303,6 +303,7 @@ Decisions taken by the Delivery Lead under the owner's delegation (order, priori
 | DL-15 | 2026-10-05 | ADR 0011 answer 6 (C-21): turning 2FA off accepts only a current TOTP code, never a recovery code. A user who has lost their device uses the admin reset. `totpEnabled` is added to the authenticated session user (the hub approved it with five conditions), and the web reads 2FA state from it; there is no status route. | It unblocks #36; the docs were silent on the detail |
 | DL-16 | 2026-10-05 | The 2FA disable body field is `totpCode` (`{ currentPassword, totpCode }`), as #51 implements; setup/confirm keeps `code`. api-contract.md on main already matches (#52). | Code and contract had to agree before #36 and #51 merge |
 | DL-17 | 2026-10-05 | The server refuses question and draft writes (409 SESSION_PAUSED) while a SCREEN_SHARE_STOPPED or SIDE_CAMERA_LOST pause is active. FULLSCREEN_EXIT stays client-enforced and logged. The client keeps the unsaved draft and retries after resume. | It enforces ADR 0002 P-2 on the server; avoids rejecting autosaves on frequent fullscreen events |
+| DL-18 | 2026-10-05 | C-28 review queue: the fast review path is for the LOW band only, and MEDIUM always gets the full review; fastReviewBands is system configuration for the pilot (no org override), revisited at the pilot exit review; queue order is HIGH, then holds (identity not confirmed, manual scoring), then MEDIUM, then LOW, oldest first within each tier. | Integrity asked; implementation detail inside C-28 |
 
 ### Parked for the owner
 
