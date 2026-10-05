@@ -347,7 +347,9 @@ Each environment has its own bucket (D-10, D-11), so keys carry no environment. 
     The fence never starts grading, `analyze-session`, webhooks or review routing.
   - **`SessionStateService.guardLive(tx, sessionId)`: the per-session write lock.**
     - It is a model-API `sessions.updateMany({ where: { id, status: <status read> }, data: { status: <same status> } })` under the SessionStateService grant. It writes the status to its current value, which takes the row lock.
-    - Every SERVICE writer calls it as the **first statement of its write transaction**: `grade-session`, `close-section`, `analyze-session`, the `face-recheck` outcome handler, `server-event`, report generation, the consent-PDF job and `start-session`.
+    - Every SERVICE writer calls it as the **first statement of its write transaction** (ADR 0004 9.5): every `close-section` variant (deadline, finish, final), the session auto-submit, `start-session`, `grade-session`, `analyze-session`, the `face-recheck` outcome handler, `server-event`, report generation and the consent-PDF job. `sessions` is locked first, per the ADR 0015 lock order.
+    - A plain status read inside the transaction is not enough: under READ COMMITTED a fence that commits just after the read would not be seen. `guardLive` takes the row lock, so the fence and the writer serialise.
+    - **Every SessionStateService transition** (VERIFIED → IN_PROGRESS in `start-session`, → SUBMITTED, SUBMITTED → GRADED, the proctor resume) is an `updateMany` compare-and-set on the from-status. None of them can overwrite ERASED.
     - **If it returns 0**, the job re-reads the status. It stops (writing nothing) only on ERASED. Otherwise the status changed meanwhile, and the job retries a bounded number of times (3) or fails for the job's own retry.
     - **Short transactions.** After `guardLive`, the transaction stays short, with no external calls (Judge0, S3, the worker) while the lock is held. External work runs before the transaction and its results are written under the lock.
     - **Objects under the session prefix.** A SERVICE writer that writes an S3 object there (the sealed copy, a report, the consent PDF is outside the prefix) writes it inside the `guardLive` transaction, or deletes its own object when `guardLive` returns 0. An erased session therefore gains no new object.
@@ -449,6 +451,7 @@ Operations covered:
 - **Filtered:** `findUnique`, `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `findMany`, `count`, `aggregate`, `groupBy`, `update`, `updateMany`, `updateManyAndReturn`, `delete`, `deleteMany` and the `where` of `upsert`.
 - **Creates** (`create`, `createMany`, `createManyAndReturn` and the create branch of `upsert`) take the session from the context, and throw on a different value.
 - **Unknown operations** throw.
+- **Session keys are immutable** in both actors: an `update`, `updateMany` or upsert-update whose data changes `session_id` (or `submissions.session_question_id`) on a session-path model throws. This mirrors the scalar `orgId` rule in ADR 0006 section 8.2, because SERVICE has no column limits.
 - `findUnique` by `id` uses Prisma's extended unique `where`.
 - **Raw SQL is refused in any scope carrying `sessionId`** (ADR 0006 section 8.5, PR #41). Session jobs (risk scoring, reports, per-session deletion) therefore use the query API.
 
@@ -479,7 +482,7 @@ Any model not listed throws. Within one org, the org filter alone would expose o
 - Writing any other column throws.
 - **Explicit-only** columns are excluded from the default select. They are enforced **at runtime**: the extension refuses them unless a matching grant is active. A lint rule is an extra check, not the control.
 - **Grant spec** (identical text in ADR 0006 section 8.4):
-  - A grant is `withGrant({ model, columns, ids }, fn)`, and **`ids` is mandatory**. It unlocks exactly those columns, on that model only, and only for rows whose id is in `ids`. The extension ANDs `id IN ids` itself.
+  - A grant is `withGrant({ model, columns, ids }, fn)`, and **`ids` is mandatory**. It unlocks exactly those columns, on that model only, and only for rows whose id is in `ids`. The extension ANDs `id IN ids` itself. An empty `ids` throws.
   - **Lifetime: the grant object carries an `active` flag**, set to false in a `finally` when `fn` settles. The extension refuses any query under an inactive grant. AsyncLocalStorage keeps the store alive in async work started inside `fn` and not awaited (a promise, `setTimeout`, an emitter or a stream callback), so the flag is what ends the grant. A test checks that a detached query run after `fn` resolves throws.
   - A grant can be entered only inside a scope, so none can exist outside one. Grants never widen the model allowlist or the row filters.
   - **`ids` are never request input.** They are resolved through CS-2 within the session or taken from the context. SectionGateService's step-1 id comes from the URL only after CS-2 has resolved it.
@@ -502,8 +505,8 @@ Any model not listed throws. Within one org, the org filter alone would expose o
 
 | Model | Read | Write | Extra row filter |
 | --- | --- | --- | --- |
-| `sessions` | `id`, `status`, `started_at`, `deadline_at`, `pause_reasons`, `submitted_at`, `auth_epoch`. Explicit-only: `hmac_key_enc` (KeyService), `invitation_id` (CandidateSessionGuard), `device_info` (DeviceInfoService) | `last_heartbeat`; `device_info` only through DeviceInfoService (grant, below); `status`, `pause_reasons`, `submitted_at` only under the SessionStateService grant (CS-4.4a) | — |
-| `session_sections` | all columns | none. `started_at`, `deadline_at` and `ended_at` are written only by the `close-section` and `start-session` jobs (SERVICE) | — |
+| `sessions` | `id`, `status`, `started_at`, `deadline_at`, `pause_reasons`, `paused_ms`, `proctor_paused_at`, `submitted_at`, `auth_epoch` (`paused_ms` and `proctor_paused_at` feed `effectiveDeadline`). Explicit-only: `hmac_key_enc` (KeyService), `invitation_id` (CandidateSessionGuard), `device_info` (DeviceInfoService) | `last_heartbeat`; `device_info` only through DeviceInfoService (grant, below); `status`, `pause_reasons`, `submitted_at` only under the SessionStateService grant (CS-4.4a) | — |
+| `session_sections` | all columns | none. Only SERVICE jobs write it: `close-section` and `start-session` (`started_at`, `deadline_at`, `ended_at`), and the proctor-resume transition (ADR 0002 P-3, staff route), which adds the open section's credit to its `deadline_at` after `guardLive` locks `sessions` | — |
 | `session_questions` | `id`, `session_id`, `position`, `points`, `final_code`, `final_language`, `answer`. Explicit-only: `test_question_id` (`SectionGateService.sectionOf`) | `final_code`, `final_language`, `answer` | — |
 | `submissions` | `id`, `session_question_id`, `kind`, `language`, `created_at`; plus `results`, `passed`, `total` under the extra filter | create only: `session_question_id`, `kind` (`RUN` or `SUBMIT`), `language`, `source_code`; and `results`, `passed`, `total` on `RUN` rows | **Mechanism:** whenever `results`, `passed` or `total` appears anywhere in `select`, `where`, `orderBy`, `groupBy` or an aggregate, the extension ANDs `kind: 'RUN'` into the query, so `count({ where: { kind: 'SUBMIT', passed: N } })` returns 0. **`score` is never readable.** |
 | `identity_checks` | `id`, `attempt`, `status`, `created_at` | create only: `attempt`, `id_image_key`, `selfie_key`, `liveness_passed` | — |
@@ -595,7 +598,10 @@ All of it comes from one projection:
   - the session status is IN_PROGRESS or PAUSED; otherwise 409 `SESSION_NOT_ACTIVE`;
   - `now() < effectiveDeadline(section)` and `now() < effectiveDeadline(session)`; otherwise 409 `SECTION_NOT_OPEN`, even if the close job has not run yet.
   - **`effectiveDeadline(x)`** (one function, ADR 0002 P-3 and P-4; TC-079) = `x.deadline_at + activeCredit`, where:
-    - `activeCredit` = `min(now − proctor_paused_at, max(0, cap − paused_ms))` while a `PROCTOR` pause is active, else 0;
+    - for the **session**: `activeCredit` = `min(now − proctor_paused_at, max(0, cap − paused_ms))` while a `PROCTOR` pause is active, else 0;
+    - for a **section**, only its own pause time counts (ADR 0002 S-4): `base = max(proctor_paused_at, section.started_at)`, and `activeCredit = min(max(0, now − base), max(0, cap − paused_ms − (base − proctor_paused_at)))`. A section opened during a pause therefore gets no credit for the pause time before it opened;
+    - the proctor-resume write (P-3) adds the same per-section amount to the open section's `deadline_at`. This needs an ADR 0002 P-3 note (section 7);
+    - a section with no own limit (S-4) has `deadline_at` equal to the session deadline, and `effectiveDeadline(section)` uses that stored value;
     - `cap` = `maxProctorPauseMinutes` in ms.
 
     P-3 adds the credit to `deadline_at` only on resume, so during a pause the raw deadline is stale. The gate, the heartbeat's `deadlineAt` and `sectionDeadlineAt`, the section deadline job and the session auto-submit job all use this function. A reload during a pause therefore still shows the section open.
@@ -604,10 +610,11 @@ All of it comes from one projection:
     - `SCREEN_SHARE_STOPPED` and `SIDE_CAMERA_LOST`: the server learns these only from client-signed events. The refusal therefore holds for an **unmodified** client. Against a modified client that never sends them, the control is recording-gap detection (5.5, 5.8).
     - `FULLSCREEN_EXIT` stays client-enforced and logged. The server's pause state lags behind this frequent, accessibility-sensitive event, so refusing on it would reject legitimate autosaves.
     - **SDK and frontend:** autosave must not drop a draft on 409 `SESSION_PAUSED`. The client keeps the unsaved draft and retries after resume, so no code is lost.
+    - **Section-finish during a PROCTOR pause (owner question Q21, candidate-facing).** Recommended: refuse section-finish with 409 `SESSION_PAUSED` during a PROCTOR pause, and when `close-section` (deadline variant, past the cap) runs while PAUSED with PROCTOR, defer opening the next section until resume. Until the owner answers, the per-section credit formula above already prevents over-credit.
     - **At finish**, the frontend retries a pending save before calling `/finish`. If the session is still paused, the unsaved draft from the last autosave interval (at most 10 s) can be lost. Auto-submit at the deadline has the same small window. Both are documented, accepted gaps.
   - **Clock.** `now()` here is the **API process clock**, NTP-synced. A readiness alarm fires on skew above 1 s between API replicas and the worker hosts.
 - **In-flight writes.** `close-section` for a deadline runs 5 s after the deadline.
-  - Candidate write routes use a dedicated candidate-write datasource URL with `pool_timeout=2` and `options=-c statement_timeout=3000`. That needs no raw SQL, which is refused in session scopes; `SET LOCAL` is not used. The client built on that URL carries the same org-scope extension, and the FU-DB-67 importer test covers it (ADR 0006 section 8.10 gets a matching line).
+  - The question write routes **only** (Run, draft, answer, submit) use a dedicated candidate-write datasource URL with `pool_timeout=2`, `options=-c statement_timeout=3000` and a small `connection_limit`. Its limit plus the main pool's stays under Postgres `max_connections` with headroom (NFR-02). Batch ingest uses the main pool: a 2 MiB keystroke insert cut off at 3 s would otherwise be retried on 5xx forever. That needs no raw SQL, which is refused in session scopes; `SET LOCAL` is not used. The client built on that URL carries the same org-scope extension, and the FU-DB-67 importer test covers it (ADR 0006 section 8.10 gets a matching line).
   - The bound is **best-effort**. A write that is admitted before the deadline but commits after the close is not graded, because only the close snapshot is graded (5.11).
   - Finished sections are refused by default. Whether a candidate may re-read finished sections is owner question Q19.
   - Each route resolves the id through CS-2 and runs `sectionOf` **before** any cache lookup, enqueue or write.
@@ -625,7 +632,8 @@ All of it comes from one projection:
 | `start-session` (assign questions, sections, key, projections, VERIFIED → IN_PROGRESS); the route waits up to 10 s, else 503 with `Retry-After`; idempotent | SERVICE | `start-session:{sid}` |
 | `render-question` | SERVICE | `render-question:{sid}:{sessionQuestionId}` |
 | `verify-session` (CONSENTED → VERIFIED when all checks are done; compare-and-set) | SERVICE | `verify-session:{sid}:{n}`, where `n` comes from Redis `INCR vs:{sid}` (TTL 24 h). Debounced (see below), so a burst of room-scan confirms (up to 60 per minute) produces one run |
-| `close-section`, deadline variant (enqueued for the section deadline + 5 s; re-checks and re-delays, 5.11) | SERVICE | `close-section:{sid}:{sectionId}:deadline:{deadlineEpochMs}` |
+| `close-section`, deadline variant (enqueued for the section deadline + 5 s; re-checks and re-delays, 5.11); `removeOnComplete` and `removeOnFail: true` | SERVICE | `close-section:{sid}:{sectionId}:deadline:{deadlineEpochMs}` |
+| `auto-submit` (session deadline + 5 s; same re-check and re-delay, 5.11); `removeOnComplete` and `removeOnFail: true` | SERVICE | `auto-submit:{sid}:{deadlineEpochMs}` |
 | `close-section`, finish variant (section-finish button) | SERVICE | `close-section:{sid}:{sectionId}:finish` |
 | `close-section`, final variant (flow child on SUBMITTED, delayed 5 s) | SERVICE | `close-section:{sid}:{sectionId}:final` |
 | `grading-reconciler` (repeatable discovery every 5 min under `BACKGROUND_JOB`) | system discovery that only enqueues | none (repeatable) |
@@ -686,15 +694,21 @@ All of it comes from one projection:
   - **One transaction, one timestamp, compare-and-set first.** `close-section` takes a single app-clock timestamp `T`, then in one transaction:
     1. **Claim:** `updateMany({ where: { sessionId, sectionId, endedAt: null, startedAt: { not: null } }, data: { endedAt: T } })`. If 0 rows are updated, another variant already closed the section; the job aborts as a no-op (but see "post-commit work" below).
     2. Read `session_questions.final_code` and `final_language` for the section.
-    3. **Always** insert one `SUBMIT` snapshot row per coding question that has saved code, with `created_at = T`, exempt from the cap.
-    4. **Open the next section** (finish and deadline variants only; **the final variant never opens a section**): `updateMany({ where: { sessionId, position: k + 1, startedAt: null, session: { status: { in: ['IN_PROGRESS', 'PAUSED'] } } }, data: { startedAt: T, deadlineAt } })`, with `deadlineAt` per ADR 0002 S-4.
+    3. **Always** insert one `SUBMIT` snapshot row per coding question that has saved code, with `created_at = T`, exempt from the cap. (Step 0, before the claim, is `guardLive`.)
+    4. **Last section:** if no section k+1 exists and the variant is finish or deadline, move the session to SUBMITTED with an `updateMany` compare-and-set from IN_PROGRESS or PAUSED (ADR 0002 S-5: "the end of the last section submits the session"). That starts the SUBMITTED flow.
+    5. **Open the next section** (finish and deadline variants only; **the final variant never opens a section**): `updateMany({ where: { sessionId, position: k + 1, startedAt: null, session: { status: { in: ['IN_PROGRESS', 'PAUSED'] } } }, data: { startedAt: T, deadlineAt } })`, with `deadlineAt` per ADR 0002 S-4.
 
     `updateMany` compare-and-set is the only concurrency tool here: Prisma has no `FOR UPDATE`, and raw SQL is refused in session scopes. Two variants racing therefore produce exactly one close, one snapshot set and at most one opening of the next section. SERVICE scope has no column limits, so `created_at` and `ended_at` are set by the job and never left to a database default.
   - **Post-commit work.** After the commit, or on the no-op path, the job enqueues the next section's deadline job and its `render-question` jobs, with deterministic jobIds. A retry that finds the section already closed still enqueues them, so a failed enqueue is never lost.
   - **Between the click and the commit**, the section stays open under the gate. Writes in that window are in `final_code` before the claim and are snapshotted, or they arrive after it and are not graded.
-  - **Graded row: only the close snapshot.** `grade-session` grades exactly the snapshot of each coding question. Candidate `SUBMIT` rows are history; submit also writes `final_code` and `final_language`, as draft does. There is no `created_at` comparison and no id tie-break, so clock skew between the API and the database host does not matter.
+  - **Graded row: the close snapshot, identified by its timestamp.** For each coding question, `grade-session` grades the `SUBMIT` row whose `created_at` equals that question's `session_sections.ended_at`. Both are the same app-clock `T`, written by the same transaction.
+    - Candidate rows can never match: they cannot write `created_at` (CS-4.4) and get the database's `now()` at microsecond precision.
+    - **More than one match:** `grade-session` fails loudly and alerts.
+    - **No match:** the question scores 0.
+    - No schema change. The alternative, a `submission_kind` value `SNAPSHOT`, is an ADR 0008 delta and an owner decision (Q22).
+    - The candidate submit route writes its `SUBMIT` row and `final_code`/`final_language` in **one transaction**, so "has saved code" never lags behind a submit.
   - **Deadline variant (ADR 0002 P-3 and P-4; TC-079).** It is enqueued for `effectiveDeadline(section)` + 5 s. When it runs:
-    - it returns as a no-op unless the session is IN_PROGRESS or PAUSED;
+    - it starts its transaction with `guardLive` and returns as a no-op unless the session is IN_PROGRESS or PAUSED;
     - while a `PROCTOR` pause under the cap is active, it re-delays to `min(proctor_paused_at + remaining cap, now + 30 s)`. That time is always in the future, so the job never spins;
     - once the cap is exhausted the clock runs again (P-3), and when the section is due it closes even while PAUSED (P-4). An active pause cannot block closing or grading forever, because the cap bounds it;
     - if the section is otherwise not yet due (an extended deadline), it re-delays to the new `effectiveDeadline` + 5 s.
@@ -703,10 +717,14 @@ All of it comes from one projection:
     - `grade-session` is the parent. Its children are the final-variant `close-section` for every **started** section without `ended_at`, each delayed 5 s so in-flight saves from the last seconds land first.
     - Children have 5 attempts with exponential backoff and `failParentOnFailure: true`. A failed parent is not retried by its own attempts; only the reconciler recovers it.
     - `grade-session` checks at start that every started section has `ended_at`, and fails if not. Questions of sections that never opened score 0.
-    - `grade-session` writes its scores and moves SUBMITTED → GRADED with a compare-and-set, so a second run no-ops.
-  - **Grading reconciler.** A repeatable discovery job every 5 minutes, under `BACKGROUND_JOB`, re-creates work for two cases:
+    - `grade-session` runs Judge0 **outside** any transaction. Then one transaction:
+      1. `guardLive`;
+      2. `updateMany` status SUBMITTED → GRADED;
+      3. writes the scores only if that changed exactly 1 row, and throws to roll back on 0. A second run therefore no-ops.
+  - **Grading reconciler.** A repeatable discovery job every 5 minutes, under `BACKGROUND_JOB`, re-creates work for three cases:
     - **SUBMITTED** sessions older than 10 minutes that are not graded: it re-creates the flow;
-    - **IN_PROGRESS or PAUSED** sessions whose open section is past `effectiveDeadline` + 2 minutes with `ended_at` NULL: it enqueues the deadline variant.
+    - **IN_PROGRESS or PAUSED** sessions whose open section is past `effectiveDeadline` + 2 minutes with `ended_at` NULL: it enqueues the deadline variant;
+    - **IN_PROGRESS or PAUSED** sessions past `effectiveDeadline(session)` + 2 minutes, including those with no open section left: it enqueues `auto-submit`.
 
     It skips any session whose `grade-session` job is active, waiting, waiting-children or delayed. It also skips sessions in status ERASED and sessions with `RETENTION_RESULTS_DONE` (5.7). The skip is keyed on the session, so during an erasure hold a second SUBMITTED session of the same candidate is still recovered. Sessions stuck longer than 1 hour raise the alert proposed in ADR 0004 9.4.
   - A coding question with no `SUBMIT` row and no saved code scores 0 without a Judge0 run. A session with no work at all is graded with score 0; it is never skipped.
@@ -851,6 +869,7 @@ CI and deploy:
   - the six relation vectors: point to ADR 0013 CS-4.5 as the CANDIDATE enforcement (all refused, with the fluent API also linted);
   - state that SERVICE scope's session filter is top-level only, and nested reads stay under rule (i) review (defence in depth);
   - the disconnect watchdog runs as `BACKGROUND_JOB` discovery that enqueues per-session SERVICE jobs; the discovery job only enqueues; each session job runs in its own worker callback, and `runAsSessionJob` is entered from no scope only (ADR 0006 section 8.4).
+- **ADR 0002 P-3 (note).** The resume credit for the open section counts only that section's own pause time (`base = max(proctor_paused_at, section.started_at)`, 5.10 CS-4.6), and the resume write locks `sessions` with `guardLive` first.
 - **ADR 0002 P-2 (note).** The editor lock for `SCREEN_SHARE_STOPPED` and `SIDE_CAMERA_LOST` (and `PROCTOR`) is also enforced on the server: writes get 409 `SESSION_PAUSED` (DL-17, 5.10 CS-4.6). `FULLSCREEN_EXIT` stays client-side.
 - **FR-502 and backend.md Step 11.** "Submit runs hidden tests" becomes "Submit records the final code; hidden tests run in `grade-session` after SUBMITTED". The submit response carries no results (5.11). FR-502 is an owner decision (Q17).
 - **backend.md Step 7:**
@@ -914,10 +933,12 @@ CI and deploy:
    - (a) **Media tier.** C-26 says recordings and other session media stay 90 days, but the media tier uses `retention_days` (7..730). Should it be fixed at 90?
    - (b) **EVENT evidence frames** (`evidence/*.jpg`, webcam stills) are in the media tier, though OQ-5 listed face evidence frames. Should they move to the face tier?
    - (c) **Results clock.** C-26 says "1 year after the test"; the ADR uses the anchor. Confirm which.
+21. **Section-finish during a PROCTOR pause (candidate-facing; 5.10 CS-4.6).** Recommended: refuse section-finish with 409 `SESSION_PAUSED` during a PROCTOR pause, and defer opening the next section until resume when a close runs while PAUSED with PROCTOR.
+22. **Snapshot marker (5.11).** Keep identifying the graded snapshot by `created_at = ended_at` (no schema change, recommended), or add a `submission_kind` value `SNAPSHOT` (an ADR 0008 delta)?
 
 **Architect details to confirm**
 
-21. Names and limits: `SESSION_KEY_ENC_KEY_<kid>`, `PROCTOR_INGEST_GRACE_SECONDS`, per-route limits and quotas, 16 MiB per chunk, 1 MiB and 1920 × 1920 per image, the 15-minute freshness of the system check, JWT `iss` and `aud`.
-22. Candidate-session enforcement (5.10 CS-4): the actor model, the CANDIDATE model and column allowlists, all six relation vectors refused, the `render-question` projection, and start-test as an awaited session job.
-23. The onnxruntime variant: the plain wasm only, with object storage as the fallback if vad-web needs jsep (section 6).
-24. Media `seq` per stream across segments, following ADR 0004 (the SDK changes, not the schema).
+23. Names and limits: `SESSION_KEY_ENC_KEY_<kid>`, `PROCTOR_INGEST_GRACE_SECONDS`, per-route limits and quotas, 16 MiB per chunk, 1 MiB and 1920 × 1920 per image, the 15-minute freshness of the system check, JWT `iss` and `aud`.
+24. Candidate-session enforcement (5.10 CS-4): the actor model, the CANDIDATE model and column allowlists, all six relation vectors refused, the `render-question` projection, and start-test as an awaited session job.
+25. The onnxruntime variant: the plain wasm only, with object storage as the fallback if vad-web needs jsep (section 6).
+26. Media `seq` per stream across segments, following ADR 0004 (the SDK changes, not the schema).
