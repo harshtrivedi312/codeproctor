@@ -1,8 +1,11 @@
 // TC-003 (FR-102) cold start: the first Redis commands after a fresh boot may arrive together
 // (the client is lazy, enableOfflineQueue is off). Parallel 2FA sign-ins for different users must
 // all work (200 each); none may answer 503 "Verification is temporarily unavailable." while Redis is healthy.
+import type { Redis } from 'ioredis';
+import request from 'supertest';
+import { authenticator } from 'otplib';
 import { UserRole } from '../../src/generated/prisma/client';
-import { boot, createUser, Harness, signInWithTotp, TOTP_SECRET } from '../support/harness';
+import { API, Body, boot, createUser, Harness, login, TOTP_SECRET } from '../support/harness';
 
 describe('TC-003 (FR-102): parallel 2FA sign-ins right after boot', () => {
   let h: Harness;
@@ -10,7 +13,7 @@ describe('TC-003 (FR-102): parallel 2FA sign-ins right after boot', () => {
   beforeAll(async () => {
     h = await boot();
     users = [];
-    // Set-up errors here fail the suite (red); they must never be mistaken for the known defect.
+    // Set-up errors fail the suite (red) before the test body runs.
     for (let i = 0; i < 5; i++) {
       users.push(await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET }));
     }
@@ -24,13 +27,31 @@ describe('TC-003 (FR-102): parallel 2FA sign-ins right after boot', () => {
   // /2fa/verify answered 503. Now every caller waits for the shared ready promise. This is a plain
   // regression test: any failure of any kind among the five sign-ins fails it.
   it('TC-003 QA-D-04 (FR-102): five parallel 2FA sign-ins on a cold API all succeed (no 503 from the Redis connect race)', async () => {
-    // No Redis command has run yet in this process: every sign-in below races the first connect.
-    const results = await Promise.allSettled(users.map((u) => signInWithTotp(h, u.email)));
+    // Password sign-in does not touch Redis, so phase 1 leaves the lazy client untouched.
+    const challenges = await Promise.all(
+      users.map(async (u) => ((await login(h, u.email).expect(200)).body as Body).challengeToken),
+    );
+    // Premise guard: the Redis client must still be unconnected, or this stops testing a cold start.
+    // boot() resets the module registry, so the token must come from the same registry as the app.
+    const { REDIS_CLIENT } = jest.requireActual<
+      typeof import('../../src/infrastructure/infrastructure.module')
+    >('../../src/infrastructure/infrastructure.module');
+    expect(h.app.get<Redis>(REDIS_CLIENT, { strict: false }).status).toBe('wait');
+    // Phase 2: five verifies fired together, so they all race the first connect.
+    const code = authenticator.generate(TOTP_SECRET);
+    const results = await Promise.allSettled(
+      challenges.map((challengeToken) =>
+        request(h.app.getHttpServer())
+          .post(`${API}/auth/2fa/verify`)
+          .send({ challengeToken, code })
+          .expect(200),
+      ),
+    );
     const failures = results.flatMap((r) => (r.status === 'rejected' ? [String(r.reason)] : []));
     expect(failures).toEqual([]);
     for (const r of results) {
-      expect(r.status).toBe('fulfilled');
-      if (r.status === 'fulfilled') expect(r.value.Authorization).toMatch(/^Bearer .+/);
+      const token = r.status === 'fulfilled' ? (r.value.body as Body).accessToken : undefined;
+      expect(token).toMatch(/^[\w-]+\.[\w-]+\.[\w-]+$/);
     }
   });
 });
