@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import random
+
 import pytest
 from pydantic import ValidationError
 
 from worker.config import IntegrityConfig
-from worker.events import EventType
-from worker.risk import ScoredEvent, calculate_risk, route_for_review
+from worker.events import EventType, RiskBand
+from worker.risk import (
+    QueueItem,
+    ScoredEvent,
+    calculate_risk,
+    order_review_queue,
+    queue_sort_key,
+    route_for_review,
+)
 
 
 def cfg(**risk: object) -> IntegrityConfig:
@@ -152,10 +161,69 @@ def test_tc076_medium_band_goes_to_review_queue() -> None:
     assert route_for_review(r.band).needs_review is True
 
 
-def test_fr805_low_band_completes_unless_a_human_task_is_pending() -> None:
-    assert route_for_review("LOW").needs_review is False
-    assert route_for_review("LOW", identity_review_pending=True).reasons == [
-        "IDENTITY_MANUAL_REVIEW"
-    ]
+# ---------- C-28: every session is reviewed ----------
+
+
+@pytest.mark.parametrize("band", ["LOW", "MEDIUM", "HIGH"])
+@pytest.mark.parametrize("identity", [False, True])
+@pytest.mark.parametrize("short", [False, True])
+def test_fr805_c28_no_band_or_hold_combination_is_ever_auto_cleared(
+    band: RiskBand, identity: bool, short: bool
+) -> None:
+    r = route_for_review(band, identity, short)
+    assert r.needs_review is True
+    assert r.review_path in {"fast", "full"} and f"RISK_{band}" in r.reasons
+
+
+def test_fr805_c28_low_band_without_holds_takes_the_fast_path_others_the_full_path() -> None:
+    assert route_for_review("LOW").review_path == "fast"
+    assert route_for_review("MEDIUM").review_path == "full"
+    assert route_for_review("HIGH").review_path == "full"
+
+
+def test_fr805_c28_pending_identity_or_short_answer_forces_the_full_path() -> None:
+    assert route_for_review("LOW", identity_review_pending=True).review_path == "full"
+    assert route_for_review("LOW", short_answer_pending=True).review_path == "full"
     both = route_for_review("HIGH", True, True)
     assert both.reasons == ["RISK_HIGH", "IDENTITY_MANUAL_REVIEW", "SHORT_ANSWER_MANUAL_SCORING"]
+
+
+def test_fr805_c28_fast_path_bands_may_only_hold_low_or_be_empty() -> None:
+    assert route_for_review("LOW", config=cfg(fastReviewBands=[])).review_path == "full"
+    assert cfg(fast_review_bands=["LOW"]).risk.fast_review_bands == {"LOW"}
+    for bad in (["MEDIUM"], ["LOW", "MEDIUM"], ["HIGH"], ["URGENT"]):
+        with pytest.raises(ValidationError):
+            cfg(fastReviewBands=bad)
+
+
+def test_fr805_c28_queue_rank_puts_high_first_then_medium_then_low() -> None:
+    ranks = [route_for_review(b).queue_rank for b in ("HIGH", "MEDIUM", "LOW")]
+    assert ranks == sorted(ranks) and len(set(ranks)) == 3
+
+
+def test_fr805_c28_queue_order_is_band_then_score_then_age_then_id_and_deterministic() -> None:
+    items = [
+        QueueItem("e", "LOW", 10.0, 5),
+        QueueItem("a", "HIGH", 61.0, 9),
+        QueueItem("b", "HIGH", 90.0, 9),
+        QueueItem("c", "MEDIUM", 40.0, 7),
+        QueueItem("d", "MEDIUM", 40.0, 3),  # same score as c, older: first
+        QueueItem("f", "MEDIUM", 40.0, 3),  # same score and age as d: by id
+    ]
+    expected = ["b", "a", "d", "f", "c", "e"]
+    assert [i.session_id for i in order_review_queue(items)] == expected
+    for seed in range(5):  # input order never changes the result
+        shuffled = items[:]
+        random.Random(seed).shuffle(shuffled)
+        assert [i.session_id for i in order_review_queue(shuffled)] == expected
+    assert queue_sort_key(items[1]) < queue_sort_key(items[3]) < queue_sort_key(items[0])
+
+
+def test_fr804_fr305_c28_accommodated_detectors_stay_out_of_the_score_and_the_band() -> None:
+    c = IntegrityConfig(disabled_event_types=frozenset({"GAZE_AWAY", "NO_FACE"}))
+    gaze: EventType = "GAZE_AWAY"
+    face: EventType = "NO_FACE"
+    r = calculate_risk([gaze, gaze, gaze, face, face, face], c)
+    assert r.score == 0.0 and r.band == "LOW" and r.ignored_disabled == 6
+    routing = route_for_review(r.band, config=c)
+    assert routing.needs_review is True and routing.review_path == "fast"  # still reviewed
