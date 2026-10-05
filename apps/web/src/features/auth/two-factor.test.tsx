@@ -83,9 +83,7 @@ describe('TwoFactorVerifyForm', () => {
     router.replace.mockClear();
     await u.type(code, MOCK_TOTP_CODE);
     await u.click(screen.getByRole('button', { name: 'Verify and sign in' }));
-    await waitFor(() =>
-      expect(router.replace).toHaveBeenCalledWith('/admin/login?reason=expired'),
-    );
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith('/admin/login?reason=expired'));
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(router.replace).toHaveBeenLastCalledWith('/admin/login?reason=expired');
   });
