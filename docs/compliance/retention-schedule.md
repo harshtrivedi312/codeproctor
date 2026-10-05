@@ -61,7 +61,7 @@ Contact [EMAIL]. This schedule was last updated on [date].
 
 1. **Results have no retention period today.** ADR 0004 R-5 keeps scores, code, event rows (without images), reviews and appeals with no time limit. GDPR storage limitation needs one. Suggest: **[2] years after the assessment is finished**, matching a common hiring-record retention period, then anonymise to scores only. This is new decision **OQ-4**.
 2. **Consent record on erasure:** decided by C-17 and applied above.
-3. **"With the session data" (C-13)** is read here as deletion at 90 days, together with the recordings. If you meant with the results instead (note 1), change that row.
+3. **"With the session data" (C-13)** is read here as deletion together with the recordings, after [N] days. If you meant with the results instead (note 1), change that row.
 4. **BIPA** requires permanent destruction when the purpose is met, or within 3 years of the individual's last interaction, whichever is first. 90 days is within that limit. The 730-day organisation setting must not apply to biometric items. The engineering rule for DB-06: cap biometric items at 90 days whatever `retention_days` says. This needs your confirmation, because today's design applies `retention_days` to ID images and selfies too. This is new decision **OQ-5**.
 5. **Volunteer tuning set (C-11).** BIPA's public policy must cover every biometric identifier we hold, so the tuning set has its own row above. That matches the volunteer form's drafting note 2.
 6. **S3 versioning.** Permanent deletion needs versioning off, or a lifecycle rule that expires noncurrent versions within days (ARC-05, DEP-03).
