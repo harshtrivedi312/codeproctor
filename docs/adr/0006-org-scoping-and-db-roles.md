@@ -274,7 +274,15 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 | Org A | `runSystem` | Refused |
 | Org A as user U | `runInOrg(A)` | Allowed, and user U stays in the context |
 | Org A as user U | `runAsUser` naming another user | Refused |
-| Org A with `sessionId` S (ADR 0013) | Any scope that drops or changes S | Refused |
+| None | `runInOrg(A, { sessionId: S })` | Allowed: `CandidateSessionGuard` and session-job processors |
+| Org A, no user and no S | `runInOrg(A, { sessionId: S })` | Allowed (narrows): the guard or a job processor |
+| System, reason R | `runInOrg(A, { sessionId: S })` | Allowed (the session-job path) |
+| Org A with S | `runInOrg(A)` | Allowed, and S stays in the context |
+| Org A with S | `runInOrg(A, { sessionId: T })` with T ≠ S, or any call that would clear S | Refused |
+| Org A with S | `runAsUser` | Refused |
+| Org A as user U | `runInOrg(A, { sessionId: S })` | Refused. Staff code never enters a candidate scope; staff reads of a session use the org scope and service checks. |
+
+`runInOrg(orgId, { sessionId })` is the name used here. The db-engineer may name it `runAsCandidate`, as long as the table holds.
 
 PR #30 already refuses the org switch and the system-from-org case (`org-context.ts`, `enter`). The other rows are db-engineer work. In particular, `runInOrg` inside `runAsUser` must keep the user.
 
@@ -292,8 +300,9 @@ PR #30 already refuses the org switch and the system-from-org case (`org-context
 - That check catches a mismatched payload. It does not stop an attacker who can write both fields, so the trust boundary is Redis access control and network isolation (ADR 0001 C-7). Signed job payloads are an option if the owner wants more.
 - Once ADR 0013 lands, a session job runs in `runInOrg(orgId)` with `sessionId` in the scope.
 
-**Candidate routes use no system scope.**
-- `CandidateSessionGuard` (ADR 0013 section 5.10) enters `runInOrg(oid)` from the verified candidate JWT.
+**Routes behind `CandidateSessionGuard` use no system scope.**
+- The OTP exchange is the one candidate route outside the guard (ADR 0013 section 5.10). It runs under `AUTH_BOOTSTRAP`, together with resolving the invitation link.
+- `CandidateSessionGuard` enters `runInOrg(oid, { sessionId: sid })` from the verified candidate JWT.
 - It loads the session with `id = sid`, and checks `auth_epoch` against the token's `epoch`. A session in another org is simply not found, which answers 401.
 
 There is no org-provisioning reason (8.6, 8.9).
@@ -305,13 +314,13 @@ There is no org-provisioning reason (8.6, 8.9).
   - `runRawSql` requires an active scope, org or system.
   - **This changes PR #30 behaviour.** PR #30 currently allows `runRawSql` with no scope at all. The db-engineer makes that call throw.
 - **What each scope allows:**
-  - **System scope:** raw SQL is allowed only under that scope's own 8.4 reason. An example is the `AUTH_BOOTSTRAP` failed-login counter.
+  - **System scope:** the raw SQL must serve the active system reason. An example is the `AUTH_BOOTSTRAP` failed-login counter.
   - **Org scope:** the SQL itself must filter by `org_id`. A table without `org_id` must be joined along its 8.7 scope path.
-  - **Scope carrying a `sessionId` (candidate units of work, ADR 0013 CS-4):** raw SQL is refused.
+  - **Scope carrying a `sessionId`:** raw SQL is refused. This covers candidate requests and session jobs (8.10). ADR 0013 CS-4 (PR #39) must match this rule.
 - Model queries inside `runRawSql` stay scoped.
 - The `runRawSql` reason stays free text for the reviewer.
 - **Call-site allow-list.** A test of every `runSystem`, `runInOrg` and `runRawSql` call site lands with FU-DB-58 (BE-03).
-  - For each raw call, the list records which system reason or org scope it runs under.
+  - For each raw call, the list records the pair (call site, system reason or org scope).
   - A new call site updates the list, and code-reviewer checks it.
 
 ### 8.6 Organization (architect detail)
@@ -323,6 +332,17 @@ There is no org-provisioning reason (8.6, 8.9).
   - the extension refuses `id` in the data of `update`, `updateMany` and the update branch of `upsert` on `Organization`, in every scope;
   - a test covers it;
   - a database trigger is not added (8.3: no schema change).
+- **Nested writes.** A query extension sees only the top-level model, so writes nested under other models would otherwise get past the rules above.
+  - Examples: `user.create({ data: { organization: { create: … } } })`, a `connectOrCreate` or `upsert` on an `organization` relation, and `test.update({ data: { organization: { update: { id } } } })`.
+  - The extension therefore walks the `data` of every write, at any depth. On any relation whose target is `Organization`, it refuses nested `create`, `createMany`, `connectOrCreate`, `upsert`, `delete`, and an `update` or `updateMany` that sets `id`.
+  - There is one test per case.
+- **Raw client.** The raw, unextended factory client is the 8.9 exemption. A lint rule or test ensures that only these files import `createPrismaClient`:
+  - `prisma.service.ts`, which extends it;
+  - the seed;
+  - the provisioning CLI;
+  - BE-02's interim `prisma.module.ts`, until FU-DB-58 deletes it.
+
+  Otherwise the exemption would be a bypass inside `apps/api`.
 
 ### 8.7 Path rule (architect detail)
 
@@ -335,11 +355,15 @@ There is no org-provisioning reason (8.6, 8.9).
 **Readiness role assertion (FU-DB-66, before DEP-01).** The readiness check asserts all of these:
 
 - `current_user = 'app_user'`;
-- the role has no SUPERUSER, BYPASSRLS, CREATEROLE or CREATEDB;
+- the role has no SUPERUSER, BYPASSRLS, CREATEROLE, CREATEDB or REPLICATION;
 - **it is a member of no role.** `SELECT 1 FROM pg_auth_members WHERE member = 'app_user'::regrole` returns no rows.
   - The query filters on the `member` column only. In PG 16 a CREATEROLE creator, such as the RDS master or the Neon owner, gets a row with `roleid = app_user`. A two-way query would therefore fail on those hosts.
   - Being a member of no role directly also rules out indirect memberships, such as `pg_read_all_data`, `pg_write_all_data`, `rds_superuser`, `neon_superuser` or the owner role.
-- **it owns nothing.** It owns no schema (`pg_namespace.nspowner`), and no relation in `public` (`pg_class.relowner`).
+- **it owns nothing:**
+  - no database (`pg_database.datdba`);
+  - no schema (`pg_namespace.nspowner`);
+  - no relation in any schema (`pg_class.relowner`);
+  - no function (`pg_proc.proowner`).
 
 How the check runs:
 
@@ -365,14 +389,24 @@ How the check runs:
   - one `organizations` row (name, `retention_days`);
   - its first SUPER_ADMIN user, with no password.
 
-  It creates no consent text or other content; the admin adds those in the app. The admin's set-password link goes by email only. The CLI enqueues the API's email job, or uses the same mail provider. The link or token is never printed, never written to a file, and never in a GitHub Actions log.
+  It creates no consent text or other content; the admin adds those in the app.
+- **The set-password link.** The `users` CHECK constraint (`password_hash` or `set_password_token_hash` must be set; database.md) means the admin row needs a token hash at insert. Three options were considered:
+  - (a) The CLI mints the token and sends it through the mail provider directly. The cleartext stays only in the CLI's memory, but the CLI then needs mail credentials and its own mail path.
+  - **(b) Recommended.**
+    - In the transaction, the CLI stores the SHA-256 of a random token and discards the cleartext at once. It never prints, logs or keeps it.
+    - After commit, it enqueues a job whose payload carries only `orgId` and `userId`.
+    - The processor runs inside `runInOrg(orgId)`. It rotates `set_password_token_hash` and `set_password_expires_at`, mints the link itself, and sends it by email.
+    - No raw token ever reaches Redis, a kept completed or failed job, or a dashboard.
+  - (c) Enqueue the cleartext with `removeOnComplete` and `removeOnFail`, and no payload logging. This is the minimum only, and is not recommended.
+  - Whichever is chosen, the link or token is never printed, never written to a file, and never in a GitHub Actions log.
+- **Re-issue.** If mail fails after commit, the CLI can re-issue the link for an existing admin whose `password_hash` is NULL. It enqueues the same (b) job, and the processor rotates the token. It refuses a user who already has a password.
 - **Where it runs:**
   - only on the pilot host, over SSH from a GitHub Actions job, or on a self-hosted runner inside the pilot network;
   - never from a developer machine or an agent session (ADR 0009, D-38);
   - a GitHub-hosted runner never connects straight to the pilot database, because Postgres is not exposed to the internet.
 - **Inputs.**
-  - The org name and the admin email come from a file on the pilot host or from a secret, not from plain `workflow_dispatch` inputs.
-  - If inputs are ever used, they are masked with `::add-mask::` before any step logs them. Inputs stay visible to repository readers in the run metadata.
+  - The org name and the admin email come from a file on the pilot host or from a secret.
+  - `workflow_dispatch` inputs are not used for them. Masking does not hide inputs in the run metadata, and the admin email is personal data.
 - **How it connects:**
   - as `app_user` through `DATABASE_URL`;
   - with no `MIGRATION_DATABASE_URL` fallback;
@@ -387,15 +421,17 @@ How the check runs:
 ### 8.10 Consequences and agents affected
 
 - **Positive:** the scope rules are closed and testable (FK classification, call-site allow-list, readiness check), with no schema change before the pilot.
-- **Negative:** rule (i) stays a service-level guard for 25 foreign keys until RLS is revisited (FU-DB-77).
+- **Negative:**
+  - Rule (i) stays a service-level guard for 25 foreign keys until RLS is revisited (FU-DB-77).
+  - Session jobs run in a `sessionId` scope, so they cannot use raw SQL (8.5). This is deliberate. It covers BE-12 risk scoring, report generation and DB-06 per-session deletion, which must use the model API. If one of them needs raw SQL, that needs an amendment.
 - **db-engineer:**
   - 8.1: `RULE_I_REFERENCES` and its test.
   - 8.2: FU-DB-63.
-  - 8.4: the narrowing table and its tests (`runInOrg` inside `runAsUser` keeps the user; system to system with another reason is refused).
+  - 8.4: the narrowing table and its tests (`runInOrg` inside `runAsUser` keeps the user; system to system with another reason is refused; the `sessionId` rows).
   - 8.5: `runRawSql` requires a scope, and is refused in a `sessionId` scope.
-  - 8.6: refuse `Organization` create and delete in every scope, and refuse `id` in updates.
-  - 8.8: FU-DB-65 and FU-DB-66, including the membership and ownership checks.
-  - 8.9: the provisioning CLI (org and first admin, emailed set-password link, audit row).
+  - 8.6: refuse `Organization` create and delete in every scope, refuse `id` in updates, refuse nested `Organization` writes at any depth, and limit importers of the raw factory client.
+  - 8.8: FU-DB-65 and FU-DB-66, including the REPLICATION, membership and ownership checks.
+  - 8.9: the provisioning CLI (org and first admin, option (b) token job, re-issue, audit row).
 - **backend-engineer:**
   - Use only the three reasons in 8.4.
   - Build job payloads and processors per `BACKGROUND_JOB` in 8.4.
