@@ -523,12 +523,11 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
           }),
       },
       {
-        name: 'nested write (test.update with sections.create): the guard walks data and sends nothing',
+        name: 'create of a path-scoped model with a scalar foreign key (the way a nested write is done now)',
         raw: false,
-        run: (c, orgId) =>
-          c.test.update({
-            where: { id: A.rows.Test.filter.id as string, ...and(orgId, direct) },
-            data: { name: 'nested', sections: { create: { title: 'n', position: 5 } } },
+        run: (c) =>
+          c.testSection.create({
+            data: { testId: A.rows.Test.filter.id as string, title: 'n', position: 5 },
           }),
       },
       {
@@ -698,6 +697,22 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
         expect(text).toContain(phase === 'insert' ? 'INSERT INTO' : 'UPDATE');
       }
       await owner.candidate.deleteMany({ where: { email } });
+    });
+
+    it('NFR-04 a refused nested relation write sends no statement, in an org scope, in system scope and with no scope', async () => {
+      const nested = (): Promise<unknown> =>
+        scoped().test.update({
+          where: { id: A.rows.Test.filter.id as string },
+          data: { sections: { create: { title: 'nested', position: 6 } } },
+        });
+      const inOrg = (): Promise<unknown> => orgContext.runInOrg(A.orgId, nested);
+      const inSystem = (): Promise<unknown> => system(nested);
+      await expect(inOrg()).rejects.toBeInstanceOf(OrgScopeViolationError);
+      await expect(inSystem()).rejects.toBeInstanceOf(OrgScopeViolationError);
+      await expect(nested()).rejects.toBeInstanceOf(OrgContextMissingError);
+      for (const run of [inOrg, inSystem, nested]) {
+        expect(await statementsOf(() => run().catch(() => undefined))).toEqual([]);
+      }
     });
 
     it('NFR-04 $connect sends no statement', async () => {
