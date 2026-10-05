@@ -242,6 +242,128 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v1/admin/users': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Staff users of the caller's organisation (SUPER_ADMIN, FR-103) */
+    get: operations['listStaffUsers'];
+    put?: never;
+    /** Invite a staff user by email; they set a password from the emailed link (ADR 0003 section 4) */
+    post: operations['inviteStaffUser'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/admin/users/{userId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Change a role or deactivate or reactivate a user (revokes their refresh tokens) */
+    patch: operations['updateStaffUser'];
+    trace?: never;
+  };
+  '/v1/admin/settings': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Organisation settings (retention, erasure hold, risk scoring, decline contact) */
+    get: operations['getOrgSettings'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Change some organisation settings */
+    patch: operations['updateOrgSettings'];
+    trace?: never;
+  };
+  '/v1/admin/consent-texts': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Consent document versions (D-17), newest first */
+    get: operations['listConsentTexts'];
+    put?: never;
+    /** Add a new version. It starts as a placeholder; Legal approval is recorded outside this API (Q-43). */
+    post: operations['createConsentText'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/admin/consent-texts/{consentTextId}/current': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /** Make this version the one candidates sign */
+    put: operations['setCurrentConsentText'];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/admin/candidates': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Candidates of the organisation with their erasure state (list view only; the full page is FE-05) */
+    get: operations['listCandidates'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/admin/candidates/{candidateId}/erasure': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Request erasure of a candidate's data (NFR-05, D-19). Waits while a review or appeal is open if the hold is on. */
+    post: operations['requestCandidateErasure'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -348,8 +470,91 @@ export interface components {
       /** @description Questions of the open section only */
       questions: components['schemas']['Question'][];
     };
+    StaffUser: {
+      id: string;
+      email: string;
+      name: string;
+      role: components['schemas']['StaffRole'];
+      /** @enum {string} */
+      status: 'invited' | 'active' | 'deactivated';
+      /** Format: date-time */
+      lastLoginAt?: string | null;
+    };
+    /** @enum {string} */
+    EventSeverity: 'LOW' | 'MEDIUM' | 'HIGH';
+    /** @description FR-804 and ADR 0005 section 2. Weights are keyed by event type. */
+    RiskSettings: {
+      severityPoints: {
+        LOW: number;
+        MEDIUM: number;
+        HIGH: number;
+      };
+      capPerType: number;
+      bandMinScore: {
+        MEDIUM: number;
+        HIGH: number;
+      };
+      weights: {
+        [key: string]: number;
+      };
+    };
+    OrgSettings: {
+      retentionDays: number;
+      erasure: {
+        holdWhileReviewOrAppealOpen: boolean;
+      };
+      risk: components['schemas']['RiskSettings'];
+      consentDeclineContact: string;
+    };
+    OrgSettingsPatch: {
+      retentionDays?: number;
+      erasure?: {
+        holdWhileReviewOrAppealOpen?: boolean;
+      };
+      risk?: components['schemas']['RiskSettings'];
+      consentDeclineContact?: string;
+    };
+    ConsentText: {
+      id: string;
+      version: string;
+      bodyMd: string;
+      /** Format: date-time */
+      createdAt: string;
+      /** Format: date-time */
+      legalApprovedAt: string | null;
+      legalApprovedBy?: string | null;
+      isCurrent: boolean;
+    };
+    CandidateSummary: {
+      id: string;
+      name: string;
+      email: string;
+      /** Format: date-time */
+      lastSessionAt?: string | null;
+      erasure: {
+        /**
+         * @description waiting = held while a review or appeal is open (D-19)
+         * @enum {string}
+         */
+        state: 'none' | 'waiting' | 'queued' | 'erased';
+        /** Format: date-time */
+        requestedAt?: string | null;
+        /** @enum {string|null} */
+        waitingFor?: 'review' | 'appeal' | null;
+      };
+    };
   };
-  responses: never;
+  responses: {
+    /** @description The role is not allowed to call this route (FR-103) */
+    Forbidden: {
+      headers: {
+        [name: string]: unknown;
+      };
+      content: {
+        'application/json': components['schemas']['ApiError'];
+      };
+    };
+  };
   parameters: {
     QuestionId: string;
   };
@@ -791,6 +996,337 @@ export interface operations {
       };
       /** @description Token invalid, expired or already used (one message for all three) */
       400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+    };
+  };
+  listStaffUsers: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Users */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: components['schemas']['StaffUser'][];
+          };
+        };
+      };
+      403: components['responses']['Forbidden'];
+    };
+  };
+  inviteStaffUser: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          email: string;
+          name: string;
+          role: components['schemas']['StaffRole'];
+        };
+      };
+    };
+    responses: {
+      /** @description Invited */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['StaffUser'];
+        };
+      };
+      /** @description Invalid input */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description A user with this email already exists */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+    };
+  };
+  updateStaffUser: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        userId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          role?: components['schemas']['StaffRole'];
+          active?: boolean;
+        };
+      };
+    };
+    responses: {
+      /** @description Updated */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['StaffUser'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description No such user in this organisation */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+      /** @description Refused, for example deactivating yourself or the last Super Admin */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+    };
+  };
+  getOrgSettings: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Settings, with defaults for missing keys */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['OrgSettings'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+    };
+  };
+  updateOrgSettings: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['OrgSettingsPatch'];
+      };
+    };
+    responses: {
+      /** @description Updated settings */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['OrgSettings'];
+        };
+      };
+      /** @description Invalid input */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+    };
+  };
+  listConsentTexts: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Versions and whether this environment refuses unapproved texts */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description REQUIRE_LEGAL_APPROVED_CONSENT (true in pilot and production) */
+            legalApprovalRequired: boolean;
+            items: components['schemas']['ConsentText'][];
+          };
+        };
+      };
+      403: components['responses']['Forbidden'];
+    };
+  };
+  createConsentText: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          version: string;
+          bodyMd: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Created */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ConsentText'];
+        };
+      };
+      /** @description Invalid input */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description This version name already exists */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+    };
+  };
+  setCurrentConsentText: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        consentTextId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Now current */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ConsentText'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description Refused because the text is not approved by Legal and approval is required */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+    };
+  };
+  listCandidates: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Candidates */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: components['schemas']['CandidateSummary'][];
+          };
+        };
+      };
+      403: components['responses']['Forbidden'];
+    };
+  };
+  requestCandidateErasure: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        candidateId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Accepted; the body says whether it waits */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['CandidateSummary'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description No such candidate in this organisation */
+      404: {
         headers: {
           [name: string]: unknown;
         };

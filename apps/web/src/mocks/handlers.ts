@@ -1,6 +1,7 @@
 import { delay, http, HttpResponse } from 'msw';
 import { apiBaseUrl } from '@/lib/env';
 import type { Schemas } from '@/lib/api/client';
+import { createAdminHandlers } from './admin-handlers';
 import { createAuthHandlers } from './auth-handlers';
 import { mockSession } from './data';
 
@@ -9,9 +10,11 @@ export interface MockOptions {
   runLatencyMs: number;
   /** Simulated autosave latency. */
   saveLatencyMs: number;
+  /** Simulated latency of staff administration calls. */
+  adminLatencyMs: number;
 }
 
-const DEFAULTS: MockOptions = { runLatencyMs: 2500, saveLatencyMs: 300 };
+const DEFAULTS: MockOptions = { runLatencyMs: 2500, saveLatencyMs: 300, adminLatencyMs: 300 };
 
 /** Fake grading, only to make the demo feel real. Not a judge: it looks for a few keywords. */
 export function fakeRun(code: string, tests: Schemas['SampleTest'][]): Schemas['RunResult'] {
@@ -67,6 +70,7 @@ export function createHandlers(options: Partial<MockOptions> = {}) {
 
   return [
     ...createAuthHandlers(),
+    ...createAdminHandlers({ latencyMs: opts.adminLatencyMs }),
     http.get(`${base}/v1/health`, () => HttpResponse.json({ status: 'ok' as const })),
 
     // The mocked clock runs 90 seconds ahead of the browser, so the offset logic is visible.
