@@ -3,11 +3,21 @@
 // by `prisma migrate deploy`. The code under test connects as app_user through the real client
 // factory, so the real grants are in force. Fixtures and checks use the owner role.
 //
-// Two tenants (A and B) hold one row in each of the 31 models. Every operation is tried as A against
-// B's rows, for every model, including the models that have no org_id and are scoped only through a
-// parent chain (for example proctor_events through its session, test_cases through their question
-// version and question). A positive control proves A still sees and changes its own rows, so a
-// filter that simply returns nothing cannot pass.
+// Two tenants (A and B) hold one row in each of the 31 models, including the models that have no
+// org_id and are scoped only through a parent chain (proctor_events through their session,
+// test_cases through their question version and question). What is covered:
+//   - For every one of the 31 models, as A against B's row: findMany, findFirst, findFirstOrThrow,
+//     findUnique, findUniqueOrThrow, count, aggregate and groupBy find nothing; update, updateMany,
+//     updateManyAndReturn, delete and deleteMany change nothing (B's rows are compared before and
+//     after). Positive controls prove A still reads and updates its own row, and that A and B
+//     between them see every row exactly once, so a filter that returns nothing cannot pass.
+//   - upsert (not generic): tried against B's row on three models only (Test, TestSection,
+//     TestCase), plus A's own row and the create branch on Test and Candidate.
+//   - Dedicated tests, on chosen models: create, createMany and createManyAndReturn, filters that
+//     try to widen the scope, cursors, deleting own rows, transactions, system scope, raw SQL, the
+//     app_user role and the HTTP path through the real guard.
+//   - Not covered, by design (README "Limits"): nested writes, re-parenting, and nested reads. One
+//     test pins that an include follows a cross-org foreign key.
 import { Controller, Get, INestApplication, NotFoundException, Param } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
@@ -323,7 +333,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       });
     });
 
-    it("TC-008 select and include return only org A's rows, through every relation", async () => {
+    it("TC-008 select and include on a filtered parent return only org A's rows (the parent is filtered; relations are followed as they are)", async () => {
       const sessions = await asA(() =>
         prisma.client.session.findMany({
           include: {
@@ -337,6 +347,30 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expect(sessions[0]?.org.id).toBe(A.orgId);
       expect(sessions[0]?.proctorEvents).toHaveLength(1);
       expect(sessions[0]?.questions[0]?.submissions).toHaveLength(1);
+    });
+
+    it("TC-008 KNOWN LIMIT (pinned, not a fix): an include follows a foreign key into another org and returns that org's row", async () => {
+      // The scope filters the top-level model only. If a foreign key crosses orgs (here a review
+      // whose reviewer is org B's user, which the database allows), the include returns B's user,
+      // password hash included. README "Limits" (c): every id written follows rule (i).
+      const G = await createTenant(owner, 'g');
+      const reviewId = G.rows.SessionReview.filter.id as string;
+      await owner.sessionReview.update({ where: { id: reviewId }, data: { reviewerId: B.userId } });
+      const review = await orgContext.runInOrg(G.orgId, () =>
+        prisma.client.sessionReview.findUnique({
+          where: { id: reviewId },
+          include: { reviewer: true },
+        }),
+      );
+      expect(review?.reviewer.id).toBe(B.userId);
+      expect(review?.reviewer.orgId).toBe(B.orgId);
+      expect(review?.reviewer.passwordHash).toBe('not-a-real-hash');
+      // Reading that user directly is still scoped: org G does not see it.
+      expect(
+        await orgContext.runInOrg(G.orgId, () =>
+          prisma.client.user.findUnique({ where: { id: B.userId } }),
+        ),
+      ).toBeNull();
     });
 
     it('TC-008 findUnique calls of both orgs in the same tick are not mixed up by batching', async () => {
@@ -634,7 +668,18 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       });
     });
 
-    it("TC-008 upsert that creates fills in org A's id, and refuses another org's", async () => {
+    it("TC-008 upsert's create branch gets org A's id when it has none, and a create for another org is refused", async () => {
+      // No orgId in the create branch: the scope fills it in.
+      const filled = await asA(
+        () =>
+          scoped('Candidate').upsert?.({
+            where: { orgId_email: { orgId: A.orgId, email: 'filled-upsert@example.test' } },
+            create: { email: 'filled-upsert@example.test', fullName: 'Filled' },
+            update: {},
+          }) as Promise<{ orgId: string }>,
+      );
+      expect(filled.orgId).toBe(A.orgId);
+      // The caller's own orgId is accepted as it is.
       const created = await asA(() =>
         prisma.client.candidate.upsert({
           where: { orgId_email: { orgId: A.orgId, email: 'new-upsert@example.test' } },
