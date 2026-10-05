@@ -254,6 +254,9 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 - An org-scoped write changes only the rows its filter selected, or the rows it creates.
 - The extension refuses, on the parent side, a nested `connect`, `set`, `connectOrCreate`, or a nested create or update that names another org (FU-DB-63).
 - A child-side `connect` (the child holds the foreign key) stays under rule (i): load the target through the scoped client first, answer 404 on a miss.
+- **Where these rules apply.**
+  - In a CANDIDATE scope, ADR 0013 CS-4 is stricter: it refuses every nested write and every relation operation outright (`include` and `select` of relations, relation filters, `_count`).
+  - The nested-write rules here, and those in 8.6, still apply to STAFF scopes, plain org scopes, SERVICE scopes and system scope.
 
 ### 8.3 Schema and row-level security (owner decision: Delivery Lead)
 
@@ -262,25 +265,29 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 
 ### 8.4 Scopes inside the API (architect detail)
 
-**Every scope has an actor.** The actor is part of the scope.
+**Every scope has an actor**, set by the entry function. A caller cannot pass the actor, so it cannot forge it.
+- ADR 0013 section 5.10, rule CS-4 (PR #39), is the one place that defines the two session actors: their entries, filters, allowlists and tests. This section only places them among the org scopes.
+- If the two ADRs disagree, CS-4 wins for session scopes, and this table is corrected.
 
-| Actor | Entered by | Who calls it |
-| --- | --- | --- |
-| STAFF | `runAsUser({ orgId, userId, role })` | `OrgContextInterceptor`, and auth code once the user is known |
-| CANDIDATE | `runAsCandidate(orgId, sessionId)` | `CandidateSessionGuard` only. The call-site allow-list (8.5) limits it to the guard file. |
-| SERVICE | `runInOrg(orgId)` or `runInOrg(orgId, { sessionId })` | Job processors, and narrowing from system scope |
-| SYSTEM | `runSystem(reason)` | The three reasons below |
+| Actor | Entered by | Allowed from | Who calls it |
+| --- | --- | --- | --- |
+| STAFF | `runAsUser({ orgId, userId, role })` | no scope, or system | `OrgContextInterceptor`, and auth code once the user is known |
+| Org scope, no session | `runInOrg(orgId)` | no scope, or system | Cross-session jobs (similarity, dashboards, retention follow-up), and narrowing from system scope |
+| CANDIDATE (ADR 0013 CS-4) | `runAsCandidate(oid, sid)` | no scope only | `CandidateSessionGuard` only |
+| SERVICE (ADR 0013 CS-4) | `runAsSessionJob(oid, sid)` | no scope, or system `BACKGROUND_JOB` only | `SessionJobProcessor`, the one job-processor base class, only |
+| SYSTEM | `runSystem(reason)` | no scope | The three reasons below |
 
 **A scope only narrows.** Each row below has its own test. A row not listed is refused.
 
 | Current scope | Entering | Result |
 | --- | --- | --- |
-| None | `runAsUser`, `runInOrg` (with or without `sessionId`), or `runSystem(reason)` | Allowed |
+| None | `runAsUser`, `runInOrg`, `runSystem(reason)` | Allowed |
 | None | `runAsCandidate(A, S)` | Allowed (the guard) |
-| Any scope | `runAsCandidate` | Refused. The guard enters it only from no scope. |
+| None | `runAsSessionJob(A, S)` | Allowed (`SessionJobProcessor`) |
 | SYSTEM, reason R | `runAsUser` or `runInOrg(A)` | Allowed (narrows) |
-| SYSTEM, `BACKGROUND_JOB` or `RETENTION_ERASURE` | `runInOrg(A, { sessionId: S })` | Allowed (narrows: the session-job path) |
-| SYSTEM, `AUTH_BOOTSTRAP` | `runInOrg(A, { sessionId: S })` | Refused |
+| SYSTEM, `BACKGROUND_JOB` | `runAsSessionJob(A, S)` | Allowed (narrows: the session-job path) |
+| SYSTEM, `AUTH_BOOTSTRAP` or `RETENTION_ERASURE` | `runAsSessionJob` | Refused. Retention enqueues per-session jobs instead. |
+| SYSTEM, any reason | `runAsCandidate` | Refused |
 | SYSTEM, reason R | `runSystem(R)` | Allowed, no change |
 | SYSTEM, reason R | `runSystem` with a different reason | Refused |
 | Any org scope | `runSystem` | Refused |
@@ -288,39 +295,43 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 | STAFF, user U in org A | `runAsUser(U)` | Allowed, no change |
 | STAFF, user U | `runAsUser` naming another user | Refused |
 | STAFF, user U in org A | `runInOrg(A)` | Allowed; the actor stays STAFF with user U |
-| STAFF | `runInOrg(A, { sessionId: S })` | Refused. Staff code never enters a session scope; staff reads of a session use the org scope and service checks. |
-| SERVICE in org A, no session | `runInOrg(A, { sessionId: S })` | Allowed (narrows: a job processor) |
-| SERVICE in org A, no session | `runAsUser` | Refused |
-| SERVICE in org A, session S | `runInOrg(A, { sessionId: S })` or `runInOrg(A)` | Allowed, no change (S stays) |
-| SERVICE in org A, session S | another session, `runAsUser` | Refused |
-| CANDIDATE in org A, session S | `runAsCandidate(A, S)`, `runInOrg(A, { sessionId: S })` or `runInOrg(A)` | Allowed, no change. The actor stays CANDIDATE and S stays. |
-| CANDIDATE | another session, `runAsUser`, or anything that would make it SERVICE or STAFF | Refused |
+| STAFF, or org scope with no session | `runAsCandidate` or `runAsSessionJob` | Refused. A plain org scope never narrows into a session scope; staff reads of a session use the org scope and service checks. |
+| CANDIDATE or SERVICE in org A, session S | `runInOrg(A)` | Allowed; S stays and the actor stays |
+| CANDIDATE in org A, session S | `runAsCandidate(A, S)` | Allowed, no change |
+| SERVICE in org A, session S | `runAsSessionJob(A, S)` | Allowed, no change |
+| CANDIDATE | `runAsSessionJob` | Refused |
+| SERVICE | `runAsCandidate` | Refused |
+| CANDIDATE or SERVICE | `runAsUser`, `runSystem`, or any call that drops or changes S | Refused |
 
-PR #30 already refuses the org switch and the system-from-org case (`org-context.ts`, `enter`). The other rows are db-engineer work. The actor model, the guard flow and the candidate allowlist are defined in ADR 0013 section 5.10 (PR #39); this table must match it.
+PR #30 already refuses the org switch and the system-from-org case (`org-context.ts`, `enter`). The other rows are db-engineer work.
 
-**System scope has three closed reasons.** A new reason needs an amendment to this ADR.
+No rule in this ADR depends on a plain org scope narrowing into a session scope. There is no `runInOrg(A, { sessionId })` entry: session scopes are entered only through the two CS-4 entries.
+
+**System scope has three closed reasons.** A new reason needs an amendment to this ADR. ADR 0013 adds none: start-test and grading are session jobs (below).
 
 | Reason | Allowed for |
 | --- | --- |
 | `AUTH_BOOTSTRAP` | Lookups before the caller's org is known. On the staff side: login by email, refresh-token rotation and set-password tokens. On the candidate side: only the invitation-link and OTP exchange, before a candidate session JWT exists. Narrow to `runAsUser` or `runInOrg(A)` as soon as the org is known. It cannot enter a session scope. |
 | `BACKGROUND_JOB` | Scheduled discovery across orgs only. See the job rules below. |
-| `RETENTION_ERASURE` | Selecting what is due only. DB-06 deletes each session inside `runInOrg(A, { sessionId })`. |
+| `RETENTION_ERASURE` | Selecting what is due only. Deletion of each session runs as a per-session job (`runAsSessionJob`, entered from no scope), not directly from this scope. |
 
 **Background jobs.**
 - The job payload carries `orgId`, and `sessionId` when the job concerns a session.
-- The processor loads its target inside `runInOrg(orgId)`, or `runInOrg(orgId, { sessionId })` for a session job, with the actor SERVICE. If the target is missing, or the `sessionId` does not belong to the `orgId`, the job is dropped.
+- A session job runs in `runAsSessionJob(orgId, sessionId)` through `SessionJobProcessor` (actor SERVICE).
+- A cross-session job (similarity, dashboards, retention follow-up) runs in plain `runInOrg(orgId)`.
+- Either way, the processor loads its target in scope. If the target is missing, or the `sessionId` does not belong to the `orgId`, the job is dropped.
 - That check catches a mismatched payload. It does not stop an attacker who can write both fields, so the trust boundary is Redis access control and network isolation (ADR 0001 C-7). Signed job payloads are an option if the owner wants more.
 
 **Routes behind `CandidateSessionGuard` use no system scope.**
 - The OTP exchange is the one candidate route outside the guard (ADR 0013 section 5.10). It runs under `AUTH_BOOTSTRAP`, together with resolving the invitation link.
-- The guard verifies the candidate JWT, then enters `runAsCandidate(oid, sid)` from no scope.
+- The guard verifies the candidate JWT, then enters `runAsCandidate(oid, sid)` from no scope, using the verified claims.
 - Inside that scope it loads the session with `id = sid` and checks `auth_epoch` against the token's `epoch`.
 - A session in another org is simply not found, which answers 401.
 
-**Grading and question assignment.**
-- ADR 0013 needs hidden-test grading and question assignment at start, which read data that a candidate scope may not read. This ADR adds no system reason and no exception for them. `runSystem` stays refused from every org scope, including a candidate scope.
-- They run either as session jobs (actor SERVICE, entered with `runInOrg(A, { sessionId })` from no scope), or as a named service unit of work as defined in ADR 0013 section 5.10, provided it fits the table above.
-- If ADR 0013 needs a synchronous step inside a candidate request that leaves the CANDIDATE scope, it asks for an explicit amendment to this section. That amendment names the call site and the new row.
+**Grading and start-test add no system reason.**
+- Hidden-test grading (`grade-answer`) and start-test (`start-session`, which includes question assignment) are session jobs with actor SERVICE (ADR 0013 CS-4). The route enqueues the job and awaits it.
+- `runSystem` stays refused from every org scope, including a candidate scope, and the reason set stays closed.
+- Any future synchronous exception inside a candidate request needs an explicit amendment to this section, naming the call site and the new row.
 
 There is no org-provisioning reason (8.6, 8.9).
 
@@ -333,13 +344,13 @@ There is no org-provisioning reason (8.6, 8.9).
 - **What each scope allows:**
   - **System scope:** the raw SQL must serve the active system reason. An example is the `AUTH_BOOTSTRAP` failed-login counter.
   - **Org scope without a session:** the SQL itself must filter by `org_id`. A table without `org_id` must be joined along its 8.7 scope path.
-  - **Any scope carrying a `sessionId`:** raw SQL is refused, for actor CANDIDATE and actor SERVICE alike. A session job that needs raw SQL needs an amendment to this ADR; a named call site alone is not enough. ADR 0013 CS-4 must say the same.
+  - **Any scope carrying a `sessionId`:** raw SQL is refused, for actor CANDIDATE (`runAsCandidate`) and actor SERVICE (`runAsSessionJob`) alike. A session job that needs raw SQL needs an amendment to this ADR; a named call site alone is not enough. ADR 0013 CS-4 must say the same.
 - **Never on organizations.** Raw SQL never writes `organizations`, in any scope.
 - Model queries inside `runRawSql` stay scoped.
 - The `runRawSql` reason stays free text for the reviewer.
-- **Call-site allow-list.** A test of every `runSystem`, `runInOrg`, `runAsCandidate` and `runRawSql` call site lands with FU-DB-58 (BE-03).
+- **Call-site allow-list.** A test of every `runSystem`, `runInOrg`, `runAsCandidate`, `runAsSessionJob` and `runRawSql` call site lands with FU-DB-58 (BE-03).
   - For each raw call, the list records the pair (call site, system reason or org scope).
-  - `runAsCandidate` is allowed only in the `CandidateSessionGuard` file.
+  - Only two call sites may enter a session scope: `runAsCandidate` in the `CandidateSessionGuard` file, and `runAsSessionJob` in the `SessionJobProcessor` base class.
   - A new call site updates the list, and code-reviewer checks it.
 
 ### 8.6 Organization (architect detail)
@@ -360,7 +371,7 @@ There is no org-provisioning reason (8.6, 8.9).
 - Refused: `create`, `createMany`, `createManyAndReturn`, `upsert`, `delete` and `deleteMany`.
 - Any operation the extension does not recognise throws.
 
-**Nested writes.** A query extension sees only the top-level model, so the extension walks the `data` of every write at any depth.
+**Nested writes.** A query extension sees only the top-level model, so the extension walks the `data` of every write at any depth. In a CANDIDATE scope, ADR 0013 CS-4 already refuses every nested write and relation operation. The rules below matter for STAFF, plain org, SERVICE and system scopes.
 - On any relation whose target is `Organization` it refuses `create`, `createMany`, `connectOrCreate`, `upsert`, `update`, `updateMany`, `delete`, `deleteMany`, `set` and `disconnect`.
 - Org settings change only through a top-level `organization.update`, in the service that holds the authorization check for org settings.
 - Examples it refuses: `user.create({ data: { organization: { create: … } } })` and `test.update({ data: { organization: { update: { id } } } })`.
@@ -480,7 +491,9 @@ How the check runs:
 - **db-engineer:**
   - 8.1: `RULE_I_REFERENCES` and its test.
   - 8.2: FU-DB-63.
-  - 8.4: the actor in the scope (STAFF, CANDIDATE, SERVICE, SYSTEM), `runAsCandidate`, and the transition table with one test per row.
+  - 8.4: the actor in the scope (STAFF, plain org, CANDIDATE, SERVICE, SYSTEM), set by the entry function.
+  - 8.4: both session entries, `runAsCandidate` (guard only, from no scope) and `runAsSessionJob` (`SessionJobProcessor` only, from no scope or `BACKGROUND_JOB`), per ADR 0013 CS-4.
+  - 8.4: the transition table, with one test per row.
   - 8.5: `runRawSql` requires a scope, and is refused in a `sessionId` scope.
   - 8.6: `Organization` deny by default, no nested `Organization` writes, no write that moves a row to another org, and a limit on importers of the raw factory client.
   - 8.8: FU-DB-65 and FU-DB-66, including the REPLICATION, membership and ownership checks.
@@ -489,7 +502,9 @@ How the check runs:
   - Use only the three reasons in 8.4.
   - Build job payloads and processors per `BACKGROUND_JOB` in 8.4.
   - Build the `set-password` job processor in 8.9: a conditional rotate, mail sent in process, no link in any queue or log.
-  - Run grading and question assignment per 8.4 and ADR 0013 section 5.10.
+  - Build `SessionJobProcessor`.
+  - Run grading (`grade-answer`) and start-test (`start-session`) as session jobs (ADR 0013 CS-4).
+  - Retention deletes each session through a per-session job.
   - Land the call-site allow-list with FU-DB-58 (BE-03).
   - DB-06 and the retention job follow 8.4.
 - **Deploy (DEP-01, DEP-03):**
