@@ -4,7 +4,7 @@ import { z } from 'zod';
 /*
  * Web-local schemas for FR-101, FR-102 and FR-107. They reuse the shared constants and schemas and
  * only add what packages/shared does not have yet; the needed shared additions are listed as
- * [ARC-02] in docs/followups.md.
+ * [ARC-02] in docs/followups/frontend.md.
  */
 
 /** ADR 0003 section 1: 16 random base32 characters. Shown as groups of 4; spaces and dashes are ignored. */
