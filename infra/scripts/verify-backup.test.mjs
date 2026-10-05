@@ -113,6 +113,17 @@ describe('DB-07 guards (NFR-03)', () => {
     assert.match(r.stderr, /--backup must be a file name/);
   });
 
+  it('restore.sh with a missing option value exits 1, never the "counts differ" code 2', async () => {
+    for (const args of [['--target-db'], ['--target-db', 'x', '--backup']]) {
+      const r = await run(RESTORE, args, {
+        PGHOST: 'localhost',
+        PGUSER: 'u',
+        S3_BACKUP_BUCKET: 'b',
+      });
+      assert.equal(r.status, 1, args.join(' '));
+    }
+  });
+
   it('restore.sh refuses --skip-erasures on a remote restore (it would bring erased candidates back)', async () => {
     const r = await run(RESTORE, ['--target-db', 'x', '--skip-erasures'], {
       PGHOST: 'db.example.com',
@@ -189,6 +200,7 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
       S3_ACCESS_KEY_ID: 'drill',
       S3_SECRET_ACCESS_KEY: SECRET,
       RESTORE_CREATE_APP_USER: '1',
+      AWS_MAX_ATTEMPTS: '1',
       PG_BIN_DIR: clientShims(pg, mkdtempSync(join(tmpdir(), 'pg-shims-'))),
     };
   });
@@ -338,12 +350,13 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
       'Erased|true',
     );
     assert.equal(q(`SELECT device_info::text FROM sessions WHERE id IN (${erasedSessions})`), '{}');
-    // session credentials fenced (ADR 0004 9.7): old tokens and the HMAC key do not come back
+    // Session credentials fenced (ADR 0004 9.7): the epoch jumps past anything issued between the
+    // backup and the erasure, and the HMAC key does not come back.
     assert.equal(
       q(
         `SELECT auth_epoch || '|' || (hmac_key_enc IS NULL) || '|' || (report_key IS NULL) || '|' || (retention_anchor_at IS NOT NULL) FROM sessions WHERE id IN (${erasedSessions})`,
       ),
-      '1|true|true|true',
+      '1000000|true|true|true',
     );
     assert.equal(
       q(
@@ -397,6 +410,10 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
     // Completed after the oldest remaining backup: must survive.
     put(`db/erasure-list/${stampDaysAgo(2)}-${recent}.json`);
     put(`db/erasure-completed/${stampDaysAgo(1)}-${recent}.json`);
+    // The reviewer's case: requested 40 days ago, completed 1 day ago. Backups from days 2 to 14 still hold the data.
+    const slow = '66666666-6666-4666-8666-666666666666';
+    put(`db/erasure-list/${stampDaysAgo(40)}-${slow}.json`);
+    put(`db/erasure-completed/${stampDaysAgo(1)}-${slow}.json`);
     // Files that are not ours under the dumps prefix are never touched.
     put('db/dumps/notes.txt');
     put('db/dumps/codeproctor-x.dump.gz');
@@ -406,6 +423,7 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
     assert.match(list, new RegExp(held), 'a held erasure is never pruned');
     assert.doesNotMatch(list, new RegExp(done));
     assert.match(list, new RegExp(recent));
+    assert.match(list, new RegExp(slow), 'old request, recent completion: kept');
     assert.match(list, new RegExp(ERASED_ID));
     assert.ok(
       !keys().some((k) => k.includes(`erasure-completed/${stampDaysAgo(39)}`)),
@@ -441,9 +459,45 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
     assert.match(r.stderr, /row counts differ/);
   });
 
-  it('NFR-03: a failure the script did not plan (here: no connection) is exit 1, never 2', async () => {
+  it('NFR-03: a server that cannot be reached says so and exits 1', async () => {
     const r = await run(RESTORE, ['--target-db', 'never_made'], { ...env, PGPORT: '1' });
     assert.equal(r.status, 1);
+    assert.match(r.stderr, /cannot reach the database server/);
+  });
+
+  it('NFR-03: a command that fails with status 2 on its own is still exit 1, not "counts differ"', async () => {
+    const r = await run(RESTORE, ['--target-db', 'never_made2'], {
+      ...env,
+      FAKE_PSQL_FAIL_ON: 'pg_database',
+      FAKE_PSQL_FAIL_STATUS: '2',
+    });
+    assert.equal(r.status, 1, r.stderr);
+  });
+
+  it('ADR 0004 R-7: a restore that cannot read the erasure list fails and says not to use the database', async () => {
+    s3.faults.failList = true;
+    // The latest dump is named by listing, so name it.
+    const dump = keys()
+      .filter((k) => /dump\.gz$/.test(k) && !k.includes('codeproctor-x'))
+      .sort()
+      .at(-1);
+    const r = await run(
+      RESTORE,
+      ['--target-db', 'restored_nolist', '--backup', dump.replace('db/dumps/', '')],
+      env,
+    );
+    s3.faults.failList = false;
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /cannot list|cannot read the erasure list/);
+    assert.doesNotMatch(r.stderr, /re-applied 0 erasure/);
+  });
+
+  it('ADR 0004 R-7: an erasure-list key that does not parse stops the restore (it may be an erasure)', async () => {
+    put('db/erasure-list/hand-written-by-someone.json');
+    const r = await run(ERASURES, ['list'], env);
+    s3.objects.delete('drill-backups/db/erasure-list/hand-written-by-someone.json');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /is not named/);
   });
 
   it('NFR-03: a failed erasure step says the database must not be used', async () => {
@@ -488,10 +542,67 @@ describe('DB-07 dump safety (NFR-03)', { skip }, () => {
   });
 });
 
-describe('DB-07 version check (NFR-03)', () => {
+describe('DB-07 truncated dumps (NFR-03)', { skip }, () => {
+  it('a pg_dump that exits 0 but writes a cut-off archive is refused, nothing uploaded', async () => {
+    const pg = startPostgres();
+    const s3 = await startFakeS3();
+    try {
+      applyMigrations(pg, 'source');
+      loadFixture(pg, 'source');
+      const real = clientShims(pg, mkdtempSync(join(tmpdir(), 'pg-real-')));
+      const dir = mkdtempSync(join(tmpdir(), 'pg-trunc-'));
+      const { writeFileSync } = await import('node:fs');
+      writeFileSync(
+        join(dir, 'pg_dump'),
+        `#!/bin/sh\n${real}/pg_dump "$@" || exit $?\nfor a in "$@"; do case "$a" in --file=*) f=\${a#--file=}; head -c 4000 "$f" > "$f.cut"; mv "$f.cut" "$f";; esac; done\ncase "$1" in --version) ;; esac\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      const r = await run(BACKUP, [], {
+        ...pg.env,
+        PGDATABASE: 'source',
+        S3_BACKUP_BUCKET: 'b',
+        S3_ENDPOINT: `http://127.0.0.1:${s3.port}`,
+        S3_FORCE_PATH_STYLE: 'true',
+        S3_ACCESS_KEY_ID: 'x',
+        S3_SECRET_ACCESS_KEY: 'y',
+        PG_BIN_DIR: dir,
+      });
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /truncated|damaged|cannot read the dump|table data entries/);
+      assert.equal(s3.objects.size, 0, 'nothing uploaded');
+    } finally {
+      pg.stop();
+      await s3.close();
+    }
+  });
+
+  it('an empty database is never "backed up": a dump with no tables is refused', async () => {
+    const pg = startPostgres();
+    const s3 = await startFakeS3();
+    try {
+      const real = clientShims(pg, mkdtempSync(join(tmpdir(), 'pg-real-')));
+      const r = await run(BACKUP, [], {
+        ...pg.env,
+        PGDATABASE: 'postgres',
+        S3_BACKUP_BUCKET: 'b',
+        S3_ENDPOINT: `http://127.0.0.1:${s3.port}`,
+        S3_FORCE_PATH_STYLE: 'true',
+        S3_ACCESS_KEY_ID: 'x',
+        S3_SECRET_ACCESS_KEY: 'y',
+        PG_BIN_DIR: real,
+      });
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /table data entries/);
+      assert.equal(s3.objects.size, 0);
+    } finally {
+      pg.stop();
+      await s3.close();
+    }
+  });
+});
+
+describe('DB-07 version check (NFR-03)', { skip }, () => {
   it('backup.sh refuses a pg_dump whose major version differs from the server', async () => {
-    const skipHere = drillUnavailable() ?? false;
-    if (skipHere) return;
     const pg = startPostgres();
     try {
       const dir = mkdtempSync(join(tmpdir(), 'pg-fake-'));

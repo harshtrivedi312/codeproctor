@@ -35,7 +35,10 @@ case "$RETENTION_DAYS" in '' | *[!0-9]*) die "BACKUP_RETENTION_DAYS must be a wh
 [ "$RETENTION_DAYS" -ge 1 ] || die "BACKUP_RETENTION_DAYS must be at least 1."
 
 WORK=$(mktemp -d)
+# The work directory holds a plaintext dump of candidate data: remove it on every way out,
+# signals included (dash runs the EXIT trap after `exit`, not after a signal by itself).
 trap 'rm -rf "$WORK"' EXIT
+trap 'exit 1' INT TERM HUP
 init_s3
 
 stamp=$(utc_stamp)
@@ -93,8 +96,9 @@ log "uploaded $DUMP_PREFIX$name ($size bytes)."
 # 5. Prune, only now that the new backup is safely stored. Dumps older than the retention
 #    period go; the newest dump is never pruned, so a stalled schedule cannot empty the bucket.
 cutoff=$(stamp_days_ago "$RETENTION_DAYS")
-newest=$(list_keys "$DUMP_PREFIX" | sed -n "s#^$DUMP_PREFIX\\(codeproctor-$STAMP_RE\\)\\.dump\\.gz\$#\\1#p" | sort | tail -1)
-list_keys "$DUMP_PREFIX" | while read -r key; do
+load_keys "$DUMP_PREFIX"
+newest=$(printf '%s\n' "$KEYS" | sed -n "s#^$DUMP_PREFIX\\(codeproctor-$STAMP_RE\\)\\.dump\\.gz\$#\\1#p" | sort | tail -1)
+printf '%s\n' "$KEYS" | while read -r key; do
   base=${key#"$DUMP_PREFIX"}
   case "$base" in codeproctor-*) ;; *) continue ;; esac
   keystamp=$(printf '%s' "$base" | sed -n "s#^codeproctor-\\($STAMP_RE\\)\\..*#\\1#p")
@@ -109,7 +113,8 @@ done
 # 6. The erasure list only needs entries whose erasure COMPLETED after the oldest backup that is
 #    left (an erasure finished earlier is already in every remaining backup). One day of margin.
 #    Entries not marked complete are never pruned (see erasure-list.sh).
-oldest=$(list_keys "$DUMP_PREFIX" | sed -n "s#^$DUMP_PREFIX\\(codeproctor-$STAMP_RE\\)\\.dump\\.gz\$#\\1#p" | sort | head -1)
+load_keys "$DUMP_PREFIX"
+oldest=$(printf '%s\n' "$KEYS" | sed -n "s#^$DUMP_PREFIX\\(codeproctor-$STAMP_RE\\)\\.dump\\.gz\$#\\1#p" | sort | head -1)
 oldest=${oldest#codeproctor-}
 if [ -n "$oldest" ]; then
   oday=$(printf '%s' "$oldest" | cut -c1-8)

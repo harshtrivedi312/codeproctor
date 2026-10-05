@@ -13,7 +13,7 @@ the nightly workflow (below). Tests: `infra/scripts/verify-backup.test.mjs`.
 
 | Piece | What it does |
 | --- | --- |
-| `infra/backup/backup.sh` | `pg_dump` (custom format) piped through gzip. It checks that the gzip and the dump are readable and that every table has a data entry. It uploads `dumps/codeproctor-<UTC stamp>.dump.gz`, `.sha256` and `.counts.tsv` to the backup bucket, checks the stored size, then deletes dumps older than 14 days and erasure-list entries that no remaining backup needs. The newest dump is never pruned. |
+| `infra/backup/backup.sh` | `pg_dump` (custom format) to a file, then gzip. It checks that the gzip and the dump are readable and that every table has a data entry. It uploads `dumps/codeproctor-<UTC stamp>.dump.gz`, `.sha256` and `.counts.tsv` to the backup bucket, checks the stored size, then deletes dumps older than 14 days and erasure-list entries that no remaining backup needs. The newest dump is never pruned. |
 | `infra/backup/restore.sh` | Downloads a named backup (or the latest), verifies the checksum, restores into a **new** database, compares row counts with the counts taken at backup time, then re-applies the erasure list. Never restores over an existing database and never drops one. |
 | `infra/backup/erasure-list.sh` | The erased-candidate list kept outside the database and its backups (see below). |
 | Nightly workflow (proposed to the architecture hub, which owns CI config; not in this PR) | 02:17 UTC every night: backs up staging with repository secrets, then restores the new backup into a throwaway Postgres 16 service container and compares counts. Until it lands, nothing schedules the backup (FU-DBB-07). |
@@ -41,7 +41,7 @@ erased candidates are kept in the backup bucket under `<prefix>erasure-list/`, o
 database and its dumps. One object per erasure request, named `<UTC stamp>-<candidate uuid>.json`,
 holding the id and time only (no name or email). `restore.sh` re-applies **every** entry after the
 restore; the SQL is idempotent (`infra/backup/reapply-erasures.sql`), it follows C-17 (the consent
-record is kept), it also bumps `sessions.auth_epoch` and clears `hmac_key_enc` and `report_key` so
+record is kept), it also raises `sessions.auth_epoch` by 1,000,000 (past any epoch issued between the backup and the erasure) and clears `hmac_key_enc` and `report_key` so
 old candidate tokens and keys do not come back, and it does not touch object storage (objects
 already deleted stay deleted). Restored rows can still point at deleted objects until the retention
 jobs run.
@@ -53,8 +53,8 @@ The erasure service (DB-06) calls, in this order:
 2. `erasure-list.sh complete <uuid>` once the candidate row is anonymised and `ERASURE_COMPLETED` is
    written. An erasure can finish weeks after the request (review or appeal hold, the re-run after
    the fence, anonymisation at day 28), and every backup taken until then still holds the personal
-   data. So `backup.sh` prunes an entry only when its **completion** is older than the oldest remaining
-   backup plus one day, and never prunes an entry without a completion marker.
+   data. So `backup.sh` prunes an entry only when its **completion** is more than a day older than the oldest remaining
+   backup, and never prunes an entry without a completion marker.
 
 Known gaps until DB-06 lands (FU-DBB-01): re-application erases every session of the candidate even if a
 review or appeal hold still protects it, anonymises the candidate at once instead of at day 28, and sets

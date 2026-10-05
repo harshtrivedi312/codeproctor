@@ -44,12 +44,13 @@ WHERE session_review_id IN (
         SELECT id FROM session_reviews WHERE session_id IN (SELECT id FROM _reapply_sessions))
   AND (resolution_note IS NOT NULL OR reason <> 'Erased');
 
--- Session credentials (ADR 0004 9.7 fence): a restore brings back the old epoch and HMAC key, so a
--- candidate token issued before the erasure would work again. The epoch is bumped on every run
--- (harmless), which invalidates any token.
+-- Session credentials (ADR 0004 9.7 fence): a restore brings back the old epoch and HMAC key. Every
+-- OTP success raises auth_epoch (ADR 0002, ADR 0013), so a token issued after the backup carries an
+-- epoch higher than the restored one. A +1 bump could land on exactly that value; jumping by a
+-- million puts the epoch past anything issued in the backup window. Applied on every run (harmless).
 UPDATE sessions
 SET device_info = '{}',
-    auth_epoch = auth_epoch + 1,
+    auth_epoch = auth_epoch + 1000000,
     hmac_key_enc = NULL,
     report_key = NULL,
     retention_anchor_at = COALESCE(retention_anchor_at, (

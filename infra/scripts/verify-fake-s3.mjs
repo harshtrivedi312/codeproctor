@@ -6,8 +6,10 @@ import { createServer } from 'node:http';
 const xml = (body) => `<?xml version="1.0" encoding="UTF-8"?>${body}`;
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
-/** @returns {Promise<{ port: number, objects: Map<string, Buffer>, close: () => Promise<void> }>} */
+/** @returns {Promise<{ port: number, faults: { failList: boolean }, objects: Map<string, Buffer>, close: () => Promise<void> }>} */
 export async function startFakeS3() {
+  /** Set to true to make every listing fail with a 500. */
+  const faults = { failList: false };
   /** @type {Map<string, Buffer>} key = "bucket/key" */
   const objects = new Map();
   const server = createServer((req, res) => {
@@ -29,6 +31,7 @@ export async function startFakeS3() {
         return send(204);
       }
       if (req.method === 'GET' && url.searchParams.get('list-type') === '2') {
+        if (faults.failList) return send(500, xml('<Error><Code>InternalError</Code></Error>'));
         const bucket = path.replace(/\/$/, '');
         const prefix = url.searchParams.get('prefix') ?? '';
         const keys = [...objects.keys()]
@@ -72,6 +75,7 @@ export async function startFakeS3() {
   const { port } = /** @type {import('node:net').AddressInfo} */ (server.address());
   return {
     port,
+    faults,
     objects,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };

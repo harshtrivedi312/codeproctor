@@ -62,11 +62,16 @@ s3cp() {
   fi
 }
 
-# list_keys <prefix>: one key per line, all pages.
-list_keys() {
-  s3api list-objects-v2 --bucket "$BUCKET" --prefix "$1" --query 'Contents[].Key' --output text |
-    tr '\t' '\n' | sed '/^None$/d;/^$/d'
+# load_keys <prefix>: sets KEYS to every key under the prefix, one per line. It runs in the main
+# shell and dies when the listing fails: a pipeline would hide the failure (POSIX sh has no
+# pipefail), and a restore that cannot read the erasure list must not look like an empty list.
+load_keys() {
+  s3api list-objects-v2 --bucket "$BUCKET" --prefix "$1" --query 'Contents[].Key' --output text > "$WORK/list.out" ||
+    die "cannot list the bucket under $1."
+  KEYS=$(tr '\t' '\n' < "$WORK/list.out" | sed '/^None$/d;/^$/d')
 }
+# keys_grep <grep args>: greps KEYS.
+keys_grep() { printf '%s\n' "$KEYS" | grep "$@"; }
 
 utc_stamp() { date -u +%Y%m%dT%H%M%SZ; }
 
@@ -99,10 +104,11 @@ require_matching_client() {
   if [ -n "${PG_BIN_DIR:-}" ]; then PATH=$PG_BIN_DIR:$PATH; export PATH; fi
   # An empty first argument means "use PGDATABASE from the environment", so it never appears in argv.
   if [ -n "${1:-}" ]; then
-    server_major=$(psql --no-psqlrc -X -At -v ON_ERROR_STOP=1 -d "$1" -c 'SHOW server_version_num' | cut -c1-2)
+    version_num=$(psql --no-psqlrc -X -At -v ON_ERROR_STOP=1 -d "$1" -c 'SHOW server_version_num') || die "cannot reach the database server."
   else
-    server_major=$(psql --no-psqlrc -X -At -v ON_ERROR_STOP=1 -c 'SHOW server_version_num' | cut -c1-2)
+    version_num=$(psql --no-psqlrc -X -At -v ON_ERROR_STOP=1 -c 'SHOW server_version_num') || die "cannot reach the database server."
   fi
+  server_major=$(printf '%s' "$version_num" | cut -c1-2)
   for tool in $2; do
     client_major=$("$tool" --version | sed -n 's/^[a-z_]* (PostgreSQL) \([0-9]*\).*/\1/p')
     [ "$server_major" = "$client_major" ] ||

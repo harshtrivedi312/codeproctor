@@ -29,8 +29,16 @@ backup=latest
 reapply=yes
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --target-db) target=${2:-}; shift 2 || die "--target-db needs a value." ;;
-    --backup) backup=${2:-}; shift 2 || die "--backup needs a value." ;;
+    --target-db)
+      [ "$#" -ge 2 ] || die "--target-db needs a value."
+      target=$2
+      shift 2
+      ;;
+    --backup)
+      [ "$#" -ge 2 ] || die "--backup needs a value."
+      backup=$2
+      shift 2
+      ;;
     --skip-erasures)
       # Skipping brings erased candidates back. Drills only: never with a remote target.
       [ "${RESTORE_ALLOW_REMOTE:-}" != "1" ] || die "--skip-erasures is for local drills only."
@@ -69,10 +77,12 @@ finish() {
   exit "$rc"
 }
 trap finish EXIT
+trap 'exit 1' INT TERM HUP
 init_s3
 
 if [ "$backup" = latest ]; then
-  backup=$(list_keys "$DUMP_PREFIX" | sed -n "s#^$DUMP_PREFIX\\(codeproctor-$STAMP_RE\\.dump\\.gz\\)\$#\\1#p" | sort | tail -1)
+  load_keys "$DUMP_PREFIX"
+  backup=$(printf '%s\n' "$KEYS" | sed -n "s#^$DUMP_PREFIX\\(codeproctor-$STAMP_RE\\.dump\\.gz\\)\$#\\1#p" | sort | tail -1)
   [ -n "$backup" ] || die "the bucket has no backup under $DUMP_PREFIX."
 fi
 printf '%s' "$backup" | grep -q "^codeproctor-$STAMP_RE\\.dump\\.gz\$" || die "--backup must be a file name like codeproctor-20261005T020000Z.dump.gz."
@@ -124,7 +134,8 @@ fi
 # 5. Re-apply the erasures (ADR 0004 R-7). Every entry on the list is applied, not just those
 #    after the backup stamp: re-applying one that is already in the backup changes nothing.
 if [ "$reapply" = yes ]; then
-  sh "$here/erasure-list.sh" list > "$WORK/erasures.txt"
+  sh "$here/erasure-list.sh" list > "$WORK/erasures.txt" ||
+    die "cannot read the erasure list. Do not use database $target: erased candidates may be back in it."
   n=$(wc -l < "$WORK/erasures.txt" | tr -d ' ')
   {
     printf 'CREATE TEMP TABLE _reapply_erasures (candidate_id uuid PRIMARY KEY, erased_at timestamptz NOT NULL);\n'
@@ -133,7 +144,7 @@ if [ "$reapply" = yes ]; then
       iso=$(printf '%s' "$stamp" | sed 's/^\(....\)\(..\)\(..\)T\(..\)\(..\)\(..\)Z$/\1-\2-\3T\4:\5:\6Z/')
       printf "INSERT INTO _reapply_erasures VALUES ('%s', '%s') ON CONFLICT DO NOTHING;\n" "$id" "$iso"
     done < "$WORK/erasures.txt"
-    printf '\\i %s/reapply-erasures.sql\n' "$here"
+    printf '\\i '"'"'%s/reapply-erasures.sql'"'"'\n' "$here"
   } > "$WORK/reapply.sql"
   psql --no-psqlrc -X -q -v ON_ERROR_STOP=1 -d "$target" -f "$WORK/reapply.sql" > /dev/null ||
     die "erasures were NOT re-applied. Do not use database $target: it holds personal data that was erased."

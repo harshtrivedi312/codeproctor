@@ -125,7 +125,7 @@ export function clientShims(pg, dir) {
   const realPsql = spawnSync('sh', ['-c', 'command -v psql'], { encoding: 'utf8' }).stdout.trim();
   writeFileSync(
     join(dir, 'psql'),
-    `#!/bin/sh\ncase "$*" in *"\${FAKE_PSQL_FAIL_ON:-@@never@@}"*) echo "psql: simulated failure" >&2; exit 3 ;; esac\nexec ${realPsql} "$@"\n`,
+    `#!/bin/sh\ncase "$*" in *"\${FAKE_PSQL_FAIL_ON:-@@never@@}"*) echo "psql: simulated failure" >&2; exit "\${FAKE_PSQL_FAIL_STATUS:-3}" ;; esac\nexec ${realPsql} "$@"\n`,
     { mode: 0o755 },
   );
   if (installed.match(/\) (\d+)/)?.[1] === String(major)) {
