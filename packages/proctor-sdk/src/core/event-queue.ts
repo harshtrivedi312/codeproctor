@@ -6,9 +6,29 @@ import {
 import { canonicalJson } from './canonical';
 import { signHex } from './hmac';
 import { IdbStore, STORES, padSeq } from './idb';
-import { SessionTouch, sweepStaleSessions } from './sweep';
+import { DEFAULT_STALE_AFTER_MS, SessionTouch, sweepStaleSessions } from './sweep';
 
 /** What goes on the wire: `body` is the exact signed string, `signature` is hex HMAC-SHA256. */
+const BACKUP_PREFIX = 'codeproctor:eventseq:';
+const SEQ_SEED_FLOOR = 10_000_000;
+const MAX_SEQ_SEED = 2_147_483_000; // below MAX_BATCH_SEQ (2^31 - 1) with room to grow
+
+/** Accepts only a plausible stored counter: a non-negative safe integer below 2^31. */
+function validSeq(v: unknown): v is number {
+  return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 && v < 2 ** 31;
+}
+
+function parseBackup(raw: string): { seq: number; seenAt: number } | null {
+  try {
+    const j = JSON.parse(raw) as { seq?: unknown; seenAt?: unknown };
+    return validSeq(j.seq) && typeof j.seenAt === 'number'
+      ? { seq: j.seq, seenAt: j.seenAt }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface SignedBatch {
   seq: number;
   body: string;
@@ -111,34 +131,63 @@ export class EventQueue {
     this.opts.onStorageDegraded?.(reason);
   }
 
-  /** Backup of the sequence counter outside IndexedDB (a small integer, not candidate data). */
+  /**
+   * Backup of the sequence counter outside IndexedDB: `{ seq, seenAt }` in localStorage under
+   * `codeproctor:eventseq:<sessionId>` (a pseudonymous id and an integer, no candidate data). This
+   * localStorage use is an exception to confirm with the hub. Entries of other sessions older than
+   * `staleAfterMs` are removed on start.
+   */
   private backupKey(): string {
-    return `codeproctor:eventseq:${this.opts.sessionId}`;
+    return `${BACKUP_PREFIX}${this.opts.sessionId}`;
   }
   private readBackup(): number {
     try {
-      return Number(globalThis.localStorage?.getItem(this.backupKey()) ?? 0) || 0;
+      const raw = globalThis.localStorage?.getItem(this.backupKey());
+      return raw ? (parseBackup(raw)?.seq ?? 0) : 0;
     } catch {
       return 0;
     }
   }
   private writeBackup(): void {
     try {
-      globalThis.localStorage?.setItem(this.backupKey(), String(this.nextSeq));
+      globalThis.localStorage?.setItem(
+        this.backupKey(),
+        JSON.stringify({ seq: this.nextSeq, seenAt: Date.now() }),
+      );
     } catch {
       // storage disabled
+    }
+  }
+  private sweepBackups(): void {
+    try {
+      const ls = globalThis.localStorage;
+      if (!ls) return;
+      const maxAge = this.opts.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
+      for (let i = ls.length - 1; i >= 0; i--) {
+        const key = ls.key(i);
+        if (!key?.startsWith(BACKUP_PREFIX) || key === this.backupKey()) continue;
+        const parsed = parseBackup(ls.getItem(key) ?? '');
+        // Unparseable or old entries go; a pre-existing plain integer gets no age, so it goes too.
+        if (!parsed || Date.now() - parsed.seenAt > maxAge) ls.removeItem(key);
+      }
+    } catch {
+      // ignore
     }
   }
 
   /**
    * Fail closed when the sequence counter cannot be trusted (IndexedDB unreadable and no backup).
-   * Reusing an acknowledged seq makes the server answer 409 SEQ_CONFLICT and drop every later
-   * batch, which is silent evidence loss. A seed far above any plausible earlier value (seconds
-   * since 2026-01-01, always below the schema limit) can only leave holes in the sequence, which
-   * review shows as holes, never as collisions. Until ADR 0013 server counters exist.
+   * A seed far above any plausible earlier value (10 000 000 plus seconds since 2026-01-01, always
+   * below the schema limit, and high even on a device clock set before 2026) leaves holes in the
+   * sequence instead of reusing a seq; every reused seq is rejected by the server (ADR 0013: that
+   * batch is dropped and counted as rejected). Two reuse paths stay unflagged until ADR 0013
+   * counters exist: every counter write failed in the previous page load while IndexedDB reads
+   * work on reload (the sequence restarts at 0), and resuming on a new device always restarts at 0
+   * (FR-106, D-21; fixed by `proctor-key` `counters.eventSeqStart`, max(local, server)).
    */
   private seqSeed(): number {
-    return Math.max(1, Math.floor((Date.now() - Date.UTC(2026, 0, 1)) / 1000));
+    const secs = Math.max(0, Math.floor((Date.now() - Date.UTC(2026, 0, 1)) / 1000));
+    return Math.min(MAX_SEQ_SEED, SEQ_SEED_FLOOR + secs);
   }
 
   async start(): Promise<void> {
@@ -161,7 +210,12 @@ export class EventQueue {
     } catch {
       readFailed = true; // the saved batches (if any) still count, see maxSaved
     }
+    if (stored !== null && !validSeq(stored)) {
+      stored = null; // a corrupt counter is no counter
+      readFailed = true;
+    }
     const backup = this.readBackup();
+    this.sweepBackups();
     this.nextSeq = Math.max(maxSaved, stored ?? 0, backup);
     if (readFailed && backup === 0 && stored === null) {
       // The counter is unknowable: seed above anything plausible and say so.

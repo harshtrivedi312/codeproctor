@@ -166,7 +166,11 @@ export class VoiceMonitor implements Detector {
         const created = await Promise.race([creating, timeout]);
         if (gen !== this.gen || this.stopped || token !== this.token) {
           // Abandoned (stop, restart or a newer attach) while loading: release it, keep none.
-          await created.destroy();
+          try {
+            await created.destroy();
+          } catch {
+            // a throwing destroy must not fall into the load-failure handling below
+          }
           return;
         }
         this.handle = created;
@@ -178,8 +182,12 @@ export class VoiceMonitor implements Detector {
         clearTimeout(timer);
       }
       await this.handle?.start();
+      if (gen !== this.gen || token !== this.token || this.stopped) return;
       ctx.setCapability({ id: 'voice', status: 'SUPPORTED' });
     } catch {
+      // An abandoned begin (stop, restart or a newer attach) must not report a failure: that would
+      // be false evidence and could overwrite the newer run's SUPPORTED flag.
+      if (gen !== this.gen || token !== this.token || this.stopped) return;
       ctx.setCapability({
         id: 'voice',
         status: 'UNSUPPORTED',

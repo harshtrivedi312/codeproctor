@@ -181,6 +181,61 @@ describe('EventQueue sequence safety after storage failures (B1, TC-065, NFR-08)
   });
 });
 
+describe('sequence seed and backup hygiene (S-C, S-E, N1, TC-065)', () => {
+  it('TC-065: with the device clock before 2026 the seed is still far above any earlier seq and below the schema limit', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2025-03-01T00:00:00Z'));
+    const store = newStore();
+    vi.spyOn(store, 'entries').mockRejectedValue(new Error('x'));
+    vi.spyOn(store, 'get').mockRejectedValue(new Error('x'));
+    const { q, attempts } = await queue(store, 'OK');
+    await q.start();
+    q.enqueue(ev());
+    await q.flush();
+    expect(attempts[0]?.seq).toBeGreaterThanOrEqual(10_000_000);
+    expect(attempts[0]?.seq).toBeLessThan(2_147_483_647);
+  });
+
+  it('NFR-08: a corrupt, negative or oversized counter in IndexedDB or the backup is ignored, not trusted', async () => {
+    const store = newStore();
+    await store.put('meta', 's:nextEventSeq', 2 ** 40);
+    localStorage.setItem('codeproctor:eventseq:s', JSON.stringify({ seq: -5, seenAt: Date.now() }));
+    const flags: string[] = [];
+    const { q } = await queue(store, 'OK', { onSeqUntrusted: () => flags.push('seq') });
+    await q.start();
+    expect(flags).toEqual(['seq']);
+    expect(q.stats().nextSeq).toBeGreaterThanOrEqual(10_000_000);
+  });
+
+  it('NFR-08: the backup stores {seq, seenAt} and start() removes other sessions older than staleAfterMs but keeps fresh ones', async () => {
+    const now = Date.now();
+    localStorage.setItem(
+      'codeproctor:eventseq:old',
+      JSON.stringify({ seq: 3, seenAt: now - 3 * 86_400_000 }),
+    );
+    localStorage.setItem(
+      'codeproctor:eventseq:fresh',
+      JSON.stringify({ seq: 3, seenAt: now - 1000 }),
+    );
+    localStorage.setItem('codeproctor:eventseq:plain', '7');
+    localStorage.setItem('unrelated', 'keep');
+    const { q } = await queue(newStore(), 'OK');
+    await q.start();
+    q.enqueue(ev());
+    await q.flush();
+    expect(localStorage.getItem('codeproctor:eventseq:old')).toBeNull();
+    expect(localStorage.getItem('codeproctor:eventseq:plain')).toBeNull(); // no age: not kept
+    expect(localStorage.getItem('codeproctor:eventseq:fresh')).not.toBeNull();
+    expect(localStorage.getItem('unrelated')).toBe('keep');
+    const mine = JSON.parse(localStorage.getItem('codeproctor:eventseq:s') ?? '{}') as {
+      seq: number;
+      seenAt: number;
+    };
+    expect(mine.seq).toBe(1);
+    expect(mine.seenAt).toBeGreaterThanOrEqual(now);
+  });
+});
+
 describe('EventQueue.finish() drain (S2, NFR-08)', () => {
   it('NFR-08: during a 5xx outage finish() sends a handful of requests, not hundreds, and does not retry after it returned', async () => {
     const { q, attempts } = await queue(newStore(), 'RETRY');
@@ -221,20 +276,21 @@ describe('EventQueue.finish() drain (S2, NFR-08)', () => {
     const s = new ProctorSession();
     const caps: string[] = [];
     s.on('capability', (c) => caps.push(`${c.id}`));
+    const sendBatch = vi.fn(() => Promise.resolve('RETRY' as const));
     await s.start({
       sessionId: 's',
       hmacKeyBase64: TEST_KEY_B64,
       root: document.createElement('div'),
       consent: { recordedAt: '2026-01-01T00:00:00Z' },
       transport: {
-        sendBatch: () => Promise.resolve('RETRY'),
+        sendBatch,
         heartbeat: () => Promise.resolve(true),
       },
       detectors: [{ id: 'x', start: (ctx) => ctx.emit('RIGHT_CLICK', {}), stop: () => undefined }],
       store: newStore(),
       flushIntervalMs: 10,
     });
-    await new Promise((r) => setTimeout(r, 60)); // the batch is cut and cannot be sent
+    await vi.waitFor(() => expect(sendBatch).toHaveBeenCalled()); // cut, signed, tried, refused
     const r = await s.finish(200);
     expect(r.lostBatches).toBe(1);
     expect(caps).toEqual(['finish-pending', 'finish-lost']);

@@ -967,14 +967,24 @@ describe('voice: exactly one live VAD (B2, FR-607)', () => {
     const second = m.start(h.ctx);
     await Promise.all([first, staleAttach, second]);
     expect(r.live()).toBe(1);
-    // every callback set but the newest is ignored: one segment yields one event
-    for (const cb of r.callbacks) {
+    const speech = () => h.events.filter((e) => e.type === 'SPEECH_DETECTED');
+    const live = r.callbacks.at(-1) as VadCallbacks;
+    const stale = r.callbacks.slice(0, -1);
+    expect(stale.length).toBeGreaterThan(0);
+    // callbacks of every older VAD are ignored: a full segment on them reports nothing
+    for (const cb of stale) {
       cb.onSpeechStart();
       t += 2000;
       cb.onSpeechEnd();
     }
-    expect(h.events.filter((e) => e.type === 'SPEECH_DETECTED')).toHaveLength(1);
+    expect(speech()).toHaveLength(0);
+    // the live VAD reports exactly one event for its segment
+    live.onSpeechStart();
+    t += 2000;
+    live.onSpeechEnd();
+    expect(speech()).toHaveLength(1);
     await m.stop();
+    expect(speech()).toHaveLength(1); // stop() flushes nothing extra
   });
 
   it('FR-607: start() on a running monitor replaces the VAD instead of adding a second one', async () => {
@@ -1006,5 +1016,54 @@ describe('vision: down state (S5, FR-606)', () => {
     expect(h.events).toHaveLength(emitted);
     current = null;
     m.stop();
+  });
+});
+
+describe('voice: an abandoned begin reports nothing (S-B, FR-607)', () => {
+  it('FR-607: a createVad that rejects after stop() and restart emits no DETECTOR_UNAVAILABLE and keeps the newer SUPPORTED flag', async () => {
+    const h = fakeContext();
+    let rejectFirst!: (e: Error) => void;
+    let calls = 0;
+    const m = new VoiceMonitor({
+      getStream: () => stream,
+      createVad: () => {
+        calls++;
+        if (calls === 1) {
+          return new Promise((_r, rej) => {
+            rejectFirst = rej;
+          });
+        }
+        return Promise.resolve({ start: vi.fn(), destroy: vi.fn() });
+      },
+    });
+    const first = m.start(h.ctx); // hangs in createVad
+    await new Promise((r) => setTimeout(r, 5));
+    await m.stop();
+    const second = m.start(h.ctx); // queued behind the first
+    rejectFirst(new Error('model 404')); // the abandoned begin fails late
+    await Promise.all([first, second]);
+    expect(h.events.filter((e) => e.type === 'DETECTOR_UNAVAILABLE')).toHaveLength(0);
+    expect(h.capabilities.at(-1)).toMatchObject({ id: 'voice', status: 'SUPPORTED' });
+    await m.stop();
+  });
+
+  it('FR-607: a throwing destroy() of an abandoned VAD does not fall into the load-failure handling', async () => {
+    const h = fakeContext();
+    const m = new VoiceMonitor({
+      getStream: () => stream,
+      createVad: async () => {
+        await new Promise((r) => setTimeout(r, 10));
+        return {
+          start: vi.fn(),
+          destroy: () => {
+            throw new Error('destroy failed');
+          },
+        };
+      },
+    });
+    const starting = m.start(h.ctx);
+    await m.stop();
+    await starting;
+    expect(h.events.filter((e) => e.type === 'DETECTOR_UNAVAILABLE')).toHaveLength(0);
   });
 });
