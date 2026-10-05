@@ -445,7 +445,7 @@ describe('other tabs (shared refresh cookie)', () => {
     await signInAs(MOCK_USERS.recruiter);
     await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
     const tabB = renderWithAuth(<Who />);
-    await act(async () => undefined); // let tab B start and finish its first-load refresh
+    await act(() => Promise.resolve()); // let tab B start and finish its first-load refresh
     await settleSession();
     const refreshes = refreshCounter();
     act(() => {
