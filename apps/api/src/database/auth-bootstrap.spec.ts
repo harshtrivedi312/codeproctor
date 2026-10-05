@@ -641,7 +641,7 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
       expect(await measured(get)).toEqual(bare);
     });
 
-    it('NFR-04 connecting and the first scoped query send no statement besides the query', async () => {
+    it('NFR-04 $connect sends no statement', async () => {
       const fresh = createPrismaClient(db.appUserUrl);
       try {
         expect(await statementsOf(() => fresh.$connect())).toEqual([]);
