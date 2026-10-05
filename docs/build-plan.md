@@ -1,6 +1,6 @@
 # CodeProctor build plan
 
-Owner: Delivery Lead (from 2026-10-05). Last updated: 2026-10-05 (merge rule aligned with CLAUDE.md; sequencing decisions DL-01..DL-10 in status.md section 9b). Earlier: 2026-10-01 (ARC-01 Phase B: D-16..D-23 applied, DEP-03 added; D-24..D-30: PA-01..PA-08 approved, INT-01 added, DEP owners set). Status of every task: see /docs/status.md.
+Owner: Delivery Lead (from 2026-10-05). Last updated: 2026-10-05 (merge rule aligned with CLAUDE.md; sequencing decisions DL-01..DL-12 in status.md section 9b; COMP-01 and FAIR-01 added by the compliance decisions C-01..C-16, D-47). Earlier: 2026-10-01 (ARC-01 Phase B: D-16..D-23 applied, DEP-03 added; D-24..D-30: PA-01..PA-08 approved, INT-01 added, DEP owners set). Status of every task: see /docs/status.md.
 
 Sources: CLAUDE.md, /docs/brd.md, /docs/fsd.md, /docs/architecture.md, /docs/database.md, /docs/test-cases.md, /docs/prompts/{database,backend,frontend,agents-qa-deploy}.md, .claude/agents/*.
 
