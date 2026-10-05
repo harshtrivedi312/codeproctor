@@ -1,0 +1,129 @@
+# Consent document: proctored coding assessment
+
+Status: **DRAFT v0.1 for owner approval** (C-09, with C-02, C-04, C-05, C-07, C-08, C-13, C-14). Drafted 2026-10-05 by the Delivery Lead. Approver: Harsh Trivedi. This text has not had professional legal review (C-15).
+
+The placeholder guard stays: pilot and production refuse to run until the owner approves a final version, and that version is loaded with its own version number (C-09, FR-401). Items in [square brackets] are filled in per organisation or before approval. The drafting notes at the end are not shown to candidates.
+
+---
+
+## Your consent for this proctored coding assessment
+
+Document version [x.y] · [Company legal name]
+
+Please read this document to the end. It explains what happens during the assessment, what we record, how we check your identity, who sees the results, how long we keep your data, and your choices. At the end you sign by typing your full legal name. **Nothing is recorded, and your camera, microphone and screen are not touched, until you sign.**
+
+### 1. Who we are
+
+The assessment is run by **[Company legal name]**, [address] ("we"), for the role of [role]. We are responsible for your data (the "controller"). Our contact for privacy questions is [privacy contact, email]. Your recruiter is [recruiter name, email].
+
+### 2. What happens during the assessment
+
+1. You have already confirmed your email with a one-time code.
+2. You read and sign this document.
+3. We check that your browser, camera, microphone and screen sharing work.
+4. We check your identity: a photo of your government ID and a live selfie.
+5. You take the coding test in full-screen mode, with your whole screen shared, and your camera and microphone on.
+6. After the test, you may answer optional questions about yourself (section 10).
+
+### 3. What we record during the test
+
+- **Your screen:** a recording of your whole screen.
+- **Your webcam:** a video recording of you.
+- **Your microphone:** an audio recording.
+- **Your typing and editing in the code editor:** keystroke timing, pastes, and how your code changes over time.
+- **Browser activity:** for example, leaving full-screen mode, switching tabs or windows, pasting, connecting a second screen, or using a virtual camera.
+- **Technical details:** your IP address, browser and device type, and connection events.
+
+We record this to check that the test was taken fairly and by the right person.
+
+### 4. Identity check and your biometric data
+
+To confirm that you are the person taking the test, we:
+
+- take a photo of your government ID and a live selfie, with a short liveness check (for example, turning your head);
+- compare the faces using face-matching software, which calculates measurements of your face (a "face template");
+- re-check during the test that the same person is at the keyboard, by comparing **one small webcam frame (640 px) every 2 minutes** with your verified face. A frame that matches is discarded at once. A frame that does not match is kept as evidence for a human reviewer.
+
+Face images and face templates are **biometric data**. We use them **only to confirm your identity for this assessment.**
+- The face templates are calculated in memory and **never stored**.
+- The ID photo and selfie are deleted 90 days after the assessment is finished (section 8).
+- We **never sell, rent or trade your biometric data, and never share it for profit.**
+
+If the faces don't match well enough, **a person compares them. You are never rejected automatically** by the face match.
+
+### 5. Automated detection, and people making every decision
+
+During the test, software looks for signs that a test may not have been taken fairly. Examples:
+- more than one face on camera;
+- looking away for long periods;
+- a phone or book in view;
+- other voices;
+- large pastes;
+- code very similar to other submissions or to AI-generated answers;
+- leaving full-screen mode.
+
+**The software only raises flags. It never decides anything.** A trained reviewer looks at each flag together with the recording and decides what happened. **A person makes every decision about your assessment, and nothing rejects you automatically.**
+
+Your code is also run against test cases to calculate a score. Your score, the reviewer's decision and a short report are shared with the hiring team for [role]. Together with your other application materials, they are used to decide whether to move your application forward.
+
+### 6. Who can see your data
+
+- **Recruiters** for this role see your invitation, status, scores and the final decision.
+- **Reviewers** see the recordings, images, flags and your code, so they can review the assessment. Reviewers sign in with two-factor authentication, and every time someone opens your data it is logged.
+- **Administrators** manage the system and handle requests about your data.
+- **Service providers** that host and run the system for us, under contract and only on our instructions: [Amazon Web Services (hosting and storage)], [Cloudflare (delivering the web pages)], [email provider (sending your invitation and copy of this document)], [error monitoring provider, if used]. They may not use your data for their own purposes.
+
+We don't share your data with anyone else unless the law requires it.
+
+### 7. Where your data is stored
+
+All your data is stored in the **United States**, in [AWS region]. If you are in the European Union or the United Kingdom, your data is transferred to the United States. We protect that transfer with [the European Commission's Standard Contractual Clauses (and the UK Addendum) / the EU–US Data Privacy Framework and its UK extension], and we apply the same protections described here wherever you are.
+
+### 8. How long we keep your data
+
+- Recordings, the ID photo, the selfie, re-check frames that didn't match, evidence images and keystroke data: deleted **90 days** after your assessment is finished.
+- Face templates: **never stored**.
+- This signed consent record (document version, your typed name, time of signing, IP address, browser and signed PDF): kept **3 years** to prove you consented, then deleted.
+- Your scores, code and the reviewer's decision: [retention period, e.g. 2 years], then anonymised.
+
+The full schedule, including how we destroy data, is here: **[link to the retention and destruction schedule]**.
+
+### 9. Your rights and choices
+
+- **Ask for accommodations or an alternative.** If you need extra time, assistive technology, or changes to the monitoring (for example, if you can't use a webcam, microphone or ID check), contact [recruiter name, email] **before you start**. We handle each request individually. Accommodations may include extra time, turning specific detectors off, or an alternative to the face match.
+- **Decline.** You may decline at the end of this document. Nothing will be recorded, the assessment will end, and you will see your recruiter's contact so you can discuss alternatives. [Declining is not treated as a failed assessment: see drafting note 2.]
+- **Withdraw your consent.** You can stop at any time by ending the test. Recording stops at once. Data already collected is kept as described in section 8 unless you ask us to delete it.
+- **Access, correct or delete your data.** Contact [privacy contact]. Deletion is completed within 30 days of your request, or within 30 days after an open review or appeal closes, whichever is later. If a review or appeal delays it, we tell you.
+- **Appeal a decision.** If the reviewer finds a violation, you can appeal within 7 days, and a different reviewer looks at it.
+- **If you are in the EU or UK:** you also have the right to object, to restrict processing, to data portability, and to complain to your local data protection authority.
+- **If you are in California:** you have the rights to know, delete and correct your personal information, and to limit the use of sensitive personal information. We don't sell or share your personal information for advertising.
+
+### 10. Optional questions after the test
+
+After the test, you may be asked optional questions about yourself (for example, age range, gender or ethnicity), with a separate consent and a "prefer not to say" option. **Answering is entirely optional and has no effect on your assessment.** Your answers are stored separately and never shown to reviewers or recruiters. They are used only in totals for groups of at least 10 people, to check that our monitoring treats everyone fairly, and are deleted with your recordings.
+
+### 11. Your consent
+
+By typing your full legal name below and selecting **I agree and sign**, you confirm that you have read this document and that:
+
+1. you agree to the recording of your screen, webcam, microphone and editor activity during this assessment, as described in sections 3 and 5;
+2. **you give your explicit consent and written release** for [Company legal name] to collect, use and store your biometric data (images of your face and face templates calculated from them) only to verify your identity for this assessment, and to keep and destroy it as described in section 8 and in the retention and destruction schedule;
+3. you understand that your data is stored in the United States (section 7);
+4. you understand that software only raises flags, and a person makes every decision (section 5).
+
+Full legal name: ______________________   [I agree and sign]   [I decline]
+
+We record the document version, your typed name, the date and time from our server, your IP address and your browser. We generate a signed PDF of this document and email you a copy.
+
+---
+
+## Drafting notes for the approver (not shown to candidates)
+
+1. **One signature or separate tick boxes?** FR-401 and C-07 specify one typed-name signature. Under BIPA a written release must be specific, and GDPR explicit consent should be clearly separate from other terms. Item 2 of section 11 keeps biometric consent as its own explicit statement. A separate required tick box for item 2 would make it stronger. It would be a small FR-401 change. Your call.
+2. **"Declining is not treated as a failed assessment."** If you can commit to this, keep the sentence: it helps show consent is freely given (R-18). If you can't, replace it with "You can discuss alternatives with your recruiter."
+3. **Results retention** (section 8, last bullet) depends on OQ-4.
+4. **Section 6 processors** must match the processor register (processors.md) and the P-10 choice (email and error tracker).
+5. **Section 7 transfer wording** depends on which mechanism each processor offers (C-03).
+6. **The section 10 example questions** must match the FAIR-01 form once it is designed. Some categories (for example ethnicity) are special-category data under GDPR, and the separate consent covers them.
+7. **Job postings (C-14)** should carry a one-line notice, for example: "This role includes a proctored online coding assessment. Automated tools flag possible issues, and a person makes every decision."
+8. **Reading level.** The aim is plain language at about a US grade 8 reading level. A final readability pass is recommended after your edits.
