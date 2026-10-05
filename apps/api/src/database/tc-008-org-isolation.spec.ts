@@ -8,29 +8,21 @@
 // parent chain (for example proctor_events through its session, test_cases through their question
 // version and question). A positive control proves A still sees and changes its own rows, so a
 // filter that simply returns nothing cannot pass.
-import {
-  Controller,
-  Get,
-  INestApplication,
-  Injectable,
-  CanActivate,
-  ExecutionContext,
-  NotFoundException,
-  Param,
-} from '@nestjs/common';
+import { Controller, Get, INestApplication, NotFoundException, Param } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
-import type { Request } from 'express';
 import { Client } from 'pg';
 import request from 'supertest';
 import type { App } from 'supertest/types';
+import { Public, Roles } from '../common/auth/decorators';
+import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
+import { TokenModule, TokenService } from '../common/auth/token.service';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import { createPrismaClient } from './create-prisma-client';
 import { DatabaseModule } from './database.module';
 import { OrgContextMissingError, OrgScopeViolationError, RawQueryNotAllowedError } from './errors';
 import { OrgContextService } from './org-context';
-import type { AuthenticatedUser } from './org-context';
 import { ORG_SCOPE } from './org-scope-map';
 import type { ModelName } from './org-scope-map';
 import { PrismaService } from './prisma.service';
@@ -79,19 +71,13 @@ const TOUCH: Record<ModelName, Record<string, unknown>> = {
   WebhookDelivery: { error: 'changed' },
 };
 
-// Stand-in for the BE-02 auth guard: sets request.user from a header.
-@Injectable()
-class FakeAuthGuard implements CanActivate {
-  canActivate(context: ExecutionContext): boolean {
-    const req = context.switchToHttp().getRequest<Request & { user?: unknown }>();
-    const header = req.headers['x-test-user'];
-    if (typeof header === 'string') req.user = JSON.parse(header) as unknown;
-    return true;
-  }
-}
+const ALL_ROLES = ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'REVIEWER'] as const;
+const JWT_SECRET = 'a-secret-for-the-tc-008-tests-only';
 
-// What a staff route does: look a row up by the id in the URL, answer 404 on a miss.
+// What a staff route does: look a row up by the id in the URL, answer 404 on a miss. BE-02's
+// JwtAuthGuard authenticates (deny by default: @Roles or @Public) and the interceptor sets the org.
 @Controller('probe')
+@Roles(...ALL_ROLES)
 class ProbeController {
   constructor(private readonly prisma: PrismaService) {}
 
@@ -118,6 +104,13 @@ class ProbeController {
   async testCases(): Promise<string[]> {
     return (await this.prisma.client.testCase.findMany()).map((c) => c.id);
   }
+
+  // A public route (no request.user, so no org context) that tries to read org data.
+  @Get('public-sessions')
+  @Public()
+  async publicSessions(): Promise<string[]> {
+    return (await this.prisma.client.session.findMany()).map((s) => s.id);
+  }
 }
 
 describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
@@ -136,12 +129,14 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         ConfigModule.forRoot({
           isGlobal: true,
           ignoreEnvFile: true,
-          load: [() => ({ DATABASE_URL: url })],
+          load: [() => ({ DATABASE_URL: url, JWT_ACCESS_SECRET: JWT_SECRET })],
         }),
+        TokenModule,
         DatabaseModule,
       ],
       controllers: [ProbeController],
-      providers: [{ provide: APP_GUARD, useClass: FakeAuthGuard }],
+      // BE-02's guard. DatabaseModule registers the interceptor that runs after it.
+      providers: [{ provide: APP_GUARD, useClass: JwtAuthGuard }],
     }).compile();
   }
 
@@ -675,26 +670,28 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
   });
 
   describe('staff routes: user from org A requests data of org B (TC-008)', () => {
-    const userA: AuthenticatedUser = { orgId: '', userId: '', role: 'RECRUITER' };
+    // A real access token with the claims BE-02's AuthService signs: sub, org, role, kind.
     const asUser = (tenant: TenantFixture): string =>
-      JSON.stringify({ ...userA, orgId: tenant.orgId, userId: tenant.userId });
+      `Bearer ${app
+        .get(TokenService)
+        .sign({ sub: tenant.userId, org: tenant.orgId, role: 'RECRUITER', kind: 'access' }, 300)}`;
 
     it("TC-008 GET another org's session is 404 and leaks nothing; own session is 200", async () => {
       const server = app.getHttpServer();
       const bSession = B.rows.Session.filter.id as string;
       const denied = await request(server)
         .get(`/probe/sessions/${bSession}`)
-        .set('x-test-user', asUser(A))
+        .set('Authorization', asUser(A))
         .expect(404);
       expect(JSON.stringify(denied.body)).not.toContain(B.orgId);
       const own = await request(server)
         .get(`/probe/sessions/${A.rows.Session.filter.id as string}`)
-        .set('x-test-user', asUser(A))
+        .set('Authorization', asUser(A))
         .expect(200);
       expect(own.body).toEqual({ id: A.rows.Session.filter.id, orgId: A.orgId });
       await request(server)
         .get(`/probe/sessions/${bSession}`)
-        .set('x-test-user', asUser(B))
+        .set('Authorization', asUser(B))
         .expect(200);
     });
 
@@ -703,11 +700,11 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       const bEvent = String(B.rows.ProctorEvent.filter.id);
       await request(server)
         .get(`/probe/events/${bEvent}`)
-        .set('x-test-user', asUser(A))
+        .set('Authorization', asUser(A))
         .expect(404);
       await request(server)
         .get(`/probe/events/${bEvent}`)
-        .set('x-test-user', asUser(B))
+        .set('Authorization', asUser(B))
         .expect(200);
     });
 
@@ -715,23 +712,24 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       const server = app.getHttpServer();
       const listA = await request(server)
         .get('/probe/sessions')
-        .set('x-test-user', asUser(A))
+        .set('Authorization', asUser(A))
         .expect(200);
       const listB = await request(server)
         .get('/probe/sessions')
-        .set('x-test-user', asUser(B))
+        .set('Authorization', asUser(B))
         .expect(200);
       expect(listA.body).toEqual([A.rows.Session.filter.id]);
       expect(listB.body).toEqual([B.rows.Session.filter.id]);
       const casesA = await request(server)
         .get('/probe/test-cases')
-        .set('x-test-user', asUser(A))
+        .set('Authorization', asUser(A))
         .expect(200);
       expect(casesA.body).toEqual([A.rows.TestCase.filter.id]);
     });
 
-    it('TC-008 a route reached with no authenticated user cannot read org data (500, nothing leaked)', async () => {
-      const res = await request(app.getHttpServer()).get('/probe/sessions').expect(500);
+    it('TC-008 a staff route without a token is 401 (the guard), and a public route cannot read org data (500, nothing leaked)', async () => {
+      await request(app.getHttpServer()).get('/probe/sessions').expect(401);
+      const res = await request(app.getHttpServer()).get('/probe/public-sessions').expect(500);
       expect(JSON.stringify(res.body)).not.toContain('Session');
       expect(JSON.stringify(res.body)).not.toContain(A.orgId);
     });
@@ -742,7 +740,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         const tenant = i % 2 === 0 ? A : B;
         return request(server)
           .get('/probe/sessions')
-          .set('x-test-user', asUser(tenant))
+          .set('Authorization', asUser(tenant))
           .then((res) => ({ tenant, body: res.body as string[] }));
       });
       for (const { tenant, body } of await Promise.all(calls)) {
