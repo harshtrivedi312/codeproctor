@@ -3,6 +3,8 @@ import type { NextConfig } from 'next';
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  // The SDK is consumed as TypeScript source (workspace package).
+  transpilePackages: ['@codeproctor/proctor-sdk'],
   turbopack: {
     // msw/browser has "node": null in its exports, which breaks the server pass of the bundler even
     // though the worker only ever starts in the browser. Serve a stub on the server pass.
@@ -35,6 +37,22 @@ const nextConfig: NextConfig = {
           },
         ],
       },
+      // Dev only (listed last so it overrides the global policy for this one path): the /dev/proctor demo needs the microphone for the voice detector, which the
+      // global policy blocks. Not emitted in production builds; every other route is unchanged.
+      ...(process.env.NODE_ENV === 'production'
+        ? []
+        : [
+            {
+              source: '/dev/proctor',
+              headers: [
+                {
+                  key: 'Permissions-Policy',
+                  value:
+                    'camera=(self), microphone=(self), display-capture=(self), fullscreen=(self)',
+                },
+              ],
+            },
+          ]),
     ]);
   },
 };

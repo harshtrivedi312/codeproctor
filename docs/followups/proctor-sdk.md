@@ -195,3 +195,9 @@ Nits
 - `review-fixes.test.ts` comment says the fake clock keeps ticking; it is frozen (the drift comes from elsewhere, so check before keeping the tolerance).
 - `vision-monitor.test.ts`: `.every(...)` passes on an empty array; also assert the `vision-` capability flags exist.
 - (Fixed in this commit) the PR #23 numbered list was merged into one line, and the "Round 3" heading lacked a blank line.
+## /dev/proctor demo page (apps/web)
+- Root `eslint.config.mjs` does not ignore `apps/web/public/dev-proctor-models/**`. After a human downloads the models there, `pnpm --filter @codeproctor/web lint` lints about 170 MB of vendored files (11k errors). CI is unaffected (the dir is gitignored and absent). Hub: add `'apps/web/public/dev-proctor-models/**'` to `globalIgnores`.
+- Production CSP has no `'wasm-unsafe-eval'`, so MediaPipe, ONNX and TF.js wasm will not compile in a production build. The dev server works because dev adds `'unsafe-eval'`. Needed before any real candidate run; also `worker-src`/`connect-src` for the real object-storage origin.
+- The global `Permissions-Policy` sets `microphone=()`, which blocks the voice detector everywhere. The demo gets a dev-only per-path override in `next.config.ts`; the real candidate test route needs `microphone=(self)`.
+- The demo files under `public/dev-proctor-models/` would be served by a production build if present on the build machine; the build step must not fetch them.
+- `fetch-models.mjs` now also downloads COCO-SSD lite_mobilenet_v2 (still no SHA-256 pinning).
