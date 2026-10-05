@@ -2,7 +2,7 @@
 
 Non-blocking findings. Only blockers stop a merge.
 
-## Analysis worker (branch integrity/worker-analysis)
+## Analysis worker (PRs #20, #27)
 
 ### Needs a decision or a change outside apps/worker
 1. **Doc location.** The role brief wants `/docs/integrity-config.md` and `/docs/red-team-report.md`; the worker session may only edit `apps/worker`. Both are seeded in `apps/worker/INTEGRITY-CONFIG.md` (sections 1-4 config, 5 false positives, 6 known bypasses). Architecture hub: move or split.
@@ -14,31 +14,18 @@ Non-blocking findings. Only blockers stop a merge.
 7. **Python CI.** No CI job runs ruff, mypy or pytest for apps/worker, and `apps/worker/package.json` only compiles. Add a job (CI config is hub-owned).
 
 ### Should-fix inside the worker
-- Peer comparison is O(n^2) over a question's submissions; fine for pilot sizes. Add an inverted index on fingerprint hashes before any corpus over a few thousand.
-- Silero ONNX backend input names (`input`, `state`, `sr`, 64-sample context) follow the v5 interface and are untested against the real v6.2.3 file; run the opt-in test with `SILERO_VAD_MODEL_PATH` before BE-12.
+- **Peer comparison scale (NFR-01/02).** O(n^2) over a question's submissions (about 1.2 s for 150 and 4.5 s for 300 large submissions). Precompute fingerprints once and add an inverted index on fingerprint hashes before any corpus over a few thousand; the routes are synchronous and block the event loop on large corpora. (AI references and the starter ignore set are already prepared once per request.)
+- **Silero ONNX backend** input names (`input`, `state`, `sr`, 64-sample context) follow the v5 interface and are untested against the real v6.2.3 file; run the opt-in test with `SILERO_VAD_MODEL_PATH` before BE-12.
 - Audio chunk download, decoding and resampling to 16 kHz are not built (BE-12).
-- `app.py` has no request size limit beyond field caps; put a body limit at the proxy.
-- Starlette TestClient emits a deprecation warning about httpx.
-
-# Follow-ups: Integrity track
-
-## From ARC-02 review of PR #16 (code-reviewer)
-
-- **[BE-12 / worker, FR-802] RESET can bypass paste-burst detection.** A client can send a RESET whose text is a finished solution ("restore after reload") and typing-speed or paste-burst analytics will not see it. The worker or API should compare RESET text with server-known state (starter code or the last saved draft) and, on a mismatch, emit evidence (PASTE_BURST or a new signal), never a verdict automatically.
-
-## From ARC-02 review of PR #19 (code-reviewer)
-
-- **[BE-10, security, must do in BE-10] Body limit on POST /candidate/session/keystrokes.** Set a per-route limit of `MAX_KEYSTROKE_BATCH_BODY_BYTES` (2 MiB; the NestJS/Express default of 100 KB would reject valid large batches). Apply it before the HMAC check and before parsing, measure the decompressed size (backend.md Step 10 allows HTTP compression; a zip bomb must not get past it), and add a test for the 413 response. Same for the events route (`MAX_EVENT_BATCH_BODY_BYTES`).
-
-### Code-reviewer findings on PR #20 (should-fix and nits; the blocker and the regex fix are in the PR)
-- Peer compare: precompute fingerprints once and use an inverted index (O(n^2) today); routes are synchronous and block the event loop on large corpora.
-- Mirror drift from keystroke.ts: `MAX_KEYSTROKE_BATCH_TEXT` total-text check is missing, `sessionQuestionId` should be a UUID, `startedAt` should be timezone-aware (AwareDatetime). Extend `test_contracts.py` accordingly.
-- `app.py` input limits: cap total request size, per-field code lengths on keystroke text, and number of events in `/risk`.
+- **Mirror drift from keystroke.ts.** `sessionQuestionId` should be validated as a UUID and `startedAt` should be timezone-aware (AwareDatetime); the batch text caps are already mirrored. Extend `test_contracts.py` accordingly.
+- **`app.py` input limits.** Cap total request size (put a body limit at the proxy), per-field code lengths on keystroke text, and the number of events in `/risk`.
 - `sample_rate` and `frame_samples` are org-overridable in `VadConfig` but the Silero backend needs 16000/512; make them constants or validate.
 - `X-Internal-Token` / `WORKER_INTERNAL_TOKEN` is provisional pending the architect decision on API-to-worker auth (ADR 0001 TB-6, OI-1, Q-21). Document the env var in the deploy env template once decided.
+- `compare` confidence `size_factor` uses raw token counts including starter code (should use non-ignored size).
+- A stray unterminated `/*` hides the rest of the file from similarity, which a candidate could use to evade; consider falling back to line-based comment stripping.
+- `prepare_ai_context` builds starter ignore sets for every language passed, not only those present in the references; the route could limit them. A `ParamSpec` wrapper for the call-counting monkeypatches in `test_app.py` would remove the `type: ignore`.
+- Starlette TestClient emits a deprecation warning about httpx.
 - Nits: `/risk` response drops the breakdown; `/docs` and `/openapi.json` are open; 422 responses echo input (candidate code); camelCase vs snake_case in route bodies; peer cap is applied one-sided; `deleted_chars` stat counts replaced text; `speaker_min_voiced_ms // 4` is a magic number; `test_contracts.py` has a hard-coded language set and a module-wide skipif that could hide drift.
-- Re-review nits: `compare` confidence `size_factor` uses raw token counts including starter code (should use non-ignored size). A stray unterminated `/*` hides the rest of the file from similarity, which a candidate could use to evade; consider falling back to line-based comment stripping.
-- Perf (NFR-01/02): `/analyze/similarity` re-prepares each AI reference and the starter code once per submission; prepare once per language per request (or cache by content hash). `session_question_id` in the keystroke mirror should be validated as a UUID like keystroke.ts.
 
 ### MUST-FIX BEFORE PILOT: recall on questions with a large starter template (FR-803)
 Ignoring every starter k-gram (with identifiers normalized to ID) also ignores generic code patterns that occur in a large scaffold, and the `minFingerprints` gate then skips comparison when the candidate wrote little. Measured on synthetic data (`tests/test_similarity_large_starter.py`, 60 seeded pairs per row, scaffold about 780 tokens, 3 TODO sites; copies are light renaming/reformatting, independents use different fill-ins from the same statement pool):
@@ -50,7 +37,12 @@ Ignoring every starter k-gram (with identifiers normalized to ID) also ignores g
 | 1 site x 2 statements | 97% | 2% | 97% | 2% |
 | 1 site x 1 statement | 48% | 3% | 48% | 0% |
 
-With a single short fill-in, MORE THAN HALF of genuine copies are missed. Not a bug in the current design (the gate is deliberate to avoid false alarms from the scaffold), but unacceptable recall for questions with large templates. Options to decide before the pilot: compare the candidate's diff against the starter (token-level diff, then fingerprint only the changed regions with a lower k), lower `minFingerprints`/`k` for the changed region, or require authors to keep starter code small. Detector behaviour is unchanged in this PR. Thresholds in the test are floors that record current behaviour; do not loosen them.
+With a single short fill-in, MORE THAN HALF of genuine copies are missed. Not a bug in the current design (the gate is deliberate to avoid false alarms from the scaffold), but unacceptable recall for questions with large templates. Options to decide before the pilot: compare the candidate's diff against the starter (token-level diff, then fingerprint only the changed regions with a lower k), lower `minFingerprints`/`k` for the changed region, or require authors to keep starter code small. Floors in the test sit about one pair under the measured values; do not loosen them. Proposal for the hub: `docs/followups/integrity-starter-diff-proposal.md` (diff each submission against the starter and fingerprint only the changed regions).
 
-### Other nits folded in
-- Per-request preparation (NFR-01/02): the starter ignore set and AI references are rebuilt per submission in `/analyze/similarity`; build once per language per request.
+## From ARC-02 review of PR #16 (code-reviewer)
+
+- **[BE-12 / worker, FR-802] RESET can bypass paste-burst detection.** A client can send a RESET whose text is a finished solution ("restore after reload") and typing-speed or paste-burst analytics will not see it. The worker or API should compare RESET text with server-known state (starter code or the last saved draft) and, on a mismatch, emit evidence (PASTE_BURST or a new signal), never a verdict automatically.
+
+## From ARC-02 review of PR #19 (code-reviewer)
+
+- **[BE-10, security, must do in BE-10] Body limit on POST /candidate/session/keystrokes.** Set a per-route limit of `MAX_KEYSTROKE_BATCH_BODY_BYTES` (2 MiB; the NestJS/Express default of 100 KB would reject valid large batches). Apply it before the HMAC check and before parsing, measure the decompressed size (backend.md Step 10 allows HTTP compression; a zip bomb must not get past it), and add a test for the 413 response. Same for the events route (`MAX_EVENT_BATCH_BODY_BYTES`).
