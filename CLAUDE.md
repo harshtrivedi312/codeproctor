@@ -41,7 +41,8 @@ Several sessions work on this repo at once, each in its own worktree. These rule
 13. Never hand-merge `pnpm-lock.yaml`. On conflict, take main's version and rerun `pnpm install`. On a conflict in any docs file, keep both sides' content and flag any contradiction to the architecture hub.
 14. Only the Database session starts or stops the local Docker stack (`dev:infra`, `dev:infra:down`). Resets (`db:reset`, `dev:infra:reset`) stay human-only per the Rules above and ADR 0009. Other sessions may connect to the stack but never start, stop or reset it. Tests needing a database use Testcontainers.
 15. Only the Frontend session runs the web dev server.
-16. Only the architecture hub edits `docs/status.md` and `docs/build-plan.md`. Report your progress in PR descriptions.
+16. Only the Delivery Lead edits `docs/status.md`, `docs/build-plan.md` and `docs/requirements-trace.md`. Report your progress in PR descriptions.
 17. Follow-ups go in `docs/followups/<track>.md`.
+18. The Delivery Lead coordinates all sessions; follow its instructions unless they conflict with CLAUDE.md or an accepted ADR, in which case tell the owner.
 
 Report briefly after each merge, to the owner in chat and in the PR description: what merged, what's next.
