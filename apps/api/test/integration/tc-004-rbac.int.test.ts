@@ -10,6 +10,7 @@
 // mutating routes need the acting admin's own currentPassword; a wrong one is 403 REAUTH_FAILED
 // and the 404 for a missing or other-org id is only given after a correct password.
 import jwt from 'jsonwebtoken';
+import type request from 'supertest';
 import { UserRole } from '../../src/generated/prisma/client';
 import {
   Body,
@@ -100,6 +101,16 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
         process.env.JWT_ACCESS_SECRET ?? '',
         { expiresIn: -10 },
       );
+    // alg:none: an unsigned token naming a SUPER_ADMIN.
+    const unsigned = (): string =>
+      `${Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url')}.${Buffer.from(
+        JSON.stringify({
+          sub: byRole.SUPER_ADMIN.id,
+          org: h.orgId,
+          role: 'SUPER_ADMIN',
+          kind: 'access',
+        }),
+      ).toString('base64url')}.`;
     const forged = (): string =>
       jwt.sign(
         { sub: byRole.SUPER_ADMIN.id, org: h.orgId, role: 'SUPER_ADMIN', kind: 'access' },
@@ -111,9 +122,16 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
       const label = routeLabel(route);
       const holders = USER_ROLES.filter((r) => hasPermission(r, route.permission));
 
-      it(`TC-004: ${label} gives 401 with no token, a garbage token, a forged token, an expired token and a 2FA challenge token`, async () => {
+      it(`TC-004: ${label} gives 401 with no token, a garbage token, a forged token, an expired token, an alg:none token and a 2FA challenge token`, async () => {
         const t = await route.prepare(h, h.orgId);
-        for (const token of [undefined, 'garbage', forged(), expired(), challengeToken]) {
+        for (const token of [
+          undefined,
+          'garbage',
+          forged(),
+          expired(),
+          unsigned(),
+          challengeToken,
+        ]) {
           await call(h, route.method, t.path, token, t.body).expect(401);
         }
         expect(await t.unchanged()).toBe(true);
@@ -130,6 +148,8 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
             if (route.mutating) expect(await t.unchanged()).toBe(false);
           } else {
             expect(res.status).toBe(403);
+            // A role refusal is not a failed re-auth: the web must not show "wrong password".
+            expect((res.body as Body).code).not.toBe('REAUTH_FAILED');
             expect(await t.unchanged()).toBe(true);
           }
         },
@@ -180,10 +200,8 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
           expect(cross.status).toBe(404);
           expect(missing.status).toBe(404);
           // Compare the bodies with the volatile and id-bearing parts removed.
-          const norm = (res: { body: unknown }, id: string): string =>
-            JSON.stringify(stableProblem(res as never))
-              .split(id)
-              .join('ID');
+          const norm = (res: request.Response, id: string): string =>
+            JSON.stringify(stableProblem(res)).split(id).join('ID');
           expect(norm(cross, realId)).toBe(norm(missing, randomId));
         });
       }
@@ -261,13 +279,16 @@ rbacSuite(
       const routes = listRoutes(h.app.get(ModulesContainer));
       expect(matrixProblems(routes)).toEqual([]);
 
-      const listed = new Set(BE03_ROUTES.map(routeKey));
+      // BE-13 routes count only once the BE-13 switch is on (they do not exist before).
+      const listed = new Set(
+        [...routesFor('BE-03'), ...(BE13_READY ? routesFor('BE-13') : [])].map(routeKey),
+      );
       const missing = Object.entries(ROUTE_PERMISSIONS)
-        .filter(([key, access]) => access !== 'public' && !COVERED_ELSEWHERE.includes(key))
+        .filter(([key, access]) => access !== 'public' && !(key in COVERED_ELSEWHERE))
         .map(([key]) => key)
         .filter((key) => !listed.has(key));
       // A new backend route with no QA entry fails here: add it to be03-routes.ts with its audit
-      // action, body and fixtures (or to COVERED_ELSEWHERE with the file that tests it).
+      // action, body and fixtures (or to COVERED_ELSEWHERE, next to the file that tests it).
       expect(missing).toEqual([]);
 
       // Every BE-03 route QA lists is served, with the permission QA expects.
@@ -284,10 +305,21 @@ rbacSuite(
       }
     });
 
+    it('TC-006 [BE-03 pending]: the list routes carry audited === true in the matrix', () => {
+      const { ROUTE_PERMISSIONS } = loadBackendRegistry();
+      for (const key of ['GET /admin/users', 'GET /admin/users/lock-events']) {
+        const entry = ROUTE_PERMISSIONS[key];
+        expect([key, entry !== 'public' && entry?.audited]).toEqual([key, true]);
+      }
+    });
+
     it('TC-004 TC-006 [BE-03 pending]: the matrix `audited` flag (route carries @Audited) agrees with the QA list, and a route marked candidateData is audited', () => {
       const { ROUTE_PERMISSIONS } = loadBackendRegistry();
+      const known = ['audited', 'candidateData', 'permission', 'roles'];
       for (const [key, access] of Object.entries(ROUTE_PERMISSIONS)) {
         if (access === 'public') continue;
+        // A renamed or new matrix field must fail here, not be silently ignored.
+        expect([key, Object.keys(access).filter((k) => !known.includes(k))]).toEqual([key, []]);
         const mine = BE03_ROUTES.filter((r) => routeKey(r) === key);
         if (mine.length > 0) {
           // `audited` = the interceptor writes the row. Service-written rows (invite, role, unlock)
@@ -416,6 +448,14 @@ rbacSuite(
     expect(await h.owner.user.count({ where: { orgId: orgC, role: UserRole.RECRUITER } })).toBe(
       created,
     );
+    // The refused call sent no invite mail and wrote no USER_INVITED row beyond the created ones.
+    await h.settle();
+    expect(
+      h.mails.filter((m) => m.method === 'sendStaffInvite' && m.to.startsWith('qa-rate-')),
+    ).toHaveLength(created);
+    expect(await h.owner.auditLog.count({ where: { orgId: orgC, action: 'USER_INVITED' } })).toBe(
+      created,
+    );
     // Another org, same client IP: not limited.
     await invite(adminD, emailOf(9999)).expect(201);
   });
@@ -522,7 +562,11 @@ rbacSuite(
       patch(a, b.id, { active: false }),
       patch(b, a.id, { active: false }),
     ]);
-    for (const r of results) expect(r.status).toBeLessThan(500);
+    for (const r of results) {
+      expect(r.status).toBeLessThan(500);
+      // Any 403 here is the re-auth refusal (caller changed while the request ran), nothing else.
+      if (r.status === 403) expectReauthFailed(r);
+    }
     const left = await h.owner.user.count({
       where: { orgId: orgF, role: UserRole.SUPER_ADMIN, isActive: true },
     });

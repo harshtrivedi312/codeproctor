@@ -72,13 +72,13 @@ export function loadBackendRegistry(): RegistryApi {
  * Registry routes that QA covers in other files (tc-003: re-auth and 2FA routes). Every other
  * non-public route in the registry must be in BE03_ROUTES, or the matrix test fails.
  */
-export const COVERED_ELSEWHERE: readonly string[] = [
-  'POST /auth/2fa/setup/start',
-  'POST /auth/2fa/setup/confirm',
-  'POST /auth/2fa/disable',
-  'POST /auth/2fa/recovery-codes/regenerate',
-  'POST /auth/2fa/reset/:userId',
-];
+export const COVERED_ELSEWHERE: Readonly<Record<string, string>> = {
+  'POST /auth/2fa/setup/start': 'apps/api/test/integration/tc-003.int.test.ts',
+  'POST /auth/2fa/setup/confirm': 'apps/api/test/integration/tc-003.int.test.ts',
+  'POST /auth/2fa/disable': 'apps/api/test/integration/tc-003.int.test.ts',
+  'POST /auth/2fa/recovery-codes/regenerate': 'apps/api/test/integration/tc-003.int.test.ts',
+  'POST /auth/2fa/reset/:userId': 'apps/api/test/integration/tc-003.int.test.ts',
+};
 
 /** What a route needs before a call: a path with real ids and a body, built per call. */
 export interface Target {
@@ -190,6 +190,8 @@ export async function sessionFixture(
 }
 
 const noop = (): Promise<boolean> => Promise.resolve(true);
+// Routes built with withPassword() list PASSWORD in `secrets`: the acting admin's password must
+// never reach an audit column (TC-006).
 const withPassword = <T extends object>(body: T): T & { currentPassword: string } => ({
   ...body,
   currentPassword: PASSWORD,
@@ -249,7 +251,7 @@ export const BE03_ROUTES: Be03Route[] = [
       return Promise.resolve({
         path: ADMIN_USERS,
         body: withPassword({ email, name: 'QA Invitee', role: 'RECRUITER' }),
-        secrets: [], // the 72 h set-password token is read from the captured mail by the test
+        secrets: [PASSWORD], // the 72 h set-password token is read from the captured mail by the test
         resolveEntityId: async () => (await lookup())?.id,
         unchanged: async () => (await lookup()) === null,
       });
@@ -272,7 +274,7 @@ export const BE03_ROUTES: Be03Route[] = [
         path: `${ADMIN_USERS}/${u.id}`,
         body: withPassword({ role: 'AUTHOR' }),
         entityId: u.id,
-        secrets: [],
+        secrets: [PASSWORD],
         unchanged: async () =>
           (await h.owner.user.findUniqueOrThrow({ where: { id: u.id } })).role ===
           UserRole.RECRUITER,
@@ -296,7 +298,7 @@ export const BE03_ROUTES: Be03Route[] = [
         path: `${ADMIN_USERS}/${u.id}`,
         body: withPassword({ active: false }),
         entityId: u.id,
-        secrets: [],
+        secrets: [PASSWORD],
         unchanged: async () =>
           (await h.owner.user.findUniqueOrThrow({ where: { id: u.id } })).isActive,
       };
@@ -319,7 +321,7 @@ export const BE03_ROUTES: Be03Route[] = [
         path: `${ADMIN_USERS}/${u.id}`,
         body: withPassword({ active: true }),
         entityId: u.id,
-        secrets: [],
+        secrets: [PASSWORD],
         unchanged: async () =>
           !(await h.owner.user.findUniqueOrThrow({ where: { id: u.id } })).isActive,
       };
@@ -346,7 +348,7 @@ export const BE03_ROUTES: Be03Route[] = [
         path: `${ADMIN_USERS}/${u.id}/unlock`,
         body: withPassword({}),
         entityId: u.id,
-        secrets: [],
+        secrets: [PASSWORD],
         unchanged: async () =>
           (await h.owner.user.findUniqueOrThrow({ where: { id: u.id } })).lockedUntil !== null,
       };

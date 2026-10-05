@@ -6,7 +6,15 @@
 // but switched off until the routes exist: set BE03_READY / BE13_READY in support/be03-routes.ts.
 // The append-only and row-shape tests of the existing audit table are in tc-006.int.test.ts.
 import { AuditLog, UserRole } from '../../src/generated/prisma/client';
-import { Body, boot, expectReauthFailed, Harness, login, PASSWORD } from '../support/harness';
+import {
+  Body,
+  boot,
+  createUser,
+  expectReauthFailed,
+  Harness,
+  login,
+  PASSWORD,
+} from '../support/harness';
 import { actor, Actor, call, tokenFromUrl } from '../support/be03-helpers';
 import {
   ADMIN_USERS,
@@ -176,18 +184,19 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
           expect(await since(before)).toEqual([]);
         });
 
-        it(`TC-006: ${label} with an invalid body (400) writes no audit row and changes nothing`, async () => {
-          if (!route.mutating || route.takesBody === false) return;
-          const who = await as(roleFor(route));
-          const t = await route.prepare(h, h.orgId);
-          const before = await lastId();
-          const res = await call(h, route.method, t.path, who.token, {
-            unexpected: 'x'.repeat(10),
+        if (route.mutating && route.takesBody !== false) {
+          it(`TC-006: ${label} with an invalid body (400) writes no audit row and changes nothing`, async () => {
+            const who = await as(roleFor(route));
+            const t = await route.prepare(h, h.orgId);
+            const before = await lastId();
+            const res = await call(h, route.method, t.path, who.token, {
+              unexpected: 'x'.repeat(10),
+            });
+            expect(res.status).toBe(400);
+            expect(await t.unchanged()).toBe(true);
+            expect(await since(before)).toEqual([]);
           });
-          expect(res.status).toBe(400);
-          expect(await t.unchanged()).toBe(true);
-          expect(await since(before)).toEqual([]);
-        });
+        }
         if (route.reauth) {
           it(`TC-006 FR-102: ${label} with a missing (400) or wrong (403 REAUTH_FAILED) currentPassword writes no audit row and changes nothing`, async () => {
             // Fresh admins: wrong passwords count towards the shared lockout (5 failures lock the
@@ -207,7 +216,12 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
               expectReauthFailed(await call(h, route.method, t.path, outsider.token, wrong));
             }
             expect(await t.unchanged()).toBe(true);
-            expect(await since(before)).toEqual([]);
+            // No row at all, so neither the right nor the wrong password can be in one.
+            const rows = await since(before);
+            expect(rows).toEqual([]);
+            expect(
+              JSON.stringify(rows, (_k, v: unknown) => (typeof v === 'bigint' ? String(v) : v)),
+            ).not.toMatch(/Wrong-Password-1|Correct-Horse-9/);
           });
         }
       } else {
@@ -332,24 +346,85 @@ auditSuite(
         .expect(400);
     });
 
-    it('TC-006 [BE-03 pending]: when the audit write fails the request fails with 500 and an empty body (fail closed), on an interceptor route and on an invite', async () => {
+    it('TC-006 [BE-03 pending]: when the audit write fails the request fails with 500 and no route data (fail closed), on an interceptor route and on an invite', async () => {
       const admin = await actor(h, UserRole.SUPER_ADMIN);
       // Sign-ins above wrote their rows; now remove the app role's right to insert audit rows.
+      const mailsBefore = h.mails.length;
       await h.owner.$executeRawUnsafe('REVOKE INSERT ON audit_logs FROM app_user');
-      const email = `qa-auditfail-${Date.now()}@example.com`;
-      const list = await call(h, 'GET', ADMIN_USERS, admin.token);
-      expect(list.status).toBe(500);
-      expectNoDataProblem(list); // the data the route read is not returned
-      const invite = await call(h, 'POST', ADMIN_USERS, admin.token, {
-        email,
-        name: 'Audit Fail',
-        role: 'RECRUITER',
+      try {
+        const email = `qa-auditfail-${Date.now()}@example.com`;
+        const list = await call(h, 'GET', ADMIN_USERS, admin.token);
+        expectNoDataProblem(list); // the data the route read is not returned
+        const invite = await call(h, 'POST', ADMIN_USERS, admin.token, {
+          email,
+          name: 'Audit Fail',
+          role: 'RECRUITER',
+          currentPassword: PASSWORD,
+        });
+        expectNoDataProblem(invite);
+        // No audit row, so no change either: no user row left behind, and no invite mail sent.
+        expect(await h.owner.user.count({ where: { email } })).toBe(0);
+        await h.settle();
+        await new Promise((r) => setImmediate(r));
+        expect(h.mails.slice(mailsBefore).filter((m) => m.method === 'sendStaffInvite')).toEqual(
+          [],
+        );
+      } finally {
+        await h.owner.$executeRawUnsafe('GRANT INSERT ON audit_logs TO app_user');
+      }
+    });
+  },
+);
+
+(BE03_READY ? describe : describe.skip)(
+  'TC-006 [BE-03 pending]: no secret in the logs of the admin user routes',
+  () => {
+    let h: Harness;
+    beforeAll(async () => {
+      h = await boot({ captureLogs: true });
+    });
+    afterAll(async () => {
+      await h?.close();
+    });
+
+    it('TC-006 [BE-03 pending]: invite, PATCH and unlock with the right and a wrong currentPassword log neither password, the invite token from the mail, nor the access token', async () => {
+      const admin = await actor(h, UserRole.SUPER_ADMIN);
+      const target = await createUser(h);
+      const wrong = 'Wrong-Password-Logcheck-1';
+      const email = `qa-logs-${Date.now()}@example.com`;
+      const invite = (currentPassword: string) =>
+        call(h, 'POST', ADMIN_USERS, admin.token, {
+          email,
+          name: 'Log Check',
+          role: 'RECRUITER',
+          currentPassword,
+        });
+      await invite(wrong).expect(403);
+      await invite(PASSWORD).expect(201);
+      await call(h, 'PATCH', `${ADMIN_USERS}/${target.id}`, admin.token, {
+        role: 'AUTHOR',
+        currentPassword: wrong,
+      }).expect(403);
+      await call(h, 'PATCH', `${ADMIN_USERS}/${target.id}`, admin.token, {
+        role: 'AUTHOR',
         currentPassword: PASSWORD,
-      });
-      expect(invite.status).toBe(500);
-      expectNoDataProblem(invite);
-      // No audit row, so no change either: the user row is not left behind without its row.
-      expect(await h.owner.user.count({ where: { email } })).toBe(0);
+      }).expect(200);
+      await call(h, 'POST', `${ADMIN_USERS}/${target.id}/unlock`, admin.token, {
+        currentPassword: wrong,
+      }).expect(403);
+      await call(h, 'POST', `${ADMIN_USERS}/${target.id}/unlock`, admin.token, {
+        currentPassword: PASSWORD,
+      }).expect(204);
+      await h.settle();
+
+      const inviteMail = h.mails.find((m) => m.method === 'sendStaffInvite' && m.to === email);
+      const inviteToken = tokenFromUrl(inviteMail?.url ?? '');
+      expect(inviteToken.length).toBeGreaterThanOrEqual(20);
+      const logs = h.logged.join('');
+      expect(logs.length).toBeGreaterThan(0); // logging was really on
+      for (const secret of [PASSWORD, wrong, inviteToken, admin.token]) {
+        expect(logs).not.toContain(secret);
+      }
     });
   },
 );

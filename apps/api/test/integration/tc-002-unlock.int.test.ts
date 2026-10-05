@@ -61,13 +61,26 @@ import { ADMIN_USERS, BE03_READY, lockAlertsFor } from '../support/be03-routes';
       const a1 = await actor(h, UserRole.SUPER_ADMIN);
       const a2 = await actor(h, UserRole.SUPER_ADMIN);
       const u = await createUser(h);
+      // Recipients that must NOT get the mail (it carries the locked user's email): an admin of
+      // another org, and a deactivated admin of this org.
+      const orgX = (await h.owner.organization.create({ data: { name: 'QA Org X lock mail' } })).id;
+      const foreign = await createUser(h, { role: UserRole.SUPER_ADMIN, orgId: orgX });
+      const gone = await createUser(h, { role: UserRole.SUPER_ADMIN });
+      await h.owner.user.update({ where: { id: gone.id }, data: { isActive: false } });
       h.mails.length = 0;
       await lock(u.email);
       await h.settle();
       await new Promise((r) => setImmediate(r)); // the mail is deferred until after the response
       const lockMails = h.mails.filter((m) => m.method === 'sendStaffAccountLocked');
       expect(lockMails.map((m) => m.to)).toEqual(expect.arrayContaining([a1.email, a2.email]));
-      expect(lockMails.map((m) => m.to)).not.toContain(u.email);
+      const recipients = lockMails.map((m) => m.to);
+      expect(recipients).not.toContain(u.email);
+      expect(recipients).not.toContain(foreign.email); // other org
+      expect(recipients).not.toContain(gone.email); // deactivated
+      for (const r of [a1.email, a2.email]) {
+        expect(recipients.filter((x) => x === r)).toHaveLength(1); // exactly one mail each
+      }
+      expect(new Set(recipients).size).toBe(recipients.length);
       for (const m of lockMails.filter((x) => x.to === a1.email || x.to === a2.email)) {
         expect(m.args[1]).toMatchObject({ email: u.email, minutes: 15 });
         expect(JSON.stringify(m.args)).not.toMatch(/password|token/i);
@@ -120,8 +133,9 @@ import { ADMIN_USERS, BE03_READY, lockAlertsFor } from '../support/be03-routes';
       const row = await h.owner.auditLog.findFirst({
         where: { action: 'USER_UNLOCKED', entityId: u.id },
       });
-      // The audit row, if written for a no-op, must say nothing was locked (metadata wasLocked).
-      if (row) expect((row.metadata as { wasLocked?: boolean } | null)?.wasLocked).toBe(false);
+      // Contract (backend.md): USER_UNLOCKED carries wasLocked; for a no-op it says false.
+      expect(row).not.toBeNull();
+      expect((row?.metadata as { wasLocked?: boolean } | null)?.wasLocked).toBe(false);
       await login(h, u.email).expect(200);
     });
 
