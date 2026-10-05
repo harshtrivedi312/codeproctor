@@ -33,7 +33,7 @@ function groupKey(key: string): string {
 export function TwoFactorEnroll(): React.JSX.Element | null {
   const router = useRouter();
   const next = safeNextPath(useSearchParams().get('next'));
-  const { pending, signIn, setPending } = useAuth();
+  const { pending, signIn, setPending, announceSession } = useAuth();
   const [result, setResult] = React.useState<{ session: AuthSession; codes: string[] } | null>(
     null,
   );
@@ -89,6 +89,9 @@ export function TwoFactorEnroll(): React.JSX.Element | null {
         body: { challengeToken: challengeToken ?? '', code: values.code },
       });
       if (data) {
+        // The server just set this user's refresh cookie. The codes screen stays up until Continue,
+        // but other tabs must not retry a logout with that cookie in the meantime (TC-005).
+        announceSession(data.session.user.id);
         setResult({ session: data.session, codes: data.recoveryCodes });
         setPending(null);
       } else if (response.status === 401) {
