@@ -20,7 +20,6 @@ Non-blocking findings. Only blockers stop a merge.
 - `app.py` has no request size limit beyond field caps; put a body limit at the proxy.
 - Starlette TestClient emits a deprecation warning about httpx.
 
-# Follow-ups: Integrity track
 
 ## From ARC-02 review of PR #16 (code-reviewer)
 
