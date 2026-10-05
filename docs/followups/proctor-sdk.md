@@ -89,3 +89,9 @@ Nits
 - `vision-monitor.ts`: the identity re-check only runs when FACE is enabled; document the coupling to accommodations.
 - Test names in `vision-monitor.test.ts` and `rules.test.ts` use FR-606; use TC-057 (NO_FACE), TC-058 (MULTIPLE_FACES with snapshot), TC-059 (phone with snapshot).
 - Per-detector start timeout in `ProctorSession` (see the PR #21 nits).
+
+### Additional review follow-ups for PR #23 (code-reviewer, not blockers)
+- `vision-monitor.ts` `start()` catch: tasks already SUPPORTED are dropped without DETECTOR_UNAVAILABLE because of the `!tasks.has` condition. Drop that condition and reset the capability flag.
+- `inference-client.ts` `onerror` after `ready` keeps a dead worker, so `analyze()` hangs silently. Terminate it and emit RUNTIME_ERROR, or add a per-frame timeout.
+- `voice-monitor.ts`: `MicVAD.new` has no init timeout (same hang risk as the worker init).
+- `core/event-queue.ts` `stop()`: unsent event and keystroke batches stay in IndexedDB after the session ends; needs the FR-702 purge (see the Step 6 note).
