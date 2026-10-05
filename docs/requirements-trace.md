@@ -102,7 +102,7 @@ Notes:
 | FR-802 | M8 | Keystroke analytics | BE-12 | TC-073 | Not started | |
 | FR-803 | M8 | Code similarity and AI-reference similarity | BE-12, BE-04 (authoring), FE-04 (authoring) | TC-074 | Not started | Source decided (D-12); storage `ai_reference_solutions` (ADR 0005); Python, JavaScript and Java from two no-training business assistants (D-20); similarity only, never grading |
 | FR-804 | M8 | Risk score 0-100, bands, configurable weights | BE-12, FE-03 | TC-075 | Not started | Partial: defaults decided (ADR 0005, Q-09) and settings shape decided (ADR 0007, Q-16); org-settings API still in ARC-02 (Q-18) |
-| FR-805 | M8 | MEDIUM or HIGH goes to review queue; also identity awaiting review and short answers awaiting scoring | BE-12, BE-13 | TC-076 | Not started | ADR 0002 |
+| FR-805 | M8 | Every session goes to the review queue (C-28, 2026-10-05; the hub is amending the FR text). Band orders the queue: HIGH, then holds (identity awaiting review, short answers awaiting scoring), then MEDIUM, then LOW, oldest first; LOW uses the fast review path (DL-18) | BE-12 (worker part merged in #55), BE-13, FE-11 | TC-076 (expectation changes with C-28) | In progress | ADR 0002 (to amend), C-28 |
 | FR-901 | M9 | Review page, synced video, replay, diffs | BE-13, FE-11 | TC-077 | Not started | |
 | FR-902 | M9 | Flag decisions and verdict | BE-13, FE-11 | TC-078 | Not started | |
 | FR-903 | M9 | Live grid; message or pause | BE-13, FE-12, FE-10 | TC-079 | Not started | Candidate channel undefined (Q-20) |

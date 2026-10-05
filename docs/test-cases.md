@@ -72,7 +72,7 @@ Updated 2026-10-01 (ARC-01 Phase B, D-16..D-23). Changed: TC-007, TC-012, TC-030
 
 | ID | FR | Scenario | Steps | Expected result | Type | Priority |
 | --- | --- | --- | --- | --- | --- | --- |
-| TC-050 | FR-601 | Fullscreen exit | Press Esc during test | Editor locked, overlay shown, FULLSCREEN\_EXIT logged with duration | I | P1 |
+| TC-050 | FR-601 | Fullscreen exit | Press Esc during test | Editor locked, overlay shown; FULLSCREEN\_EXIT logged immediately; duration filled on restore or at session end (ADR 0013 §5.9) | I | P1 |
 | TC-051 | FR-602 | Tab switch | Alt+Tab to another window for 8 s | TAB\_SWITCH/FOCUS\_LOST with \~8 s duration | I | P1 |
 | TC-052 | FR-603 | Paste blocked | Copy code from outside, Ctrl+V into editor | Nothing pasted; PASTE\_ATTEMPT logged | I | P1 |
 | TC-053 | FR-603 | Drag-and-drop text | Drag text from another window into editor | Blocked and logged | I | P2 |

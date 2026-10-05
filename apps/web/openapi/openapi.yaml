@@ -214,6 +214,197 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /v1/auth/2fa/setup/start:
+    post:
+      operationId: startTwoFactorSetup
+      summary: Signed-in user begins optional TOTP set-up. Mirrors backend PR #26 (FR-102, FU-BE-39).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword]
+              properties:
+                currentPassword: { type: string, minLength: 1, maxLength: 1024 }
+      responses:
+        '200':
+          description: Secret, otpauth URI and QR code (PNG data URL)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [manualKey, otpauthUri, qrDataUrl]
+                properties:
+                  manualKey: { type: string }
+                  otpauthUri: { type: string }
+                  qrDataUrl: { type: string }
+        '400':
+          description: Missing or invalid currentPassword or totpCode
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '401':
+          description: Missing or invalid access token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '403':
+          description: Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '409':
+          description: Two-factor was turned on concurrently
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+  /v1/auth/2fa/setup/confirm:
+    post:
+      operationId: confirmTwoFactorSetup
+      summary: Confirm optional set-up with a first code; returns the one-time recovery codes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, code]
+              properties:
+                currentPassword: { type: string, minLength: 1, maxLength: 1024 }
+                code: { type: string, minLength: 6, maxLength: 6 }
+      responses:
+        '200':
+          description: Two-factor is on
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecoveryCodes'
+        '400':
+          description: Wrong code, or missing or invalid body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '401':
+          description: Missing or invalid access token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '403':
+          description: Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '409':
+          description: Two-factor state changed concurrently
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+  /v1/auth/2fa/disable:
+    post:
+      operationId: disableTwoFactor
+      summary: Turn TOTP off. Needs password and TOTP code; revokes all refresh tokens and clears the cookie (backend PR #51). Not for Super Admin and Reviewer.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, totpCode]
+              properties:
+                currentPassword: { type: string, minLength: 1, maxLength: 1024 }
+                totpCode:
+                  {
+                    type: string,
+                    minLength: 6,
+                    maxLength: 6,
+                    description: 6-digit TOTP code only; a recovery code is 400,
+                  }
+      responses:
+        '204':
+          description: Two-factor is off and every refresh token of the user is revoked (sign in again)
+        '400':
+          description: Missing or invalid currentPassword or totpCode
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '401':
+          description: Missing or invalid access token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '403':
+          description: REAUTH_FAILED for a wrong or locked password or a wrong or replayed code (one identical body), otherwise TWO_FACTOR_REQUIRED_FOR_ROLE for Super Admin and Reviewer (checked last)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '409':
+          description: Two-factor is not on
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '503':
+          description: Temporary outage (for example the code store); no failure is counted, try again
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+  /v1/auth/2fa/recovery-codes/regenerate:
+    post:
+      operationId: regenerateRecoveryCodes
+      summary: Replace all recovery codes; the old set stops working
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword]
+              properties:
+                currentPassword: { type: string, minLength: 1, maxLength: 1024 }
+      responses:
+        '200':
+          description: The new codes, shown once
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecoveryCodes'
+        '400':
+          description: Missing or invalid currentPassword or totpCode
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '401':
+          description: Missing or invalid access token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '403':
+          description: Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '409':
+          description: Two-factor is not on
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
   /v1/auth/2fa/verify:
     post:
       operationId: verifyTwoFactor
@@ -562,13 +753,15 @@ components:
       enum: [SUPER_ADMIN, RECRUITER, AUTHOR, REVIEWER]
     AuthUser:
       type: object
-      required: [id, email, name, role, orgName]
+      required: [id, email, name, role, orgName, totpEnabled]
       properties:
         id: { type: string }
         email: { type: string }
         name: { type: string }
         role: { $ref: '#/components/schemas/StaffRole' }
         orgName: { type: string }
+        # Backend adds this to AuthUserDto (login, 2fa/verify, enroll-confirm, refresh).
+        totpEnabled: { type: boolean }
     AuthSession:
       type: object
       required: [accessToken, user]
@@ -597,6 +790,26 @@ components:
       properties:
         code: { type: string }
         message: { type: string }
+    ProblemDetails:
+      # RFC 7807 problem JSON from the API's global filter (PR #26). `code` appears only on coded errors.
+      type: object
+      required: [type, title, status, instance, traceId]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        traceId: { type: string }
+        errors: { type: array, items: { type: string } }
+        code: { type: string, enum: [REAUTH_FAILED, TWO_FACTOR_REQUIRED_FOR_ROLE] }
+    RecoveryCodes:
+      type: object
+      required: [recoveryCodes]
+      properties:
+        recoveryCodes:
+          type: array
+          items: { type: string }
     Language:
       # Must match codeLanguageSchema in packages/shared/src/code-run.ts.
       type: string
