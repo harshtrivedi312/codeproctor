@@ -5,6 +5,7 @@
 // database settings.
 import type { INestApplication } from '@nestjs/common';
 import { hash } from '@node-rs/argon2';
+import { authenticator } from 'otplib';
 import { randomBytes } from 'node:crypto';
 import request from 'supertest';
 import type { App } from 'supertest/types';
@@ -12,7 +13,6 @@ import { Client } from 'pg';
 import { encryptSecret, sha256Hex } from '../../src/auth/crypto.util';
 import { createPrismaClient } from '../../src/database/create-prisma-client';
 import { PrismaClient, UserRole } from '../../src/generated/prisma/client';
-import type { MailPort } from '../../src/mail/mail.port';
 import { applyEnv, applyMigrations, startInfra, TestInfra } from '../../src/test/containers';
 
 export const API = '/api/v1';
@@ -34,6 +34,8 @@ export interface Harness {
   mails: SentMail[];
   /** Everything the app wrote to stdout (request logs), when logs are on. */
   logged: string[];
+  /** Waits for work the API defers until after the response (forgot-password mail, FU-BE-31). */
+  settle(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -71,6 +73,7 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
   let appUserUrl: string;
   let orgId: string;
   const mails: SentMail[] = [];
+  let settle: () => Promise<void> = () => Promise.resolve();
   try {
     await applyMigrations(infra);
 
@@ -91,12 +94,20 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     owner = createPrismaClient(infra.postgres.getConnectionUri());
     orgId = (await owner.organization.create({ data: { name: 'QA Org A' } })).id;
 
-    const fakeMail: Pick<MailPort, 'sendPasswordReset'> = {
-      sendPasswordReset: (to, url) => {
-        mails.push({ to, url });
-        return Promise.resolve();
+    // Every MailPort send method (send*): records the recipient and the URL it carries, so the
+    // same fake serves password reset now and the staff invite and lock alert mails of BE-03.
+    const fakeMail = new Proxy(
+      {},
+      {
+        get: (_target, prop) =>
+          typeof prop === 'string' && prop.startsWith('send')
+            ? (to: string, url?: string) => {
+                mails.push({ to, url: url ?? '' });
+                return Promise.resolve();
+              }
+            : undefined,
       },
-    };
+    );
 
     jest.resetModules();
     const { AppModule } =
@@ -104,6 +115,9 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     const { Test } = jest.requireActual<typeof import('@nestjs/testing')>('@nestjs/testing');
     const { configureApp } =
       jest.requireActual<typeof import('../../src/bootstrap')>('../../src/bootstrap');
+    const { AuthService } = jest.requireActual<typeof import('../../src/auth/auth.service')>(
+      '../../src/auth/auth.service',
+    );
     const { MailPort: MailToken } = jest.requireActual<typeof import('../../src/mail/mail.port')>(
       '../../src/mail/mail.port',
     );
@@ -114,6 +128,8 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     app = moduleRef.createNestApplication<INestApplication<App>>();
     configureApp(app);
     await app.init();
+    const authService = app.get(AuthService);
+    settle = () => authService.settleDeferred();
   } catch (error) {
     stdout?.mockRestore();
     await app?.close().catch(() => undefined);
@@ -133,6 +149,7 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     orgId,
     mails,
     logged,
+    settle: () => settle(),
     close: async () => {
       stdout?.mockRestore();
       await startedApp.close();
@@ -188,6 +205,34 @@ export function refreshCookie(res: request.Response): string {
 export const refresh = (h: Harness, cookie: string): request.Test =>
   request(h.app.getHttpServer()).post(`${API}/auth/refresh`).set('Cookie', cookie);
 
+/** Signs in a user with no 2FA and returns the Authorization header for protected routes. */
+export async function signIn(
+  h: Harness,
+  email: string,
+  password = PASSWORD,
+): Promise<{ Authorization: string }> {
+  const res = await login(h, email, password).expect(200);
+  return { Authorization: `Bearer ${(res.body as Body).session.accessToken}` };
+}
+
+/** Completes a 2FA login with a TOTP code and returns the Authorization header. */
+export async function signInWithTotp(
+  h: Harness,
+  email: string,
+  secret = TOTP_SECRET,
+  password = PASSWORD,
+): Promise<{ Authorization: string }> {
+  const { challengeToken } = (await login(h, email, password).expect(200)).body as Body;
+  const done = await request(h.app.getHttpServer())
+    .post(`${API}/auth/2fa/verify`)
+    .send({ challengeToken, code: authenticator.generate(secret) })
+    .expect(200);
+  // /2fa/verify answers with the session itself.
+  return {
+    Authorization: `Bearer ${(done.body as unknown as { accessToken: string }).accessToken}`,
+  };
+}
+
 /** Loose view of the JSON bodies; each test reads only the fields it expects. */
 export interface Body {
   status: string;
@@ -210,4 +255,23 @@ export function claimsOf(jwt: string): { exp: number; iat: number; role: string;
     role: string;
     org: string;
   };
+}
+
+export const REAUTH_DETAIL = 'The current password is incorrect.';
+
+/** Asserts the final FR-102 re-auth contract: 403 problem+json, code REAUTH_FAILED, fixed detail. */
+export function expectReauthFailed(res: request.Response): void {
+  expect(res.status).toBe(403);
+  expect(res.headers['content-type']).toContain('application/problem+json');
+  const body = res.body as Body;
+  expect(body.code).toBe('REAUTH_FAILED');
+  expect(body.detail).toBe(REAUTH_DETAIL);
+}
+
+/** A problem body without the per-request fields, for "identical body" comparisons. */
+export function stableProblem(res: request.Response): Record<string, unknown> {
+  const { traceId: _t, instance: _i, ...rest } = res.body as Record<string, unknown>;
+  void _t;
+  void _i;
+  return rest;
 }
