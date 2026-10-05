@@ -48,14 +48,16 @@ describe('TokenValidityService.isFresh (FR-104)', () => {
   });
 
   it('FR-104: the marker is written with that TTL', async () => {
-    const set = jest.fn().mockResolvedValue('OK');
-    const svc = new TokenValidityService({ status: 'ready', set } as unknown as Redis);
+    const evalFn = jest.fn().mockResolvedValue(1);
+    const svc = new TokenValidityService({ status: 'ready', eval: evalFn } as unknown as Redis);
     await svc.invalidateIssuedTokens('U-1');
-    expect(set).toHaveBeenCalledWith(
+    // The script only ever raises the marker (max of existing and now).
+    expect(evalFn).toHaveBeenCalledWith(
+      expect.stringContaining('now > cur'),
+      1,
       'auth:tokens-valid-after:u-1',
       expect.any(String),
-      'EX',
-      MARKER_TTL_SECONDS,
+      String(MARKER_TTL_SECONDS),
     );
   });
 });

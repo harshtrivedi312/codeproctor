@@ -900,7 +900,7 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
           .post(`${API}/auth/2fa/reset/${user.id}`)
           .set(admin.auth)
           .send({ currentPassword: PASSWORD });
-      const set = jest.spyOn(redis, 'set').mockRejectedValue(new Error('redis down'));
+      const set = jest.spyOn(redis, 'eval').mockRejectedValue(new Error('redis down'));
       try {
         expect((await reset()).status).toBe(503);
       } finally {
@@ -924,7 +924,7 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       >('../infrastructure/infrastructure.module');
       const redis = app.get<import('ioredis').Redis>(REDIS_CLIENT);
       await login(user.email).expect(200);
-      const set = jest.spyOn(redis, 'set').mockRejectedValue(new Error('redis down'));
+      const set = jest.spyOn(redis, 'eval').mockRejectedValue(new Error('redis down'));
       try {
         expect((await patch(admin, user.id, { role: 'AUTHOR' })).status).toBe(503);
       } finally {

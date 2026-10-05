@@ -6,7 +6,9 @@
 // access token whose `iat` is at or before it. A token issued in the same second as the change is
 // refused too (the user signs in again): no schema column is needed. Clock assumption: the marker
 // time and the token `iat` both come from API server clocks, so API instances must be NTP-synced
-// to within about a second (single instance today). Redis down means the check
+// to within about a second (single instance today). A deactivate then reactivate, or A -> B -> A, that finishes entirely
+// inside one in-flight sign-in still lets that sign-in open a family: its token reflects the
+// current state and valid credentials (acceptable). Redis down means the check
 // cannot run, so the request is refused with a 503 (fail closed).
 import { Inject, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { Redis } from 'ioredis';
@@ -16,6 +18,13 @@ import { ACCESS_TTL_SECONDS } from './access-ttl';
 
 /** The marker outlives any token issued before it: the access lifetime plus a margin. */
 export const MARKER_TTL_SECONDS = ACCESS_TTL_SECONDS + 5 * 60;
+
+const RAISE_MARKER = `
+local cur = tonumber(redis.call('GET', KEYS[1]))
+local now = tonumber(ARGV[1])
+if cur == nil or now > cur then redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+else redis.call('EXPIRE', KEYS[1], ARGV[2]) end
+return 1`;
 
 const key = (userId: string): string => `auth:tokens-valid-after:${userId.toLowerCase()}`;
 
@@ -33,11 +42,14 @@ export class TokenValidityService {
       // refused (same-clock assumption: API instances NTP-synced to about a second, FU-BE-80).
       // The marker is written before the audit insert and stays if the commit fails (it only
       // forces a sign-in, so it fails safe).
-      await this.redis.set(
+      // max(existing, now) in one script, so an instance with a slow clock can never move the
+      // marker backwards and revive a token (FU-BE-80 tracks a clock comparison in the health check).
+      await this.redis.eval(
+        RAISE_MARKER,
+        1,
         key(userId),
         String(Math.floor(Date.now() / 1000)),
-        'EX',
-        MARKER_TTL_SECONDS,
+        String(MARKER_TTL_SECONDS),
       );
     } catch {
       throw new ServiceUnavailableException('Verification is temporarily unavailable.');

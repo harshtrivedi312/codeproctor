@@ -1803,13 +1803,8 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
             '../infrastructure/infrastructure.module',
           ).REDIS_CLIENT,
         );
-        const realSet = redis.set.bind(redis) as (...args: unknown[]) => Promise<unknown>;
-        return jest
-          .spyOn(redis, 'set')
-          .mockImplementation(((...args: unknown[]) =>
-            String(args[0]).startsWith('auth:tokens-valid-after:')
-              ? Promise.reject(new Error('redis down'))
-              : realSet(...args)) as unknown as typeof redis.set);
+        // Only the marker uses a Redis script, so failing eval fails exactly the marker write.
+        return jest.spyOn(redis, 'eval').mockRejectedValue(new Error('redis down'));
       }
 
       it('TC-003, FR-104: an access token issued before a successful disable is 401 afterwards, even in the same second', async () => {
@@ -1854,6 +1849,139 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         ).toBe(0);
       });
 
+      /** True once some backend waits on a lock (the statement under test is blocked). */
+      async function untilLockWaiter(): Promise<void> {
+        const deadline = Date.now() + 10_000;
+        for (;;) {
+          const rows = await prisma.$queryRaw<{ n: bigint }[]>`
+            SELECT count(*) AS n FROM pg_stat_activity
+            WHERE wait_event_type = 'Lock' AND datname = current_database()`;
+          if (Number(rows[0]?.n ?? 0) > 0) return;
+          if (Date.now() > deadline) throw new Error('no statement is waiting on a lock');
+          await new Promise((r) => setTimeout(r, 20));
+        }
+      }
+
+      /** Waits until the current second is later than the user's tokens-valid-after marker. */
+      async function pastMarker(userId: string): Promise<void> {
+        const redis = app.get<import('ioredis').Redis>(
+          jest.requireActual<typeof import('../infrastructure/infrastructure.module')>(
+            '../infrastructure/infrastructure.module',
+          ).REDIS_CLIENT,
+        );
+        const marker = Number(await redis.get(`auth:tokens-valid-after:${userId}`));
+        expect(Number.isFinite(marker)).toBe(true);
+        while (Math.floor(Date.now() / 1000) <= marker) await new Promise((r) => setTimeout(r, 50));
+      }
+
+      it('TC-003, FR-104: a recovery-code sign-in held inside its transaction makes the disable wait on the user row lock, and its token is refused afterwards', async () => {
+        const u = await createUser({ totp: SECRET });
+        const recovery = 'ABCDEFGHJKLMNPQR';
+        await withRecoveryCodes(u.id, [recovery]);
+        const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+        let release: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let reached: () => void = () => undefined;
+        const atGate = new Promise<void>((resolve) => {
+          reached = resolve;
+        });
+        const target = authService as unknown as {
+          clearFailures: (...args: unknown[]) => Promise<void>;
+        };
+        const real = target.clearFailures.bind(authService);
+        const hold = jest
+          .spyOn(target, 'clearFailures')
+          .mockImplementationOnce(async (...args: unknown[]) => {
+            reached();
+            await gate;
+            return real(...args);
+          });
+        let signIn: Promise<request.Response>;
+        let disable: Promise<request.Response>;
+        try {
+          signIn = Promise.resolve(post('2fa/verify', null, { challengeToken, code: recovery }));
+          await atGate;
+          // The family is inserted but uncommitted: the disable must wait for the row lock.
+          disable = Promise.resolve(
+            post('2fa/disable', await accessFor(u.id), {
+              currentPassword: PASSWORD,
+              totpCode: goodCode(),
+            }),
+          );
+          await untilLockWaiter();
+          release();
+        } finally {
+          hold.mockRestore();
+        }
+        expect((await signIn).status).toBe(200);
+        expect((await disable).status).toBe(204);
+        await pastMarker(u.id);
+        const issued = ((await signIn).body as { accessToken: string }).accessToken;
+        expect((await post('2fa/setup/start', issued, { currentPassword: PASSWORD })).status).toBe(
+          401,
+        );
+        expect(await prisma.refreshToken.count({ where: { userId: u.id, revokedAt: null } })).toBe(
+          0,
+        );
+      });
+
+      it('TC-004, FR-102: a password sign-in that read a RECRUITER cannot open a family after the user is promoted to a 2FA-required role (held after the password check)', async () => {
+        const admin = await createUser({ role: UserRole.SUPER_ADMIN, totp: SECRET });
+        const u = await createUser({ role: UserRole.RECRUITER });
+        let release: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let reached: () => void = () => undefined;
+        const atGate = new Promise<void>((resolve) => {
+          reached = resolve;
+        });
+        passwordVerify.mockImplementationOnce(async (hash: string, password: string) => {
+          const ok = await realPasswordVerify(hash, password);
+          if (ok) {
+            reached();
+            await gate;
+          }
+          return ok;
+        });
+        const signIn = Promise.resolve(login(u.email));
+        await atGate;
+        await request(app.getHttpServer())
+          .patch(`/api/v1/admin/users/${u.id}`)
+          .set('Authorization', `Bearer ${await accessFor(admin.id)}`)
+          .send({ currentPassword: PASSWORD, role: 'REVIEWER' })
+          .expect(200);
+        release();
+        const res = await signIn;
+        expect(res.status).toBe(401);
+        expect(res.headers['set-cookie']).toBeUndefined();
+        expect(await prisma.refreshToken.count({ where: { userId: u.id, revokedAt: null } })).toBe(
+          0,
+        );
+      });
+
+      it('TC-004, FR-102: a refresh for a 2FA-required role without 2FA is refused and the family is revoked (defence in depth)', async () => {
+        const u = await createUser({ role: UserRole.REVIEWER });
+        const raw = `raw-refresh-${u.id}`;
+        const family = '22222222-2222-4222-8222-222222222222';
+        await prisma.refreshToken.create({
+          data: {
+            userId: u.id,
+            familyId: family,
+            tokenHash: sha256Hex(raw),
+            expiresAt: new Date(Date.now() + 600_000),
+          },
+        });
+        await expect(authService.refresh(raw, { ip: '203.0.113.9' })).rejects.toThrow(
+          'Authentication required.',
+        );
+        expect(await prisma.refreshToken.count({ where: { userId: u.id, revokedAt: null } })).toBe(
+          0,
+        );
+      });
+
       it('TC-003, FR-104: a TOTP sign-in whose family commits before a disable but finishes after it gets an access token the guard refuses (held, same-second race)', async () => {
         const u = await createUser({ totp: SECRET });
         const { challengeToken } = (await login(u.email).expect(200)).body as Body;
@@ -1887,6 +2015,10 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
             currentPassword: PASSWORD,
             totpCode: goodCode(),
           }).expect(204);
+          // Let the clock pass the marker's second before the sign-in finishes: with the access
+          // token signed before the family commits the token is still refused, with the old order
+          // (signed after) it would carry a later iat and be accepted.
+          await pastMarker(u.id);
           release();
         } finally {
           hold.mockRestore();

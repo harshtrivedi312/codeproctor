@@ -809,6 +809,12 @@ export class AuthService implements OnApplicationShutdown {
       await this.revokeFamily(existing.familyId);
       throw new UnauthorizedException('Authentication required.');
     }
+    // Defence in depth: a role that requires 2FA never gets a token from a family that was not
+    // opened through 2FA (a promotion racing a password sign-in). Same 401, family revoked.
+    if (TOTP_REQUIRED_ROLES.includes(user.role) && !user.totpEnabled) {
+      await this.revokeFamily(existing.familyId);
+      throw new UnauthorizedException('Authentication required.');
+    }
 
     const next = newOpaqueToken();
     // Signed before the rotation commits, like startSession (S1).
@@ -830,6 +836,7 @@ export class AuthService implements OnApplicationShutdown {
               FROM users u
               WHERE u.id = ${user.id}::uuid AND u.org_id = ${user.orgId}::uuid AND u.is_active
                 AND u.password_hash = ${user.passwordHash ?? ''}
+                AND u.role = ${user.role}::user_role
               FOR SHARE OF u
               RETURNING id`),
         );
@@ -1240,6 +1247,9 @@ export class AuthService implements OnApplicationShutdown {
     // and inserts nothing; a reset arriving later waits for this commit, so its revoke-all sees
     // the token. A family can never outlive a reset (FR-104, FR-107).
     // `?? ''` is deliberate: an empty hash can never equal a stored hash, so it inserts nothing.
+    // The role read at sign-in is bound too: a promotion to a 2FA-required role in between inserts
+    // nothing, so no family exists that skipped 2FA (the guard refuses the old-role access token,
+    // but a refresh would re-read the new role).
     // A 2FA completion also binds the TOTP secret it checked: an admin reset of the user's 2FA
     // that lands in between clears it, so no session is opened from the old second factor.
     const totpBound =
@@ -1256,6 +1266,7 @@ export class AuthService implements OnApplicationShutdown {
           FROM users u
           WHERE u.id = ${user.id}::uuid AND u.org_id = ${user.orgId}::uuid AND u.is_active
             AND u.password_hash = ${user.passwordHash ?? ''}
+            AND u.role = ${user.role}::user_role
             ${totpBound}
           FOR SHARE OF u
           RETURNING id`),
