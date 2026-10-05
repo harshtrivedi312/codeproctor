@@ -33,3 +33,18 @@ Non-blocking findings and open questions. Only blockers stop a merge.
 2. The demo does not yet record; wire `RecordingPipeline` into `mountProctorDemo` when the web page exists.
 3. `RecordingPipeline.recordScreen` does not watch the screen track; the caller should call `stopStream('SCREEN')` on SCREEN_SHARE_STOPPED and `recordScreen` again on resume.
 4. Chunks are written to IndexedDB as ArrayBuffer (not Blob) for Safari and structured-clone portability; this costs one copy per 10 s chunk.
+
+## Step 8 (in-browser AI detectors)
+
+### Needs the architecture hub or a human
+1. Model files are not committed. `packages/proctor-sdk/scripts/fetch-models.mjs <outDir>` downloads the two MediaPipe models and copies the MediaPipe wasm and vad-web assets; the web app must serve them (for example `apps/web/public/models/proctor`, `modelBaseUrl` `/models/proctor`). COCO-SSD weights (`coco-ssd/model.json` plus shards) are not handled by the script: someone with network access must export `lite_mobilenet_v2` to that folder. Decide where the binaries live (git LFS, release asset or build step).
+2. Dependencies were added to packages/proctor-sdk: `@mediapipe/tasks-vision`, `@tensorflow-models/coco-ssd`, `@tensorflow/tfjs-core`, `-converter`, `-backend-webgl`, `-backend-cpu`, `@ricky0123/vad-web`. The umbrella `@tensorflow/tfjs` was avoided on purpose: it pulls in `core-js`, whose postinstall makes `pnpm install` fail with ERR_PNPM_IGNORED_BUILDS unless `core-js: false` is added to `allowBuilds` in pnpm-workspace.yaml (hub-owned).
+3. API contracts still assumed: evidence presign (`{ contentType, bytes }` returns `{ url, key, headers? }`), identity re-check (frame in, `{ matched, similarity? }` out; fsd.md section 4 only has the one-shot `/identity` upload), and the evidence key layout (the SDK uses whatever key the API returns).
+4. MULTIPLE_VOICES is server-written only (`SERVER_EVENT_TYPES` plus the audio re-check in backend Step 13); the browser VAD cannot count speakers, so it only emits SPEECH_DETECTED.
+
+### Should-fix
+1. No real-browser run: the worker adapters (`worker/inference.worker.ts`, `createVadWebFactory`) are type-checked against the libraries but not executed here (no browser, no model files). A human must run the calibration panel on Chrome and Edge and record worker CPU and the false-alarm rate. Thresholds in `DEFAULT_AI_CONFIG` are starting values, not tuned (gaze pitch limits especially: looking down at the keyboard must not trigger).
+2. `mountCalibrationPanel` and `mountProctorDemo` exist, but the apps/web `/dev/proctor` page does not (out of scope for this run).
+3. Inference is one frame in flight; on slow devices frames are skipped and counted (`getStats().skippedFrames`). Add a UI hint if the skip rate stays high.
+4. The vad-web ONNX runtime runs on the main thread plus an AudioWorklet, not in the inference worker; its CPU is covered by the main-thread metrics only.
+5. `FACE_MISMATCH` re-check sends a 640 px JPEG every 2 minutes; confirm with the privacy review that this selfie traffic is covered by the consent document (D-17, ADR 0004).
