@@ -8,7 +8,7 @@ import {
 } from './recorder';
 import { UploadQueue } from './upload-queue';
 import type { CapabilityFlag } from '../core/types';
-import type { MediaApi, RecorderHealth, RecordingStream } from './types';
+import type { DeviceLoss, MediaApi, RecorderHealth, RecordingStream } from './types';
 
 export interface RecordingPipelineOptions {
   sessionId: string;
@@ -22,6 +22,10 @@ export interface RecordingPipelineOptions {
   put?: ConstructorParameters<typeof UploadQueue>[0]['put'];
   onHealth?: (h: RecorderHealth) => void;
   onCapability?: (f: CapabilityFlag) => void;
+  /** A device track ended or the MediaRecorder failed. Call the record* method again to restart as a new segment. */
+  onDeviceLost?: (loss: DeviceLoss) => void;
+  staleAfterMs?: number;
+  maxMemoryBytes?: number;
   maxBufferBytes?: number;
   backoffBaseMs?: number;
 }
@@ -47,6 +51,17 @@ export class RecordingPipeline {
       store: this.store,
       ...(o.put ? { put: o.put } : {}),
       ...(o.onHealth ? { onHealth: o.onHealth } : {}),
+      ...(o.staleAfterMs === undefined ? {} : { staleAfterMs: o.staleAfterMs }),
+      ...(o.maxMemoryBytes === undefined ? {} : { maxMemoryBytes: o.maxMemoryBytes }),
+      onStorageDegraded: (reason) =>
+        o.onCapability?.({
+          id: 'recording-storage',
+          status: 'UNSUPPORTED',
+          detail:
+            reason === 'OPEN_FAILED'
+              ? 'IndexedDB unavailable: recording is buffered in memory only (a reload loses unsent chunks).'
+              : 'IndexedDB writes are failing: recording is buffered in memory only.',
+        }),
       ...(o.maxBufferBytes === undefined ? {} : { maxBufferBytes: o.maxBufferBytes }),
       ...(o.backoffBaseMs === undefined ? {} : { backoffBaseMs: o.backoffBaseMs }),
     });
@@ -67,11 +82,25 @@ export class RecordingPipeline {
     return this.owned.get('WEBCAM') ?? null;
   }
 
+  /** In-memory segment counters: recording must still work when IndexedDB is broken. */
+  private readonly segmentCounters = new Map<RecordingStream, number>();
+
   private async nextSegment(stream: RecordingStream): Promise<number> {
     const key = `${this.o.sessionId}:segment:${stream}`;
-    const stored = (await this.store.get<number>(STORES.meta, key)) ?? -1;
-    const next = Math.max(stored, this.queue.maxSegment(stream)) + 1;
-    await this.store.put(STORES.meta, key, next);
+    let stored = -1;
+    try {
+      stored = (await this.store.get<number>(STORES.meta, key)) ?? -1;
+    } catch {
+      // IndexedDB unavailable: fall back to the in-memory counter and the queue's view.
+    }
+    const next =
+      Math.max(stored, this.segmentCounters.get(stream) ?? -1, this.queue.maxSegment(stream)) + 1;
+    this.segmentCounters.set(stream, next);
+    try {
+      await this.store.put(STORES.meta, key, next);
+    } catch {
+      // not persisted; a reload may reuse the number, the server upserts by (stream, segment, seq)
+    }
     return next;
   }
 
@@ -146,7 +175,23 @@ export class RecordingPipeline {
       this.o.recorderFactory,
     );
     this.recorders.set(stream, rec);
-    rec.start(media);
+    let reported = false;
+    const lost = (reason: DeviceLoss['reason']): void => {
+      if (reported || this.recorders.get(stream) !== rec) return;
+      reported = true;
+      // Flush what we have, then tell the UI; the caller restarts as a new segment.
+      void this.stopStream(stream).then(() => {
+        this.o.onCapability?.({
+          id: `record-${stream.toLowerCase()}`,
+          status: 'UNVERIFIABLE',
+          detail: `Recording stopped (${reason}).`,
+        });
+        this.o.onDeviceLost?.({ stream, reason });
+      });
+    };
+    for (const t of media.getTracks())
+      t.addEventListener('ended', () => lost('TRACK_ENDED'), { once: true });
+    rec.start(media, { onError: () => lost('RECORDER_ERROR') });
   }
 
   /** Stop one stream (for example when the screen share ended). The final chunk is flushed. */
@@ -173,7 +218,7 @@ export class RecordingPipeline {
     await this.queue.waitUntilIdle(opts.drainTimeoutMs ?? 15_000);
     this.queue.stop();
     await this.queue.purge();
-    await this.store.deletePrefix(STORES.meta, `${this.o.sessionId}:segment:`);
+    await this.store.deletePrefix(STORES.meta, `${this.o.sessionId}:segment:`).catch(() => 0);
     this.started = false;
     return this.queue.health();
   }

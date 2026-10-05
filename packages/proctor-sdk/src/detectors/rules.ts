@@ -236,14 +236,46 @@ export class ObjectRules {
 
 export class SpeechRules {
   private lastFiredAt = -Infinity;
+  private carryMs = 0;
+  private carryStart: number | null = null;
   constructor(private readonly cfg: AiDetectorConfig) {}
-  /** Called when a speech segment ends. Returns SPEECH_DETECTED with its duration. */
+
+  private get cooldownMs(): number {
+    // Short cooldown so a long conversation is a handful of events, not hundreds.
+    return Math.min(this.cfg.cooldownMs, 10_000);
+  }
+
+  get hasPending(): boolean {
+    return this.carryMs > 0;
+  }
+
+  /**
+   * Called when a speech segment ends. Returns SPEECH_DETECTED with its duration. Segments inside
+   * the cooldown are not dropped: their speaking time is added to the next event (or to flush()).
+   */
   onSegment(startedAtMs: number, endedAtMs: number): RuleEvent[] {
     const durationMs = endedAtMs - startedAtMs;
     if (durationMs < this.cfg.minSpeechMs) return [];
-    // Short cooldown so a long conversation is a handful of events, not hundreds.
-    if (endedAtMs - this.lastFiredAt < Math.min(this.cfg.cooldownMs, 10_000)) return [];
-    this.lastFiredAt = endedAtMs;
-    return [{ type: 'SPEECH_DETECTED', startedAtMs, durationMs }];
+    if (endedAtMs - this.lastFiredAt < this.cooldownMs) {
+      this.carryMs += durationMs;
+      this.carryStart ??= startedAtMs;
+      return [];
+    }
+    return [this.fire(startedAtMs, durationMs, endedAtMs)];
+  }
+
+  /** Emit the speech that was held back by the cooldown, if any (timer or stop). */
+  flush(nowMs: number): RuleEvent[] {
+    if (!this.hasPending) return [];
+    return [this.fire(this.carryStart ?? nowMs, 0, nowMs)];
+  }
+
+  private fire(startedAtMs: number, durationMs: number, nowMs: number): RuleEvent {
+    const total = durationMs + this.carryMs;
+    const start = this.carryStart === null ? startedAtMs : Math.min(this.carryStart, startedAtMs);
+    this.carryMs = 0;
+    this.carryStart = null;
+    this.lastFiredAt = nowMs;
+    return { type: 'SPEECH_DETECTED', startedAtMs: start, durationMs: total };
   }
 }
