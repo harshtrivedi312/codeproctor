@@ -17,12 +17,14 @@ from typing import Final
 
 import numpy as np
 
+from worker.config import FaceConfig
 from worker.face.modelfile import ModelLoadError, read_verified
 from worker.face.types import DetectedFace, Image
 
 LANDMARKER_PATH_ENV: Final = "FACE_LANDMARKER_MODEL_PATH"
 LANDMARKER_FILE_NAME: Final = "face_landmarker.task"
 # ADR 0001 section 12.2 (3,758,596 bytes, checked 2026-10-01).
+LANDMARKER_BYTES: Final = 3_758_596
 LANDMARKER_SHA256: Final = "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff"
 # Face Mesh indices: image-left eye corners, image-right eye corners, nose tip, mouth corners.
 _LEFT_EYE: Final = (33, 133)
@@ -81,20 +83,24 @@ class MediaPipeDetector:
         factory: LandmarkerFactory = _mediapipe_factory,
     ) -> MediaPipeDetector:
         """Verify file name and SHA-256, then load those same bytes. Raises ModelLoadError."""
-        model = read_verified(path, LANDMARKER_FILE_NAME, LANDMARKER_SHA256)
+        model = read_verified(path, LANDMARKER_FILE_NAME, LANDMARKER_SHA256, LANDMARKER_BYTES)
         try:
             return cls(model, min_detection_confidence, factory)
         except Exception:
             raise ModelLoadError("MODEL_LOAD_FAILED") from None
 
     @classmethod
-    def from_env(
-        cls, min_detection_confidence: float = 0.7, factory: LandmarkerFactory = _mediapipe_factory
+    def from_config(
+        cls, config: FaceConfig | None = None, factory: LandmarkerFactory = _mediapipe_factory
     ) -> MediaPipeDetector:
+        """Build from system config: the model path comes from `FACE_LANDMARKER_MODEL_PATH` and the
+        detection confidence floor from `FaceConfig.min_detection_confidence`
+        (`FACE_MIN_DETECTION_CONFIDENCE`), so the configured floor reaches the landmarker."""
+        cfg = config or FaceConfig.from_env()
         raw = os.environ.get(LANDMARKER_PATH_ENV)
         if not raw:
             raise ModelLoadError("MODEL_PATH_NOT_SET")
-        return cls.from_file(Path(raw), min_detection_confidence, factory)
+        return cls.from_file(Path(raw), cfg.min_detection_confidence, factory)
 
     def detect(self, image: Image) -> list[DetectedFace]:
         with self._lock:

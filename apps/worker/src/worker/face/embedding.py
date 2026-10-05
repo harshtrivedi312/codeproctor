@@ -10,6 +10,7 @@ Input float32 [1, 3, 112, 112] RGB scaled to (x - 127.5) / 127.5; output float32
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -23,6 +24,7 @@ from worker.face.types import ALIGNED_SIZE, AlignedFace, Embedding, EmbeddingErr
 
 MODEL_FILE_NAME: Final = "glintr100.onnx"
 # ADR 0001 section 12.2 (checked 2026-10-01). 260,694,151 bytes.
+AURAFACE_BYTES: Final = 260_694_151
 AURAFACE_SHA256: Final = "a7933ea5330113b01c9b60351d8f4c33003f145d8470ac5f0e52ee2effe25c60"
 MODEL_ID: Final = f"auraface-v1:{AURAFACE_SHA256[:8]}"
 EMBEDDING_DIM: Final = 512
@@ -66,7 +68,7 @@ class AuraFaceEmbedder:
 
     def __init__(self, model_path: Path, session_factory: SessionFactory = _ort_session) -> None:
         # Read once, hash those bytes, run those bytes: no gap for a file swap (TOCTOU).
-        model = read_verified(model_path, MODEL_FILE_NAME, AURAFACE_SHA256)
+        model = read_verified(model_path, MODEL_FILE_NAME, AURAFACE_SHA256, AURAFACE_BYTES)
         try:
             self._session = session_factory(model)
             inp = self._session.get_inputs()[0]
@@ -106,4 +108,6 @@ def cosine(a: Embedding, b: Embedding) -> float:
         raise EmbeddingError("DIM_MISMATCH")
     x, y = a.vector.astype(np.float64), b.vector.astype(np.float64)
     score = float(x @ y / (np.linalg.norm(x) * np.linalg.norm(y)))
+    if not math.isfinite(score):  # before clamping: min/max would turn NaN into a perfect score
+        raise EmbeddingError("NON_FINITE_SCORE")
     return max(-1.0, min(1.0, score))

@@ -144,7 +144,8 @@ class FaceMatcher:
     ) -> None:
         self._detector = detector
         self._embedder = embedder
-        self.config = config or FaceConfig()
+        # Default to the system configuration (FACE_* env), never to silent built-in defaults.
+        self.config = config if config is not None else FaceConfig.from_env()
         self.selfie_cache = SelfieCache(self.config.selfie_cache_max_sessions)
 
     # --- D-05 interface ---
@@ -170,16 +171,20 @@ class FaceMatcher:
         id_image: bytes,
         selfie_image: bytes,
         *,
+        liveness_confirmed: bool,
         session_id: str | None = None,
-        liveness_confirmed: bool = True,
     ) -> MatchResult:
         """ID photo vs selfie. The ID embedding is dropped as soon as the score is computed.
+
+        `liveness_confirmed` has no default on purpose (fail-closed): the caller must say what the
+        client reported. Anything other than True (False, None) is MANUAL_REVIEW, and liveness can
+        only ever lead to manual review (ADR 0004 section 1).
 
         The ID photo may hold a small secondary portrait (ghost image); the selfie must hold exactly
         one face. The selfie embedding is cached only after the comparison succeeded.
         """
         try:
-            if not liveness_confirmed:
+            if liveness_confirmed is not True:
                 raise _ReviewNeeded(ReviewReason.LIVENESS_NOT_CONFIRMED, "LIVENESS")
             id_emb = self._embed_single(id_image, "ID")
             selfie_emb = self._embed_single(selfie_image, "SELFIE")
@@ -189,6 +194,16 @@ class FaceMatcher:
             return self._decide(score)
         except Exception as e:
             return self._failure(e, "match")
+
+    def prime_selfie(self, session_id: str, selfie_image: bytes) -> MatchResult | None:
+        """Recompute and cache just the selfie embedding after a cache miss or restart (ADR 0004
+        section 2), through the strict single-face SELFIE path. The ID image is not touched.
+        Returns None on success, or a MANUAL_REVIEW result if the selfie cannot be used."""
+        try:
+            self.selfie_cache.put(session_id, self._embed_single(selfie_image, "SELFIE"))
+            return None
+        except Exception as e:
+            return self._failure(e, "prime")
 
     def recheck(self, session_id: str, frame_image: bytes) -> MatchResult:
         """FR-606 periodic re-check against the cached selfie. A miss is MATCH_ERROR/CACHE_MISS;
@@ -274,7 +289,7 @@ class FaceMatcher:
 def review_for_model_error(err: ModelLoadError, config: FaceConfig | None = None) -> MatchResult:
     """Model refused or unavailable (hash mismatch, wrong file, not set): MANUAL_REVIEW, never a
     failure of the candidate (ADR 0004 section 1: MATCH_ERROR goes to review at once)."""
-    cfg = config or FaceConfig()
+    cfg = config if config is not None else FaceConfig.from_env()
     return MatchResult(
         FaceDecision.MANUAL_REVIEW,
         ReviewReason.MATCH_ERROR,

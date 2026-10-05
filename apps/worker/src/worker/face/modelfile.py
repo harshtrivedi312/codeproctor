@@ -18,12 +18,19 @@ class ModelLoadError(Exception):
         self.code = code
 
 
-def read_verified(path: Path, expected_name: str, expected_sha256: str) -> bytes:
-    """Return the file's bytes if its name and SHA-256 match the pin; raise ModelLoadError."""
+def read_verified(path: Path, expected_name: str, expected_sha256: str, max_bytes: int) -> bytes:
+    """Return the file's bytes if name, size cap and SHA-256 match the pin; raise ModelLoadError.
+
+    `max_bytes` is the size recorded in ADR 0001 section 12.2; a bigger file is refused before it is
+    read into memory."""
     if path.name != expected_name:
         raise ModelLoadError("WRONG_MODEL_FILE_NAME")
     try:
+        if path.stat().st_size > max_bytes:
+            raise ModelLoadError("MODEL_TOO_LARGE")
         data = path.read_bytes()
+    except ModelLoadError:
+        raise
     except OSError:
         raise ModelLoadError("MODEL_UNREADABLE") from None
     if hashlib.sha256(data).hexdigest() != expected_sha256:

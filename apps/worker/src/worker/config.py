@@ -131,7 +131,8 @@ class FaceConfig(_Base):
     # portrait, hologram). Selfies and re-check frames stay strictly single-face.
     id_secondary_face_ratio: Annotated[float, Field(gt=0.0, le=1.0)] = 0.5
     max_image_bytes: _Pos = 10 * 1024 * 1024
-    max_image_pixels: _Pos = 25_000_000
+    # At most Pillow's guard value (set at import), so its 2x bomb check cannot override this limit.
+    max_image_pixels: Annotated[int, Field(gt=0, le=25_000_000)] = 25_000_000
     # Selfie embeddings kept in memory for FR-606 re-checks (ADR 0004 section 2); bounded LRU.
     selfie_cache_max_sessions: _Pos = 256
 
