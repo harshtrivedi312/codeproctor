@@ -363,7 +363,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Done when: tests pass and TC-008 is named in them.
 
 #### DB-06: Retention and erasure services
-- Compliance additions (2026-10-05, C-04, C-06; tests for each rule): consent records get their own 3-year clock and are deleted at its end; recordings, ID images, selfies, re-check frames and keystroke data keep the 90-day default; erasure follows the approved NFR-05 wording; see OQ-1 (consent proof on erasure).
+- Compliance additions (2026-10-05, C-04, C-06, C-17, C-26, C-27; tests for each rule): results deleted 1 year after the test, leaving anonymised statistics; face images capped at 90 days whatever retention_days says; a legal-hold hook (OQ-10); consent records get their own 3-year clock and are deleted at its end; recordings, ID images, selfies, re-check frames and keystroke data keep the 90-day default; erasure follows the approved NFR-05 wording; see OQ-1 (consent proof on erasure).
 - Owner: db-engineer. Branch: `db/step-6`. Depends on: DB-05. Gate: architect at PR.
 - Covers: FR-704, NFR-05, BR-13. TCs: TC-072, TC-094.
 - Deliverables: RetentionService (eligibility from `retention_anchor_at` + retention days, NULL anchor = hold; returns keys; nulls keys and deletes keystroke batches in one transaction after deletion; consent records and PDFs kept; one audit_logs row per session), CandidateErasureService per D-19 (records `erasure_requested_at`; waits while a review or appeal is open when the org setting `erasure.holdWhileReviewOrAppealOpen` is on, default on, and the candidate is told; then deletes all objects including consent PDFs, deletes media, identity, event and keystroke rows, blanks code and answers, anonymizes the candidate, keeps only anonymized scores), the erasure-hold setting and its default, storage interface injected and mocked. Rules: database.md Data rules and ADR 0004.
@@ -416,6 +416,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Done when: TC-042/043/044 integration tests pass against local Judge0 (or the agreed Linux runner, R-01); TC-012 passes; validation run over all seeded questions passes (PM addition to catch bad seed data, R-11).
 
 #### BE-06: Tests, invitations and email
+- Compliance additions (2026-10-05, C-31): the MailPort adapter is Amazon SES in us-east-1, with no Resend.
 - Compliance additions (2026-10-05, C-02): accommodations gain "no face match / no identity check"; every recruiter change to accommodations writes an audit row, with tests for both. The new accommodation key changes the shared accommodations contract, so the hub records it in an ADR (ADR 0010 or 0007 amendment) before BE-06 builds it.
 - Owner: backend-engineer. Branch: `backend/step-6`. Depends on: BE-05 (real: BE-03, BE-04).
 - Covers: FR-301, FR-302, FR-303, FR-304, FR-305, FR-106 (token generation). TCs: TC-020, TC-022, TC-023, TC-024.
@@ -462,7 +463,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Done when: TC-061, TC-073, TC-074, TC-075, TC-076 pass; false-positive report handed to the PM. Merging BE-12 closes the backend part of M3.
 
 #### FE-09: Candidate pre-test flow
-- Compliance additions (2026-10-05): load only an owner-approved consent version, and keep the placeholder guard (C-09); the decline screen shows the recruiter's contact (C-02); link the retention and destruction schedule from the consent step and the candidate portal (C-05).
+- Compliance additions (2026-10-05): load only an owner-approved consent version, and keep the placeholder guard (C-09); a required 18+ confirmation (C-30); the decline screen shows the recruiter's contact (C-02); link the retention and destruction schedule from the consent step and the candidate portal (C-05).
 - Owner: frontend-engineer. Branch: `frontend/step-9`. Depends on: BE-07, FE-01, FE-08. Parallel with: BE-09..BE-12.
 - Covers: FR-401, FR-402, FR-403, FR-404, FR-405, FR-406, FR-605 (start blocked), FR-106 (OTP step and resume), NFR-06, NFR-07. TCs: TC-030, TC-031, TC-032 (PM-assigned), TC-033 (UI), TC-034, TC-035, TC-036 (PM-assigned), TC-095 and TC-096 (UI side).
 - Deliverables: stepper under /t/[token]: welcome and rules (information only), OTP, consent document (D-17: full document with version, Sign enabled only after scrolling to the end, typed full legal name, "copy emailed" confirmation, Decline path with the org's contact and no device access; accessible to keyboard and screen-reader users), system check, identity with liveness, room scan, STRICT QR side camera, practice question, final checklist and Start; resume and OTP cooldown messages (D-21); declined and already-used pages; calm copy, fix-it hints, WCAG 2.1 AA.
@@ -529,6 +530,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 ### Phase 4: review, reporting, staging
 
 #### BE-13: Review and live proctoring API
+- Compliance additions (2026-10-05, C-28): GRADED always goes to UNDER_REVIEW, with no auto-clear; results are hidden from recruiters, CSV export and webhooks until the verdict; a fast review path API (summary and one-click verdict) for the LOW band; record opened-to-verdict time per review (R-21). Waits for the hub's FR-805, fsd.md §3 and ADR 0002 change.
 - Owner: backend-engineer. Branch: `backend/step-13`. Depends on: BE-12, BE-09, BE-10, BE-03, ARC-02.
 - Covers: FR-901, FR-902, FR-903, FR-904, FR-805 (queue). TCs: TC-078, TC-079, TC-080; TC-077, TC-062, TC-006, TC-008 re-verified on review endpoints.
 - Deliverables: GET /review/queue (including sessions waiting for an identity decision or manual scoring), GET /review/sessions/:id bundle, PATCH /review/flags/:id, identity decision endpoint (ADR 0004), POST /review/sessions/:id/verdict (every HIGH flag decided, identity decision recorded, every short answer scored), appeals with signed link, different-reviewer assignment and new_verdict on overturn (ADR 0002), proctor pause credit capped by maxProctorPauseMinutes, Socket.IO /live gateway with staff JWT, Redis adapter, proctor:pause and proctor:message emitted to the candidate channel, audit on every review read.
@@ -541,6 +543,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Done when: TC-081 passes (signed webhook delivered).
 
 #### FE-11: Review workspace
+- Compliance additions (2026-10-05, C-28): a fast review path for LOW-band sessions (summary view, one-click verdict, timeline available); every session must be reviewed before its results show anywhere.
 - Owner: frontend-engineer. Branch: `frontend/step-11`. Depends on: FE-03, FE-10 (soft BE-13).
 - Covers: FR-901, FR-902, FR-608 (replay), FR-403 (manual identity decision), FR-205 (manual scoring, D-23). TCs: TC-062, TC-077, TC-078, TC-099 (UI side).
 - Deliverables: queue with band badges and filters (including identity review and manual scoring); synchronized screen, webcam and side-camera players on one master clock with segment-aware playback; events timeline with seek; keystroke replay 1x-16x with PASTE_BURST highlights; run diffs; test results; identity panel with ID image, selfie and webcam frames and the MATCH / NO_MATCH / INCONCLUSIVE decision; manual scoring panel for short answers (mark correct or incorrect with note); flag panel and verdict form gated on HIGH flags, the identity decision and manual scoring; keyboard navigation (j/k, space).
@@ -597,7 +600,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Done when: checklist delivered to the human.
 
 #### DEP-03: Pilot stack
-- Compliance additions (2026-10-05): one US AWS region for all data (C-03); the licence gate passes only the two accepted pinned model files (C-10); every processor has a DPA with SCCs, or DPF certification, before the first EU/UK candidate (C-03).
+- Compliance additions (2026-10-05): one US AWS region for all data, us-east-1 (C-03); SES sending with a server-only IAM role (C-31); logs shipped to CloudWatch, with log group retention set (C-32, OQ-9); the licence gate passes only the two accepted pinned model files (C-10); every processor has a DPA with SCCs, or DPF certification, before the first EU/UK candidate (C-03).
 - Owner: backend-engineer, architect review (D-26). Branch: `deploy/pilot`. Depends on: ARC-05, DEP-01, BE-15A, QA-02. Gate: ARC-05 before start; architect at PR. Approved as PA-07 by D-16 (2026-10-01). No prompt step.
 - Covers: NFR-03, NFR-04, NFR-05, FR-703, BO-5, BO-6, BRD section 10 (pilot). TCs: none new (smoke tests; TC-093 baseline re-run against the pilot stack recommended).
 - Deliverables: the pilot environment, separate from staging (D-10, D-11): its own AWS x86 instance (api, worker, redis, judge0, caddy); Postgres in AWS (RDS or EC2 per ARC-05); an AWS S3 recordings bucket with the ARC-05 settings (encryption, versioning off or short noncurrent expiry, Block Public Access, CORS for browser PUT; ADR 0001 section 2.1); pilot-only secrets in the vault; `app_user` from the `audit_append_only` migration with a pilot-only password set at provisioning (ADR 0006 section 7.4); pilot database credentials live only in GitHub Actions secrets and on the server, never on developer machines or in agent sessions (D-38); Compose runs under its own project name `codeproctor-pilot` (ADR 0009 section 4.4, SF5); backups kept in AWS; web on Cloudflare Pages pointed at the pilot API; `REQUIRE_LEGAL_APPROVED_CONSENT=true`; no seed accounts (Q-28 guard); runbook section.
