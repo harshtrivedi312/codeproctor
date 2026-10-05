@@ -2,12 +2,12 @@
 
 Owner: QA B (ops). TC-093 (NFR-04, P1): OWASP ZAP baseline against staging, expected result "no high findings". Staging only; nothing runs until DEP-01 exists.
 
-| File                 | Purpose                                                                                                                                                                                                                                                                                        |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `baseline.conf`      | rule file for `zap-baseline.py -c`. Everything stays at the ZAP default (WARN) except purely informational rules, which go to INFO. No rule is IGNOREd and none is FAIL, so the scan step cannot stop before the report is judged.                                                             |
-| `baseline-asvs.conf` | optional stricter profile: FAIL on cookie flags, sensitive data in URLs, PII and debug output, server banner, and the HSTS, CSP, clickjacking and nosniff headers (NFR-04 ASVS level 2, FR-104, ADR 0013). Use it for a hardening pass; a FAIL gives the scan a non-zero exit code.            |
-| `evaluate.mjs`       | the TC-093 verdict from `report.json`: exit 0 when the scan reached the target and found no High alert (risk code 3), 1 on High (or Medium with `--fail-on-medium`), 2 when the report is unusable or empty. It prints alert names, rule ids and counts, never URLs (a URL can carry a token). |
-| `evaluate.test.mjs`  | unit tests of the verdict: `node --test packages/qa/zap/*.test.mjs`                                                                                                                                                                                                                            |
+| File                 | Purpose                                                                                                                                                                                                                                                                                                                                                                                                |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `baseline.conf`      | rule file for `zap-baseline.py -c`. Everything stays at the ZAP default (WARN) except purely informational rules, which go to INFO. No rule is IGNOREd and none is FAIL, so the scan step cannot stop before the report is judged.                                                                                                                                                                     |
+| `baseline-asvs.conf` | optional stricter profile: FAIL on cookie flags, sensitive data in URLs, PII and debug output, server banner, and the HSTS, CSP, clickjacking and nosniff headers (NFR-04 ASVS level 2, FR-104, ADR 0013). Use it for a hardening pass; a FAIL gives the scan a non-zero exit code.                                                                                                                    |
+| `evaluate.mjs`       | the TC-093 verdict from `report.json`: exit 0 when the scan reached the target and found no High alert (risk code 3), 1 on High (or Medium with `--fail-on-medium`), 2 when the report is unusable (also: an alert with a missing or out-of-range riskcode, or with `--target-host` no site for that host) or empty. It prints alert names, rule ids and counts, never URLs (a URL can carry a token). |
+| `evaluate.test.mjs`  | unit tests of the verdict: `node --test packages/qa/zap/*.test.mjs`                                                                                                                                                                                                                                                                                                                                    |
 
 ## What the baseline covers, and does not
 
@@ -22,7 +22,7 @@ The baseline scan is passive: ZAP spiders the target for one minute and reports 
 
 CI: Actions, workflow "QA", scan `zap-baseline`, with the staging URL. The host must be in the repository variable `QA_STAGING_HOSTS`.
 
-Locally (Docker, the image pinned in `.github/workflows/qa.yml`):
+Locally (Docker, the image pinned in `.github/workflows/qa.yml`; the digest below must be bumped together with qa.yml):
 
 ```sh
 mkdir -p zap && chmod 777 zap
@@ -30,10 +30,10 @@ cp packages/qa/zap/baseline.conf zap/
 docker run --rm -v "$PWD/zap:/zap/wrk:rw" \
   ghcr.io/zaproxy/zaproxy@sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef \
   zap-baseline.py -t "https://<staging-web-host>" -c baseline.conf -J report.json -r report.html -I
-node packages/qa/zap/evaluate.mjs zap/report.json
+node packages/qa/zap/evaluate.mjs zap/report.json --target-host <staging-web-host>
 ```
 
-`-I` stops warnings from failing the scan; the verdict then comes from `evaluate.mjs`. Keep the `zap/` output out of git and out of chat: the HTML report lists URLs.
+ZAP's own exit code 3 (the scan failed) must fail the CI step; `evaluate.mjs` only judges a report that exists. `-I` stops warnings from failing the scan; the verdict then comes from `evaluate.mjs`. Keep the `zap/` output out of git and out of chat: the HTML report lists URLs.
 
 ## Triage rules
 
@@ -43,12 +43,12 @@ node packages/qa/zap/evaluate.mjs zap/report.json
 
 ## Last check
 
-2026-10-05: `zap-baseline.py` (ZAP 2.17.0, pinned image) accepted both rule files and produced a JSON report that `evaluate.mjs` read, run against a local stand-in server (not staging). `node --test packages/qa/zap/*.test.mjs`: 5 tests pass. TC-093 itself is not run: no staging.
+2026-10-05: `zap-baseline.py` (ZAP 2.17.0, pinned image) accepted both rule files and produced a JSON report that `evaluate.mjs` read, run against a local stand-in server (not staging). `node --test packages/qa/zap/*.test.mjs`: 9 tests pass. TC-093 itself is not run: no staging.
 
 ## CI changes for the hub (not made here)
 
 The `zap-baseline` job in `.github/workflows/qa.yml` currently:
 
 1. runs `zap-baseline.py -t "$TARGET" -J report.json -r report.html -I` without `-c` (add the mount of `packages/qa/zap/baseline.conf` and `-c baseline.conf`), and
-2. decides with `jq '[.site[].alerts[] | select(.riskcode == "3")] | length'`, which counts zero High alerts and passes when the report has no site (an unreachable target). Replace the step with `node packages/qa/zap/evaluate.mjs zap/report.json` (Node is on the runner image; `actions/setup-node` with `.nvmrc` if needed).
+2. decides with `jq '[.site[].alerts[] | select(.riskcode == "3")] | length'`, which counts zero High alerts and passes when the report has no site (an unreachable target). Replace the step with `node packages/qa/zap/evaluate.mjs zap/report.json --target-host <host>`. The job also has no `actions/checkout`, so `baseline.conf` and `evaluate.mjs` are not on the runner: add `actions/checkout` and `actions/setup-node` (with `.nvmrc`) before the scan. A ZAP exit code of 3 (the scan itself failed) must fail the job (follow-up FU-QAB-01).
 3. Add a second scan of the API origin (input `api_url`, same allow-list check).
