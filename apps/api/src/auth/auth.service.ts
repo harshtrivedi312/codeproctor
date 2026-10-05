@@ -235,7 +235,7 @@ export class AuthService implements OnApplicationShutdown {
   /**
    * Re-authentication for the signed-in setup routes (FU-BE-39): the current password, checked
    * on the same reserve, equal-work and lockout path as login. A wrong password and a locked
-   * account get the same generic 401, so the lock state is never revealed. The reservation is
+   * account get the same generic 403 REAUTH_FAILED, so the lock state is never revealed. The reservation is
    * given back on success: the TOTP step reserves its own. Returns the user row whose password
    * hash was verified, so the caller can bind its final write to that hash.
    */
@@ -272,7 +272,12 @@ export class AuthService implements OnApplicationShutdown {
       where: { id: user.id, passwordHash: startHash, totpEnabled: false },
       data: { totpSecretEnc: enrollment.encrypted },
     });
-    if (stored.count !== 1) throw reauthFailed();
+    if (stored.count !== 1) {
+      // Only a changed password is a failed re-auth; TOTP turned on meanwhile is a plain 409.
+      const now = await this.prisma.client.user.findUnique({ where: { id: user.id } });
+      if (now?.passwordHash !== user.passwordHash) throw reauthFailed();
+      throw new ConflictException('Two-factor authentication is already on.');
+    }
     return {
       manualKey: enrollment.secret,
       otpauthUri: enrollment.otpauthUrl,
@@ -524,7 +529,7 @@ export class AuthService implements OnApplicationShutdown {
     return { recoveryCodes: codes };
   }
 
-  /** Why a bound write matched nothing: password changed (401), or the 2FA state moved (409). */
+  /** Why a bound write matched nothing: password changed (403 REAUTH_FAILED), or the 2FA state moved (409). */
   private async explainRefusedChange(
     tx: Prisma.TransactionClient,
     user: User,

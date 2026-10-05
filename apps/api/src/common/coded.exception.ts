@@ -1,7 +1,8 @@
 import { ForbiddenException } from '@nestjs/common';
 
 /** Machine-readable codes the problem filter copies into the RFC 7807 body as `code`. */
-export type ProblemCode = 'REAUTH_FAILED' | 'TWO_FACTOR_REQUIRED_FOR_ROLE';
+export const PROBLEM_CODES = ['REAUTH_FAILED', 'TWO_FACTOR_REQUIRED_FOR_ROLE'] as const;
+export type ProblemCode = (typeof PROBLEM_CODES)[number];
 
 /** A 403 that carries a stable machine code, so clients never have to match on `detail`. */
 export class CodedForbiddenException extends ForbiddenException {

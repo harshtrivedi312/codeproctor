@@ -17,6 +17,20 @@ import type { TotpService } from './totp.service';
 const API = '/api/v1/auth';
 const PASSWORD = 'Correct-Horse-9';
 
+// [$queryRaw, $executeRaw] calls for a refused setup/start (reserve and failure register).
+const EXPECTED_SETUP_REFUSED_COUNTS = [2, 0];
+
+/** A re-auth refusal: 403 with the machine code, never a 401 (FU-BE-39). */
+function reauthRefused(res: request.Response): void {
+  expect(res.status).toBe(403);
+  expect((res.body as { code?: string }).code).toBe('REAUTH_FAILED');
+}
+
+/** A response body without the per-request members, for wrong-vs-locked comparisons. */
+function sameShape(res: request.Response): object {
+  return { ...(res.body as object), instance: undefined, traceId: undefined };
+}
+
 interface SentMail {
   to: string;
   url: string;
@@ -398,7 +412,9 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         .body as Body;
       const code = authenticator.generate(start.manualKey);
       await setup('confirm', u.token, { code }).expect(400);
-      await setup('confirm', u.token, { currentPassword: 'wrong-password', code }).expect(403);
+      reauthRefused(
+        await setup('confirm', u.token, { currentPassword: 'wrong-password', code }).expect(403),
+      );
       const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
       expect(row.totpEnabled).toBe(false);
       expect(row.failedLogins).toBe(1);
@@ -417,13 +433,18 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
     it('TC-003: 5 wrong passwords lock the account, then the correct password is refused with the same generic 403 REAUTH_FAILED', async () => {
       const u = await signedIn();
       const generic = { detail: 'The current password is incorrect.', code: 'REAUTH_FAILED' };
+      const wrongs: request.Response[] = [];
       for (let i = 0; i < 5; i++) {
         const res = await setup('start', u.token, { currentPassword: `wrong-${i}` }).expect(403);
         expect(res.body).toMatchObject(generic);
+        wrongs.push(res);
       }
       const locked = await setup('start', u.token, { currentPassword: PASSWORD }).expect(403);
       expect(locked.body).toMatchObject(generic);
-      await setup('confirm', u.token, { currentPassword: PASSWORD, code: '123456' }).expect(403);
+      expect(sameShape(locked)).toEqual(sameShape(wrongs[4] as request.Response));
+      reauthRefused(
+        await setup('confirm', u.token, { currentPassword: PASSWORD, code: '123456' }).expect(403),
+      );
       const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
       expect(row.lockedUntil).not.toBeNull();
       expect(row.totpSecretEnc).toBeNull();
@@ -436,9 +457,9 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       const email = (await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).email;
       for (let i = 0; i < 3; i++) await login(email, 'nope').expect(401);
       for (let i = 0; i < 2; i++) {
-        await setup('start', u.token, { currentPassword: 'nope' }).expect(403);
+        reauthRefused(await setup('start', u.token, { currentPassword: 'nope' }).expect(403));
       }
-      await setup('start', u.token, { currentPassword: PASSWORD }).expect(403);
+      reauthRefused(await setup('start', u.token, { currentPassword: PASSWORD }).expect(403));
     });
 
     it('TC-003: the right password succeeds and gives the attempt back', async () => {
@@ -466,10 +487,12 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         });
         return true;
       });
-      await setup('confirm', u.token, {
-        currentPassword: PASSWORD,
-        code: authenticator.generate(start.manualKey),
-      }).expect(403);
+      reauthRefused(
+        await setup('confirm', u.token, {
+          currentPassword: PASSWORD,
+          code: authenticator.generate(start.manualKey),
+        }).expect(403),
+      );
       const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
       expect(row.totpEnabled).toBe(false);
       expect(row.recoveryCodeHashes).toEqual([]);
@@ -493,13 +516,17 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       try {
         for (const u of [wrong, locked]) {
           for (const spy of [query, exec]) spy.mockClear();
-          await setup('start', u.token, { currentPassword: 'not-the-password' }).expect(403);
+          reauthRefused(
+            await setup('start', u.token, { currentPassword: 'not-the-password' }).expect(403),
+          );
           counts.push([query, exec].map((spy) => spy.mock.calls.length));
         }
       } finally {
         for (const spy of [query, exec]) spy.mockRestore();
       }
       expect(counts[1]).toEqual(counts[0]);
+      // Absolute shape too, so a statement dropped from both paths still fails.
+      expect(counts[0]).toEqual(EXPECTED_SETUP_REFUSED_COUNTS);
     });
   });
 
@@ -1732,12 +1759,15 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         const u = await createUser({ totp: SECRET });
         const token = await accessFor(u.id);
         for (let i = 0; i < 5; i++) {
-          await post('2fa/disable', token, { currentPassword: 'wrong-password-1' }).expect(403);
+          reauthRefused(
+            await post('2fa/disable', token, { currentPassword: 'wrong-password-1' }).expect(403),
+          );
         }
         const wrong = await post('2fa/disable', token, { currentPassword: 'wrong-password-1' });
         const locked = await post('2fa/disable', token, { currentPassword: PASSWORD });
-        expect(locked.status).toBe(403);
-        expect((locked.body as Body).detail).toBe((wrong.body as Body).detail);
+        reauthRefused(wrong);
+        reauthRefused(locked);
+        expect(sameShape(locked)).toEqual(sameShape(wrong));
         expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).totpEnabled).toBe(
           true,
         );
@@ -1796,25 +1826,34 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         for (const code of codes) expect(logged.join('')).not.toContain(code);
       });
 
-      it('TC-003: a missing or wrong password is refused with no state change, a stolen access token alone cannot regenerate, a locked account gets the generic 401', async () => {
+      it('TC-003: a missing or wrong password is refused with no state change, a stolen access token alone cannot regenerate, a locked account gets the same 403 REAUTH_FAILED', async () => {
         const u = await createUser({ totp: SECRET });
         await withRecoveryCodes(u.id, ['ABCDEFGHJKLMNPQR']);
         const token = await accessFor(u.id);
         await post('2fa/recovery-codes/regenerate', token, {}).expect(400);
-        await post('2fa/recovery-codes/regenerate', token, {
-          currentPassword: 'nope-nope-1',
-        }).expect(403);
+        reauthRefused(
+          await post('2fa/recovery-codes/regenerate', token, {
+            currentPassword: 'nope-nope-1',
+          }).expect(403),
+        );
         let row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
         expect(row.recoveryCodeHashes).toEqual([sha256Hex('ABCDEFGHJKLMNPQR')]);
         expect(row.failedLogins).toBe(1);
         for (let i = 0; i < 4; i++) {
-          await post('2fa/recovery-codes/regenerate', token, {
-            currentPassword: 'nope-nope-1',
-          }).expect(403);
+          reauthRefused(
+            await post('2fa/recovery-codes/regenerate', token, {
+              currentPassword: 'nope-nope-1',
+            }).expect(403),
+          );
         }
-        await post('2fa/recovery-codes/regenerate', token, { currentPassword: PASSWORD }).expect(
-          403,
-        );
+        const wrongBody = await post('2fa/recovery-codes/regenerate', token, {
+          currentPassword: 'nope-nope-1',
+        });
+        const lockedBody = await post('2fa/recovery-codes/regenerate', token, {
+          currentPassword: PASSWORD,
+        });
+        reauthRefused(lockedBody);
+        expect(sameShape(lockedBody)).toEqual(sameShape(wrongBody));
         row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
         expect(row.recoveryCodeHashes).toEqual([sha256Hex('ABCDEFGHJKLMNPQR')]);
       });
@@ -1850,7 +1889,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           afterNextVerify(() =>
             prisma.user.update({ where: { id: u.id }, data: { passwordHash: changed } }),
           );
-          await post(route, token, { currentPassword: PASSWORD }).expect(403);
+          reauthRefused(await post(route, token, { currentPassword: PASSWORD }).expect(403));
           const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
           expect(row.totpEnabled).toBe(true);
           expect(row.recoveryCodeHashes).toEqual([sha256Hex('ABCDEFGHJKLMNPQR')]);
@@ -1869,6 +1908,31 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         await post('2fa/recovery-codes/regenerate', token, { currentPassword: PASSWORD }).expect(
           409,
         );
+      });
+
+      it('TC-003: setup/start racing a concurrent 2FA turn-on is a 409, not REAUTH_FAILED', async () => {
+        const u = await createUser();
+        const token = await accessFor(u.id);
+        afterNextVerify(() =>
+          prisma.user.update({
+            where: { id: u.id },
+            data: {
+              totpEnabled: true,
+              totpSecretEnc: encryptSecret(
+                SECRET,
+                Buffer.from(process.env.ENCRYPTION_KEY ?? '', 'base64'),
+              ),
+            },
+          }),
+        );
+        await post('2fa/setup/start', token, { currentPassword: PASSWORD }).expect(409);
+        const changed = await newPassword();
+        const w = await createUser();
+        const wt = await accessFor(w.id);
+        afterNextVerify(() =>
+          prisma.user.update({ where: { id: w.id }, data: { passwordHash: changed } }),
+        );
+        reauthRefused(await post('2fa/setup/start', wt, { currentPassword: PASSWORD }));
       });
 
       it('TC-003: disable racing a 2FA turn-off is a 409, and racing a promotion to an enforced role is a 403', async () => {
@@ -2136,8 +2200,10 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         });
         await post(`2fa/reset/${target.id}`, a.token, {}).expect(400);
         await post(`2fa/reset/${target.id}`, a.token).expect(400);
-        await post(`2fa/reset/${target.id}`, a.token, { currentPassword: 'wrong-pass-1' }).expect(
-          403,
+        reauthRefused(
+          await post(`2fa/reset/${target.id}`, a.token, { currentPassword: 'wrong-pass-1' }).expect(
+            403,
+          ),
         );
         const row = await prisma.user.findUniqueOrThrow({ where: { id: target.id } });
         expect(row.totpEnabled).toBe(true);
@@ -2194,7 +2260,9 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           await prisma.user.update({ where: { id: a.id }, data: { passwordHash: newHash } });
           return ok;
         });
-        await post('2fa/reset/00000000-0000-4000-8000-000000000002', a.token, OK).expect(403);
+        reauthRefused(
+          await post('2fa/reset/00000000-0000-4000-8000-000000000002', a.token, OK).expect(403),
+        );
       });
 
       it('TC-003: login, 2fa/verify and refresh responses carry Cache-Control: no-store', async () => {
@@ -2216,18 +2284,19 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         const a = await admin();
         const target = await createUser({ role: UserRole.REVIEWER, totp: SECRET });
         for (let i = 0; i < 5; i++) {
-          await post(`2fa/reset/${target.id}`, a.token, { currentPassword: 'wrong-pass-1' }).expect(
-            403,
+          reauthRefused(
+            await post(`2fa/reset/${target.id}`, a.token, {
+              currentPassword: 'wrong-pass-1',
+            }).expect(403),
           );
         }
         const wrong = await post(`2fa/reset/${target.id}`, a.token, {
           currentPassword: 'wrong-pass-1',
         });
         const locked = await post(`2fa/reset/${target.id}`, a.token, OK);
-        expect(locked.status).toBe(403);
-        expect((locked.body as Body).detail).toBe((wrong.body as Body).detail);
-        expect((locked.body as Body).code).toBe('REAUTH_FAILED');
-        expect((wrong.body as Body).code).toBe('REAUTH_FAILED');
+        reauthRefused(wrong);
+        reauthRefused(locked);
+        expect(sameShape(locked)).toEqual(sameShape(wrong));
         expect(
           (await prisma.user.findUniqueOrThrow({ where: { id: target.id } })).totpEnabled,
         ).toBe(true);
@@ -2247,7 +2316,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           await prisma.user.update({ where: { id: a.id }, data: { passwordHash: newHash } });
           return ok;
         });
-        await post(`2fa/reset/${target.id}`, a.token, OK).expect(403);
+        reauthRefused(await post(`2fa/reset/${target.id}`, a.token, OK).expect(403));
         expect(
           (await prisma.user.findUniqueOrThrow({ where: { id: target.id } })).totpEnabled,
         ).toBe(true);
