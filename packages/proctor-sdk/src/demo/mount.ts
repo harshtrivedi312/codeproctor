@@ -132,6 +132,8 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
   const monitors = createDefaultMonitors();
   const session = new ProctorSession();
   let consented = false;
+  /** Set by stop(): any async start step that resumes after it must tear down what it started. */
+  let stopped = false;
   let pipeline: RecordingPipeline | null = null;
   const lockState = new Map<string, boolean>();
 
@@ -141,14 +143,19 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
     eventsEl.prepend(li);
   });
   const renderCaps = (extra: string[] = []): void => {
-    capEl.innerHTML = [
+    const lines = [
       ...session
         .getCapabilities()
         .map((c) => `${c.id}: ${c.status}${c.detail ? ` (${c.detail})` : ''}`),
       ...extra,
-    ]
-      .map((t) => `<li>${t}</li>`)
-      .join('');
+    ];
+    capEl.replaceChildren(
+      ...lines.map((t) => {
+        const li = document.createElement('li');
+        li.textContent = t;
+        return li;
+      }),
+    );
   };
   const recordingCaps: string[] = [];
   session.on('capability', () => renderCaps(recordingCaps));
@@ -193,8 +200,14 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
   };
   const evidenceApi: EvidenceApi = { presign: (input) => presignEvidence('EVENT', input) };
 
+  /** Release anything a start that finished (or is still finishing) after stop() created. */
+  const teardownLate = async (): Promise<void> => {
+    await pipeline?.stop();
+    await session.stop();
+  };
+
   q('[data-a=consent]').addEventListener('click', () => {
-    if (consented) return;
+    if (consented || stopped) return;
     consented = true;
     statusEl.textContent = ' starting...';
     void (async () => {
@@ -222,8 +235,11 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
         },
       });
       await pipeline.start();
+      if (stopped) return teardownLate();
       await pipeline.recordWebcam();
+      if (stopped) return teardownLate();
       await pipeline.recordAudio();
+      if (stopped) return teardownLate();
       const pl = pipeline;
       const vision = new VisionMonitor({
         getWebcamStream: () => pl.webcamStream,
@@ -301,6 +317,7 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
         detectors: [...Object.values(monitors), vision, voice],
         transport: { sendBatch: (b) => transport.sendBatch(b), heartbeat },
       });
+      if (stopped) return teardownLate();
       statusEl.textContent = ' running';
       o.onStarted?.({ session, vision });
     })().catch((err: unknown) => {
@@ -310,13 +327,21 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
   q('[data-a=fs]').addEventListener('click', () => void monitors.fullscreen.enter());
   q('[data-a=share]').addEventListener('click', () => {
     void (async () => {
+      if (stopped) return;
       const r = await monitors.screenShare.request();
+      if (stopped) {
+        // The picker was answered after the page was left: release the capture.
+        if (r.ok) r.stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
       if (r.ok && pipeline) await pipeline.recordScreen(r.stream);
     })().catch(() => undefined);
   });
 
   return {
     async stop() {
+      stopped = true;
+      consented = false; // device requests that start after this are refused by assertConsent
       clearInterval(timer);
       await session.stop();
       await pipeline?.stop();

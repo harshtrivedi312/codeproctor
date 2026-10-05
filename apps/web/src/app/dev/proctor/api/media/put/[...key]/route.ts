@@ -1,11 +1,13 @@
 import { NextResponse } from 'next/server';
-import { notFound, toResponse } from '../../../_lib/handler';
+import { notFound, toResponse, tooLarge } from '../../../_lib/handler';
 import {
+  MAX_CHUNK_BYTES,
+  MAX_IMAGE_BYTES,
   evidencePut,
+  existingSession,
   isDevBlocked,
   mediaPut,
   problem,
-  sessionState,
 } from '../../../_lib/mock-server';
 
 // DEV ONLY mock of the presigned PUT target, provisional, ADR 0013 (Proposed, PR #39) section 5.7.
@@ -25,9 +27,16 @@ export async function PUT(
   const m = KEY.exec(path);
   if (!m?.[1]) return toResponse(problem(400, 'VALIDATION_FAILED', 'Validation failed'));
   const sessionId = m[1];
-  const st = sessionState(sessionId);
+  // An unauthenticated URL must not create session state: only sessions that already exist.
+  const st = existingSession(sessionId);
+  if (!st) return toResponse(problem(403, 'FORBIDDEN', 'Not presigned'));
+  const isEvidence = path.includes('/evidence/');
+  // Refuse on the declared length before reading the body.
+  if (tooLarge(req, isEvidence ? MAX_IMAGE_BYTES : MAX_CHUNK_BYTES)) {
+    return toResponse(problem(413, 'PAYLOAD_TOO_LARGE', 'Payload too large', st));
+  }
   const bytes = (await req.arrayBuffer()).byteLength;
-  if (path.includes('/evidence/')) {
+  if (isEvidence) {
     const name = path.slice(path.indexOf('evidence/'));
     if (!st.evidenceIssued.has(name))
       return toResponse(problem(403, 'FORBIDDEN', 'Not presigned', st));

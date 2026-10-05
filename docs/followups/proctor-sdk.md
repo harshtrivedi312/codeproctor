@@ -206,16 +206,15 @@ Nits
 Fixed in the PR: COCO manifest path traversal check (`scripts/safe-path.mjs`, tested), usage comment path, `next.config.test.ts` for the Permissions-Policy override. No model binary was ever committed on the branch (`git log --stat origin/main..HEAD -- apps/web/public` is empty).
 
 Should-fix
-4. Mock server memory: sessions, chunks and batches grow without bound, and chunk `segment`, `seq` and `bytes` accept negative or huge integers. Cap the number of sessions and chunks per session and bound the integers (reuse the limits from the shared schema).
-5. The evidence PUT should require a key that was actually presigned (it currently accepts any `evidence/<session>/...` key).
+4. DONE: mock server memory bounds (sessions 20, chunks and batches per session 5000, issued evidence names 1000, heartbeat health JSON size-limited, `/state` gap scan capped at 50 with a total count), and chunk `segment`, `seq`, `bytes` and `durationMs` are validated. Body limits are enforced on Content-Length before reading (events 256 KiB, keystrokes 2 MiB, media PUT 16 MiB, evidence PUT 1 MiB, other JSON 16 KiB).
+5. DONE: the evidence PUT requires a name that was presigned, and the media PUT no longer creates session state from an unauthenticated URL.
+6. DONE: `mount.ts` `stop()` cancels an in-progress async start (flag checked after each await; a late camera or microphone is released; the screen-share picker answer after stop is released).
 
 Nits
-- `api/_lib/handler.ts`: the comment says 401 but the code returns 400 for a missing dev token; make them agree.
-- `mount.ts` capability list is built with `innerHTML`; use `textContent` (values are SDK strings, but keep the habit).
-- Three test names in the new files lack FR/TC IDs, and the duplicate-batch test is tagged TC-063 but is closer to TC-065 (idempotent replay); retag.
-- The `/dev/proctor` chunk still compiles into production bundles (the route 404s at runtime). Consider a prebuild guard that fails the build if `public/dev-proctor-models` exists, and excluding the route from production builds.
-- Root `eslint.config.mjs` `globalIgnores` for `apps/web/public/dev-proctor-models/**` (hub-owned; see above).
-- `api/media/put/[...key]/route.ts`: use a stricter full-key regex (stream, segment and seq shape) instead of matching only the session prefix.
+- DONE: missing dev token is 401 (comment and code agree); stricter full-key regex for the PUT route; capability list in `mount.ts` uses `textContent`; test names carry FR/TC/NFR ids; content-type check is `/^application\/json(\s*;|$)/i`.
+- Open: `identity/recheck` does not validate `capturedAt` as ISO 8601 (any string is accepted); the evidence PUT does not check Content-Type, size against the presigned `bytes` or repeat count (a name can be PUT many times); the evidence key is derived with `path.indexOf('evidence/')` slicing, replace with the capture group of the key regex.
+- Open: the `/dev/proctor` chunk still compiles into production bundles (the route 404s at runtime). Consider a prebuild guard that fails the build if `public/dev-proctor-models` exists, and excluding the route from production builds.
+- Open: root `eslint.config.mjs` `globalIgnores` for `apps/web/public/dev-proctor-models/**` was added by main (#37); nothing left here.
 
 ## /dev/proctor mocks aligned with ADR 0013 (Proposed, PR #39), provisional
 The mock handlers and the demo's injected adapters (`packages/proctor-sdk/src/demo/mount.ts`) follow the wire tables of ADR 0013 sections 2 to 5. SDK core is unchanged. Deferred SDK changes, to do only after the owner accepts ADR 0013:

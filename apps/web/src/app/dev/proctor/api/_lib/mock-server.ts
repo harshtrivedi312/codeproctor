@@ -24,6 +24,10 @@ export const MAX_SESSIONS = 20;
 export const MAX_CHUNKS_PER_SESSION = 5000;
 export const MAX_BATCHES_PER_SESSION = 5000;
 export const IDENTITY_MIN_INTERVAL_MS = 60_000;
+/** Non-batch JSON bodies (ADR 0013 section 5.1). */
+export const MAX_JSON_BODY_BYTES = 16 * 1024;
+export const MAX_EVIDENCE_ISSUED = 1000;
+export const MAX_MISSING_SHOWN = 50;
 
 export type BatchStatus =
   'ACCEPTED' | 'DUPLICATE' | 'SEQ_CONFLICT' | 'SIGNATURE_INVALID' | 'VALIDATION_FAILED';
@@ -106,6 +110,11 @@ export function sessionState(id: string): SessionState {
   return st;
 }
 
+/** Existing session only (never creates state from an unauthenticated URL). */
+export function existingSession(id: string): SessionState | undefined {
+  return store().get(id);
+}
+
 /** The mock identifies the demo session from its dev token (`demo-<id>`). */
 export function sessionIdFromAuth(header: string | null): string | null {
   const m = /^Bearer demo-([A-Za-z0-9-]{1,64})$/.exec(header ?? '');
@@ -154,8 +163,10 @@ export function heartbeat(st: SessionState, body: unknown): Reply {
   const b = body as { recorder?: unknown; queue?: unknown } | null;
   if (b && (b.recorder !== undefined || b.queue !== undefined)) {
     st.heartbeats.withHealth++;
-    st.heartbeats.lastRecorder = b.recorder ?? st.heartbeats.lastRecorder;
-    st.heartbeats.lastQueue = b.queue ?? st.heartbeats.lastQueue;
+    // Keep only small health objects; anything larger is counted but not stored.
+    const small = (v: unknown): boolean => JSON.stringify(v ?? null).length <= MAX_JSON_BODY_BYTES;
+    if (b.recorder !== undefined && small(b.recorder)) st.heartbeats.lastRecorder = b.recorder;
+    if (b.queue !== undefined && small(b.queue)) st.heartbeats.lastQueue = b.queue;
   }
   return {
     status: 200,
@@ -211,7 +222,7 @@ export function batch(
     }
     return problem(status, code, title, st);
   };
-  if (!/^application\/json\b/i.test(contentType ?? '')) {
+  if (!/^application\/json(\s*;|$)/i.test(contentType ?? '')) {
     return fail(415, 'UNSUPPORTED_MEDIA_TYPE', 'Unsupported media type');
   }
   const limit = route === 'events' ? MAX_EVENT_BATCH_BYTES : MAX_KEYSTROKE_BATCH_BYTES;
@@ -398,6 +409,12 @@ export function evidencePresign(st: SessionState, sessionId: string, input: unkn
   }
   const name = `evidence/${ulid()}.jpg`;
   st.evidenceIssued.set(name, purpose);
+  // Bounded: drop the oldest issued names (Map keeps insertion order).
+  while (st.evidenceIssued.size > MAX_EVIDENCE_ISSUED) {
+    const oldest = st.evidenceIssued.keys().next().value;
+    if (oldest === undefined) break;
+    st.evidenceIssued.delete(oldest);
+  }
   st.evidence.presigned++;
   return {
     status: 200,
@@ -455,7 +472,7 @@ export interface Summary {
     rejected: number;
     events: number;
   };
-  seq: { highest: number | null; missing: number[] };
+  seq: { highest: number | null; missing: number[]; missingCount: number };
   recent: BatchRecord[];
   eventTypes: Record<string, number>;
   chunks: {
@@ -477,8 +494,16 @@ export function summarize(st: SessionState): Summary {
     .map((k) => Number(k.slice(7)));
   const highest = seqs.length ? Math.max(...seqs) : null;
   const have = new Set(seqs);
+  // The scan stops after MAX_MISSING_SHOWN gaps (a huge signed seq must not hang /state); the
+  // total is arithmetic: seqs below `highest` that were not accepted.
   const missing: number[] = [];
-  if (highest !== null) for (let i = 0; i < highest; i++) if (!have.has(i)) missing.push(i);
+  let missingCount = 0;
+  if (highest !== null) {
+    for (let i = 0; i < highest && missing.length < MAX_MISSING_SHOWN; i++) {
+      if (!have.has(i)) missing.push(i);
+    }
+    missingCount = highest - (have.size - 1);
+  }
   const bytes: Record<string, number> = {};
   let uploaded = 0;
   let confirmed = 0;
@@ -499,7 +524,7 @@ export function summarize(st: SessionState): Summary {
       rejected: count('SIGNATURE_INVALID') + count('VALIDATION_FAILED'),
       events: st.batches.filter((b) => b.status === 'ACCEPTED').reduce((n, b) => n + b.events, 0),
     },
-    seq: { highest, missing },
+    seq: { highest, missing, missingCount },
     recent: st.batches.slice(-15).reverse(),
     eventTypes: st.eventTypes,
     chunks: {

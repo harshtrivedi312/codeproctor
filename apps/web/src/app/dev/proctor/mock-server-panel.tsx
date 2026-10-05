@@ -69,7 +69,9 @@ export function MockServerPanel({ sessionId }: { sessionId: string }) {
           <dt>Highest seq, missing seqs</dt>
           <dd>
             {s.seq.highest ?? '-'},{' '}
-            {s.seq.missing.length ? s.seq.missing.join(', ') : 'none (no gap)'}
+            {s.seq.missing.length
+              ? `${s.seq.missing.join(', ')}${s.seq.missingCount > s.seq.missing.length ? ` ... (${s.seq.missingCount} missing in total)` : ''}`
+              : 'none (no gap)'}
           </dd>
           <dt>Chunks presigned / uploaded / confirmed</dt>
           <dd>

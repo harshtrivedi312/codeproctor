@@ -13,13 +13,13 @@ afterEach(() => {
 });
 
 describe('/dev/proctor page (dev only)', () => {
-  it('404s in production builds', async () => {
+  it('NFR-04: 404s in production builds', async () => {
     vi.stubEnv('NODE_ENV', 'production');
     const { default: Page } = await import('./page');
     expect(() => Page()).toThrow('NEXT_NOT_FOUND');
     expect(notFound).toHaveBeenCalled();
   });
-  it('renders the demo outside production and says the API is mocked', async () => {
+  it('FR-701: renders the demo outside production and says the API is mocked', async () => {
     vi.stubEnv('NODE_ENV', 'development');
     const { default: Page } = await import('./page');
     render(<Page />);

@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_CHUNKS_PER_SESSION,
+  MAX_EVIDENCE_ISSUED,
+  MAX_MISSING_SHOWN,
+  existingSession,
   MAX_SESSIONS,
   batch,
   evidencePresign,
@@ -83,10 +86,10 @@ describe('mock batch endpoints (TC-063, TC-065, FR-801)', () => {
     const st = fresh();
     send(st, 0);
     send(st, 3);
-    expect(summarize(st).seq).toEqual({ highest: 3, missing: [1, 2] });
+    expect(summarize(st).seq).toEqual({ highest: 3, missing: [1, 2], missingCount: 2 });
     send(st, 2);
     send(st, 1);
-    expect(summarize(st).seq).toEqual({ highest: 3, missing: [] });
+    expect(summarize(st).seq).toEqual({ highest: 3, missing: [], missingCount: 0 });
     expect(summarize(st).batches.accepted).toBe(4);
   });
 
@@ -351,12 +354,12 @@ describe('mock evidence, identity and heartbeat (FR-606, FR-609, FR-801)', () =>
 });
 
 describe('dev token and bounded state', () => {
-  it('only demo tokens identify a session', () => {
+  it('FR-801: only demo tokens identify a session', () => {
     expect(sessionIdFromAuth('Bearer demo-abc-123')).toBe('abc-123');
     expect(sessionIdFromAuth('Bearer eyJhbGciOi')).toBeNull();
     expect(sessionIdFromAuth(null)).toBeNull();
   });
-  it('state is per session and the number of sessions is capped (oldest evicted)', () => {
+  it('FR-801: state is per session and the number of sessions is capped (oldest evicted)', () => {
     store().clear();
     for (let i = 0; i < MAX_SESSIONS + 5; i++) sessionState(`cap-${i}`);
     expect(store().size).toBe(MAX_SESSIONS);
@@ -373,7 +376,7 @@ describe('production lockout and auth (dev-only routes)', () => {
       body: '{}',
     });
 
-  it('returns 404 from every handler in production', async () => {
+  it('NFR-04: returns 404 from every handler in production', async () => {
     vi.stubEnv('NODE_ENV', 'production');
     const routes = await Promise.all([
       import('./api/heartbeat/route'),
@@ -395,7 +398,7 @@ describe('production lockout and auth (dev-only routes)', () => {
     expect(state.DELETE(new Request('http://x/s?session=abc')).status).toBe(404);
   });
 
-  it('outside production a missing dev token is 401 problem+json', async () => {
+  it('FR-801: outside production a missing dev token is 401 problem+json', async () => {
     vi.stubEnv('NODE_ENV', 'development');
     const { POST } = await import('./api/heartbeat/route');
     const res = await POST(new Request('http://x/y', { method: 'POST', body: '{}' }));
@@ -403,7 +406,7 @@ describe('production lockout and auth (dev-only routes)', () => {
     expect(((await res.json()) as { code: string }).code).toBe('UNAUTHENTICATED');
   });
 
-  it('the PUT target refuses a path that no presign issued', async () => {
+  it('FR-701: the PUT target refuses a path that no presign issued', async () => {
     vi.stubEnv('NODE_ENV', 'development');
     const { PUT } = await import('./api/media/put/[...key]/route');
     const bad = await PUT(new Request('http://x', { method: 'PUT', body: 'x' }), {
@@ -416,5 +419,104 @@ describe('production lockout and auth (dev-only routes)', () => {
       params: Promise.resolve({ key: ['../etc/passwd'] }),
     });
     expect(junk.status).toBe(400);
+  });
+});
+
+describe('bounds and body limits (FR-609, FR-701, NFR-04)', () => {
+  it('TC-063 NFR-08: one signed batch with a huge seq does not hang the state scan; gaps are capped and counted', () => {
+    const st = fresh();
+    send(st, 0);
+    send(st, 2_147_483_647);
+    const t0 = Date.now();
+    const s = summarize(st);
+    expect(Date.now() - t0).toBeLessThan(500);
+    expect(s.seq.highest).toBe(2_147_483_647);
+    expect(s.seq.missing).toHaveLength(MAX_MISSING_SHOWN);
+    expect(s.seq.missing[0]).toBe(1);
+    expect(s.seq.missingCount).toBe(2_147_483_646);
+  });
+
+  it('TC-063 NFR-08: a normal gap still lists the missing seqs and counts them', () => {
+    const st = fresh();
+    send(st, 0);
+    send(st, 4);
+    expect(summarize(st).seq).toEqual({ highest: 4, missing: [1, 2, 3], missingCount: 3 });
+  });
+
+  it('FR-801: issued evidence names are capped (oldest dropped), also for EVENT purpose', () => {
+    const st = fresh();
+    for (let i = 0; i < MAX_EVIDENCE_ISSUED + 50; i++) {
+      evidencePresign(st, 's1', { purpose: 'EVENT', contentType: 'image/jpeg', bytes: 10 });
+    }
+    expect(st.evidenceIssued.size).toBe(MAX_EVIDENCE_ISSUED);
+  });
+
+  it('FR-609: oversized heartbeat health objects are counted but not stored', () => {
+    const st = fresh();
+    heartbeat(st, { recorder: { pad: 'x'.repeat(20_000) }, queue: { pendingEventBatches: 1 } });
+    expect(st.heartbeats.lastRecorder).toBeNull();
+    expect(st.heartbeats.lastQueue).toEqual({ pendingEventBatches: 1 });
+    expect(st.heartbeats.withHealth).toBe(1);
+  });
+
+  it('FR-801: only exactly application/json (optionally with parameters) is accepted', () => {
+    const st = fresh();
+    expect(send(st, 0, body(0), undefined, 'events', 'application/jsonx').status).toBe(415);
+    expect(
+      send(st, 0, body(0), undefined, 'events', 'application/json; charset=utf-8').status,
+    ).toBe(200);
+  });
+
+  it('NFR-04: routes refuse on Content-Length before reading the body (413)', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    const big = (n: number) => ({
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer demo-cl',
+        'content-type': 'application/json',
+        'content-length': String(n),
+      },
+      body: '{}',
+    });
+    const arrayBuffer = vi.spyOn(Request.prototype, 'arrayBuffer');
+    const events = await import('./api/events/route');
+    expect((await events.POST(new Request('http://x/e', big(300 * 1024)))).status).toBe(413);
+    const ks = await import('./api/keystrokes/route');
+    expect((await ks.POST(new Request('http://x/k', big(3 * 1024 * 1024)))).status).toBe(413);
+    const hb = await import('./api/heartbeat/route');
+    expect((await hb.POST(new Request('http://x/h', big(20 * 1024)))).status).toBe(413);
+    sessionState('cl');
+    const put = await import('./api/media/put/[...key]/route');
+    const key = ['orgs', 'demo', 'sessions', 'cl', 'media', 'WEBCAM', '000000', '00000001.webm'];
+    const res = await put.PUT(
+      new Request('http://x/p', {
+        method: 'PUT',
+        headers: { 'content-length': String(17 * 1024 * 1024) },
+        body: 'x',
+      }),
+      { params: Promise.resolve({ key }) },
+    );
+    expect(res.status).toBe(413);
+    expect(arrayBuffer).not.toHaveBeenCalled(); // never read
+  });
+
+  it('NFR-04: the PUT target does not create session state from an unauthenticated URL', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    const put = await import('./api/media/put/[...key]/route');
+    const key = [
+      'orgs',
+      'demo',
+      'sessions',
+      'never-seen',
+      'media',
+      'WEBCAM',
+      '000000',
+      '00000001.webm',
+    ];
+    const res = await put.PUT(new Request('http://x/p', { method: 'PUT', body: 'x' }), {
+      params: Promise.resolve({ key }),
+    });
+    expect(res.status).toBe(403);
+    expect(existingSession('never-seen')).toBeUndefined();
   });
 });
