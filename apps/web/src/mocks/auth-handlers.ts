@@ -75,7 +75,7 @@ export const LOCK_MS = 15 * 60 * 1000;
 
 interface MockAuthState {
   failed: Record<string, number>;
-  lockedUntil: Record<string, number>;
+  lockExpiresAt: Record<string, number>;
   enrolled: string[];
   usedRecovery: string[];
   usedTokens: string[];
@@ -84,7 +84,7 @@ interface MockAuthState {
 
 const EMPTY: MockAuthState = {
   failed: {},
-  lockedUntil: {},
+  lockExpiresAt: {},
   enrolled: [],
   usedRecovery: [],
   usedTokens: [],
@@ -169,17 +169,17 @@ export function createAuthHandlers() {
       const state = load();
       const user = findUser(body.email);
       const key = body.email.trim().toLowerCase();
-      const lockedUntil = state.lockedUntil[key] ?? 0;
+      const lockExpiresAt = state.lockExpiresAt[key] ?? 0;
       // Locked accounts refuse even the correct password (TC-002). The answer is the same generic
       // 401 as a wrong password: the API never says an account is locked (FU-BE-22).
-      const locked = lockedUntil > Date.now();
+      const locked = lockExpiresAt > Date.now();
       if (locked || !user || user.password !== body.password) {
         // Unknown emails get the same answer and are not counted, so nothing is revealed.
         if (user && !locked) {
           state.failed[key] = (state.failed[key] ?? 0) + 1;
           if (state.failed[key] >= MAX_FAILED_LOGINS) {
             state.failed[key] = 0;
-            state.lockedUntil[key] = Date.now() + LOCK_MS;
+            state.lockExpiresAt[key] = Date.now() + LOCK_MS;
           }
           save(state);
         }
@@ -298,7 +298,7 @@ export function createAuthHandlers() {
       state.usedTokens.push(body.token);
       // A reset revokes refresh tokens, clears the lockout and never signs in (D-22).
       state.refreshFor = null;
-      state.lockedUntil = {};
+      state.lockExpiresAt = {};
       state.failed = {};
       save(state);
       return new HttpResponse(null, { status: 204 });
