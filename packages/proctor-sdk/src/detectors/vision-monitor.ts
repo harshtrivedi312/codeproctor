@@ -41,6 +41,18 @@ const MAX_CONSECUTIVE_FAILURES = 3;
  * A detector that an accommodation disabled (ctx.isDisabled) never loads its model or runs.
  * If a model fails to load, DETECTOR_UNAVAILABLE is emitted instead of a silent pass.
  */
+/** play() can hang (autoplay policy, no frames); never let it hold a start or a swap open. */
+async function playBounded(video: HTMLVideoElement, ms = 5000): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    video.play().catch(() => undefined),
+    new Promise<void>((r) => {
+      timer = setTimeout(r, ms);
+    }),
+  ]);
+  clearTimeout(timer);
+}
+
 export class VisionMonitor implements Detector {
   readonly id = 'vision';
   private ctx: DetectorContext | null = null;
@@ -96,20 +108,24 @@ export class VisionMonitor implements Detector {
       // Already running (for example the webcam was restarted after a device loss): follow the
       // new stream instead of sampling a dead one.
       this.video.srcObject = stream;
-      await this.video.play().catch(() => undefined);
+      await playBounded(this.video);
       return;
     }
-    if (this.tasks.size > 0 || this.client) return;
-    await this.run(ctx); // run() starts from clean per-run state
+    if (this.tasks.size > 0 || this.client || this.down !== 'NO_STREAM') return;
+    await this.run(ctx); // run() starts from clean per-run state (reported, failures, down)
   }
 
   private attached: MediaStream | null = null;
+  /** Why no detector is running: only a missing stream is worth retrying on attachStream(). */
+  private down: 'NO_STREAM' | 'FAILED' | null = null;
   /** Bumped by stop() and by a start timeout so a late startInner() can tell it was abandoned. */
   private generation = 0;
 
   reportStartTimeout(ctx: DetectorContext): void {
     for (const t of ['face', 'gaze', 'objects'] as const) {
-      if (!ctx.isDisabled(TASK_TO_DETECTOR[t])) this.unavailable(ctx, t, 'RUNTIME_ERROR');
+      if (!ctx.isDisabled(TASK_TO_DETECTOR[t]) && !this.reported.has(t)) {
+        this.unavailable(ctx, t, 'RUNTIME_ERROR');
+      }
     }
   }
 
@@ -119,6 +135,8 @@ export class VisionMonitor implements Detector {
     // backstop for callers that start a reused instance without calling stop() first.
     this.reported.clear();
     this.failures.clear();
+    // Down until a run succeeds; a missing stream sets NO_STREAM (the only retryable reason).
+    this.down = 'FAILED';
     try {
       await this.startInner(ctx);
     } catch {
@@ -156,6 +174,7 @@ export class VisionMonitor implements Detector {
     const stream = this.o.getWebcamStream() ?? this.attached;
     if (!stream) {
       for (const t of wanted) this.unavailable(ctx, t, 'PERMISSION_DENIED');
+      this.down = 'NO_STREAM';
       return;
     }
     if (typeof createImageBitmap !== 'function' && !this.o.grabFrame) {
@@ -216,14 +235,7 @@ export class VisionMonitor implements Detector {
     video.playsInline = true;
     video.srcObject = stream;
     // play() can hang (autoplay policy, no frames); do not let it hold start() open.
-    let playTimer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([
-      video.play().catch(() => undefined),
-      new Promise<void>((r) => {
-        playTimer = setTimeout(r, 5000);
-      }),
-    ]);
-    clearTimeout(playTimer);
+    await playBounded(video);
     if (gen !== this.generation) {
       // Abandoned while waiting for the first frame: release our own resources only.
       video.srcObject = null;
@@ -231,6 +243,7 @@ export class VisionMonitor implements Detector {
       return;
     }
     this.video = video;
+    this.down = null;
 
     if (this.o.recheckIdentity && this.tasks.has('face')) {
       this.identity = new IdentityScheduler(
@@ -334,9 +347,6 @@ export class VisionMonitor implements Detector {
       case 'BOOK_DETECTED':
         ctx.emit('BOOK_DETECTED', {}, full);
         break;
-      case 'SPEECH_DETECTED':
-        ctx.emit('SPEECH_DETECTED', {}, full);
-        break;
     }
   }
 
@@ -383,6 +393,7 @@ export class VisionMonitor implements Detector {
     this.generation++;
     this.reported.clear();
     this.failures.clear();
+    this.down = null;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.identity?.stop();
