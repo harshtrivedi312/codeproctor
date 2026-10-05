@@ -249,3 +249,22 @@ export function claimsOf(jwt: string): { exp: number; iat: number; role: string;
     org: string;
   };
 }
+
+export const REAUTH_DETAIL = 'The current password is incorrect.';
+
+/** Asserts the final FR-102 re-auth contract: 403 problem+json, code REAUTH_FAILED, fixed detail. */
+export function expectReauthFailed(res: request.Response): void {
+  expect(res.status).toBe(403);
+  expect(res.headers['content-type']).toContain('application/problem+json');
+  const body = res.body as Body;
+  expect(body.code).toBe('REAUTH_FAILED');
+  expect(body.detail).toBe(REAUTH_DETAIL);
+}
+
+/** A problem body without the per-request fields, for "identical body" comparisons. */
+export function stableProblem(res: request.Response): Record<string, unknown> {
+  const { traceId: _t, instance: _i, ...rest } = res.body as Record<string, unknown>;
+  void _t;
+  void _i;
+  return rest;
+}

@@ -9,6 +9,7 @@ import {
   Body,
   boot,
   createUser,
+  expectReauthFailed,
   Harness,
   login,
   PASSWORD,
@@ -16,6 +17,7 @@ import {
   refreshCookie,
   signIn,
   signInWithTotp,
+  stableProblem,
   TOTP_SECRET,
 } from '../support/harness';
 
@@ -188,37 +190,42 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
     expect(((await login(h, u.email).expect(200)).body as Body).status).toBe('two_factor_required');
   });
 
-  it('FR-102: setup/start and setup/confirm refuse a missing (400) or wrong (generic 401) current password and change nothing', async () => {
+  it('FR-102: setup/start and setup/confirm refuse a missing (400) or wrong (403 REAUTH_FAILED) current password and change nothing', async () => {
     const u = await createUser(h, { role: UserRole.RECRUITER });
     const auth = await signIn(h, u.email);
     await post('2fa/setup/start').set(auth).send({}).expect(400);
     const wrong = await post('2fa/setup/start').set(auth).send({ currentPassword: 'Nope-Nope-1' });
-    expect(wrong.status).toBe(401);
-    await post('2fa/setup/confirm')
-      .set(auth)
-      .send({ currentPassword: 'Nope-Nope-1', code: '123456' })
-      .expect(401);
+    expectReauthFailed(wrong);
+    expectReauthFailed(
+      await post('2fa/setup/confirm')
+        .set(auth)
+        .send({ currentPassword: 'Nope-Nope-1', code: '123456' }),
+    );
     const row = await h.owner.user.findUniqueOrThrow({ where: { id: u.id } });
     expect(row.totpSecretEnc).toBeNull();
     expect(row.totpEnabled).toBe(false);
   });
 
-  it('FR-102: setup/start answers a locked account with the same generic 401 as a wrong password', async () => {
+  it('FR-102: setup/start answers a locked account with the same 403 REAUTH_FAILED body as a wrong password', async () => {
     const u = await createUser(h, { role: UserRole.RECRUITER });
     const auth = await signIn(h, u.email);
     let wrongBody: unknown;
     for (let i = 0; i < 5; i++) {
       const r = await post('2fa/setup/start').set(auth).send({ currentPassword: 'Nope-Nope-1' });
-      expect(r.status).toBe(401);
-      wrongBody = r.body;
+      expectReauthFailed(r);
+      wrongBody = stableProblem(r);
     }
     const lockedRes = await post('2fa/setup/start').set(auth).send({ currentPassword: PASSWORD });
-    expect(lockedRes.status).toBe(401);
-    expect({ ...lockedRes.body, traceId: 'x' }).toEqual({
-      ...(wrongBody as object),
-      traceId: 'x',
-    });
+    expectReauthFailed(lockedRes);
+    expect(stableProblem(lockedRes)).toEqual(wrongBody);
+    // login stays the generic 401, locked too.
     await login(h, u.email).expect(401);
+    // setup/confirm and the other re-auth routes answer a locked account the same way.
+    const confirm = await post('2fa/setup/confirm')
+      .set(auth)
+      .send({ currentPassword: PASSWORD, code: '123456' });
+    expectReauthFailed(confirm);
+    expect(stableProblem(confirm)).toEqual(wrongBody);
   });
 
   it('FR-102, FR-107: enrol and recovery-code responses are Cache-Control no-store', async () => {
@@ -247,6 +254,24 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
     expect(s.headers['cache-control']).toContain('no-store');
   });
 
+  it('FR-102, FR-107: login, 2fa/verify and refresh responses are Cache-Control no-store', async () => {
+    const plain = await createUser(h, { role: UserRole.AUTHOR });
+    const loginRes = await login(h, plain.email).expect(200);
+    expect(loginRes.headers['cache-control']).toContain('no-store');
+    const refreshed = await refresh(h, refreshCookie(loginRes)).expect(200);
+    expect(refreshed.headers['cache-control']).toContain('no-store');
+    const u = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
+    const step = await login(h, u.email).expect(200);
+    expect(step.headers['cache-control']).toContain('no-store');
+    const verified = await post('2fa/verify')
+      .send({
+        challengeToken: (step.body as Body).challengeToken,
+        code: authenticator.generate(TOTP_SECRET),
+      })
+      .expect(200);
+    expect(verified.headers['cache-control']).toContain('no-store');
+  });
+
   describe('FR-102: disable and recovery-code regeneration', () => {
     it('TC-003: an AUTHOR with 2FA on can turn it off with the current password: 204, secret and codes cleared, audit row, next login needs no code', async () => {
       const u = await createUser(h, { role: UserRole.AUTHOR, totp: TOTP_SECRET });
@@ -256,7 +281,9 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       });
       const auth = await signInWithTotp(h, u.email);
       await post('2fa/disable').set(auth).send({}).expect(400);
-      await post('2fa/disable').set(auth).send({ currentPassword: 'Nope-Nope-1' }).expect(401);
+      expectReauthFailed(
+        await post('2fa/disable').set(auth).send({ currentPassword: 'Nope-Nope-1' }),
+      );
       expect((await h.owner.user.findUniqueOrThrow({ where: { id: u.id } })).totpEnabled).toBe(
         true,
       );
@@ -274,11 +301,17 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
     });
 
     it.each([UserRole.SUPER_ADMIN, UserRole.REVIEWER])(
-      'TC-003: a %s cannot disable 2FA (required for the role): 403 and 2FA stays on',
+      'TC-003: a %s cannot disable 2FA: 403 TWO_FACTOR_REQUIRED_FOR_ROLE after the password check (wrong password is REAUTH_FAILED), 2FA stays on',
       async (role) => {
         const u = await createUser(h, { role, totp: TOTP_SECRET });
         const auth = await signInWithTotp(h, u.email);
-        await post('2fa/disable').set(auth).send({ currentPassword: PASSWORD }).expect(403);
+        expectReauthFailed(
+          await post('2fa/disable').set(auth).send({ currentPassword: 'Nope-Nope-1' }),
+        );
+        await post('2fa/disable').set(auth).send({}).expect(400);
+        const res = await post('2fa/disable').set(auth).send({ currentPassword: PASSWORD });
+        expect(res.status).toBe(403);
+        expect((res.body as Body).code).toBe('TWO_FACTOR_REQUIRED_FOR_ROLE');
         expect((await h.owner.user.findUniqueOrThrow({ where: { id: u.id } })).totpEnabled).toBe(
           true,
         );
@@ -294,10 +327,11 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       });
       const auth = await signInWithTotp(h, u.email);
       await post('2fa/recovery-codes/regenerate').set(auth).send({}).expect(400);
-      await post('2fa/recovery-codes/regenerate')
-        .set(auth)
-        .send({ currentPassword: 'Nope-Nope-1' })
-        .expect(401);
+      expectReauthFailed(
+        await post('2fa/recovery-codes/regenerate')
+          .set(auth)
+          .send({ currentPassword: 'Nope-Nope-1' }),
+      );
       const res = await post('2fa/recovery-codes/regenerate')
         .set(auth)
         .send({ currentPassword: PASSWORD })
@@ -345,7 +379,9 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       const auth = await signInWithTotp(h, admin.email);
 
       await resetOf(target.id).set(auth).send({}).expect(400);
-      await resetOf(target.id).set(auth).send({ currentPassword: 'Nope-Nope-1' }).expect(401);
+      expectReauthFailed(
+        await resetOf(target.id).set(auth).send({ currentPassword: 'Nope-Nope-1' }),
+      );
       expect((await h.owner.user.findUniqueOrThrow({ where: { id: target.id } })).totpEnabled).toBe(
         true,
       );
@@ -366,12 +402,54 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       );
     });
 
+    it('FR-102: a locked admin, or a wrong password, gets the identical REAUTH_FAILED body on reset, disable and regenerate', async () => {
+      const admin = await createUser(h, { role: UserRole.SUPER_ADMIN, totp: TOTP_SECRET });
+      const target = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
+      const auth = await signInWithTotp(h, admin.email);
+      const routes = [
+        (pw: string): request.Test => resetOf(target.id).set(auth).send({ currentPassword: pw }),
+        (pw: string): request.Test => post('2fa/disable').set(auth).send({ currentPassword: pw }),
+        (pw: string): request.Test =>
+          post('2fa/recovery-codes/regenerate').set(auth).send({ currentPassword: pw }),
+      ];
+      const wrong: Record<string, unknown>[] = [];
+      for (let i = 0; i < 5; i++) {
+        const route = routes[i % 3];
+        const r = await route!('Nope-Nope-1');
+        expectReauthFailed(r);
+        wrong[i % 3] = stableProblem(r);
+      }
+      for (let i = 0; i < 3; i++) {
+        const r = await routes[i]!(PASSWORD); // correct password, but the account is locked now
+        expectReauthFailed(r);
+        expect(stableProblem(r)).toEqual(wrong[i]);
+      }
+      expect((await h.owner.user.findUniqueOrThrow({ where: { id: target.id } })).totpEnabled).toBe(
+        true,
+      );
+    });
+
+    it('FR-102: an admin demoted or whose password changed after sign-in cannot reset 2FA', async () => {
+      const target = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
+      const demoted = await createUser(h, { role: UserRole.SUPER_ADMIN, totp: TOTP_SECRET });
+      const auth = await signInWithTotp(h, demoted.email);
+      await h.owner.user.update({ where: { id: demoted.id }, data: { role: UserRole.RECRUITER } });
+      // The guard re-reads the role, so the stale token is refused before the service runs.
+      const res = await resetOf(target.id).set(auth).send({ currentPassword: PASSWORD });
+      expect([401, 403]).toContain(res.status);
+      expect((await h.owner.user.findUniqueOrThrow({ where: { id: target.id } })).totpEnabled).toBe(
+        true,
+      );
+    });
+
     it('TC-002: a non-SUPER_ADMIN gets 403 on the reset route and the target is unchanged', async () => {
       const target = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
       for (const role of [UserRole.RECRUITER, UserRole.AUTHOR]) {
         const caller = await createUser(h, { role });
         const auth = await signIn(h, caller.email);
-        await resetOf(target.id).set(auth).send({ currentPassword: PASSWORD }).expect(403);
+        const res = await resetOf(target.id).set(auth).send({ currentPassword: PASSWORD });
+        expect(res.status).toBe(403);
+        expect((res.body as Body).code).toBeUndefined(); // role guard, not a coded refusal
       }
       const reviewer = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
       const rAuth = await signInWithTotp(h, reviewer.email);
@@ -398,6 +476,10 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
         .expect(404);
       await resetOf('not-a-uuid').set(auth).send({ currentPassword: PASSWORD }).expect(400);
       await resetOf(admin.id).set(auth).send({ currentPassword: PASSWORD }).expect(400);
+      await resetOf(admin.id.toUpperCase())
+        .set(auth)
+        .send({ currentPassword: PASSWORD })
+        .expect(400);
       expect(
         (await h.owner.user.findUniqueOrThrow({ where: { id: foreign.id } })).totpEnabled,
       ).toBe(true);
