@@ -12,6 +12,11 @@ module.exports = {
         // `module: NodeNext` ts-jest keeps import() as it is, and Jest refuses to run it without
         // --experimental-vm-modules. `module: commonjs` turns it into require(), which Jest runs.
         // The real build (tsconfig.build.json) is unchanged.
+        // Side effect: test code that import()s an ESM-only package is compiled to require().
+        // Node 24 can require() an ES module unless it uses top-level await; one that does fails
+        // with ERR_REQUIRE_ASYNC_MODULE. Mock such a package, or run that suite with
+        // --experimental-vm-modules and a transform without this override (the QA integration
+        // config in test/ does).
         tsconfig: { module: 'commonjs', moduleResolution: 'bundler' },
       },
     ],
