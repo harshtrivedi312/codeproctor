@@ -3,7 +3,7 @@
 // unit tested. The Prisma extension (org-scope.extension.ts) wraps this with the context lookup.
 import type { Prisma } from '../generated/prisma/client.js';
 import { OrgScopeViolationError } from './errors';
-import { assertNestedWritesScoped, assertNoNestedCursor } from './org-scope-nested';
+import { assertNoNestedCursor, assertNoNestedWritesIn } from './org-scope-nested';
 import { orgFilter } from './org-scope-map';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
 
@@ -93,15 +93,17 @@ function andWhere(
   return { ...where, AND: [...kept, filter] };
 }
 
-/** `{ connect: { id } }` naming exactly the caller's org, the only relation form a create may use. */
-function connectsOrg(relation: unknown, orgId: string): boolean {
-  if (!isPlainObject(relation) || Object.keys(relation).length !== 1) return false;
-  const connect = relation.connect;
-  return isPlainObject(connect) && Object.keys(connect).length === 1 && connect.id === orgId;
-}
-
 function violation(model: string, operation: string, what: string): OrgScopeViolationError {
   return new OrgScopeViolationError(`${model}.${operation}: ${what}`);
+}
+
+/** The org relation (`org: { connect }`) is a nested relation write: refused with the others. */
+function orgRelation(model: string, operation: string): OrgScopeViolationError {
+  return violation(
+    model,
+    operation,
+    'the org relation cannot be written; set the scalar orgId, or let the scope stamp it.',
+  );
 }
 
 /** Create payload of a model with its own org_id: the org is added when missing and must match. */
@@ -121,12 +123,7 @@ function stampCreateData(
   }
   if (rule.kind !== 'direct') return data; // path: no org_id column to stamp (ADR 0006 section 2)
   if (!isPlainObject(data)) return data; // Prisma reports the malformed payload itself
-  if (data.org !== undefined) {
-    if (!connectsOrg(data.org, orgId) || data.orgId !== undefined) {
-      throw violation(model, operation, "the org relation may only connect the caller's own org.");
-    }
-    return data;
-  }
+  if (data.org !== undefined) throw orgRelation(model, operation); // refused earlier; fail closed
   if (data.orgId === undefined) return { ...data, orgId };
   if (data.orgId !== orgId) {
     throw violation(model, operation, "orgId in the data is not the caller's org.");
@@ -147,9 +144,7 @@ function assertTenancyKept(
     throw violation(model, operation, "an organization's id cannot be changed.");
   }
   if (rule.kind !== 'direct') return;
-  if (data.org !== undefined) {
-    throw violation(model, operation, 'the org relation cannot be changed by an update.');
-  }
+  if (data.org !== undefined) throw orgRelation(model, operation); // refused earlier; fail closed
   if (data.orgId === undefined) return;
   const value = isPlainObject(data.orgId) ? data.orgId.set : data.orgId;
   if (value !== orgId) {
@@ -273,6 +268,8 @@ export function applyOrgScope(input: OrgScopeInput): PlainObject {
     );
   }
   const args = asArgs(model, operation, input.args);
+  // Deny by default: no nested relation write, in any shape (ADR 0006 section 8).
+  assertNoNestedWritesIn(model, operation, args);
   const rewritten = rewriteArgs(model, rule, operation, args, filter, orgId);
   // A cursor nested in include or select is resolved by its own fields too (any operation).
   assertNoNestedCursor(model, operation, args);
@@ -307,11 +304,9 @@ function rewriteArgs(
     case 'updateMany':
     case 'updateManyAndReturn':
       assertTenancyKept(model, operation, rule, args.data, orgId);
-      assertNestedWritesScoped(model, operation, args.data, orgId);
       return { ...args, where: andWhere(model, operation, args.where, filter) };
 
     case 'create':
-      assertNestedWritesScoped(model, operation, args.data, orgId);
       return { ...args, data: stampCreateData(model, operation, rule, args.data, orgId) };
 
     case 'createMany':
@@ -325,8 +320,6 @@ function rewriteArgs(
 
     case 'upsert':
       assertTenancyKept(model, operation, rule, args.update, orgId);
-      assertNestedWritesScoped(model, operation, args.update, orgId);
-      assertNestedWritesScoped(model, operation, args.create, orgId);
       return {
         ...args,
         where: andWhere(model, operation, args.where, filter),

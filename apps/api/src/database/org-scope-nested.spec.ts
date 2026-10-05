@@ -1,9 +1,13 @@
-// The nested-write guard (FU-DB-63): what `applyOrgScope` refuses and allows inside `data`. Pure
-// functions, no database; the queries that reach Postgres are in tc-008-org-isolation.spec.ts.
+// The nested guards: deny-by-default for nested relation writes (ADR 0006 section 8), and no nested
+// cursors. Pure functions, no database; the queries that reach Postgres are in
+// tc-008-org-isolation.spec.ts.
 import { OrgScopeViolationError } from './errors';
 import { applyOrgScope } from './org-scope-args';
 import { ORG_SCOPE } from './org-scope-map';
 import type { ModelName } from './org-scope-map';
+import { assertNoNestedWrites, NESTED_WRITE_ALLOWLIST } from './org-scope-nested';
+import type { NestedWriteAllowance } from './org-scope-nested';
+import { relationKeys } from './org-scope-relations';
 
 const ORG_A = '11111111-1111-4111-8111-111111111111';
 const ORG_B = '22222222-2222-4222-8222-222222222222';
@@ -15,334 +19,230 @@ function scope(model: ModelName, operation: string, args: unknown): Args {
   return applyOrgScope({ model, rule: ORG_SCOPE[model], operation, args, orgId: ORG_A });
 }
 
-/** True when scoping `data` as an org-scope update refuses it. */
-const refusedBy = (model: ModelName, data: Args): boolean => {
-  try {
-    scope(model, 'update', { where: { id: 'x' }, data });
-    return false;
-  } catch (error) {
-    if (error instanceof OrgScopeViolationError) return true;
-    throw error;
-  }
-};
-
 const refused = (model: ModelName, operation: string, args: unknown): void => {
   expect(() => scope(model, operation, args)).toThrow(OrgScopeViolationError);
 };
 
-describe('nested writes in an org scope (NFR-04, FR-103; FU-DB-63)', () => {
-  describe('refused: connect, connectOrCreate and set on a parent-side relation', () => {
-    it.each(['update', 'updateManyAndReturn'])(
-      "TC-008 %s: organization.update users.connect of another org's user",
-      (operation) => {
-        refused('Organization', operation, {
-          where: { id: ORG_A },
-          data: { users: { connect: { id: ID_OF_B } } },
-        });
-      },
-    );
+const NESTED_OPERATIONS = [
+  'connect',
+  'connectOrCreate',
+  'create',
+  'createMany',
+  'update',
+  'updateMany',
+  'upsert',
+  'delete',
+  'deleteMany',
+  'set',
+  'disconnect',
+] as const;
 
-    it.each([
-      ['Organization', 'users', 'connect', { id: ID_OF_B }],
-      ['Organization', 'users', 'connect', [{ id: ID_OF_B }]],
-      ['Organization', 'tests', 'set', [{ id: ID_OF_B }]],
-      ['Test', 'sections', 'connect', { id: ID_OF_B }],
-      ['TestSection', 'questions', 'set', [{ id: ID_OF_B }]],
-      ['Session', 'questions', 'connect', [{ id: ID_OF_B }]],
-      ['Session', 'proctorEvents', 'connect', [{ id: 1 }]],
-      ['Session', 'consent', 'connect', { id: ID_OF_B }],
-      ['Session', 'review', 'connect', { id: ID_OF_B }],
-      ['User', 'createdQuestions', 'connect', { id: ID_OF_B }],
-      ['ConsentText', 'currentForOrganizations', 'connect', { id: ORG_B }],
-      ['RefreshToken', 'replaces', 'connect', { id: ID_OF_B }],
-      ['SessionQuestion', 'submissions', 'set', [{ id: ID_OF_B }]],
-      ['WebhookEndpoint', 'deliveries', 'connect', [{ id: 1 }]],
-    ] as const)(
-      'TC-008 %s.%s: %s is refused (the foreign key is on the related model)',
-      (model, field, op, value) => {
-        for (const operation of ['update', 'updateMany', 'upsert', 'create']) {
-          const data = { [field]: { [op]: value } };
-          const args = { where: { id: 'x' }, data, create: data, update: data };
-          // Organization.create is refused for another reason; the point is that it is refused.
-          refused(model, operation, args);
+/** A plausible value for each nested operation. The guard refuses on the key, never on the value. */
+const NESTED_VALUE: Record<(typeof NESTED_OPERATIONS)[number], unknown> = {
+  connect: { id: ID_OF_B },
+  connectOrCreate: { where: { id: ID_OF_B }, create: {} },
+  create: { title: 't' },
+  createMany: { data: [{ title: 't' }] },
+  update: { where: { id: ID_OF_B }, data: { title: 'u' } },
+  updateMany: { where: {}, data: { title: 'u' } },
+  upsert: { where: { id: ID_OF_B }, create: {}, update: { title: 'u' } },
+  delete: true,
+  deleteMany: {},
+  set: [{ id: ID_OF_B }],
+  disconnect: true,
+};
+
+/** Every operation that carries a payload, with the payload where Prisma puts it. */
+const WRITE_OPERATIONS: Array<[string, (data: Args) => Args]> = [
+  ['create', (data) => ({ data })],
+  ['update', (data) => ({ where: { id: 'x' }, data })],
+  ['updateMany', (data) => ({ where: {}, data })],
+  ['updateManyAndReturn', (data) => ({ where: {}, data })],
+  ['upsert (create branch)', (data) => ({ where: { id: 'x' }, create: data, update: {} })],
+  ['upsert (update branch)', (data) => ({ where: { id: 'x' }, create: {}, update: data })],
+];
+
+describe('nested relation writes are denied by default (NFR-04, FR-103; ADR 0006 section 8)', () => {
+  const relations = relationKeys().map((key) => key.split('.') as [ModelName, string]);
+
+  it('TC-008 the relation table covers all 116 relation fields of the schema, both sides of 58 foreign keys', () => {
+    expect(relations).toHaveLength(116);
+  });
+
+  it.each(NESTED_OPERATIONS)(
+    'TC-008 nested %s is refused through every relation, on both sides, in create, update and upsert',
+    (op) => {
+      for (const [model, field] of relations) {
+        for (const [name, build] of WRITE_OPERATIONS) {
+          const operation = name.split(' ')[0] as string;
+          const data = { [field]: { [op]: NESTED_VALUE[op] } };
+          // Refused by the nested rule itself (the message names the relation field and the
+          // operation), not by some other check on the way.
+          expect(() => scope(model, operation, build(data))).toThrow(
+            `${model}.${operation}: nested relation write refused (${model}.${field}.${op}): `,
+          );
         }
-      },
-    );
+      }
+    },
+  );
 
-    it('TC-008 connectOrCreate on a parent-side relation is refused', () => {
+  it('TC-008 the refusal does not depend on the shape of the value: empty, null, a list or a string', () => {
+    for (const value of [{}, null, [], [{ id: 'x' }], 'x', true, 1]) {
+      expect(() =>
+        scope('Session', 'update', { where: { id: 'x' }, data: { invitation: value } }),
+      ).toThrow(/nested relation write refused \(Session\.invitation\./);
+    }
+  });
+
+  it('TC-008 the message names the operation, model, relation and nested operation, and nothing else', () => {
+    let message = '';
+    try {
+      scope('Organization', 'update', {
+        where: { id: ORG_A },
+        data: { users: { connect: { id: ID_OF_B } } },
+      });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toBe(
+      'Organization.update: nested relation write refused (Organization.users.connect): write ' +
+        'related rows with their own scoped call and scalar foreign keys (ADR 0006 §8, ' +
+        'deny-by-default).',
+    );
+    expect(message).not.toContain(ID_OF_B);
+    expect(message).not.toContain(ORG_A);
+  });
+
+  describe('the attacks this rule exists for', () => {
+    it("TC-008 parent-side connect, set and update of another org's rows", () => {
+      refused('Organization', 'update', {
+        where: { id: ORG_A },
+        data: { users: { connect: { id: ID_OF_B } } },
+      });
+      refused('TestSection', 'update', {
+        where: { id: 'x' },
+        data: { questions: { set: [{ id: ID_OF_B }] } },
+      });
+      refused('User', 'update', {
+        where: { id: 'x' },
+        data: { sessionReviews: { updateMany: { where: {}, data: { notes: 'n' } } } },
+      });
+      refused('User', 'update', {
+        where: { id: 'x' },
+        data: { sessionReviews: { deleteMany: {} } },
+      });
+    });
+
+    it('TC-008 RULE_I takeover: reviewer.update, with and without a connect next to it', () => {
+      refused('SessionReview', 'update', {
+        where: { id: 'x' },
+        data: { reviewer: { update: { passwordHash: 'p' } } },
+      });
+      refused('SessionReview', 'update', {
+        where: { id: 'x' },
+        data: {
+          reviewer: { connect: { id: ID_OF_B }, update: { email: 'a@x.test', passwordHash: 'p' } },
+        },
+      });
+    });
+
+    it('TC-008 B2(a): connect through a COMPOSITE relation rewrites org_id, so it is refused (update and create)', () => {
+      // The scalar form (invitationId) keeps org_id as it is, and Postgres checks the composite key.
       refused('Session', 'update', {
         where: { id: 'x' },
-        data: {
-          review: {
-            connectOrCreate: { where: { sessionId: 'x' }, create: { reviewerId: ID_OF_B } },
-          },
-        },
+        data: { invitation: { connect: { id: ID_OF_B } } },
       });
-      refused('Test', 'update', {
+      refused('Session', 'create', {
+        data: { org: { connect: { id: ORG_A } }, invitation: { connect: { id: ID_OF_B } } },
+      });
+      refused('Invitation', 'update', {
         where: { id: 'x' },
-        data: {
-          sections: {
-            connectOrCreate: [{ where: { id: ID_OF_B }, create: { title: 't', position: 0 } }],
-          },
-        },
+        data: { test: { connect: { id: ID_OF_B } }, candidate: { connect: { id: ID_OF_B } } },
+      });
+      refused('Invitation', 'create', {
+        data: { test: { connect: { id: ID_OF_B } }, candidate: { connect: { id: ID_OF_B } } },
       });
     });
 
-    it('TC-008 the same refusal holds at any depth', () => {
-      refused('Test', 'update', {
-        where: { id: 'x' },
-        data: {
-          sections: {
-            update: { where: { id: 'y' }, data: { questions: { connect: { id: ID_OF_B } } } },
+    it('TC-008 B2(b): connect plus a write in one to-one input is refused, in every class', () => {
+      for (const [model, field] of [
+        ['RefreshToken', 'user'], // SCOPE_HOP
+        ['TestSection', 'test'], // SCOPE_HOP
+        ['Submission', 'sessionQuestion'], // SCOPE_HOP
+        ['Session', 'invitation'], // COMPOSITE
+        ['SessionReview', 'reviewer'], // RULE_I
+      ] as const) {
+        refused(model, 'update', {
+          where: { id: 'x' },
+          data: {
+            [field]: { connect: { id: ID_OF_B }, update: { passwordHash: 'p', email: 'a@x.test' } },
           },
-        },
-      });
-      refused('Test', 'update', {
-        where: { id: 'x' },
-        data: {
-          sections: {
-            create: {
-              title: 't',
-              position: 1,
-              questions: {
-                create: { position: 0, sessionQuestions: { connect: { id: ID_OF_B } } },
-              },
-            },
-          },
-        },
-      });
-      refused('Test', 'upsert', {
-        where: { id: 'x' },
-        create: {},
-        update: {
-          sections: {
-            upsert: {
-              where: { id: 'y' },
-              create: {},
-              update: { questions: { set: [{ id: ID_OF_B }] } },
-            },
-          },
-        },
-      });
-    });
-
-    it('TC-008 the message names the model, the field and the way out, and carries no value', () => {
-      let message = '';
-      try {
-        scope('Organization', 'update', {
-          where: { id: ORG_A },
-          data: { users: { connect: { id: ID_OF_B } } },
         });
-      } catch (error) {
-        message = (error as Error).message;
       }
-      expect(message).toContain('Organization.update');
-      expect(message).toContain('Organization.users');
-      expect(message).toContain('rule (i)');
-      expect(message).not.toContain(ID_OF_B);
-      expect(message).not.toContain(ORG_A);
-      expect(message).not.toContain(ORG_B);
     });
   });
 
-  describe('refused: a nested row of a model with its own org that names another org', () => {
-    // organization.questions (an ORG_ID relation): the parent is the caller's own organization, and
-    // the nested question carries its own org. Candidate.invitations is a COMPOSITE relation.
-    const question = { slug: 's' };
-
-    it.each([
-      ['create', { create: { ...question, orgId: ORG_B } }],
-      [
-        'create (list)',
-        {
-          create: [
-            { ...question, orgId: ORG_A },
-            { ...question, orgId: ORG_B },
-          ],
-        },
-      ],
-      ['createMany', { createMany: { data: [{ ...question, orgId: ORG_B }] } }],
-      [
-        'upsert, create branch',
-        { upsert: { where: { id: 'x' }, create: { ...question, orgId: ORG_B }, update: {} } },
-      ],
-      [
-        'upsert, update branch',
-        { upsert: { where: { id: 'x' }, create: {}, update: { orgId: ORG_B } } },
-      ],
-      ['update (where and data)', { update: { where: { id: 'x' }, data: { orgId: ORG_B } } }],
-      ['update (set form)', { update: { where: { id: 'x' }, data: { orgId: { set: ORG_B } } } }],
-      ['updateMany', { updateMany: { where: {}, data: { orgId: ORG_B } } }],
-      ['create, org connect', { create: { ...question, org: { connect: { id: ORG_B } } } }],
-      ['create, org create', { create: { ...question, org: { create: { name: 'x' } } } }],
-      [
-        'update, org relation',
-        { update: { where: { id: 'x' }, data: { org: { connect: { id: ORG_A } } } } },
-      ],
-    ])('TC-008 organization.update questions.%s is refused', (_name, nested) => {
-      refused('Organization', 'update', { where: { id: ORG_A }, data: { questions: nested } });
+  describe('the org relation (org: { connect })', () => {
+    it('TC-008 org: { connect } is refused on every model with an org_id; services set orgId or let the scope stamp it', () => {
+      for (const model of [
+        'User',
+        'Question',
+        'Test',
+        'Candidate',
+        'Invitation',
+        'Session',
+        'AuditLog',
+        'ConsentText',
+        'WebhookEndpoint',
+      ] as const) {
+        refused(model, 'create', { data: { org: { connect: { id: ORG_A } } } });
+        refused(model, 'update', { where: { id: 'x' }, data: { org: { connect: { id: ORG_A } } } });
+      }
+      // A flat createMany row is not walked, but its org relation is still refused.
+      refused('Test', 'createMany', { data: [{ name: 't', org: { connect: { id: ORG_A } } }] });
+      refused('Test', 'createManyAndReturn', { data: { org: { connect: { id: ORG_A } } } });
     });
 
-    it('TC-008 a create or upsert of the parent carries the same check, through a COMPOSITE relation', () => {
-      const invitation = { testId: 't', tokenHash: 'h' };
-      refused('Candidate', 'create', {
-        data: {
-          email: 'a',
-          fullName: 'a',
-          invitations: { create: { ...invitation, orgId: ORG_B } },
-        },
+    it("TC-008 the scalar orgId is stamped when missing, accepted when it is the caller's, and refused for another org", () => {
+      expect(scope('Test', 'create', { data: { name: 't' } }).data).toEqual({
+        name: 't',
+        orgId: ORG_A,
       });
-      refused('Candidate', 'upsert', {
-        where: { id: 'x' },
-        create: { orgId: ORG_A, invitations: { create: { ...invitation, orgId: ORG_B } } },
-        update: {},
+      expect(scope('Test', 'create', { data: { name: 't', orgId: ORG_A } }).data).toEqual({
+        name: 't',
+        orgId: ORG_A,
       });
-      refused('Candidate', 'update', {
-        where: { id: 'x' },
-        data: { invitations: { createMany: { data: [{ ...invitation, orgId: ORG_B }] } } },
-      });
-    });
-
-    it('TC-008 a nested create of an organization is refused, however it is reached', () => {
-      refused('ConsentText', 'update', {
-        where: { id: 'x' },
-        data: { currentForOrganizations: { create: { name: 'rogue' } } },
-      });
-      refused('ConsentText', 'update', {
-        where: { id: 'x' },
-        data: { currentForOrganizations: { createMany: { data: [{ name: 'rogue' }] } } },
-      });
-      refused('ConsentText', 'update', {
-        where: { id: 'x' },
-        data: {
-          currentForOrganizations: {
-            upsert: { where: { id: ORG_B }, create: { name: 'r' }, update: {} },
-          },
-        },
-      });
-    });
-
-    it('TC-008 an organization reached through a relation keeps its id', () => {
-      refused('ConsentText', 'update', {
-        where: { id: 'x' },
-        data: {
-          currentForOrganizations: { update: { where: { id: ORG_B }, data: { id: ORG_A } } },
-        },
-      });
+      refused('Test', 'create', { data: { name: 't', orgId: ORG_B } });
     });
   });
 
-  describe('refused: what the guard does not know (fails closed) or will not walk', () => {
-    it('TC-008 an unknown nested operation is refused', () => {
-      refused('Test', 'update', {
-        where: { id: 'x' },
-        data: { sections: { teleport: { id: 'y' } } },
-      });
-    });
-
-    it('TC-008 a nest deeper than 16 relations is refused (the guard is a safety net, not a reachable limit)', () => {
-      // Through ORG_ID, SCOPE_HOP and COMPOSITE relations the nest is a few levels deep at most. The
-      // nested cursor walk has no such limit on the schema, so it shows the depth guard.
-      const include = (depth: number): Args =>
-        depth === 0 ? {} : { include: { replaces: include(depth - 1) } };
-      expect(() => scope('RefreshToken', 'findMany', include(10))).not.toThrow();
-      refused('RefreshToken', 'findMany', include(20));
-    });
-  });
-
-  describe('allowed', () => {
-    it('TC-008 a child-side connect is the same as setting the scalar foreign key (rule (i))', () => {
-      const cases: Array<[ModelName, Args]> = [
-        ['Session', { invitation: { connect: { id: 'i' } } }],
-        ['TestQuestion', { questionVersion: { connect: { id: 'v' } } }],
+  describe('what stays allowed', () => {
+    it('TC-008 scalar fields, including scalar foreign keys, in create, update and upsert', () => {
+      const scalars: Array<[ModelName, Args]> = [
+        ['Session', { invitationId: ID_OF_B, status: 'INVITED' }],
+        ['Invitation', { testId: 't', candidateId: 'c', tokenHash: 'h' }],
+        ['SessionReview', { reviewerId: ID_OF_B, notes: 'n' }],
+        ['RefreshToken', { userId: ID_OF_B, familyId: 'f' }],
+        ['TestSection', { testId: 't', title: 'x', position: 1 }],
         [
           'SessionQuestion',
-          { testQuestion: { connect: { id: 't' } }, variant: { connect: { id: 'v' } } },
+          { sessionId: 's', testQuestionId: 't', questionVersionId: 'v', variantId: null },
         ],
-        ['Submission', { sessionQuestion: { connect: { id: 's' } } }],
-        ['RefreshToken', { replacedBy: { connect: { id: 'r' } }, user: { connect: { id: 'u' } } }],
-        [
-          'Question',
-          { createdBy: { connect: { id: 'u' } }, currentVersion: { connect: { id: 'v' } } },
-        ],
-        ['SessionReview', { reviewer: { connect: { id: 'u' } } }],
       ];
-      for (const [model, data] of cases) {
-        for (const operation of ['update', 'create']) {
-          expect(() => scope(model, operation, { where: { id: 'x' }, data })).not.toThrow();
+      for (const [model, data] of scalars) {
+        for (const [name, build] of WRITE_OPERATIONS) {
+          expect(() => scope(model, name.split(' ')[0] as string, build(data))).not.toThrow();
         }
-        expect(() =>
-          scope(model, 'upsert', { where: { id: 'x' }, create: data, update: data }),
-        ).not.toThrow();
       }
     });
 
-    it('TC-008 nested create, update, upsert, delete, deleteMany, disconnect and updateMany under an in-scope parent', () => {
-      const data = {
-        sections: {
-          create: [{ title: 'a', position: 0, questions: { create: { position: 0 } } }],
-          createMany: { data: [{ title: 'b', position: 1 }] },
-          update: [
-            {
-              where: { id: 's1' },
-              data: {
-                title: 'c',
-                questions: { update: { where: { id: 'q' }, data: { position: 3 } } },
-              },
-            },
-          ],
-          updateMany: { where: {}, data: { title: 'd' } },
-          upsert: {
-            where: { id: 's2' },
-            create: { title: 'e', position: 2 },
-            update: { title: 'f' },
-          },
-          delete: [{ id: 's3' }],
-          deleteMany: { position: { gt: 9 } },
-          disconnect: [{ id: 's4' }],
-        },
-      };
-      expect(() => scope('Test', 'update', { where: { id: 'x' }, data })).not.toThrow();
-      expect(() =>
-        scope('Test', 'update', {
-          where: { id: 'x' },
-          data: { sections: { update: { title: 'to-one form' } } },
-        }),
-      ).not.toThrow();
-    });
-
-    it("TC-008 a nested row of a model with its own org that names the caller's org, or none", () => {
-      const question = { slug: 's' };
-      const data = {
-        questions: {
-          create: [
-            { ...question, orgId: ORG_A },
-            { ...question },
-            { ...question, org: { connect: { id: ORG_A } } },
-          ],
-          createMany: { data: [{ ...question, orgId: ORG_A }] },
-          update: { where: { id: 'x' }, data: { orgId: ORG_A, isArchived: true } },
-          upsert: {
-            where: { id: 'x' },
-            create: { ...question, orgId: ORG_A },
-            update: { orgId: { set: ORG_A } },
-          },
-        },
-      };
-      expect(() => scope('Organization', 'update', { where: { id: ORG_A }, data })).not.toThrow();
-    });
-
-    it('TC-008 a Json column is never entered, and a scalar list keeps its { set }', () => {
-      // The Json value looks like a nested write; it is data. So does the list.
+    it('TC-008 a scalar list keeps its { set }, and a Json column is never entered', () => {
       const lookalike = {
         users: { connect: { id: ID_OF_B } },
         sections: { set: [{ id: ID_OF_B }] },
       };
       expect(() =>
-        scope('Test', 'update', { where: { id: 'x' }, data: { settings: lookalike } }),
-      ).not.toThrow();
-      expect(() =>
-        scope('Question', 'update', { where: { id: 'x' }, data: { tags: { set: ['a', 'b'] } } }),
+        scope('Question', 'update', { where: { id: 'x' }, data: { tags: { set: ['a'] } } }),
       ).not.toThrow();
       expect(() =>
         scope('User', 'update', {
@@ -352,8 +252,11 @@ describe('nested writes in an org scope (NFR-04, FR-103; FU-DB-63)', () => {
       ).not.toThrow();
       expect(() =>
         scope('WebhookEndpoint', 'create', {
-          data: { url: 'u', events: { set: ['x'] }, secretEnc: 's' },
+          data: { url: 'u', events: { set: ['e'] }, secretEnc: 's' },
         }),
+      ).not.toThrow();
+      expect(() =>
+        scope('Test', 'update', { where: { id: 'x' }, data: { settings: lookalike } }),
       ).not.toThrow();
       expect(() =>
         scope('Organization', 'update', { where: { id: ORG_A }, data: { settings: lookalike } }),
@@ -366,27 +269,70 @@ describe('nested writes in an org scope (NFR-04, FR-103; FU-DB-63)', () => {
       ).not.toThrow();
     });
 
-    it('TC-008 createMany of any model is flat: relation-looking keys in a row are not walked', () => {
-      // Prisma rejects relations in createMany itself; the guard adds no walk and no cost.
-      const rows = Array.from({ length: 1000 }, (_, i) => ({
-        sessionId: 's',
-        seq: i,
-        users: { connect: { id: 'x' } },
-      }));
+    it('TC-008 a flat createMany of any model is not walked, so ingest paths pay nothing', () => {
+      const rows = Array.from({ length: 1000 }, (_, i) => ({ sessionId: 's', seq: i }));
       expect(() => scope('ProctorEvent', 'createMany', { data: rows })).not.toThrow();
       expect(() => scope('ProctorEvent', 'createManyAndReturn', { data: rows })).not.toThrow();
     });
 
-    it('TC-008 data that is not an object, or has no relations, passes through unchanged', () => {
-      expect(scope('Test', 'update', { where: { id: 'x' }, data: { name: 'n' } }).data).toEqual({
-        name: 'n',
-      });
-      expect(() => scope('Test', 'update', { where: { id: 'x' } })).not.toThrow();
-      expect(() => scope('Test', 'update', { where: { id: 'x' }, data: 'nope' })).not.toThrow();
+    it('TC-008 a relation key that is undefined, data that is not an object, and reads are left alone', () => {
+      expect(() =>
+        scope('Session', 'update', {
+          where: { id: 'x' },
+          data: { invitation: undefined, status: 'GRADED' },
+        }),
+      ).not.toThrow();
+      expect(() => scope('Session', 'update', { where: { id: 'x' } })).not.toThrow();
+      expect(() => scope('Session', 'update', { where: { id: 'x' }, data: 'nope' })).not.toThrow();
+      // include and select name relations too, but they are reads.
+      expect(() =>
+        scope('Session', 'findMany', { include: { invitation: true, org: true } }),
+      ).not.toThrow();
     });
   });
 
-  describe('refused: a cursor nested in include or select', () => {
+  describe('the allowlist', () => {
+    it('TC-008 NESTED_WRITE_ALLOWLIST is empty: BE-02 and BE-03 use scalar foreign keys only', () => {
+      // Adding an entry is a reviewed change: it needs the model, the relation, the operations and
+      // its own cross-org test in tc-008-org-isolation.spec.ts. This test fails until then.
+      expect(NESTED_WRITE_ALLOWLIST).toEqual([]);
+    });
+
+    it('TC-008 an entry allows exactly the named model, relation and operations, and nothing else', () => {
+      const allowlist: NestedWriteAllowance[] = [
+        { model: 'Session', field: 'invitation', operations: ['disconnect'], reason: 'test only' },
+      ];
+      expect(() =>
+        assertNoNestedWrites('Session', 'update', { invitation: { disconnect: true } }, allowlist),
+      ).not.toThrow();
+      // Another operation on the same relation, another relation, another model: still refused.
+      for (const [model, data] of [
+        ['Session', { invitation: { connect: { id: 'x' } } }],
+        ['Session', { invitation: { disconnect: true, update: { data: {} } } }],
+        ['Session', { consent: { disconnect: true } }],
+        ['Invitation', { sessions: { disconnect: [{ id: 'x' }] } }],
+      ] as const) {
+        expect(() => assertNoNestedWrites(model, 'update', data, allowlist)).toThrow(
+          OrgScopeViolationError,
+        );
+      }
+    });
+  });
+
+  it('TC-008 the guard does not change the arguments it was given', () => {
+    const args = { where: { id: 'x' }, data: { name: 'n', settings: { a: 1 } } };
+    const copy = structuredClone(args);
+    scope('Test', 'update', args);
+    expect(args).toEqual(copy);
+    const refusedArgs = { where: { id: 'x' }, data: { sections: { create: { title: 't' } } } };
+    const refusedCopy = structuredClone(refusedArgs);
+    expect(() => scope('Test', 'update', refusedArgs)).toThrow();
+    expect(refusedArgs).toEqual(refusedCopy);
+  });
+});
+
+describe('nested cursors in include and select (NFR-04, FR-103)', () => {
+  describe('refused', () => {
     const OPS_WITH_SELECTION = [
       'findUnique',
       'findUniqueOrThrow',
@@ -518,214 +464,5 @@ describe('nested writes in an org scope (NFR-04, FR-103; FU-DB-63)', () => {
         include: { sections: { cursor: { id: 'y' } } },
       });
     });
-  });
-
-  describe("through a RULE_I relation (S-A): nested writes can reach another org's rows", () => {
-    // Child side (this model holds the key) and parent side, for a staff and a cross-chain relation.
-    const relations = [
-      ['SessionReview', 'reviewer', 'child side, staff'],
-      ['User', 'sessionReviews', 'parent side, staff'],
-      ['SessionQuestion', 'testQuestion', 'child side, cross-chain'],
-      ['TestQuestion', 'sessionQuestions', 'parent side, cross-chain'],
-      ['Organization', 'currentConsentText', 'child side, cross-chain'],
-      ['ConsentText', 'currentForOrganizations', 'parent side, cross-chain'],
-      ['Question', 'createdBy', 'child side, staff'],
-      ['User', 'createdQuestions', 'parent side, staff'],
-    ] as const;
-    const NESTED_OPS: Array<[string, unknown]> = [
-      ['create', { title: 't' }],
-      ['createMany', { data: [{ title: 't' }] }],
-      ['update', { where: { id: 'x' }, data: { passwordHash: 'p' } }],
-      ['update (to-one form)', { passwordHash: 'p' }],
-      ['updateMany', { where: {}, data: { notes: 'n' } }],
-      ['upsert', { where: { id: 'x' }, create: {}, update: { passwordHash: 'p' } }],
-      ['delete', true],
-      ['delete (list)', [{ id: 'x' }]],
-      ['deleteMany', { notes: 'n' }],
-      ['connectOrCreate', { where: { id: 'x' }, create: {} }],
-    ];
-
-    describe.each(relations)('%s.%s (%s)', (model, field) => {
-      it.each(NESTED_OPS)('TC-008 nested %s is refused', (name, value) => {
-        const op = name.split(' ')[0] as string;
-        for (const operation of ['update', 'upsert']) {
-          const data = { [field]: { [op]: value } };
-          refused(model, operation, { where: { id: 'x' }, data, create: data, update: data });
-        }
-      });
-    });
-
-    it('TC-008 deeper: a RULE_I relation inside an allowed nest is refused', () => {
-      // test.sections (SCOPE_HOP) is allowed; sessionQuestions under a test question (RULE_I) is not.
-      expect(() =>
-        scope('Test', 'update', {
-          where: { id: 'x' },
-          data: { sections: { update: { where: { id: 's' }, data: { title: 't' } } } },
-        }),
-      ).not.toThrow();
-      refused('Test', 'update', {
-        where: { id: 'x' },
-        data: {
-          sections: {
-            update: {
-              where: { id: 's' },
-              data: {
-                questions: {
-                  update: { where: { id: 'q' }, data: { sessionQuestions: { deleteMany: {} } } },
-                },
-              },
-            },
-          },
-        },
-      });
-    });
-
-    it('TC-008 the reviewer takeover example is refused, with a connect next to the update', () => {
-      refused('SessionReview', 'update', {
-        where: { id: 'own' },
-        data: {
-          reviewer: {
-            connect: { id: ID_OF_B },
-            update: { email: 'attacker@example.test', passwordHash: 'x' },
-          },
-        },
-      });
-      refused('SessionReview', 'update', {
-        where: { id: 'own' },
-        data: { reviewer: { update: { data: { passwordHash: 'x' } } } },
-      });
-      refused('User', 'update', {
-        where: { id: 'own' },
-        data: { sessionReviews: { updateMany: { where: {}, data: { notes: 'x' } } } },
-      });
-      refused('User', 'update', {
-        where: { id: 'own' },
-        data: { sessionReviews: { deleteMany: {} } },
-      });
-    });
-
-    it('TC-008 the message says which relation, and carries no value', () => {
-      let message = '';
-      try {
-        scope('SessionReview', 'update', {
-          where: { id: ID_OF_B },
-          data: { reviewer: { update: { passwordHash: 'secret-value' } } },
-        });
-      } catch (error) {
-        message = (error as Error).message;
-      }
-      expect(message).toContain('SessionReview.update');
-      expect(message).toContain('SessionReview.reviewer');
-      expect(message).toContain('rule (i)');
-      expect(message).not.toContain('secret-value');
-      expect(message).not.toContain(ID_OF_B);
-    });
-
-    it.each([
-      ['child-side connect, staff', 'SessionReview', { reviewer: { connect: { id: ID_OF_B } } }],
-      [
-        'child-side connect, cross-chain',
-        'SessionQuestion',
-        { testQuestion: { connect: { id: 't' } } },
-      ],
-      [
-        'child-side connect, self relation',
-        'RefreshToken',
-        { replacedBy: { connect: { id: 'r' } } },
-      ],
-      ['child-side disconnect, staff', 'Question', { createdBy: { disconnect: true } }],
-      [
-        'child-side disconnect, cross-chain',
-        'Organization',
-        { currentConsentText: { disconnect: true } },
-      ],
-    ] as const)(
-      'TC-008 %s is allowed (it sets or clears the scalar foreign key: rule (i))',
-      (_name, model, data) => {
-        // Organizations are never created or replaced in an org scope: only update applies to them.
-        const operations = model === 'Organization' ? ['update'] : ['update', 'create', 'upsert'];
-        for (const operation of operations) {
-          expect(() =>
-            scope(model, operation, { where: { id: 'x' }, data, create: data, update: data }),
-          ).not.toThrow();
-        }
-      },
-    );
-
-    it('TC-008 parent-side connect, set and disconnect through a RULE_I relation are refused', () => {
-      for (const op of ['connect', 'set', 'disconnect']) {
-        refused('User', 'update', {
-          where: { id: 'x' },
-          data: { sessionReviews: { [op]: [{ id: 'r' }] } },
-        });
-      }
-    });
-
-    it('TC-008 SCOPE_HOP, COMPOSITE and ORG_ID relations keep their behaviour: nested writes are allowed', () => {
-      const cases: Array<[ModelName, Args, string]> = [
-        [
-          'Test',
-          {
-            sections: {
-              create: { title: 't', position: 1 },
-              update: { where: { id: 's' }, data: { title: 'u' } },
-              delete: [{ id: 's' }],
-            },
-          },
-          'SCOPE_HOP',
-        ],
-        [
-          'TestSection',
-          {
-            questions: {
-              upsert: { where: { id: 'q' }, create: { position: 0 }, update: { position: 2 } },
-              deleteMany: {},
-            },
-          },
-          'SCOPE_HOP',
-        ],
-        [
-          'Session',
-          {
-            sections: { createMany: { data: [{ sectionId: 's', position: 0 }] } },
-            proctorEvents: { deleteMany: { severity: 'LOW' } },
-          },
-          'SCOPE_HOP',
-        ],
-        [
-          'Candidate',
-          {
-            invitations: {
-              create: { testId: 't', tokenHash: 'h' },
-              updateMany: { where: {}, data: { sentAt: new Date() } },
-              deleteMany: {},
-            },
-          },
-          'COMPOSITE',
-        ],
-        ['Test', { invitations: { delete: [{ id: 'i' }] } }, 'COMPOSITE'],
-        [
-          'Organization',
-          {
-            questions: { create: { slug: 's' }, deleteMany: { slug: 'x' } },
-            tests: { update: { where: { id: 't' }, data: { name: 'n' } } },
-          },
-          'ORG_ID',
-        ],
-      ];
-      for (const [model, data, fkClass] of cases) {
-        expect({ fkClass, refused: refusedBy(model, data) }).toEqual({ fkClass, refused: false });
-      }
-    });
-  });
-
-  it('TC-008 the guard does not change the arguments it was given', () => {
-    const args = {
-      where: { id: 'x' },
-      data: { sections: { create: { title: 'a', position: 0 } }, name: 'n' },
-    };
-    const copy = structuredClone(args);
-    scope('Test', 'update', args);
-    expect(args).toEqual(copy);
   });
 });

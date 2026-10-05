@@ -1,265 +1,149 @@
-// The nested guards (FU-DB-63 and the nested cursor). In an org scope, a nested write in `data` can
-// reach rows the scope filter never selected: `organization.update({ where: { id: A }, data: {
-// users: { connect: { id: userOfB } } } })` filters Organization by A and then moves B's user into
-// A. And a `cursor` nested in `include` or `select` is resolved by its own fields, like a top-level
-// one, so it can rank the caller's rows against another org's row. This walks `data`, `include` and
-// `select` and refuses what can do that. It sends no query: it only reads the arguments.
+// The nested guards: deny-by-default for nested relation writes, and no nested cursors.
 //
-// Nested writes, refused at any depth:
-//   - `connect`, `connectOrCreate` and `set` on a PARENT-SIDE relation, where the foreign key is
-//     held by the related model (`organization.users`, `session.consent`). They change rows of the
-//     related model that the scope did not select.
-//   - `create`, `createMany`, `update`, `updateMany`, `upsert`, `delete`, `deleteMany` and
-//     `connectOrCreate` through a RULE_I relation, on either side (`sessionReview.reviewer`,
-//     `user.sessionReviews`): the row on the other side can belong to another org after one rule
-//     (i) slip, so `reviewer: { update: { passwordHash } }` would take over another org's user.
-//     A parent-side `disconnect` through a RULE_I relation is refused for the same reason.
-//   - a nested `create`, `update`, `upsert` or `createMany` of a model with its own org_id that
-//     names another org, through `orgId` or `org: { connect }`; a nested create of an organization;
-//     and a nested operation this guard does not know (fail closed).
-// Nested writes, allowed:
-//   - a CHILD-SIDE `connect` or `disconnect` (the key is on this model, `session.invitation`): the
-//     same as setting or clearing the scalar foreign key, so it stays under ADR 0006 section 2
-//     rule (i), through any relation.
-//   - nested `create`, `update`, `upsert` and `delete` through a SCOPE_HOP, COMPOSITE or ORG_ID
-//     relation (`test.sections`, `candidate.invitations`, `organization.questions`): the related
-//     row is in the parent's own subtree, in the parent's org by construction. They are NOT allowed
-//     through a RULE_I relation, where that is not true.
+// Nested relation writes (ADR 0006 section 8). In ANY scope the extension applies to, an org scope
+// or system scope, every nested relation write inside `data` is refused: `connect`,
+// `connectOrCreate`, `create`, `createMany`, `update`, `updateMany`, `upsert`, `delete`,
+// `deleteMany`, `set` and `disconnect`, through every relation class (ORG_ID, SCOPE_HOP, COMPOSITE,
+// RULE_I) and on both sides of the relation, including `org: { connect }`. Services write with
+// scalar foreign keys only (`invitationId`, `userId`, `testId`, `orgId`) and with separate
+// top-level calls; Postgres checks the composite foreign keys, and ADR 0006 section 2 rule (i)
+// covers the rest. What stays: scalar fields (scalar foreign keys included), a scalar list's
+// `{ set }`, Json columns, and a flat top-level `createMany`.
 //
-// Nested cursors, refused: a `cursor` anywhere inside `include` or `select`, at any depth. It
-// covers the fluent API too: `session.findUnique(...).proctorEvents({ cursor })` reaches the
-// extension as `findUnique` with `select: { proctorEvents: { cursor } }`. Page nested relations
-// with `where` plus `take` and `orderBy` instead: they name no row to rank against.
+// Why a blanket rule and not a rule per class. A nested write acts on rows the scope filter never
+// selected, and each class had a hole:
+//   - parent-side connect/set: `organization.update({ where: { id: A }, data: { users: { connect:
+//     { id: userOfB } } } })` moves B's user into A;
+//   - RULE_I relations: the row on the other side can belong to another org, so
+//     `reviewer: { update: { passwordHash } }` takes over that user;
+//   - COMPOSITE relations: `connect` writes every column of the key, the shared org_id included, so
+//     `session.update({ data: { invitation: { connect: { id: invitationOfB } } } })` moved the
+//     session, with its proctoring data, into org B (the composite foreign key is satisfied by the
+//     new values). The scalar form `invitationId: <B's>` keeps org_id = A and Postgres rejects it;
+//   - `connect` next to a write in one to-one input: Prisma applies the `update` to the row that was
+//     just connected, so `refreshToken.update({ data: { user: { connect: { id: userOfB }, update: {
+//     passwordHash } } } })` writes B's user, through a SCOPE_HOP relation.
+// A rule that lists the safe shapes would have to be re-proven on every Prisma release and every
+// schema change. Refusing all of them cannot be wrong in this way.
 //
-// Schema knowledge comes from org-scope-relations.ts (a table checked against schema.prisma), not
-// from Prisma's runtime data model. Only relation fields are visited, so a Json column is never
-// entered and a scalar list's `{ set: [...] }` is left alone. A `createMany` of a path model is
-// flat and is not walked at all, so ingest paths pay nothing. Messages name models and fields,
-// never values.
+// Exceptions go in NESTED_WRITE_ALLOWLIST, which starts empty. An entry names the model, the
+// relation field and the operations, and must come with its own cross-org test in
+// tc-008-org-isolation.spec.ts that shows the shape cannot reach another org's row. A unit test
+// fails while the list is not empty, so adding an entry is a reviewed change.
+//
+// Nested cursors (org scope). A `cursor` anywhere inside `include` or `select` is refused at any
+// depth: Prisma finds a cursor row by its own fields, so a nested one could rank the caller's rows
+// against another org's row. It covers the fluent API: `session.findUnique(...).proctorEvents({
+// cursor })` reaches the extension as `findUnique` with `select: { proctorEvents: { cursor } }`.
+// Page nested relations with `where`, `take` and `orderBy` instead.
+//
+// Schema knowledge (which fields are relations) comes from org-scope-relations.ts, a table checked
+// against schema.prisma, not from Prisma's runtime data model. Nothing here sends a query: it only
+// reads the arguments, and the cost is one lookup per key of `data`. Messages name models and
+// fields, never values.
 import { OrgScopeViolationError } from './errors';
-import { ORG_SCOPE } from './org-scope-map';
 import type { ModelName } from './org-scope-map';
 import { relationOf } from './org-scope-relations';
-import type { RelationSide } from './org-scope-relations';
 
 type PlainObject = Record<string, unknown>;
-type NestedMode = 'create' | 'update';
 
 interface Walk {
   readonly root: string;
   readonly operation: string;
-  readonly orgId: string;
 }
 
-// Real payloads are a few levels deep. Anything beyond this is refused, not walked.
+// Real selections are a few levels deep. Anything beyond this is refused, not walked.
 const MAX_DEPTH = 16;
 
 function isPlainObject(value: unknown): value is PlainObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function asList(value: unknown): unknown[] {
-  if (value === undefined || value === null) return [];
-  return Array.isArray(value) ? value : [value];
+function refuse(walk: Walk, what: string): OrgScopeViolationError {
+  return new OrgScopeViolationError(`${walk.root}.${walk.operation}: ${what}.`);
 }
 
-function refuse(walk: Walk, what: string): OrgScopeViolationError {
-  return new OrgScopeViolationError(
-    `${walk.root}.${walk.operation}: nested write refused: ${what}.`,
+// ---- nested relation writes ------------------------------------------------------------------
+
+/** One allowed nested-write pattern. Each entry needs its own cross-org test. */
+export interface NestedWriteAllowance {
+  readonly model: ModelName;
+  /** The relation field on `model`. */
+  readonly field: string;
+  /** The nested operations allowed through it, for example ['connect']. */
+  readonly operations: readonly string[];
+  /** Why this one is safe, and the name of the cross-org test that proves it. */
+  readonly reason: string;
+}
+
+/**
+ * Nested relation writes that are allowed anyway. EMPTY, on purpose: BE-02 and BE-03 write with
+ * scalar foreign keys and top-level calls only. To add an entry, name the model, the relation and
+ * the operations, explain why the shape cannot reach another org's row, and add a cross-org test
+ * for it to tc-008-org-isolation.spec.ts. org-scope-nested.spec.ts fails until it is reviewed.
+ */
+export const NESTED_WRITE_ALLOWLIST: readonly NestedWriteAllowance[] = [];
+
+function isAllowed(
+  allowlist: readonly NestedWriteAllowance[],
+  model: ModelName,
+  field: string,
+  operation: string,
+): boolean {
+  return allowlist.some(
+    (entry) =>
+      entry.model === model && entry.field === field && entry.operations.includes(operation),
   );
 }
 
 /**
- * Walks the `data` of a write on `model` for the org `orgId` and throws on a nested write that
- * could change rows outside the org scope. The top-level payload's own orgId is checked by the
- * caller (applyOrgScope); only what is reached through its relations is checked here.
+ * Refuses every nested relation write in `data`: any relation field with a value, whatever the
+ * nested operation, class or side. `data` is the payload of a create, an update, or one branch of an
+ * upsert.
  */
-export function assertNestedWritesScoped(
+export function assertNoNestedWrites(
   model: ModelName,
   operation: string,
   data: unknown,
-  orgId: string,
+  allowlist: readonly NestedWriteAllowance[] = NESTED_WRITE_ALLOWLIST,
 ): void {
-  walkRelations({ root: model, operation, orgId }, model, data, 0);
-}
-
-function walkRelations(walk: Walk, model: ModelName, data: unknown, depth: number): void {
   if (!isPlainObject(data)) return;
-  for (const key of Object.keys(data)) {
-    const side = relationOf(model, key);
-    if (side === undefined) continue; // a scalar, a Json column or a scalar list: never entered
-    // The org relation of a model with its own org_id is checked with its payload (checkOwnOrg).
-    if (side.target === 'Organization' && side.holdsFk) continue;
-    walkRelationInput(walk, model, key, side, data[key], depth);
-  }
-}
-
-function walkRelationInput(
-  walk: Walk,
-  model: ModelName,
-  field: string,
-  side: RelationSide,
-  input: unknown,
-  depth: number,
-): void {
-  if (depth >= MAX_DEPTH) throw refuse(walk, `${model}.${field} is nested too deeply`);
-  if (!isPlainObject(input)) return;
-  const ruleI = side.fkClass === 'RULE_I';
-  for (const [op, value] of Object.entries(input)) {
-    switch (op) {
-      case 'connect':
-      case 'set':
-        if (!side.holdsFk) throw parentSide(walk, model, field, side, op);
-        break; // child side: same as setting the scalar foreign key (rule (i))
-      case 'disconnect':
-        // Child side: clears the scalar foreign key (rule (i)). Parent side: clears the key on
-        // related rows, which through a RULE_I relation can belong to another org.
-        if (ruleI && !side.holdsFk) throw throughRuleI(walk, model, field, side, op);
-        break;
-      case 'connectOrCreate':
-        if (!side.holdsFk) throw parentSide(walk, model, field, side, op);
-        if (ruleI) throw throughRuleI(walk, model, field, side, op);
-        for (const item of asList(value)) {
-          visitPayload(
-            walk,
-            side.target,
-            isPlainObject(item) ? item.create : undefined,
-            'create',
-            depth + 1,
-          );
-        }
-        break;
-      case 'create':
-      case 'createMany':
-      case 'update':
-      case 'updateMany':
-      case 'upsert':
-      case 'delete':
-      case 'deleteMany':
-        if (ruleI) throw throughRuleI(walk, model, field, side, op);
-        walkNestedWrite(walk, side, op, value, depth);
-        break;
-      default:
-        throw refuse(walk, `an operation on ${model}.${field} that the guard does not know`);
+  for (const [field, value] of Object.entries(data)) {
+    if (value === undefined || relationOf(model, field) === undefined) continue;
+    const nested = isPlainObject(value) ? Object.keys(value) : ['(not an object)'];
+    for (const nestedOperation of nested.length === 0 ? ['(empty)'] : nested) {
+      if (isAllowed(allowlist, model, field, nestedOperation)) continue;
+      throw refuse(
+        { root: model, operation },
+        `nested relation write refused (${model}.${field}.${nestedOperation}): write related rows ` +
+          'with their own scoped call and scalar foreign keys (ADR 0006 §8, deny-by-default)',
+      );
     }
   }
 }
 
-/** The nested write `op` through a relation that is not RULE_I: check the rows it writes. */
-function walkNestedWrite(
-  walk: Walk,
-  side: RelationSide,
-  op: string,
-  value: unknown,
-  depth: number,
+/** The payloads of a write that can carry nested writes: `data`, or an upsert's two branches. */
+export function assertNoNestedWritesIn(
+  model: ModelName,
+  operation: string,
+  args: unknown,
+  allowlist: readonly NestedWriteAllowance[] = NESTED_WRITE_ALLOWLIST,
 ): void {
-  switch (op) {
+  if (!isPlainObject(args)) return;
+  switch (operation) {
     case 'create':
-      for (const item of asList(value)) visitPayload(walk, side.target, item, 'create', depth + 1);
-      break;
-    case 'createMany':
-      for (const row of asList(isPlainObject(value) ? value.data : undefined)) {
-        visitFlatRow(walk, side.target, row, 'create');
-      }
-      break;
     case 'update':
-      for (const item of asList(value)) {
-        const payload = isPlainObject(item) && isPlainObject(item.data) ? item.data : item;
-        visitPayload(walk, side.target, payload, 'update', depth + 1);
-      }
-      break;
     case 'updateMany':
-      for (const item of asList(value)) {
-        visitFlatRow(walk, side.target, isPlainObject(item) ? item.data : undefined, 'update');
-      }
+    case 'updateManyAndReturn':
+      assertNoNestedWrites(model, operation, args.data, allowlist);
       break;
     case 'upsert':
-      for (const item of asList(value)) {
-        if (!isPlainObject(item)) continue;
-        visitPayload(walk, side.target, item.create, 'create', depth + 1);
-        visitPayload(walk, side.target, item.update, 'update', depth + 1);
-      }
+      assertNoNestedWrites(model, operation, args.create, allowlist);
+      assertNoNestedWrites(model, operation, args.update, allowlist);
       break;
     default:
-      break; // delete and deleteMany carry no data; they act inside the parent's subtree
+      break; // reads and deletes carry no data; createMany rows are flat and never walked
   }
-}
-
-function throughRuleI(
-  walk: Walk,
-  model: ModelName,
-  field: string,
-  side: RelationSide,
-  op: string,
-): OrgScopeViolationError {
-  return refuse(
-    walk,
-    `${op} through ${model}.${field} reaches ${side.target} rows that can belong to another org ` +
-      '(a rule (i) reference). Write them with their own scoped call; only connect and, on the ' +
-      'child side, disconnect are allowed through this relation (ADR 0006 section 2, rule (i))',
-  );
-}
-
-function parentSide(
-  walk: Walk,
-  model: ModelName,
-  field: string,
-  side: RelationSide,
-  op: string,
-): OrgScopeViolationError {
-  return refuse(
-    walk,
-    `${op} on ${model}.${field} would change ${side.target} rows the org scope did not select ` +
-      `(the foreign key is on ${side.target}). Load the id through the scoped client and set the ` +
-      'foreign key on the child instead (ADR 0006 section 2, rule (i))',
-  );
-}
-
-/** A nested row (create or update payload) of `model`: its own org, then its relations. */
-function visitPayload(
-  walk: Walk,
-  model: ModelName,
-  payload: unknown,
-  mode: NestedMode,
-  depth: number,
-): void {
-  if (!isPlainObject(payload)) return;
-  checkOwnOrg(walk, model, payload, mode);
-  walkRelations(walk, model, payload, depth);
-}
-
-/** A nested row of createMany or updateMany: flat, so only its own org is checked. */
-function visitFlatRow(walk: Walk, model: ModelName, row: unknown, mode: NestedMode): void {
-  if (!isPlainObject(row)) return;
-  checkOwnOrg(walk, model, row, mode);
-}
-
-/** A nested row of a model with its own org_id must not name another org. */
-function checkOwnOrg(walk: Walk, model: ModelName, row: PlainObject, mode: NestedMode): void {
-  const rule = ORG_SCOPE[model];
-  if (rule.kind === 'self') {
-    if (mode === 'create') throw refuse(walk, `${model} would be created (only in system scope)`);
-    if (row.id !== undefined) throw refuse(walk, `${model} id would be changed`);
-    return;
-  }
-  if (rule.kind !== 'direct') return;
-  const org = row.org;
-  if (org !== undefined) {
-    if (mode === 'update' || !connectsOwnOrg(org, walk.orgId) || row.orgId !== undefined) {
-      throw refuse(walk, `${model} names another org through the org relation`);
-    }
-  }
-  if (row.orgId !== undefined) {
-    const value = isPlainObject(row.orgId) ? row.orgId.set : row.orgId;
-    if (value !== walk.orgId) throw refuse(walk, `${model} names another org through orgId`);
-  }
-}
-
-/** `{ connect: { id } }` naming exactly the caller's org. */
-function connectsOwnOrg(relation: unknown, orgId: string): boolean {
-  if (!isPlainObject(relation) || Object.keys(relation).length !== 1) return false;
-  const connect = relation.connect;
-  return isPlainObject(connect) && Object.keys(connect).length === 1 && connect.id === orgId;
 }
 
 // ---- nested cursors in include and select ----------------------------------------------------
@@ -271,7 +155,7 @@ function connectsOwnOrg(relation: unknown, orgId: string): boolean {
  * relation. Page nested relations with `where`, `take` and `orderBy` instead.
  */
 export function assertNoNestedCursor(model: ModelName, operation: string, args: PlainObject): void {
-  walkSelection({ root: model, operation, orgId: '' }, model, args, 0);
+  walkSelection({ root: model, operation }, model, args, 0);
 }
 
 function walkSelection(walk: Walk, model: ModelName, args: PlainObject, depth: number): void {
