@@ -18,12 +18,31 @@ import { Client } from 'pg';
 
 const REPO_ROOT = resolve(__dirname, '../../../../..');
 
+/** One distinct SQL statement as Postgres saw it (parameters shown as $1, $2) and how often it ran. */
+export interface StatementCount {
+  readonly query: string;
+  readonly calls: number;
+}
+
 export interface MigratedDatabase {
   /** Connection string of the schema owner (the container's user). Use it for fixtures and checks. */
   readonly ownerUrl: string;
   /** Connection string of app_user, as the API connects at runtime. */
   readonly appUserUrl: string;
+  /**
+   * Statements app_user has sent to Postgres, from pg_stat_statements. Only with
+   * `statementStats: true`: Postgres is then started with the extension preloaded.
+   */
+  readonly statements: {
+    reset(): Promise<void>;
+    read(): Promise<StatementCount[]>;
+  };
   stop(): Promise<void>;
+}
+
+export interface StartOptions {
+  /** Record every statement app_user sends (pg_stat_statements), for statement-count tests. */
+  readonly statementStats?: boolean;
 }
 
 function prismaCli(): string {
@@ -60,11 +79,41 @@ async function setAppUserPassword(ownerUrl: string, password: string): Promise<v
   }
 }
 
-export async function startMigratedDatabase(): Promise<MigratedDatabase> {
-  const container = await new PostgreSqlContainer('postgres:16').start();
+async function ownerQuery<T extends Record<string, unknown>>(
+  ownerUrl: string,
+  sql: string,
+): Promise<T[]> {
+  const client = new Client({ connectionString: ownerUrl });
+  await client.connect();
+  try {
+    return (await client.query<T>(sql)).rows;
+  } finally {
+    await client.end();
+  }
+}
+
+export async function startMigratedDatabase(options: StartOptions = {}): Promise<MigratedDatabase> {
+  let image = new PostgreSqlContainer('postgres:16');
+  if (options.statementStats === true) {
+    // Arguments for the postgres server (the image entrypoint adds the command name).
+    image = image.withCommand([
+      '-c',
+      'shared_preload_libraries=pg_stat_statements',
+      '-c',
+      'pg_stat_statements.track=all',
+      '-c',
+      'pg_stat_statements.track_utility=on',
+      '-c',
+      'pg_stat_statements.max=10000',
+    ]);
+  }
+  const container = await image.start();
   try {
     const ownerUrl = container.getConnectionUri();
     migrateDeploy(ownerUrl);
+    if (options.statementStats === true) {
+      await ownerQuery(ownerUrl, 'CREATE EXTENSION pg_stat_statements');
+    }
 
     const password = randomBytes(24).toString('hex');
     await setAppUserPassword(ownerUrl, password);
@@ -72,9 +121,26 @@ export async function startMigratedDatabase(): Promise<MigratedDatabase> {
     appUser.username = 'app_user';
     appUser.password = password;
 
+    const statements = {
+      reset: async (): Promise<void> => {
+        await ownerQuery(ownerUrl, 'SELECT pg_stat_statements_reset()');
+      },
+      read: async (): Promise<StatementCount[]> => {
+        const rows = await ownerQuery<{ query: string; calls: number }>(
+          ownerUrl,
+          `SELECT query, calls::int AS calls FROM pg_stat_statements
+           WHERE userid = (SELECT oid FROM pg_roles WHERE rolname = 'app_user')
+             AND dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+           ORDER BY query`,
+        );
+        return rows.map((row) => ({ query: row.query, calls: row.calls }));
+      },
+    };
+
     return {
       ownerUrl,
       appUserUrl: appUser.toString(),
+      statements,
       stop: async () => {
         await container.stop();
       },
