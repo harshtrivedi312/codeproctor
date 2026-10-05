@@ -71,6 +71,7 @@ export class VoiceMonitor implements Detector {
 
   async start(ctx: DetectorContext): Promise<void> {
     this.ctx = ctx;
+    this.stopped = false; // a monitor instance can be started again after stop()
     const stream = this.o.getStream();
     if (!stream) {
       ctx.setCapability({ id: 'voice', status: 'DENIED', detail: 'No microphone stream.' });
@@ -89,18 +90,26 @@ export class VoiceMonitor implements Detector {
    * A new microphone stream (for example after `recordAudio()` restarted following a device
    * loss): restart the VAD on it instead of listening to a dead stream.
    */
-  async attachStream(stream: MediaStream): Promise<void> {
-    const ctx = this.ctx;
-    if (!ctx || this.stopped) return;
-    const old = this.handle;
-    this.handle = null;
-    await old?.destroy();
-    await this.begin(ctx, stream);
+  attachStream(stream: MediaStream): Promise<void> {
+    // Serialised: two quick swaps must not interleave and leak a VAD.
+    const run = this.attachChain.then(async () => {
+      const ctx = this.ctx;
+      if (!ctx || this.stopped) return;
+      const old = this.handle;
+      this.handle = null;
+      await old?.destroy();
+      await this.begin(ctx, stream);
+    });
+    this.attachChain = run.catch(() => undefined);
+    return run;
   }
+
+  private attachChain: Promise<void> = Promise.resolve();
 
   private async begin(ctx: DetectorContext, stream: MediaStream): Promise<void> {
     const cfg = { ...DEFAULT_AI_CONFIG, ...this.o.config };
-    const rules = (this.rules = new SpeechRules(cfg));
+    // Reuse the rules on a stream swap so speech held back by the cooldown is not lost.
+    const rules = (this.rules ??= new SpeechRules(cfg));
     const now = this.o.now ?? Date.now;
     let startedAt: number | null = null;
     try {
@@ -170,5 +179,6 @@ export class VoiceMonitor implements Detector {
     await this.handle?.destroy();
     this.handle = null;
     this.ctx = null;
+    this.rules = null;
   }
 }

@@ -444,10 +444,14 @@ describe('review fixes: late stream, failure reporting, dead worker (FR-606)', (
     expect(m.getStats().tasks).toEqual([]);
   });
 
-  it('FR-606: a worker that errors after ready is terminated and RUNTIME_ERROR is emitted', async () => {
+  it('FR-606: one error event after ready is only a strike; three terminate the worker and emit RUNTIME_ERROR', async () => {
     const h = fakeContext();
     const { m, worker } = setup();
     await m.start(h.ctx);
+    worker.onerror?.({});
+    expect(worker.terminated).toBe(false); // an uncaught handler exception does not kill a worker
+    expect(m.getStats().tasks).toHaveLength(3);
+    worker.onerror?.({});
     worker.onerror?.({});
     expect(worker.terminated).toBe(true);
     expect(
@@ -771,5 +775,147 @@ describe('review blockers: abandoned start, bounded play, stream swap (FR-606, F
     }
     await s2.stop();
     await s1.stop();
+  });
+});
+
+describe('should-fix round (FR-606, FR-607)', () => {
+  it('FR-606: after a frame timeout the worker keeps back-pressure until it answers late, then is free again', async () => {
+    vi.useFakeTimers();
+    const w = new FakeWorker();
+    const frames: number[] = [];
+    const orig = w.postMessage.bind(w);
+    w.postMessage = (msg) => {
+      if (msg.type === 'init') orig(msg);
+      else frames.push(msg.id);
+    };
+    const c = new InferenceClient(() => w, 30_000, 1000);
+    const init = c.init({
+      tasks: ['face'],
+      urls: { faceDetector: '', faceLandmarker: '', mediapipeWasm: '', cocoSsd: '' },
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    await init;
+    const p1 = c.analyze(bitmap(), ['face']);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await p1).toBeNull(); // timed out
+    expect(await c.analyze(bitmap(), ['face'])).toBeNull(); // still busy: skipped, not posted
+    expect(frames).toHaveLength(1);
+    w.onmessage?.({
+      data: { type: 'result', id: frames[0] as number, busyMs: 5 },
+    } as MessageEvent<FromWorker>);
+    const p2 = c.analyze(bitmap(), ['face']); // the worker answered late: free again
+    expect(frames).toHaveLength(2);
+    w.onmessage?.({
+      data: { type: 'result', id: frames[1] as number, busyMs: 5 },
+    } as MessageEvent<FromWorker>);
+    expect(await p2).not.toBeNull();
+    vi.useRealTimers();
+  });
+
+  it('FR-606: if the worker never answers the frame it timed out on, it is declared dead after another timeout', async () => {
+    vi.useFakeTimers();
+    const w = new FakeWorker();
+    const orig = w.postMessage.bind(w);
+    w.postMessage = (msg) => {
+      if (msg.type === 'init') orig(msg);
+    };
+    const c = new InferenceClient(() => w, 30_000, 1000);
+    const init = c.init({
+      tasks: ['face'],
+      urls: { faceDetector: '', faceLandmarker: '', mediapipeWasm: '', cocoSsd: '' },
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    await init;
+    const dead = vi.fn();
+    c.onDead = dead;
+    const p = c.analyze(bitmap(), ['face']);
+    await vi.advanceTimersByTimeAsync(1000);
+    await p;
+    expect(dead).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(dead).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it('FR-606: attachStream retries only when the monitor was down for lack of a stream, not after a model failure', async () => {
+    const h = fakeContext();
+    const { m, worker, createWorker } = setup({ getWebcamStream: () => null }, { objects: false });
+    await m.start(h.ctx);
+    expect(createWorker).not.toHaveBeenCalled(); // no stream: nothing loaded yet
+    const before = h.events.length;
+    await m.attachStream(stream); // the missing stream arrived: load now
+    expect(createWorker).toHaveBeenCalledTimes(1);
+    const afterLoad = h.events.length;
+    expect(afterLoad).toBeGreaterThan(before); // OBJECT model failed: reported once
+    m.stop();
+    // second monitor: models fail to load, a later stream swap must not re-run and re-emit
+    const h2 = fakeContext();
+    const s2 = setup({}, { face: false, gaze: false, objects: false });
+    await s2.m.start(h2.ctx);
+    const reported = h2.events.length;
+    await s2.m.attachStream(stream);
+    expect(h2.events).toHaveLength(reported);
+    expect(s2.createWorker).toHaveBeenCalledTimes(1);
+    expect(worker).toBeDefined();
+  });
+
+  it('FR-606: attachStream on a running monitor does not hang when play() never resolves', async () => {
+    vi.useFakeTimers();
+    const h = fakeContext();
+    const video = {
+      ...fakeVideo(),
+      play: () => new Promise<void>(() => undefined),
+    };
+    const { m } = setup({ createVideo: () => video });
+    const started = m.start(h.ctx);
+    await vi.advanceTimersByTimeAsync(5000);
+    await started;
+    const swap = m.attachStream({} as MediaStream);
+    await vi.advanceTimersByTimeAsync(5000);
+    await swap; // resolved: the swap is bounded
+    m.stop();
+    vi.useRealTimers();
+  });
+
+  it('FR-606: reportStartTimeout does not re-emit for tasks that were already reported', () => {
+    const h = fakeContext();
+    const { m } = setup();
+    // first report all three, then a second report must stay silent
+    m.reportStartTimeout(h.ctx);
+    const n = h.events.length;
+    expect(n).toBe(3);
+    m.reportStartTimeout(h.ctx);
+    expect(h.events).toHaveLength(n);
+  });
+
+  it('FR-607: VoiceMonitor attachStream calls are serialised, keep held-back speech, and the monitor can restart after stop()', async () => {
+    const h = fakeContext();
+    const order: string[] = [];
+    let cb!: VadCallbacks;
+    const m = new VoiceMonitor({
+      getStream: () => stream,
+      createVad: async (_s, c) => {
+        cb = c;
+        order.push('create');
+        await new Promise((r) => setTimeout(r, 5));
+        return {
+          start: vi.fn(),
+          destroy: () => {
+            order.push('destroy');
+          },
+        };
+      },
+    });
+    await m.start(h.ctx);
+    const a = m.attachStream({} as MediaStream);
+    const b = m.attachStream({} as MediaStream);
+    await Promise.all([a, b]);
+    // never two live VADs: each create is preceded by the destroy of the previous one
+    expect(order).toEqual(['create', 'destroy', 'create', 'destroy', 'create']);
+    expect(cb).toBeDefined();
+    await m.stop();
+    await m.start(h.ctx); // restart on the same instance
+    expect(order.at(-1)).toBe('create');
+    await m.stop();
   });
 });
