@@ -4,7 +4,6 @@
 import {
   BadRequestException,
   ConflictException,
-  ForbiddenException,
   HttpException,
   HttpStatus,
   Inject,
@@ -34,6 +33,7 @@ import {
   sha256Hex,
 } from './crypto.util';
 import { TokenService } from '../common/auth/token.service';
+import { CodedForbiddenException, reauthFailed } from '../common/coded.exception';
 import { PasswordService } from './password.service';
 import { TotpService } from './totp.service';
 
@@ -151,16 +151,24 @@ export class AuthService implements OnApplicationShutdown {
   }
 
   /** Unknown or ineligible account: reserve, burn and register against the nil id. */
-  private async rejectWithSameWork(password: string, ctx: RequestContext): Promise<never> {
+  private async rejectWithSameWork(
+    password: string,
+    ctx: RequestContext,
+    fail: () => Error = () => this.invalid(),
+  ): Promise<never> {
     await this.reserveAttempt(null, ctx);
-    return this.burnAndFail(password, ctx);
+    return this.burnAndFail(password, ctx, fail);
   }
 
   /** Argon2 against a dummy hash, then a failure-shaped UPDATE that matches no row. */
-  private async burnAndFail(password: string, ctx: RequestContext): Promise<never> {
+  private async burnAndFail(
+    password: string,
+    ctx: RequestContext,
+    fail: () => Error = () => this.invalid(),
+  ): Promise<never> {
     await this.passwords.burn(password);
     await this.registerFailure(null, ctx);
-    throw this.invalid();
+    throw fail();
   }
 
   // ---- FR-102: TOTP -------------------------------------------------------------------------
@@ -237,13 +245,13 @@ export class AuthService implements OnApplicationShutdown {
     ctx: RequestContext,
   ): Promise<UserWithOrg> {
     const user = await this.loadActive(userId);
-    if (!user.passwordHash) return this.rejectWithSameWork(password, ctx);
+    if (!user.passwordHash) return this.rejectWithSameWork(password, ctx, reauthFailed);
     if ((await this.reserveAttempt(user, ctx)) !== 'granted') {
-      return this.burnAndFail(password, ctx);
+      return this.burnAndFail(password, ctx, reauthFailed);
     }
     if (!(await this.passwords.verify(user.passwordHash, password))) {
       await this.registerFailure(user, ctx);
-      throw this.invalid();
+      throw reauthFailed();
     }
     await this.refundAttempt(user.id);
     return user;
@@ -264,7 +272,7 @@ export class AuthService implements OnApplicationShutdown {
       where: { id: user.id, passwordHash: startHash, totpEnabled: false },
       data: { totpSecretEnc: enrollment.encrypted },
     });
-    if (stored.count !== 1) throw this.invalid();
+    if (stored.count !== 1) throw reauthFailed();
     return {
       manualKey: enrollment.secret,
       otpauthUri: enrollment.otpauthUrl,
@@ -338,7 +346,7 @@ export class AuthService implements OnApplicationShutdown {
     const user = await this.loadActive(userId);
     if (challengePwv !== undefined) this.requireChallengePassword(user, challengePwv);
     if (boundPasswordHash !== undefined && user.passwordHash !== boundPasswordHash) {
-      throw this.invalid();
+      throw reauthFailed();
     }
     if (user.totpEnabled) throw new ConflictException('Two-factor authentication is already on.');
     // A locked account looks exactly like a wrong code (FU-BE-22, FU-BE-34).
@@ -384,7 +392,7 @@ export class AuthService implements OnApplicationShutdown {
         throw new ConflictException('Two-factor authentication could not be turned on. Try again.');
       }
       if (e instanceof PasswordChangedSignal) {
-        throw boundPasswordHash === undefined ? this.challengeExpired() : this.invalid();
+        throw boundPasswordHash === undefined ? this.challengeExpired() : reauthFailed();
       }
       throw e;
     }
@@ -523,15 +531,18 @@ export class AuthService implements OnApplicationShutdown {
     fromDisable: boolean,
   ): Promise<never> {
     const now = await tx.user.findUnique({ where: { id: user.id } });
-    if (now?.passwordHash !== user.passwordHash) throw this.invalid();
+    if (now?.passwordHash !== user.passwordHash) throw reauthFailed();
     // The enforced-role refusal only applies to disable; a regenerate race is a plain 409.
     if (fromDisable && now && TOTP_REQUIRED_ROLES.includes(now.role))
       throw this.twoFactorRequiredForRole();
     throw new ConflictException('Two-factor authentication changed. Try again.');
   }
 
-  private twoFactorRequiredForRole(): ForbiddenException {
-    return new ForbiddenException('Two-factor authentication is required for your role.');
+  private twoFactorRequiredForRole(): CodedForbiddenException {
+    return new CodedForbiddenException(
+      'Two-factor authentication is required for your role.',
+      'TWO_FACTOR_REQUIRED_FOR_ROLE',
+    );
   }
 
   /**
@@ -550,21 +561,22 @@ export class AuthService implements OnApplicationShutdown {
    */
   async resetTwoFactorOf(
     actor: { id: string; orgId: string },
-    targetId: string,
+    rawTargetId: string,
     adminPassword: string,
     ctx: RequestContext,
   ): Promise<void> {
-    if (actor.id === targetId) {
+    // UUIDs are case-insensitive in Postgres: compare and use the canonical lowercase form.
+    const targetId = rawTargetId.toLowerCase();
+    const actorId = actor.id.toLowerCase();
+    if (actorId === targetId) {
       throw new BadRequestException('Use your own security settings to change your 2FA.');
     }
     const verified = await this.requireCurrentPassword(actor.id, adminPassword, ctx);
     await this.prisma.client.$transaction(async (tx) => {
-      const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
-        SELECT id FROM users
-        WHERE id = ${targetId}::uuid AND org_id = ${actor.orgId}::uuid
-        FOR NO KEY UPDATE`);
-      if (locked.length !== 1) throw new NotFoundException('User not found.');
-      // The final write is bound to the verified admin: same password, still a super admin.
+      // The admin's password hash, role and active flag are re-checked here with a plain read (the
+      // admin row is deliberately not locked: locking it would allow an A<->B deadlock between
+      // two admins resetting each other). It runs before the lock, so a changed admin gets
+      // REAUTH_FAILED whether or not the target exists.
       const stillAdmin = await tx.user.count({
         where: {
           id: actor.id,
@@ -574,7 +586,16 @@ export class AuthService implements OnApplicationShutdown {
           isActive: true,
         },
       });
-      if (stillAdmin !== 1) throw this.invalid();
+      if (stillAdmin !== 1) throw reauthFailed();
+      const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT id FROM users
+        WHERE id = ${targetId}::uuid AND org_id = ${actor.orgId}::uuid
+        FOR NO KEY UPDATE`);
+      if (locked.length !== 1) throw new NotFoundException('User not found.');
+      // Also enforced after the lock, on the id as the database sees it.
+      if (locked[0]?.id === actorId) {
+        throw new BadRequestException('Use your own security settings to change your 2FA.');
+      }
       const target = await tx.user.findUniqueOrThrow({ where: { id: targetId } });
       await tx.user.update({
         where: { id: targetId },
