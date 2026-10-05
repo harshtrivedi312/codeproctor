@@ -14,7 +14,7 @@ Changing a second factor with only an access token lets a stolen token take over
 
 ## Decision
 
-Setup, disable and recovery-code regeneration require `currentPassword` in the body (owner decision). A wrong password returns `403` with problem `code: "REAUTH_FAILED"`, not 401 (owner decision). Architect details (covered by C-21's acceptance of this ADR): the SUPER_ADMIN reset takes the admin's own password; failures share login's lockout and a locked account returns the same 403; all attempts are audited. Forced enrolment during login is unchanged. Full rules, the endpoint table and the frontend behaviour are in `docs/api-contract.md` section 1.
+Setup, disable and recovery-code regeneration require `currentPassword` in the body (owner decision). A wrong password returns `403` with problem `code: "REAUTH_FAILED"`, not 401 (owner decision). Disabling 2FA also requires a current TOTP code (`totpCode`, C-21 answer 6) and revokes the user's sessions (answer 5; backend PR #51). Architect details (covered by C-21's acceptance of this ADR): the SUPER_ADMIN reset takes the admin's own password; failures share login's lockout and a locked account returns the same 403; all attempts are audited. Forced enrolment during login is unchanged. Full rules, the endpoint table and the frontend behaviour are in `docs/api-contract.md` section 1.
 
 ## Options considered
 
@@ -25,7 +25,8 @@ Setup, disable and recovery-code regeneration require `currentPassword` in the b
 ## Consequences
 
 - API shape change (C-8): `ProblemDetails` gains an optional `code` member (RFC 7807 extension). Affects backend (problem filter), frontend (API client) and QA.
-- Backend PR #26 (on main) already returns 403 `REAUTH_FAILED` and 403 `TWO_FACTOR_REQUIRED_FOR_ROLE`. Two backend follow-ups remain from C-21: disabling 2FA must revoke that user's refresh sessions (reset already does) and must require a current TOTP code.
+- Shared response type: `AuthUserDto` gains `totpEnabled: boolean` (own account, authenticated responses only; see `docs/api-contract.md`). Affects backend, frontend and QA; not on main yet.
+- Backend PR #26 (on main) already returns 403 `REAUTH_FAILED` and 403 `TWO_FACTOR_REQUIRED_FOR_ROLE`. Backend PR #51 (open) implements the two follow-ups from C-21: disabling 2FA must revoke that user's refresh sessions (reset already does) and must require a current TOTP code.
 - Frontend: stop excluding the bearer-authenticated 2FA management routes from refresh-and-retry in `isAuthRequest`.
 - A `reauth` body schema in packages/shared is wanted (ARC-02 part 2).
 - QA assigns new TC IDs for re-auth; TC-002 and TC-003 are not reused for it.

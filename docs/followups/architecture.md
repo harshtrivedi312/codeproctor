@@ -63,7 +63,7 @@ The [ARC-02] items under "frontend/step-2" in docs/followups/frontend.md (staff 
 
 ## ADR 0011 re-authentication (PR #31 review)
 
-The six owner questions were answered by C-21 (2026-10-05, D-49) and are recorded in `docs/api-contract.md` section 1 ("Owner answers"). Two backend follow-ups come from them: (1) disabling 2FA must require a current TOTP code (`totpCode`) and revoke that user's refresh sessions: backend PR #51 (pending merge); (2) reset already revokes the target's sessions in #26. QA must update `apps/api/test/integration/tc-003.int.test.ts` for the new disable body. Also recorded: `totpEnabled` on the session user (api-contract.md section 1).
+The six owner questions were answered by C-21 (2026-10-05, D-49) and are recorded in `docs/api-contract.md` section 1 ("Owner answers"). Two backend follow-ups come from them: (1) disabling 2FA must require a current TOTP code (`totpCode`) and revoke that user's refresh sessions: backend PR #51 (pending merge); (2) reset already revokes the target's sessions in #26. QA must update `apps/api/test/integration/tc-003.int.test.ts` for the new disable body. Also recorded: `totpEnabled` on the session user (api-contract.md section 1; backend-engineer, task to be assigned by the Delivery Lead). Should-fix (ARC-02 part 2): the other docs that still call ADR 0011/0012 proposed (`docs/status.md`, `docs/compliance/dpia.md`) are the Delivery Lead's to update.
 
 ### Should-fix (ARC-02 part 2)
 - Add fsd.md §4 rows for `/auth/2fa/setup/*`, disable, regenerate and reset; ask QA for new TC IDs.
