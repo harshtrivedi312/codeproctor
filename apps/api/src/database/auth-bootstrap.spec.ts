@@ -167,7 +167,7 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
       ).toEqual(['hash-2']);
     });
 
-    it('NFR-04 the nesting works in either order, but runRawSql needs an active scope', async () => {
+    it('NFR-04 runRawSql works inside a scope (system or org), scope first, and throws with no scope', async () => {
       const count = (): Promise<{ n: number }[]> =>
         scoped().$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM users`;
       expect((await system(() => rawSql(count)))[0]?.n).toBeGreaterThanOrEqual(2);

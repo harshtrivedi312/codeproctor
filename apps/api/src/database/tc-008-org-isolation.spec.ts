@@ -14,10 +14,14 @@
 //   - upsert (not generic): tried against B's row on three models only (Test, TestSection,
 //     TestCase), plus A's own row and the create branch on Test and Candidate.
 //   - Dedicated tests, on chosen models: create, createMany and createManyAndReturn, filters that
-//     try to widen the scope, cursors, deleting own rows, transactions, system scope, raw SQL, the
-//     app_user role and the HTTP path through the real guard.
-//   - Not covered, by design (README "Limits"): nested writes, re-parenting, and nested reads. One
-//     test pins that an include follows a cross-org foreign key.
+//     try to widen the scope, cursors (top-level, compound, nested and fluent), nested writes
+//     (parent-side connect, set and connectOrCreate, nested creates naming another org, and nested
+//     writes through a RULE_I relation, all refused; child-side connect and nested writes through
+//     SCOPE_HOP and COMPOSITE relations still work), deleting own rows, transactions, system scope,
+//     raw SQL, the app_user role and the HTTP path through the real guard.
+//   - Not covered, by design (README "Limits"): re-parenting, ids written through a child-side
+//     connect or a scalar foreign key (rule (i), the service's job), and nested reads. One test pins
+//     that an include follows a cross-org foreign key.
 import { Controller, Get, INestApplication, NotFoundException, Param, Query } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
@@ -879,7 +883,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
                 reviewer: {
                   connect: { id: I.userId },
                   update: { email: 'attacker@example.test', passwordHash: 'pwned' },
-                } as never,
+                },
               },
             }),
           () =>
@@ -1487,7 +1491,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expect(casesA.body).toEqual([A.rows.TestCase.filter.id]);
     });
 
-    // ---- no existence oracle -------------------------------------------------------------------
+    // ---- the same response for another org's id and for an id that exists nowhere -------------
 
     /** The response headers without the named ones. */
     const headersWithout = (res: request.Response, names: string[]): Record<string, unknown> =>
@@ -1523,7 +1527,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expect(size(b) - size(a)).toBe(idB.length - idA.length);
     };
 
-    it("TC-008 no existence oracle: another org's session id and an id that exists nowhere get the same 404, field by field", async () => {
+    it("TC-008 same response: another org's session id and an id that exists nowhere get the same 404, field by field", async () => {
       const server = app.getHttpServer();
       const bSession = B.rows.Session.filter.id as string;
       const nowhere = randomUUID();
@@ -1569,7 +1573,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expect(JSON.stringify([denied.body, denied.headers])).not.toContain(B.orgId);
     });
 
-    it('TC-008 no existence oracle: the same holds for a model scoped through its parent chain (a proctor event)', async () => {
+    it('TC-008 same response: the same holds for a model scoped through its parent chain (a proctor event)', async () => {
       const server = app.getHttpServer();
       const bEvent = String(B.rows.ProctorEvent.filter.id);
       const nowhere = '9'.repeat(12); // an id no tenant has
@@ -1588,7 +1592,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expectSameSize(denied, missing, bEvent, nowhere);
     });
 
-    it("TC-008 no existence oracle: a filtered list for another org's id and for an id that exists nowhere have the same shape", async () => {
+    it("TC-008 same response: a filtered list for another org's id and for an id that exists nowhere have the same shape", async () => {
       const server = app.getHttpServer();
       const cases: Array<[string, string, string]> = [
         ['/probe/sessions?id=', B.rows.Session.filter.id as string, randomUUID()],
@@ -1604,11 +1608,8 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         // No id in the response, so every header but Date matches, ETag included.
         expect(headersWithout(denied, ['date'])).toEqual(headersWithout(missing, ['date']));
         // The same filter for an id that does exist in org A returns A's row: the filter works.
-        const own = await get(
-          path.includes('sessions?')
-            ? (A.rows.Session.filter.id as string)
-            : (A.rows.Session.filter.id as string),
-        );
+        // Both filters take org A's own session id (events are filtered by their session).
+        const own = await get(A.rows.Session.filter.id as string);
         expect((own.body as unknown[]).length).toBeGreaterThan(0);
       }
     });
