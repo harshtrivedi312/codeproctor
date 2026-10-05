@@ -4,7 +4,10 @@ import { expect } from 'vitest';
 /**
  * Resolves once a DataTable has left its loading state (not aria-busy, skeleton rows gone) or
  * shows its empty state. Waits for that state, not for a fixed time, so a slow CI runner cannot
- * time a test out while the table is still loading. The long limit is only a safety net.
+ * time a test out while the table was still loading. The long limit is only a safety net (it
+ * needs `testTimeout` in vitest.config.mts to be higher still). Returning on the empty state is
+ * safe: DataTable shows it only after a load finished with no rows, and an error renders an alert
+ * with no table, so the helper keeps waiting and fails.
  */
 export async function findLoadedTable(): Promise<void> {
   await waitFor(
