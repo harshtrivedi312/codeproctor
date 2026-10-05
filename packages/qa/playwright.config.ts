@@ -22,7 +22,16 @@ export default defineConfig({
     baseURL: externalBaseUrl ?? `http://localhost:${port}`,
     trace: 'retain-on-failure',
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    {
+      // The frontend's own staff specs (TC-001..004, TC-094, TC-098 browser side), run by the gate
+      // against the same production build with mocks, so a failure there blocks a merge as well.
+      name: 'web-staff',
+      testDir: '../../apps/web/e2e',
+      use: { ...devices['Desktop Chrome'] },
+    },
+  ],
   webServer: externalBaseUrl
     ? undefined
     : {

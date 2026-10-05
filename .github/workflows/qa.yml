@@ -79,24 +79,53 @@ jobs:
         env:
           NEXT_PUBLIC_API_MOCKING: enabled
 
+      # Every test step runs even when an earlier one failed (`!cancelled()`), so the gate below
+      # sees all reports and prints one verdict per P1 case. The job still fails if any step failed.
+      - name: Create the report folder
+        run: mkdir -p packages/qa/test-results
+
       # Vitest in apps/web, with coverage per module in the log. The JSON files feed the gate.
       - name: Unit tests and coverage per module (apps/web)
+        if: ${{ !cancelled() }}
         run: pnpm --filter @codeproctor/qa run coverage:web --reporter=default --reporter=json --outputFile.json=../../packages/qa/test-results/web.json
 
       - name: Matrix check and QA package tests
+        if: ${{ !cancelled() }}
         run: pnpm --filter @codeproctor/qa exec vitest run --reporter=default --reporter=json --outputFile.json=test-results/qa.json
 
+      - name: Proctor SDK tests (TC-050..056, TC-063, TC-065 and the SDK suites)
+        if: ${{ !cancelled() }}
+        run: pnpm --filter @codeproctor/proctor-sdk exec vitest run --reporter=default --reporter=json --outputFile.json=../qa/test-results/sdk.json
+
+      - name: Shared contract tests (node:test, JUnit report)
+        if: ${{ !cancelled() }}
+        run: pnpm --filter @codeproctor/shared exec node --import tsx --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=../qa/test-results/shared.xml "src/**/*.test.ts"
+
+      - name: Worker tests (pytest, JUnit report)
+        if: ${{ !cancelled() }}
+        run: |
+          python -m pip install --quiet -e 'apps/worker[dev]'
+          cd apps/worker && python -m pytest --junitxml=../../packages/qa/test-results/worker.xml
+
+      # Testcontainers starts throwaway Postgres 16 and Redis from the runner's own Docker; no
+      # secret and no shared database is involved (apps/api/test/support/harness.ts).
+      - name: API integration tests (Testcontainers)
+        if: ${{ !cancelled() }}
+        run: pnpm --filter @codeproctor/api exec node --experimental-vm-modules node_modules/jest/bin/jest.js -c test/jest.integration.config.js --runInBand --forceExit --json --outputFile=../../packages/qa/test-results/api-int.json
+
       - name: Install the Playwright browser
+        if: ${{ !cancelled() }}
         run: pnpm --filter @codeproctor/qa exec playwright install --with-deps chromium
 
       - name: End-to-end and axe tests
+        if: ${{ !cancelled() }}
         run: pnpm --filter @codeproctor/qa run test:e2e
 
       # Fails when a test that names a P1 TC ID failed. Playwright runs above fail the job on their
       # own as well; the gate makes the P1 verdict explicit and prints one line per P1 case.
       - name: P1 gate
         if: ${{ !cancelled() }}
-        run: pnpm --filter @codeproctor/qa run gate test-results/web.json test-results/qa.json test-results/e2e.json
+        run: pnpm --filter @codeproctor/qa run gate test-results/web.json test-results/qa.json test-results/sdk.json test-results/shared.xml test-results/worker.xml test-results/api-int.json test-results/e2e.json
 
       - name: Upload test reports
         if: ${{ !cancelled() }}
