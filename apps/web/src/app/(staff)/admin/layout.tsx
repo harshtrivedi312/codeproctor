@@ -1,16 +1,7 @@
-import { ThemeToggle } from '@/components/theme-toggle';
+import { AuthProvider } from '@/features/auth/auth-provider';
 
-// Staff shell placeholder. Sidebar, role-based navigation and auth arrive in FE-02 and FE-03.
-export default function StaffLayout({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="min-h-dvh">
-      <header className="flex items-center justify-between border-b bg-card px-4 py-2">
-        <span className="font-semibold">CodeProctor staff</span>
-        <ThemeToggle />
-      </header>
-      <main id="main" className="p-4">
-        {children}
-      </main>
-    </div>
-  );
+// One AuthProvider for every /admin page so the in-memory session and pending 2FA step survive
+// client-side navigation between login, 2FA and the staff shell.
+export default function AdminRootLayout({ children }: { children: React.ReactNode }) {
+  return <AuthProvider>{children}</AuthProvider>;
 }
