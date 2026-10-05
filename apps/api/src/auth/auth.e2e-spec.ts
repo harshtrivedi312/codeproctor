@@ -9,6 +9,7 @@ import { PrismaClient, UserRole } from '../generated/prisma/client';
 import { applyEnv, applyMigrations, startInfra, TestInfra } from '../test/containers';
 import { encryptSecret, sha256Hex } from './crypto.util';
 import type { MailPort } from '../mail/mail.port';
+import type { AuthService } from './auth.service';
 import type { PasswordService } from './password.service';
 import type { TotpService } from './totp.service';
 
@@ -41,6 +42,8 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
   let stdout: jest.SpyInstance;
   let passwordVerify: jest.SpyInstance;
   let totpVerify: jest.SpyInstance;
+  let authService: AuthService;
+  let realPasswordVerify: PasswordService['verify'];
 
   beforeAll(async () => {
     stdout = jest.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
@@ -70,7 +73,11 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       jest.requireActual<typeof import('./password.service')>('./password.service');
     const { TotpService: Totp } =
       jest.requireActual<typeof import('./totp.service')>('./totp.service');
+    const { AuthService: Auth } =
+      jest.requireActual<typeof import('./auth.service')>('./auth.service');
+    authService = app.get(Auth);
     const passwords: PasswordService = app.get(Passwords);
+    realPasswordVerify = passwords.verify.bind(passwords);
     const totp: TotpService = app.get(Totp);
     passwordVerify = jest.spyOn(passwords, 'verify');
     totpVerify = jest.spyOn(totp, 'verify');
@@ -376,17 +383,112 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       expect(JSON.stringify(refused.body)).not.toMatch(/lock/i);
     });
 
-    it('TC-002: a correct password in a burst of wrong ones never clears a lock a sibling set', async () => {
+    it('TC-002: a correct password in a burst of wrong ones never clears a lock a sibling set, whichever request wins', async () => {
       const u = await createUser();
       const results = await Promise.all([
         ...Array.from({ length: 8 }, (_, i) => login(u.email, `wrong-password-${i}`)),
         login(u.email),
       ]);
-      expect(results.filter((r) => r.status === 200).length).toBeLessThanOrEqual(1);
+      expect(results.every((r) => r.status === 200 || r.status === 401)).toBe(true);
+      const wins = results.filter((r) => r.status === 200).length;
+      expect(wins).toBeLessThanOrEqual(1);
       const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
-      if (!results.some((r) => r.status === 200)) {
+      if (wins === 1) {
+        // The correct guess got a slot: the sign-in succeeded and any lock a sibling set after it
+        // is still in force (it is never cleared half way).
+        expect(row.failedLogins).toBeLessThanOrEqual(5);
+        if (row.lockedUntil) expect(row.lockedUntil.getTime()).toBeGreaterThan(Date.now());
+      } else {
+        // All 5 slots went to wrong guesses: the account is locked and the correct one was refused.
+        expect(row.failedLogins).toBe(5);
         expect(row.lockedUntil?.getTime() ?? 0).toBeGreaterThan(Date.now());
       }
+      // Never more than 5 verified guesses against the account.
+      expect(row.failedLogins).toBeLessThanOrEqual(5);
+    });
+
+    it('TC-002: 5 reservations held past the 2 minute window lock the account and no 6th password is verified (FU-BE-26)', async () => {
+      const u = await createUser();
+      const stored = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      // The account's own verifies hang; the dummy-hash burn runs normally.
+      passwordVerify.mockImplementation(async (hash: string, password: string) => {
+        if (hash !== stored.passwordHash) return realPasswordVerify(hash, password);
+        await gate;
+        return false;
+      });
+      try {
+        const inFlight = Array.from({ length: 5 }, (_, i) =>
+          login(u.email, `slow-wrong-${i}`).then((r) => r),
+        );
+        const deadline = Date.now() + 10_000;
+        while (
+          passwordVerify.mock.calls.filter((c: unknown[]) => c[0] === stored.passwordHash).length <
+          5
+        ) {
+          if (Date.now() > deadline) throw new Error('reservations did not reach verify');
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        // Age the window past two minutes. The DB-03 trigger rewrites updated_at on every update,
+        // so switch it off for this one statement.
+        await prisma.$executeRaw`ALTER TABLE users DISABLE TRIGGER users_set_updated_at`;
+        try {
+          await prisma.$executeRaw`UPDATE users SET updated_at = now() - interval '3 minutes' WHERE id = ${u.id}::uuid`;
+        } finally {
+          await prisma.$executeRaw`ALTER TABLE users ENABLE TRIGGER users_set_updated_at`;
+        }
+
+        const sixth = await login(u.email, 'sixth-guess').expect(401);
+        expect((sixth.body as Body).detail).toBe('Invalid email or password.');
+        expect(
+          passwordVerify.mock.calls.filter((c: unknown[]) => c[0] === stored.passwordHash),
+        ).toHaveLength(5);
+        const locked = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+        expect(locked.lockedUntil?.getTime() ?? 0).toBeGreaterThan(Date.now() + 14 * 60_000);
+        expect(locked.failedLogins).toBe(5);
+
+        release();
+        const done = await Promise.all(inFlight);
+        expect(done.every((r) => r.status === 401)).toBe(true);
+      } finally {
+        release();
+        passwordVerify.mockImplementation(realPasswordVerify);
+      }
+      expect(
+        await prisma.auditLog.count({ where: { actorId: u.id, action: 'AUTH_ACCOUNT_LOCKED' } }),
+      ).toBe(1);
+    });
+
+    it('TC-002: a refused attempt costs the same database statements for an unknown account, a wrong password and a locked account (FU-BE-30)', async () => {
+      const wrong = await createUser();
+      const locked = await createUser();
+      await prisma.user.update({
+        where: { id: locked.id },
+        data: { failedLogins: 5, lockedUntil: new Date(Date.now() + 600_000) },
+      });
+      const { PrismaService: PrismaSvc } = jest.requireActual<
+        typeof import('../database/prisma.module')
+      >('../database/prisma.module');
+      const client = app.get(PrismaSvc).client;
+      const query = jest.spyOn(client, '$queryRaw');
+      const exec = jest.spyOn(client, '$executeRaw');
+      const find = jest.spyOn(client.user, 'findUnique');
+      const counts: number[][] = [];
+      try {
+        for (const email of ['nobody-shape@example.com', wrong.email, locked.email]) {
+          for (const spy of [query, exec, find]) spy.mockClear();
+          await login(email, 'not-the-password').expect(401);
+          counts.push([query, exec, find].map((spy) => spy.mock.calls.length));
+        }
+      } finally {
+        for (const spy of [query, exec, find]) spy.mockRestore();
+      }
+      expect(counts[0]).toEqual([2, 0, 1]);
+      expect(counts[1]).toEqual(counts[0]);
+      expect(counts[2]).toEqual(counts[0]);
     });
 
     it('TC-002: 10 parallel wrong 2FA codes verify at most 5, lock the account, and a correct code is then refused exactly like a wrong one', async () => {
@@ -556,28 +658,93 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       await verify2fa(next, code).expect(400);
     });
 
-    it('TC-003: when Redis is unavailable a valid code is refused (fail closed)', async () => {
-      const secret = 'JBSWY3DPEHPK3PXP';
-      const u = await createUser({ role: UserRole.REVIEWER, totp: secret });
-      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+    function failRedisSet(prefix: string): jest.SpyInstance {
       const redis = app.get<import('ioredis').Redis>(
         jest.requireActual<typeof import('../infrastructure/infrastructure.module')>(
           '../infrastructure/infrastructure.module',
         ).REDIS_CLIENT,
       );
       const realSet = redis.set.bind(redis) as (...args: unknown[]) => Promise<unknown>;
-      // Only the TOTP step marker fails; the challenge marker uses the same client.
-      const setSpy = jest
+      return jest
         .spyOn(redis, 'set')
         .mockImplementation(((...args: unknown[]) =>
-          String(args[0]).startsWith('auth:totp:used:')
+          String(args[0]).startsWith(prefix)
             ? Promise.reject(new Error('redis down'))
             : realSet(...args)) as unknown as typeof redis.set);
+    }
+
+    it('TC-003: when Redis is unavailable a valid code is refused with a fixed 503, the attempt is not counted and the challenge still works afterwards (fail closed)', async () => {
+      const secret = 'JBSWY3DPEHPK3PXP';
+      const u = await createUser({ role: UserRole.REVIEWER, totp: secret });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      const setSpy = failRedisSet('auth:totp:used:');
       try {
-        await verify2fa(challengeToken, authenticator.generate(secret)).expect(400);
+        for (let i = 0; i < 7; i++) {
+          const res = await verify2fa(challengeToken, authenticator.generate(secret)).expect(503);
+          expect((res.body as Body).detail).toBe('Verification is temporarily unavailable.');
+          expect(res.headers['set-cookie']).toBeUndefined();
+        }
       } finally {
         setSpy.mockRestore();
       }
+      const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      expect(row.failedLogins).toBe(0);
+      expect(row.lockedUntil).toBeNull();
+      await verify2fa(challengeToken, authenticator.generate(secret)).expect(200);
+    });
+
+    it('TC-003: when Redis is unavailable the challenge claim fails closed with a 503 and reserves nothing', async () => {
+      const secret = 'JBSWY3DPEHPK3PXP';
+      const u = await createUser({ role: UserRole.REVIEWER, totp: secret });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      const setSpy = failRedisSet('auth:challenge:used:');
+      try {
+        const res = await verify2fa(challengeToken, authenticator.generate(secret)).expect(503);
+        expect((res.body as Body).detail).toBe('Verification is temporarily unavailable.');
+        expect(res.headers['set-cookie']).toBeUndefined();
+      } finally {
+        setSpy.mockRestore();
+      }
+      expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).failedLogins).toBe(0);
+      await verify2fa(challengeToken, authenticator.generate(secret)).expect(200);
+    });
+
+    it('TC-003: an enrollment race that finds TOTP already on is a 409 and gives the attempt back (FR-102)', async () => {
+      const u = await createUser({ role: UserRole.SUPER_ADMIN });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      const start = (
+        await request(app.getHttpServer())
+          .post(`${API}/2fa/enroll/start`)
+          .send({ challengeToken })
+          .expect(200)
+      ).body as Body;
+      // Another request switches TOTP on after this one loaded the user and checked the code.
+      totpVerify.mockImplementationOnce(async () => {
+        await prisma.user.update({ where: { id: u.id }, data: { totpEnabled: true } });
+        return true;
+      });
+      await request(app.getHttpServer())
+        .post(`${API}/2fa/enroll/confirm`)
+        .send({ challengeToken, code: authenticator.generate(start.manualKey) })
+        .expect(409);
+      const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      expect(row.failedLogins).toBe(0);
+      expect(row.recoveryCodeHashes).toEqual([]);
+      expect(
+        await prisma.auditLog.count({ where: { actorId: u.id, action: 'AUTH_TOTP_ENABLED' } }),
+      ).toBe(0);
+    });
+
+    it('TC-003: a TOTP user who logs in with the right password many times still gets 2FA and is never locked (reservation refunded)', async () => {
+      const u = await createUser({ role: UserRole.REVIEWER, totp: 'JBSWY3DPEHPK3PXP' });
+      for (let i = 0; i < 8; i++) {
+        expect(((await login(u.email).expect(200)).body as Body).status).toBe(
+          'two_factor_required',
+        );
+      }
+      const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      expect(row.failedLogins).toBe(0);
+      expect(row.lockedUntil).toBeNull();
     });
   });
 
@@ -735,6 +902,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
 
       const real = await forgot(u.email).expect(202);
       const unknown = await forgot('nobody-at-all@example.com').expect(202);
+      await authService.settleDeferred();
       expect(real.body).toEqual(unknown.body);
       expect(mails).toHaveLength(1);
       expect(mails[0]?.to).toBe(u.email);
@@ -785,6 +953,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       const u = await createUser();
       mails.length = 0;
       await forgot(u.email).expect(202);
+      await authService.settleDeferred();
       const token = tokenFrom(mails[0]);
       await prisma.user.update({
         where: { id: u.id },
@@ -802,6 +971,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       await prisma.user.update({ where: { id: u.id }, data: { isActive: false } });
       mails.length = 0;
       await forgot(u.email).expect(202);
+      await authService.settleDeferred();
       expect(mails).toHaveLength(0);
     });
 
@@ -811,6 +981,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       mails.length = 0;
       const res = await forgot(pending.email).expect(202);
       const unknown = await forgot('nobody-pending@example.com').expect(202);
+      await authService.settleDeferred();
       expect(res.body).toEqual(unknown.body);
       expect(mails).toHaveLength(0);
       const after = await prisma.user.findUniqueOrThrow({ where: { id: pending.id } });
@@ -819,23 +990,74 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       expect(after.passwordHash).toBeNull();
     });
 
-    it('TC-098: forgot-password runs the same single UPDATE for a real and an unknown account (FU-BE-31)', async () => {
-      const u = await createUser();
-      const { PrismaService: Prisma } = jest.requireActual<
+    it('TC-098: the awaited work of forgot-password is identical for real, pending, deactivated and unknown accounts; the reset is sent only afterwards, and only for a real one (FU-BE-31)', async () => {
+      const real = await createUser();
+      const pending = await createUser({ password: null });
+      const inactive = await createUser();
+      await prisma.user.update({ where: { id: inactive.id }, data: { isActive: false } });
+      const { PrismaService: PrismaSvc } = jest.requireActual<
         typeof import('../database/prisma.module')
       >('../database/prisma.module');
-      const appPrisma = app.get(Prisma).client;
-      const spy = jest.spyOn(appPrisma.user, 'updateMany');
+      const { REDIS_CLIENT } = jest.requireActual<
+        typeof import('../infrastructure/infrastructure.module')
+      >('../infrastructure/infrastructure.module');
+      const appPrisma = app.get(PrismaSvc).client;
+      const redis = app.get<import('ioredis').Redis>(REDIS_CLIENT);
+      const findSpy = jest.spyOn(appPrisma.user, 'findUnique');
+      const writeSpy = jest.spyOn(appPrisma.user, 'update');
+      const writeManySpy = jest.spyOn(appPrisma.user, 'updateMany');
+      const incrSpy = jest.spyOn(redis, 'incr');
+      const sendSpy = jest.spyOn(fakeMail, 'sendPasswordReset');
+      const ctx = { ip: '203.0.113.50' };
+      const awaited: Record<string, number[]> = {};
       try {
-        await forgot(u.email).expect(202);
-        const real = spy.mock.calls.length;
-        spy.mockClear();
-        await forgot('nobody-equal-work@example.com').expect(202);
-        expect(real).toBe(1);
-        expect(spy.mock.calls.length).toBe(1);
+        await resetForgotBudget();
+        for (const [name, email] of [
+          ['real', real.email],
+          ['pending', pending.email],
+          ['inactive', inactive.email],
+          ['unknown', 'nobody-equal-work@example.com'],
+        ] as const) {
+          for (const spy of [findSpy, writeSpy, writeManySpy, incrSpy, sendSpy]) spy.mockClear();
+          await authService.forgotPassword(email, ctx);
+          // Measured the moment the awaited work is done: no account-dependent call yet.
+          awaited[name] = [findSpy, writeSpy, writeManySpy, incrSpy, sendSpy].map(
+            (spy) => spy.mock.calls.length,
+          );
+          await authService.settleDeferred();
+          if (name === 'real') {
+            expect(findSpy).toHaveBeenCalledTimes(1);
+            expect(writeSpy).toHaveBeenCalledTimes(1);
+            expect(sendSpy).toHaveBeenCalledTimes(1);
+          } else {
+            expect(writeSpy).not.toHaveBeenCalled();
+            expect(sendSpy).not.toHaveBeenCalled();
+          }
+        }
       } finally {
-        spy.mockRestore();
+        for (const spy of [findSpy, writeSpy, writeManySpy, incrSpy, sendSpy]) spy.mockRestore();
       }
+      expect(awaited.real).toEqual([0, 0, 0, 2, 0]);
+      expect(awaited.pending).toEqual(awaited.real);
+      expect(awaited.inactive).toEqual(awaited.real);
+      expect(awaited.unknown).toEqual(awaited.real);
+    });
+
+    it('TC-098: a failure in the deferred reset work is swallowed and logs neither the email nor a token', async () => {
+      const u = await createUser();
+      const failing = jest
+        .spyOn(fakeMail, 'sendPasswordReset')
+        .mockRejectedValue(new Error(`smtp refused ${u.email}`));
+      logged.length = 0;
+      try {
+        await authService.forgotPassword(u.email, { ip: '203.0.113.51' });
+        await authService.settleDeferred();
+      } finally {
+        failing.mockRestore();
+      }
+      expect(logged.join('')).toContain('Deferred password-reset work failed');
+      expect(logged.join('')).not.toContain(u.email);
+      expect(logged.join('')).not.toContain('#token=');
     });
 
     it('TC-098: requests are rate limited per email (silently) and per IP (429)', async () => {
@@ -843,6 +1065,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       await resetForgotBudget();
       mails.length = 0;
       for (let i = 0; i < 6; i++) await forgot(u.email).expect(202);
+      await authService.settleDeferred();
       expect(mails).toHaveLength(3);
       // Per IP: the budget is 10 per hour across all emails.
       const statuses: number[] = [];

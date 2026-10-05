@@ -104,14 +104,14 @@ export class AuthController {
     @Res({ passthrough: true }) res: Response,
   ): Promise<EnrollmentConfirmedDto> {
     const challenge = await this.auth.resolveChallenge(dto.challengeToken);
-    const result = await this.auth.confirmEnrollment(
+    const result = await this.auth.confirmEnrollmentWithChallenge(
       challenge.userId,
       dto.code,
       ctxOf(req),
       challenge.jti,
     );
-    if (result.session) setRefreshCookie(res, result.session);
-    return { session: result.session?.body.session, recoveryCodes: result.recoveryCodes };
+    setRefreshCookie(res, result.session);
+    return { session: result.session.body.session, recoveryCodes: result.recoveryCodes };
   }
 
   @Public()
