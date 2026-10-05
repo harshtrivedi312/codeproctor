@@ -12,7 +12,9 @@ analyzers and never scored by the risk calculator, whatever the events list cont
 
 from __future__ import annotations
 
-from typing import Annotated, Self
+import os
+from collections.abc import Mapping
+from typing import Annotated, Final, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
@@ -108,6 +110,51 @@ class VadConfig(_Base):
     speaker_max_confidence: _Unit = 0.6
     f0_min_hz: _Pos = 70
     f0_max_hz: _Pos = 400
+
+
+class FaceConfig(_Base):
+    """Face matching (FR-403, ADR 0004 section 2, D-05). Defaults in INTEGRITY-CONFIG.md section 7.
+
+    SYSTEM CONFIGURATION, NOT AN ORG SETTING (ADR 0004 section 2, ADR 0007): this class is not part
+    of `IntegrityConfig`, so `organizations.settings` cannot reach it. Load it with `from_env()`.
+
+    PLACEHOLDER THRESHOLD: `match_threshold` is NOT tuned. It waits for the demographically diverse
+    test set (INT-01, pilot entry criterion in ADR 0004 section 2). The default is deliberately high
+    so that doubt goes to a human (MANUAL_REVIEW); it never rejects anyone.
+    """
+
+    # Cosine similarity at or above which the pair is a MATCH; below goes to MANUAL_REVIEW.
+    match_threshold: Annotated[float, Field(ge=0.30, le=1.0)] = 0.75
+    # Detector confidence (when the detector reports one) below this is treated as no usable face.
+    min_detection_confidence: _Unit = 0.7
+    # ID photo only: faces smaller than this share of the largest face's size are ignored (ghost
+    # portrait, hologram). Selfies and re-check frames stay strictly single-face.
+    id_secondary_face_ratio: Annotated[float, Field(gt=0.0, le=1.0)] = 0.5
+    max_image_bytes: _Pos = 10 * 1024 * 1024
+    # At most Pillow's guard value (set at import), so its 2x bomb check cannot override this limit.
+    max_image_pixels: Annotated[int, Field(gt=0, le=25_000_000)] = 25_000_000
+    # Selfie embeddings kept in memory for FR-606 re-checks (ADR 0004 section 2); bounded LRU.
+    selfie_cache_max_sessions: _Pos = 256
+
+    @classmethod
+    def from_env(cls, environ: Mapping[str, str] | None = None) -> FaceConfig:
+        """Read system configuration from `FACE_*` environment variables; invalid values raise."""
+        env = os.environ if environ is None else environ
+        raw: dict[str, str] = {}
+        for field, var in _FACE_ENV.items():
+            if var in env:
+                raw[field] = env[var]
+        return cls.model_validate(raw)
+
+
+_FACE_ENV: Final = {
+    "match_threshold": "FACE_MATCH_THRESHOLD",
+    "min_detection_confidence": "FACE_MIN_DETECTION_CONFIDENCE",
+    "id_secondary_face_ratio": "FACE_ID_SECONDARY_FACE_RATIO",
+    "max_image_bytes": "FACE_MAX_IMAGE_BYTES",
+    "max_image_pixels": "FACE_MAX_IMAGE_PIXELS",
+    "selfie_cache_max_sessions": "FACE_SELFIE_CACHE_MAX_SESSIONS",
+}
 
 
 class RiskConfig(_Base):

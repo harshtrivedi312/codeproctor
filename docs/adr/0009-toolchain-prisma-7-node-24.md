@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Accepted** 2026-10-02 (D-31, D-32). Details marked "architect detail" are chosen by the architect, for the owner to confirm. **Amended 2026-10-02 (D-37, D-38, D-39; DB-01 second review):** section 4.4 now describes a policy backed by speed bumps, with the final script texts, the credentials rule and the accepted risks. |
+| Status | **Accepted** 2026-10-02 (D-31, D-32). Details marked "architect detail" are chosen by the architect, for the owner to confirm. **Amended 2026-10-02 (D-37, D-38, D-39; DB-01 second review):** section 4.4 now describes a policy backed by speed bumps, with the final script texts, the credentials rule and the accepted risks. **Proposed notes 2026-10-05 (DB-05 review), owner to accept:** section 4.2 (Jest settings, `errorFormat`, parameter logging) and row P14 in section 5. |
 | Author | architect |
 | Decides | Toolchain versions; where the database URL lives; the Prisma Client generator and driver adapter; the Prisma 7 CLI changes DB-02..DB-04 rely on; how the `db:*` scripts are guarded; how Prisma's AI-agent consent check is handled |
 | Serves | NFR-04 (secrets, least privilege), NFR-03 (no accidental loss of a shared database), FR-105 (the app connects as `app_user`), NFR-01 (driver pool, tuned in BE-15B) |
@@ -79,6 +79,11 @@ generator client {
   - PrismaService wraps the factory with `DATABASE_URL`.
   - The org filter is a `$extends` query extension, because Prisma 7 removed `$use` middleware.
   - A smoke test proves the client loads under the Nest build.
+  - *Notes 2026-10-05 (DB-05 review, PR #30; proposed, owner to accept):*
+    - P14 is verified: the generated client runs under the Nest build on Node 24, connected as `app_user` (`prisma-client-smoke.spec.ts`).
+    - Jest needs the `.js` module mapper (`'^(\\.{1,2}/.*)\\.js$': '$1'`) and a ts-jest `module: commonjs` override, because the generated client loads its query compiler with a dynamic `import()`. The build (`tsconfig.build.json`) is unchanged.
+    - The QA integration config (`apps/api/test/jest.integration.config.js`) still relies on `--experimental-vm-modules`.
+    - The factory sets `errorFormat: 'minimal'`, and query parameter logging stays off outside local development (FU-DB-70, before BE-09 and DEP-01). Parameters can hold tokens, hashes and media keys (ADR 0001 C-5).
 - **BE-01:**
   - The zod config requires `DATABASE_URL` and never reads `MIGRATION_DATABASE_URL`.
   - The pool size is set on the adapter and tuned in BE-15B (NFR-01, NFR-02).
@@ -309,7 +314,7 @@ It does not check agent markers; the policy covers it. Staging and pilot run Com
 | P11 | `migrate dev` needs CREATEDB (or superuser) for its temporary shadow database; `migrate deploy` uses none | Verified | [Shadow database](https://www.prisma.io/docs/orm/prisma-migrate/understanding-prisma-migrate/shadow-database) |
 | P12 | `migrate reset` drops and recreates the schema, which loses PUBLIC's default USAGE on `public` | **Not verified** from docs; schema-engine strings in 7.10.0 show `DROP SCHEMA "…" CASCADE` and `CREATE SCHEMA`. ADR 0006 section 7 grants USAGE explicitly either way. | 7.10.0 `schema_engine_bg.wasm` |
 | P13 | Client middleware (`$use`) removed; use `$extends` | Verified | Upgrade guide |
-| P14 | `moduleFormat = "cjs"` is supported by `prisma-client` | Verified. **Not verified:** the generated client running under the NestJS build on Node 24; DB-05 smoke test | Generators v7 |
+| P14 | `moduleFormat = "cjs"` is supported by `prisma-client`, and the generated client runs under the NestJS build on Node 24 | Verified. The runtime part was verified 2026-10-05 by the DB-05 smoke test (PR #30), as `app_user` | Generators v7; `apps/api/src/database/prisma-client-smoke.spec.ts` |
 | P15 | Prisma 7.10.0 requires Node `^20.19 \|\| ^22.12 \|\| >=24.0` and TypeScript >= 5.4 | Verified | installed `prisma/package.json` |
 | P16 | `process.loadEnvFile` does not override variables already set in the shell | Verified on Node 22.23.3 (architect) and Node 24.21.0 (db-engineer, DB-01 second review) | local tests |
 | P17 | `migrate dev` accepts `--url` and `--config`; `migrate reset` accepts `--config` but not `--url`. The CLI reference does not list `--url` for `migrate dev`. | Verified in source only | 7.10.0 `build/cli.js` |
