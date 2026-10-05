@@ -307,7 +307,7 @@ Decisions taken by the Delivery Lead under the owner's delegation (order, priori
 | P-01 | Decided: C-21 (D-49). The hub needs the owner's direct confirmation in its session to merge #31 and #33 | |
 | P-02 | Decided: D-43; #34 merged 2026-10-05 | |
 | P-03 | Decided: D-44 (alert and unlock in BE-03; per-IP or progressive lockout before production) | |
-| P-04 | Decided: C-01..C-16 (D-47). OQ-1..OQ-3 answered by C-17..C-19 (D-48); open: OQ-4 (results retention), OQ-5 (90-day cap on biometrics), OQ-6 (lawful basis for non-biometric processing), OQ-7 (minimum age), OQ-8 (auto-clear of LOW-band sessions vs "a human makes every decision") | Legal, privacy |
+| P-04 | Decided: C-01..C-16 (D-47). OQ-1..OQ-3 answered by C-17..C-19 (D-48) and OQ-4..OQ-8 by C-26..C-30 (D-49); open: OQ-9..OQ-15 | Legal, privacy |
 | P-05 | Decided: D-45 (Frontend implements, with a test that the directive is absent elsewhere) | |
 | P-06 | Decided: D-46 | |
 | P-07 | Decided: C-22 (download approved, with conditions) | |
