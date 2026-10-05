@@ -50,10 +50,7 @@ export interface SessionEvents {
 }
 type Handler<K extends keyof SessionEvents> = (payload: SessionEvents[K]) => void;
 
-/**
- * Entry point of the SDK. start() wires detectors (plug-ins) to the signed event queue and the
- * heartbeat; on() lets the UI react (pause the editor on a lock, show a capability notice).
- */
+/** Thrown by withTimeout when a detector's start() does not settle in time. */
 class StartTimeoutError extends Error {}
 
 /** Rejects with StartTimeoutError when `p` has not settled in `ms`. */
@@ -65,6 +62,10 @@ function withTimeout<T>(p: Promise<T> | T, ms: number): Promise<T> {
   return Promise.race([Promise.resolve(p), timeout]).finally(() => clearTimeout(timer));
 }
 
+/**
+ * Entry point of the SDK. start() wires detectors (plug-ins) to the signed event queue and the
+ * heartbeat; on() lets the UI react (pause the editor on a lock, show a capability notice).
+ */
 export class ProctorSession {
   private handlers: { [K in keyof SessionEvents]: Set<Handler<K>> } = {
     event: new Set(),
@@ -147,9 +148,41 @@ export class ProctorSession {
     for (const d of config.detectors) {
       if (d.accommodationId && disabled.has(d.accommodationId)) continue;
       this.started.push(d);
+      // A per-detector context that goes silent if the detector is abandoned, so a late start()
+      // cannot emit events or flags after DETECTOR_UNAVAILABLE was reported.
+      let abandoned = false;
+      const dctx: DetectorContext = {
+        ...ctx,
+        emit: (type, payload, o) => {
+          if (!abandoned) ctx.emit(type, payload, o);
+        },
+        setCapability: (f) => {
+          if (!abandoned) ctx.setCapability(f);
+        },
+        setLock: (l) => {
+          if (!abandoned) ctx.setLock(l);
+        },
+      };
       try {
-        await withTimeout(d.start(ctx), config.detectorStartTimeoutMs ?? 45_000);
-      } catch {
+        await withTimeout(d.start(dctx), config.detectorStartTimeoutMs ?? 45_000);
+      } catch (err) {
+        if (err instanceof StartTimeoutError) {
+          abandoned = true;
+          // Abandon cleanly: report, stop best-effort and forget it, so no half-started detector
+          // keeps timers or streams alive.
+          try {
+            if (d.reportStartTimeout) d.reportStartTimeout(ctx);
+            else ctx.setCapability({ id: d.id, status: 'UNVERIFIABLE', detail: 'start timed out' });
+          } catch {
+            // ignore
+          }
+          try {
+            await d.stop();
+          } catch {
+            // best effort
+          }
+          this.started = this.started.filter((x) => x !== d);
+        }
         // One broken detector must not stop the others; say so instead of passing silently.
         if (d.accommodationId) {
           this.emit('DETECTOR_UNAVAILABLE', {

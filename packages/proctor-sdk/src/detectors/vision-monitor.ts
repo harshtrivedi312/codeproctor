@@ -91,12 +91,28 @@ export class VisionMonitor implements Detector {
   async attachStream(stream: MediaStream): Promise<void> {
     this.attached = stream;
     const ctx = this.ctx;
-    if (!ctx || this.tasks.size > 0 || this.client) return;
+    if (!ctx) return;
+    if (this.video) {
+      // Already running (for example the webcam was restarted after a device loss): follow the
+      // new stream instead of sampling a dead one.
+      this.video.srcObject = stream;
+      await this.video.play().catch(() => undefined);
+      return;
+    }
+    if (this.tasks.size > 0 || this.client) return;
     this.reported.clear();
     await this.run(ctx);
   }
 
   private attached: MediaStream | null = null;
+  /** Bumped by stop() and by a start timeout so a late startInner() can tell it was abandoned. */
+  private generation = 0;
+
+  reportStartTimeout(ctx: DetectorContext): void {
+    for (const t of ['face', 'gaze', 'objects'] as const) {
+      if (!ctx.isDisabled(TASK_TO_DETECTOR[t])) this.unavailable(ctx, t, 'RUNTIME_ERROR');
+    }
+  }
 
   private async run(ctx: DetectorContext): Promise<void> {
     try {
@@ -118,6 +134,7 @@ export class VisionMonitor implements Detector {
   private readonly reported = new Set<InferenceTask>();
 
   private async startInner(ctx: DetectorContext): Promise<void> {
+    const gen = this.generation;
     this.ctx = ctx;
     this.cfg = { ...DEFAULT_AI_CONFIG, ...this.o.config };
     this.face = new FaceRules(this.cfg);
@@ -159,6 +176,12 @@ export class VisionMonitor implements Detector {
         cocoSsd: urls.cocoSsd,
       },
     });
+    if (gen !== this.generation) {
+      // Abandoned while the models were loading: release the worker and do nothing else.
+      this.client?.terminate();
+      this.client = null;
+      return;
+    }
     if (!ready) {
       for (const t of wanted) this.unavailable(ctx, t, 'UNSUPPORTED');
       this.client.terminate();
@@ -183,7 +206,22 @@ export class VisionMonitor implements Detector {
     video.muted = true;
     video.playsInline = true;
     video.srcObject = stream;
-    await video.play().catch(() => undefined);
+    // play() can hang (autoplay policy, no frames); do not let it hold start() open.
+    let playTimer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      video.play().catch(() => undefined),
+      new Promise<void>((r) => {
+        playTimer = setTimeout(r, 5000);
+      }),
+    ]);
+    clearTimeout(playTimer);
+    if (gen !== this.generation) {
+      video.srcObject = null;
+      this.client?.terminate();
+      this.client = null;
+      this.tasks.clear();
+      return;
+    }
     this.video = video;
 
     if (this.o.recheckIdentity && this.tasks.has('face')) {
@@ -334,6 +372,7 @@ export class VisionMonitor implements Detector {
   }
 
   stop(): void {
+    this.generation++;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.identity?.stop();

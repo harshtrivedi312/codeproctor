@@ -1,5 +1,5 @@
 import { IdbStore, STORES, padSeq } from '../core/idb';
-import { sweepStaleSessions } from '../core/sweep';
+import { SessionTouch, sweepStaleSessions } from '../core/sweep';
 import {
   MAX_BUFFER_BYTES,
   MediaApiError,
@@ -90,6 +90,7 @@ export class UploadQueue {
   private droppedChunks = 0;
   private droppedBytes = 0;
   private running = false;
+  private readonly touch: SessionTouch;
   /** Chunks that could not be written to IndexedDB, uploaded from memory. */
   private readonly memory = new Map<string, ArrayBuffer>();
   private storageDegraded = false;
@@ -101,6 +102,7 @@ export class UploadQueue {
     this.baseMs = o.backoffBaseMs ?? 1000;
     this.maxMs = o.backoffMaxMs ?? 30_000;
     this.jitter = o.jitter ?? 0.2;
+    this.touch = new SessionTouch(o.store, o.sessionId);
   }
 
   private prefix(): string {
@@ -157,6 +159,7 @@ export class UploadQueue {
       this.memory.set(key, data);
     }
     this.pending.set(key, chunk);
+    void this.touch.touch();
     this.report();
     this.pump();
   }
@@ -254,6 +257,7 @@ export class UploadQueue {
       this.attempts.delete(key);
       this.notBefore.delete(key);
       this.lastOk = Date.now();
+      void this.touch.touch();
       this.failures = 0;
     } catch (err) {
       if (err instanceof MediaApiError && err.kind === 'FATAL') {

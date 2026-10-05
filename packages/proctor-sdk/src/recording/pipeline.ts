@@ -82,11 +82,25 @@ export class RecordingPipeline {
     return this.owned.get('WEBCAM') ?? null;
   }
 
+  /** In-memory segment counters: recording must still work when IndexedDB is broken. */
+  private readonly segmentCounters = new Map<RecordingStream, number>();
+
   private async nextSegment(stream: RecordingStream): Promise<number> {
     const key = `${this.o.sessionId}:segment:${stream}`;
-    const stored = (await this.store.get<number>(STORES.meta, key)) ?? -1;
-    const next = Math.max(stored, this.queue.maxSegment(stream)) + 1;
-    await this.store.put(STORES.meta, key, next);
+    let stored = -1;
+    try {
+      stored = (await this.store.get<number>(STORES.meta, key)) ?? -1;
+    } catch {
+      // IndexedDB unavailable: fall back to the in-memory counter and the queue's view.
+    }
+    const next =
+      Math.max(stored, this.segmentCounters.get(stream) ?? -1, this.queue.maxSegment(stream)) + 1;
+    this.segmentCounters.set(stream, next);
+    try {
+      await this.store.put(STORES.meta, key, next);
+    } catch {
+      // not persisted; a reload may reuse the number, the server upserts by (stream, segment, seq)
+    }
     return next;
   }
 
@@ -204,7 +218,7 @@ export class RecordingPipeline {
     await this.queue.waitUntilIdle(opts.drainTimeoutMs ?? 15_000);
     this.queue.stop();
     await this.queue.purge();
-    await this.store.deletePrefix(STORES.meta, `${this.o.sessionId}:segment:`);
+    await this.store.deletePrefix(STORES.meta, `${this.o.sessionId}:segment:`).catch(() => 0);
     this.started = false;
     return this.queue.health();
   }

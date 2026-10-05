@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { sha256Hex, updateLock, verifyAgainstLock } from './lock.mjs';
 
-const file = (name, text) => ({ name, sha256: sha256Hex(Buffer.from(text)), bytes: text.length });
+const file = (name, text) => ({
+  name,
+  sha256: sha256Hex(Buffer.from(text)),
+  bytes: Buffer.byteLength(text),
+});
 const describeFile = () => ({
   component: 'OBJECT',
   source: 'https://example.invalid/x',

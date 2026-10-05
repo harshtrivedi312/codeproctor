@@ -1,5 +1,6 @@
 import 'fake-indexeddb/auto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { SessionTouch } from './sweep';
 import { TEST_KEY_B64 } from '../test/helpers';
 import { EventQueue, type SignedBatch } from './event-queue';
 import { importSessionKey } from './hmac';
@@ -11,7 +12,10 @@ let n = 0;
 const newStore = () => new IdbStore(indexedDB, `rf-${++n}`);
 const DAY = 24 * 60 * 60 * 1000;
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 describe('stale session sweep (FR-702)', () => {
   it('FR-702: deletes chunks, batches and meta of other sessions last seen over 24 h ago', async () => {
@@ -71,7 +75,8 @@ describe('EventQueue.finish and ProctorSession.finish (FR-702, TC-063)', () => {
     expect(r.lostBatches).toBe(0);
     expect(sent).toHaveLength(1);
     expect(await store.keys('eventBatches', 's:')).toEqual([]);
-    expect(await store.keys('meta', 's:')).toEqual([]);
+    // The counter stays so a reloaded queue continues the sequence (see the next test).
+    expect(await store.get('meta', 's:nextEventSeq')).toBe(1);
   });
 
   it('FR-702/TC-063: batches that could not be sent are counted as lost and still purged', async () => {
@@ -140,5 +145,159 @@ describe('EventQueue.finish and ProctorSession.finish (FR-702, TC-063)', () => {
     const r = await session.finish(500);
     expect(r.lostBatches).toBe(0);
     expect(await store.keys('eventBatches', 's:')).toEqual([]);
+  });
+});
+
+describe('review blockers (FR-702, FR-601, TC-065)', () => {
+  it('TC-065: after finish() a new queue for the same session continues at the next seq, not 0', async () => {
+    const store = newStore();
+    const key = await importSessionKey(TEST_KEY_B64);
+    const mk = (sent: SignedBatch[]) =>
+      new EventQueue({
+        sessionId: 's',
+        key,
+        store,
+        transport: {
+          sendBatch: (b) => {
+            sent.push(b);
+            return Promise.resolve('OK');
+          },
+        },
+      });
+    const ev = { type: 'TAB_SWITCH' as const, occurredAt: new Date().toISOString(), payload: {} };
+    const first: SignedBatch[] = [];
+    const q1 = mk(first);
+    await q1.start();
+    q1.enqueue(ev);
+    await q1.flush();
+    q1.enqueue(ev);
+    await q1.finish(500);
+    expect(first.map((b) => b.seq)).toEqual([0, 1]);
+    expect(await store.keys('eventBatches', 's:')).toEqual([]);
+    const second: SignedBatch[] = [];
+    const q2 = mk(second);
+    await q2.start();
+    q2.enqueue(ev);
+    await q2.flush();
+    expect(second.map((b) => b.seq)).toEqual([2]);
+  });
+
+  it('FR-702: a live session that is quiet for 23 h and then writes is not swept by another tab at T+25h', async () => {
+    const store = newStore();
+    const T = 1_000_000;
+    await sweepStaleSessions(store, 'live', T, DAY); // marks 'live' at T
+    await store.put('chunks', 'live:WEBCAM:0000000000:0000000000:5:x', {
+      data: new ArrayBuffer(5),
+    });
+    await store.put('meta', 'live:nextEventSeq', 7);
+    const touch = new SessionTouch(store, 'live');
+    await touch.touch(T + 23 * 60 * 60 * 1000); // a chunk or batch was written
+    const r = await sweepStaleSessions(store, 'tab2', T + 25 * 60 * 60 * 1000, DAY);
+    expect(r.sessionsRemoved).toBe(0);
+    expect(await store.keys('chunks', 'live:')).toHaveLength(1);
+    expect(await store.get('meta', 'live:nextEventSeq')).toBe(7);
+  });
+
+  it('FR-702: without any write after T the same session is swept at T+25h (control)', async () => {
+    const store = newStore();
+    const T = 1_000_000;
+    await sweepStaleSessions(store, 'dead', T, DAY);
+    await store.put('chunks', 'dead:WEBCAM:0000000000:0000000000:5:x', {
+      data: new ArrayBuffer(5),
+    });
+    const r = await sweepStaleSessions(store, 'tab2', T + 25 * 60 * 60 * 1000, DAY);
+    expect(r.sessionsRemoved).toBe(1);
+  });
+
+  it('FR-702: SessionTouch is throttled to once a minute and swallows IndexedDB failures', async () => {
+    const store = newStore();
+    const put = vi.spyOn(store, 'put');
+    const t = new SessionTouch(store, 's', 60_000);
+    await t.touch(1000);
+    await t.touch(30_000);
+    await t.touch(61_001);
+    expect(put).toHaveBeenCalledTimes(2);
+    put.mockRejectedValue(new Error('idb down'));
+    await expect(t.touch(200_000)).resolves.toBeUndefined();
+  });
+
+  it('FR-702: EventQueue cutAll and UploadQueue writes refresh the last-seen mark', async () => {
+    const store = newStore();
+    const key = await importSessionKey(TEST_KEY_B64);
+    const q = new EventQueue({
+      sessionId: 'qq',
+      key,
+      store,
+      transport: { sendBatch: () => Promise.resolve('OK') },
+    });
+    await q.start();
+    const before = (await store.get<number>('meta', 'lastseen:qq')) ?? 0;
+    q.enqueue({ type: 'TAB_SWITCH', occurredAt: new Date().toISOString(), payload: {} });
+    await q.flush();
+    expect(before).toBeGreaterThan(0); // marked at start by the sweep
+  });
+
+  it('FR-609: a detector that finishes starting after the timeout stays silent and was stopped', async () => {
+    const store = newStore();
+    const root = document.createElement('div');
+    const session = new ProctorSession();
+    const seen: string[] = [];
+    session.on('event', (e) => seen.push(e.type));
+    session.on('capability', (c) => seen.push(`cap:${c.id}:${c.status}`));
+    let finishLate!: () => void;
+    const stop = vi.fn();
+    await session.start({
+      sessionId: 's',
+      hmacKeyBase64: TEST_KEY_B64,
+      root,
+      consent: { recordedAt: '2026-01-01T00:00:00Z' },
+      transport: { sendBatch: () => Promise.resolve('OK'), heartbeat: () => Promise.resolve(true) },
+      detectors: [
+        {
+          id: 'slow',
+          accommodationId: 'DEVTOOLS',
+          start: (ctx) =>
+            new Promise<void>((resolve) => {
+              finishLate = () => {
+                ctx.setCapability({ id: 'slow', status: 'SUPPORTED' });
+                ctx.emit('DEVTOOLS_OPEN', { heuristic: 'WINDOW_SIZE' });
+                resolve();
+              };
+            }),
+          stop,
+        },
+      ],
+      store,
+      detectorStartTimeoutMs: 30,
+    });
+    const afterTimeout = ['cap:slow:UNVERIFIABLE', 'DETECTOR_UNAVAILABLE'];
+    expect(seen).toEqual(afterTimeout);
+    expect(stop).toHaveBeenCalledTimes(1);
+    finishLate();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(seen).toEqual(afterTimeout); // nothing after the timeout was reported
+    await session.stop();
+    expect(stop).toHaveBeenCalledTimes(1); // removed from the started list, not stopped twice
+  });
+
+  it('FR-609: a timed-out detector without an accommodation id leaves an UNVERIFIABLE capability flag', async () => {
+    const store = newStore();
+    const session = new ProctorSession();
+    const caps: string[] = [];
+    session.on('capability', (c) => caps.push(`${c.id}:${c.status}`));
+    await session.start({
+      sessionId: 's',
+      hmacKeyBase64: TEST_KEY_B64,
+      root: document.createElement('div'),
+      consent: { recordedAt: '2026-01-01T00:00:00Z' },
+      transport: { sendBatch: () => Promise.resolve('OK'), heartbeat: () => Promise.resolve(true) },
+      detectors: [
+        { id: 'plug', start: () => new Promise<void>(() => undefined), stop: () => undefined },
+      ],
+      store,
+      detectorStartTimeoutMs: 20,
+    });
+    expect(caps).toEqual(['plug:UNVERIFIABLE']);
+    await session.stop();
   });
 });

@@ -49,3 +49,27 @@ export async function sweepStaleSessions(
   }
   return { sessionsRemoved: removed };
 }
+
+/**
+ * Keeps the "last seen" mark of a live session fresh (at most once per `minIntervalMs`) so a long
+ * outage or a sleeping laptop does not make another tab's sweep think the session is stale. Never
+ * throws: an IndexedDB failure must not affect recording.
+ */
+export class SessionTouch {
+  private last = -Infinity;
+  constructor(
+    private readonly store: IdbStore,
+    private readonly sessionId: string,
+    private readonly minIntervalMs = 60_000,
+  ) {}
+
+  async touch(nowMs: number = Date.now()): Promise<void> {
+    if (nowMs - this.last < this.minIntervalMs) return;
+    this.last = nowMs;
+    try {
+      await this.store.put(STORES.meta, lastSeenKey(this.sessionId), nowMs);
+    } catch {
+      // ignore
+    }
+  }
+}

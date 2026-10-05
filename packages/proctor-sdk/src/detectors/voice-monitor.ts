@@ -77,6 +77,28 @@ export class VoiceMonitor implements Detector {
       ctx.emit('DETECTOR_UNAVAILABLE', { detector: 'VOICE', reason: 'PERMISSION_DENIED' });
       return;
     }
+    await this.begin(ctx, stream);
+  }
+
+  reportStartTimeout(ctx: DetectorContext): void {
+    // The session emits DETECTOR_UNAVAILABLE for detectors that declare an accommodationId.
+    ctx.setCapability({ id: 'voice', status: 'UNSUPPORTED', detail: 'Voice start timed out.' });
+  }
+
+  /**
+   * A new microphone stream (for example after `recordAudio()` restarted following a device
+   * loss): restart the VAD on it instead of listening to a dead stream.
+   */
+  async attachStream(stream: MediaStream): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx || this.stopped) return;
+    const old = this.handle;
+    this.handle = null;
+    await old?.destroy();
+    await this.begin(ctx, stream);
+  }
+
+  private async begin(ctx: DetectorContext, stream: MediaStream): Promise<void> {
     const cfg = { ...DEFAULT_AI_CONFIG, ...this.o.config };
     const rules = (this.rules = new SpeechRules(cfg));
     const now = this.o.now ?? Date.now;

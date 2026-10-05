@@ -57,7 +57,10 @@ describe('UploadQueue (FR-701, FR-702, TC-063, NFR-08)', () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
   });
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
 
   it('FR-701: presign, PUT, confirm, then the chunk leaves IndexedDB', async () => {
     const store = newStore();
@@ -488,5 +491,46 @@ describe('RecordingPipeline', () => {
     await p.recordWebcam();
     recs[0]?.onerror?.();
     await vi.waitFor(() => expect(lost).toEqual([{ stream: 'WEBCAM', reason: 'RECORDER_ERROR' }]));
+  });
+});
+
+describe('pipeline with a broken IndexedDB (FR-701, FR-702)', () => {
+  it('FR-702: when every store call rejects, recording still starts, segments come from memory and chunks upload from memory', async () => {
+    const store = newStore();
+    for (const m of ['get', 'put', 'keys', 'delete', 'deletePrefix', 'entries'] as const) {
+      vi.spyOn(store, m).mockRejectedValue(new Error('idb broken'));
+    }
+    const confirmed: string[] = [];
+    const api: MediaApi = {
+      presign: () => Promise.resolve({ url: 'https://store.invalid/put' }),
+      confirm: (c) => {
+        confirmed.push(`${c.stream}:${c.segment}:${c.seq}`);
+        return Promise.resolve();
+      },
+    };
+    const caps: string[] = [];
+    const p = new RecordingPipeline({
+      sessionId: 's',
+      api,
+      assertConsent: () => undefined,
+      store,
+      mediaDevices: {
+        getUserMedia: () =>
+          Promise.resolve({
+            getTracks: () => [],
+            getVideoTracks: () => [],
+          } as unknown as MediaStream),
+      },
+      recorderFactory: () => new FakeRecorder(),
+      isTypeSupported: () => true,
+      put: () => Promise.resolve(200),
+      onCapability: (f) => caps.push(`${f.id}:${f.status}`),
+    });
+    await p.recordWebcam();
+    await p.recordWebcam(); // restart: the previous recorder flushes its chunk, new segment
+    const h = await p.finish({ drainTimeoutMs: 3000 });
+    expect(confirmed.sort()).toEqual(['WEBCAM:0:0', 'WEBCAM:1:0']);
+    expect(caps).toContain('recording-storage:UNSUPPORTED');
+    expect(h.droppedChunks).toBe(0);
   });
 });

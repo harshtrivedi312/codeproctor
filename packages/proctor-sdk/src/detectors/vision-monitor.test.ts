@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import 'fake-indexeddb/auto';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ProctorSession } from '../core/session';
+import { TEST_KEY_B64 } from '../test/helpers';
 import { fakeContext } from '../test/helpers';
 import { NO_FACE_SEQUENCE, PHONE_STRONG, secondsOf } from './__fixtures__/samples';
 import { uploadEvidence, needsEvidence, type EvidenceApi } from './evidence';
@@ -559,5 +562,104 @@ describe('review fixes: voice (FR-607, TC-061)', () => {
     cb.onSpeechEnd();
     await m.stop();
     expect(h.events.map((e) => e.options?.durationMs)).toEqual([2000, 1500]);
+  });
+});
+
+afterEach(() => vi.restoreAllMocks());
+
+describe('review blockers: abandoned start, bounded play, stream swap (FR-606, FR-607)', () => {
+  it('FR-606: a vision start that completes after the session timeout is stopped, silent and leaks nothing', async () => {
+    const worker = new FakeWorker();
+    let releaseReady!: () => void;
+    const origPost = worker.postMessage.bind(worker);
+    worker.postMessage = (msg) => {
+      if (msg.type === 'init') releaseReady = () => origPost(msg);
+      else origPost(msg);
+    };
+    const vision = new VisionMonitor({
+      getWebcamStream: () => stream,
+      createWorker: () => worker,
+      modelBaseUrl: '/models/proctor',
+      grabFrame: () => Promise.resolve(bitmap()),
+      createVideo: fakeVideo,
+      initTimeoutMs: 60_000,
+    });
+    const session = new ProctorSession();
+    const seen: string[] = [];
+    session.on('event', (e) =>
+      seen.push(`${e.type}:${(e.payload as { detector?: string }).detector ?? ''}`),
+    );
+    await session.start({
+      sessionId: 'late',
+      hmacKeyBase64: TEST_KEY_B64,
+      root: document.createElement('div'),
+      consent: { recordedAt: '2026-01-01T00:00:00Z' },
+      transport: { sendBatch: () => Promise.resolve('OK'), heartbeat: () => Promise.resolve(true) },
+      detectors: [vision],
+      detectorStartTimeoutMs: 30,
+    });
+    // timeout: every task reported unavailable, worker not started sampling
+    expect(seen.sort()).toEqual([
+      'DETECTOR_UNAVAILABLE:FACE',
+      'DETECTOR_UNAVAILABLE:GAZE',
+      'DETECTOR_UNAVAILABLE:OBJECT',
+    ]);
+    releaseReady(); // the models "finish loading" late
+    await new Promise((r) => setTimeout(r, 30));
+    expect(worker.terminated).toBe(true);
+    expect(vision.getStats().tasks).toEqual([]);
+    expect(seen).toHaveLength(3); // no events after the timeout report
+    await session.stop();
+  });
+
+  it('FR-606: video.play() that never resolves does not hold start() open beyond 5 s', async () => {
+    vi.useFakeTimers();
+    const h = fakeContext();
+    const { m } = setup({
+      createVideo: () => ({
+        ...fakeVideo(),
+        play: () => new Promise<void>(() => undefined),
+      }),
+    });
+    const p = m.start(h.ctx);
+    await vi.advanceTimersByTimeAsync(5000);
+    await p;
+    expect(m.getStats().tasks.sort()).toEqual(['face', 'gaze', 'objects']);
+    m.stop();
+    vi.useRealTimers();
+  });
+
+  it('FR-606: attachStream on a running monitor swaps the video source to the restarted webcam', async () => {
+    const h = fakeContext();
+    const video = fakeVideo();
+    const { m } = setup({ createVideo: () => video });
+    await m.start(h.ctx);
+    expect(video.srcObject).toBe(stream);
+    const fresh = {} as MediaStream;
+    await m.attachStream(fresh);
+    expect(video.srcObject).toBe(fresh);
+    expect(m.getStats().tasks.sort()).toEqual(['face', 'gaze', 'objects']);
+    m.stop();
+  });
+
+  it('FR-607: VoiceMonitor.attachStream restarts the VAD on the new microphone stream', async () => {
+    const h = fakeContext();
+    const used: MediaStream[] = [];
+    const destroys: number[] = [];
+    const m = new VoiceMonitor({
+      getStream: () => stream,
+      createVad: (s) => {
+        used.push(s);
+        const id = used.length;
+        return Promise.resolve({ start: vi.fn(), destroy: () => void destroys.push(id) });
+      },
+    });
+    await m.start(h.ctx);
+    const fresh = {} as MediaStream;
+    await m.attachStream(fresh);
+    expect(used).toEqual([stream, fresh]);
+    expect(destroys).toEqual([1]);
+    await m.stop();
+    expect(destroys).toEqual([1, 2]);
   });
 });
