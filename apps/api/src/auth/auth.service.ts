@@ -550,21 +550,20 @@ export class AuthService implements OnApplicationShutdown {
    */
   async resetTwoFactorOf(
     actor: { id: string; orgId: string },
-    targetId: string,
+    rawTargetId: string,
     adminPassword: string,
     ctx: RequestContext,
   ): Promise<void> {
-    if (actor.id === targetId) {
+    // UUIDs are case-insensitive in Postgres: compare and use the canonical lowercase form.
+    const targetId = rawTargetId.toLowerCase();
+    const actorId = actor.id.toLowerCase();
+    if (actorId === targetId) {
       throw new BadRequestException('Use your own security settings to change your 2FA.');
     }
     const verified = await this.requireCurrentPassword(actor.id, adminPassword, ctx);
     await this.prisma.client.$transaction(async (tx) => {
-      const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
-        SELECT id FROM users
-        WHERE id = ${targetId}::uuid AND org_id = ${actor.orgId}::uuid
-        FOR NO KEY UPDATE`);
-      if (locked.length !== 1) throw new NotFoundException('User not found.');
-      // The final write is bound to the verified admin: same password, still a super admin.
+      // The final write is bound to the verified admin: same password, still a super admin. A
+      // plain read before the lock, so a changed admin gets 401 whether or not the target exists.
       const stillAdmin = await tx.user.count({
         where: {
           id: actor.id,
@@ -575,6 +574,15 @@ export class AuthService implements OnApplicationShutdown {
         },
       });
       if (stillAdmin !== 1) throw this.invalid();
+      const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT id FROM users
+        WHERE id = ${targetId}::uuid AND org_id = ${actor.orgId}::uuid
+        FOR NO KEY UPDATE`);
+      if (locked.length !== 1) throw new NotFoundException('User not found.');
+      // Also enforced after the lock, on the id as the database sees it.
+      if (locked[0]?.id === actorId) {
+        throw new BadRequestException('Use your own security settings to change your 2FA.');
+      }
       const target = await tx.user.findUniqueOrThrow({ where: { id: targetId } });
       await tx.user.update({
         where: { id: targetId },

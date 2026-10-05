@@ -2147,6 +2147,60 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         expect((await prisma.user.findUniqueOrThrow({ where: { id: a.id } })).failedLogins).toBe(1);
       });
 
+      it('TC-003: the admin own id in upper or mixed case is still the self-target 400 and changes nothing', async () => {
+        const a = await admin();
+        await prisma.refreshToken.create({
+          data: {
+            userId: a.id,
+            familyId: '55555555-5555-4555-8555-555555555555',
+            tokenHash: sha256Hex(`own-${a.id}`),
+            expiresAt: new Date(Date.now() + 600_000),
+          },
+        });
+        const mixed = a.id
+          .split('')
+          .map((c, i) => (i % 2 ? c.toUpperCase() : c))
+          .join('');
+        for (const id of [a.id.toUpperCase(), mixed]) {
+          await post(`2fa/reset/${id}`, a.token, OK).expect(400);
+        }
+        const row = await prisma.user.findUniqueOrThrow({ where: { id: a.id } });
+        expect(row.totpEnabled).toBe(true);
+        expect(row.totpSecretEnc).not.toBeNull();
+        expect(await prisma.refreshToken.count({ where: { userId: a.id, revokedAt: null } })).toBe(
+          1,
+        );
+        expect(
+          await prisma.auditLog.count({
+            where: { action: 'AUTH_2FA_RESET_BY_ADMIN', entityId: a.id },
+          }),
+        ).toBe(0);
+      });
+
+      it('TC-003: a changed admin gets 401 even when the target does not exist', async () => {
+        const a = await admin();
+        const newHash = await hash('Another-Pass-77', ARGON2_OPTIONS);
+        passwordVerify.mockImplementationOnce(async (h: string, p: string) => {
+          const ok = await realPasswordVerify(h, p);
+          await prisma.user.update({ where: { id: a.id }, data: { passwordHash: newHash } });
+          return ok;
+        });
+        await post('2fa/reset/00000000-0000-4000-8000-000000000002', a.token, OK).expect(401);
+      });
+
+      it('TC-003: login, 2fa/verify and refresh responses carry Cache-Control: no-store', async () => {
+        const u = await createUser({ totp: SECRET });
+        const first = await login(u.email).expect(200);
+        expect(first.headers['cache-control']).toBe('no-store');
+        const verified = await post('2fa/verify', null, {
+          challengeToken: (first.body as Body).challengeToken,
+          code: authenticator.generate(SECRET),
+        }).expect(200);
+        expect(verified.headers['cache-control']).toBe('no-store');
+        const refreshed = await refresh(refreshCookie(verified)).expect(200);
+        expect(refreshed.headers['cache-control']).toBe('no-store');
+      });
+
       it('TC-003: a locked admin gets the same generic 401 as a wrong password, even with the right one, and nothing changes', async () => {
         const a = await admin();
         const target = await createUser({ role: UserRole.REVIEWER, totp: SECRET });
@@ -2211,8 +2265,8 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
     });
 
     /**
-     * Holds an admin reset open the way the route runs it: target row lock, writes, then the audit
-     * insert (actor FK), so the lock order matches. Nothing commits until commit() is called.
+     * Holds an admin reset open the way the route runs it: target row lock, user update, refresh
+     * token revoke, then the audit insert (actor FK), in the route's order. Nothing commits until commit() is called.
      */
     function holdResetLock(
       actorId: string,
@@ -2233,6 +2287,12 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
             where: { id: targetId },
             data: { totpEnabled: false, totpSecretEnc: null, recoveryCodeHashes: [] },
           });
+          locked();
+          await hold;
+          await tx.refreshToken.updateMany({
+            where: { userId: targetId, revokedAt: null },
+            data: { revokedAt: new Date() },
+          });
           await tx.auditLog.create({
             data: {
               orgId,
@@ -2242,12 +2302,6 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
               entityId: targetId,
               metadata: {},
             },
-          });
-          locked();
-          await hold;
-          await tx.refreshToken.updateMany({
-            where: { userId: targetId, revokedAt: null },
-            data: { revokedAt: new Date() },
           });
         },
         { timeout: 20_000 },

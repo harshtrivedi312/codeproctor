@@ -48,7 +48,7 @@ import {
 } from './dto/auth.dto';
 
 export const REFRESH_COOKIE = 'cp_refresh';
-// Responses that carry a TOTP secret, QR code or recovery codes must never be cached.
+// Responses that carry a TOTP secret, QR code, recovery codes or a bearer token are never cached.
 const NO_STORE = 'no-store';
 const ALL_STAFF = [UserRole.SUPER_ADMIN, UserRole.RECRUITER, UserRole.AUTHOR, UserRole.REVIEWER];
 
@@ -84,6 +84,7 @@ export class AuthController {
   @Public()
   @Post('login')
   @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Staff password login; may return a 2FA challenge (FR-101, FR-102)' })
   @ApiOkResponse({ type: LoginResultDto })
   @ApiUnauthorizedResponse({ description: 'Wrong email or password (one message for all causes)' })
@@ -136,6 +137,7 @@ export class AuthController {
   @Public()
   @Post('2fa/verify')
   @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Complete login with a TOTP code or a recovery code (FR-102)' })
   @ApiOkResponse({ type: AuthSessionDto })
   @ApiBadRequestResponse({ description: 'Wrong code' })
@@ -247,6 +249,7 @@ export class AuthController {
   @Public()
   @Post('refresh')
   @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Rotate the refresh cookie and return a new access token (FR-104)' })
   @ApiCookieAuth()
   @ApiOkResponse({ type: AuthSessionDto })
