@@ -153,6 +153,7 @@ Model files (never committed, never downloaded by code; download needs owner app
 (ADR 0001 section 12.2); any other file name or digest is refused. `FACE_LANDMARKER_MODEL_PATH` ->
 `face_landmarker.task` (full SHA-256 `64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff`, ADR 0001 section 12.2). Both files are read once, hashed, and the same bytes are given to the runtime (no check-then-use gap); a mismatch or wrong file name is MANUAL_REVIEW (MATCH_ERROR) via `review_for_model_error`. `model_id` = `auraface-v1:a7933ea5`.
 Images: JPEG, PNG and phone MPO (first frame) only; EXIF orientation is applied after the pixel-count check. Detail codes are prefixed `ID_`, `SELFIE_` or `FRAME_`.
+`match()` requires `liveness_confirmed` (no default; anything but `True` is MANUAL_REVIEW). `FACE_MIN_DETECTION_CONFIDENCE` is passed to the MediaPipe landmarker by `build_face_matcher`. `maxImagePixels` is at most 25,000,000. Model files over the ADR byte size are refused unread. `prime_selfie(session_id, selfie)` rebuilds only the selfie embedding after a cache miss.
 Optional extra: `pip install -e '.[face]'` (mediapipe, onnxruntime, pillow).
 
 Privacy: embeddings, aligned crops and the selfie cache have redacted repr/str, cannot be pickled or
