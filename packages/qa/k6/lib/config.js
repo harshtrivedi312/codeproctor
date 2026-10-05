@@ -31,7 +31,7 @@ export function assertSafeTarget() {
 //     "keyB64": "<optional: the 32-byte batch key, base64, if it was already fetched>",
 //     "counters": { optional: the counters object of the proctor-key response } }
 // Provide the list with SESSIONS_FILE (a path; read in the init stage) or SESSIONS_JSON (the JSON
-// text). The file is git-ignored (packages/qa/load/.gitignore); keep it outside the repository.
+// text). The file is git-ignored (packages/qa/k6/.gitignore); keep it outside the repository.
 export const SESSIONS = new SharedArray('sessions', function () {
   let text = __ENV.SESSIONS_JSON;
   if (!text && __ENV.SESSIONS_FILE) {
@@ -51,7 +51,7 @@ export function requireSessions(minimum) {
   if (SESSIONS.length < minimum) {
     throw new Error(
       `Need at least ${minimum} seeded sessions (one per virtual user), got ${SESSIONS.length}. ` +
-        'Set SESSIONS_FILE or SESSIONS_JSON (see packages/qa/load/README.md).',
+        'Set SESSIONS_FILE or SESSIONS_JSON (see packages/qa/k6/README.md).',
     );
   }
 }

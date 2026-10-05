@@ -1,8 +1,8 @@
 // A small stand-in for the candidate API, only to check that the k6 scripts in this folder are
 // correct (right routes, valid signatures, cadence under the ADR 0013 rate limits). It is NOT the
 // product and proves nothing about it. Synthetic tokens only; nothing is stored on disk.
-//   node packages/qa/load/mock/server.mjs [port] [sessionCount]  -> writes mock/sessions.json
-// then: k6 run -e API_BASE_URL=http://localhost:4010/api/v1 -e SESSIONS_FILE=packages/qa/load/mock/sessions.json ...
+//   node packages/qa/k6/mock/server.mjs [port] [sessionCount]  -> writes mock/sessions.json
+// then: k6 run -e API_BASE_URL=http://localhost:4010/api/v1 -e SESSIONS_FILE=packages/qa/k6/mock/sessions.json ...
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';

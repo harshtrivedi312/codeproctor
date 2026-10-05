@@ -68,10 +68,10 @@ Requirements: k6 (or the pinned Docker image), network access to the staging API
 # Local binary
 k6 run -e API_BASE_URL=https://<staging-host>/api/v1 \
        -e SESSIONS_FILE=/absolute/path/to/sessions.json \
-       packages/qa/load/tc-090-load.js
+       packages/qa/k6/tc-090-load.js
 
 # Docker (the image CI pins by digest in .github/workflows/qa.yml)
-docker run --rm -v "$PWD/packages/qa/load:/load" -v /absolute/path/to:/seed:ro -w /load \
+docker run --rm -v "$PWD/packages/qa/k6:/k6" -v /absolute/path/to:/seed:ro -w /k6 \
   grafana/k6@sha256:e66db15b860113878fa74670e31f5e274830b7b6e42c8bff28b2f2d86a257603 \
   run -e API_BASE_URL=https://<staging-host>/api/v1 -e SESSIONS_FILE=/seed/sessions.json tc-090-load.js
 ```
@@ -102,10 +102,10 @@ Cloudflare R2 free tier (check the current limits before the run): about 10 GB s
 `mock/server.mjs` is a small stand-in for the candidate API, only for checking that the scripts send the right routes, valid canonical-JSON signatures and a cadence under the ADR 0013 limits. It is not the product and says nothing about its performance.
 
 ```sh
-node packages/qa/load/mock/server.mjs 4010 60          # writes mock/sessions.json (git-ignored)
-docker run --rm -v "$PWD/packages/qa/load:/load" -w /load \
+node packages/qa/k6/mock/server.mjs 4010 60          # writes mock/sessions.json (git-ignored)
+docker run --rm -v "$PWD/packages/qa/k6:/k6" -w /k6 \
   grafana/k6@sha256:e66db15b860113878fa74670e31f5e274830b7b6e42c8bff28b2f2d86a257603 \
-  run -e API_BASE_URL=http://host.docker.internal:4010/api/v1 -e SESSIONS_FILE=/load/mock/sessions.json \
+  run -e API_BASE_URL=http://host.docker.internal:4010/api/v1 -e SESSIONS_FILE=/k6/mock/sessions.json \
       -e VUS=60 -e RAMP_UP=10s -e HOLD=60s -e RAMP_DOWN=5s tc-090-load.js
 ```
 
@@ -115,7 +115,7 @@ Result of the last check (2026-10-05, k6 from the pinned image, 60 candidates ag
 
 The job `k6` in `.github/workflows/qa.yml` runs `packages/qa/k6/<script>` through `run - < file` on stdin, which cannot import `lib/*.js`, and passes `CANDIDATE_TOKENS`. To use these scripts the workflow needs:
 
-1. Mount the folder instead of stdin: `docker run --rm -v "$PWD/packages/qa/load:/load" -w /load ... run -e API_BASE_URL="$TARGET/api/v1" -e SESSIONS_JSON="$K6_SESSIONS_JSON" tc-090-load.js` (script from `inputs.scan`).
+1. Mount the folder instead of stdin: `docker run --rm -v "$PWD/packages/qa/k6:/k6" -w /k6 ... run -e API_BASE_URL="$TARGET/api/v1" -e SESSIONS_JSON="$K6_SESSIONS_JSON" tc-090-load.js` (script from `inputs.scan`).
 2. Replace the secret `K6_CANDIDATE_TOKENS` with `K6_SESSIONS_JSON` (the JSON list above) in the `staging` environment.
 3. Keep the `QA_STAGING_HOSTS` allow-list step; add `-e` for `API_BASE_URL` from the already-validated target.
 4. Upload the k6 summary (`--summary-export`) as an artefact so the result report for BE-15B and the matrix has numbers.
