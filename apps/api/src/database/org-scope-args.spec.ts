@@ -233,13 +233,15 @@ describe('org scope arguments (NFR-04, FR-103)', () => {
       });
     });
 
-    it("TC-008 accepts the caller's org, as orgId or as a connect of the org relation", () => {
+    it("TC-008 accepts the caller's org as the scalar orgId; org: { connect } is a nested relation write and is refused", () => {
       expect(scope('Test', 'create', { data: { name: 'T', orgId: ORG_A } }).data).toEqual({
         name: 'T',
         orgId: ORG_A,
       });
-      const connect = { name: 'T', org: { connect: { id: ORG_A } } };
-      expect(scope('Test', 'create', { data: connect }).data).toEqual(connect);
+      // Even naming the caller's own org: services set orgId, or let the scope stamp it.
+      expect(() =>
+        scope('Test', 'create', { data: { name: 'T', org: { connect: { id: ORG_A } } } }),
+      ).toThrow(/nested relation write refused \(Test\.org\.connect\)/);
     });
 
     it("TC-008 refuses another org's id, a connect to another org, or both forms at once", () => {

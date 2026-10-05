@@ -48,6 +48,7 @@ import type { PrismaClient } from '../generated/prisma/client.js';
 import { OrgContextMissingError, OrgScopeViolationError, RawQueryNotAllowedError } from './errors';
 import type { ScopeSource } from './org-context';
 import { applyOrgScope } from './org-scope-args';
+import { assertNoNestedWritesIn } from './org-scope-nested';
 import { ORG_SCOPE } from './org-scope-map';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
 
@@ -85,7 +86,11 @@ export function orgScopeExtension(source: ScopeSource) {
 
         const scope = store?.scope;
         if (scope === undefined) throw new OrgContextMissingError(`${model}.${operation}`);
-        if (scope.kind === 'system') return query(args);
+        if (scope.kind === 'system') {
+          // System scope is unfiltered, but a nested relation write is refused here too.
+          assertNoNestedWritesIn(model as ModelName, operation, args);
+          return query(args);
+        }
 
         return query(
           applyOrgScope({ model: model as ModelName, rule, operation, args, orgId: scope.orgId }),
