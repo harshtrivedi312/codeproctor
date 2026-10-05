@@ -27,8 +27,14 @@ describe('TC-098 (FR-107): staff password reset', () => {
     await h?.close();
   });
 
-  const forgot = (email: string): request.Test =>
+  const forgotRaw = (email: string): request.Test =>
     request(h.app.getHttpServer()).post(`${API}/auth/password/forgot`).send({ email });
+  // The mail goes out after the response (FU-BE-31); wait for it before reading h.mails.
+  const forgot = async (email: string): Promise<request.Response> => {
+    const res = await forgotRaw(email);
+    await h.settle();
+    return res;
+  };
   const reset = (token: string, newPassword: string): request.Test =>
     request(h.app.getHttpServer()).post(`${API}/auth/password/reset`).send({ token, newPassword });
 
@@ -51,12 +57,19 @@ describe('TC-098 (FR-107): staff password reset', () => {
   it('TC-098: the link resets the password once, revokes every refresh token of the user, keeps TOTP and clears a lockout', async () => {
     const u = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
     // Two open sessions on two devices.
+    // A TOTP code is accepted once per time step (replay guard), so the second device signs in
+    // with a recovery code.
+    const recovery = 'ABCDEFGHJKLMNPQR';
+    await h.owner.user.update({
+      where: { id: u.id },
+      data: { recoveryCodeHashes: [sha256Hex(recovery)] },
+    });
     const cookies: string[] = [];
     for (let i = 0; i < 2; i++) {
       const { challengeToken } = (await login(h, u.email).expect(200)).body as Body;
       const done = await request(h.app.getHttpServer())
         .post(`${API}/auth/2fa/verify`)
-        .send({ challengeToken, code: authenticator.generate(TOTP_SECRET) })
+        .send({ challengeToken, code: i === 0 ? authenticator.generate(TOTP_SECRET) : recovery })
         .expect(200);
       cookies.push(refreshCookie(done));
     }
@@ -65,7 +78,7 @@ describe('TC-098 (FR-107): staff password reset', () => {
       data: { failedLogins: 5, lockedUntil: new Date(Date.now() + 600_000) },
     });
     h.mails.length = 0;
-    await forgot(u.email).expect(202);
+    expect((await forgot(u.email)).status).toBe(202);
     const token = tokenFrom(h.mails[0]);
     // Stored as a hash, never the raw token; 30 minute expiry.
     const stored = await h.owner.user.findUniqueOrThrow({ where: { id: u.id } });
@@ -100,7 +113,7 @@ describe('TC-098 (FR-107): staff password reset', () => {
   it('TC-098: the second use of the same link is refused and does not change the password again', async () => {
     const u = await createUser(h);
     h.mails.length = 0;
-    await forgot(u.email).expect(202);
+    expect((await forgot(u.email)).status).toBe(202);
     const token = tokenFrom(h.mails[0]);
     await reset(token, 'First-New-Passphrase-1').expect(204);
     await reset(token, 'Second-New-Passphrase-2').expect(400);
@@ -111,7 +124,7 @@ describe('TC-098 (FR-107): staff password reset', () => {
   it('TC-098: a link older than 30 minutes is refused and the old password still works', async () => {
     const u = await createUser(h);
     h.mails.length = 0;
-    await forgot(u.email).expect(202);
+    expect((await forgot(u.email)).status).toBe(202);
     const token = tokenFrom(h.mails[0]);
     await h.owner.user.update({
       where: { id: u.id },
@@ -129,8 +142,8 @@ describe('TC-098 (FR-107): staff password reset', () => {
   it('TC-098: a newer link replaces the older one', async () => {
     const u = await createUser(h);
     h.mails.length = 0;
-    await forgot(u.email).expect(202);
-    await forgot(u.email).expect(202);
+    expect((await forgot(u.email)).status).toBe(202);
+    expect((await forgot(u.email)).status).toBe(202);
     expect(h.mails).toHaveLength(2);
     const first = tokenFrom(h.mails[0]);
     const second = tokenFrom(h.mails[1]);
@@ -141,7 +154,7 @@ describe('TC-098 (FR-107): staff password reset', () => {
   it('TC-098: neither the raw token nor the new password appears in any log line or audit row', async () => {
     const u = await createUser(h);
     h.mails.length = 0;
-    await forgot(u.email).expect(202);
+    expect((await forgot(u.email)).status).toBe(202);
     const token = tokenFrom(h.mails[0]);
     await reset(token, 'Log-Probe-Passphrase-77').expect(204);
     expect(h.logged.length).toBeGreaterThan(0);
@@ -160,7 +173,7 @@ describe('TC-098 (FR-107): staff password reset', () => {
     const u = await createUser(h);
     await h.owner.user.update({ where: { id: u.id }, data: { isActive: false } });
     h.mails.length = 0;
-    await forgot(u.email).expect(202);
+    expect((await forgot(u.email)).status).toBe(202);
     expect(h.mails).toHaveLength(0);
   });
 });
