@@ -25,6 +25,13 @@ export const MOCK_USERS = {
     role: 'SUPER_ADMIN',
     totp: true,
   },
+  author: {
+    email: 'author@example.test',
+    password: 'Author-Pass-12345',
+    name: 'Avery Author',
+    role: 'AUTHOR',
+    totp: false,
+  },
   reviewer: {
     email: 'reviewer@example.test',
     password: 'Reviewer-Pass-12',
@@ -115,9 +122,25 @@ function findUser(email: string): MockUser | undefined {
   const lower = email.trim().toLowerCase();
   return Object.values<MockUser>(MOCK_USERS).find((u) => u.email === lower);
 }
+/** The role is part of the fake token so the mock admin API can answer 403 like the real one (FR-103). */
+export function mockRoleFromToken(authorization: string | null): Schemas['StaffRole'] | null {
+  const match = /^Bearer mock-access-([A-Z_]+)-/.exec(authorization ?? '');
+  const role = match?.[1];
+  return role === 'SUPER_ADMIN' || role === 'RECRUITER' || role === 'AUTHOR' || role === 'REVIEWER'
+    ? role
+    : null;
+}
+
+/** Plants the mock refresh cookie so the next silent refresh signs this user in (tests and demos). */
+export function seedMockRefresh(email: string): void {
+  const state = load();
+  state.refreshFor = email;
+  save(state);
+}
+
 function sessionFor(user: MockUser): Schemas['AuthSession'] {
   return {
-    accessToken: `mock-access-${Math.random().toString(36).slice(2)}`,
+    accessToken: `mock-access-${user.role}-${Math.random().toString(36).slice(2)}`,
     user: {
       id: `user-${user.role.toLowerCase()}`,
       email: user.email,

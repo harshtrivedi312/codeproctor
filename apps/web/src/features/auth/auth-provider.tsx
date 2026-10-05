@@ -3,6 +3,7 @@ import { useRouter } from 'next/navigation';
 import * as React from 'react';
 import { api, type Schemas } from '@/lib/api/client';
 import {
+  invalidateRefreshes,
   onSessionChange,
   publishSession,
   refreshSession,
@@ -60,8 +61,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
 
   const signOut = React.useCallback(async () => {
     setSignedOutByUser(true);
+    // A refresh that is still in flight must not bring the session back after this.
+    invalidateRefreshes();
     try {
       await api.POST('/v1/auth/logout');
+    } catch {
+      // Offline or server error: the local sign-out below still happens; the refresh cookie
+      // expires on its own (FR-104).
     } finally {
       // Whatever the server said, this browser forgets the session.
       publishSession(null);

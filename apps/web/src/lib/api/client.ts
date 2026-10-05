@@ -13,12 +13,25 @@ const authMiddleware: Middleware = {
   },
 };
 
+const basePath = new URL(apiBaseUrl).pathname.replace(/\/+$/, '');
+
+/**
+ * True for the auth endpoints (login, 2FA, refresh, logout), which must not trigger a refresh and
+ * retry. The check is relative to the API base URL, so a path prefix in NEXT_PUBLIC_API_URL or a
+ * move to /api/v1 does not break it.
+ */
+export function isAuthRequest(url: string): boolean {
+  const { pathname } = new URL(url);
+  const relative = pathname.startsWith(basePath) ? pathname.slice(basePath.length) : pathname;
+  return /^(?:\/api)?\/v\d+\/auth\//.test(relative);
+}
+
 // A staff request that gets 401 (access token expired) is retried once after a silent refresh. If
 // the refresh fails, auth-session publishes "signed out" and the staff layout goes to login.
 const retryCopies = new WeakMap<Request, Request>();
 const refreshMiddleware: Middleware = {
   onRequest({ request }) {
-    if (getAccessToken() && !new URL(request.url).pathname.startsWith('/v1/auth/')) {
+    if (getAccessToken() && !isAuthRequest(request.url)) {
       retryCopies.set(request, request.clone());
     }
     return undefined;

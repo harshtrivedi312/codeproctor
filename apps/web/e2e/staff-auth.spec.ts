@@ -10,6 +10,11 @@ const TOTP = '123456';
 // Next.js adds its own role=alert route announcer; skip it.
 const appAlert = (page: Page) => page.locator('[role=alert]:not(#__next-route-announcer__)');
 
+async function signOut(page: Page) {
+  await page.getByTestId('user-menu').click();
+  await page.getByRole('menuitem', { name: 'Sign out' }).click();
+}
+
 async function login(page: Page, user: { email: string; password: string }) {
   await page.goto('/admin/login');
   await page.getByLabel('Work email').fill(user.email);
@@ -25,7 +30,7 @@ test.describe('FR-101 login', () => {
     await expect(page).toHaveURL(/\/admin$/);
     await expect(page.getByRole('heading', { name: 'Staff dashboard' })).toBeVisible();
     await expect(page.getByText('Signed in as recruiter@example.test')).toBeVisible();
-    await page.getByRole('button', { name: 'Sign out' }).click();
+    await signOut(page);
     await expect(page).toHaveURL(/\/admin\/login$/);
     // The refresh cookie is gone, so going back to the dashboard asks for a login.
     await page.goto('/admin');
@@ -53,7 +58,7 @@ test.describe('FR-101 login', () => {
     await page.getByRole('button', { name: 'Verify and sign in' }).click();
     await expect(page.getByRole('heading', { name: 'Staff dashboard' })).toBeVisible();
 
-    await page.getByRole('button', { name: 'Sign out' }).click();
+    await signOut(page);
     await login(page, ADMIN);
     await page.getByRole('button', { name: 'Use a recovery code instead' }).click();
     await page.getByLabel('Recovery code').fill('ABCDEFGH23456723');
