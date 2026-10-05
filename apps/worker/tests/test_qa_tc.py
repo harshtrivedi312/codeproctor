@@ -192,21 +192,24 @@ def test_TC_075_score_never_exceeds_100() -> None:
     assert out["score"] == 100.0 and out["band"] == "HIGH"
 
 
-def test_TC_076_medium_and_high_sessions_go_to_the_review_queue_low_do_not() -> None:
-    assert route_for_review("MEDIUM").needs_review is True
+def test_TC_076_C28_every_band_goes_to_review_and_the_band_picks_the_path() -> None:
     assert route_for_review("HIGH").needs_review is True
-    assert route_for_review("LOW").needs_review is False
+    assert route_for_review("MEDIUM").needs_review is True
+    low = route_for_review("LOW")
+    assert low.needs_review is True and low.review_path == "fast"
+    assert route_for_review("MEDIUM").review_path == "full"
+    assert route_for_review("HIGH").review_path == "full"
 
 
-def test_TC_076_identity_and_short_answer_holds_route_a_low_session_to_review_with_reasons() -> (
-    None
-):
+def test_TC_076_C28_identity_and_short_answer_holds_force_the_full_path_with_reasons() -> None:
     r = route_for_review("LOW", identity_review_pending=True, short_answer_pending=True)
-    assert r.needs_review is True
-    assert r.reasons == ["IDENTITY_MANUAL_REVIEW", "SHORT_ANSWER_MANUAL_SCORING"]
+    assert r.needs_review is True and r.review_path == "full"
+    assert r.reasons == ["RISK_LOW", "IDENTITY_MANUAL_REVIEW", "SHORT_ANSWER_MANUAL_SCORING"]
 
 
 def test_TC_076_the_risk_route_band_for_a_medium_session_feeds_routing() -> None:
     out = _risk(["TAB_SWITCH"] * 3 + ["NO_FACE"] * 2)  # 24 + 16 = 40
     assert out["band"] == "MEDIUM"
     assert route_for_review("MEDIUM").reasons == ["RISK_MEDIUM"]
+    assert out["needs_review"] is True and out["review_path"] == "full"
+    assert out["review_reasons"] == ["RISK_MEDIUM"] and out["queue_rank"] == 1

@@ -25,6 +25,7 @@ from worker.events import (
     DEFAULT_SEVERITY_POINTS,
     ZERO_WEIGHT_EVENT_TYPES,
     EventType,
+    RiskBand,
     Severity,
 )
 
@@ -127,6 +128,10 @@ class RiskConfig(_Base):
     )
     medium_min_score: float = DEFAULT_MEDIUM_MIN_SCORE
     high_min_score: float = DEFAULT_HIGH_MIN_SCORE
+    # C-28: every session gets a human review. The band picks the review path: bands listed here
+    # get the fast path (summary and one-click verdict); the others get the full review. Only LOW
+    # is allowed until the hub decides otherwise (empty set = everything full).
+    fast_review_bands: frozenset[RiskBand] = frozenset({"LOW"})
 
     @model_validator(mode="after")
     def _merge_defaults(self) -> Self:
@@ -146,6 +151,10 @@ class RiskConfig(_Base):
     def _bands(self) -> Self:
         if not 0 < self.medium_min_score < self.high_min_score <= 100:
             raise ValueError("Band edges must satisfy 0 < medium < high <= 100.")
+        if not self.fast_review_bands <= {"LOW"}:
+            raise ValueError(
+                "Only the LOW band may use the fast review path (pending hub decision)."
+            )
         if any(p < 0 for p in self.severity_points.values()):
             raise ValueError("severity_points must not be negative.")
         return self
