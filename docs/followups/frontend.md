@@ -93,3 +93,33 @@ The reviewer's only "blocker" was a possible Prettier failure it could not run; 
 - `two-factor-enroll.tsx:48`: the challenge token is in the React Query key; use a constant key.
 - `client.ts:18-23`: every authenticated request is cloned up front; watch for large code bodies (NFR-01).
 - `two-factor-verify-form.tsx:49`: the code is trimmed twice.
+
+## frontend/step-3 (staff shell and Settings, FE-03)
+
+Built against MSW mocks; the `/v1/admin/*` paths are placeholders in `apps/web/openapi/openapi.yaml`.
+
+### Needed shared and contract changes for ARC-02 and BE-03 (web used web-local copies)
+
+- **[ARC-02] The shared permission matrix skeleton has gaps the staff shell needed.** `packages/shared/src/permissions.ts` has no entry for Reports (Step 14) or candidate erasure (NFR-05, D-19), so `apps/web/src/features/staff/permissions.ts` adds `report:read` (SUPER_ADMIN, RECRUITER, REVIEWER) and `candidate:erase` (SUPER_ADMIN) locally. Add both to shared, then delete `LOCAL_ROLE_PERMISSIONS`. The Candidates sidebar item is gated by `invitation:create` or `candidate:erase` because there is no `candidate:read`; add one.
+- **[ARC-02] `OrgSettings` and the form schemas belong in shared.** ADR 0007 section 6 says shared defines `OrgSettings`. Web-local copies are in `apps/web/src/features/admin/schemas.ts` (invite, retention 7..730, risk points 0..100, cap 1..20, MEDIUM 1..99 < HIGH 2..100, weights 0..5, consent version and body limits, decline contact up to 300 characters). The API must enforce the same bounds.
+- **[ARC-02] Decide the org-settings and admin endpoints** (placeholders: `GET/POST /v1/admin/users`, `PATCH /v1/admin/users/{id}`, `GET/PATCH /v1/admin/settings`, `GET/POST /v1/admin/consent-texts`, `PUT /v1/admin/consent-texts/{id}/current`, `GET /v1/admin/candidates`, `POST /v1/admin/candidates/{id}/erasure`) and add them to fsd.md section 4 (it has none of them). The consent list also returns `legalApprovalRequired` (REQUIRE_LEGAL_APPROVED_CONSENT, ADR 0007) so the UI can disable "Use as current" for a placeholder; the API must refuse it too (409). Legal approval is recorded outside this UI (Q-43); there is no approve action.
+- **[BE-03] Staff user rules the UI assumes:** a Super Admin cannot change their own role or deactivate themselves, nor remove the last Super Admin (409); deactivation revokes refresh tokens; an invite creates a user in an `invited` state until the first sign-in. Erasure answers 202 with the candidate's erasure state (`waiting` with `waitingFor` review or appeal, `queued`, `erased`).
+- **[ARC-02] Risk settings shape.** Web sends the full `risk` object (points per severity, cap, band minimums, weights keyed by event type). Confirm that shape against ADR 0005 and ADR 0007 section 6, including what happens to an event type added later (web falls back to the shared default weight).
+- **[ARC-02] Default roles for Review and Live:** the shared skeleton gives SUPER_ADMIN review and live rights (BE-03 open question). The sidebar follows it; if BE-03 removes them, the nav follows automatically.
+
+### Should-fix
+
+1. **Candidate-erasure confirmation is a single click.** TC-094 and D-19 are irreversible; consider typing the candidate's email to confirm, once Legal confirms the flow.
+2. **The users and consent tables are client-side only.** `DataTable` filters, sorts and pages in the browser; switch to server-side paging behind the same props before lists can exceed a few thousand rows (candidates will, in Step 5).
+3. **No keyboard shortcuts for navigation yet.** The shell has none; the review workspace shortcuts come with Step 11. A `g` then letter sequence for the sidebar would fit staff users.
+4. **`MswInit` starts the worker twice under React StrictMode in `next dev`.** The dev server logs "cannot configure an already enabled network" as an unhandled rejection (same file as step-1 item 1; give it a `.catch` and a start guard).
+5. **Settings tabs are links, not a tablist.** Fine for now (they navigate); keep as nav links.
+6. **Screenshots not produced.** No PR was opened; capture them when the PR is created.
+7. **The deactivate and erase confirmations are Radix dialogs inside the table page;** focus returns to the trigger button on close, but the row can re-render and lose it (the row button for a just-deactivated user turns into Reactivate). Move focus to the table caption after the action if screen reader users report it.
+
+### Nits
+
+- The mock admin state is in memory, so a reload resets it, unlike the auth state which uses a cookie.
+- Weight inputs in the risk table are `type=number`; the browser's spinner can change a value on scroll. Consider `type=text inputMode=decimal` with the same zod rules.
+- `DataTable` search matches only columns that give a `sortValue` or `searchValue`.
+- `welcome-panel.tsx` still lives under `features/auth`; move it to `features/staff` when the real dashboard arrives. `UserBadge` and `SignOutButton` are now unused by the shell (kept for `ROLE_LABELS` and tests).
