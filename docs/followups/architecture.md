@@ -45,17 +45,19 @@ Verdict: approve after the blocker fixes below. Fixed on this branch: `RunReques
 
 The [ARC-02] items under "frontend/step-2" in docs/followups/frontend.md (staff auth schemas, endpoints, 2FA challenge, password policy, fragment tokens) are architecture-hub work and are tracked there.
 
-## Compliance amendments to ADR 0004 and ADR 0001 (C-04, C-06, C-10, C-17, C-18; branch arc/compliance-adr-amendments)
+## Compliance amendments to ADR 0004 and ADR 0001 (C-04, C-06, C-10, C-17, C-18, C-26, C-27; branch arc/compliance-adr-amendments)
 
-Proposed; the owner accepts. Apply these once the ADR 0004 §9 and ADR 0001 §12.4 amendments are accepted. Full list: ADR 0004 §9.6.
+Proposed; the owner accepts. Apply these once ADR 0004 §9 and ADR 0001 §12.4 are accepted. The full list is in ADR 0004 §9.9.
 
-- [hub] database.md Data rules: replace the retention *Kept.* bullet and the two erasure bullets on the consent PDF and consent record; add R-9 (consent records deleted 3 years after `signed_at`) and the post-erasure access rule; comment on `consents.pdf_key`.
-- [hub] fsd.md FR-401 and FR-704: consent record kept 3 years after signing, then deleted, also after erasure (C-04, C-17). NFR-05: C-06 wording, drop "Provisional".
-- [hub] test-cases.md TC-094: erasure keeps the consent record and PDF; drop "provisional, Legal to confirm". QA adds a TC for the 3-year consent clock.
-- [hub] prompts/database.md Step 6: RetentionService adds R-9; CandidateErasureService stops deleting consent PDFs and blanking the consent record.
-- [hub, PR #39] ADR 0013 5.7: consent PDF row reason ("kept 3 years after signing, through erasure") and the erasure bullet (session prefix only; R-9 deletes the consent prefix). Owner question 16 then closes.
-- [hub, PR #39] ADR 0013 licence gate: overrides for AuraFace and COCO-SSD cite D-28 (updated by C-10) in status.md §9, or the gate also reads docs/compliance/decisions.md.
-- [database] DB-06: implement R-9 and the amended R-6 (tests: TC-072, TC-094, new consent-clock TC).
-- [backend] BE-09: erasure deletes only the session prefix. BE-06: erasure confirmation email says the consent record is kept until its 3-year date.
-- [frontend] FE-03: erase confirmation text mentions the kept consent record.
-- [owner] ADR 0004 §9.7 questions: litigation hold; declined consents on the 3-year clock; erasure clears `invitations.accommodations`.
+- [hub] database.md Data rules, four conflicts: *Eligible* has no 90-day face-image cap (C-27); *Kept* says "until erasure" (C-04, R-9); the erasure rules delete the consent PDF and blank `signed_name`/`ip`/`user_agent` (C-17). Also add R-9, R-10 (1-year results, C-26), the no-session-delete rule and the post-erasure access rule.
+- [hub] fsd.md FR-704: 90-day face-image cap, 3-year consent clock and 1-year results clock. NFR-05: the C-06 wording, dropping "Provisional (D-19, Legal to confirm)". FR-401: consent proof kept through erasure.
+- [hub] test-cases.md TC-072 (cap) and TC-094 (keeps the consent proof). QA adds TCs for R-9, R-10 and access to the kept proof.
+- [hub] prompts/database.md Step 6: two-tier R-4, R-9, R-10; the erasure service keeps the consent proof.
+- [hub, with or before #39] ADR 0013: the 5.7 consent PDF row ("kept until erasure"), the 5.7 erasure bullet (it deletes the consent prefix), the §8 BE-09 row (consent PDF prefix), and the CS-4 actor and column allowlists for erased candidates' consents.
+- [hub, #39] ADR 0013 licence gate: one override unit per named model (COCO-SSD manifest plus every shard); entries cite C-10 and D-28.
+- [Delivery Lead] status.md §9: one entry citing C-10 and D-28 that lists the exact `name@sha256` of every AuraFace and COCO-SSD file (the gate reads it). retention-schedule.md: pseudonymisation wording and the IP and browser row. DPIA: 3-year rationale and the legal flags in ADR 0004 §9.8.
+- [database] DB-06: ADR 0004 §9.2 to §9.5 and §9.7.
+- [backend] BE-06 `erasure-completed` template; BE-09 two-tier deletion and prefixes; BE-13 and BE-14 hide erased candidates' consent fields.
+- [integrity] BE-08 embedding cache lifetime (ADR 0004 §9.1).
+- [frontend] FE-03 erase confirmation text.
+- [owner] OQ-10 (legal hold), OQ-11 (declined consents), OQ-12 (accommodations on erasure); the embedding cache under C-18; C-27 scope; the pseudonymisation wording; the BIPA 5-year flag.
