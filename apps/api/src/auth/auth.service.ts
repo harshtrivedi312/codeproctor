@@ -50,6 +50,11 @@ export interface SessionOutcome {
   refreshToken?: string;
 }
 
+/** Short fingerprint of the current password hash; changes whenever the password does. */
+function passwordVersion(passwordHash: string): string {
+  return sha256Hex(passwordHash).slice(0, 16);
+}
+
 class RefreshReuseSignal extends Error {}
 
 @Injectable()
@@ -80,8 +85,10 @@ export class AuthService {
       await this.passwords.burn(password);
       throw this.invalid();
     }
-    if (user.lockedUntil && user.lockedUntil.getTime() > Date.now()) {
-      // Same answer as a wrong password: do not confirm the account exists or is locked.
+    // The attempt is reserved atomically before the password is verified, so parallel guesses
+    // cannot exceed the limit (FU-BE-26). A locked account gets the same answer as a wrong
+    // password: never reveal that the account exists or is locked (FU-BE-22).
+    if (!(await this.reserveAttempt(user.id))) {
       await this.passwords.burn(password);
       throw this.invalid();
     }
@@ -91,11 +98,14 @@ export class AuthService {
     }
 
     if (user.totpEnabled) {
+      // The password was right: give the reservation back. The 2FA step reserves its own.
+      await this.refundAttempt(user.id);
       return {
         body: { status: 'two_factor_required', challengeToken: this.challenge(user) },
       };
     }
     if (TOTP_REQUIRED_ROLES.includes(user.role)) {
+      await this.refundAttempt(user.id);
       return {
         body: {
           status: 'two_factor_enrollment_required',
@@ -108,18 +118,63 @@ export class AuthService {
 
   // ---- FR-102: TOTP -------------------------------------------------------------------------
 
-  /** Validates a 2FA challenge token and returns the user it was issued to. */
-  resolveChallenge(token: string): string {
-    let claims: { sub?: unknown; kind?: unknown };
+  /**
+   * Validates a 2FA challenge token and returns the user and its single-use id. The challenge is
+   * bound to the password it was issued under, so a reset invalidates it (FU-BE-27).
+   */
+  async resolveChallenge(token: string): Promise<{ userId: string; jti: string }> {
+    let claims: { sub?: unknown; kind?: unknown; jti?: unknown; pwv?: unknown };
     try {
-      claims = this.tokens.verify(token) as { sub?: unknown; kind?: unknown };
+      claims = this.tokens.verify(token) as typeof claims;
     } catch {
-      throw new UnauthorizedException('Your sign-in has expired. Sign in again.');
+      throw this.challengeExpired();
     }
-    if (claims.kind !== 'challenge' || typeof claims.sub !== 'string') {
-      throw new UnauthorizedException('Your sign-in has expired. Sign in again.');
+    if (
+      claims.kind !== 'challenge' ||
+      typeof claims.sub !== 'string' ||
+      typeof claims.jti !== 'string' ||
+      typeof claims.pwv !== 'string'
+    ) {
+      throw this.challengeExpired();
     }
-    return claims.sub;
+    const user = await this.prisma.client.user.findUnique({ where: { id: claims.sub } });
+    if (
+      !user?.isActive ||
+      !user.passwordHash ||
+      passwordVersion(user.passwordHash) !== claims.pwv
+    ) {
+      throw this.challengeExpired();
+    }
+    return { userId: user.id, jti: claims.jti };
+  }
+
+  private challengeExpired(): UnauthorizedException {
+    return new UnauthorizedException('Your sign-in has expired. Sign in again.');
+  }
+
+  /**
+   * Runs `fn` with the challenge marked used (Redis SET NX), so one challenge cannot mint two
+   * sessions. The mark is released when `fn` fails (wrong code), so retries stay possible.
+   */
+  private async withChallengeUse<T>(jti: string | undefined, fn: () => Promise<T>): Promise<T> {
+    if (jti === undefined) return fn();
+    const key = `auth:challenge:used:${jti}`;
+    let claimed: string | null;
+    try {
+      if (this.redis.status === 'wait' || this.redis.status === 'end') await this.redis.connect();
+      claimed = await this.redis.set(key, '1', 'EX', CHALLENGE_TTL_SECONDS, 'NX');
+    } catch {
+      claimed = null; // fail closed
+    }
+    if (claimed !== 'OK') throw this.challengeExpired();
+    let succeeded = false;
+    try {
+      const result = await fn();
+      succeeded = true;
+      return result;
+    } finally {
+      if (!succeeded) await this.redis.del(key).catch(() => undefined);
+    }
   }
 
   async startEnrollment(userId: string): Promise<TotpEnrollmentDto> {
@@ -145,14 +200,26 @@ export class AuthService {
     userId: string,
     code: string,
     ctx: RequestContext,
+    challengeJti?: string,
+  ): Promise<{ session?: SessionOutcome; recoveryCodes: string[] }> {
+    return this.withChallengeUse(challengeJti, () =>
+      this.doConfirmEnrollment(userId, code, ctx, challengeJti !== undefined),
+    );
+  }
+
+  private async doConfirmEnrollment(
+    userId: string,
+    code: string,
+    ctx: RequestContext,
     openSession: boolean,
   ): Promise<{ session?: SessionOutcome; recoveryCodes: string[] }> {
     const user = await this.loadActive(userId);
-    this.assertNotLocked(user);
     if (user.totpEnabled) throw new ConflictException('Two-factor authentication is already on.');
+    // A locked account looks exactly like a wrong code (FU-BE-22, FU-BE-34).
+    if (!(await this.reserveAttempt(user.id))) throw this.invalidCode();
     if (!user.totpSecretEnc || !this.totp.verify(user.totpSecretEnc, code)) {
       await this.registerFailure(user, ctx);
-      throw new BadRequestException('That code is not valid.');
+      throw this.invalidCode();
     }
     const codes = Array.from({ length: RECOVERY_CODE_COUNT }, newRecoveryCode);
     const enabled = await this.prisma.client.user.updateMany({
@@ -162,17 +229,32 @@ export class AuthService {
     if (enabled.count === 0)
       throw new ConflictException('Two-factor authentication is already on.');
     await this.audit(user, 'AUTH_TOTP_ENABLED', ctx);
-    if (!openSession) return { recoveryCodes: codes };
+    if (!openSession) {
+      await this.clearFailures(user.id);
+      return { recoveryCodes: codes };
+    }
     return { session: await this.startSession(user), recoveryCodes: codes };
   }
 
   /** Completes a login with a TOTP code or a recovery code (FR-102, ADR 0003 section 1). */
-  async completeLogin(userId: string, code: string, ctx: RequestContext): Promise<SessionOutcome> {
+  async completeLogin(
+    userId: string,
+    code: string,
+    ctx: RequestContext,
+    challengeJti: string,
+  ): Promise<SessionOutcome> {
+    return this.withChallengeUse(challengeJti, () => this.doCompleteLogin(userId, code, ctx));
+  }
+
+  private async doCompleteLogin(
+    userId: string,
+    code: string,
+    ctx: RequestContext,
+  ): Promise<SessionOutcome> {
     const user = await this.loadActive(userId);
-    this.assertNotLocked(user);
-    if (!user.totpEnabled || !user.totpSecretEnc) {
-      throw new UnauthorizedException('Your sign-in has expired. Sign in again.');
-    }
+    if (!user.totpEnabled || !user.totpSecretEnc) throw this.challengeExpired();
+    // Same status and message as a wrong code, so a locked account is indistinguishable.
+    if (!(await this.reserveAttempt(user.id))) throw this.invalidCode();
     if (/^\d{6}$/.test(code)) {
       if (!this.totp.verify(user.totpSecretEnc, code)) return this.failCode(user, ctx);
     } else {
@@ -190,7 +272,7 @@ export class AuthService {
 
   private async failCode(user: UserWithOrg, ctx: RequestContext): Promise<never> {
     await this.registerFailure(user, ctx);
-    throw new BadRequestException('That code is not valid.');
+    throw this.invalidCode();
   }
 
   // ---- FR-104: refresh and logout -----------------------------------------------------------
@@ -349,10 +431,8 @@ export class AuthService {
     return new BadRequestException('This reset link is invalid or has expired.');
   }
 
-  private assertNotLocked(user: User): void {
-    if (user.lockedUntil && user.lockedUntil.getTime() > Date.now()) {
-      throw new UnauthorizedException('Invalid code.');
-    }
+  private invalidCode(): BadRequestException {
+    return new BadRequestException('That code is not valid.');
   }
 
   private async loadActive(id: string): Promise<UserWithOrg> {
@@ -364,22 +444,56 @@ export class AuthService {
     return user;
   }
 
-  /** Atomic failure counter. The 5th failure starts a 15 minute lock (TC-002). */
-  private async registerFailure(user: User, ctx: RequestContext): Promise<void> {
-    const rows = await this.prisma.client.$queryRaw<{ failed_logins: number }[]>(Prisma.sql`
+  /**
+   * Reserves one verification attempt atomically, before the secret is checked (FU-BE-26).
+   * Zero rows means the account is locked or already has MAX_FAILED_LOGINS attempts in flight, so
+   * at most 5 guesses are ever verified per window however many requests arrive together. An
+   * expired lock (or a stuck in-flight window older than two minutes) restarts the count.
+   */
+  private async reserveAttempt(userId: string): Promise<boolean> {
+    const stale = Prisma.sql`(
+      (locked_until IS NOT NULL AND locked_until <= now())
+      OR (locked_until IS NULL AND failed_logins >= ${MAX_FAILED_LOGINS}::int
+          AND updated_at < now() - interval '2 minutes'))`;
+    const rows = await this.prisma.client.$queryRaw<{ id: string }[]>(Prisma.sql`
       UPDATE users SET
-        failed_logins = CASE WHEN locked_until IS NOT NULL AND locked_until <= now()
-                             THEN 1 ELSE failed_logins + 1 END,
-        locked_until = CASE
-          WHEN (CASE WHEN locked_until IS NOT NULL AND locked_until <= now()
-                     THEN 1 ELSE failed_logins + 1 END) >= ${MAX_FAILED_LOGINS}::int
-            THEN now() + make_interval(mins => ${LOCKOUT_MINUTES}::int)
-          WHEN locked_until IS NOT NULL AND locked_until <= now() THEN NULL
-          ELSE locked_until END,
+        failed_logins = CASE WHEN ${stale} THEN 1 ELSE failed_logins + 1 END,
+        locked_until = CASE WHEN ${stale} THEN NULL ELSE locked_until END,
+        updated_at = now()
+      WHERE id = ${userId}::uuid
+        AND (${stale} OR (locked_until IS NULL AND failed_logins < ${MAX_FAILED_LOGINS}::int))
+      RETURNING id`);
+    return rows.length === 1;
+  }
+
+  /** Gives back a reservation whose secret turned out right but whose login is not finished. */
+  private async refundAttempt(userId: string): Promise<void> {
+    await this.prisma.client.$executeRaw`
+      UPDATE users SET failed_logins = failed_logins - 1
+      WHERE id = ${userId}::uuid AND locked_until IS NULL AND failed_logins > 0`;
+  }
+
+  /** Clears the counter after a success, but never a lock a sibling request just set. */
+  private async clearFailures(userId: string): Promise<void> {
+    await this.prisma.client.$executeRaw`
+      UPDATE users SET failed_logins = 0, locked_until = NULL, updated_at = now()
+      WHERE id = ${userId}::uuid AND (locked_until IS NULL OR locked_until <= now())`;
+  }
+
+  /**
+   * A failed guess. The attempt was already counted by reserveAttempt; once all 5 slots are
+   * used, exactly one failing request sets the 15 minute lock and writes the audit row (TC-002).
+   */
+  private async registerFailure(user: User, ctx: RequestContext): Promise<void> {
+    const locked = await this.prisma.client.$queryRaw<{ id: string }[]>(Prisma.sql`
+      UPDATE users SET
+        locked_until = now() + make_interval(mins => ${LOCKOUT_MINUTES}::int),
         updated_at = now()
       WHERE id = ${user.id}::uuid
-      RETURNING failed_logins`);
-    if (rows[0]?.failed_logins === MAX_FAILED_LOGINS) {
+        AND failed_logins >= ${MAX_FAILED_LOGINS}::int
+        AND locked_until IS NULL
+      RETURNING id`);
+    if (locked.length === 1) {
       await this.audit(user, 'AUTH_ACCOUNT_LOCKED', ctx, { minutes: LOCKOUT_MINUTES });
     }
   }
@@ -413,7 +527,14 @@ export class AuthService {
 
   private challenge(user: User): string {
     return this.tokens.sign(
-      { sub: user.id, org: user.orgId, role: user.role, kind: 'challenge' },
+      {
+        sub: user.id,
+        org: user.orgId,
+        role: user.role,
+        kind: 'challenge',
+        jti: randomUUID(),
+        pwv: passwordVersion(user.passwordHash ?? ''),
+      },
       CHALLENGE_TTL_SECONDS,
     );
   }
@@ -428,10 +549,7 @@ export class AuthService {
 
   /** Full sign-in: clears the failure counter and opens a new refresh-token family. */
   private async startSession(user: UserWithOrg): Promise<SessionOutcome> {
-    await this.prisma.client.user.update({
-      where: { id: user.id },
-      data: { failedLogins: 0, lockedUntil: null },
-    });
+    await this.clearFailures(user.id);
     const refreshToken = newOpaqueToken();
     await this.prisma.client.refreshToken.create({
       data: {

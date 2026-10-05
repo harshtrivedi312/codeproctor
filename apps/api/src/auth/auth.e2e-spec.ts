@@ -8,6 +8,8 @@ import { PrismaClient, UserRole } from '../generated/prisma/client';
 import { applyEnv, applyMigrations, startInfra, TestInfra } from '../test/containers';
 import { encryptSecret, sha256Hex } from './crypto.util';
 import type { MailPort } from '../mail/mail.port';
+import type { PasswordService } from './password.service';
+import type { TotpService } from './totp.service';
 
 const API = '/api/v1/auth';
 const PASSWORD = 'Correct-Horse-9';
@@ -36,6 +38,8 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
   // out of the test output and collect them instead.
   const logged: string[] = [];
   let stdout: jest.SpyInstance;
+  let passwordVerify: jest.SpyInstance;
+  let totpVerify: jest.SpyInstance;
 
   beforeAll(async () => {
     stdout = jest.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
@@ -61,6 +65,14 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
     app = moduleRef.createNestApplication<INestApplication<App>>();
     configureApp(app);
     await app.init();
+    const { PasswordService: Passwords } =
+      jest.requireActual<typeof import('./password.service')>('./password.service');
+    const { TotpService: Totp } =
+      jest.requireActual<typeof import('./totp.service')>('./totp.service');
+    const passwords: PasswordService = app.get(Passwords);
+    const totp: TotpService = app.get(Totp);
+    passwordVerify = jest.spyOn(passwords, 'verify');
+    totpVerify = jest.spyOn(totp, 'verify');
   });
 
   afterAll(async () => {
@@ -156,7 +168,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       await request(app.getHttpServer())
         .post(`${API}/2fa/verify`)
         .send({ challengeToken: first.challengeToken, code: '000000' })
-        .expect(400);
+        .expect(401);
     });
 
     it('TC-001: wrong password, unknown email and a pending invite all get the same generic 401', async () => {
@@ -285,9 +297,10 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         .post(`${API}/2fa/verify`)
         .send({ challengeToken, code: code.toLowerCase() })
         .expect(200);
+      const second = (await login(u.email).expect(200)).body as Body;
       await request(app.getHttpServer())
         .post(`${API}/2fa/verify`)
-        .send({ challengeToken, code })
+        .send({ challengeToken: second.challengeToken, code })
         .expect(400);
       const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
       expect(row.recoveryCodeHashes).toEqual([sha256Hex(other)]);
@@ -309,7 +322,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       await request(app.getHttpServer())
         .post(`${API}/2fa/verify`)
         .send({ challengeToken, code: authenticator.generate('JBSWY3DPEHPK3PXP') })
-        .expect(401);
+        .expect(400);
     });
 
     it('FR-102: a recruiter can turn on optional 2FA while signed in', async () => {
@@ -326,6 +339,186 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         .expect(200);
       expect((res.body as Body).recoveryCodes).toHaveLength(10);
       expect(((await login(u.email).expect(200)).body as Body).status).toBe('two_factor_required');
+    });
+  });
+
+  describe('TC-002 (FR-101): lockout under concurrency (FU-BE-26)', () => {
+    const verify2fa = (challengeToken: string, code: string): request.Test =>
+      request(app.getHttpServer()).post(`${API}/2fa/verify`).send({ challengeToken, code });
+
+    it('TC-002: 10 parallel wrong logins verify at most 5 passwords, lock once, and the correct password is then refused with the same generic 401', async () => {
+      const u = await createUser();
+      passwordVerify.mockClear();
+      const results = await Promise.all(
+        Array.from({ length: 10 }, (_, i) => login(u.email, `wrong-password-${i}`)),
+      );
+      expect(results.every((r) => r.status === 401)).toBe(true);
+      expect(new Set(results.map((r) => (r.body as Body).detail))).toEqual(
+        new Set(['Invalid email or password.']),
+      );
+      // burn() also calls verify, but with a dummy hash; count only checks against the account's own.
+      const stored = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      const realVerifies = passwordVerify.mock.calls.filter(
+        (c: unknown[]) => c[0] === stored.passwordHash,
+      );
+      expect(realVerifies.length).toBeLessThanOrEqual(5);
+      expect(realVerifies.length).toBeGreaterThan(0);
+
+      const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      expect(row.lockedUntil?.getTime() ?? 0).toBeGreaterThan(Date.now());
+      expect(
+        await prisma.auditLog.count({ where: { actorId: u.id, action: 'AUTH_ACCOUNT_LOCKED' } }),
+      ).toBe(1);
+
+      const refused = await login(u.email).expect(401);
+      expect((refused.body as Body).detail).toBe('Invalid email or password.');
+      expect(JSON.stringify(refused.body)).not.toMatch(/lock/i);
+    });
+
+    it('TC-002: a correct password in a burst of wrong ones never clears a lock a sibling set', async () => {
+      const u = await createUser();
+      const results = await Promise.all([
+        ...Array.from({ length: 8 }, (_, i) => login(u.email, `wrong-password-${i}`)),
+        login(u.email),
+      ]);
+      expect(results.filter((r) => r.status === 200).length).toBeLessThanOrEqual(1);
+      const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      if (!results.some((r) => r.status === 200)) {
+        expect(row.lockedUntil?.getTime() ?? 0).toBeGreaterThan(Date.now());
+      }
+    });
+
+    it('TC-002: 10 parallel wrong 2FA codes verify at most 5, lock the account, and a correct code is then refused exactly like a wrong one', async () => {
+      const secret = 'JBSWY3DPEHPK3PXP';
+      const u = await createUser({ role: UserRole.REVIEWER, totp: secret });
+      // One challenge per request: a challenge is single use, so a shared one would serialise them.
+      const challenges: string[] = [];
+      for (let i = 0; i < 10; i++) {
+        challenges.push(((await login(u.email).expect(200)).body as Body).challengeToken);
+      }
+      const challengeToken = challenges[0] ?? '';
+      totpVerify.mockClear();
+      const results = await Promise.all(challenges.map((c) => verify2fa(c, '000000')));
+      expect(results.every((r) => r.status === 400)).toBe(true);
+      expect(totpVerify.mock.calls.length).toBeLessThanOrEqual(5);
+      const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      expect(row.lockedUntil?.getTime() ?? 0).toBeGreaterThan(Date.now());
+      expect(
+        await prisma.auditLog.count({ where: { actorId: u.id, action: 'AUTH_ACCOUNT_LOCKED' } }),
+      ).toBe(1);
+
+      const wrong = await verify2fa(challengeToken, '000000');
+      const right = await verify2fa(challengeToken, authenticator.generate(secret));
+      expect(right.status).toBe(wrong.status);
+      expect((right.body as Body).detail).toBe((wrong.body as Body).detail);
+      expect(right.headers['set-cookie']).toBeUndefined();
+    });
+
+    it('FR-101: a locked account never reveals the lock on login or 2FA (FU-BE-22, FU-BE-34)', async () => {
+      const secret = 'JBSWY3DPEHPK3PXP';
+      const u = await createUser({ role: UserRole.REVIEWER, totp: secret });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      await prisma.user.update({
+        where: { id: u.id },
+        data: { failedLogins: 5, lockedUntil: new Date(Date.now() + 600_000) },
+      });
+      const wrongCode = await verify2fa(challengeToken, '000000');
+      const rightCode = await verify2fa(challengeToken, authenticator.generate(secret));
+      expect(wrongCode.status).toBe(400);
+      expect(rightCode.status).toBe(400);
+      const strip = (b: unknown): object => ({ ...(b as object), traceId: undefined });
+      expect(strip(rightCode.body)).toEqual(strip(wrongCode.body));
+      const loginRes = await login(u.email).expect(401);
+      expect(JSON.stringify(loginRes.body)).not.toMatch(/lock/i);
+    });
+  });
+
+  describe('FR-102 challenge token hardening (FU-BE-27)', () => {
+    const post = (path: string, body: Record<string, string>): request.Test =>
+      request(app.getHttpServer()).post(`${API}/${path}`).send(body);
+
+    it('TC-003: a challenge is single use; reuse after a successful verify is refused even with a valid code', async () => {
+      const secret = 'JBSWY3DPEHPK3PXP';
+      const u = await createUser({ role: UserRole.REVIEWER, totp: secret });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      await post('2fa/verify', { challengeToken, code: authenticator.generate(secret) }).expect(
+        200,
+      );
+      const reuse = await post('2fa/verify', {
+        challengeToken,
+        code: authenticator.generate(secret),
+      }).expect(401);
+      expect(reuse.headers['set-cookie']).toBeUndefined();
+      expect(await prisma.refreshToken.count({ where: { userId: u.id } })).toBe(1);
+    });
+
+    it('TC-003: two parallel verifies with one challenge mint only one session', async () => {
+      const secret = 'JBSWY3DPEHPK3PXP';
+      const u = await createUser({ role: UserRole.REVIEWER, totp: secret });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      const code = authenticator.generate(secret);
+      const results = await Promise.all([
+        post('2fa/verify', { challengeToken, code }),
+        post('2fa/verify', { challengeToken, code }),
+      ]);
+      expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+      expect(await prisma.refreshToken.count({ where: { userId: u.id } })).toBe(1);
+    });
+
+    it('TC-003: a challenge issued before a password reset is refused afterwards, for verify and for enrolment', async () => {
+      const secret = 'JBSWY3DPEHPK3PXP';
+      const withTotp = await createUser({ role: UserRole.REVIEWER, totp: secret });
+      const needsEnrol = await createUser({ role: UserRole.SUPER_ADMIN });
+      const verifyChallenge = ((await login(withTotp.email).expect(200)).body as Body)
+        .challengeToken;
+      const enrolChallenge = ((await login(needsEnrol.email).expect(200)).body as Body)
+        .challengeToken;
+
+      for (const u of [withTotp, needsEnrol]) {
+        // Seed a reset token directly so this test does not spend the per-IP forgot budget.
+        const token = `reset-token-${u.id}-padding-padding`;
+        await prisma.user.update({
+          where: { id: u.id },
+          data: {
+            setPasswordTokenHash: sha256Hex(token),
+            setPasswordExpiresAt: new Date(Date.now() + 600_000),
+          },
+        });
+        await request(app.getHttpServer())
+          .post(`${API}/password/reset`)
+          .send({ token, newPassword: 'A-Brand-New-Passphrase-1' })
+          .expect(204);
+      }
+
+      await post('2fa/verify', {
+        challengeToken: verifyChallenge,
+        code: authenticator.generate(secret),
+      }).expect(401);
+      await post('2fa/enroll/start', { challengeToken: enrolChallenge }).expect(401);
+      await post('2fa/enroll/confirm', { challengeToken: enrolChallenge, code: '123456' }).expect(
+        401,
+      );
+    });
+
+    it('TC-003: an access token is refused as a challenge', async () => {
+      const u = await createUser();
+      const { session } = (await login(u.email).expect(200)).body as Body;
+      await post('2fa/verify', { challengeToken: session.accessToken, code: '123456' }).expect(401);
+      await post('2fa/enroll/start', { challengeToken: session.accessToken }).expect(401);
+      await post('2fa/enroll/confirm', {
+        challengeToken: session.accessToken,
+        code: '123456',
+      }).expect(401);
+    });
+
+    it('FR-102: a wrong code does not burn the challenge; the right one still works once', async () => {
+      const secret = 'JBSWY3DPEHPK3PXP';
+      const u = await createUser({ role: UserRole.REVIEWER, totp: secret });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      await post('2fa/verify', { challengeToken, code: '000000' }).expect(400);
+      await post('2fa/verify', { challengeToken, code: authenticator.generate(secret) }).expect(
+        200,
+      );
     });
   });
 

@@ -86,8 +86,9 @@ export class AuthController {
   @ApiOperation({ summary: 'Begin forced TOTP enrollment with the login challenge (FR-102)' })
   @ApiOkResponse({ type: TotpEnrollmentDto })
   @ApiUnauthorizedResponse({ description: 'Challenge expired' })
-  enrollStart(@Body() dto: ChallengeDto): Promise<TotpEnrollmentDto> {
-    return this.auth.startEnrollment(this.auth.resolveChallenge(dto.challengeToken));
+  async enrollStart(@Body() dto: ChallengeDto): Promise<TotpEnrollmentDto> {
+    const challenge = await this.auth.resolveChallenge(dto.challengeToken);
+    return this.auth.startEnrollment(challenge.userId);
   }
 
   @Public()
@@ -102,8 +103,13 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<EnrollmentConfirmedDto> {
-    const userId = this.auth.resolveChallenge(dto.challengeToken);
-    const result = await this.auth.confirmEnrollment(userId, dto.code, ctxOf(req), true);
+    const challenge = await this.auth.resolveChallenge(dto.challengeToken);
+    const result = await this.auth.confirmEnrollment(
+      challenge.userId,
+      dto.code,
+      ctxOf(req),
+      challenge.jti,
+    );
     if (result.session) setRefreshCookie(res, result.session);
     return { session: result.session?.body.session, recoveryCodes: result.recoveryCodes };
   }
@@ -120,8 +126,13 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<AuthSessionDto | undefined> {
-    const userId = this.auth.resolveChallenge(dto.challengeToken);
-    const outcome = await this.auth.completeLogin(userId, dto.code, ctxOf(req));
+    const challenge = await this.auth.resolveChallenge(dto.challengeToken);
+    const outcome = await this.auth.completeLogin(
+      challenge.userId,
+      dto.code,
+      ctxOf(req),
+      challenge.jti,
+    );
     setRefreshCookie(res, outcome);
     return outcome.body.session;
   }
@@ -148,7 +159,7 @@ export class AuthController {
     @Body() dto: TotpCodeDto,
     @Req() req: AuthedRequest,
   ): Promise<EnrollmentConfirmedDto> {
-    const result = await this.auth.confirmEnrollment(this.userId(req), dto.code, ctxOf(req), false);
+    const result = await this.auth.confirmEnrollment(this.userId(req), dto.code, ctxOf(req));
     return { recoveryCodes: result.recoveryCodes };
   }
 
