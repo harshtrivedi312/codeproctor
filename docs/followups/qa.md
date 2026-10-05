@@ -375,14 +375,14 @@ The manual script is a secondary level for TCs that already have an automated le
 | Compliance proposal (k) | M-01 | manual (secondary) | P1 | age confirmation; TC ID pending |
 | Compliance proposal (b), (d) | M-02, M-01 step 9 | manual (secondary) | P2 | decline contact, retention link; TC ID pending |
 | Compliance proposal (e) | M-06 | manual (secondary) | P1 (privacy) | demographics, blocked until FAIR-01; TC ID pending |
-| TC-090 | packages/qa/load | load (k6) | P1 | script added by QA B (see B.2); status stays Planned until DEP-01 |
-| TC-091 | packages/qa/load | load (k6) | P2 | same |
+| TC-090 | packages/qa/k6 | load (k6) | P1 | script added by QA B (see B.2); status stays Planned until DEP-01 |
+| TC-091 | packages/qa/k6 | load (k6) | P2 | same |
 | TC-093 | packages/qa/zap | scan (ZAP) | P1 | config added by QA B; status stays Planned until DEP-01 |
 | TC-065, TC-053, TC-054, TC-056, TC-064, TC-036 | docs/qa/redteam-plan.md | manual / red team | P1/P2 | QA-02 adversarial re-attempts; report goes to docs/red-team-report.md after DEP-01 |
 
 ### B.2 Notes on the existing k6 scripts (packages/qa/k6, QA A)
 
-`packages/qa/k6/tc-090-load.js` and `tc-091-code-run.js` use placeholder paths (`/v1/sessions/current/...`) that match neither FSD section 4 nor ADR 0013, and they do not send presign, confirm, keystrokes or signed batches. QA B's scripts in `packages/qa/load/` use the ADR 0013 routes and the real cadence (R-02) and are meant to replace them. Once they merge, QA A or the hub should point `.github/workflows/qa.yml` at `packages/qa/load/` (see the CI list in B.4) and delete `packages/qa/k6/`.
+QA B has replaced the placeholder `packages/qa/k6/tc-090-load.js` and `tc-091-code-run.js` in place (PR #77). The old scripts used placeholder paths (`/v1/sessions/current/...`) that matched neither FSD section 4 nor ADR 0013, and sent no presign, confirm, keystrokes or signed batches. The new ones use the ADR 0013 routes and the real cadence (R-02). The hub should update the k6 job in `.github/workflows/qa.yml` (see B.4).
 
 ### B.3 Doc disagreements found (for the hub)
 
