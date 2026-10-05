@@ -177,6 +177,7 @@ enum AppealStatus {
   OPEN
   UPHELD
   OVERTURNED
+  CLOSED_ERASED
 
   @@map("appeal_status")
 }
