@@ -291,9 +291,10 @@ Decisions taken by the Delivery Lead under the owner's delegation (order, priori
 | P-04 | B-05 Legal pilot entry items (unchanged) | Legal |
 | P-05 | Production CSP: allow `'wasm-unsafe-eval'` (never `'unsafe-eval'`), only on the candidate test route, so that MediaPipe, onnxruntime and the tfjs wasm backends run. Hub recommends yes, with a CSP test proving the directive is absent elsewhere | Security trade-off that loosens CSP |
 | P-06 | Auto-fix on PRs: D-40 (2026-10-02) says it stays off; CLAUDE.md rule 4 (2026-10-05) says switch it on. Sessions follow CLAUDE.md (it is newer and says it wins); the DB session switched it on for #30. Confirm, or say which one should change | Shared rules / owner decision conflict |
+| P-07 | May the Integrity session download AuraFace `glintr100.onnx` (fal/AuraFace-v1, pinned SHA-256, Apache 2.0 per D-05) for a local, opt-in real-model test run? Until then the face-match PR ships with a fake backend only | File download from an external source |
 
 ## 10. Next 3 tasks, blockers, decisions
 
 - **Next 3 tasks on the critical path:** #26 merge (BE-02 hardening); #30 merge (DB-05, after DL-01 fixes); BE-03 (DL-02).
 - **Blockers:** GitHub Actions outage (external; affects every merge). B-05 blocks only the pilot.
-- **Decisions needed from the owner:** section 9b "Parked for the owner" (P-01 to P-06).
+- **Decisions needed from the owner:** section 9b "Parked for the owner" (P-01 to P-07).
