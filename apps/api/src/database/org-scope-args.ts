@@ -171,7 +171,7 @@ function assertNoOrgMove(
     throw violation(
       model,
       operation,
-      'orgId cannot be written by an update, in system scope or any other (a row is never moved to another org).',
+      'orgId cannot be written by an update in system scope (a row is never moved to another org).',
     );
   }
 }

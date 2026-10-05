@@ -1811,7 +1811,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         system(() =>
           prisma.client.user.update({ where: { id: M.userId }, data: { orgId: N.orgId } }),
         ),
-      ).rejects.toThrow(/orgId cannot be written by an update/);
+      ).rejects.toThrow(/orgId cannot be written by an update in system scope/);
       // The { set } form, and naming the row's own org: the key itself is refused, whatever the value.
       await expect(
         system(() =>

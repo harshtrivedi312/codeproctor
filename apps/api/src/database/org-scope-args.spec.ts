@@ -454,7 +454,9 @@ describe('system scope: a scalar orgId cannot move a row (ADR 0006 section 8; NF
         message = (error as Error).message;
       }
       expect(message).toContain(`User.${operation}`);
-      expect(message).toContain('orgId cannot be written by an update');
+      expect(message).toContain('orgId cannot be written by an update in system scope');
+      // Org scope does not refuse the key: an update may name the caller's own orgId there.
+      expect(message).not.toContain('or any other');
       expect(message).not.toContain(ORG_X);
     });
 
