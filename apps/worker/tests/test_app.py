@@ -171,3 +171,25 @@ def test_nfr01_fr803_request_with_many_submissions_and_large_starter_is_fast_eno
     # so the bound is deliberately loose; the call-count test above is what catches
     # per-submission re-preparation.
     assert elapsed < 60.0, f"{elapsed:.2f}s for 120 submissions"
+
+
+def test_fr805_c28_risk_route_returns_review_path_queue_rank_and_always_needs_review() -> None:
+    low = client.post("/risk", json={"events": []}, headers=AUTH).json()
+    assert low["band"] == "LOW" and low["needs_review"] is True
+    assert low["review_path"] == "fast" and low["review_reasons"] == ["RISK_LOW"]
+    held = client.post(
+        "/risk", json={"events": [], "identity_review_pending": True}, headers=AUTH
+    ).json()
+    assert held["review_path"] == "full" and "IDENTITY_MANUAL_REVIEW" in held["review_reasons"]
+    high = client.post(
+        "/risk",
+        json={
+            "events": [
+                {"type": t}
+                for t in ["MULTIPLE_FACES", "PHONE_DETECTED", "TAB_SWITCH", "NO_FACE", "GAZE_AWAY"]
+            ]
+        },
+        headers=AUTH,
+    ).json()
+    assert high["band"] == "HIGH" and high["review_path"] == "full"
+    assert high["queue_rank"] < low["queue_rank"]
