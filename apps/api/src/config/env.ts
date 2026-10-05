@@ -52,6 +52,8 @@ export const envSchema = z
     // Code runner (BE-05, FR-503). Unset means runs fail as "unavailable". Token is a secret.
     JUDGE0_URL: z.url().optional(),
     JUDGE0_AUTH_TOKEN: z.string().min(1).optional(),
+    // Judge0 AUTHZ token (X-Auth-User): needed to DELETE submissions after use. Never log.
+    JUDGE0_AUTHZ_TOKEN: z.string().min(1).optional(),
     JUDGE0_REQUEST_TIMEOUT_MS: positiveInt.default(10_000),
     JUDGE0_POLL_DEADLINE_MS: positiveInt.default(60_000),
   })
@@ -81,6 +83,13 @@ export const envSchema = z
         ctx.addIssue({
           code: 'custom',
           path: ['JUDGE0_AUTH_TOKEN'],
+          message: 'is required in pilot and production, at least 32 characters',
+        });
+      }
+      if (!env.JUDGE0_AUTHZ_TOKEN || env.JUDGE0_AUTHZ_TOKEN.length < 32) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['JUDGE0_AUTHZ_TOKEN'],
           message: 'is required in pilot and production, at least 32 characters',
         });
       }

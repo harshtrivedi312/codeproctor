@@ -5,6 +5,8 @@ import type { Judge0Client, Judge0RawResult, Judge0Submission } from './judge0.t
 export interface HttpJudge0Options {
   readonly baseUrl: string;
   readonly authToken?: string;
+  /** Judge0 AUTHZ token, sent as X-Auth-User. Judge0 requires it for DELETE /submissions/:token. */
+  readonly authzToken?: string;
   /** Per HTTP request timeout. */
   readonly requestTimeoutMs: number;
   /**
@@ -180,6 +182,9 @@ export class HttpJudge0Client implements Judge0Client {
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (this.options.authToken) headers['X-Auth-Token'] = this.options.authToken;
+    if (method === 'DELETE' && this.options.authzToken) {
+      headers['X-Auth-User'] = this.options.authzToken;
+    }
     return this.fetchFn(`${this.base}${path}`, {
       method,
       headers,

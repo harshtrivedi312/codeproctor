@@ -69,9 +69,16 @@ describe('NFR-04 environment validation', () => {
       APP_ENV: 'pilot',
       JUDGE0_URL: 'https://judge0.example.com',
       JUDGE0_AUTH_TOKEN: token,
+      JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
     };
     expect(validateEnv(live).JUDGE0_URL).toBe('https://judge0.example.com');
     expect(() => validateEnv({ ...live, JUDGE0_URL: undefined })).toThrow(/JUDGE0_URL/);
+    expect(() => validateEnv({ ...live, JUDGE0_AUTHZ_TOKEN: undefined })).toThrow(
+      /JUDGE0_AUTHZ_TOKEN/,
+    );
+    expect(() => validateEnv({ ...live, JUDGE0_AUTHZ_TOKEN: 'short-authz' })).toThrow(
+      /JUDGE0_AUTHZ_TOKEN/,
+    );
     expect(() => validateEnv({ ...live, JUDGE0_AUTH_TOKEN: undefined })).toThrow(
       /JUDGE0_AUTH_TOKEN/,
     );

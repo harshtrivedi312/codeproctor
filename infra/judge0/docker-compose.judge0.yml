@@ -5,7 +5,7 @@
 # on the Linux x86 runner or VM that ARC-05 confirms. It is not started by CI.
 #
 # Use:  docker compose -f infra/judge0/docker-compose.judge0.yml --env-file .env up -d
-# Needs JUDGE0_AUTH_TOKEN, JUDGE0_DB_PASSWORD and JUDGE0_REDIS_PASSWORD in the environment (no defaults on purpose).
+# Needs JUDGE0_AUTH_TOKEN, JUDGE0_AUTHZ_TOKEN, JUDGE0_DB_PASSWORD and JUDGE0_REDIS_PASSWORD in the environment (no defaults on purpose).
 #
 # Isolation:
 #   - judge0_internal is `internal: true`: no route to the internet. db, redis and the workers are
@@ -28,6 +28,10 @@ x-judge0-env: &judge0-env
   # Authenticate callers with X-Auth-Token (JUDGE0_AUTH_TOKEN in the API).
   AUTHN_HEADER: X-Auth-Token
   AUTHN_TOKEN: ${JUDGE0_AUTH_TOKEN:?set JUDGE0_AUTH_TOKEN}
+  # Judge0 authorizes DELETE /submissions/:token separately (X-Auth-User); without AUTHZ_TOKEN it
+  # answers 403. The API sends JUDGE0_AUTHZ_TOKEN on DELETE.
+  AUTHZ_HEADER: X-Auth-User
+  AUTHZ_TOKEN: ${JUDGE0_AUTHZ_TOKEN:?set JUDGE0_AUTHZ_TOKEN}
   # The API sends enable_network=false; refuse anyone who tries to turn it on.
   ALLOW_ENABLE_NETWORK: 'false'
   ALLOW_ENABLE_PER_PROCESS_AND_THREAD_TIME_LIMIT: 'false'
@@ -49,7 +53,7 @@ x-judge0-env: &judge0-env
   ENABLE_COMPILER_OPTIONS: 'false'
   ENABLE_COMMAND_LINE_ARGUMENTS: 'false'
   # The API DELETEs each submission once its results are read, so candidate source, stdin and
-  # hidden test data do not stay in Judge0's database. Delete is behind AUTHN_TOKEN above.
+  # hidden test data do not stay in Judge0's database. Delete needs AUTHN and AUTHZ tokens above.
   ENABLE_SUBMISSION_DELETE: 'true'
   ENABLE_CALLBACKS: 'false'
   # Workers run this many sandboxes at once; tune on the real host.

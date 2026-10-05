@@ -16,6 +16,7 @@ import type { Judge0Client } from './judge0.types';
         return new HttpJudge0Client({
           baseUrl,
           authToken: config.get('JUDGE0_AUTH_TOKEN', { infer: true }),
+          authzToken: config.get('JUDGE0_AUTHZ_TOKEN', { infer: true }),
           requestTimeoutMs: config.get('JUDGE0_REQUEST_TIMEOUT_MS', { infer: true }),
           pollDeadlineMs: config.get('JUDGE0_POLL_DEADLINE_MS', { infer: true }),
         });

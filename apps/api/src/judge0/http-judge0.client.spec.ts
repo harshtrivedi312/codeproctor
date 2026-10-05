@@ -43,6 +43,7 @@ function harness(opts: {
   postStatus?: number;
   deleteStatus?: number;
   deleteThrows?: boolean;
+  authz?: boolean;
   postBody?: unknown;
   pollDeadlineMs?: number;
   maxBatchSize?: number;
@@ -63,6 +64,9 @@ function harness(opts: {
       return Promise.resolve(json(Array.from({ length: n }, () => ({ token: tok(nextToken++) }))));
     }
     if (method === 'DELETE') {
+      // Judge0 CE answers 403 to DELETE without the AUTHZ header.
+      const headers = init.headers as Record<string, string>;
+      if (headers['X-Auth-User'] !== 'authz-456') return Promise.resolve(json({}, 403));
       if (opts.deleteThrows) return Promise.reject(new Error('boom http://secret-host'));
       return Promise.resolve(json({ token: 'x' }, opts.deleteStatus ?? 200));
     }
@@ -73,6 +77,7 @@ function harness(opts: {
   const client = new HttpJudge0Client({
     baseUrl: 'http://judge0.internal:2358/',
     authToken: 'tok-123',
+    authzToken: opts.authz === false ? undefined : 'authz-456',
     requestTimeoutMs: 1000,
     pollDeadlineMs: opts.pollDeadlineMs ?? 5000,
     maxBatchSize: opts.maxBatchSize ?? 2,
@@ -117,6 +122,22 @@ describe('HttpJudge0Client (FR-503)', () => {
     for (const c of h.calls) {
       expect((c.init.headers as Record<string, string>)['X-Auth-Token']).toBe('tok-123');
     }
+  });
+
+  it('FR-503: DELETE carries X-Auth-User, other calls do not, and the fake API accepts it', async () => {
+    const h = harness({ polls: [[finished('x')]] });
+    await h.client.runBatch([sub()]);
+    const header = (m: string) =>
+      (h.calls.find((c) => c.method === m)?.init.headers as Record<string, string>)['X-Auth-User'];
+    expect(header('DELETE')).toBe('authz-456');
+    expect(header('POST')).toBeUndefined();
+    expect(header('GET')).toBeUndefined();
+  });
+
+  it('FR-503: without the AUTHZ token the server refuses DELETE (403); results still return', async () => {
+    const h = harness({ polls: [[finished('ok')]], authz: false });
+    expect((await h.client.runBatch([sub()]))[0]?.stdout).toBe('ok');
+    expect(h.deletes()).toHaveLength(1);
   });
 
   it('FR-503: polls with growing backoff until every submission finished', async () => {
@@ -210,8 +231,7 @@ describe('HttpJudge0Client (FR-503)', () => {
       authToken: 'tok-123',
       requestTimeoutMs: 1000,
       pollDeadlineMs: 1000,
-      fetchFn: () =>
-        Promise.reject(new Error('boom http://secret-host')),
+      fetchFn: () => Promise.reject(new Error('boom http://secret-host')),
     });
     const err = await client.runBatch([sub()]).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(Judge0UnavailableError);
