@@ -12,6 +12,7 @@ import { MOCK_USERS, seedMockRefresh } from '@/mocks/auth-handlers';
 import { server } from '@/mocks/server';
 import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
 import { useQueryClient } from '@tanstack/react-query';
+import { findLoadedTable } from '@/test/table-utils';
 import { CandidatesPage } from './candidates-page';
 import { DataSettingsPage } from './data-settings-page';
 import { adminKeys, useUpdateSettings } from './queries';
@@ -54,6 +55,7 @@ describe('cached API data does not cross users (FR-103, FR-104)', () => {
       </>,
       MOCK_USERS.admin,
     );
+    await findLoadedTable();
     expect(await screen.findByText('Ada Lovelace')).toBeInTheDocument();
 
     await captured.auth!.signOut();
@@ -74,6 +76,7 @@ describe('cached API data does not cross users (FR-103, FR-104)', () => {
     expect(screen.queryByText('Grace Hopper')).not.toBeInTheDocument();
     release();
     // Org B has no candidates: its own empty state renders, and still none of org A's rows.
+    await findLoadedTable();
     expect(await screen.findByTestId('table-empty')).toBeInTheDocument();
     expect(screen.queryByText('Ada Lovelace')).not.toBeInTheDocument();
   });
@@ -191,6 +194,7 @@ describe('cached API data does not cross users (FR-103, FR-104)', () => {
       </>,
       MOCK_USERS.admin,
     );
+    await findLoadedTable();
     await screen.findByText('Ada Lovelace');
 
     const releases: (() => void)[] = [];

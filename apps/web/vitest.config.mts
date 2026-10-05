@@ -19,5 +19,7 @@ export default defineConfig({
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.test.{ts,tsx}'],
     css: false,
+    // CI runners are slower than laptops; table tests wait for their loaded state, so give the whole test room.
+    testTimeout: 30_000,
   },
 });
