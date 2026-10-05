@@ -144,3 +144,4 @@ Observation for proctor-sdk-engineer (low, not a data-loss defect; NFR-08 holds)
 - [ ] Add the BE-10 API test for the server-filled `duration_ms`, including the close at session end.
 - [ ] Remove TC-050 from the known-defect list in `docs/test-matrix.md` (line 15) once both tests pass.
 - [ ] TC-063: the test drops the network for 45 s but expects DISCONNECTED, while FR-609 logs it only after 60 s (ADR 0013 Q13).
+- [ ] Owner: qa-engineer. Assign TC IDs to the ADR 0013 CS-4.8 suite (DMMF model sweep, the six relation vectors, column allowlists including where/orderBy/groupBy, write-column refusals, SERVER-event invisibility, injected filters, actor crossing, raw SQL refusal) and to the cross-candidate route suite (5.10), then add them to test-cases.md and test-matrix.md.
