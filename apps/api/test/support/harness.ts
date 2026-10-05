@@ -255,7 +255,7 @@ export async function signInWithTotp(
     .expect(200);
   // /2fa/verify answers with the session itself.
   return {
-    Authorization: `Bearer ${(done.body as unknown as { accessToken: string }).accessToken}`,
+    Authorization: `Bearer ${(done.body as Body).accessToken}`,
   };
 }
 
@@ -266,6 +266,8 @@ export async function signInWithTotp(
 export function sessionUser(body: unknown, shape: 'nested' | 'flat'): Record<string, unknown> {
   const b = body as { session?: { user?: unknown }; user?: unknown };
   const user = shape === 'nested' ? b.session?.user : b.user;
+  if (shape === 'nested' && b.user !== undefined)
+    throw new Error('nested body has a top-level user');
   if (typeof user !== 'object' || user === null) {
     throw new Error(`no ${shape} session user in the body`);
   }
@@ -285,13 +287,13 @@ export interface Body {
   detail: string;
   title: string;
   challengeToken: string;
-  accessToken: string;
+  accessToken?: string;
   session: { accessToken: string; user: { email: string; role: string } };
   manualKey: string;
   otpauthUri: string;
   qrDataUrl: string;
   recoveryCodes: string[];
-  user: { email: string; role: string; totpEnabled: boolean };
+  user?: { email: string; role: string; totpEnabled: boolean };
   [key: string]: unknown;
 }
 

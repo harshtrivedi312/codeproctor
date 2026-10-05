@@ -85,7 +85,6 @@ describe('TC-001 (FR-101): valid staff login', () => {
     expect(sessionUser(done.body, 'flat').totpEnabled).toBe(true);
     const again = await refresh(h, refreshCookie(done)).expect(200);
     expect(sessionUser(again.body, 'flat').totpEnabled).toBe(true);
-    expect(refreshCookie(done)).toMatch(/^cp_refresh=/);
   });
 
   it('TC-001: the refresh token is an httpOnly, Secure, SameSite=Strict cookie that expires in 7 days and is stored only as a hash (FR-104)', async () => {

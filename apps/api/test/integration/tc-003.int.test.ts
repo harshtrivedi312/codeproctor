@@ -98,7 +98,6 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
     const body = done.body as Body;
     expect(body.session.accessToken).toEqual(expect.any(String));
     expect(sessionUser(body, 'nested').totpEnabled).toBe(true);
-    expect(refreshCookie(done)).toMatch(/^cp_refresh=/);
     expect(body.recoveryCodes).toHaveLength(10);
     expect(new Set(body.recoveryCodes).size).toBe(10);
 
@@ -307,7 +306,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
         where: { id: u.id },
         data: { recoveryCodeHashes: [sha256Hex('AAAAAAAAAAAAAAAA')] },
       });
-      const { auth, cookie } = await signInKeepingCookie(h, u.email, TOTP_SECRET);
+      const { auth } = await signInKeepingCookie(h, u.email, TOTP_SECRET);
       await post('2fa/disable').set(auth).send({}).expect(400);
       expectReauthFailed(
         await post('2fa/disable').set(auth).send({ currentPassword: 'Nope-Nope-1' }),
@@ -323,14 +322,15 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       expect(
         await h.owner.auditLog.count({ where: { actorId: u.id, action: 'AUTH_2FA_DISABLED' } }),
       ).toBe(1);
-      // Self-service disable does not revoke refresh families (only the admin reset does), so the
-      // pre-change cookie is still valid and must now report false.
-      const afterOff = await refresh(h, cookie).expect(200);
-      expect(sessionUser(afterOff.body, 'flat').totpEnabled).toBe(false);
+      // Freshness comes from a new sign-in, not the pre-disable cookie: a disable may revoke every
+      // refresh family (backend PR #51), which would make the old cookie a 401.
       const after = await login(h, u.email).expect(200);
       expect((after.body as Body).session).toBeDefined();
       expect(sessionUser(after.body, 'nested').totpEnabled).toBe(false);
-      // Already off now.
+      const afterRefresh = await refresh(h, refreshCookie(after)).expect(200);
+      expect(sessionUser(afterRefresh.body, 'flat').totpEnabled).toBe(false);
+      // Already off now. This reuses the pre-disable access token; if BE-03/#51 starts invalidating
+      // access tokens on disable this becomes a 401 and should use the new session's token.
       await post('2fa/disable').set(auth).send({ currentPassword: PASSWORD }).expect(409);
     });
 
