@@ -58,7 +58,8 @@ The interceptor checks it (`kind` must be `access`, `id` and `orgId` must be uui
 role), maps `id` to `userId`, and runs the handler inside `runAsUser({ orgId, userId, role })`.
 `AuthenticatedUser` (`{ orgId, userId, role }`) is the shape inside the context. `orgId` comes from
 the verified token, never from the body, a header or the query string. A `request.user` that does
-not match is answered 401 and the handler does not run. A `@Public()` route has no `request.user`
+not match is answered **401** and the handler does not run (FU-DB-65 changes this to 500 in a
+later PR). A `@Public()` route has no `request.user`
 (the guard returns early), so it runs with no context and a query on org data from it throws.
 Guards run before interceptors, so `request.user` is always set by the time the interceptor reads
 it (tested with the real `JwtAuthGuard` and real tokens).
@@ -251,22 +252,26 @@ rows through a relation. Everything else reached through a relation is **not** l
 
 ## Foreign keys and rule (i)
 
-`org-scope-relations.ts` classifies **every foreign key in the schema** (`FK_CLASSES`, 58 of them),
-and `org-scope-relations.spec.ts` derives the keys from `prisma/schema.prisma` and fails when one
-is missing, unclassified, classified twice, or of the wrong kind. A new foreign key breaks the build
+`org-scope-relations.ts` classifies **every foreign key in the schema**, one class each
+(`FK_CLASSES`, **58 foreign keys**). `org-scope-relations.spec.ts` derives the keys from
+`prisma/schema.prisma`, asserts the total and each class count
+(`{ ORG_ID: 9, SCOPE_HOP: 21, COMPOSITE: 3, RULE_I: 25, total: 58 }`), and fails for a key that is
+missing, unclassified, classified twice, or in the wrong class. A new foreign key breaks the build
 until it is classified.
 
-| Kind          | Count | What it is                                                              | Who guards it                                          |
-| ------------- | ----- | ----------------------------------------------------------------------- | ------------------------------------------------------ |
-| `org-column`  | 9     | the `org_id` column of a model with its own org                         | the scope (filter and stamp)                           |
-| `scope-hop`   | 21    | the first hop of a path model's scope path (its own parent)             | the scope filter; creating or re-parenting is rule (i) |
-| `composite`   | 3     | `(id, org_id)` keys on `invitations` and `sessions` (ADR 0006 2 ii)     | the database                                           |
-| `staff-ref`   | 12    | a reference to a user (`created_by`, `reviewer_id`, `assigned_to`, ...) | **rule (i)**                                           |
-| `cross-chain` | 13    | a reference into another chain or to a second parent                    | **rule (i)**                                           |
+| Class       | Count | What it is                                                                                                                                                             | Who guards it                                          |
+| ----------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `ORG_ID`    | 9     | the `org_id` key of a model with its own org (to `organizations`)                                                                                                      | the scope (filter and stamp)                           |
+| `SCOPE_HOP` | 21    | the first hop of a path model's scope path (its own parent)                                                                                                            | the scope filter; creating or re-parenting is rule (i) |
+| `COMPOSITE` | 3     | `(id, org_id)` keys on `invitations` (2) and `sessions` (1), ADR 0006 2 ii                                                                                             | the database                                           |
+| `RULE_I`    | 25    | references the scope cannot check: **12 staff** (to users: `created_by`, `reviewer_id`, `assigned_to`, ...) and **13 cross-chain** (another chain, or a second parent) | **rule (i)**                                           |
 
-`RULE_I_REFERENCES` (the last two kinds, 25 keys) is the list a service must follow: **before
-writing an id into any of these columns, load the row through the scoped client and answer 404 on a
-miss.** Module tests and code review take their checklist from it, for example "every write of
+`SCOPE_HOP + COMPOSITE + RULE_I` is 49; the 9 `ORG_ID` keys make 58. Each `RULE_I` entry also says
+whether it is `staff` or `cross-chain` (`ruleI`).
+
+`RULE_I_REFERENCES` (the 25 `RULE_I` keys) is the list a service must follow: **before writing an
+id into any of these columns, load the row through the scoped client and answer 404 on a miss.**
+Module tests and code review take their checklist from it, for example "every write of
 `session_questions.test_question_id` loads the test question first".
 
 The same table says which side of each relation holds the key, which the nested-write guard needs
