@@ -1,6 +1,8 @@
 import { PSEUDO_ROLES, USER_ROLES, userRoleSchema } from '@codeproctor/shared';
 import { UserRole } from '../generated/prisma/client';
 
+// No TC ID is assigned to this drift test yet. It is complementary to packages/shared/src/events.test.ts:52,
+// which checks role order against schema.prisma.
 // The API enforces roles with the Prisma enum; packages/shared owns the contract that the web app
 // and the permission matrix use. They must list the same roles so neither side can drift.
 describe('shared contract (NFR-04, FR-103)', () => {
