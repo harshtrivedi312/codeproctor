@@ -187,47 +187,64 @@ Alternative: keep text and define the values in packages/shared only.
 - "(architect detail)" marks what this ADR adds, for the owner to confirm.
 - "(flag for owner/Legal advice, not verified by the architect)" marks legal points the architect raises but has not verified.
 
+**Acceptance gate.** Accept this amendment only together with an ADR 0013 (PR #39) whose object-deletion rules match 9.6.
+
 Serves FR-401, FR-704, NFR-05, TC-072, TC-094.
 
 ### 9.1 Embeddings (C-18)
 
-- Face embeddings are never stored. They are computed in memory for each comparison and discarded, and periodic re-checks recompute from the stored selfie (owner decision C-18). Section 2 option (a) stands. Option (b) and the conditional `face_embeddings` clause in R-4 are closed.
-- **Per-session cache (architect detail; owner to confirm that C-18 allows it).** Section 2 keeps the selfie embedding in the worker's memory for the re-checks. Its lifetime:
-  - process memory only: never Redis, BullMQ job payloads or results, disk, or logs;
-  - evicted when the session reaches SUBMITTED or EXPIRED, or at ingest close (ADR 0013), whichever comes first;
-  - TTL backstop: `deadline_at` plus the ingest grace, so a lost eviction cannot keep it longer;
-  - a restart or a miss recomputes it from the stored selfie.
+- Face embeddings are never stored. They are computed in memory for each comparison and then discarded. Periodic re-checks recompute them from the stored selfie (owner decision C-18). Section 2 option (a) stands. Option (b) and the conditional `face_embeddings` clause in R-4 are closed.
+- **Per-session cache (architect detail; owner to confirm that C-18 allows it).** Section 2 keeps the selfie embedding in the worker's memory for the re-checks. Its lifetime is bounded:
+  - It lives in process memory only. It never goes to Redis, BullMQ job payloads or results, disk, or logs.
+  - It is evicted at the first of: SUBMITTED, EXPIRED or DECLINED; ingest close (ADR 0013); or erasure of a live session (ADR 0013 also destroys the HMAC key then).
+  - A TTL backstop of `deadline_at` plus the ingest grace means a lost eviction cannot keep it longer.
+  - After a restart or a cache miss, the worker recomputes it from the stored selfie.
 
 ### 9.2 Media and face images (C-04, C-27)
 
 | Item | Clock | Marker |
 | --- | --- | --- |
 | Recordings (all streams, ROOM_SCAN included), evidence snapshots of `EVENT` purpose, keystroke data | anchor + `retention_days` (default 90, range 7..730), under R-3 and R-4 | owner decision C-04 |
-| **Face images:** the ID image, the selfie, and identity re-check frames kept on a mismatch (the sealed FACE_MISMATCH evidence) | anchor + **LEAST(`retention_days`, 90 days)**. `retention_days` may shorten this but never extend it past 90 days | owner decision C-27 |
-| How | R-4 runs in two tiers. At anchor + LEAST(`retention_days`, 90) it deletes the identity objects and the FACE_MISMATCH evidence, and nulls `identity_checks.id_image_key`, `selfie_key` and those `proctor_events.evidence_key` values. At anchor + `retention_days` it does the rest. It is idempotent because it selects rows whose keys are still set. No DDL | architect detail |
+| **Face images:** ID image, selfie, and identity re-check frames kept on a mismatch (the sealed FACE_MISMATCH evidence) | anchor + **LEAST(`retention_days`, 90 days)**. `retention_days` may shorten this but never extend it past 90 days | owner decision C-27 |
+| Report PDF | Not on this clock: it moves to R-10 (9.4) | owner decision C-26 |
 
-- **Owner to confirm (architect detail).** C-27 names only the ID image, the selfie and the mismatch frames. Evidence snapshots (for example MULTIPLE_FACES) and webcam recordings also show the face, yet they still follow `retention_days`, up to 730 days. Retention-schedule drafting note 4 (PR #44) reads C-27 the same way. Is that intended?
-- **Hold versus cap (architect detail).** The 90 days count from the anchor. An open review or appeal keeps the anchor NULL (R-2), so face images stay while it is open. That is the existing hold, not the org setting.
+**Object-level deletion (architect detail).** Neither tier is a whole-prefix operation any more. Keys follow ADR 0013 5.7.
+
+| Tier | When | Deletes objects | Then, in one transaction |
+| --- | --- | --- | --- |
+| Face | anchor + LEAST(`retention_days`, 90) | `orgs/{orgId}/sessions/{sessionId}/identity/**` and `.../evidence/sealed/**` | Null `identity_checks.id_image_key` and `selfie_key`, and `proctor_events.evidence_key` where `type = 'FACE_MISMATCH'`; one audit row |
+| Main (R-4) | anchor + `retention_days` | The session prefix **except `reports/`** (media, evidence, identity leftovers, live) | As R-4 today, but without `sessions.report_key`; delete `keystroke_batches`; one audit row |
+| Report (R-10) | anchor + 1 year | `.../reports/**` | Null `sessions.report_key` (9.4) |
+
+- Each tier selects rows whose keys are still set, so it is idempotent. When `retention_days` ≤ 90, the face and main tiers run together. No DDL.
+- **Owner to confirm (architect detail).** C-27 names the ID image, the selfie and the mismatch frames only. Evidence snapshots (for example MULTIPLE_FACES) and webcam recordings also show the face, but they still follow `retention_days`, up to 730 days. Retention-schedule drafting note 4 (PR #44) reads C-27 the same way. Is that intended?
+- **The 90 days count from the anchor, not from the test (architect detail; owner item).** An open review or appeal keeps the anchor NULL (R-2). A VIOLATION verdict adds 7 days. So face images can be kept more than 90 days after the test: review time, plus 7 days, plus any appeal time. retention-schedule.md promises "never more than 90 days" after the assessment is finished. Two choices:
+  - keep the anchor, and change the published text to "90 days after the final decision";
+  - or cap face images at `submitted_at` + 90 days, even while a review is open. The reviewer then may lose the images.
 
 ### 9.3 Consent records: rule R-9 (C-04, C-17)
 
-Signed consent records are kept 3 years to prove consent, then deleted (owner decision C-04). They leave R-5.
+Signed consent records are kept 3 years to prove consent, then deleted (owner decision C-04). They are no longer in R-5.
 
 | Item | Rule | Marker |
 | --- | --- | --- |
-| What the record is | Document version, signed name, timestamp, IP, user agent and signed PDF: `consents.consent_text_id`, `signed_name`, `signed_at`, `ip`, `user_agent`, `pdf_key` and the PDF object. Future consent-row fields follow the same clock, including the C-30 age confirmation | owner decision C-04, C-17, C-30; mapping: architect detail |
-| Clock | Deleted 3 years after signing. The anchor is `consents.signed_at`; a record is eligible when `signed_at + interval '3 years' <= now()` | owner decision C-04, C-17; anchor: architect detail |
+| What the record is | Document version, signed name, timestamp, IP, user agent and signed PDF. In columns: `consents.consent_text_id`, `signed_name`, `signed_at`, `ip`, `user_agent`, `pdf_key`, plus the PDF object. Future consent-row fields follow the same clock, including the C-30 age confirmation | owner decision C-04, C-17, C-30; mapping: architect detail |
+| Clock | Deleted 3 years after signing. The anchor is `consents.signed_at`; the record is eligible when `signed_at + interval '3 years' <= now()` | owner decision C-04, C-17; anchor: architect detail |
 | Declined consents | Provisional: the same 3 years from `declined_at`, so no consent row is kept without a limit. Open owner question **OQ-11** | architect detail |
-| Period setting | A system constant, not an org setting | architect detail |
+| Who sets the period | A system constant, not an org setting | architect detail |
 | How | The daily retention job deletes the objects under `orgs/{orgId}/consents/{sessionId}/`, then the `consents` row, and writes one audit row with IDs only (ADR 0001 C-3) | architect detail |
-| Skip | Not deleted while its own session is UNDER_REVIEW or APPEALED, or has an OPEN appeal. A session stuck in a non-terminal state does not block R-9. For the anchor-based clocks, the expiry job and the deadline auto-submit are the backstop that moves every session to a terminal state | architect detail |
+| Skip | Not deleted while its own session is UNDER_REVIEW or APPEALED, or has an OPEN appeal. A session stuck in a non-terminal state does not block R-9. For the anchor-based clocks, the expiry job and the deadline auto-submit move every session to a terminal state | architect detail |
 | Legal hold | None today. Open owner question **OQ-10** (9.8) | open |
-| Index | None for the pilot. A partial index on the anchor is a later optimisation, and it needs an ADR 0008 delta | architect detail |
-| Idempotent | Anchored on `signed_at`, so the next daily run deletes again any expired row that a restore brought back (9.7) | architect detail |
+| Index | None for the pilot. A partial index on the anchor is a later optimisation, and it would need an ADR 0008 delta | architect detail |
+| Idempotent | Anchored on `signed_at`, so a restore that brings back an expired row is fixed on the next daily run (9.7) | architect detail |
 
-**The consent row must outlive the results (architect detail).** `consents.session_id` is `ON DELETE CASCADE` (database.md). If the 1-year results clock (9.4) deleted `sessions` rows, the consent proof would die at 1 year, not 3.
-- Rule: **no retention, results or erasure job deletes `sessions` rows.** R-10 clears the result data and keeps the session row, which then holds no personal data.
-- Rejected alternative: detach the consent (`ON DELETE SET NULL` on a nullable `session_id`). It is a schema change, and it loses the session link used to find the consent prefix.
+**Order of the clocks (architect detail; next to OQ-10).** R-9 counts from `signed_at`, and R-10 counts from the anchor. If a review or appeal held the anchor for more than 2 years, R-9 would delete the consent proof before R-10 deletes the results, and data would then be held without proof of consent. A legal hold (OQ-10) is the way to handle this. Without one, the skip rule above keeps the proof only while the review or appeal is still open.
+
+**The consent row must outlive the results (architect detail).** `consents.session_id` is `ON DELETE CASCADE` (database.md). If R-10 deleted `sessions` rows, the consent proof would end at 1 year, not 3.
+- Rule: no retention, results or erasure job deletes `sessions` rows. R-10 clears the result data and keeps the row.
+- **Enforced in the database, as for `audit_logs`:** `REVOKE DELETE ON sessions FROM app_user`. This is an ADR 0006 §7.2 grants delta and an ADR 0008 delta, added in a migration.
+- DB-06 adds a test (TC ID to be assigned by QA): a session delete as `app_user` is refused, and the consent row survives.
+- The rejected alternative is to detach the consent (`ON DELETE SET NULL` on a nullable `session_id`). It is a schema change, and it loses the link to the session used to find the consent prefix.
 
 ### 9.4 Results: rule R-10 (C-26)
 
@@ -236,84 +253,113 @@ Results (scores, verdicts, reviewer notes, reports) are kept 1 year after the te
 | Item | Rule | Marker |
 | --- | --- | --- |
 | Anchor | `retention_anchor_at`, the same anchor as R-3, so an open review or appeal holds it. Eligible at anchor + 1 year | architect detail |
-| Report PDF | Moves from R-4 to R-10. The report object and `sessions.report_key` are deleted at 1 year, not at `retention_days` | owner decision C-26 (reports are results); mechanism: architect detail |
-| What R-10 deletes | The R-6 erasure steps for that session, except the consent: delete event, batch, identity, media and keystroke rows; blank code and answers; null reviewer notes and appeal text; clear `device_info`; delete the report; set `invitations.accommodations` to `'{}'` | architect detail |
-| What remains | The `sessions` row (status, timestamps, `total_score`, `risk_band`), per-question scores, and the verdict without notes. Once none of a candidate's sessions still has results, the `candidates` row is anonymised as in R-6 | owner decision C-26 ("anonymised statistics"); fields: architect detail |
-| Pseudonymised | While a consent record exists (up to 3 years after signing), it still links a name to the session and its scores (9.5) | architect detail |
+| Report PDF | Moves from R-4 to R-10. The report objects (`reports/**`) are deleted and `sessions.report_key` is nulled at 1 year | owner decision C-26 (reports are results); mechanism: architect detail |
+| Content deleted | The R-6 erasure steps for that session, except the consent (R-9 handles it): delete event, batch, identity, media and keystroke rows; blank code and answers; null `session_reviews.notes`, `session_questions.scoring_note` and the appeal text; clear `device_info`; delete the report. Setting `invitations.accommodations` to `'{}'` is under **OQ-12**: that field also holds C-19 waiver reasons (ADR 0015) | architect detail |
+| Scores deleted | **Recommended option (a), with no schema change:** null `sessions.total_score`, `risk_score` and `risk_band`, `session_questions.score` and `session_reviews.verdict`, and delete the `appeals` row (its CHECK ties `new_verdict` to its status) | architect detail |
+| What remains | The `sessions` row (status, timestamps, test through the invitation) and the audit rows (IDs only). Statistics are counts, such as invitations, completions and per-test volumes. Dashboards (FR-1002) compute score and pass-rate statistics only from sessions still inside their year | owner decision C-26 ("anonymised statistics"); fields: architect detail |
+| Candidate row | Once no session of the candidate still has results, the `candidates` row is anonymised as in R-6, and `erased_at` is set | architect detail |
 | Legal hold | None today (OQ-10). Without one, R-10 can delete records that must be kept while a charge is pending (9.8) | open |
+
+**Why scores are nulled (architect detail; owner to confirm).** `sessions.invitation_id` and `invitations.candidate_id` are NOT NULL. If R-10 kept per-session scores and verdicts, and anonymised the candidate only once none of the candidate's sessions still had results, then a candidate tested every year would keep old verdicts linked to their real name and email indefinitely. That contradicts C-26 and the retention schedule. Options considered:
+- **(a) Recommended:** null the scores and the verdict at R-10 for every session. This is uniform, needs no DDL, and leaves no pseudonymised scores behind. A narrower variant nulls them only when the candidate is not anonymised in the same run; it keeps more statistics but behaves differently for multi-session candidates.
+- (b) An aggregate statistics table, written before nulling (for example per test and month: count, mean score, band counts). It keeps richer statistics but is an ADR 0008 delta.
+- (c) Re-point the session to a per-org anonymous placeholder candidate. That has to work through the composite FKs `(invitation_id, org_id)` and `(candidate_id, org_id)`, and re-pointing invitations rewrites history.
+
+**Owner item: the multi-session case** described above.
+
+**Org settings above one year (architect detail; owner to confirm).** R-10 runs the R-6 content steps at anchor + 1 year, so a `retention_days` of 366..730 never takes effect for media. Should the database.md range become 7..365 (a CHECK change, ADR 0008 delta), or should R-10 leave media to R-4? Proposed: 7..365.
 
 ### 9.5 Erasure: R-6 confirmed and amended (C-06, C-17)
 
-- **Confirmed.** "Erasure completes within 30 days of the request, or within 30 days after an open review or appeal closes, whichever is later." The candidate is told about any delay. Code is erased too; only anonymised scores remain (owner decision C-06). R-6 is no longer provisional, and the "Tension for Legal" bullet is removed.
+- **Confirmed.** "Erasure completes within 30 days of the request, or within 30 days after an open review or appeal closes, whichever is later." The candidate is told about any delay. Code is erased too; only anonymised scores remain (owner decision C-06). R-6 is no longer provisional. The "Tension for Legal" bullet is removed.
 - **Changed.** After an erasure request, the minimal consent proof is kept until its 3-year limit, to defend legal claims. The proof is the signed consent record only: version, name, timestamp, IP, user agent and signed PDF. Everything else is erased at once (owner decision C-17).
 
 | R-6 bullet | Before (D-19) | After (C-17) |
 | --- | --- | --- |
-| Erasure | Applies R-4 at once and also deletes the signed consent PDFs | Applies R-4 at once (the session prefix). Does **not** delete the consent PDFs; R-9 deletes them |
+| Erasure | Applies R-4 at once and also deletes the signed consent PDFs | Applies the face and main tiers at once, **and deletes the report objects (`reports/**`) and nulls `sessions.report_key`**: the report carries the name, scores and reviewer notes. Does **not** delete the consent PDFs; R-9 deletes them |
+| Free text | Null `session_reviews.notes` and `appeals.resolution_note`; set `appeals.reason` to 'Erased' | The same, plus null `session_questions.scoring_note` |
 | Consent record | Set `signed_name` to 'Erased'; null `ip`, `user_agent`, `pdf_key` | Removed. The record stays as it is until R-9 |
 | What remains | "Only anonymized scores" | Scores, **pseudonymised until the consent proof is deleted**, then anonymised |
 
-**Re-identification (architect detail).** The kept consent record (name, IP, user agent, PDF) stays joined to `session_id`, and through it to the scores. For up to 3 years after signing, the data is pseudonymised, not anonymised. Controls:
+**Who counts as erased (architect detail).** The rules below apply to any candidate whose `candidates.erased_at` IS NOT NULL. R-10's candidate anonymisation also sets `erased_at`, so candidates anonymised by R-10 are covered too.
+
+**Re-identification (architect detail).** The kept consent record (name, IP, user agent, PDF) stays joined to `session_id`. For up to 3 years after signing, the session is therefore pseudonymised, not anonymised. Controls:
 - After erasure, only SUPER_ADMIN can read the consent record and PDF, and every read writes an audit row (FR-105).
 - For an erased candidate, `signed_name`, `ip`, `user_agent` and the PDF never appear in the review workspace, recruiter views, CSV exports, reports or webhooks.
-- decisions.md OQ-1 suggested keeping the PDF "in restricted storage". That stays optional: a separate bucket, or a prefix policy that only the SUPER_ADMIN path can read (ARC-05).
-- ADR 0013's actor and column allowlists (CS-4) must match: no CANDIDATE or SERVICE path reads the `consents` row of an erased candidate (follow-up).
-- **Owner item, because it changes published text.** The C-06 wording "only anonymised scores remain" and retention-schedule.md's "We keep only anonymised scores, which can no longer be linked to you" are untrue while the proof exists. Proposed wording: "scores remain, pseudonymised until the consent proof is deleted, then anonymised". retention-schedule.md also says IP and browser details are "removed if you ask us to delete your data", but the consent proof keeps both.
+- **System carve-out.** The R-9 deletion job and the R-7 erasure re-application read only ids and keys (`id`, `session_id`, `signed_at`, `declined_at`, `pdf_key`), never `signed_name`, `ip` or `user_agent`. ADR 0013 CS-4.1 gives SERVICE scope no column allowlist, so this rule is enforced in the service layer: one `ConsentRetentionRepository` with a fixed `select`, plus a test that fails if any other module selects these columns for an erased candidate.
+- decisions.md OQ-1 suggested the PDF "in restricted storage". That remains optional: a separate bucket or prefix policy that only the SUPER_ADMIN path can read (ARC-05).
+- **Owner item (it changes published text).** The C-06 wording "only anonymised scores remain" and retention-schedule.md ("We keep only anonymised scores, which can no longer be linked to you") are untrue while the proof exists. Proposed wording: "scores remain, pseudonymised until the consent proof is deleted, then anonymised". retention-schedule.md also says IP and browser details are "removed if you ask us to delete your data", but the consent proof keeps them.
 
-**Telling the candidate (architect detail).** A new email template, `erasure-completed`, is sent when erasure runs. It says the signed consent record (version, name, time, IP, browser, PDF) is kept until its 3-year date to defend legal claims, and is then deleted. `erasure-delayed` stays for the hold.
+**Telling the candidate (architect detail).** A new email template, `erasure-completed`, says that the signed consent record (version, name, time, IP, browser, PDF) is kept until its 3-year date to defend legal claims, and then deleted. Ordering in the erasure run:
+1. Read the real address.
+2. Enqueue the email, with BullMQ `removeOnComplete` and `removeOnFail`, so the address does not stay in Redis.
+3. Only then anonymise the `candidates` row (`erased+<id>@invalid`).
 
-**Accommodations (open owner question OQ-12).** R-6's "free text about the candidate" does not cover `invitations.accommodations`, whose `notes` can hold health information. Proposed: erasure sets it to `'{}'`, as R-10 does.
+The address is never logged. `erasure-delayed` remains for the hold.
 
-### 9.6 Consistency with ADR 0013 (PR #39)
+**Accommodations (OQ-12).** R-6's "free text about the candidate" does not cover `invitations.accommodations`. Its `notes` field, and the C-19 waiver reason (ADR 0015), can hold health-adjacent information. Proposed: erasure and R-10 set it to `'{}'`. Audit rows keep the record that accommodations were changed, with IDs only.
 
-- **The key layout agrees.** The consent PDF sits at `orgs/{orgId}/consents/{sessionId}/{ULID}.pdf`, outside the session prefix, and now outlives R-4, R-10 and erasure.
-- **These parts conflict with C-17** and must change with #39 or before it merges (follow-ups):
-  - 5.7 table, consent PDF row: "kept until erasure, D-17" becomes "kept 3 years after signing, through erasure (C-04, C-17)";
-  - 5.7 bullet "Erasure (R-6) deletes the session prefix and `orgs/{orgId}/consents/{sessionId}/`" becomes "Erasure deletes the session prefix; R-9 deletes the consent prefix";
-  - section 8, backend BE-09 row: "prefix deletion in retention and erasure, consent PDF prefix" becomes "consent PDF prefix deleted by R-9 only";
-  - CS-4 allowlists: add the erased-candidate consent rule from 9.5.
+### 9.6 Required ADR 0013 changes (PR #39); this amendment's acceptance depends on them
+
+ADR 0013 5.7 says R-4 "deletes the whole prefix `orgs/{orgId}/sessions/{sessionId}/`", and its section 8 BE-09 row repeats prefix deletion. The report sits at `.../reports/`. If BE-09 were built that way, it would delete the report at `retention_days` (default 90), break C-26 and leave `sessions.report_key` dangling. Required changes in ADR 0013:
+- **R-4 at `retention_days`:** delete the session prefix **except `reports/`**.
+- **Face tier at LEAST(`retention_days`, 90):** delete `identity/**` and `evidence/sealed/**`, and null the identity keys and the FACE_MISMATCH `evidence_key`.
+- **R-10 at anchor + 1 year:** delete `reports/**` and null `report_key`. Erasure deletes `reports/**` at once.
+- **The BE-09 row in section 8:** the same three rules.
+- **The cite for R-9:** ADR 0013 5.7 cites "proposed ADR 0004 section 9.2". It should cite section 9.3.
+- **CS-4 allowlists:** add the erased-candidate consent rule and the system carve-out from 9.5.
+
+ADR 0013 already carries the other C-17 changes (the consent PDF row and the erasure bullet at 5.7, and the BE-09 consent prefix).
 
 ### 9.7 Backups (R-7)
 
-- A restore re-applies the erasures recorded after the backup. Re-applied erasure follows C-17 and keeps the consent proof (architect detail).
-- R-9 and R-10 are anchored and idempotent. Rows that a restore brings back after their deletion date are deleted again on the next daily run (architect detail).
+- A restore re-applies the erasures recorded after the backup. Re-applied erasure follows C-17: it keeps the consent proof (architect detail).
+- R-9, R-10 and both R-4 tiers are anchored and idempotent. Rows that a restore brings back after their deletion date are deleted again on the next daily run (architect detail).
+- **Object versioning (follow-up for ARC-05).** If S3 versioning is turned on (OI-5 is open), deleted face images, reports and consent PDFs survive as noncurrent versions, which breaks C-27 and R-9. ARC-05 must either delete every version or set a noncurrent-version lifecycle rule much shorter than the caps (for example 1 day).
 
 ### 9.8 Legal flags (flag for owner/Legal advice, not verified by the architect)
 
-1. **BIPA limitation period.** The Illinois Supreme Court (Tims v. Black Horse Carriers, 2023) applies a 5-year limitation period to all BIPA claims. A 3-year consent clock would delete the written release while a claim can still be brought. Options: 5 years for the consent proof only, or the legal hold (OQ-10).
+1. **BIPA limitation period.** The Illinois Supreme Court (Tims v. Black Horse Carriers, 2023) applies a 5-year limitation period to all BIPA claims. A 3-year consent clock deletes the written release while a claim can still be brought. Options: keep the consent proof (only) for 5 years, or use the legal hold (OQ-10).
 2. **Records during a charge.** Without a hold, R-9 and R-10 can delete records that 29 CFR 1602.14 requires to be kept while a charge is pending (OQ-10).
 3. **DPIA.** Record the 3-year rationale (GDPR Art. 17(3)(e), legal claims) in the DPIA.
-4. **Response time.** A hold can push the erasure response past GDPR Art. 12(3)'s one month; the candidate must be told.
-5. **CCPA.** The legal-claims exception covers keeping the proof, as long as it is disclosed.
+4. **Response time.** A hold can push the erasure response past the one month in GDPR Art. 12(3). The candidate must be told.
+5. **CCPA.** The legal-claims exception covers keeping the proof, if it is disclosed.
 
 ### 9.9 What else must change (not edited in this PR)
 
 | # | Where | Change | Owner |
 | --- | --- | --- | --- |
-| 1 | database.md Data rules, retention *Eligible* | No cap today. Add LEAST(`retention_days`, 90) for face images (C-27) | hub, on acceptance |
-| 2 | database.md Data rules, retention *Kept* | "kept as proof of consent until erasure" conflicts with C-04. Replace it with R-9 and R-10 | hub |
+| 1 | database.md Data rules, retention *Eligible* | No cap today. Add LEAST(`retention_days`, 90) for face images (C-27) and the object tiers (9.2) | hub, on acceptance |
+| 2 | database.md Data rules, retention *Kept* | "kept as proof of consent until erasure" conflicts with C-04. Replace with R-9 and R-10 | hub |
 | 3 | database.md Data rules, erasure | "delete all stored objects, including the consent PDF" conflicts with C-17 | hub |
-| 4 | database.md Data rules, erasure | "set `consents.signed_name` to 'Erased' and null its `ip`, `user_agent` and `pdf_key`" conflicts with C-17. Also add the 9.5 access rule, the no-session-delete rule (9.3) and a comment on `pdf_key` | hub |
+| 4 | database.md Data rules, erasure | "set `consents.signed_name` to 'Erased' and null its `ip`, `user_agent` and `pdf_key`" conflicts with C-17. Also add the 9.5 access rule and carve-out, the no-session-delete rule and the REVOKE (9.3), `scoring_note`, the report deletion, and a comment on `pdf_key`. Also the `retention_days` range question (9.4) | hub |
 | 5 | fsd.md FR-704 | Add the 90-day face-image cap (C-27), the 3-year consent clock (C-04) and the 1-year results clock (C-26) | hub |
-| 6 | fsd.md NFR-05 | Take the C-06 wording and drop "Provisional (D-19, Legal to confirm)" | hub |
-| 7 | fsd.md FR-401 | The consent record is kept 3 years after signing, also after erasure (C-17) | hub |
-| 8 | test-cases.md TC-072, TC-094 | TC-072 adds the 90-day cap with `retention_days` > 90. TC-094 keeps the consent proof and drops "provisional, Legal to confirm". QA adds TCs for R-9, R-10 and access to the kept proof | hub, QA |
-| 9 | prompts/database.md Step 6 | RetentionService: two-tier R-4, R-9 and R-10. CandidateErasureService keeps the consent proof | hub |
-| 10 | DB-06 | Implement 9.2 to 9.5 and 9.7, with tests | db-engineer |
-| 11 | BE-06 email | New template `erasure-completed` (9.5) | backend-engineer |
-| 12 | BE-09 storage | Two-tier deletion; the report under R-10; the consent prefix under R-9 only | backend-engineer |
+| 6 | fsd.md NFR-05 | Take the C-06 wording; drop "Provisional (D-19, Legal to confirm)" | hub |
+| 7 | fsd.md FR-401 | Consent record kept 3 years after signing, through erasure (C-17) | hub |
+| 8 | test-cases.md TC-072, TC-094 | TC-072 adds the 90-day cap with `retention_days` > 90 and keeps `reports/` at R-4. TC-094 keeps the consent proof, deletes the report and drops "provisional, Legal to confirm". QA adds TCs for R-9, R-10 (multi-session candidate), the session-delete refusal, access to the kept proof, and the email ordering | hub, QA |
+| 9 | prompts/database.md Step 6 | RetentionService: the tiers, R-9, R-10. CandidateErasureService: keeps the proof and deletes the report | hub |
+| 10 | DB-06 | Implement 9.2 to 9.5 and 9.7; the `REVOKE DELETE ON sessions` migration (ADR 0006 §7.2 and ADR 0008 deltas) with its test | db-engineer |
+| 11 | BE-06 email | New template `erasure-completed`, with the ordering in 9.5 | backend-engineer |
+| 12 | BE-09 storage | The object tiers in 9.2 and 9.6; R-9 alone deletes the consent prefix | backend-engineer |
 | 13 | BE-08 and the worker | Embedding cache lifetime (9.1) | integrity-engineer |
-| 14 | BE-13, BE-14 | Never return an erased candidate's consent fields in review, export or webhook paths | backend-engineer |
-| 15 | FE-03 | The erase confirmation mentions the kept consent proof | frontend-engineer |
-| 16 | ADR 0013 | The items in 9.6, with #39 or before it merges | hub |
-| 17 | retention-schedule.md, consent document | Pseudonymisation wording, the IP and browser row (9.5), and the C-27 scope (9.2) | Delivery Lead drafts, owner approves |
-| 18 | DPIA | The 3-year rationale and the legal flags (9.8) | Delivery Lead |
+| 14 | BE-13, BE-14 | No consent fields of erased candidates in review, export or webhook paths; dashboards tolerate nulled scores | backend-engineer |
+| 15 | FE-03 | Erase confirmation mentions the kept consent proof | frontend-engineer |
+| 16 | ADR 0013 (PR #39) | Every item in 9.6, before this amendment is accepted | hub |
+| 17 | retention-schedule.md, consent document | Pseudonymisation wording; the IP and browser row; the C-27 scope; the "never more than 90 days" promise versus the anchor (9.2) | Delivery Lead drafts, owner approves |
+| 18 | DPIA | 3-year rationale and the legal flags (9.8) | Delivery Lead |
+| 19 | ARC-05 | Object versioning (9.7) | hub |
 
-### 9.10 Open owner questions (recorded in decisions.md)
+### 9.10 Open owner questions
 
-- **OQ-10** Legal hold: should a SUPER_ADMIN hold per candidate pause R-4, R-9 and R-10? See flags 1 and 2 in 9.8.
-- **OQ-11** Declined consents: 3 years from `declined_at`, as provisionally proposed here?
-- **OQ-12** Should erasure clear `invitations.accommodations`, as proposed?
+Recorded in decisions.md:
+- **OQ-10** Legal hold: a SUPER_ADMIN hold per candidate that pauses R-4, R-9 and R-10? See flags 1 and 2 in 9.8, and the clock-order note in 9.3.
+- **OQ-11** Declined consents: 3 years from `declined_at` (provisional here)?
+- **OQ-12** Erasure and R-10 set `invitations.accommodations` to `'{}'` (proposed)?
 
-Also for the owner, from the architect details above: the per-session embedding cache under C-18 (9.1); whether C-27 should also cover evidence snapshots and webcam recordings (9.2); and the pseudonymisation wording in published text (9.5).
-
+From the architect details above:
+1. Does C-18 allow the per-session embedding cache (9.1)?
+2. Should C-27 also cover evidence snapshots and webcam recordings (9.2)?
+3. The face-image cap counts from the anchor, not the test; change the published promise, or cap from `submitted_at` (9.2)?
+4. R-10 nulls scores and verdicts for every session; the multi-session case (9.4)?
+5. Should `retention_days` become 7..365 (9.4)?
+6. The pseudonymisation wording in published texts (9.5).
