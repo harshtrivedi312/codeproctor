@@ -300,3 +300,12 @@ def test_fr305_disabled_detectors_never_run(monkeypatch: pytest.MonkeyPatch) -> 
     a = analyze_question([batch([edit(0, "a" * 500)])], cfg)
     assert a.findings == []
     assert a.final_text == "a" * 500
+
+
+def test_fr608_batch_text_limits_mirror_shared() -> None:
+    big = "a" * 100_000
+    with pytest.raises(ValidationError):
+        batch([edit(0, big), edit(1, "b", offset=100_000)])  # EDIT text over the cap
+    with pytest.raises(ValidationError):
+        batch([reset(0, big), edit(1, big), edit(2, "b", offset=0)])  # total over 2x
+    assert batch([reset(0, big), edit(1, big)])  # one max RESET plus a full batch of edits is fine

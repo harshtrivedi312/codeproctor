@@ -123,6 +123,8 @@ DEFAULT_HIGH_MIN_SCORE: Final = 60.0
 MAX_SOURCE_CODE_LENGTH: Final = 100_000
 MAX_KEYSTROKE_OFFSET_MS: Final = 600_000
 MAX_KEYSTROKE_EVENTS_PER_BATCH: Final = 1000
+MAX_KEYSTROKE_BATCH_TEXT: Final = MAX_SOURCE_CODE_LENGTH  # EDIT text only
+MAX_KEYSTROKE_BATCH_TOTAL_TEXT: Final = 2 * MAX_SOURCE_CODE_LENGTH  # RESET and EDIT text
 MAX_BATCH_SEQ: Final = 2_147_483_647
 MAX_EVENT_DURATION_MS: Final = 86_400_000
 
@@ -200,10 +202,20 @@ class KeystrokeBatch(BaseModel):
     @model_validator(mode="after")
     def _time_ordered(self) -> KeystrokeBatch:
         previous = 0
+        edit_text = 0
+        all_text = 0
         for e in self.events:
             if e.t < previous:
                 raise ValueError("Editor events must be in time order.")
             previous = e.t
+            if isinstance(e, KeystrokeEdit):
+                edit_text += len(e.text)
+            if not isinstance(e, KeystrokeCursor):
+                all_text += len(e.text)
+        if edit_text > MAX_KEYSTROKE_BATCH_TEXT:
+            raise ValueError("Too much inserted text in one batch.")
+        if all_text > MAX_KEYSTROKE_BATCH_TOTAL_TEXT:
+            raise ValueError("Too much text (resets and edits) in one batch.")
         return self
 
 

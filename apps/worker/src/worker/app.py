@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from worker.config import IntegrityConfig
-from worker.events import CodeLanguage, Finding, KeystrokeBatch
+from worker.events import MAX_SOURCE_CODE_LENGTH, CodeLanguage, Finding, KeystrokeBatch
 from worker.keystrokes import analyze_keystrokes
 from worker.risk import RiskResult, ScoredEvent, calculate_risk
 from worker.similarity import AiReference, Submission, find_ai_likeness, find_peer_similarity
@@ -59,14 +59,14 @@ class SubmissionIn(BaseModel):
     session_id: str
     session_question_id: str
     language: CodeLanguage
-    code: str = Field(max_length=100_000)
+    code: str = Field(max_length=MAX_SOURCE_CODE_LENGTH)
 
 
 class AiRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str
     language: CodeLanguage
-    code: str = Field(max_length=100_000)
+    code: str = Field(max_length=MAX_SOURCE_CODE_LENGTH)
     is_variant_match: bool = False
 
 
@@ -78,7 +78,9 @@ class RiskResultOut(BaseModel):
 
 class SimilarityRequest(_Req):
     submissions: list[SubmissionIn] = Field(min_length=1, max_length=2000)
-    starter_code: dict[CodeLanguage, str] = Field(default_factory=dict)
+    starter_code: dict[CodeLanguage, Annotated[str, Field(max_length=MAX_SOURCE_CODE_LENGTH)]] = (
+        Field(default_factory=dict)
+    )
     ai_references: list[AiRef] = Field(default_factory=list, max_length=100)
 
 

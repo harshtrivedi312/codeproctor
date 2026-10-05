@@ -278,38 +278,47 @@ JAVA_SCAFFOLD = """
 import java.util.*;
 public class Solution {
     public List<String> topK(List<String> words, int k) {
+        Map<String, Integer> counts = new HashMap<>();
+        List<String> result = new ArrayList<>();
+        int n = words.size();
         // TODO
-        return new ArrayList<>();
+        return result;
     }
 }
 """
+STARTER: dict[CodeLanguage, str] = {"java": JAVA_SCAFFOLD}
+
+
+def test_fr803_scaffold_fixture_is_long_enough_to_be_compared() -> None:
+    assert len(normalize(JAVA_SCAFFOLD, "java")) >= SC.min_tokens
 
 
 def test_fr803_blocker_blank_scaffold_is_not_ai_likeness() -> None:
     refs = [AiReference("r", "java", JAVA_SCAFFOLD)]  # AI answer that is mostly the scaffold
     s = sub("s1", JAVA_SCAFFOLD, "java")
-    assert find_ai_likeness(s, refs, starter_code={"java": JAVA_SCAFFOLD}) == []
+    assert find_ai_likeness(s, refs, starter_code=STARTER) == []
+    control = find_ai_likeness(s, refs)  # without the starter code it is a false alarm
+    assert len(control) == 1 and control[0].type == "AI_LIKENESS"
 
 
 def test_fr803_blocker_starter_plus_same_one_liner_is_not_peer_similarity() -> None:
-    code = JAVA_SCAFFOLD.replace("// TODO", "int n = k;")
-    res = find_peer_similarity(
-        [sub("a", code, "java"), sub("b", code, "java")], starter_code={"java": JAVA_SCAFFOLD}
-    )
-    assert res == {}
+    code = JAVA_SCAFFOLD.replace("// TODO", "int m = k;")
+    subs = [sub("a", code, "java"), sub("b", code, "java")]
+    assert find_peer_similarity(subs, starter_code=STARTER) == {}
+    assert set(find_peer_similarity(subs)) == {"a", "b"}  # control
 
 
 def test_fr803_real_copy_on_top_of_starter_is_still_flagged() -> None:
     res = find_peer_similarity(
-        [sub("a", JAVA_A, "java"), sub("b", JAVA_A, "java")], starter_code={"java": JAVA_SCAFFOLD}
+        [sub("a", JAVA_A, "java"), sub("b", JAVA_A, "java")], starter_code=STARTER
     )
     assert set(res) == {"a", "b"}
 
 
-def test_nfr04_unterminated_block_comment_is_linear_time() -> None:
+def test_nfr04_unterminated_block_comments_are_linear_time() -> None:
     import time
 
-    hostile = "/*" * 20000 + "x" * 20000
+    hostile = "/*a" * 30000  # never forms "*/": quadratic under the old pattern
     start = time.perf_counter()
     normalize(hostile, "java")
     normalize(hostile, "javascript")

@@ -61,6 +61,10 @@ def test_fr608_keystroke_limits_match_shared() -> None:
     ks = _read("keystroke.ts")
     assert _num(ks, "MAX_KEYSTROKE_EVENTS_PER_BATCH") == ev.MAX_KEYSTROKE_EVENTS_PER_BATCH
     assert _num(ks, "MAX_KEYSTROKE_OFFSET_MS") == ev.MAX_KEYSTROKE_OFFSET_MS
+    assert "MAX_KEYSTROKE_BATCH_TEXT = MAX_SOURCE_CODE_LENGTH" in ks
+    assert ev.MAX_KEYSTROKE_BATCH_TEXT == ev.MAX_SOURCE_CODE_LENGTH
+    assert "MAX_KEYSTROKE_BATCH_TOTAL_TEXT = 2 * MAX_SOURCE_CODE_LENGTH" in ks
+    assert ev.MAX_KEYSTROKE_BATCH_TOTAL_TEXT == 2 * ev.MAX_SOURCE_CODE_LENGTH
     assert _num(_read("code-run.ts"), "MAX_SOURCE_CODE_LENGTH") == ev.MAX_SOURCE_CODE_LENGTH
     assert _num(_read("events.ts"), "MAX_BATCH_SEQ") == ev.MAX_BATCH_SEQ
 

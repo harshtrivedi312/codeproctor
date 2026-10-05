@@ -69,13 +69,23 @@ def test_nfr04_invalid_body_is_422() -> None:
 
 
 def test_fr803_similarity_route_passes_starter_code_to_ai_check() -> None:
-    scaffold = "def f(a):\n    out = []\n    for x in a:\n        if x % 2 == 0 and x > 10:\n            out.append(x * 3 + 1)\n    return out\n"
-    body = {
+    scaffold = (
+        "def f(a):\n    out = []\n    for x in a:\n        if x % 2 == 0 and x > 10:\n"
+        "            out.append(x * 3 + 1)\n    return sorted(out, reverse=True)[:5]\n"
+    )
+    body: dict[str, object] = {
         "submissions": [
             {"session_id": "a", "session_question_id": "qa", "language": "python", "code": scaffold}
         ],
-        "starter_code": {"python": scaffold},
         "ai_references": [{"id": "r", "language": "python", "code": scaffold}],
     }
+    control = client.post("/analyze/similarity", json=body, headers=AUTH).json()
+    assert control["findings_by_session"]["a"][0]["type"] == "AI_LIKENESS"
+    body["starter_code"] = {"python": scaffold}
     r = client.post("/analyze/similarity", json=body, headers=AUTH)
     assert r.json()["findings_by_session"] == {}
+
+
+def test_nfr04_oversized_starter_code_is_422() -> None:
+    body = {"submissions": [], "starter_code": {"python": "x" * 100_001}}
+    assert client.post("/analyze/similarity", json=body, headers=AUTH).status_code == 422

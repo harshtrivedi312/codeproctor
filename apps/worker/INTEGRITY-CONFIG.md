@@ -48,6 +48,8 @@ Starter code (if passed) is ignored. Findings carry `matchedLines` (inclusive li
 start/end) in the candidate's own code. Confidence = similarity x a size factor (0.5 at minTokens
 to 1.0 at 4x). Peer matches cite `matchedSessionId`, AI matches `aiReferenceSolutionId`, never both.
 
+Known limit: an unterminated `/*` comment hides the rest of the file from similarity (it is read as one comment), so a candidate could evade comparison by adding one. Logged in docs/followups/integrity.md.
+
 ## 3. Voice activity (FR-607 server re-check, TC-061) `vad.*`
 
 | Key | Default | Meaning |
