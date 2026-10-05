@@ -62,8 +62,11 @@ describe('org scope arguments (NFR-04, FR-103)', () => {
     it.each(Object.keys(ORG_SCOPE) as ModelName[])(
       'TC-008 adds the org filter to the where of %s',
       (model) => {
-        if (operation === 'upsert' && ORG_SCOPE[model].kind === 'self') {
-          // Replacing an organization is not possible inside an org scope.
+        if (
+          ['upsert', 'delete', 'deleteMany'].includes(operation) &&
+          ORG_SCOPE[model].kind === 'self'
+        ) {
+          // Replacing or deleting an organization is not possible inside an org scope.
           expect(() => scope(model, operation, { where: { id: 'x' }, ...data })).toThrow(
             OrgScopeViolationError,
           );
@@ -356,6 +359,22 @@ describe('org scope arguments (NFR-04, FR-103)', () => {
             where: { id: ORG_B },
           }),
         ).toThrow(OrgScopeViolationError);
+      },
+    );
+
+    it.each(['delete', 'deleteMany'])(
+      'TC-008 %s is refused inside an org scope: deleting a tenant is a system operation (FU-DB-68)',
+      (operation) => {
+        for (const args of [{ where: { id: ORG_A } }, { where: { id: ORG_B } }, {}, undefined]) {
+          expect(() => scope('Organization', operation, args)).toThrow(
+            /organizations are deleted only in system scope/,
+          );
+        }
+        // Other models are still deletable by their own org.
+        expect(scope('Test', operation, { where: { id: 'x' } }).where).toEqual({
+          id: 'x',
+          AND: [{ orgId: ORG_A }],
+        });
       },
     );
 

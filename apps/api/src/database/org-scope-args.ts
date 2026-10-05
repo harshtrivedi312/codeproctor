@@ -348,8 +348,18 @@ function rewriteArgs(
     case 'count':
     case 'aggregate':
     case 'groupBy':
+      return { ...args, where: andWhere(model, operation, args.where, filter) };
+
     case 'delete':
     case 'deleteMany':
+      // Deleting a tenant is a system operation (FU-DB-68), not something its own staff can do.
+      if (rule.kind === 'self') {
+        throw violation(
+          model,
+          operation,
+          'organizations are deleted only in system scope (OrgContextService.runSystem).',
+        );
+      }
       return { ...args, where: andWhere(model, operation, args.where, filter) };
 
     case 'update':

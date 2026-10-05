@@ -1867,6 +1867,36 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expect(await snapshot()).toEqual(before);
     });
 
+    it('TC-008 an org scope cannot delete its own organization or another one, and system scope can (FU-DB-68)', async () => {
+      const D1 = await createTenant(owner, 'od');
+      const D2 = await createTenant(owner, 'oe');
+      const before = await snapshot();
+      const attempts: Array<() => Promise<unknown>> = [
+        () => prisma.client.organization.delete({ where: { id: D1.orgId } }),
+        () => prisma.client.organization.deleteMany({ where: { id: D1.orgId } }),
+        () => prisma.client.organization.deleteMany(),
+        () => prisma.client.organization.delete({ where: { id: D2.orgId } }),
+      ];
+      for (const attempt of attempts) {
+        await expect(orgContext.runInOrg(D1.orgId, attempt)).rejects.toThrow(
+          /organizations are deleted only in system scope/,
+        );
+      }
+      expect(await snapshot()).toEqual(before);
+      // System scope can: with the org's own rows out of the way (the foreign keys are NO ACTION),
+      // so what this shows is that the extension does not refuse it there.
+      await expect(
+        orgContext.runSystem('BACKGROUND_JOB', () =>
+          prisma.client.organization.delete({ where: { id: D2.orgId } }),
+        ),
+      ).rejects.toMatchObject({ code: 'P2003' }); // the database, not the extension, objects
+      const empty = await owner.organization.create({ data: { name: 'Empty org' } });
+      await orgContext.runSystem('BACKGROUND_JOB', () =>
+        prisma.client.organization.delete({ where: { id: empty.id } }),
+      );
+      expect(await owner.organization.count({ where: { id: empty.id } })).toBe(0);
+    });
+
     it('TC-008 an Organization keeps its id in system scope too', async () => {
       await expect(
         system(() =>
