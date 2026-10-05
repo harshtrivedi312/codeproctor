@@ -7,7 +7,19 @@ import jwt from 'jsonwebtoken';
 import request from 'supertest';
 import { IS_PUBLIC, ROLES } from '../../src/common/auth/decorators';
 import { UserRole } from '../../src/generated/prisma/client';
-import { API, Body, boot, createUser, Harness, login } from '../support/harness';
+import { hash } from '@node-rs/argon2';
+import {
+  API,
+  Body,
+  boot,
+  createUser,
+  Harness,
+  login,
+  PASSWORD,
+  signIn,
+  signInWithTotp,
+  TOTP_SECRET,
+} from '../support/harness';
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;
 // Nest stores the HTTP verb as the RequestMethod enum index in 'method'.
@@ -67,7 +79,9 @@ describe('TC-004 (FR-103): RBAC enforcement', () => {
       ).toString('base64url') +
       '.';
     for (const bearer of [undefined, 'garbage', forged, none]) {
-      const req = request(h.app.getHttpServer()).post(`${API}/auth/2fa/setup/start`);
+      const req = request(h.app.getHttpServer())
+        .post(`${API}/auth/2fa/setup/start`)
+        .send({ currentPassword: PASSWORD });
       if (bearer !== undefined) req.set('Authorization', `Bearer ${bearer}`);
       await req.expect(401);
     }
@@ -75,6 +89,7 @@ describe('TC-004 (FR-103): RBAC enforcement', () => {
     await request(h.app.getHttpServer())
       .post(`${API}/auth/2fa/setup/start`)
       .set('Authorization', `Bearer ${real.session.accessToken}`)
+      .send({ currentPassword: PASSWORD })
       .expect(200);
   });
 
@@ -88,7 +103,61 @@ describe('TC-004 (FR-103): RBAC enforcement', () => {
     await request(h.app.getHttpServer())
       .post(`${API}/auth/2fa/setup/start`)
       .set('Authorization', `Bearer ${expired}`)
+      .send({ currentPassword: PASSWORD })
       .expect(401);
+  });
+
+  describe('TC-004: the guard re-reads the user on every request (FU-BE-19), so a token never outlives the account state it was issued for', () => {
+    const probe = (auth: { Authorization: string }): request.Test =>
+      request(h.app.getHttpServer())
+        .post(`${API}/auth/2fa/setup/start`)
+        .set(auth)
+        .send({ currentPassword: PASSWORD });
+
+    it('TC-004: a deactivated user is refused at once with a still-valid token', async () => {
+      const u = await createUser(h);
+      const auth = await signIn(h, u.email);
+      await h.owner.user.update({ where: { id: u.id }, data: { isActive: false } });
+      await probe(auth).expect(401);
+    });
+
+    it('TC-004: a role change takes effect at once: a token minted as SUPER_ADMIN stops opening the super admin route', async () => {
+      const u = await createUser(h, { role: UserRole.SUPER_ADMIN, totp: TOTP_SECRET });
+      const auth = await signInWithTotp(h, u.email);
+      const target = '00000000-0000-4000-8000-000000000000';
+      const reset = (): request.Test =>
+        request(h.app.getHttpServer())
+          .post(`${API}/auth/2fa/reset/${target}`)
+          .set(auth)
+          .send({ currentPassword: PASSWORD });
+      expect((await reset()).status).toBe(404); // allowed through the guard, no such user
+      await h.owner.user.update({ where: { id: u.id }, data: { role: UserRole.RECRUITER } });
+      await reset().expect(401); // claim no longer matches the stored role
+    });
+
+    it('TC-004: moving the user to another organization invalidates the token', async () => {
+      const u = await createUser(h);
+      const auth = await signIn(h, u.email);
+      const other = await h.owner.organization.create({ data: { name: 'QA Org C' } });
+      await h.owner.user.update({ where: { id: u.id }, data: { orgId: other.id } });
+      await probe(auth).expect(401);
+    });
+
+    it('TC-004: a password change invalidates access tokens issued before it', async () => {
+      const u = await createUser(h);
+      const auth = await signIn(h, u.email);
+      await h.owner.user.update({
+        where: { id: u.id },
+        data: { passwordHash: await hash('Another-Passphrase-42', { algorithm: 2 }) },
+      });
+      await probe(auth).expect(401);
+    });
+
+    it('TC-004: a 2FA challenge token is not a session', async () => {
+      const u = await createUser(h, { role: UserRole.REVIEWER });
+      const { challengeToken } = (await login(h, u.email).expect(200)).body as Body;
+      await probe({ Authorization: `Bearer ${challengeToken}` }).expect(401);
+    });
   });
 
   it('TC-004: an unauthenticated call to a route from the FSD route table is never answered with data', async () => {
