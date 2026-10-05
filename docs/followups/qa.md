@@ -145,11 +145,16 @@ Observation for proctor-sdk-engineer (low, not a data-loss defect; NFR-08 holds)
 - [ ] Remove TC-050 from the known-defect list in `docs/test-matrix.md` (line 15) once both tests pass.
 - [ ] TC-063: the test drops the network for 45 s but expects DISCONNECTED, while FR-609 logs it only after 60 s (ADR 0013 Q13).
 - [ ] Owner: qa-engineer. Section gate (ADR 0013 CS-4.6): read, Run, draft, answer and submit outside the open section get 409; fail-closed with Redis flushed; after the section deadline and after the session deadline, with the close job delayed, draft and submit get 409 and a late SUBMIT is never graded; writes during a PROCTOR pause get 409 `SESSION_PAUSED`.
-- [ ] Owner: qa-engineer. The C-25 re-check matrix (waiver; face detectors off; both; neither), pending owner question Q20 in ADR 0013.
+- [ ] Owner: qa-engineer. The C-25 re-check matrix (waiver; face detectors off; both; neither). Interim default: refused when either is set (ADR 0013 Q20).
 - [ ] Owner: qa-engineer. Tiered retention clocks (face, media, results, consent), see row (c) in section 9.
 - [ ] Owner: qa-engineer. Close-section and grading order: `grade-session` runs only after every `close-section` child completes; the cutoff is `ended_at`; a failed `close-section` can be re-enqueued.
 - [ ] Owner: qa-engineer. DeviceInfoService fencing: concurrent writers lose no update; a skip sets resync and the next heartbeat asks for full capabilities; the first write fences on `{}`.
 - [ ] Owner: qa-engineer. `detachForSessionJob` refusals: in any scope, with a raw-SQL hatch open, with a grant present; a discovery processor cannot run a session handler inline.
+- [ ] Owner: qa-engineer. Section finished by the button: the latest saved code is graded (close-section is the only writer of `ended_at`, ADR 0013 5.11).
+- [ ] Owner: qa-engineer. A PROCTOR pause spanning a section deadline does not close the section, which closes at the credited deadline + 5 s (TC-079, ADR 0002 P-3/P-4).
+- [ ] Owner: qa-engineer. A failed `close-section` child does not strand `grade-session` (`failParentOnFailure`), and the grading reconciler re-creates a lost flow.
+- [ ] Owner: qa-engineer. A session with no work at all is graded with score 0 and is not mistaken for one past R-10.
+- [ ] Owner: qa-engineer. DL-17: writes during a PROCTOR, SCREEN_SHARE_STOPPED or SIDE_CAMERA_LOST pause get 409 `SESSION_PAUSED` (a modified client cannot keep editing with the share stopped); FULLSCREEN_EXIT does not block autosave; the client keeps the draft and saves it after resume.
 - [ ] Owner: qa-engineer. Assign TC IDs to the ADR 0013 CS-4.8 suite (DMMF model sweep, the six relation vectors, column allowlists including where/orderBy/groupBy, write-column refusals, SERVER-event invisibility, injected filters, actor crossing, raw SQL refusal) and to the cross-candidate route suite (5.10), then add them to test-cases.md and test-matrix.md.
 
 ## 8. QA step 2b (2026-10-05): BE-02 security hardening contract changes
