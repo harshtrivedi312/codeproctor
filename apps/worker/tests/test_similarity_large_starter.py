@@ -13,8 +13,10 @@ reproducible. Measured on 2026-10-05 (60 pairs per row, peer / AI reference):
 
 Plain reading: with a large scaffold and a single short fill-in, MORE THAN HALF of genuine copies
 are NOT detected (they fall under `minFingerprints`, so no comparison happens). That is the
-documented recall gap (docs/followups/integrity.md, MUST-FIX BEFORE PILOT). The floors below record
-current behaviour; they are not a target and must not be loosened to hide a regression.
+documented recall gap (docs/followups/integrity.md, MUST-FIX BEFORE PILOT). The floors below sit
+about one pair (1/60 = 1.7 points) under the measured values, so a regression fails; they record
+current behaviour, are not a target, and must not be loosened to hide a regression. The weak row
+is expected to move when the starter-diff proposal is implemented (then raise the floor).
 """
 
 from __future__ import annotations
@@ -64,7 +66,7 @@ def _fills(rng: random.Random, n: int) -> list[str]:
 
 def _build(sites: list[list[str]]) -> str:
     code = MULTI_TODO
-    for site, fill in zip(TODO_SITES, sites, strict=False):
+    for site, fill in zip(TODO_SITES, sites, strict=True):
         code = code.replace(site, "\n    ".join(fill))
     return code
 
@@ -77,7 +79,7 @@ def _disguise(code: str) -> str:
 
 def _solution(rng: random.Random, sites: int, per_site: int) -> str:
     filled = [_fills(rng, per_site) for _ in range(sites)]
-    return _build(filled + [["pass"]] * (3 - sites))
+    return _build([*filled, *([["pass"]] * (3 - sites))])
 
 
 def _measure(sites: int, per_site: int) -> tuple[float, float, float, float]:
@@ -100,27 +102,27 @@ def _measure(sites: int, per_site: int) -> tuple[float, float, float, float]:
     return peer_hit / n, peer_fp / n, ai_hit / n, ai_fp / n
 
 
-def test_fr803_fixture_starter_is_large() -> None:
-    assert len(normalize(MULTI_TODO, "python")) >= 500
+def test_tc074_fr803_fixture_starter_is_large_but_bounded() -> None:
+    assert 700 <= len(normalize(MULTI_TODO, "python")) <= 850
 
 
+# Floors: about one pair below what is measured on main (recall, then false positives).
 @pytest.mark.parametrize(
     ("sites", "per_site", "min_recall", "max_fp"),
     [
-        (3, 2, 0.95, 0.05),  # substantial fill-ins: reliable
-        (3, 1, 0.90, 0.05),
-        (1, 2, 0.90, 0.10),
-        (1, 1, 0.35, 0.10),  # POOR recall, documented gap: about half of copies are missed
+        (3, 2, 0.98, 0.02),  # measured 1.00 / 0.00
+        (3, 1, 0.96, 0.02),  # measured 0.98 / 0.00
+        (1, 2, 0.95, 0.04),  # measured 0.97 / 0.02
+        (1, 1, 0.45, 0.05),  # measured 0.48 / 0.03: POOR recall, the documented gap
     ],
 )
 def test_tc074_fr803_large_starter_recall_and_false_positive_floors(
     sites: int, per_site: int, min_recall: float, max_fp: float
 ) -> None:
     peer_recall, peer_fp, ai_recall, ai_fp = _measure(sites, per_site)
-    print(
-        f"large-starter sites={sites} per_site={per_site} "
-        f"peer_recall={peer_recall:.2f} peer_fp={peer_fp:.2f} "
-        f"ai_recall={ai_recall:.2f} ai_fp={ai_fp:.2f}"
+    msg = (
+        f"sites={sites} per_site={per_site} peer_recall={peer_recall:.3f} peer_fp={peer_fp:.3f} "
+        f"ai_recall={ai_recall:.3f} ai_fp={ai_fp:.3f} (floors recall>={min_recall}, fp<={max_fp})"
     )
-    assert peer_recall >= min_recall and ai_recall >= min_recall
-    assert peer_fp <= max_fp and ai_fp <= max_fp
+    assert peer_recall >= min_recall and ai_recall >= min_recall, msg
+    assert peer_fp <= max_fp and ai_fp <= max_fp, msg
