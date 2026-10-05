@@ -601,6 +601,223 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
     });
   });
 
+  describe("nested writes (FU-DB-63): a write through a relation cannot change another org's rows", () => {
+    // H acts; I is the victim. Fresh tenants, so the refusals can be checked against untouched rows.
+    let H: TenantFixture;
+    let I: TenantFixture;
+    const asH = <T>(fn: () => Promise<T>): Promise<T> => orgContext.runInOrg(H.orgId, fn);
+    const id = (tenant: TenantFixture, model: ModelName): string =>
+      tenant.rows[model].filter.id as string;
+
+    beforeAll(async () => {
+      H = await createTenant(owner, 'h');
+      I = await createTenant(owner, 'i');
+    });
+
+    it("TC-008 organization.update users.connect of org I's user is refused, and the user stays in org I", async () => {
+      await expect(
+        asH(() =>
+          prisma.client.organization.update({
+            where: { id: H.orgId },
+            data: { users: { connect: { id: I.userId } } },
+          }),
+        ),
+      ).rejects.toBeInstanceOf(OrgScopeViolationError);
+      expect((await owner.user.findUniqueOrThrow({ where: { id: I.userId } })).orgId).toBe(I.orgId);
+    });
+
+    it("TC-008 a parent-side set, connect and connectOrCreate are refused, and org I's rows are unchanged", async () => {
+      const before = await snapshot();
+      const attempts: Array<() => Promise<unknown>> = [
+        // set: re-point org I's test question at org H's section
+        () =>
+          prisma.client.testSection.update({
+            where: { id: id(H, 'TestSection') },
+            data: { questions: { set: [{ id: id(I, 'TestQuestion') }] } },
+          }),
+        // connect on a one-to-one whose key is on the related model
+        () =>
+          prisma.client.session.update({
+            where: { id: id(H, 'Session') },
+            data: { review: { connect: { id: id(I, 'SessionReview') } } },
+          }),
+        // connectOrCreate on the same relation
+        () =>
+          prisma.client.session.update({
+            where: { id: id(H, 'Session') },
+            data: {
+              review: {
+                connectOrCreate: {
+                  where: { id: id(I, 'SessionReview') },
+                  create: { reviewerId: H.userId },
+                },
+              },
+            },
+          }),
+        // connect on a to-many deep inside a nested update
+        () =>
+          prisma.client.test.update({
+            where: { id: id(H, 'Test') },
+            data: {
+              sections: {
+                update: {
+                  where: { id: id(H, 'TestSection') },
+                  data: { questions: { connect: { id: id(I, 'TestQuestion') } } },
+                },
+              },
+            },
+          }),
+      ];
+      for (const attempt of attempts) {
+        await expect(asH(attempt)).rejects.toBeInstanceOf(OrgScopeViolationError);
+      }
+      expect(await snapshot()).toEqual(before);
+    });
+
+    it('TC-008 a nested create that names another org is refused and creates nothing', async () => {
+      // user.createdQuestions: the parent is the staff user, and the question names its own org.
+      const questions = await owner.question.count();
+      const create = (orgId: string, slug: string) =>
+        asH(() =>
+          prisma.client.user.update({
+            where: { id: H.userId },
+            data: { createdQuestions: { create: { orgId, slug } } },
+          }),
+        );
+      await expect(create(I.orgId, 'smuggled')).rejects.toBeInstanceOf(OrgScopeViolationError);
+      await expect(
+        asH(() =>
+          prisma.client.user.update({
+            where: { id: H.userId },
+            data: {
+              createdQuestions: { createMany: { data: [{ orgId: I.orgId, slug: 'many' }] } },
+            },
+          }),
+        ),
+      ).rejects.toBeInstanceOf(OrgScopeViolationError);
+      await expect(
+        asH(() =>
+          prisma.client.user.update({
+            where: { id: H.userId },
+            data: {
+              createdQuestions: { create: { org: { connect: { id: I.orgId } }, slug: 'via-org' } },
+            },
+          }),
+        ),
+      ).rejects.toBeInstanceOf(OrgScopeViolationError);
+      expect(await owner.question.count()).toBe(questions);
+      // Positive control: the same create naming org H works.
+      await create(H.orgId, 'allowed');
+      expect(await owner.question.count()).toBe(questions + 1);
+      expect((await owner.question.findFirstOrThrow({ where: { slug: 'allowed' } })).orgId).toBe(
+        H.orgId,
+      );
+    });
+
+    it('TC-008 the refusals carry no ids, org ids or other values', async () => {
+      const error = await asH(() =>
+        prisma.client.organization.update({
+          where: { id: H.orgId },
+          data: { users: { connect: { id: I.userId } } },
+        }),
+      ).catch((e: unknown) => e as Error);
+      expect(error).toBeInstanceOf(OrgScopeViolationError);
+      for (const secret of [I.userId, I.orgId, H.orgId, H.userId]) {
+        expect((error as Error).message).not.toContain(secret);
+      }
+    });
+
+    it('TC-008 a child-side connect still works (rule (i) covers its id)', async () => {
+      const updated = await asH(() =>
+        prisma.client.testQuestion.update({
+          where: { id: id(H, 'TestQuestion') },
+          data: { questionVersion: { connect: { id: id(H, 'QuestionVersion') } } },
+        }),
+      );
+      expect(updated.questionVersionId).toBe(id(H, 'QuestionVersion'));
+    });
+
+    it('TC-008 nested create, update and delete under an in-scope parent still work, and stay in org H', async () => {
+      const test = await asH(() =>
+        prisma.client.test.update({
+          where: { id: id(H, 'Test') },
+          data: {
+            sections: {
+              create: {
+                title: 'nested',
+                position: 11,
+                questions: { create: { position: 0, questionVersionId: id(H, 'QuestionVersion') } },
+              },
+            },
+          },
+          include: { sections: { include: { questions: true } } },
+        }),
+      );
+      const nested = test.sections.find((section) => section.title === 'nested');
+      expect(nested?.questions).toHaveLength(1);
+      // Visible to org H, invisible to org I.
+      expect(await asH(() => prisma.client.testSection.count({ where: { title: 'nested' } }))).toBe(
+        1,
+      );
+      expect(
+        await orgContext.runInOrg(I.orgId, () =>
+          prisma.client.testSection.count({ where: { title: 'nested' } }),
+        ),
+      ).toBe(0);
+      // Update and delete through the parent.
+      await asH(() =>
+        prisma.client.test.update({
+          where: { id: id(H, 'Test') },
+          data: {
+            sections: { update: { where: { id: nested?.id ?? '' }, data: { title: 'renamed' } } },
+          },
+        }),
+      );
+      expect(
+        (await owner.testSection.findUniqueOrThrow({ where: { id: nested?.id ?? '' } })).title,
+      ).toBe('renamed');
+      await asH(() =>
+        prisma.client.test.update({
+          where: { id: id(H, 'Test') },
+          data: { sections: { deleteMany: { title: 'renamed' } } },
+        }),
+      );
+      expect(await owner.testSection.count({ where: { title: 'renamed' } })).toBe(0);
+    });
+
+    it('TC-008 a Json column and a scalar list are never mistaken for a nested write', async () => {
+      const lookalike = { users: { connect: { id: I.userId } }, sections: { set: [{ id: 'x' }] } };
+      await asH(() =>
+        prisma.client.test.update({ where: { id: id(H, 'Test') }, data: { settings: lookalike } }),
+      );
+      expect(
+        (await owner.test.findUniqueOrThrow({ where: { id: id(H, 'Test') } })).settings,
+      ).toEqual(lookalike);
+      await asH(() =>
+        prisma.client.question.update({
+          where: { id: id(H, 'Question') },
+          data: { tags: { set: ['a', 'b'] } },
+        }),
+      );
+      expect(
+        (await owner.question.findUniqueOrThrow({ where: { id: id(H, 'Question') } })).tags,
+      ).toEqual(['a', 'b']);
+    });
+
+    it('TC-008 in system scope nested writes are not walked (the guard is for org scopes)', async () => {
+      // System scope is for work with no org. The same connect that is refused above is allowed.
+      const J = await createTenant(owner, 'j');
+      const K = await createTenant(owner, 'k');
+      await orgContext.runSystem('BACKGROUND_JOB', () =>
+        prisma.client.organization.update({
+          where: { id: J.orgId },
+          data: { users: { connect: { id: K.userId } } },
+        }),
+      );
+      expect((await owner.user.findUniqueOrThrow({ where: { id: K.userId } })).orgId).toBe(J.orgId);
+    });
+  });
+
   describe('FU-DB-04: the session of an invitation', () => {
     it("TC-008 a session is looked up by invitationId, and only inside the invitation's org", async () => {
       const invitationA = A.rows.Invitation.filter.id as string;
