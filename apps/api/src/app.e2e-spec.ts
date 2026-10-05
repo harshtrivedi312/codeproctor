@@ -1,22 +1,32 @@
 import { Controller, Get, INestApplication, Post } from '@nestjs/common';
 import request from 'supertest';
+import { Public } from './common/auth/decorators';
 import type { App } from 'supertest/types';
 import type { ProblemDetails } from './common/problem.filter';
 import { applyEnv, startInfra, TestInfra } from './test/containers';
 
 // Stand-ins for the real /auth and /candidate controllers (Steps 2 and 7).
+@Public()
 @Controller('auth')
 class AuthProbeController {
   @Post('ping') ping(): { ok: true } {
     return { ok: true };
   }
 }
+@Public()
 @Controller('candidate')
 class CandidateProbeController {
   @Get('ping') ping(): { ok: true } {
     return { ok: true };
   }
 }
+@Controller('unmarked')
+class UnmarkedController {
+  @Get() unmarked(): { ok: true } {
+    return { ok: true };
+  }
+}
+@Public()
 @Controller('boom')
 class BoomController {
   @Get() boom(): never {
@@ -33,7 +43,12 @@ async function createApp(): Promise<INestApplication<App>> {
   const { configureApp } = jest.requireActual<typeof import('./bootstrap')>('./bootstrap');
   const moduleRef = await Test.createTestingModule({
     imports: [AppModule],
-    controllers: [AuthProbeController, CandidateProbeController, BoomController],
+    controllers: [
+      AuthProbeController,
+      CandidateProbeController,
+      BoomController,
+      UnmarkedController,
+    ],
   }).compile();
   const app = moduleRef.createNestApplication<INestApplication<App>>();
   configureApp(app);
@@ -51,6 +66,7 @@ describe('API foundation (NFR-04, NFR-09)', () => {
       THROTTLE_DEFAULT_LIMIT: '1000',
       THROTTLE_AUTH_LIMIT: '3',
       THROTTLE_CANDIDATE_LIMIT: '5',
+      ENABLE_API_DOCS: 'true',
     });
     app = await createApp();
   });
@@ -88,6 +104,10 @@ describe('API foundation (NFR-04, NFR-09)', () => {
     expect(JSON.stringify(res.body)).not.toContain('secret internal detail');
   });
 
+  it('FU-BE-04: a route with no @Public() or @Roles() is denied by default', async () => {
+    await request(app.getHttpServer()).get('/api/v1/unmarked').expect(401);
+  });
+
   it('NFR-04: routes live only under /api/v1', async () => {
     await request(app.getHttpServer()).get('/health').expect(404);
   });
@@ -118,7 +138,7 @@ describe('API foundation (NFR-04, NFR-09)', () => {
     await request(server).get('/api/v1/candidate/ping').expect(429);
   });
 
-  it('NFR-04: Swagger UI is served at /api/docs outside production', async () => {
+  it('FU-BE-10: Swagger UI is served at /api/docs when ENABLE_API_DOCS is true', async () => {
     await request(app.getHttpServer()).get('/api/docs').expect(200);
     const json = await request(app.getHttpServer()).get('/api/docs-json').expect(200);
     expect((json.body as { paths: Record<string, unknown> }).paths['/api/v1/health']).toBeDefined();
@@ -149,8 +169,89 @@ describe('API foundation in production (NFR-04)', () => {
     await infra?.stop();
   });
 
-  it('NFR-04: OpenAPI docs are disabled in production', async () => {
+  it('FU-BE-10: OpenAPI docs are off when ENABLE_API_DOCS is not set (production)', async () => {
     await request(app.getHttpServer()).get('/api/docs').expect(404);
     await request(app.getHttpServer()).get('/api/docs-json').expect(404);
+  });
+});
+
+describe('Throttle client identity and path matching (NFR-04)', () => {
+  let infra: TestInfra;
+
+  beforeAll(async () => {
+    infra = await startInfra();
+  });
+  afterAll(async () => {
+    await infra?.stop();
+  });
+
+  async function appWith(hops: string): Promise<INestApplication<App>> {
+    applyEnv(infra, {
+      THROTTLE_AUTH_LIMIT: '3',
+      TRUST_PROXY_HOPS: hops,
+    });
+    return createApp();
+  }
+
+  it('FU-BE-08: with TRUST_PROXY_HOPS=0 a spoofed X-Forwarded-For does not escape the throttle', async () => {
+    const app = await appWith('0');
+    try {
+      const server = app.getHttpServer();
+      for (let i = 1; i <= 3; i++) {
+        await request(server)
+          .post('/api/v1/auth/ping')
+          .set('X-Forwarded-For', `203.0.113.${i}`)
+          .expect(201);
+      }
+      await request(server)
+        .post('/api/v1/auth/ping')
+        .set('X-Forwarded-For', '203.0.113.99')
+        .expect(429);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('FU-BE-08: with TRUST_PROXY_HOPS=1 each client behind the proxy gets its own bucket', async () => {
+    const app = await appWith('1');
+    try {
+      const server = app.getHttpServer();
+      for (let i = 1; i <= 6; i++) {
+        await request(server)
+          .post('/api/v1/auth/ping')
+          .set('X-Forwarded-For', `203.0.113.${i}`)
+          .expect(201);
+      }
+      // The same client still hits its own limit.
+      for (let i = 0; i < 2; i++) {
+        await request(server)
+          .post('/api/v1/auth/ping')
+          .set('X-Forwarded-For', '198.51.100.7')
+          .expect(201);
+      }
+      await request(server)
+        .post('/api/v1/auth/ping')
+        .set('X-Forwarded-For', '198.51.100.7')
+        .expect(201);
+      await request(server)
+        .post('/api/v1/auth/ping')
+        .set('X-Forwarded-For', '198.51.100.7')
+        .expect(429);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('FU-BE-09: mixed-case /AUTH paths are throttled as auth, not as other', async () => {
+    const app = await appWith('0');
+    try {
+      const server = app.getHttpServer();
+      await request(server).post('/api/v1/AUTH/ping').expect(201);
+      await request(server).post('/api/v1/Auth/ping').expect(201);
+      await request(server).post('/api/v1/aUTH/ping').expect(201);
+      await request(server).post('/api/v1/AUTH/ping').expect(429);
+    } finally {
+      await app.close();
+    }
   });
 });

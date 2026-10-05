@@ -321,7 +321,238 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  # ---- Staff administration (FE-03). Placeholder paths; the real ones come from BE-03 / ARC-02. ----
+  /v1/admin/users:
+    get:
+      operationId: listStaffUsers
+      summary: Staff users of the caller's organisation (SUPER_ADMIN, FR-103)
+      responses:
+        '200':
+          description: Users
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/StaffUser' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      operationId: inviteStaffUser
+      summary: Invite a staff user by email; they set a password from the emailed link (ADR 0003 section 4)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, name, role]
+              properties:
+                email: { type: string, maxLength: 254 }
+                name: { type: string, maxLength: 100 }
+                role: { $ref: '#/components/schemas/StaffRole' }
+      responses:
+        '201':
+          description: Invited
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffUser' }
+        '400':
+          description: Invalid input
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: A user with this email already exists
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+  /v1/admin/users/{userId}:
+    patch:
+      operationId: updateStaffUser
+      summary: Change a role or deactivate or reactivate a user (revokes their refresh tokens)
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role: { $ref: '#/components/schemas/StaffRole' }
+                active: { type: boolean }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffUser' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such user in this organisation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '409':
+          description: Refused, for example deactivating yourself or the last Super Admin
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+  /v1/admin/settings:
+    get:
+      operationId: getOrgSettings
+      summary: Organisation settings (retention, erasure hold, risk scoring, decline contact)
+      responses:
+        '200':
+          description: Settings, with defaults for missing keys
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrgSettings' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    patch:
+      operationId: updateOrgSettings
+      summary: Change some organisation settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OrgSettingsPatch' }
+      responses:
+        '200':
+          description: Updated settings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrgSettings' }
+        '400':
+          description: Invalid input
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/admin/consent-texts:
+    get:
+      operationId: listConsentTexts
+      summary: Consent document versions (D-17), newest first
+      responses:
+        '200':
+          description: Versions and whether this environment refuses unapproved texts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, legalApprovalRequired]
+                properties:
+                  legalApprovalRequired:
+                    type: boolean
+                    description: REQUIRE_LEGAL_APPROVED_CONSENT (true in pilot and production)
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ConsentText' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      operationId: createConsentText
+      summary: Add a new version. It starts as a placeholder; Legal approval is recorded outside this API (Q-43).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version, bodyMd]
+              properties:
+                version: { type: string, maxLength: 40 }
+                bodyMd: { type: string, maxLength: 50000 }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConsentText' }
+        '400':
+          description: Invalid input
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: This version name already exists
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+  /v1/admin/consent-texts/{consentTextId}/current:
+    put:
+      operationId: setCurrentConsentText
+      summary: Make this version the one candidates sign
+      parameters:
+        - name: consentTextId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Now current
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConsentText' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Refused because the text is not approved by Legal and approval is required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+  /v1/admin/candidates:
+    get:
+      operationId: listCandidates
+      summary: Candidates of the organisation with their erasure state (list view only; the full page is FE-05)
+      responses:
+        '200':
+          description: Candidates
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/CandidateSummary' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/admin/candidates/{candidateId}/erasure:
+    post:
+      operationId: requestCandidateErasure
+      summary: Request erasure of a candidate's data (NFR-05, D-19). Waits while a review or appeal is open if the hold is on.
+      parameters:
+        - name: candidateId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '202':
+          description: Accepted; the body says whether it waits
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CandidateSummary' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such candidate in this organisation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 components:
+  responses:
+    Forbidden:
+      description: The role is not allowed to call this route (FR-103)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
   parameters:
     QuestionId:
       name: questionId
@@ -472,3 +703,90 @@ components:
           type: array
           description: Questions of the open section only
           items: { $ref: '#/components/schemas/Question' }
+    StaffUser:
+      type: object
+      required: [id, email, name, role, status]
+      properties:
+        id: { type: string }
+        email: { type: string }
+        name: { type: string }
+        role: { $ref: '#/components/schemas/StaffRole' }
+        status: { type: string, enum: [invited, active, deactivated] }
+        lastLoginAt: { type: string, format: date-time, nullable: true }
+    EventSeverity:
+      # Must match SEVERITIES in packages/shared/src/events.ts.
+      type: string
+      enum: [LOW, MEDIUM, HIGH]
+    RiskSettings:
+      type: object
+      description: FR-804 and ADR 0005 section 2. Weights are keyed by event type.
+      required: [severityPoints, capPerType, bandMinScore, weights]
+      properties:
+        severityPoints:
+          type: object
+          required: [LOW, MEDIUM, HIGH]
+          properties:
+            LOW: { type: integer, minimum: 0, maximum: 100 }
+            MEDIUM: { type: integer, minimum: 0, maximum: 100 }
+            HIGH: { type: integer, minimum: 0, maximum: 100 }
+        capPerType: { type: integer, minimum: 1, maximum: 20 }
+        bandMinScore:
+          type: object
+          required: [MEDIUM, HIGH]
+          properties:
+            MEDIUM: { type: integer, minimum: 1, maximum: 99 }
+            HIGH: { type: integer, minimum: 2, maximum: 100 }
+        weights:
+          type: object
+          additionalProperties: { type: number, minimum: 0, maximum: 5 }
+    OrgSettings:
+      type: object
+      required: [retentionDays, erasure, risk, consentDeclineContact]
+      properties:
+        retentionDays: { type: integer, minimum: 7, maximum: 730 }
+        erasure:
+          type: object
+          required: [holdWhileReviewOrAppealOpen]
+          properties:
+            holdWhileReviewOrAppealOpen: { type: boolean }
+        risk: { $ref: '#/components/schemas/RiskSettings' }
+        consentDeclineContact: { type: string, maxLength: 300 }
+    OrgSettingsPatch:
+      type: object
+      properties:
+        retentionDays: { type: integer, minimum: 7, maximum: 730 }
+        erasure:
+          type: object
+          properties:
+            holdWhileReviewOrAppealOpen: { type: boolean }
+        risk: { $ref: '#/components/schemas/RiskSettings' }
+        consentDeclineContact: { type: string, maxLength: 300 }
+    ConsentText:
+      type: object
+      required: [id, version, bodyMd, createdAt, legalApprovedAt, isCurrent]
+      properties:
+        id: { type: string }
+        version: { type: string }
+        bodyMd: { type: string }
+        createdAt: { type: string, format: date-time }
+        legalApprovedAt: { type: string, format: date-time, nullable: true }
+        legalApprovedBy: { type: string, nullable: true }
+        isCurrent: { type: boolean }
+    CandidateSummary:
+      type: object
+      required: [id, name, email, erasure]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        email: { type: string }
+        lastSessionAt: { type: string, format: date-time, nullable: true }
+        erasure:
+          type: object
+          required: [state]
+          properties:
+            state:
+              type: string
+              enum: [none, waiting, queued, erased]
+              description: waiting = held while a review or appeal is open (D-19)
+            requestedAt: { type: string, format: date-time, nullable: true }
+            waitingFor: { type: string, enum: [review, appeal], nullable: true }

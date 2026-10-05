@@ -97,3 +97,18 @@ void describe('keystroke batch (FR-608)', () => {
     );
   });
 });
+
+void it('FR-608, TC-062: a maximum-size RESET does not count toward the per-batch EDIT text cap', () => {
+  const full = 'a'.repeat(MAX_SOURCE_CODE_LENGTH);
+  const ok = keystrokeBatchSchema.safeParse(
+    batch([
+      { kind: 'RESET', t: 0, language: 'python', text: full },
+      { kind: 'EDIT', t: 1, offset: 0, deleteLength: 0, text: 'x' },
+    ]),
+  );
+  assert.equal(ok.success, true);
+  const tooBig = keystrokeBatchSchema.safeParse(
+    batch([{ kind: 'RESET', t: 0, language: 'python', text: full + 'b' }]),
+  );
+  assert.equal(tooBig.success, false);
+});

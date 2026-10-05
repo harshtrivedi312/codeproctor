@@ -18,7 +18,7 @@ import { batchSeqSchema, clientTimestampSchema } from './events';
 export const MAX_KEYSTROKE_EVENTS_PER_BATCH = 1000;
 /** Max ms offset of an editor event from the batch's `startedAt` (10 minutes). */
 export const MAX_KEYSTROKE_OFFSET_MS = 600_000;
-/** Max inserted text across one batch; equal to the source code limit. */
+/** Max inserted text (EDIT events only) across one batch; equal to the source code limit. */
 export const MAX_KEYSTROKE_BATCH_TEXT = MAX_SOURCE_CODE_LENGTH;
 /** Suggested JSON body limit for POST /candidate/session/keystrokes (worst case UTF-8 plus JSON). */
 export const MAX_KEYSTROKE_BATCH_BODY_BYTES = 1024 * 1024;
@@ -89,7 +89,8 @@ export const keystrokeBatchSchema = z
         });
       }
       previous = e.t;
-      if (e.kind !== 'CURSOR') totalText += e.text.length;
+      // RESET has its own limit (textSchema, MAX_SOURCE_CODE_LENGTH); only EDIT text counts here.
+      if (e.kind === 'EDIT') totalText += e.text.length;
     });
     if (totalText > MAX_KEYSTROKE_BATCH_TEXT) {
       ctx.addIssue({
