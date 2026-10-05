@@ -367,10 +367,15 @@ export class AuthService implements OnApplicationShutdown {
   private async beginEnrollment(user: UserWithOrg): Promise<TotpEnrollmentDto> {
     if (user.totpEnabled) throw new ConflictException('Two-factor authentication is already on.');
     const enrollment = await this.totp.createEnrollment(user.email);
-    await this.prisma.client.user.update({
-      where: { id: user.id },
+    // Conditional write: an enroll/confirm that committed after the read above must not have its
+    // live secret replaced while totpEnabled stays true.
+    const stored = await this.prisma.client.user.updateMany({
+      where: { id: user.id, totpEnabled: false },
       data: { totpSecretEnc: enrollment.encrypted },
     });
+    if (stored.count !== 1) {
+      throw new ConflictException('Two-factor authentication is already on.');
+    }
     return {
       manualKey: enrollment.secret,
       otpauthUri: enrollment.otpauthUrl,

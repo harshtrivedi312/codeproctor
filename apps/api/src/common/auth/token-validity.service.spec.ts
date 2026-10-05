@@ -7,7 +7,6 @@ function serviceWith(stored: string | null): TokenValidityService {
   const redis = {
     status: 'ready',
     get: jest.fn().mockResolvedValue(stored),
-    set: jest.fn().mockResolvedValue('OK'),
   } as unknown as Redis;
   return new TokenValidityService(redis);
 }

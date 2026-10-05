@@ -127,7 +127,7 @@ describe('JwtAuthGuard user re-check (FR-103, FR-104, FU-BE-19)', () => {
     await expect(guard.canActivate(protectedContext())).rejects.toThrow('db down');
   });
 
-  it('FR-104: a token issued before a role change or deactivation is refused even if the user is back as before (S1)', async () => {
+  it('TC-004, FR-104: a token issued before a role change or deactivation is refused even if the user is back as before (S1)', async () => {
     fresh = false;
     await expect(
       guardWith(jest.fn().mockResolvedValue(current)).canActivate(protectedContext()),

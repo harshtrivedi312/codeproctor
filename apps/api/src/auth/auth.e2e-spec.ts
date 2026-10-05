@@ -2166,9 +2166,38 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         const res = await signIn;
         expect(res.status).toBe(401);
         expect(res.headers['set-cookie']).toBeUndefined();
+        // The refused attempt was refunded: the right password must not count as a failure.
+        expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).failedLogins).toBe(0);
         expect(await prisma.refreshToken.count({ where: { userId: u.id, revokedAt: null } })).toBe(
           0,
         );
+      });
+
+      it('TC-003, FR-102: forced enrollment start refuses with 409 and keeps the stored secret when 2FA was turned on between its read and its write', async () => {
+        const u = await createUser({ role: UserRole.REVIEWER });
+        const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+        const { TotpService: Totp } =
+          jest.requireActual<typeof import('./totp.service')>('./totp.service');
+        const totpService = app.get(Totp);
+        const real = totpService.createEnrollment.bind(totpService);
+        const flip = jest
+          .spyOn(totpService, 'createEnrollment')
+          .mockImplementationOnce(async (email: string) => {
+            // Another request finishes enrollment while this one is between read and write.
+            await prisma.user.update({
+              where: { id: u.id },
+              data: { totpEnabled: true, totpSecretEnc: 'live-secret-of-the-other-request' },
+            });
+            return real(email);
+          });
+        try {
+          await post('2fa/enroll/start', null, { challengeToken }).expect(409);
+        } finally {
+          flip.mockRestore();
+        }
+        const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+        expect(row.totpEnabled).toBe(true);
+        expect(row.totpSecretEnc).toBe('live-secret-of-the-other-request');
       });
 
       it('TC-004, FR-102: a refresh for a 2FA-required role without 2FA is refused and the family is revoked (defence in depth)', async () => {

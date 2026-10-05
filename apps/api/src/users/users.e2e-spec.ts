@@ -916,6 +916,35 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       expect((await probe()).status).toBe(401);
     });
 
+    it('FR-104: the marker script only raises the value and always refreshes the TTL (real Redis)', async () => {
+      const { REDIS_CLIENT } = jest.requireActual<
+        typeof import('../infrastructure/infrastructure.module')
+      >('../infrastructure/infrastructure.module');
+      const { TokenValidityService: Validity, MARKER_TTL_SECONDS } = jest.requireActual<
+        typeof import('../common/auth/token-validity.service')
+      >('../common/auth/token-validity.service');
+      const redis = app.get<import('ioredis').Redis>(REDIS_CLIENT);
+      const validity = app.get(Validity);
+      const id = '99999999-9999-4999-8999-999999999999';
+      const key = `auth:tokens-valid-after:${id}`;
+      await redis.del(key);
+      const now = Math.floor(Date.now() / 1000);
+      // Absent: set to now with the full TTL.
+      await validity.invalidateIssuedTokens(id);
+      expect(Math.abs(Number(await redis.get(key)) - now)).toBeLessThanOrEqual(2);
+      expect(await redis.ttl(key)).toBeGreaterThan(MARKER_TTL_SECONDS - 5);
+      // A marker ahead of now (a fast clock elsewhere) is never moved back; the TTL is refreshed.
+      await redis.set(key, String(now + 60), 'EX', 30);
+      await validity.invalidateIssuedTokens(id);
+      expect(await redis.get(key)).toBe(String(now + 60));
+      expect(await redis.ttl(key)).toBeGreaterThan(MARKER_TTL_SECONDS - 5);
+      // An older marker is raised.
+      await redis.set(key, String(now - 600), 'EX', 30);
+      await validity.invalidateIssuedTokens(id);
+      expect(Number(await redis.get(key))).toBeGreaterThanOrEqual(now);
+      await redis.del(key);
+    });
+
     it('FR-104: if the marker cannot be written the role change rolls back (503), nothing half-done', async () => {
       const admin = await make(UserRole.SUPER_ADMIN);
       const user = await make(UserRole.RECRUITER);
