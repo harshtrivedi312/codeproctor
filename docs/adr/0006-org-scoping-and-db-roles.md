@@ -453,7 +453,18 @@ There is no org-provisioning reason (8.6, 8.9).
   - **Jobs that work on ERASED sessions** use a separate entry, not `guardLive`: ingest-close and key destruction, the sweep passes, evidence-expire, and the consent-PDF job.
   - **Where it lives.** `SessionJobProcessor` provides the write-transaction wrapper that calls `guardLive`. Writers do not call it by hand.
   - **Lock timeout.** If ADR 0004 keeps a `lock_timeout`, it is set without raw SQL: either a SERVICE pool whose pg options include `-c lock_timeout=...`, or the Prisma interactive-transaction `timeout`.
-  - **Lock order.** A writer that touches several sessions takes one session per transaction. Where it cannot, it locks them in ascending id order.
+- **Second model-API lock: `lockForAccommodation` (ADR 0015).**
+  - It is the same same-value `sessions.updateMany` with `status: <the status read>` in the `where`, but without the ERASED exclusion. It works in any status, ERASED included.
+  - It is used only by the accommodation writers:
+    - the accommodations PATCH;
+    - redact-note;
+    - the video-check PUT;
+    - the accommodations reduction in erasure, R-10 and R-4.
+  - Those writers never use `guardLive`, and no other writer uses `lockForAccommodation`.
+  - On 0 rows, the writer re-reads the status and retries a bounded number of times.
+- **Lock order** (both locks):
+  - the ADR 0004 advisory lock (where used), then the `sessions` row lock (`guardLive` or `lockForAccommodation`), then `invitations`;
+  - a writer that touches several sessions takes one session per transaction. Where it cannot, it locks them in ascending id order.
 - **Never on organizations.** Raw SQL never writes `organizations`, in any scope.
 - Model queries inside `runRawSql` stay scoped.
 - The `runRawSql` reason stays free text for the reviewer.
@@ -482,6 +493,7 @@ There is no org-provisioning reason (8.6, 8.9).
       - `SectionGateService` (two grants)
       - `ConsentService`
       - the private candidate-facts setter for `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. Only `CandidateSessionGuard` may call it, once per scope, and the values are immutable afterwards.
+      - the two model-API lock call sites, `guardLive` (only from the `SessionJobProcessor` write-transaction wrapper) and `lockForAccommodation` (only from the ADR 0015 accommodation writers).
 
       ADR 0013 CS-4.4 defines each site's model, columns and ids. This ADR does not repeat them.
   - The grant-entry API and the candidate-facts setter stay private to `org-context.ts` or the extension, like the store.
@@ -664,6 +676,7 @@ How the check runs:
     - Run the readiness role assertion on its pool too (8.8).
   - 8.2: in SERVICE session scope, refuse an update that changes `session_id` or `session_question_id`.
   - 8.5: list the advisory-lock raw call site (ADR 0004 section 9.4) on FU-DB-67. SERVICE writers use `guardLive` instead.
+  - 8.5: put `guardLive` and `lockForAccommodation` (ADR 0015) on the FU-DB-67 call-site list, each limited to its writers, with the lock order advisory lock, then `sessions`, then `invitations`.
   - 8.2: the relation side table and its completeness test replace any use of Prisma's runtime data model in production code (FU-DB-103, FU-DB-61).
   - 8.2: add the `createMany` relation-key test.
   - Nested reads stay open (FU-DB-78).
