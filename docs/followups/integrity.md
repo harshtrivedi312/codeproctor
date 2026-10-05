@@ -19,3 +19,17 @@ Non-blocking findings. Only blockers stop a merge.
 - Audio chunk download, decoding and resampling to 16 kHz are not built (BE-12).
 - `app.py` has no request size limit beyond field caps; put a body limit at the proxy.
 - Starlette TestClient emits a deprecation warning about httpx.
+
+# Follow-ups: Integrity track
+
+## From ARC-02 review of PR #16 (code-reviewer)
+
+- **[BE-12 / worker, FR-802] RESET can bypass paste-burst detection.** A client can send a RESET whose text is a finished solution ("restore after reload") and typing-speed or paste-burst analytics will not see it. The worker or API should compare RESET text with server-known state (starter code or the last saved draft) and, on a mismatch, emit evidence (PASTE_BURST or a new signal), never a verdict automatically.
+
+### Code-reviewer findings on PR #20 (should-fix and nits; the blocker and the regex fix are in the PR)
+- Peer compare: precompute fingerprints once and use an inverted index (O(n^2) today); routes are synchronous and block the event loop on large corpora.
+- Mirror drift from keystroke.ts: `MAX_KEYSTROKE_BATCH_TEXT` total-text check is missing, `sessionQuestionId` should be a UUID, `startedAt` should be timezone-aware (AwareDatetime). Extend `test_contracts.py` accordingly.
+- `app.py` input limits: cap total request size, per-field code lengths on keystroke text, and number of events in `/risk`.
+- `sample_rate` and `frame_samples` are org-overridable in `VadConfig` but the Silero backend needs 16000/512; make them constants or validate.
+- `X-Internal-Token` / `WORKER_INTERNAL_TOKEN` is provisional pending the architect decision on API-to-worker auth (ADR 0001 TB-6, OI-1, Q-21). Document the env var in the deploy env template once decided.
+- Nits: `/risk` response drops the breakdown; `/docs` and `/openapi.json` are open; 422 responses echo input (candidate code); camelCase vs snake_case in route bodies; peer cap is applied one-sided; `deleted_chars` stat counts replaced text; `speaker_min_voiced_ms // 4` is a magic number; `test_contracts.py` has a hard-coded language set and a module-wide skipif that could hide drift.

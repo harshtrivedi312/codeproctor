@@ -42,8 +42,8 @@ _KEYWORDS: Final[dict[CodeLanguage, frozenset[str]]] = {
 
 _COMMENTS: Final[dict[CodeLanguage, str]] = {
     "python": r"\#[^\n]*",
-    "javascript": r"/\*.*?\*/|//[^\n]*",
-    "java": r"/\*.*?\*/|//[^\n]*",
+    "javascript": r"/\*.*?(?:\*/|\Z)|//[^\n]*",
+    "java": r"/\*.*?(?:\*/|\Z)|//[^\n]*",
 }
 
 _PATTERN_TEMPLATE: Final = r"""
@@ -177,7 +177,8 @@ def compare(
         return None
     ha = a.hashes - ignore
     hb = b.hashes - ignore
-    if not ha or not hb:
+    # Size gate after the ignore step: starter code and idioms must not count as evidence.
+    if len(ha) < cfg.min_fingerprints or len(hb) < cfg.min_fingerprints:
         return None
     shared = ha & hb
     similarity = len(shared) / min(len(ha), len(hb))
@@ -285,6 +286,7 @@ def find_ai_likeness(
     submission: Submission,
     references: Sequence[AiReference],
     config: IntegrityConfig | None = None,
+    starter_code: Mapping[CodeLanguage, str] | None = None,
 ) -> list[Finding]:
     """AI_LIKENESS: the best match against stored AI reference solutions (AI-1, AI-2).
 
@@ -297,13 +299,19 @@ def find_ai_likeness(
         return []
     sc = cfg.similarity
     prep = prepare(submission.code, submission.language, sc)
+    lang = submission.language
+    ignore = (
+        prepare(starter_code[lang], lang, sc).hashes
+        if starter_code and lang in starter_code
+        else frozenset()
+    )
     ordered = sorted(
         (r for r in references if r.language == submission.language),
         key=lambda r: not r.is_variant_match,
     )
     best: tuple[Comparison, AiReference] | None = None
     for ref in ordered:
-        c = compare(prep, prepare(ref.code, ref.language, sc), sc)
+        c = compare(prep, prepare(ref.code, ref.language, sc), sc, ignore)
         if c is not None and (best is None or c.similarity > best[0].similarity):
             best = (c, ref)
     if best is None or best[0].similarity < sc.ai_threshold:

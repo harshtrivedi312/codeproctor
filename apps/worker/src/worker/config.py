@@ -79,6 +79,8 @@ class SimilarityConfig(_Base):
     k: _Pos = 5  # k-gram size in normalized tokens
     window: _Pos = 4  # winnowing window in k-grams
     min_tokens: _Pos = 40  # below this the code is too short to compare
+    # Distinct fingerprints left after ignoring starter code and idioms.
+    min_fingerprints: _Pos = 12
     peer_threshold: _Unit = 0.80
     ai_threshold: _Unit = 0.85
     # Fingerprints present in more than this share of the corpus are common idioms, ignored.

@@ -114,7 +114,7 @@ def analyze_similarity_route(req: SimilarityRequest) -> SimilarityResult:
     refs = [AiReference(**r.model_dump()) for r in req.ai_references]
     if refs:
         for s in subs:
-            for f in find_ai_likeness(s, refs, req.config):
+            for f in find_ai_likeness(s, refs, req.config, req.starter_code):
                 result.setdefault(s.session_id, []).append(f)
     return SimilarityResult(findings_by_session=result)
 

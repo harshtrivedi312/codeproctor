@@ -272,3 +272,45 @@ def test_fr803_ai_likeness_variant_rows_win_ties() -> None:
 def test_fr305_disabled_ai_likeness_does_not_run() -> None:
     cfg = IntegrityConfig(disabled_event_types=frozenset({"AI_LIKENESS"}))
     assert find_ai_likeness(sub("s1", PY_A), [AiReference("r", "python", PY_A)], cfg) == []
+
+
+JAVA_SCAFFOLD = """
+import java.util.*;
+public class Solution {
+    public List<String> topK(List<String> words, int k) {
+        // TODO
+        return new ArrayList<>();
+    }
+}
+"""
+
+
+def test_fr803_blocker_blank_scaffold_is_not_ai_likeness() -> None:
+    refs = [AiReference("r", "java", JAVA_SCAFFOLD)]  # AI answer that is mostly the scaffold
+    s = sub("s1", JAVA_SCAFFOLD, "java")
+    assert find_ai_likeness(s, refs, starter_code={"java": JAVA_SCAFFOLD}) == []
+
+
+def test_fr803_blocker_starter_plus_same_one_liner_is_not_peer_similarity() -> None:
+    code = JAVA_SCAFFOLD.replace("// TODO", "int n = k;")
+    res = find_peer_similarity(
+        [sub("a", code, "java"), sub("b", code, "java")], starter_code={"java": JAVA_SCAFFOLD}
+    )
+    assert res == {}
+
+
+def test_fr803_real_copy_on_top_of_starter_is_still_flagged() -> None:
+    res = find_peer_similarity(
+        [sub("a", JAVA_A, "java"), sub("b", JAVA_A, "java")], starter_code={"java": JAVA_SCAFFOLD}
+    )
+    assert set(res) == {"a", "b"}
+
+
+def test_nfr04_unterminated_block_comment_is_linear_time() -> None:
+    import time
+
+    hostile = "/*" * 20000 + "x" * 20000
+    start = time.perf_counter()
+    normalize(hostile, "java")
+    normalize(hostile, "javascript")
+    assert time.perf_counter() - start < 2.0

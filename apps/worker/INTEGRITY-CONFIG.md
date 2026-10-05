@@ -38,6 +38,7 @@ reformatting (format document), re-insertion of text deleted in the last `undoMe
 | --- | --- | --- |
 | k / window | 5 / 4 | Winnowing k-gram and window (guarantees any shared run of 8 tokens is found) |
 | minTokens | 40 | Shorter normalized code is not compared |
+| minFingerprints | 12 | Distinct fingerprints left after ignoring starter code and idioms; fewer means no comparison |
 | peerThreshold | 0.80 | CODE_SIMILARITY (containment: shared fingerprints / smaller set) |
 | aiThreshold | 0.85 | AI_LIKENESS against ai_reference_solutions (best row only) |
 | commonFingerprintShare / commonMinCorpus | 0.5 / 5 | Fingerprints in over half of a corpus of >= 5 are idioms, ignored |
