@@ -22,7 +22,7 @@ Owner: Delivery Lead (CLAUDE.md rules 16 and 18, merged in #34 on 2026-10-05; pr
 | --- | --- |
 | Tasks done (merged) | 14 of 52: ARC-01, DB-01, DB-02, DB-03, DB-04, BE-01, BE-02, FE-01, FE-02, FE-03, FE-06, FE-07, FE-08, QA-01A (COMP-01 and FAIR-01 added 2026-10-05, D-47) |
 | Tasks in progress | 5: ARC-02 (contract ADRs 0011 and 0012 open), ARC-03 (ADR 0013 pending), DB-05 (#30, in review), BE-12 worker part (#32), QA-01B early automation (merged as #28) |
-| Open PRs (2026-10-05 evening) | 16: #26 BE-02 hardening, #30 DB-05, #31 ADR 0011, #32 worker hardening, #33 ADR 0012, #35 /dev/proctor, #36 Security page, #38 this docs PR, #39 ADR 0013, #40 web admin-table flake fix, #41 ADR 0006 §8, #42 QA-03, #43 SDK review fixes, #44 compliance decisions and drafts, #45 CSP wasm-unsafe-eval (D-45), #47 SDK stop() in-flight proof. Merged since cycle 1: #34 (CLAUDE.md rules 16 and 18), #37 (dev-proctor-models ignore), #46 (TC-065 flake fix) |
+| Open PRs (2026-10-05 evening) | 16: #26 BE-02 hardening, #30 DB-05, #31 ADR 0011, #32 worker hardening, #33 ADR 0012, #35 /dev/proctor, #36 Security page, #38 this docs PR, #39 ADR 0013, #40 web admin-table flake fix, #41 ADR 0006 §8, #42 QA-03, #43 SDK review fixes, #44 compliance decisions and drafts, #45 CSP wasm-unsafe-eval (D-45), #47 SDK stop() in-flight proof. Merged since cycle 1: #26, #31, #32, #33, #34, #37, #38, #40, #42, #43, #44, #45, #46, #47, #50 (and #52, #53 pending green CI) |
 | Test cases verified | 6 of 72 marked Verified in /docs/test-matrix.md (TC-002, TC-005, TC-075 fully; TC-001, TC-003 and TC-098 on the API with the UI mocked) |
 | Open risks | 18 open (R-01..R-21 less accepted R-15, R-16 and R-20; section 5) |
 
