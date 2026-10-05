@@ -519,6 +519,15 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
           }),
       },
       {
+        name: 'nested write (test.update with sections.create): the guard walks data and sends nothing',
+        raw: false,
+        run: (c, orgId) =>
+          c.test.update({
+            where: { id: A.rows.Test.filter.id as string, ...and(orgId, direct) },
+            data: { name: 'nested', sections: { create: { title: 'n', position: 5 } } },
+          }),
+      },
+      {
         name: 'audit log insert',
         raw: false,
         run: (c) =>

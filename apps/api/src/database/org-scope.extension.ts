@@ -13,15 +13,17 @@
 //                     OrgContextService.runRawSql(reason, fn). Raw SQL cannot be filtered, so the
 //                     SQL itself must filter by org_id, and the reason says why it is allowed.
 //
-// What it does not do. Only the top-level model, its `where`, its `cursor` and the `orgId` of a
-// create or update are looked at. Everything reached through a relation is not (README "Limits"):
+// What it does not do. Only the top-level model, its `where`, its `cursor`, the `orgId` of a create
+// or update, and nested writes (org-scope-nested.ts, FU-DB-63) are looked at. Everything else
+// reached through a relation is not (README "Limits"):
 //
-// (a) Nested writes are passed through. A parent-side `connect`, `set`, `connectOrCreate`, nested
-//     `create` or `update` can change another org's rows: for example
-//     `organization.update({ where: { id: A }, data: { users: { connect: { id: userOfB } } } })`
-//     moves B's user into A, and the filter on Organization does not see it. Until FU-DB-63 adds a
-//     guard, every id in a nested write follows ADR 0006 section 2 rule (i): load it through the
-//     scoped client first, and answer 404 on a miss.
+// (a) Ids written through a relation or a scalar foreign key. In an org scope a parent-side
+//     `connect`, `connectOrCreate` or `set` is refused (it changes rows the filter never selected:
+//     `organization.update({ where: { id: A }, data: { users: { connect: { id: userOfB } } } })`),
+//     and so is a nested row of a model with its own org_id that names another org. A child-side
+//     `connect` is the same as setting the scalar foreign key and stays allowed, as do nested
+//     create, update, upsert and delete under an in-scope parent. The ids in all of them follow
+//     ADR 0006 section 2 rule (i): load each through the scoped client first, answer 404 on a miss.
 // (b) An update that changes a path model's first-hop foreign key (re-parenting, for example
 //     `testSection.update({ data: { testId } })`) is the same as a path create: rule (i).
 // (c) Nested reads are not filtered. `include`, `select`, the fluent API, relation filters,
