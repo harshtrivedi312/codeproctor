@@ -2,7 +2,7 @@
 // (org-scope-relations.ts), as a pure function over the table and the parsed schema. The real test
 // runs it on the real table and expects no problems; it is also run on deliberately broken input
 // to show that each rule can fail.
-import type { ForeignKey, FkKind, RelationSide } from '../org-scope-relations';
+import type { ForeignKey, FkClass, RelationSide, RuleIKind } from '../org-scope-relations';
 import type { ModelName, OrgScopeRule } from '../org-scope-map';
 import type { SchemaField } from './data-model';
 
@@ -26,19 +26,35 @@ export function schemaForeignKeys(schema: SchemaModels): string[] {
   );
 }
 
-/** The kind a foreign key must have, from the schema and the scope map alone. */
-export function expectedKind(
+/** The class (and, for RULE_I, the kind) a foreign key must have, from the schema and the scope map alone. */
+export function expectedClass(
   model: string,
   field: SchemaField,
   scope: Readonly<Record<string, OrgScopeRule>>,
-): FkKind {
+): { fkClass: FkClass; ruleI?: RuleIKind } {
   const rule = scope[model];
   if (field.name === 'org' && field.type === 'Organization' && rule?.kind === 'direct') {
-    return 'org-column';
+    return { fkClass: 'ORG_ID' };
   }
-  if (field.foreignKeyFields.length > 1) return 'composite';
-  if (rule?.kind === 'path' && rule.path[0] === field.name) return 'scope-hop';
-  return field.type === 'User' ? 'staff-ref' : 'cross-chain';
+  if (field.foreignKeyFields.length > 1) return { fkClass: 'COMPOSITE' };
+  if (rule?.kind === 'path' && rule.path[0] === field.name) return { fkClass: 'SCOPE_HOP' };
+  return { fkClass: 'RULE_I', ruleI: field.type === 'User' ? 'staff' : 'cross-chain' };
+}
+
+/** How many foreign keys of each class the schema has, derived from the schema and the scope map. */
+export function countClasses(
+  schema: SchemaModels,
+  scope: Readonly<Record<string, OrgScopeRule>>,
+): { ORG_ID: number; SCOPE_HOP: number; COMPOSITE: number; RULE_I: number; total: number } {
+  const counts = { ORG_ID: 0, SCOPE_HOP: 0, COMPOSITE: 0, RULE_I: 0, total: 0 };
+  for (const [model, fields] of Object.entries(schema)) {
+    for (const field of Object.values(fields)) {
+      if (!field.holdsForeignKey) continue;
+      counts[expectedClass(model, field, scope).fkClass] += 1;
+      counts.total += 1;
+    }
+  }
+  return counts;
 }
 
 export function findRelationProblems(input: RelationInputs): string[] {
@@ -74,9 +90,13 @@ export function findRelationProblems(input: RelationInputs): string[] {
     if (back === undefined || back.type !== key.model || back.holdsForeignKey) {
       problems.push(`${id}: ${key.target}.${key.back} is not the relation that points back.`);
     }
-    const kind = expectedKind(key.model, field, scope);
-    if (kind !== key.kind) {
-      problems.push(`${id} is classified ${key.kind} but its kind is ${kind}.`);
+    const expected = expectedClass(key.model, field, scope);
+    if (expected.fkClass !== key.fkClass) {
+      problems.push(`${id} is classified ${key.fkClass} but its class is ${expected.fkClass}.`);
+    } else if (expected.ruleI !== key.ruleI) {
+      problems.push(
+        `${id} is RULE_I ${key.ruleI ?? '(no kind)'} but its kind is ${expected.ruleI ?? '(none)'}.`,
+      );
     }
   }
 

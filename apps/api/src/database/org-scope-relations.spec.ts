@@ -3,10 +3,10 @@
 import { ORG_SCOPE } from './org-scope-map';
 import type { ModelName } from './org-scope-map';
 import { FK_CLASSES, RULE_I_REFERENCES, relationKeys, relationOf } from './org-scope-relations';
-import type { FkKind, ForeignKey } from './org-scope-relations';
+import type { FkClass, ForeignKey, RuleIKind } from './org-scope-relations';
 import { readSchemaModels } from './testing/data-model';
 import type { SchemaField } from './testing/data-model';
-import { findRelationProblems, schemaForeignKeys } from './testing/relation-checks';
+import { countClasses, findRelationProblems, schemaForeignKeys } from './testing/relation-checks';
 import type { RelationInputs, SchemaModels } from './testing/relation-checks';
 
 const real = (): RelationInputs => ({
@@ -17,28 +17,41 @@ const real = (): RelationInputs => ({
   relationKeys: relationKeys(),
 });
 
-const count = (kind: FkKind): number => FK_CLASSES.filter((k) => k.kind === kind).length;
+const tally = (keys: readonly ForeignKey[]) => ({
+  ORG_ID: keys.filter((k) => k.fkClass === 'ORG_ID').length,
+  SCOPE_HOP: keys.filter((k) => k.fkClass === 'SCOPE_HOP').length,
+  COMPOSITE: keys.filter((k) => k.fkClass === 'COMPOSITE').length,
+  RULE_I: keys.filter((k) => k.fkClass === 'RULE_I').length,
+  total: keys.length,
+});
 
 describe('foreign key classification (NFR-04, FR-103; FU-DB-64)', () => {
   it('TC-008 every foreign key in schema.prisma is classified exactly once, and the relation side table matches the schema', () => {
     expect(findRelationProblems(real())).toEqual([]);
   });
 
-  it('TC-008 the schema has 58 foreign keys: 9 org, 21 scope hops, 3 composite, 12 staff and 13 cross-chain references', () => {
+  it('TC-008 the schema has 58 foreign keys: 9 ORG_ID, 21 SCOPE_HOP, 3 COMPOSITE and 25 RULE_I', () => {
+    const expected = { ORG_ID: 9, SCOPE_HOP: 21, COMPOSITE: 3, RULE_I: 25, total: 58 };
+    // Counted from schema.prisma and the scope map alone, and from the table: both are 58.
     expect(schemaForeignKeys(readSchemaModels())).toHaveLength(58);
-    expect(FK_CLASSES).toHaveLength(58);
-    expect(count('org-column')).toBe(9);
-    expect(count('scope-hop')).toBe(21);
-    expect(count('composite')).toBe(3);
-    expect(count('staff-ref')).toBe(12);
-    expect(count('cross-chain')).toBe(13);
+    expect(countClasses(readSchemaModels(), ORG_SCOPE)).toEqual(expected);
+    expect(tally(FK_CLASSES)).toEqual(expected);
   });
 
-  it('TC-008 RULE_I_REFERENCES is the 25 foreign keys rule (i) applies to (12 staff, 13 cross-chain)', () => {
+  it('TC-008 the 25 RULE_I references are 12 staff references and 13 cross-chain references', () => {
+    const kinds = (kind: RuleIKind): number => FK_CLASSES.filter((k) => k.ruleI === kind).length;
+    expect({ staff: kinds('staff'), crossChain: kinds('cross-chain') }).toEqual({
+      staff: 12,
+      crossChain: 13,
+    });
+    // Only RULE_I keys carry a kind.
+    expect(FK_CLASSES.filter((k) => k.fkClass !== 'RULE_I' && k.ruleI !== undefined)).toEqual([]);
+    expect(FK_CLASSES.filter((k) => k.fkClass === 'RULE_I' && k.ruleI === undefined)).toEqual([]);
+  });
+
+  it('TC-008 RULE_I_REFERENCES is the 25 foreign keys rule (i) applies to', () => {
     expect(RULE_I_REFERENCES).toHaveLength(25);
-    expect(RULE_I_REFERENCES.every((k) => k.kind === 'staff-ref' || k.kind === 'cross-chain')).toBe(
-      true,
-    );
+    expect(RULE_I_REFERENCES.every((k) => k.fkClass === 'RULE_I')).toBe(true);
     const ids = RULE_I_REFERENCES.map((k) => `${k.model}.${k.field}`);
     // The ones the review and the follow-ups name.
     expect(ids).toEqual(
@@ -64,7 +77,7 @@ describe('foreign key classification (NFR-04, FR-103; FU-DB-64)', () => {
     const paths = Object.entries(ORG_SCOPE).flatMap(([model, rule]) =>
       rule.kind === 'path' ? [`${model}.${rule.path[0]}`] : [],
     );
-    const hops = FK_CLASSES.filter((k) => k.kind === 'scope-hop').map(
+    const hops = FK_CLASSES.filter((k) => k.fkClass === 'SCOPE_HOP').map(
       (k) => `${k.model}.${k.field}`,
     );
     expect(hops.sort()).toEqual(paths.sort());
@@ -101,17 +114,19 @@ describe('foreign key classification checks can fail (NFR-04)', () => {
     f: string,
     target: string,
     back: string,
-    kind: FkKind,
+    fkClass: FkClass,
+    ruleI?: RuleIKind,
   ): ForeignKey => ({
     model: asModel(model),
     field: f,
     target: asModel(target),
     back,
-    kind,
+    fkClass,
+    ...(ruleI === undefined ? {} : { ruleI }),
   });
   const good: ForeignKey[] = [
-    fk('Child', 'org', 'Organization', 'children', 'org-column'),
-    fk('Child', 'owner', 'Parent', 'children', 'cross-chain'),
+    fk('Child', 'org', 'Organization', 'children', 'ORG_ID'),
+    fk('Child', 'owner', 'Parent', 'children', 'RULE_I', 'cross-chain'),
   ];
   const sides = new Map<string, { target: ModelName; holdsFk: boolean }>([
     ['Child.org', { target: asModel('Organization'), holdsFk: true }],
@@ -143,30 +158,41 @@ describe('foreign key classification checks can fail (NFR-04)', () => {
     expect(findRelationProblems(inputs({ fks: [...good, good[0] as ForeignKey] }))).toEqual([
       expect.stringContaining('Child.org is classified 2 times'),
     ]);
-    const ghost = fk('Child', 'ghost', 'Parent', 'children', 'cross-chain');
+    const ghost = fk('Child', 'ghost', 'Parent', 'children', 'RULE_I', 'cross-chain');
     expect(findRelationProblems(inputs({ fks: [...good, ghost] }))).toEqual([
       expect.stringContaining('Child.ghost is classified but is not a foreign key'),
     ]);
   });
 
-  it('TC-008 fails for a wrong kind, a wrong target or a wrong back relation', () => {
+  it('TC-008 fails for a wrong class or kind, a wrong target or a wrong back relation', () => {
+    const wrongClass = [
+      good[0] as ForeignKey,
+      fk('Child', 'owner', 'Parent', 'children', 'SCOPE_HOP'),
+    ];
+    expect(findRelationProblems(inputs({ fks: wrongClass }))).toEqual([
+      expect.stringContaining('Child.owner is classified SCOPE_HOP but its class is RULE_I'),
+    ]);
     const wrongKind = [
       good[0] as ForeignKey,
-      fk('Child', 'owner', 'Parent', 'children', 'staff-ref'),
+      fk('Child', 'owner', 'Parent', 'children', 'RULE_I', 'staff'),
     ];
     expect(findRelationProblems(inputs({ fks: wrongKind }))).toEqual([
-      expect.stringContaining('Child.owner is classified staff-ref but its kind is cross-chain'),
+      expect.stringContaining('Child.owner is RULE_I staff but its kind is cross-chain'),
+    ]);
+    const noKind = [good[0] as ForeignKey, fk('Child', 'owner', 'Parent', 'children', 'RULE_I')];
+    expect(findRelationProblems(inputs({ fks: noKind }))).toEqual([
+      expect.stringContaining('Child.owner is RULE_I (no kind) but its kind is cross-chain'),
     ]);
     const wrongTarget = [
       good[0] as ForeignKey,
-      fk('Child', 'owner', 'Organization', 'children', 'cross-chain'),
+      fk('Child', 'owner', 'Organization', 'children', 'RULE_I', 'cross-chain'),
     ];
     expect(findRelationProblems(inputs({ fks: wrongTarget })).join('\n')).toContain(
       'Child.owner points to Parent in the schema, not Organization',
     );
     const wrongBack = [
       good[0] as ForeignKey,
-      fk('Child', 'owner', 'Parent', 'nothing', 'cross-chain'),
+      fk('Child', 'owner', 'Parent', 'nothing', 'RULE_I', 'cross-chain'),
     ];
     expect(findRelationProblems(inputs({ fks: wrongBack }))).toEqual([
       expect.stringContaining('Parent.nothing is not the relation that points back'),

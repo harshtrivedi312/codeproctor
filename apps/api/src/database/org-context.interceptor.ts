@@ -51,7 +51,8 @@ export class OrgContextInterceptor implements NestInterceptor {
 
     const parsed = requestUserSchema.safeParse(user);
     if (!parsed.success) {
-      // The auth layer produced a user without a usable org. Fail closed; log no values.
+      // The auth layer produced a user without a usable org. Fail closed with 401 (FU-DB-65 changes
+      // this to 500 in a later PR); log no values.
       this.logger.error('request.user does not match AuthUser (id, orgId, role, kind "access")');
       throw new UnauthorizedException();
     }
