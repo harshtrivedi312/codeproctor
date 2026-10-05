@@ -157,14 +157,69 @@ function assertTenancyKept(
 }
 
 /**
+ * A cursor, scoped. Prisma finds the cursor row with the cursor's own fields only: the query's
+ * `where` is not applied to that lookup, so in org A's scope `cursor: { id: <B's id> }` would rank
+ * A's rows against B's row (leaking its values and whether the id exists). So:
+ *
+ * - `direct`: the caller's org is added to the cursor (`{ id, orgId }` is a valid cursor and the
+ *   lookup then includes `org_id`), and a cursor that names another org is refused.
+ * - `self` (Organization): the cursor must be the caller's own organization.
+ * - `path`: refused. A cursor takes no relation filter and no AND, so there is no way to scope
+ *   it. Page with `where` plus `orderBy` (for example `where: { id: { gt: lastId } }`), which the
+ *   scope does filter.
+ */
+function scopeCursor(
+  model: string,
+  operation: string,
+  rule: OrgScopeRule,
+  cursor: unknown,
+  orgId: string,
+): unknown {
+  if (cursor === undefined || cursor === null) return cursor;
+  if (!isPlainObject(cursor)) {
+    throw violation(model, operation, 'cursor is not an object.');
+  }
+  switch (rule.kind) {
+    case 'direct':
+      if (namesOtherOrg(cursor, orgId)) {
+        throw violation(model, operation, "the cursor names another org's row.");
+      }
+      return { ...cursor, orgId };
+    case 'self':
+      if (cursor.id !== orgId) {
+        throw violation(model, operation, "the cursor is not the caller's own organization.");
+      }
+      return cursor;
+    case 'path':
+      throw violation(
+        model,
+        operation,
+        'a cursor cannot be scoped on a model without org_id (Prisma finds the cursor row by its ' +
+          "own fields, so a cursor on another org's row would rank this org's rows against it). " +
+          'Page with where plus orderBy instead, for example where: { id: { gt: lastId } }.',
+      );
+    case 'unscoped':
+      return cursor;
+  }
+}
+
+/** True when the cursor, or a compound key inside it, has an orgId that is not `orgId`. */
+function namesOtherOrg(cursor: PlainObject, orgId: string): boolean {
+  return Object.entries(cursor).some(([key, value]) =>
+    key === 'orgId' ? value !== orgId : isPlainObject(value) && namesOtherOrg(value, orgId),
+  );
+}
+
+/**
  * Arguments for a query on a scoped model, for the org `orgId`.
  *
  * - Reads, updates, deletes, counts, aggregates and group-bys get the org filter ANDed into
  *   `where`, so a row of another org is simply not found.
+ * - A `cursor` (findMany, findFirst, findFirstOrThrow, count, aggregate) is scoped too, or refused
+ *   on a model without org_id; see scopeCursor.
  * - Creates on a model with its own org_id get that org added, or are refused when they name
  *   another org. Creates on a path-scoped model are passed through: there is no org_id column to
- *   stamp, and the parent id in the payload must have been loaded through the scoped client first
- *   (ADR 0006 section 2, rule (i)).
+ *   stamp, so the parent id in the payload must follow ADR 0006 section 2 rule (i).
  * - An unknown operation is refused.
  *
  * Nested writes (`create`, `connect` inside `data`) are not inspected; see the README.
@@ -187,7 +242,21 @@ export function applyOrgScope(input: OrgScopeInput): PlainObject {
     );
   }
   const args = asArgs(model, operation, input.args);
+  const rewritten = rewriteArgs(model, rule, operation, args, filter, orgId);
+  // A cursor never goes through unscoped, whichever operation carries it.
+  return args.cursor === undefined
+    ? rewritten
+    : { ...rewritten, cursor: scopeCursor(model, operation, rule, args.cursor, orgId) };
+}
 
+function rewriteArgs(
+  model: ModelName,
+  rule: OrgScopeRule,
+  operation: ScopedOperation,
+  args: PlainObject,
+  filter: PlainObject,
+  orgId: string,
+): PlainObject {
   switch (operation) {
     case 'findUnique':
     case 'findUniqueOrThrow':

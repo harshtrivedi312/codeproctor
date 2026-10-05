@@ -351,6 +351,222 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
     });
   });
 
+  describe('cursor paging (Prisma finds the cursor row by its own fields, not by where)', () => {
+    // Tenants E and F get rows in an interleaved order, so the ids (sequential BigInt identity
+    // values) of E's rows sit on both sides of F's: a cursor on F's row ranks E's rows against it.
+    let E: TenantFixture;
+    let F: TenantFixture;
+    let plain: PrismaClient; // the factory client with no scope, to show the hazard
+    let eAudit: bigint[];
+    let fAudit: bigint;
+    let eEvents: bigint[];
+    let fEvent: bigint;
+
+    beforeAll(async () => {
+      plain = createPrismaClient(db.appUserUrl);
+      E = await createTenant(owner, 'e');
+      F = await createTenant(owner, 'f');
+      const audit = (org: TenantFixture, n: number): Promise<{ id: bigint }> =>
+        owner.auditLog.create({
+          data: { orgId: org.orgId, action: `cursor-${n}`, entityType: 'test' },
+          select: { id: true },
+        });
+      const event = (org: TenantFixture, n: number): Promise<{ id: bigint }> =>
+        owner.proctorEvent.create({
+          data: {
+            sessionId: org.rows.Session.filter.id as string,
+            type: 'TAB_SWITCH',
+            severity: 'LOW',
+            occurredAt: new Date(),
+            durationMs: n,
+          },
+          select: { id: true },
+        });
+      // Fixture rows exist already (E first, then F). E gets two more after F's.
+      eAudit = [
+        E.rows.AuditLog.filter.id as bigint,
+        (await audit(E, 2)).id,
+        (await audit(E, 3)).id,
+      ];
+      fAudit = F.rows.AuditLog.filter.id as bigint;
+      eEvents = [
+        E.rows.ProctorEvent.filter.id as bigint,
+        (await event(E, 2)).id,
+        (await event(E, 3)).id,
+      ];
+      fEvent = F.rows.ProctorEvent.filter.id as bigint;
+    });
+
+    afterAll(async () => {
+      await plain?.$disconnect();
+    });
+
+    const asE = <T>(fn: () => Promise<T>): Promise<T> => orgContext.runInOrg(E.orgId, fn);
+    const ids = (rows: Array<{ id: bigint }>): bigint[] => rows.map((r) => r.id);
+    const order = { id: 'asc' } as const;
+
+    it("TC-008 left as it is, a cursor on org F's row ranks org E's rows against it (why the scope handles cursors)", async () => {
+      // The ids are sequential, so E's rows 2 and 3 come after F's row: they are returned.
+      expect(fAudit > eAudit[0]! && fAudit < eAudit[1]!).toBe(true);
+      const leaked = await plain.auditLog.findMany({
+        where: { orgId: E.orgId },
+        cursor: { id: fAudit },
+        orderBy: order,
+      });
+      expect(ids(leaked)).toEqual([eAudit[1], eAudit[2]]);
+      expect(
+        await plain.auditLog.count({
+          where: { orgId: E.orgId },
+          cursor: { id: fAudit },
+          orderBy: order,
+        }),
+      ).toBe(2);
+    });
+
+    it("TC-008 org E cannot rank its rows against org F's row: findMany, findFirst, findFirstOrThrow, count and aggregate see nothing", async () => {
+      const cursor = { id: fAudit };
+      await asE(async () => {
+        const client = prisma.client;
+        expect(await client.auditLog.findMany({ cursor, orderBy: order })).toEqual([]);
+        expect(
+          await client.auditLog.findMany({
+            where: { orgId: E.orgId },
+            cursor,
+            orderBy: order,
+            take: 2,
+          }),
+        ).toEqual([]);
+        expect(await client.auditLog.findFirst({ cursor, orderBy: order })).toBeNull();
+        await expect(
+          client.auditLog.findFirstOrThrow({ cursor, orderBy: order }),
+        ).rejects.toMatchObject({ code: 'P2025' });
+        expect(await client.auditLog.count({ cursor, orderBy: order })).toBe(0);
+        expect(await client.auditLog.aggregate({ cursor, orderBy: order, _count: true })).toEqual({
+          _count: 0,
+        });
+      });
+    });
+
+    it('TC-008 a cursor that names another org (orgId, or a compound key) is refused for every operation that takes a cursor', async () => {
+      await asE(async () => {
+        const client = prisma.client;
+        const test = F.rows.Test.filter.id as string;
+        const cursors = [{ id: test, orgId: F.orgId }, { id_orgId: { id: test, orgId: F.orgId } }];
+        for (const cursor of cursors) {
+          const args = { cursor, orderBy: order };
+          await expect(client.test.findMany(args)).rejects.toBeInstanceOf(OrgScopeViolationError);
+          await expect(client.test.findFirst(args)).rejects.toBeInstanceOf(OrgScopeViolationError);
+          await expect(client.test.findFirstOrThrow(args)).rejects.toBeInstanceOf(
+            OrgScopeViolationError,
+          );
+          await expect(client.test.count(args)).rejects.toBeInstanceOf(OrgScopeViolationError);
+          await expect(client.test.aggregate({ ...args, _count: true })).rejects.toBeInstanceOf(
+            OrgScopeViolationError,
+          );
+        }
+      });
+    });
+
+    it('TC-008 org E pages through its own rows with its own cursor (positive control)', async () => {
+      await asE(async () => {
+        const client = prisma.client;
+        const from = (cursor: bigint) => ({ cursor: { id: cursor }, orderBy: order });
+        expect(ids(await client.auditLog.findMany(from(eAudit[0]!)))).toEqual(eAudit);
+        expect(ids(await client.auditLog.findMany(from(eAudit[1]!)))).toEqual([
+          eAudit[1],
+          eAudit[2],
+        ]);
+        expect(ids(await client.auditLog.findMany({ ...from(eAudit[0]!), take: 2 }))).toEqual([
+          eAudit[0],
+          eAudit[1],
+        ]);
+        expect(
+          ids(await client.auditLog.findMany({ ...from(eAudit[0]!), skip: 1, take: 1 })),
+        ).toEqual([eAudit[1]]);
+        expect(ids(await client.auditLog.findMany({ ...from(eAudit[2]!), take: -2 }))).toEqual([
+          eAudit[1],
+          eAudit[2],
+        ]);
+        expect((await client.auditLog.findFirst(from(eAudit[1]!)))?.id).toBe(eAudit[1]);
+        expect((await client.auditLog.findFirstOrThrow(from(eAudit[2]!))).id).toBe(eAudit[2]);
+        expect(await client.auditLog.count(from(eAudit[0]!))).toBe(3);
+        expect(await client.auditLog.count(from(eAudit[1]!))).toBe(2);
+        expect(await client.auditLog.aggregate({ ...from(eAudit[0]!), _count: true })).toEqual({
+          _count: 3,
+        });
+        // Naming its own org in the cursor is fine.
+        expect(
+          ids(
+            await client.auditLog.findMany({
+              cursor: { id: eAudit[1]!, orgId: E.orgId },
+              orderBy: order,
+            }),
+          ),
+        ).toEqual([eAudit[1], eAudit[2]]);
+      });
+    });
+
+    it('TC-008 a model without org_id takes no cursor in an org scope, and where plus orderBy pages it instead', async () => {
+      await asE(async () => {
+        const client = prisma.client;
+        for (const cursor of [{ id: fEvent }, { id: eEvents[0]! }]) {
+          const args = { cursor, orderBy: order };
+          await expect(client.proctorEvent.findMany(args)).rejects.toThrow(
+            /Page with where plus orderBy/,
+          );
+          await expect(client.proctorEvent.findFirst(args)).rejects.toBeInstanceOf(
+            OrgScopeViolationError,
+          );
+          await expect(client.proctorEvent.findFirstOrThrow(args)).rejects.toBeInstanceOf(
+            OrgScopeViolationError,
+          );
+          await expect(client.proctorEvent.count(args)).rejects.toBeInstanceOf(
+            OrgScopeViolationError,
+          );
+          await expect(
+            client.proctorEvent.aggregate({ ...args, _count: true }),
+          ).rejects.toBeInstanceOf(OrgScopeViolationError);
+        }
+        // Keyset paging with where: only E's events, in order, never F's.
+        const firstPage = await client.proctorEvent.findMany({ orderBy: order, take: 2 });
+        expect(ids(firstPage)).toEqual([eEvents[0], eEvents[1]]);
+        const secondPage = await client.proctorEvent.findMany({
+          where: { id: { gt: firstPage.at(-1)!.id } },
+          orderBy: order,
+          take: 2,
+        });
+        expect(ids(secondPage)).toEqual([eEvents[2]]);
+        // A where that starts from F's id still sees only E's rows after it.
+        const afterF = await client.proctorEvent.findMany({
+          where: { id: { gte: fEvent } },
+          orderBy: order,
+        });
+        expect(ids(afterF)).toEqual([eEvents[1], eEvents[2]]);
+      });
+    });
+
+    it('TC-008 the organization row takes only its own id as the cursor', async () => {
+      await asE(async () => {
+        const client = prisma.client;
+        await expect(
+          client.organization.findMany({ cursor: { id: F.orgId } }),
+        ).rejects.toBeInstanceOf(OrgScopeViolationError);
+        await expect(
+          client.organization.findFirst({ cursor: { id: F.orgId }, orderBy: order }),
+        ).rejects.toBeInstanceOf(OrgScopeViolationError);
+        await expect(
+          client.organization.count({ cursor: { id: F.orgId }, orderBy: order }),
+        ).rejects.toBeInstanceOf(OrgScopeViolationError);
+        expect(
+          (await client.organization.findMany({ cursor: { id: E.orgId } })).map((o) => o.id),
+        ).toEqual([E.orgId]);
+        expect(await client.organization.count({ cursor: { id: E.orgId }, orderBy: order })).toBe(
+          1,
+        );
+      });
+    });
+  });
+
   describe('FU-DB-04: the session of an invitation', () => {
     it("TC-008 a session is looked up by invitationId, and only inside the invitation's org", async () => {
       const invitationA = A.rows.Invitation.filter.id as string;
