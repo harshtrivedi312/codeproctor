@@ -18,9 +18,11 @@ export default function LandingPage() {
           <Link className="text-primary underline underline-offset-4" href="/admin">
             Staff area
           </Link>
-          <Link className="text-primary underline underline-offset-4" href="/t/demo/test">
+          {/* A plain anchor on purpose: /t/[token]/test needs a full document load so it gets its own
+              CSP with 'wasm-unsafe-eval' (D-45 (P-05)); a client-side Link would keep this page's. */}
+          <a className="text-primary underline underline-offset-4" href="/t/demo/test">
             Preview the candidate test screen (mock data)
-          </Link>
+          </a>
         </div>
       </main>
     </>
