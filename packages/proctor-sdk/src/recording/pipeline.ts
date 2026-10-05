@@ -160,6 +160,24 @@ export class RecordingPipeline {
     this.owned.delete(stream);
   }
 
+  /**
+   * End of session (FR-702). Stops recorders (final chunks are flushed), waits up to
+   * `drainTimeoutMs` for uploads, then deletes every chunk and segment counter of this session from
+   * IndexedDB. Chunks that did not make it are counted in `droppedChunks` and `droppedBytes`;
+   * the caller should show that gap. Only `${sessionId}:segment:` meta keys are removed, because
+   * the event queue keeps its own counter under the same session prefix.
+   */
+  async finish(opts: { drainTimeoutMs?: number } = {}): Promise<RecorderHealth> {
+    globalThis.removeEventListener?.('online', this.onOnline);
+    for (const s of [...this.recorders.keys()]) await this.stopStream(s);
+    await this.queue.waitUntilIdle(opts.drainTimeoutMs ?? 15_000);
+    this.queue.stop();
+    await this.queue.purge();
+    await this.store.deletePrefix(STORES.meta, `${this.o.sessionId}:segment:`);
+    this.started = false;
+    return this.queue.health();
+  }
+
   /** Stop recording; unsent chunks stay in IndexedDB and upload on the next load. */
   async stop(): Promise<void> {
     globalThis.removeEventListener?.('online', this.onOnline);

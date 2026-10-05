@@ -338,4 +338,40 @@ describe('RecordingPipeline', () => {
     expect(segs).toEqual([0, 1]);
     spy.mockRestore();
   });
+
+  it('FR-702/TC-063: finish() leaves IndexedDB empty and reports undelivered chunks as dropped', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const store = newStore();
+    const { p } = make({
+      store,
+      put: () => Promise.reject(new Error('offline')),
+      backoffBaseMs: 1000,
+    });
+    const stream = { getVideoTracks: () => [], getTracks: () => [] } as unknown as MediaStream;
+    await p.recordScreen(stream);
+    const q = (p as unknown as { queue: UploadQueue }).queue;
+    await q.add(ref(0, 500), bytes(500));
+    await q.add(ref(1, 500), bytes(500));
+    const done = p.finish({ drainTimeoutMs: 2000 });
+    await run(3000);
+    const h = await done;
+    expect(h.droppedChunks).toBeGreaterThanOrEqual(2);
+    expect(h.droppedBytes).toBeGreaterThanOrEqual(1000);
+    expect(h.chunksPending).toBe(0);
+    expect(await store.keys('chunks', 's:')).toHaveLength(0);
+    expect(await store.keys('meta', 's:')).toHaveLength(0);
+    vi.useRealTimers();
+  });
+
+  it('FR-702: finish() with a working network uploads everything and drops nothing', async () => {
+    const store = newStore();
+    const { p } = make({ store });
+    const stream = { getVideoTracks: () => [], getTracks: () => [] } as unknown as MediaStream;
+    await p.recordScreen(stream);
+    const q = (p as unknown as { queue: UploadQueue }).queue;
+    await q.add(ref(0, 100), bytes(100));
+    const h = await p.finish({ drainTimeoutMs: 5000 });
+    expect(h.droppedChunks).toBe(0);
+    expect(await store.keys('chunks', 's:')).toHaveLength(0);
+  });
 });
