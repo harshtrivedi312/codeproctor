@@ -213,3 +213,20 @@ Source: docs/compliance/decisions.md (PR #44, branch dl/compliance-decisions). N
 | (f) C-10, ADR 0013 | Model licence gate passes only the two accepted model files | unit (script) plus CI | integrity-engineer, backend-engineer (DEP-01/03) | P1 | The gate passes exactly the AuraFace and COCO-SSD files pinned by SHA-256 (citing C-10); the same file with one byte changed is blocked; any other model file without a verified licence is blocked; the gate fails the deploy job on a block. | `infra/scripts/tc-XXX.test.mjs` (node:test, run by root `pnpm test`) or the gate's own test directory, as ADR 0013 defines it |
 
 Open dependencies for these cases: OQ-1 (consent record on erasure), OQ-2 (embeddings never stored), OQ-3 (fallback for a waived identity check) in decisions.md; the FAIR-01 ADR; the ADR 0013 gate interface.
+
+## 10. QA-04a (2026-10-05): staged BE-03 tests moved to the final contract
+
+Branch `qa/step-4a`. `apps/api/test/support/be03-routes.ts` and the dependent tests (tc-002-unlock, tc-002-lock-privacy, tc-004-rbac, tc-006-audit) follow the final BE-03 contract: `/admin/users` routes, `currentPassword` step-up on invite, PATCH and unlock (the `UNLOCK_NEEDS_REAUTH` switch is gone), audit actions, interceptor rows for the list reads, fake `MailPort` that records the method and all arguments. The route list is checked against the backend registry (`ROUTE_PERMISSIONS`, `listRoutes`, `matrixProblems`) through `loadBackendRegistry()`, loaded lazily so main compiles without those files. To switch everything on when BE-03 merges, change `BE03_DEFAULT` to `true` in be03-routes.ts (one line).
+
+Trial run with `BE03_READY=1` against `origin/backend/step-3` (4251cfb) in a temporary worktree: 198 passed, 0 failed, 41 BE-13 tests skipped, 3 todo. First run had 14 failures; all were test bugs (shared SUPER_ADMIN used up by wrong-password tests and locked, a pre-reset Nest class token, same-step TOTP reuse for a fresh sign-in, a wrong audit failure body assumption, `instance` echoing the caller's own URL, self-unlock of a locked admin).
+
+Product findings (owner backend-engineer):
+
+| ID | Sev | Finding |
+| --- | --- | --- |
+| QA-D-04 | low | Cold start: `ensureConnected()` (apps/api/src/infrastructure/redis-ready.ts) returns at once when the lazy client is `connecting`, the client has `enableOfflineQueue: false`, so parallel first requests that use Redis (2FA verify) answer 503. Reproduced on main: `tc-003-coldstart.int.test.ts` (`it.failing`, KNOWN DEFECT) |
+| QA-O-01 | doc | backend.md says an audit write failure gives "500, no body". The answer is a bare problem+json (type, title, status, instance, traceId) with no route data. Fix the wording or the code; the test accepts the bare problem |
+| QA-O-02 | observation | Each password-protected admin call reserves a password attempt on the shared lockout, so more than 5 parallel calls from one admin get 403 REAUTH_FAILED with the right password, and 5 wrong passwords lock the admin (AUTH_ACCOUNT_LOCKED). A locked admin cannot unlock themself (their own password check fails); another SUPER_ADMIN must. Probably by design; tell the frontend (no bulk parallel admin actions) |
+| QA-O-03 | observation | A token issued in the same second as a role change or reactivation is refused (marker in epoch seconds): a sign-in right after reactivation can get a dead token. Documented by backend; tests wait 1.1 s |
+
+Left for QA-04b: TC-065 follow-ups, compliance proposals g, h, i-m and the C-28 impact list, gate tests, re-checking the TC-002..008 and TC-098 matrix rows that existed only on qa/step-2b, the TC-008 gate reader.
