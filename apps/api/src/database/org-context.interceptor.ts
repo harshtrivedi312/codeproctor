@@ -26,7 +26,8 @@ import type { AuthenticatedUser } from './org-context';
 type RequestWithUser = Request & { user?: unknown };
 
 // Checks request.user against BE-02's AuthUser. Typing the schema as ZodType<AuthUser> makes the
-// compiler flag a change to AuthUser that this check no longer matches. z.guid() accepts any
+// compiler flag an AuthUser that gains a field or changes a field's type. It does not notice a
+// field being removed from AuthUser (the schema's output is still assignable to it). z.guid() accepts any
 // 8-4-4-4-12 hex id, which is all a Postgres uuid column needs. Only an access token is a session;
 // the guard never lets a 2FA challenge token through, and this check does not either.
 const requestUserSchema: z.ZodType<AuthUser> = z.object({
