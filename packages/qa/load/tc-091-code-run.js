@@ -1,4 +1,4 @@
-/* global __ENV */
+/* global __ENV, __VU */
 // TC-091 (NFR-01, P2): 50 concurrent code runs. Expected: p95 under 5 s.
 // Each virtual user is one candidate with its own seeded session; FR-502 allows one run per 5 s per
 // candidate, so each user waits 5.5 s between runs. Judge0 is the part under test.

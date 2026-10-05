@@ -1,4 +1,4 @@
-/* global __ENV */
+/* global __ENV, open */
 // Shared configuration for the TC-090 and TC-091 k6 scripts.
 // Everything environment-specific comes from environment variables. No default points at a real
 // host, and nothing here is a secret.
