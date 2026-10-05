@@ -168,6 +168,9 @@ Built against MSW mocks; paths are placeholders like the rest of `apps/web/opena
 - **Rate limits are the server's job.** The web assumes setup, disable and regenerate are rate limited server-side; the UI has no attempt counter. The mock mirrors only the shared lockout, not request rate limits.
 - **401 handling.** The client's refresh-and-retry skips `/v1/auth/*`, so these calls retry once after a silent refresh themselves (`features/security/api.ts`). A 403 never reaches that path and never signs the user out.
 
+- **[QA] Allocate TC IDs for the optional 2FA flows.** There are none yet for optional set-up, disable, regenerate and the re-auth rules: a re-auth 403 `REAUTH_FAILED` does not sign the user out and makes no refresh call; its lockout is shared with login (5 failures, the 6th correct password is refused with the identical body); recovery codes are shown once (and the old set stops working on regenerate); a 401 replay never crosses users. Tests in `features/security/security.test.tsx` and `e2e/security.spec.ts` are tagged FR-102 for now; rename them when the IDs exist.
+- **Session handling.** The "401, refresh, send again" guard is one helper, `refreshForReplay` in `src/lib/auth-session.ts`, used by both `lib/api/client.ts` and `features/security/api.ts`: it replays only for the same signed-in user and an unchanged session generation, otherwise the call fails with `session` and no second request (the password is never sent as another user).
+
 ### Test flake: admin tables (seen once in CI)
 
 - `apps/web/src/features/admin/settings.test.tsx` ("lists staff users sorted by name...") timed out once under CI load while the table was still loading. Fixed by awaiting the loaded state (`findLoadedTable` / `findLoadedRow` in `src/test/table-utils.ts`: table not `aria-busy`, no skeleton rows, or the empty state) instead of relying on a time limit; applied to the users, candidates and consent tests and to `cross-user-cache.test.tsx`.

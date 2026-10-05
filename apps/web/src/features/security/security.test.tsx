@@ -6,12 +6,14 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { LoginForm } from '@/features/auth/login-form';
 import { TwoFactorEnroll } from '@/features/auth/two-factor-enroll';
 import { UserMenu } from '@/features/staff/user-menu';
+import { handleSignInElsewhere, getSessionUserId } from '@/lib/auth-session';
 import { getAccessToken } from '@/lib/auth-token';
 import { apiBaseUrl } from '@/lib/env';
 import {
   MOCK_ADMIN_RECOVERY_CODE,
   MOCK_TOTP_CODE,
   MOCK_USERS,
+  seedMockRefresh,
   seedMockTwoFactor,
 } from '@/mocks/auth-handlers';
 import { server } from '@/mocks/server';
@@ -26,7 +28,11 @@ vi.mock('qrcode', () => ({
 }));
 
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
-afterEach(() => server.resetHandlers());
+afterEach(() => {
+  server.resetHandlers();
+  // watchSessionCalls and the request spies add listeners; do not let them leak across tests.
+  server.events.removeAllListeners();
+});
 afterAll(() => server.close());
 beforeEach(() => resetAuthTestState());
 
@@ -396,6 +402,114 @@ describe('Security page: PR #26 error contract (FR-102, FU-BE-39)', () => {
     await u.click(screen.getByRole('button', { name: 'Set up 2FA' }));
     await u.click(within(dialog()).getByRole('button', { name: 'Continue' }));
     expect(await within(dialog()).findByText('Enter your current password.')).toBeInTheDocument();
+  });
+});
+
+describe('Security page: recovery codes are shown once (FR-102)', () => {
+  it('FR-102: a reload or tab close is warned about while the codes show, and not after Done', async () => {
+    const u = await pageAs(MOCK_USERS.admin, { twoFactorOn: true });
+    const unload = () => {
+      const event = new Event('beforeunload', { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    expect(unload()).toBe(false);
+    await openAndSubmit(u, 'Regenerate recovery codes', MOCK_USERS.admin.password);
+    await within(dialog()).findByTestId('recovery-codes');
+    expect(unload()).toBe(true);
+    await u.click(within(dialog()).getByRole('checkbox'));
+    await u.click(within(dialog()).getByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(unload()).toBe(false);
+  });
+
+  it('FR-102: the status is refreshed as soon as set-up succeeds, before the dialog is closed', async () => {
+    let statusCalls = 0;
+    server.events.on('request:start', ({ request }) => {
+      if (new URL(request.url).pathname.endsWith('/2fa/status')) statusCalls += 1;
+    });
+    const u = await pageAs(MOCK_USERS.recruiter);
+    const before = statusCalls;
+    await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
+    await u.type(await within(dialog()).findByLabelText('6-digit code'), MOCK_TOTP_CODE);
+    await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
+    await within(dialog()).findByTestId('recovery-codes');
+    await waitFor(() => expect(statusCalls).toBeGreaterThan(before));
+  });
+});
+
+describe('Security page: 401 replay is for the same user only (FR-102, FR-103, TC-005)', () => {
+  const unauthorized = () =>
+    HttpResponse.json({ status: 401, title: 'Unauthorized' }, { status: 401 });
+
+  it('FR-102 TC-005: a 401 then a refresh as the same user replays the request once and succeeds', async () => {
+    let posts = 0;
+    server.use(
+      http.post(
+        `${base}/2fa/setup/start`,
+        () => {
+          posts += 1;
+          return unauthorized();
+        },
+        { once: true },
+      ),
+    );
+    const calls = watchSessionCalls();
+    const u = await pageAs(MOCK_USERS.recruiter);
+    const refreshBefore = calls.refresh;
+    await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
+    expect(await within(dialog()).findByTestId('manual-key')).toBeInTheDocument();
+    expect(posts).toBe(1);
+    expect(calls.refresh).toBe(refreshBefore + 1);
+  });
+
+  it('FR-103 TC-005: after another tab signs in as someone else, the 401 is not replayed, the other user is not published and no second POST is sent', async () => {
+    let posts = 0;
+    server.use(
+      http.post(`${base}/2fa/setup/start`, () => {
+        posts += 1;
+        // Meanwhile tab B signed in as the admin: this tab learns it through the storage event.
+        handleSignInElsewhere('nonce|user-super_admin');
+        return unauthorized();
+      }),
+    );
+    const calls = watchSessionCalls();
+    const u = await pageAs(MOCK_USERS.recruiter);
+    // The refresh cookie now belongs to the admin, as it would after tab B signed in.
+    seedMockRefresh(MOCK_USERS.admin.email);
+    const refreshBefore = calls.refresh;
+    await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
+    expect(await within(dialog()).findByText('Your session has expired')).toBeInTheDocument();
+    expect(posts).toBe(1);
+    expect(calls.refresh).toBe(refreshBefore);
+    expect(getSessionUserId()).toBeNull();
+    expect(getAccessToken()).toBeNull();
+  });
+
+  it('FR-102 TC-005: a 401 whose refresh returns a different user is not replayed either', async () => {
+    let posts = 0;
+    server.use(
+      http.post(`${base}/2fa/setup/start`, () => {
+        posts += 1;
+        // The shared cookie is swapped to the admin before this tab refreshes.
+        seedMockRefresh(MOCK_USERS.admin.email);
+        return unauthorized();
+      }),
+    );
+    const u = await pageAs(MOCK_USERS.recruiter);
+    await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
+    expect(await within(dialog()).findByText('Your session has expired')).toBeInTheDocument();
+    expect(posts).toBe(1);
+    expect(getSessionUserId()).not.toBe('user-super_admin');
+  });
+
+  it('FR-102: a 403 REAUTH_FAILED makes no refresh call', async () => {
+    const calls = watchSessionCalls();
+    const u = await pageAs(MOCK_USERS.recruiter);
+    const before = calls.refresh;
+    await openAndSubmit(u, 'Set up 2FA', 'wrong-password-1');
+    await within(dialog()).findByText('Password incorrect');
+    expect(calls.refresh).toBe(before);
   });
 });
 

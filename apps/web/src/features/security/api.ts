@@ -1,5 +1,5 @@
 import { api, type Schemas } from '@/lib/api/client';
-import { refreshSession } from '@/lib/auth-session';
+import { captureSessionStamp, refreshForReplay } from '@/lib/auth-session';
 import { REAUTH_FAILED_CODE, ROLE_REQUIRED_CODE } from './schemas';
 
 /*
@@ -36,8 +36,13 @@ interface Result<T> {
 
 async function run<T>(send: () => Promise<Result<T>>, empty?: T): Promise<Outcome<T>> {
   try {
+    const stamp = captureSessionStamp();
     let result = await send();
-    if (result.response.status === 401 && (await refreshSession())) result = await send();
+    if (result.response.status === 401) {
+      // Replay only for the same signed-in user; never send this password as someone else.
+      if (!(await refreshForReplay(stamp))) return { ok: false, failure: 'session' };
+      result = await send();
+    }
     const { response, error } = result;
     if (response.ok) {
       const data = result.data ?? empty;

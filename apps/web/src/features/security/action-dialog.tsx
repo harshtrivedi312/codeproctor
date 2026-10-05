@@ -1,5 +1,6 @@
 'use client';
 import { zodResolver } from '@hookform/resolvers/zod';
+import { useQueryClient } from '@tanstack/react-query';
 import * as React from 'react';
 import { useForm } from 'react-hook-form';
 import { Alert } from '@/components/ui/alert';
@@ -98,8 +99,11 @@ export function ActionDialog({
   onDone: (result: SecurityResult) => void;
 }): React.JSX.Element {
   const { user } = useAuth();
+  const queryClient = useQueryClient();
   const [stage, setStage] = React.useState<Stage>({ kind: 'password', passwordWrong: false });
-  // Held for the set-up confirm call; cleared as soon as that call has been made.
+  // The password sits in this component state between set-up start and set-up confirm because
+  // the confirm call needs it again. It is cleared once confirm succeeds or fails on the password,
+  // and is gone when the dialog closes (the component unmounts).
   const [password, setPassword] = React.useState('');
   const [failure, setFailure] = React.useState<Failure | null>(null);
   const copy = COPY[action];
@@ -111,6 +115,8 @@ export function ActionDialog({
     if (action === 'setup') {
       const out = await startSetup(values.currentPassword);
       if (!out.ok) return fail(out.failure);
+      // Only a PNG data URL may become the image source.
+      if (!out.data.qrDataUrl.startsWith('data:image/png;base64,')) return fail('unknown');
       setPassword(values.currentPassword);
       setStage({ kind: 'confirm', manualKey: out.data.manualKey, qr: out.data.qrDataUrl });
       return 'ok';
@@ -123,8 +129,14 @@ export function ActionDialog({
     }
     const out = await regenerateRecoveryCodes(values.currentPassword);
     if (!out.ok) return fail(out.failure);
+    refreshStatus();
     setStage({ kind: 'codes', codes: out.data.recoveryCodes });
     return 'ok';
+  }
+
+  /** 2FA state changed on the server: refresh it now, not only when the dialog is closed. */
+  function refreshStatus(): void {
+    void queryClient.invalidateQueries({ queryKey: ['2fa-status', user?.id ?? null] });
   }
 
   function fail(f: Failure): 'wrong' | 'invalid' | 'failed' {
@@ -140,6 +152,7 @@ export function ActionDialog({
     const out = await confirmSetup(password, values.code);
     if (out.ok) {
       setPassword('');
+      refreshStatus();
       setStage({ kind: 'codes', codes: out.data.recoveryCodes });
       return 'ok';
     }
@@ -155,6 +168,13 @@ export function ActionDialog({
   }
 
   const locked = stage.kind === 'codes';
+  // The codes are shown once: warn before a reload or tab close loses them.
+  React.useEffect(() => {
+    if (!locked) return undefined;
+    const warn = (event: BeforeUnloadEvent): void => event.preventDefault();
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [locked]);
   return (
     <Dialog open onOpenChange={(open) => (!open ? onClose() : undefined)}>
       <DialogContent

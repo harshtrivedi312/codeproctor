@@ -960,7 +960,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
     };

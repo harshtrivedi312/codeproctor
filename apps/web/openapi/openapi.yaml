@@ -233,7 +233,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ApiError'
+                $ref: '#/components/schemas/ProblemDetails'
   /v1/auth/2fa/setup/start:
     post:
       operationId: startTwoFactorSetup
