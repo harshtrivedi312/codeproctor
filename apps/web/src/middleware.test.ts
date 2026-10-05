@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server';
+// Experimental Next API; rename here if a Next upgrade moves it.
 import { unstable_doesMiddlewareMatch as doesMiddlewareMatch } from 'next/experimental/testing/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { config, middleware } from './middleware';
@@ -40,7 +41,8 @@ describe('CSP middleware (D-45 (P-05))', () => {
     expect(cspFor('/t/%2e%2e/test')).not.toContain('wasm-unsafe-eval');
     // An encoded slash stays in the token segment; it still routes to the test page.
     expect(cspFor('/t/a%2Fb/test')).toContain("'wasm-unsafe-eval'");
-    // Case differences, repeated slashes and suffixes do not match (and 404 under the strict policy).
+    // Case differences, repeated slashes and suffixes do not match (redirected or 404, always under
+    // the strict policy).
     for (const path of [
       '/T/abc123/test',
       '/t/abc123/TEST',
@@ -93,6 +95,10 @@ describe('CSP middleware matcher (NFR-04)', () => {
   it('skips static assets and router prefetches', () => {
     expect(runsFor('/_next/static/chunks/x.js')).toBe(false);
     expect(runsFor('/monaco/vs/loader.js')).toBe(false);
+    expect(runsFor('/_next/image?url=%2Fx.png&w=64&q=75')).toBe(false);
+    expect(runsFor('/mockServiceWorker.js')).toBe(false);
+    expect(runsFor('/favicon.ico')).toBe(false);
     expect(runsFor('/t/abc123/test', { 'next-router-prefetch': '1' })).toBe(false);
+    expect(runsFor('/t/abc123/test', { purpose: 'prefetch' })).toBe(false);
   });
 });

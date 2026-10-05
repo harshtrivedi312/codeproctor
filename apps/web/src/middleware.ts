@@ -29,7 +29,8 @@ export function middleware(request: NextRequest): NextResponse {
 export const config = {
   matcher: [
     {
-      // Skip static assets (Monaco, the MSW worker, Next static files). Prefetches keep the CSP.
+      // Skip static assets (Monaco, the MSW worker, Next static files) and router prefetches; the
+      // document keeps the CSP it was loaded with.
       source: '/((?!_next/static|_next/image|monaco/|mockServiceWorker\\.js|favicon\\.ico).*)',
       missing: [
         { type: 'header', key: 'next-router-prefetch' },
