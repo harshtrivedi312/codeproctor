@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Proposed 2026-10-05 (owner's plan; step details and timing for the owner to accept) |
+| Status | Accepted 2026-10-05 (C-21, D-49). PR #36 (frontend) was allowed to merge ahead of the first sync PR under C-21, then moves in that sync PR. |
 | Author | architecture hub |
 | Serves | NFR-04; ARC-02 part 2; FE-01 |
 | Builds on | ADR 0001 C-8, C-9; ADR 0011 |
@@ -29,7 +29,7 @@ The path prefix is `/api/v1` (the backend's `API_PREFIX`). Errors are RFC 7807 w
 - A test fails when any operation has no documented 2xx response type, no declared error response using the problem schema, or neither a security requirement nor an explicit public marker. This is what keeps the generated client types useful instead of `unknown`.
 - DTOs use the `@nestjs/swagger` CLI plugin where possible, so the spec follows the class-validator DTOs.
 
-**CI (hub).** One job `openapi-drift` in `ci.yml`: install, run `openapi:check`, fail with "run `pnpm --filter @codeproctor/api openapi:export` and commit the result". CI config goes through the hub (CLAUDE.md rule 12), so the hub adds the job.
+**CI (hub-owned, `.github/workflows/ci.yml`).** One job `openapi-drift` in `ci.yml`: install, run `openapi:check`, fail with "run `pnpm --filter @codeproctor/api openapi:export` and commit the result". CI config goes through the hub (CLAUDE.md rule 12), so the hub adds the job. The export and the check use fixed dummy environment values and no GitHub secrets, and run from the Nest build output, so a pull request from a branch cannot read a secret through them.
 
 **Frontend, gradual and isolated.** The backend has built only auth and health. The web app also needs admin and candidate routes that do not exist yet, so the placeholder cannot be dropped in one step.
 - `apps/web/openapi/pending.yaml` keeps the placeholder routes the backend has not built, renamed to `/api/v1`.

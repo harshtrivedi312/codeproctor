@@ -14,7 +14,7 @@ Changing a second factor with only an access token lets a stolen token take over
 
 ## Decision
 
-Setup, disable and recovery-code regeneration require `currentPassword` in the body (owner decision). A wrong password returns `403` with problem `code: "REAUTH_FAILED"`, not 401 (owner decision). Architect details, to be confirmed by the owner: the SUPER_ADMIN reset takes the admin's own password; failures share login's lockout and a locked account returns the same 403; all attempts are audited. Forced enrolment during login is unchanged. Full rules, the endpoint table and the frontend behaviour are in `docs/api-contract.md` section 1.
+Setup, disable and recovery-code regeneration require `currentPassword` in the body (owner decision). A wrong password returns `403` with problem `code: "REAUTH_FAILED"`, not 401 (owner decision). Architect details (covered by C-21's acceptance of this ADR): the SUPER_ADMIN reset takes the admin's own password; failures share login's lockout and a locked account returns the same 403; all attempts are audited. Forced enrolment during login is unchanged. Full rules, the endpoint table and the frontend behaviour are in `docs/api-contract.md` section 1.
 
 ## Options considered
 
