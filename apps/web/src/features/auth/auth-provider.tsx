@@ -3,6 +3,8 @@ import { useRouter } from 'next/navigation';
 import * as React from 'react';
 import { api, type Schemas } from '@/lib/api/client';
 import {
+  beginSession,
+  beginSignOut,
   invalidateRefreshes,
   onSessionChange,
   publishSession,
@@ -56,13 +58,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
   const signIn = React.useCallback((session: AuthSession) => {
     setPending(null);
     setSignedOutByUser(false);
+    beginSession();
     publishSession(session);
   }, []);
 
   const signOut = React.useCallback(async () => {
     setSignedOutByUser(true);
     // A refresh that is still in flight must not bring the session back after this.
-    invalidateRefreshes();
+    beginSignOut();
     try {
       await api.POST('/v1/auth/logout');
     } catch {
@@ -71,6 +74,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     } finally {
       // Whatever the server said, this browser forgets the session.
       publishSession(null);
+      invalidateRefreshes();
       setPending(null);
       router.replace('/admin/login');
     }

@@ -215,6 +215,74 @@ describe('session handling', () => {
     expect(getAccessToken()).toBeNull();
     expect(screen.getByTestId('who')).toHaveTextContent('nobody');
   });
+
+  it('FR-104: a refresh triggered by a 401 while logout is in flight cannot sign the user back in', async () => {
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <SignOutButton />
+        <Who />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let lateRefresh: Promise<unknown> = Promise.resolve();
+    server.use(
+      http.post('*/v1/auth/logout', () => {
+        // Another request got a 401 meanwhile, and its handler asks for a refresh.
+        lateRefresh = refreshSession();
+        return new HttpResponse(null, { status: 204 });
+      }),
+      http.post('*/v1/auth/refresh', async () => {
+        await gate;
+        return HttpResponse.json({
+          accessToken: 'resurrected-token',
+          user: {
+            id: 'u',
+            email: 'recruiter@example.test',
+            name: 'R',
+            role: 'RECRUITER',
+            orgName: 'x',
+          },
+        });
+      }),
+    );
+    const u = userEvent.setup();
+    await u.click(screen.getByRole('button', { name: 'Sign out' }));
+    await waitFor(() => expect(router.replace).toHaveBeenLastCalledWith('/admin/login'));
+    release();
+    await lateRefresh;
+    expect(getAccessToken()).toBeNull();
+    expect(screen.getByTestId('who')).toHaveTextContent('nobody');
+  });
+
+  it('FR-101: a slow first-load refresh that ends in 401 cannot sign out a fresh login', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let refreshes = 0;
+    server.use(
+      http.post('*/v1/auth/refresh', async () => {
+        refreshes++;
+        await gate;
+        return new HttpResponse(null, { status: 401 });
+      }),
+    );
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <Who />
+      </>,
+    );
+    await waitFor(() => expect(refreshes).toBe(1));
+    await signInAs(MOCK_USERS.recruiter);
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
+    release();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER');
+    expect(getAccessToken()).toBeTruthy();
+  });
 });
 
 describe('isAuthRequest', () => {

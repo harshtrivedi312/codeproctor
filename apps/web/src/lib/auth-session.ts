@@ -28,14 +28,34 @@ let inFlight: Promise<AuthSession | null> | null = null;
 // Bumped on sign-out. A refresh that started before the bump must not restore the session.
 let generation = 0;
 
-/** Called by sign-out: refreshes already in flight are ignored when they finish. */
+// True from the moment the user chooses Sign out until the next sign-in. While set, no refresh
+// starts, so a 401 on some other request during logout cannot bring the session back.
+let signingOut = false;
+
+/** Refreshes already in flight are ignored when they finish. */
 export function invalidateRefreshes(): void {
   generation += 1;
   inFlight = null;
 }
 
+/** Called when the user chooses Sign out: stops in-flight and new refreshes until the next sign-in. */
+export function beginSignOut(): void {
+  signingOut = true;
+  invalidateRefreshes();
+}
+
+/**
+ * Called on a fresh login. Bumps the generation so a slow first-load refresh that ends in 401
+ * cannot sign out the new session, and allows refreshes again.
+ */
+export function beginSession(): void {
+  signingOut = false;
+  invalidateRefreshes();
+}
+
 /** One refresh at a time; concurrent callers share the result. Returns null when it failed. */
 export function refreshSession(): Promise<AuthSession | null> {
+  if (signingOut) return Promise.resolve(null);
   if (inFlight) return inFlight;
   const mine = doRefresh().finally(() => {
     if (inFlight === mine) inFlight = null;
