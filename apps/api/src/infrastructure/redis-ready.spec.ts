@@ -4,10 +4,10 @@ import { ensureConnected } from './redis-ready';
 
 type Status = 'wait' | 'connecting' | 'reconnecting' | 'ready' | 'end';
 
-/** A minimal ioredis stand-in: an emitter with a status, options and a connect() spy. */
+/** An ioredis stand-in: status events fire on the next tick, a failed connect goes to reconnecting. */
 class FakeRedis extends EventEmitter {
   status: Status = 'wait';
-  options = { connectTimeout: 200 };
+  options: { connectTimeout?: number } = { connectTimeout: 200 };
   connectCalls = 0;
   private settle: { resolve: () => void; reject: (e: Error) => void } | null = null;
 
@@ -20,14 +20,19 @@ class FakeRedis extends EventEmitter {
   }
 
   becomeReady(): void {
-    this.status = 'ready';
-    this.settle?.resolve();
-    this.emit('ready');
+    process.nextTick(() => {
+      this.status = 'ready';
+      this.emit('ready');
+      this.settle?.resolve();
+    });
   }
 
   fail(e: Error): void {
-    this.status = 'end';
-    this.settle?.reject(e);
+    process.nextTick(() => {
+      this.status = 'reconnecting';
+      this.emit('error', e);
+      this.settle?.reject(e);
+    });
   }
 
   asRedis(): Redis {
@@ -35,29 +40,39 @@ class FakeRedis extends EventEmitter {
   }
 }
 
-describe('ensureConnected (FR-102, TC-003, NFR-09: QA-D-04 cold start)', () => {
-  it('TC-003: N concurrent callers during connecting all resolve once ready with one connect() call', async () => {
+const tick = (): Promise<void> => new Promise((r) => setImmediate(r));
+
+function track(p: Promise<void>): { done: () => boolean } {
+  let done = false;
+  p.then(
+    () => (done = true),
+    () => (done = true),
+  );
+  return { done: () => done };
+}
+
+describe('ensureConnected (FR-102, TC-003, NFR-03, NFR-04: QA-D-04 cold start)', () => {
+  it('TC-003: N concurrent callers during connecting all wait, then resolve once ready with one connect() call', async () => {
     const r = new FakeRedis();
     const calls = Array.from({ length: 8 }, () => ensureConnected(r.asRedis()));
-    expect(r.connectCalls).toBe(1);
+    const probes = calls.map(track);
+    await tick();
+    expect(probes.some((p) => p.done())).toBe(false);
     r.becomeReady();
     await expect(Promise.all(calls)).resolves.toHaveLength(8);
     expect(r.connectCalls).toBe(1);
   });
 
-  it('TC-003: a caller arriving while status is connecting (promise pending) waits and resolves', async () => {
+  it('TC-003: a caller arriving while status is connecting waits and resolves', async () => {
     const r = new FakeRedis();
     const first = ensureConnected(r.asRedis());
     expect(r.status).toBe('connecting');
-    let late = false;
-    const second = ensureConnected(r.asRedis()).then(() => {
-      late = true;
-    });
-    await Promise.resolve();
-    expect(late).toBe(false);
+    const second = ensureConnected(r.asRedis());
+    const probe = track(second);
+    await tick();
+    expect(probe.done()).toBe(false);
     r.becomeReady();
     await Promise.all([first, second]);
-    expect(late).toBe(true);
     expect(r.connectCalls).toBe(1);
   });
 
@@ -65,8 +80,10 @@ describe('ensureConnected (FR-102, TC-003, NFR-09: QA-D-04 cold start)', () => {
     const r = new FakeRedis();
     r.status = 'reconnecting';
     const waiting = ensureConnected(r.asRedis());
-    r.status = 'ready';
-    r.emit('ready');
+    const probe = track(waiting);
+    await tick();
+    expect(probe.done()).toBe(false);
+    r.becomeReady();
     await expect(waiting).resolves.toBeUndefined();
     expect(r.connectCalls).toBe(0);
   });
@@ -78,16 +95,36 @@ describe('ensureConnected (FR-102, TC-003, NFR-09: QA-D-04 cold start)', () => {
     expect(r.connectCalls).toBe(0);
   });
 
-  it('NFR-09: a Redis that never becomes ready rejects within the timeout (fails closed)', async () => {
+  it('NFR-04: a connect() that never settles (stuck handshake) rejects within the timeout and leaves no listeners', async () => {
     const r = new FakeRedis();
-    r.status = 'connecting';
     const started = Date.now();
     await expect(ensureConnected(r.asRedis())).rejects.toThrow('Redis ready timeout');
     expect(Date.now() - started).toBeLessThan(1000);
+    for (const ev of ['ready', 'error', 'end']) expect(r.listenerCount(ev)).toBe(0);
+  });
+
+  it('NFR-04: a client stuck in connecting with no promise rejects within the timeout', async () => {
+    const r = new FakeRedis();
+    r.status = 'connecting';
+    await expect(ensureConnected(r.asRedis())).rejects.toThrow('Redis ready timeout');
     expect(r.listenerCount('ready')).toBe(0);
   });
 
-  it('NFR-09: a reconnecting client that errors rejects the waiter', async () => {
+  it('NFR-04: connectTimeout 0 (disabled in ioredis) still gets a bounded default wait', async () => {
+    jest.useFakeTimers();
+    try {
+      const r = new FakeRedis();
+      r.options = { connectTimeout: 0 };
+      const p = ensureConnected(r.asRedis());
+      const assertion = expect(p).rejects.toThrow('Redis ready timeout');
+      await jest.advanceTimersByTimeAsync(10_000);
+      await assertion;
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('NFR-04: a reconnecting client that errors rejects the waiter at once', async () => {
     const r = new FakeRedis();
     r.status = 'reconnecting';
     const waiting = ensureConnected(r.asRedis());
@@ -95,7 +132,7 @@ describe('ensureConnected (FR-102, TC-003, NFR-09: QA-D-04 cold start)', () => {
     await expect(waiting).rejects.toThrow('ECONNREFUSED');
   });
 
-  it('NFR-09: a connect failure rejects all waiters and a later call retries', async () => {
+  it('NFR-04: a connect failure (client goes to reconnecting) rejects all waiters and a later call retries', async () => {
     const r = new FakeRedis();
     const calls = Array.from({ length: 4 }, () => ensureConnected(r.asRedis()));
     const settled = Promise.allSettled(calls);
@@ -104,6 +141,7 @@ describe('ensureConnected (FR-102, TC-003, NFR-09: QA-D-04 cold start)', () => {
     expect(results.every((x) => x.status === 'rejected')).toBe(true);
     expect(r.connectCalls).toBe(1);
 
+    r.status = 'wait';
     const retry = ensureConnected(r.asRedis());
     expect(r.connectCalls).toBe(2);
     r.becomeReady();

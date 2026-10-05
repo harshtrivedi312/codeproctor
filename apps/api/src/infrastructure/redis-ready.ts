@@ -1,14 +1,17 @@
-// One shared connect promise per Redis client (FU-BE-33, QA-D-04). The client is lazy and has no
+// One shared ready-wait per Redis client (FU-BE-33, QA-D-04). The client is lazy and has no
 // offline queue, so a command sent while the client is still connecting fails fast. Every caller
-// therefore waits for the in-flight connect (or an auto-reconnect) to reach 'ready', bounded by
-// the client's connect timeout, and a genuinely down Redis still fails closed quickly.
+// therefore waits for the in-flight connect (or an auto-reconnect) to reach 'ready', all bounded
+// by one timer, so a Redis that accepts TCP but never finishes the handshake (or is stuck LOADING)
+// cannot hang callers. Any 'error' or 'end' during the wait rejects at once on purpose: this fails
+// closed (NFR-04). Do not turn it into retry-until-timeout without a security check.
 import type { Redis } from 'ioredis';
 
-const connecting = new WeakMap<Redis, Promise<void>>();
+const waiting = new WeakMap<Redis, Promise<void>>();
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 function waitForReady(redis: Redis): Promise<void> {
-  const timeoutMs = redis.options?.connectTimeout ?? DEFAULT_TIMEOUT_MS;
+  // 0 means "disabled" in ioredis; never allow an unbounded wait.
+  const timeoutMs = redis.options?.connectTimeout || DEFAULT_TIMEOUT_MS;
   return new Promise<void>((resolve, reject) => {
     const cleanup = (): void => {
       clearTimeout(timer);
@@ -35,13 +38,14 @@ function waitForReady(redis: Redis): Promise<void> {
 
 export function ensureConnected(redis: Redis): Promise<void> {
   if (redis.status === 'ready') return Promise.resolve();
-  const existing = connecting.get(redis);
+  const existing = waiting.get(redis);
   if (existing) return existing;
-  const pending: Promise<void> =
-    redis.status === 'wait' || redis.status === 'end' ? redis.connect() : waitForReady(redis); // 'connecting' | 'connect' | 'reconnecting' | 'close' without our promise
-  const tracked = pending.finally(() => {
-    if (connecting.get(redis) === tracked) connecting.delete(redis);
+  // 'wait' and 'end' need a connect() (swallowed: ioredis emits 'error', which the waiter sees);
+  // every other status is an in-flight connect or an auto-reconnect.
+  if (redis.status === 'wait' || redis.status === 'end') redis.connect().catch(() => undefined);
+  const tracked = waitForReady(redis).finally(() => {
+    if (waiting.get(redis) === tracked) waiting.delete(redis);
   });
-  connecting.set(redis, tracked);
+  waiting.set(redis, tracked);
   return tracked;
 }

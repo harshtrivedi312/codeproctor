@@ -14,9 +14,11 @@ const PASSWORD = 'Correct-Horse-9';
 const SECRET = 'JBSWY3DPEHPK3PXP';
 const USERS = 5;
 
-describe('2FA verify right after a cold start (FR-102, TC-003, NFR-09, QA-D-04)', () => {
+describe('2FA verify right after a cold start (FR-102, TC-003, NFR-03, NFR-04, QA-D-04)', () => {
   let infra: TestInfra;
   let app: INestApplication<App>;
+  let orgId: string;
+  let key: Buffer;
   let prisma: PrismaClient;
 
   beforeAll(async () => {
@@ -24,6 +26,8 @@ describe('2FA verify right after a cold start (FR-102, TC-003, NFR-09, QA-D-04)'
     await applyMigrations(infra);
     applyEnv(infra, { THROTTLE_AUTH_LIMIT: '10000' });
     prisma = createPrismaClient(process.env.DATABASE_URL ?? '');
+    orgId = (await prisma.organization.create({ data: { name: 'Cold Start Org' } })).id;
+    key = Buffer.from(process.env.ENCRYPTION_KEY ?? '', 'base64');
   });
 
   afterAll(async () => {
@@ -32,18 +36,16 @@ describe('2FA verify right after a cold start (FR-102, TC-003, NFR-09, QA-D-04)'
     await infra?.stop();
   });
 
-  it('TC-003: parallel 2FA verifies on a freshly booted app (lazy Redis not yet connected) never answer 503', async () => {
-    const orgId = (await prisma.organization.create({ data: { name: 'Cold Start Org' } })).id;
-    const key = Buffer.from(process.env.ENCRYPTION_KEY ?? '', 'base64');
+  async function createTotpUsers(prefix: string, count: number): Promise<string[]> {
     const emails: string[] = [];
-    for (let i = 0; i < USERS; i += 1) {
-      const email = `cold${i}@example.com`;
+    for (let i = 0; i < count; i += 1) {
+      const email = `${prefix}${i}@example.com`;
       emails.push(email);
       await prisma.user.create({
         data: {
           orgId,
           email,
-          fullName: `Cold ${i}`,
+          fullName: `${prefix} ${i}`,
           role: UserRole.REVIEWER,
           passwordHash: await hash(PASSWORD, ARGON2_OPTIONS),
           totpSecretEnc: encryptSecret(SECRET, key),
@@ -51,7 +53,11 @@ describe('2FA verify right after a cold start (FR-102, TC-003, NFR-09, QA-D-04)'
         },
       });
     }
+    return emails;
+  }
 
+  async function bootFreshApp(): Promise<void> {
+    await app?.close();
     jest.resetModules();
     const { AppModule } = jest.requireActual<typeof import('../app.module')>('../app.module');
     const { Test } = jest.requireActual<typeof import('@nestjs/testing')>('@nestjs/testing');
@@ -65,23 +71,46 @@ describe('2FA verify right after a cold start (FR-102, TC-003, NFR-09, QA-D-04)'
     app = moduleRef.createNestApplication<INestApplication<App>>();
     configureApp(app);
     await app.init();
+  }
 
-    // Password sign-in does not touch Redis, so the first Redis use is the parallel verify burst.
-    const challenges = await Promise.all(
-      emails.map(async (email) => {
-        const res = await request(app.getHttpServer())
-          .post(`${API}/login`)
-          .send({ email, password: PASSWORD })
-          .expect(200);
-        return (res.body as { challengeToken: string }).challengeToken;
-      }),
-    );
+  // Password sign-in does not touch Redis, so the first Redis use is the verify that follows.
+  async function challengeFor(email: string): Promise<string> {
+    const res = await request(app.getHttpServer())
+      .post(`${API}/login`)
+      .send({ email, password: PASSWORD })
+      .expect(200);
+    return (res.body as { challengeToken: string }).challengeToken;
+  }
+
+  it('TC-003: parallel 2FA verifies on a freshly booted app (lazy Redis not yet connected) all succeed, never 503', async () => {
+    const emails = await createTotpUsers('cold', USERS);
+    await bootFreshApp();
+    const challenges = await Promise.all(emails.map(challengeFor));
     const code = authenticator.generate(SECRET);
     const results = await Promise.all(
       challenges.map((challengeToken) =>
         request(app.getHttpServer()).post(`${API}/2fa/verify`).send({ challengeToken, code }),
       ),
     );
-    expect(results.map((r) => r.status)).not.toContain(503);
+    expect(results.map((r) => r.status)).toEqual(Array(USERS).fill(200));
+    for (const r of results)
+      expect((r.body as { accessToken?: string }).accessToken).toEqual(expect.any(String));
+  });
+
+  it('NFR-04: with Redis unreachable a 2FA verify fails closed with 503 within the health timeout, no session, no failed-login count', async () => {
+    const [email] = await createTotpUsers('down', 1);
+    applyEnv(infra, { THROTTLE_AUTH_LIMIT: '10000', REDIS_URL: 'redis://127.0.0.1:1' });
+    await bootFreshApp();
+    const challengeToken = await challengeFor(email ?? '');
+    const started = Date.now();
+    const res = await request(app.getHttpServer())
+      .post(`${API}/2fa/verify`)
+      .send({ challengeToken, code: authenticator.generate(SECRET) });
+    expect(res.status).toBe(503);
+    expect(Date.now() - started).toBeLessThan(1500 + 1500);
+    expect(res.headers['set-cookie']).toBeUndefined();
+    expect((res.body as { accessToken?: string }).accessToken).toBeUndefined();
+    const row = await prisma.user.findUniqueOrThrow({ where: { email: email ?? '' } });
+    expect(row.failedLogins).toBe(0);
   });
 });
