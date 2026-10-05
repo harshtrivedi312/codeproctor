@@ -123,22 +123,25 @@ describe('TC-050 (FR-601): fullscreen exit', () => {
     expect(ev[1]?.durationMs).toBe(6000);
   });
 
-  // Documented gap: test-cases.md says FULLSCREEN_EXIT is "logged with duration". The SDK can only
-  // know the duration when fullscreen returns, so the EXIT event has none and a candidate who never
-  // returns leaves no duration at all. Reported as defect QA-D-01; remove KNOWN DEFECT when decided.
-  it.fails(
-    'TC-050 KNOWN DEFECT QA-D-01: the FULLSCREEN_EXIT event itself carries a duration',
-    async () => {
-      vi.useFakeTimers({ toFake: ['Date'] });
-      const setFs = fullscreen();
-      const r = await rig([new FullscreenMonitor()]);
-      setFs(null);
-      vi.advanceTimersByTime(6000);
-      setFs(document.documentElement);
-      await r.session.stop();
-      expect(r.events().find((e) => e.type === 'FULLSCREEN_EXIT')?.durationMs).toBe(6000);
-    },
-  );
+  // Hub decision (QA-D-01): the SDK does not change. FULLSCREEN_EXIT is sent at once without a
+  // duration; the API fills duration_ms on the open FULLSCREEN_EXIT when FULLSCREEN_RESTORED
+  // arrives, or at session end.
+  it('TC-050: FULLSCREEN_EXIT is emitted immediately without durationMs, and FULLSCREEN_RESTORED carries the time away', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const setFs = fullscreen();
+    const r = await rig([new FullscreenMonitor()]);
+    const live: { type: string; durationMs?: number }[] = [];
+    r.session.on('event', (e) => live.push(e));
+    setFs(null);
+    expect(live.map((e) => e.type)).toEqual(['FULLSCREEN_EXIT']);
+    expect(live[0]?.durationMs).toBeUndefined();
+    vi.advanceTimersByTime(6000);
+    setFs(document.documentElement);
+    expect(live[1]).toMatchObject({ type: 'FULLSCREEN_RESTORED', durationMs: 6000 });
+    await r.session.stop();
+    const sentExit = r.events().find((e) => e.type === 'FULLSCREEN_EXIT');
+    expect(sentExit?.durationMs).toBeUndefined();
+  });
 });
 
 describe('TC-051 (FR-602): tab switch', () => {

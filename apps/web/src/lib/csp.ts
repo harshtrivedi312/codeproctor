@@ -17,6 +17,22 @@ export interface CspOptions {
   uploadOrigins?: readonly string[];
   /** `next dev` only: adds the minimum Next.js and React dev tooling needs. */
   isDev?: boolean;
+  /**
+   * Adds 'wasm-unsafe-eval' to script-src. Only the candidate test route gets it (see
+   * `isCandidateTestPath`); every other route stays without it.
+   */
+  allowWasm?: boolean;
+}
+
+/**
+ * The candidate test screen, /t/[token]/test, and nothing else (D-45 (P-05)). The pre-test
+ * stepper and every other route do not match. A document keeps the CSP it was loaded with, so
+ * entry to /t/[token]/test must be a full document navigation (window.location.assign or a server
+ * redirect), not a client-side router push from another candidate page. The reverse holds too:
+ * a client-side navigation out of the test route keeps the allowance, so keep links out of it.
+ */
+export function isCandidateTestPath(pathname: string): boolean {
+  return /^\/t\/[^/]+\/test\/?$/.test(pathname);
 }
 
 /** Reduces a URL to its origin; returns null for anything that is not an http(s) URL. */
@@ -42,6 +58,7 @@ export function buildCsp({
   apiOrigin,
   uploadOrigins = [],
   isDev = false,
+  allowWasm = false,
 }: CspOptions): string {
   const api = toOrigin(apiOrigin);
 
@@ -55,6 +72,11 @@ export function buildCsp({
   // Dev only: React in development uses eval to rebuild server call stacks in the browser.
   // Never emitted in production builds.
   if (isDev) script.push("'unsafe-eval'");
+  // D-45 (P-05): the in-browser detectors (MediaPipe, onnxruntime-web and the tfjs wasm backends)
+  // must compile WebAssembly, which needs 'wasm-unsafe-eval'. It allows WebAssembly compilation
+  // only, not eval() or new Function(), and is added for the candidate test route only. Model
+  // files are served from our own origin, so connect-src and script-src gain nothing else.
+  if (allowWasm) script.push("'wasm-unsafe-eval'");
 
   const directives: Record<string, string[]> = {
     'default-src': ["'self'"],
