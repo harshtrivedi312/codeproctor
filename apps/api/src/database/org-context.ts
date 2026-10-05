@@ -113,8 +113,9 @@ export class OrgContextService implements ScopeSource {
   /**
    * Allow raw SQL ($queryRaw, $executeRaw and their Unsafe forms) inside `fn`. Raw SQL cannot be
    * filtered by the extension, so the SQL itself must filter by org_id. The reason is free text,
-   * for the reviewer: say what the query does and why the model API cannot. The org scope that is
-   * active stays in force for model queries inside `fn`.
+   * for the reviewer: say what the query does and why the model API cannot. It needs an active
+   * scope (org or system) and throws without one. The scope that is active stays in force for
+   * model queries inside `fn`.
    *
    * The hatch stays open for the whole of `fn`, including any runAsUser, runInOrg or runSystem
    * started inside it (a nested scope keeps the outer hatch). So wrap only the single raw
@@ -127,6 +128,9 @@ export class OrgContextService implements ScopeSource {
       );
     }
     const current = this.storage.getStore();
+    // The hatch is not a scope. With no org or system scope the model queries inside would throw
+    // anyway, and a raw query alone would run with nobody accountable for the org.
+    if (current?.scope === undefined) throw new OrgContextMissingError('runRawSql');
     return this.runWith({ ...current, rawSqlReason: reason }, fn);
   }
 

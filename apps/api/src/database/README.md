@@ -145,8 +145,8 @@ cannot be filtered by the extension, so the SQL itself must filter by `org_id`. 
 change. It cannot be entered from inside an org scope (work that has an org never widens to all
 orgs), but code in a system scope may narrow to one org with `runInOrg`. An org scope cannot switch
 to another org either. `runRawSql` nests inside `runSystem` and inside `runAsUser` or `runInOrg`, in
-either order, and also works with no scope at all. Treat every `runSystem` and `runRawSql` in a pull
-request as a review flag.
+either order, but it needs an active scope: with none it throws. Treat every `runSystem` and
+`runRawSql` in a pull request as a review flag.
 
 ### Transactions
 
