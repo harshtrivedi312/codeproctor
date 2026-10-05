@@ -100,8 +100,7 @@ export class VisionMonitor implements Detector {
       return;
     }
     if (this.tasks.size > 0 || this.client) return;
-    this.reported.clear();
-    await this.run(ctx);
+    await this.run(ctx); // run() starts from clean per-run state
   }
 
   private attached: MediaStream | null = null;
@@ -116,6 +115,10 @@ export class VisionMonitor implements Detector {
 
   private async run(ctx: DetectorContext): Promise<void> {
     const gen = this.generation;
+    // stop() already clears this state, which closes the silent-pass bug; clearing here again is a
+    // backstop for callers that start a reused instance without calling stop() first.
+    this.reported.clear();
+    this.failures.clear();
     try {
       await this.startInner(ctx);
     } catch {
@@ -378,6 +381,8 @@ export class VisionMonitor implements Detector {
 
   stop(): void {
     this.generation++;
+    this.reported.clear();
+    this.failures.clear();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.identity?.stop();
