@@ -22,7 +22,7 @@ Owner: Delivery Lead (from 2026-10-05, owner-requested CLAUDE.md change in PR #3
 | --- | --- |
 | Tasks done (merged) | 14 of 50: ARC-01, DB-01, DB-02, DB-03, DB-04, BE-01, BE-02, FE-01, FE-02, FE-03, FE-06, FE-07, FE-08, QA-01A |
 | Tasks in progress | 5: ARC-02 (contract ADRs 0011 and 0012 open), ARC-03 (ADR 0013 pending), DB-05 (#30, in review), BE-12 worker part (#32), QA-01B early automation (merged as #28) |
-| Open PRs | 13: #42 QA-03 BE-03 acceptance tests, #39 ADR 0013, #40 web admin-table flake fix, the eslint-ignore config PR, #26 BE-02 hardening, #30 DB-05 (draft), #31 ADR 0011, #32 worker hardening, #33 ADR 0012, #34 CLAUDE.md (Delivery Lead owns status docs), #35 /dev/proctor (draft), #36 Security page, plus this docs PR |
+| Open PRs | 14: #41 ADR 0006 §8 amendment (DB-05 gate items; review BLOCK, revising), #42 QA-03 BE-03 acceptance tests, #39 ADR 0013, #40 web admin-table flake fix, the eslint-ignore config PR, #26 BE-02 hardening, #30 DB-05 (draft), #31 ADR 0011, #32 worker hardening, #33 ADR 0012, #34 CLAUDE.md (Delivery Lead owns status docs), #35 /dev/proctor (draft), #36 Security page, plus this docs PR |
 | Test cases verified | 6 of 72 marked Verified in /docs/test-matrix.md (TC-002, TC-005, TC-075 fully; TC-001, TC-003 and TC-098 on the API with the UI mocked) |
 | Open risks | 15 (section 5) |
 
@@ -298,10 +298,11 @@ Decisions taken by the Delivery Lead under the owner's delegation (order, priori
 | P-05 | Decided: D-45 (Frontend implements, with a test that the directive is absent elsewhere) | |
 | P-06 | Decided: D-46 | |
 | P-07 | May the Integrity session download AuraFace `glintr100.onnx` (fal/AuraFace-v1, pinned SHA-256, Apache 2.0 per D-05) for a local, opt-in real-model test run? Until then the face-match PR ships with a fake backend only | File download from an external source |
-| P-08 | Accept ADR 0013 (ARC-03 part 1: HMAC key lifecycle, candidate API wire tables, candidate-session scope CS-1..CS-5, model-file lock; PR #39) and answer its section 9 owner questions. The main ones: lost key means OTP resume vs re-issue; 300 s ingest grace after submit; unsigned system-check findings unscored; consent covering a 640 px re-check frame every 2 min, kept only on mismatch; repeated FACE_MISMATCH goes to manual review; SCREEN_SHARE weight; COCO-SSD for the pilot (override after Legal, deploy without object detection, or swap the detector); the sessionId scope control. Code on the key and media routes waits for acceptance; mocks may follow the tables | Accepting an ADR; consent and licensing questions |
+| P-09 | Accept the ADR 0006 §8 amendment (PR #41: FK classification, write invariant, system-scope reasons, raw-SQL allow-list, pilot org provisioning). Review BLOCK on 2 text blockers; comes to the owner once clean | Amending an accepted ADR |
+| P-08 | Accept ADR 0013 (ARC-03 part 1: HMAC key lifecycle, candidate API wire tables, candidate-session scope CS-1..CS-5, model-file lock; PR #39) and answer its section 9 owner questions. The main ones: lost key means OTP resume vs re-issue; 300 s ingest grace after submit; unsigned system-check findings unscored; consent covering a 640 px re-check frame every 2 min, kept only on mismatch; repeated FACE_MISMATCH goes to manual review; SCREEN_SHARE weight; COCO-SSD for the pilot (override after Legal, deploy without object detection, or swap the detector); the sessionId scope control. Code on the key and media routes waits for acceptance; mocks may follow the tables Status 2026-10-05: security review BLOCK (3 blockers: licence-override controls, upload size and integrity, re-check frames outliving the delete promise); the architect is revising, and it comes to the owner once clean. | Accepting an ADR; consent and licensing questions |
 
 ## 10. Next 3 tasks, blockers, decisions
 
 - **Next 3 tasks on the critical path:** #26 merge (BE-02 hardening); #30 merge (DB-05, after DL-01 fixes); BE-03 (DL-02).
 - **Blockers:** GitHub Actions outage (external; affects every merge). B-05 blocks only the pilot.
-- **Decisions needed from the owner:** section 9b "Parked for the owner" (open: P-01, P-04, P-07, P-08).
+- **Decisions needed from the owner:** section 9b "Parked for the owner" (open: P-01, P-04, P-07, P-08, P-09).
