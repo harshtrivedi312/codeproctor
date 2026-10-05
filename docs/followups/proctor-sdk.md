@@ -82,7 +82,12 @@ Nits
 
 ### Review follow-ups for PR #23 (code-reviewer, not blockers)
 
-Should-fix 4. `vision-monitor.ts` reads the webcam stream only once in `start()`. If `pipeline.recordWebcam()` runs after `session.start()`, vision stays PERMISSION_DENIED. Add `attachStream()`, or document and assert the order. 5. `rules.ts` `SpeechRules`: the cooldown drops whole segments within 10 s of the last event, so speech is under-reported. Merge suppressed segments into the next event's duration. 6. `scripts/fetch-models.mjs`: downloads have no SHA-256 pinning. 7. `identity.ts` and `vision-monitor.ts`: FACE_MISMATCH is relayed by the client, so a tampered client can drop it. Raise with the architect whether the re-check endpoint should write it server-side (not a contract violation; ADR 0010 lists it as a client type).
+Should-fix
+
+4. `vision-monitor.ts` reads the webcam stream only once in `start()`. If `pipeline.recordWebcam()` runs after `session.start()`, vision stays PERMISSION_DENIED. Add `attachStream()`, or document and assert the order.
+5. `rules.ts` `SpeechRules`: the cooldown drops whole segments within 10 s of the last event, so speech is under-reported. Merge suppressed segments into the next event's duration.
+6. `scripts/fetch-models.mjs`: downloads have no SHA-256 pinning.
+7. `identity.ts` and `vision-monitor.ts`: FACE_MISMATCH is relayed by the client, so a tampered client can drop it. Raise with the architect whether the re-check endpoint should write it server-side (not a contract violation; ADR 0010 lists it as a client type).
 
 Nits
 
@@ -179,3 +184,14 @@ Nits
 Owner decisions to respect (C-25, C-32)
 - C-25: "face detectors off" is its own accommodation setting, separate from "no identity check". Today the SDK has one `FACE` detector id (`PROCTOR_DETECTORS`) and `VisionMonitor` only starts the identity re-check when the `face` task is enabled, so disabling FACE also disables the re-check. Gap: the accommodation model needs a separate flag (and `IdentityScheduler` needs its own enable switch) before this is correct; and with the ADR 0013 server-side re-check, the server (409 `DETECTOR_DISABLED`) must follow the same separation. Not changed yet.
 - C-32: no Sentry or third-party error tracker in the SDK. The SDK currently reports nothing outside the event pipeline. If it ever reports errors it must go through the app's error reporter to our API, scrubbed (no URLs, keys, tokens, object names).
+
+## Round 4 review items for PR #43 (filed, not fixed; docs only)
+Should-fix
+- SF-A The SF1 test (`vision-monitor.test.ts`, "an abandoned first run cannot tear down a later run") does not reach the race. Run 1's late code now finishes inside `s1.start()` because `stop()` settles the init, so only the `video.play()` wait can resume an old run after a new one has started. Rewrite: abandon run 1 during a test-controlled `play()`, start session 2, release run 1's play, then assert worker B is not terminated, tasks are still 3 and `tick()` samples. Also `workerA.terminated` would be true without the `terminate()` change, so its comment overclaims.
+- SF-B `review-fixes.test.ts` (last-seen test): the name says add/confirm but confirm is not asserted (the throttle skips the T+4 min confirm write; the T+6 min system time is set twice). Make `put` wait on a controlled promise and assert last-seen near T+6 min, or drop "confirm" from the name and delete both T+6 lines.
+- SF-C (silent-pass class, FR-606, TC-070; do soon) `vision-monitor.ts`: `this.reported` is not cleared by `stop()`. After `reportStartTimeout` in session 1, a reused instance whose session-2 `startInner` throws skips every task in `reported` and emits no DETECTOR_UNAVAILABLE. Clear `reported` and `failures` in `stop()` or at the start of `run()`.
+
+Nits
+- `review-fixes.test.ts` comment says the fake clock keeps ticking; it is frozen (the drift comes from elsewhere, so check before keeping the tolerance).
+- `vision-monitor.test.ts`: `.every(...)` passes on an empty array; also assert the `vision-` capability flags exist.
+- (Fixed in this commit) the PR #23 numbered list was merged into one line, and the "Round 3" heading lacked a blank line.
