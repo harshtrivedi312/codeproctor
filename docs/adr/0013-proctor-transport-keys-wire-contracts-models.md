@@ -256,8 +256,20 @@ Org scoping (ADR 0006, C-1) does not stop one candidate from reading another can
   - evidence names (5.2, 5.6);
   - identity attempts.
 - **Rule CS-3.** Object keys, Redis keys (`rl:`, `pkey:`, `evidence:`, `rec:`), HMAC keys and jobs are built from `ctx.sessionId` and `ctx.orgId`, never from client input.
-- **Rule CS-4.** Candidate service methods take `CandidateContext` as a required parameter. A lint rule or unit test fails if a candidate repository query on a session-owned table lacks a `session_id` filter **(architect detail; BE-07 picks the mechanism, for example a Prisma extension that adds `session_id` to candidate-scoped models)**.
-- **Tests (BE-07, QA).** Use two candidates in the same org. Candidate B's token is sent with every candidate route, using A's question, section, evidence and attempt ids, and each call must return 404 or have no effect on A. A staff token on `/candidate/*` returns 401, and a candidate token on staff routes returns 401.
+- **Rule CS-4: enforcement (DB-05 gate; architect detail, owner to confirm).** Two options were considered:
+  - (a) Session checks written in the BE-07 and BE-10 services only.
+  - (b) The org scope also carries `sessionId` for candidate units of work. The db-engineer's org-scope Prisma extension (PR #30, ADR 0006) then adds `session_id = ctx.sessionId` to every read of a table on the session path (`sessions`, `session_questions`, `session_sections`, `submissions`, `identity_checks`, `media_chunks`, `proctor_event_batches`, `proctor_events`, `keystroke_batches`, `consents`).
+  - **Recommended: (b) as the structural control, plus (a) as explicit service-level checks for defence in depth.**
+  - Candidate service methods take `CandidateContext` as a required parameter.
+  - A test fails if a candidate unit of work runs a session-path query without the session filter.
+- **Rule CS-5: sockets and storage.**
+  - Candidate sockets (OI-2, if any) authenticate with the same token and join only the room `session:{sessionId}` taken from it. The server ignores any session id in a socket payload.
+  - Every presign route builds the key from the token's org and session (5.7), and confirm refuses any key or (stream, seq) outside the token's session.
+- **Tests (BE-07, BE-09, BE-10, QA; a TC-008 sibling, QA assigns the ID).** Use two candidates, A and B, in the **same org**. With B's token, sent with A's question, section, evidence, attempt and media identifiers to every candidate route (read, run, draft, submit, presign, confirm, evidence, re-check, batches):
+  - each call returns 404, or succeeds without touching A's data;
+  - no presigned URL for A's prefix is ever issued.
+
+  In addition, a staff token on `/candidate/*` returns 401, and a candidate token on staff routes returns 401.
 
 ## 6. ML model files (decision 4)
 
@@ -354,6 +366,7 @@ CI and deploy:
 | --- | --- |
 | proctor-sdk | Accept a CryptoKey (or base64), persist it non-extractable in IndexedDB, re-sign the outbox on a new epoch or `KEY_EPOCH_STALE`, and seed counters from `proctor-key` (max with local). Map status codes as in 5.2, and stop on `SESSION_NOT_ACTIVE`. Add the heartbeat body and its 409 handling. For media: send `startedAt` and `durationMs`, handle `alreadyUploaded`, `UPLOAD_MISMATCH` and `UPLOAD_NOT_FOUND`, and never drop a segment's first chunk. Evidence presign gets `purpose` and uses the relative name. Re-check becomes upload plus 202, and client FACE_MISMATCH emission is removed. Add a `runSystemCheck()` helper. Replace `fetch-models.mjs` with lock scripts. Purge the key and outbox at finish. Never log URLs. |
 | backend BE-07 | Candidate-session scope (5.10: token claims, `CandidateSessionGuard`, CS-1..CS-4, cross-candidate tests) before any other candidate route; master key, AAD, epoch derivation, the `proctor-key` route, system-check route and start gate (TC-056), heartbeat and watchdog, key destruction at ingest close |
+| db-engineer (DB-05, PR #30) | Let the org-scope context carry an optional `sessionId` for candidate units of work, and AND it into session-path reads (5.10 CS-4 option (b)) |
 | backend BE-09 | Key layout 5.7, presign and confirm 5.5, evidence presign 5.6 and the Redis name set, prefix deletion in retention and erasure, consent PDF prefix |
 | integrity BE-10 | Raw-body verification order (section 2), fullscreen duration fill-in on FULLSCREEN_RESTORED (5.9), duplicate check across epochs, error codes, evidence-name resolution, grace window, per-session limits, a `rejected` metric with no body |
 | integrity BE-12 | Score from server `duration_ms` only (5.9); `face-recheck` job and outcome hand-off (API writes the event; OI-1 mechanism in ARC-04), hole-tolerant segment concatenation, worker `models.lock.json` |
@@ -375,3 +388,4 @@ CI and deploy:
 8. **COCO-SSD (F-3) for the pilot**: (a) an owner override after Legal review (B-05), (b) deploy without object detection, or (c) a swap after a licence check. And confirm that only you set `MODEL_LICENCE_OVERRIDES`.
 9. **Env names and limits** (`SESSION_KEY_ENC_KEY`, `PROCTOR_INGEST_GRACE_SECONDS`, per-route limits, 16 MiB per chunk, 1 MiB per image) are architect details to confirm.
 10. **Fullscreen duration edge case (5.9)**: after an outage, should the clamped `occurredAt` delta replace the receive-time delta, and is 10 s the right cross-check tolerance? This refines hub decision QA-D-01.
+11. **Candidate-session enforcement (5.10 CS-4)**: use the Prisma extension with `sessionId` (b) as the structural control, plus service checks (a), as recommended (architect detail)?
