@@ -14,7 +14,7 @@ Owner: QA B (ops). TC-093 (NFR-04, P1): OWASP ZAP baseline against staging, expe
 The baseline scan is passive: ZAP spiders the target for one minute and reports what it sees in the responses. It does not log in, does not send attacks and does not exercise the candidate API behind a token. So:
 
 1. Run it against the web origin (the Cloudflare Pages staging URL) and, as a second run, against the API origin (for example `https://<staging-api>/api/v1/health`), so headers, cookies and error pages of both are seen.
-2. A clean baseline is not a security pass. Authenticated and abuse cases are the red-team plan (docs/qa/redteam-plan.md, RT-01 to RT-70) and the API tests (TC-004, TC-008, TC-065).
+2. A clean baseline is not a security pass. Authenticated and abuse cases are the red-team plan (docs/qa/redteam-plan.md, RT-01 to RT-74) and the API tests (TC-004, TC-008, TC-065).
 3. An empty report is not a pass. If the target is unreachable the HTML and JSON reports can come out empty, which a "count the High alerts" check would call green. `evaluate.mjs` exits 2 in that case. Also check in the HTML report that the spider visited pages, not only `/`, `robots.txt` and a 404.
 4. Never run the active scan (`zap-full-scan.py`, `zap-api-scan.py`) against staging without the owner's agreement: it sends attack payloads to routes that create sessions and lock accounts.
 
