@@ -69,6 +69,12 @@ export class IdbStore {
     return keys.map((key, i) => ({ key, value: values[i] as T }));
   }
 
+  /** Keys only (cheap even when values are large chunks). */
+  async keys(name: StoreName, prefix: string): Promise<string[]> {
+    const s = await this.store(name, 'readonly');
+    return (await req(s.getAllKeys(IDBKeyRange.bound(prefix, `${prefix}\uffff`)))) as string[];
+  }
+
   async close(): Promise<void> {
     if (!this.dbPromise) return;
     (await this.dbPromise).close();
