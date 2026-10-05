@@ -23,7 +23,7 @@ import {
   signIn,
   stableProblem,
 } from '../support/harness';
-import { actor, Actor, call } from '../support/be03-helpers';
+import { actor, Actor, call, flushDeferred } from '../support/be03-helpers';
 import {
   ADMIN_USERS,
   allowedRoles,
@@ -279,6 +279,9 @@ rbacSuite(
       const routes = listRoutes(h.app.get(ModulesContainer));
       expect(matrixProblems(routes)).toEqual([]);
 
+      // Every key QA says is covered elsewhere must really exist (a rename must not go unnoticed).
+      for (const key of Object.keys(COVERED_ELSEWHERE))
+        expect([key, key in ROUTE_PERMISSIONS]).toEqual([key, true]);
       // BE-13 routes count only once the BE-13 switch is on (they do not exist before).
       const listed = new Set(
         [...routesFor('BE-03'), ...(BE13_READY ? routesFor('BE-13') : [])].map(routeKey),
@@ -449,7 +452,7 @@ rbacSuite(
       created,
     );
     // The refused call sent no invite mail and wrote no USER_INVITED row beyond the created ones.
-    await h.settle();
+    await flushDeferred(h);
     expect(
       h.mails.filter((m) => m.method === 'sendStaffInvite' && m.to.startsWith('qa-rate-')),
     ).toHaveLength(created);

@@ -357,7 +357,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       expect(((await login(h, u.email).expect(200)).body as Body).session).toBeDefined();
     });
 
-    it('TC-003: disable revokes a rotated token of the same family too, and a RECRUITER succeeds with a whitespace-padded code (the DTO trims it)', async () => {
+    it('TC-003: a RECRUITER can disable 2FA too (same rules as an AUTHOR): a rotated token of the family is revoked, a whitespace-padded code is trimmed, one AUTH_2FA_DISABLED row is written', async () => {
       const u = await createUser(h, { role: UserRole.RECRUITER, totp: TOTP_SECRET });
       const first = await signInPrevStep(u.email);
       const rotatedCookie = refreshCookie(await refresh(h, first.cookie).expect(200));
@@ -370,6 +370,11 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
         0,
       );
       expect(await twoFactorOn(u.id)).toBe(false);
+      const audit = await h.owner.auditLog.findMany({
+        where: { actorId: u.id, action: 'AUTH_2FA_DISABLED' },
+      });
+      expect(audit).toHaveLength(1);
+      expect(audit[0]?.orgId).toBe(h.orgId);
     });
 
     it('TC-003: disable refuses a missing or malformed totpCode (and a recovery code) with 400 and changes nothing', async () => {
