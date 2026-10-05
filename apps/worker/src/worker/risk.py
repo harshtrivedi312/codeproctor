@@ -1,4 +1,8 @@
-"""Risk score calculator (FR-804, FR-805, ADR 0005 section 2, TC-075, TC-076).
+"""Risk score calculator (FR-804, FR-805, ADR 0005 section 2, TC-075, TC-076; owner decision C-28).
+
+C-28: a person reviews EVERY session; nothing is auto-cleared. The band no longer decides WHETHER a
+session is reviewed. It orders the review queue (HIGH first, then MEDIUM, then LOW, higher score
+first within a band) and picks the review path: "fast" (summary and one-click verdict) or "full".
 
 score = min(100, sum over types of min(count, cap) * points[severity] * weight[type])
 
@@ -12,6 +16,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -45,12 +50,37 @@ class RiskResult:
     ignored_disabled: int
 
 
+ReviewPath = Literal["fast", "full"]
+
+# Lower rank = reviewed earlier.
+_BAND_RANK: Final[dict[RiskBand, int]] = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+
+
 @dataclass(frozen=True, slots=True)
 class ReviewRouting:
-    """FR-805. The API applies the state change through SessionStateService."""
+    """FR-805 as changed by C-28. The API applies the state change through SessionStateService.
+
+    `needs_review` is always True. `review_path` is "fast" only for bands in
+    `risk.fastReviewBands` (default LOW) and only when no identity review or manual short-answer
+    score is pending; those holds force the "full" path. `queue_rank` is the band's queue priority
+    (0 = first).
+    """
 
     needs_review: bool
     reasons: list[str]
+    review_path: ReviewPath
+    queue_rank: int
+
+
+@dataclass(frozen=True, slots=True)
+class QueueItem:
+    """What the review queue needs to order a session. `submitted_at_ms` breaks score ties (oldest
+    first); `session_id` makes the order total and deterministic."""
+
+    session_id: str
+    band: RiskBand
+    score: float
+    submitted_at_ms: int
 
 
 def calculate_risk(
@@ -87,14 +117,33 @@ def calculate_risk(
 
 
 def route_for_review(
-    band: RiskBand, identity_review_pending: bool = False, short_answer_pending: bool = False
+    band: RiskBand,
+    identity_review_pending: bool = False,
+    short_answer_pending: bool = False,
+    config: IntegrityConfig | None = None,
 ) -> ReviewRouting:
-    """FR-805: MEDIUM or HIGH, a pending identity review, or a pending manual score -> review."""
-    reasons: list[str] = []
-    if band != "LOW":
-        reasons.append(f"RISK_{band}")
+    """Every session is reviewed (C-28). Pick the review path and queue rank from the band."""
+    cfg = config or IntegrityConfig()
+    reasons = [f"RISK_{band}"]
     if identity_review_pending:
         reasons.append("IDENTITY_MANUAL_REVIEW")
     if short_answer_pending:
         reasons.append("SHORT_ANSWER_MANUAL_SCORING")
-    return ReviewRouting(needs_review=bool(reasons), reasons=reasons)
+    held = identity_review_pending or short_answer_pending
+    fast = band in cfg.risk.fast_review_bands and not held
+    return ReviewRouting(
+        needs_review=True,
+        reasons=reasons,
+        review_path="fast" if fast else "full",
+        queue_rank=_BAND_RANK[band],
+    )
+
+
+def queue_sort_key(item: QueueItem) -> tuple[int, float, int, str]:
+    """HIGH, MEDIUM, LOW; higher score first; older submission first; then session id."""
+    return (_BAND_RANK[item.band], -item.score, item.submitted_at_ms, item.session_id)
+
+
+def order_review_queue(items: Iterable[QueueItem]) -> list[QueueItem]:
+    """Deterministic review order. Input order never changes the result."""
+    return sorted(items, key=queue_sort_key)

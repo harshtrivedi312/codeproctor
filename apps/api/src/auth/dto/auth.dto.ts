@@ -48,6 +48,14 @@ export class CurrentPasswordDto {
   currentPassword!: string;
 }
 
+/** Disabling 2FA needs the password and a current 6-digit TOTP code (ADR 0011); no recovery code. */
+export class DisableTwoFactorDto extends CurrentPasswordDto {
+  @ApiProperty({ example: '123456', writeOnly: true, description: 'Current 6-digit TOTP code' })
+  @Transform(trim)
+  @Matches(/^\d{6}$/)
+  totpCode!: string;
+}
+
 export class SetupStartDto extends CurrentPasswordDto {}
 
 export class SetupConfirmDto extends CurrentPasswordDto {
