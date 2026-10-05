@@ -1,6 +1,6 @@
 # Project status
 
-Owner: Delivery Lead (from 2026-10-05; previously project-manager and the architecture hub). As of 2026-10-05 21:00 UTC. Sources: /docs/build-plan.md, /docs/requirements-trace.md, GitHub PRs and CI.
+Owner: Delivery Lead (from 2026-10-05, owner-requested CLAUDE.md change in PR #34; this PR merges only after #34; previously project-manager and the architecture hub). As of 2026-10-05 21:00 UTC. Sources: /docs/build-plan.md, /docs/requirements-trace.md, GitHub PRs and CI.
 
 ## 1. Blocked and needs a human (read first)
 
@@ -21,9 +21,9 @@ Owner: Delivery Lead (from 2026-10-05; previously project-manager and the archit
 | Measure | Value |
 | --- | --- |
 | Tasks done (merged) | 14 of 50: ARC-01, DB-01, DB-02, DB-03, DB-04, BE-01, BE-02, FE-01, FE-02, FE-03, FE-06, FE-07, FE-08, QA-01A |
-| Tasks in progress | 5: ARC-02 (contract ADRs 0011 and 0012 open), ARC-03 (ADR 0013 pending), DB-05 (#30), BE-12 worker part (#32), QA-01B early automation (merged as #28) |
+| Tasks in progress | 5: ARC-02 (contract ADRs 0011 and 0012 open), ARC-03 (ADR 0013 pending), DB-05 (#30, in review), BE-12 worker part (#32), QA-01B early automation (merged as #28) |
 | Open PRs | 9: #26 BE-02 hardening, #30 DB-05 (draft), #31 ADR 0011, #32 worker hardening, #33 ADR 0012, #34 CLAUDE.md (Delivery Lead owns status docs), #35 /dev/proctor (draft), #36 Security page, plus this docs PR |
-| Test cases verified | 5 of 72 (TC-002, TC-005, TC-075 fully; TC-001, TC-003 and TC-098 verified on the API with the UI mocked; see /docs/test-matrix.md) |
+| Test cases verified | 6 of 72 marked Verified in /docs/test-matrix.md (TC-002, TC-005, TC-075 fully; TC-001, TC-003 and TC-098 on the API with the UI mocked) |
 | Open risks | 15 (section 5) |
 
 ## 3. Done this period
@@ -52,7 +52,7 @@ Sequencing set by the Delivery Lead (section 9b):
 4. **Proctor SDK:** #35 gets a full review. It merges after the frontend flake PR and #36, with the Frontend session's OK on its apps/web config changes (DL-04). Then the PR #21/#23 should-fix items. QA-D-01 needs no SDK change (hub, 2026-10-05).
 5. **Integrity:** merge #32, then the worker-side BE-08 face-matching module (DL-05).
 6. **QA:** TC-004 and TC-006 acceptance tests ahead of BE-03, plus matrix updates (DL-06).
-7. **Architecture hub queue (DL-07), in order:** QA-01 event shape, ADR 0013, ARC-03 candidate-session scope, ARC-04, the integrity starter-diff proposal, the DB-05 gate items, then small items.
+7. **Architecture hub queue (DL-07), in order:** QA-D-01 event shape (answered 2026-10-05), ADR 0013, ARC-03 candidate-session scope, ARC-04, the integrity starter-diff proposal, the DB-05 gate items, then small items.
 
 ## 5. Risks
 
@@ -276,10 +276,10 @@ Decisions taken by the Delivery Lead under the owner's delegation (order, priori
 | DL-04 | 2026-10-05 | PR #35 (/dev/proctor) gets a full review. It merges after the flake PR and #36, and only with the Frontend session's OK on its apps/web config changes. | Cross-track edits to apps/web (`next.config.ts`, `package.json`, vitest config) |
 | DL-05 | 2026-10-05 | Integrity starts the worker side of BE-08 (MediaPipe alignment and pinned AuraFace `glintr100.onnx` behind an interface; synthetic images only; no stored embeddings). The API side waits for BE-07, BE-09 and ARC-04. | Keeps an idle track on approved work that INT-01 needs |
 | DL-06 | 2026-10-05 | QA writes the TC-004 and TC-006 acceptance tests ahead of BE-03, staged as todo, and fixes the TC-008 path in the matrix (FU-DB-59). | Shortens BE-03's review loop |
-| DL-07 | 2026-10-05 | Hub priority order: QA-D-01 event shape, ADR 0013, ARC-03 candidate-session scope (before BE-07), ARC-04 worker contract and token, the integrity starter-diff proposal, the DB-05 gate items, then small items. | Ordered by which track is waiting |
-| DL-08 | 2026-10-05 | No Postgres RLS and no schema change for the build or the pilot; ADR 0006 stands. FU-DB-77 (revisit RLS) is a pre-production item for the hub under ARC-05/DEP-02. | No accepted ADR requires RLS; this keeps the current design |
-| DL-10 | 2026-10-05 | build-plan.md section 6 merge rule aligned with CLAUDE.md rules 6, 8 and 9: sessions merge their own PRs; humans no longer merge. | CLAUDE.md wins; the plan contradicted it |
+| DL-07 | 2026-10-05 | Hub priority order: QA-D-01 event shape (answered the same day), ADR 0013, ARC-03 candidate-session scope (before BE-07), ARC-04 worker contract and token, the integrity starter-diff proposal, the DB-05 gate items, then small items. | Ordered by which track is waiting |
+| DL-08 | 2026-10-05 | No Postgres RLS (and so no RLS-related schema change) for the build or the pilot; ADR 0006 stands, and its option (b) already says RLS is not for the pilot. FU-DB-77 (revisit RLS) is a pre-production item for the hub under ARC-05/DEP-02. | No accepted ADR requires RLS; this keeps the current design |
 | DL-09 | 2026-10-05 | The main CI red from 20:12 UTC is the GitHub Actions outage. No code change; sessions re-run cancelled checks once Actions recovers. | Jobs were cancelled without getting a runner |
+| DL-10 | 2026-10-05 | build-plan.md section 6 merge rule aligned with CLAUDE.md rules 6, 8 and 9: sessions merge their own PRs; humans no longer merge. | CLAUDE.md wins; the plan contradicted it |
 
 ### Parked for the owner
 

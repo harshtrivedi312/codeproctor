@@ -38,7 +38,7 @@ Active agents are the files in `.claude/agents/`. The orchestrator prompt in age
 | (none) | integrity-engineer, architect review (D-24) | INT-01 |
 | (none) | Out of scope for this build (D-13) | FE-14 |
 | (every branch) | code-reviewer (read-only) | review gate on all tasks |
-| (this file) | project-manager | plan, status, trace, briefs |
+| (this file) | Delivery Lead (from 2026-10-05; project-manager before) | plan, status, trace; briefs by project-manager |
 
 ## 3. Phases and milestones
 
@@ -221,7 +221,7 @@ BE-11 and BE-10 run beside BE-09/BE-08 and must merge before BE-12. DEP-01 must 
 5. The PR description lists FR IDs implemented, TC IDs covered, files changed, commands run with results, and any change to `packages/shared` or the OpenAPI spec.
 6. code-reviewer verdict has no Blocking findings; architect review where section 6 requires it.
 7. Conventional commit messages, small commits.
-8. Status and trace updated by the PM from the actual test run.
+8. Status and trace updated by the Delivery Lead from the actual test run.
 
 Per-task "Done when" lines below add to this list; they do not replace it.
 
