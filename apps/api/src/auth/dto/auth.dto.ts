@@ -40,7 +40,17 @@ export class ChallengeCodeDto extends ChallengeDto {
   code!: string;
 }
 
-export class TotpCodeDto {
+/** Re-authentication for the signed-in 2FA routes (FU-BE-39). */
+export class CurrentPasswordDto {
+  @ApiProperty({ writeOnly: true, description: 'The signed-in user current password' })
+  @IsString()
+  @Length(1, MAX_PASSWORD_LENGTH)
+  currentPassword!: string;
+}
+
+export class SetupStartDto extends CurrentPasswordDto {}
+
+export class SetupConfirmDto extends CurrentPasswordDto {
   @ApiProperty({ example: '123456', description: '6-digit TOTP code' })
   @Transform(trim)
   @Matches(/^\d{6}$/)
@@ -98,6 +108,11 @@ export class TotpEnrollmentDto {
 
 export class EnrollmentConfirmedDto {
   @ApiProperty({ required: false, type: AuthSessionDto }) session?: AuthSessionDto;
+  @ApiProperty({ type: [String], description: 'Shown once. Store them safely.' })
+  recoveryCodes!: string[];
+}
+
+export class RecoveryCodesDto {
   @ApiProperty({ type: [String], description: 'Shown once. Store them safely.' })
   recoveryCodes!: string[];
 }
