@@ -12,12 +12,13 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { CurrentPasswordDto } from '../../auth/dto/auth.dto';
 import { UserRole } from '../../generated/prisma/enums';
 
 const trim = ({ value }: { value: unknown }): unknown =>
   typeof value === 'string' ? value.trim() : value;
 
-export class InviteStaffUserDto {
+export class InviteStaffUserDto extends CurrentPasswordDto {
   @ApiProperty({ example: 'new.recruiter@example.com' })
   @Transform(trim)
   @IsEmail()
@@ -35,7 +36,7 @@ export class InviteStaffUserDto {
   role!: UserRole;
 }
 
-export class UpdateStaffUserDto {
+export class UpdateStaffUserDto extends CurrentPasswordDto {
   @ApiPropertyOptional({ enum: UserRole, description: 'New role; revokes the refresh sessions.' })
   @IsOptional()
   @IsEnum(UserRole)
@@ -48,6 +49,9 @@ export class UpdateStaffUserDto {
   @IsBoolean()
   active?: boolean;
 }
+
+/** Unlock needs the admin's own current password, like the 2FA reset (FR-102 re-auth). */
+export class UnlockStaffUserDto extends CurrentPasswordDto {}
 
 export class ListQueryDto {
   @ApiPropertyOptional({ default: 1, minimum: 1 })

@@ -8,7 +8,15 @@
 import type { UserRole } from '../../generated/prisma/client';
 
 export type RouteAccess =
-  'public' | { readonly roles: readonly UserRole[]; readonly permission: string };
+  | 'public'
+  | {
+      readonly roles: readonly UserRole[];
+      readonly permission: string;
+      /** The route carries @Audited (FR-105). The registry test checks both directions. */
+      readonly audited?: true;
+      /** The route reads or changes candidate data (FR-105): it must be audited. */
+      readonly candidateData?: true;
+    };
 
 const ALL_STAFF: readonly UserRole[] = ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'REVIEWER'];
 const SUPER_ADMIN: readonly UserRole[] = ['SUPER_ADMIN'];
@@ -37,8 +45,8 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'POST /auth/2fa/reset/:userId': userManage,
 
   // Staff user management (FR-103, FR-105; SUPER_ADMIN only, same org only).
-  'GET /admin/users': userManage,
-  'GET /admin/users/lock-events': userManage,
+  'GET /admin/users': { ...userManage, audited: true },
+  'GET /admin/users/lock-events': { ...userManage, audited: true },
   'POST /admin/users': userManage,
   'PATCH /admin/users/:userId': userManage,
   'POST /admin/users/:userId/unlock': userManage,

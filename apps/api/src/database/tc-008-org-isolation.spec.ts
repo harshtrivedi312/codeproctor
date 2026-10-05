@@ -31,6 +31,7 @@ import { Public, Roles } from '../common/auth/decorators';
 import { ProblemFilter } from '../common/problem.filter';
 import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
 import { TokenModule, TokenService } from '../common/auth/token.service';
+import { TokenValidityService } from '../common/auth/token-validity.service';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import { createPrismaClient } from './create-prisma-client';
 import { DatabaseModule } from './database.module';
@@ -151,20 +152,26 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
   let B: TenantFixture;
 
   function compileApp(url: string) {
-    return Test.createTestingModule({
-      imports: [
-        ConfigModule.forRoot({
-          isGlobal: true,
-          ignoreEnvFile: true,
-          load: [() => ({ DATABASE_URL: url, JWT_ACCESS_SECRET: JWT_SECRET })],
-        }),
-        TokenModule,
-        DatabaseModule,
-      ],
-      controllers: [ProbeController],
-      // BE-02's guard. DatabaseModule registers the interceptor that runs after it.
-      providers: [{ provide: APP_GUARD, useClass: JwtAuthGuard }],
-    }).compile();
+    return (
+      Test.createTestingModule({
+        imports: [
+          ConfigModule.forRoot({
+            isGlobal: true,
+            ignoreEnvFile: true,
+            load: [() => ({ DATABASE_URL: url, JWT_ACCESS_SECRET: JWT_SECRET })],
+          }),
+          TokenModule,
+          DatabaseModule,
+        ],
+        controllers: [ProbeController],
+        // BE-02's guard. DatabaseModule registers the interceptor that runs after it.
+        providers: [{ provide: APP_GUARD, useClass: JwtAuthGuard }],
+      })
+        // The guard's Redis marker check (S1) is not under test here: no token is invalidated.
+        .overrideProvider(TokenValidityService)
+        .useValue({ isFresh: () => Promise.resolve(true) })
+        .compile()
+    );
   }
 
   const asA = <T>(fn: () => Promise<T>): Promise<T> => orgContext.runInOrg(A.orgId, fn);
@@ -1180,18 +1187,16 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
   describe('staff routes: user from org A requests data of org B (TC-008)', () => {
     // A real access token with the claims BE-02's AuthService signs: sub, org, role, kind.
     const asUser = (tenant: TenantFixture): string =>
-      `Bearer ${app
-        .get(TokenService)
-        .sign(
-          {
-            sub: tenant.userId,
-            org: tenant.orgId,
-            role: 'RECRUITER',
-            kind: 'access',
-            pwv: passwordVersion('not-a-real-hash'),
-          },
-          300,
-        )}`;
+      `Bearer ${app.get(TokenService).sign(
+        {
+          sub: tenant.userId,
+          org: tenant.orgId,
+          role: 'RECRUITER',
+          kind: 'access',
+          pwv: passwordVersion('not-a-real-hash'),
+        },
+        300,
+      )}`;
 
     it("TC-008 GET another org's session is 404 and leaks nothing; own session is 200", async () => {
       const server = app.getHttpServer();

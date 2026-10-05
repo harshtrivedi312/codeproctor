@@ -19,6 +19,13 @@ import type { AuthUser } from '../common/auth/auth.types';
 import { AUDITED } from './audited.decorator';
 import type { AuditedOptions } from './audited.decorator';
 
+/** Uuids are stored in lowercase, whatever case the URL used, so one entity has one id. */
+function normaliseId(id: string): string {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
+    ? id.toLowerCase()
+    : id;
+}
+
 type AuditedRequest = Request & { user?: AuthUser };
 
 @Injectable()
@@ -59,7 +66,7 @@ export class AuditInterceptor implements NestInterceptor {
           actorId: user.id,
           action: options.action,
           entityType: options.entityType,
-          entityId: typeof rawId === 'string' ? rawId : null,
+          entityId: typeof rawId === 'string' ? normaliseId(rawId) : null,
           ip: req.ip ?? null,
           metadata: { method: req.method, route },
         },

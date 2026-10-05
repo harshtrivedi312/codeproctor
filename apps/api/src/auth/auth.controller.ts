@@ -29,7 +29,8 @@ import type { AuthedRequest } from '../common/auth/auth.types';
 import { Public, Roles } from '../common/auth/decorators';
 import { UserRole } from '../generated/prisma/client';
 import { AuthService, REFRESH_TTL_MS } from './auth.service';
-import type { RequestContext, SessionOutcome } from './auth.service';
+import type { SessionOutcome } from './auth.service';
+import { ctxOf } from '../common/request-context';
 import {
   AcceptedDto,
   AuthSessionDto,
@@ -59,10 +60,6 @@ const cookieOptions: CookieOptions = {
   signed: true,
   path: '/api/v1/auth',
 };
-
-function ctxOf(req: Request): RequestContext {
-  return { ip: req.ip };
-}
 
 function setRefreshCookie(res: Response, outcome: SessionOutcome): void {
   if (outcome.refreshToken) {

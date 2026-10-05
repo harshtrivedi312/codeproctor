@@ -34,6 +34,8 @@ import {
   passwordVersion,
   sha256Hex,
 } from './crypto.util';
+import type { RequestContext } from '../common/request-context';
+import { errorName } from '../common/request-context';
 import { TokenService } from '../common/auth/token.service';
 import { CodedForbiddenException, reauthFailed } from '../common/coded.exception';
 import { PasswordService } from './password.service';
@@ -51,6 +53,8 @@ const FORGOT_PER_IP = 10;
 const FORGOT_WINDOW_SECONDS = 60 * 60;
 /** Matches no user; used so unknown accounts run the same UPDATE as real ones. */
 const NO_USER_ID = '00000000-0000-0000-0000-000000000000';
+/** The org of the nil user: the same statement shape, matching no row. */
+const NO_ORG_ID = '00000000-0000-0000-0000-000000000000';
 
 /** Roles that must use TOTP (FR-102). */
 const TOTP_REQUIRED_ROLES: readonly UserRole[] = [UserRole.SUPER_ADMIN, UserRole.REVIEWER];
@@ -61,9 +65,7 @@ type Db = Pick<
   'user' | 'refreshToken' | 'auditLog' | '$queryRaw' | '$executeRaw'
 >;
 
-export interface RequestContext {
-  ip?: string;
-}
+export type { RequestContext };
 
 export type UserWithOrg = User & { org: { name: string } };
 
@@ -168,13 +170,13 @@ export class AuthService implements OnApplicationShutdown {
 
     if (user.totpEnabled) {
       // The password was right: give the reservation back. The 2FA step reserves its own.
-      await this.refundAttempt(user.id);
+      await this.refundAttempt(user);
       return {
         body: { status: 'two_factor_required', challengeToken: this.challenge(user) },
       };
     }
     if (TOTP_REQUIRED_ROLES.includes(user.role)) {
-      await this.refundAttempt(user.id);
+      await this.refundAttempt(user);
       return {
         body: {
           status: 'two_factor_enrollment_required',
@@ -188,7 +190,7 @@ export class AuthService implements OnApplicationShutdown {
       // A reset landed while the password was being verified: the sign-in is refused and the
       // reserved attempt is given back, as the password was right when it was checked.
       if (e instanceof PasswordChangedSignal) {
-        await this.refundAttempt(user.id).catch(() => undefined);
+        await this.refundAttempt(user).catch(() => undefined);
         throw this.invalid();
       }
       throw e;
@@ -304,8 +306,23 @@ export class AuthService implements OnApplicationShutdown {
       await this.registerFailure(user, ctx);
       throw reauthFailed();
     }
-    await this.refundAttempt(user.id);
+    await this.refundAttempt(user);
     return user;
+  }
+
+  /**
+   * Step-up for the SUPER_ADMIN user-management routes (follows the FR-102 re-auth decision): the
+   * admin's current password on the login path (reserve, equal work, shared lockout). A wrong or
+   * locked password is the same 403 REAUTH_FAILED. Returns the verified hash so the caller can bind
+   * its transaction to it.
+   */
+  async verifyCurrentPassword(
+    userId: string,
+    password: string,
+    ctx: RequestContext,
+  ): Promise<{ passwordHash: string }> {
+    const user = await this.requireCurrentPassword(userId, password, ctx);
+    return { passwordHash: user.passwordHash ?? '' };
   }
 
   /** A signed-in user begins optional TOTP enrollment; needs the current password (FU-BE-39). */
@@ -457,7 +474,7 @@ export class AuthService implements OnApplicationShutdown {
         }
         await this.audit(user, 'AUTH_TOTP_ENABLED', ctx, {}, tx);
         if (!openSession) {
-          await this.clearFailures(user.id, tx);
+          await this.clearFailures(user, tx);
           return undefined;
         }
         return this.startSession(user, tx);
@@ -465,7 +482,7 @@ export class AuthService implements OnApplicationShutdown {
       return { session, recoveryCodes: codes };
     } catch (e) {
       // The code was right, so the reservation is not a failed guess.
-      await this.refundAttempt(user.id).catch(() => undefined);
+      await this.refundAttempt(user).catch(() => undefined);
       if (e instanceof AlreadyEnrolledSignal) {
         throw new ConflictException('Two-factor authentication could not be turned on. Try again.');
       }
@@ -484,7 +501,7 @@ export class AuthService implements OnApplicationShutdown {
     try {
       return await this.totp.verify(user.id, encryptedSecret, code);
     } catch (e) {
-      await this.refundAttempt(user.id).catch(() => undefined);
+      await this.refundAttempt(user).catch(() => undefined);
       throw e;
     }
   }
@@ -541,7 +558,8 @@ export class AuthService implements OnApplicationShutdown {
           () => tx.$executeRaw`
             UPDATE users SET recovery_code_hashes = array_remove(recovery_code_hashes, ${hash}),
                              updated_at = now()
-            WHERE id = ${user.id}::uuid AND ${hash} = ANY(recovery_code_hashes)`,
+            WHERE id = ${user.id}::uuid AND org_id = ${user.orgId}::uuid
+              AND ${hash} = ANY(recovery_code_hashes)`,
         );
         if (used !== 1) throw new WrongRecoveryCodeSignal();
         await this.audit(user, 'AUTH_RECOVERY_CODE_USED', ctx, {}, tx);
@@ -550,7 +568,7 @@ export class AuthService implements OnApplicationShutdown {
     } catch (e) {
       if (e instanceof WrongRecoveryCodeSignal) return this.failCode(user, ctx);
       if (e instanceof PasswordChangedSignal) {
-        await this.refundAttempt(user.id).catch(() => undefined);
+        await this.refundAttempt(user).catch(() => undefined);
         throw this.challengeExpired();
       }
       throw e;
@@ -774,7 +792,7 @@ export class AuthService implements OnApplicationShutdown {
               SELECT u.id, ${existing.familyId}::uuid, ${sha256Hex(next)},
                      ${new Date(Date.now() + REFRESH_TTL_MS)}::timestamptz
               FROM users u
-              WHERE u.id = ${user.id}::uuid AND u.is_active
+              WHERE u.id = ${user.id}::uuid AND u.org_id = ${user.orgId}::uuid AND u.is_active
                 AND u.password_hash = ${user.passwordHash ?? ''}
               FOR SHARE OF u
               RETURNING id`),
@@ -1007,7 +1025,9 @@ export class AuthService implements OnApplicationShutdown {
         this.prisma.client.$queryRaw<{ granted: boolean }[]>(Prisma.sql`
       WITH old AS (
         SELECT id, failed_logins, locked_until, updated_at
-        FROM users WHERE id = ${user?.id ?? NO_USER_ID}::uuid FOR UPDATE)
+        FROM users
+        WHERE id = ${user?.id ?? NO_USER_ID}::uuid AND org_id = ${user?.orgId ?? NO_ORG_ID}::uuid
+        FOR UPDATE)
       UPDATE users u SET
         failed_logins = CASE WHEN ${lockExpired} THEN 1
                              WHEN ${open} THEN old.failed_logins + 1
@@ -1027,24 +1047,29 @@ export class AuthService implements OnApplicationShutdown {
   }
 
   /** Gives back a reservation whose secret turned out right but whose login is not finished. */
-  private async refundAttempt(userId: string): Promise<void> {
+  private async refundAttempt(user: Pick<User, 'id' | 'orgId'>): Promise<void> {
     await this.raw(
       'give back one reserved attempt, never below zero or under a lock',
       () =>
         this.prisma.client.$executeRaw`
         UPDATE users SET failed_logins = failed_logins - 1
-        WHERE id = ${userId}::uuid AND locked_until IS NULL AND failed_logins > 0`,
+        WHERE id = ${user.id}::uuid AND org_id = ${user.orgId}::uuid
+          AND locked_until IS NULL AND failed_logins > 0`,
     );
   }
 
   /** Clears the counter after a success, but never a lock a sibling request just set. */
-  private async clearFailures(userId: string, db: Db = this.prisma.client): Promise<void> {
+  private async clearFailures(
+    user: Pick<User, 'id' | 'orgId'>,
+    db: Db = this.prisma.client,
+  ): Promise<void> {
     await this.raw(
       'clear the failure counter without clearing a live lock',
       () =>
         db.$executeRaw`
         UPDATE users SET failed_logins = 0, locked_until = NULL, updated_at = now()
-        WHERE id = ${userId}::uuid AND (locked_until IS NULL OR locked_until <= now())`,
+        WHERE id = ${user.id}::uuid AND org_id = ${user.orgId}::uuid
+          AND (locked_until IS NULL OR locked_until <= now())`,
     );
   }
 
@@ -1062,7 +1087,7 @@ export class AuthService implements OnApplicationShutdown {
         UPDATE users SET
           locked_until = now() + make_interval(mins => ${LOCKOUT_MINUTES}::int),
           updated_at = now()
-        WHERE id = ${user?.id ?? NO_USER_ID}::uuid
+        WHERE id = ${user?.id ?? NO_USER_ID}::uuid AND org_id = ${user?.orgId ?? NO_ORG_ID}::uuid
           AND failed_logins >= ${MAX_FAILED_LOGINS}::int
           AND locked_until IS NULL
         RETURNING id`),
@@ -1188,14 +1213,14 @@ export class AuthService implements OnApplicationShutdown {
           SELECT u.id, ${randomUUID()}::uuid, ${sha256Hex(refreshToken)},
                  ${new Date(Date.now() + REFRESH_TTL_MS)}::timestamptz
           FROM users u
-          WHERE u.id = ${user.id}::uuid AND u.is_active
+          WHERE u.id = ${user.id}::uuid AND u.org_id = ${user.orgId}::uuid AND u.is_active
             AND u.password_hash = ${user.passwordHash ?? ''}
             ${totpBound}
           FOR SHARE OF u
           RETURNING id`),
     );
     if (inserted.length !== 1) throw new PasswordChangedSignal();
-    await this.clearFailures(user.id, db);
+    await this.clearFailures(user, db);
     return { body: this.authenticated(user), refreshToken };
   }
 
@@ -1223,8 +1248,4 @@ export class AuthService implements OnApplicationShutdown {
       return null;
     }
   }
-}
-
-function errorName(e: unknown): string {
-  return e instanceof Error ? e.name : 'unknown';
 }

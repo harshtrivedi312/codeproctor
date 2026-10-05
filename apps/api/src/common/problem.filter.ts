@@ -68,7 +68,7 @@ export class ProblemFilter implements ExceptionFilter {
     };
 
     if (noScope) {
-      this.logger.warn({ traceId, errorName: exception.name }, 'Query without an org context');
+      this.logger.error({ traceId, errorName: exception.name }, 'Query without an org context');
       problem.detail = 'Access denied.';
     } else if (exception instanceof HttpException) {
       const body = exception.getResponse();
@@ -86,6 +86,10 @@ export class ProblemFilter implements ExceptionFilter {
       // Only our own coded exceptions may set `code`, and never on a 5xx.
       if (exception instanceof CodedForbiddenException && status < 500) {
         problem.code = exception.code;
+      }
+      if (status >= 500) {
+        // Fixed message, class name and trace id only: never the body, which may carry values.
+        this.logger.error({ traceId, errorName: exception.name, status }, 'Request failed');
       }
       if (status >= 500 && status !== 503) problem.detail = 'The service is unavailable or failed';
     } else {

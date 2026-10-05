@@ -20,13 +20,14 @@ import {
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiTooManyRequestsResponse,
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
-import type { Request } from 'express';
 import { Audited } from '../audit/audited.decorator';
 import type { AuthedRequest } from '../common/auth/auth.types';
 import { Roles } from '../common/auth/decorators';
+import { ctxOf } from '../common/request-context';
 import { UserRole } from '../generated/prisma/client';
 import {
   InviteStaffUserDto,
@@ -34,14 +35,11 @@ import {
   LockEventListDto,
   StaffUserDto,
   StaffUserListDto,
+  UnlockStaffUserDto,
   UpdateStaffUserDto,
 } from './dto/users.dto';
 import { UsersService } from './users.service';
-import type { Actor, RequestContext } from './users.service';
-
-function ctxOf(req: Request): RequestContext {
-  return { ip: req.ip };
-}
+import type { Actor } from './users.service';
 
 function actorOf(req: AuthedRequest): Actor {
   if (!req.user) throw new Error('Guard did not attach a user');
@@ -55,7 +53,10 @@ function actorOf(req: AuthedRequest): Actor {
 @Roles(UserRole.SUPER_ADMIN)
 @Controller('admin/users')
 @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
-@ApiForbiddenResponse({ description: 'Caller is not a super admin' })
+@ApiForbiddenResponse({
+  description:
+    "Caller is not a super admin, or (invite, role/active change, unlock) the admin's own currentPassword is wrong or locked: code 'REAUTH_FAILED', one body for both (FR-102 re-auth decision)",
+})
 export class UsersController {
   constructor(private readonly users: UsersService) {}
 
@@ -85,6 +86,7 @@ export class UsersController {
   @ApiCreatedResponse({ type: StaffUserDto })
   @ApiBadRequestResponse({ description: 'Validation failed' })
   @ApiConflictResponse({ description: 'A user with this email already exists' })
+  @ApiTooManyRequestsResponse({ description: 'Per-organization invite limit reached' })
   invite(@Body() dto: InviteStaffUserDto, @Req() req: AuthedRequest): Promise<StaffUserDto> {
     return this.users.invite(actorOf(req), dto, ctxOf(req));
   }
@@ -117,8 +119,9 @@ export class UsersController {
   @ApiNotFoundResponse({ description: 'No such user in your organization' })
   async unlock(
     @Param('userId', new ParseUUIDPipe()) userId: string,
+    @Body() dto: UnlockStaffUserDto,
     @Req() req: AuthedRequest,
   ): Promise<void> {
-    await this.users.unlock(actorOf(req), userId, ctxOf(req));
+    await this.users.unlock(actorOf(req), userId, dto.currentPassword, ctxOf(req));
   }
 }

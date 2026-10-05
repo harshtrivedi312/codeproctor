@@ -103,6 +103,15 @@ describe('AuditInterceptor (FR-105, TC-006)', () => {
     expect(JSON.stringify(row)).not.toContain('secret-query-value');
   });
 
+  it('FR-105: a uuid entity id is stored in lowercase whatever case the URL used', async () => {
+    const id = 'ABCDEF12-3456-4789-8ABC-DEF123456789';
+    await request(app.getHttpServer())
+      .get(`/probe/sessions/${id}`)
+      .set('x-user', 'yes')
+      .expect(200);
+    expect(created[0]?.data.entityId).toBe(id.toLowerCase());
+  });
+
   it('FR-105: a handler that fails (404) writes no audit row; an unmarked route writes none', async () => {
     await request(app.getHttpServer())
       .get('/probe/sessions/missing')

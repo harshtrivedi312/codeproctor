@@ -15,6 +15,7 @@ import { passwordVersion } from '../../auth/crypto.util';
 import type { AuthedRequest, AuthUser, TokenKind } from './auth.types';
 import { IS_PUBLIC, ROLES } from './decorators';
 import { TokenService } from './token.service';
+import { TokenValidityService } from './token-validity.service';
 
 interface StaffClaims {
   sub: string;
@@ -22,6 +23,7 @@ interface StaffClaims {
   role: UserRole;
   kind: TokenKind;
   pwv?: unknown;
+  iat?: unknown;
 }
 
 function isClaims(v: unknown): v is StaffClaims {
@@ -43,6 +45,7 @@ export class JwtAuthGuard implements CanActivate {
     private readonly tokens: TokenService,
     private readonly prisma: PrismaService,
     private readonly orgContext: OrgContextService,
+    private readonly validity: TokenValidityService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -91,6 +94,11 @@ export class JwtAuthGuard implements CanActivate {
       throw new UnauthorizedException('Authentication required.');
     }
 
+    // A role change or deactivation after this token was issued ends it for good, even if the
+    // user later gets the old role or account back (Redis marker; 503 when Redis is down).
+    if (typeof claims.iat !== 'number' || !(await this.validity.isFresh(claims.sub, claims.iat))) {
+      throw new UnauthorizedException('Authentication required.');
+    }
     const roles = this.reflector.getAllAndOverride<UserRole[] | undefined>(ROLES, targets);
     if (!roles || !roles.includes(current.role)) throw new ForbiddenException('Forbidden.');
 

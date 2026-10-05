@@ -21,6 +21,7 @@ import { Roles } from '../common/auth/decorators';
 import { passwordVersion } from '../auth/crypto.util';
 import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
 import { TokenModule, TokenService } from '../common/auth/token.service';
+import { TokenValidityService } from '../common/auth/token-validity.service';
 import { Prisma } from '../generated/prisma/client.js';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import { createPrismaClient } from './create-prisma-client';
@@ -93,7 +94,11 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
       ],
       controllers: [ProbeController],
       providers: [{ provide: APP_GUARD, useClass: JwtAuthGuard }],
-    }).compile();
+    })
+      // The guard's Redis marker check (S1) is not under test here: no token is invalidated.
+      .overrideProvider(TokenValidityService)
+      .useValue({ isFresh: () => Promise.resolve(true) })
+      .compile();
     app = moduleRef.createNestApplication<INestApplication<App>>({ logger: false });
     await app.listen(0);
     prisma = app.get(PrismaService);
@@ -636,18 +641,16 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
     });
 
     it("NFR-04 an authenticated HTTP request sends exactly two statements: the guard's user re-check, then the handler's one", async () => {
-      const token = app
-        .get(TokenService)
-        .sign(
-          {
-            sub: A.userId,
-            org: A.orgId,
-            role: 'RECRUITER',
-            kind: 'access',
-            pwv: passwordVersion('not-a-real-hash'),
-          },
-          300,
-        );
+      const token = app.get(TokenService).sign(
+        {
+          sub: A.userId,
+          org: A.orgId,
+          role: 'RECRUITER',
+          kind: 'access',
+          pwv: passwordVersion('not-a-real-hash'),
+        },
+        300,
+      );
       const get = (): Promise<unknown> =>
         request(app.getHttpServer())
           .get(`/probe/users/${A.userId}`)

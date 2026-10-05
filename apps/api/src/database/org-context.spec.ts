@@ -18,6 +18,7 @@ import { Public, Roles } from '../common/auth/decorators';
 import { passwordVersion } from '../auth/crypto.util';
 import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
 import { TokenModule, TokenService } from '../common/auth/token.service';
+import { TokenValidityService } from '../common/auth/token-validity.service';
 import type { UserRole } from '../generated/prisma/enums.js';
 import { OrgContextMissingError, OrgScopeViolationError } from './errors';
 import { OrgContextService, SYSTEM_SCOPE_REASONS } from './org-context';
@@ -305,7 +306,11 @@ describe('OrgContextInterceptor with the real JwtAuthGuard (BE-02, NFR-04, FR-10
         { provide: APP_GUARD, useClass: JwtAuthGuard },
         { provide: APP_INTERCEPTOR, useClass: OrgContextInterceptor },
       ],
-    }).compile();
+    })
+      // The guard's Redis marker check (S1) is not under test here: no token is invalidated.
+      .overrideProvider(TokenValidityService)
+      .useValue({ isFresh: () => Promise.resolve(true) })
+      .compile();
     app = moduleRef.createNestApplication<INestApplication<App>>({ logger: false });
     await app.listen(0);
     tokens = app.get(TokenService);

@@ -7,6 +7,7 @@ import { OrgContextService } from '../../database/org-context';
 import { Public, Roles } from './decorators';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import type { TokenService } from './token.service';
+import type { TokenValidityService } from './token-validity.service';
 
 const orgContext = new OrgContextService();
 
@@ -44,6 +45,7 @@ describe('JwtAuthGuard decorator conflicts (FR-103, FU-BE-35)', () => {
     {} as TokenService,
     {} as PrismaService,
     orgContext,
+    {} as TokenValidityService,
   );
 
   it('FR-103: a class-level @Public() does not open a method that declares @Roles()', async () => {
@@ -84,7 +86,13 @@ describe('JwtAuthGuard user re-check (FR-103, FR-104, FU-BE-19)', () => {
     role: UserRole.RECRUITER,
     kind: 'access',
     pwv: passwordVersion(HASH),
+    iat: 1000,
   };
+  let fresh = true;
+  const validity = { isFresh: () => Promise.resolve(fresh) } as unknown as TokenValidityService;
+  beforeEach(() => {
+    fresh = true;
+  });
   const tokens = { verify: () => claims } as unknown as TokenService;
   const protectedContext = (): ExecutionContext => {
     const handler = (Protected.prototype as unknown as Record<string, () => void>)
@@ -101,6 +109,7 @@ describe('JwtAuthGuard user re-check (FR-103, FR-104, FU-BE-19)', () => {
       tokens,
       { client: { user: { findUnique } } } as unknown as PrismaService,
       orgContext,
+      validity,
     );
   const current = { isActive: true, role: UserRole.RECRUITER, orgId: 'org-1', passwordHash: HASH };
 
@@ -113,6 +122,13 @@ describe('JwtAuthGuard user re-check (FR-103, FR-104, FU-BE-19)', () => {
   it('FR-104: a database error refuses the request instead of trusting the token', async () => {
     const guard = guardWith(jest.fn().mockRejectedValue(new Error('db down')));
     await expect(guard.canActivate(protectedContext())).rejects.toThrow('db down');
+  });
+
+  it('FR-104: a token issued before a role change or deactivation is refused even if the user is back as before (S1)', async () => {
+    fresh = false;
+    await expect(
+      guardWith(jest.fn().mockResolvedValue(current)).canActivate(protectedContext()),
+    ).rejects.toThrow(UnauthorizedException);
   });
 
   it('FR-103: a token whose user has since moved to another organization is refused', async () => {

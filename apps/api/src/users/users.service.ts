@@ -1,4 +1,9 @@
-// Staff user management for SUPER_ADMIN (FR-103, FR-105, ADR 0003 section 4). Every query runs
+// Staff user management for SUPER_ADMIN (FR-103, FR-105, ADR 0003 section 4). Invite, role change,
+// deactivation and unlock need the admin's current password (step-up, following the FR-102 re-auth
+// decision of the admin 2FA reset): a stolen access token alone cannot create or strip admins or
+// unlock accounts. The password is checked first, on the login path (reserve, equal work, lockout),
+// so a wrong or locked password is the same 403 REAUTH_FAILED whatever the target is; the by-id
+// 404 for a missing or other-org user comes only after it succeeds. Every query runs
 // through the org-scoped client, so another org's user is simply not found: the same 404 as a
 // user that does not exist (TC-008). Lock order, everywhere: the org's active SUPER_ADMIN rows
 // (by id), then the target users row, then refresh_tokens, then the audit insert. The users row
@@ -8,18 +13,32 @@
 import {
   BadRequestException,
   ConflictException,
-  ForbiddenException,
+  HttpException,
+  HttpStatus,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Redis } from 'ioredis';
+import { AuthService } from '../auth/auth.service';
 import { newOpaqueToken, sha256Hex } from '../auth/crypto.util';
+import { TokenValidityService } from '../common/auth/token-validity.service';
+import { reauthFailed } from '../common/coded.exception';
+import { errorName } from '../common/request-context';
+import type { RequestContext } from '../common/request-context';
+import { ensureConnected } from '../infrastructure/redis-ready';
+import { REDIS_CLIENT } from '../infrastructure/infrastructure.module';
 import type { Env } from '../config/env';
 import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
 import { Prisma, UserRole } from '../generated/prisma/client';
 import type { User } from '../generated/prisma/client';
+import type { OrgScopedPrismaClient } from '../database/org-scope.extension';
+
+type OrgScopedTx = Pick<OrgScopedPrismaClient, 'user'>;
 import { MailPort } from '../mail/mail.port';
 import type {
   InviteStaffUserDto,
@@ -36,37 +55,45 @@ export interface Actor {
   orgId: string;
 }
 
-export interface RequestContext {
-  ip?: string;
-}
+/** The most rows a list can skip: deep offsets are refused (400) instead of scanning the table. */
+export const MAX_LIST_OFFSET = 10_000;
+const INVITE_WINDOW_SECONDS = 60 * 60;
 
-interface LockedRow {
+interface AdminRow {
   id: string;
-  role?: UserRole;
-  is_active?: boolean;
+  password_hash: string | null;
 }
 
-function errorName(e: unknown): string {
-  return e instanceof Error ? e.name : 'unknown';
+interface TargetRow {
+  id: string;
+  role: UserRole;
+  is_active: boolean;
+  has_password: boolean;
 }
 
 @Injectable()
 export class UsersService {
   private readonly logger = new Logger(UsersService.name);
   private readonly webOrigin: string;
+  private readonly inviteLimit: number;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly orgContext: OrgContextService,
     private readonly mail: MailPort,
+    private readonly auth: AuthService,
+    private readonly validity: TokenValidityService,
+    @Inject(REDIS_CLIENT) private readonly redis: Redis,
     config: ConfigService<Env, true>,
   ) {
     this.webOrigin = config.get('WEB_ORIGIN', { infer: true });
+    this.inviteLimit = config.get('INVITE_RATE_LIMIT_PER_ORG_HOUR', { infer: true });
   }
 
   // ---- read -----------------------------------------------------------------------------------
 
   async list(page: number, pageSize: number): Promise<StaffUserListDto> {
+    this.checkOffset(page, pageSize);
     const [rows, total] = await Promise.all([
       this.prisma.client.user.findMany({
         orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
@@ -80,6 +107,7 @@ export class UsersService {
 
   /** Recent AUTH_ACCOUNT_LOCKED audit rows of this org, newest first (P-03 in-app alert). */
   async lockEvents(page: number, pageSize: number): Promise<LockEventListDto> {
+    this.checkOffset(page, pageSize);
     const where = { action: 'AUTH_ACCOUNT_LOCKED' };
     const [rows, total] = await Promise.all([
       this.prisma.client.auditLog.findMany({
@@ -121,13 +149,17 @@ export class UsersService {
    * Creates a pending user (no password) with a 72 hour single-use set-password token: only the
    * SHA-256 of 32 random bytes is stored. The link goes out through the staff-invite template,
    * after the commit. The user accepts through POST /auth/password/reset, the same hardened route
-   * as a reset (single use, expiry, atomic, revokes sessions, never signs in).
+   * as a reset (single use, expiry, atomic, revokes sessions, never signs in). Needs the admin's
+   * current password and is rate limited per org (Redis fixed window, fails closed).
    */
   async invite(actor: Actor, dto: InviteStaffUserDto, ctx: RequestContext): Promise<StaffUserDto> {
+    const verified = await this.auth.verifyCurrentPassword(actor.id, dto.currentPassword, ctx);
+    await this.takeInviteSlot(actor.orgId);
     const token = newOpaqueToken();
     let created: User;
     try {
       created = await this.prisma.client.$transaction(async (tx) => {
+        await this.requireSameAdmin(tx, actor, verified.passwordHash);
         const user = await tx.user.create({
           data: {
             orgId: actor.orgId,
@@ -170,6 +202,47 @@ export class UsersService {
     return this.toDto(created);
   }
 
+  /** Fixed window per org and hour. Redis down is a 503 (fail closed), over the limit a 429. */
+  private async takeInviteSlot(orgId: string): Promise<void> {
+    const key = `invite:org:${orgId}:${Math.floor(Date.now() / (INVITE_WINDOW_SECONDS * 1000))}`;
+    let count: number;
+    try {
+      await ensureConnected(this.redis);
+      count = await this.redis.incr(key);
+      if (count === 1) await this.redis.expire(key, INVITE_WINDOW_SECONDS);
+    } catch {
+      throw new ServiceUnavailableException('Verification is temporarily unavailable.');
+    }
+    if (count > this.inviteLimit) {
+      throw new HttpException(
+        'Too many invitations. Try again later.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+  }
+
+  /**
+   * The admin must still be the one whose password was verified: active SUPER_ADMIN of this org
+   * with the same hash. A plain read, no lock on the admin row (two admins acting on each other
+   * cannot deadlock); a change in between is the same REAUTH_FAILED.
+   */
+  private async requireSameAdmin(
+    tx: Pick<OrgScopedTx, 'user'>,
+    actor: Actor,
+    verifiedHash: string,
+  ): Promise<void> {
+    const still = await tx.user.count({
+      where: {
+        id: actor.id,
+        orgId: actor.orgId,
+        passwordHash: verifiedHash,
+        role: UserRole.SUPER_ADMIN,
+        isActive: true,
+      },
+    });
+    if (still !== 1) throw reauthFailed();
+  }
+
   // ---- role, deactivate, reactivate -----------------------------------------------------------
 
   async update(
@@ -181,66 +254,77 @@ export class UsersService {
     if (dto.role === undefined && dto.active === undefined) {
       throw new BadRequestException('Send a role, active, or both.');
     }
+    const verified = await this.auth.verifyCurrentPassword(actor.id, dto.currentPassword, ctx);
     const targetId = rawTargetId.toLowerCase();
     const actorId = actor.id.toLowerCase();
     const updated = await this.prisma.client.$transaction(async (tx) => {
       // 1. Every active SUPER_ADMIN of the org, in id order. Serialises changes to the admin set,
-      //    so two admins demoting each other cannot both pass the last-admin check.
+      //    so two admins demoting each other cannot both pass the last-admin check. The caller's
+      //    own row is among them, so this also re-checks the caller (still an active SUPER_ADMIN
+      //    with the verified password) under the lock.
       const admins = await this.raw('lock the org active SUPER_ADMIN rows in id order', () =>
-        tx.$queryRaw<LockedRow[]>(Prisma.sql`
-          SELECT id FROM users
+        tx.$queryRaw<AdminRow[]>(Prisma.sql`
+          SELECT id, password_hash FROM users
           WHERE org_id = ${actor.orgId}::uuid AND role = 'SUPER_ADMIN' AND is_active
           ORDER BY id FOR NO KEY UPDATE`),
       );
-      // 2. The target row, same org only. A missing and a cross-org id are the same 404.
+      const self = admins.find((a) => a.id === actorId);
+      if (!self || self.password_hash !== verified.passwordHash) throw reauthFailed();
+      // 2. The target row, same org only. A missing and a cross-org id are the same 404 (after
+      //    the password check above).
       const found = await this.raw('lock the target user row, same org only', () =>
-        tx.$queryRaw<Required<LockedRow>[]>(Prisma.sql`
-          SELECT id, role, is_active FROM users
+        tx.$queryRaw<TargetRow[]>(Prisma.sql`
+          SELECT id, role, is_active, (password_hash IS NOT NULL) AS has_password FROM users
           WHERE id = ${targetId}::uuid AND org_id = ${actor.orgId}::uuid
           FOR NO KEY UPDATE`),
       );
       const target = found[0];
       if (!target) throw new NotFoundException('User not found.');
-      // The caller must still be an active SUPER_ADMIN now (a demotion may have landed since the
-      // guard looked).
-      if (!admins.some((a) => a.id === actorId)) throw new ForbiddenException('Forbidden.');
 
-      const demotes = dto.role !== undefined && dto.role !== target.role;
+      const roleChanges = dto.role !== undefined && dto.role !== target.role;
       const deactivates = dto.active === false && target.is_active;
-      if (target.id === actorId && (demotes || dto.active === false)) {
+      if (target.id === actorId && (roleChanges || dto.active === false)) {
         throw new ConflictException('You cannot change your own role or deactivate yourself.');
       }
+      // Defensive: the caller is an active SUPER_ADMIN other than the target here (a self change
+      // is refused above), so the set never empties. Kept in case that rule is ever relaxed.
       const leavesAdmins =
         target.role === UserRole.SUPER_ADMIN &&
         target.is_active &&
-        ((demotes && dto.role !== UserRole.SUPER_ADMIN) || deactivates);
+        ((roleChanges && dto.role !== UserRole.SUPER_ADMIN) || deactivates);
       if (leavesAdmins && admins.filter((a) => a.id !== target.id).length === 0) {
         throw new ConflictException('An organization needs at least one active super admin.');
       }
       const reactivates = dto.active === true && !target.is_active;
-      if (!demotes && !deactivates && !reactivates) {
+      if (!roleChanges && !deactivates && !reactivates) {
         return tx.user.findUniqueOrThrow({ where: { id: targetId } });
       }
 
-      // 3. The users row first ...
+      // 3. The users row first ... A deactivated account also drops a pending password-reset
+      //    token (an invite token of a user with no password has to stay: the schema needs one).
       const user = await tx.user.update({
         where: { id: targetId },
         data: {
-          ...(demotes ? { role: dto.role } : {}),
+          ...(roleChanges ? { role: dto.role } : {}),
           ...(deactivates ? { isActive: false } : {}),
+          ...(deactivates && target.has_password
+            ? { setPasswordTokenHash: null, setPasswordExpiresAt: null }
+            : {}),
           ...(reactivates ? { isActive: true } : {}),
           updatedAt: new Date(),
         },
       });
-      // 4. ... then the tokens. A new role or a deactivation ends every refresh family.
+      // 4. ... then the tokens. A new role or a deactivation ends every refresh family and every
+      //    access token issued so far (Redis marker; a Redis outage rolls this back with a 503).
       let revoked = 0;
-      if (demotes || deactivates) {
+      if (roleChanges || deactivates) {
         revoked = (
           await tx.refreshToken.updateMany({
             where: { userId: targetId, revokedAt: null },
             data: { revokedAt: new Date() },
           })
         ).count;
+        await this.validity.invalidateIssuedTokens(targetId);
       }
       const audit = async (action: string, metadata: Prisma.InputJsonObject): Promise<void> => {
         await tx.auditLog.create({
@@ -255,7 +339,7 @@ export class UsersService {
           },
         });
       };
-      if (demotes) {
+      if (roleChanges) {
         await audit('USER_ROLE_CHANGED', {
           from: target.role,
           to: dto.role ?? null,
@@ -272,15 +356,23 @@ export class UsersService {
   // ---- unlock ---------------------------------------------------------------------------------
 
   /**
-   * Clears a login lockout (FR-101, P-03). The target row is locked first (FOR NO KEY UPDATE, the
-   * same lock the attempt reservation takes), so an attempt in flight either finishes before and
-   * is wiped with the counter, or starts after and counts from zero: at most 5 verified guesses
-   * in the new window. The password, 2FA and sessions are not touched. No re-authentication is
-   * asked: it grants nobody access, is audited, and a SUPER_ADMIN may unlock themselves.
+   * Clears a login lockout (FR-101, P-03). Needs the admin's current password: without it a stolen
+   * admin token could unlock an account again and again and so remove the 5-attempt limit. The
+   * target row is locked first (FOR NO KEY UPDATE, the lock the attempt reservation takes), so an
+   * attempt in flight either finishes before and is wiped with the counter, or starts after and
+   * counts from zero: at most 5 verified guesses in the new window. The password, 2FA and
+   * sessions are not touched. A SUPER_ADMIN may unlock themselves.
    */
-  async unlock(actor: Actor, rawTargetId: string, ctx: RequestContext): Promise<void> {
+  async unlock(
+    actor: Actor,
+    rawTargetId: string,
+    currentPassword: string,
+    ctx: RequestContext,
+  ): Promise<void> {
+    const verified = await this.auth.verifyCurrentPassword(actor.id, currentPassword, ctx);
     const targetId = rawTargetId.toLowerCase();
     await this.prisma.client.$transaction(async (tx) => {
+      await this.requireSameAdmin(tx, actor, verified.passwordHash);
       const found = await this.raw('lock the target user row, same org only', () =>
         tx.$queryRaw<{ id: string; failed_logins: number; locked: boolean }[]>(Prisma.sql`
           SELECT id, failed_logins, (locked_until IS NOT NULL AND locked_until > now()) AS locked
@@ -309,6 +401,12 @@ export class UsersService {
   }
 
   // ---- helpers --------------------------------------------------------------------------------
+
+  private checkOffset(page: number, pageSize: number): void {
+    if (page * pageSize > MAX_LIST_OFFSET) {
+      throw new BadRequestException('That page is too deep. Narrow the list instead.');
+    }
+  }
 
   private raw<T>(reason: string, run: () => Promise<T>): Promise<T> {
     return this.orgContext.runRawSql(reason, run);

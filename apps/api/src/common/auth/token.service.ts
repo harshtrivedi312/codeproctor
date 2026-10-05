@@ -4,6 +4,7 @@ import { Global, Injectable, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import jwt from 'jsonwebtoken';
 import type { Env } from '../../config/env';
+import { TokenValidityService } from './token-validity.service';
 
 @Injectable()
 export class TokenService {
@@ -24,5 +25,8 @@ export class TokenService {
 }
 
 @Global()
-@Module({ providers: [TokenService], exports: [TokenService] })
+@Module({
+  providers: [TokenService, TokenValidityService],
+  exports: [TokenService, TokenValidityService],
+})
 export class TokenModule {}

@@ -74,3 +74,23 @@ describe('ProblemFilter org-scope failure (FR-103, TC-008)', () => {
     expect(run(new OrgScopeViolationError('x')).status).toBe(500);
   });
 });
+
+describe('ProblemFilter logging of failures (S8)', () => {
+  it('FR-103: a missing org context and a 5xx are logged at error level by name and trace id only', () => {
+    const { OrgContextMissingError } =
+      jest.requireActual<typeof import('../database/errors')>('../database/errors');
+    const { Logger } = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    try {
+      run(new OrgContextMissingError('Session.findMany'));
+      run(new HttpException('boom with a secret value', 500));
+      const logged = JSON.stringify(error.mock.calls);
+      expect(error).toHaveBeenCalledTimes(2);
+      expect(logged).toContain('OrgContextMissingError');
+      expect(logged).toContain('trace-1');
+      expect(logged).not.toMatch(/Session|findMany|secret value/);
+    } finally {
+      error.mockRestore();
+    }
+  });
+});

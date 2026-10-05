@@ -4,6 +4,7 @@ import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { RequestMethod } from '@nestjs/common';
 import { ModulesContainer } from '@nestjs/core';
 import type { UserRole } from '../../generated/prisma/client';
+import { AUDITED } from '../../audit/audited.decorator';
 import { IS_PUBLIC, ROLES } from './decorators';
 import { ROUTE_PERMISSIONS } from './route-permissions';
 
@@ -13,16 +14,35 @@ export interface RegisteredRoute {
   handler: string;
   isPublic: boolean;
   roles: readonly UserRole[];
-}
-
-function firstPath(value: unknown): string {
-  const raw = Array.isArray(value) ? (value[0] as unknown) : value;
-  return typeof raw === 'string' ? raw : '';
+  /** The handler or its class carries @Audited. */
+  audited: boolean;
 }
 
 function join(...parts: string[]): string {
   const clean = parts.map((p) => p.replace(/^\/+|\/+$/g, '')).filter((p) => p.length > 0);
   return `/${clean.join('/')}`;
+}
+
+function pathsOf(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((v) => (typeof v === 'string' ? v : ''));
+  return [typeof value === 'string' ? value : ''];
+}
+
+/** Method names of a controller and of every class it extends (inherited routes count). */
+function handlerNames(cls: object): Map<string, object> {
+  const found = new Map<string, object>();
+  for (
+    let proto: object | null = (cls as { prototype: object }).prototype;
+    proto !== null && proto !== Object.prototype;
+    proto = Object.getPrototypeOf(proto) as object | null
+  ) {
+    for (const name of Object.getOwnPropertyNames(proto)) {
+      if (name === 'constructor' || found.has(name)) continue;
+      const value = (proto as Record<string, unknown>)[name];
+      if (typeof value === 'function') found.set(name, value);
+    }
+  }
+  return found;
 }
 
 export function listRoutes(modules: ModulesContainer): RegisteredRoute[] {
@@ -31,22 +51,25 @@ export function listRoutes(modules: ModulesContainer): RegisteredRoute[] {
     for (const wrapper of mod.controllers.values()) {
       const cls = wrapper.metatype;
       if (typeof cls !== 'function') continue;
-      const proto = cls.prototype as Record<string, unknown>;
-      const base = firstPath(Reflect.getMetadata(PATH_METADATA, cls));
-      for (const name of Object.getOwnPropertyNames(proto)) {
-        const handler = proto[name];
-        if (typeof handler !== 'function') continue;
+      const bases = pathsOf(Reflect.getMetadata(PATH_METADATA, cls));
+      for (const [name, handler] of handlerNames(cls)) {
         const verb = Reflect.getMetadata(METHOD_METADATA, handler) as RequestMethod | undefined;
         if (verb === undefined) continue;
-        const path = firstPath(Reflect.getMetadata(PATH_METADATA, handler));
+        const paths = pathsOf(Reflect.getMetadata(PATH_METADATA, handler));
         const pick = <T>(key: string): T | undefined =>
           (Reflect.getMetadata(key, handler) ?? Reflect.getMetadata(key, cls)) as T | undefined;
-        routes.push({
-          key: `${RequestMethod[verb]} ${join(base, path)}`,
-          handler: `${cls.name}.${name}`,
-          isPublic: pick<boolean>(IS_PUBLIC) === true,
-          roles: pick<UserRole[]>(ROLES) ?? [],
-        });
+        // One entry per path: @Get(['a', 'b']) and @Controller(['x', 'y']) register every combination.
+        for (const base of bases) {
+          for (const path of paths) {
+            routes.push({
+              key: `${RequestMethod[verb]} ${join(base, path)}`,
+              handler: `${cls.name}.${name}`,
+              isPublic: pick<boolean>(IS_PUBLIC) === true,
+              roles: pick<UserRole[]>(ROLES) ?? [],
+              audited: pick<unknown>(AUDITED) !== undefined,
+            });
+          }
+        }
       }
     }
   }
@@ -75,6 +98,16 @@ export function matrixProblems(routes: readonly RegisteredRoute[]): string[] {
       !entry.roles.every((r) => route.roles.includes(r))
     ) {
       problems.push(`${route.key} @Roles() differs from the matrix`);
+    } else {
+      const marked = entry.audited === true;
+      if (marked && !route.audited) {
+        problems.push(`${route.key} is audited in the matrix but has no @Audited()`);
+      } else if (!marked && route.audited) {
+        problems.push(`${route.key} has @Audited() but the matrix does not say audited`);
+      }
+      if (entry.candidateData === true && !marked) {
+        problems.push(`${route.key} touches candidate data but is not audited (FR-105)`);
+      }
     }
   }
   for (const key of Object.keys(ROUTE_PERMISSIONS)) {

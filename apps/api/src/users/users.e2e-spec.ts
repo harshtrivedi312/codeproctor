@@ -8,6 +8,7 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { encryptSecret, passwordVersion, sha256Hex } from '../auth/crypto.util';
 import { ARGON2_OPTIONS } from '../auth/password.service';
+const hash2 = (p: string): Promise<string> => hash(p, ARGON2_OPTIONS);
 import type { AuthService } from '../auth/auth.service';
 import type { PasswordService } from '../auth/password.service';
 import { createPrismaClient } from '../database/create-prisma-client';
@@ -246,12 +247,20 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
         const calls: request.Test[] = [
           http().get(`${API}/admin/users`).set(caller.auth),
           http().get(`${API}/admin/users/lock-events`).set(caller.auth),
+          http().post(`${API}/admin/users`).set(caller.auth).send({
+            currentPassword: PASSWORD,
+            email: 'x@example.com',
+            name: 'X',
+            role: 'RECRUITER',
+          }),
           http()
-            .post(`${API}/admin/users`)
+            .patch(`${API}/admin/users/${victim.id}`)
             .set(caller.auth)
-            .send({ email: 'x@example.com', name: 'X', role: 'RECRUITER' }),
-          http().patch(`${API}/admin/users/${victim.id}`).set(caller.auth).send({ role: 'AUTHOR' }),
-          http().post(`${API}/admin/users/${victim.id}/unlock`).set(caller.auth),
+            .send({ currentPassword: PASSWORD, role: 'AUTHOR' }),
+          http()
+            .post(`${API}/admin/users/${victim.id}/unlock`)
+            .set(caller.auth)
+            .send({ currentPassword: PASSWORD }),
         ];
         for (const call of calls) expect((await call).status).toBe(403);
       }
@@ -275,7 +284,7 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       await http()
         .patch(`${API}/admin/users/${b.id}`)
         .set(a.auth)
-        .send({ role: 'RECRUITER' })
+        .send({ currentPassword: PASSWORD, role: 'RECRUITER' })
         .expect(200);
       expect((await http().get(`${API}/admin/users`).set(b.auth)).status).toBe(401);
     });
@@ -344,7 +353,7 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       const res = await http()
         .post(`${API}/admin/users`)
         .set(admin.auth)
-        .send({ email, name: 'New Person', role })
+        .send({ currentPassword: PASSWORD, email, name: 'New Person', role })
         .expect(201);
       return res.body as Body;
     }
@@ -387,17 +396,23 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       await http()
         .post(`${API}/admin/users`)
         .set(admin.auth)
-        .send({ email: other.email, name: 'Dup', role: 'RECRUITER' })
+        .send({ currentPassword: PASSWORD, email: other.email, name: 'Dup', role: 'RECRUITER' })
         .expect(409);
       await http()
         .post(`${API}/admin/users`)
         .set(admin.auth)
-        .send({ email: 'not-an-email', name: '', role: 'KING' })
+        .send({ currentPassword: PASSWORD, email: 'not-an-email', name: '', role: 'KING' })
         .expect(400);
       await http()
         .post(`${API}/admin/users`)
         .set(admin.auth)
-        .send({ email: 'x1@example.com', name: 'X', role: 'RECRUITER', orgId: orgB })
+        .send({
+          currentPassword: PASSWORD,
+          email: 'x1@example.com',
+          name: 'X',
+          role: 'RECRUITER',
+          orgId: orgB,
+        })
         .expect(400);
     });
 
@@ -457,7 +472,7 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       await http()
         .patch(`${API}/admin/users/${String(body.id)}`)
         .set(admin.auth)
-        .send({ active: false })
+        .send({ currentPassword: PASSWORD, active: false })
         .expect(200);
       await http()
         .post(`${API}/auth/password/reset`)
@@ -477,7 +492,7 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       const res = await http()
         .patch(`${API}/admin/users/${user.id}`)
         .set(admin.auth)
-        .send({ role: 'AUTHOR' })
+        .send({ currentPassword: PASSWORD, role: 'AUTHOR' })
         .expect(200);
       expect((res.body as Body).role).toBe('AUTHOR');
       expect(await liveTokens(user.id)).toBe(0);
@@ -504,7 +519,7 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       await http()
         .patch(`${API}/admin/users/${user.id}`)
         .set(admin.auth)
-        .send({ active: false })
+        .send({ currentPassword: PASSWORD, active: false })
         .expect(200);
       expect(await liveTokens(user.id)).toBe(0);
       expect(
@@ -521,7 +536,7 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       const back = await http()
         .patch(`${API}/admin/users/${user.id}`)
         .set(admin.auth)
-        .send({ active: true })
+        .send({ currentPassword: PASSWORD, active: true })
         .expect(200);
       expect((back.body as Body).status).toBe('active');
       await login(user.email).expect(200);
@@ -532,23 +547,27 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       await http()
         .patch(`${API}/admin/users/${admin.id}`)
         .set(admin.auth)
-        .send({ role: 'RECRUITER' })
+        .send({ currentPassword: PASSWORD, role: 'RECRUITER' })
         .expect(409);
       await http()
         .patch(`${API}/admin/users/${admin.id}`)
         .set(admin.auth)
-        .send({ active: false })
+        .send({ currentPassword: PASSWORD, active: false })
         .expect(409);
       await http()
         .patch(`${API}/admin/users/${admin.id.toUpperCase()}`)
         .set(admin.auth)
-        .send({ role: 'REVIEWER' })
+        .send({ currentPassword: PASSWORD, role: 'REVIEWER' })
         .expect(409);
-      await http().patch(`${API}/admin/users/${admin.id}`).set(admin.auth).send({}).expect(400);
       await http()
         .patch(`${API}/admin/users/${admin.id}`)
         .set(admin.auth)
-        .send({ role: 'SUPER_ADMIN', active: true })
+        .send({ currentPassword: PASSWORD })
+        .expect(400);
+      await http()
+        .patch(`${API}/admin/users/${admin.id}`)
+        .set(admin.auth)
+        .send({ currentPassword: PASSWORD, role: 'SUPER_ADMIN', active: true })
         .expect(200);
       expect(await auditRows('USER_ROLE_CHANGED', admin.id)).toHaveLength(0);
       expect((await owner.user.findUniqueOrThrow({ where: { id: admin.id } })).role).toBe(
@@ -561,8 +580,14 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       const a = await make(UserRole.SUPER_ADMIN, { orgId: org });
       const b = await make(UserRole.SUPER_ADMIN, { orgId: org });
       const results = await Promise.all([
-        http().patch(`${API}/admin/users/${b.id}`).set(a.auth).send({ role: 'RECRUITER' }),
-        http().patch(`${API}/admin/users/${a.id}`).set(b.auth).send({ role: 'RECRUITER' }),
+        http()
+          .patch(`${API}/admin/users/${b.id}`)
+          .set(a.auth)
+          .send({ currentPassword: PASSWORD, role: 'RECRUITER' }),
+        http()
+          .patch(`${API}/admin/users/${a.id}`)
+          .set(b.auth)
+          .send({ currentPassword: PASSWORD, role: 'RECRUITER' }),
       ]);
       expect(results.filter((r) => r.status === 200)).toHaveLength(1);
       expect(
@@ -570,7 +595,7 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       ).toBe(1);
     });
 
-    it('TC-098: a deactivation that meets an in-flight session insert waits for it, then revokes that token (users row before tokens)', async () => {
+    it('TC-098: a deactivation waits on the user row lock of an uncommitted sign-in, then revokes the token that sign-in created (users row before tokens)', async () => {
       const admin = await make(UserRole.SUPER_ADMIN);
       const user = await make(UserRole.RECRUITER);
       // A sign-in in flight: it has read the user FOR SHARE and inserted its refresh token, but
@@ -587,9 +612,12 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       const deactivate = http()
         .patch(`${API}/admin/users/${user.id}`)
         .set(admin.auth)
-        .send({ active: false })
+        .send({ currentPassword: PASSWORD, active: false })
         .then((r) => r);
       await untilLockWaiter();
+      // Still blocked: the sign-in's token is not visible yet and the deactivation has not finished.
+      expect(await liveTokens(user.id)).toBe(0);
+      expect((await owner.user.findUniqueOrThrow({ where: { id: user.id } })).isActive).toBe(true);
       await inflight.query('COMMIT');
       await inflight.end();
       expect((await deactivate).status).toBe(200);
@@ -602,12 +630,304 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       const first = await login(user.email).expect(200);
       const cookie = ((first.headers['set-cookie'] as unknown as string[]) ?? [])[0] ?? '';
       const results = await Promise.all([
-        http().patch(`${API}/admin/users/${user.id}`).set(admin.auth).send({ active: false }),
+        http()
+          .patch(`${API}/admin/users/${user.id}`)
+          .set(admin.auth)
+          .send({ currentPassword: PASSWORD, active: false }),
         http().post(`${API}/auth/refresh`).set('Cookie', cookie),
       ]);
       expect(results[0].status).toBe(200);
       expect([200, 401]).toContain(results[1].status);
       expect(await liveTokens(user.id)).toBe(0);
+    });
+  });
+
+  // ---- B1: step-up (the admin's current password) on every state-changing admin route ----------------
+
+  describe('FR-103, FR-102 follow-up: a stolen SUPER_ADMIN access token alone changes nothing', () => {
+    const calls = (adminAuth: { Authorization: string }, targetId: string, body: object) => ({
+      invite: () =>
+        http()
+          .post(`${API}/admin/users`)
+          .set(adminAuth)
+          .send({ email: 'stepup@example.com', name: 'S', role: 'SUPER_ADMIN', ...body }),
+      role: () =>
+        http()
+          .patch(`${API}/admin/users/${targetId}`)
+          .set(adminAuth)
+          .send({ role: 'AUTHOR', ...body }),
+      deactivate: () =>
+        http()
+          .patch(`${API}/admin/users/${targetId}`)
+          .set(adminAuth)
+          .send({ active: false, ...body }),
+      unlock: () => http().post(`${API}/admin/users/${targetId}/unlock`).set(adminAuth).send(body),
+    });
+
+    it('TC-004: no password is 400; a wrong password is the same 403 REAUTH_FAILED on every route; nothing changes', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const victim = await make(UserRole.RECRUITER);
+      await owner.user.update({
+        where: { id: victim.id },
+        data: { failedLogins: 5, lockedUntil: new Date(Date.now() + 600_000) },
+      });
+      const missing = calls(admin.auth, victim.id, {});
+      for (const name of ['invite', 'role', 'deactivate', 'unlock'] as const) {
+        expect([name, (await missing[name]()).status]).toEqual([name, 400]);
+      }
+      const wrong = calls(admin.auth, victim.id, { currentPassword: 'not-the-password-1' });
+      const bodies: unknown[] = [];
+      for (const name of ['invite', 'role', 'deactivate', 'unlock'] as const) {
+        const res = await wrong[name]();
+        expect([name, res.status]).toEqual([name, 403]);
+        expect((res.body as Body).code).toBe('REAUTH_FAILED');
+        bodies.push(stable(res));
+      }
+      expect(new Set(bodies.map((b) => JSON.stringify(b))).size).toBe(1);
+      expect(await owner.user.count({ where: { email: 'stepup@example.com' } })).toBe(0);
+      const row = await owner.user.findUniqueOrThrow({ where: { id: victim.id } });
+      expect(row).toMatchObject({ role: 'RECRUITER', isActive: true, failedLogins: 5 });
+      expect(row.lockedUntil).not.toBeNull();
+      expect(await auditRows('USER_UNLOCKED', victim.id)).toHaveLength(0);
+      expect(await auditRows('USER_INVITED')).not.toContainEqual(
+        expect.objectContaining({ actor_id: admin.id }),
+      );
+    });
+
+    it('FR-101, TC-002: repeated wrong admin passwords lock the admin like a login; a locked admin password is the same 403 as a wrong one', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const victim = await make(UserRole.RECRUITER);
+      const unlock = (password: string): request.Test =>
+        http()
+          .post(`${API}/admin/users/${victim.id}/unlock`)
+          .set(admin.auth)
+          .send({ currentPassword: password });
+      const wrong = await unlock('nope-nope-nope-1');
+      for (let i = 0; i < 6; i++) await unlock('nope-nope-nope-1');
+      const lockedRight = await unlock(PASSWORD);
+      expect(lockedRight.status).toBe(403);
+      expect(stable(lockedRight)).toEqual(stable(wrong));
+      expect(await auditRows('USER_UNLOCKED', victim.id)).toHaveLength(0);
+    });
+
+    it('TC-002: a refused step-up costs the same statements for a wrong and a locked admin password, and for any target (invite, unlock, role)', async () => {
+      const wrongAdmin = await make(UserRole.SUPER_ADMIN);
+      const lockedAdmin = await make(UserRole.SUPER_ADMIN);
+      await owner.user.update({
+        where: { id: lockedAdmin.id },
+        data: { failedLogins: 5, lockedUntil: new Date(Date.now() + 600_000) },
+      });
+      const victim = await make(UserRole.RECRUITER);
+      const ghost = '00000000-0000-4000-8000-000000000043';
+      for (const target of [victim.id, ghost]) {
+        // Keep the wrong-password admin below the lock threshold: the 5th failure writes more.
+        await owner.user.update({ where: { id: wrongAdmin.id }, data: { failedLogins: 0 } });
+        const counts: number[] = [];
+        const statuses: number[] = [];
+        for (const admin of [wrongAdmin, lockedAdmin]) {
+          const c = calls(admin.auth, target, { currentPassword: 'nope-nope-nope-1' });
+          for (const name of ['invite', 'role', 'unlock'] as const) {
+            let res: request.Response | undefined;
+            counts.push(
+              await statementsDuring(async () => {
+                res = await c[name]();
+              }),
+            );
+            statuses.push(res?.status ?? 0);
+          }
+        }
+        expect(statuses.every((s) => s === 403)).toBe(true);
+        // [invite, role, unlock] for the wrong admin equals the same for the locked one.
+        expect(counts.slice(0, 3)).toEqual(counts.slice(3));
+      }
+    });
+
+    it('FR-103: with the right password everything works; the password check precedes the 404', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const ghost = '00000000-0000-4000-8000-000000000044';
+      const wrongToGhost = await calls(admin.auth, ghost, {
+        currentPassword: 'nope-nope-nope-1',
+      }).role();
+      expect(wrongToGhost.status).toBe(403);
+      const rightToGhost = await calls(admin.auth, ghost, { currentPassword: PASSWORD }).role();
+      expect(rightToGhost.status).toBe(404);
+    });
+
+    it('TC-004: an admin whose password changed after the check is refused inside the transaction (no state change)', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const victim = await make(UserRole.RECRUITER);
+      // The password changes while the admin password is being verified.
+      passwordVerify.mockImplementationOnce(async (hash: string, password: string) => {
+        const ok = await realVerify(hash, password);
+        await owner.user.update({
+          where: { id: admin.id },
+          data: { passwordHash: await hash2(NEW_PASSWORD) },
+        });
+        return ok;
+      });
+      const res = await calls(admin.auth, victim.id, { currentPassword: PASSWORD }).role();
+      expect(res.status).toBe(403);
+      expect((res.body as Body).code).toBe('REAUTH_FAILED');
+      expect((await owner.user.findUniqueOrThrow({ where: { id: victim.id } })).role).toBe(
+        UserRole.RECRUITER,
+      );
+    });
+
+    it('TC-004: an admin demoted while the password was being verified is refused (no state change)', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      await make(UserRole.SUPER_ADMIN);
+      const victim = await make(UserRole.RECRUITER);
+      passwordVerify.mockImplementationOnce(async (hash: string, password: string) => {
+        const ok = await realVerify(hash, password);
+        await owner.user.update({ where: { id: admin.id }, data: { role: UserRole.RECRUITER } });
+        return ok;
+      });
+      const res = await calls(admin.auth, victim.id, { currentPassword: PASSWORD }).deactivate();
+      expect(res.status).toBe(403);
+      expect((await owner.user.findUniqueOrThrow({ where: { id: victim.id } })).isActive).toBe(
+        true,
+      );
+    });
+  });
+
+  // ---- S1: tokens issued before a role change or deactivation stay dead -----------------------------
+
+  describe('FR-104, S1: a role change or deactivation ends access tokens for good', () => {
+    const patch = (admin: Made, id: string, body: object): request.Test =>
+      http()
+        .patch(`${API}/admin/users/${id}`)
+        .set(admin.auth)
+        .send({ currentPassword: PASSWORD, ...body });
+    const pause = (): Promise<void> => new Promise((r) => setTimeout(r, 1100));
+
+    it('FR-104: deactivate then reactivate inside the token lifetime does not revive the old access token', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const user = await make(UserRole.SUPER_ADMIN);
+      await http().get(`${API}/admin/users`).set(user.auth).expect(200);
+      await patch(admin, user.id, { active: false }).expect(200);
+      await patch(admin, user.id, { active: true }).expect(200);
+      expect((await http().get(`${API}/admin/users`).set(user.auth)).status).toBe(401);
+      // A fresh sign-in works.
+      await pause();
+      // A SUPER_ADMIN signs in with 2FA; mint the token the sign-in would, after the change.
+      const stored = await owner.user.findUniqueOrThrow({ where: { id: user.id } });
+      const access = {
+        Authorization: `Bearer ${tokens.sign(
+          {
+            sub: user.id,
+            org: orgA,
+            role: UserRole.SUPER_ADMIN,
+            kind: 'access',
+            pwv: passwordVersion(stored.passwordHash ?? ''),
+          },
+          900,
+        )}`,
+      };
+      await http().get(`${API}/admin/users`).set(access).expect(200);
+    });
+
+    it('FR-104: a role changed A to B and back to A does not revive a token issued under A', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const user = await make(UserRole.RECRUITER);
+      await patch(admin, user.id, { role: 'AUTHOR' }).expect(200);
+      await patch(admin, user.id, { role: 'RECRUITER' }).expect(200);
+      // The old token claims RECRUITER and the user is RECRUITER again: only the marker refuses it.
+      expect(
+        (
+          await http()
+            .post(`${API}/auth/2fa/disable`)
+            .set(user.auth)
+            .send({ currentPassword: PASSWORD })
+        ).status,
+      ).toBe(401);
+    });
+
+    it('FR-104: the guard refuses with 503 when the marker cannot be read (Redis down), never lets the token through', async () => {
+      const user = await make(UserRole.RECRUITER);
+      const { REDIS_CLIENT } = jest.requireActual<
+        typeof import('../infrastructure/infrastructure.module')
+      >('../infrastructure/infrastructure.module');
+      const redis = app.get<import('ioredis').Redis>(REDIS_CLIENT);
+      const get = jest.spyOn(redis, 'get').mockRejectedValue(new Error('redis down'));
+      try {
+        const res = await http()
+          .post(`${API}/auth/2fa/disable`)
+          .set(user.auth)
+          .send({ currentPassword: PASSWORD });
+        expect(res.status).toBe(503);
+      } finally {
+        get.mockRestore();
+      }
+    });
+
+    it('FR-104: if the marker cannot be written the role change rolls back (503), nothing half-done', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const user = await make(UserRole.RECRUITER);
+      const { REDIS_CLIENT } = jest.requireActual<
+        typeof import('../infrastructure/infrastructure.module')
+      >('../infrastructure/infrastructure.module');
+      const redis = app.get<import('ioredis').Redis>(REDIS_CLIENT);
+      await login(user.email).expect(200);
+      const set = jest.spyOn(redis, 'set').mockRejectedValue(new Error('redis down'));
+      try {
+        expect((await patch(admin, user.id, { role: 'AUTHOR' })).status).toBe(503);
+      } finally {
+        set.mockRestore();
+      }
+      expect((await owner.user.findUniqueOrThrow({ where: { id: user.id } })).role).toBe(
+        UserRole.RECRUITER,
+      );
+      expect(await liveTokens(user.id)).toBe(1);
+      expect(await auditRows('USER_ROLE_CHANGED', user.id)).toHaveLength(0);
+    });
+  });
+
+  // ---- S2: invite rate limit ---------------------------------------------------------------------------
+
+  describe('FR-103, S2: per-organization invite limit', () => {
+    it('FR-103: the 3rd invite in an hour is 429 when the limit is 2, and a refused invite creates no user', async () => {
+      const org = (await owner.organization.create({ data: { name: 'Invite Limit Org' } })).id;
+      const admin = await make(UserRole.SUPER_ADMIN, { orgId: org });
+      const { UsersService } =
+        jest.requireActual<typeof import('./users.service')>('./users.service');
+      const svc = app.get(UsersService);
+      const before = Reflect.get(svc, 'inviteLimit') as number;
+      Reflect.set(svc, 'inviteLimit', 2);
+      try {
+        const send = (n: number): request.Test =>
+          http()
+            .post(`${API}/admin/users`)
+            .set(admin.auth)
+            .send({
+              currentPassword: PASSWORD,
+              email: `limit${n}@example.com`,
+              name: 'L',
+              role: 'AUTHOR',
+            });
+        await send(1).expect(201);
+        await send(2).expect(201);
+        await send(3).expect(429);
+        expect(await owner.user.count({ where: { email: 'limit3@example.com' } })).toBe(0);
+        // Another org has its own budget.
+        const other = await make(UserRole.SUPER_ADMIN, { orgId: orgB });
+        await http()
+          .post(`${API}/admin/users`)
+          .set(other.auth)
+          .send({
+            currentPassword: PASSWORD,
+            email: 'limitb@example.com',
+            name: 'L',
+            role: 'AUTHOR',
+          })
+          .expect(201);
+      } finally {
+        Reflect.set(svc, 'inviteLimit', before);
+      }
+    });
+
+    it('FR-103: the default limit comes from INVITE_RATE_LIMIT_PER_ORG_HOUR (20)', () => {
+      const { validateEnv } = jest.requireActual<typeof import('../config/env')>('../config/env');
+      expect(validateEnv({ ...process.env }).INVITE_RATE_LIMIT_PER_ORG_HOUR).toBe(20);
     });
   });
 
@@ -632,18 +952,34 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
     it('TC-008: role change, deactivate and unlock of another org user are the same 404 as a missing id, with the same statements', async () => {
       const adminA = await make(UserRole.SUPER_ADMIN);
       const userB = await make(UserRole.RECRUITER, { orgId: orgB });
+      await login(userB.email).expect(200);
+      expect(await liveTokens(userB.id)).toBe(1);
       const ghost = '00000000-0000-4000-8000-000000000042';
       const attempts: [string, (id: string) => request.Test][] = [
         [
           'role',
           (id) =>
-            http().patch(`${API}/admin/users/${id}`).set(adminA.auth).send({ role: 'AUTHOR' }),
+            http()
+              .patch(`${API}/admin/users/${id}`)
+              .set(adminA.auth)
+              .send({ currentPassword: PASSWORD, role: 'AUTHOR' }),
         ],
         [
           'deactivate',
-          (id) => http().patch(`${API}/admin/users/${id}`).set(adminA.auth).send({ active: false }),
+          (id) =>
+            http()
+              .patch(`${API}/admin/users/${id}`)
+              .set(adminA.auth)
+              .send({ currentPassword: PASSWORD, active: false }),
         ],
-        ['unlock', (id) => http().post(`${API}/admin/users/${id}/unlock`).set(adminA.auth)],
+        [
+          'unlock',
+          (id) =>
+            http()
+              .post(`${API}/admin/users/${id}/unlock`)
+              .set(adminA.auth)
+              .send({ currentPassword: PASSWORD }),
+        ],
       ];
       for (const [name, call] of attempts) {
         let cross: request.Response | undefined;
@@ -662,7 +998,8 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       }
       const row = await owner.user.findUniqueOrThrow({ where: { id: userB.id } });
       expect(row).toMatchObject({ role: 'RECRUITER', isActive: true });
-      expect(await liveTokens(userB.id)).toBe(0);
+      // The cross-org attempts revoked nothing.
+      expect(await liveTokens(userB.id)).toBe(1);
     });
 
     it('TC-008: an invite is stamped with the caller org, never one from the body', async () => {
@@ -670,7 +1007,12 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       await http()
         .post(`${API}/admin/users`)
         .set(adminA.auth)
-        .send({ email: 'stamped@example.com', name: 'S', role: 'AUTHOR' })
+        .send({
+          currentPassword: PASSWORD,
+          email: 'stamped@example.com',
+          name: 'S',
+          role: 'AUTHOR',
+        })
         .expect(201);
       expect(
         (await owner.user.findUniqueOrThrow({ where: { email: 'stamped@example.com' } })).orgId,
@@ -847,8 +1189,12 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       ).body as Body;
       expect(JSON.stringify(otherList)).not.toContain(lockedPlain.email);
       expect(
-        (await http().post(`${API}/admin/users/${lockedPlain.id}/unlock`).set(otherAdmin.auth))
-          .status,
+        (
+          await http()
+            .post(`${API}/admin/users/${lockedPlain.id}/unlock`)
+            .set(otherAdmin.auth)
+            .send({ currentPassword: PASSWORD })
+        ).status,
       ).toBe(404);
       const sameList = (
         await http().get(`${API}/admin/users?pageSize=100`).set(sameAdmin.auth).expect(200)
@@ -871,6 +1217,7 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       await http()
         .post(`${API}/admin/users/${user.id.toUpperCase()}/unlock`)
         .set(admin.auth)
+        .send({ currentPassword: PASSWORD })
         .expect(204);
       const after = await owner.user.findUniqueOrThrow({ where: { id: user.id } });
       expect(after).toMatchObject({ failedLogins: 0, lockedUntil: null });
@@ -883,9 +1230,17 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       expect(rows[0]).toMatchObject({ org_id: orgA, actor_id: admin.id });
       expect(rows[0]?.ip).toMatch(/127\.0\.0\.1/);
       expect(rows[0]?.metadata).toEqual({ wasLocked: true });
-      await http().post(`${API}/admin/users/not-a-uuid/unlock`).set(admin.auth).expect(400);
+      await http()
+        .post(`${API}/admin/users/not-a-uuid/unlock`)
+        .set(admin.auth)
+        .send({ currentPassword: PASSWORD })
+        .expect(400);
       // A SUPER_ADMIN may unlock themselves.
-      await http().post(`${API}/admin/users/${admin.id}/unlock`).set(admin.auth).expect(204);
+      await http()
+        .post(`${API}/admin/users/${admin.id}/unlock`)
+        .set(admin.auth)
+        .send({ currentPassword: PASSWORD })
+        .expect(204);
     });
 
     it('TC-002: unlocking while wrong guesses are in flight allows at most 5 verified guesses in the new window', async () => {
@@ -895,7 +1250,10 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       const stored = (await owner.user.findUniqueOrThrow({ where: { id: user.id } })).passwordHash;
       passwordVerify.mockClear();
       const results = await Promise.all([
-        http().post(`${API}/admin/users/${user.id}/unlock`).set(admin.auth),
+        http()
+          .post(`${API}/admin/users/${user.id}/unlock`)
+          .set(admin.auth)
+          .send({ currentPassword: PASSWORD }),
         ...Array.from({ length: 12 }, () => login(user.email, 'wrong-password-1')),
       ]);
       expect(results[0]?.status).toBe(204);
