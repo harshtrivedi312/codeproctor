@@ -354,4 +354,25 @@ describe('Re-issue a pending invite (DL-23, FR-103, FR-105, TC-004, TC-008)', ()
     expect(await auditCount(pending.id)).toBe(0);
     expect(invites).toHaveLength(0);
   });
+
+  it('FR-105: a failing audit insert rolls the token rotation back: 500, old link still works, no mail, no audit row', async () => {
+    const admin = await make(UserRole.SUPER_ADMIN);
+    const pending = await make(UserRole.AUTHOR, { pending: true });
+    const oldHash = await tokenHashOf(pending.id);
+    await pg.query(
+      `CREATE OR REPLACE FUNCTION fail_reissue_audit() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'audit down'; END $$ LANGUAGE plpgsql`,
+    );
+    await pg.query(
+      `CREATE TRIGGER fail_reissue BEFORE INSERT ON audit_logs FOR EACH ROW WHEN (NEW.action = 'USER_INVITE_REISSUED') EXECUTE FUNCTION fail_reissue_audit()`,
+    );
+    try {
+      await reissue(admin, pending.id).expect(500);
+    } finally {
+      await pg.query('DROP TRIGGER fail_reissue ON audit_logs');
+    }
+    expect(await tokenHashOf(pending.id)).toBe(oldHash);
+    expect(await auditCount(pending.id)).toBe(0);
+    expect(invites).toHaveLength(0);
+    await accept(pending.token).expect(204);
+  });
 });
