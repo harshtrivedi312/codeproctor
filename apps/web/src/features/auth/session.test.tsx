@@ -2,7 +2,8 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from '@/lib/api/client';
+import { api, isAuthRequest } from '@/lib/api/client';
+import { refreshSession } from '@/lib/auth-session';
 import { getAccessToken } from '@/lib/auth-token';
 import { MOCK_USERS } from '@/mocks/auth-handlers';
 import { server } from '@/mocks/server';
@@ -162,5 +163,65 @@ describe('session handling', () => {
     await u.click(await screen.findByRole('button', { name: 'Sign out' }));
     await waitFor(() => expect(router.replace).toHaveBeenLastCalledWith('/admin/login'));
     expect(getAccessToken()).toBeNull();
+  });
+  it('FR-104: a failed logout call still signs out locally, with no unhandled rejection', async () => {
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <SignOutButton />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    server.use(http.post('*/v1/auth/logout', () => HttpResponse.error()));
+    const u = userEvent.setup();
+    await u.click(await screen.findByRole('button', { name: 'Sign out' }));
+    await waitFor(() => expect(router.replace).toHaveBeenLastCalledWith('/admin/login'));
+    expect(getAccessToken()).toBeNull();
+  });
+
+  it('FR-104: a refresh still in flight when the user signs out cannot restore the session', async () => {
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <SignOutButton />
+        <Who />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    server.use(
+      http.post('*/v1/auth/refresh', async () => {
+        await gate;
+        return HttpResponse.json({
+          accessToken: 'stale-token',
+          user: {
+            id: 'u',
+            email: 'recruiter@example.test',
+            name: 'R',
+            role: 'RECRUITER',
+            orgName: 'x',
+          },
+        });
+      }),
+    );
+    const pending = refreshSession();
+    const u = userEvent.setup();
+    await u.click(screen.getByRole('button', { name: 'Sign out' }));
+    await waitFor(() => expect(getAccessToken()).toBeNull());
+    release();
+    expect(await pending).toBeNull();
+    expect(getAccessToken()).toBeNull();
+    expect(screen.getByTestId('who')).toHaveTextContent('nobody');
+  });
+});
+
+describe('isAuthRequest', () => {
+  it('FR-104: recognises auth endpoints relative to the API base, not a hard-coded prefix', () => {
+    expect(isAuthRequest('http://localhost:4000/v1/auth/refresh')).toBe(true);
+    expect(isAuthRequest('http://localhost:4000/api/v1/auth/login')).toBe(true);
+    expect(isAuthRequest('http://localhost:4000/v1/time')).toBe(false);
+    expect(isAuthRequest('http://localhost:4000/v1/settings/auth/x')).toBe(false);
   });
 });

@@ -4,7 +4,8 @@ import { setAccessToken } from '@/lib/auth-token';
 import { nav, router } from './nav-mock';
 import { AuthProvider } from '@/features/auth/auth-provider';
 import { publishSession } from '@/lib/auth-session';
-import { resetMockAuthState } from '@/mocks/auth-handlers';
+import { resetMockAdminState } from '@/mocks/admin-handlers';
+import { resetMockAuthState, seedMockRefresh } from '@/mocks/auth-handlers';
 
 export function resetAuthTestState(): void {
   router.push.mockReset();
@@ -13,6 +14,7 @@ export function resetAuthTestState(): void {
   nav.search = new URLSearchParams();
   publishSession(null);
   resetMockAuthState();
+  resetMockAdminState();
 }
 
 export function renderWithAuth(ui: React.ReactElement) {
@@ -26,4 +28,10 @@ export function renderWithAuth(ui: React.ReactElement) {
 
 export function setAccessTokenForTest(token: string | null): void {
   setAccessToken(token);
+}
+
+/** Renders inside the auth provider with the mock refresh cookie planted, so the user is signed in. */
+export function renderAsStaff(ui: React.ReactElement, user: { email: string }) {
+  seedMockRefresh(user.email);
+  return renderWithAuth(ui);
 }

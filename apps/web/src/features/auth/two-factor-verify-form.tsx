@@ -23,6 +23,10 @@ export function TwoFactorVerifyForm(): React.JSX.Element | null {
   const { pending, signIn, setPending } = useAuth();
   const [serverError, setServerError] = React.useState<'wrong' | 'network' | null>(null);
   const [useRecovery, setUseRecovery] = React.useState(false);
+  // Set once this form has finished the step itself (signed in, or sent back to login with a
+  // reason). signIn clears `pending`, and without this the "no challenge" effect below would
+  // replace the destination with /admin/login and drop `next` and `?reason=expired`.
+  const finishedRef = React.useRef(false);
 
   const {
     register,
@@ -37,7 +41,7 @@ export function TwoFactorVerifyForm(): React.JSX.Element | null {
   // No pending challenge (page reload or direct visit): start again at login.
   const hasChallenge = pending?.kind === 'verify';
   React.useEffect(() => {
-    if (!hasChallenge) router.replace('/admin/login');
+    if (!hasChallenge && !finishedRef.current) router.replace('/admin/login');
   }, [hasChallenge, router]);
   if (!pending || pending.kind !== 'verify') return null;
   const challengeToken = pending.challengeToken;
@@ -49,9 +53,11 @@ export function TwoFactorVerifyForm(): React.JSX.Element | null {
         body: { challengeToken, code: values.code.trim() },
       });
       if (data) {
+        finishedRef.current = true;
         signIn(data);
         router.replace(next);
       } else if (response.status === 401) {
+        finishedRef.current = true;
         setPending(null);
         router.replace('/admin/login?reason=expired');
       } else {

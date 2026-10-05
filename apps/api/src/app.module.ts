@@ -9,13 +9,19 @@ import { randomUUID } from 'node:crypto';
 import { API_PREFIX } from './bootstrap';
 import { validateEnv } from './config/env';
 import type { Env } from './config/env';
+import { AuthModule } from './auth/auth.module';
+import { JwtAuthGuard } from './common/auth/jwt-auth.guard';
+import { TokenModule } from './common/auth/token.service';
+import { PrismaModule } from './database/prisma.module';
+import { MailModule } from './mail/mail.module';
 import { HealthModule } from './health/health.module';
 import { InfrastructureModule } from './infrastructure/infrastructure.module';
 
 type Area = 'auth' | 'candidate' | 'other';
 
 function areaOf(context: ExecutionContext): Area {
-  const path = context.switchToHttp().getRequest<Request>().path;
+  // Express matches routes case-insensitively, so classify the same way (FU-BE-09).
+  const path = context.switchToHttp().getRequest<Request>().path.toLowerCase();
   if (path.startsWith(`/${API_PREFIX}/auth`)) return 'auth';
   if (path.startsWith(`/${API_PREFIX}/candidate`)) return 'candidate';
   return 'other';
@@ -90,8 +96,16 @@ function areaOf(context: ExecutionContext): Area {
       },
     }),
     InfrastructureModule,
+    PrismaModule,
+    MailModule,
+    TokenModule,
+    AuthModule,
     HealthModule,
   ],
-  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
+  // Order matters: throttle first, then authenticate (deny by default).
+  providers: [
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
+  ],
 })
 export class AppModule {}
