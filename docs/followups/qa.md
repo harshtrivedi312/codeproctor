@@ -307,3 +307,35 @@ Same rule as section 9: no TC IDs are invented here; the hub assigns them and QA
 | (k) C-30 | Age 18 confirmation required and stored | integration plus e2e | backend-engineer (BE-07), frontend-engineer (FE-09) | P1 | The consent step cannot be completed without the 18-or-older confirmation (400, UI blocks); the confirmation is stored with the consent record; a candidate who does not confirm cannot continue and no media is requested. | `apps/api/test/integration/tc-XXX.int.test.ts`, `packages/qa/e2e/tc-XXX.spec.ts` |
 | (l) C-32 | Client-error endpoint: DTO, rate limit, scrubbing | integration | backend-engineer | P2 | A browser error is accepted with a valid body (400 otherwise), rate limited per client (429), email addresses, tokens and URLs with tokens are scrubbed before logging, and nothing reaches a third party. C-31 (SES): the mail adapter sends only through the MailPort; covered by the BE-06 adapter tests, plus a check that no `resend` or `sentry` dependency remains (`pnpm why`). | `apps/api/test/integration/tc-XXX.int.test.ts` |
 | (m) C-25, OQ-15 | Two accommodation settings: "no identity check" and "face detectors off" | integration (API and worker) plus unit (SDK) | backend-engineer, integrity-engineer, proctor-sdk-engineer | P1 | "No identity check" skips the verification step only (C-19 applies) and the face detectors still run; "face detectors off" turns off the in-browser and server face detectors (FACE, GAZE) and the server answers 409 DETECTOR_DISABLED for their events, and the identity re-check still runs; each combination tested; refusing biometrics switches off every face-based detector (OQ-15). Known gap: the SDK has one FACE id today (proctor-sdk.md). | `apps/api/test/integration/tc-XXX.int.test.ts`, `packages/proctor-sdk/src/qa/qa-tc.test.ts`, worker tests |
+
+
+## 12. Workflow step for TC-008 (hub request; CI config goes through the hub, CLAUDE.md rule 12)
+
+`packages/qa/src/p1-gate.ts` can already read the apps/api unit Jest JSON (`api-unit.json`). To make the P1 gate see the TC-008 spec (`apps/api/src/database/tc-008-org-isolation.spec.ts`, DB PR #30), `.github/workflows/qa.yml` needs one extra step before "P1 gate" and `test-results/api-unit.json` appended to the gate's report list. Land it together with, or after, DB PR #30. Exact change (a diff against main; QA did NOT apply it):
+
+```diff
+@@ -113,6 +113,12 @@ jobs:
+         if: ${{ !cancelled() }}
+         run: pnpm --filter @codeproctor/api exec node --experimental-vm-modules node_modules/jest/bin/jest.js -c test/jest.integration.config.js --runInBand --forceExit --json --outputFile=../../packages/qa/test-results/api-int.json
+ 
++      # The apps/api unit config also holds TC-008 (org isolation, src/database/tc-008-org-isolation.spec.ts
++      # once DB PR #30 is on main). Its JSON goes to the gate so TC-008 is read like any other P1 case.
++      - name: API unit and org-isolation tests (TC-008)
++        if: ${{ !cancelled() }}
++        run: pnpm --filter @codeproctor/api exec node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --forceExit --json --outputFile=../../packages/qa/test-results/api-unit.json
++
+       - name: Install the Playwright browser
+         if: ${{ !cancelled() }}
+         run: pnpm --filter @codeproctor/qa exec playwright install --with-deps chromium
+@@ -125,7 +131,7 @@ jobs:
+       # own as well; the gate makes the P1 verdict explicit and prints one line per P1 case.
+       - name: P1 gate
+         if: ${{ !cancelled() }}
+-        run: pnpm --filter @codeproctor/qa run gate test-results/web.json test-results/qa.json test-results/sdk.json test-results/shared.xml test-results/worker.xml test-results/api-int.json test-results/e2e.json
++        run: pnpm --filter @codeproctor/qa run gate test-results/web.json test-results/qa.json test-results/sdk.json test-results/shared.xml test-results/worker.xml test-results/api-int.json test-results/api-unit.json test-results/e2e.json
+ 
+       - name: Upload test reports
+         if: ${{ !cancelled() }}
+```
+
+Until it lands the gate does not read `api-unit.json` and TC-008 stays Planned in the matrix.
