@@ -21,6 +21,21 @@ import {
 import request from 'supertest';
 import { hasPermission } from '../../../../packages/shared/src/permissions';
 
+/**
+ * A fail-closed 500: a bare problem+json with no route data and no detail. (backend.md says "no
+ * body"; the global problem filter, ADR 0001 C-9, answers every error with problem JSON, so the
+ * contract is "nothing the route read or wrote", checked here by allowing only the problem fields.)
+ */
+function expectNoDataProblem(res: request.Response): void {
+  expect(res.status).toBe(500);
+  expect(
+    Object.keys(res.body as object).filter(
+      (k) => !['type', 'title', 'status', 'instance', 'traceId'].includes(k),
+    ),
+  ).toEqual([]);
+  expect(res.text).not.toMatch(/items|currentPassword|qa-auditfail|@example\.com/);
+}
+
 const FORBIDDEN_KEY = /password|token|secret|hash|otp|recovery|\bcode\b|key|authorization|cookie/i;
 
 /** Every key anywhere in a JSON value. */
@@ -175,10 +190,10 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
         });
         if (route.reauth) {
           it(`TC-006 FR-102: ${label} with a missing (400) or wrong (403 REAUTH_FAILED) currentPassword writes no audit row and changes nothing`, async () => {
-            const who = await as(roleFor(route));
-            const outsider = hasPathId(route)
-              ? (orgBStaff[roleFor(route)] ??= await actor(h, roleFor(route), orgB))
-              : undefined;
+            // Fresh admins: wrong passwords count towards the shared lockout (5 failures lock the
+            // account and write AUTH_ACCOUNT_LOCKED), so do not spend them on the shared actors.
+            const who = await actor(h, roleFor(route));
+            const outsider = hasPathId(route) ? await actor(h, roleFor(route), orgB) : undefined;
             const t = await route.prepare(h, h.orgId);
             const body = t.body as Record<string, unknown>;
             const { currentPassword: _p, ...without } = body;
@@ -227,15 +242,21 @@ auditSuite(
       await h?.close();
     });
 
-    it('TC-006 [BE-03 pending]: ten parallel role changes write exactly ten rows (no lost or doubled rows)', async () => {
-      const admin = await actor(h, UserRole.SUPER_ADMIN);
+    it('TC-006 [BE-03 pending]: ten parallel role changes (two per admin, five admins) write exactly ten rows (no lost or doubled rows)', async () => {
+      // One admin sends at most two at once: every call reserves a password attempt (shared lockout
+      // with login), so more than five parallel calls of ONE admin are refused 403 REAUTH_FAILED.
+      const admins: Actor[] = [];
+      // One at a time: parallel first sign-ins hit the cold-start Redis race (QA-D-04).
+      for (let i = 0; i < 5; i++) admins.push(await actor(h, UserRole.SUPER_ADMIN));
       const route = BE03_ROUTES.find((r) => r.id === 'users-role') as Be03Route;
       const targets = await Promise.all(
         Array.from({ length: 10 }, () => route.prepare(h, h.orgId)),
       );
       const before = (await h.owner.auditLog.findFirst({ orderBy: { id: 'desc' } }))?.id ?? 0n;
       const results = await Promise.all(
-        targets.map((t) => call(h, route.method, t.path, admin.token, t.body)),
+        targets.map((t, i) =>
+          call(h, route.method, t.path, (admins[i % 5] as Actor).token, t.body),
+        ),
       );
       expect(results.map((r) => r.status)).toEqual(Array(10).fill(200));
       const rows = await h.owner.auditLog.findMany({ where: { id: { gt: before } } });
@@ -318,7 +339,7 @@ auditSuite(
       const email = `qa-auditfail-${Date.now()}@example.com`;
       const list = await call(h, 'GET', ADMIN_USERS, admin.token);
       expect(list.status).toBe(500);
-      expect(list.text).toBe(''); // the data the route read is not returned
+      expectNoDataProblem(list); // the data the route read is not returned
       const invite = await call(h, 'POST', ADMIN_USERS, admin.token, {
         email,
         name: 'Audit Fail',
@@ -326,7 +347,7 @@ auditSuite(
         currentPassword: PASSWORD,
       });
       expect(invite.status).toBe(500);
-      expect(invite.text).toBe('');
+      expectNoDataProblem(invite);
       // No audit row, so no change either: the user row is not left behind without its row.
       expect(await h.owner.user.count({ where: { email } })).toBe(0);
     });

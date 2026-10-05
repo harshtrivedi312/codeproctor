@@ -10,7 +10,6 @@
 // mutating routes need the acting admin's own currentPassword; a wrong one is 403 REAUTH_FAILED
 // and the 404 for a missing or other-org id is only given after a correct password.
 import jwt from 'jsonwebtoken';
-import { ModulesContainer } from '@nestjs/core';
 import { UserRole } from '../../src/generated/prisma/client';
 import {
   Body,
@@ -20,7 +19,7 @@ import {
   Harness,
   login,
   PASSWORD,
-  signInWithTotp,
+  signIn,
   stableProblem,
 } from '../support/harness';
 import { actor, Actor, call } from '../support/be03-helpers';
@@ -144,8 +143,10 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
             const t = await route.prepare(h, h.orgId);
             const res = await call(h, route.method, t.path, caller.token, t.body);
             expect(res.status).toBe(404);
-            expect(JSON.stringify(res.body)).not.toContain(h.orgId);
-            expect(JSON.stringify(res.body)).not.toContain(t.entityId ?? 'no-entity');
+            // `instance` echoes the caller's own request URL, so compare the rest of the problem body.
+            const text = JSON.stringify(stableProblem(res));
+            expect(text).not.toContain(h.orgId);
+            expect(text).not.toContain(t.entityId ?? 'no-entity');
             expect(await t.unchanged()).toBe(true);
           } else {
             // No id in the path: the call must act inside the caller's org only. Seed org A with
@@ -189,7 +190,10 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
 
       if (route.reauth) {
         it(`TC-004 FR-102: ${label} without currentPassword is 400 and with a wrong, or another user's, password is 403 REAUTH_FAILED, nothing changed`, async () => {
-          const admin = byRole.SUPER_ADMIN;
+          // Fresh admins: wrong passwords count towards the shared lockout (reserve, 5 failures lock),
+          // so they must not be spent on the actors the other tests of this suite use.
+          const admin = await actor(h, UserRole.SUPER_ADMIN);
+          const outsider = await actor(h, UserRole.SUPER_ADMIN, orgB);
           const t = await route.prepare(h, h.orgId);
           const body = t.body as Record<string, unknown>;
           const { currentPassword: _dropped, ...without } = body;
@@ -202,16 +206,10 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
           expectReauthFailed(wrong);
           // The password is checked before the target exists for the caller: an org B admin with a
           // wrong password gets the same 403 for an org A id, not a 404 (no existence oracle).
-          const crossWrong = await call(
-            h,
-            route.method,
-            t.path,
-            (await orgBActor('SUPER_ADMIN')).token,
-            {
-              ...body,
-              currentPassword: 'Wrong-Password-1',
-            },
-          );
+          const crossWrong = await call(h, route.method, t.path, outsider.token, {
+            ...body,
+            currentPassword: 'Wrong-Password-1',
+          });
           expectReauthFailed(crossWrong);
           expect(stableProblem(crossWrong)).toEqual(stableProblem(wrong));
           // The same applies to an id that does not exist at all.
@@ -257,6 +255,9 @@ rbacSuite(
 
     it('TC-004 [BE-03 pending]: the backend matrix agrees with the controllers, and every non-public route is in the QA route list or covered in tc-003', () => {
       const { ROUTE_PERMISSIONS, listRoutes, matrixProblems } = loadBackendRegistry();
+      // The app was built from a fresh module registry (jest.resetModules), so take the class from it.
+      const { ModulesContainer } =
+        jest.requireActual<typeof import('@nestjs/core')>('@nestjs/core');
       const routes = listRoutes(h.app.get(ModulesContainer));
       expect(matrixProblems(routes)).toEqual([]);
 
@@ -283,21 +284,18 @@ rbacSuite(
       }
     });
 
-    it('TC-004 TC-006 [BE-03 pending]: the matrix `audited` flag agrees with the QA audit list (checked once the flag exists)', () => {
+    it('TC-004 TC-006 [BE-03 pending]: the matrix `audited` flag (route carries @Audited) agrees with the QA list, and a route marked candidateData is audited', () => {
       const { ROUTE_PERMISSIONS } = loadBackendRegistry();
-      const entries = Object.entries(ROUTE_PERMISSIONS).flatMap(([key, a]) =>
-        a === 'public' ? [] : [[key, a] as const],
-      );
-      if (!entries.some(([, a]) => typeof a.audited === 'boolean')) {
-        console.warn('[BE-03 pending] ROUTE_PERMISSIONS has no `audited` flag yet; check skipped');
-        return;
-      }
-      for (const [key, access] of entries) {
-        expect([key, typeof access.audited]).toEqual([key, 'boolean']); // every entry must say
+      for (const [key, access] of Object.entries(ROUTE_PERMISSIONS)) {
+        if (access === 'public') continue;
         const mine = BE03_ROUTES.filter((r) => routeKey(r) === key);
         if (mine.length > 0) {
-          expect([key, access.audited]).toEqual([key, mine.some((r) => r.audit !== null)]);
+          // `audited` = the interceptor writes the row. Service-written rows (invite, role, unlock)
+          // do not carry the flag but still write a row (every mutating route lists an audit action).
+          expect([key, access.audited === true]).toEqual([key, mine.some((r) => r.interceptor)]);
+          if (access.candidateData) expect(mine.every((r) => r.audit !== null)).toBe(true);
         }
+        if (access.candidateData) expect([key, access.audited === true]).toEqual([key, true]);
       }
     });
   },
@@ -330,32 +328,49 @@ rbacSuite(
     await call(h, 'GET', ADMIN_USERS, admin.token).expect(401);
   });
 
-  it('TC-004 [BE-03 pending]: an access token issued before a deactivate then reactivate is still refused (401), a fresh sign-in works', async () => {
+  // An AUTHOR has no 2FA, so a fresh sign-in is possible (a TOTP code is single use per time step).
+  // POST /auth/2fa/setup/start is open to every staff role and answers 200 with the right password.
+  const probe = (token: string) =>
+    call(h, 'POST', '/auth/2fa/setup/start', token, { currentPassword: PASSWORD });
+  const secondPassesBeforeFreshSignIn = (): Promise<void> =>
+    // A token issued in the same second as the change is refused too (marker at epoch seconds).
+    new Promise((resolve) => setTimeout(resolve, 1100));
+
+  it('TC-004 [BE-03 pending]: an access token issued before a deactivate then reactivate is still refused (401); a new sign-in works', async () => {
     const admin = await actor(h, UserRole.SUPER_ADMIN);
-    const victim = await actor(h, UserRole.SUPER_ADMIN);
-    await call(h, 'GET', ADMIN_USERS, victim.token).expect(200);
+    const victim = await actor(h, UserRole.AUTHOR);
+    await probe(victim.token).expect(200);
     await patch(admin, victim.id, { active: false }).expect(200);
-    await call(h, 'GET', ADMIN_USERS, victim.token).expect(401);
+    await probe(victim.token).expect(401);
     await patch(admin, victim.id, { active: true }).expect(200);
     // Deactivation ended the token for good: reactivating the account does not revive it.
-    await call(h, 'GET', ADMIN_USERS, victim.token).expect(401);
-    const fresh = await signInWithTotp(
-      h,
-      (await h.owner.user.findUniqueOrThrow({ where: { id: victim.id } })).email,
-    );
-    await call(h, 'GET', ADMIN_USERS, fresh.Authorization.replace('Bearer ', '')).expect(200);
+    await probe(victim.token).expect(401);
+    await secondPassesBeforeFreshSignIn();
+    const fresh = await signIn(h, victim.email);
+    await probe(fresh.Authorization.replace('Bearer ', '')).expect(200);
   });
 
-  it('TC-004 [BE-03 pending]: an access token issued before a role flip is refused (401) after the demotion and still after the role is restored', async () => {
+  it('TC-004 [BE-03 pending]: an access token issued before a role flip (A then B then A) is refused (401) at each step; a new sign-in works', async () => {
     const admin = await actor(h, UserRole.SUPER_ADMIN);
-    const victim = await actor(h, UserRole.SUPER_ADMIN);
-    await call(h, 'GET', ADMIN_USERS, victim.token).expect(200);
+    const victim = await actor(h, UserRole.AUTHOR);
+    await probe(victim.token).expect(200);
+    await patch(admin, victim.id, { role: 'RECRUITER' }).expect(200);
+    await probe(victim.token).expect(401);
     await patch(admin, victim.id, { role: 'AUTHOR' }).expect(200);
-    await call(h, 'GET', ADMIN_USERS, victim.token).expect(401);
-    await patch(admin, victim.id, { role: 'SUPER_ADMIN' }).expect(200);
-    await call(h, 'GET', ADMIN_USERS, victim.token).expect(401); // the claim matches again, the token is still stale
-    const fresh = await signInWithTotp(h, victim.email);
-    await call(h, 'GET', ADMIN_USERS, fresh.Authorization.replace('Bearer ', '')).expect(200);
+    await probe(victim.token).expect(401); // the claim matches again, the token is still stale
+    await secondPassesBeforeFreshSignIn();
+    const fresh = await signIn(h, victim.email);
+    await probe(fresh.Authorization.replace('Bearer ', '')).expect(200);
+  });
+
+  it('TC-004 [BE-03 pending]: a demoted SUPER_ADMIN loses the admin routes at once, and the old token stays dead after the role is restored', async () => {
+    const admin = await actor(h, UserRole.SUPER_ADMIN);
+    const other = await actor(h, UserRole.SUPER_ADMIN);
+    await call(h, 'GET', ADMIN_USERS, other.token).expect(200);
+    await patch(admin, other.id, { role: 'AUTHOR' }).expect(200);
+    await call(h, 'GET', ADMIN_USERS, other.token).expect(401);
+    await patch(admin, other.id, { role: 'SUPER_ADMIN' }).expect(200);
+    await call(h, 'GET', ADMIN_USERS, other.token).expect(401);
   });
 
   it('TC-004 [BE-03 pending]: a deactivation or role change revokes the refresh sessions of the target', async () => {
@@ -455,6 +470,9 @@ rbacSuite(
       await call(h, 'GET', `${ADMIN_USERS}?page=3&pageSize=2`, admin.token).expect(200)
     ).body as typeof body;
     expect(beyond.items).toEqual([]);
+    // Deep offsets are refused: page * pageSize > 10000 is 400, exactly 10000 is allowed.
+    await call(h, 'GET', `${ADMIN_USERS}?page=101&pageSize=100`, admin.token).expect(400);
+    await call(h, 'GET', `${ADMIN_USERS}?page=100&pageSize=100`, admin.token).expect(200);
     for (const q of ['page=0', 'pageSize=0', 'pageSize=101', 'page=abc', 'pageSize=-1']) {
       await call(h, 'GET', `${ADMIN_USERS}?${q}`, admin.token).expect(400);
     }
@@ -509,15 +527,17 @@ rbacSuite(
       where: { orgId: orgF, role: UserRole.SUPER_ADMIN, isActive: true },
     });
     expect(left).toBeGreaterThanOrEqual(1);
-    expect(results.some((r) => r.status === 409 || r.status === 401)).toBe(true);
+    // At most one change can win. The others are refused: 409 (last admin), 401 (the caller's own
+    // token is dead) or 403 REAUTH_FAILED (the caller's account changed while the request ran).
+    const statuses = results.map((r) => r.status);
+    expect(statuses.filter((c) => c === 200).length).toBeLessThan(4);
+    expect(statuses.filter((c) => c !== 200 && c !== 409 && c !== 401 && c !== 403)).toEqual([]);
   });
 
-  it('TC-004 [BE-03 pending]: a SUPER_ADMIN may unlock their own account (204) and a non-uuid id is 400', async () => {
+  it('TC-004 [BE-03 pending]: a SUPER_ADMIN may unlock their own account with their password (204, counter reset) and a non-uuid id is 400', async () => {
     const admin = await actor(h, UserRole.SUPER_ADMIN);
-    await h.owner.user.update({
-      where: { id: admin.id },
-      data: { failedLogins: 5, lockedUntil: new Date(Date.now() + 15 * 60_000) },
-    });
+    // Not locked (a locked admin fails their own password check, so another admin must unlock them).
+    await h.owner.user.update({ where: { id: admin.id }, data: { failedLogins: 3 } });
     await call(h, 'POST', `${ADMIN_USERS}/${admin.id}/unlock`, admin.token, {
       currentPassword: PASSWORD,
     }).expect(204);

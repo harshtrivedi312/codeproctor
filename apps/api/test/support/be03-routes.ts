@@ -43,12 +43,15 @@ export const lockEventsPath = `${ADMIN_USERS}/lock-events`;
  * The backend route registry, loaded lazily so this file compiles and the always-run tests pass on
  * a branch where apps/api/src/common/auth/route-permissions.ts and route-registry.ts do not exist
  * yet (they arrive with BE-03). Only called from tests that run behind BE03_READY.
- * `audited` is the flag the matrix gains; entries without it are tolerated until it exists.
+ * `audited` means the route carries @Audited (the interceptor writes its row); routes that write
+ * their audit row inside their own transaction (invite, role, unlock) do not carry it.
+ * `candidateData` marks a route that reads or changes candidate data, which must be audited.
  */
 export interface MatrixEntry {
   roles: readonly string[];
   permission: string;
-  audited?: boolean;
+  audited?: true;
+  candidateData?: true;
 }
 export interface RegistryApi {
   ROUTE_PERMISSIONS: Readonly<Record<string, 'public' | MatrixEntry>>;
