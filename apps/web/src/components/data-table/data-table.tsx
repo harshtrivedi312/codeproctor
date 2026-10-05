@@ -162,7 +162,7 @@ export function DataTable<T>({
               ))}
             </>
           ) : null}
-          {toolbar}
+          {noRowsAtAll && empty.action ? null : toolbar}
         </div>
       </div>
 

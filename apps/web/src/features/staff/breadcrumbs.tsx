@@ -22,6 +22,14 @@ export interface Crumb {
   label: string;
 }
 
+function safeDecode(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment; // malformed escape such as %E0%A4%A
+  }
+}
+
 /** /admin/settings/users becomes Dashboard / Settings / Users. Unknown segments (IDs) show as-is. */
 export function crumbsFor(pathname: string): Crumb[] {
   const segments = pathname.split('/').filter(Boolean);
@@ -29,7 +37,7 @@ export function crumbsFor(pathname: string): Crumb[] {
   let href = '/admin';
   for (const segment of segments.slice(1)) {
     href += `/${segment}`;
-    crumbs.push({ href, label: LABELS[segment] ?? decodeURIComponent(segment) });
+    crumbs.push({ href, label: LABELS[segment] ?? safeDecode(segment) });
   }
   return crumbs;
 }

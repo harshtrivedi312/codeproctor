@@ -123,3 +123,19 @@ Built against MSW mocks; the `/v1/admin/*` paths are placeholders in `apps/web/o
 - Weight inputs in the risk table are `type=number`; the browser's spinner can change a value on scroll. Consider `type=text inputMode=decimal` with the same zod rules.
 - `DataTable` search matches only columns that give a `sortValue` or `searchValue`.
 - `welcome-panel.tsx` still lives under `features/auth`; move it to `features/staff` when the real dashboard arrives. `UserBadge` and `SignOutButton` are now unused by the shell (kept for `ROLE_LABELS` and tests).
+
+## frontend/step-3 code-reviewer findings
+
+Items from the review of FE Step 3 that were not fixed in `frontend/step-3-fixes`. The sign-out race, role-change confirmation and login lock message are fixed there.
+
+### Should-fix
+
+1. **Risk settings: weight errors in hidden rows are invisible.** When a table filter hides a row whose weight input is invalid, Save fails with no visible error. Show a summary above the table that lists the hidden invalid rows, or clear the filter on submit.
+2. **Risk settings page shows the raw server message** on a failed save. Replace it with fixed copy plus a fix-it hint; log the server message only through the approved logger.
+3. **`c.facet!` non-null assertions in `DataTable`.** Narrow the type (a filtered list of columns that have a facet) instead of asserting.
+4. **`DataTable` recomputes filtering and sorting on every render.** Wrap in `useMemo` keyed on rows, query, facets and sort. Fine for the small Step 3 lists; do it before the server-side paging change.
+
+### Nits
+
+- The TC-004 tag on the mock and UI tests overstates what they prove. TC-004 is a backend authorization case; label these tests FR-103 and keep TC-004 for the real API tests.
+- The TC-075 example in the risk settings UI ignores the weights, so the sample score it shows can differ from what the engine computes. Compute the example from the current weights.

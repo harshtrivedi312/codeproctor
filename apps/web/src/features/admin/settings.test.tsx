@@ -141,6 +141,15 @@ describe('Users (FR-103)', () => {
     patches.stop();
   });
 
+  it('FR-103: an empty users list shows one Invite button, not two', async () => {
+    server.use(
+      http.get('*/v1/admin/users', () => HttpResponse.json({ items: [], nextCursor: null })),
+    );
+    renderAsStaff(<UsersPage />, MOCK_USERS.admin);
+    await screen.findByTestId('table-empty');
+    expect(screen.getAllByRole('button', { name: 'Invite a user' })).toHaveLength(1);
+  });
+
   it('FR-103: you cannot change your own role or deactivate yourself', async () => {
     renderAsStaff(<UsersPage />, MOCK_USERS.admin);
     await findRow('Casey Newhire');
