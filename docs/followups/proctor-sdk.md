@@ -165,14 +165,17 @@ Nits
 Observation (confirmed): the fired flush-timer callback in `event-queue.ts` never resets `flushTimer`. An event enqueued while a flush is on the chain (after the timer fired, before `cutAll()` ran) gets no new timer and joins the earlier batch, so 3 pastes can produce 2 batches instead of 3. No event is lost or delivered out of order (proved in PR #47); only the batch count differs. Decision for the Delivery Lead or hub: should a late event open a new 5 s window (reset `flushTimer = null` when the timer fires, and start a timer after a cut if events remain), or is joining the earlier batch acceptable? Not changed in PR #47 on purpose.
 
 ## Round 3 review items for PR #43 (filed, not fixed)
+
 Fixed in this round: SF1 (an abandoned vision start only touches its own client; `InferenceClient.terminate()` settles a pending init at once; test: start times out, same instance restarted in a new session, new run intact), SF2 (last-seen test now checks the written time), N1 (finish() comments and test name say the counter is kept).
 
 Should-fix
+
 - SF3 `VisionMonitor.attachStream` on a running monitor calls `video.play()` unbounded (start bounds it to 5 s).
 - SF4 `VoiceMonitor.attachStream`: concurrent calls can overlap, a VAD created by an abandoned call can leak, and held-back speech rules are replaced by the new `SpeechRules` (speech held by the cooldown is lost on a stream swap).
 - SF5 `d.stop()` after a detector start timeout is unbounded; a detector whose `stop()` hangs blocks `ProctorSession.start`.
 
 Nits
+
 - N2 `reportStartTimeout` re-emits DETECTOR_UNAVAILABLE for tasks that were already reported.
 - N3 missing `.catch` on the `stopStream().then(...)` chain in `pipeline.ts` device loss.
 - N4 single-entry `describe.each` in `stop-inflight.test.ts` style tests; use a plain `describe`.
@@ -182,16 +185,67 @@ Nits
 - N8 (from the earlier list) kept under "Remaining review items".
 
 Owner decisions to respect (C-25, C-32)
+
 - C-25: "face detectors off" is its own accommodation setting, separate from "no identity check". Today the SDK has one `FACE` detector id (`PROCTOR_DETECTORS`) and `VisionMonitor` only starts the identity re-check when the `face` task is enabled, so disabling FACE also disables the re-check. Gap: the accommodation model needs a separate flag (and `IdentityScheduler` needs its own enable switch) before this is correct; and with the ADR 0013 server-side re-check, the server (409 `DETECTOR_DISABLED`) must follow the same separation. Not changed yet.
 - C-32: no Sentry or third-party error tracker in the SDK. The SDK currently reports nothing outside the event pipeline. If it ever reports errors it must go through the app's error reporter to our API, scrubbed (no URLs, keys, tokens, object names).
 
 ## Round 4 review items for PR #43 (filed, not fixed; docs only)
+
 Should-fix
+
 - SF-A The SF1 test (`vision-monitor.test.ts`, "an abandoned first run cannot tear down a later run") does not reach the race. Run 1's late code now finishes inside `s1.start()` because `stop()` settles the init, so only the `video.play()` wait can resume an old run after a new one has started. Rewrite: abandon run 1 during a test-controlled `play()`, start session 2, release run 1's play, then assert worker B is not terminated, tasks are still 3 and `tick()` samples. Also `workerA.terminated` would be true without the `terminate()` change, so its comment overclaims.
 - SF-B `review-fixes.test.ts` (last-seen test): the name says add/confirm but confirm is not asserted (the throttle skips the T+4 min confirm write; the T+6 min system time is set twice). Make `put` wait on a controlled promise and assert last-seen near T+6 min, or drop "confirm" from the name and delete both T+6 lines.
 - SF-C (silent-pass class, FR-606, TC-070; do soon) `vision-monitor.ts`: `this.reported` is not cleared by `stop()`. After `reportStartTimeout` in session 1, a reused instance whose session-2 `startInner` throws skips every task in `reported` and emits no DETECTOR_UNAVAILABLE. Clear `reported` and `failures` in `stop()` or at the start of `run()`.
 
 Nits
+
 - `review-fixes.test.ts` comment says the fake clock keeps ticking; it is frozen (the drift comes from elsewhere, so check before keeping the tolerance).
 - `vision-monitor.test.ts`: `.every(...)` passes on an empty array; also assert the `vision-` capability flags exist.
 - (Fixed in this commit) the PR #23 numbered list was merged into one line, and the "Round 3" heading lacked a blank line.
+
+## /dev/proctor demo page (apps/web)
+
+- Root `eslint.config.mjs` does not ignore `apps/web/public/dev-proctor-models/**`. After a human downloads the models there, `pnpm --filter @codeproctor/web lint` lints about 170 MB of vendored files (11k errors). CI is unaffected (the dir is gitignored and absent). Hub: add `'apps/web/public/dev-proctor-models/**'` to `globalIgnores`.
+- Production CSP has no `'wasm-unsafe-eval'`, so MediaPipe, ONNX and TF.js wasm will not compile in a production build. The dev server works because dev adds `'unsafe-eval'`. Needed before any real candidate run; also `worker-src`/`connect-src` for the real object-storage origin.
+- The global `Permissions-Policy` sets `microphone=()`, which blocks the voice detector everywhere. The demo gets a dev-only per-path override in `next.config.ts`; the real candidate test route needs `microphone=(self)`.
+- The demo files under `public/dev-proctor-models/` would be served by a production build if present on the build machine; the build step must not fetch them.
+- `fetch-models.mjs` now also downloads COCO-SSD lite_mobilenet_v2 (still no SHA-256 pinning).
+
+### Review follow-ups for PR #35 (code-reviewer, not blockers)
+
+Fixed in the PR: COCO manifest path traversal check (`scripts/safe-path.mjs`, tested), usage comment path, `next.config.test.ts` for the Permissions-Policy override. No model binary was ever committed on the branch (`git log --stat origin/main..HEAD -- apps/web/public` is empty).
+
+Should-fix 4. DONE: mock server memory bounds (sessions 20, chunks and batches per session 5000, issued evidence names 1000, heartbeat health JSON size-limited, `/state` gap scan capped at 50 with a total count), and chunk `segment`, `seq`, `bytes` and `durationMs` are validated. Body limits are enforced on Content-Length before reading (events 256 KiB, keystrokes 2 MiB, media PUT 16 MiB, evidence PUT 1 MiB, other JSON 16 KiB). 5. DONE: the evidence PUT requires a name that was presigned, and the media PUT no longer creates session state from an unauthenticated URL. 6. DONE: `mount.ts` `stop()` cancels an in-progress async start (flag checked after each await; a late camera or microphone is released; the screen-share picker answer after stop is released).
+
+Nits
+
+- DONE: missing dev token is 401 (comment and code agree); stricter full-key regex for the PUT route; capability list in `mount.ts` uses `textContent`; test names carry FR/TC/NFR ids; content-type check is `/^application\/json(\s*;|$)/i`.
+- Open: `identity/recheck` does not validate `capturedAt` as ISO 8601 (any string is accepted); the evidence PUT does not check Content-Type, size against the presigned `bytes` or repeat count (a name can be PUT many times); the evidence key is derived with `path.indexOf('evidence/')` slicing, replace with the capture group of the key regex.
+- Open: the `/dev/proctor` chunk still compiles into production bundles (the route 404s at runtime). Consider a prebuild guard that fails the build if `public/dev-proctor-models` exists, and excluding the route from production builds.
+- Open: root `eslint.config.mjs` `globalIgnores` for `apps/web/public/dev-proctor-models/**` was added by main (#37); nothing left here.
+
+## /dev/proctor mocks aligned with ADR 0013 (Proposed, PR #39), provisional
+
+The mock handlers and the demo's injected adapters (`packages/proctor-sdk/src/demo/mount.ts`) follow the wire tables of ADR 0013 sections 2 to 5. SDK core is unchanged. Deferred SDK changes, to do only after the owner accepts ADR 0013:
+
+- `POST /candidate/session/proctor-key` flow: per-epoch key, non-extractable `CryptoKey` in IndexedDB, re-sign the outbox on a new epoch or `KEY_EPOCH_STALE`, counters seeded from the response. The mock still uses one demo key and base64 in the bundle.
+- RFC 7807 `code` mapping in `createFetchTransport` and `createFetchMediaApi` (today they map by status only; 409 and 422 mean different things by code). The demo's media adapter reads `code` itself.
+- Heartbeat body from SDK core (recorder and queue health) plus 409 `SESSION_NOT_ACTIVE` handling. The demo wraps the transport; per-stream `segment` and `lastSeq` are not exposed by `RecorderHealth`, so the demo sends 0 for them.
+- Media presign fields: `startedAt`, `durationMs`, exact `video/webm` or `audio/webm` content type (SDK sends `video/webm;codecs=vp8`), `alreadyUploaded`, `UPLOAD_MISMATCH` and `UPLOAD_NOT_FOUND` retry, never drop a segment's first chunk. Open question for the hub: the ADR makes `seq` unique per stream (`SEQ_CONFLICT` when the same seq exists in another segment) but the SDK restarts `seq` at 0 in every segment; the demo adapter sends `segment * 100000 + seq`.
+- Evidence presign `purpose` and `evidenceKey` (relative `evidence/<ULID>.jpg`); identity re-check as frame upload plus 202; SDK core must stop emitting client FACE_MISMATCH (the demo adapter reports `matched: true` to stop the relay).
+- `runSystemCheck()` and `POST /candidate/session/system-check`; SCREEN_SHARE detector value; `models:fetch` and `models:update` with `models.lock.json`.
+- Not modelled in the mock: key epochs, SESSION_NOT_ACTIVE, rate limits other than identity (1 per 60 s), org prefixes (fixed `demo`).
+
+## Review round 2 for PR #35 (code-reviewer, not blockers; docs only)
+
+Should-fix
+
+- SF1 `api/_lib/handler.ts` `tooLarge`: a chunked upload without Content-Length passes (`Number(null)` is 0) and is fully buffered by `arrayBuffer()` or `json()`. Add a `readCapped(req, max)` helper that reads `req.body` with a reader and answers 413 once the limit is passed.
+- SF2 `api/media/put/[...key]/route.ts` reads the body before checking the chunk was presigned. Do the lookup first and answer 403 without reading.
+
+Nits
+
+- `mount.test.ts`: add cases for stop() during a delayed `recordAudio` `getUserMedia` (microphone released) and stop() while the screen-share picker is open (late tracks stopped). Note that the existing "no microphone request" assertion would pass even without the stopped checks; `cam.stop` is the real catch.
+- `pipeline.recordScreen` can call `begin('SCREEN')` after `pipeline.stop()` if stop lands during `applyConstraints` or `nextSegment` (`mount.ts` screen-share handler): check `stopped` after `recordScreen` and call `pipeline.stopStream('SCREEN')`.
+- `api/state/route.ts` GET still creates sessions via `sessionState(id)`; use `existingSession` and return an empty summary.
+- `withSession` returns 413 before 401; check auth first.

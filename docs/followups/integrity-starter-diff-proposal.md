@@ -11,11 +11,11 @@ little, the gate skips comparison. Measured by `tests/test_similarity_large_star
 about 780 tokens, 3 TODO sites, 60 seeded pairs per row):
 
 | Candidate-written code | Peer recall | Peer FP | AI recall | AI FP |
-| --- | --- | --- | --- | --- |
-| 3 sites x 2 statements | 100% | 0% | 100% | 0% |
-| 3 sites x 1 statement | 98% | 0% | 98% | 0% |
-| 1 site x 2 statements | 97% | 2% | 97% | 2% |
-| 1 site x 1 statement | 48% | 3% | 48% | 0% |
+| ---------------------- | ----------- | ------- | --------- | ----- |
+| 3 sites x 2 statements | 100%        | 0%      | 100%      | 0%    |
+| 3 sites x 1 statement  | 98%         | 0%      | 98%       | 0%    |
+| 1 site x 2 statements  | 97%         | 2%      | 97%       | 2%    |
+| 1 site x 1 statement   | 48%         | 3%      | 48%       | 0%    |
 
 One short fill-in in a large template loses more than half of genuine copies. Tagged MUST-FIX
 BEFORE PILOT in docs/followups/integrity.md.

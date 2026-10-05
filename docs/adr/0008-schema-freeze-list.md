@@ -1,53 +1,53 @@
 # ADR 0008: Schema freeze list
 
-| Field | Value |
-| --- | --- |
-| Status | **Accepted** 2026-10-01 (D-16; ARC-01 Phase B). Gate for DB-02 and DB-03. Section 8 "Roles" amended 2026-10-02 (D-35, ADR 0006 section 7). |
-| Author | architect |
-| Base | The reference DDL in /docs/database.md at commit `7f5c6b9` (24 tables, 13 enums). |
-| Target | The reference DDL in /docs/database.md as updated on 2026-10-01 (31 tables, 20 enums). The target DDL is authoritative; this list is the checklist of every difference. |
-| Sources | ADRs 0002 to 0007 (accepted, D-16) and decisions D-17 to D-23 (status.md section 9) |
+| Field   | Value                                                                                                                                                                   |
+| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status  | **Accepted** 2026-10-01 (D-16; ARC-01 Phase B). Gate for DB-02 and DB-03. Section 8 "Roles" amended 2026-10-02 (D-35, ADR 0006 section 7).                              |
+| Author  | architect                                                                                                                                                               |
+| Base    | The reference DDL in /docs/database.md at commit `7f5c6b9` (24 tables, 13 enums).                                                                                       |
+| Target  | The reference DDL in /docs/database.md as updated on 2026-10-01 (31 tables, 20 enums). The target DDL is authoritative; this list is the checklist of every difference. |
+| Sources | ADRs 0002 to 0007 (accepted, D-16) and decisions D-17 to D-23 (status.md section 9)                                                                                     |
 
 **How to use it.** DB-02 writes `prisma/schema.prisma` from the target DDL in database.md. DB-02 and DB-03 tick every line below, and nothing else changes. If database.md and this list ever disagree, stop and ask the architect.
 
 ## 1. Counts
 
-| Item | Base (7f5c6b9) | Target | Change |
-| --- | --- | --- | --- |
-| Tables | 24 | 31 | +7 |
-| Enum types | 13 | 20 | +7 new; 3 changed (`session_status`, `proctor_profile`, `event_type`) |
-| CHECK constraints | 5 | 12 | +7 |
-| UNIQUE constraints (not PKs) | 12 | 20 | +8 |
-| Composite primary keys | 0 | 3 | `session_sections`, `variant_test_cases`, `proctor_event_batches` |
-| Non-unique indexes | 6 (1 partial) | 24 (2 partial) | +18 |
-| ON DELETE CASCADE foreign keys | 15 | 22 | +7 |
-| ON DELETE SET NULL foreign keys | 0 | 1 | `webhook_deliveries.session_id` |
-| Composite foreign keys | 0 | 3 | section 6 |
-| `GENERATED ALWAYS AS IDENTITY` columns | 4 | 5 | + `webhook_deliveries.id` |
-| Triggers | 1 (`users.updated_at`) | 1 | none added |
-| Circular foreign keys added by ALTER | 1 | 2 | + `organizations.current_consent_text_id` |
+| Item                                   | Base (7f5c6b9)         | Target         | Change                                                                |
+| -------------------------------------- | ---------------------- | -------------- | --------------------------------------------------------------------- |
+| Tables                                 | 24                     | 31             | +7                                                                    |
+| Enum types                             | 13                     | 20             | +7 new; 3 changed (`session_status`, `proctor_profile`, `event_type`) |
+| CHECK constraints                      | 5                      | 12             | +7                                                                    |
+| UNIQUE constraints (not PKs)           | 12                     | 20             | +8                                                                    |
+| Composite primary keys                 | 0                      | 3              | `session_sections`, `variant_test_cases`, `proctor_event_batches`     |
+| Non-unique indexes                     | 6 (1 partial)          | 24 (2 partial) | +18                                                                   |
+| ON DELETE CASCADE foreign keys         | 15                     | 22             | +7                                                                    |
+| ON DELETE SET NULL foreign keys        | 0                      | 1              | `webhook_deliveries.session_id`                                       |
+| Composite foreign keys                 | 0                      | 3              | section 6                                                             |
+| `GENERATED ALWAYS AS IDENTITY` columns | 4                      | 5              | + `webhook_deliveries.id`                                             |
+| Triggers                               | 1 (`users.updated_at`) | 1              | none added                                                            |
+| Circular foreign keys added by ALTER   | 1                      | 2              | + `organizations.current_consent_text_id`                             |
 
 ## 2. Enums
 
 **New enum types (7):**
 
-| Enum | Values | ADR |
-| --- | --- | --- |
-| `pause_reason` | 'FULLSCREEN_EXIT', 'SCREEN_SHARE_STOPPED', 'SIDE_CAMERA_LOST', 'PROCTOR' | 0002 §5 |
-| `client_kind` | 'WEB' | 0004 §6 |
-| `event_source` | 'CLIENT', 'SERVER' | 0004 §6 |
-| `identity_check_status` | 'PENDING', 'PASSED', 'LOW_CONFIDENCE', 'MANUAL_REVIEW', 'REVIEWED' | 0004 §1 |
-| `identity_review_reason` | 'BELOW_THRESHOLD', 'NO_FACE', 'MULTIPLE_FACES', 'LIVENESS_NOT_CONFIRMED', 'MATCH_ERROR' | 0004 §1 |
-| `identity_manual_decision` | 'MATCH', 'NO_MATCH', 'INCONCLUSIVE' | 0004 §1 |
-| `question_scoring` | 'AUTO', 'MANUAL_PENDING', 'MANUAL' | 0007 §5 (D-23) |
+| Enum                       | Values                                                                                  | ADR            |
+| -------------------------- | --------------------------------------------------------------------------------------- | -------------- |
+| `pause_reason`             | 'FULLSCREEN_EXIT', 'SCREEN_SHARE_STOPPED', 'SIDE_CAMERA_LOST', 'PROCTOR'                | 0002 §5        |
+| `client_kind`              | 'WEB'                                                                                   | 0004 §6        |
+| `event_source`             | 'CLIENT', 'SERVER'                                                                      | 0004 §6        |
+| `identity_check_status`    | 'PENDING', 'PASSED', 'LOW_CONFIDENCE', 'MANUAL_REVIEW', 'REVIEWED'                      | 0004 §1        |
+| `identity_review_reason`   | 'BELOW_THRESHOLD', 'NO_FACE', 'MULTIPLE_FACES', 'LIVENESS_NOT_CONFIRMED', 'MATCH_ERROR' | 0004 §1        |
+| `identity_manual_decision` | 'MATCH', 'NO_MATCH', 'INCONCLUSIVE'                                                     | 0004 §1        |
+| `question_scoring`         | 'AUTO', 'MANUAL_PENDING', 'MANUAL'                                                      | 0007 §5 (D-23) |
 
 **Changed enum types (3):**
 
-| Enum | Change | Target values | ADR |
-| --- | --- | --- | --- |
-| `session_status` | add 'DECLINED' (last) | 'INVITED', 'OPENED', 'CONSENTED', 'VERIFIED', 'IN_PROGRESS', 'PAUSED', 'SUBMITTED', 'GRADED', 'UNDER_REVIEW', 'COMPLETED', 'EXPIRED', 'APPEALED', 'DECLINED' | 0002 §2 (D-17) |
-| `proctor_profile` | remove 'LOCKDOWN' | 'STANDARD', 'STRICT' | 0007 §8 |
-| `event_type` | remove 'PROHIBITED_PROCESS'; add 13 values at the end | 39 values: the 26 kept, in base order, then 'SIDE_CAMERA_DISCONNECTED', 'SIDE_CAMERA_RECONNECTED', 'DROP_ATTEMPT', 'CUT_ATTEMPT', 'SHORTCUT_BLOCKED', 'EXTENSION_INTERFERENCE', 'FULLSCREEN_RESTORED', 'SCREEN_SHARE_RESUMED', 'PROCTOR_RESUME', 'IDLE_THEN_COMPLETE', 'DETECTOR_UNAVAILABLE', 'IDENTITY_MANUAL_REVIEW', 'RESUME_OTP_FAILED' | 0005 §1, 0007 §8, D-21 |
+| Enum              | Change                                                | Target values                                                                                                                                                                                                                                                                                                                                | ADR                    |
+| ----------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| `session_status`  | add 'DECLINED' (last)                                 | 'INVITED', 'OPENED', 'CONSENTED', 'VERIFIED', 'IN_PROGRESS', 'PAUSED', 'SUBMITTED', 'GRADED', 'UNDER_REVIEW', 'COMPLETED', 'EXPIRED', 'APPEALED', 'DECLINED'                                                                                                                                                                                 | 0002 §2 (D-17)         |
+| `proctor_profile` | remove 'LOCKDOWN'                                     | 'STANDARD', 'STRICT'                                                                                                                                                                                                                                                                                                                         | 0007 §8                |
+| `event_type`      | remove 'PROHIBITED_PROCESS'; add 13 values at the end | 39 values: the 26 kept, in base order, then 'SIDE_CAMERA_DISCONNECTED', 'SIDE_CAMERA_RECONNECTED', 'DROP_ATTEMPT', 'CUT_ATTEMPT', 'SHORTCUT_BLOCKED', 'EXTENSION_INTERFERENCE', 'FULLSCREEN_RESTORED', 'SCREEN_SHARE_RESUMED', 'PROCTOR_RESUME', 'IDLE_THEN_COMPLETE', 'DETECTOR_UNAVAILABLE', 'IDENTITY_MANUAL_REVIEW', 'RESUME_OTP_FAILED' | 0005 §1, 0007 §8, D-21 |
 
 Unchanged enums (10): `user_role`, `difficulty`, `question_type`, `submission_kind`, `media_stream` (keeps 'ROOM_SCAN'), `severity`, `risk_band`, `verdict`, `flag_decision`, `appeal_status`.
 
@@ -55,15 +55,15 @@ Unchanged enums (10): `user_role`, `difficulty`, `question_type`, `submission_ki
 
 The full DDL of each is in database.md.
 
-| Table | Columns | Keys and constraints | ADR |
-| --- | --- | --- | --- |
-| `variant_test_cases` | variant_id uuid NOT NULL, test_case_id uuid NOT NULL, input text NOT NULL, expected_output text NOT NULL | PK (variant_id, test_case_id); FK variant_id → question_variants ON DELETE CASCADE; FK test_case_id → test_cases ON DELETE CASCADE | 0007 §1 |
+| Table                    | Columns                                                                                                                                                                                                                                                                                                                                                      | Keys and constraints                                                                                                                       | ADR           |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------- |
+| `variant_test_cases`     | variant_id uuid NOT NULL, test_case_id uuid NOT NULL, input text NOT NULL, expected_output text NOT NULL                                                                                                                                                                                                                                                     | PK (variant_id, test_case_id); FK variant_id → question_variants ON DELETE CASCADE; FK test_case_id → test_cases ON DELETE CASCADE         | 0007 §1       |
 | `ai_reference_solutions` | id uuid PK default gen_random_uuid(), question_version_id uuid NOT NULL, variant_id uuid, assistant text NOT NULL, model_label text NOT NULL, language text NOT NULL, solution_code text NOT NULL, prompt_text text, collected_at timestamptz NOT NULL, collected_by uuid NOT NULL, superseded_at timestamptz, created_at timestamptz NOT NULL default now() | FK question_version_id → question_versions ON DELETE CASCADE; FK variant_id → question_variants ON DELETE CASCADE; FK collected_by → users | 0005 §4, D-20 |
-| `session_sections` | session_id uuid NOT NULL, section_id uuid NOT NULL, position int NOT NULL, time_limit_ms bigint, started_at timestamptz, deadline_at timestamptz, ended_at timestamptz | PK (session_id, section_id); UNIQUE (session_id, position); FK session_id → sessions ON DELETE CASCADE; FK section_id → test_sections | 0002 §1 |
-| `consent_texts` | id uuid PK default gen_random_uuid(), org_id uuid NOT NULL, version text NOT NULL, body_md text NOT NULL, legal_approved_at timestamptz, legal_approved_by text, created_by uuid, created_at timestamptz NOT NULL default now() | UNIQUE (org_id, version); FK org_id → organizations; FK created_by → users | 0007 §6, D-17 |
-| `proctor_event_batches` | session_id uuid NOT NULL, seq int NOT NULL, signature bytea NOT NULL, event_count smallint NOT NULL, received_at timestamptz NOT NULL default now() | PK (session_id, seq); FK session_id → sessions ON DELETE CASCADE | 0005 §3 |
-| `webhook_endpoints` | id uuid PK default gen_random_uuid(), org_id uuid NOT NULL, url text NOT NULL, events text[] NOT NULL, secret_enc text NOT NULL, is_active boolean NOT NULL default true, created_by uuid, created_at timestamptz NOT NULL default now() | FK org_id → organizations; FK created_by → users | 0007 §7 |
-| `webhook_deliveries` | id bigint GENERATED ALWAYS AS IDENTITY PK, endpoint_id uuid NOT NULL, event text NOT NULL, session_id uuid, attempt int NOT NULL, status_code int, error text, created_at timestamptz NOT NULL default now() | FK endpoint_id → webhook_endpoints ON DELETE CASCADE; FK session_id → sessions ON DELETE SET NULL | 0007 §7 |
+| `session_sections`       | session_id uuid NOT NULL, section_id uuid NOT NULL, position int NOT NULL, time_limit_ms bigint, started_at timestamptz, deadline_at timestamptz, ended_at timestamptz                                                                                                                                                                                       | PK (session_id, section_id); UNIQUE (session_id, position); FK session_id → sessions ON DELETE CASCADE; FK section_id → test_sections      | 0002 §1       |
+| `consent_texts`          | id uuid PK default gen_random_uuid(), org_id uuid NOT NULL, version text NOT NULL, body_md text NOT NULL, legal_approved_at timestamptz, legal_approved_by text, created_by uuid, created_at timestamptz NOT NULL default now()                                                                                                                              | UNIQUE (org_id, version); FK org_id → organizations; FK created_by → users                                                                 | 0007 §6, D-17 |
+| `proctor_event_batches`  | session_id uuid NOT NULL, seq int NOT NULL, signature bytea NOT NULL, event_count smallint NOT NULL, received_at timestamptz NOT NULL default now()                                                                                                                                                                                                          | PK (session_id, seq); FK session_id → sessions ON DELETE CASCADE                                                                           | 0005 §3       |
+| `webhook_endpoints`      | id uuid PK default gen_random_uuid(), org_id uuid NOT NULL, url text NOT NULL, events text[] NOT NULL, secret_enc text NOT NULL, is_active boolean NOT NULL default true, created_by uuid, created_at timestamptz NOT NULL default now()                                                                                                                     | FK org_id → organizations; FK created_by → users                                                                                           | 0007 §7       |
+| `webhook_deliveries`     | id bigint GENERATED ALWAYS AS IDENTITY PK, endpoint_id uuid NOT NULL, event text NOT NULL, session_id uuid, attempt int NOT NULL, status_code int, error text, created_at timestamptz NOT NULL default now()                                                                                                                                                 | FK endpoint_id → webhook_endpoints ON DELETE CASCADE; FK session_id → sessions ON DELETE SET NULL                                          | 0007 §7       |
 
 Not created: `face_embeddings` (ADR 0004 §2: embeddings are never stored), `user_recovery_codes` and `user_invites` (ADR 0003 chose columns), `candidate_otps` (ADR 0003: Redis), `reports` (ADR 0007: columns on `sessions`).
 
@@ -71,52 +71,52 @@ Not created: `face_embeddings` (ADR 0004 §2: embeddings are never stored), `use
 
 Notation: **add** = new column; **change** = type, nullability or default changes; **rename**; **drop**.
 
-| Table | Change | ADR |
-| --- | --- | --- |
-| organizations | **add** `current_consent_text_id uuid`. Its FK to `consent_texts(id)` is added by `ALTER TABLE ... ADD CONSTRAINT fk_current_consent_text` after `consent_texts` exists (circular, like `fk_current_version`). | 0007 §6 |
-| users | **change** `password_hash text NOT NULL` → `password_hash text` (nullable) | 0003 §4 |
-| users | **add** `recovery_code_hashes text[] NOT NULL DEFAULT '{}'` | 0003 §1 |
-| users | **add** `set_password_token_hash text UNIQUE`, `set_password_expires_at timestamptz` | 0003 §4, D-22 |
-| users | **add CHECK** `(password_hash IS NOT NULL OR set_password_token_hash IS NOT NULL)` | 0003 §4 |
-| refresh_tokens | **add** `family_id uuid NOT NULL` | 0003 §3 |
-| question_versions | **rename** `mcq_options` → `answer_spec` (still `jsonb`, nullable) | 0007 §5, D-23 |
-| question_versions | **add** `validation_report jsonb` | 0007 §1 |
-| tests | **change** `profile` keeps type `proctor_profile`, which loses 'LOCKDOWN'; default stays 'STANDARD' | 0007 §8 |
-| tests | **add UNIQUE** `(id, org_id)` | 0006 §2 |
-| candidates | **add** `erasure_requested_at timestamptz`, `erased_at timestamptz` | 0004 §5, D-19 |
-| candidates | **add UNIQUE** `(id, org_id)` | 0006 §2 |
-| invitations | **add** `org_id uuid NOT NULL REFERENCES organizations(id)` | 0006 §1 |
-| invitations | **change** `test_id`: drop its single-column FK and add composite FK `(test_id, org_id) → tests (id, org_id)` | 0006 §2 |
-| invitations | **change** `candidate_id`: drop its single-column FK and add composite FK `(candidate_id, org_id) → candidates (id, org_id)` | 0006 §2 |
-| invitations | **add UNIQUE** `(id, org_id)` | 0006 §2 |
-| sessions | **add** `org_id uuid NOT NULL REFERENCES organizations(id)` | 0006 §1 |
-| sessions | **change** `invitation_id`: keep NOT NULL UNIQUE; drop its single-column FK and add composite FK `(invitation_id, org_id) → invitations (id, org_id)` | 0006 §2 |
-| sessions | **change** `status` default 'OPENED' → 'INVITED' | 0002 §2 |
-| sessions | **change** `hmac_key_enc text NOT NULL` → `hmac_key_enc text` (nullable) | 0002 §3 |
-| sessions | **change** `client_kind text NOT NULL DEFAULT 'WEB'` → `client_kind client_kind NOT NULL DEFAULT 'WEB'` | 0004 §6 |
-| sessions | **add** `auth_epoch int NOT NULL DEFAULT 0` | 0002 §4 |
-| sessions | **add** `pause_reasons pause_reason[] NOT NULL DEFAULT '{}'`, `proctor_paused_at timestamptz` (`paused_ms` keeps its type; it now holds credited proctor-pause time only) | 0002 §5 |
-| sessions | **add** `retention_anchor_at timestamptz` | 0004 §5 |
-| sessions | **add** `report_key text`, `report_generated_at timestamptz` | 0007 §7 |
-| session_questions | **add** `test_question_id uuid NOT NULL REFERENCES test_questions(id)` (no ON DELETE clause) | 0002 §1 |
-| session_questions | **add** `answer jsonb` | 0007 §5 |
-| session_questions | **add** `scoring question_scoring NOT NULL DEFAULT 'AUTO'`, `scored_by uuid REFERENCES users(id)`, `scored_at timestamptz`, `scoring_note text` | 0007 §5, D-23 |
-| session_questions | **add CHECK** `((scoring = 'MANUAL') = (scored_by IS NOT NULL AND scored_at IS NOT NULL))` | 0007 §5 |
-| consents | **drop** `consent_version text NOT NULL`; **add** `consent_text_id uuid NOT NULL REFERENCES consent_texts(id)` | 0007 §6 |
-| consents | **drop** `accepted_at timestamptz NOT NULL DEFAULT now()`; **add** `signed_name text`, `signed_at timestamptz`, `declined_at timestamptz` | D-17, 0007 §6 |
-| consents | **add** `pdf_key text`, `pdf_generated_at timestamptz`, `copy_emailed_at timestamptz` (`ip` and `user_agent` unchanged) | D-17 |
-| consents | **add CHECK** `((signed_at IS NULL) <> (declined_at IS NULL))` and **add CHECK** `(signed_at IS NULL OR signed_name IS NOT NULL)` | D-17 |
-| identity_checks | **change** `status text NOT NULL DEFAULT 'PENDING'` → `status identity_check_status NOT NULL DEFAULT 'PENDING'` | 0004 §1 |
-| identity_checks | **drop** `room_scan_key` | 0004 §3 |
-| identity_checks | **add** `attempt smallint NOT NULL DEFAULT 1 CHECK (attempt BETWEEN 1 AND 2)` | 0004 §1 |
-| identity_checks | **add** `model_id text`, `threshold numeric(5,4)`, `review_reason identity_review_reason`, `manual_decision identity_manual_decision`, `reviewed_by uuid REFERENCES users(id)`, `reviewed_at timestamptz`, `review_note text` | 0004 §1 |
-| identity_checks | **add UNIQUE** `(session_id, attempt)`; **add CHECK** `((status = 'REVIEWED') = (manual_decision IS NOT NULL AND reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL))` | 0004 §1 |
-| media_chunks | **change** `object_key text NOT NULL` → `object_key text` (nullable) | 0004 §4 |
-| media_chunks | **add** `segment int NOT NULL DEFAULT 0`, `deleted_at timestamptz` | 0004 §4 |
-| proctor_events | **change** `source text NOT NULL DEFAULT 'CLIENT'` → `source event_source NOT NULL DEFAULT 'CLIENT'` | 0004 §6 |
-| proctor_events | **add** `batch_seq int` | 0005 §3 |
-| keystroke_batches | **add** `signature bytea NOT NULL` | 0005 §3 |
-| appeals | **add** `new_verdict verdict`; **add UNIQUE** `(session_review_id)`; **add CHECK** `((status = 'OVERTURNED') = (new_verdict IS NOT NULL))` | 0002 §7 |
+| Table             | Change                                                                                                                                                                                                                        | ADR           |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| organizations     | **add** `current_consent_text_id uuid`. Its FK to `consent_texts(id)` is added by `ALTER TABLE ... ADD CONSTRAINT fk_current_consent_text` after `consent_texts` exists (circular, like `fk_current_version`).                | 0007 §6       |
+| users             | **change** `password_hash text NOT NULL` → `password_hash text` (nullable)                                                                                                                                                    | 0003 §4       |
+| users             | **add** `recovery_code_hashes text[] NOT NULL DEFAULT '{}'`                                                                                                                                                                   | 0003 §1       |
+| users             | **add** `set_password_token_hash text UNIQUE`, `set_password_expires_at timestamptz`                                                                                                                                          | 0003 §4, D-22 |
+| users             | **add CHECK** `(password_hash IS NOT NULL OR set_password_token_hash IS NOT NULL)`                                                                                                                                            | 0003 §4       |
+| refresh_tokens    | **add** `family_id uuid NOT NULL`                                                                                                                                                                                             | 0003 §3       |
+| question_versions | **rename** `mcq_options` → `answer_spec` (still `jsonb`, nullable)                                                                                                                                                            | 0007 §5, D-23 |
+| question_versions | **add** `validation_report jsonb`                                                                                                                                                                                             | 0007 §1       |
+| tests             | **change** `profile` keeps type `proctor_profile`, which loses 'LOCKDOWN'; default stays 'STANDARD'                                                                                                                           | 0007 §8       |
+| tests             | **add UNIQUE** `(id, org_id)`                                                                                                                                                                                                 | 0006 §2       |
+| candidates        | **add** `erasure_requested_at timestamptz`, `erased_at timestamptz`                                                                                                                                                           | 0004 §5, D-19 |
+| candidates        | **add UNIQUE** `(id, org_id)`                                                                                                                                                                                                 | 0006 §2       |
+| invitations       | **add** `org_id uuid NOT NULL REFERENCES organizations(id)`                                                                                                                                                                   | 0006 §1       |
+| invitations       | **change** `test_id`: drop its single-column FK and add composite FK `(test_id, org_id) → tests (id, org_id)`                                                                                                                 | 0006 §2       |
+| invitations       | **change** `candidate_id`: drop its single-column FK and add composite FK `(candidate_id, org_id) → candidates (id, org_id)`                                                                                                  | 0006 §2       |
+| invitations       | **add UNIQUE** `(id, org_id)`                                                                                                                                                                                                 | 0006 §2       |
+| sessions          | **add** `org_id uuid NOT NULL REFERENCES organizations(id)`                                                                                                                                                                   | 0006 §1       |
+| sessions          | **change** `invitation_id`: keep NOT NULL UNIQUE; drop its single-column FK and add composite FK `(invitation_id, org_id) → invitations (id, org_id)`                                                                         | 0006 §2       |
+| sessions          | **change** `status` default 'OPENED' → 'INVITED'                                                                                                                                                                              | 0002 §2       |
+| sessions          | **change** `hmac_key_enc text NOT NULL` → `hmac_key_enc text` (nullable)                                                                                                                                                      | 0002 §3       |
+| sessions          | **change** `client_kind text NOT NULL DEFAULT 'WEB'` → `client_kind client_kind NOT NULL DEFAULT 'WEB'`                                                                                                                       | 0004 §6       |
+| sessions          | **add** `auth_epoch int NOT NULL DEFAULT 0`                                                                                                                                                                                   | 0002 §4       |
+| sessions          | **add** `pause_reasons pause_reason[] NOT NULL DEFAULT '{}'`, `proctor_paused_at timestamptz` (`paused_ms` keeps its type; it now holds credited proctor-pause time only)                                                     | 0002 §5       |
+| sessions          | **add** `retention_anchor_at timestamptz`                                                                                                                                                                                     | 0004 §5       |
+| sessions          | **add** `report_key text`, `report_generated_at timestamptz`                                                                                                                                                                  | 0007 §7       |
+| session_questions | **add** `test_question_id uuid NOT NULL REFERENCES test_questions(id)` (no ON DELETE clause)                                                                                                                                  | 0002 §1       |
+| session_questions | **add** `answer jsonb`                                                                                                                                                                                                        | 0007 §5       |
+| session_questions | **add** `scoring question_scoring NOT NULL DEFAULT 'AUTO'`, `scored_by uuid REFERENCES users(id)`, `scored_at timestamptz`, `scoring_note text`                                                                               | 0007 §5, D-23 |
+| session_questions | **add CHECK** `((scoring = 'MANUAL') = (scored_by IS NOT NULL AND scored_at IS NOT NULL))`                                                                                                                                    | 0007 §5       |
+| consents          | **drop** `consent_version text NOT NULL`; **add** `consent_text_id uuid NOT NULL REFERENCES consent_texts(id)`                                                                                                                | 0007 §6       |
+| consents          | **drop** `accepted_at timestamptz NOT NULL DEFAULT now()`; **add** `signed_name text`, `signed_at timestamptz`, `declined_at timestamptz`                                                                                     | D-17, 0007 §6 |
+| consents          | **add** `pdf_key text`, `pdf_generated_at timestamptz`, `copy_emailed_at timestamptz` (`ip` and `user_agent` unchanged)                                                                                                       | D-17          |
+| consents          | **add CHECK** `((signed_at IS NULL) <> (declined_at IS NULL))` and **add CHECK** `(signed_at IS NULL OR signed_name IS NOT NULL)`                                                                                             | D-17          |
+| identity_checks   | **change** `status text NOT NULL DEFAULT 'PENDING'` → `status identity_check_status NOT NULL DEFAULT 'PENDING'`                                                                                                               | 0004 §1       |
+| identity_checks   | **drop** `room_scan_key`                                                                                                                                                                                                      | 0004 §3       |
+| identity_checks   | **add** `attempt smallint NOT NULL DEFAULT 1 CHECK (attempt BETWEEN 1 AND 2)`                                                                                                                                                 | 0004 §1       |
+| identity_checks   | **add** `model_id text`, `threshold numeric(5,4)`, `review_reason identity_review_reason`, `manual_decision identity_manual_decision`, `reviewed_by uuid REFERENCES users(id)`, `reviewed_at timestamptz`, `review_note text` | 0004 §1       |
+| identity_checks   | **add UNIQUE** `(session_id, attempt)`; **add CHECK** `((status = 'REVIEWED') = (manual_decision IS NOT NULL AND reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL))`                                                       | 0004 §1       |
+| media_chunks      | **change** `object_key text NOT NULL` → `object_key text` (nullable)                                                                                                                                                          | 0004 §4       |
+| media_chunks      | **add** `segment int NOT NULL DEFAULT 0`, `deleted_at timestamptz`                                                                                                                                                            | 0004 §4       |
+| proctor_events    | **change** `source text NOT NULL DEFAULT 'CLIENT'` → `source event_source NOT NULL DEFAULT 'CLIENT'`                                                                                                                          | 0004 §6       |
+| proctor_events    | **add** `batch_seq int`                                                                                                                                                                                                       | 0005 §3       |
+| keystroke_batches | **add** `signature bytea NOT NULL`                                                                                                                                                                                            | 0005 §3       |
+| appeals           | **add** `new_verdict verdict`; **add UNIQUE** `(session_review_id)`; **add CHECK** `((status = 'OVERTURNED') = (new_verdict IS NOT NULL))`                                                                                    | 0002 §7       |
 
 Changed tables (15): organizations, users, refresh_tokens, question_versions, tests, candidates, invitations, sessions, session_questions, consents, identity_checks, media_chunks, proctor_events, keystroke_batches, appeals.
 
@@ -151,6 +151,7 @@ Tables with no column change (9): audit_logs, questions, test_cases (gets an ind
   - `webhook_deliveries.endpoint_id`
 
   The 15 base cascades are unchanged, for 22 in total.
+
 - **New ON DELETE SET NULL (1):** `webhook_deliveries.session_id`.
 - **Composite foreign keys (3).** They replace the single-column FKs on these columns:
   - `invitations (test_id, org_id) → tests (id, org_id)`
@@ -170,6 +171,7 @@ Tables with no column change (9): audit_logs, questions, test_cases (gets an ind
 ## 7. Indexes
 
 **New non-unique indexes (18):**
+
 - `users (org_id)`
 - `refresh_tokens (user_id)`, `refresh_tokens (family_id)`
 - `test_cases (question_version_id)`, `question_variants (question_version_id)`, `variant_test_cases (test_case_id)`, `ai_reference_solutions (question_version_id)`
@@ -183,6 +185,7 @@ Tables with no column change (9): audit_logs, questions, test_cases (gets an ind
 **Kept (6):** `audit_logs (org_id, created_at DESC)`; `sessions (status)`; `sessions (risk_band) WHERE status IN ('GRADED','UNDER_REVIEW')` (partial); `submissions (session_question_id, created_at)`; `proctor_events (session_id, occurred_at)`; `proctor_events (session_id, severity)`.
 
 **New UNIQUE constraints (8):**
+
 - `users.set_password_token_hash`
 - `tests (id, org_id)`, `candidates (id, org_id)`, `invitations (id, org_id)`
 - `identity_checks (session_id, attempt)`
@@ -193,6 +196,7 @@ Tables with no column change (9): audit_logs, questions, test_cases (gets an ind
 ## 8. Migrations: what DB-03 adds in SQL
 
 DB-03 adds these in SQL, in addition to the base Step 3 list:
+
 - The 7 new CHECK constraints (section 5).
 - The new partial index on `sessions (retention_anchor_at)`.
 - `GENERATED ALWAYS AS IDENTITY` on `webhook_deliveries.id` (same decision as the other four identity columns).
@@ -201,6 +205,7 @@ DB-03 adds these in SQL, in addition to the base Step 3 list:
 - `bytea` columns (`Bytes`).
 
 **Roles (ADR 0006 §3).** The `audit_append_only` migration does **not** create `app_user`. `infra/sql/roles.sql` creates it once per environment, and the local compose init runs the same file (DB-03 adds both). The migration grants and revokes:
+
 - `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user`
 - `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_user`
 - `ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user`
@@ -209,6 +214,7 @@ DB-03 adds these in SQL, in addition to the base Step 3 list:
 It fails with a clear message if `app_user` is missing. `DATABASE_URL` connects as `app_user`; `MIGRATION_DATABASE_URL` connects as the owner role.
 
 > **Amended 2026-10-02 (D-35; ADR 0006 section 7).** The roles paragraph above is replaced as follows.
+>
 > - There is no `infra/sql/roles.sql` and no compose init script.
 > - The `audit_append_only` migration first creates `app_user` if it does not exist (LOGIN, no password), then grants. It also:
 >   - grants USAGE on schema `public`;

@@ -8,25 +8,25 @@ Remote coding tests are now easy to game. AI assistants can solve most standard 
 
 ## 2. Objectives
 
-| ID | Objective | Measure |
-| --- | --- | --- |
-| BO-1 | Trustworthy screening results | 90%+ of candidates who pass the test also pass the live technical interview (baseline to be measured in pilot) |
-| BO-2 | Detect integrity violations | Every high-risk session is flagged for human review before a hiring decision |
-| BO-3 | Reduce interviewer load | Fewer live interviews per hire compared with the pre-launch baseline |
-| BO-4 | Fair candidate experience | Candidate satisfaction 4/5 or higher; accommodation requests honored |
-| BO-5 | Low running cost | Built and staged on free tiers using synthetic data only; pilot and production run on the company's AWS account within an approved budget |
-| BO-6 | Legal compliance | Written consent, retention limits and deletion on request for all recordings |
+| ID   | Objective                     | Measure                                                                                                                                   |
+| ---- | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| BO-1 | Trustworthy screening results | 90%+ of candidates who pass the test also pass the live technical interview (baseline to be measured in pilot)                            |
+| BO-2 | Detect integrity violations   | Every high-risk session is flagged for human review before a hiring decision                                                              |
+| BO-3 | Reduce interviewer load       | Fewer live interviews per hire compared with the pre-launch baseline                                                                      |
+| BO-4 | Fair candidate experience     | Candidate satisfaction 4/5 or higher; accommodation requests honored                                                                      |
+| BO-5 | Low running cost              | Built and staged on free tiers using synthetic data only; pilot and production run on the company's AWS account within an approved budget |
+| BO-6 | Legal compliance              | Written consent, retention limits and deletion on request for all recordings                                                              |
 
 ## 3. Stakeholders
 
-| Role | Interest |
-| --- | --- |
-| Hiring managers | Reliable signal on coding skill |
-| Recruiters | Send tests, track status, see results |
-| Technical reviewers | Review flagged sessions, confirm or clear violations |
-| Candidates | Clear rules, fair test, working tech, privacy |
+| Role                 | Interest                                                    |
+| -------------------- | ----------------------------------------------------------- |
+| Hiring managers      | Reliable signal on coding skill                             |
+| Recruiters           | Send tests, track status, see results                       |
+| Technical reviewers  | Review flagged sessions, confirm or clear violations        |
+| Candidates           | Clear rules, fair test, working tech, privacy               |
 | Legal / HR / Privacy | Consent, data retention, anti-discrimination, accessibility |
-| IT / Security | Data protection, access control, audits |
+| IT / Security        | Data protection, access control, audits                     |
 
 ## 4. User roles
 
@@ -55,23 +55,23 @@ Out of scope (initial release):
 
 ## 6. High-level business requirements
 
-| ID | Requirement | Priority |
-| --- | --- | --- |
-| BR-01 | Recruiters can invite candidates to a test by email with a unique, expiring link | Must |
-| BR-02 | Candidates must verify identity (photo ID + live selfie) before starting | Must |
-| BR-03 | The system records screen, webcam and audio for the full session | Must |
-| BR-04 | The system detects and logs tab switches, fullscreen exits, paste attempts, multiple faces, absent face, phone in view and extra voices | Must |
-| BR-05 | Code is executed and graded against hidden test cases automatically | Must |
-| BR-06 | Each session gets an integrity risk score with a timeline of evidence | Must |
-| BR-07 | Reviewers can replay the candidate's typing and watch linked video at each flag | Must |
-| BR-08 | Candidates receive different question variants to limit answer sharing | Must |
-| BR-09 | Live proctor view of active sessions with the ability to message or pause a candidate | Should |
-| BR-10 | Plagiarism and AI-likeness checks on submitted code | Should |
-| BR-11 | Desktop lockdown client for high-stakes roles | Should (Phase 3) |
-| BR-12 | Accommodation settings: extra time, disabled detectors, screen-reader support | Must |
-| BR-13 | Recordings deleted automatically after a configurable retention period | Must |
-| BR-14 | Complete audit log of staff actions on candidate data | Must |
-| BR-15 | ATS integration via webhooks and CSV export | Could |
+| ID    | Requirement                                                                                                                             | Priority         |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| BR-01 | Recruiters can invite candidates to a test by email with a unique, expiring link                                                        | Must             |
+| BR-02 | Candidates must verify identity (photo ID + live selfie) before starting                                                                | Must             |
+| BR-03 | The system records screen, webcam and audio for the full session                                                                        | Must             |
+| BR-04 | The system detects and logs tab switches, fullscreen exits, paste attempts, multiple faces, absent face, phone in view and extra voices | Must             |
+| BR-05 | Code is executed and graded against hidden test cases automatically                                                                     | Must             |
+| BR-06 | Each session gets an integrity risk score with a timeline of evidence                                                                   | Must             |
+| BR-07 | Reviewers can replay the candidate's typing and watch linked video at each flag                                                         | Must             |
+| BR-08 | Candidates receive different question variants to limit answer sharing                                                                  | Must             |
+| BR-09 | Live proctor view of active sessions with the ability to message or pause a candidate                                                   | Should           |
+| BR-10 | Plagiarism and AI-likeness checks on submitted code                                                                                     | Should           |
+| BR-11 | Desktop lockdown client for high-stakes roles                                                                                           | Should (Phase 3) |
+| BR-12 | Accommodation settings: extra time, disabled detectors, screen-reader support                                                           | Must             |
+| BR-13 | Recordings deleted automatically after a configurable retention period                                                                  | Must             |
+| BR-14 | Complete audit log of staff actions on candidate data                                                                                   | Must             |
+| BR-15 | ATS integration via webhooks and CSV export                                                                                             | Could            |
 
 ## 7. Compliance and ethics
 
@@ -89,13 +89,13 @@ Out of scope (initial release):
 
 ## 9. Risks
 
-| Risk | Impact | Mitigation |
-| --- | --- | --- |
-| False positives unfairly flag honest candidates | Lost talent, reputational and legal risk | Human review, tuned thresholds, candidate appeal path |
-| Candidates drop out because of heavy proctoring | Smaller pipeline | Clear instructions, practice test, short system check |
-| Free-tier limits hit during a large hiring round | Outages | Usage alerts, upgrade path documented |
-| Recording storage breach | Severe privacy incident | Encryption, signed URLs, least-privilege access, audit logs |
-| Questions leak online | Weaker signal | Variants, rotation, leak monitoring |
+| Risk                                             | Impact                                   | Mitigation                                                  |
+| ------------------------------------------------ | ---------------------------------------- | ----------------------------------------------------------- |
+| False positives unfairly flag honest candidates  | Lost talent, reputational and legal risk | Human review, tuned thresholds, candidate appeal path       |
+| Candidates drop out because of heavy proctoring  | Smaller pipeline                         | Clear instructions, practice test, short system check       |
+| Free-tier limits hit during a large hiring round | Outages                                  | Usage alerts, upgrade path documented                       |
+| Recording storage breach                         | Severe privacy incident                  | Encryption, signed URLs, least-privilege access, audit logs |
+| Questions leak online                            | Weaker signal                            | Variants, rotation, leak monitoring                         |
 
 ## 10. Success criteria for launch
 

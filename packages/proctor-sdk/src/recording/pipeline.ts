@@ -78,6 +78,10 @@ export class RecordingPipeline {
     return this.queue.health();
   }
 
+  get audioStream(): MediaStream | null {
+    return this.owned.get('AUDIO') ?? null;
+  }
+
   get webcamStream(): MediaStream | null {
     return this.owned.get('WEBCAM') ?? null;
   }

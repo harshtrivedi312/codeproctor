@@ -1,16 +1,16 @@
 # Brief ARC-01: Schema readiness review (architect gate before DB-02)
 
-| Field | Value |
-| --- | --- |
-| Task ID | ARC-01 |
-| Owner | architect |
-| Branch | `arch/adr-schema-gaps` (needs the initial commit on main, blocker B-01) |
-| Size | L (widened 2026-10-01, D-03 and D-08) |
-| Depends on | Nothing to start drafting. Finalizing needs human answers (Phase B below). |
-| Runs in parallel with | DB-01, QA-01A |
-| Unblocks | DB-02 (schema), ARC-02 (shared contracts), ARC-03 (security model) |
-| Reviewer | Human approves each ADR; code-reviewer reads the final doc changes |
-| Related | /docs/adr/0001-overall-architecture.md (Accepted, decisions D-01..D-09 in section 11); /docs/adr/review-2026-09-30-plan-and-schema.md |
+| Field                 | Value                                                                                                                                 |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Task ID               | ARC-01                                                                                                                                |
+| Owner                 | architect                                                                                                                             |
+| Branch                | `arch/adr-schema-gaps` (needs the initial commit on main, blocker B-01)                                                               |
+| Size                  | L (widened 2026-10-01, D-03 and D-08)                                                                                                 |
+| Depends on            | Nothing to start drafting. Finalizing needs human answers (Phase B below).                                                            |
+| Runs in parallel with | DB-01, QA-01A                                                                                                                         |
+| Unblocks              | DB-02 (schema), ARC-02 (shared contracts), ARC-03 (security model)                                                                    |
+| Reviewer              | Human approves each ADR; code-reviewer reads the final doc changes                                                                    |
+| Related               | /docs/adr/0001-overall-architecture.md (Accepted, decisions D-01..D-09 in section 11); /docs/adr/review-2026-09-30-plan-and-schema.md |
 
 ## 1. Goal
 
@@ -38,48 +38,48 @@ Verify every gap yourself against the quoted doc lines. If the PM's reading is w
 
 In scope: /docs/adr/*.md, /docs/database.md (only after human approval of the matching ADR).
 
-Out of scope: prisma/, apps/*, packages/shared, /docs/fsd.md and /docs/test-cases.md (report conflicts; do not edit), /docs/prompts/*.md (list needed amendments for a human), API contract and security behavior questions (Q-18..Q-28 belong to ARC-02, ARC-03, ARC-04), except Q-23 and Q-24, which moved here (D-08). Token binding, HMAC key storage in the browser and canonical JSON stay in ARC-03. No new dependencies or services.
+Out of scope: prisma/, apps/_, packages/shared, /docs/fsd.md and /docs/test-cases.md (report conflicts; do not edit), /docs/prompts/_.md (list needed amendments for a human), API contract and security behavior questions (Q-18..Q-28 belong to ARC-02, ARC-03, ARC-04), except Q-23 and Q-24, which moved here (D-08). Token binding, HMAC key storage in the browser and canonical JSON stay in ARC-03. No new dependencies or services.
 
 ## 4. Questions in scope (from /docs/status.md)
 
-| Q | Gap |
-| --- | --- |
-| Q-01 | INVITED and EXPIRED have no representation (no session row before link open, no invitation status, no expiry job); TC-022 |
-| Q-02 | `sessions.hmac_key_enc` NOT NULL at OPENED versus Step 7 generating the key at IN_PROGRESS and returning it once (reload problem) |
-| Q-03 | No storage for hashed 2FA recovery codes |
-| Q-04 | No storage for candidate OTP, attempt count, 30 min link block; no recruiter notification template (TC-007) |
-| Q-05 | No family id for refresh-token family revocation (TC-005) |
-| Q-06 | No storage for face embeddings; retention does not cover them |
-| Q-07 | No storage or source for AI-generated reference solutions (FR-803) |
-| Q-08 | `event_type` enum missing SIDE_CAMERA disconnect, drop attempt, extension interference, resume events, idle-then-complete, capability flags |
-| Q-09 | No default severity per event type and no default risk weights (Step 12 says they are in FR-804; they are not) |
-| Q-10 | Org scoping of tables without `org_id` (sessions, submissions, events); Step 5 extension only filters tables that have `org_id`; TC-008 |
-| Q-11 | Retention scope (evidence_key JPEGs, report PDFs, embeddings, keystrokes) and "older than" timestamp; erasure entry point |
-| Q-12 | `identity_checks.status` values, manual approval fields and workflow, client-reported liveness |
-| Q-13 | Practice question data model (FR-406) |
-| Q-14 | MCQ and short-answer answering and scoring (FR-205, TC-014) |
-| Q-15 | `app_user` role creation, credentials and migration role on managed Postgres |
-| Q-16 | Org settings storage and consent version source (frontend Step 3 versus backend Step 7 "config") |
-| Q-17 | ERD versus DDL naming (`totp_secret` vs `totp_secret_enc`); Data rules wording about `audit_logs` |
-| Q-23 | Single-use link (FR-303, TC-021) versus reopening mid-test (TC-045, TC-063, FR-609): when `used_at` is set, whether OTP is asked again (moved from ARC-03, D-08) |
+| Q    | Gap                                                                                                                                                                                               |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Q-01 | INVITED and EXPIRED have no representation (no session row before link open, no invitation status, no expiry job); TC-022                                                                         |
+| Q-02 | `sessions.hmac_key_enc` NOT NULL at OPENED versus Step 7 generating the key at IN_PROGRESS and returning it once (reload problem)                                                                 |
+| Q-03 | No storage for hashed 2FA recovery codes                                                                                                                                                          |
+| Q-04 | No storage for candidate OTP, attempt count, 30 min link block; no recruiter notification template (TC-007)                                                                                       |
+| Q-05 | No family id for refresh-token family revocation (TC-005)                                                                                                                                         |
+| Q-06 | No storage for face embeddings; retention does not cover them                                                                                                                                     |
+| Q-07 | No storage or source for AI-generated reference solutions (FR-803)                                                                                                                                |
+| Q-08 | `event_type` enum missing SIDE_CAMERA disconnect, drop attempt, extension interference, resume events, idle-then-complete, capability flags                                                       |
+| Q-09 | No default severity per event type and no default risk weights (Step 12 says they are in FR-804; they are not)                                                                                    |
+| Q-10 | Org scoping of tables without `org_id` (sessions, submissions, events); Step 5 extension only filters tables that have `org_id`; TC-008                                                           |
+| Q-11 | Retention scope (evidence_key JPEGs, report PDFs, embeddings, keystrokes) and "older than" timestamp; erasure entry point                                                                         |
+| Q-12 | `identity_checks.status` values, manual approval fields and workflow, client-reported liveness                                                                                                    |
+| Q-13 | Practice question data model (FR-406)                                                                                                                                                             |
+| Q-14 | MCQ and short-answer answering and scoring (FR-205, TC-014)                                                                                                                                       |
+| Q-15 | `app_user` role creation, credentials and migration role on managed Postgres                                                                                                                      |
+| Q-16 | Org settings storage and consent version source (frontend Step 3 versus backend Step 7 "config")                                                                                                  |
+| Q-17 | ERD versus DDL naming (`totp_secret` vs `totp_secret_enc`); Data rules wording about `audit_logs`                                                                                                 |
+| Q-23 | Single-use link (FR-303, TC-021) versus reopening mid-test (TC-045, TC-063, FR-609): when `used_at` is set, whether OTP is asked again (moved from ARC-03, D-08)                                  |
 | Q-24 | Paused time extends `deadline_at` (backend.md Step 10) versus server time continuing (FR-505, FR-609): which events pause, whether paused time is added back, and a cap (moved from ARC-03, D-08) |
 
 ### Review findings in scope (D-03; review section 5 routing)
 
-| Finding | Gap | Decide first? |
-| --- | --- | --- |
-| A-01 | Variant-specific test data has no storage (FR-203, TC-012) | **Yes, before anything else** |
-| A-03 | No per-section timing on a session; `session_questions` has no link to its section (FR-301, FR-505, TC-024) | **Yes, before anything else** |
-| A-02 | `media_chunks.object_key` NOT NULL but retention nulls it (TC-072) | |
-| A-04 | Recording segments and restart grouping, if a column is chosen | |
-| A-06 | State machine gaps: APPEALED row, CONSENTED/VERIFIED expiry, identity pending, focus lost, appeal verdict storage | |
-| A-07 | Cross-tenant foreign keys (NFR-04, TC-008) | |
-| A-09 | Retention hold: anchor on the later of `submitted_at` and the final verdict or appeal resolution; skip UNDER_REVIEW, APPEALED and open appeals (FR-904) | |
-| A-10 | Durable replay state for event batches (TC-065) | |
-| A-11 | Staff invites, webhook endpoints and deliveries, report PDF keys, validation results, allowed assistive tools | |
-| A-21 items 2 and 4 | Room scan stored in two places; free-text enum columns | |
-| A-22 | Indexes on foreign-key columns | |
-| A-23 | Score formula: points versus weights (TC-048) | |
+| Finding            | Gap                                                                                                                                                     | Decide first?                 |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| A-01               | Variant-specific test data has no storage (FR-203, TC-012)                                                                                              | **Yes, before anything else** |
+| A-03               | No per-section timing on a session; `session_questions` has no link to its section (FR-301, FR-505, TC-024)                                             | **Yes, before anything else** |
+| A-02               | `media_chunks.object_key` NOT NULL but retention nulls it (TC-072)                                                                                      |                               |
+| A-04               | Recording segments and restart grouping, if a column is chosen                                                                                          |                               |
+| A-06               | State machine gaps: APPEALED row, CONSENTED/VERIFIED expiry, identity pending, focus lost, appeal verdict storage                                       |                               |
+| A-07               | Cross-tenant foreign keys (NFR-04, TC-008)                                                                                                              |                               |
+| A-09               | Retention hold: anchor on the later of `submitted_at` and the final verdict or appeal resolution; skip UNDER_REVIEW, APPEALED and open appeals (FR-904) |                               |
+| A-10               | Durable replay state for event batches (TC-065)                                                                                                         |                               |
+| A-11               | Staff invites, webhook endpoints and deliveries, report PDF keys, validation results, allowed assistive tools                                           |                               |
+| A-21 items 2 and 4 | Room scan stored in two places; free-text enum columns                                                                                                  |                               |
+| A-22               | Indexes on foreign-key columns                                                                                                                          |                               |
+| A-23               | Score formula: points versus weights (TC-048)                                                                                                           |                               |
 
 ## 5. Deliverables
 
@@ -95,6 +95,7 @@ Out of scope: prisma/, apps/*, packages/shared, /docs/fsd.md and /docs/test-case
 
    Send the A-01 and A-03 options to the human first, ahead of the other ADRs, so the core tables can be settled early.
    Each option states the exact DDL delta (table, column, type, constraint) or says "no schema change". Prefer the simplest option that meets the NFRs; do not add a service or paid dependency.
+
 2. Hand the PM a short decision list: each question, your recommendation, and what breaks if the human says no.
 
 ### Phase B: after the human approves (per ADR)

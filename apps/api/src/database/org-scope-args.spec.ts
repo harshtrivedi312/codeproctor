@@ -1,6 +1,6 @@
 // What the extension turns each operation's arguments into. Pure functions, no database.
 import { OrgScopeViolationError } from './errors';
-import { applyOrgScope, SCOPED_OPERATIONS } from './org-scope-args';
+import { applyOrgScope, assertSystemScopeWrite, SCOPED_OPERATIONS } from './org-scope-args';
 import type { ScopedOperation } from './org-scope-args';
 import { ORG_SCOPE, orgFilter } from './org-scope-map';
 import type { ModelName } from './org-scope-map';
@@ -389,5 +389,104 @@ describe('org scope arguments (NFR-04, FR-103)', () => {
         orgId: ORG_A,
       }),
     ).toThrow(OrgScopeViolationError);
+  });
+});
+
+describe('system scope: a scalar orgId cannot move a row (ADR 0006 section 8; NFR-04)', () => {
+  const ORG_X = '44444444-4444-4444-8444-444444444444';
+  const system = (model: ModelName, operation: string, args: unknown): void =>
+    assertSystemScopeWrite(model, ORG_SCOPE[model], operation, args);
+
+  /** The payload of each write operation that can carry an update, with the update at `data`. */
+  const UPDATES: Array<[string, (data: Record<string, unknown>) => Record<string, unknown>]> = [
+    ['update', (data) => ({ where: { id: 'x' }, data })],
+    ['updateMany', (data) => ({ where: {}, data })],
+    ['updateManyAndReturn', (data) => ({ where: {}, data })],
+    ['upsert (update branch)', (data) => ({ where: { id: 'x' }, create: {}, update: data })],
+  ];
+  const DIRECT = [
+    'User',
+    'Question',
+    'Test',
+    'Candidate',
+    'Invitation',
+    'Session',
+    'AuditLog',
+    'ConsentText',
+    'WebhookEndpoint',
+  ] as const;
+
+  describe.each(UPDATES)('%s', (name, build) => {
+    const operation = name.split(' ')[0] as string;
+
+    it.each(DIRECT)('TC-008 %s: any orgId key is refused, whatever its value', (model) => {
+      for (const value of [ORG_X, ORG_A, null, '', { set: ORG_X }, { set: ORG_A }, { set: null }]) {
+        expect(() => system(model, operation, build({ orgId: value }))).toThrow(
+          OrgScopeViolationError,
+        );
+      }
+    });
+
+    it('TC-008 the message names the model and operation and carries no value', () => {
+      let message = '';
+      try {
+        system('User', operation, build({ orgId: ORG_X }));
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toContain(`User.${operation}`);
+      expect(message).toContain('orgId cannot be written by an update');
+      expect(message).not.toContain(ORG_X);
+    });
+
+    it.each(DIRECT)('TC-008 %s: an update without orgId is allowed in system scope', (model) => {
+      expect(() =>
+        system(model, operation, build({ fullName: 'x', orgId: undefined })),
+      ).not.toThrow();
+      expect(() => system(model, operation, build({ name: 'x' }))).not.toThrow();
+    });
+
+    it('TC-008 a model without its own org_id has no orgId to refuse, and Organization keeps its id', () => {
+      expect(() => system('TestSection', operation, build({ title: 'x' }))).not.toThrow();
+      expect(() => system('Organization', operation, build({ name: 'x' }))).not.toThrow();
+      expect(() => system('Organization', operation, build({ id: ORG_X }))).toThrow(
+        OrgScopeViolationError,
+      );
+    });
+  });
+
+  it('TC-008 a system-scope create may set orgId (creates in system scope are review-only)', () => {
+    for (const model of DIRECT) {
+      system(model, 'create', { data: { orgId: ORG_X } });
+      system(model, 'createMany', { data: [{ orgId: ORG_X }] });
+      system(model, 'createManyAndReturn', { data: [{ orgId: ORG_X }] });
+    }
+    // The create branch of an upsert too; only its update branch is refused.
+    expect(() =>
+      system('User', 'upsert', { where: { id: 'x' }, create: { orgId: ORG_X }, update: {} }),
+    ).not.toThrow();
+    expect(() =>
+      system('User', 'upsert', {
+        where: { id: 'x' },
+        create: { orgId: ORG_X },
+        update: { orgId: ORG_X },
+      }),
+    ).toThrow(OrgScopeViolationError);
+  });
+
+  it('TC-008 reads and deletes carry no data and are untouched', () => {
+    for (const operation of ['findMany', 'findFirst', 'count', 'delete', 'deleteMany']) {
+      expect(() => system('User', operation, { where: { orgId: ORG_X } })).not.toThrow();
+    }
+  });
+
+  it('TC-008 the nested relation rule still applies next to it, and the arguments are not changed', () => {
+    expect(() =>
+      system('User', 'update', { where: { id: 'x' }, data: { org: { connect: { id: ORG_X } } } }),
+    ).toThrow(/nested relation write refused \(User\.org\.connect\)/);
+    const args = { where: { id: 'x' }, data: { fullName: 'n' } };
+    const copy = structuredClone(args);
+    system('User', 'update', args);
+    expect(args).toEqual(copy);
   });
 });

@@ -1712,87 +1712,372 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       });
     }
 
+    /** The current TOTP code, and one that cannot be in the accepted window. */
+    const goodCode = (): string => authenticator.generate(SECRET);
+    const badCode = (): string =>
+      authenticator.clone({ epoch: Date.now() + 10 * 60_000 }).generate(SECRET);
+
+    /**
+     * A real sign-in for a TOTP user with the previous step's code, so the current step stays
+     * unused for the disable call. Returns the refresh cookie of the new family.
+     */
+    async function signInWithTotp(email: string): Promise<string> {
+      const { challengeToken } = (await login(email).expect(200)).body as Body;
+      const code = authenticator.clone({ epoch: Date.now() - 30_000 }).generate(SECRET);
+      const res = await post('2fa/verify', null, { challengeToken, code }).expect(200);
+      return refreshCookie(res);
+    }
+
+    const countCalls = async (run: () => Promise<unknown>): Promise<number[]> => {
+      const { PrismaService: PrismaSvc } = jest.requireActual<
+        typeof import('../database/prisma.service')
+      >('../database/prisma.service');
+      const client = app.get(PrismaSvc).client;
+      const query = jest.spyOn(client, '$queryRaw');
+      const exec = jest.spyOn(client, '$executeRaw');
+      try {
+        await run();
+        return [query, exec].map((spy) => spy.mock.calls.length);
+      } finally {
+        for (const spy of [query, exec]) spy.mockRestore();
+      }
+    };
+
+    function failTotpMarker(): jest.SpyInstance {
+      const redis = app.get<import('ioredis').Redis>(
+        jest.requireActual<typeof import('../infrastructure/infrastructure.module')>(
+          '../infrastructure/infrastructure.module',
+        ).REDIS_CLIENT,
+      );
+      const realSet = redis.set.bind(redis) as (...args: unknown[]) => Promise<unknown>;
+      return jest
+        .spyOn(redis, 'set')
+        .mockImplementation(((...args: unknown[]) =>
+          String(args[0]).startsWith('auth:totp:used:')
+            ? Promise.reject(new Error('redis down'))
+            : realSet(...args)) as unknown as typeof redis.set);
+    }
+
     describe('POST /auth/2fa/disable', () => {
-      it('TC-003: the right password turns 2FA off, clears secret and recovery codes, writes an audit row and leaves sessions alone', async () => {
+      it('TC-003: password plus a current code turns 2FA off, clears secret and recovery codes, revokes every refresh family, clears the cookie and audits without secrets (FR-102, FR-104)', async () => {
         const u = await createUser({ totp: SECRET });
         await withRecoveryCodes(u.id, ['ABCDEFGHJKLMNPQR']);
-        const other = await prisma.refreshToken.create({
+        const cookie = await signInWithTotp(u.email);
+        await prisma.refreshToken.create({
           data: {
             userId: u.id,
             familyId: '11111111-1111-4111-8111-111111111111',
-            tokenHash: sha256Hex(`keep-${u.id}`),
+            tokenHash: sha256Hex(`other-${u.id}`),
             expiresAt: new Date(Date.now() + 600_000),
           },
         });
-        await post('2fa/disable', await accessFor(u.id), { currentPassword: PASSWORD }).expect(204);
+        const res = await post('2fa/disable', await accessFor(u.id), {
+          currentPassword: PASSWORD,
+          totpCode: goodCode(),
+        }).expect(204);
+        const cleared = ((res.headers['set-cookie'] as unknown as string[] | undefined) ?? []).find(
+          (c) => c.startsWith('cp_refresh='),
+        );
+        expect(cleared).toMatch(/^cp_refresh=;/);
+        expect(cleared).toMatch(/Expires=Thu, 01 Jan 1970/);
         const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
         expect(row.totpEnabled).toBe(false);
         expect(row.totpSecretEnc).toBeNull();
         expect(row.recoveryCodeHashes).toEqual([]);
-        expect(
-          await prisma.auditLog.count({ where: { actorId: u.id, action: 'AUTH_2FA_DISABLED' } }),
-        ).toBe(1);
-        expect(
-          (await prisma.refreshToken.findUniqueOrThrow({ where: { id: other.id } })).revokedAt,
-        ).toBeNull();
+        expect(row.failedLogins).toBe(0);
+        expect(await prisma.refreshToken.count({ where: { userId: u.id, revokedAt: null } })).toBe(
+          0,
+        );
+        await refresh(cookie).expect(401);
+        const audit = await prisma.auditLog.findMany({
+          where: { actorId: u.id, action: 'AUTH_2FA_DISABLED' },
+        });
+        expect(audit).toHaveLength(1);
+        expect(audit[0]?.metadata).toEqual({ sessionsRevoked: 2 });
         expect(((await login(u.email).expect(200)).body as Body).status).toBe('authenticated');
       });
 
-      it('TC-003: a missing or wrong password is a 403 REAUTH_FAILED, changes nothing and counts the failure; a stolen access token alone cannot disable', async () => {
+      it('TC-003: a missing or malformed totpCode is a 400 and nothing is counted (a recovery code is not accepted)', async () => {
         const u = await createUser({ totp: SECRET });
         const token = await accessFor(u.id);
-        await post('2fa/disable', token, {}).expect(400);
-        const refused = await post('2fa/disable', token, {
+        await post('2fa/disable', token, { currentPassword: PASSWORD }).expect(400);
+        for (const totpCode of ['12345', '1234567', 'abcdef', 'ABCD-EFGH-JKLM', 123456, '']) {
+          await post('2fa/disable', token, { currentPassword: PASSWORD, totpCode }).expect(400);
+        }
+        const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+        expect(row.totpEnabled).toBe(true);
+        expect(row.failedLogins).toBe(0);
+      });
+
+      it('TC-003: a wrong password and a wrong code are the same 403 REAUTH_FAILED body; a stolen access token plus the password cannot disable', async () => {
+        const u = await createUser({ totp: SECRET });
+        const cookie = await signInWithTotp(u.email);
+        const token = await accessFor(u.id);
+        const wrongPassword = await post('2fa/disable', token, {
           currentPassword: 'wrong-password-1',
-        }).expect(403);
-        expect((refused.body as Body).code).toBe('REAUTH_FAILED');
+          totpCode: goodCode(),
+        });
+        const wrongCode = await post('2fa/disable', token, {
+          currentPassword: PASSWORD,
+          totpCode: badCode(),
+        });
+        reauthRefused(wrongPassword);
+        reauthRefused(wrongCode);
+        expect(sameShape(wrongCode)).toEqual(sameShape(wrongPassword));
         const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
         expect(row.totpEnabled).toBe(true);
         expect(row.totpSecretEnc).not.toBeNull();
-        expect(row.failedLogins).toBe(1);
+        expect(row.failedLogins).toBe(2);
         expect(
           await prisma.auditLog.count({ where: { actorId: u.id, action: 'AUTH_2FA_DISABLED' } }),
         ).toBe(0);
+        // The sessions are untouched.
+        await refresh(cookie).expect(200);
       });
 
-      it('TC-003: a locked account gets the same generic 403 REAUTH_FAILED as a wrong password, even with the right one', async () => {
+      it('TC-003: a replayed code is refused with the same 403 REAUTH_FAILED and counts as a failure', async () => {
         const u = await createUser({ totp: SECRET });
         const token = await accessFor(u.id);
-        for (let i = 0; i < 5; i++) {
+        const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+        const code = goodCode();
+        await post('2fa/verify', null, { challengeToken, code }).expect(200);
+        const replay = await post('2fa/disable', token, {
+          currentPassword: PASSWORD,
+          totpCode: code,
+        });
+        reauthRefused(replay);
+        const wrongPassword = await post('2fa/disable', token, {
+          currentPassword: 'wrong-password-1',
+          totpCode: code,
+        });
+        expect(sameShape(replay)).toEqual(sameShape(wrongPassword));
+        const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+        expect(row.totpEnabled).toBe(true);
+        expect(row.failedLogins).toBe(2);
+      });
+
+      it('TC-003: wrong codes and wrong passwords share the 5-attempt lockout, and a locked account refuses the right password and code like a wrong one', async () => {
+        const u = await createUser({ totp: SECRET });
+        const token = await accessFor(u.id);
+        for (let i = 0; i < 3; i++) {
           reauthRefused(
-            await post('2fa/disable', token, { currentPassword: 'wrong-password-1' }).expect(403),
+            await post('2fa/disable', token, { currentPassword: PASSWORD, totpCode: badCode() }),
           );
         }
-        const wrong = await post('2fa/disable', token, { currentPassword: 'wrong-password-1' });
-        const locked = await post('2fa/disable', token, { currentPassword: PASSWORD });
-        reauthRefused(wrong);
+        for (let i = 0; i < 2; i++) {
+          reauthRefused(
+            await post('2fa/disable', token, {
+              currentPassword: 'wrong-password-1',
+              totpCode: goodCode(),
+            }),
+          );
+        }
+        const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+        expect(row.failedLogins).toBe(5);
+        expect(row.lockedUntil).not.toBeNull();
+        const wrong = await post('2fa/disable', token, {
+          currentPassword: 'wrong-password-1',
+          totpCode: badCode(),
+        });
+        const locked = await post('2fa/disable', token, {
+          currentPassword: PASSWORD,
+          totpCode: goodCode(),
+        });
         reauthRefused(locked);
         expect(sameShape(locked)).toEqual(sameShape(wrong));
+        expect(JSON.stringify(locked.body)).not.toMatch(/lock/i);
         expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).totpEnabled).toBe(
           true,
         );
       });
 
-      it('TC-003: SUPER_ADMIN and REVIEWER cannot disable 2FA (FR-102 enforcement)', async () => {
+      it('TC-003: a failure at the code step that fills the last slot locks the account', async () => {
+        const u = await createUser({ totp: SECRET });
+        await prisma.user.update({ where: { id: u.id }, data: { failedLogins: 3 } });
+        reauthRefused(
+          await post('2fa/disable', await accessFor(u.id), {
+            currentPassword: PASSWORD,
+            totpCode: badCode(),
+          }),
+        );
+        const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+        expect(row.failedLogins).toBe(4);
+        expect(row.lockedUntil).toBeNull();
+        await prisma.user.update({ where: { id: u.id }, data: { failedLogins: 4 } });
+        reauthRefused(
+          await post('2fa/disable', await accessFor(u.id), {
+            currentPassword: PASSWORD,
+            totpCode: badCode(),
+          }),
+        );
+        expect(
+          (await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).lockedUntil,
+        ).not.toBeNull();
+      });
+
+      it('TC-003: a refused disable costs the same statements for a wrong password and a locked account; a wrong code adds only the second reservation', async () => {
+        const wrong = await createUser({ totp: SECRET });
+        const locked = await createUser({ totp: SECRET });
+        const codeUser = await createUser({ totp: SECRET });
+        await prisma.user.update({
+          where: { id: locked.id },
+          data: { failedLogins: 5, lockedUntil: new Date(Date.now() + 600_000) },
+        });
+        const counts: number[][] = [];
+        for (const [u, currentPassword, totpCode] of [
+          [wrong, 'wrong-password-1', goodCode()],
+          [locked, 'wrong-password-1', goodCode()],
+          [codeUser, PASSWORD, badCode()],
+        ] as const) {
+          const token = await accessFor(u.id);
+          counts.push(
+            await countCalls(async () =>
+              reauthRefused(await post('2fa/disable', token, { currentPassword, totpCode })),
+            ),
+          );
+        }
+        expect(counts[0]).toEqual(EXPECTED_SETUP_REFUSED_COUNTS);
+        expect(counts[1]).toEqual(counts[0]);
+        // Password reserve, refund, code reserve, failure register.
+        expect(counts[2]).toEqual([3, 1]);
+      });
+
+      it('TC-003: when Redis cannot record the code a valid code gets a fixed 503, no failure is counted, nothing changes, and a retry works', async () => {
+        const u = await createUser({ totp: SECRET });
+        const token = await accessFor(u.id);
+        const spy = failTotpMarker();
+        try {
+          for (let i = 0; i < 7; i++) {
+            const res = await post('2fa/disable', token, {
+              currentPassword: PASSWORD,
+              totpCode: goodCode(),
+            }).expect(503);
+            expect((res.body as Body).detail).toBe('Verification is temporarily unavailable.');
+            expect(res.headers['set-cookie']).toBeUndefined();
+          }
+        } finally {
+          spy.mockRestore();
+        }
+        const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+        expect(row.failedLogins).toBe(0);
+        expect(row.lockedUntil).toBeNull();
+        expect(row.totpEnabled).toBe(true);
+        await post('2fa/disable', token, {
+          currentPassword: PASSWORD,
+          totpCode: goodCode(),
+        }).expect(204);
+      });
+
+      it('TC-003: SUPER_ADMIN and REVIEWER cannot disable 2FA even with the right password and code, and a wrong code is a REAUTH_FAILED first (FR-102 enforcement)', async () => {
         for (const role of [UserRole.SUPER_ADMIN, UserRole.REVIEWER]) {
           const u = await createUser({ role, totp: SECRET });
-          const res = await post('2fa/disable', await accessFor(u.id), {
+          const token = await accessFor(u.id);
+          reauthRefused(
+            await post('2fa/disable', token, { currentPassword: PASSWORD, totpCode: badCode() }),
+          );
+          const res = await post('2fa/disable', token, {
             currentPassword: PASSWORD,
+            totpCode: goodCode(),
           }).expect(403);
           expect((res.body as Body).detail).toBe(
             'Two-factor authentication is required for your role.',
           );
           expect((res.body as Body).code).toBe('TWO_FACTOR_REQUIRED_FOR_ROLE');
-          expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).totpEnabled).toBe(
-            true,
-          );
+          const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+          expect(row.totpEnabled).toBe(true);
+          expect(row.failedLogins).toBe(1);
         }
       });
 
-      it('TC-003: without 2FA on it is a 409, and without a token a 401', async () => {
+      it('TC-003: without 2FA on it is a 409 after the password check, and without a token a 401', async () => {
         const u = await createUser();
-        await post('2fa/disable', await accessFor(u.id), { currentPassword: PASSWORD }).expect(409);
-        await post('2fa/disable', null, { currentPassword: PASSWORD }).expect(401);
+        const body = { currentPassword: PASSWORD, totpCode: goodCode() };
+        await post('2fa/disable', await accessFor(u.id), body).expect(409);
+        reauthRefused(
+          await post('2fa/disable', await accessFor(u.id), {
+            ...body,
+            currentPassword: 'wrong-password-1',
+          }),
+        );
+        await post('2fa/disable', null, body).expect(401);
+      });
+    });
+
+    describe('2fa/disable racing a refresh or a 2FA sign-in', () => {
+      const gate = (): { wait: Promise<void>; open: () => void } => {
+        let open: () => void = () => undefined;
+        const wait = new Promise<void>((resolve) => {
+          open = resolve;
+        });
+        return { wait, open };
+      };
+      async function untilTrue(cond: () => boolean): Promise<void> {
+        const deadline = Date.now() + 10_000;
+        while (!cond()) {
+          if (Date.now() > deadline) throw new Error('condition not reached');
+          await new Promise((r) => setTimeout(r, 20));
+        }
+      }
+
+      it('TC-003: a refresh that rotates while the disable waits is revoked by it, and no family stays live (FR-104)', async () => {
+        const u = await createUser({ totp: SECRET });
+        const cookie = await signInWithTotp(u.email);
+        const token = await accessFor(u.id);
+        const g = gate();
+        let reached = false;
+        totpVerify.mockImplementationOnce(async () => {
+          reached = true;
+          await g.wait;
+          return true;
+        });
+        const inFlight = post('2fa/disable', token, {
+          currentPassword: PASSWORD,
+          totpCode: goodCode(),
+        }).then((r) => r);
+        try {
+          await untilTrue(() => reached);
+          const rotated = await refresh(cookie).expect(200);
+          g.open();
+          expect((await inFlight).status).toBe(204);
+          await refresh(refreshCookie(rotated)).expect(401);
+        } finally {
+          g.open();
+          await inFlight.catch(() => undefined);
+        }
+        expect(await prisma.refreshToken.count({ where: { userId: u.id, revokedAt: null } })).toBe(
+          0,
+        );
+      });
+
+      it('TC-003: a 2FA sign-in that completes after the disable is refused and leaves no live refresh token (FR-102, FR-104)', async () => {
+        const u = await createUser({ totp: SECRET });
+        const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+        const token = await accessFor(u.id);
+        const g = gate();
+        let reached = false;
+        totpVerify.mockImplementationOnce(async () => {
+          reached = true;
+          await g.wait;
+          return true;
+        });
+        const signIn = post('2fa/verify', null, { challengeToken, code: '123456' }).then((r) => r);
+        try {
+          await untilTrue(() => reached);
+          await post('2fa/disable', token, {
+            currentPassword: PASSWORD,
+            totpCode: goodCode(),
+          }).expect(204);
+          g.open();
+          const res = await signIn;
+          expect(res.status).toBe(401);
+          expect(res.headers['set-cookie']).toBeUndefined();
+        } finally {
+          g.open();
+          await signIn.catch(() => undefined);
+        }
+        expect(await prisma.refreshToken.count({ where: { userId: u.id, revokedAt: null } })).toBe(
+          0,
+        );
       });
     });
 
@@ -1882,6 +2167,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
 
       it('TC-003: disable and regenerate that race a password change are a 403 REAUTH_FAILED and change nothing', async () => {
         for (const route of ['2fa/disable', '2fa/recovery-codes/regenerate']) {
+          const extra = route === '2fa/disable' ? { totpCode: goodCode() } : {};
           const u = await createUser({ totp: SECRET });
           await withRecoveryCodes(u.id, ['ABCDEFGHJKLMNPQR']);
           const token = await accessFor(u.id);
@@ -1889,7 +2175,9 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           afterNextVerify(() =>
             prisma.user.update({ where: { id: u.id }, data: { passwordHash: changed } }),
           );
-          reauthRefused(await post(route, token, { currentPassword: PASSWORD }).expect(403));
+          reauthRefused(
+            await post(route, token, { currentPassword: PASSWORD, ...extra }).expect(403),
+          );
           const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
           expect(row.totpEnabled).toBe(true);
           expect(row.recoveryCodeHashes).toEqual([sha256Hex('ABCDEFGHJKLMNPQR')]);
@@ -1944,12 +2232,18 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
             data: { totpEnabled: false, totpSecretEnc: null },
           }),
         );
-        await post('2fa/disable', token, { currentPassword: PASSWORD }).expect(409);
+        await post('2fa/disable', token, {
+          currentPassword: PASSWORD,
+          totpCode: goodCode(),
+        }).expect(409);
         const v = await createUser({ totp: SECRET });
         afterNextVerify(() =>
           prisma.user.update({ where: { id: v.id }, data: { role: UserRole.REVIEWER } }),
         );
-        await post('2fa/disable', await accessFor(v.id), { currentPassword: PASSWORD }).expect(403);
+        await post('2fa/disable', await accessFor(v.id), {
+          currentPassword: PASSWORD,
+          totpCode: goodCode(),
+        }).expect(403);
         expect((await prisma.user.findUniqueOrThrow({ where: { id: v.id } })).totpEnabled).toBe(
           true,
         );

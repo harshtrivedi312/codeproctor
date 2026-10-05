@@ -1,12 +1,12 @@
 # ADR 0011: Re-authentication for 2FA management
 
-| Field | Value |
-| --- | --- |
-| Status | Accepted 2026-10-05 (C-21, D-49): the owner's decision (currentPassword on setup, disable and recovery-code regeneration; 403 `REAUTH_FAILED`; forced enrolment unchanged) and the six answers recorded in `docs/api-contract.md`. |
-| Author | architecture hub |
-| Serves | FR-101, FR-102, FR-104; NFR-04; TC-002, TC-003 |
-| Builds on | ADR 0003 (credential storage), ADR 0001 TB-1 |
-| Affects | backend-engineer (BE-02, PR #26), frontend-engineer (Security page, FE-03), qa-engineer |
+| Field     | Value                                                                                                                                                                                                                              |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status    | Accepted 2026-10-05 (C-21, D-49): the owner's decision (currentPassword on setup, disable and recovery-code regeneration; 403 `REAUTH_FAILED`; forced enrolment unchanged) and the six answers recorded in `docs/api-contract.md`. |
+| Author    | architecture hub                                                                                                                                                                                                                   |
+| Serves    | FR-101, FR-102, FR-104; NFR-04; TC-002, TC-003                                                                                                                                                                                     |
+| Builds on | ADR 0003 (credential storage), ADR 0001 TB-1                                                                                                                                                                                       |
+| Affects   | backend-engineer (BE-02, PR #26), frontend-engineer (Security page, FE-03), qa-engineer                                                                                                                                            |
 
 ## Context
 

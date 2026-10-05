@@ -1,11 +1,11 @@
 # ADR 0010: Shared contracts v0 (events, keystrokes, permission matrix)
 
-| Field | Value |
-| --- | --- |
-| Status | Accepted 2026-10-05 by the owner, with the changes recorded in §1, §3 and §6. |
-| Author | architect |
-| Serves | FR-103, FR-501, FR-601..FR-610, FR-608, FR-801, FR-802, FR-804, FR-903; NFR-04, NFR-05, NFR-08; TC-004, TC-053, TC-055, TC-062, TC-063, TC-065, TC-075, TC-097 |
-| Builds on | ADR 0001 (TB-1, C-2), ADR 0005 (taxonomy, defaults, replay), ADR 0007 §8 |
+| Field     | Value                                                                                                                                                                                                                                             |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status    | Accepted 2026-10-05 by the owner, with the changes recorded in §1, §3 and §6.                                                                                                                                                                     |
+| Author    | architect                                                                                                                                                                                                                                         |
+| Serves    | FR-103, FR-501, FR-601..FR-610, FR-608, FR-801, FR-802, FR-804, FR-903; NFR-04, NFR-05, NFR-08; TC-004, TC-053, TC-055, TC-062, TC-063, TC-065, TC-075, TC-097                                                                                    |
+| Builds on | ADR 0001 (TB-1, C-2), ADR 0005 (taxonomy, defaults, replay), ADR 0007 §8                                                                                                                                                                          |
 | Leaves to | ARC-03: canonical JSON, HMAC transport and key lifecycle, evidence key layout, and how system-check events (MULTI_MONITOR, before the HMAC key is issued) are signed. Rest of ARC-02: API contract v0 (paths, drafts, RunResult, error envelope). |
 
 ## Context

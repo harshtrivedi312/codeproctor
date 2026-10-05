@@ -593,27 +593,56 @@ export class AuthService implements OnApplicationShutdown {
   // ---- FR-102: manage 2FA while signed in ---------------------------------------------------
 
   /**
-   * Turns 2FA off for the signed-in user. Needs the current password (same path as setup). Roles
-   * that must use 2FA are refused, since disabling would bypass FR-102. Other sessions are left
-   * alone: an access token carries no family id, so the caller's own family cannot be told
-   * apart from the rest.
+   * Turns 2FA off for the signed-in user (ADR 0011). Needs the current password AND a current
+   * TOTP code, so a stolen access token plus a phished password is not enough. Order: password
+   * (shared reserve and lockout, 403 REAUTH_FAILED), then 409 when 2FA is off, then the TOTP code
+   * on its own reservation (same lockout, replay-protected; a wrong or replayed code is the same
+   * 403 REAUTH_FAILED body as a wrong password; a Redis outage is a 503 with the reservation
+   * given back), and only then the role refusal. The 409 before the code check tells someone who
+   * already holds the password only that 2FA is off, which the signed-in user can see anyway.
+   * Roles that must use 2FA are refused (FR-102). One transaction clears secret, flag and
+   * recovery hashes (users row first), then revokes every refresh-token family of the user,
+   * including the caller's own (users before refresh_tokens, the lock order every other path
+   * uses), and audits. A refresh or a 2FA login racing this either waits on the users row lock
+   * and is refused, or commits first and is revoked here. Access tokens already issued end at
+   * once through the BE-03 tokens-valid-after marker (set in the same transaction).
    */
-  async disableTwoFactor(userId: string, password: string, ctx: RequestContext): Promise<void> {
+  async disableTwoFactor(
+    userId: string,
+    password: string,
+    totpCode: string,
+    ctx: RequestContext,
+  ): Promise<void> {
     const user = await this.requireCurrentPassword(userId, password, ctx);
-    if (TOTP_REQUIRED_ROLES.includes(user.role)) throw this.twoFactorRequiredForRole();
     if (!user.totpEnabled) throw new ConflictException('Two-factor authentication is not on.');
+    const secret = user.totpSecretEnc;
+    if ((await this.reserveAttempt(user, ctx)) !== 'granted') throw reauthFailed();
+    if (!secret || !(await this.verifyTotp(user, secret, totpCode))) {
+      await this.registerFailure(user, ctx);
+      throw reauthFailed();
+    }
+    // Both factors passed: the reservation is not a failed guess.
+    await this.refundAttempt(user).catch(() => undefined);
+    if (TOTP_REQUIRED_ROLES.includes(user.role)) throw this.twoFactorRequiredForRole();
     await this.prisma.client.$transaction(async (tx) => {
       const updated = await tx.user.updateMany({
         where: {
           id: user.id,
           passwordHash: user.passwordHash ?? '',
           totpEnabled: true,
+          totpSecretEnc: secret,
           role: { notIn: [...TOTP_REQUIRED_ROLES] },
         },
         data: { totpEnabled: false, totpSecretEnc: null, recoveryCodeHashes: [] },
       });
       if (updated.count !== 1) await this.explainRefusedChange(tx, user, true);
-      await this.audit(user, 'AUTH_2FA_DISABLED', ctx, {}, tx);
+      const revoked = await tx.refreshToken.updateMany({
+        where: { userId: user.id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      // Access tokens issued so far end too (Redis marker; a Redis outage rolls this back, 503).
+      await this.validity.invalidateIssuedTokens(user.id);
+      await this.audit(user, 'AUTH_2FA_DISABLED', ctx, { sessionsRevoked: revoked.count }, tx);
     });
   }
 

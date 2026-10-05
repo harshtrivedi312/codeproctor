@@ -4,19 +4,19 @@ This tab turns each business requirement into testable functional requirements (
 
 ## 1. Modules
 
-| Module | Covers BR | Owner service |
-| --- | --- | --- |
-| M1 Identity & Access | BR-14 | API: auth, users |
-| M2 Question Bank | BR-05, BR-08 | API: questions |
-| M3 Test Builder & Invitations | BR-01 | API: tests, invitations |
-| M4 Candidate Portal | BR-02, BR-12 | Web: candidate app |
-| M5 Coding Environment & Execution | BR-05 | Web + API + Judge0 |
-| M6 Proctoring Client | BR-03, BR-04 | Web: proctor SDK |
-| M7 Media Pipeline | BR-03, BR-13 | API + object storage (S3-compatible) + worker |
-| M8 Integrity Engine | BR-06, BR-10 | Worker |
-| M9 Review & Live Proctoring | BR-07, BR-09 | Web: staff app + Socket.IO |
-| M10 Reporting & Integrations | BR-15 | API |
-| M11 Lockdown Client | BR-11 | Electron (Phase 3) |
+| Module                            | Covers BR    | Owner service                                 |
+| --------------------------------- | ------------ | --------------------------------------------- |
+| M1 Identity & Access              | BR-14        | API: auth, users                              |
+| M2 Question Bank                  | BR-05, BR-08 | API: questions                                |
+| M3 Test Builder & Invitations     | BR-01        | API: tests, invitations                       |
+| M4 Candidate Portal               | BR-02, BR-12 | Web: candidate app                            |
+| M5 Coding Environment & Execution | BR-05        | Web + API + Judge0                            |
+| M6 Proctoring Client              | BR-03, BR-04 | Web: proctor SDK                              |
+| M7 Media Pipeline                 | BR-03, BR-13 | API + object storage (S3-compatible) + worker |
+| M8 Integrity Engine               | BR-06, BR-10 | Worker                                        |
+| M9 Review & Live Proctoring       | BR-07, BR-09 | Web: staff app + Socket.IO                    |
+| M10 Reporting & Integrations      | BR-15        | API                                           |
+| M11 Lockdown Client               | BR-11        | Electron (Phase 3)                            |
 
 ## 2. Functional requirements
 
@@ -119,64 +119,64 @@ This tab turns each business requirement into testable functional requirements (
 
 ## 3. Session state machine
 
-| State | Entered when | Next states |
-| --- | --- | --- |
-| INVITED | Invitation created (the session row is created with it) | OPENED, EXPIRED |
-| OPENED | Candidate opens link inside the window and passes OTP | CONSENTED, DECLINED, EXPIRED |
-| CONSENTED | Consent document signed | VERIFIED, EXPIRED |
-| VERIFIED | System check, ID and selfie attempts and room scan done (identity passed or sent to manual review; never rejected) | IN\_PROGRESS, EXPIRED |
-| IN\_PROGRESS | Timer starts | PAUSED, SUBMITTED |
-| PAUSED | Fullscreen exit, share stopped, STRICT side camera lost, proctor pause (only a proctor pause stops the clock) | IN\_PROGRESS, SUBMITTED |
-| SUBMITTED | Candidate submits, last section ends, or time runs out | GRADED |
-| GRADED | Hidden tests and risk score done | UNDER\_REVIEW, COMPLETED |
-| UNDER\_REVIEW | Risk MEDIUM/HIGH, identity awaiting manual review, or a short answer awaiting manual scoring | COMPLETED |
-| COMPLETED | Verdict set or auto-clean | APPEALED |
-| APPEALED | Candidate appeals within 7 days of a VIOLATION verdict | COMPLETED |
-| EXPIRED | Start window closed before the test started | — |
-| DECLINED | Candidate declined the consent document; no recording | — |
+| State         | Entered when                                                                                                       | Next states                  |
+| ------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------- |
+| INVITED       | Invitation created (the session row is created with it)                                                            | OPENED, EXPIRED              |
+| OPENED        | Candidate opens link inside the window and passes OTP                                                              | CONSENTED, DECLINED, EXPIRED |
+| CONSENTED     | Consent document signed                                                                                            | VERIFIED, EXPIRED            |
+| VERIFIED      | System check, ID and selfie attempts and room scan done (identity passed or sent to manual review; never rejected) | IN\_PROGRESS, EXPIRED        |
+| IN\_PROGRESS  | Timer starts                                                                                                       | PAUSED, SUBMITTED            |
+| PAUSED        | Fullscreen exit, share stopped, STRICT side camera lost, proctor pause (only a proctor pause stops the clock)      | IN\_PROGRESS, SUBMITTED      |
+| SUBMITTED     | Candidate submits, last section ends, or time runs out                                                             | GRADED                       |
+| GRADED        | Hidden tests and risk score done                                                                                   | UNDER\_REVIEW, COMPLETED     |
+| UNDER\_REVIEW | Risk MEDIUM/HIGH, identity awaiting manual review, or a short answer awaiting manual scoring                       | COMPLETED                    |
+| COMPLETED     | Verdict set or auto-clean                                                                                          | APPEALED                     |
+| APPEALED      | Candidate appeals within 7 days of a VIOLATION verdict                                                             | COMPLETED                    |
+| EXPIRED       | Start window closed before the test started                                                                        | —                            |
+| DECLINED      | Candidate declined the consent document; no recording                                                              | —                            |
 
 Rules and timing details: ADR 0002 (updated 2026-10-01, D-16, D-17).
 
 ## 4. Core API (REST, JSON, `/api/v1`)
 
-| Method | Path | Role | Purpose |
-| --- | --- | --- | --- |
-| POST | /auth/login | Staff | Password login, returns 2FA challenge if enabled |
-| POST | /auth/2fa/verify | Staff | Completes login |
-| POST | /auth/refresh | Staff | Rotate tokens |
-| POST | /auth/password/forgot | Public | Request a password reset link; same response whether or not the account exists (FR-107) |
-| POST | /auth/password/reset | Public | Set a new password with the single-use reset token (FR-107) |
-| GET/POST/PATCH | /questions, /questions/:id | Author | CRUD and versions |
-| POST | /questions/:id/validate | Author | Run reference solution on all tests and variants |
-| GET/POST/PATCH | /tests, /tests/:id | Recruiter | Test templates |
-| POST | /tests/:id/invitations | Recruiter | Single or bulk invite |
-| POST | /candidate/session/start | Candidate | Exchange invitation token + OTP for session token |
-| GET | /candidate/session/consent | Candidate | The consent document for this session (version and text) |
-| POST | /candidate/session/consent/sign | Candidate | Sign with the typed full legal name; server timestamps it, stores the PDF and emails a copy (FR-401) |
-| POST | /candidate/session/consent/decline | Candidate | Decline; ends the session with no recording (FR-401) |
-| POST | /candidate/session/identity | Candidate | Upload ID + selfie, returns match result |
-| POST | /candidate/session/media/presign | Candidate | Presigned URL for next recording chunk |
-| POST | /candidate/session/events | Candidate | Batch of proctoring events |
-| POST | /candidate/session/keystrokes | Candidate | Batch of editor events |
-| POST | /candidate/answers/:questionId/run | Candidate | Run sample tests |
-| POST | /candidate/answers/:questionId/submit | Candidate | Submit and grade hidden tests |
-| POST | /candidate/session/finish | Candidate | End test |
-| GET | /review/queue | Reviewer | Sessions awaiting review |
-| GET | /review/sessions/:id | Reviewer | Full review bundle |
-| PATCH | /review/flags/:id | Reviewer | Confirm or dismiss a flag |
-| POST | /review/sessions/:id/verdict | Reviewer | Final verdict |
-| WS | /live | Reviewer | Live sessions, events, pause/message |
+| Method         | Path                                  | Role      | Purpose                                                                                              |
+| -------------- | ------------------------------------- | --------- | ---------------------------------------------------------------------------------------------------- |
+| POST           | /auth/login                           | Staff     | Password login, returns 2FA challenge if enabled                                                     |
+| POST           | /auth/2fa/verify                      | Staff     | Completes login                                                                                      |
+| POST           | /auth/refresh                         | Staff     | Rotate tokens                                                                                        |
+| POST           | /auth/password/forgot                 | Public    | Request a password reset link; same response whether or not the account exists (FR-107)              |
+| POST           | /auth/password/reset                  | Public    | Set a new password with the single-use reset token (FR-107)                                          |
+| GET/POST/PATCH | /questions, /questions/:id            | Author    | CRUD and versions                                                                                    |
+| POST           | /questions/:id/validate               | Author    | Run reference solution on all tests and variants                                                     |
+| GET/POST/PATCH | /tests, /tests/:id                    | Recruiter | Test templates                                                                                       |
+| POST           | /tests/:id/invitations                | Recruiter | Single or bulk invite                                                                                |
+| POST           | /candidate/session/start              | Candidate | Exchange invitation token + OTP for session token                                                    |
+| GET            | /candidate/session/consent            | Candidate | The consent document for this session (version and text)                                             |
+| POST           | /candidate/session/consent/sign       | Candidate | Sign with the typed full legal name; server timestamps it, stores the PDF and emails a copy (FR-401) |
+| POST           | /candidate/session/consent/decline    | Candidate | Decline; ends the session with no recording (FR-401)                                                 |
+| POST           | /candidate/session/identity           | Candidate | Upload ID + selfie, returns match result                                                             |
+| POST           | /candidate/session/media/presign      | Candidate | Presigned URL for next recording chunk                                                               |
+| POST           | /candidate/session/events             | Candidate | Batch of proctoring events                                                                           |
+| POST           | /candidate/session/keystrokes         | Candidate | Batch of editor events                                                                               |
+| POST           | /candidate/answers/:questionId/run    | Candidate | Run sample tests                                                                                     |
+| POST           | /candidate/answers/:questionId/submit | Candidate | Submit and grade hidden tests                                                                        |
+| POST           | /candidate/session/finish             | Candidate | End test                                                                                             |
+| GET            | /review/queue                         | Reviewer  | Sessions awaiting review                                                                             |
+| GET            | /review/sessions/:id                  | Reviewer  | Full review bundle                                                                                   |
+| PATCH          | /review/flags/:id                     | Reviewer  | Confirm or dismiss a flag                                                                            |
+| POST           | /review/sessions/:id/verdict          | Reviewer  | Final verdict                                                                                        |
+| WS             | /live                                 | Reviewer  | Live sessions, events, pause/message                                                                 |
 
 ## 5. Non-functional requirements
 
-| ID | Area | Requirement |
-| --- | --- | --- |
-| NFR-01 | Performance | API p95 under 300 ms excluding code execution; code run result under 5 s p95 |
-| NFR-02 | Capacity | 200 concurrent candidates on the pilot deployment |
-| NFR-03 | Availability | 99.5% during scheduled test windows |
-| NFR-04 | Security | OWASP ASVS Level 2; TLS 1.2+; secrets in environment vault; rate limits on all public endpoints |
-| NFR-05 | Privacy | Data minimization, encryption at rest, retention jobs, deletion on request within 30 days. Provisional (D-19, Legal to confirm): erasure waits while a review or appeal is open and runs as soon as it closes; the candidate is told. Proposed wording for Legal (D-27): erasure completes within 30 days of the request, or within 30 days after an open review or appeal closes, whichever is later; the candidate is told about any delay. The hold is configurable |
-| NFR-06 | Accessibility | WCAG 2.1 AA on candidate and staff screens |
-| NFR-07 | Browser support | Chrome and Edge (latest 2 versions) for STANDARD/STRICT; Firefox and Safari blocked with a clear message |
-| NFR-08 | Resilience | A network drop of up to 60 s loses no code and no recording chunks |
-| NFR-09 | Observability | Structured logs, error tracking, uptime alerts, per-session trace ID |
+| ID     | Area            | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------ | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| NFR-01 | Performance     | API p95 under 300 ms excluding code execution; code run result under 5 s p95                                                                                                                                                                                                                                                                                                                                                                                           |
+| NFR-02 | Capacity        | 200 concurrent candidates on the pilot deployment                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| NFR-03 | Availability    | 99.5% during scheduled test windows                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| NFR-04 | Security        | OWASP ASVS Level 2; TLS 1.2+; secrets in environment vault; rate limits on all public endpoints                                                                                                                                                                                                                                                                                                                                                                        |
+| NFR-05 | Privacy         | Data minimization, encryption at rest, retention jobs, deletion on request within 30 days. Provisional (D-19, Legal to confirm): erasure waits while a review or appeal is open and runs as soon as it closes; the candidate is told. Proposed wording for Legal (D-27): erasure completes within 30 days of the request, or within 30 days after an open review or appeal closes, whichever is later; the candidate is told about any delay. The hold is configurable |
+| NFR-06 | Accessibility   | WCAG 2.1 AA on candidate and staff screens                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| NFR-07 | Browser support | Chrome and Edge (latest 2 versions) for STANDARD/STRICT; Firefox and Safari blocked with a clear message                                                                                                                                                                                                                                                                                                                                                               |
+| NFR-08 | Resilience      | A network drop of up to 60 s loses no code and no recording chunks                                                                                                                                                                                                                                                                                                                                                                                                     |
+| NFR-09 | Observability   | Structured logs, error tracking, uptime alerts, per-session trace ID                                                                                                                                                                                                                                                                                                                                                                                                   |

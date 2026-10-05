@@ -152,6 +152,50 @@ describe('org scope extension without a database (NFR-04, FR-103)', () => {
     });
   });
 
+  describe('system scope: a scalar orgId in an update is refused (before any SQL)', () => {
+    const ORG_X = '44444444-4444-4444-8444-444444444444';
+    const attempts: Array<[string, () => Promise<unknown>]> = [
+      ['user.update', () => client.user.update({ where: { id: ORG_A }, data: { orgId: ORG_X } })],
+      [
+        'user.update (set form)',
+        () => client.user.update({ where: { id: ORG_A }, data: { orgId: { set: ORG_X } } }),
+      ],
+      ['question.updateMany', () => client.question.updateMany({ data: { orgId: ORG_X } })],
+      [
+        'question.updateManyAndReturn',
+        () => client.question.updateManyAndReturn({ data: { orgId: ORG_X } }),
+      ],
+      [
+        'test.upsert (update branch)',
+        () =>
+          client.test.upsert({
+            where: { id: ORG_A },
+            create: { orgId: ORG_A, name: 't', durationMinutes: 30 },
+            update: { orgId: ORG_X },
+          }),
+      ],
+      [
+        'organization.update (id)',
+        () => client.organization.update({ where: { id: ORG_A }, data: { id: ORG_X } }),
+      ],
+    ];
+
+    it.each(attempts)('TC-008 %s is refused in system scope', async (_name, run) => {
+      await expect(orgContext.runSystem('BACKGROUND_JOB', run)).rejects.toBeInstanceOf(
+        OrgScopeViolationError,
+      );
+    });
+
+    it('TC-008 and still refused in an org scope, and with no scope nothing changes', async () => {
+      for (const [, run] of attempts) {
+        await expect(orgContext.runInOrg(ORG_A, run)).rejects.toBeInstanceOf(
+          OrgScopeViolationError,
+        );
+        await expect(run()).rejects.toBeInstanceOf(OrgContextMissingError);
+      }
+    });
+  });
+
   describe('raw SQL', () => {
     const attempts: Array<[string, () => Promise<unknown>]> = [
       ['$queryRaw', () => client.$queryRaw`SELECT 1`],

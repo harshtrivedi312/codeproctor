@@ -153,6 +153,61 @@ function assertTenancyKept(
 }
 
 /**
+ * System scope: no org filter, but writes still may not move a row to another org. After nested
+ * relation writes are denied, a scalar `orgId` in an update is the only way left to do that, and
+ * Postgres catches it only on the composite-key tables. So on a model with its own org_id, any
+ * `orgId` key in the payload of `update`, `updateMany`, `updateManyAndReturn` or the update branch
+ * of `upsert` is refused, whatever its value and in any form (`{ set }` too), and an Organization
+ * keeps its id. A `create` may set `orgId` here: creates in system scope are review-only (ADR 0006).
+ * Sends no query; the message carries no value.
+ */
+function assertNoOrgMove(
+  model: string,
+  operation: string,
+  rule: OrgScopeRule,
+  data: unknown,
+): void {
+  if (!isPlainObject(data)) return;
+  if (rule.kind === 'self' && data.id !== undefined) {
+    throw violation(model, operation, "an organization's id cannot be changed.");
+  }
+  if (rule.kind === 'direct' && data.orgId !== undefined) {
+    throw violation(
+      model,
+      operation,
+      'orgId cannot be written by an update, in system scope or any other (a row is never moved to another org).',
+    );
+  }
+}
+
+/**
+ * The checks that apply in system scope, where nothing is filtered: no nested relation write
+ * (ADR 0006 section 8), and no `orgId` in an update. Org scope has the same two checks inside
+ * applyOrgScope, with the filter and stamping on top.
+ */
+export function assertSystemScopeWrite(
+  model: ModelName,
+  rule: OrgScopeRule,
+  operation: string,
+  args: unknown,
+): void {
+  assertNoNestedWritesIn(model, operation, args);
+  if (!isPlainObject(args)) return;
+  switch (operation) {
+    case 'update':
+    case 'updateMany':
+    case 'updateManyAndReturn':
+      assertNoOrgMove(model, operation, rule, args.data);
+      break;
+    case 'upsert':
+      assertNoOrgMove(model, operation, rule, args.update);
+      break;
+    default:
+      break; // creates may set orgId in system scope; reads and deletes carry no data
+  }
+}
+
+/**
  * A cursor, scoped. Prisma finds the cursor row with the cursor's own fields only: the query's
  * `where` is not applied to that lookup, so in org A's scope `cursor: { id: <B's id> }` would rank
  * A's rows against B's row (leaking its values and whether the id exists). So:

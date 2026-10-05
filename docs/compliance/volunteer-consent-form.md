@@ -70,7 +70,7 @@ You must be 18 or over to take part. Please tick each box you agree to. Box A is
 - [ ] **B. Demographic information (optional).** I agree to give optional demographic information, stored separately from my photos and deleted with them.
 - [ ] **C. Group results (optional).** I agree that my demographic information may be used to calculate how accurate the identity check is for different groups. Only totals for groups of [10] or more people will be reported.
 
-Full name: ______________________   Signature: ______________________   Date: ____________
+Full name: ______________________ Signature: ______________________ Date: ____________
 
 Volunteer code (filled in by us): ____________
 
