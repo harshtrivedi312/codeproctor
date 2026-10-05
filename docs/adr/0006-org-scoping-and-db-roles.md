@@ -15,7 +15,7 @@
   - Every other table without `org_id` declares a scope path along its composition parent chain to an ancestor that has one (section 8.7; for example ProctorEvent → session.orgId, TestCase → questionVersion.question.orgId). *Wording amended 2026-10-05 (proposed, owner to accept): was "to its nearest ancestor".*
   - DB-05's Prisma extension adds the filter from that map.
   - A test fails if any model has neither `org_id` nor a scope path, like the permission-matrix test.
-  - Candidate routes scope through the token's session, and jobs through the job's session (ADR 0001 C-1).
+  - Candidate routes scope through the token's session. Session jobs scope through the job's session, and cross-session jobs run in `runInOrg` (ADR 0001 C-1; section 8.4). *Wording amended 2026-10-05 (proposed): was "jobs through the job's session".*
 - (b) Postgres row-level security with a per-request `SET app.org_id`. It is the strongest guard, but with Prisma it needs a transaction per request and complicates pooling. Not for the pilot.
 - (c) Parent-chain joins only, no DDL. Hot candidate routes then pay multi-hop joins (NFR-01), and every child query depends on a hand-written join.
 
@@ -273,9 +273,9 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 - **What the extension does not check (rule (i), documented in the PR #30 README).**
   - Child-side `connect`, scalar foreign-key writes and re-parenting stay under rule (i): load the target through the scoped client first, and answer 404 on a miss.
   - Nested reads (`include`, `select`, the fluent API, relation filters, relation `orderBy`, `_count`) follow foreign keys without the org filter. One TC-008 test pins this behaviour (FU-DB-78).
-  - ADR 0013 CS-4 refuses nested reads in a CANDIDATE scope. In STAFF, plain org and SERVICE scopes they remain a rule (i) review item: select only the fields needed, and never `include` a user.
+  - CS-4 refuses all six vectors in a CANDIDATE scope: `include`, `select` of a relation, the fluent API, relation filters, relation `orderBy` and `_count` (ADR 0013). In STAFF, plain org and SERVICE scopes they remain a rule (i) review item: select only the fields needed, and never `include` a user.
 - **Where these rules apply.**
-  - In a CANDIDATE scope, ADR 0013 CS-4 is stricter: it refuses every nested write and every relation operation outright (`include` and `select` of relations, relation filters, `_count`).
+  - In a CANDIDATE scope, ADR 0013 CS-4 is stricter. It refuses every nested write, and all six nested-read vectors listed above, outright.
   - The nested-write rules here, and those in 8.6, still apply to STAFF scopes, plain org scopes, SERVICE scopes and system scope.
 
 ### 8.3 Schema and row-level security (owner decision: Delivery Lead)
@@ -291,8 +291,8 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 
 | Actor | Entered by | Allowed from | Who calls it |
 | --- | --- | --- | --- |
-| STAFF | `runAsUser({ orgId, userId, role })` | no scope, or system | `OrgContextInterceptor`, and auth code once the user is known |
-| Org scope, no session | `runInOrg(orgId)` | no scope, or system | Cross-session jobs (similarity, dashboards, retention follow-up), and narrowing from system scope |
+| STAFF | `runAsUser({ orgId, userId, role })` | no scope, system, or the same user (no change) | `OrgContextInterceptor`, and auth code once the user is known |
+| Org scope, no session | `runInOrg(orgId)` | no scope, or system. Inside any org scope of the same org it is allowed and changes nothing; the actor, user and session stay (rows below). | Cross-session jobs (similarity, dashboards, retention follow-up), and narrowing from system scope |
 | CANDIDATE (ADR 0013 CS-4) | `runAsCandidate(oid, sid)` | no scope only | `CandidateSessionGuard` only |
 | SERVICE (ADR 0013 CS-4) | `runAsSessionJob(oid, sid)` | no scope, or system `BACKGROUND_JOB` only | `SessionJobProcessor`, the one job-processor base class, only |
 | SYSTEM | `runSystem(reason)` | no scope | The three reasons below |
@@ -315,6 +315,7 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 | STAFF, user U in org A | `runAsUser(U)` | Allowed, no change |
 | STAFF, user U | `runAsUser` naming another user | Refused |
 | STAFF, user U in org A | `runInOrg(A)` | Allowed; the actor stays STAFF with user U |
+| Org scope in org A, no session | `runInOrg(A)` | Allowed, no change |
 | STAFF, or org scope with no session | `runAsCandidate` or `runAsSessionJob` | Refused. A plain org scope never narrows into a session scope; staff reads of a session use the org scope and service checks. |
 | CANDIDATE or SERVICE in org A, session S | `runInOrg(A)` | Allowed; S stays and the actor stays |
 | CANDIDATE in org A, session S | `runAsCandidate(A, S)` | Allowed, no change |
@@ -332,7 +333,7 @@ No rule in this ADR depends on a plain org scope narrowing into a session scope.
 
 | Reason | Allowed for |
 | --- | --- |
-| `AUTH_BOOTSTRAP` | Lookups before the caller's org is known. On the staff side: login by email, refresh-token rotation and set-password tokens. On the candidate side: only the invitation-link and OTP exchange, before a candidate session JWT exists. Narrow to `runAsUser` or `runInOrg(A)` as soon as the org is known. It cannot enter a session scope. |
+| `AUTH_BOOTSTRAP` | Lookups before the caller's org is known. On the staff side: login by email, refresh-token rotation and set-password tokens. On the candidate side, only the three routes before a candidate session JWT exists: link resolve, OTP send and OTP verify (ADR 0013 section 5.10). Narrow to `runAsUser` or `runInOrg(A)` as soon as the org is known. It cannot enter a session scope. |
 | `BACKGROUND_JOB` | Scheduled discovery across orgs only. See the job rules below. |
 | `RETENTION_ERASURE` | Selecting what is due only. Each session is then deleted in a plain `runInOrg(orgId)` (FU-DB-71) or by a per-session job. It never enters `runAsSessionJob` directly from this scope. |
 
@@ -344,13 +345,16 @@ No rule in this ADR depends on a plain org scope narrowing into a session scope.
 - That check catches a mismatched payload. It does not stop an attacker who can write both fields, so the trust boundary is Redis access control and network isolation (ADR 0001 C-7). Signed job payloads are an option if the owner wants more.
 
 **Routes behind `CandidateSessionGuard` use no system scope.**
-- The OTP exchange is the one candidate route outside the guard (ADR 0013 section 5.10). It runs under `AUTH_BOOTSTRAP`, together with resolving the invitation link.
+- Link resolve, OTP send and OTP verify are the candidate routes outside the guard (ADR 0013 section 5.10). They run under `AUTH_BOOTSTRAP`.
 - The guard verifies the candidate JWT, then enters `runAsCandidate(oid, sid)` from no scope, using the verified claims.
 - Inside that scope it loads the session with `id = sid` and checks `auth_epoch` against the token's `epoch`.
 - A session in another org is simply not found, which answers 401.
 
 **Grading and start-test add no system reason.**
-- Hidden-test grading (`grade-answer`) and start-test (`start-session`, which includes question assignment) are session jobs with actor SERVICE (ADR 0013 CS-4). The route enqueues the job and awaits it.
+- Hidden-test grading and start-test run as session jobs with actor SERVICE. ADR 0013 holds their contracts and timeouts; this ADR does not restate them.
+  - **Grading.** ADR 0013 (round 5) has submit return only `{ accepted, submissionId }`. Hidden-test grading runs in `grade-session` (ADR 0007). There is no synchronous submit result.
+  - **Start-test.** `start-session`, which includes question assignment, stays a job that the route awaits, with 503 on timeout.
+  - What the candidate sees after the test is an open owner question.
 - `runSystem` stays refused from every org scope, including a candidate scope, and the reason set stays closed.
 - Any future synchronous exception inside a candidate request needs an explicit amendment to this section, naming the call site and the new row.
 
@@ -392,7 +396,7 @@ There is no org-provisioning reason (8.6, 8.9).
   - extend the full deny-by-default list below to every scope, system scope included.
 - Allowed:
   - reads: `findUnique`, `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `findMany`, `count`, `aggregate` and `groupBy`;
-  - `update`, `updateMany` and `updateManyAndReturn`, but only in an org scope and only when the data does not contain `id`. `organizations.id` is immutable; a test covers it, and there is no trigger (8.3).
+  - `update`, `updateMany` and `updateManyAndReturn`, but only in a STAFF scope (the org-settings service), never in a plain org, SERVICE or CANDIDATE scope, and only when the data does not contain `id`. `organizations.id` is immutable; a test covers it, and there is no trigger (8.3).
 - Refused: `create`, `createMany`, `createManyAndReturn`, `upsert`, `delete` and `deleteMany`.
 - Any operation the extension does not recognise throws.
 
@@ -444,6 +448,10 @@ Without that check, the exemption would be a bypass inside `apps/api`.
   - no schema (`pg_namespace.nspowner`);
   - no relation in any schema (`pg_class.relowner`);
   - no function (`pg_proc.proowner`).
+- **it has no create rights:**
+  - no CREATE or TEMP on the database (`has_database_privilege`);
+  - no CREATE on schema `public` (`has_schema_privilege`).
+  - DB-08 already checks these at test time; the readiness check repeats them at runtime.
 
 How the check runs:
 
@@ -474,7 +482,7 @@ How the check runs:
   It creates no consent text or other content; the admin adds those in the app.
 - **The placeholder token.** The `users` CHECK (`password_hash` or `set_password_token_hash` must be set; database.md) needs a token hash when the admin row is inserted. So the CLI:
   - stores the SHA-256 of a random 32-byte token;
-  - sets `set_password_expires_at` to the insert time, so the placeholder is never valid;
+  - sets `set_password_expires_at` to the insert time, so the placeholder is never valid. The reset endpoint treats `set_password_expires_at <= now()` as expired, so the placeholder can never match;
   - discards the cleartext at once, and never prints, logs or keeps it.
 - **Sending the link (option (b), recommended).** Considered: (a) the CLI sends mail itself; (c) enqueue the cleartext with `removeOnComplete` and `removeOnFail` (the minimum, not recommended).
   - After commit, the CLI enqueues a `set-password` job.
