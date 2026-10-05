@@ -209,9 +209,10 @@ describe('session handling', () => {
     const pending = refreshSession();
     const u = userEvent.setup();
     await u.click(screen.getByRole('button', { name: 'Sign out' }));
-    await waitFor(() => expect(getAccessToken()).toBeNull());
+    // Sign-out waits for the refresh to settle before it calls logout.
     release();
     expect(await pending).toBeNull();
+    await waitFor(() => expect(getAccessToken()).toBeNull());
     expect(getAccessToken()).toBeNull();
     expect(screen.getByTestId('who')).toHaveTextContent('nobody');
   });
@@ -282,6 +283,70 @@ describe('session handling', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER');
     expect(getAccessToken()).toBeTruthy();
+  });
+});
+
+describe('sign-out that the server did not confirm', () => {
+  it('FR-104: after a failed logout, a reload does not restore the session and retries the logout', async () => {
+    const first = renderWithAuth(
+      <>
+        <LoginForm />
+        <SignOutButton />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    server.use(http.post('*/v1/auth/logout', () => HttpResponse.error()));
+    const u = userEvent.setup();
+    await u.click(await screen.findByRole('button', { name: 'Sign out' }));
+    expect(await screen.findByText('We could not confirm you were signed out')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry sign-out' })).toBeInTheDocument();
+    first.unmount();
+
+    // "Reload": a fresh provider. The refresh cookie is still valid on the mock server.
+    server.resetHandlers();
+    let refreshCalls = 0;
+    let logoutCalls = 0;
+    server.use(
+      http.post('*/v1/auth/refresh', () => {
+        refreshCalls++;
+        return new HttpResponse(null, { status: 401 });
+      }),
+      http.post('*/v1/auth/logout', () => {
+        logoutCalls++;
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <Who />
+      </>,
+    );
+    await waitFor(() => expect(logoutCalls).toBe(1));
+    expect(refreshCalls).toBe(0);
+    expect(screen.getByTestId('who')).toHaveTextContent('nobody');
+    expect(getAccessToken()).toBeNull();
+    await waitFor(() =>
+      expect(
+        screen.queryByText('We could not confirm you were signed out'),
+      ).not.toBeInTheDocument(),
+    );
+    expect(localStorage.getItem('cp.signOutPending')).toBeNull();
+  });
+
+  it('FR-104: the pending marker holds no token', async () => {
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <SignOutButton />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    const token = getAccessToken()!;
+    server.use(http.post('*/v1/auth/logout', () => HttpResponse.error()));
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Sign out' }));
+    await waitFor(() => expect(localStorage.getItem('cp.signOutPending')).toBe('1'));
+    expect(JSON.stringify({ ...localStorage })).not.toContain(token);
   });
 });
 

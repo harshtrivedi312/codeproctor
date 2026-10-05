@@ -38,10 +38,61 @@ export function invalidateRefreshes(): void {
   inFlight = null;
 }
 
-/** Called when the user chooses Sign out: stops in-flight and new refreshes until the next sign-in. */
-export function beginSignOut(): void {
+const SIGN_OUT_MARKER = 'cp.signOutPending';
+
+/*
+ * "Sign-out pending" marker. A boolean only, never a token. It survives a reload so that a logout
+ * the server did not confirm cannot be undone by the next page load's silent refresh (FR-104).
+ */
+function markerSet(): boolean {
+  try {
+    return window.localStorage.getItem(SIGN_OUT_MARKER) === '1';
+  } catch {
+    return false;
+  }
+}
+function writeMarker(on: boolean): void {
+  try {
+    if (on) window.localStorage.setItem(SIGN_OUT_MARKER, '1');
+    else window.localStorage.removeItem(SIGN_OUT_MARKER);
+  } catch {
+    // Storage blocked: the in-memory flag still covers this page load.
+  }
+}
+
+/** True while a sign-out has not been confirmed by the server (survives reloads). */
+export function isSignOutPending(): boolean {
+  return signingOut || markerSet();
+}
+
+/** Called once the server answered the logout call with success. */
+export function confirmSignedOut(): void {
+  signingOut = false;
+  writeMarker(false);
+}
+
+/** Resolves when any refresh in flight has finished, whatever its result. Never rejects. */
+export function settleRefresh(): Promise<void> {
+  return inFlight ? inFlight.then(noop, noop) : Promise.resolve();
+}
+function noop(): void {}
+
+/** The current session generation. Requests record it so a later user's token is never used to replay them. */
+export function getGeneration(): number {
+  return generation;
+}
+
+/**
+ * Called when the user chooses Sign out: stops in-flight and new refreshes until the next sign-in
+ * and sets the pending marker. Resolves once any refresh already running has settled (its result
+ * is ignored), so the logout call is not racing a cookie rotation.
+ */
+export function beginSignOut(): Promise<void> {
+  const settled = settleRefresh();
   signingOut = true;
+  writeMarker(true);
   invalidateRefreshes();
+  return settled;
 }
 
 /**
@@ -50,12 +101,13 @@ export function beginSignOut(): void {
  */
 export function beginSession(): void {
   signingOut = false;
+  writeMarker(false);
   invalidateRefreshes();
 }
 
 /** One refresh at a time; concurrent callers share the result. Returns null when it failed. */
 export function refreshSession(): Promise<AuthSession | null> {
-  if (signingOut) return Promise.resolve(null);
+  if (isSignOutPending()) return Promise.resolve(null);
   if (inFlight) return inFlight;
   const mine = doRefresh().finally(() => {
     if (inFlight === mine) inFlight = null;

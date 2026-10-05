@@ -27,7 +27,7 @@ export function LoginForm(): React.JSX.Element {
   const router = useRouter();
   const params = useSearchParams();
   const next = safeNextPath(params.get('next'));
-  const { signIn, setPending, status } = useAuth();
+  const { signIn, setPending, status, signOutUnconfirmed, retrySignOut } = useAuth();
   const [banner, setBanner] = React.useState<Banner>(null);
 
   const {
@@ -89,6 +89,21 @@ export function LoginForm(): React.JSX.Element {
         <Alert tone="success" role="status" title="Password saved">
           Sign in with your new password. If your role uses an authenticator app, you will be asked
           for a code next.
+        </Alert>
+      ) : null}
+      {signOutUnconfirmed ? (
+        <Alert tone="warning" role="alert" title="We could not confirm you were signed out">
+          Your sign-out may not have reached the server. Check your connection, then try again. Do
+          this before leaving a shared computer.
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="mt-2"
+            onClick={() => void retrySignOut()}
+          >
+            Retry sign-out
+          </Button>
         </Alert>
       ) : null}
       {expired && !banner ? (
