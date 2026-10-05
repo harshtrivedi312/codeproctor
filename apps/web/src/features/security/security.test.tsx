@@ -881,7 +881,7 @@ describe('Normal sign-out forgets the session before the logout call (FR-104, TC
     });
     releaseLogout();
     await signingOut;
-    await new Promise((r) => setTimeout(r, 50));
+    await act(async () => {});
     expect(screen.queryByText(/could not confirm you were signed out/)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Retry sign-out' })).not.toBeInTheDocument();
   });

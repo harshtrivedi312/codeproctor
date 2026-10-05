@@ -197,3 +197,9 @@ Built against MSW mocks; paths are placeholders like the rest of `apps/web/opena
 ### Playwright flake: staff-shell loading state (seen once, FE-03)
 
 - `e2e/staff-shell.spec.ts` "shows a loading state before the rows arrive" failed once in a full run and passed on the rerun (25 of 25). Not reproduced; likely a race between the mock's response and the assertion on the skeleton rows. Capture a trace on failure before wiring Playwright into CI, and make the test hold the response with a gated handler instead of relying on timing.
+
+### Sign-out and enrollment ordering (PR #66 rounds)
+
+- **Should-fix (S2):** a remounted provider (for example a client-side navigation that remounts `AuthProvider`) loses the "could not confirm you were signed out" warning although the marker is still set. Derive the initial warning state from the marker after mount.
+- **Fixed here:** forced enrollment now calls `announceSession` as soon as `enroll/confirm` returns (clears the marker, announces the sign-in, does not publish the session or navigate), so no tab retries a logout with the new user's cookie while the recovery codes are still on screen. "Retry sign-out" also checks that the failed answer is still current and the marker is still set, and is disabled while a retry runs.
+- **[BE-02] Residual:** for login and 2FA verify the same cookie-before-`signIn` window is a few milliseconds between the server's Set-Cookie and `signIn`; it cannot be closed on the client. Backend could make `POST /v1/auth/logout` safe to retry against a rotated cookie (it only ends the session the cookie belongs to) but cannot tell the web whose cookie it is.

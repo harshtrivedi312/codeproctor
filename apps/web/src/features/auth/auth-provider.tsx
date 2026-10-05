@@ -59,6 +59,12 @@ interface AuthContextValue {
    * cross-tab broadcast (other tabs sign out) and cleared last.
    */
   signOutRevoked: () => Promise<void>;
+  /**
+   * The server just set this user's refresh cookie but the session is not published yet (forced
+   * enrollment: the recovery codes are still on screen). Clears the sign-out marker and tells
+   * other tabs now, so no tab retries a logout with the new cookie. Does not sign in.
+   */
+  announceSession: (userId: string) => void;
   setPending: (pending: PendingChallenge | null) => void;
   /** Called after a successful login, 2FA verify or enrollment. */
   signIn: (session: AuthSession) => void;
@@ -106,7 +112,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     if (startedIn !== getGeneration()) return;
     if (ok) confirmSignedOut();
     // Remember which generation the failed answer belongs to, so Retry can tell it went stale.
-    unconfirmedGen.current = ok ? null : getGeneration();
+    unconfirmedGen.current = ok ? null : startedIn;
     setSignOutUnconfirmed(!ok);
   }, []);
 
@@ -174,10 +180,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
         event.key === SESSION_EPOCH_KEY &&
         (logoutOutstanding.current > 0 || unconfirmedGen.current !== null || isSignOutPending())
       ) {
-        // This tab already forgot its session and its logout call is still in flight, but another
-        // tab has signed in (the shared cookie is now theirs). Supersede the logout: its late
-        // answer must not show "could not confirm" or offer a retry that would revoke the new
-        // session (TC-005).
+        // Another tab has signed in (the shared cookie is now theirs) while this tab still has a
+        // sign-out outstanding: its logout call in flight, a failed answer awaiting Retry, or a
+        // pending marker. Supersede it: a late answer must not show "could not confirm" and
+        // Retry must not revoke the new session (TC-005).
         // (The in-memory signing-out flag stays true after this on purpose: no refresh here.)
         invalidateRefreshes();
         unconfirmedGen.current = null;
@@ -235,6 +241,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     }
   }, [router, confirmLogout, queryClient]);
 
+  const announceSession = React.useCallback((userId: string) => {
+    unconfirmedGen.current = null;
+    setSignOutUnconfirmed(false);
+    beginSession(userId);
+  }, []);
+
   const signOutRevoked = React.useCallback(async () => {
     setSignedOutByUser(true);
     setLoginPath(TWO_FACTOR_OFF_LOGIN_PATH);
@@ -265,6 +277,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       retrySignOut,
       loginPath,
       signOutRevoked,
+      announceSession,
       setPending,
       signIn,
       signOut,
@@ -278,6 +291,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       retrySignOut,
       loginPath,
       signOutRevoked,
+      announceSession,
       signIn,
       signOut,
     ],
