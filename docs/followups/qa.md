@@ -213,3 +213,7 @@ Source: docs/compliance/decisions.md (PR #44, branch dl/compliance-decisions). N
 | (f) C-10, ADR 0013 | Model licence gate passes only the two accepted model files | unit (script) plus CI | integrity-engineer, backend-engineer (DEP-01/03) | P1 | The gate passes exactly the AuraFace and COCO-SSD files pinned by SHA-256 (citing C-10); the same file with one byte changed is blocked; any other model file without a verified licence is blocked; the gate fails the deploy job on a block. | `infra/scripts/tc-XXX.test.mjs` (node:test, run by root `pnpm test`) or the gate's own test directory, as ADR 0013 defines it |
 
 Open dependencies for these cases: OQ-1 (consent record on erasure), OQ-2 (embeddings never stored), OQ-3 (fallback for a waived identity check) in decisions.md; the FAIR-01 ADR; the ADR 0013 gate interface.
+
+## TC-003 disable freshness depends on backend PR #51
+
+The tc-003 "turn 2FA off" test proves `totpEnabled` is fresh after a disable through a new login and a refresh of that new session, not through the pre-disable cookie, because #51 revokes every refresh family on disable. The later "already off" check (409) still reuses the pre-disable access token; if BE-03 or #51 invalidates access tokens on disable, switch it to the new session's token. Owner: qa-engineer.
