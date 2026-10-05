@@ -85,17 +85,29 @@ export type Scoped<T> = T extends PromiseLike<infer U> ? Promise<U> : T;
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MIN_RAW_REASON_LENGTH = 10;
 
+/**
+ * One storage for the whole process (FU-DB-83). The scope belongs to the unit of work, not to a
+ * provider instance, so a service that is provided twice (a test module, a second Nest context)
+ * shares it with the instance the extension was built with.
+ */
+const storage = new AsyncLocalStorage<ScopeStore>();
+
 @Injectable()
 export class OrgContextService implements ScopeSource {
-  private readonly storage = new AsyncLocalStorage<ScopeStore>();
-
+  /** The scope of the current unit of work. A frozen object: it cannot be changed from outside. */
   current(): ScopeStore | undefined {
-    return this.storage.getStore();
+    return storage.getStore();
   }
 
   /** Run `fn` as a signed-in staff member. The interceptor calls this for staff routes. */
   runAsUser<T>(user: AuthenticatedUser, fn: () => T): Scoped<T> {
-    return this.enter({ kind: 'org', orgId: user.orgId, user }, fn);
+    // A frozen copy: the caller's object may change later, and the context must not.
+    const frozen: AuthenticatedUser = Object.freeze({
+      orgId: user.orgId,
+      userId: user.userId,
+      role: user.role,
+    });
+    return this.enter({ kind: 'org', orgId: user.orgId, user: frozen }, fn);
   }
 
   /** Run `fn` for one org without a staff user: candidate routes (the token's session) and jobs. */
@@ -136,7 +148,7 @@ export class OrgContextService implements ScopeSource {
         'runRawSql needs a written reason (at least 10 characters).',
       );
     }
-    const current = this.storage.getStore();
+    const current = storage.getStore();
     // The hatch is not a scope. With no org or system scope the model queries inside would throw
     // anyway, and a raw query alone would run with nobody accountable for the org.
     if (current?.scope === undefined) throw new OrgContextMissingError('runRawSql');
@@ -145,14 +157,14 @@ export class OrgContextService implements ScopeSource {
 
   /** The org of the current unit of work. Throws outside an org scope, including in system scope. */
   requireOrgId(): string {
-    const scope = this.storage.getStore()?.scope;
+    const scope = storage.getStore()?.scope;
     if (scope?.kind !== 'org') throw new OrgContextMissingError('This call');
     return scope.orgId;
   }
 
   /** The signed-in staff member. Throws when the work has no user (candidate route, job). */
   requireUser(): AuthenticatedUser {
-    const scope = this.storage.getStore()?.scope;
+    const scope = storage.getStore()?.scope;
     if (scope?.kind !== 'org' || scope.user === undefined) {
       throw new OrgContextMissingError('This call (it needs a signed-in staff user)');
     }
@@ -160,7 +172,7 @@ export class OrgContextService implements ScopeSource {
   }
 
   private enter<T>(scope: OrgScope, fn: () => T): Scoped<T> {
-    const current = this.storage.getStore();
+    const current = storage.getStore();
     if (scope.kind === 'org') {
       if (!GUID.test(scope.orgId)) {
         throw new OrgScopeViolationError('The org context needs an org id in uuid form.');
@@ -176,7 +188,7 @@ export class OrgContextService implements ScopeSource {
         'Already inside an org scope; system scope would widen it to every org.',
       );
     }
-    return this.runWith({ ...current, scope }, fn);
+    return this.runWith({ ...current, scope: Object.freeze(scope) }, fn);
   }
 
   /**
@@ -191,7 +203,8 @@ export class OrgContextService implements ScopeSource {
    * the callback.
    */
   private runWith<T>(store: ScopeStore, fn: () => T): Scoped<T> {
-    return this.storage.run(store, () => {
+    // Frozen: current() returns this object to any caller, and it must not be a live one to mutate.
+    return storage.run(Object.freeze(store), () => {
       const result = fn();
       return (isThenable(result) ? Promise.resolve(result) : result) as Scoped<T>;
     });

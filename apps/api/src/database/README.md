@@ -71,7 +71,7 @@ A request-scoped provider makes every provider that injects it request-scoped, a
 that whole chain on each request: slower (NFR-01), and unusable outside HTTP. This API also runs
 BullMQ jobs and Socket.IO events, which have no request object. AsyncLocalStorage keeps every
 provider a singleton, follows one request's async calls, and keeps concurrent requests apart
-(tested with concurrent units of work and concurrent HTTP requests from two orgs).
+(tested with concurrent units of work and concurrent HTTP requests from two orgs). The storage is module-level, so a service that is provided twice shares one context, and `current()` returns frozen objects (the store, the scope and a copy of the user), so nothing can change the context from outside.
 
 ## The scope map
 
