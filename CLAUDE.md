@@ -19,29 +19,29 @@ Build prompts: /docs/prompts/database.md (runs first), backend.md, frontend.md, 
 
 ## Working in parallel
 
-Several sessions work on this repo at once, each in its own worktree. These rules apply to every session and replace any pasted copy.
+Several sessions work on this repo at once, each in its own worktree. These rules apply to every session and replace any pasted copy; if they conflict, this file wins.
 
 ### Autonomy
 1. You may create branches, commit, push and open draft PRs without asking.
-2. Review rule: only blockers stop a merge. Should-fix items and nits go to your track's file at `docs/followups/<track>.md` (database, frontend, backend, proctor-sdk, integrity, qa, architecture).
+2. Review rule: only blockers stop a merge. Should-fix items and nits go to your track's file at `docs/followups/<track>.md` (database, frontend, backend, proctor-sdk, integrity, qa, architecture; deploy work files under qa).
 3. Security weaknesses in authentication, authorization, session handling, cryptography or access to candidate data are always blockers. Fix them before merge, even if the reviewer files them as should-fix.
 4. Switch on the CI monitor (auto_fix) for your PRs. Auto-fix may only change files on your own branch and within your scope.
-5. No PR skips code-reviewer, whatever its size. Docs-only PRs may get a quick review; anything touching `packages/shared`, schemas, tests, CI or config always gets a full review.
+5. No PR skips code-reviewer, whatever its size. Docs-only PRs may get a quick review; anything touching `packages/shared`, schemas, tests, CI or config (including CLAUDE.md, ADRs and `.claude/`) always gets a full review.
 6. When code-reviewer has no blockers and CI is green, merge and start the next step in your track without asking.
-7. Ask the owner only for: an unresolvable blocker, a database schema or `packages/shared` change not covered by an approved ADR, anything involving real credentials or AWS, agent definition changes, or scope changes.
+7. Ask the owner only for: an unresolvable blocker, a database schema or `packages/shared` change not covered by an approved ADR, anything involving real credentials or AWS, agent definition changes, scope changes, or a disagreement between code and docs (in addition to the Rules above).
 
 ### Merging
 8. Never enable GitHub auto-merge (no `gh pr merge --auto`, no `set_auto_merge`, no UI toggle).
-9. Merge only with an explicit `gh pr merge`, only your own PRs, only after your final push, and never while the PR is a draft or has pending work. Before merging, confirm you have no unpushed or pending commits.
-10. If you have waited on CI for more than 30 minutes without an event, check it with `gh pr checks`.
+9. Merge only with an explicit `gh pr merge`, only your own PRs, only after your final push, and never while the PR is a draft or has pending work. After your final push and review, mark the PR ready with `gh pr ready`. Before merging, confirm you have no unpushed or pending commits. If auto-fix pushed after the review, re-run code-reviewer on the new commits, and confirm the head SHA is the one that was reviewed and CI-green.
+10. If you have waited on CI for more than 30 minutes without a CI status update or notification, check it with `gh pr checks`.
 
 ### Coordination
 11. Before each step, update from main. Before opening a PR, rebase on main and rerun lint, type-check and tests.
 12. Stay inside your agent's file scope. Changes to `packages/shared`, root `package.json`, CI config or `prisma/` go through the architecture hub unless your step explicitly owns them.
-13. Never hand-merge `pnpm-lock.yaml`. On conflict, take main's version and rerun `pnpm install`. On a conflict in any docs file, keep both sides' content.
-14. Only the Database session starts, stops or resets the local Docker stack. Others may connect to it but never run `dev:infra`, `dev:infra:down` or `db:reset`. Tests needing a database use Testcontainers.
+13. Never hand-merge `pnpm-lock.yaml`. On conflict, take main's version and rerun `pnpm install`. On a conflict in any docs file, keep both sides' content and flag any contradiction to the architecture hub.
+14. Only the Database session starts or stops the local Docker stack (`dev:infra`, `dev:infra:down`). Resets (`db:reset`, `dev:infra:reset`) stay human-only per the Rules above and ADR 0009. Other sessions may connect to the stack but never start, stop or reset it. Tests needing a database use Testcontainers.
 15. Only the Frontend session runs the web dev server.
 16. Only the architecture hub edits `docs/status.md` and `docs/build-plan.md`. Report your progress in PR descriptions.
 17. Follow-ups go in `docs/followups/<track>.md`.
 
-Report briefly after each merge: what merged, what's next.
+Report briefly after each merge, to the owner in chat and in the PR description: what merged, what's next.
