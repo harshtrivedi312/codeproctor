@@ -266,7 +266,11 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
   - Operations: `connect`, `connectOrCreate`, `create`, `createMany`, `update`, `updateMany`, `upsert`, `delete`, `deleteMany`, `set` and `disconnect`.
   - Relations: every relation class (`ORG_ID`, `SCOPE_HOP`, `COMPOSITE`, `RULE_I`), on both sides, including `org: { connect }`. A relation key whose value is `null` or `{}` is refused too.
   - The error, `OrgScopeViolationError`, names the model, relation and operation, never a value.
-  - The check adds no query: it looks up each key of `data` in the relation table, so scalar-list `{ set }` and Json columns are not relation writes.
+  - The check adds no query. It looks up each key of `data` in the relation side table in `apps/api/src/database/org-scope-relations.ts` (FU-DB-103).
+    - That table covers 116 relation fields, on both sides of the 58 foreign keys.
+    - A completeness test checks it against `schema.prisma`.
+    - Production code does not read Prisma's internal runtime data model (FU-DB-61).
+    - So a relation `set` is refused, while a scalar-list `{ set }` and Json columns are not relation writes and stay allowed.
 - **Allowlist:** `NESTED_WRITE_ALLOWLIST` starts empty. Adding an entry needs all of the following (FU-DB-101):
   - a named pattern (model, relation field, operations and reason);
   - its own cross-org Postgres test;
@@ -290,20 +294,23 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
   - nested reads without a cursor (FU-DB-78, below);
   - nested cursors refused, and top-level cursors scoped;
   - the 58-key foreign-key classification, kept as the rule (i) checklist.
-- **Today (PR #30 at bcd9615):** all of the above is built, in org scope and in system scope (FU-DB-94, FU-DB-98).
+- **Today (PR #30):**
+  - Deny by default is built, in org scope and in system scope (FU-DB-94, FU-DB-98), with an empty allowlist.
+  - An `Organization`'s `id` cannot change, in any scope.
+  - In system scope, `orgId` cannot change on update. This is gate item 4, which lands in PR #30 before merge (below).
 - **Planned:** the `createMany` relation-key test.
 - **DB-05 merge gate.** Of the gate items, these are now built at bcd9615:
   - deny by default;
   - its application in system scope;
   - the COMPOSITE `connect` evidence.
 
-  Still planned, and still gating: the system-scope refusal of a scalar `orgId` (below). Until it lands, PR #30 does not merge, and BE-03 and BE-06 write no invitation or session code.
+  Gate item 4, the system-scope refusal of a scalar `orgId` (below), lands in PR #30 before merge, so PR #30 meets all four gate items when it merges. Until then PR #30 does not merge, and BE-03 and BE-06 write no invitation or session code.
 
 **No write moves a row to another org.**
 - With nested relation writes refused, the remaining path is a scalar `orgId`.
 - **In an org scope** (built today, PR #30): on `create`, `update` and `upsert` (both branches) of a direct model, the extension stamps `orgId` when it is missing, and refuses a scalar `orgId` whose value is not `ctx.orgId`.
 - **In system scope** there is no `ctx.orgId`.
-  - **Planned, and part of the DB-05 merge gate:** the extension refuses any scalar `orgId` in `update`, `updateMany` and the update branch of `upsert`. Today, system scope runs unfiltered apart from the nested-write refusal. `AUTH_BOOTSTRAP` writes sessions (INVITED → OPENED) and auth rows before it narrows, so this check matters.
+  - **Gate item 4, landing in PR #30 before merge:** on direct models, the extension refuses any scalar `orgId` in `update`, `updateMany`, `updateManyAndReturn` and the update branch of `upsert`. A system-scope create may still set it. `AUTH_BOOTSTRAP` writes sessions (INVITED → OPENED) and auth rows before it narrows, so this check matters.
   - Writes under `AUTH_BOOTSTRAP` should still narrow to `runInOrg` as soon as the org is known.
   - A create of a model with `org_id` should narrow to `runInOrg(orgId)` first, so the scalar rule applies.
   - A create left in system scope is review-only (rule (i)): the context does not track which org ids were loaded, and code-reviewer checks that the org was loaded first.
@@ -378,7 +385,7 @@ No rule in this ADR depends on a plain org scope narrowing into a session scope.
 
 | Reason | Allowed for |
 | --- | --- |
-| `AUTH_BOOTSTRAP` | Lookups before the caller's org is known. On the staff side: login by email, refresh-token rotation and set-password tokens. On the candidate side, only the three routes before a candidate session JWT exists: link resolve, OTP send and OTP verify (ADR 0013 section 5.10). Narrow to `runAsUser` or `runInOrg(A)` as soon as the org is known. It cannot enter a session scope. |
+| `AUTH_BOOTSTRAP` | Lookups before the caller's org is known. On the staff side: login by email, refresh-token rotation and set-password tokens. On the candidate side, only the three routes before a candidate session JWT exists: link resolve, OTP send and OTP verify (ADR 0013 section 5.10). Narrow to `runAsUser` or `runInOrg(A)` as soon as the org is known. It cannot enter a session scope. The per-request guard re-check of the user (BE-03) is not `AUTH_BOOTSTRAP`: it runs in `runInOrg(claims.org)`, because the verified token carries the org (FU-DB-58, FU-DB-102). |
 | `BACKGROUND_JOB` | Scheduled discovery across orgs only. See the job rules below. |
 | `RETENTION_ERASURE` | Selecting what is due only. Each session is then deleted in a plain `runInOrg(orgId)` (FU-DB-71), or by enqueueing a per-session job, which does not run inside the system scope. No system reason enters `runAsSessionJob`. |
 
@@ -477,7 +484,7 @@ There is no org-provisioning reason (8.6, 8.9).
 - Every nested write on a relation to `Organization` is refused, in every scope: `create`, `connect`, `connectOrCreate`, `update` (including one that sets `id`), `upsert`, `delete`, `set` and `disconnect`.
 - Examples: `user.create({ data: { organization: { create: … } } })` and `test.update({ data: { organization: { update: { id } } } })`.
 - Org settings change only through a top-level `organization.update`, in the service that holds the authorization check for org settings.
-- **Today (PR #30 at bcd9615):** built, as part of the general rule in 8.2, in org and system scope.
+- **Today (PR #30):** built, as part of the general rule in 8.2, in org and system scope. An `Organization`'s `id` cannot change in any scope.
 
 **No write moves a row to another org.** This is the scalar `orgId` rule in 8.2.
 
@@ -595,7 +602,8 @@ How the check runs:
 - **db-engineer:**
   - 8.1 is done in PR #30 (FU-DB-64).
   - 8.2: deny by default is built at bcd9615 (FU-DB-94, FU-DB-98), in org and system scope, with an empty `NESTED_WRITE_ALLOWLIST` (FU-DB-101).
-  - 8.2, still a DB-05 merge gate: refuse a scalar `orgId` in system-scope updates; PR #30 does not merge until this lands.
+  - 8.2, DB-05 gate item 4, landing in PR #30 before merge: refuse a scalar `orgId` in system-scope `update`, `updateMany`, `updateManyAndReturn` and `upsert.update` on direct models.
+  - 8.2: the relation side table and its completeness test replace any use of Prisma's runtime data model in production code (FU-DB-103, FU-DB-61).
   - 8.2: add the `createMany` relation-key test.
   - Nested reads stay open (FU-DB-78).
   - 8.5: the raw-SQL hatch does not carry into nested scopes.
