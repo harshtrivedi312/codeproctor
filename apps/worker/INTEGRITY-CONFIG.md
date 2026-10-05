@@ -121,6 +121,8 @@ The worker has no face-based detectors, so poor lighting and glasses do not affe
 
 ## 7. Face matching (FR-403, TC-033; ADR 0004, D-05) `face.*`
 
+**System configuration, not an org setting** (ADR 0004 section 2, ADR 0007): `FaceConfig` is not part of `IntegrityConfig`, so `organizations.settings` cannot override it. It loads from `FACE_*` environment variables via `FaceConfig.from_env()` (`FACE_MATCH_THRESHOLD`, `FACE_MIN_DETECTION_CONFIDENCE`, `FACE_ID_SECONDARY_FACE_RATIO`, `FACE_MAX_IMAGE_BYTES`, `FACE_MAX_IMAGE_PIXELS`, `FACE_SELFIE_CACHE_MAX_SESSIONS`); invalid values fail at startup.
+
 Code: `src/worker/face/`. Interface (ADR 0004 section 2): `detect_and_align(image)`, `embed(aligned)`,
 `compare(a, b)`, `model_id`. Detector (MediaPipe Face Landmarker, Apache 2.0) and embedder (AuraFace
 `glintr100.onnx` only, F-1) are swappable; tests use fakes. Output is MATCH or MANUAL_REVIEW with a
@@ -130,15 +132,17 @@ score below threshold are all MANUAL_REVIEW.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| matchThreshold | **0.75 (PLACEHOLDER, NOT TUNED)** | Cosine at or above is MATCH. Valid range 0.30-1.0. Waits for INT-01 tuning on the diverse test set (ADR 0004 section 2, D-18). Deliberately high so doubt goes to a human. ADR 0004 calls the threshold system configuration, not an org setting: the API should pass it from system config, not `organizations.settings`. |
+| matchThreshold | **0.75 (PLACEHOLDER, NOT TUNED)** | Cosine at or above is MATCH. Valid range 0.30-1.0. Waits for INT-01 tuning on the diverse test set (ADR 0004 section 2, D-18). Deliberately high so doubt goes to a human. |
 | minDetectionConfidence | 0.7 | Reported detector confidence below this is treated as no usable face (NO_FACE). The MediaPipe landmarker reports none, so it only applies to other detectors |
 | maxImageBytes / maxImagePixels | 10 MiB / 25,000,000 | Larger images are MANUAL_REVIEW (MATCH_ERROR, IMAGE_SIZE); decompression-bomb guard |
+| idSecondaryFaceRatio | 0.5 | ID photo only: faces smaller than this share of the largest face (by landmark extent) are ignored (ghost portrait); a comparable second face is MULTIPLE_FACES. Selfies and re-check frames must hold exactly one face |
 | selfieCacheMaxSessions | 256 | Bounded LRU of selfie embeddings for FR-606 re-checks; cleared at session end; ID embeddings are never kept |
 
 Model files (never committed, never downloaded by code; download needs owner approval P-07):
 `AURAFACE_MODEL_PATH` -> `glintr100.onnx`, SHA-256 `a7933ea5330113b01c9b60351d8f4c33003f145d8470ac5f0e52ee2effe25c60`
 (ADR 0001 section 12.2); any other file name or digest is refused. `FACE_LANDMARKER_MODEL_PATH` ->
-`face_landmarker.task` (SHA-256 `64184e22...` in ADR 0001 section 12.2). `model_id` = `auraface-v1:a7933ea5`.
+`face_landmarker.task` (full SHA-256 `64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff`, ADR 0001 section 12.2). Both files are read once, hashed, and the same bytes are given to the runtime (no check-then-use gap); a mismatch or wrong file name is MANUAL_REVIEW (MATCH_ERROR) via `review_for_model_error`. `model_id` = `auraface-v1:a7933ea5`.
+Images: JPEG, PNG and phone MPO (first frame) only; EXIF orientation is applied after the pixel-count check. Detail codes are prefixed `ID_`, `SELFIE_` or `FRAME_`.
 Optional extra: `pip install -e '.[face]'` (mediapipe, onnxruntime, pillow).
 
 Privacy: embeddings, aligned crops and the selfie cache have redacted repr/str, cannot be pickled or
