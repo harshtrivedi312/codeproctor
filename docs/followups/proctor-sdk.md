@@ -42,3 +42,14 @@ Non-blocking findings and open questions. Only blockers stop a merge.
 2. The demo does not yet record; wire `RecordingPipeline` into `mountProctorDemo` when the web page exists.
 3. `RecordingPipeline.recordScreen` does not watch the screen track; the caller should call `stopStream('SCREEN')` on SCREEN_SHARE_STOPPED and `recordScreen` again on resume.
 4. Chunks are written to IndexedDB as ArrayBuffer (not Blob) for Safari and structured-clone portability; this costs one copy per 10 s chunk.
+
+### Review follow-ups for PR #21 (code-reviewer, not blockers)
+Should-fix
+1. `recorder.ts` (sink error is swallowed) and `upload-queue.ts` `add()`: if the IndexedDB put fails (quota, unavailable), the chunk vanishes without being counted in `droppedChunks`; if IndexedDB cannot open, the whole recording is lost with no signal. This conflicts with TC-070 ("never silently skip"). Count these as drops, raise a degraded or capability flag, and consider an in-memory upload fallback.
+2. `pipeline.ts` `begin()`: device loss is not surfaced. No `onEnded` is passed, webcam and audio tracks are not watched for `ended`, and a MediaRecorder error stops silently. Emit a signal to the UI and allow a restart as a new segment.
+3. `upload-queue.ts` `start()` loads only this session's prefix, so stale chunks from other sessions stay in IndexedDB forever. Sweep them, or those past the retention period.
+
+Nits
+- `makeRoom` can exceed the 200 MB cap by the in-flight chunks; event batches are not counted in the cap.
+- `media-api.ts`: consider rejecting non-https presigned URLs.
+- Per-detector start timeout: `ProctorSession.start` awaits detectors in order, so a hanging custom plug-in delays later ones. Add a per-detector start timeout (also noted in the PR #23 section).
