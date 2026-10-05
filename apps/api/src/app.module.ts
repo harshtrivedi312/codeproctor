@@ -9,7 +9,9 @@ import { randomUUID } from 'node:crypto';
 import { API_PREFIX } from './bootstrap';
 import { validateEnv } from './config/env';
 import type { Env } from './config/env';
+import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
+import { UsersModule } from './users/users.module';
 import { JwtAuthGuard } from './common/auth/jwt-auth.guard';
 import { TokenModule } from './common/auth/token.service';
 import { DatabaseModule } from './database/database.module';
@@ -99,7 +101,9 @@ function areaOf(context: ExecutionContext): Area {
     DatabaseModule,
     MailModule,
     TokenModule,
+    AuditModule,
     AuthModule,
+    UsersModule,
     HealthModule,
   ],
   // Order matters: throttle first, then authenticate (deny by default).

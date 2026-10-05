@@ -1022,7 +1022,7 @@ export class AuthService implements OnApplicationShutdown {
     if (!row) return 'denied';
     if (row.granted) return 'granted';
     // The stuck window was just locked here.
-    if (user) await this.audit(user, 'AUTH_ACCOUNT_LOCKED', ctx, { minutes: LOCKOUT_MINUTES });
+    if (user) await this.recordLock(user, ctx);
     return 'denied';
   }
 
@@ -1067,9 +1067,41 @@ export class AuthService implements OnApplicationShutdown {
           AND locked_until IS NULL
         RETURNING id`),
     );
-    if (user && locked.length === 1) {
-      await this.audit(user, 'AUTH_ACCOUNT_LOCKED', ctx, { minutes: LOCKOUT_MINUTES });
-    }
+    if (user && locked.length === 1) await this.recordLock(user, ctx);
+  }
+
+  /**
+   * The one place a lock is recorded: the AUTH_ACCOUNT_LOCKED audit row (which the SUPER_ADMIN
+   * lock-events list reads) and, after the response, an email to the org's SUPER_ADMINs (P-03).
+   * The alert is deferred and its failures only logged by name, so it never changes the answer,
+   * the status or the statements of the locked user's request. Locked accounts are shown only to
+   * SUPER_ADMINs of the same org (FU-BE-22).
+   */
+  private async recordLock(user: User, ctx: RequestContext): Promise<void> {
+    await this.audit(user, 'AUTH_ACCOUNT_LOCKED', ctx, { minutes: LOCKOUT_MINUTES });
+    const { orgId, email, fullName } = user;
+    this.defer(() => this.alertAdmins(orgId, email, fullName));
+  }
+
+  private alertAdmins(orgId: string, email: string, name: string): Promise<void> {
+    return this.orgContext.runInOrg(orgId, async () => {
+      const admins = await this.prisma.client.user.findMany({
+        where: { role: UserRole.SUPER_ADMIN, isActive: true, passwordHash: { not: null } },
+        select: { email: true },
+      });
+      for (const admin of admins) {
+        try {
+          await this.mail.sendStaffAccountLocked(admin.email, {
+            email,
+            name,
+            minutes: LOCKOUT_MINUTES,
+          });
+        } catch (e) {
+          // Name only: the error may carry an address.
+          this.logger.error(`Lock alert email failed (${errorName(e)})`);
+        }
+      }
+    });
   }
 
   private async audit(
