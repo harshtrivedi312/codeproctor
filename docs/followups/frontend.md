@@ -174,3 +174,8 @@ Built against MSW mocks; paths are placeholders like the rest of `apps/web/opena
 ### Test flake: admin tables (seen once in CI)
 
 - `apps/web/src/features/admin/settings.test.tsx` ("lists staff users sorted by name...") timed out once under CI load while the table was still loading. Fixed by awaiting the loaded state (`findLoadedTable` / `findLoadedRow` in `src/test/table-utils.ts`: table not `aria-busy`, no skeleton rows, or the empty state) instead of relying on a time limit; applied to the users, candidates and consent tests and to `cross-user-cache.test.tsx`.
+
+### frontend/security-page re-review (verdict: MERGE, no blockers)
+
+- **Should-fix (tests):** add a test where a security call gets a 401 with no signed-in user (expect no refresh, failure `session`) and one where `beginSignOut()` runs while a security POST is in flight and the response is a 401 (expect no refresh, no second POST). Strengthen the assertion at `security.test.tsx:503` to `getSessionUserId()` and `getAccessToken()` both null, and count that exactly one refresh happened.
+- **Nits:** take the session stamp in the same synchronous step as the token in `lib/api/client.ts` (today the token is attached in `authMiddleware.onRequest` and the stamp in the next middleware, after an await; no realistic trigger found); in `features/security/api.ts` replay with the token `refreshForReplay` just checked or re-check the stamp synchronously before `send()`; update the `getGeneration` doc comment in `auth-session.ts:139` (requests now use `captureSessionStamp`).
