@@ -294,7 +294,7 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 | STAFF | `runAsUser({ orgId, userId, role })` | no scope, system, or the same user (no change) | `OrgContextInterceptor`, and auth code once the user is known |
 | Org scope, no session | `runInOrg(orgId)` | no scope, or system. Inside any org scope of the same org it is allowed and changes nothing; the actor, user and session stay (rows below). | Cross-session jobs (similarity, dashboards, retention follow-up), and narrowing from system scope |
 | CANDIDATE (ADR 0013 CS-4) | `runAsCandidate(oid, sid)` | no scope only | `CandidateSessionGuard` only |
-| SERVICE (ADR 0013 CS-4) | `runAsSessionJob(oid, sid)` | no scope only. The processor first leaves any inherited context with `AsyncLocalStorage.exit()` (ADR 0013 CS-4.1). | `SessionJobProcessor`, the one job-processor base class, only |
+| SERVICE (ADR 0013 CS-4) | `runAsSessionJob(oid, sid)` | no scope only. The processor first leaves any inherited context through `orgContext.detachForSessionJob()` (8.5; ADR 0013 CS-4.1). | `SessionJobProcessor`, the one job-processor base class, only |
 | SYSTEM | `runSystem(reason)` | no scope | The three reasons below |
 
 **A scope only narrows.** Each row below has its own test. A row not listed is refused.
@@ -334,7 +334,7 @@ No rule in this ADR depends on a plain org scope narrowing into a session scope.
 | --- | --- |
 | `AUTH_BOOTSTRAP` | Lookups before the caller's org is known. On the staff side: login by email, refresh-token rotation and set-password tokens. On the candidate side, only the three routes before a candidate session JWT exists: link resolve, OTP send and OTP verify (ADR 0013 section 5.10). Narrow to `runAsUser` or `runInOrg(A)` as soon as the org is known. It cannot enter a session scope. |
 | `BACKGROUND_JOB` | Scheduled discovery across orgs only. See the job rules below. |
-| `RETENTION_ERASURE` | Selecting what is due only. Each session is then deleted in a plain `runInOrg(orgId)` (FU-DB-71) or by a per-session job. No system reason enters `runAsSessionJob`. |
+| `RETENTION_ERASURE` | Selecting what is due only. Each session is then deleted in a plain `runInOrg(orgId)` (FU-DB-71), or by enqueueing a per-session job, which does not run inside the system scope. No system reason enters `runAsSessionJob`. |
 
 **Background jobs.**
 - The job payload carries `orgId`, and `sessionId` when the job concerns a session.
@@ -349,7 +349,7 @@ No rule in this ADR depends on a plain org scope narrowing into a session scope.
 - Inside that scope it loads the session with `id = sid` and checks `auth_epoch` against the token's `epoch`.
 - A session in another org is simply not found, which answers 401.
 
-**Grading and start-test add no system reason.**
+**Session jobs (grading, render-question, start-test) add no system reason.**
 - Hidden-test grading and start-test run as session jobs with actor SERVICE. ADR 0013 holds their contracts and timeouts; this ADR does not restate them.
   - **Grading.** In ADR 0013 section 5.11, submit returns only `{ accepted, submissionId }`. Hidden-test grading runs in `grade-session` (ADR 0007). There is no synchronous submit result.
   - **Start-test.** `start-session`, which includes question assignment, stays a job that the route awaits, with 503 on timeout.
@@ -375,6 +375,13 @@ There is no org-provisioning reason (8.6, 8.9).
 - **Call-site allow-list (planned, FU-DB-67).** A test lists every call site of `runSystem`, `runInOrg`, `runAsCandidate`, `runAsSessionJob` and `runRawSql`, by file and count. It also refuses `$queryRawUnsafe` and `$executeRawUnsafe` unless they are listed. It lands before BE-03, together with FU-DB-58.
   - For each raw call, the list records the pair (call site, system reason or org scope).
   - Only two call sites may enter a session scope: `runAsCandidate` in the `CandidateSessionGuard` file, and `runAsSessionJob` in the `SessionJobProcessor` base class. Both start from no scope only.
+- **Leaving a scope.** `AsyncLocalStorage.exit()`, `enterWith()` and `disable()` would let code leave its scope and bypass every "only narrows" row. So:
+  - The OrgContext `AsyncLocalStorage` instance stays private to `org-context.ts`. It is never exported, and never reachable through a getter.
+  - The only way to leave a scope is `orgContext.detachForSessionJob(fn)`, called only by the `SessionJobProcessor` base class. It runs `fn` with no scope.
+    - It is allowed only when there is no scope, or in system scope with `BACKGROUND_JOB`.
+    - It throws inside any org scope: STAFF, plain org, SERVICE and above all CANDIDATE. A candidate scope therefore cannot leave itself.
+    - A test covers each case.
+  - The call-site allow-list and its test (FU-DB-67) also cover `exit`, `enterWith` and `disable` on the OrgContext store, and `detachForSessionJob`. Any use outside `org-context.ts`, or any call of `detachForSessionJob` outside the `SessionJobProcessor` file, fails the test or the lint rule.
   - A new call site updates the list, and code-reviewer checks it.
 
 ### 8.6 Organization (architect detail)
@@ -538,7 +545,8 @@ How the check runs:
   - FU-DB-68: refuse Organization delete in an org scope.
   - FU-DB-71 and FU-DB-72: DB-06 and the job rules. Update FU-DB-72 so that session jobs use `runAsSessionJob`.
   - 8.4: the actor in the scope (STAFF, plain org, CANDIDATE, SERVICE, SYSTEM), set by the entry function.
-  - 8.4: both session entries, `runAsCandidate` (guard only, from no scope) and `runAsSessionJob` (`SessionJobProcessor` only, from no scope only, after `AsyncLocalStorage.exit()`), per ADR 0013 CS-4.
+  - 8.4: both session entries, `runAsCandidate` (guard only, from no scope) and `runAsSessionJob` (`SessionJobProcessor` only, from no scope only, after `detachForSessionJob`), per ADR 0013 CS-4.
+  - 8.5: keep the `AsyncLocalStorage` instance private, add `detachForSessionJob` (refused in every org scope, CANDIDATE included), and extend FU-DB-67 to `exit`, `enterWith`, `disable` and `detachForSessionJob`.
   - 8.4: the transition table, with one test per row.
   - 8.5: refuse raw SQL in a `sessionId` scope (the scope requirement is done).
   - 8.6: `Organization` deny by default, no nested `Organization` writes, no write that moves a row to another org, and a limit on importers of the raw factory client.
