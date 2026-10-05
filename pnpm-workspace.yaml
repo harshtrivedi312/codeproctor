@@ -1,11 +1,26 @@
 packages:
   - 'apps/*'
   - 'packages/*'
-# Dependency install scripts are blocked unless listed here. One line per entry says why.
+# Dependency install scripts are blocked unless listed here as true; false records a reviewed denial.
+# One line per entry says why.
+# Policy (owner, 2026-10-05): a new package that needs a build decision is requested from the
+# architecture hub and defaults to false unless something breaks without its script.
 allowBuilds:
+  # Install script runs node-gyp only when npm_config_build_from_source=true; the prebuilt per-platform binary comes from optionalDependencies.
+  '@parcel/watcher': false
   # Postinstall fetches the Prisma engine binaries (schema engine) for this platform.
   '@prisma/engines': true
+  # Postinstall only sends install analytics to Scarf; nothing needs it, and blocking it avoids telemetry.
+  '@scarf/scarf': false
+  # Optional native addon for ssh2, compiled with node-gyp; ssh2 works without it.
+  cpu-features: false
   # Postinstall only validates and optimizes the binary; esbuild (pulled in by tsx) works without it.
   esbuild: false
   # Preinstall stops with a clear message when the Node version is unsupported.
   prisma: true
+  # Postinstall only runs a version check; the runtime library needs nothing from it.
+  protobufjs: false
+  # Install script only tries to compile an optional native crypto binding; ssh2 falls back to Node's crypto module.
+  ssh2: false
+  # Postinstall only fetches a native binding when the prebuilt optional platform package is missing.
+  unrs-resolver: false
