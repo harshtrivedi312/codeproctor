@@ -60,7 +60,7 @@ The SDK (FE-06..FE-08, merged) signs event batches, uploads media and evidence, 
 - Each OTP success raises `auth_epoch`, which kills the old device's token (ADR 0002). New batches must be signed with `K_current`.
 - **Same device, new epoch.** The SDK re-signs its unsent outbox with the new key. It stores the exact body, so only the signature changes.
 - **Different device.** Batches still queued on the old device are lost: its token is dead, and it purges on `SESSION_TAKEN_OVER`. Server-side gap detection (section 5.8) shows the hole to the reviewer.
-- **Ingest close.** Ingestion closes at `submitted_at + PROCTOR_INGEST_GRACE_SECONDS` (default 300). The same close, with the same grace, runs for every other terminal exit ADR 0002 allows from IN_PROGRESS or PAUSED, measured from that transition's server time (today SUBMITTED by finish, last section or auto-submit). All of these go through one named method, `SessionStateService.closeIngest(sessionId, reason)`, which any terminated or invalidated status added later must also call. EXPIRED sessions never received a key (EXPIRED applies only before start), but still get the storage sweep. The close job then sets `hmac_key_enc = NULL` (key destruction), tells the worker to evict the session's in-memory selfie embedding (ADR 0004 §2, C-18), and runs the storage sweep (section 5.7). After that, stored signatures cannot be re-verified, which is acceptable because they serve idempotency only. **(architect detail, owner to confirm; ARC-04 delays `analyze-session` by the same grace.)**
+- **Ingest close.** Ingestion closes at `submitted_at + PROCTOR_INGEST_GRACE_SECONDS` (default 300). The same close, with the same grace, runs for every other terminal exit ADR 0002 allows from IN_PROGRESS or PAUSED, measured from that transition's server time (today SUBMITTED by finish, last section or auto-submit). All of these go through one named method, `SessionStateService.closeIngest(sessionId, reason)`, which any terminated or invalidated status added later must also call. EXPIRED sessions never received a key (EXPIRED applies only before start), but still get the storage sweep. **An ERASED session (5.7) gets no grace.** The epoch bump at the fence already makes every candidate request answer 401, so ingestion is closed at the fence time and the key is destroyed at once. The close job then sets `hmac_key_enc = NULL` (key destruction), tells the worker to evict the session's in-memory selfie embedding (ADR 0004 §2, C-18), and runs the storage sweep (section 5.7). After that, stored signatures cannot be re-verified, which is acceptable because they serve idempotency only. **(architect detail, owner to confirm; ARC-04 delays `analyze-session` by the same grace.)**
 - **Erasure (R-6) of a live session** also nulls `hmac_key_enc` and deletes the session's Redis keys: `pkey:`, `qview:`, `evidence:`, `etag:`, `rec:`, `submits:`, `rl:submit:`, `lock:device-info:`, `devinfo-resync:` and the `verify-session` counter `vs:`. It also evicts the worker's in-memory selfie embedding for the session (ADR 0004 §2, C-18), as ingest close does.
 
 **Canonical JSON and transport: the SDK's scheme is confirmed.**
@@ -319,9 +319,9 @@ Each environment has its own bucket (D-10, D-11), so keys carry no environment. 
 
   | Tier | When | Deletes | Nulls |
   | --- | --- | --- | --- |
-  | Face (C-27) | **face clock** = COALESCE(`submitted_at`, the latest identity capture, the terminal transition time (expiry or decline), `sessions.created_at`), as in ADR 0004 section 9. The tier deletes at face clock + LEAST(`retention_days`, 90). **No review hold applies** (C-35), and a shorter `retention_days` shortens it (C-27) | `identity/**` and `evidence/sealed/**` | `identity_checks.id_image_key`, `selfie_key`; `proctor_events.evidence_key` of FACE_MISMATCH rows |
+  | Face (C-27) | **face clock** = COALESCE(`submitted_at`, latest capture, terminal transition time, `sessions.created_at`), as ADR 0004 section 9 defines it. *Latest capture* is the newest `identity_checks.created_at` or the `occurred_at` of the newest FACE_MISMATCH event. The *terminal transition time* is the expiry, decline or erasure-fence time. The tier deletes at face clock + LEAST(`retention_days`, 90). **No review hold applies** (C-35), and a shorter `retention_days` shortens it (C-27) | `identity/**` and `evidence/sealed/**` | `identity_checks.id_image_key`, `selfie_key`; `proctor_events.evidence_key` of FACE_MISMATCH rows |
   | Media (R-4) | anchor + `retention_days` | everything under `orgs/{orgId}/sessions/{sessionId}/` **except `reports/`** (also the final backstop for orphans) | the R-4 columns except `sessions.report_key` |
-  | Results (R-10, C-26) | anchor + 1 year | first the face and media tiers, if they have not completed; then the **whole** session prefix, `reports/` included. This is the backstop for every earlier marker | `sessions.report_key`; R-10 also deletes the `submissions` rows (proposed ADR 0004 section 9) |
+  | Results (R-10, C-26) | anchor + 1 year | the **whole** session prefix, `reports/` included, with its own whole-prefix verification. R-10 does **not** wait for the face or media markers (ADR 0004 section 9); it is the backstop for every earlier tier | `sessions.report_key`; R-10 also deletes the `submissions` rows (proposed ADR 0004 section 9) |
 
   - **Tiers are selected by session, not by database keys.** A session is visited by a tier when it is eligible for that tier and has no completion marker for it.
   - **Completion markers (as ADR 0004 9.2, PR #48).** The marker is the per-session audit row `RETENTION_FACE_DONE`, `RETENTION_MEDIA_DONE` or `RETENTION_RESULTS_DONE`.
@@ -340,14 +340,20 @@ Each environment has its own bucket (D-10, D-11), so keys carry no environment. 
   - **Nothing in this ADR reads `submissions` after the results clock.** Grading, review and the sweep all run long before it. A job decides that a session is past R-10 **only from the `RETENTION_RESULTS_DONE` marker**, never from missing rows. A fresh session with no work has zero `submissions` and must still be graded (score 0).
 
 - **Erasure (R-6)**, as proposed in ADR 0004 section 9 (PR #48):
-  - **Fence first.** A non-terminal session is fenced, as ADR 0004 section 9 and ADR 0002 define it:
+  - **Fence first (ADR 0004 section 9; ADR 0002 and ADR 0008 amendments).** Every session of the candidate that is not on an erasure hold is fenced, terminal ones included (COMPLETED, EXPIRED, DECLINED):
     - `auth_epoch` is bumped, which kills the candidate token;
-    - `SessionStateService.closeIngest` moves the session to **a real terminal status** with an "erased" reason, which sets `retention_anchor_at` at the fence.
+    - `SessionStateService.closeIngest` moves the session to the new terminal status **`ERASED`**, which has **no transition out**, and sets `retention_anchor_at` to the fence time.
 
-    The fence must never start grading, `analyze-session`, webhooks or review routing. ADR 0004 is still settling the exact status (owner question Q21); this ADR follows it.
-    - **Job skips.** `grade-session`, the grading reconciler, `analyze-session` and review routing skip a session in the fenced state, or with `RETENTION_RESULTS_DONE`, and re-check that inside their write transaction.
+    The fence never starts grading, `analyze-session`, webhooks or review routing.
+  - **`SessionStateService.guardLive(tx, sessionId)`: the per-session write lock.**
+    - It is a model-API `sessions.updateMany({ where: { id, status: <status read> }, data: { status: <same status> } })` under the SessionStateService grant. It writes the status to its current value, which takes the row lock.
+    - Every SERVICE writer calls it as the **first statement of its write transaction**: `grade-session`, `close-section`, `analyze-session`, the `face-recheck` outcome handler, `server-event`, report generation, the consent-PDF job and `start-session`.
+    - **If it returns 0**, the job re-reads the status. It stops (writing nothing) only on ERASED. Otherwise the status changed meanwhile, and the job retries a bounded number of times (3) or fails for the job's own retry.
+    - **Short transactions.** After `guardLive`, the transaction stays short, with no external calls (Judge0, S3, the worker) while the lock is held. External work runs before the transaction and its results are written under the lock.
+    - **Objects under the session prefix.** A SERVICE writer that writes an S3 object there (the sealed copy, a report, the consent PDF is outside the prefix) writes it inside the `guardLive` transaction, or deletes its own object when `guardLive` returns 0. An erased session therefore gains no new object.
+  - **Job skips are keyed on the session's ERASED status**, never on the candidate's `erasure_requested_at`. During an erasure hold, the candidate's other sessions keep being graded and recovered until they are fenced. Sessions with `RETENTION_RESULTS_DONE` are skipped too.
   - **Then delete.** Erasure deletes the whole session prefix, `reports/` included, and nulls `report_key`.
-  - **Re-run.** The prefix delete runs again after ingest close plus `STORAGE_SWEEP_MARGIN_SECONDS`. A late PUT from a URL issued before the fence is deleted by that re-run, or at the latest by R-10.
+  - **Re-run.** The prefix delete runs again at the **fence time + 60 s** (the URL life) **+ `STORAGE_SWEEP_MARGIN_SECONDS`**, with the same verification. A late PUT from a URL issued before the fence is deleted by that re-run, or at the latest by R-10.
   - **No markers.** Erasure **never** writes `RETENTION_*_DONE` markers, so the anchor-driven tiers remain the backstop. `orgs/{orgId}/consents/{sessionId}/` is kept until its 3-year limit (C-17) and is deleted by the R-9 consent job (proposed ADR 0004 section 9.3, PR #48), objects first, then the row.
 - **Media chunk keys are deterministic**, so a retried presign targets the pending object. A confirmed chunk is protected by 5.5 controls 3 and 4.
 - **Review GET URLs** (15 min, FR-703) always set `response-content-type` to the expected type (`video/webm`, `audio/webm`, `image/jpeg` or `application/pdf`) and `response-content-disposition: attachment`. A file uploaded as HTML can then never render as a page from the storage host. `<video>` and `<img>` ignore the disposition, so playback still works.
@@ -702,7 +708,7 @@ All of it comes from one projection:
     - **SUBMITTED** sessions older than 10 minutes that are not graded: it re-creates the flow;
     - **IN_PROGRESS or PAUSED** sessions whose open section is past `effectiveDeadline` + 2 minutes with `ended_at` NULL: it enqueues the deadline variant.
 
-    It skips any session whose `grade-session` job is active, waiting, waiting-children or delayed. It also skips sessions whose candidate has `erasure_requested_at` set, and sessions with `RETENTION_RESULTS_DONE` (5.7). Sessions stuck longer than 1 hour raise the alert proposed in ADR 0004 9.4.
+    It skips any session whose `grade-session` job is active, waiting, waiting-children or delayed. It also skips sessions in status ERASED and sessions with `RETENTION_RESULTS_DONE` (5.7). The skip is keyed on the session, so during an erasure hold a second SUBMITTED session of the same candidate is still recovered. Sessions stuck longer than 1 hour raise the alert proposed in ADR 0004 9.4.
   - A coding question with no `SUBMIT` row and no saved code scores 0 without a Judge0 run. A session with no work at all is graded with score 0; it is never skipped.
   - The review UI labels the graded snapshot and shows when `final_code` is newer than it.
 - MCQ and short answers are not submitted. `session_questions.answer` is autosaved through the draft route and final at SUBMITTED (ADR 0007 §5).
@@ -908,11 +914,10 @@ CI and deploy:
    - (a) **Media tier.** C-26 says recordings and other session media stay 90 days, but the media tier uses `retention_days` (7..730). Should it be fixed at 90?
    - (b) **EVENT evidence frames** (`evidence/*.jpg`, webcam stills) are in the media tier, though OQ-5 listed face evidence frames. Should they move to the face tier?
    - (c) **Results clock.** C-26 says "1 year after the test"; the ADR uses the anchor. Confirm which.
-21. **Erasure fence target state (5.7).** Which real terminal status, with an "erased" reason, does the fence use (ADR 0004 section 9 and ADR 0002)? It must not be SUBMITTED, which is not terminal and starts grading. The options are a new `ERASED` status (an enum delta under ADR 0008) or COMPLETED/EXPIRED with an erased reason.
 
 **Architect details to confirm**
 
-22. Names and limits: `SESSION_KEY_ENC_KEY_<kid>`, `PROCTOR_INGEST_GRACE_SECONDS`, per-route limits and quotas, 16 MiB per chunk, 1 MiB and 1920 × 1920 per image, the 15-minute freshness of the system check, JWT `iss` and `aud`.
-23. Candidate-session enforcement (5.10 CS-4): the actor model, the CANDIDATE model and column allowlists, all six relation vectors refused, the `render-question` projection, and start-test as an awaited session job.
-24. The onnxruntime variant: the plain wasm only, with object storage as the fallback if vad-web needs jsep (section 6).
-25. Media `seq` per stream across segments, following ADR 0004 (the SDK changes, not the schema).
+21. Names and limits: `SESSION_KEY_ENC_KEY_<kid>`, `PROCTOR_INGEST_GRACE_SECONDS`, per-route limits and quotas, 16 MiB per chunk, 1 MiB and 1920 × 1920 per image, the 15-minute freshness of the system check, JWT `iss` and `aud`.
+22. Candidate-session enforcement (5.10 CS-4): the actor model, the CANDIDATE model and column allowlists, all six relation vectors refused, the `render-question` projection, and start-test as an awaited session job.
+23. The onnxruntime variant: the plain wasm only, with object storage as the fallback if vad-web needs jsep (section 6).
+24. Media `seq` per stream across segments, following ADR 0004 (the SDK changes, not the schema).
