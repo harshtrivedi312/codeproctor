@@ -137,3 +137,7 @@ Root cause was in the test, not the SDK: it assumed one batch per paste and wait
 
 Observation for proctor-sdk-engineer (low, not a data-loss defect; NFR-08 holds): `EventQueue.retryNow()` does nothing while a drain is already running. If the browser `online` event arrives during a send that is about to fail, the next attempt waits for the exponential backoff (up to 30 s) instead of starting at once. Suggested: remember that a retry was requested and run another drain pass when the current one ends in RETRY.
 
+
+### 7.6 TC-008 evidence is outside the P1 gate's inputs (FU-DB-59, 2026-10-05)
+
+- **should-fix (qa-engineer):** the TC-008 tests live in `apps/api/src/database/tc-008-org-isolation.spec.ts` (DB-05, PR #30), run by `apps/api/jest.config.js`. The P1 gate in `.github/workflows/qa.yml` reads only the report from `test/jest.integration.config.js`, so it does not see the TC-008 results. The test-matrix path is fixed (architecture hub, 2026-10-05); CI is not changed here. QA decides whether to add the API unit Jest report to the gate inputs or to move the TC-008 run into the integration config.

@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Accepted** 2026-10-01 (D-16): every recommendation as proposed. No amendment from D-17..D-23 beyond the tables they add, which carry or inherit `org_id` (section 1). Applied to database.md; deltas in ADR 0008. **Amended 2026-10-02 (D-35):** section 7 replaces "roles are created outside the migrations" in section 3; the rest of section 3 stands. |
+| Status | **Accepted** 2026-10-01 (D-16): every recommendation as proposed. No amendment from D-17..D-23 beyond the tables they add, which carry or inherit `org_id` (section 1). Applied to database.md; deltas in ADR 0008. **Amended 2026-10-02 (D-35):** section 7 replaces "roles are created outside the migrations" in section 3; the rest of section 3 stands. **Proposed amendment 2026-10-05 (DB-05 review):** section 8, for the owner to accept. |
 | Author | architect |
 | Decides | Q-10, Q-15, A-07, A-22 (index list for the freeze list), Q-17 (doc hygiene) |
 | Serves | FR-103, FR-105; NFR-01, NFR-04; TC-006, TC-008 |
@@ -222,3 +222,85 @@ Roles belong to the whole Postgres cluster, not to one database. So the `IF NOT 
 - **backend-engineer:** DEP-01, DEP-03 and production set the password per 7.4, and create `app_user` first only where 7.5 says the migration role cannot.
 - **architect:** ARC-05 confirms the migration role on the chosen pilot and production host.
 - **code-reviewer:** rejects any password, or any `infra/sql/roles.sql`, in a PR.
+
+## 8. DB-05 review decisions
+
+**Status: Proposed amendment 2026-10-05, for the owner to accept.** It comes from the DB-05 architect gate (PR #30) and the Delivery Lead. Until the owner accepts it, sections 1 to 7 stand as written. Serves FR-103, FR-105, NFR-01 and NFR-04; TC-006 and TC-008. Candidate session scope (token to session to `runInOrg`) is not decided here: ADR 0013 covers it (proposed, PR #39), with ADR 0001 C-1.
+
+### 8.1 Foreign-key classification
+
+The init migration has 58 foreign keys. Nine are the `org_id` columns of the `direct` tables. The other 49 fall into three classes:
+
+| Class | Count | Foreign keys |
+| --- | --- | --- |
+| Scope first hop | 21 | The first relation of each scope path in the DB-05 scope map, one per `path` model (for example `proctor_events.session_id`, `test_cases.question_version_id`, `webhook_deliveries.endpoint_id`) |
+| Composite (section 2 ii) | 3 | `invitations (test_id, org_id)`, `invitations (candidate_id, org_id)`, `sessions (invitation_id, org_id)` |
+| Rule (i) references | 25 | **12 staff references:** `audit_logs.actor_id`, `questions.created_by`, `ai_reference_solutions.collected_by`, `tests.created_by`, `invitations.created_by`, `session_questions.scored_by`, `consent_texts.created_by`, `identity_checks.reviewed_by`, `session_reviews.reviewer_id`, `flag_decisions.reviewer_id`, `appeals.assigned_to`, `webhook_endpoints.created_by`. **13 cross-chain references:** `organizations.current_consent_text_id`, `refresh_tokens.replaced_by`, `questions.current_version_id`, `variant_test_cases.test_case_id`, `ai_reference_solutions.variant_id`, `test_questions.question_version_id`, `session_sections.section_id`, `session_questions.test_question_id`, `session_questions.question_version_id`, `session_questions.variant_id`, `consents.consent_text_id`, `keystroke_batches.session_question_id`, `webhook_deliveries.session_id` |
+
+- This replaces the shorter list at the end of section 2, which named only five staff columns and `test_questions.question_version_id`.
+- The rule (i) list lives in code as `RULE_I_REFERENCES` (FU-DB-64). A test fails on any foreign key that is in none of the three classes, so a new foreign key must be classified in the PR that adds it.
+
+### 8.2 Write invariant
+
+- An org-scoped write changes only the rows its filter selected, or the rows it creates.
+- The extension refuses, on the parent side, a nested `connect`, `set`, `connectOrCreate`, or a nested create or update that names another org (FU-DB-63).
+- A child-side `connect` (the child holds the foreign key) stays under rule (i): load the target through the scoped client first, answer 404 on a miss.
+
+### 8.3 Schema and row-level security
+
+- No schema change for the build or the pilot (Delivery Lead decision).
+- FU-DB-77 stays open as a pre-production item for ARC-05 and DEP-02: revisit Postgres RLS on `org_id` (section 1, option b).
+
+### 8.4 System scope
+
+Three closed reasons. A new reason needs an amendment to this ADR.
+
+| Reason | Allowed for |
+| --- | --- |
+| `AUTH_BOOTSTRAP` | Staff lookups before login, and resolving a candidate token. Narrow to `runAsUser` or `runInOrg` as soon as the org is known. |
+| `BACKGROUND_JOB` | Scheduled discovery across orgs only. Job payloads carry `orgId` and `sessionId`, and the processor runs the work inside `runInOrg`. |
+| `RETENTION_ERASURE` | Selecting what is due only. DB-06 deletes each session inside `runInOrg`. |
+
+- `runSystem` is refused inside an org scope. Narrowing from system scope to an org scope is allowed.
+- There is no org-provisioning reason (8.9).
+
+### 8.5 Raw SQL
+
+- Raw SQL is refused unless it runs inside `runRawSql(reason)`, and `runRawSql` requires an active scope (system or org).
+- Model queries inside `runRawSql` stay scoped.
+- In an org scope, the SQL itself must filter by `org_id`.
+- An allow-list test of every `runSystem`, `runInOrg` and `runRawSql` call site lands with FU-DB-58 (BE-03). A new call site updates the list, and code-reviewer checks it.
+
+### 8.6 Organization
+
+- `organizations` rows are created and deleted only in system scope.
+- `organizations.id` is immutable.
+
+### 8.7 Path rule
+
+- A scope path follows the composition parent, the owner in the database.md ERD.
+- It never follows a staff or cross-chain reference, and it is not chosen by hop count.
+- Example: `AiReferenceSolution` is scoped through its question version (`questionVersion.question.orgId`), not through `collectedBy`.
+
+### 8.8 Runtime checks
+
+- **Readiness role assertion (FU-DB-66, before DEP-01).**
+  - The readiness check asserts `current_user = 'app_user'`, and that the role has no SUPERUSER, BYPASSRLS, CREATEROLE or CREATEDB and does not own schema `public`.
+  - It is a readiness check, not a blocking startup query.
+  - It logs which flags failed, never the connection URL.
+- **Interceptor (FU-DB-65).** A malformed `request.user` (it reaches the interceptor only after the guard has passed) is a server fault and answers 500, not 401.
+
+### 8.9 Pilot org provisioning (FU-DB-76, ARC-05 and DEP-03)
+
+- Pilot orgs are created outside the API by a CLI built on the client factory, like the seed.
+- There is no API route and no system-scope reason for it.
+- If self-serve or platform-admin org creation is ever needed, add `ORG_PROVISIONING` through an amendment to this ADR.
+
+### 8.10 Consequences and agents affected
+
+- **Positive:** the scope rules are closed and testable (FK classification, call-site allow-list, readiness check), with no schema change before the pilot.
+- **Negative:** rule (i) stays a service-level guard for 25 foreign keys until RLS is revisited (FU-DB-77).
+- **db-engineer:** DB-05 or its follow-ups implement 8.1 (`RULE_I_REFERENCES` and its test), 8.2 (FU-DB-63), 8.5 (`runRawSql` requires a scope), 8.6, 8.8 (FU-DB-65, FU-DB-66) and the pilot CLI in 8.9.
+- **backend-engineer:** uses only the three reasons in 8.4; jobs carry `orgId` and `sessionId`; lands the call-site allow-list with FU-DB-58 (BE-03); DB-06 and the retention job follow 8.4.
+- **code-reviewer:** checks 8.1 classification for every new foreign key, every new `runSystem`, `runInOrg` and `runRawSql` call site, and the path rule in 8.7.
+- **qa:** TC-008 evidence lives in `apps/api/src/database/tc-008-org-isolation.spec.ts` (FU-DB-59); see docs/followups/qa.md for the P1 gate gap.

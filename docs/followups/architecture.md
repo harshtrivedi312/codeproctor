@@ -41,6 +41,13 @@ Verdict: approve after the blocker fixes below. Fixed on this branch: `RunReques
 - **Nit:** `pnpm --filter @codeproctor/web gen:api` writes unformatted output while the committed `schema.d.ts` is prettier-formatted (and the file is in `.prettierignore`), so every regeneration shows a whole-file diff. Either append a prettier step to `gen:api` or commit the raw output.
 - **Nit:** `packages/shared` resolves to `dist/` for `tsc` but to `src/` for vitest; a new export can pass tests and fail typecheck until `shared` is rebuilt. Consider `exports` with a source condition or TS project references in ARC-02.
 
+## DB-05 architect gate (2026-10-05, ADR 0006 section 8 proposed)
+
+- **[ARC-05] Pilot org provisioning (FU-DB-76).** Pilot orgs are provisioned outside the API by a CLI built on the client factory (`apps/api/src/database/create-prisma-client.ts`), like the seed. No API route and no system-scope reason. If self-serve or platform-admin org creation is ever needed, add `ORG_PROVISIONING` through an ADR 0006 amendment. DEP-03 runs the CLI on the pilot host; the db-engineer builds it. Recorded in ADR 0006 section 8.9.
+- **[ARC-05, DEP-02] RLS revisit (FU-DB-77).** Revisit Postgres row-level security on `org_id` (ADR 0006 section 1, option b) before production. Not for build or pilot (ADR 0006 section 8.3).
+- **TODO (FU-DB-60, FU-DB-64): link `apps/api/src/database/README.md` from docs/architecture.md** once PR #30 merges. The README is not on main yet, so the link is deferred.
+- **[Delivery Lead] build-plan.md DB-05 still says "request-scoped OrgContext".** ADR 0001 C-1 and database prompt Step 5 now say "an OrgContext per unit of work on AsyncLocalStorage, not a Nest REQUEST-scoped provider". The architect may not edit build-plan.md in parallel work, so the Delivery Lead aligns it.
+
 ## Pointer
 
 The [ARC-02] items under "frontend/step-2" in docs/followups/frontend.md (staff auth schemas, endpoints, 2FA challenge, password policy, fragment tokens) are architecture-hub work and are tracked there.
