@@ -49,7 +49,7 @@ def _as_scores(values: Sequence[float] | Scores, label: str) -> Scores:
 
 
 def upper95(count: int, n: int) -> float:
-    """Wilson 95% upper bound, or the rule of three when count is zero."""
+    """Two-sided 95% Wilson upper limit; the one-sided rule of three (3/n) when count is zero."""
     if n <= 0:
         raise ValueError("n must be positive")
     if count == 0:

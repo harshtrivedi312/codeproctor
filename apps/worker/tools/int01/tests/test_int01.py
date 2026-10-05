@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tools.int01 import evaluate, groups, intake, metrics, report, synthetic  # noqa: E402
+from tools.int01.safety import inside_git_tree  # noqa: E402
 
 
 def test_fr403_sweep_counts_match_rule_score_equal_to_threshold_is_match() -> None:
@@ -34,7 +35,7 @@ def test_fr403_rates_move_monotonically_with_threshold() -> None:
 
 def test_zero_count_uses_rule_of_three_and_wilson_otherwise() -> None:
     assert metrics.upper95(0, 300) == pytest.approx(0.01)
-    assert metrics.upper95(5, 100) > 0.05
+    assert metrics.upper95(5, 100) == pytest.approx(0.1118, abs=1e-3)
 
 
 @pytest.mark.parametrize("bad", [[], [float("nan")], [float("inf")]])
@@ -53,38 +54,82 @@ def test_recommend_uses_upper_bound_and_reports_when_sample_too_small() -> None:
         metrics.recommend(pts, 0)
 
 
-def _two_groups(n_a: int, n_b: int) -> tuple[list[groups.ScoredPair], dict[str, dict[str, str]]]:
+def _groups(
+    *sizes: int, consent: bool = True
+) -> tuple[list[groups.ScoredPair], dict[str, groups.SubjectDemo]]:
     pairs: list[groups.ScoredPair] = []
-    demo: dict[str, dict[str, str]] = {}
-    for n in range(n_a + n_b):
-        code = f"s{n}"
-        demo[code] = {"band": "A" if n < n_a else "B"}
-        pairs += [groups.ScoredPair(code, "genuine", 0.8), groups.ScoredPair(code, "impostor", 0.1)]
+    demo: dict[str, groups.SubjectDemo] = {}
+    n = 0
+    for gi, size in enumerate(sizes):
+        for _ in range(size):
+            code = f"s{n}"
+            n += 1
+            demo[code] = groups.SubjectDemo(consent, {"band": f"G{gi}"})
+            pairs += [
+                groups.ScoredPair(code, "genuine", 0.8),
+                groups.ScoredPair(code, "impostor", 0.1),
+            ]
     return pairs, demo
 
 
-def test_c12_groups_under_ten_volunteers_are_suppressed_without_size() -> None:
-    pairs, demo = _two_groups(12, 9)
+def _rows(
+    pairs: list[groups.ScoredPair], demo: dict[str, groups.SubjectDemo]
+) -> tuple[list[str], bool]:
     (dim,) = groups.group_report(pairs, demo, 0.5)
-    assert [r.group for r in dim.rows] == ["A"]
-    assert dim.suppressed_groups == 1
-    md = report.render(
-        data_label="t",
-        n_volunteers=21,
-        points=[],
-        rec=metrics.Recommendation(0.1, metrics.sweep([0.8], [0.1], [0.5])[0], "r"),
-        groups=[dim],
-        synthetic=True,
-    )
-    assert "| B |" not in md and "| 9 |" not in md
+    return [r.group for r in dim.rows], dim.hidden
 
 
-def test_c12_group_of_exactly_ten_is_shown_and_min_group_cannot_be_lowered() -> None:
-    pairs, demo = _two_groups(10, 10)
-    (dim,) = groups.group_report(pairs, demo, 0.5)
-    assert len(dim.rows) == 2 and dim.suppressed_groups == 0
+def test_c12_single_small_group_forces_complementary_suppression() -> None:
+    # G2 has 9 volunteers. Hiding only G2 would let anyone compute it as total minus shown.
+    shown, hidden = _rows(*_groups(12, 15, 9))
+    assert hidden and shown == ["G1"]  # G0 (12) is hidden too, so the hidden set is 21 >= 10
+
+
+def test_c12_dimension_withheld_when_hidden_set_cannot_reach_ten() -> None:
+    shown, hidden = _rows(*_groups(9))
+    assert shown == [] and hidden
+    shown, hidden = _rows(*_groups(12, 3))  # hiding G1 needs G0 hidden too: 15 hidden, none shown
+    assert shown == [] and hidden
+
+
+def test_c12_nothing_hidden_when_every_group_has_ten() -> None:
+    shown, hidden = _rows(*_groups(10, 10))
+    assert shown == ["G0", "G1"] and not hidden
     with pytest.raises(ValueError):
-        groups.group_report(pairs, demo, 0.5, min_group=5)
+        groups.group_report(*_groups(10, 10), 0.5, min_group=5)
+
+
+def test_c12_rendered_report_gives_size_bands_only_never_exact_sizes() -> None:
+    pairs, demo = _groups(23, 31, 9, 11)
+    (dim,) = groups.group_report(pairs, demo, 0.5)
+    rec = metrics.Recommendation(0.1, metrics.sweep([0.8], [0.1], [0.5])[0], "r")
+    md = report.render(
+        data_label="t", n_volunteers=74, points=[], rec=rec, groups=[dim], synthetic=True
+    )
+    for exact in ("| 23 |", "| 31 |", "| 9 |", "| 11 |"):
+        assert exact not in md
+    assert "20-49" in md
+
+
+def test_c12_only_volunteers_with_group_consent_count_in_groups() -> None:
+    pairs, demo = _groups(12, 12)
+    for code in list(demo)[:6]:  # 6 of G0 did not tick box C
+        demo[code] = groups.SubjectDemo(False, demo[code].values)
+    shown, hidden = _rows(pairs, demo)
+    assert hidden and shown == []  # G0 now has 6 consenting volunteers; complement withholds all
+    assert groups.group_report(pairs, {}, 0.5) == []  # no consent entries: no group section
+
+
+def test_c12_demographics_file_is_strict(tmp_path: Path) -> None:
+    for bad in (
+        {"a": {"age_band": "30-44"}},  # consent flag missing
+        {"a": {"consent_group_results": "yes", "age_band": "30-44"}},  # not a boolean
+        {"a": {"consent_group_results": True, "age_band": "<b>x</b>\n| evil |"}},  # markup
+    ):
+        with pytest.raises(ValueError):
+            groups.parse_subject_demo(next(iter(bad.values())))
+    ok = groups.parse_subject_demo({"consent_group_results": True, "age_band": groups.UNKNOWN})
+    assert ok.consent_group_results and ok.values["age_band"] == groups.UNKNOWN
 
 
 def test_report_never_contains_subject_codes_and_marks_synthetic() -> None:
@@ -105,7 +150,7 @@ def test_cli_synthetic_and_refuses_inputs_inside_git_tree(tmp_path: Path) -> Non
         (repo / name).write_text("{}")
         with pytest.raises(ValueError, match="outside the repository"):
             loader(repo / name)
-    assert not evaluate.inside_git_tree(tmp_path / "elsewhere.json")
+    assert not inside_git_tree(tmp_path / "elsewhere.json")
 
 
 class _OneFace:
@@ -117,7 +162,8 @@ class _OneFace:
 
 
 def _write_png(path: Path) -> None:
-    PIL = pytest.importorskip("PIL.Image")
+    from PIL import Image as PIL
+
     arr = np.random.default_rng(0).integers(0, 255, (200, 300, 3), dtype=np.uint8)
     PIL.fromarray(arr, "RGB").save(path)
 
@@ -151,9 +197,60 @@ def test_c11_intake_failure_still_deletes_original_and_writes_nothing(
 
 
 def test_c11_intake_unreadable_file_is_deleted(tmp_path: Path) -> None:
-    pytest.importorskip("PIL")
     src = tmp_path / "id.png"
     src.write_bytes(b"not an image")
     with pytest.raises(intake.IntakeError) as ei:
         intake.intake_id_photo(src, tmp_path / "p.png", _OneFace([]))
     assert ei.value.code == "UNREADABLE" and not src.exists()
+
+
+def test_c11_intake_refuses_unsafe_paths_and_touches_nothing(tmp_path: Path) -> None:
+    src = tmp_path / "id.png"
+    _write_png(src)
+    link = tmp_path / "link.png"
+    link.symlink_to(src)
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    for s_, d_ in (
+        (link, tmp_path / "o.png"),
+        (src, src),
+        (src, repo / "o.png"),
+        (tmp_path / "none.png", tmp_path / "o.png"),
+    ):
+        with pytest.raises(intake.IntakeError) as ei:
+            intake.intake_id_photo(s_, d_, _OneFace([intake.Box(100, 50, 160, 130)]))
+        assert ei.value.code == "PATH_REFUSED"
+    assert src.exists()
+
+
+def test_c11_intake_reports_delete_failure_and_removes_the_crop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src, dest = tmp_path / "id.png", tmp_path / "portrait.png"
+    _write_png(src)
+    monkeypatch.setattr(intake, "_delete_original", lambda p: False)
+    with pytest.raises(intake.IntakeError) as ei:
+        intake.intake_id_photo(src, dest, _OneFace([intake.Box(100, 50, 160, 130)]))
+    assert ei.value.code == "DELETE_FAILED" and not dest.exists()
+
+
+def test_c11_intake_leaves_no_temp_crop_when_encoding_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src, out = tmp_path / "id.png", tmp_path / "out"
+    _write_png(src)
+
+    def boom(*a: object, **k: object) -> None:
+        raise ValueError("encode")
+
+    monkeypatch.setattr("PIL.Image.Image.save", boom)
+    with pytest.raises(ValueError):
+        intake.intake_id_photo(src, out / "p.png", _OneFace([intake.Box(100, 50, 160, 130)]))
+    assert not src.exists() and list(out.iterdir()) == []
+
+
+def test_scores_csv_header_is_validated(tmp_path: Path) -> None:
+    f = tmp_path / "s.csv"
+    f.write_text("a,b\n1,2\n")
+    with pytest.raises(ValueError, match="columns"):
+        evaluate.load_scores(f)

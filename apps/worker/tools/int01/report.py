@@ -55,6 +55,10 @@ def render(
         ]
     lines += [
         "",
+        "Caveat: impostor pairs reuse the same volunteers, so pairs are not independent and the "
+        "bounds understate the uncertainty. A target of 0.1% needs about 3,000 effectively "
+        "independent impostor pairs even with zero false matches.",
+        "",
         "## Rates across thresholds",
         "",
         "| Threshold | FMR | FMR 95% upper | FNMR (manual review) | FNMR 95% upper |",
@@ -70,25 +74,27 @@ def render(
         lines.append("Not produced (no recommended threshold, or no demographic data).")
     else:
         lines.append(
-            f"Shown on the volunteers' explicit consent (C-12). Groups with fewer than "
-            f"{MIN_GROUP} volunteers are suppressed: no rates and no size are given."
+            "Shown on the volunteers' explicit consent (C-12); only volunteers who agreed to "
+            f"group results are included. Groups under {MIN_GROUP} volunteers are hidden, with "
+            "complementary suppression, and sizes are given as bands only."
         )
         for d in groups:
             lines += [
                 "",
                 f"### {d.dimension}",
                 "",
-                "| Group | Volunteers | FMR | FNMR |",
+                "| Group | Volunteers (band) | FMR | FNMR |",
                 "|---|---|---|---|",
             ]
             for r in d.rows:
                 lines.append(
-                    f"| {r.group} | {r.volunteers} | {_pct(r.point.fmr)} | {_pct(r.point.fnmr)} |"
+                    f"| {r.group} | {r.size_band} | {_pct(r.point.fmr)} | {_pct(r.point.fnmr)} |"
                 )
-            if d.suppressed_groups:
+            if d.hidden:
                 lines.append(
-                    f"\n{d.suppressed_groups} group(s) suppressed "
-                    f"(fewer than {MIN_GROUP} volunteers)."
+                    "\nSome groups are not shown: groups under "
+                    f"{MIN_GROUP} volunteers, groups without both pair kinds, and the smallest "
+                    "shown groups when needed so that a hidden group cannot be worked out."
                 )
     lines += [
         "",
