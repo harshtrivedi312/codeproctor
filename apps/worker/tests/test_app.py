@@ -174,14 +174,18 @@ def test_nfr01_fr803_request_with_many_submissions_and_large_starter_is_fast_eno
 
 
 def test_fr805_c28_risk_route_returns_review_path_queue_rank_and_always_needs_review() -> None:
-    low = client.post("/risk", json={"events": []}, headers=AUTH).json()
+    resp = client.post("/risk", json={"events": []}, headers=AUTH)
+    assert resp.status_code == 200
+    low = resp.json()
     assert low["band"] == "LOW" and low["needs_review"] is True
     assert low["review_path"] == "fast" and low["review_reasons"] == ["RISK_LOW"]
-    held = client.post(
+    held_resp = client.post(
         "/risk", json={"events": [], "identity_review_pending": True}, headers=AUTH
-    ).json()
+    )
+    assert held_resp.status_code == 200
+    held = held_resp.json()
     assert held["review_path"] == "full" and "IDENTITY_MANUAL_REVIEW" in held["review_reasons"]
-    high = client.post(
+    high_resp = client.post(
         "/risk",
         json={
             "events": [
@@ -190,6 +194,8 @@ def test_fr805_c28_risk_route_returns_review_path_queue_rank_and_always_needs_re
             ]
         },
         headers=AUTH,
-    ).json()
+    )
+    assert high_resp.status_code == 200
+    high = high_resp.json()
     assert high["band"] == "HIGH" and high["review_path"] == "full"
     assert high["queue_rank"] < low["queue_rank"]

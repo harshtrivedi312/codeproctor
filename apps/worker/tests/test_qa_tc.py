@@ -212,3 +212,4 @@ def test_TC_076_the_risk_route_band_for_a_medium_session_feeds_routing() -> None
     assert out["band"] == "MEDIUM"
     assert route_for_review("MEDIUM").reasons == ["RISK_MEDIUM"]
     assert out["needs_review"] is True and out["review_path"] == "full"
+    assert out["review_reasons"] == ["RISK_MEDIUM"] and out["queue_rank"] == 1

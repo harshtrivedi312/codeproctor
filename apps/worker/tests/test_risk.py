@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from worker.config import IntegrityConfig
-from worker.events import EventType
+from worker.events import EventType, RiskBand
 from worker.risk import (
     QueueItem,
     ScoredEvent,
@@ -168,9 +168,9 @@ def test_tc076_medium_band_goes_to_review_queue() -> None:
 @pytest.mark.parametrize("identity", [False, True])
 @pytest.mark.parametrize("short", [False, True])
 def test_fr805_c28_no_band_or_hold_combination_is_ever_auto_cleared(
-    band: str, identity: bool, short: bool
+    band: RiskBand, identity: bool, short: bool
 ) -> None:
-    r = route_for_review(band, identity, short)  # type: ignore[arg-type]
+    r = route_for_review(band, identity, short)
     assert r.needs_review is True
     assert r.review_path in {"fast", "full"} and f"RISK_{band}" in r.reasons
 
@@ -188,17 +188,12 @@ def test_fr805_c28_pending_identity_or_short_answer_forces_the_full_path() -> No
     assert both.reasons == ["RISK_HIGH", "IDENTITY_MANUAL_REVIEW", "SHORT_ANSWER_MANUAL_SCORING"]
 
 
-def test_fr805_c28_fast_path_bands_are_configurable_and_high_can_never_be_fast() -> None:
-    assert (
-        route_for_review("MEDIUM", config=cfg(fastReviewBands=["LOW", "MEDIUM"])).review_path
-        == "fast"
-    )
+def test_fr805_c28_fast_path_bands_may_only_hold_low_or_be_empty() -> None:
     assert route_for_review("LOW", config=cfg(fastReviewBands=[])).review_path == "full"
     assert cfg(fast_review_bands=["LOW"]).risk.fast_review_bands == {"LOW"}
-    with pytest.raises(ValidationError):
-        cfg(fastReviewBands=["HIGH"])
-    with pytest.raises(ValidationError):
-        cfg(fastReviewBands=["URGENT"])
+    for bad in (["MEDIUM"], ["LOW", "MEDIUM"], ["HIGH"], ["URGENT"]):
+        with pytest.raises(ValidationError):
+            cfg(fastReviewBands=bad)
 
 
 def test_fr805_c28_queue_rank_puts_high_first_then_medium_then_low() -> None:

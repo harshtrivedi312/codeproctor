@@ -80,7 +80,7 @@ class QueueItem:
     session_id: str
     band: RiskBand
     score: float
-    submitted_at_ms: int = 0
+    submitted_at_ms: int
 
 
 def calculate_risk(

@@ -78,10 +78,12 @@ Routing (FR-805 as changed by owner decision C-28): a person reviews EVERY sessi
 is always true and nothing is auto-cleared. The band now orders the queue and picks the review path:
 `review_path` is `fast` (summary and one-click verdict; default for bands in `risk.fastReviewBands` =
 `["LOW"]`) or `full`. A pending identity review or pending manual short-answer score forces `full`
-(brief assumption, to confirm with the hub). HIGH can never be fast (validated). Queue order
+(brief assumption, to confirm with the hub). `fastReviewBands` may hold only `LOW` (or be empty) until the hub decides. HIGH can never be fast (validated). Queue order
 (`order_review_queue`): HIGH, MEDIUM, LOW; higher score first; older submission first; session id as
-the final tie-break, so the order is total and deterministic. `reasons` always starts with
-`RISK_<band>`. The `/risk` route accepts `identity_review_pending` and `short_answer_pending` and
+the final tie-break, so the order is total and deterministic. A LOW session with a hold ranks with plain LOW: the queue rank is band-based on
+purpose (the band orders the queue, C-28); the hold already shows in `reasons` and forces the `full`
+path, and ranking it higher would make the rank depend on two inputs the hub has not agreed on
+(see followups). `reasons` always starts with `RISK_<band>`. The `/risk` route accepts `identity_review_pending` and `short_answer_pending` and
 returns `needs_review`, `review_path`, `queue_rank`, `review_reasons`.
 Severity is always taken from the type; a severity sent by a client is ignored.
 

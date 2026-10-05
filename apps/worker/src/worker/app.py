@@ -16,9 +16,15 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from worker.config import IntegrityConfig
-from worker.events import MAX_SOURCE_CODE_LENGTH, CodeLanguage, Finding, KeystrokeBatch
+from worker.events import (
+    MAX_SOURCE_CODE_LENGTH,
+    CodeLanguage,
+    Finding,
+    KeystrokeBatch,
+    RiskBand,
+)
 from worker.keystrokes import analyze_keystrokes
-from worker.risk import RiskResult, ScoredEvent, calculate_risk, route_for_review
+from worker.risk import ReviewPath, RiskResult, ScoredEvent, calculate_risk, route_for_review
 from worker.similarity import (
     AiReference,
     Submission,
@@ -79,10 +85,10 @@ class AiRef(BaseModel):
 class RiskResultOut(BaseModel):
     score: float
     raw_score: float
-    band: str
+    band: RiskBand
     # C-28: every session is reviewed; the band picks the path and orders the queue.
     needs_review: bool
-    review_path: str
+    review_path: ReviewPath
     queue_rank: int
     review_reasons: list[str]
 
