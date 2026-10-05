@@ -9,6 +9,8 @@ import {
   Logger,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
+import { CodedForbiddenException } from './coded.exception';
+import type { ProblemCode } from './coded.exception';
 
 export interface ProblemDetails {
   type: string;
@@ -18,6 +20,8 @@ export interface ProblemDetails {
   instance: string;
   traceId: string;
   errors?: string[];
+  /** Stable machine code, present only where a route defines one (e.g. REAUTH_FAILED). */
+  code?: ProblemCode;
 }
 
 const TITLES: Record<number, string> = {
@@ -67,6 +71,10 @@ export class ProblemFilter implements ExceptionFilter {
         } else if (typeof message === 'string') {
           problem.detail = message;
         }
+      }
+      // Only our own coded exceptions may set `code`, and never on a 5xx.
+      if (exception instanceof CodedForbiddenException && status < 500) {
+        problem.code = exception.code;
       }
       if (status >= 500 && status !== 503) problem.detail = 'The service is unavailable or failed';
     } else {

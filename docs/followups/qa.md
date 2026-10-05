@@ -138,6 +138,26 @@ Root cause was in the test, not the SDK: it assumed one batch per paste and wait
 Observation for proctor-sdk-engineer (low, not a data-loss defect; NFR-08 holds): `EventQueue.retryNow()` does nothing while a drain is already running. If the browser `online` event arrives during a send that is about to fail, the next attempt waits for the exponential backoff (up to 30 s) instead of starting at once. Suggested: remember that a retry was requested and run another drain pass when the current one ends in RETRY.
 
 
+## 8. QA step 2b (2026-10-05): BE-02 security hardening contract changes
+
+Branch `qa/step-2b`, on top of backend PR #26. API integration suite: 9 suites, 77 passed, 3 todo, 0 failed (was 11 failing against the new contract). API unit suite 124 passed; lint and typecheck clean; the P1 gate over all reports shows no failing P1 case.
+
+### 8.1 What changed in the tests
+
+1. `tc-098`: forgot-password answers the same 202 and mails after the response. The harness now exposes `h.settle()` (calls `AuthService.settleDeferred()`), and the test helper waits for it before reading `h.mails`. The two-device session test signs the second device in with a recovery code, because a TOTP code is now accepted once per time step.
+2. `tc-003`: challenges are single-use, so the recovery-code test logs in again for a fresh challenge; new tests for a spent challenge (401) and a challenge issued before a password change (401). Setup routes send `currentPassword` (missing 400; wrong or locked is 403 REAUTH_FAILED with identical bodies, no lockedUntil or 423; updated for the final BE-02 contract). New tests: /2fa/disable (403 TWO_FACTOR_REQUIRED_FOR_ROLE for SUPER_ADMIN and REVIEWER after the password check, 409 when off, audit row), /2fa/recovery-codes/regenerate, SUPER_ADMIN /2fa/reset/:userId (403 other roles, 404 other org or unknown, 400 self or non-UUID, sessions revoked, audit row), Cache-Control no-store on login, verify, refresh, enrol, setup and regenerate, locked account (401 login, 400 code), 503 on /2fa/verify with Redis stopped.
+3. `tc-004`: the 200 at ~78 failed only because setup/start now needs `currentPassword`; fixed. Added per-request guard coverage (deactivated, role change, org change, password change, challenge token is not a session). A pending-invite user cannot be built for the guard test: the `users_check` constraint forbids a null password on an active user, so that path is covered by the database.
+4. `test/support/harness.ts`: `settle()`, `signIn()` and `signInWithTotp()` helpers.
+
+### 8.2 Gaps
+
+- 503 on `/2fa/enroll/confirm` and "the challenge stays usable after Redis returns" are not tested. Testcontainers cannot restart Redis on the same host port, and `docker pause` makes the client hang with no command timeout. The verify 503 test stops Redis for good and is the last test in `tc-003.int.test.ts`; keep it last. A proper test needs a Redis client override or a TCP proxy in the harness.
+- Challenge single-use under concurrency (two parallel verifies, one wins) is not tested.
+- TC-004 stays Partial (question and review routes still do not exist).
+
+### 8.3 Defects
+
+None confirmed. Observation for backend-engineer (nit): the Redis client has no command timeout, so an unreachable but not closed Redis (paused container, network black hole) holds a request open until the HTTP layer gives up instead of returning the documented 503.
 ## 8. QA-03 round (2026-10-05): BE-03 acceptance tests staged
 
 ### 8.1 What was added
