@@ -18,6 +18,7 @@
 # (ADR 0009). Never run this against them from a developer machine or an agent session.
 #
 # The dump runs as a role that can read every table (the migration owner, not app_user).
+# Note on `[ a \< b ]` below: dash and bash accept it; a shell that did not would never prune, which is safe.
 # Objects uploaded: <prefix>dumps/codeproctor-<stamp>.dump.gz, .sha256, .counts.tsv
 set -eu
 here=$(dirname "$0")
@@ -26,6 +27,9 @@ here=$(dirname "$0")
 
 [ "$#" -eq 0 ] || die "backup.sh takes no arguments. Configure it through the environment."
 require_env PGHOST PGDATABASE PGUSER
+# libpq reads a connection string with a password from PGDATABASE; only a plain name is allowed,
+# so nothing sensitive can reach a log line or a command line.
+printf '%s' "$PGDATABASE" | grep -q '^[A-Za-z0-9_.-]\{1,63\}$' || die "PGDATABASE must be a plain database name."
 RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-14}
 case "$RETENTION_DAYS" in '' | *[!0-9]*) die "BACKUP_RETENTION_DAYS must be a whole number." ;; esac
 [ "$RETENTION_DAYS" -ge 1 ] || die "BACKUP_RETENTION_DAYS must be at least 1."
@@ -39,7 +43,7 @@ name=codeproctor-$stamp.dump.gz
 file=$WORK/$name
 
 # 0. The dump client must match the server's major version (see lib.sh).
-require_matching_client "$PGDATABASE" pg_dump
+require_matching_client "" pg_dump
 
 # 1. Row counts, in one read-only snapshot. The restore drill compares them (TC-none, NFR-03).
 psql --no-psqlrc -X -q -At -v ON_ERROR_STOP=1 > "$WORK/counts.tsv" <<'SQL'
@@ -54,12 +58,19 @@ SQL
 
 # 2. Dump. --no-owner lets a restore run as any role; privileges (GRANT to app_user) are kept.
 #    -Z0 because gzip compresses the whole stream afterwards.
-log "dumping database $PGDATABASE..."
-pg_dump --format=custom --compress=0 --no-owner --quote-all-identifiers | gzip -6 > "$file"
+#    The dump goes to a file first: a pipe would hide pg_dump's exit status (POSIX sh has no
+#    pipefail), and a dump cut off after its table of contents would still look valid.
+log "dumping the database..."
+pg_dump --format=custom --compress=0 --no-owner --quote-all-identifiers --file="$WORK/dump" ||
+  die "pg_dump failed. Nothing was uploaded or pruned."
+gzip -6 -c "$WORK/dump" > "$file"
+rm -f "$WORK/dump"
 
 # 3. Verify before anything is uploaded or deleted: the gzip is intact and pg_restore can read it.
 gzip -t "$file" || die "the gzip stream is damaged."
 gzip -dc "$file" | pg_restore --list > "$WORK/toc.txt" || die "pg_restore cannot read the dump."
+# A full read of every data block catches a truncated archive that the table of contents hides.
+gzip -dc "$file" | pg_restore --file=/dev/null || die "the dump is truncated or damaged."
 # An empty or partial dump must never replace a good one: every table counted above needs a data entry.
 tables=$(wc -l < "$WORK/counts.tsv" | tr -d ' ')
 data=$(grep -c ' TABLE DATA ' "$WORK/toc.txt" || true)
@@ -70,11 +81,11 @@ size=$(wc -c < "$file" | tr -d ' ')
 # 4. Upload and confirm the stored size.
 set --
 [ -z "${BACKUP_SSE:-}" ] || set -- --sse "$BACKUP_SSE"
-for part in "$name" "$name.sha256" "${name%.dump.gz}.counts.tsv"; do
-  src=$WORK/$part
-  [ "$part" != "${name%.dump.gz}.counts.tsv" ] || src=$WORK/counts.tsv
-  s3cp "$src" "s3://$BUCKET/$DUMP_PREFIX$part" "$@"
-done
+# The dump goes up LAST: a dump that is present always has its checksum and counts, so
+# "restore latest" never picks a backup it cannot verify.
+s3cp "$WORK/$name.sha256" "s3://$BUCKET/$DUMP_PREFIX$name.sha256" "$@"
+s3cp "$WORK/counts.tsv" "s3://$BUCKET/$DUMP_PREFIX${name%.dump.gz}.counts.tsv" "$@"
+s3cp "$file" "s3://$BUCKET/$DUMP_PREFIX$name" "$@"
 remote=$(s3api head-object --bucket "$BUCKET" --key "$DUMP_PREFIX$name" --query ContentLength --output text)
 [ "$remote" = "$size" ] || die "uploaded size $remote differs from local size $size. Nothing was pruned."
 log "uploaded $DUMP_PREFIX$name ($size bytes)."
@@ -95,13 +106,14 @@ list_keys "$DUMP_PREFIX" | while read -r key; do
   fi
 done
 
-# 6. The erasure list only needs entries newer than the oldest backup that is left (an older
-#    erasure is already in every remaining backup). One day of margin.
+# 6. The erasure list only needs entries whose erasure COMPLETED after the oldest backup that is
+#    left (an erasure finished earlier is already in every remaining backup). One day of margin.
+#    Entries not marked complete are never pruned (see erasure-list.sh).
 oldest=$(list_keys "$DUMP_PREFIX" | sed -n "s#^$DUMP_PREFIX\\(codeproctor-$STAMP_RE\\)\\.dump\\.gz\$#\\1#p" | sort | head -1)
 oldest=${oldest#codeproctor-}
 if [ -n "$oldest" ]; then
   oday=$(printf '%s' "$oldest" | cut -c1-8)
   margin=$(date -u -d "$oday -1 day" +%Y%m%d 2>/dev/null || date -u -j -v-1d -f %Y%m%d "$oday" +%Y%m%d)
-  "$here/erasure-list.sh" prune "${margin}T000000Z"
+  sh "$here/erasure-list.sh" prune "${margin}T000000Z"
 fi
 log "backup finished."

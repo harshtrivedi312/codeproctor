@@ -11,11 +11,13 @@
 #                             Actions or on a server, where its credentials live (D-38). Without
 #                             it the script runs the localhost guard (assert-local-db.mjs) and
 #                             refuses any other PGHOST.
+#   (a real restore runs as the migration owner role, because --no-owner makes the restoring role the
+#   owner of every object; later migrations run as that role)
 #   RESTORE_CREATE_APP_USER=1 create app_user (NOLOGIN) when the target server lacks it. The dump
 #                             grants to app_user, and roles are not part of a database dump.
 #                             Production servers have the role from provisioning (ADR 0006 7.5).
 #
-# Exit codes: 0 restored and verified; 1 error; 2 restored but the row counts differ from the
+# Exit codes: 0 restored and verified; 1 any error; 2 restored but the row counts differ from the
 # counts recorded at backup time (the database is left in place for inspection).
 set -eu
 here=$(dirname "$0")
@@ -29,7 +31,13 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --target-db) target=${2:-}; shift 2 || die "--target-db needs a value." ;;
     --backup) backup=${2:-}; shift 2 || die "--backup needs a value." ;;
-    --skip-erasures) reapply=no; shift ;;
+    --skip-erasures)
+      # Skipping brings erased candidates back. Drills only: never with a remote target.
+      [ "${RESTORE_ALLOW_REMOTE:-}" != "1" ] || die "--skip-erasures is for local drills only."
+      log "WARNING: --skip-erasures. The restored database holds candidates who asked to be erased. Do not use it."
+      reapply=no
+      shift
+      ;;
     *) die "unknown argument. Usage: restore.sh --target-db <name> [--backup <file>|latest] [--skip-erasures]" ;;
   esac
 done
@@ -50,7 +58,17 @@ if [ "${RESTORE_ALLOW_REMOTE:-}" != "1" ]; then
 fi
 
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+# Only 0 and the deliberate 2 (row counts differ) leave this script as they are. A failing
+# command under `set -e` passes on its own status (psql and aws can return 2), and the runbook
+# reads 2 as "restored, counts differ", so every other failure is mapped to 1.
+deliberate=0
+finish() {
+  rc=$?
+  rm -rf "$WORK"
+  if [ "$rc" -ne 0 ] && [ "$deliberate" -ne 1 ]; then rc=1; fi
+  exit "$rc"
+}
+trap finish EXIT
 init_s3
 
 if [ "$backup" = latest ]; then
@@ -106,7 +124,7 @@ fi
 # 5. Re-apply the erasures (ADR 0004 R-7). Every entry on the list is applied, not just those
 #    after the backup stamp: re-applying one that is already in the backup changes nothing.
 if [ "$reapply" = yes ]; then
-  "$here/erasure-list.sh" list > "$WORK/erasures.txt"
+  sh "$here/erasure-list.sh" list > "$WORK/erasures.txt"
   n=$(wc -l < "$WORK/erasures.txt" | tr -d ' ')
   {
     printf 'CREATE TEMP TABLE _reapply_erasures (candidate_id uuid PRIMARY KEY, erased_at timestamptz NOT NULL);\n'
@@ -117,8 +135,10 @@ if [ "$reapply" = yes ]; then
     done < "$WORK/erasures.txt"
     printf '\\i %s/reapply-erasures.sql\n' "$here"
   } > "$WORK/reapply.sql"
-  psql --no-psqlrc -X -q -v ON_ERROR_STOP=1 -d "$target" -f "$WORK/reapply.sql" > /dev/null
+  psql --no-psqlrc -X -q -v ON_ERROR_STOP=1 -d "$target" -f "$WORK/reapply.sql" > /dev/null ||
+    die "erasures were NOT re-applied. Do not use database $target: it holds personal data that was erased."
   log "re-applied $n erasure(s) from the erasure list."
 fi
 log "restore finished: database $target."
+[ "$status" -eq 0 ] || deliberate=1
 exit "$status"

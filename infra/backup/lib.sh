@@ -38,9 +38,12 @@ init_s3() {
   BUCKET=$S3_BACKUP_BUCKET
   PREFIX=${BACKUP_PREFIX:-db/}
   case "$PREFIX" in */) ;; *) PREFIX="$PREFIX/" ;; esac
-  case "$PREFIX" in /* | *..*) die "BACKUP_PREFIX must be a relative path without '..'." ;; esac
+  # The prefix goes into sed patterns, so only plain path characters are allowed.
+  printf '%s' "$PREFIX" | grep -q '^[A-Za-z0-9_/-]*$' || die "BACKUP_PREFIX may hold only letters, digits, underscore, hyphen and slash."
+  case "$PREFIX" in /* | *//*) die "BACKUP_PREFIX must be a relative path." ;; esac
   DUMP_PREFIX="${PREFIX}dumps/"
   ERASURE_PREFIX="${PREFIX}erasure-list/"
+  COMPLETED_PREFIX="${PREFIX}erasure-completed/"
 }
 
 # s3api <aws s3api args...>: adds the endpoint when one is configured.
@@ -94,7 +97,12 @@ is_stamp() { printf '%s' "$1" | grep -q "^$STAMP_RE\$"; }
 # PG_BIN_DIR points at the right client when several are installed. Needs PG* set for psql.
 require_matching_client() {
   if [ -n "${PG_BIN_DIR:-}" ]; then PATH=$PG_BIN_DIR:$PATH; export PATH; fi
-  server_major=$(psql --no-psqlrc -X -At -v ON_ERROR_STOP=1 -d "${1:-postgres}" -c 'SHOW server_version_num' | cut -c1-2)
+  # An empty first argument means "use PGDATABASE from the environment", so it never appears in argv.
+  if [ -n "${1:-}" ]; then
+    server_major=$(psql --no-psqlrc -X -At -v ON_ERROR_STOP=1 -d "$1" -c 'SHOW server_version_num' | cut -c1-2)
+  else
+    server_major=$(psql --no-psqlrc -X -At -v ON_ERROR_STOP=1 -c 'SHOW server_version_num' | cut -c1-2)
+  fi
   for tool in $2; do
     client_major=$("$tool" --version | sed -n 's/^[a-z_]* (PostgreSQL) \([0-9]*\).*/\1/p')
     [ "$server_major" = "$client_major" ] ||

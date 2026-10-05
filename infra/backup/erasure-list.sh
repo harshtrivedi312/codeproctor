@@ -8,9 +8,16 @@
 # The body ({"candidateId":..., "erasedAt":...}) is for humans. The list holds ids only:
 # no name, email or other personal data.
 #
-#   erasure-list.sh append <candidate-uuid> [<UTC stamp>]   record an erasure (idempotent)
-#   erasure-list.sh list                                     print "<stamp> <uuid>" per entry
-#   erasure-list.sh prune <UTC stamp>                        drop entries older than the stamp
+#   erasure-list.sh append <candidate-uuid> [<UTC stamp>]    record an erasure request (idempotent)
+#   erasure-list.sh complete <candidate-uuid> [<UTC stamp>]  record that the erasure is finished
+#   erasure-list.sh list                                      print "<stamp> <uuid>" per entry
+#   erasure-list.sh prune <UTC stamp>                         drop COMPLETED entries finished before the stamp
+#
+# An erasure can finish long after it was requested (a review or appeal hold, the re-run after the
+# fence, day-28 anonymisation: ADR 0004 9.5). Backups taken in between still hold the personal data,
+# so an entry is pruned on its COMPLETION time, never on its request time, and an entry without a
+# completion marker is never pruned. The erasure service calls `complete` once the candidate row is
+# anonymised and ERASURE_COMPLETED is written.
 #
 # The erasure service must append BEFORE it commits the erasure to the database (DB-06): a
 # crash then leaves an entry for an erasure that did not happen, which is harmless (re-applying
@@ -40,6 +47,20 @@ case "$cmd" in
     printf '{"candidateId":"%s","erasedAt":"%s"}\n' "$id" "$stamp" > "$WORK/entry.json"
     s3cp "$WORK/entry.json" "s3://$BUCKET/$ERASURE_PREFIX$stamp-$id.json" --content-type application/json
     ;;
+  complete)
+    id=${2:-}
+    stamp=${3:-$(utc_stamp)}
+    is_uuid "$id" || die "complete needs a candidate uuid."
+    is_stamp "$stamp" || die "the time must look like 20261005T020000Z."
+    id=$(printf '%s' "$id" | tr 'A-F' 'a-f')
+    list_keys "$ERASURE_PREFIX" | grep -q -- "-$id\.json\$" || die "the candidate is not on the erasure list. Run append first."
+    if list_keys "$COMPLETED_PREFIX" | grep -q -- "-$id\.json\$"; then
+      log "erasure already marked complete."
+      exit 0
+    fi
+    printf '{"candidateId":"%s","completedAt":"%s"}\n' "$id" "$stamp" > "$WORK/done.json"
+    s3cp "$WORK/done.json" "s3://$BUCKET/$COMPLETED_PREFIX$stamp-$id.json" --content-type application/json
+    ;;
   list)
     list_keys "$ERASURE_PREFIX" |
       sed -n "s#^$ERASURE_PREFIX\\($STAMP_RE\\)-\\([0-9a-f-]\\{36\\}\\)\\.json\$#\\1 \\2#p" | sort
@@ -47,14 +68,21 @@ case "$cmd" in
   prune)
     before=${2:-}
     is_stamp "$before" || die "prune needs a UTC stamp."
-    "$0" list | while read -r stamp id; do
-      if [ "$stamp" \< "$before" ]; then
-        s3api delete-object --bucket "$BUCKET" --key "$ERASURE_PREFIX$stamp-$id.json" > /dev/null
-        log "pruned erasure-list entry from $stamp."
-      fi
-    done
+    # Only entries whose completion marker is older than the stamp. Entries without a marker stay.
+    list_keys "$COMPLETED_PREFIX" |
+      sed -n "s#^$COMPLETED_PREFIX\\($STAMP_RE\\)-\\([0-9a-f-]\\{36\\}\\)\\.json\$#\\1 \\2#p" |
+      while read -r done_stamp id; do
+        if [ "$done_stamp" \< "$before" ]; then
+          s3api list-objects-v2 --bucket "$BUCKET" --prefix "$ERASURE_PREFIX" --query 'Contents[].Key' --output text |
+            tr '\t' '\n' | grep -- "-$id\.json\$" | while read -r key; do
+              s3api delete-object --bucket "$BUCKET" --key "$key" > /dev/null
+            done
+          s3api delete-object --bucket "$BUCKET" --key "$COMPLETED_PREFIX$done_stamp-$id.json" > /dev/null
+          log "pruned a completed erasure-list entry from $done_stamp."
+        fi
+      done
     ;;
   *)
-    die "usage: erasure-list.sh append <uuid> [stamp] | list | prune <stamp>"
+    die "usage: erasure-list.sh append|complete <uuid> [stamp] | list | prune <stamp>"
     ;;
 esac

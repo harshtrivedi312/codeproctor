@@ -119,14 +119,41 @@ export function applyMigrations(pg, db) {
 export function clientShims(pg, dir) {
   const major = Number(POSTGRES_IMAGE.split(':')[1]);
   const installed = spawnSync('pg_dump', ['--version'], { encoding: 'utf8' }).stdout;
-  if (installed.match(/\) (\d+)/)?.[1] === String(major)) return '';
   mkdirSync(dir, { recursive: true });
+  // A psql wrapper that fails when the arguments contain FAKE_PSQL_FAIL_ON, so a test can break
+  // one step (for example the erasure re-application) and nothing else.
+  const realPsql = spawnSync('sh', ['-c', 'command -v psql'], { encoding: 'utf8' }).stdout.trim();
+  writeFileSync(
+    join(dir, 'psql'),
+    `#!/bin/sh\ncase "$*" in *"\${FAKE_PSQL_FAIL_ON:-@@never@@}"*) echo "psql: simulated failure" >&2; exit 3 ;; esac\nexec ${realPsql} "$@"\n`,
+    { mode: 0o755 },
+  );
+  if (installed.match(/\) (\d+)/)?.[1] === String(major)) {
+    for (const tool of ['pg_dump', 'pg_restore']) {
+      const real = spawnSync('sh', ['-c', `command -v ${tool}`], {
+        encoding: 'utf8',
+      }).stdout.trim();
+      writeFileSync(join(dir, tool), `#!/bin/sh\nexec ${real} "$@"\n`, { mode: 0o755 });
+    }
+    return dir;
+  }
   for (const tool of ['pg_dump', 'pg_restore']) {
     // The tools talk to the server over its own socket; stdin and stdout pass through.
+    // pg_dump runs inside the container, so --file=<host path> becomes a redirect on the host.
     const script = [
       '#!/bin/sh',
       `case "$1" in --version) exec docker exec ${pg.id} ${tool} --version ;; esac`,
-      `exec docker exec -i -e PGPASSWORD="$PGPASSWORD" -e PGDATABASE="$PGDATABASE" ${pg.id} ${tool} -h 127.0.0.1 -U "$PGUSER" "$@"`,
+      'out=',
+      'n=$#',
+      'while [ "$n" -gt 0 ]; do',
+      '  a=$1; shift; n=$((n - 1))',
+      '  case "$a" in --file=/dev/null) set -- "$@" "$a" ;; --file=*) out=${a#--file=} ;; *) set -- "$@" "$a" ;; esac',
+      'done',
+      `if [ -n "$out" ]; then`,
+      `  docker exec -i -e PGPASSWORD="$PGPASSWORD" -e PGDATABASE="$PGDATABASE" ${pg.id} ${tool} -h 127.0.0.1 -U "$PGUSER" "$@" > "$out"`,
+      'else',
+      `  exec docker exec -i -e PGPASSWORD="$PGPASSWORD" -e PGDATABASE="$PGDATABASE" ${pg.id} ${tool} -h 127.0.0.1 -U "$PGUSER" "$@"`,
+      'fi',
       '',
     ].join('\n');
     writeFileSync(join(dir, tool), script, { mode: 0o755 });
@@ -160,8 +187,8 @@ BEGIN
     VALUES (cand, 'aaaaaaaa-0000-4000-8000-000000000001', 'cand' || n || '@example.test', 'Candidate ' || n, 'ref' || n);
   INSERT INTO invitations (id, org_id, test_id, candidate_id, token_hash, window_start, window_end)
     VALUES (inv, 'aaaaaaaa-0000-4000-8000-000000000001', 'aaaaaaaa-0000-4000-8000-000000000005', cand, 'h' || n, now(), now() + interval '1 day');
-  INSERT INTO sessions (id, org_id, invitation_id, device_info)
-    VALUES (ses, 'aaaaaaaa-0000-4000-8000-000000000001', inv, '{"ua":"secret"}');
+  INSERT INTO sessions (id, org_id, invitation_id, device_info, hmac_key_enc, report_key)
+    VALUES (ses, 'aaaaaaaa-0000-4000-8000-000000000001', inv, '{"ua":"secret"}', 'enc-key-' || n, 'reports/' || n);
   INSERT INTO session_questions (id, session_id, test_question_id, question_version_id, position, points, final_code, answer, scoring_note)
     VALUES (sq, ses, 'aaaaaaaa-0000-4000-8000-000000000007', 'aaaaaaaa-0000-4000-8000-000000000004', 1, 100, 'print(1)', '{"a":1}', 'note');
   INSERT INTO submissions (session_question_id, kind, language, source_code, results)

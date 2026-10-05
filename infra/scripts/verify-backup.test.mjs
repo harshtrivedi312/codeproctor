@@ -110,6 +110,30 @@ describe('DB-07 guards (NFR-03)', () => {
       S3_BACKUP_BUCKET: 'b',
     });
     assert.equal(r.status, 1);
+    assert.match(r.stderr, /--backup must be a file name/);
+  });
+
+  it('restore.sh refuses --skip-erasures on a remote restore (it would bring erased candidates back)', async () => {
+    const r = await run(RESTORE, ['--target-db', 'x', '--skip-erasures'], {
+      PGHOST: 'db.example.com',
+      PGUSER: 'u',
+      S3_BACKUP_BUCKET: 'b',
+      RESTORE_ALLOW_REMOTE: '1',
+    });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /local drills only/);
+  });
+
+  it('backup.sh accepts only a plain database name, so a connection string with a password is never logged', async () => {
+    const r = await run(BACKUP, [], {
+      PGHOST: 'h',
+      PGUSER: 'u',
+      S3_BACKUP_BUCKET: 'b',
+      PGDATABASE: `postgresql://u:${SECRET}@h/db`,
+    });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /plain database name/);
+    assert.doesNotMatch(r.stderr + r.stdout, new RegExp(SECRET));
   });
 
   it('FR-704: the erasure list takes uuids only', async () => {
@@ -120,16 +144,29 @@ describe('DB-07 guards (NFR-03)', () => {
       /time must look like/,
     );
     assert.match((await run(ERASURES, ['prune', 'x'], env)).stderr, /UTC stamp/);
+    assert.match((await run(ERASURES, ['complete', 'nope'], env)).stderr, /candidate uuid/);
   });
 
   it('BACKUP_PREFIX cannot climb out with ..', async () => {
-    const r = await run(ERASURES, ['list'], { S3_BACKUP_BUCKET: 'b', BACKUP_PREFIX: '../x' });
-    assert.equal(r.status, 1);
+    for (const bad of ['../x', '/abs', 'a//b', 'a#b', 'a b']) {
+      const r = await run(ERASURES, ['list'], { S3_BACKUP_BUCKET: 'b', BACKUP_PREFIX: bad });
+      assert.equal(r.status, 1, bad);
+    }
   });
 });
 
 const skip = drillUnavailable() ?? false;
 if (skip) console.log(`# DB-07 restore drill skipped: ${skip}`);
+
+// CI sets REQUIRE_DB_DRILL=1 so that a runner without docker, aws or the PostgreSQL tools fails
+// instead of passing without ever running the drill (FU-DBB-03).
+it(
+  'NFR-03: the restore drill can run when it is required',
+  { skip: !(skip && process.env.REQUIRE_DB_DRILL === '1') },
+  () => {
+    assert.fail(`REQUIRE_DB_DRILL=1 but the drill cannot run: ${skip}`);
+  },
+);
 
 describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { skip }, () => {
   let pg;
@@ -301,6 +338,19 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
       'Erased|true',
     );
     assert.equal(q(`SELECT device_info::text FROM sessions WHERE id IN (${erasedSessions})`), '{}');
+    // session credentials fenced (ADR 0004 9.7): old tokens and the HMAC key do not come back
+    assert.equal(
+      q(
+        `SELECT auth_epoch || '|' || (hmac_key_enc IS NULL) || '|' || (report_key IS NULL) || '|' || (retention_anchor_at IS NOT NULL) FROM sessions WHERE id IN (${erasedSessions})`,
+      ),
+      '1|true|true|true',
+    );
+    assert.equal(
+      q(
+        `SELECT auth_epoch || '|' || (hmac_key_enc IS NULL) FROM sessions WHERE id NOT IN (${erasedSessions})`,
+      ),
+      '0|false',
+    );
     // consent proof kept (C-17)
     assert.equal(
       q(
@@ -335,13 +385,106 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
     assert.equal(q("SELECT md5(string_agg(t::text, ',' ORDER BY id)) FROM candidates t"), before);
   });
 
-  it('ADR 0004 R-7: pruning drops erasure entries older than the oldest remaining backup, keeps newer ones', async () => {
-    put(`db/erasure-list/${stampDaysAgo(40)}-33333333-3333-4333-8333-333333333333.json`);
+  it('ADR 0004 R-7: only COMPLETED erasures are pruned, and only once older than the oldest backup', async () => {
+    const held = '33333333-3333-4333-8333-333333333333';
+    const done = '44444444-4444-4444-8444-444444444444';
+    const recent = '55555555-5555-4555-8555-555555555555';
+    // A held erasure requested 40 days ago and still running: its entry must survive.
+    put(`db/erasure-list/${stampDaysAgo(40)}-${held}.json`);
+    // An erasure requested and completed long ago: every remaining backup already has it.
+    put(`db/erasure-list/${stampDaysAgo(40)}-${done}.json`);
+    put(`db/erasure-completed/${stampDaysAgo(39)}-${done}.json`);
+    // Completed after the oldest remaining backup: must survive.
+    put(`db/erasure-list/${stampDaysAgo(2)}-${recent}.json`);
+    put(`db/erasure-completed/${stampDaysAgo(1)}-${recent}.json`);
+    // Files that are not ours under the dumps prefix are never touched.
+    put('db/dumps/notes.txt');
+    put('db/dumps/codeproctor-x.dump.gz');
     const r = await run(BACKUP, [], env);
     assert.equal(r.status, 0, r.stderr);
     const list = (await run(ERASURES, ['list'], env)).stdout;
-    assert.doesNotMatch(list, /33333333-3333/);
+    assert.match(list, new RegExp(held), 'a held erasure is never pruned');
+    assert.doesNotMatch(list, new RegExp(done));
+    assert.match(list, new RegExp(recent));
     assert.match(list, new RegExp(ERASED_ID));
+    assert.ok(
+      !keys().some((k) => k.includes(`erasure-completed/${stampDaysAgo(39)}`)),
+      'its marker goes with it',
+    );
+    assert.ok(keys().includes('db/dumps/notes.txt'));
+    assert.ok(keys().includes('db/dumps/codeproctor-x.dump.gz'));
+  });
+
+  it('ADR 0004 R-7: complete needs an existing entry and is idempotent', async () => {
+    assert.match(
+      (await run(ERASURES, ['complete', KEPT_ID], env)).stderr,
+      /not on the erasure list/,
+    );
+    assert.equal((await run(ERASURES, ['complete', ERASED_ID], env)).status, 0);
+    assert.equal((await run(ERASURES, ['complete', ERASED_ID], env)).status, 0);
+    assert.equal(
+      keys().filter((k) => k.includes('erasure-completed/') && k.includes(ERASED_ID)).length,
+      1,
+    );
+  });
+
+  it('NFR-03: exit code 2 means only "restored, row counts differ"', async () => {
+    const counts = keys()
+      .filter((k) => k.endsWith('.counts.tsv'))
+      .sort()
+      .at(-1);
+    const original = s3.objects.get(`drill-backups/${counts}`);
+    s3.objects.set(`drill-backups/${counts}`, Buffer.from('candidates\t999\n'));
+    const r = await run(RESTORE, ['--target-db', 'restored_counts', '--skip-erasures'], env);
+    s3.objects.set(`drill-backups/${counts}`, original);
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /row counts differ/);
+  });
+
+  it('NFR-03: a failure the script did not plan (here: no connection) is exit 1, never 2', async () => {
+    const r = await run(RESTORE, ['--target-db', 'never_made'], { ...env, PGPORT: '1' });
+    assert.equal(r.status, 1);
+  });
+
+  it('NFR-03: a failed erasure step says the database must not be used', async () => {
+    const r = await run(RESTORE, ['--target-db', 'restored_broken'], {
+      ...env,
+      FAKE_PSQL_FAIL_ON: 'reapply.sql',
+    });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /erasures were NOT re-applied. Do not use database restored_broken/);
+  });
+});
+
+describe('DB-07 dump safety (NFR-03)', { skip }, () => {
+  it('a pg_dump that fails after writing part of the archive uploads and prunes nothing', async () => {
+    const pg = startPostgres();
+    const s3 = await startFakeS3();
+    try {
+      const { writeFileSync } = await import('node:fs');
+      const dir = mkdtempSync(join(tmpdir(), 'pg-fake-'));
+      writeFileSync(
+        join(dir, 'pg_dump'),
+        '#!/bin/sh\ncase "$1" in --version) echo "pg_dump (PostgreSQL) 16.0"; exit 0;; esac\nfor a in "$@"; do case "$a" in --file=*) printf PGDMP-partial > "${a#--file=}";; esac; done\nexit 1\n',
+        { mode: 0o755 },
+      );
+      const r = await run(BACKUP, [], {
+        ...pg.env,
+        PGDATABASE: 'postgres',
+        S3_BACKUP_BUCKET: 'b',
+        S3_ENDPOINT: `http://127.0.0.1:${s3.port}`,
+        S3_FORCE_PATH_STYLE: 'true',
+        S3_ACCESS_KEY_ID: 'x',
+        S3_SECRET_ACCESS_KEY: 'y',
+        PG_BIN_DIR: dir,
+      });
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /pg_dump failed/);
+      assert.equal(s3.objects.size, 0, 'nothing uploaded');
+    } finally {
+      pg.stop();
+      await s3.close();
+    }
   });
 });
 

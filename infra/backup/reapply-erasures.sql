@@ -5,7 +5,9 @@
 --
 -- It mirrors the database part of erasure (docs/database.md "Erasure on request", C-17). Objects
 -- are not touched: those deleted at erasure time stay deleted. The consent record is KEPT (C-17).
--- docs/followups/database.md FU-DBB-01: keep this in step with DB-06's erasure service.
+-- docs/followups/database.md FU-DBB-01: keep this in step with DB-06's erasure service. Known gaps
+-- until then: it ignores the review/appeal hold, anonymises at once instead of at day 28, and sets no
+-- ERASED status (the value does not exist yet).
 \set ON_ERROR_STOP on
 BEGIN;
 
@@ -42,8 +44,19 @@ WHERE session_review_id IN (
         SELECT id FROM session_reviews WHERE session_id IN (SELECT id FROM _reapply_sessions))
   AND (resolution_note IS NOT NULL OR reason <> 'Erased');
 
-UPDATE sessions SET device_info = '{}'
-WHERE id IN (SELECT id FROM _reapply_sessions) AND device_info <> '{}'::jsonb;
+-- Session credentials (ADR 0004 9.7 fence): a restore brings back the old epoch and HMAC key, so a
+-- candidate token issued before the erasure would work again. The epoch is bumped on every run
+-- (harmless), which invalidates any token.
+UPDATE sessions
+SET device_info = '{}',
+    auth_epoch = auth_epoch + 1,
+    hmac_key_enc = NULL,
+    report_key = NULL,
+    retention_anchor_at = COALESCE(retention_anchor_at, (
+      SELECT e.erased_at FROM _reapply_erasures e
+      JOIN invitations i ON i.candidate_id = e.candidate_id
+      WHERE i.id = sessions.invitation_id))
+WHERE id IN (SELECT id FROM _reapply_sessions);
 
 UPDATE candidates c
 SET email = 'erased+' || c.id || '@invalid',
