@@ -145,7 +145,9 @@ Observation for proctor-sdk-engineer (low, not a data-loss defect; NFR-08 holds)
 - [ ] Remove TC-050 from the known-defect list in `docs/test-matrix.md` (line 15) once both tests pass.
 - [ ] TC-063: the test drops the network for 45 s but expects DISCONNECTED, while FR-609 logs it only after 60 s (ADR 0013 Q13).
 - [ ] Owner: qa-engineer. Section gate (ADR 0013 CS-4.6): read, Run, draft, answer and submit outside the open section get 409; fail-closed with Redis flushed; after the section deadline and after the session deadline, with the close job delayed, draft and submit get 409 and a late SUBMIT is never graded; writes during a PROCTOR pause get 409 `SESSION_PAUSED`.
-- [ ] Owner: qa-engineer. The C-25 re-check matrix (waiver; face detectors off; both; neither). Interim default: refused when either is set (ADR 0013 Q20).
+- [ ] Owner: qa-engineer. The re-check matrix per owner decision C-34 (waiver; face detectors off; both; neither): refused with 409 `IDENTITY_CHECK_WAIVED` (waiver) or `DETECTOR_DISABLED` (face detectors off) when either is set, allowed only when neither is.
+- [ ] Owner: qa-engineer. Face tier per C-35: ID images, selfies and sealed mismatch frames are deleted 90 days after capture or `submitted_at`, even while a review hold is open.
+- [ ] Owner: qa-engineer. Retention markers (ADR 0004 section 9): a marker is written only after a complete listing, no DeleteObjects errors and an empty re-listing; erasure writes no markers, fences a live session first, and its re-run deletes a late PUT; R-10 deletes the whole session prefix.
 - [ ] Owner: qa-engineer. Tiered retention clocks (face, media, results, consent), see row (c) in section 9.
 - [ ] Owner: qa-engineer. Close-section and grading order: `grade-session` runs only after every `close-section` child completes; the cutoff is `ended_at`; a failed `close-section` can be re-enqueued.
 - [ ] Owner: qa-engineer. DeviceInfoService fencing: concurrent writers lose no update; a skip sets resync and the next heartbeat asks for full capabilities; the first write fences on `{}`.
