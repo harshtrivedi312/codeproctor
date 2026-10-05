@@ -8,7 +8,7 @@ Items in [square brackets] must be filled in before use. The drafting notes at t
 
 ## Help us make identity checks fair: volunteer consent
 
-**[Company legal name]** ("we") is building CodeProctor, a tool we use to run online coding tests for job candidates. Before each test, CodeProctor checks that the candidate is the person on their photo ID by comparing a photo of the ID with a live selfie. If the two don't match well enough, a person reviews them. Nobody is ever rejected automatically.
+**Rysun Labs Inc.** ("we") is building CodeProctor, a tool we use to run online coding tests for job candidates. Before each test, CodeProctor checks that the candidate is the person on their photo ID by comparing a photo of the ID with a live selfie. If the two don't match well enough, a person reviews them. Nobody is ever rejected automatically.
 
 To set that "match well enough" level fairly, we need to test the comparison on photos of real people with a range of ages, skin tones, genders and appearances. We are asking colleagues to volunteer. This form explains what is involved. Please read it all before signing.
 
@@ -43,8 +43,8 @@ The photos and the face-shape measurements calculated from them are **biometric 
 ### 5. Who can see it and where it is kept
 
 - Only the people running the tuning can open your photos: [names or roles, e.g. the integrity engineer and Harsh Trivedi].
-- Photos and demographic answers are stored separately, in encrypted storage with restricted access, in [location, e.g. our AWS account in the United States, region X]. They are linked only by a random code, not by your name.
-- If you are in the EU or UK, your data is stored in the United States. We protect it with [Standard Contractual Clauses / our internal data transfer agreement].
+- Photos and demographic answers are stored separately, in encrypted storage with restricted access, in our AWS account in the United States (region us-east-1). They are linked only by a random code, not by your name.
+- If you are in the EU or UK, your data is stored in the United States. The transfer is protected by Standard Contractual Clauses in our service providers' data processing agreements.
 
 ### 6. How long we keep it
 
@@ -54,19 +54,19 @@ The photos and the face-shape measurements calculated from them are **biometric 
 
 ### 7. Changing your mind
 
-- You can withdraw at any time by emailing [contact email]. You don't need to give a reason.
+- You can withdraw at any time by emailing privacy@example.com. You don't need to give a reason.
 - We delete your photos and answers within [7] days and confirm when it is done.
 - If the report has already been written, we can't remove you from totals that are already calculated, but those totals don't identify you.
 
 ### 8. Your rights
 
-You can ask to see the data we hold about you, correct it, or have it deleted, at [contact email]. If you are in the EU or UK, you can also complain to your data protection authority. Questions about this form go to [Harsh Trivedi, contact].
+You can ask to see the data we hold about you, correct it, or have it deleted, at privacy@example.com. If you are in the EU or UK, you can also complain to your data protection authority. Questions about this form go to [Harsh Trivedi, contact].
 
 ### 9. Your consent
 
 You must be 18 or over to take part. Please tick each box you agree to. Box A is required to take part; B and C are optional.
 
-- [ ] **A. Photos and face matching (required).** I agree that [Company legal name] may collect my ID-style photo and selfies, create face measurements from them, and use the resulting scores only to tune and test CodeProctor's identity check, as described above. I have read how long they will be kept and when they will be destroyed.
+- [ ] **A. Photos and face matching (required).** I agree that Rysun Labs Inc. may collect my ID-style photo and selfies, create face measurements from them, and use the resulting scores only to tune and test CodeProctor's identity check, as described above. I have read how long they will be kept and when they will be destroyed.
 - [ ] **B. Demographic information (optional).** I agree to give optional demographic information, stored separately from my photos and deleted with them.
 - [ ] **C. Group results (optional).** I agree that my demographic information may be used to calculate how accurate the identity check is for different groups. Only totals for groups of [10] or more people will be reported.
 
@@ -82,5 +82,5 @@ Volunteer code (filled in by us): ____________
 2. **BIPA.** BIPA needs a written release that states the purpose and how long the data is kept, plus a public retention and destruction policy. Section 6 and box A cover the release. The public policy is the retention schedule (C-05), which should list the tuning set as its own category.
 3. **Crop-and-delete of the ID photo** keeps us from holding ID numbers. The integrity engineer must build it into the upload step before collection starts. An alternative is an ID-style portrait taken by us instead of a real ID, but that tests the real-world case less well.
 4. **Group size of 10** follows C-13 for candidates. A small volunteer set may make some groups unreportable. The report should say which groups were merged or left out.
-5. **The real model must run for tuning.** Tuning needs the AuraFace model file. That download is still waiting for your decision (P-07).
+5. **The real model:** the download was approved by C-22.
 6. **Fill-ins needed:** company legal name, contact email, storage location and region, the people with access, the number of selfies, the deletion deadline, the withdrawal turnaround, and the EU/UK transfer mechanism (C-03).

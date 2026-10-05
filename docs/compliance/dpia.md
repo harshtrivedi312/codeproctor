@@ -1,6 +1,6 @@
 # Data protection impact assessment: CodeProctor pilot
 
-Status: **DRAFT v0.1 for owner approval** (C-03a, C-14). Drafted 2026-10-05 by the Delivery Lead from the project documents (BRD, FSD, architecture, accepted ADRs 0001 to 0010, proposed ADRs 0011 to 0013, compliance decisions C-01 to C-20). Approver: Harsh Trivedi. **This DPIA has not had professional legal review (C-15, R-17).** Statements about laws are a first-pass reading for planning and need verification, especially the items marked *verify*.
+Status: **DRAFT v0.2 for owner approval** (C-03a, C-14). Drafted 2026-10-05 by the Delivery Lead from the project documents (BRD, FSD, architecture, accepted ADRs 0001 to 0010, proposed ADRs 0011 to 0013, compliance decisions C-01 to C-33). Approver: Harsh Trivedi. **This DPIA has not had professional legal review (C-15, R-17).** Statements about laws are a first-pass reading for planning and need verification, especially the items marked *verify*.
 
 Approval of this DPIA is a pilot entry blocker for EU/UK candidates (C-03a; status.md B-05 item 5).
 
@@ -17,21 +17,21 @@ The GDPR and UK GDPR require a DPIA where processing is likely to result in a hi
 
 | Item | Description |
 | --- | --- |
-| Controller | [Company legal name], [address], for its own hiring. Approver and contact: Harsh Trivedi |
+| Controller | Rysun Labs Inc., [address], for its own hiring. Approver and contact: Harsh Trivedi |
 | Purpose | Run fair, trustworthy online coding assessments for hiring: check the candidate's identity, detect possible cheating, score the code, and let trained people make the decision |
 | People affected | Job candidates worldwide (C-01), including the EU, UK and US (Illinois, California, New York City and others); staff users (recruiters, reviewers, admins, authors); internal volunteers for face-match tuning (separate consent, C-11) |
 | Data | Identity: name, email, invitation details. Identity check: ID image, selfie, liveness result, match score (face templates are calculated in memory and **never stored**, ADR 0004). Monitoring: screen, webcam and microphone recordings, room scan, identity re-check frames (kept only on mismatch, C-08), evidence snapshots, browser and integrity events, keystroke timing and edits, IP address, device details. Results: code, answers, scores, risk score and band, reviewer decisions and notes, appeals. Consent record: version, typed name, timestamp, IP, user agent, signed PDF. Optional demographics (C-13), separate and aggregate only |
 | Data flow | Browser to API (HTTPS); browser to object storage directly through short-lived presigned URLs, so media never passes through the API; API to Postgres; worker reads media from storage for analysis; Judge0 (self-hosted) runs code; reviewers watch through 15-minute signed playback URLs |
 | Where | One US AWS region for all data, EU/UK included (C-03). Web front end served by Cloudflare Pages. Processors: [processors.md](processors.md) |
 | Retention | [retention-schedule.md](retention-schedule.md): media and biometric data [N] days after the assessment is finished (the organisation's setting, default 90; biometric items capped at 90 if OQ-5 is decided as proposed); consent records 3 years, also after erasure (C-17); consent records 3 years; results [OQ-4]; backups 14 days |
-| Who decides | Nothing negative is decided automatically. LOW-band sessions with confirmed identity are marked clear without a reviewer (ADR 0002, fsd.md §3); every other session goes to a trained reviewer; a person makes every hiring decision (BRD §7, FR-805, FR-902, C-14; OQ-8 asks whether every session needs a person) |
+| Who decides | A trained reviewer reviews **every** session; nothing is cleared or rejected automatically, and results can't be used for hiring until the reviewer signs off (C-28). A person makes every hiring decision (BRD §7, FR-805, FR-902, C-14) |
 
 ## 3. Lawful basis
 
 | Processing | GDPR / UK GDPR basis | Notes |
 | --- | --- | --- |
 | Biometric identity check and re-checks | Art. 6(1)(a) consent and **Art. 9(2)(a) explicit consent** (C-02), given by signing the consent document | Consent must be freely given; see risk R5 and section 6 |
-| Recording, monitoring, integrity detection, scoring | Current design: consent, through the same signed document. **Alternative to consider (OQ-6):** Art. 6(1)(f) legitimate interests (a fair and secure assessment), or Art. 6(1)(b) (steps before entering a contract), with consent kept only for biometrics. Under consent, withdrawal stops further processing (data already collected follows the retention schedule or is erased on request); under legitimate interests, the record of the attempt could be kept for integrity. The consent document's withdrawal text waits for this choice | Choose one basis per purpose and state it in the consent document and privacy notice |
+| Recording, monitoring, integrity detection, scoring | **Art. 6(1)(f) legitimate interests (C-29)**: a fair, secure assessment that every candidate takes under the same conditions. See the assessment in section 3a | Candidates can object (Art. 21); objections are handled case by case, like accommodations |
 | Optional demographics (C-13) | Art. 9(2)(a) explicit consent, separate from the test consent | Aggregate reporting only, with a minimum group size of 10 |
 | Consent records kept 3 years | Art. 6(1)(c)/(f) and Art. 17(3)(e) (proving consent; legal claims) | Kept for 3 years even after an erasure request (C-17) |
 
@@ -39,6 +39,15 @@ US laws:
 - **Illinois BIPA:** written notice of purpose and retention period; a written release; a public retention and destruction schedule (C-05); no selling or profiting (C-05); no disclosure without consent (the consent document names the processors); reasonable security.
 - **CCPA/CPRA:** a notice at collection listing the categories of personal information, including sensitive personal information (biometric data, ID images), the purposes and retention; rights to know, delete, correct and limit. CCPA applies only if the company meets its thresholds (*verify*). The owner has decided to treat it as applying (C-01).
 - **Texas (CUBI) and Washington** have their own biometric notice and consent rules; the BIPA-level approach should cover them (*verify*).
+
+## 3a. Legitimate interests assessment (C-29)
+
+| Test | Assessment |
+| --- | --- |
+| **Purpose:** is there a legitimate interest? | Yes. A hiring assessment is only useful if it is fair and was taken by the right person without outside help. Candidates who prepare honestly benefit from that too. |
+| **Necessity:** is the processing needed for it, and is there a less intrusive way? | Remote assessments can't be supervised in person. Screen, webcam, audio and keystroke monitoring is the least intrusive way we know to give similar assurance. It is limited to the test window, starts only after the candidate has read the document, keeps media for [N] days (default 90), keeps face images at most 90 days, and stores no face templates. In-person or video-supervised alternatives are offered as accommodations (C-02, C-19). |
+| **Balancing:** do the candidate's interests override ours? | The intrusion is significant: the home environment, voice and behaviour. It is mitigated by: notice before anything is recorded; a candidate-initiated room scan; a person reviewing every session (C-28); no automatic rejection; appeals; short retention; access logging; accommodations; and the right to object. Candidates expect proctoring for remote technical assessments, and it is disclosed in job postings (C-14). **Conclusion: the balance favours processing, with these safeguards.** |
+| **Device access (ePrivacy Art. 5(3))** | Turning on the camera, microphone and screen sharing goes through browser permission prompts the candidate grants. It is strictly necessary for the service the candidate asked for, the assessment (*verify*). |
 
 ## 4. Necessity and proportionality
 
@@ -76,20 +85,22 @@ Likelihood and severity are before the measures. Residual risk is after them.
 | R2 | A false face mismatch, more often for some groups (lighting, skin tone, eye conditions, disability) | Likely / significant | Never auto-reject; manual comparison by a person; threshold tuned on a diverse volunteer set with a per-group breakdown (C-11, C-12); pilot exit review of error rates by group (D-05); fairness monitoring (C-13) | Medium |
 | R3 | False integrity flags (gaze, voice, pastes, AI-likeness), with disabled or neurodivergent candidates possibly affected more | Likely / significant | Flags are evidence only; trained reviewers; accommodations that turn detectors off; appeal; configurable thresholds and weights | Medium |
 | R4 | Recording of bystanders and the private home (household members, room contents, notifications on screen) | Likely / moderate | Tell candidates in advance to use a private space and close other apps; the room scan is the candidate's own action; access limited to reviewers; deletion after [N] days (default 90) | Medium |
-| R5 | Consent not freely given, because the candidate needs the job (GDPR Art. 7(4), recital 43; status.md R-18) | Possible / significant (lawful basis invalid) | Alternative path through accommodations (C-02); a statement that declining is not a failed assessment (consent document drafting note 2); consider legitimate interests for non-biometric processing (OQ-6) | Medium: **owner decision needed** |
+| R5 | Consent not freely given, because the candidate needs the job (GDPR Art. 7(4), recital 43; status.md R-18) | Possible / significant (lawful basis invalid) | Consent is now used only for biometrics (C-29); the alternative path is a waived identity check with a recorded reason, a reviewer flag and an advised video ID check (C-02, C-19); declining is not a failed assessment (consent drafting note 2) | Low to medium |
 | R6 | Inferring special-category data from video or audio (health, religion, ethnicity) | Possible / significant | No such processing; reviewer guidance not to note such observations; free-text notes erased on erasure | Low |
 | R7 | Function creep: recordings or biometric data used for other purposes (security, other hiring, training models) | Unlikely / severe | Purpose limitation in the consent document; no model training on candidate data; access logging; the retention schedule | Low |
 | R8 | EU/UK data stored in the US (government access, weaker remedies) | Possible / moderate | SCCs or DPF for every processor (C-03b); encryption; minimal retention; transfer-impact notes in section 8 | Medium |
 | R9 | Over-retention (results kept with no limit; organisation settings up to 730 days) | Likely / moderate | Decide OQ-4 (a results retention period) and OQ-5 (cap biometric items at 90 days) | Medium until decided, then low |
-| R10 | Automated decision-making in effect, because reviewers rubber-stamp the score or risk band | Possible / significant | A verdict requires a decision on every HIGH flag (ADR 0001 F7, FR-902); reviewer training; monitoring of how often reviewers agree with the risk band; appeals | Medium |
-| R11 | Under-18 candidates (for example, interns) | Unlikely / moderate | Add an age confirmation, or a parental-consent path, if minors can apply (OQ-7) | Low after OQ-7 |
+| R10 | Automated decision-making in effect, because reviewers rubber-stamp the score or risk band (more likely now that every session, including low-risk ones, is reviewed through a fast path) | Possible / significant | A verdict requires a decision on every HIGH flag (ADR 0001 F7, FR-902); reviewer training; monitoring of how often reviewers agree with the risk band; appeals | Medium |
+| R11 | Under-18 candidates | Unlikely / moderate | A required 18+ confirmation in the consent step; no confirmation, no test (C-30) | Low |
 | R12 | Misuse of the optional demographic data, or re-identification from small groups | Unlikely / severe | Separate store; never visible to staff; never used in decisions; aggregate only with a minimum group of 10; deleted with the recordings after [N] days (default 90; C-13) | Low |
-| R13 | Candidate data reaching third parties not listed (error tracking, fonts, model CDNs) | Possible / moderate | Processor register boundary; PII scrubbing; self-hosted fonts and model files (ADR 0013) | Low |
+| R13 | Candidate data reaching third parties not listed (fonts, model CDNs, logs) | Possible / moderate | Processor register boundary; errors and logs stay in AWS CloudWatch and email goes through AWS SES (C-31, C-32); browser errors are scrubbed before they are logged; self-hosted fonts and model files (ADR 0013) | Low |
+| R14 | Results kept past the 1-year limit when a legal claim is open, or deleted while one is pending (C-26) | Possible / moderate | A legal hold (OQ-10) | Low after OQ-10 |
+| R15 | Agents act through the owner's GitHub account, so an agent could change CI or the model licence gate (C-33, status.md R-20) | Possible / moderate | Code review on every PR; a PR comment naming the merging session; the owner's own review of security-sensitive files | Medium (accepted by the owner) |
 
 ## 6. Measures still to put in place
 
-1. Decide OQ-4, OQ-5, OQ-6, OQ-7 and OQ-8 (OQ-1 to OQ-3 were decided by C-17 to C-19).
-2. Sign or accept the DPAs, with SCCs or DPF, for every processor ([processors.md](processors.md)), and choose the email provider and error tracker (P-10).
+1. Decide OQ-9 (log retention) and OQ-10 (legal hold). OQ-1 to OQ-8 are decided (C-17 to C-19, C-26 to C-30).
+2. Accept the AWS and Cloudflare DPAs, with SCCs or DPF ([processors.md](processors.md)). Email (SES) and logs (CloudWatch) are under the AWS DPA (C-31, C-32).
 3. Write a reviewer guide covering bias awareness, not rubber-stamping, and what not to record in notes.
 4. Write a breach and incident response procedure (in DEP-02's checklist), including the 72-hour notification under GDPR Art. 33, and US state breach rules.
 5. Decide whether an EU representative and a UK representative are needed (GDPR Art. 27; UK GDPR Art. 27) (*verify* the exemptions).
@@ -99,7 +110,7 @@ Likelihood and severity are before the measures. Residual risk is after them.
 
 ## 7. Automated-decision and AI laws (C-14)
 
-**Position:** automated detection only produces flags. Nothing negative is decided automatically: a session is only ever auto-cleared (LOW band, identity confirmed), never auto-failed. A person makes every hiring decision. This lowers the exposure under every regime below, but it does not remove it, because several regimes cover tools that "substantially assist" a decision, or AI used to "evaluate" candidates.
+**Position:** automated detection only produces flags. A trained reviewer reviews every session, and results are held until the reviewer signs off (C-28). Nothing is cleared or rejected automatically, and a person makes every hiring decision. This lowers the exposure under every regime below, but it does not remove it, because several regimes cover tools that "substantially assist" a decision, or AI used to "evaluate" candidates.
 
 ### GDPR / UK GDPR Art. 22
 
@@ -152,14 +163,14 @@ Art. 22 covers decisions based **solely** on automated processing. Because a per
 ## 8. International transfer notes (C-03)
 
 - All data is stored in one US AWS region.
-- If [Company legal name] is established only in the US, an EU/UK candidate's own submission to our site is direct collection by a US controller. Under EDPB Guidelines 05/2021 that is not a Chapter V transfer, but the GDPR applies to it through Art. 3(2)(b), monitoring behaviour in the EU. An Art. 27 representative may then be required. If the company has an EU or UK establishment, the export from it to the US is a transfer, and SCCs or DPF apply.
+- If Rysun Labs Inc. is established only in the US, an EU/UK candidate's own submission to our site is direct collection by a US controller. Under EDPB Guidelines 05/2021 that is not a Chapter V transfer, but the GDPR applies to it through Art. 3(2)(b), monitoring behaviour in the EU. An Art. 27 representative may then be required. If the company has an EU or UK establishment, the export from it to the US is a transfer, and SCCs or DPF apply.
 - Either way, C-03 requires SCCs or DPF for every processor, and records them in [processors.md](processors.md). A short transfer risk assessment should note that AWS and Cloudflare are DPF-certified (*verify*), that data is encrypted at rest and in transit, and that retention is short.
 
 ## 9. Outcome and sign-off
 
 | Item | Value |
 | --- | --- |
-| Overall residual risk | Medium, acceptable for a pilot **if** OQ-4, OQ-5, OQ-6, OQ-7 and OQ-8 are decided, the processor agreements are in place, and the human-review evidence (R10) is collected |
+| Overall residual risk | Medium, acceptable for a pilot **if** OQ-9 and OQ-10 are decided, the processor agreements are in place, and the human-review evidence (R10) is collected |
 | Prior consultation with a supervisory authority (Art. 36) | Not needed if the residual risks above are accepted as medium or low. Revisit if R5 or R2 cannot be brought down |
 | Review date | At the pilot exit review, and before production |
 | Approved by | Harsh Trivedi, product owner: ____________ date: ________ |
