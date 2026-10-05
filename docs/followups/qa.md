@@ -137,3 +137,10 @@ Root cause was in the test, not the SDK: it assumed one batch per paste and wait
 
 Observation for proctor-sdk-engineer (low, not a data-loss defect; NFR-08 holds): `EventQueue.retryNow()` does nothing while a drain is already running. If the browser `online` event arrives during a send that is about to fail, the next attempt waits for the exponential backoff (up to 30 s) instead of starting at once. Suggested: remember that a retry was requested and run another drain pass when the current one ends in RETRY.
 
+
+## Architecture hub: TC-050 follow-through (ADR 0013 section 5.9, PR #39)
+
+- [ ] Rewrite `TC-050 KNOWN DEFECT QA-D-01` (`it.fails` in `packages/proctor-sdk/src/qa/qa-tc.test.ts`) as plain tests: FULLSCREEN_EXIT has no `durationMs`, FULLSCREEN_RESTORED has one.
+- [ ] Add the BE-10 API test for the server-filled `duration_ms`, including the close at session end.
+- [ ] Remove TC-050 from the known-defect list in `docs/test-matrix.md` (line 15) once both tests pass.
+- [ ] TC-063: the test drops the network for 45 s but expects DISCONNECTED, while FR-609 logs it only after 60 s (ADR 0013 Q13).

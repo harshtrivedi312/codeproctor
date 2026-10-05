@@ -36,7 +36,22 @@ The SDK (FE-06..FE-08, merged) signs event batches, uploads media and evidence, 
   - A reload on the same epoch loads the key from IndexedDB.
   - **This ADR is the permission OI-10 and the code-reviewer privacy rule (D-07) require for a key in the FR-702 IndexedDB buffer.** No other secret may be stored there; the candidate token stays with ARC-03 part 2.
   - `extractable: false` only stops page JS from reading the bytes. Malware or anyone with access to the browser profile on disk can still recover the key.
-- **Purge.** The SDK deletes the key and the outbox at finish, on 409 `SESSION_NOT_ACTIVE`, and on 401 `SESSION_TAKEN_OVER` (section 5.2).
+- **Who calls what (decided).** The **host app** (frontend) calls `proctor-key` and runs the OTP resume and the token refresh. The SDK cannot do any of those. The app hands the key to the SDK through hooks:
+  - `ProctorSession.setKey(key, epoch, counters)`: the SDK imports the key non-extractable, stores it, re-signs its outbox and seeds counters.
+  - `ProctorSession.loadStoredKey(sessionId)`: returns `{ epoch } | null` from IndexedDB.
+  - `onKeyStale`: raised on `KEY_EPOCH_STALE` when the SDK has no newer key.
+  - `onReauthRequired`: raised on `SESSION_TAKEN_OVER` or repeated `TOKEN_EXPIRED`.
+  - `onToken`: passes a renewed token from the heartbeat to the app.
+
+  The SDK stores only the key and its own outbox, never the token.
+- **Intended consequence.** A device that sees `KEY_EPOCH_STALE` but did not do the OTP resume cannot refetch the key, because `proctor-key` answers `KEY_ALREADY_ISSUED` for that epoch. The candidate must pass the OTP again. In practice that device's token is usually already dead, so the 401 `SESSION_TAKEN_OVER` comes first.
+- **Purge.**
+  - **At finish:** the SDK deletes the key once the outbox is drained, or at the end of the post-finish grace window. Unsent outbox items still queued then are dropped and counted.
+  - **On 409 `SESSION_NOT_ACTIVE` and on 401 `SESSION_TAKEN_OVER`:** the SDK purges immediately.
+  - **Stale sweep at `ProctorSession` start:** it deletes keys and outboxes of any other session, and anything older than 24 h.
+  - **Never** the live session's key during a long outage.
+  - Delete-at-finish is required for shared test-centre machines.
+  - With IndexedDB unavailable, the key cannot persist, so **every reload costs an OTP**. The SDK reports capability `idb: UNSUPPORTED`.
 - **Missing key.** The frontend checks IndexedDB first. If the key is absent (IndexedDB cleared, response lost), it runs the OTP resume (ADR 0002 L-2), which raises the epoch, and then fetches a new key. The clock keeps running.
   - The check-then-fetch sequence runs inside a Web Lock (`navigator.locks.request("cp-key:" + sessionId)`), so two tabs cannot each trigger an OTP and thrash the epoch.
 - The key is never logged, never put in a URL, never written to localStorage or sessionStorage, and never sent to error tracking. The response carries `Cache-Control: no-store`.
@@ -45,7 +60,7 @@ The SDK (FE-06..FE-08, merged) signs event batches, uploads media and evidence, 
 - Each OTP success raises `auth_epoch`, which kills the old device's token (ADR 0002). New batches must be signed with `K_current`.
 - **Same device, new epoch.** The SDK re-signs its unsent outbox with the new key. It stores the exact body, so only the signature changes.
 - **Different device.** Batches still queued on the old device are lost: its token is dead, and it purges on `SESSION_TAKEN_OVER`. Server-side gap detection (section 5.8) shows the hole to the reviewer.
-- **Ingest close.** Ingestion closes at `submitted_at + PROCTOR_INGEST_GRACE_SECONDS` (default 300). The same close, with the same grace, runs for every other terminal exit ADR 0002 allows from IN_PROGRESS or PAUSED, measured from that transition's server time (today SUBMITTED by finish, last section or auto-submit; any terminated or invalidated status added later must call the same close). EXPIRED sessions never received a key (EXPIRED applies only before start), but still get the storage sweep. The close job then sets `hmac_key_enc = NULL` (key destruction) and runs the storage sweep (section 5.7). After that, stored signatures cannot be re-verified, which is acceptable because they serve idempotency only. **(architect detail, owner to confirm; ARC-04 delays `analyze-session` by the same grace.)**
+- **Ingest close.** Ingestion closes at `submitted_at + PROCTOR_INGEST_GRACE_SECONDS` (default 300). The same close, with the same grace, runs for every other terminal exit ADR 0002 allows from IN_PROGRESS or PAUSED, measured from that transition's server time (today SUBMITTED by finish, last section or auto-submit). All of these go through one named method, `SessionStateService.closeIngest(sessionId, reason)`, which any terminated or invalidated status added later must also call. EXPIRED sessions never received a key (EXPIRED applies only before start), but still get the storage sweep. The close job then sets `hmac_key_enc = NULL` (key destruction) and runs the storage sweep (section 5.7). After that, stored signatures cannot be re-verified, which is acceptable because they serve idempotency only. **(architect detail, owner to confirm; ARC-04 delays `analyze-session` by the same grace.)**
 - **Erasure (R-6) of a live session** also nulls `hmac_key_enc` and deletes the `pkey:` markers.
 
 **Canonical JSON and transport: the SDK's scheme is confirmed.**
@@ -73,6 +88,14 @@ Derived keys may be cached in process, keyed by `(sessionId, epoch)`, with a 60-
 **Sequence numbers across devices.** `seq` is unique per session, while a new device starts with empty IndexedDB, so a fresh counter would collide with stored batches (409 or silent loss). The `proctor-key` response therefore returns `counters`, and the SDK starts each counter at `max(local, server)`:
 - `eventSeqStart` and `keystrokeSeqStart`: the stored maximum + 1;
 - per media stream, `nextSeq` and `nextSegment`.
+
+Counters arrive only with the key, once per epoch. That is enough:
+- a same-device reload keeps its IndexedDB counters;
+- a lost IndexedDB also loses the key, which forces an OTP and so a fresh `proctor-key` with counters.
+
+**Media `seq` is unique per stream across segments (decided).** This follows ADR 0004 §4, accepted, and the DB `UNIQUE (session_id, stream, seq)`.
+- The SDK currently restarts `seq` at 0 for each segment (`recorder.ts`). It must instead continue one per-stream counter, persisted in IndexedDB and seeded from `counters.media`. This is SDK work.
+- The object key carries both segment and seq (5.7) for listing and reassembly, but seq alone identifies a chunk.
 
 **What the key protects and what it does not (R-04, TB-1).**
 
@@ -116,7 +139,8 @@ Decision: **unsigned, token-authenticated, advisory input, flagged as unsigned**
 ### 5.1 Common rules
 
 - **Auth.** `Authorization: Bearer <candidate token>` on every route here. The session and org come from the token, never from the URL or body (section 5.10). A body that names a session id is ignored (stripped).
-- **Rate limits.** Per session in Redis (`rl:{route}:{sessionId}`), returning 429 with `Retry-After`. The per-IP candidate throttle (FU-BE-18, 30 per minute per IP) must not apply to these routes: a test centre puts many candidates behind one NAT. **(architect detail)**
+- **Problem `code`.** Clients branch on the RFC 7807 `code` (`SEQ_CONFLICT`, `UPLOAD_NOT_FOUND`, `UPLOAD_MISMATCH`, `KEY_EPOCH_STALE`, …), never on the status alone or on `detail`.
+- **Rate limits.** Per session in Redis (`rl:{route}:{sessionId}`), returning 429 with `Retry-After`. Limits are token buckets sized for **catch-up after an outage**: a 10-minute backlog must drain within about 5 minutes. On 429 the SDK waits `Retry-After` and never drops. After `SESSION_NOT_ACTIVE` (the grace has passed), the remaining backlog is dropped and counted (section 2, Purge). The per-IP candidate throttle (FU-BE-18, 30 per minute per IP) must not apply to these routes: a test centre puts many candidates behind one NAT. **(architect detail)**
 - **Body limits.** Non-batch JSON bodies are capped at 16 KiB (413).
 - **Never logged** (C-5, R-8): bodies of `/candidate/*`, presigned URLs, object keys, evidence names, signatures, keys.
   - API logs carry session id, route, stream, seq and outcome only.
@@ -147,8 +171,14 @@ Decision: **unsigned, token-authenticated, advisory input, flagged as unsigned**
   - `SESSION_NOT_ACTIVE`: stop and purge.
   - 400, 403, `SEQ_CONFLICT`, 413, 415: drop the batch and count it in `getQueueStats().rejected`; never silently.
 - **Evidence references.** `evidenceKey` in an event is the **session-relative name** returned by evidence presign (`evidence/<ULID>.jpg`), which matches the ADR 0010 regex. The server stores the full key (section 5.7) in `proctor_events.evidence_key`.
-  - **Names are single-purpose and single-use.** The Redis hash `evidence:{sessionId}` maps each name to `{ purpose, state: ISSUED | USED }`. Its TTL lasts until `deadline_at` + grace + 1 h.
-  - An event may reference only an `EVENT` name in state `ISSUED`. It is marked `USED` with `usedBy = <batch seq>` only **after** the Postgres batch transaction commits. The ISSUED → USED step is atomic (a Lua script, or `WATCH`/`MULTI`). A name already `USED` by the same session and the same `seq` is accepted again, so a retried batch keeps its evidence.
+  - **Names are single-purpose and single-use.** The Redis hash `evidence:{sessionId}` maps each name to `{ purpose, state: ISSUED | RESERVED | USED | EXPIRED, seq? }`. Every state change is one atomic compare-and-set (a Lua script). Its TTL lasts until `deadline_at` + grace + 1 h.
+  - An event may reference only an `EVENT` name. Before the Postgres batch transaction, BE-10 reserves it: ISSUED → RESERVED{seq}.
+    - If the transaction rolls back, the reservation is released (RESERVED{seq} → ISSUED).
+    - After commit, the name moves to USED{seq}.
+    - A name that is already RESERVED or USED by the same seq is accepted again, so a retried batch keeps its evidence.
+    - Two concurrent batches with different seqs cannot both reserve the same name; the loser's event is stored with `evidence_key` NULL.
+    - If the process dies between commit and USED, the RESERVED{seq} entry still matches that committed seq, and the sweep treats it as referenced.
+  - ISSUED → EXPIRED (5.6) is the same compare-and-set, so a name can never be both expired and used.
   - An unknown, wrong-purpose or already-used name is dropped from that event (`evidence_key` NULL), and the batch still succeeds.
   - Another session's object can never be referenced, because the prefix comes from the token.
 - **Timestamps.** `occurredAt` is clamped to `[sessions.started_at, server now]` (TB-1).
@@ -158,8 +188,8 @@ Decision: **unsigned, token-authenticated, advisory input, flagged as unsigned**
 | Item | Contract |
 | --- | --- |
 | Route | `POST /candidate/session/heartbeat` every 10 s, unsigned |
-| Body (optional) | `{ capabilities?: CapabilityFlag[] (≤ 32, only when changed), recorder?: { streams: [{ stream, segment, lastSeq, bufferedChunks, bufferedBytes, droppedChunks, droppedBytes }] }, queue?: { pendingEventBatches, pendingKeystrokeBatches, rejectedBatches } }` |
-| 200 | `{ serverTime, status: "IN_PROGRESS" \| "PAUSED", deadlineAt, sectionDeadlineAt \| null, pauseReasons: [] }`, plus a renewed token field if ARC-03 part 2 keeps refresh-by-heartbeat (backend.md Step 7) |
+| Body (optional; the SDK fills it from a `getHealth()` provider wired to the recorder and the queues) | `{ capabilities?: CapabilityFlag[] (≤ 32, only when changed), recorder?: { streams: [{ stream, segment, lastSeq, bufferedChunks, bufferedBytes, droppedChunks, droppedBytes }] }, queue?: { pendingEventBatches, pendingKeystrokeBatches, rejectedBatches } }` |
+| 200 | `{ serverTime, status: "IN_PROGRESS" \| "PAUSED", deadlineAt, sectionDeadlineAt \| null, pauseReasons: [] }`, plus optional `sessionToken` and `sessionTokenExpiresAt`, present only when the server renews the candidate token (backend.md Step 7; lifetime in ARC-03 part 2). The SDK passes them to the app through `onToken` and never stores them |
 | Errors | 401; 409 `SESSION_NOT_ACTIVE` with `status` (the SDK stops the heartbeat and fires an `ended` event instead of reporting "offline"); 429 |
 | Limit | 12 per minute per session |
 
@@ -191,10 +221,10 @@ VIRTUAL_CAMERA is logged but does not block (FR-610); MULTI_MONITOR blocks (FR-6
 | --- | --- | --- |
 | Route | `POST /candidate/session/media/presign` | `POST /candidate/session/media/confirm` |
 | Body | `{ stream, segment, seq, bytes, contentType, startedAt, durationMs }` | `{ stream, segment, seq }` |
-| Rules | `stream` is SCREEN, WEBCAM, AUDIO or ROOM_SCAN; SIDE_CAMERA waits for ARC-03 part 2. `segment` 0..9,999; `seq` 0..99,999,999 (both fit the key padding in 5.7). `contentType` is exactly `video/webm` or `audio/webm`, with no codecs parameter, so the signed header matches. `bytes` 1..16 MiB (AUDIO 4 MiB). `durationMs` 1..60,000. `startedAt` is clamped. Per session, at most `ceil(duration / 10 s) × 1.5 + 50` presigns per stream. | — |
+| Rules | `stream` is SCREEN, WEBCAM, AUDIO or ROOM_SCAN; SIDE_CAMERA waits for ARC-03 part 2. `segment` 0..9,999; `seq` 0..99,999,999 (both fit the key padding in 5.7). `contentType` is exactly `video/webm` or `audio/webm`, with no codecs parameter, so the signed header matches. The recorder's `video/webm;codecs=vp8,opus` is normalised by the SDK to its essence (the part before `;`, lowercased). The PUT sends that bare value as an explicit `Content-Type` header, never `blob.type`. `bytes` 1..16 MiB (AUDIO 4 MiB). `durationMs` 1..60,000. `startedAt` is clamped. Per session, at most `ceil(duration / 10 s) × 1.5 + 50` presigns per stream. | — |
 | States | ROOM_SCAN: CONSENTED. Other streams: IN_PROGRESS, PAUSED, or SUBMITTED within the grace. | same |
-| 200 | `{ url, method: "PUT", headers: { "Content-Type": ..., "If-None-Match"?: "*" }, expiresAt }`, valid 60 s, with Content-Type and Content-Length signed (ST-2, ST-3); or `{ alreadyUploaded: true }` once confirmed (no new URL is ever issued for a confirmed chunk) | `{ uploaded: true, sizeBytes }`, idempotent |
-| Errors | 400; 409 `SEQ_CONFLICT` (seq exists with another segment); 409 `SESSION_NOT_ACTIVE`; 429 | 404 `CHUNK_NOT_PRESIGNED`; 409 `UPLOAD_NOT_FOUND` (HEAD 404: upload again, presigning again if expired); 422 `UPLOAD_MISMATCH` (HEAD size or type differs: the server deletes the object, the row stays pending, the client presigns again) |
+| 200 | `{ url, method: "PUT", headers: { "Content-Type": ..., "If-None-Match"?: "*" }, expiresAt }`, valid 60 s, with Content-Type and Content-Length signed (ST-2, ST-3); or `{ alreadyUploaded: true }` with **no `url`** (a union in the schema) once confirmed; no new URL is ever issued for a confirmed chunk | `{ uploaded: true, sizeBytes }`, idempotent |
+| Errors | 400; 409 `SEQ_CONFLICT` (this stream's seq already exists with another segment); 409 `SESSION_NOT_ACTIVE`; 429 | 404 `CHUNK_NOT_PRESIGNED`; 409 `UPLOAD_NOT_FOUND` (HEAD 404: upload again, presigning again if expired); 422 `UPLOAD_MISMATCH` (HEAD size or type differs: the server deletes the object, the row stays pending, the client presigns again) |
 | Limit | 60 per minute per stream | same |
 
 - **Rows.** Presign upserts `media_chunks (stream, segment, seq)` as pending. Confirm HEADs the object and checks its size against the declared `bytes`, the stream maximum and the content type. It then sets `uploaded_at` and `size_bytes`, and records the ETag.
@@ -208,7 +238,10 @@ VIRTUAL_CAMERA is logged but does not block (FR-610); MULTI_MONITOR blocks (FR-6
   - **Remaining exposure.** Until the sweep runs, a client holding a 60-second URL may store an oversize object or overwrite a confirmed chunk (where control 3 is unavailable). The rate limits and per-session presign caps bound how many URLs exist.
 - **Segments (OI-9, ADR 0004 §4).**
   - A recorder restart starts a new segment, and the segment's lowest seq carries the WebM header.
-  - The SDK uploads a segment's first chunk first. Its drop-oldest overflow policy must never drop a segment's first chunk: dropping it makes the whole segment unplayable.
+  - The SDK uploads a segment's first chunk first. Losing that chunk makes the whole segment unplayable, so it is **protected** in the 200 MB buffer (FR-702):
+    - `makeRoom` never evicts a protected chunk;
+    - when only protected chunks remain and the cap is reached, the SDK drops the **incoming** non-first chunk and counts it;
+    - an incoming first chunk may exceed the cap by at most 16 MiB per stream; beyond that it too is dropped, the segment is lost, and the loss is reported.
   - Playback (FE-11) and the worker (BE-12) concatenate bytes per (stream, segment) in seq order. A missing middle chunk is skipped: decoding resumes at the next cluster. QA tests this with a synthetic hole.
 - **Gaps and drops.**
   - Server truth is seq holes in `media_chunks` plus missing trailing chunks (the heartbeat's `lastSeq` above the highest uploaded seq).
@@ -227,12 +260,18 @@ VIRTUAL_CAMERA is logged but does not block (FR-610); MULTI_MONITOR blocks (FR-6
 | Limit | 20 per minute. Per session at most 300 `EVENT` names and `duration_minutes + 10` `IDENTITY_RECHECK` names (409 `QUOTA_EXCEEDED`) **(architect detail)** | 1 per 60 s (SDK interval 120 s) |
 
 **Decision: the server writes the re-check outcome itself.**
-- **Names.** The re-check accepts only an `IDENTITY_RECHECK` name in state `ISSUED` and marks it `USED` (5.2). The API then enqueues `face-recheck` on the face-match queue, at a lower priority than initial checks.
+- **Names.** The re-check accepts only an `IDENTITY_RECHECK` name in state `ISSUED` and marks it `USED` with the same compare-and-set (5.2).
+- **Sealed copy (decided).** On accepting the re-check, the API server-side copies the frame (S3 CopyObject, the same bucket) to `…/evidence/sealed/{ULID}.jpg` and deletes the original.
+  - No presigned URL is ever issued under `sealed/`. The worker reads the sealed copy, and FACE_MISMATCH references it.
+  - A client re-PUT to the original key within the URL's 60-second life therefore cannot swap the frame behind a verdict.
+  - `If-None-Match: *` is also signed on evidence PUTs where supported (5.5, control 3).
+  - EVENT evidence is not sealed: the client authored that event, so swapping its own snapshot within 60 s is no different from taking another one.
+- The API then enqueues `face-recheck` on the face-match queue, at a lower priority than initial checks.
 - **Worker.**
   - It HEADs the frame first and refuses (outcome ERROR) anything over 1 MiB or not `image/jpeg`.
   - It reads the JPEG header and refuses anything over 1920 × 1920 pixels before decoding (decompression-bomb guard).
   - It compares the frame with the selfie of the latest identity attempt (cached embedding, ADR 0004 §2) and returns `{ outcome: MATCH | BELOW_THRESHOLD | NO_FACE | MULTIPLE_FACES | ERROR, score, modelId, threshold }`.
-- **Outcome.** On BELOW_THRESHOLD, the API writes FACE_MISMATCH with `source = SERVER`, `occurred_at` = the clamped `capturedAt`, `payload { similarity }` and `evidence_key` = the frame. **Every other outcome deletes the frame at once (NFR-05).**
+- **Outcome.** On BELOW_THRESHOLD, the API writes FACE_MISMATCH with `source = SERVER`, `occurred_at` = the clamped `capturedAt`, `payload { similarity }` and `evidence_key` = the sealed copy. **Every other outcome deletes the frame at once (NFR-05).**
 - **Frames are deleted unless a FACE_MISMATCH references them.** This is what makes the consent premise in Q4 true. Three paths do it:
   - the outcome handler deletes on any outcome other than BELOW_THRESHOLD, including ERROR, and the BullMQ failed-job handler deletes after the last retry;
   - a delayed `evidence-expire` job, enqueued at presign for +10 minutes and **only for `IDENTITY_RECHECK` names** (an `EVENT` name may wait in an outbox through a long outage; the sweep handles unreferenced EVENT objects):
@@ -254,7 +293,8 @@ Each environment has its own bucket (D-10, D-11), so keys carry no environment. 
 | --- | --- | --- | --- |
 | Media chunk (incl. ROOM_SCAN) | `orgs/{orgId}/sessions/{sessionId}/media/{stream}/{segment:06d}/{seq:08d}.webm` | browser, presigned PUT | `media_chunks.object_key` |
 | ID image, selfie | `orgs/{orgId}/sessions/{sessionId}/identity/{attempt}/{id\|selfie}-{ULID}.jpg` | browser | `identity_checks.id_image_key`, `selfie_key` |
-| Evidence snapshot, re-check frame | `orgs/{orgId}/sessions/{sessionId}/evidence/{ULID}.jpg` (wire name `evidence/{ULID}.jpg`) | browser | `proctor_events.evidence_key` |
+| Evidence snapshot, re-check frame | `orgs/{orgId}/sessions/{sessionId}/evidence/{ULID}.jpg` (wire name `evidence/{ULID}.jpg`) | browser | `proctor_events.evidence_key` (EVENT) |
+| Sealed re-check frame | `orgs/{orgId}/sessions/{sessionId}/evidence/sealed/{ULID}.jpg` | API (CopyObject); never presigned for PUT | `proctor_events.evidence_key` (FACE_MISMATCH) |
 | Report PDF | `orgs/{orgId}/sessions/{sessionId}/reports/{ULID}.pdf` | API | `sessions.report_key` |
 | Signed consent PDF | `orgs/{orgId}/consents/{sessionId}/{ULID}.pdf` (**outside** the session prefix, because it is kept until erasure, D-17; this fills in ADR 0004 §8, owner to confirm, Q16) | API | `consents.pdf_key` |
 | Live thumbnail (BE-13, if stored) | `orgs/{orgId}/sessions/{sessionId}/live/{ULID}.jpg` | browser | none (transient) |
@@ -313,56 +353,83 @@ Org scoping (ADR 0006, C-1) does not stop one candidate from reading another can
   - The token carries `typ: "candidate"`, `sid` (session id), `oid` (org id) and `epoch`.
   - Lifetime, storage and device binding are left to ARC-03 part 2.
   - Staff tokens are rejected on `/candidate/*` (401), and candidate tokens on staff routes (401). The guard checks `typ` and the secret, not only the role.
-- **Guard (BE-07).** `CandidateSessionGuard` runs on every `/candidate/*` route except the OTP exchange.
-  - It verifies the token, then loads `sessions` by `sid` under the ADR 0006 section 8.4 `AUTH_BOOTSTRAP` scope (amended in PR #41). It narrows to org plus session as soon as the row is loaded, by entering `runInOrg(oid, { sessionId })` or the PR #41 equivalent. There is no improvised system-scope call site.
-  - Inside that scope, entering a staff scope (`runAsUser`, or `runInOrg` without the same `sessionId`) is refused: there is no staff scope inside a candidate scope.
-  - It checks that `org_id = oid` (401 on a mismatch) and `auth_epoch = epoch` (401 `SESSION_TAKEN_OVER` when the token's epoch is lower).
-  - It then opens a `CandidateContext { sessionId, orgId, epoch, status }` **per unit of work on AsyncLocalStorage**, together with the `OrgContext`. This follows ADR 0001 C-1 as amended in PR #41: not a Nest REQUEST-scoped provider.
+- **Guard (BE-07), matching ADR 0006 section 8.4 (PR #41).** `CandidateSessionGuard` runs on every `/candidate/*` route except the OTP exchange. That exchange is the only candidate route that uses `AUTH_BOOTSTRAP`, because no session JWT exists yet. Routes behind the guard use no system scope.
+  - The guard verifies the JWT, then enters the narrowed scope straight from the verified claims with `runAsCandidate(oid, sid)` (CS-4). It loads `sessions` with `id = sid` **inside** that scope.
+  - A session in another org is simply not found, which answers 401. No cross-org read ever happens.
+  - It checks `auth_epoch` against the token's `epoch`, answering 401 `SESSION_TAKEN_OVER` when the token's is lower.
+  - The `CandidateContext { sessionId, orgId, epoch, status }` lives **per unit of work on AsyncLocalStorage** (ADR 0001 C-1 as amended in PR #41), not in a Nest REQUEST-scoped provider.
 - **Rule CS-1.** The session id comes **only** from `CandidateContext`. No candidate route has a `:sessionId` parameter, and session ids in bodies or queries are stripped and ignored.
-- **Rule CS-2.** Every other id a candidate sends is resolved **within** the context session, with `session_id = ctx.sessionId` in the same query. An id that does not belong to it returns 404, the same as a cross-org read (TC-008). This covers:
+- **Rule CS-2.** Every other id a candidate sends is resolved **within** the context session. An id that does not belong to it returns 404, the same as a cross-org read (TC-008). This covers:
   - `:questionId` on run, draft and submit: a `session_questions.id`, or a question resolved through the session's `session_questions`;
   - `sessionQuestionId` in keystroke batches;
   - section ids;
   - evidence names (5.2, 5.6);
   - identity attempts.
-- **Rule CS-3.** Object keys, Redis keys (`rl:`, `pkey:`, `evidence:`, `rec:`), HMAC keys and jobs are built from `ctx.sessionId` and `ctx.orgId`, never from client input.
-- **Rule CS-4: enforcement (DB-05 gate; architect detail, owner to confirm).** This rule depends on PR #41 (the ADR 0006 amendments) merging first. Two options were considered:
-  - (a) Session checks written in the BE-07 and BE-10 services only.
-  - (b) The org scope also carries `sessionId` for candidate units of work. The db-engineer's org-scope Prisma extension (PR #30; ADR 0006 section 8.2 as amended in PR #41) enforces it.
-  - **Recommended: (b) as the structural control, plus (a) as explicit service-level checks for defence in depth.**
-  - **Deny by default.** Inside a scope entered by the candidate guard (actor CANDIDATE), the extension **throws for every model not on the allowlist below**. Session jobs (actor SERVICE) get the session filter on session-path models under ADR 0006, not this allowlist. The org filter alone is not enough: within one org it would still expose other candidates' names and emails, invitations (accommodations, which are health-adjacent), reviews, flag decisions, appeals, webhook deliveries and hidden tests. Each allowlisted model gets its own filter:
+- **Rule CS-3.** Object keys, Redis keys (`rl:`, `pkey:`, `evidence:`, `rec:`), HMAC keys and job payloads are built from `ctx.sessionId` and `ctx.orgId`, never from client input.
+- **Rule CS-4: actor model and enforcement (DB-05 gate; architect detail, owner to confirm).** This ADR is the one place that defines the actor model. ADR 0006 section 8.4 references it (amendment request at the end of this ADR). Section 5.10 depends on PR #41 merging first.
+  - **Options.** (a) Session checks written in the services only. (b) Session-carrying scopes enforced by the org-scope Prisma extension (PR #30). **Recommended: (b) as the structural control, plus (a) as service-level checks for defence in depth.**
+  - **Two session actors.** The scope records the actor, and the entry function sets it, not a caller parameter, so it cannot be forged:
 
-    | Model | Access in candidate scope | Filter |
-    | --- | --- | --- |
-    | `sessions` | read, update | `id = ctx.sessionId` |
-    | `session_questions`, `session_sections`, `identity_checks`, `media_chunks`, `proctor_event_batches`, `proctor_events`, `keystroke_batches`, `consents` | read, write | `session_id = ctx.sessionId` |
-    | `submissions` (no `session_id` column; database.md) | read, write | relation filter `session_question: { session_id: ctx.sessionId }`; creates must reference a `session_question_id` already resolved inside the context |
-    | `candidates` | read only | `id` = the session's candidate (`sessions.invitation_id` → `invitations.candidate_id`) |
-    | `invitations` | read only | `id = sessions.invitation_id` |
-    | `consent_texts` | read only | the org's current text, or `id = consents.consent_text_id` |
-    | `test_sections`, `test_questions` | read only | ids referenced by this session's `session_sections` and `session_questions` |
-    | `question_versions`, `question_variants` | read only | ids referenced by this session's `session_questions` |
-    | `test_cases`, `variant_test_cases` | read only, **samples only** | `is_hidden = false`, and `question_version_id` (or `variant_id`) in this session's set |
+    | Entry | Actor | Entered by | Allowed from | Rules |
+    | --- | --- | --- | --- | --- |
+    | `runAsCandidate(oid, sid)` | `CANDIDATE` | `CandidateSessionGuard` only | no scope | deny-by-default allowlist, column allowlists, no relation operations (below) |
+    | `runAsSessionJob(oid, sid)` | `SERVICE` | `SessionJobProcessor`, the one job-processor base class, from the job payload (ADR 0006 job rules: target loaded in scope, dropped on mismatch) | no scope, or system `BACKGROUND_JOB` | org filter on every model (ADR 0006), plus the session filter on session-path models (table below); no allowlist, no column restriction |
 
-    - **Hidden-test rule (TC-011).** Hidden `test_cases` and their `variant_test_cases` overrides are never readable in a candidate scope.
-      - The submit path runs them only inside a named grading call site (an ADR 0006 section 8.4 system unit of work listed by name, not improvised). It hands back only per-test pass or fail, the weights and the score.
-      - Serialisers never include a hidden case's `input` or `expected_output`.
-    - **Question assignment at start** (random rules resolved over the org's bank) runs in a named SessionStateService system unit of work, not in the candidate scope.
-    - Everything else is denied: `users`, `session_reviews`, `flag_decisions`, `appeals`, `webhook_*`, `audit_logs` writes (the audit service has its own call site), `ai_reference_solutions`, `questions` and other tests' content.
-  - **Operations covered.** The filter applies to writes as well as reads, as ADR 0006 section 8.2 does for `org_id`:
-    - filtered: `findUnique`, `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `findMany`, `count`, `aggregate`, `groupBy`, `update`, `updateMany`, `updateManyAndReturn` (Prisma 7), `delete`, `deleteMany`, and the `where` of `upsert`;
-    - `create`, `createMany`, `createManyAndReturn` (Prisma 7) and the create branch of `upsert` take `session_id` from the context, and throw if the caller supplies a different value;
-    - nested writes follow the same reject-if-different rule: `connect` and `connectOrCreate` on a session relation, and nested `create`;
-    - an operation the extension does not recognise throws (deny by default).
-  - **Unique lookups.** `findUnique` and `update` by `id` use Prisma's extended unique `where` (non-unique fields allowed alongside the unique one); `findFirst` is the fallback. BE-07 and DB-05 choose.
-  - **Raw SQL is refused in a scope carrying `sessionId` (ADR 0006 section 8.5, amended in PR #41); use the query API.** This is deliberate.
-    - Session jobs also run in a `sessionId` scope, so BE-12 risk scoring, BE-14 report generation and DB-06 per-session deletion cannot use raw SQL either; they use the query API.
-    - A job that truly needs raw SQL must run at a separately named ADR 0006 call site, which needs its own review.
-  - **Scope nesting (ADR 0006 section 8.4, amended in PR #41).** A scope only narrows.
-    - A nested scope can neither drop `sessionId` nor change it to another value; trying to do either throws.
-    - A staff or system scope cannot be opened inside a candidate scope to widen it, except at the named call sites above.
+  - **Nesting inside a CANDIDATE or SERVICE scope:**
+    - `runInOrg(oid)` with the same org is allowed and keeps the session and the actor (ADR 0006 section 8.4: "Org A with S → runInOrg(A): S stays");
+    - a call that would drop or change `sessionId` is refused;
+    - so are `runAsUser`, `runSystem`, and entering the other actor: a SERVICE scope can never be entered from a CANDIDATE scope, nor the reverse. No staff scope exists inside a candidate scope.
+  - **Jobs that read across sessions** (similarity across submissions, dashboards, retention selection) run in plain `runInOrg(orgId)` without a `sessionId`, under the ADR 0006 job rules. They are not session jobs.
+  - **Session filter for session-path models (both actors):**
+
+    | Model | Filter |
+    | --- | --- |
+    | `sessions` | `id = ctx.sessionId` |
+    | `session_questions`, `session_sections`, `identity_checks`, `media_chunks`, `proctor_event_batches`, `proctor_events`, `keystroke_batches`, `consents` | `session_id = ctx.sessionId` |
+    | `submissions` (no `session_id` column; database.md) | relation filter `sessionQuestion: { sessionId: ctx.sessionId }` (extension-injected); a create must reference a `session_question_id` already loaded in the scope |
+
+  - **CANDIDATE allowlist.** Deny by default: any model not listed throws. The org filter alone would expose other candidates' names and emails, invitations (accommodations, which are health-adjacent), reviews, flag decisions, appeals, webhook deliveries and hidden tests. Read-only models also get a **column allowlist**: selecting any other column throws, and the default select is narrowed with `omit`, so a new column is hidden until it is listed.
+
+    | Model | Access | Row filter | Columns |
+    | --- | --- | --- | --- |
+    | session-path models above | read, write | session filter | all |
+    | `organizations` | read | `id = ctx.orgId` | `id`, `name`, `retention_days`, `settings`, `current_consent_text_id` |
+    | `candidates` | read | `invitations: { some: { session: { id: ctx.sessionId } } }` | `id`, `full_name`, `email` |
+    | `invitations` | read | `session: { id: ctx.sessionId }` | `id`, `test_id`, `candidate_id`, `window_start`, `window_end`, `accommodations`, `used_at` (never `token_hash`) |
+    | `tests` | read | `id` = the session invitation's `test_id` | `id`, `name`, `description`, `duration_minutes`, `profile`, `settings` (never `pass_score`) |
+    | `consent_texts` | read | the org's `current_consent_text_id`, or this session's `consents.consent_text_id` | `id`, `version`, `body_md`, `legal_approved_at` |
+    | `test_sections`, `test_questions` | read | ids referenced by this session's `session_sections` / `session_questions` | `test_questions` without `random_rule` |
+    | `question_versions` | read | ids referenced by this session's `session_questions` | `id`, `question_id`, `version`, `title`, `statement_md`, `difficulty`, `allowed_languages`, `limits`, `starter_code`. **Never `reference_solution`, `answer_spec` or `validation_report`.** |
+    | `question_variants` | read | ids referenced by this session's `session_questions` | `id`, `question_version_id`, `rendered_statement` |
+    | `test_cases` | read, **samples only** | `is_hidden = false` and `question_version_id` in this session's set | `id`, `question_version_id`, `input`, `expected_output`, `position` |
+    | `variant_test_cases` | read, **samples only** | `variant_id` in this session's set and the relation filter `testCase: { isHidden: false }` (extension-injected; this table has no `is_hidden`) | `variant_id`, `test_case_id`, `input`, `expected_output` |
+
+    - **Hidden-content rule (TC-011).** These never reach a candidate scope: hidden `test_cases` and their `variant_test_cases` overrides, `reference_solution`, `validation_report` (per-test results of hidden tests), and the MCQ and short-answer key in `answer_spec`.
+    - **Grading** of hidden tests and of MCQ and short answers (`answer_spec`) is therefore a session job (`grade-answer`, SERVICE).
+      - The submit route enqueues it and waits up to 10 s (`waitUntilFinished`), then returns the result: per-test pass or fail, the weights and the score, never case data.
+      - On timeout it returns 202 `{ submissionId }`, and the client polls `GET /candidate/answers/:questionId/submissions/:submissionId`, which reads only the `submissions` row.
+      - Judge0 is already asynchronous, so the wait adds little.
+      - Run (sample tests only) stays in the candidate scope.
+    - **Start-test** (assigning questions over the org's bank, opening sections, generating the key, VERIFIED → IN_PROGRESS) is a session job (`start-session`, SERVICE) that the route enqueues and awaits (10 s, else 503 with `Retry-After`; the job is idempotent). **Chosen over a named service entry**, so ADR 0006 needs no new system reason.
+    - **Audit.** Candidate routes write no `audit_logs` rows: FR-105 covers staff access to candidate data, and candidate actions are recorded in their own rows (consents, events, submissions). The OTP-exchange lockout audit (ADR 0003) runs under `AUTH_BOOTSTRAP`, outside the guard. Session jobs that must audit (for example retention) write with a null actor under the org filter.
+  - **Relation operations in CANDIDATE scope: refused (recommended for the pilot).** A Prisma query extension sees only the top-level model, so nested access would bypass the allowlist. For example, `sessionQuestion.findMany({ include: { questionVersion: { include: { testCases: true } } } })` would return hidden tests, and `session.findUnique({ include: { invitation: { include: { test: { include: { invitations: { include: { candidate: true } } } } } } } })` would expose other candidates.
+    - The extension therefore throws on any caller-supplied relation field in `include` or `select`, any relation filter in `where` (`some`, `every`, `none`, `is`, `isNot`), any relation `_count`, and **any nested write** (`create`, `connect`, `connectOrCreate`, `update`, `upsert`, `delete`, `set`, `disconnect`). Services load each model separately.
+    - Only the relation filters the extension injects itself (the `submissions`, `candidates`, `invitations` and `variant_test_cases` rows above) are allowed.
+    - The alternative, walking `include`, `select`, `where` and `data` at every depth and applying each target's rules, is kept for after the pilot.
+  - **Operations (both actors).** The session filter applies to `findUnique`, `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `findMany`, `count`, `aggregate`, `groupBy`, `update`, `updateMany`, `updateManyAndReturn` (Prisma 7), `delete`, `deleteMany` and the `where` of `upsert`.
+    - `create`, `createMany`, `createManyAndReturn` (Prisma 7) and the create branch of `upsert` take the session from the context, and throw on a different value.
+    - In SERVICE scope, nested `connect` and `connectOrCreate` to a session relation follow the same reject-if-different rule (ADR 0006 section 8.2).
+    - An unrecognised operation throws.
+  - **Unique lookups.** `findUnique` by `id` uses Prisma's extended unique `where`; `findFirst` is the fallback.
+  - **Raw SQL is refused in any scope carrying `sessionId` (ADR 0006 section 8.5, amended in PR #41); use the query API.** This is deliberate: session jobs (BE-12 risk scoring, BE-14 report generation, DB-06 per-session deletion) cannot use raw SQL either.
   - Candidate service methods take `CandidateContext` as a required parameter.
-  - **Tests.** One fails if a candidate unit of work runs a query on a model outside the allowlist. Another fails if a session-path query runs without the session filter.
+  - **Tests (DB-05, BE-07):**
+    - iterate every Prisma DMMF model and assert that each one not on the CANDIDATE allowlist throws in a candidate scope;
+    - one test per nested case: an `include` reaching a hidden test case, an `include` reaching another candidate, a `select` of a relation, a relation `where`, `_count`, and each nested write kind;
+    - a column test: selecting `question_versions.reference_solution`, `answer_spec` or `validation_report`, `invitations.token_hash` or `tests.pass_score` throws, and the default select omits them;
+    - variant sample filter: a hidden case's `variant_test_cases` row is never returned;
+    - actor crossing: CANDIDATE → SERVICE, SERVICE → CANDIDATE and CANDIDATE → `runAsUser` are each refused;
+    - a session-path query without the session filter fails in both actors.
 - **Rule CS-5: sockets and storage.**
   - Candidate sockets (OI-2, if any) authenticate with the same token and join only the room `session:{sessionId}` taken from it. The server ignores any session id in a socket payload.
   - Every presign route builds the key from the token's org and session (5.7), and confirm refuses any key or (stream, seq) outside the token's session.
@@ -406,10 +473,17 @@ Org scoping (ADR 0006, C-1) does not stop one candidate from reading another can
 - Each entry may name a `licenceFile` that is fetched alongside it. A generated `THIRD_PARTY_NOTICES.txt` is served (Apache 2.0 NOTICE; F-5 keeps Silero's LICENSE).
 - The COCO-SSD shards listed in `model.json`'s `weightsManifest` each get an entry. This replaces the manual "export lite_mobilenet_v2" step.
 
-Scripts (proctor-sdk owns them; they replace `fetch-models.mjs`):
+Scripts (proctor-sdk owns them; they replace `fetch-models.mjs`). The SDK's `scripts/lock.mjs` (hash, verify and update, in this `files[]` shape, preserving hand-edited `licence` and `status`; on the SDK branch, not yet on main) is the starting implementation. It moves under `scripts/models/` so CODEOWNERS covers it (control 1).
 - `models:fetch <outDir>` reads the lock, downloads or copies each file, and fails on any SHA-256 or size mismatch.
-  - It writes to `<outDir>/<lockDigest12>/…`: a versioned, immutable path, which becomes the SDK's `modelBaseUrl`.
+  - It writes to `<outDir>/<lockDigest12>/<name>`. The lock `name` is the served relative path (for example `coco-ssd/ssdlite_mobilenet_v2/model.json`).
+    - SDK work: `resolveModelUrls` maps components to these lock names instead of the flat layout it assumes today.
+    - `modelBaseUrl` becomes `/models/proctor/<lockDigest12>`, injected by the web build (`NEXT_PUBLIC_PROCTOR_MODEL_BASE`) from the lock digest.
+  - **One model directory in every environment, including dev:** `apps/web/public/models/proctor/`. The dev-only `apps/web/public/dev-proctor-models/`, ignored on main by PR #37, is retired. `/dev/proctor` uses the same fetch and path, and the frontend removes the old ignore entries once nothing uses them.
   - It copies only the onnxruntime wasm variants the lock lists, not every `.wasm`.
+  - **Variant (decided).** Serve only the plain `ort-wasm-simd-threaded.wasm` (about 14 MB) and its `.mjs`. Voice activity detection needs the wasm execution provider only, not WebGPU.
+    - The jsep (about 28 MB) and asyncify (about 27 MB) variants exceed the limit and are not served.
+    - The SDK configures vad-web to load the wasm-only onnxruntime entry (`onnxruntime-web/wasm`) and confirms in a real browser which file it requests. Which variant vad-web loads today is unconfirmed.
+    - If vad-web cannot be made to use the plain variant, the fallback is serving models from object storage behind the same origin (section 7), not raising the limit, which is a platform limit.
   - It fails on a file over 25 MiB, the Cloudflare Pages per-file limit (not re-verified 2026-10-05; DEP-01 confirms).
 - `models:update` is run by a person or agent with network access. It refreshes `sha256`, `bytes` and `version`. The script does not write `licence` or `status`, but that is only a promise of the script; control 2 in the gate-protection table below is what enforces it.
 
@@ -437,8 +511,9 @@ CI and deploy:
 
   | # | Control | Kind |
   | --- | --- | --- |
-  | 0 | **Separate agent identity.** Agents run under their own GitHub identity (a bot account or a fine-grained PAT) with **Write, not Admin**, and with no Variables, Secrets, Environments or Administration permission. The owner's `gh` login is not available in agent sessions. **Every other control depends on this one.** | owner action |
-  | 1 | `CODEOWNERS` naming the owner for `packages/proctor-sdk/models.lock.json`, `apps/worker/models.lock.json`, the gate scripts (`packages/proctor-sdk/scripts/**`), `.github/workflows/**`, `.github/CODEOWNERS` and `docs/status.md` (the decision log control 3 reads). Branch protection or a ruleset on `main` requires code-owner review, with **bypass disallowed / "include administrators" on** | owner action (the hub drafts the CODEOWNERS file; the owner sets the protection) |
+  | 0 | **Separate agent identity.** Agents run under **a separate bot account (or a GitHub App)**, with a token issued for that account and **never a token of the owner's account**. A fine-grained PAT on the owner's account still acts as the owner. The identity gets **Write, not Admin**, and with no Variables, Secrets, Environments or Administration permission. The owner's `gh` login is not available in agent sessions. **Every other control depends on this one.** | owner action |
+  | 1 | `CODEOWNERS` naming the owner for `packages/proctor-sdk/models.lock.json`, `apps/worker/models.lock.json`, `packages/proctor-sdk/package.json` (it defines the `models:licence-gate` script, and `"models:licence-gate": "true"` would neutralise the gate), the gate itself (self-contained under `packages/proctor-sdk/scripts/models/**`, importing nothing outside that folder, so CODEOWNERS covers all of it), the future worker gate (`apps/worker/scripts/models/**` and `apps/worker/pyproject.toml`), `.github/workflows/**`, `.github/CODEOWNERS` and `docs/status.md` (the Delivery Lead's decision log, which control 3 reads). Branch protection or a ruleset on `main` requires code-owner review, with **bypass disallowed / "include administrators" on** | owner action (the hub drafts the CODEOWNERS file; the owner sets the protection) |
+  | 1b | **Deployment branch policy** on the `pilot` and `production` Environments: `main` only. A workflow pushed to another branch must not be able to target them, because CODEOWNERS applies only at merge | owner action |
   | 2 | CI check: a PR that changes `licence` or `status` in a lock file fails unless the PR has the owner's approving review. It re-runs on `pull_request_review` events as well as on pushes. **It only works if control 1 covers `.github/workflows/**` and cannot be bypassed**, since otherwise the check can be edited away in the same PR. `models:update` diffs can then only touch `sha256`, `bytes` and `version` | architect detail, owner to confirm |
   | 3 | Override decision ids are recorded in the decision log (`docs/status.md` §9, under control 1) and cross-checked by the gate | architect detail, owner to confirm |
   | 4 | Deny patterns in the agents' permission settings: `gh variable *`, `gh secret *`, `gh api */environments*`, `gh auth token`, `gh api */branches/*/protection*`, `gh api */rulesets*`, `gh pr merge --admin*`. **Best effort only.** Bash deny patterns match command text, so an agent with the token can call the REST API through `curl` or another spelling. Recommendation only: the hub does not edit `.claude/` or any settings file (its own operating rules; agent configuration is the owner's decision) | owner action |
@@ -450,7 +525,7 @@ CI and deploy:
   - required code-owner review cannot tell the owner and an agent apart on one account. And because an author cannot approve their own PR, the owner would routinely need admin bypass, which defeats control 1.
 
   **Until control 0 exists, the gate is not protected.** It catches mistakes, not a determined change. Until then, the owner checks `MODEL_LICENCE_OVERRIDES`, the lock-file diff and the gate workflow before each pilot or production deploy.
-- **Deploying without the object detector.** The owner can instead deploy with `PROCTOR_EXCLUDE_COMPONENTS=OBJECT`.
+- **Deploying without the object detector.** The owner can instead deploy with `PROCTOR_EXCLUDE_COMPONENTS=OBJECT`. This needs SDK support: an `excludeComponents` option that never starts the detector and emits no DETECTOR_UNAVAILABLE.
   - The fetch skips the OBJECT files.
   - The SDK does not start the object detector and reports capability `object: UNSUPPORTED`, with no DETECTOR_UNAVAILABLE events, so candidates are not penalised for a deployment choice.
   - PHONE_DETECTED and BOOK_DETECTED are then unavailable (TC-059).
@@ -483,6 +558,12 @@ CI and deploy:
 - **FR-606 (owner decision, Q15).** FACE_MISMATCH moves from a browser check every second to a server re-check of a frame every 2 minutes. That is an FR change and new server-side biometric processing during the test.
 - **ADR 0004 §8.** The consent PDF key sits outside the session prefix (5.7), which fills in and amends the layout ADR 0004 §8 delegated to ARC-03.
 - **ADR 0005 §3 and database.md (`proctor_events.batch_seq`, around line 586).** The comment "NULL for SERVER events" becomes "NULL for SERVER events and unsigned system-check findings". `batch_seq` is already nullable, so there is no schema change.
+- **ADR 0006 section 8.4 (PR #41), requested:**
+  - reference the actor model in 5.10 CS-4 instead of defining session scopes itself;
+  - split the `runInOrg(A, { sessionId })` rows into `runAsCandidate(oid, sid)` (guard only, from no scope) and `runAsSessionJob(oid, sid)` (`SessionJobProcessor` only, from no scope or `BACKGROUND_JOB`);
+  - add rows refusing CANDIDATE → SERVICE, SERVICE → CANDIDATE, and `runSystem` from either;
+  - keep "Org A with S → `runInOrg(A)`: S stays", and state that the actor stays too;
+  - no new system reason is needed: start-test and grading are session jobs.
 - **Flagged schema changes (each needs its own ADR, not decided here):** a durable key-issue marker (`sessions.hmac_key_issued_epoch`) and `media_chunks.etag` (Q12).
 
 ## 8. Consequences and per-agent changes
@@ -493,16 +574,16 @@ CI and deploy:
 
 | Agent | Must do |
 | --- | --- |
-| proctor-sdk | Accept a CryptoKey (or base64), persist it non-extractable in IndexedDB, re-sign the outbox on a new epoch or `KEY_EPOCH_STALE`, and seed counters from `proctor-key` (max with local). Map status codes as in 5.2: stop and purge on `SESSION_NOT_ACTIVE` and on 401 `SESSION_TAKEN_OVER`; at most 3 retries on `TOKEN_EXPIRED`, then raise `reauthRequired`; never retry a 401 forever. Add the heartbeat body and its 409 handling. For media: send `startedAt` and `durationMs`, send the `If-None-Match` header when the presign returns it, treat 412 as already stored, handle `alreadyUploaded`, `UPLOAD_MISMATCH` and `UPLOAD_NOT_FOUND`, and never drop a segment's first chunk. Evidence presign gets `purpose`; each name is used once and only for its purpose. Re-check becomes upload plus 202, and client FACE_MISMATCH emission is removed. Add a `runSystemCheck()` helper. Replace `fetch-models.mjs` with lock scripts. Purge the key and outbox at finish. Never log URLs. |
+| proctor-sdk | Key hooks `setKey`, `loadStoredKey`, `onKeyStale`, `onReauthRequired` and `onToken` (section 2; the app fetches the key, the SDK stores it non-extractable), outbox re-sign, counter seeding, purge rules and the stale sweep; status mapping by problem `code` (5.1, 5.2), with no endless 401 retries. Heartbeat: a `getHealth()` provider and 409 handling. Media: one per-stream `seq` across segments (replacing the per-segment restart in `recorder.ts`), `startedAt` and `durationMs`, `contentType` normalised to its essence, `If-None-Match` and 412, the `alreadyUploaded` union with no URL, and protected first chunks with the cap rule (5.5). Evidence `purpose` and single-use names; re-check as upload plus 202, with client FACE_MISMATCH removed. New: `runSystemCheck()`, a ROOM_SCAN recording stream, the `excludeComponents` option. Models: `scripts/lock.mjs` under `scripts/models/`, `resolveModelUrls` on lock names with the versioned base, the plain onnxruntime variant confirmed in a browser. Never log URLs. |
 | backend BE-07 | Candidate-session scope first (5.10: pinned HS256 with `iss` and `aud`, `CandidateSessionGuard` on AsyncLocalStorage, CS-1 to CS-5, `SESSION_TAKEN_OVER`, cross-candidate tests); then the master key with AAD and `kid`, epoch derivation, the issue marker with TTL until deadline + grace, system-check gates on CONSENTED → VERIFIED and on start, the `proctor-key` route, system-check route and start gate (TC-056), heartbeat and watchdog, key destruction at ingest close and on erasure |
-| db-engineer (DB-05, PR #30) | Let the org-scope context carry an optional `sessionId` for candidate units of work and apply it to every operation, with the per-table filters, create defaults, raw SQL refused in a `sessionId` scope (ADR 0006 section 8.5, amended in PR #41) and narrow-only nesting (5.10 CS-4 option (b)) |
+| db-engineer (DB-05, PR #30) | Implement `runAsCandidate` and `runAsSessionJob` with a non-forgeable actor, the CANDIDATE allowlist with row filters and column allowlists, refusal of relation include/select/where/_count and nested writes in CANDIDATE scope, the session filter for both actors on every operation (Prisma 7 operations included), raw SQL refused in a `sessionId` scope, and the actor-crossing refusals. Tests as listed in 5.10 CS-4, including the DMMF sweep. |
 | backend BE-09 | Key layout 5.7; presign and confirm 5.5, with the HEAD check, ETag recording, the `If-None-Match` spike for R2 and S3, and per-session caps; evidence presign 5.6 with single-purpose, single-use names, quotas, the FACE-disabled refusal and the `evidence-expire` job; the ingest-close sweep; review GET URLs with response-type and disposition overrides; prefix deletion in retention and erasure, consent PDF prefix |
 | integrity BE-10 | Raw-body verification order (section 2); fullscreen pairing by `occurred_at` and the duration rule (5.9); duplicate check (stored signature first, then the 8-epoch window); invariant test that CLIENT rows from batches have `batch_seq`; error codes, evidence-name resolution, grace window, per-session limits, a `rejected` metric with no body |
 | integrity BE-12 | Score from server `duration_ms` only (5.9); `face-recheck` job with the 1 MiB and 1920 × 1920 refusals before decoding, frame deletion on every non-mismatch outcome including failure, and outcome hand-off (API writes the event; OI-1 mechanism in ARC-04), hole-tolerant segment concatenation, worker `models.lock.json` |
-| backend BE-11 and BE-13 | SessionStateService (BE-07/BE-11) closes open FULLSCREEN_EXIT rows at session end (5.9). BE-11: the frontend flushes the SDK (bounded) before `/finish`; `analyze-session` is delayed by the grace (with ARC-04). BE-13: review bundle with recording gaps, batch-seq holes, recorder health, the unsigned label and server FACE_MISMATCH evidence |
-| frontend | Check IndexedDB first, then call `proctor-key` after start and after OTP resume, inside a Web Lock; when the key is missing or `KEY_ALREADY_ISSUED`, run the OTP resume; handle `reauthRequired`. Build the system-check call. Pages `_headers` and CSP for models. Sentry scrubbing. Review UI labels and gap panel. `/dev/proctor` uses the lock-served path. |
-| QA | TC-050 reworded (done in this PR; 5.9). Follow-through: rewrite the SDK test `TC-050 KNOWN DEFECT QA-D-01` (`it.fails` in `packages/proctor-sdk/src/qa/qa-tc.test.ts`) as plain tests (EXIT has no `durationMs`, RESTORED has one); add a BE-10 API-level test of the server-filled `duration_ms`, including the close at session end; remove TC-050 from the known-defect list in `docs/test-matrix.md` (line 15). Then: TC-063 45 s against the 60 s FR-609 threshold (Q13); cross-candidate scope tests including presign and confirm (5.10); B2: oversize PUT deleted by confirm or the sweep, re-PUT after confirm blocked (412) or caught by the sweep, review URLs carry the response overrides; B3: re-check presign refused when FACE is disabled, a reused name is rejected, an EVENT name sent to re-check gets 400, a RECHECK name in an event is dropped, an unused frame is deleted within 10 min, a frame whose job failed is deleted, a MATCH frame is deleted, and the sweep removes unreferenced re-check frames; licence gate fails on an override id missing from the decision log; TC-065 (tamper → 403, identical replay → 200 duplicate, same seq with a different body → 409, other-session key → 403); TC-063 with an epoch change mid-outage; TC-070 with a synthetic hole; TC-056 server gate. New TCs: key issued once per epoch, cross-session evidence name dropped, server-written FACE_MISMATCH, prefix retention removes orphans, licence gate fails on unverified without override. k6 signer through `k6/crypto`. |
-| deploy (QA track) | `models:fetch` and the licence gate in the DEP-01, DEP-03 and production workflows; protected environments; controls 1 to 4 of section 6 tracked as owner actions; bucket CORS (PUT with Content-Type) per ST-7 |
+| backend BE-11 and BE-13 | Grading of hidden tests and MCQ or short answers as the `grade-answer` session job, awaited for up to 10 s, then 202 plus the poll route (5.10); start-test as the `start-session` job (BE-07). `SessionStateService.closeIngest` and the close of open FULLSCREEN_EXIT rows at session end (5.9). BE-11: the frontend flushes the SDK (bounded) before `/finish`; `analyze-session` is delayed by the grace (with ARC-04). BE-13: review bundle with recording gaps, batch-seq holes, recorder health, the unsigned label and server FACE_MISMATCH evidence |
+| frontend | Own the key fetch and the OTP and token refresh, passing results to the SDK hooks (section 2). Inject `NEXT_PUBLIC_PROCTOR_MODEL_BASE`; retire `public/dev-proctor-models/` in favour of `public/models/proctor/`. Check IndexedDB first, then call `proctor-key` after start and after OTP resume, inside a Web Lock; when the key is missing or `KEY_ALREADY_ISSUED`, run the OTP resume; handle `reauthRequired`. Build the system-check call. Pages `_headers` and CSP for models. Sentry scrubbing. Review UI labels and gap panel. `/dev/proctor` uses the lock-served path. |
+| QA | TC-050 reworded (done in this PR; 5.9). Follow-through: rewrite the SDK test `TC-050 KNOWN DEFECT QA-D-01` (`it.fails` in `packages/proctor-sdk/src/qa/qa-tc.test.ts`) as plain tests (EXIT has no `durationMs`, RESTORED has one); add a BE-10 API-level test of the server-filled `duration_ms`, including the close at session end; remove TC-050 from the known-defect list in `docs/test-matrix.md` (line 15). Then: TC-063 45 s against the 60 s FR-609 threshold (Q13); cross-candidate scope tests including presign and confirm (5.10); B2: oversize PUT deleted by confirm or the sweep, re-PUT after confirm blocked (412) or caught by the sweep, review URLs carry the response overrides; B3: re-check presign refused when FACE is disabled, a re-PUT to the original key after a FACE_MISMATCH cannot change the sealed evidence, concurrent batches cannot both take one evidence name, a reused name is rejected, an EVENT name sent to re-check gets 400, a RECHECK name in an event is dropped, an unused frame is deleted within 10 min, a frame whose job failed is deleted, a MATCH frame is deleted, and the sweep removes unreferenced re-check frames; licence gate fails on an override id missing from the decision log; TC-065 (tamper → 403, identical replay → 200 duplicate, same seq with a different body → 409, other-session key → 403); TC-063 with an epoch change mid-outage; TC-070 with a synthetic hole; TC-056 server gate. New TCs: key issued once per epoch, cross-session evidence name dropped, server-written FACE_MISMATCH, prefix retention removes orphans, licence gate fails on unverified without override. k6 signer through `k6/crypto`. |
+| deploy (QA track) | `models:fetch` and the licence gate in the DEP-01, DEP-03 and production workflows; protected environments; controls 0 to 4 (with 1b) of section 6 tracked as owner actions; bucket CORS (PUT with Content-Type) per ST-7 |
 | hub, on acceptance | fsd.md §4 rows; api-contract.md error codes (after #31 and #33 merge); database.md comments (`batch_seq`, `hmac_key_enc`, `device_info`); architecture.md Security bullet; ADR 0010, 0004 §8 and 0005 §3 amendments; FR-606 wording if Q15 is yes; ADR 0001 OI-3 and OI-9 marked decided; the `ci.yml` model job and the lock licence-diff check; `CODEOWNERS` file |
 
 ## 9. Owner questions
@@ -518,9 +599,10 @@ CI and deploy:
 7. **`SCREEN_SHARE` detector value**: add it (recommended), decide its weight, and confirm it is never an accommodation.
 8. **COCO-SSD (F-3) for the pilot**: (a) an override after Legal review (B-05), (b) deploy without object detection, or (c) a swap after a licence check.
 9. **Gate protection (section 6, controls 0 to 4).** All of these are owner decisions:
-   - a separate agent GitHub identity (bot or fine-grained PAT) with Write, not Admin, and no Variables, Secrets, Environments or Administration permission;
+   - a separate bot account (or a GitHub App) for agents, with a token issued for that account and never a token of your account, holding Write, not Admin, and no Variables, Secrets, Environments or Administration permission;
    - branch protection or rulesets on `main` with bypass disallowed and administrators included;
-   - `CODEOWNERS` covering both lock files, the gate scripts, `.github/workflows/**`, `.github/CODEOWNERS` and `docs/status.md`;
+   - a deployment branch policy (`main` only) on `pilot` and `production`;
+   - `CODEOWNERS` covering both lock files, `packages/proctor-sdk/package.json`, the self-contained gate folders, `.github/workflows/**`, `.github/CODEOWNERS` and `docs/status.md`;
    - the best-effort deny patterns of control 4 in the agents' permission settings (the owner changes those, not the hub).
 
    Until a separate identity exists, even controls 1 to 4 do not stop an agent that uses your credentials.
@@ -535,4 +617,6 @@ CI and deploy:
 **Architect details to confirm**
 
 17. Names and limits: `SESSION_KEY_ENC_KEY_<kid>`, `PROCTOR_INGEST_GRACE_SECONDS`, per-route limits and quotas, 16 MiB per chunk, 1 MiB and 1920 × 1920 per image, the 15-minute freshness of the system check, JWT `iss` and `aud`.
-18. Candidate-session enforcement (5.10 CS-4): the Prisma extension with `sessionId` (b) plus service checks (a).
+18. Candidate-session enforcement (5.10 CS-4): the actor model, the CANDIDATE allowlist, relation operations refused for the pilot, and grading and start-test as awaited session jobs (a contract change for submit: 202 plus poll on timeout).
+19. The onnxruntime variant: the plain wasm only, with object storage as the fallback if vad-web needs jsep (section 6).
+20. Media `seq` per stream across segments, following ADR 0004 (the SDK changes, not the schema).
