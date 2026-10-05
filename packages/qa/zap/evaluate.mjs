@@ -1,5 +1,6 @@
 // TC-093 verdict from a ZAP JSON report (zap-baseline.py -J report.json).
-//   node packages/qa/zap/evaluate.mjs zap/report.json [--fail-on-medium] [--target-host <host>]
+// Library only. The command line is cli.mjs:
+//   node packages/qa/zap/cli.mjs zap/report.json [--fail-on-medium] [--target-host <host>]
 // Exit 0: the scan reached the target and found no High alert (risk code 3).
 // Exit 1: a High alert, or (with --fail-on-medium) a Medium alert.
 // Exit 2: unusable report, or the scan reached nothing. The second case matters: an unreachable
@@ -10,8 +11,6 @@
 //
 // Output lists alert names, rule ids, risk and instance counts only. It prints no URL, because a URL
 // can carry a token (CLAUDE.md: never log tokens).
-import fs from 'node:fs';
-import { pathToFileURL } from 'node:url';
 
 const RISK = { 0: 'Informational', 1: 'Low', 2: 'Medium', 3: 'High' };
 
@@ -25,6 +24,15 @@ export function evaluate(report, { failOnMedium = false, targetHost } = {}) {
       code: 2,
       lines: ['The report has no site for the target host: the scan did not reach it. Not a pass.'],
     };
+  }
+  const unusable = {
+    code: 2,
+    lines: ['The report has a malformed site or alerts list: unusable report.'],
+  };
+  for (const site of sites) {
+    if (site === null || typeof site !== 'object') return unusable;
+    if (site.alerts !== undefined && !Array.isArray(site.alerts)) return unusable;
+    for (const a of site.alerts ?? []) if (a === null || typeof a !== 'object') return unusable;
   }
   const counts = { 0: 0, 1: 0, 2: 0, 3: 0 };
   const rows = [];
@@ -50,42 +58,4 @@ export function evaluate(report, { failOnMedium = false, targetHost } = {}) {
   const failed = counts[3] > 0 || (failOnMedium && counts[2] > 0);
   lines.push(failed ? 'TC-093 FAIL' : 'TC-093 PASS');
   return { code: failed ? 1 : 0, lines };
-}
-
-function isMain() {
-  if (!process.argv[1]) return false;
-  try {
-    return import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href;
-  } catch {
-    return false;
-  }
-}
-
-if (isMain()) {
-  const args = process.argv.slice(2);
-  const hostIdx = args.indexOf('--target-host');
-  const targetHost = hostIdx >= 0 ? args[hostIdx + 1] : undefined;
-  const file = args.find((a, i) => !a.startsWith('--') && (hostIdx < 0 || i !== hostIdx + 1));
-  if (!file || (hostIdx >= 0 && !targetHost)) {
-    console.error(
-      'Usage: node evaluate.mjs <report.json> [--fail-on-medium] [--target-host <host>]',
-    );
-    process.exitCode = 2;
-  } else {
-    let report;
-    try {
-      report = JSON.parse(fs.readFileSync(file, 'utf8'));
-    } catch {
-      console.error('Cannot read the ZAP report as JSON.');
-      process.exitCode = 2;
-    }
-    if (process.exitCode !== 2) {
-      const { code, lines } = evaluate(report, {
-        failOnMedium: args.includes('--fail-on-medium'),
-        targetHost,
-      });
-      console.log(lines.join('\n'));
-      process.exitCode = code;
-    }
-  }
 }
