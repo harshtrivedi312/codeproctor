@@ -22,8 +22,9 @@ from face_helpers import (
 )
 from worker.config import FaceConfig, IntegrityConfig
 from worker.face import FaceDecision, FaceMatcher, ReviewReason
-from worker.face.embedding import MODEL_ID, ModelLoadError
+from worker.face.embedding import MODEL_ID
 from worker.face.matcher import SelfieCache, decode_image, review_for_model_error
+from worker.face.modelfile import ModelLoadError
 from worker.face.types import AlignedFace, DetectedFace, Embedding
 
 ID_A, ID_B = synthetic_png(0), synthetic_png(1)
@@ -91,13 +92,13 @@ def test_fr403_hash_mismatch_maps_to_manual_review_match_error() -> None:
 
 def test_fr403_reason_codes_for_each_case() -> None:
     reasons = {n: (m.match(a, b).reason, m.match(a, b).detail) for n, m, a, b in failure_modes()}
-    assert reasons["no face"] == (ReviewReason.NO_FACE, "NO_FACE")
+    assert reasons["no face"] == (ReviewReason.NO_FACE, "ID_NO_FACE")
     assert reasons["two faces"][0] is ReviewReason.MULTIPLE_FACES
-    assert reasons["low confidence"] == (ReviewReason.NO_FACE, "LOW_DETECTION_CONFIDENCE")
-    assert reasons["corrupt"] == (ReviewReason.MATCH_ERROR, "IMAGE_CORRUPT")
-    assert reasons["oversized"] == (ReviewReason.MATCH_ERROR, "IMAGE_SIZE")
-    assert reasons["too many pixels"] == (ReviewReason.MATCH_ERROR, "IMAGE_SIZE")
-    assert reasons["model error"] == (ReviewReason.MATCH_ERROR, "UNEXPECTED")
+    assert reasons["low confidence"] == (ReviewReason.NO_FACE, "ID_LOW_DETECTION_CONFIDENCE")
+    assert reasons["corrupt"] == (ReviewReason.MATCH_ERROR, "ID_IMAGE_FORMAT_OR_CORRUPT")
+    assert reasons["oversized"] == (ReviewReason.MATCH_ERROR, "ID_IMAGE_SIZE")
+    assert reasons["too many pixels"] == (ReviewReason.MATCH_ERROR, "ID_IMAGE_SIZE")
+    assert reasons["model error"] == (ReviewReason.MATCH_ERROR, "ID_UNEXPECTED")
     assert reasons["below threshold"][0] is ReviewReason.BELOW_THRESHOLD
 
 
@@ -108,10 +109,14 @@ def test_fr403_liveness_not_confirmed_goes_to_manual_review_without_running_the_
     assert r.reason is ReviewReason.LIVENESS_NOT_CONFIRMED and emb.calls == 0
 
 
-def test_fr403_tc034_liveness_is_client_reported_and_only_leads_to_review() -> None:
-    for confirmed in (True, False):
-        r = matcher().match(ID_A, ID_A, liveness_confirmed=confirmed)
-        assert r.decision in set(FaceDecision)
+def test_fr403_tc034_failed_liveness_never_matches_and_never_rejects() -> None:
+    failed = matcher().match(
+        ID_A, ID_A, liveness_confirmed=False
+    )  # identical images, spoof flagged
+    assert failed.decision is FaceDecision.MANUAL_REVIEW
+    assert failed.reason is ReviewReason.LIVENESS_NOT_CONFIRMED and failed.score is None
+    confirmed = matcher().match(ID_A, ID_A, liveness_confirmed=True)
+    assert confirmed.decision is FaceDecision.MATCH
 
 
 # ---------- matching and threshold ----------
@@ -153,7 +158,7 @@ def test_fr403_zero_norm_or_nan_embedding_is_match_error_not_a_crash() -> None:
     for bad in ([0.0, 0.0], [float("nan"), 1.0]):
         r = matcher(embedder=_BadEmbedder(bad)).match(ID_A, ID_B)
         assert r.decision is FaceDecision.MANUAL_REVIEW and r.reason is ReviewReason.MATCH_ERROR
-        assert r.detail in {"ZERO_NORM", "NON_FINITE"}
+        assert r.detail in {"ID_ZERO_NORM", "ID_NON_FINITE"}
 
 
 def test_fr403_embedding_dimension_mismatch_is_match_error() -> None:
@@ -210,7 +215,7 @@ def test_fr403_decode_accepts_png_and_jpeg_and_rejects_other_formats(tmp_path: P
     gif = io.BytesIO()
     PILImage.new("RGB", (8, 8)).save(gif, format="GIF")
     r = matcher().match(gif.getvalue(), ID_B)
-    assert r.reason is ReviewReason.MATCH_ERROR and r.detail == "IMAGE_FORMAT"
+    assert r.reason is ReviewReason.MATCH_ERROR and r.detail == "ID_IMAGE_FORMAT_OR_CORRUPT"
     rgba = io.BytesIO()
     PILImage.new("RGBA", (8, 8), (1, 2, 3, 4)).save(rgba, format="PNG")
     assert decode_image(rgba.getvalue(), cfg).shape == (8, 8, 3)
@@ -271,7 +276,7 @@ def test_fr606_recheck_matches_same_person_reviews_other_and_miss_asks_for_recom
     assert m.recheck("s1", b"junk").reason is ReviewReason.MATCH_ERROR
     broken = FaceMatcher(FakeDetector(_explode), FakeEmbedder())
     broken.selfie_cache.put("s", Embedding(np.ones(3, dtype=np.float32)))
-    assert broken.recheck("s", ID_A).detail == "UNEXPECTED"
+    assert broken.recheck("s", ID_A).detail == "FRAME_UNEXPECTED"
 
 
 # ---------- privacy ----------
@@ -309,7 +314,7 @@ def test_adr0004_error_messages_and_logs_carry_no_vector_values(
         r = matcher(embedder=Leaky()).match(ID_A, ID_B, session_id="s1")
         m = matcher()
         m.match(ID_A, ID_B, session_id="s2")
-    assert secret not in repr(r) and r.detail == "UNEXPECTED"
+    assert secret not in repr(r) and r.detail == "ID_UNEXPECTED"
     assert secret not in caplog.text
     assert "s1" not in caplog.text  # session ids are not logged either
 
@@ -359,32 +364,36 @@ def test_fr403_config_default_is_a_placeholder_that_errs_toward_review() -> None
     assert FaceConfig.__doc__ is not None and "PLACEHOLDER" in FaceConfig.__doc__
 
 
-def test_fr403_config_validation_and_org_override() -> None:
-    assert (
-        IntegrityConfig.model_validate({"face": {"matchThreshold": 0.9}}).face.match_threshold
-        == 0.9
-    )
-    assert (
-        IntegrityConfig.model_validate({"face": {"match_threshold": 0.8}}).face.match_threshold
-        == 0.8
-    )
+def test_fr403_s2_face_config_is_not_reachable_from_org_settings() -> None:
+    assert "face" not in IntegrityConfig.model_fields
+    with pytest.raises(ValidationError):
+        IntegrityConfig.model_validate({"face": {"matchThreshold": 0.31}})  # unknown key: rejected
+
+
+def test_fr403_s2_face_config_loads_from_system_env_with_validation() -> None:
+    assert FaceConfig.from_env({}).match_threshold == 0.75
+    env = {"FACE_MATCH_THRESHOLD": "0.9", "FACE_SELFIE_CACHE_MAX_SESSIONS": "8"}
+    cfg = FaceConfig.from_env(env)
+    assert cfg.match_threshold == 0.9 and cfg.selfie_cache_max_sessions == 8
+    for bad in (
+        {"FACE_MATCH_THRESHOLD": "0.1"},
+        {"FACE_MATCH_THRESHOLD": "high"},
+        {"FACE_ID_SECONDARY_FACE_RATIO": "0"},
+    ):
+        with pytest.raises(ValidationError):
+            FaceConfig.from_env(bad)
+
+
+def test_fr403_face_config_validation_and_snake_or_camel_keys() -> None:
+    assert FaceConfig.model_validate({"matchThreshold": 0.9}).match_threshold == 0.9
+    assert FaceConfig.model_validate({"match_threshold": 0.8}).match_threshold == 0.8
     for bad in (
         {"matchThreshold": 0.1},
         {"matchThreshold": 1.5},
         {"maxImageBytes": 0},
         {"bogus": 1},
         {"minDetectionConfidence": 2},
+        {"idSecondaryFaceRatio": 1.5},
     ):
         with pytest.raises(ValidationError):
             FaceConfig.model_validate(bad)
-
-
-def test_fr403_image_just_over_the_pixel_limit_is_rejected_as_size() -> None:
-    import io
-
-    from PIL import Image as PILImage
-
-    buf = io.BytesIO()
-    PILImage.new("RGB", (12, 12)).save(buf, format="PNG")  # 144 px, limit 100 (under Pillow's 2x)
-    r = matcher(maxImagePixels=100).match(buf.getvalue(), ID_B)
-    assert r.reason is ReviewReason.MATCH_ERROR and r.detail == "IMAGE_SIZE"

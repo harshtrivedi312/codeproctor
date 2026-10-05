@@ -9,13 +9,8 @@ import numpy.typing as npt
 import pytest
 
 from worker.face import embedding as emb
-from worker.face.embedding import (
-    AURAFACE_SHA256,
-    MODEL_ID,
-    AuraFaceEmbedder,
-    ModelLoadError,
-    cosine,
-)
+from worker.face.embedding import AURAFACE_SHA256, MODEL_ID, AuraFaceEmbedder, cosine
+from worker.face.modelfile import ModelLoadError
 from worker.face.types import AlignedFace, Embedding, EmbeddingError
 
 
@@ -67,7 +62,7 @@ def test_fr403_hash_mismatch_is_refused(tmp_path: Path) -> None:
     p = tmp_path / "glintr100.onnx"
     p.write_bytes(b"not the pinned model")
     with pytest.raises(ModelLoadError) as e:
-        AuraFaceEmbedder(p, lambda _p: FakeSession())
+        AuraFaceEmbedder(p, lambda _b: FakeSession())
     assert e.value.code == "MODEL_HASH_MISMATCH"
 
 
@@ -81,7 +76,7 @@ def test_fr403_f1_any_other_file_name_is_refused_even_with_valid_hash(
     p.write_bytes(b"x")
     monkeypatch.setattr(emb, "AURAFACE_SHA256", hashlib.sha256(b"x").hexdigest())
     with pytest.raises(ModelLoadError) as e:
-        AuraFaceEmbedder(p, lambda _p: FakeSession())
+        AuraFaceEmbedder(p, lambda _b: FakeSession())
     assert e.value.code == "WRONG_MODEL_FILE_NAME"
 
 
@@ -89,7 +84,7 @@ def test_fr403_missing_file_and_unset_env_are_load_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with pytest.raises(ModelLoadError, match="MODEL_UNREADABLE"):
-        AuraFaceEmbedder(tmp_path / "glintr100.onnx", lambda _p: FakeSession())
+        AuraFaceEmbedder(tmp_path / "glintr100.onnx", lambda _b: FakeSession())
     monkeypatch.delenv("AURAFACE_MODEL_PATH", raising=False)
     with pytest.raises(ModelLoadError, match="MODEL_PATH_NOT_SET"):
         AuraFaceEmbedder.from_env()
@@ -99,23 +94,23 @@ def test_fr403_from_env_loads_a_verified_model(
     model_file: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AURAFACE_MODEL_PATH", str(model_file))
-    assert AuraFaceEmbedder.from_env(lambda _p: FakeSession()).model_id == MODEL_ID
+    assert AuraFaceEmbedder.from_env(lambda _b: FakeSession()).model_id == MODEL_ID
 
 
 def test_fr403_session_failure_and_wrong_input_shape_are_load_errors(model_file: Path) -> None:
-    def boom(_p: Path) -> FakeSession:
+    def boom(_b: bytes) -> FakeSession:
         raise RuntimeError("secret path /x/y")
 
     with pytest.raises(ModelLoadError) as e:
         AuraFaceEmbedder(model_file, boom)
     assert e.value.code == "MODEL_LOAD_FAILED" and "secret" not in str(e.value)
     with pytest.raises(ModelLoadError, match="UNEXPECTED_INPUT_SHAPE"):
-        AuraFaceEmbedder(model_file, lambda _p: FakeSession(shape=("N", 3, 64, 64)))
+        AuraFaceEmbedder(model_file, lambda _b: FakeSession(shape=("N", 3, 64, 64)))
 
 
 def test_fr403_embed_preprocesses_rgb_to_nchw_float32_in_range(model_file: Path) -> None:
     session = FakeSession()
-    e = AuraFaceEmbedder(model_file, lambda _p: session)
+    e = AuraFaceEmbedder(model_file, lambda _b: session)
     out = e.embed(aligned())
     blob = session.feeds[0]["input.1"]
     assert blob.shape == (1, 3, 112, 112) and blob.dtype == np.float32
@@ -124,18 +119,18 @@ def test_fr403_embed_preprocesses_rgb_to_nchw_float32_in_range(model_file: Path)
 
 
 def test_fr403_embed_rejects_bad_input_and_bad_model_output(model_file: Path) -> None:
-    e = AuraFaceEmbedder(model_file, lambda _p: FakeSession())
+    e = AuraFaceEmbedder(model_file, lambda _b: FakeSession())
     with pytest.raises(EmbeddingError, match="BAD_INPUT"):
         e.embed(AlignedFace(np.zeros((64, 64, 3), dtype=np.uint8)))
     with pytest.raises(EmbeddingError, match="BAD_INPUT"):
         e.embed(AlignedFace(np.zeros((112, 112, 3), dtype=np.float32)))
     wrong_shape = AuraFaceEmbedder(
-        model_file, lambda _p: FakeSession(out=np.ones((1, 128), np.float32))
+        model_file, lambda _b: FakeSession(out=np.ones((1, 128), np.float32))
     )
     with pytest.raises(EmbeddingError, match="BAD_OUTPUT"):
         wrong_shape.embed(aligned())
     wrong_dtype = AuraFaceEmbedder(
-        model_file, lambda _p: FakeSession(out=np.ones((1, 512), np.float64))
+        model_file, lambda _b: FakeSession(out=np.ones((1, 512), np.float64))
     )
     with pytest.raises(EmbeddingError, match="BAD_OUTPUT"):
         wrong_dtype.embed(aligned())
@@ -145,9 +140,9 @@ def test_fr403_model_nan_and_zero_outputs_are_embedding_errors(model_file: Path)
     nan = np.full((1, 512), np.nan, dtype=np.float32)
     zero = np.zeros((1, 512), dtype=np.float32)
     with pytest.raises(EmbeddingError, match="NON_FINITE"):
-        AuraFaceEmbedder(model_file, lambda _p: FakeSession(out=nan)).embed(aligned())
+        AuraFaceEmbedder(model_file, lambda _b: FakeSession(out=nan)).embed(aligned())
     with pytest.raises(EmbeddingError, match="ZERO_NORM"):
-        AuraFaceEmbedder(model_file, lambda _p: FakeSession(out=zero)).embed(aligned())
+        AuraFaceEmbedder(model_file, lambda _b: FakeSession(out=zero)).embed(aligned())
 
 
 def test_fr403_real_model_runs_when_provided(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -204,3 +199,47 @@ def test_fr403_embedding_is_immutable_and_independent_of_the_source_array() -> N
     assert e.vector[0] == 1
     with pytest.raises(ValueError):
         e.vector[0] = 5
+
+
+def test_fr403_s1_session_factory_is_never_called_on_hash_mismatch_or_wrong_name(
+    tmp_path: Path,
+) -> None:
+    calls: list[bytes] = []
+
+    def factory(model: bytes) -> FakeSession:
+        calls.append(model)
+        return FakeSession()
+
+    bad = tmp_path / "glintr100.onnx"
+    bad.write_bytes(b"tampered")
+    with pytest.raises(ModelLoadError, match="MODEL_HASH_MISMATCH"):
+        AuraFaceEmbedder(bad, factory)
+    other = tmp_path / "scrfd_10g_bnkps.onnx"
+    other.write_bytes(b"x")
+    with pytest.raises(ModelLoadError, match="WRONG_MODEL_FILE_NAME"):
+        AuraFaceEmbedder(other, factory)
+    assert calls == []
+
+
+def test_fr403_s1_the_verified_bytes_are_the_bytes_that_run_file_is_read_once(
+    model_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = model_file.read_bytes()
+    reads = {"n": 0}
+    real = Path.read_bytes
+
+    def counting(self: Path) -> bytes:
+        reads["n"] += 1
+        data = real(self)
+        self.write_bytes(b"swapped after the read")  # an attacker replaces the file mid-load
+        return data
+
+    monkeypatch.setattr(Path, "read_bytes", counting)
+    seen: list[bytes] = []
+
+    def factory(model: bytes) -> FakeSession:
+        seen.append(model)
+        return FakeSession()
+
+    AuraFaceEmbedder(model_file, factory)
+    assert reads["n"] == 1 and seen == [original]
