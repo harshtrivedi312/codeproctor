@@ -1,6 +1,7 @@
 // Finds files that use something they should not, by what they import. Used by
-// import-guard.spec.ts to keep the unscoped Prisma client, the client factory and BE-01's raw
-// pg Pool token out of new code: each of them bypasses the org scope.
+// import-guard.spec.ts to keep the unscoped Prisma client, the client factory, BE-01's raw pg Pool
+// token, and the `pg` and `@prisma/adapter-pg` packages out of new code: each of them bypasses the
+// org scope.
 import { dirname, relative, resolve, sep } from 'node:path';
 
 export interface SourceFile {
@@ -15,6 +16,8 @@ export interface GuardRule {
   readonly why: string;
   /** The module that must not be imported, as a path under src without extension. */
   readonly module?: string;
+  /** A package that must not be imported: `pg` also matches `pg/lib/...`, not `pg-pool`. */
+  readonly package?: string;
   /** An identifier that must not appear. */
   readonly identifier?: string;
   /** The only files that may use it. Explicit paths, never folders. */
@@ -43,17 +46,51 @@ export function resolveSpecifier(fromPath: string, specifier: string): string | 
     .replace(/\.(js|ts)$/, '');
 }
 
-/** The files that break a rule: they use the module or identifier and are not on its allowlist. */
+/** True when `specifier` is the guarded package, or a path inside it. */
+function isPackage(specifier: string, name: string): boolean {
+  return specifier === name || specifier.startsWith(`${name}/`);
+}
+
+function matchesSpecifier(file: SourceFile, specifier: string, rule: GuardRule): boolean {
+  if (rule.module !== undefined && resolveSpecifier(file.path, specifier) === rule.module)
+    return true;
+  return rule.package !== undefined && isPackage(specifier, rule.package);
+}
+
+// export * from '…', export * as x from '…', export { a } from '…', export type { a } from '…'.
+const REEXPORT =
+  /\bexport\s+(?:type\s+)?(\*(?:\s+as\s+\w+)?|\{[^}]*\})\s*from\s*(['"])([^'"\n]+)\2/g;
+
+/** Every re-export in `source`: what it exports (the clause) and the module it comes from. */
+export function reexportsOf(source: string): Array<{ clause: string; specifier: string }> {
+  return [...source.matchAll(REEXPORT)].map((match) => ({
+    clause: match[1] as string,
+    specifier: match[3] as string,
+  }));
+}
+
+/**
+ * The files that break a rule. A file breaks it by importing the module or package, or by using the
+ * identifier, unless it is on the allowlist. A file that RE-EXPORTS a guarded module, package or
+ * identifier breaks it even when it is on the allowlist: a re-export hands the guarded thing to every
+ * importer of that file, who are not on the list.
+ */
 export function findViolations(files: readonly SourceFile[], rule: GuardRule): string[] {
   return files
-    .filter((file) => !rule.allowed.includes(file.path))
     .filter((file) => {
-      const importsModule =
-        rule.module !== undefined &&
-        specifiersOf(file.text).some((spec) => resolveSpecifier(file.path, spec) === rule.module);
+      const reexports = reexportsOf(file.text).some(
+        ({ clause, specifier }) =>
+          matchesSpecifier(file, specifier, rule) ||
+          (rule.identifier !== undefined && new RegExp(`\\b${rule.identifier}\\b`).test(clause)),
+      );
+      if (reexports) return true;
+      if (rule.allowed.includes(file.path)) return false;
+      const importsGuarded = specifiersOf(file.text).some((spec) =>
+        matchesSpecifier(file, spec, rule),
+      );
       const usesIdentifier =
         rule.identifier !== undefined && new RegExp(`\\b${rule.identifier}\\b`).test(file.text);
-      return importsModule || usesIdentifier;
+      return importsGuarded || usesIdentifier;
     })
     .map((file) => file.path)
     .sort();

@@ -6,7 +6,8 @@
 //   Model operation   The model's rule in ORG_SCOPE decides. With no org context the call throws
 //                     OrgContextMissingError. In an org scope, applyOrgScope adds the filter (or
 //                     stamps and checks the payload). In system scope the call runs unfiltered,
-//                     but a nested relation write and an `orgId` in an update are still refused.
+//                     but a nested relation write, an `orgId` in an update and a change of a
+//                     path model's first-hop scope key (`testId` of TestSection) are still refused.
 //                     An unscoped model runs as it is. A model with no rule, or an operation that
 //                     is not in SCOPED_OPERATIONS, is refused: the extension fails closed.
 //   Raw query         $queryRaw, $queryRawUnsafe, $executeRaw, $executeRawUnsafe (and any other
@@ -33,8 +34,9 @@
 //     composite keys (invitations.test_id, invitations.candidate_id, sessions.invitation_id) are
 //     checked by Postgres, and every other id follows ADR 0006 section 2 rule (i): load each
 //     through the scoped client first, answer 404 on a miss.
-// (b) An update that changes a path model's first-hop foreign key (re-parenting, for example
-//     `testSection.update({ data: { testId } })`) is the same as a path create: rule (i).
+// (b) In an org scope, an update that changes a path model's first-hop foreign key (re-parenting,
+//     for example `testSection.update({ data: { testId } })`) is the same as a path create: rule
+//     (i). System scope refuses it (FU-DB-107), as it refuses `orgId` in an update.
 // (c) Nested reads are not filtered. `include`, `select`, the fluent API, relation filters,
 //     `orderBy` on a relation and `_count` follow foreign keys blindly, so any foreign key that
 //     crosses orgs leaks: `sessionReview.findUnique({ include: { reviewer: true } })` returns the
@@ -52,6 +54,7 @@ import type { PrismaClient } from '../generated/prisma/client.js';
 import { OrgContextMissingError, OrgScopeViolationError, RawQueryNotAllowedError } from './errors';
 import type { ScopeSource } from './org-context';
 import { applyOrgScope, assertSystemScopeWrite } from './org-scope-args';
+import { scrubPrismaError } from './error-scrub';
 import { ORG_SCOPE } from './org-scope-map';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
 
@@ -60,6 +63,15 @@ interface HookArgs {
   readonly operation: string;
   readonly args: unknown;
   readonly query: (args: unknown) => Promise<unknown>;
+}
+
+/** Runs the query, and keeps argument values out of any Prisma error it throws (FU-DB-70). */
+async function execute(query: HookArgs['query'], args: unknown): Promise<unknown> {
+  try {
+    return await query(args);
+  } catch (error) {
+    throw scrubPrismaError(error);
+  }
 }
 
 function ruleFor(model: string): OrgScopeRule | undefined {
@@ -76,7 +88,7 @@ export function orgScopeExtension(source: ScopeSource) {
         // Raw queries and any other operation that is not tied to a model.
         if (model === undefined) {
           if (store?.rawSqlReason === undefined) throw new RawQueryNotAllowedError(operation);
-          return query(args);
+          return execute(query, args);
         }
 
         const rule = ruleFor(model);
@@ -85,18 +97,20 @@ export function orgScopeExtension(source: ScopeSource) {
             `${model} has no entry in ORG_SCOPE (apps/api/src/database/org-scope-map.ts).`,
           );
         }
-        if (rule.kind === 'unscoped') return query(args);
+        if (rule.kind === 'unscoped') return execute(query, args);
 
         const scope = store?.scope;
         if (scope === undefined) throw new OrgContextMissingError(`${model}.${operation}`);
         if (scope.kind === 'system') {
-          // System scope is unfiltered, but a nested relation write and an orgId in an update are
-          // refused here too (a row is never moved to another org).
+          // System scope is unfiltered, but a nested relation write, an orgId in an update and a
+          // change of a path model's first-hop scope key are refused here too (a row is never
+          // moved to another org).
           assertSystemScopeWrite(model as ModelName, rule, operation, args);
-          return query(args);
+          return execute(query, args);
         }
 
-        return query(
+        return execute(
+          query,
           applyOrgScope({ model: model as ModelName, rule, operation, args, orgId: scope.orgId }),
         );
       },
