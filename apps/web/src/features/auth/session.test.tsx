@@ -286,6 +286,54 @@ describe('session handling', () => {
   });
 });
 
+describe('requests from an earlier session', () => {
+  it('FR-104 FR-103: a 401 for user X that arrives after Y signed in is not replayed with Y token', async () => {
+    let auth: ReturnType<typeof useAuth> | null = null;
+    function Capture() {
+      auth = useAuth();
+      return null;
+    }
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <SignOutButton />
+        <Capture />
+        <Who />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
+
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const seen: (string | null)[] = [];
+    server.use(
+      http.get('*/v1/time', async ({ request }) => {
+        seen.push(request.headers.get('authorization'));
+        await gate;
+        return new HttpResponse(null, { status: 401 });
+      }),
+    );
+    const inFlight = api.GET('/v1/time'); // sent as X (recruiter)
+    await waitFor(() => expect(seen).toHaveLength(1));
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Sign out' }));
+    await waitFor(() => expect(getAccessToken()).toBeNull());
+    const login = await api.POST('/v1/auth/login', {
+      body: { email: MOCK_USERS.author.email, password: MOCK_USERS.author.password },
+    });
+    if (login.data?.status !== 'authenticated' || !login.data.session) throw new Error('login');
+    auth!.signIn(login.data.session);
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('AUTHOR'));
+
+    release();
+    const { response } = await inFlight;
+    expect(response.status).toBe(401);
+    expect(seen).toHaveLength(1); // no replay
+    expect(screen.getByTestId('who')).toHaveTextContent('AUTHOR');
+  });
+});
+
 describe('sign-out that the server did not confirm', () => {
   it('FR-104: after a failed logout, a reload does not restore the session and retries the logout', async () => {
     const first = renderWithAuth(
