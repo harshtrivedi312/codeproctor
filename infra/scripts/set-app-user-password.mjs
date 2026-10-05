@@ -87,6 +87,7 @@ try {
   fail('the pg package is not installed. Run pnpm install.');
 }
 
+const SAFE_ERROR_CODE = /^[A-Z0-9_]{1,40}$/;
 const ROLE_MISSING =
   'the app_user role does not exist yet. Run the migrations first (pnpm db:migrate).';
 
@@ -96,7 +97,10 @@ function describeFailure(error) {
   if (error instanceof URIError) {
     return 'MIGRATION_DATABASE_URL could not be parsed. Check it for a malformed %-sequence.';
   }
-  const code = typeof error?.code === 'string' ? error.code : '';
+  // The code comes from the driver or, for a server error, from the server. Print it only when it
+  // looks like a code, so nothing else can ride along in it (FU-DB-33).
+  const rawCode = typeof error?.code === 'string' ? error.code : '';
+  const code = SAFE_ERROR_CODE.test(rawCode) ? rawCode : '';
   switch (code) {
     case 'ENOENT':
       return 'a file named in MIGRATION_DATABASE_URL (for example sslrootcert) was not found.';
@@ -125,6 +129,10 @@ let failure;
 let skipped = false;
 try {
   client = new Client({ connectionString: databaseUrl, connectionTimeoutMillis: 10_000 });
+  // An error on a connection with no query running would otherwise be thrown from an event emitter,
+  // with a stack trace instead of our message. Ignore it: each query's own promise reports its
+  // failures (FU-DB-33).
+  client.on('error', () => undefined);
   // Whatever the guard saw, the host pg resolved must be this machine. No host is printed.
   if (!LOOPBACK_HOSTS.has(String(client.host).toLowerCase())) {
     failure =

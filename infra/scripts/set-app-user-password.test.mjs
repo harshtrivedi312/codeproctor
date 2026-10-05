@@ -42,9 +42,10 @@ const LOOKUP_QUERY = "SELECT 1 FROM pg_roles WHERE rolname = 'app_user'";
 /**
  * Starts a stand-in Postgres server on 127.0.0.1. It counts connections and records each simple
  * query. A SELECT (the pg_roles lookup) finds one row, or none when `roleExists` is false. `failWith`
- * makes the ALTER ROLE fail with that SQLSTATE and a message that echoes `leak`.
+ * makes the ALTER ROLE fail with that SQLSTATE and a message that echoes `leak`. `idleError` follows
+ * a successful ALTER ROLE with a fatal error while no query is running.
  */
-async function startFakePostgres({ failWith, leak, roleExists = true } = {}) {
+async function startFakePostgres({ failWith, leak, roleExists = true, idleError = false } = {}) {
   const state = { connections: 0, queries: [] };
   const server = net.createServer((socket) => {
     state.connections += 1;
@@ -89,7 +90,23 @@ async function startFakePostgres({ failWith, leak, roleExists = true } = {}) {
                     Buffer.from([0]),
                   ]),
                 );
-          socket.write(Buffer.concat([reply, READY]));
+          // A fatal error that arrives after the query finished: the client is idle by then.
+          const tail =
+            idleError && !isLookup && failWith === undefined
+              ? message(
+                  'E',
+                  Buffer.concat([
+                    Buffer.from('S'),
+                    cstring('FATAL'),
+                    Buffer.from('C'),
+                    cstring('57P01'),
+                    Buffer.from('M'),
+                    cstring('terminating connection due to administrator command'),
+                    Buffer.from([0]),
+                  ]),
+                )
+              : Buffer.alloc(0);
+          socket.write(Buffer.concat([reply, READY, tail]));
         } else if (type === 'X') {
           socket.end();
         }
@@ -342,6 +359,51 @@ test('ADR-0006 7.4: when the database refuses, the message is ours and never ech
     assert.match(result.stderr, /the app_user role does not exist yet\. Run the migrations first/);
     assert.doesNotMatch(result.stdout, /app_user password set/);
     assertNoSecrets(result);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('FU-DB-33: an error code is printed only if it looks like a code', async () => {
+  const cases = [
+    // [what the server sends as the SQLSTATE, what the script may print]
+    ['99999', /failed \(99999\)\./],
+    ['XX000', /failed \(XX000\)\./],
+    ['not a code: owner-secret-pw', /failed \(no error code\)\./],
+    ['lowercase', /failed \(no error code\)\./],
+    ['A'.repeat(41), /failed \(no error code\)\./],
+  ];
+  for (const [code, expected] of cases) {
+    const fake = await startFakePostgres({ failWith: code });
+    try {
+      const result = await runScript({
+        MIGRATION_DATABASE_URL: fake.url,
+        DATABASE_URL: fake.url,
+        APP_USER_PASSWORD: PASSWORD,
+      });
+      assert.equal(result.status, 1, `${code}: ${result.output}`);
+      assert.match(result.stderr, expected, code);
+      assert.doesNotMatch(result.output, /not a code|lowercase|AAAAAAAA/);
+      assertNoSecrets(result);
+    } finally {
+      await fake.close();
+    }
+  }
+});
+
+test("FU-DB-33: an error on an idle connection ends in the script's own output, not a stack trace", async () => {
+  // The server reports success and then a fatal error while the client is idle. Without a listener
+  // for the client's error event, Node would throw it from the event emitter.
+  const fake = await startFakePostgres({ idleError: true });
+  try {
+    const result = await runScript({
+      MIGRATION_DATABASE_URL: fake.url,
+      DATABASE_URL: fake.url,
+      APP_USER_PASSWORD: PASSWORD,
+    });
+    assert.equal(result.status, 0, result.output);
+    assert.equal(result.stdout, 'app_user password set\n');
+    assert.equal(result.stderr, '');
   } finally {
     await fake.close();
   }
