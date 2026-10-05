@@ -45,6 +45,16 @@ describe('output normalization (FR-503)', () => {
     expect(outputsMatch('1\n\n2', '1\n2')).toBe(false);
   });
 
+  it('FR-503: long whitespace runs normalize in linear time (no ReDoS)', () => {
+    const start = Date.now();
+    expect(normalizeOutput(' '.repeat(65536) + 'x')).toBe(' '.repeat(65536) + 'x');
+    expect(normalizeOutput('x' + ' '.repeat(65536) + '\n' + ' \n'.repeat(30000))).toBe('x');
+    expect(normalizeOutput(' \t'.repeat(32768) + 'x ' + '\n'.repeat(10000))).toBe(
+      ' \t'.repeat(32768) + 'x',
+    );
+    expect(Date.now() - start).toBeLessThan(50);
+  });
+
   it('FR-503: truncate reports truncation', () => {
     expect(truncate('abcdef', 3)).toEqual({ text: 'abc', truncated: true });
     expect(truncate('ab', 3)).toEqual({ text: 'ab', truncated: false });

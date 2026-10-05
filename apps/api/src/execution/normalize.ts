@@ -3,13 +3,16 @@
  * on every line, and trailing blank lines (trailing whitespace overall) are dropped. Leading
  * whitespace and inner blank lines are significant.
  */
+// Linear backwards scans: candidate output is attacker-controlled, so no backtracking regexes.
+function trimEndChars(text: string, chars: string): string {
+  let end = text.length;
+  while (end > 0 && chars.includes(text.charAt(end - 1))) end -= 1;
+  return end === text.length ? text : text.slice(0, end);
+}
+
 export function normalizeOutput(text: string): string {
-  return text
-    .replace(/\r\n?/g, '\n')
-    .split('\n')
-    .map((line) => line.replace(/[ \t\f\v]+$/, ''))
-    .join('\n')
-    .replace(/\s+$/, '');
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  return trimEndChars(lines.map((line) => trimEndChars(line, ' \t\f\v')).join('\n'), ' \t\f\v\n');
 }
 
 export function outputsMatch(actual: string, expected: string): boolean {
