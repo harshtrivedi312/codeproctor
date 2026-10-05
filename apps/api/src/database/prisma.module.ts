@@ -1,4 +1,4 @@
-// The one injectable Prisma client for business modules. Connects as app_user via DATABASE_URL.
+// BE-02's interim unscoped client for auth only; deleted by FU-DB-58.
 import { Global, Injectable, Module, OnApplicationShutdown } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Env } from '../config/env';
