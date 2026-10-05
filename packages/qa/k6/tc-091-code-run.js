@@ -7,7 +7,14 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Counter } from 'k6/metrics';
-import { API_BASE, SESSIONS, assertSafeTarget, requireSessions, intEnv } from './lib/config.js';
+import {
+  API_BASE,
+  SESSIONS,
+  assertSafeTarget,
+  requireSessions,
+  intEnv,
+  SYSTEM_TAGS,
+} from './lib/config.js';
 
 const VUS = intEnv('VUS', 50);
 const ROUNDS = intEnv('ROUNDS', 6);
@@ -15,6 +22,7 @@ const CODE = __ENV.RUN_CODE || 'import sys\nprint(sum(int(x) for x in sys.stdin.
 const failures = new Counter('cp_failures');
 
 export const options = {
+  systemTags: SYSTEM_TAGS,
   scenarios: {
     runs: { executor: 'per-vu-iterations', vus: VUS, iterations: ROUNDS, maxDuration: '10m' },
   },
@@ -42,7 +50,19 @@ export default function () {
       tags: { endpoint: 'run', name: 'run' },
     },
   );
-  if (!check(res, { 'run completed with 200': (r) => r.status === 200 })) {
+  // 200 alone is not enough: the body must be a JSON object holding a results array (shape per the
+  // mock and ADR 0013; confirm against BE-09 when it merges).
+  const ok = check(res, {
+    'run completed with 200': (r) => r.status === 200,
+    'run result has a results array': (r) => {
+      try {
+        return Array.isArray(r.json('results'));
+      } catch {
+        return false;
+      }
+    },
+  });
+  if (!ok) {
     failures.add(1, { status: String(res.status) });
   }
   sleep(5.5);

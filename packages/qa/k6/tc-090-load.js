@@ -12,7 +12,7 @@
 // variables; nothing secret is in this file.
 //   k6 run -e API_BASE_URL=https://<staging-host>/api/v1 -e SESSIONS_FILE=/path/sessions.json \
 //     packages/qa/k6/tc-090-load.js
-import { assertSafeTarget, requireSessions, intEnv } from './lib/config.js';
+import { assertSafeTarget, requireSessions, intEnv, SYSTEM_TAGS } from './lib/config.js';
 import { candidateTick } from './lib/candidate.js';
 
 const VUS = intEnv('VUS', 200);
@@ -20,7 +20,26 @@ const RAMP = __ENV.RAMP_UP || '2m';
 const HOLD = __ENV.HOLD || '10m';
 const DOWN = __ENV.RAMP_DOWN || '1m';
 
+// Seconds in a k6 duration such as 90s, 2m or 1h (one unit only; enough for these variables).
+function seconds(text) {
+  const m = /^(\d+)(s|m|h)$/.exec(text);
+  if (!m) {
+    throw new Error(`Duration "${text}" must look like 30s, 2m or 1h.`);
+  }
+  return Number(m[1]) * { s: 1, m: 60, h: 3600 }[m[2]];
+}
+
+// Proof of offered load: if the generator or the API falls behind, the achieved request rate drops
+// below what the cadence requires and the run must fail rather than pass on a lighter load. The
+// expected average rate over the whole run weights the ramps at half (VUs rise and fall linearly).
+const R = seconds(RAMP);
+const H = seconds(HOLD);
+const D = seconds(DOWN);
+const EXPECTED_RATE = (1.4 * VUS * (R / 2 + H + D / 2)) / (R + H + D);
+
 export const options = {
+  // Keep 'url' out of every metric sample: storage PUT URLs are presigned (see lib/candidate.js).
+  systemTags: SYSTEM_TAGS,
   scenarios: {
     candidates: {
       executor: 'ramping-vus',
@@ -47,6 +66,13 @@ export const options = {
     // above this cadence). Storage PUTs are judged separately below.
     'http_req_failed{kind:api}': ['rate==0'],
     'http_req_failed{kind:storage}': ['rate<0.001'],
+    // Storage PUTs: 2xx and 412 are expected; other failures are judged here, not in cp_failures.
+    cp_storage_failures: ['count<=' + Math.ceil(0.001 * VUS * 0.3 * (R / 2 + H + D / 2))],
+    // A replayed seq (duplicate:true) is a finding even though the script moves on.
+    cp_duplicate_batches: ['count==0'],
+    // Offered load: slots that ran more than half an interval late are counted and skipped ahead.
+    cp_late_slots: ['rate<0.01'],
+    'http_reqs{kind:api}': ['rate>=' + (0.9 * EXPECTED_RATE).toFixed(1)],
     cp_failures: ['count==0'],
     cp_setup_failures: ['count==0'],
     checks: ['rate==1'],
@@ -55,7 +81,7 @@ export const options = {
 };
 
 export function setup() {
-  assertSafeTarget();
+  assertSafeTarget(); // also runs at init (lib/config.js)
   requireSessions(VUS);
 }
 

@@ -11,18 +11,23 @@
 // That is about 1.4 requests per second per candidate (280 per second at 200 candidates).
 //
 // Nothing here logs a token, a key, a signature, a presigned URL or a request body. Failures are
-// counted by endpoint and status code only.
+// counted by endpoint and status code only. Presigned URLs are kept out of k6 metrics by the
+// systemTags list in each script (SYSTEM_TAGS in config.js has no 'url'); k6's own stderr warnings can
+// still print a URL, see the README section on logs.
 import http from 'k6/http';
 import crypto from 'k6/crypto';
 import encoding from 'k6/encoding';
 import { check, sleep } from 'k6';
-import { Counter, Trend } from 'k6/metrics';
+import { Counter, Rate, Trend } from 'k6/metrics';
 import { API_BASE, SESSIONS, intEnv } from './config.js';
 import { canonicalJson } from './canonical.js';
 
 export const apiDuration = new Trend('api_duration', true); // every API call except runs and storage PUTs
 export const failures = new Counter('cp_failures'); // tagged by endpoint and status
 export const setupFailures = new Counter('cp_setup_failures');
+export const duplicates = new Counter('cp_duplicate_batches'); // 200 with duplicate:true (a replayed seq)
+export const storageFailures = new Counter('cp_storage_failures'); // PUTs that were not 2xx or 412
+export const lateSlots = new Rate('cp_late_slots'); // share of scheduled slots that ran late and were skipped ahead
 
 const STREAMS = ['SCREEN', 'WEBCAM', 'AUDIO'];
 const CHUNK_MS = 10_000;
@@ -133,13 +138,13 @@ function eventBatch() {
     ],
   });
   const res = api('/candidate/session/events', body, 'events', { 'X-Signature': sign(body) });
-  const ok = check(
-    res,
-    { 'events 200 and stored': (r) => r.status === 200 && r.json('duplicate') === false },
-    { endpoint: 'events' },
-  );
-  if (ok) {
+  // Any 200 means the server has this seq (stored now, or already stored): move on, or one
+  // duplicate would make every later batch a duplicate too. Duplicates are counted on their own.
+  if (check(res, { 'events 200': (r) => r.status === 200 }, { endpoint: 'events' })) {
     state.eventSeq += 1;
+    if (res.json('duplicate') === true) {
+      duplicates.add(1, { endpoint: 'events' });
+    }
   }
 }
 
@@ -166,13 +171,11 @@ function keystrokeBatch() {
   const res = api('/candidate/session/keystrokes', body, 'keystrokes', {
     'X-Signature': sign(body),
   });
-  const ok = check(
-    res,
-    { 'keystrokes 200 and stored': (r) => r.status === 200 && r.json('duplicate') === false },
-    { endpoint: 'keystrokes' },
-  );
-  if (ok) {
+  if (check(res, { 'keystrokes 200': (r) => r.status === 200 }, { endpoint: 'keystrokes' })) {
     state.keystrokeSeq += 1;
+    if (res.json('duplicate') === true) {
+      duplicates.add(1, { endpoint: 'keystrokes' });
+    }
   }
 }
 
@@ -197,20 +200,19 @@ function mediaChunk(stream) {
   const grant = presign.json();
   if (!grant.alreadyUploaded) {
     // Straight to object storage (R2 on staging). Not an API call: tagged kind:storage and left out
-    // of the 300 ms threshold (NFR-01 covers the API). The URL is never logged or stored in a metric.
+    // of the 300 ms threshold (NFR-01 covers the API). The URL is never logged, and it is not a
+    // metric tag (SYSTEM_TAGS in config.js has no 'url'). 412 means "already stored" (If-None-Match, ADR 0013
+    // 5.5), so it is an expected status; only other non-2xx answers count as failed requests.
     const put = http.put(grant.url, isAudio ? payloads.audio : payloads.video, {
       headers: grant.headers || { 'Content-Type': contentType },
       tags: { kind: 'storage', endpoint: 'media_put', name: 'media_put' },
+      responseCallback: http.expectedStatuses({ min: 200, max: 299 }, 412),
     });
-    // 412 means "already stored" (If-None-Match, ADR 0013 5.5): go on to confirm.
-    if (
-      !check(
-        put,
-        { 'chunk PUT 2xx or 412': (r) => (r.status >= 200 && r.status < 300) || r.status === 412 },
-        { endpoint: 'media_put' },
-      )
-    ) {
-      failures.add(1, { endpoint: 'media_put', status: String(put.status) });
+    // Storage failures are judged on their own (http_req_failed{kind:storage}, cp_storage_failures),
+    // not by cp_failures or checks, which are strict and about the API only. Without a stored
+    // chunk there is nothing to confirm.
+    if (!((put.status >= 200 && put.status < 300) || put.status === 412)) {
+      storageFailures.add(1, { status: String(put.status) });
       return;
     }
   }
@@ -264,7 +266,10 @@ export function candidateTick() {
       item.fn();
       // Fixed-rate schedule: advance from the previous due time, so a slow response does not
       // lower the offered load. If we fell far behind, skip ahead (do not burst).
-      state.due[item.name] = Math.max(state.due[item.name] + item.every, now + item.every / 2);
+      const nextDue = state.due[item.name] + item.every;
+      const late = nextDue < now + item.every / 2;
+      lateSlots.add(late);
+      state.due[item.name] = late ? now + item.every / 2 : nextDue;
     }
   }
   const next = Math.min(...SCHEDULE.map((s) => state.due[s.name]));
