@@ -91,7 +91,7 @@ Should-fix
 
 Nits
 
-- `config.ts`: stale doc comment on `snapshotMaxWidth`.
+- (DONE) `config.ts`: stale doc comment on `snapshotMaxWidth`.
 - `vision-monitor.ts`: unreachable `SPEECH_DETECTED` case in `emitRuleEvent`; remove.
 - `rules.ts`: object confidence falls back to the threshold on a window miss; carry the max score seen instead.
 - `evidence.ts`: snapshots follow default severities, so org overrides are ignored; make the type list configurable.
@@ -249,3 +249,7 @@ Nits
 - `pipeline.recordScreen` can call `begin('SCREEN')` after `pipeline.stop()` if stop lands during `applyConstraints` or `nextSegment` (`mount.ts` screen-share handler): check `stopped` after `recordScreen` and call `pipeline.stopStream('SCREEN')`.
 - `api/state/route.ts` GET still creates sessions via `sessionState(id)`; use `existingSession` and return an empty summary.
 - `withSession` returns 413 before 401; check auth first.
+
+## Identity re-check constants (owner decision C-08; PR fe/sdk-identity-constants)
+Done: `IDENTITY_FRAME_WIDTH_PX = 640` and `IDENTITY_RECHECK_INTERVAL_MS = 120_000` are named constants and the defaults (`snapshotMaxWidth`, `identityIntervalMs`); tests assert width, size scaling and one re-check per 120 s. Gaps: the capture only scales down, so a webcam narrower than 640 px gives a narrower frame (the recorder asks for 640x360, so this is the normal width); a real-browser capture was not measured here; the ADR 0013 limit is 1 re-check per 60 s and the `/dev/proctor` demo uses 61 s so it shows one soon. The FACE/identity coupling (C-25) is unchanged and waits for ADRs 0013 and 0015.
+- There is no TC for the identity re-check (QA to add one for the 640 px / 120 s behaviour). `snapshotMaxWidth` also sizes HIGH-event evidence snapshots; if the config ever becomes per-org, add a separate `identityFrameWidthPx`.
