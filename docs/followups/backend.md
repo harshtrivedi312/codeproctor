@@ -85,3 +85,24 @@ ADR 0011 (owner decision C-21) answers 5 and 6 are now done on `POST /auth/2fa/d
 - Success is still 204 but now signs the user out everywhere: every refresh-token family of the user (including the caller's) is revoked in the same transaction that clears the TOTP secret, flag and recovery hashes, and the response clears the refresh cookie. The frontend must redirect to sign-in after a successful disable. The audit row `AUTH_2FA_DISABLED` carries `{ sessionsRevoked }`.
 - Access tokens already issued live until they expire (15 minutes); the BE-03 tokens-valid-after marker will close that gap. `POST /auth/2fa/reset/:userId` already revoked all of the target's families (answer 5) and keeps its test.
 - QA-owned `apps/api/test/integration/tc-003.int.test.ts` calls `/2fa/disable` with `{ currentPassword }` only (lines around 283 to 312, 364, 411) and must be updated by QA to send `totpCode`.
+
+## Backend B (candidate) (D-51)
+
+IDs use the prefix FU-BEB-NN. Only blockers stop a merge (CLAUDE.md rule 2); security weaknesses are always blockers (rule 3).
+
+| ID | Source | Severity | Item | Owner | Target | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| FU-BEB-01 | BE-05 | should-fix | `ValidationReportSink` (execution/reference-validation.types.ts, token `VALIDATION_REPORT_SINK`) has no implementation. BE-04 must implement it (write `validation_report`, `validated_at`), render Mustache references per variant, call `validateAndRecord`, and gate publish (FR-203, TC-012). | Backend A (BE-04) | BE-04 | open |
+| FU-BEB-02 | BE-05 | should-fix | apps/api cannot import packages/shared; language map uses its own keys and a test reads CODE_LANGUAGES as text. Hub: add shared as workspace dependency of apps/api (PR #62 may cover it), then type the map as Record<CodeLanguage, number>. | architecture hub | after #62 | open |
+| FU-BEB-03 | BE-05 | should-fix | PA-05/R-11: seed validation (6 questions x 3 languages) via `validateSeeded` is not run; needs real Judge0 on the ARC-05 host. Confirm seeded Java uses `public class Main`. | backend-cand | ARC-05 | open |
+| FU-BEB-04 | BE-05 | should-fix | MEMORY_LIMIT is inferred (crash status, peak memory >= 95% of limit) since Judge0 has no such status; language ids 100/102/91 and cgroup v1 on 1.13.1 need confirming on the real host (R-01). | backend-cand | ARC-05 | open |
+| FU-BEB-05 | BE-05 | nit | infra/judge0/docker-compose.judge0.yml is a standalone fragment, not merged into infra/docker-compose.yml; DEP-01/hub decides. Real-Judge0 TC-042..044 skipped unless JUDGE0_URL and JUDGE0_INTEGRATION=true; not in CI until ARC-05. | hub, DEP-01 | DEP-01 | open |
+| FU-BEB-06 | BE-05 | nit | Run/Submit endpoints (FR-502, 1 run per 5 s) are BE-11 and call `ExecutionService.run` with reveal for samples only, without captureActualOutput. | backend-cand | BE-11 | open |
+| FU-BEB-07 | BE-05 review | should-fix | Review item 8: reviewer's item 8 from PR #75 (batch and status handling nit) is recorded here for the next BE-05 touch; confirm exact wording in the PR thread. | backend-cand | BE-11 | open |
+| FU-BEB-08 | BE-05 review | should-fix | Judge0 submission delete is best effort (review item 2): schedule a purge of old rows in Judge0's Postgres on the host, and alert on repeated delete-failure warnings. | backend-cand, DEP-01 | DEP-01 | open |
+| FU-BEB-09 | BE-05 review | should-fix | Review item 11 from PR #75: see the PR thread; not changed in this round. | backend-cand | BE-11 | open |
+| FU-BEB-10 | BE-05 review | nit | Review item 13 from PR #75: see the PR thread; not changed in this round. | backend-cand | BE-11 | open |
+| FU-BEB-11 | BE-05 review | nit | Review item 15 from PR #75: see the PR thread; not changed in this round. | backend-cand | BE-11 | open |
+| FU-BEB-12 | BE-05 review | nit | Review item 17 from PR #75: see the PR thread; not changed in this round. | backend-cand | BE-11 | open |
+| FU-BEB-13 | BE-05 review | should-fix | TC-042 needs a scripted no-egress check on the real host (curl from a worker container must fail, plus the in-submission socket test) before the Judge0 host is accepted; the https-off-loopback rule for JUDGE0_URL applies to pilot and production only (staging may use http on the Docker network). | qa, backend-cand | ARC-05 | open |
+| FU-BEB-14 | BE-05 review | should-fix | FR-203 publish gating is not done: BE-05 ships the validation service only. BE-04 must wire the sink and the publish check (see FU-BEB-01). | Backend A (BE-04) | BE-04 | open |
