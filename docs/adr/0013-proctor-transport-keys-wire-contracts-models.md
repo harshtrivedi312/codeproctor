@@ -2,11 +2,11 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Proposed** 2026-10-05. Acceptance is pending the owner: C-23 (docs/compliance/decisions.md, PR #44) accepts it with the Delivery Lead's recommended answers once the hub reports a clean security review. Items marked **(architect detail, owner to confirm)** are not owner decisions; section 9 lists the questions. |
+| Status | **Proposed** 2026-10-05. Acceptance is pending the owner: C-23 (docs/compliance/decisions.md, PR #44) accepts it with the Delivery Lead's recommended answers. **Depends on:** PR #41 (ADR 0006 section 8), PR #44 (C-10, C-17, C-25, C-33 in docs/compliance/decisions.md) and PR #48 (ADR 0004 R-9, consent clock) once the hub reports a clean security review. Items marked **(architect detail, owner to confirm)** are not owner decisions; section 9 lists the questions. |
 | Author | architecture hub |
 | Decides | OI-3 (key lifecycle, canonical JSON, threat model), OI-9 (key layout, segment reassembly rules), the key half of OI-10, the ARC-03 items ADR 0010 "Leaves to", and every "Open for the architecture hub" item in docs/followups/proctor-sdk.md |
 | Serves | FR-403, FR-601, FR-604, FR-605, FR-606, FR-607, FR-609, FR-610, FR-701, FR-702, FR-704, FR-801; NFR-01, NFR-02, NFR-04, NFR-05, NFR-08; TC-008, TC-050, TC-056, TC-058, TC-059, TC-063, TC-065, TC-070, TC-072 |
-| Builds on | ADR 0001 (TB-1, TB-3, C-4, C-5, ST-1..ST-8, section 12 and F-3), ADR 0002 §3 option (a) and L-2, ADR 0004 (§1, §2, §4, R-4, R-6), ADR 0005 §3, ADR 0006 (section 8 as amended in PR #41), ADR 0007 §5, ADR 0010 (not contradicted; proposed amendments in section 7) |
+| Builds on | ADR 0001 (TB-1, TB-3, C-4, C-5, ST-1..ST-8, section 12 and F-3), ADR 0002 §3 option (a) and L-2, ADR 0004 (§1, §2, §4, R-4, R-6), ADR 0005 §3, ADR 0006 (section 8 as amended in PR #41), ADR 0007 §5, ADR 0010 (not contradicted; proposed amendments in section 7); C-17 and C-25 (PR #44) and proposed ADR 0004 §9 (PR #48), both unmerged |
 | Leaves to | ARC-03 part 2: candidate token lifetime, storage and binding (OI-4, token half of OI-10, OI-11) and STRICT side-camera device auth. ARC-02 part 2: copying these rows into api-contract.md and fsd.md §4 (PRs #29, #31, #33 are in flight, so the tables live here until then). ARC-04: worker job interface, `analyze-session` delay, worker model lock. ARC-05: bucket settings, CORS, access-log restriction. |
 
 Paths are under `/api/v1`. Errors are RFC 7807 with the `code` extension (ADR 0011 / api-contract.md, PR #31); the `code` values below are new. Once a route is built, the generated OpenAPI becomes its source of truth (ADR 0012, proposed); this ADR remains the record of the rules.
@@ -196,7 +196,7 @@ Decision: **unsigned, token-authenticated, advisory input, flagged as unsigned**
 Server behaviour:
 - Each beat sets `last_heartbeat = now()` with one UPDATE by primary key. About 20 writes per second at 200 candidates; target p95 below 50 ms.
 - If a DISCONNECTED was logged since the last beat (Redis flag), the beat enqueues a `server-event` session job that writes RECONNECTED (SERVER), because candidate scope cannot write SERVER rows (CS-4.4).
-- A repeatable discovery job every 15 s, under `BACKGROUND_JOB`, finds IN_PROGRESS and PAUSED sessions silent for more than 60 s. It only enqueues one SERVICE job per session (it never enters a session scope itself); each job runs in `runAsSessionJob` from no scope and writes DISCONNECTED `{ lastHeartbeatAt }` (FR-609, CS-4.7).
+- A repeatable discovery job every 15 s, under `BACKGROUND_JOB`, finds IN_PROGRESS and PAUSED sessions silent for more than 60 s. It only enqueues one SERVICE job per session. Each job is a separate BullMQ worker callback: `SessionJobProcessor` asserts that no scope is active, then enters `runAsSessionJob` and writes DISCONNECTED `{ lastHeartbeatAt }` (FR-609, CS-4.7).
   - **Flag for QA and the owner:** TC-063 drops the network for 45 s yet expects DISCONNECTED, while FR-609 sets the threshold at 60 s, so a 45 s drop logs nothing. Either TC-063 uses more than 60 s or FR-609 changes (Q13; QA already noted it in docs/followups/qa.md).
 - `recorder` and `queue` go to Redis `rec:{sessionId}`. The final snapshot is copied to `device_info.recorder` at SUBMITTED.
 - The proctor push channel (OI-2, Q-20) is not decided here.
@@ -254,12 +254,13 @@ VIRTUAL_CAMERA is logged but does not block (FR-610); MULTI_MONITOR blocks (FR-6
 | --- | --- | --- |
 | Route | `POST /candidate/session/evidence/presign` | `POST /candidate/session/identity/recheck` |
 | Body | `{ purpose: "EVENT" \| "IDENTITY_RECHECK", contentType: "image/jpeg", bytes: 1..1 MiB }` | `{ evidenceKey: <name issued with purpose IDENTITY_RECHECK>, capturedAt }` |
-| States | IN_PROGRESS, PAUSED. Purpose `IDENTITY_RECHECK` is refused with 409 `DETECTOR_DISABLED` when FACE is disabled by accommodation (FR-305) | IN_PROGRESS, PAUSED; 409 `DETECTOR_DISABLED` when FACE is disabled |
+| States | IN_PROGRESS, PAUSED. Purpose `IDENTITY_RECHECK` is refused with 409 `IDENTITY_CHECK_WAIVED` when the identity check is waived (C-25, ADR 0015). **Disabling the FACE detector does not disable the re-check** | IN_PROGRESS, PAUSED; 409 `IDENTITY_CHECK_WAIVED` when the identity check is waived |
 | 200 / 202 | 200 `{ url, method: "PUT", headers, evidenceKey: "evidence/<ULID>.jpg", expiresAt }` | **202 `{ accepted: true }`. No match result is returned to the browser.** |
-| Errors | 400; 409 `SESSION_NOT_ACTIVE` / `DETECTOR_DISABLED` / `QUOTA_EXCEEDED`; 429 | 400 (unknown, wrong-purpose or already-used name), 409, 429 |
+| Errors | 400; 409 `SESSION_NOT_ACTIVE` / `IDENTITY_CHECK_WAIVED` / `QUOTA_EXCEEDED`; 429 | 400 (unknown, wrong-purpose or already-used name), 409, 429 |
 | Limit | 20 per minute. Per session at most 300 `EVENT` names and `duration_minutes + 10` `IDENTITY_RECHECK` names (409 `QUOTA_EXCEEDED`) **(architect detail)** | 1 per 60 s (SDK interval 120 s) |
 
 **Decision: the server writes the re-check outcome itself.**
+- **Governed by identity verification (C-25).** The re-check belongs to the identity check, not to the FACE detector. It stops only when the identity check is waived (ADR 0015). A refusal of biometric processing waives it and also switches off every face-based detector (OQ-15, ADR 0015 covers the setting). ADR 0015's interaction table must drop "FACE off stops the re-check" to match.
 - **Names.** The re-check accepts only an `IDENTITY_RECHECK` name in state `ISSUED` and marks it `USED` with the same compare-and-set (5.2).
 - **Sealed copy (decided).** The re-check route runs these steps in order:
   1. HEAD the original. Missing (PUT still in flight) gives 409 `UPLOAD_NOT_FOUND`, and the name stays `ISSUED` so the client can retry. Over 1 MiB or not `image/jpeg` gives 400; the name moves to `EXPIRED` and the original is deleted.
@@ -288,7 +289,7 @@ VIRTUAL_CAMERA is logged but does not block (FR-610); MULTI_MONITOR blocks (FR-6
 - FACE_MISMATCH only adds risk weight. It never changes status and is never a rejection (D-05, ADR 0004).
 - A tampered client can stop sending frames but cannot turn a mismatch into a match. Missing re-checks are detectable (Q6).
 - The SDK stops emitting client FACE_MISMATCH. The server still accepts it from older clients until ADR 0010 is amended (section 7).
-- The initial ID and selfie upload (BE-08) uses the same presign shape with purpose `ID_IMAGE` or `SELFIE`, in state CONSENTED, ≤ 5 MiB; BE-08 pins its route.
+- The initial ID and selfie upload (BE-08) uses the same presign shape with purpose `ID_IMAGE` or `SELFIE`, in state CONSENTED, ≤ 5 MiB; BE-08 pins its route. These images could be re-PUT within the 60-second URL life, so BE-08 seals them the same way (copy to `identity/{attempt}/sealed/…` on `POST /candidate/session/identity`, then delete the original) and signs `If-None-Match: *` where supported.
 
 ### 5.7 Object key layout (all object types; BE-09)
 
@@ -384,11 +385,12 @@ The entry function sets the actor; callers cannot pass it in, so it cannot be fo
 | `runAsCandidate(oid, sid)` | `CANDIDATE` | `CandidateSessionGuard` only | no scope | CS-4.3 to CS-4.6 |
 | `runAsSessionJob(oid, sid)` | `SERVICE` | `SessionJobProcessor` (the one session-job base class), from the job payload; target loaded in scope and the job dropped on a mismatch (ADR 0006 job rules) | **no scope only** (any system scope, `BACKGROUND_JOB` included, is refused; `SessionJobProcessor` detaches first with `detachForSessionJob`) | ADR 0006 org filter on every model, plus the session filter on session-path models (CS-4.2). No allowlist and no column limits. |
 
-- **Inherited context.** `SessionJobProcessor` wraps its work in `orgContext.detachForSessionJob(fn)` (ADR 0006 section 8.4, PR #41), then calls `runAsSessionJob` inside `fn`. That way it never inherits the enqueuer's context. `runAsSessionJob` is entered from no scope only.
-  - `detachForSessionJob` runs `fn` with no scope.
-  - Only the `SessionJobProcessor` base class may call it, and only from no scope or from system `BACKGROUND_JOB` discovery.
-  - It throws inside any org scope: STAFF, plain org, SERVICE or CANDIDATE.
-  - The AsyncLocalStorage instance is private to `org-context.ts`. `exit`, `enterWith` and `disable` are covered by the FU-DB-67 call-site test.
+- **Inherited context.** BullMQ workers are built at module init, outside any scope, and each session job runs in its own worker callback. Before `runAsSessionJob`, `SessionJobProcessor` calls `orgContext.detachForSessionJob(fn)` (ADR 0006 section 8.4, PR #41). `runAsSessionJob` is then entered from no scope only.
+  - `detachForSessionJob` clears the **whole** store (scope, actor, any system reason and any raw-SQL hatch) and runs `fn` with no scope.
+  - It throws while a `runRawSql` hatch is open, and inside any scope: STAFF, plain org, SERVICE, CANDIDATE or system (**the `BACKGROUND_JOB` allowance is dropped**). In practice `SessionJobProcessor` asserts that no scope is active.
+  - Only the `SessionJobProcessor` base class may call it.
+  - A test asserts that a discovery processor cannot invoke a session handler inline: session handlers run only from the BullMQ worker callback.
+  - The AsyncLocalStorage instance and the grant API are private to `org-context.ts`. `exit`, `enterWith` and `disable` are covered by the FU-DB-67 call-site test.
 - **Nesting.**
   - `runInOrg(oid)` with the same org keeps both the session and the actor (ADR 0006: "S stays").
   - A call that would drop or change `sessionId` is refused, as are `runAsUser`, `runSystem` and entering the other actor.
@@ -424,22 +426,34 @@ Any model not listed throws. Within one org, the org filter alone would expose o
 | `consent_texts` | read | `id IN (organizations.current_consent_text_id, consents.consent_text_id)` (values loaded by the consent service before the query, then passed as a direct `id IN` filter) |
 | `test_sections` | read | `sessionSections: { some: { sessionId } }` (injected relation filter) |
 | `questions` | read | `versions: { some: { sessionQuestions: { some: { sessionId } } } }` (injected relation filter) |
+| `test_questions` | read, columns `id` and `section_id` only, and only under the `SectionGateService` grant | `id IN` (the `test_question_id`s of this session's `session_questions`, loaded by `SectionGateService` before the query, then passed as a direct filter) |
 
 - **Read-only means every write operation throws.**
-- **Question content is not on the allowlist.** That covers `question_versions`, `question_variants`, `test_questions`, `test_cases` and `variant_test_cases` (CS-4.6).
+- **Question content is not on the allowlist.** That covers `question_versions`, `question_variants`, `test_cases` and `variant_test_cases` (CS-4.6). `test_questions` is readable only as (`id`, `section_id`), for the section gate.
+- **Shape without content (N6).** `questions (id, type)` and `test_sections` stay readable for every section of the session. They reveal how many questions of each type there are and the section titles and limits, which the candidate sees in the test outline anyway; no statement, code, sample or key is in them.
 
 #### CS-4.4 CANDIDATE: column allowlists for reads and writes
 
 - Reading any other column throws. The default select is narrowed with `omit`, so a new column stays hidden until it is listed.
 - The read list also governs `where`, `orderBy`, `distinct`, `groupBy.by`, `_count`, `_sum`, `_avg`, `_min` and `_max`. A filter or sort on a hidden column (for example a JSON-path `where`) throws, so it cannot act as a boolean oracle.
 - Writing any other column throws.
-- **Explicit-only** columns are excluded from the default select. They are enforced **at runtime**: the extension refuses them unless a per-column grant is present on AsyncLocalStorage. Only the named service method shown enters that grant, and each grant site is listed in the FU-DB-67 call-site allow-list. A lint rule is an extra check, not the control.
+- **Explicit-only** columns are excluded from the default select. They are enforced **at runtime**: the extension refuses them unless a per-column grant is present on AsyncLocalStorage. Only the named service method shown enters that grant. A lint rule is an extra check, not the control.
+- **The grant API is private** to `org-context.ts` (ADR 0006 is adding it). The only grant sites, and therefore the FU-DB-67 call-site entries, are:
+  - `SessionStateService` (state columns);
+  - `KeyService` (`hmac_key_enc`);
+  - `CandidateSessionGuard` (`invitation_id`);
+  - `DeviceInfoService` (`device_info`);
+  - `StorageService` (`media_chunks.object_key`);
+  - `OrgSettingsService` (`organizations.settings`);
+  - `TestSettingsService` (`tests.settings`);
+  - `AccommodationsService` (`invitations.accommodations`, projection only);
+  - `SectionGateService` (`session_questions.test_question_id`, `test_questions`).
 
 | Model | Read | Write | Extra row filter |
 | --- | --- | --- | --- |
 | `sessions` | `id`, `status`, `started_at`, `deadline_at`, `pause_reasons`, `submitted_at`, `auth_epoch`. Explicit-only: `hmac_key_enc` (KeyService), `invitation_id` (CandidateSessionGuard), `device_info` (DeviceInfoService) | `last_heartbeat`; `device_info` only through DeviceInfoService (grant, below); `status`, `pause_reasons`, `submitted_at` only under the SessionStateService grant (CS-4.4a) | — |
 | `session_sections` | all columns | `started_at`, `deadline_at`, `ended_at`, only under the SessionStateService grant (CS-4.4a) | — |
-| `session_questions` | `id`, `session_id`, `position`, `points`, `final_code`, `final_language`, `answer` | `final_code`, `final_language`, `answer` | — |
+| `session_questions` | `id`, `session_id`, `position`, `points`, `final_code`, `final_language`, `answer`. Explicit-only: `test_question_id` (`SectionGateService.sectionOf`) | `final_code`, `final_language`, `answer` | — |
 | `submissions` | `id`, `session_question_id`, `kind`, `language`, `created_at`; plus `results`, `passed`, `total` under the extra filter | create only: `session_question_id`, `kind` (`RUN` or `SUBMIT`), `language`, `source_code`; and `results`, `passed`, `total` on `RUN` rows | **Mechanism:** whenever `results`, `passed` or `total` appears anywhere in `select`, `where`, `orderBy`, `groupBy` or an aggregate, the extension ANDs `kind: 'RUN'` into the query, so `count({ where: { kind: 'SUBMIT', passed: N } })` returns 0. **`score` is never readable.** |
 | `identity_checks` | `id`, `attempt`, `status`, `created_at` | create only: `attempt`, `id_image_key`, `selfie_key`, `liveness_passed` | — |
 | `media_chunks` | `id`, `stream`, `segment`, `seq`, `size_bytes`, `uploaded_at`. Explicit-only: `object_key` (StorageService) | `stream`, `segment`, `seq`, `started_at`, `duration_ms`, `size_bytes`, `uploaded_at`, `object_key` | — |
@@ -466,12 +480,18 @@ Any model not listed throws. Within one org, the org filter alone would expose o
   | add or remove `FULLSCREEN_EXIT`, `SCREEN_SHARE_STOPPED`, `SIDE_CAMERA_LOST` in `pause_reasons` | event batches (ADR 0002 P-1) |
 
   - **A candidate scope can never add or remove the `PROCTOR` pause reason.** The method refuses any change that touches it, and refuses every other transition.
+  - `transition()` recomputes the status from `pause_reasons` (ADR 0002 P-1). Removing a candidate reason therefore never moves PAUSED → IN_PROGRESS while `PROCTOR` remains.
+  - **Finishing during a PROCTOR pause.** ADR 0002 P-4 allows IN_PROGRESS or PAUSED → SUBMITTED, and nothing forbids a candidate finish while paused. Confirmed: finish is allowed, and the proctor-pause credit stops at SUBMITTED.
   - The others run in SERVICE scope:
     - CONSENTED → VERIFIED: a `verify-session` job, enqueued by the system-check, identity and room-scan routes;
     - VERIFIED → IN_PROGRESS: `start-session`;
     - deadline auto-submit, grading and review transitions: their jobs.
   - INVITED → OPENED and the EXPIRED check on link resolve run before the JWT exists, under `AUTH_BOOTSTRAP` (ADR 0006 section 8.4).
-- **`device_info` writers.** Heartbeat capabilities, the system check and the sweep all write through `DeviceInfoService`. It reads the column under its grant, merges in memory and writes back, holding a Redis lock `lock:device-info:{sid}` (`SET NX PX 2000`, up to 3 retries). That avoids lost updates, which matters because raw `jsonb_set` is refused in session scopes.
+- **`device_info` writers.** Heartbeat capabilities, the system check and the sweep all write through `DeviceInfoService`. It reads the column under its grant, merges in memory and writes back, holding a Redis lock `lock:device-info:{sid}`, because raw `jsonb_set` is refused in session scopes:
+  - The lock is `SET NX PX 2000` with a random token. It is released by a Lua compare-and-delete on that token.
+  - **Fencing.** The write is a conditional `updateMany` whose `where` includes the `device_info` value that was read. 0 rows updated means another writer got in, so the service re-reads and retries. A slow write past the 2 s lock therefore cannot overwrite a newer value.
+  - **After 3 failed attempts** it skips the update, never writes unlocked, and the next heartbeat retries.
+  - The system-check route is the exception: it answers 503 with `Retry-After`, because `device_info.systemCheck` feeds both security gates (CONSENTED → VERIFIED and start).
 - **Settings reaching the browser.** `CandidateOrgSettingsView` sends only the detector thresholds and `consentDeclineContact`. Risk points, caps, bands, weights, erasure and `aiReferences` keys never leave the server. `CandidateTestSettingsView` is deny-by-default until BE-06 defines the `tests.settings` keys. BE-10 reads severity overrides server-side through OrgSettingsService.
 - **`submissions.results` shape (pinned).** For `SUBMIT` rows (written by `grade-session`), the shape is `{ testCaseId, passed, status, timeMs, memoryKb }[]`, with no stdin, stdout, expected output or variant data, so even a serialiser bug cannot leak case data. `RUN` rows hold sample results only.
 
@@ -504,14 +524,25 @@ All of it comes from one projection:
   - The zod schema is `.strict()`, so no extra field can slip through.
   - MCQ option ids are opaque per session: `opt_` + the first 10 base32 characters of `HMAC(QUESTION_OPTION_ID_SECRET, sessionId + ":" + optionId)`. `grade-session` recomputes the mapping, so nothing is stored.
   - Options keep the author's order, so neither ids nor positions are derived from the key.
-- **Open section only (ADR 0002 S-1, S-5; FR-301).** `GET /candidate/questions/:sessionQuestionId` serves a question only if it belongs to the **open section**: its `session_sections` row has `started_at` set and `ended_at` NULL. Otherwise it answers 409 `SECTION_NOT_OPEN`.
+- **Open section only (ADR 0002 S-1, S-5; FR-301).** The rule applies to every question route:
+  - read: `GET /candidate/questions/:sessionQuestionId`;
+  - Run;
+  - draft and answer: `PUT …/draft`, including MCQ and short-answer `answer` autosave;
+  - submit.
+
+  Each one serves or accepts a question only if it belongs to the **open section** (its `session_sections` row has `started_at` set and `ended_at` NULL). Otherwise it answers 409 `SECTION_NOT_OPEN`.
+- **Data path (decided, option (a)).** `SectionGateService.sectionOf(sessionQuestionId)` resolves the section from the database on every call, under its own grant:
+  1. it reads `session_questions.test_question_id` (explicit-only);
+  2. it reads `test_questions (id, section_id)` with the injected `id IN` filter;
+  3. it reads the matching `session_sections` row.
+
+  If any step finds nothing, the answer is 409 `SECTION_NOT_OPEN`: the gate **fails closed**. It never relies on Redis, so a flush cannot open it.
   - Finished sections are refused by default. Whether a candidate may re-read finished sections is owner question Q19.
-  - The route resolves the id through CS-2 and checks the open section **before** any cache lookup or enqueue.
+  - Each route resolves the id through CS-2 and runs `sectionOf` **before** any cache lookup, enqueue or write.
   - `start-session` builds the projections for section 1 only. Opening the next section (SessionStateService) enqueues that section's `render-question` jobs.
 - They are cached in Redis as `qview:{sessionId}:{sessionQuestionId}`, with TTL until `deadline_at` + grace (re-set on extension).
 - On a cache miss, the candidate route enqueues the job and waits up to 5 s; on timeout it answers 503 with `Retry-After`.
 - Run (sample tests only) uses the cached samples.
-- Run (sample tests) applies the same open-section check (ADR 0002 S-5).
 - **Hidden-content rule (TC-011):** these never reach the candidate scope or a projection: hidden test cases and their variant overrides, `reference_solution`, `validation_report`, the MCQ correct option ids and the short-answer accepted answers.
 - **Minimal alternative (owner decision, Q18):** a candidate-safe snapshot column (for example `session_questions.prompt jsonb`, written by `start-session`) survives a Redis flush. It is a schema change under ADR 0008, so it is not chosen for the pilot.
 
@@ -521,7 +552,8 @@ All of it comes from one projection:
 | --- | --- | --- |
 | `start-session` (assign questions, sections, key, projections, VERIFIED → IN_PROGRESS); the route waits up to 10 s, else 503 with `Retry-After`; idempotent | SERVICE | `start-session:{sid}` |
 | `render-question` | SERVICE | `render-question:{sid}:{sessionQuestionId}` |
-| `verify-session` (CONSENTED → VERIFIED when all checks are done) | SERVICE | `verify-session:{sid}` |
+| `verify-session` (CONSENTED → VERIFIED when all checks are done) | SERVICE | `verify-session:{sid}:{n}`, where `n` is a Redis `INCR` per enqueue |
+| `close-section` (S-5 submit of saved code) | SERVICE | `close-section:{sid}:{sectionId}` |
 | `grade-session` (hidden tests through Judge0, MCQ and short-answer scoring per ADR 0007 §5, D-23) | SERVICE | `grade-session:{sid}` |
 | `analyze-session` | org scope (cross-session similarity); per-session writes through SessionStateService with service checks | `analyze-session:{sid}` |
 | ingest close (key destruction, sweep pass 1) and sweep pass 2 | SERVICE | `ingest-close:{sid}`, `sweep-2:{sid}` |
@@ -533,7 +565,11 @@ All of it comes from one projection:
 
 - BullMQ `returnvalue` and `failedReason` never carry case data, stdout, keys, URLs or answer keys.
 - `render-question`'s return value is the candidate-safe projection by construction.
-- `removeOnComplete` and `removeOnFail` are set explicitly on `start-session`, `render-question`, `grade-session`, `face-recheck` and `server-event`.
+- **Fixed jobIds and lost re-runs (S2).** BullMQ keeps completed jobs by default and ignores an enqueue whose id already exists, including one that is still active. A fixed id is therefore used only where one run is final.
+  - `verify-session`: each enqueue gets a fresh suffix, and the job re-checks every condition after it runs, so a no-op run can never strand a session in CONSENTED.
+  - `ingest-close` and `consent-pdf`: one run is final; the jobs are idempotent and set `removeOnFail`, so a failed run can be enqueued again.
+  - `analyze-session`: it must re-run when late data arrives, so it uses `removeOnComplete` with a re-enqueue on that late data.
+- `removeOnComplete` and `removeOnFail` are set explicitly on `verify-session`, `analyze-session`, `start-session`, `render-question`, `grade-session`, `face-recheck` and `server-event`.
 - **Spike (BE-07):** whether BullMQ accepts `:` in custom jobIds is **not verified** (the same pattern appears in ADR 0006 section 8.9). If it does not, the separator becomes `_`.
 
 #### CS-4.8 Tests (DB-05, BE-07; TC IDs assigned by QA, tracked in docs/followups/qa.md)
@@ -543,7 +579,7 @@ All of it comes from one projection:
 - Column tests:
   - every hidden column throws on select, `where`, `orderBy` and `groupBy`;
   - the default select omits them;
-  - a write to a non-listed column (`sessions.status` outside SessionStateService via lint, `sessions.auth_epoch`, `session_questions.score`, `identity_checks.manual_decision`, a `proctor_events` row with `source = SERVER`) throws.
+  - a write to a non-listed column (`sessions.status` with no SessionStateService grant, asserted as the **runtime** refusal, `sessions.auth_epoch`, `session_questions.score`, `identity_checks.manual_decision`, a `proctor_events` row with `source = SERVER`) throws.
 - `proctor_events` reads never return SERVER rows. `submissions.score` and `SUBMIT` results are never readable.
 - Injected filters: one test per CS-4.3 row.
 - Actor crossing and raw SQL refusal.
@@ -561,8 +597,8 @@ All of it comes from one projection:
 - **`POST /candidate/answers/:questionId/submit`** stores a `SUBMIT` row with the code and language and returns **200 `{ accepted: true, submissionId }`. Nothing else is returned**: no per-test result, weight or score. Hidden tests and answers therefore cannot be used as an oracle.
 - **Limits** (architect detail), checked atomically **before** any insert:
   - Redis `SET NX PX 10000` on `rl:submit:{sid}` gives one submit per 10 s per session; on failure, 429 with `Retry-After`.
-  - Redis `INCR submits:{sid}:{sqid}` returns the new count. Above 20, the route `DECR`s and answers 409 `SUBMIT_LIMIT_REACHED`.
-- **What is graded (consistent with ADR 0002 S-5 and backend.md Step 11).** Section close and auto-submit write a `SUBMIT` row from `session_questions.final_code` and `final_language`, exempt from the cap, whenever `final_code` differs from the latest `SUBMIT`. `grade-session` grades the latest `SUBMIT` row per coding question.
+  - Redis `INCR submits:{sid}:{sqid}` returns the new count. Above 20, the route `DECR`s and answers 409 `SUBMIT_LIMIT_REACHED`. If the insert fails after the `INCR`, the route also `DECR`s.
+- **What is graded (consistent with ADR 0002 S-5 and backend.md Step 11).** Section close, `/finish` (for the last section) and auto-submit write a `SUBMIT` row from `session_questions.final_code` and `final_language`, exempt from the cap, whenever `final_code` differs from the latest `SUBMIT`. Candidate scope cannot read `submissions.source_code`, so this comparison runs in a `close-section` SERVICE session job (jobId `close-section:{sid}:{sectionId}`), enqueued by the section-finish route, `/finish` and the deadline jobs. `grade-session` grades the latest `SUBMIT` row per coding question.
   - Later saved work is therefore always graded.
   - A coding question with no `SUBMIT` row and no saved code scores 0 without a Judge0 run.
 - MCQ and short answers are not submitted. `session_questions.answer` is autosaved through the draft route and final at SUBMITTED (ADR 0007 §5).
@@ -629,7 +665,7 @@ CI and deploy:
   | staging (synthetic data only) | fails | warning |
   | pilot, production | fails | fails, unless every file of that model is listed in the accepted-risk list below |
 
-  - **Accepted-risk list (D-28, C-10).** The gate reads exactly one list: a fenced block tagged `licence-acceptances` in `docs/status.md` section 9, which the Delivery Lead owns. Each line is `<decision-id> <model> <file-name>@<sha256>`.
+  - **Accepted-risk list (D-28, C-10).** The gate reads exactly one list: a fenced block tagged `licence-acceptances` in `docs/status.md` section 9, the owner's decision log, which the Delivery Lead maintains (section 9b is the Delivery Lead's own log). Pilot and production deploys **fail if the block is missing or appears more than once**; on main today it does not exist yet. Each line is `<decision-id> <model> <file-name>@<sha256>`.
     - A model counts as one named model, but **every file of it must be listed**. COCO-SSD's `model.json` and each weight shard appear on separate lines under the one model.
     - The gate fails if any file of an `unverified` model is missing, if a hash differs, or if the decision id is not a row of section 9.
     - **Requested entry** (Delivery Lead): D-28, as extended by C-10, listing AuraFace `glintr100.onnx` (worker lock) and COCO-SSD `ssdlite_mobilenet_v2` (`model.json` plus every shard, proctor-sdk lock), with exact hashes taken from the lock files once they exist.
@@ -693,18 +729,18 @@ CI and deploy:
   - if Q6 is yes, a server reason `NOT_REPORTED` on DETECTOR_UNAVAILABLE, or a `RECORDING_GAP` type;
   - any later fullscreen mismatch field would also go here; 5.9 adds none.
 - **FR-606 (owner decision, Q15).** FACE_MISMATCH moves from a browser check every second to a server re-check of a frame every 2 minutes. That is an FR change and new server-side biometric processing during the test.
-- **ADR 0004 §8.** The consent PDF key sits outside the session prefix (5.7), which fills in and amends the layout ADR 0004 §8 delegated to ARC-03.
+- **ADR 0004 §8.** The consent PDF key sits outside the session prefix (5.7), which fills in and amends the layout ADR 0004 §8 delegated to ARC-03. The accepted sentence "retention keeps it with the consent record (R-5), and erasure deletes it (R-6)" is amended: the PDF is kept through erasure until its 3-year limit. This depends on C-17 (PR #44) and ADR 0004 R-9 (PR #48), neither merged yet.
 - **ADR 0005 §3 and database.md (`proctor_events.batch_seq`, around line 586).** The comment "NULL for SERVER events" becomes "NULL for SERVER events and unsigned system-check findings". `batch_seq` is already nullable, so there is no schema change.
 - **ADR 0006 section 8.4 (PR #41), requested:**
   - reference the actor model in 5.10 CS-4 instead of defining session scopes itself;
-  - split the `runInOrg(A, { sessionId })` rows into `runAsCandidate(oid, sid)` (guard only, from no scope) and `runAsSessionJob(oid, sid)` (`SessionJobProcessor` only, from no scope only; any system reason refused);
+  - split the `runInOrg(A, { sessionId })` rows into `runAsCandidate(oid, sid)` (guard only, from no scope) and `runAsSessionJob(oid, sid)` (`SessionJobProcessor` only, entered from no scope only, after `detachForSessionJob`, which itself throws in any scope, system scopes included, and while a raw-SQL hatch is open);
   - add rows refusing CANDIDATE → SERVICE, SERVICE → CANDIDATE, and `runSystem` from either;
   - keep "Org A with S → `runInOrg(A)`: S stays", and state that the actor stays too;
   - no new system reason is needed: start-test, `render-question` and grading are session jobs;
   - name the candidate `AUTH_BOOTSTRAP` routes as the three pre-JWT routes: link resolve, OTP send, OTP verify;
   - the six relation vectors: point to ADR 0013 CS-4.5 as the CANDIDATE enforcement (all refused, with the fluent API also linted);
   - state that SERVICE scope's session filter is top-level only, and nested reads stay under rule (i) review (defence in depth);
-  - the disconnect watchdog runs as `BACKGROUND_JOB` discovery that enqueues per-session SERVICE jobs; `runAsSessionJob` is entered from no scope only (as PR #41 f5f89ad now says).
+  - the disconnect watchdog runs as `BACKGROUND_JOB` discovery that enqueues per-session SERVICE jobs; the discovery job only enqueues; each session job runs in its own worker callback, and `runAsSessionJob` is entered from no scope only (ADR 0006 section 8.4).
 - **FR-502 and backend.md Step 11.** "Submit runs hidden tests" becomes "Submit records the final code; hidden tests run in `grade-session` after SUBMITTED". The submit response carries no results (5.11). FR-502 is an owner decision (Q17).
 - **backend.md Step 7:**
   - the key is delivered by `proctor-key`, not in the start response;
@@ -729,7 +765,7 @@ CI and deploy:
 | integrity BE-12 | Score from server `duration_ms` only (5.9); the `face-recheck` outcome handler as a SERVICE job that writes FACE_MISMATCH with the sealed key; `face-recheck` job with the 1 MiB and 1920 × 1920 refusals before decoding, frame deletion on every non-mismatch outcome including failure, and outcome hand-off (API writes the event; OI-1 mechanism in ARC-04), hole-tolerant segment concatenation, worker `models.lock.json` |
 | backend BE-11 and BE-13 | Submit per 5.11 (`{ accepted, submissionId }` only, with the limits); `grade-session` as a SERVICE session job after SUBMITTED, writing the pinned `SUBMIT` results shape; `render-question` and its projection cache (CS-4.6); jobs and jobIds per CS-4.7; `SessionStateService.closeIngest` and the close of open FULLSCREEN_EXIT rows at session end (5.9). BE-11: the frontend flushes the SDK (bounded) before `/finish`; `analyze-session` (org scope, cross-session) is delayed by the grace (with ARC-04). BE-13: review bundle with recording gaps, batch-seq holes, recorder health, the unsigned label and server FACE_MISMATCH evidence. |
 | frontend | Own the key fetch and the OTP and token refresh, passing results to the SDK hooks (section 2). Inject `NEXT_PUBLIC_PROCTOR_MODEL_BASE`; retire `public/dev-proctor-models/` in favour of `public/models/proctor/`. Check IndexedDB first, then call `proctor-key` after start and after OTP resume, inside a Web Lock; when the key is missing or `KEY_ALREADY_ISSUED`, run the OTP resume; handle `reauthRequired`. Build the system-check call. Pages `_headers` and CSP for models. Sentry scrubbing. Review UI labels and gap panel. `/dev/proctor` uses the lock-served path. |
-| QA | TC-050 reworded (done in this PR; 5.9). Follow-through: rewrite the SDK test `TC-050 KNOWN DEFECT QA-D-01` (`it.fails` in `packages/proctor-sdk/src/qa/qa-tc.test.ts`) as plain tests (EXIT has no `durationMs`, RESTORED has one); add a BE-10 API-level test of the server-filled `duration_ms`, including the close at session end; remove TC-050 from the known-defect list in `docs/test-matrix.md` (line 15). Then: TC-063 45 s against the 60 s FR-609 threshold (Q13); cross-candidate scope tests including presign and confirm (5.10); B2: oversize PUT deleted by confirm or the sweep, re-PUT after confirm blocked (412) or caught by the sweep, review URLs carry the response overrides; B3: re-check presign refused when FACE is disabled, the re-check route's HEAD/copy/compare-and-set order and its failure cases, a re-PUT to the original key after a FACE_MISMATCH cannot change the sealed evidence, concurrent batches cannot both take one evidence name, a reused name is rejected, an EVENT name sent to re-check gets 400, a RECHECK name in an event is dropped, an unused frame is deleted within 10 min, a frame whose job failed is deleted, a MATCH frame is deleted, and the sweep removes unreferenced re-check frames; licence gate fails when a file of an unverified model is missing from the D-28 list in docs/status.md or its hash differs; submit returns only `{ accepted, submissionId }` and enforces its atomic limits; a later-section question read (and Run) answers 409 `SECTION_NOT_OPEN`; a candidate-scope route can never add or remove the PROCTOR pause reason; no candidate-scope read ever returns `reasonCode`, `reasonNote` or `notes` from accommodations; identity uses names, never client keys; a SERVER FACE_MISMATCH is never visible through any candidate route; the CS-4.8 suite (tracked in docs/followups/qa.md with an owner); TC-065 (tamper → 403, identical replay → 200 duplicate, same seq with a different body → 409, other-session key → 403); TC-063 with an epoch change mid-outage; TC-070 with a synthetic hole; TC-056 server gate. New TCs: key issued once per epoch, cross-session evidence name dropped, server-written FACE_MISMATCH, prefix retention removes orphans, licence gate fails on any other unverified file. k6 signer through `k6/crypto`. |
+| QA | TC-050 reworded (done in this PR; 5.9). Follow-through: rewrite the SDK test `TC-050 KNOWN DEFECT QA-D-01` (`it.fails` in `packages/proctor-sdk/src/qa/qa-tc.test.ts`) as plain tests (EXIT has no `durationMs`, RESTORED has one); add a BE-10 API-level test of the server-filled `duration_ms`, including the close at session end; remove TC-050 from the known-defect list in `docs/test-matrix.md` (line 15). Then: TC-063 45 s against the 60 s FR-609 threshold (Q13); cross-candidate scope tests including presign and confirm (5.10); B2: oversize PUT deleted by confirm or the sweep, re-PUT after confirm blocked (412) or caught by the sweep, review URLs carry the response overrides; B3: re-check presign refused with `IDENTITY_CHECK_WAIVED` when the identity check is waived and still allowed when only FACE is disabled (C-25), the re-check route's HEAD/copy/compare-and-set order and its failure cases, a re-PUT to the original key after a FACE_MISMATCH cannot change the sealed evidence, concurrent batches cannot both take one evidence name, a reused name is rejected, an EVENT name sent to re-check gets 400, a RECHECK name in an event is dropped, an unused frame is deleted within 10 min, a frame whose job failed is deleted, a MATCH frame is deleted, and the sweep removes unreferenced re-check frames; licence gate fails when a file of an unverified model is missing from the D-28 list in docs/status.md or its hash differs; submit returns only `{ accepted, submissionId }` and enforces its atomic limits; a later-section read, Run, draft, answer and submit must each answer 409 `SECTION_NOT_OPEN`, and an unresolvable section fails closed with a flushed Redis; a candidate-scope route can never add or remove the PROCTOR pause reason; no candidate-scope read ever returns `reasonCode`, `reasonNote` or `notes` from accommodations; identity uses names, never client keys; a SERVER FACE_MISMATCH is never visible through any candidate route; the CS-4.8 suite (tracked in docs/followups/qa.md with an owner); TC-065 (tamper → 403, identical replay → 200 duplicate, same seq with a different body → 409, other-session key → 403); TC-063 with an epoch change mid-outage; TC-070 with a synthetic hole; TC-056 server gate. New TCs: key issued once per epoch, cross-session evidence name dropped, server-written FACE_MISMATCH, prefix retention removes orphans, licence gate fails on any other unverified file. k6 signer through `k6/crypto`. |
 | deploy (QA track) | `models:fetch` and the licence gate in the DEP-01, DEP-03 and production workflows; protected environments; controls 0 to 4 (with 1b) of section 6 tracked as owner actions; bucket CORS (PUT with Content-Type) per ST-7 |
 | hub, on acceptance | fsd.md §4 rows; api-contract.md error codes (after #31 and #33 merge); database.md comments (`batch_seq`, `hmac_key_enc`, `device_info`); architecture.md Security bullet; ADR 0010, 0004 §8 and 0005 §3 amendments; FR-606 wording if Q15 is yes; ADR 0001 OI-3 and OI-9 marked decided; the `ci.yml` model job and the lock licence-diff check; `CODEOWNERS` file |
 
