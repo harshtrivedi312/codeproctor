@@ -280,9 +280,11 @@ Status values: Not started, In progress, In review, Changes requested, Done (mer
 | DEP-01 | Deploy 1 | backend-engineer (D-26) | deploy/staging | ARC-05, BE-12, FE-10 | architect + code-reviewer | XL | Not started |
 | DEP-02 | Deploy 2 | backend-engineer (D-26) | deploy/go-live-checklist | BE-15B, QA-01B, QA-02, FE-13 | architect | M | Not started |
 | DEP-03 | Pilot stack (PA-07, D-16; no prompt step) | backend-engineer (D-26) | deploy/pilot | ARC-05, DEP-01, BE-15A, QA-02 | architect + code-reviewer | L | Not started |
-| INT-01 | Face-match threshold tuning (PA-08, D-24; no prompt step) | integrity-engineer | integrity/threshold-tuning | BE-08, ARC-04; Legal B-05 item 3 | architect + code-reviewer | M | Not started |
+| INT-01 | Face-match threshold tuning (PA-08, D-24; no prompt step) | integrity-engineer | integrity/threshold-tuning | BE-08, ARC-04; owner-approved volunteer form (C-11), volunteers, model download (P-07) | architect + code-reviewer | M | Not started |
+| COMP-01 | Compliance documents (C-03, C-05, C-09, C-11; no prompt step) | Delivery Lead drafts, owner approves | dl/compliance-decisions | none | owner | M | In progress |
+| FAIR-01 | Optional demographic self-report (C-13; no prompt step) | architect (ADR), db-engineer, backend-engineer, frontend-engineer | fair/demographics | ADR for separate storage, BE-07, FE-10 | architect + code-reviewer | M | Not started |
 
-Totals: 50 tasks (5 architect gates, 8 database, 16 backend, 1 integrity tuning, 14 frontend/SDK, 3 QA, 3 deploy).
+Totals: 52 tasks (5 architect gates, 8 database, 16 backend, 1 integrity tuning, 14 frontend/SDK, 3 QA, 3 deploy, 1 compliance documents, 1 fairness monitoring). COMP-01 and FAIR-01 were added 2026-10-05 by the owner's compliance decisions (D-47).
 
 ## 9. Task catalogue
 
@@ -361,6 +363,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Done when: tests pass and TC-008 is named in them.
 
 #### DB-06: Retention and erasure services
+- Compliance additions (2026-10-05, C-04, C-06): consent records get their own 3-year clock and are deleted at its end; recordings, ID images, selfies, re-check frames and keystroke data keep the 90-day default; erasure follows the approved NFR-05 wording; see OQ-1 (consent proof on erasure).
 - Owner: db-engineer. Branch: `db/step-6`. Depends on: DB-05. Gate: architect at PR.
 - Covers: FR-704, NFR-05, BR-13. TCs: TC-072, TC-094.
 - Deliverables: RetentionService (eligibility from `retention_anchor_at` + retention days, NULL anchor = hold; returns keys; nulls keys and deletes keystroke batches in one transaction after deletion; consent records and PDFs kept; one audit_logs row per session), CandidateErasureService per D-19 (records `erasure_requested_at`; waits while a review or appeal is open when the org setting `erasure.holdWhileReviewOrAppealOpen` is on, default on, and the candidate is told; then deletes all objects including consent PDFs, deletes media, identity, event and keystroke rows, blanks code and answers, anonymizes the candidate, keeps only anonymized scores), the erasure-hold setting and its default, storage interface injected and mocked. Rules: database.md Data rules and ADR 0004.
@@ -413,6 +416,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Done when: TC-042/043/044 integration tests pass against local Judge0 (or the agreed Linux runner, R-01); TC-012 passes; validation run over all seeded questions passes (PM addition to catch bad seed data, R-11).
 
 #### BE-06: Tests, invitations and email
+- Compliance additions (2026-10-05, C-02): accommodations gain "no face match / no identity check"; every recruiter change to accommodations writes an audit row.
 - Owner: backend-engineer. Branch: `backend/step-6`. Depends on: BE-05 (real: BE-03, BE-04).
 - Covers: FR-301, FR-302, FR-303, FR-304, FR-305, FR-106 (token generation). TCs: TC-020, TC-022, TC-023, TC-024.
 - Deliverables: TestsModule (sequential sections with limits not exceeding the duration, fixed and random-pick rules, profile STANDARD or STRICT, pass score); InvitationsModule (32-byte token, SHA-256 hash stored, window, accommodations zod schema with allowedAssistiveTools; creates the INVITED session); bulk CSV with row report; BullMQ `email` queue with Resend provider behind an interface (templates: invitation, reminder 24 h before window_end, OTP, results, otp-lockout, consent-copy with the signed PDF (D-17), password-reset (D-22), staff-invite, erasure-delayed (D-19)); expiry job moving unstarted sessions to EXPIRED (ADR 0002).
@@ -445,6 +449,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Done when: the six TCs pass as named tests.
 
 #### BE-08: Identity verification service
+- Compliance additions (2026-10-05, C-02, C-08): skip the face match when the invitation's accommodation says so, and show "identity check waived by accommodation" to the reviewer (OQ-3); periodic re-check frames follow C-08.
 - Owner: integrity-engineer. Branch: `backend/step-8`. Depends on: BE-07, BE-09, ARC-04. Parallel with: BE-11.
 - Covers: FR-403, FR-606 (FACE_MISMATCH re-check), FR-704 (embedding deletion). TCs: TC-033, TC-034 (PM-assigned, server half).
 - Deliverables: POST /candidate/session/identity (object storage keys, enqueues face-match, returns job ID) and GET status; worker scaffold (FastAPI, job consumer per ARC-04); face embedding with the model approved in ARC-04; configurable threshold; one retry then manual approval, never auto-reject; manual approval path per ADR 0004 (identity_checks status enum, manual decision fields); embeddings never stored; fixture images under a permissive licence.
@@ -457,6 +462,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Done when: TC-061, TC-073, TC-074, TC-075, TC-076 pass; false-positive report handed to the PM. Merging BE-12 closes the backend part of M3.
 
 #### FE-09: Candidate pre-test flow
+- Compliance additions (2026-10-05): load only an owner-approved consent version, and keep the placeholder guard (C-09); the decline screen shows the recruiter's contact (C-02); link the retention and destruction schedule from the consent step and the candidate portal (C-05).
 - Owner: frontend-engineer. Branch: `frontend/step-9`. Depends on: BE-07, FE-01, FE-08. Parallel with: BE-09..BE-12.
 - Covers: FR-401, FR-402, FR-403, FR-404, FR-405, FR-406, FR-605 (start blocked), FR-106 (OTP step and resume), NFR-06, NFR-07. TCs: TC-030, TC-031, TC-032 (PM-assigned), TC-033 (UI), TC-034, TC-035, TC-036 (PM-assigned), TC-095 and TC-096 (UI side).
 - Deliverables: stepper under /t/[token]: welcome and rules (information only), OTP, consent document (D-17: full document with version, Sign enabled only after scrolling to the end, typed full legal name, "copy emailed" confirmation, Decline path with the org's contact and no device access; accessible to keyboard and screen-reader users), system check, identity with liveness, room scan, STRICT QR side camera, practice question, final checklist and Start; resume and OTP cooldown messages (D-21); declined and already-used pages; calm copy, fix-it hints, WCAG 2.1 AA.
@@ -591,6 +597,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Done when: checklist delivered to the human.
 
 #### DEP-03: Pilot stack
+- Compliance additions (2026-10-05): one US AWS region for all data (C-03); the licence gate passes only the two accepted pinned model files (C-10); every processor has a DPA with SCCs, or DPF certification, before the first EU/UK candidate (C-03).
 - Owner: backend-engineer, architect review (D-26). Branch: `deploy/pilot`. Depends on: ARC-05, DEP-01, BE-15A, QA-02. Gate: ARC-05 before start; architect at PR. Approved as PA-07 by D-16 (2026-10-01). No prompt step.
 - Covers: NFR-03, NFR-04, NFR-05, FR-703, BO-5, BO-6, BRD section 10 (pilot). TCs: none new (smoke tests; TC-093 baseline re-run against the pilot stack recommended).
 - Deliverables: the pilot environment, separate from staging (D-10, D-11): its own AWS x86 instance (api, worker, redis, judge0, caddy); Postgres in AWS (RDS or EC2 per ARC-05); an AWS S3 recordings bucket with the ARC-05 settings (encryption, versioning off or short noncurrent expiry, Block Public Access, CORS for browser PUT; ADR 0001 section 2.1); pilot-only secrets in the vault; `app_user` from the `audit_append_only` migration with a pilot-only password set at provisioning (ADR 0006 section 7.4); pilot database credentials live only in GitHub Actions secrets and on the server, never on developer machines or in agent sessions (D-38); Compose runs under its own project name `codeproctor-pilot` (ADR 0009 section 4.4, SF5); backups kept in AWS; web on Cloudflare Pages pointed at the pilot API; `REQUIRE_LEGAL_APPROVED_CONSENT=true`; no seed accounts (Q-28 guard); runbook section.
@@ -601,8 +608,19 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Owner: integrity-engineer, architect review. Branch: `integrity/threshold-tuning`. Depends on: BE-08 (face-matching interface and model pinning), ARC-04. Approved as PA-08 by D-24 (2026-10-01). No prompt step.
 - Covers: FR-403, NFR-05, BO-4, BO-6; D-05 pilot entry criterion; D-18 test set. TCs: none directly (supports TC-033).
 - Deliverables: the internal test set from volunteers who sign the separate short consent (D-18): ID-style photo and selfie pairs per volunteer, plus impostor pairs; optional self-reported demographic data stored apart from the images, outside the CodeProctor database, and deleted after tuning; an offline evaluation script that calls the worker's face-matching interface with the pinned AuraFace model; false-match and false-non-match rates across thresholds, broken down by group only where Legal confirms a lawful basis; a recommended threshold and its expected manual-review rate; /docs/face-threshold-report.md. Fallback: a licensed dataset whose licence allows commercial use and biometric processing (ADR 0001 section 12). No production data.
-- Human inputs: Legal-approved volunteer consent form and lawful basis for the per-group breakdown (B-05 item 3); volunteers.
+- Human inputs: the owner-approved volunteer consent form (C-11; draft in /docs/compliance/volunteer-consent-form.md); volunteers; the model download (P-07). The per-group breakdown is allowed on the volunteers' explicit consent (C-12). The ID photo is cropped to the portrait on upload and the original deleted (form section 2).
 - Done when: the threshold is set in system configuration; the owner accepts the report; demographic data is deleted and the deletion recorded. Clears B-05 item 4.
+
+#### COMP-01: Compliance documents
+- Owner: Delivery Lead drafts; Harsh Trivedi approves (C-15). Branch: `dl/compliance-decisions` (PR #44). Added 2026-10-05 (D-47). No prompt step.
+- Deliverables, in this order: volunteer consent form (C-11, first, because recruiting takes time); retention and destruction schedule (C-05); consent document (C-09); DPIA with an automated-decision-law assessment (C-03, C-14); processor register with DPA/SCC/DPF status (C-03).
+- Done when: the owner approves each document; the consent document and retention schedule are loaded and linked by the frontend (FE-09); B-05 items 1, 2, 5 and 6 are cleared.
+
+#### FAIR-01: Optional demographic self-report
+- Owner: architect (ADR for separate storage and access, under ADR 0008), then db-engineer (schema and deletion with session data), backend-engineer (API, aggregate report with a minimum group of 10), frontend-engineer (post-test form with its own consent and "prefer not to say"). Added 2026-10-05 (C-13, D-47). No prompt step.
+- Covers: brd.md section 7 (flag rates monitored across groups); the new FR the hub adds; new TCs from QA.
+- Rules (C-13): asked after the test; separate explicit consent; stored apart from the session; never shown to reviewers or recruiters; never used in scoring or decisions; aggregate only, with a minimum group of 10; deleted with the session data.
+- Done when: in place and tested before the pilot exit review (not needed for pilot start).
 
 #### FE-14: Lockdown desktop client (later phase, out of scope for this build)
 - Owner: TBD. Branch: `frontend/step-14`. Depends on: a later-phase go-ahead, new ADR on attestation, BE-07, FE-10. Not scheduled in this build (D-13, 2026-10-01).
