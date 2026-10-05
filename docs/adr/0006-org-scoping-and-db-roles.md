@@ -326,7 +326,9 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
   - A create of a model with `org_id` should narrow to `runInOrg(orgId)` first, so the scalar rule applies.
   - A create left in system scope is review-only (rule (i)): the context does not track which org ids were loaded, and code-reviewer checks that the org was loaded first.
 
-**No write moves a row to another session (ADR 0013 CS-4).** In a SERVICE session scope, an update on a session-path model may not change `session_id` or `session_question_id`. This mirrors the scalar `orgId` rule above.
+**No write moves a row to another session (ADR 0013 CS-4).** In a SERVICE session scope, an update on a session-path model may not change `session_id` or any `session_question_id`. This mirrors the scalar `orgId` rule above.
+- This is enforced only in SERVICE session scope.
+- Cross-session plain-org jobs, such as `analyze-session` and retention, can still re-parent a row under rule (i). Code review checks that they never write `session_id` or `session_question_id`.
 - It covers `update`, `updateMany`, `updateManyAndReturn` and the update branch of `upsert`.
 - Creates take `session_id` from the scope.
 - CANDIDATE scope follows the stricter ADR 0013 CS-4 rules.
@@ -443,8 +445,15 @@ There is no org-provisioning reason (8.6, 8.9).
       - It is refused in any `sessionId` scope, like all raw SQL.
   - **Any scope carrying a `sessionId`:** raw SQL is refused, for actor CANDIDATE (`runAsCandidate`) and actor SERVICE (`runAsSessionJob`) alike. A session job that needs raw SQL needs an amendment to this ADR; a named call site alone is not enough. ADR 0013 CS-4 must say the same.
 - **Per-session write lock for SERVICE writers: `guardLive` (ADR 0004 section 9.5; ADR 0013).**
-  - SERVICE writers do not use the advisory lock. They take the lock through the model API with `guardLive`: an `updateMany` on `sessions` that writes `status` to its current value, filtered by the session's live status.
-  - This locks the session row without raw SQL. A count of 0 means the session is no longer live, and the writer stops.
+  - SERVICE writers do not use the advisory lock. They take the lock through the model API with `guardLive`, the first statement of the write transaction.
+  - **The lock.** `guardLive` is `sessions.updateMany({ where: { id, status: <the status read>, NOT: { status: 'ERASED' } }, data: { status: <the same status> } })`. It writes the status to its current value, which takes the row lock without raw SQL.
+    - It does not require a "live" status. Writers on GRADED or COMPLETED sessions, such as reports, use it too.
+    - If the status read is ERASED, the writer returns without writing.
+  - **0 rows.** The status changed in the meantime. The writer re-reads it and stops on ERASED; otherwise it retries a bounded number of times.
+  - **Jobs that work on ERASED sessions** use a separate entry, not `guardLive`: ingest-close and key destruction, the sweep passes, evidence-expire, and the consent-PDF job.
+  - **Where it lives.** `SessionJobProcessor` provides the write-transaction wrapper that calls `guardLive`. Writers do not call it by hand.
+  - **Lock timeout.** If ADR 0004 keeps a `lock_timeout`, it is set without raw SQL: either a SERVICE pool whose pg options include `-c lock_timeout=...`, or the Prisma interactive-transaction `timeout`.
+  - **Lock order.** A writer that touches several sessions takes one session per transaction. Where it cannot, it locks them in ascending id order.
 - **Never on organizations.** Raw SQL never writes `organizations`, in any scope.
 - Model queries inside `runRawSql` stay scoped.
 - The `runRawSql` reason stays free text for the reviewer.
@@ -525,7 +534,12 @@ There is no org-provisioning reason (8.6, 8.9).
 - the seed;
 - the provisioning CLI;
 - BE-02's interim `prisma.module.ts`, until FU-DB-58 deletes it;
-- the candidate-write datasource (ADR 0013): a second client with `pool_timeout=2` and `options=-c statement_timeout=3000`. It exists because `SET LOCAL` is raw SQL and is refused in session scopes, and it must carry the same extension.
+- the candidate-write datasource (ADR 0013): a second client. Prisma 7 uses `@prisma/adapter-pg` (ADR 0009 section 4.2), so `pool_timeout` and `connection_limit` URL parameters do not apply; the pool options go on `PrismaPg`:
+  - `max`;
+  - `connectionTimeoutMillis: 2000`;
+  - `statement_timeout: 3000`.
+
+  The factory signature widens to `createPrismaClient(connectionString, poolOptions?)`. The BE-07 spike confirms the options. It exists because `SET LOCAL` is raw SQL and is refused in session scopes, and it must carry the same extension.
 
 This list is part of the FU-DB-67 importer test. That test proves only who calls `createPrismaClient`, not that the extension is applied, so a second test checks the candidate-write client itself:
 - with no scope, a query on it throws `OrgContextMissingError`;
@@ -644,7 +658,7 @@ How the check runs:
     - refuse a scalar `orgId` in system-scope `update`, `updateMany`, `updateManyAndReturn` and `upsert.update` on direct models;
     - make an unrecognised write operation throw in system scope.
   - 8.5: build `withGrant({ model, columns, ids }, fn)` per the grant spec: mandatory ids, the extension adds `id IN ids`, and the `active` flag, plus the test for a detached query.
-  - **Second client.** Build the candidate-write datasource (`pool_timeout=2`, `options=-c statement_timeout=3000`; ADR 0013) with the same extension.
+  - **Second client.** Build the candidate-write datasource with the same extension and pool options on `PrismaPg` (`max`, `connectionTimeoutMillis: 2000`, `statement_timeout: 3000`), through the widened factory `createPrismaClient(connectionString, poolOptions?)`. The BE-07 spike confirms the options.
     - List it as an allowed importer in the FU-DB-67 importer test (8.6, "The raw client").
     - Add the test that it throws `OrgContextMissingError` with no scope and applies the CS-4 filters in CANDIDATE scope.
     - Run the readiness role assertion on its pool too (8.8).
