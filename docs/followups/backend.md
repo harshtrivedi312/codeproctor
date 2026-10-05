@@ -66,3 +66,13 @@ Should-fix items and nits from Backend-track work. Same columns as `docs/followu
 - (e2) For the architect and frontend: problem+json now has an optional `code` extension member (ADR 0001 C-9, QA-D-03 mock shape). Only our own coded 403s set it (`REAUTH_FAILED`, `TWO_FACTOR_REQUIRED_FOR_ROLE`), never a 5xx.
 - (f) `apps/web/openapi/openapi.yaml` is a hand-written MSW mock contract (paths under `/v1`, not the real API), so it was NOT regenerated here: replacing it would be a huge unrelated diff and break the web mocks. The hub or frontend must swap it for `/api/docs-json` and delete the mocks (see its own header). apps/web was not edited.
 - fsd.md API table (hub update): add `POST /auth/2fa/disable`, `POST /auth/2fa/recovery-codes/regenerate`, `POST /auth/2fa/reset/:userId` (SUPER_ADMIN) next to FU-BE-37's missing rows; audit actions `AUTH_2FA_DISABLED`, `AUTH_RECOVERY_CODES_REGENERATED`, `AUTH_2FA_RESET_BY_ADMIN`.
+
+### Contract changes from the ADR 0011 follow-up (frontend and architecture hub)
+
+ADR 0011 (owner decision C-21) answers 5 and 6 are now done on `POST /auth/2fa/disable` (FR-102, FR-104; TC-003). Answers 1 to 4 were done in BE-02. This supersedes FU-BE-44 where it says sessions are left alone.
+
+- Body is `{ currentPassword, totpCode }`. `totpCode` is a 6-digit TOTP code only; a recovery code or a missing code is 400. The frontend must collect a TOTP code next to the password.
+- Order: password (403 `REAUTH_FAILED`), 409 if 2FA is off, TOTP code (same 403 `REAUTH_FAILED` body for a wrong or replayed code; counts toward the same 5-attempt lockout; Redis outage is 503 "Verification is temporarily unavailable." and counts nothing), then the role refusal 403 `TWO_FACTOR_REQUIRED_FOR_ROLE` for SUPER_ADMIN and REVIEWER. The 409 before the code check tells a caller who already holds the password only that 2FA is off.
+- Success is still 204 but now signs the user out everywhere: every refresh-token family of the user (including the caller's) is revoked in the same transaction that clears the TOTP secret, flag and recovery hashes, and the response clears the refresh cookie. The frontend must redirect to sign-in after a successful disable. The audit row `AUTH_2FA_DISABLED` carries `{ sessionsRevoked }`.
+- Access tokens already issued live until they expire (15 minutes); the BE-03 tokens-valid-after marker will close that gap. `POST /auth/2fa/reset/:userId` already revoked all of the target's families (answer 5) and keeps its test.
+- QA-owned `apps/api/test/integration/tc-003.int.test.ts` calls `/2fa/disable` with `{ currentPassword }` only (lines around 283 to 312, 364, 411) and must be updated by QA to send `totpCode`.
