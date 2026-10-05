@@ -5,7 +5,8 @@
 //
 //   Model operation   The model's rule in ORG_SCOPE decides. With no org context the call throws
 //                     OrgContextMissingError. In an org scope, applyOrgScope adds the filter (or
-//                     stamps and checks the payload). In system scope the call runs unfiltered.
+//                     stamps and checks the payload). In system scope the call runs unfiltered,
+//                     but a nested relation write and an `orgId` in an update are still refused.
 //                     An unscoped model runs as it is. A model with no rule, or an operation that
 //                     is not in SCOPED_OPERATIONS, is refused: the extension fails closed.
 //   Raw query         $queryRaw, $queryRawUnsafe, $executeRaw, $executeRawUnsafe (and any other
@@ -50,8 +51,7 @@ import { Prisma } from '../generated/prisma/client.js';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import { OrgContextMissingError, OrgScopeViolationError, RawQueryNotAllowedError } from './errors';
 import type { ScopeSource } from './org-context';
-import { applyOrgScope } from './org-scope-args';
-import { assertNoNestedWritesIn } from './org-scope-nested';
+import { applyOrgScope, assertSystemScopeWrite } from './org-scope-args';
 import { ORG_SCOPE } from './org-scope-map';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
 
@@ -90,8 +90,9 @@ export function orgScopeExtension(source: ScopeSource) {
         const scope = store?.scope;
         if (scope === undefined) throw new OrgContextMissingError(`${model}.${operation}`);
         if (scope.kind === 'system') {
-          // System scope is unfiltered, but a nested relation write is refused here too.
-          assertNoNestedWritesIn(model as ModelName, operation, args);
+          // System scope is unfiltered, but a nested relation write and an orgId in an update are
+          // refused here too (a row is never moved to another org).
+          assertSystemScopeWrite(model as ModelName, rule, operation, args);
           return query(args);
         }
 

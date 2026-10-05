@@ -1791,6 +1791,120 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
     });
   });
 
+  describe('system scope cannot move a row to another org (scalar orgId in an update)', () => {
+    // Deny-by-default refuses nested relation writes, so a scalar orgId is the only way left to
+    // move a row. Postgres catches it only on the composite-key tables, so the extension refuses it
+    // in system scope too (org scope already did).
+    let M: TenantFixture;
+    let N: TenantFixture;
+    const system = <T>(fn: () => Promise<T>): Promise<T> =>
+      orgContext.runSystem('AUTH_BOOTSTRAP', fn);
+
+    beforeAll(async () => {
+      M = await createTenant(owner, 'm');
+      N = await createTenant(owner, 'n');
+    });
+
+    it('TC-008 system-scope user.update({ data: { orgId: <other org> } }) is refused, and the user stays in its org', async () => {
+      const before = await snapshot();
+      await expect(
+        system(() =>
+          prisma.client.user.update({ where: { id: M.userId }, data: { orgId: N.orgId } }),
+        ),
+      ).rejects.toThrow(/orgId cannot be written by an update/);
+      // The { set } form, and naming the row's own org: the key itself is refused, whatever the value.
+      await expect(
+        system(() =>
+          prisma.client.user.update({ where: { id: M.userId }, data: { orgId: { set: N.orgId } } }),
+        ),
+      ).rejects.toBeInstanceOf(OrgScopeViolationError);
+      await expect(
+        system(() =>
+          prisma.client.user.update({ where: { id: M.userId }, data: { orgId: M.orgId } }),
+        ),
+      ).rejects.toBeInstanceOf(OrgScopeViolationError);
+      expect((await owner.user.findUniqueOrThrow({ where: { id: M.userId } })).orgId).toBe(M.orgId);
+      expect(await snapshot()).toEqual(before);
+    });
+
+    it('TC-008 updateMany, updateManyAndReturn and the update branch of upsert are refused on other direct models (Question, Test, Candidate)', async () => {
+      const before = await snapshot();
+      const question = M.rows.Question.filter.id as string;
+      const attempts: Array<() => Promise<unknown>> = [
+        () =>
+          prisma.client.question.updateMany({
+            where: { id: question },
+            data: { orgId: N.orgId },
+          }),
+        () =>
+          prisma.client.question.updateManyAndReturn({
+            where: { id: question },
+            data: { orgId: N.orgId },
+          }),
+        () =>
+          prisma.client.question.upsert({
+            where: { id: question },
+            create: { orgId: M.orgId, slug: 'never-created' },
+            update: { orgId: N.orgId },
+          }),
+        () =>
+          prisma.client.test.update({
+            where: { id: M.rows.Test.filter.id as string },
+            data: { orgId: N.orgId },
+          }),
+        () =>
+          prisma.client.candidate.updateMany({
+            where: { id: M.rows.Candidate.filter.id as string },
+            data: { orgId: { set: N.orgId } },
+          }),
+      ];
+      for (const attempt of attempts) {
+        await expect(system(attempt)).rejects.toBeInstanceOf(OrgScopeViolationError);
+      }
+      expect((await owner.question.findUniqueOrThrow({ where: { id: question } })).orgId).toBe(
+        M.orgId,
+      );
+      expect(await snapshot()).toEqual(before);
+    });
+
+    it('TC-008 an Organization keeps its id in system scope too', async () => {
+      await expect(
+        system(() =>
+          prisma.client.organization.update({ where: { id: M.orgId }, data: { id: N.orgId } }),
+        ),
+      ).rejects.toBeInstanceOf(OrgScopeViolationError);
+      expect(await owner.organization.count({ where: { id: M.orgId } })).toBe(1);
+    });
+
+    it('TC-008 positive controls: a system-scope update without orgId works, and a system-scope create may set orgId', async () => {
+      const renamed = await system(() =>
+        prisma.client.user.update({
+          where: { id: M.userId },
+          data: { fullName: 'Renamed by system' },
+        }),
+      );
+      expect(renamed).toMatchObject({ fullName: 'Renamed by system', orgId: M.orgId });
+      const updated = await system(() =>
+        prisma.client.question.updateMany({
+          where: { id: M.rows.Question.filter.id as string },
+          data: { isArchived: true },
+        }),
+      );
+      expect(updated.count).toBe(1);
+      // Creates in system scope are review-only: the orgId is whatever the caller wrote.
+      const created = await system(() =>
+        prisma.client.question.create({ data: { orgId: N.orgId, slug: 'created-by-system' } }),
+      );
+      expect(created.orgId).toBe(N.orgId);
+      const many = await system(() =>
+        prisma.client.question.createManyAndReturn({
+          data: [{ orgId: M.orgId, slug: 'many-by-system' }],
+        }),
+      );
+      expect(many.map((row) => row.orgId)).toEqual([M.orgId]);
+    });
+  });
+
   describe('system scope and raw SQL', () => {
     it('TC-008 system scope reads every org, and is only reachable through runSystem', async () => {
       const everyOrg = await orgContext.runSystem('AUTH_BOOTSTRAP', () =>

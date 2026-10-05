@@ -133,7 +133,7 @@ One hook, `query.$allOperations`, sees every model operation and every raw query
 | anything else                                                                                                   | refused (fail closed), and a compile-time check (`OPERATION_COVERAGE`) breaks `typecheck` when Prisma adds an operation |
 
 With no context a query on any model throws `OrgContextMissingError`. In system scope it runs
-unfiltered. The caller's own `where` (`OR`, `NOT`, an `orgId` naming another org) is kept and ANDed
+unfiltered, except that a nested relation write and an `orgId` in an update are still refused. The caller's own `where` (`OR`, `NOT`, an `orgId` naming another org) is kept and ANDed
 with the org filter, so it can only narrow.
 
 ### Raw queries
@@ -153,6 +153,16 @@ orgs), but code in a system scope may narrow to one org with `runInOrg`. An org 
 to another org either. `runRawSql` needs an active scope: **scope first, then `runRawSql`** (inside
 `runSystem`, `runAsUser` or `runInOrg`). Called with no scope it throws, so there is no other
 order. Treat every `runSystem` and `runRawSql` in a pull request as a review flag.
+
+System scope is unfiltered, but two rules hold in it as in an org scope: **nested relation writes
+are refused** (see "Nested writes and nested cursors"), and **`orgId` cannot be changed on update**.
+In system scope any `orgId` key in the data of `update`, `updateMany`, `updateManyAndReturn` or the
+update branch of `upsert` is refused on a model with its own `org_id`, whatever its value (the
+`{ set }` form too), and an Organization keeps its id. **`create` may set `orgId`** (creates in
+system scope are review-only, ADR 0006). With nested writes denied, a scalar `orgId` is the only way
+left to move a row to another org, and Postgres catches that only on the composite-key tables, so a
+mass-assignment bug in a system-scope write could otherwise move a user, question, test, candidate,
+consent text or webhook endpoint. The check sends no query, and its message carries no value.
 
 ### Transactions
 
