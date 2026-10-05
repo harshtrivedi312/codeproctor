@@ -2,7 +2,13 @@
 // reads (FU-DB-63) must match prisma/schema.prisma. No database needed.
 import { ORG_SCOPE } from './org-scope-map';
 import type { ModelName } from './org-scope-map';
-import { FK_CLASSES, RULE_I_REFERENCES, relationKeys, relationOf } from './org-scope-relations';
+import {
+  FK_CLASSES,
+  RULE_I_REFERENCES,
+  relationKeys,
+  relationOf,
+  scopeHopColumn,
+} from './org-scope-relations';
 import type { FkClass, ForeignKey, RelationSide, RuleIKind } from './org-scope-relations';
 import { readSchemaModels } from './testing/data-model';
 import type { SchemaField } from './testing/data-model';
@@ -81,6 +87,29 @@ describe('foreign key classification (NFR-04, FR-103; FU-DB-64)', () => {
       (k) => `${k.model}.${k.field}`,
     );
     expect(hops.sort()).toEqual(paths.sort());
+  });
+
+  it('TC-008 scopeHopColumn names the scalar column of every path model first hop, as the schema holds it (FU-DB-107)', () => {
+    const schema = readSchemaModels();
+    for (const [model, rule] of Object.entries(ORG_SCOPE)) {
+      const column = scopeHopColumn(model as ModelName);
+      if (rule.kind !== 'path') {
+        expect(column).toBeUndefined();
+        continue;
+      }
+      expect(schema[model]?.[rule.path[0]]?.foreignKeyFields).toEqual([column]);
+      // It is a plain scalar column of the model, not a relation.
+      expect(schema[model]?.[column ?? '']?.holdsForeignKey).toBe(false);
+      expect(schema[model]?.[column ?? '']?.type).not.toBe(schema[model]?.[rule.path[0]]?.type);
+    }
+    expect(scopeHopColumn('TestSection')).toBe('testId');
+    expect(scopeHopColumn('ProctorEvent')).toBe('sessionId');
+    expect(scopeHopColumn('RefreshToken')).toBe('userId');
+    expect(scopeHopColumn('Submission')).toBe('sessionQuestionId');
+    expect(scopeHopColumn('FlagDecision')).toBe('eventId');
+    expect(scopeHopColumn('WebhookDelivery')).toBe('endpointId');
+    expect(scopeHopColumn('Session')).toBeUndefined();
+    expect(scopeHopColumn('Organization')).toBeUndefined();
   });
 });
 
@@ -221,6 +250,38 @@ describe('foreign key classification checks can fail (NFR-04)', () => {
         'Child.owner: the side table says class ORG_ID, the foreign key is RULE_I',
       ),
     ]);
+  });
+
+  it('TC-008 fails when a SCOPE_HOP key is held in a column that is not its relation field plus Id (scopeHopColumn derives it)', () => {
+    const oddSchema: SchemaModels = {
+      Child: { id: field('id', 'String'), owner: field('owner', 'Parent', ['parentRef']) },
+      Parent: { id: field('id', 'String'), children: field('children', 'Child') },
+    };
+    const oddScope = {
+      Child: { kind: 'path', path: ['owner'] },
+      Parent: { kind: 'unscoped', reason: 'test' },
+    } as const;
+    const hop = [fk('Child', 'owner', 'Parent', 'children', 'SCOPE_HOP')];
+    const oddSides = new Map<string, RelationSide>([
+      ['Child.owner', { target: asModel('Parent'), holdsFk: true, fkClass: 'SCOPE_HOP' }],
+      ['Parent.children', { target: asModel('Child'), holdsFk: false, fkClass: 'SCOPE_HOP' }],
+    ]);
+    const broken = (schemaToCheck: SchemaModels): string[] =>
+      findRelationProblems({
+        fks: hop,
+        schema: schemaToCheck,
+        scope: oddScope,
+        relationOf: (m, f) => oddSides.get(`${m}.${f}`),
+        relationKeys: [...oddSides.keys()],
+      });
+    expect(broken(oddSchema)).toEqual([
+      expect.stringContaining('Child.owner is a SCOPE_HOP key held in parentRef, not ownerId'),
+    ]);
+    const conventional: SchemaModels = {
+      ...oddSchema,
+      Child: { id: field('id', 'String'), owner: field('owner', 'Parent', ['ownerId']) },
+    };
+    expect(broken(conventional)).toEqual([]);
   });
 
   it('TC-008 a two-column key is COMPOSITE only when it includes orgId', () => {

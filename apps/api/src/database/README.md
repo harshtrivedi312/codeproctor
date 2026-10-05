@@ -134,13 +134,13 @@ pass a model that already has one (nearest ancestor).
 One hook, `query.$allOperations`, sees every model operation and every raw query
 (`org-scope.extension.ts`; the argument rewriting is in `org-scope-args.ts`).
 
-| Operation                                                                                                       | Inside an org scope                                                                                                                                                        |
-| --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `findUnique`, `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `findMany`, `count`, `aggregate`, `groupBy` | org filter ANDed into `where`                                                                                                                                              |
-| `update`, `updateMany`, `updateManyAndReturn`, `delete`, `deleteMany`                                           | org filter ANDed into `where`; on `direct` models an update cannot change `orgId`. `self`: `delete` and `deleteMany` are refused (deleting a tenant is a system operation) |
-| `create`, `createMany`, `createManyAndReturn`                                                                   | `direct`: `orgId` checked (refused when it names another org) and, as a safety net, added when missing. `path`: passed through. `self`: refused                            |
-| `upsert`                                                                                                        | filter on `where`, `create` stamped and `update` checked as above                                                                                                          |
-| anything else                                                                                                   | refused (fail closed), and a compile-time check (`OPERATION_COVERAGE`) breaks `typecheck` when Prisma adds an operation                                                    |
+| Operation                                                                                                       | Inside an org scope                                                                                                                                                                              |
+| --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `findUnique`, `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `findMany`, `count`, `aggregate`, `groupBy` | org filter ANDed into `where`                                                                                                                                                                    |
+| `update`, `updateMany`, `updateManyAndReturn`, `delete`, `deleteMany`                                           | org filter ANDed into `where`; on `direct` models an update that names another org's `orgId` is refused. `self`: `delete` and `deleteMany` are refused (deleting a tenant is a system operation) |
+| `create`, `createMany`, `createManyAndReturn`                                                                   | `direct`: `orgId` checked (refused when it names another org) and, as a safety net, added when missing. `path`: passed through. `self`: refused                                                  |
+| `upsert`                                                                                                        | filter on `where`, `create` stamped and `update` checked as above                                                                                                                                |
+| anything else                                                                                                   | refused (fail closed), and a compile-time check (`OPERATION_COVERAGE`) breaks `typecheck` when Prisma adds an operation                                                                          |
 
 With no context a query on any model throws `OrgContextMissingError`. In system scope it runs
 unfiltered, except that a nested relation write and an `orgId` in an update are still refused. The caller's own `where` (`OR`, `NOT`, an `orgId` naming another org) is kept and ANDed
@@ -166,15 +166,33 @@ to another org either. `runRawSql` needs an active scope: **scope first, then `r
 `runSystem`, `runAsUser` or `runInOrg`). Called with no scope it throws, so there is no other
 order. Treat every `runSystem` and `runRawSql` in a pull request as a review flag.
 
-System scope is unfiltered, but two rules hold in it as in an org scope: **nested relation writes
-are refused** (see "Nested writes and nested cursors"), and **`orgId` cannot be changed on update**.
-In system scope any `orgId` key in the data of `update`, `updateMany`, `updateManyAndReturn` or the
-update branch of `upsert` is refused on a model with its own `org_id`, whatever its value (the
-`{ set }` form too), and an Organization keeps its id. **`create` may set `orgId`** (creates in
-system scope are review-only, ADR 0006). With nested writes denied, a scalar `orgId` is the only way
-left to move a row to another org, and Postgres catches that only on the composite-key tables, so a
-mass-assignment bug in a system-scope write could otherwise move a user, question, test, candidate,
-consent text or webhook endpoint. The check sends no query, and its message carries no value.
+System scope is unfiltered, but it refuses what would move a row to another org. Three rules hold in
+it:
+
+- **Nested relation writes are refused**, as in an org scope (see "Nested writes and nested cursors").
+- **`orgId` cannot be changed on update.** Any `orgId` key in the data of `update`, `updateMany`,
+  `updateManyAndReturn` or the update branch of `upsert` is refused on a model with its own
+  `org_id`, whatever its value (the `{ set }` form too), and an Organization keeps its id.
+- **A path model's first-hop scope key cannot be changed on update** (FU-DB-107): `testId` of
+  `TestSection`, `sessionId` of `ProctorEvent`, `userId` of `RefreshToken`, and the rest of the 21
+  `SCOPE_HOP` keys (`scopeHopColumn(model)` in `org-scope-relations.ts`), on the same four
+  operations and in the same forms. The first hop is what ties such a row to its org, so re-pointing
+  it moves the row to the org of the new parent, and Postgres does not catch that.
+
+**`create` may set `orgId` and any parent id** (creates in system scope are review-only, ADR 0006).
+With nested relation writes denied, a scalar foreign key is the only way left to move a row: the
+`orgId` of a model that has one, or the first-hop key of a path model. They are the keys that decide
+which org a row belongs to, which is why they, and not the other foreign keys, are refused. Postgres
+catches `orgId` only on the composite-key tables and the first-hop key never, so a mass-assignment
+bug in a system-scope write could otherwise move a user, question, test, candidate, consent text or
+webhook endpoint, or re-parent a section, event or token. The checks send no query, and their
+messages carry no value.
+
+In an **org scope** the two rules differ. An update naming the caller's own `orgId` is accepted
+(another org's is refused). A first-hop key is **not** refused: re-parenting a path-model row there
+is rule (i), limit (b) below, because the scope filters the row being updated and cannot see the new
+parent. A service that re-parents loads the new parent through the scoped client first and answers
+404 on a miss. (`tc-008-org-isolation.spec.ts` pins this; it documents the limit and is not a fix.)
 
 ### Transactions
 
@@ -244,8 +262,9 @@ looked at.
   Postgres checks only the composite keys (`invitations.test_id`, `invitations.candidate_id`,
   `sessions.invitation_id`, which include `org_id`). **Every other id follows rule (i)**: load the
   row through the scoped client first, and answer 404 on a miss.
-- **(b) Re-parenting.** An update that changes a path model's first-hop foreign key, for example
-  `testSection.update({ data: { testId } })`, is the same as a path create: rule (i). A `create` on
+- **(b) Re-parenting in an org scope.** An update that changes a path model's first-hop foreign
+  key, for example `testSection.update({ data: { testId } })`, is the same as a path create: rule
+  (i). System scope refuses it (see "System scope"); an org scope does not. A `create` on
   a `path` model cannot be stamped either (there is no `org_id` column), so the parent id in the
   payload must have been loaded through the scoped client first.
 - **(c) Nested reads are not filtered.** `include`, `select`, the fluent API, relation filters,
@@ -284,12 +303,12 @@ looked at.
 missing, unclassified, classified twice, or in the wrong class. A new foreign key breaks the build
 until it is classified.
 
-| Class       | Count | What it is                                                                                                                                                             | Who guards it                                          |
-| ----------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| `ORG_ID`    | 9     | the `org_id` key of a model with its own org (to `organizations`)                                                                                                      | the scope (filter and stamp)                           |
-| `SCOPE_HOP` | 21    | the first hop of a path model's scope path (its own parent)                                                                                                            | the scope filter; creating or re-parenting is rule (i) |
-| `COMPOSITE` | 3     | `(id, org_id)` keys on `invitations` (2) and `sessions` (1), ADR 0006 2 ii                                                                                             | the database                                           |
-| `RULE_I`    | 25    | references the scope cannot check: **12 staff** (to users: `created_by`, `reviewer_id`, `assigned_to`, ...) and **13 cross-chain** (another chain, or a second parent) | **rule (i)**                                           |
+| Class       | Count | What it is                                                                                                                                                             | Who guards it                                                                                                 |
+| ----------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `ORG_ID`    | 9     | the `org_id` key of a model with its own org (to `organizations`)                                                                                                      | the scope (filter and stamp)                                                                                  |
+| `SCOPE_HOP` | 21    | the first hop of a path model's scope path (its own parent)                                                                                                            | the scope filter; creating, and re-parenting in an org scope, is rule (i) (system scope refuses to re-parent) |
+| `COMPOSITE` | 3     | `(id, org_id)` keys on `invitations` (2) and `sessions` (1), ADR 0006 2 ii                                                                                             | the database                                                                                                  |
+| `RULE_I`    | 25    | references the scope cannot check: **12 staff** (to users: `created_by`, `reviewer_id`, `assigned_to`, ...) and **13 cross-chain** (another chain, or a second parent) | **rule (i)**                                                                                                  |
 
 `SCOPE_HOP + COMPOSITE + RULE_I` is 49; the 9 `ORG_ID` keys make 58. Each `RULE_I` entry also says
 whether it is `staff` or `cross-chain` (`ruleI`).
@@ -465,24 +484,28 @@ which stays one statement, and be ready to retry on `P2002` elsewhere.
 - Relate rows with scalar foreign keys, through Prisma's unchecked inputs, one top-level call per
   row; never `connect` and the other nested relation writes (see "Write with scalar foreign keys
   and separate calls").
+- Re-parenting a row (an update of a path model's first-hop key, `testSection.testId`,
+  `proctorEvent.sessionId`) in an org scope is rule (i): load the new parent through the scoped
+  client first, and answer 404 on a miss. System scope refuses it (FU-DB-107); do not re-parent from
+  there.
 - Connect as `app_user` (`DATABASE_URL`). `MIGRATION_DATABASE_URL` never appears in API code.
 
 ## Files
 
-| File                                           | What it holds                                                                                                      |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `create-prisma-client.ts`                      | The only `new PrismaClient` (ADR 0009 section 4.2)                                                                 |
-| `prisma.service.ts`, `database.module.ts`      | The Nest service (connect, disconnect) and the global module                                                       |
-| `org-scope-map.ts`                             | The scope map and `orgFilter`                                                                                      |
-| `org-scope-args.ts`                            | Pure argument rewriting per operation, and the operation coverage check                                            |
-| `org-scope-nested.ts`                          | The nested guards: nested writes that reach another org's rows, and nested cursors                                 |
-| `org-scope-relations.ts`                       | Every foreign key classified (`FK_CLASSES`, `RULE_I_REFERENCES`) and the side of every relation that holds the key |
-| `org-scope.extension.ts`                       | The `$extends` query extension and `OrgScopedPrismaClient`                                                         |
-| `org-context.ts`, `org-context.interceptor.ts` | The AsyncLocalStorage context, its API, and the HTTP population point                                              |
-| `prisma.module.ts`                             | BE-02's interim unscoped client for auth bootstrap only (not part of DB-05)                                        |
-| `errors.ts`                                    | `OrgContextMissingError`, `OrgScopeViolationError`, `RawQueryNotAllowedError`                                      |
-| `error-scrub.ts`                               | Keeps argument values out of the Prisma errors that are logged (FU-DB-70)                                          |
-| `testing/`                                     | Test helpers (excluded from the build): throwaway migrated Postgres, fixtures, scope checks                        |
+| File                                           | What it holds                                                                                                                                                                  |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `create-prisma-client.ts`                      | The only `new PrismaClient` (ADR 0009 section 4.2)                                                                                                                             |
+| `prisma.service.ts`, `database.module.ts`      | The Nest service (connect, disconnect) and the global module                                                                                                                   |
+| `org-scope-map.ts`                             | The scope map and `orgFilter`                                                                                                                                                  |
+| `org-scope-args.ts`                            | Pure argument rewriting per operation, and the operation coverage check                                                                                                        |
+| `org-scope-nested.ts`                          | The nested guards: nested writes that reach another org's rows, and nested cursors                                                                                             |
+| `org-scope-relations.ts`                       | Every foreign key classified (`FK_CLASSES`, `RULE_I_REFERENCES`), the first-hop column of each path model (`scopeHopColumn`) and the side of every relation that holds the key |
+| `org-scope.extension.ts`                       | The `$extends` query extension and `OrgScopedPrismaClient`                                                                                                                     |
+| `org-context.ts`, `org-context.interceptor.ts` | The AsyncLocalStorage context, its API, and the HTTP population point                                                                                                          |
+| `prisma.module.ts`                             | BE-02's interim unscoped client for auth bootstrap only (not part of DB-05)                                                                                                    |
+| `errors.ts`                                    | `OrgContextMissingError`, `OrgScopeViolationError`, `RawQueryNotAllowedError`                                                                                                  |
+| `error-scrub.ts`                               | Keeps argument values out of the Prisma errors that are logged (FU-DB-70)                                                                                                      |
+| `testing/`                                     | Test helpers (excluded from the build): throwaway migrated Postgres, fixtures, scope checks                                                                                    |
 
 Tests (`*.spec.ts`) name TC-008 and NFR-04 or FR-103: the map completeness test and its failure
 cases, the argument rewriting for every operation and model, the context and interceptor, the

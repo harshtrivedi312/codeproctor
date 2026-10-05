@@ -6,6 +6,7 @@ import { OrgScopeViolationError } from './errors';
 import { assertNoNestedCursor, assertNoNestedWritesIn } from './org-scope-nested';
 import { orgFilter } from './org-scope-map';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
+import { scopeHopColumn } from './org-scope-relations';
 
 type PlainObject = Record<string, unknown>;
 
@@ -149,16 +150,24 @@ function assertTenancyKept(
 }
 
 /**
- * System scope: no org filter, but writes still may not move a row to another org. After nested
- * relation writes are denied, a scalar `orgId` in an update is the only way left to do that, and
- * Postgres catches it only on the composite-key tables. So on a model with its own org_id, any
- * `orgId` key in the payload of `update`, `updateMany`, `updateManyAndReturn` or the update branch
- * of `upsert` is refused, whatever its value and in any form (`{ set }` too), and an Organization
- * keeps its id. A `create` may set `orgId` here: creates in system scope are review-only (ADR 0006).
- * Sends no query; the message carries no value.
+ * System scope: no org filter, but an update may not move a row to another org or another parent.
+ * Nested relation writes are denied (ADR 0006 section 8), so a row can be moved only by writing a
+ * scalar foreign key, and these are refused here, on `update`, `updateMany`, `updateManyAndReturn`
+ * and the update branch of `upsert`, whatever the value and in any form (`{ set }` too):
+ *
+ * - `orgId` on a model with its own org_id. Postgres catches it only on the composite-key tables.
+ * - The first-hop scope key of a path model: `testId` of TestSection, `sessionId` of ProctorEvent,
+ *   `userId` of RefreshToken (FU-DB-107; `scopeHopColumn`). Postgres does not catch it, and it
+ *   re-parents the row, and so moves it to the org of the new parent.
+ * - The id of an Organization.
+ *
+ * A `create` may set these in system scope (creates there are review-only, ADR 0006). Sends no
+ * query, and the message carries no value. Org scope does not have this rule: an update there may
+ * name the caller's own `orgId` (assertTenancyKept) and may change a first-hop key (README
+ * "Limits" (b), rule (i): the service loads the new parent through the scoped client first).
  */
-function assertNoOrgMove(
-  model: string,
+function assertNoRowMove(
+  model: ModelName,
   operation: string,
   rule: OrgScopeRule,
   data: unknown,
@@ -174,12 +183,21 @@ function assertNoOrgMove(
       'orgId cannot be written by an update in system scope (a row is never moved to another org).',
     );
   }
+  const hop = rule.kind === 'path' ? scopeHopColumn(model) : undefined;
+  if (hop !== undefined && data[hop] !== undefined) {
+    throw violation(
+      model,
+      operation,
+      `${hop} cannot be written by an update in system scope (a row is never moved to another parent, and so to another org).`,
+    );
+  }
 }
 
 /**
  * The checks that apply in system scope, where nothing is filtered: no nested relation write
- * (ADR 0006 section 8), and no `orgId` in an update. Org scope has the same two checks inside
- * applyOrgScope, with the filter and stamping on top.
+ * (ADR 0006 section 8), and no `orgId` or first-hop scope key in an update (assertNoRowMove). Org
+ * scope has the nested-write check inside applyOrgScope, with the filter and stamping on top, and
+ * keeps rule (i) for first-hop keys.
  */
 export function assertSystemScopeWrite(
   model: ModelName,
@@ -193,10 +211,10 @@ export function assertSystemScopeWrite(
     case 'update':
     case 'updateMany':
     case 'updateManyAndReturn':
-      assertNoOrgMove(model, operation, rule, args.data);
+      assertNoRowMove(model, operation, rule, args.data);
       break;
     case 'upsert':
-      assertNoOrgMove(model, operation, rule, args.update);
+      assertNoRowMove(model, operation, rule, args.update);
       break;
     default:
       break; // creates may set orgId in system scope; reads and deletes carry no data
@@ -283,8 +301,10 @@ function namesOtherOrg(cursor: PlainObject, orgId: string): boolean {
  *
  * (a) Ids written as scalar foreign keys. Which id is written is not checked: Postgres checks the
  *     composite keys, and every other id follows rule (i), load it through the scoped client first.
- * (b) Re-parenting. An update that changes a path model's first-hop foreign key
- *     (`testSection.update({ data: { testId } })`) is the same as a path create: rule (i).
+ * (b) Re-parenting in an org scope. An update that changes a path model's first-hop foreign key
+ *     (`testSection.update({ data: { testId } })`) is the same as a path create: rule (i), the
+ *     service loads the new parent through the scoped client first. System scope refuses it
+ *     (assertNoRowMove, FU-DB-107); an org scope does not.
  * (c) Nested reads. `include`, `select`, the fluent API, relation filters, `orderBy` on a relation
  *     and `_count` follow foreign keys blindly and are not filtered. Any foreign key that crosses
  *     orgs leaks: `sessionReview.findUnique({ include: { reviewer: true } })` returns the reviewer

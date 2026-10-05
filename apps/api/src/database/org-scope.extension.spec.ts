@@ -9,6 +9,7 @@ import { createOrgScopedClient } from './org-scope.extension';
 import { SCOPED_OPERATIONS } from './org-scope-args';
 import { ORG_SCOPE } from './org-scope-map';
 import type { ModelName } from './org-scope-map';
+import { scopeHopColumn } from './org-scope-relations';
 
 const ORG_A = '11111111-1111-4111-8111-111111111111';
 const ORG_B = '22222222-2222-4222-8222-222222222222';
@@ -272,6 +273,51 @@ describe('org scope extension without a database (NFR-04, FR-103)', () => {
         );
         await expect(run()).rejects.toBeInstanceOf(OrgContextMissingError);
       }
+    });
+  });
+
+  describe("system scope: a path model's first-hop scope key in an update is refused (before any SQL, FU-DB-107)", () => {
+    const PARENT = '55555555-5555-4555-8555-555555555555';
+    const PATH = (Object.keys(ORG_SCOPE) as ModelName[]).filter(
+      (model) => ORG_SCOPE[model].kind === 'path',
+    );
+    const UPDATES: Array<[string, (data: Record<string, unknown>) => Record<string, unknown>]> = [
+      ['update', (data) => ({ where: { id: PARENT }, data })],
+      ['updateMany', (data) => ({ data })],
+      ['updateManyAndReturn', (data) => ({ data })],
+      ['upsert', (data) => ({ where: { id: PARENT }, create: {}, update: data })],
+    ];
+
+    it('TC-008 all 21 path models are covered', () => {
+      expect(PATH).toHaveLength(21);
+    });
+
+    // The client points at a closed port: a call that is not refused by the extension would fail
+    // with a connection error instead, so OrgScopeViolationError proves no query was sent.
+    it.each(PATH)(
+      'TC-008 %s: update, updateMany, updateManyAndReturn and upsert are refused',
+      async (model) => {
+        const column = scopeHopColumn(model) as string;
+        for (const [operation, build] of UPDATES) {
+          await expect(
+            orgContext.runSystem('BACKGROUND_JOB', () =>
+              delegate(model)[operation]?.(build({ [column]: PARENT })),
+            ),
+          ).rejects.toThrow(new RegExp(`${model}\\.${operation}: ${column} cannot be written`));
+          // The { set } form too.
+          await expect(
+            orgContext.runSystem('AUTH_BOOTSTRAP', () =>
+              delegate(model)[operation]?.(build({ [column]: { set: PARENT } })),
+            ),
+          ).rejects.toBeInstanceOf(OrgScopeViolationError);
+        }
+      },
+    );
+
+    it('TC-008 with no scope nothing changes: OrgContextMissingError, not a violation', async () => {
+      await expect(
+        client.testSection.update({ where: { id: PARENT }, data: { testId: PARENT } }),
+      ).rejects.toBeInstanceOf(OrgContextMissingError);
     });
   });
 

@@ -6,7 +6,8 @@
 //   Model operation   The model's rule in ORG_SCOPE decides. With no org context the call throws
 //                     OrgContextMissingError. In an org scope, applyOrgScope adds the filter (or
 //                     stamps and checks the payload). In system scope the call runs unfiltered,
-//                     but a nested relation write and an `orgId` in an update are still refused.
+//                     but a nested relation write, an `orgId` in an update and a change of a
+//                     path model's first-hop scope key (`testId` of TestSection) are still refused.
 //                     An unscoped model runs as it is. A model with no rule, or an operation that
 //                     is not in SCOPED_OPERATIONS, is refused: the extension fails closed.
 //   Raw query         $queryRaw, $queryRawUnsafe, $executeRaw, $executeRawUnsafe (and any other
@@ -33,8 +34,9 @@
 //     composite keys (invitations.test_id, invitations.candidate_id, sessions.invitation_id) are
 //     checked by Postgres, and every other id follows ADR 0006 section 2 rule (i): load each
 //     through the scoped client first, answer 404 on a miss.
-// (b) An update that changes a path model's first-hop foreign key (re-parenting, for example
-//     `testSection.update({ data: { testId } })`) is the same as a path create: rule (i).
+// (b) In an org scope, an update that changes a path model's first-hop foreign key (re-parenting,
+//     for example `testSection.update({ data: { testId } })`) is the same as a path create: rule
+//     (i). System scope refuses it (FU-DB-107), as it refuses `orgId` in an update.
 // (c) Nested reads are not filtered. `include`, `select`, the fluent API, relation filters,
 //     `orderBy` on a relation and `_count` follow foreign keys blindly, so any foreign key that
 //     crosses orgs leaks: `sessionReview.findUnique({ include: { reviewer: true } })` returns the
@@ -100,8 +102,9 @@ export function orgScopeExtension(source: ScopeSource) {
         const scope = store?.scope;
         if (scope === undefined) throw new OrgContextMissingError(`${model}.${operation}`);
         if (scope.kind === 'system') {
-          // System scope is unfiltered, but a nested relation write and an orgId in an update are
-          // refused here too (a row is never moved to another org).
+          // System scope is unfiltered, but a nested relation write, an orgId in an update and a
+          // change of a path model's first-hop scope key are refused here too (a row is never
+          // moved to another org).
           assertSystemScopeWrite(model as ModelName, rule, operation, args);
           return execute(query, args);
         }
