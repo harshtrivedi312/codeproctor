@@ -109,14 +109,22 @@ Use `SESSIONS_JSON` instead of `SESSIONS_FILE` when the list comes from a CI sec
 | `CHUNK_BYTES_VIDEO`, `CHUNK_BYTES_AUDIO` | 262144, 65536                             | size of the synthetic chunks                                                                                                                                                                      |
 | `ALLOWED_HOSTS`                          | none (required)                           | comma separated exact host names (no scheme or port) the run may target; `localhost`, `127.0.0.1`, `host.docker.internal` are always allowed. Any other host is refused, at init and in `setup()` |
 
-A host name containing `prod`, `production` or `pilot` is refused even when it is in `ALLOWED_HOSTS`; there is no override.
+A host name containing `prod`, `production` or `pilot` is refused even when it is in `ALLOWED_HOSTS`; there is no override. The deny-list matches substrings, so a host such as `product-staging.example.com` is refused too.
+
+`API_BASE_URL` itself must match `^https?://([a-z0-9.-]+)(:port)?(/[A-Za-z0-9._~/-]*)?$` as a whole, and the host is taken from that match. Anything else is refused: userinfo (`@`), `?`, `#`, `\`, `%` escapes, whitespace, `[` (IPv6), a trailing or leading dot. This is deliberate: k6 (Go `net/url`) and a hand-written parser can read tricks such as `https://api.prod.example.com?@staging.example.com` differently, so those forms never reach k6. The logic is in `lib/guard.js` (pure, no k6 imports) and is tested with a table of good and bad inputs:
+
+```sh
+node --test packages/qa/k6/lib/guard.test.mjs
+```
+
+`STORAGE_ALLOWED_HOSTS` (optional, comma separated exact host names) additionally restricts where chunk PUTs may go: a presign answer pointing elsewhere is not followed (counted in `cp_storage_failures`, the URL is not logged). Storage PUTs never follow redirects.
 
 ## Logs and outputs: presigned URLs
 
 A presigned storage URL is a bearer capability for its lifetime (about 60 s). Three places could carry it, and each is handled:
 
 - **Metrics.** Both scripts set `systemTags` (in `lib/config.js`) without `url`, so no `http_req_*` sample, summary, `--out` file or cloud output has a URL tag. Do not add `url` back.
-- **k6 stderr.** On a transport error k6 prints the URL, for example `WARN Request Failed error="Put \"https://...?X-Amz-Signature=...\"..."`. Either keep the k6 log out of artefacts, or redact query strings before it is stored or shown: `... 2>&1 | sed -E 's/\?[^" ]*/?<redacted>/g'`.
+- **k6 stderr.** On a transport error k6 prints the whole URL, for example `WARN Request Failed error="Put \"https://<host>/<media object key>?X-Amz-Signature=...\"..."`. The path holds the media object key, so redact whole URLs, not only the query: either keep the k6 log out of artefacts, or pipe it through `sed -E 's#https?://[^" ]*#<url-redacted>#g'` before it is stored or shown (a pattern that matches only `?...` would leave the key in the path).
 - **Forbidden flags.** Never use `--http-debug` (it dumps request lines and headers, including bearer tokens and signatures). Never use `--out json`, `--out csv` or `--out cloud` with the `url` tag enabled; with the default `systemTags` of these scripts they are safe, but do not override `--system-tags` on the command line. `--summary-export` is safe.
 
 Do a smoke run first, for example `-e VUS=5 -e RAMP_UP=10s -e HOLD=1m -e RAMP_DOWN=5s`, and clean up the data it left.
@@ -137,6 +145,8 @@ docker run --rm -v "$PWD/packages/qa/k6:/k6" -w /k6 \
       -e VUS=60 -e RAMP_UP=10s -e HOLD=60s -e RAMP_DOWN=5s tc-090-load.js
 ```
 
+Code runs run inline in the candidate's tick (the VU is blocked while Judge0 answers, up to 5 s at p95). A slot of that candidate that a run delayed is excused: it is not counted in `cp_late_slots` and not skipped, it fires as soon as the run returns, as a browser timer would. Check with a slow run: start the mock with `MOCK_RUN_MS=3000` and run with `-e RUN_EVERY_MS=20000`; `cp_late_slots` stays under 1 percent. `VUS` must be at least 1 and `RAMP_UP + HOLD + RAMP_DOWN` longer than zero (TC-090), `VUS` and `ROUNDS` at least 1 (TC-091); a run that sent no API request fails (`http_reqs` count threshold).
+
 Result of the last check (2026-10-05, k6 from the pinned image, 60 candidates against the mock): all thresholds passed, zero 429s, about 1.43 API requests per second per candidate-second (5,819 API requests over an average of 54 active candidates across the 75 s run, 77 per second), slightly above the 1.4 estimate because it includes one proctor-key call per user and runs every 60 s (0.017 per second). TC-090 now fails if the achieved rate falls under 90 percent of the expected average. The mock binds to 127.0.0.1 by default (`MOCK_HOST` overrides); `host.docker.internal` reached it from Docker Desktop on macOS in this check. On Linux Docker, set `MOCK_HOST=0.0.0.0` only on a trusted network, or run k6 with `--network host`. `k6 inspect` accepts both scripts.
 
 ## CI (hub changes, not made here)
@@ -147,4 +157,4 @@ This folder does not edit `.github/**`. The exact workflow diff was sent to the 
    `docker run --rm -e SESSIONS_JSON -v "$PWD/packages/qa/k6:/k6" -w /k6 ... run -e API_BASE_URL="$TARGET/api/v1" -e ALLOWED_HOSTS="$TARGET_HOST" tc-090-load.js`, with `SESSIONS_JSON: ${{ secrets.K6_SESSIONS_JSON }}` in the step `env:`. `-e SESSIONS_JSON` with no value makes Docker copy it from the step environment; k6 reads it from its own environment (do not give it as `k6 run -e SESSIONS_JSON=...`).
 2. `K6_SESSIONS_JSON` (the JSON list above) replaces the secret `K6_CANDIDATE_TOKENS` in the `staging` environment.
 3. Keep the `QA_STAGING_HOSTS` allow-list step; derive `API_BASE_URL` and `ALLOWED_HOSTS` from the already-validated target.
-4. Upload the k6 summary (`--summary-export`) as an artefact so the result report for BE-15B and the matrix has numbers. Do not upload the raw k6 log unless it is redacted (section above).
+4. Upload the k6 summary (`--summary-export`) as an artefact so the result report for BE-15B and the matrix has numbers. Do not upload the raw k6 log unless it went through `sed -E 's#https?://[^" ]*#<url-redacted>#g'` (section "Logs and outputs").
