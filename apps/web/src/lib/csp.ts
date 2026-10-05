@@ -26,7 +26,9 @@ export interface CspOptions {
 
 /**
  * The candidate test screen, /t/[token]/test, and nothing else (D-45 (P-05)). The pre-test
- * stepper and every other route do not match.
+ * stepper and every other route do not match. A document keeps the CSP it was loaded with, so
+ * entry to /t/[token]/test must be a full document navigation (window.location.assign or a server
+ * redirect), not a client-side router push from another candidate page.
  */
 export function isCandidateTestPath(pathname: string): boolean {
   return /^\/t\/[^/]+\/test\/?$/.test(pathname);

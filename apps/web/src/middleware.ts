@@ -13,6 +13,7 @@ export function middleware(request: NextRequest): NextResponse {
     uploadOrigins: parseOrigins(process.env.NEXT_PUBLIC_UPLOAD_ORIGINS),
     isDev: process.env.NODE_ENV === 'development',
     // D-45 (P-05): WebAssembly compilation for the in-browser detectors on /t/[token]/test only.
+    // Matches the request path before any rewrite, so a future rewrite into the route fails closed.
     allowWasm: isCandidateTestPath(request.nextUrl.pathname),
   });
 

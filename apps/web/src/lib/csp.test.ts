@@ -53,6 +53,12 @@ describe('CSP (NFR-04)', () => {
     const strip = (value: string) => value.replace(" 'wasm-unsafe-eval'", '');
     expect(strip(csp)).toBe(buildCsp(base));
   });
+  it("D-45 (P-05): development keeps 'unsafe-eval' and gains 'wasm-unsafe-eval' only when asked", () => {
+    const csp = buildCsp({ ...base, isDev: true, allowWasm: true });
+    expect(csp).toMatch(/script-src[^;]*'unsafe-eval'/);
+    expect(csp).toMatch(/script-src[^;]*'wasm-unsafe-eval'/);
+    expect(buildCsp({ ...base, isDev: true })).not.toContain('wasm-unsafe-eval');
+  });
   it('D-45 (P-05): only /t/[token]/test counts as the candidate test route', () => {
     for (const path of ['/t/abc123/test', '/t/abc123/test/', '/t/demo/test']) {
       expect(isCandidateTestPath(path)).toBe(true);
