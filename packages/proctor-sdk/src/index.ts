@@ -39,3 +39,9 @@ export function createDefaultMonitors() {
   };
 }
 export { mountProctorDemo, type DemoHandle } from './demo/mount';
+
+export * from './recording/types';
+export * from './recording/upload-queue';
+export * from './recording/recorder';
+export * from './recording/media-api';
+export * from './recording/pipeline';
