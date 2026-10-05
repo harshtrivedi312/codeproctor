@@ -210,9 +210,9 @@ export class UsersService {
    * is bound to `password_hash IS NULL` and `is_active`, so a re-issue that races the invitee
    * accepting cannot overwrite the new password or bring a link back: it finds the password set and
    * is a 409. A user with a password or a deactivated one is a 409 as well, so this cannot be used
-   * to take over a live account. Same step-up, same rate limit as invite(). The audit row comes
-   * from the route's @Audited interceptor (metadata method and route only); the mail goes out
-   * after the commit and its failure is only logged by error name.
+   * to take over a live account. Same step-up, same rate limit as invite(). The audit row
+   * (metadata method and route only) is written in the same transaction as the token rotation, so
+   * a failed audit insert rolls the rotation back; the mail goes out after the commit and its failure is only logged by error name.
    */
   async reissueInvite(
     actor: Actor,
@@ -247,6 +247,17 @@ export class UsersService {
       });
       if (done.count !== 1)
         throw new ConflictException('Only a pending invitation can be re-issued.');
+      await tx.auditLog.create({
+        data: {
+          orgId: actor.orgId,
+          actorId: actor.id,
+          action: 'USER_INVITE_REISSUED',
+          entityType: 'user',
+          entityId: targetId,
+          ip: ctx.ip ?? null,
+          metadata: { method: 'POST', route: '/api/v1/admin/users/:userId/invite' },
+        },
+      });
       return tx.user.findUniqueOrThrow({ where: { id: targetId } });
     });
     try {

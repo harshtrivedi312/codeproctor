@@ -94,7 +94,6 @@ export class UsersController {
 
   @Post(':userId/invite')
   @HttpCode(200)
-  @Audited('USER_INVITE_REISSUED', 'user', { idParam: 'userId' })
   @ApiOperation({
     summary:
       'Re-issue the invite of a user who has not set a password yet: a new 72 hour single-use link, the old link stops working (DL-23, FR-103)',
