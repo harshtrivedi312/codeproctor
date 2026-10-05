@@ -23,6 +23,19 @@ export interface EvidenceApi {
 }
 
 /** Encode a video frame as a JPEG, scaled to at most `maxWidth`. */
+/** Output size of a snapshot: scaled down to `maxWidth`, never up, aspect ratio kept. */
+export function scaledSize(
+  sourceWidth: number,
+  sourceHeight: number,
+  maxWidth: number,
+): { width: number; height: number } {
+  const scale = Math.min(1, maxWidth / sourceWidth);
+  return {
+    width: Math.max(1, Math.round(sourceWidth * scale)),
+    height: Math.max(1, Math.round(sourceHeight * scale)),
+  };
+}
+
 export async function captureJpeg(
   source: CanvasImageSource,
   sourceWidth: number,
@@ -30,9 +43,7 @@ export async function captureJpeg(
   maxWidth: number,
   quality: number,
 ): Promise<Blob> {
-  const scale = Math.min(1, maxWidth / sourceWidth);
-  const w = Math.max(1, Math.round(sourceWidth * scale));
-  const h = Math.max(1, Math.round(sourceHeight * scale));
+  const { width: w, height: h } = scaledSize(sourceWidth, sourceHeight, maxWidth);
   const canvas = new OffscreenCanvas(w, h);
   const g = canvas.getContext('2d');
   if (!g) throw new Error('no 2d context');
