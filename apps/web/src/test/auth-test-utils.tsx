@@ -3,7 +3,7 @@ import { render } from '@testing-library/react';
 import { setAccessToken } from '@/lib/auth-token';
 import { nav, router } from './nav-mock';
 import { AuthProvider } from '@/features/auth/auth-provider';
-import { publishSession } from '@/lib/auth-session';
+import { beginSession, publishSession } from '@/lib/auth-session';
 import { resetMockAdminState } from '@/mocks/admin-handlers';
 import { resetMockAuthState, seedMockRefresh } from '@/mocks/auth-handlers';
 
@@ -12,6 +12,7 @@ export function resetAuthTestState(): void {
   router.replace.mockReset();
   nav.pathname = '/admin';
   nav.search = new URLSearchParams();
+  beginSession();
   publishSession(null);
   resetMockAuthState();
   resetMockAdminState();

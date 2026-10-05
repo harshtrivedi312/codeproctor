@@ -74,13 +74,15 @@ test.describe('FR-101 login', () => {
       await page.getByLabel('Work email').fill(RECRUITER.email);
       await page.getByLabel('Password').fill('wrong-password-1');
       await page.getByRole('button', { name: 'Sign in' }).click();
-      await expect(appAlert(page)).toContainText('Email or password is incorrect');
+      await expect(appAlert(page)).toContainText('Sign-in failed.');
     }
     await page.getByLabel('Password').fill(RECRUITER.password);
     await page.getByRole('button', { name: 'Sign in' }).click();
     const alert = appAlert(page);
-    await expect(alert).toContainText('This account is temporarily locked');
-    await expect(alert).toContainText('about 15 minutes');
+    await expect(alert).toHaveText(
+      'Sign-in failed. If this keeps happening, wait 15 minutes or contact your administrator.',
+    );
+    await expect(alert).not.toContainText(/locked/i);
     await expect(page).toHaveURL(/\/admin\/login/);
     await expectNoAxeViolations(page);
   });

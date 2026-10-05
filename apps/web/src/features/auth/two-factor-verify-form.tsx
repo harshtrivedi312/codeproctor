@@ -99,7 +99,6 @@ export function TwoFactorVerifyForm(): React.JSX.Element | null {
             {...aria}
             inputMode={useRecovery ? 'text' : 'numeric'}
             autoComplete="one-time-code"
-
             spellCheck={false}
             {...register('code')}
           />

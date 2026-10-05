@@ -75,7 +75,7 @@ export const LOCK_MS = 15 * 60 * 1000;
 
 interface MockAuthState {
   failed: Record<string, number>;
-  lockedUntil: Record<string, number>;
+  lockExpiresAt: Record<string, number>;
   enrolled: string[];
   usedRecovery: string[];
   usedTokens: string[];
@@ -84,7 +84,7 @@ interface MockAuthState {
 
 const EMPTY: MockAuthState = {
   failed: {},
-  lockedUntil: {},
+  lockExpiresAt: {},
   enrolled: [],
   usedRecovery: [],
   usedTokens: [],
@@ -169,30 +169,22 @@ export function createAuthHandlers() {
       const state = load();
       const user = findUser(body.email);
       const key = body.email.trim().toLowerCase();
-      const lockedUntil = state.lockedUntil[key] ?? 0;
-      // Locked accounts refuse even the correct password (TC-002), and say so the same way.
-      if (lockedUntil > Date.now()) {
-        return HttpResponse.json(
-          {
-            code: 'account_locked' as const,
-            message: 'Account locked.',
-            lockedUntil: new Date(lockedUntil).toISOString(),
-          },
-          { status: 423 },
-        );
-      }
-      if (!user || user.password !== body.password) {
+      const lockExpiresAt = state.lockExpiresAt[key] ?? 0;
+      // Locked accounts refuse even the correct password (TC-002). The answer is the same generic
+      // 401 as a wrong password: the API never says an account is locked (FU-BE-22).
+      const locked = lockExpiresAt > Date.now();
+      if (locked || !user || user.password !== body.password) {
         // Unknown emails get the same answer and are not counted, so nothing is revealed.
-        if (user) {
+        if (user && !locked) {
           state.failed[key] = (state.failed[key] ?? 0) + 1;
           if (state.failed[key] >= MAX_FAILED_LOGINS) {
             state.failed[key] = 0;
-            state.lockedUntil[key] = Date.now() + LOCK_MS;
+            state.lockExpiresAt[key] = Date.now() + LOCK_MS;
           }
           save(state);
         }
         return HttpResponse.json(
-          { code: 'invalid_credentials', message: 'Email or password is incorrect.' },
+          { code: 'invalid_credentials', message: 'Sign-in failed.' },
           { status: 401 },
         );
       }
@@ -306,7 +298,7 @@ export function createAuthHandlers() {
       state.usedTokens.push(body.token);
       // A reset revokes refresh tokens, clears the lockout and never signs in (D-22).
       state.refreshFor = null;
-      state.lockedUntil = {};
+      state.lockExpiresAt = {};
       state.failed = {};
       save(state);
       return new HttpResponse(null, { status: 204 });

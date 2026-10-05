@@ -16,9 +16,9 @@ Items 1, 3 and 8 below (mock start hang, Run/Finish error states, demo controls 
 4. **Autosave-on-run can skip the latest code (FR-504).** `apps/web/src/features/candidate-test/use-autosave.ts:30`. `flush()` should await an in-flight save, then save again if `latest` changed.
 5. **Tests do not name TC IDs; failure paths untested.** `test-screen.test.tsx`, `logic.test.ts`, `use-autosave.test.tsx`. Name tests with TC-040/041/045/050 and cover the 429 path (`mocks/handlers.ts:96` ties the 429 to latency, so the Node test server never hits it; give it its own `cooldownMs`), paste blocking (TC-052), run network error and finish failure.
 6. **Contract changes need architect sign-off.** Resolved in PR #4: the architect reviewed `packages/shared` and the placeholder OpenAPI, bounded the code and login inputs, and tracked the rest under ARC-02 below. Still open: the `Language` enum is duplicated in shared and the YAML (see the architect section).
-9. **No client-side code length check.** `test-screen.tsx` does not validate against `runRequestSchema` (100,000 chars) before Run or the draft PUT, so an oversized submission gets a server rejection with no clear message.
-7. **Permissions-Policy blocks the microphone.** `apps/web/next.config.ts:24`. `microphone=()` breaks FR-402, FR-607 and FR-701 later; use `microphone=(self)` or add a TODO tied to FE Steps 7 and 9.
-8. **[MUST-FIX before Step 10] Demo-only controls ship in the real route bundle.** `apps/web/src/app/(candidate)/t/[token]/test/page.tsx:2`, `test-screen.tsx:144-152,422-431`. Alt+Shift+X "Simulate fullscreen exit", "Continue without fullscreen (demo only)" and the demo banner would bypass the lock in a real session. Load via `next/dynamic` only in mock mode or move into a demo wrapper before Step 10 builds on this screen.
+7. **No client-side code length check.** `test-screen.tsx` does not validate against `runRequestSchema` (100,000 chars) before Run or the draft PUT, so an oversized submission gets a server rejection with no clear message.
+8. **Permissions-Policy blocks the microphone.** `apps/web/next.config.ts:24`. `microphone=()` breaks FR-402, FR-607 and FR-701 later; use `microphone=(self)` or add a TODO tied to FE Steps 7 and 9.
+9. **[MUST-FIX before Step 10] Demo-only controls ship in the real route bundle.** `apps/web/src/app/(candidate)/t/[token]/test/page.tsx:2`, `test-screen.tsx:144-152,422-431`. Alt+Shift+X "Simulate fullscreen exit", "Continue without fullscreen (demo only)" and the demo banner would bypass the lock in a real session. Load via `next/dynamic` only in mock mode or move into a demo wrapper before Step 10 builds on this screen.
 
 ### Nits
 
@@ -40,8 +40,6 @@ Items 1, 3 and 8 below (mock start hang, Run/Finish error states, demo controls 
 - Nothing ran on Node 24 (sandbox has 22.23.3; installed with `--config.engine-strict=false`).
 - **[ARC-05]** `middleware.ts` is kept for now instead of Next 16 `proxy.ts`, because `proxy.ts` is Node-only and Cloudflare Pages needs the edge runtime (R-08). The build prints a deprecation warning. Decide in ARC-05 whether to move to `proxy.ts` or stay.
 
-
-
 ## frontend/step-2 (staff authentication screens, FE-02)
 
 Built against MSW mocks; the paths below are placeholders like the rest of `apps/web/openapi/openapi.yaml`.
@@ -51,12 +49,12 @@ Built against MSW mocks; the paths below are placeholders like the rest of `apps
 - **[ARC-02] Move `recoveryCodeSchema` and the 2FA verify body to `packages/shared`.** Web has them in `apps/web/src/features/auth/schemas.ts` (16 base32 characters, spaces and dashes ignored, upper-cased). `/auth/2fa/verify` takes a 6-digit code or a recovery code; the API must normalise the same way. See also the existing [BE-02] note on `otpCodeSchema`.
 - **[ARC-02] Add the password-reset and set-password schemas and the password policy to `packages/shared`.** No doc defines the strength rules. Web assumes at least 12 characters, one lower-case, one upper-case and one digit, at most `MAX_PASSWORD_LENGTH` (`PASSWORD_RULES` in `schemas.ts`). The architect must confirm or change the policy; the backend must enforce the same list.
 - **[ARC-02] Add `forgotPasswordRequestSchema` (email only) and `challengeToken` bodies** for `/auth/2fa/*`.
-- **[ARC-02] Add the staff auth endpoints to the API contract and fsd.md section 4.** Placeholders used: `POST /v1/auth/login` (200 `authenticated` or `two_factor_required` or `two_factor_enrollment_required`, 401, 423 with `lockedUntil`), `POST /v1/auth/2fa/enroll/start`, `POST /v1/auth/2fa/enroll/confirm` (returns the session and the 10 recovery codes once), `POST /v1/auth/2fa/verify`, `POST /v1/auth/refresh`, `POST /v1/auth/logout`, `POST /v1/auth/password/forgot` (202), `POST /v1/auth/password/reset` (204, or 400 with one message for unknown, expired and used tokens). fsd.md section 4 lists only login, 2fa/verify, refresh, forgot and reset; enrollment start/confirm and logout are missing.
+- **[ARC-02] Add the staff auth endpoints to the API contract and fsd.md section 4.** Placeholders used: `POST /v1/auth/login` (200 `authenticated` or `two_factor_required` or `two_factor_enrollment_required`, generic 401), `POST /v1/auth/2fa/enroll/start`, `POST /v1/auth/2fa/enroll/confirm` (returns the session and the 10 recovery codes once), `POST /v1/auth/2fa/verify`, `POST /v1/auth/refresh`, `POST /v1/auth/logout`, `POST /v1/auth/password/forgot` (202), `POST /v1/auth/password/reset` (204, or 400 with one message for unknown, expired and used tokens). fsd.md section 4 lists only login, 2fa/verify, refresh, forgot and reset; enrollment start/confirm and logout are missing.
 - **[ARC-02] Decide the shape of the 2FA challenge.** Web holds an opaque `challengeToken` (returned by login, sent to the 2FA calls) in memory. The API needs a short-lived, single-purpose token for this and must not issue an access token before enrollment is confirmed (TC-003). Document its lifetime.
 - **[ARC-02] Email links must carry the token in the URL fragment** (`/admin/reset-password#token=...`, `/admin/set-password#token=...`) so it never appears in server or proxy access logs. Web also accepts `?token=` and strips it, but a query token has already reached the server by then (ADR 0001 C-5, A-13). BE-06 templates `password-reset` and `staff-invite` should use the fragment.
 - **[ARC-02] Add `StaffRole` and a permission matrix to `packages/shared`.** `RequireRole` takes an explicit role list because no shared permission matrix exists yet; the OpenAPI `StaffRole` enum duplicates `UserRole` from prisma (same drift risk as `Language`).
 - **[ARC-02] Access token lifetime is unknown to the client.** Web refreshes on first load and after a 401 only. If the API returns `expiresIn`, add a timer to refresh just before expiry and avoid a failed first call.
-- **[ARC-02] Account-lock response.** Web reads `lockedUntil` from a 423 body; the API should also send `Retry-After`. A locked account refuses even the correct password (TC-002); the message should not reveal whether an email exists (web only shows lock text when the API says 423).
+- **[ARC-02] Account-lock response. Resolved by owner decision (FU-BE-22).** The API returns a generic 401 for locked accounts and never sends 423, `lockedUntil` or `Retry-After`. Web shows one neutral message for every failed sign-in ("Sign-in failed. If this keeps happening, wait 15 minutes or contact your administrator."), and the mock answers a locked account with the same 401 as a wrong password.
 
 ### Should-fix
 
@@ -80,11 +78,11 @@ The reviewer's only "blocker" was a possible Prettier failure it could not run; 
 
 #### Should-fix
 
-1. **[MUST-FIX before Step 3 (FE-03) adds deep-linked staff pages] FIXED in FE-03: `next` is lost after 2FA verify.** `apps/web/src/features/auth/two-factor-verify-form.tsx:38-41,51-53`. `signIn()` clears `pending`, so the page bounces to `/admin/login` after the `router.replace(next)`, and the login page then forwards to `/admin`. The 401 branch also loses `?reason=expired`. Fix with a `submittedRef` or a `status !== 'authenticated'` check, and add a test that `next=/admin/x` survives the 2FA step. *Done: `finishedRef` in `two-factor-verify-form.tsx`; tests in `two-factor.test.tsx` cover `next=/admin/x` and the 401 `?reason=expired` redirect.*
+1. **[MUST-FIX before Step 3 (FE-03) adds deep-linked staff pages] FIXED in FE-03: `next` is lost after 2FA verify.** `apps/web/src/features/auth/two-factor-verify-form.tsx:38-41,51-53`. `signIn()` clears `pending`, so the page bounces to `/admin/login` after the `router.replace(next)`, and the login page then forwards to `/admin`. The 401 branch also loses `?reason=expired`. Fix with a `submittedRef` or a `status !== 'authenticated'` check, and add a test that `next=/admin/x` survives the 2FA step. _Done: `finishedRef` in `two-factor-verify-form.tsx`; tests in `two-factor.test.tsx` cover `next=/admin/x` and the 401 `?reason=expired` redirect._
 2. **Multiple tabs and refresh-token rotation.** `lib/auth-session.ts:30-35`, `auth-provider.tsx:51`. Two tabs refreshing at once can look like refresh-token reuse (FR-104) and revoke the family. Share one refresh across tabs with `navigator.locks` or BroadcastChannel, or add a short server-side reuse grace window ([BE-02]).
-3. **FIXED in FE-03: A stale refresh can restore a session after sign-out.** `auth-session.ts:37-55`, `auth-provider.tsx:61-71`. Add a generation counter bumped by `signOut`, and drop results from an older generation. *FIXED in FE-03 (`invalidateRefreshes` in `auth-session.ts`, test in `session.test.tsx`).*
-4. **FIXED in FE-03: Retry check hard-codes `/v1/auth/`.** `lib/api/client.ts:21`. Breaks when ARC-02 moves the API to `/api/v1` or `NEXT_PUBLIC_API_URL` has a path. Compare against the base path or tag auth calls explicitly. *FIXED in FE-03 (`isAuthRequest` in `client.ts`, relative to the API base URL and tolerant of `/api/v1`).*
-5. **FIXED in FE-03: A failed logout call leaves an unhandled rejection.** `auth-provider.tsx:63-70`. Add `catch {}`; local sign-out still happens. *FIXED in FE-03 (test: failed logout still signs out).*
+3. **FIXED in FE-03: A stale refresh can restore a session after sign-out.** `auth-session.ts:37-55`, `auth-provider.tsx:61-71`. Add a generation counter bumped by `signOut`, and drop results from an older generation. _FIXED in FE-03 (`invalidateRefreshes` in `auth-session.ts`, test in `session.test.tsx`)._
+4. **FIXED in FE-03: Retry check hard-codes `/v1/auth/`.** `lib/api/client.ts:21`. Breaks when ARC-02 moves the API to `/api/v1` or `NEXT_PUBLIC_API_URL` has a path. Compare against the base path or tag auth calls explicitly. _FIXED in FE-03 (`isAuthRequest` in `client.ts`, relative to the API base URL and tolerant of `/api/v1`)._
+5. **FIXED in FE-03: A failed logout call leaves an unhandled rejection.** `auth-provider.tsx:63-70`. Add `catch {}`; local sign-out still happens. _FIXED in FE-03 (test: failed logout still signs out)._ _Superseded in frontend/step-3-fixes: a failed logout now sets a "sign-out pending" boolean in localStorage (no token). While it is set the first-load silent refresh is skipped and the logout is retried; it clears only on a confirmed success or the next sign-in, and the login screen shows "We could not confirm you were signed out" with a retry button. The retry has no access token (it was dropped locally), so the API's `POST /v1/auth/logout` must revoke by the httpOnly refresh cookie alone._
 
 #### Nits
 
@@ -123,3 +121,23 @@ Built against MSW mocks; the `/v1/admin/*` paths are placeholders in `apps/web/o
 - Weight inputs in the risk table are `type=number`; the browser's spinner can change a value on scroll. Consider `type=text inputMode=decimal` with the same zod rules.
 - `DataTable` search matches only columns that give a `sortValue` or `searchValue`.
 - `welcome-panel.tsx` still lives under `features/auth`; move it to `features/staff` when the real dashboard arrives. `UserBadge` and `SignOutButton` are now unused by the shell (kept for `ROLE_LABELS` and tests).
+
+## frontend/step-3 code-reviewer findings
+
+Items from the review of FE Step 3 that were not fixed in `frontend/step-3-fixes`. The sign-out race, role-change confirmation and login lock message are fixed there.
+
+### Should-fix
+
+1. **Risk settings: weight errors in hidden rows are invisible.** When a table filter hides a row whose weight input is invalid, Save fails with no visible error. Show a summary above the table that lists the hidden invalid rows, or clear the filter on submit.
+2. **Risk settings page shows the raw server message** on a failed save. Replace it with fixed copy plus a fix-it hint; log the server message only through the approved logger.
+3. **`c.facet!` non-null assertions in `DataTable`.** Narrow the type (a filtered list of columns that have a facet) instead of asserting.
+4. **`DataTable` recomputes filtering and sorting on every render.** Wrap in `useMemo` keyed on rows, query, facets and sort. Fine for the small Step 3 lists; do it before the server-side paging change.
+
+### Nits
+
+- The TC-004 tag on the mock and UI tests overstates what they prove. TC-004 is a backend authorization case; label these tests FR-103 and keep TC-004 for the real API tests.
+- The TC-075 example in the risk settings UI ignores the weights, so the sample score it shows can differ from what the engine computes. Compute the example from the current weights.
+
+## Must-fix before later steps merge
+
+- **[MUST-FIX before Step 10 merges] QA defect TC-047 / FR-505: a forward OS clock change shrinks the candidate's countdown.** `useServerClock` (`apps/web/src/features/candidate-test/use-clock.ts`) reads server time once and never re-syncs, so the remaining time follows the device clock afterwards. Fix: compute remaining time from the server deadline using a monotonic clock (`performance.now`) and re-sync with the server on every heartbeat. When it is fixed, tell QA so TC-047 becomes a normal test. Not fixed now; this is Step 10 work.

@@ -141,17 +141,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/LoginResult'
         '401':
-          description: Wrong email or password
+          description: >-
+            Sign-in failed. One generic answer for a wrong password, an unknown email and a locked
+            account (15 minutes after 5 failed attempts, FR-101); the API never reveals which.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
-        '423':
-          description: Account locked for 15 minutes after 5 failed attempts (FR-101)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LockedError'
   /v1/auth/2fa/enroll/start:
     post:
       operationId: startTwoFactorEnrollment
@@ -601,13 +597,6 @@ components:
       properties:
         code: { type: string }
         message: { type: string }
-    LockedError:
-      type: object
-      required: [code, message, lockedUntil]
-      properties:
-        code: { type: string, enum: [account_locked] }
-        message: { type: string }
-        lockedUntil: { type: string, format: date-time }
     Language:
       # Must match codeLanguageSchema in packages/shared/src/code-run.ts.
       type: string

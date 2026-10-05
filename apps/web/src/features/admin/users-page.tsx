@@ -45,7 +45,16 @@ function UsersContent(): React.JSX.Element {
   const [inviteOpen, setInviteOpen] = React.useState(false);
   const [toDeactivate, setToDeactivate] = React.useState<StaffUser | null>(null);
 
-  function changeRole(user: StaffUser, role: Schemas['StaffRole']): void {
+  // The select only stages a choice; nothing is sent until the user confirms in the dialog.
+  const [roleChange, setRoleChange] = React.useState<{
+    user: StaffUser;
+    role: Schemas['StaffRole'];
+  } | null>(null);
+
+  function confirmRoleChange(): void {
+    const target = roleChange;
+    if (!target) return;
+    const { user, role } = target;
     update.mutate(
       { id: user.id, role },
       {
@@ -53,9 +62,10 @@ function UsersContent(): React.JSX.Element {
         onError: (e) =>
           toast.error(
             e instanceof ApiFailure && e.status === 409
-              ? 'You cannot change your own role. Ask another Super Admin.'
+              ? 'This role change is not allowed. You cannot change your own role, and the last Super Admin cannot be changed. Ask another Super Admin if you need this.'
               : 'Could not change the role. Check your connection and try again.',
           ),
+        onSettled: () => setRoleChange(null),
       },
     );
   }
@@ -94,7 +104,10 @@ function UsersContent(): React.JSX.Element {
             value={u.role}
             disabled={locked || update.isPending}
             title={u.id === me?.id ? 'You cannot change your own role.' : undefined}
-            onChange={(e) => changeRole(u, e.target.value as Schemas['StaffRole'])}
+            onChange={(e) => {
+              const role = e.target.value as Schemas['StaffRole'];
+              if (role !== u.role) setRoleChange({ user: u, role });
+            }}
           >
             {USER_ROLES.map((r) => (
               <option key={r} value={r}>
@@ -186,6 +199,28 @@ function UsersContent(): React.JSX.Element {
         toolbar={<Button onClick={() => setInviteOpen(true)}>Invite a user</Button>}
       />
       <InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} />
+      <ConfirmDialog
+        open={roleChange !== null}
+        onOpenChange={(open) => {
+          if (!open) setRoleChange(null);
+        }}
+        title={
+          roleChange
+            ? `Change ${roleChange.user.name} from ${ROLE_LABELS[roleChange.user.role]} to ${ROLE_LABELS[roleChange.role]}?`
+            : 'Change role?'
+        }
+        description={
+          roleChange &&
+          (roleChange.user.role === 'SUPER_ADMIN' || roleChange.role === 'SUPER_ADMIN')
+            ? roleChange.role === 'SUPER_ADMIN'
+              ? 'Super Admins can manage users, settings and data retention for your whole organisation. Only give this role to someone you trust with that.'
+              : 'They will lose access to user management and organisation settings straight away.'
+            : 'Their access changes straight away. You can change it back at any time.'
+        }
+        confirmLabel="Change role"
+        pending={update.isPending}
+        onConfirm={confirmRoleChange}
+      />
       <ConfirmDialog
         open={toDeactivate !== null}
         onOpenChange={(open) => {
