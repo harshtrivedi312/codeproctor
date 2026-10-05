@@ -54,6 +54,24 @@ describe('org scope extension without a database (NFR-04, FR-103)', () => {
     });
   });
 
+  describe('lazy queries (a Prisma query sends nothing until it is awaited)', () => {
+    it('TC-008 a query returned straight from the callback is started inside the scope', async () => {
+      // It reaches the payload check, which only runs in a scope: the scope was active.
+      await expect(
+        orgContext.runInOrg(ORG_A, () =>
+          client.test.create({ data: { orgId: ORG_B, name: 'x', durationMinutes: 60 } }),
+        ),
+      ).rejects.toBeInstanceOf(OrgScopeViolationError);
+    });
+
+    it('TC-008 a query wrapped in an object or an array is not started in the scope, and finds no context (fails closed)', async () => {
+      const inObject = orgContext.runInOrg(ORG_A, () => ({ rows: client.session.findMany() }));
+      await expect(inObject.rows).rejects.toBeInstanceOf(OrgContextMissingError);
+      const inArray = orgContext.runInOrg(ORG_A, () => [client.session.findMany()]);
+      await expect(Promise.all(inArray)).rejects.toBeInstanceOf(OrgContextMissingError);
+    });
+  });
+
   describe('raw SQL', () => {
     const attempts: Array<[string, () => Promise<unknown>]> = [
       ['$queryRaw', () => client.$queryRaw`SELECT 1`],

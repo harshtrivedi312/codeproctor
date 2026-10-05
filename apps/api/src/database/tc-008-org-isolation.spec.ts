@@ -837,6 +837,16 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expect(other).toEqual([]);
     });
 
+    it('TC-008 a batch built in one scope and run in another runs with the scope it runs in', async () => {
+      // The queries are lazy, so the scope that counts is the one active when the batch runs. This
+      // is why a batch must be built and run in the same scope (README "Writing queries").
+      const builtInA = orgContext.runInOrg(A.orgId, () => [prisma.client.test.findMany()]);
+      const results = await orgContext.runInOrg(B.orgId, () =>
+        prisma.client.$transaction(builtInA),
+      );
+      expect(new Set((results[0] ?? []).map((t) => t.orgId))).toEqual(new Set([B.orgId]));
+    });
+
     it('TC-008 a transaction with no org context throws before it starts', async () => {
       await expect(
         prisma.client.$transaction(async (tx) => tx.test.findMany()),
