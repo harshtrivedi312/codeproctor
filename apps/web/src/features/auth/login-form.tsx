@@ -13,12 +13,14 @@ import { api } from '@/lib/api/client';
 import { useAuth } from './auth-provider';
 import { safeNextPath } from './schemas';
 
-type Banner =
-  { kind: 'wrong' } | { kind: 'locked'; lockedUntil: string } | { kind: 'network' } | null;
+type Banner = { kind: 'failed' } | { kind: 'network' } | null;
 
-export function formatTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
+/**
+ * One neutral message for every failed sign-in (wrong password, unknown email, locked account), so
+ * the screen never reveals which one it was (FR-101, TC-002).
+ */
+export const SIGN_IN_FAILED_MESSAGE =
+  'Sign-in failed. If this keeps happening, wait 15 minutes or contact your administrator.';
 
 /** FR-101 login form. TOTP (FR-102) and enrollment are separate screens reached from the result. */
 export function LoginForm(): React.JSX.Element {
@@ -54,7 +56,7 @@ export function LoginForm(): React.JSX.Element {
       setBanner({ kind: 'network' });
       return;
     }
-    const { data, error, response } = result;
+    const { data, response } = result;
     if (data) {
       if (data.status === 'authenticated' && data.session) {
         signIn(data.session);
@@ -70,10 +72,8 @@ export function LoginForm(): React.JSX.Element {
       }
       return;
     }
-    if (response.status === 423 && error && 'lockedUntil' in error) {
-      setBanner({ kind: 'locked', lockedUntil: error.lockedUntil });
-    } else if (response.status === 401) {
-      setBanner({ kind: 'wrong' });
+    if (response.status === 401) {
+      setBanner({ kind: 'failed' });
       setFocus('password');
     } else {
       setBanner({ kind: 'network' });
@@ -96,17 +96,9 @@ export function LoginForm(): React.JSX.Element {
           Your session ended. Sign in again to continue.
         </Alert>
       ) : null}
-      {banner?.kind === 'wrong' ? (
-        <Alert tone="error" role="alert" title="Email or password is incorrect">
-          Check for typing mistakes and that Caps Lock is off. If you forgot your password, use
-          &ldquo;Forgot password&rdquo; below.
-        </Alert>
-      ) : null}
-      {banner?.kind === 'locked' ? (
-        <Alert tone="warning" role="alert" title="This account is temporarily locked">
-          There were too many incorrect sign-in attempts. You can try again after{' '}
-          <strong>{formatTime(banner.lockedUntil)}</strong> (about 15 minutes). To sign in sooner,
-          reset your password with &ldquo;Forgot password&rdquo; below.
+      {banner?.kind === 'failed' ? (
+        <Alert tone="error" role="alert">
+          {SIGN_IN_FAILED_MESSAGE}
         </Alert>
       ) : null}
       {banner?.kind === 'network' ? (

@@ -6,7 +6,8 @@ import { MOCK_USERS } from '@/mocks/auth-handlers';
 import { server } from '@/mocks/server';
 import { renderWithAuth, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav, router } from '@/test/nav-mock';
-import { LoginForm } from './login-form';
+import { api } from '@/lib/api/client';
+import { LoginForm, SIGN_IN_FAILED_MESSAGE } from './login-form';
 
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
 
@@ -44,11 +45,10 @@ describe('LoginForm', () => {
     expect(router.replace).not.toHaveBeenCalledWith('/admin');
   });
 
-  it('FR-101: wrong password shows a fix-it message and stays on the page', async () => {
+  it('FR-101: wrong password shows the neutral failed-sign-in message and stays on the page', async () => {
     renderWithAuth(<LoginForm />);
     await signIn(MOCK_USERS.recruiter.email, 'wrong-password');
-    expect(await screen.findByRole('alert')).toHaveTextContent('Email or password is incorrect');
-    expect(screen.getByRole('alert')).toHaveTextContent('Forgot password');
+    expect(await screen.findByRole('alert')).toHaveTextContent(SIGN_IN_FAILED_MESSAGE);
     expect(router.replace).not.toHaveBeenCalled();
   });
 
@@ -74,9 +74,24 @@ describe('LoginForm', () => {
     await user.type(screen.getByLabelText('Password'), MOCK_USERS.recruiter.password);
     await user.click(screen.getByRole('button', { name: 'Sign in' }));
     const alert = await screen.findByRole('alert');
-    await waitFor(() => expect(alert).toHaveTextContent('temporarily locked'));
-    expect(screen.getByRole('alert')).toHaveTextContent('15 minutes');
+    await waitFor(() => expect(alert).toHaveTextContent(SIGN_IN_FAILED_MESSAGE));
+    expect(alert).toHaveTextContent(
+      'Sign-in failed. If this keeps happening, wait 15 minutes or contact your administrator.',
+    );
+    expect(alert).not.toHaveTextContent(/locked/i);
     expect(router.replace).not.toHaveBeenCalled();
+  });
+
+  it('TC-002 FR-101: a locked account answers exactly like a wrong password (no 423, no lock details)', async () => {
+    const attempt = (password: string) =>
+      api.POST('/v1/auth/login', { body: { email: MOCK_USERS.recruiter.email, password } });
+    const wrong = await attempt('nope-nope-nope');
+    for (let i = 0; i < 4; i++) await attempt('nope-nope-nope');
+    const lockedCorrect = await attempt(MOCK_USERS.recruiter.password);
+    expect(lockedCorrect.response.status).toBe(401);
+    expect(lockedCorrect.response.status).toBe(wrong.response.status);
+    expect(lockedCorrect.error).toEqual(wrong.error);
+    expect(lockedCorrect.response.headers.get('retry-after')).toBeNull();
   });
 
   it('FR-101: a network failure says what to do', async () => {

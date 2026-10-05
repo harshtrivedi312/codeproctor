@@ -59,15 +59,15 @@ also passes sample 3, empty code gives a compile error, `while True` gives a tim
 
 Routes (all under the `(staff)/admin` group; one `AuthProvider` in `admin/layout.tsx`):
 
-| Route                    | What it is                                                           |
-| ------------------------ | -------------------------------------------------------------------- |
-| `/admin/login`           | Email + password (FR-101), locked-account message, "Forgot password" |
-| `/admin/2fa`             | 6-digit code or recovery code (FR-102)                               |
-| `/admin/2fa/enroll`      | Forced enrollment: QR code, manual key, confirm, recovery codes      |
-| `/admin/forgot-password` | Same confirmation for any email (FR-107)                             |
-| `/admin/reset-password`  | Set a new password from the emailed link (FR-107, D-22)              |
-| `/admin/set-password`    | Same page for a staff invite (ADR 0003 section 4)                    |
-| `/admin`                 | Dashboard inside the staff shell (see FE-03 below)                   |
+| Route                    | What it is                                                                       |
+| ------------------------ | -------------------------------------------------------------------------------- |
+| `/admin/login`           | Email + password (FR-101), one neutral failed-sign-in message, "Forgot password" |
+| `/admin/2fa`             | 6-digit code or recovery code (FR-102)                                           |
+| `/admin/2fa/enroll`      | Forced enrollment: QR code, manual key, confirm, recovery codes                  |
+| `/admin/forgot-password` | Same confirmation for any email (FR-107)                                         |
+| `/admin/reset-password`  | Set a new password from the emailed link (FR-107, D-22)                          |
+| `/admin/set-password`    | Same page for a staff invite (ADR 0003 section 4)                                |
+| `/admin`                 | Dashboard inside the staff shell (see FE-03 below)                               |
 
 Try it: `pnpm dev:web:mock`, then open <http://localhost:3000/admin/login>. Mock users (fake):
 
@@ -78,7 +78,7 @@ Try it: `pnpm dev:web:mock`, then open <http://localhost:3000/admin/login>. Mock
 | `author@example.test`    | `Author-Pass-12345` | AUTHOR      | No 2FA, goes straight in                                                          |
 | `reviewer@example.test`  | `Reviewer-Pass-12`  | REVIEWER    | Not enrolled: forced to enroll, confirm with `123456`                             |
 
-Five wrong passwords for a known email lock it for 15 minutes (a sixth, correct attempt is refused).
+Five wrong passwords for a known email lock it for 15 minutes (a sixth, correct attempt is refused). Wrong password, unknown email and locked account all get the same generic 401, and the login screen shows one message for all of them (FU-BE-22).
 Reset link: `/admin/reset-password#token=mock-reset-token` (works once; `mock-expired-token` is always
 refused). Invite link: `/admin/set-password#token=mock-invite-token`. The mock keeps its state
 (failed logins, enrolled users, used tokens, the fake refresh "cookie") in one mock-only cookie,

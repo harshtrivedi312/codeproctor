@@ -170,20 +170,12 @@ export function createAuthHandlers() {
       const user = findUser(body.email);
       const key = body.email.trim().toLowerCase();
       const lockedUntil = state.lockedUntil[key] ?? 0;
-      // Locked accounts refuse even the correct password (TC-002), and say so the same way.
-      if (lockedUntil > Date.now()) {
-        return HttpResponse.json(
-          {
-            code: 'account_locked' as const,
-            message: 'Account locked.',
-            lockedUntil: new Date(lockedUntil).toISOString(),
-          },
-          { status: 423 },
-        );
-      }
-      if (!user || user.password !== body.password) {
+      // Locked accounts refuse even the correct password (TC-002). The answer is the same generic
+      // 401 as a wrong password: the API never says an account is locked (FU-BE-22).
+      const locked = lockedUntil > Date.now();
+      if (locked || !user || user.password !== body.password) {
         // Unknown emails get the same answer and are not counted, so nothing is revealed.
-        if (user) {
+        if (user && !locked) {
           state.failed[key] = (state.failed[key] ?? 0) + 1;
           if (state.failed[key] >= MAX_FAILED_LOGINS) {
             state.failed[key] = 0;
@@ -192,7 +184,7 @@ export function createAuthHandlers() {
           save(state);
         }
         return HttpResponse.json(
-          { code: 'invalid_credentials', message: 'Email or password is incorrect.' },
+          { code: 'invalid_credentials', message: 'Sign-in failed.' },
           { status: 401 },
         );
       }
