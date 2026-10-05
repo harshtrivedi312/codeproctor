@@ -61,7 +61,7 @@ const FAILURE_HINT: Record<
   { title: string; hint: string }
 > = {
   busy: {
-    title: 'Please try again in a moment',
+    title: 'Verification is temporarily unavailable',
     hint: 'The service is busy. Nothing was changed. Wait a few seconds, then submit again.',
   },
   role: {

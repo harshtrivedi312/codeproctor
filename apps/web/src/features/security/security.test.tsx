@@ -531,7 +531,9 @@ describe('Disable 2FA needs a code and signs out everywhere (FR-102, backend PR 
     await u.type(passwordField(), MOCK_USERS.recruiter.password);
     await u.type(within(dialog()).getByLabelText('6-digit code'), MOCK_TOTP_CODE);
     await u.click(within(dialog()).getByRole('button', { name: 'Turn off 2FA' }));
-    expect(await within(dialog()).findByText('Please try again in a moment')).toBeInTheDocument();
+    expect(
+      await within(dialog()).findByText('Verification is temporarily unavailable'),
+    ).toBeInTheDocument();
     expect(getAccessToken()).not.toBeNull();
     expect(router.replace).not.toHaveBeenCalled();
   });
