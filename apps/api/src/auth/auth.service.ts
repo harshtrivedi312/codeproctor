@@ -4,11 +4,13 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   HttpException,
   HttpStatus,
   Inject,
   Injectable,
   Logger,
+  NotFoundException,
   OnApplicationShutdown,
   ServiceUnavailableException,
   UnauthorizedException,
@@ -66,7 +68,7 @@ export interface SessionOutcome {
 class RefreshReuseSignal extends Error {}
 class AlreadyEnrolledSignal extends Error {}
 class WrongRecoveryCodeSignal extends Error {}
-/** The password changed after it was verified: no session may be opened (FR-104, FR-107). */
+/** The password (or the 2FA secret) changed after it was verified: no session may open (FR-104). */
 class PasswordChangedSignal extends Error {}
 
 /** A reservation is granted, or refused (locked, window full, or a stuck window just locked). */
@@ -421,15 +423,16 @@ export class AuthService implements OnApplicationShutdown {
   ): Promise<SessionOutcome> {
     const user = await this.loadActive(userId);
     this.requireChallengePassword(user, challengePwv);
-    if (!user.totpEnabled || !user.totpSecretEnc) throw this.challengeExpired();
+    const secret = user.totpSecretEnc;
+    if (!user.totpEnabled || !secret) throw this.challengeExpired();
     // Same status and message as a wrong code, so a locked account is indistinguishable.
     if ((await this.reserveAttempt(user, ctx)) !== 'granted') throw this.invalidCode();
     try {
       if (/^\d{6}$/.test(code)) {
-        if (!(await this.verifyTotp(user, user.totpSecretEnc, code))) {
+        if (!(await this.verifyTotp(user, secret, code))) {
           return await this.failCode(user, ctx);
         }
-        return await this.startSession(user);
+        return await this.startSession(user, this.prisma.client, secret);
       }
       const hash = sha256Hex(normalizeRecoveryCode(code));
       // Removing the code and opening the session are one transaction, so a password change that
@@ -442,7 +445,7 @@ export class AuthService implements OnApplicationShutdown {
           WHERE id = ${user.id}::uuid AND ${hash} = ANY(recovery_code_hashes)`;
         if (used !== 1) throw new WrongRecoveryCodeSignal();
         await this.audit(user, 'AUTH_RECOVERY_CODE_USED', ctx, {}, tx);
-        return this.startSession(user, tx);
+        return this.startSession(user, tx, secret);
       });
     } catch (e) {
       if (e instanceof WrongRecoveryCodeSignal) return this.failCode(user, ctx);
@@ -464,6 +467,110 @@ export class AuthService implements OnApplicationShutdown {
   private async failCode(user: UserWithOrg, ctx: RequestContext): Promise<never> {
     await this.registerFailure(user, ctx);
     throw this.invalidCode();
+  }
+
+  // ---- FR-102: manage 2FA while signed in ---------------------------------------------------
+
+  /**
+   * Turns 2FA off for the signed-in user. Needs the current password (same path as setup). Roles
+   * that must use 2FA are refused, since disabling would bypass FR-102. Other sessions are left
+   * alone: an access token carries no family id, so the caller's own family cannot be told
+   * apart from the rest.
+   */
+  async disableTwoFactor(userId: string, password: string, ctx: RequestContext): Promise<void> {
+    const user = await this.requireCurrentPassword(userId, password, ctx);
+    if (TOTP_REQUIRED_ROLES.includes(user.role)) throw this.twoFactorRequiredForRole();
+    if (!user.totpEnabled) throw new ConflictException('Two-factor authentication is not on.');
+    await this.prisma.client.$transaction(async (tx) => {
+      const updated = await tx.user.updateMany({
+        where: {
+          id: user.id,
+          passwordHash: user.passwordHash ?? '',
+          totpEnabled: true,
+          role: { notIn: [...TOTP_REQUIRED_ROLES] },
+        },
+        data: { totpEnabled: false, totpSecretEnc: null, recoveryCodeHashes: [] },
+      });
+      if (updated.count !== 1) await this.explainRefusedChange(tx, user);
+      await this.audit(user, 'AUTH_2FA_DISABLED', ctx, {}, tx);
+    });
+  }
+
+  /** Replaces all recovery codes with 10 new ones; the old ones stop working at once. */
+  async regenerateRecoveryCodes(
+    userId: string,
+    password: string,
+    ctx: RequestContext,
+  ): Promise<{ recoveryCodes: string[] }> {
+    const user = await this.requireCurrentPassword(userId, password, ctx);
+    if (!user.totpEnabled) throw new ConflictException('Two-factor authentication is not on.');
+    const codes = Array.from({ length: RECOVERY_CODE_COUNT }, newRecoveryCode);
+    await this.prisma.client.$transaction(async (tx) => {
+      const updated = await tx.user.updateMany({
+        where: { id: user.id, passwordHash: user.passwordHash ?? '', totpEnabled: true },
+        data: { recoveryCodeHashes: codes.map((c) => sha256Hex(c)) },
+      });
+      if (updated.count !== 1) await this.explainRefusedChange(tx, user);
+      await this.audit(user, 'AUTH_RECOVERY_CODES_REGENERATED', ctx, {}, tx);
+    });
+    return { recoveryCodes: codes };
+  }
+
+  /** Why a bound write matched nothing: password changed (401), or the 2FA state moved (409). */
+  private async explainRefusedChange(tx: Prisma.TransactionClient, user: User): Promise<never> {
+    const now = await tx.user.findUnique({ where: { id: user.id } });
+    if (now?.passwordHash !== user.passwordHash) throw this.invalid();
+    if (now && TOTP_REQUIRED_ROLES.includes(now.role)) throw this.twoFactorRequiredForRole();
+    throw new ConflictException('Two-factor authentication changed. Try again.');
+  }
+
+  private twoFactorRequiredForRole(): ForbiddenException {
+    return new ForbiddenException('Two-factor authentication is required for your role.');
+  }
+
+  /**
+   * A SUPER_ADMIN clears another user's 2FA (lost device and recovery codes). Same organisation
+   * only: another org's user is a 404, like a missing one. The password is not touched. The users
+   * row is locked first, then refresh_tokens (same order as a password reset). A session being
+   * opened from the old second factor is refused by startSession's bound secret. Access tokens
+   * already issued stay valid until they expire (15 minutes): the guard keys on the password
+   * version, which this does not change; the refresh families are all revoked, so none renews.
+   * A role that requires 2FA is sent through forced enrollment at the next login (FR-102).
+   */
+  async resetTwoFactorOf(
+    actor: { id: string; orgId: string },
+    targetId: string,
+    ctx: RequestContext,
+  ): Promise<void> {
+    if (actor.id === targetId) {
+      throw new BadRequestException('Use your own security settings to change your 2FA.');
+    }
+    await this.prisma.client.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT id FROM users
+        WHERE id = ${targetId}::uuid AND org_id = ${actor.orgId}::uuid
+        FOR UPDATE`);
+      if (locked.length !== 1) throw new NotFoundException('User not found.');
+      await tx.user.update({
+        where: { id: targetId },
+        data: { totpEnabled: false, totpSecretEnc: null, recoveryCodeHashes: [] },
+      });
+      const revoked = await tx.refreshToken.updateMany({
+        where: { userId: targetId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      await tx.auditLog.create({
+        data: {
+          orgId: actor.orgId,
+          actorId: actor.id,
+          action: 'AUTH_2FA_RESET_BY_ADMIN',
+          entityType: 'user',
+          entityId: targetId,
+          ip: ctx.ip ?? null,
+          metadata: { targetUserId: targetId, sessionsRevoked: revoked.count },
+        },
+      });
+    });
   }
 
   // ---- FR-104: refresh and logout -----------------------------------------------------------
@@ -818,6 +925,7 @@ export class AuthService implements OnApplicationShutdown {
   private async startSession(
     user: UserWithOrg,
     db: Prisma.TransactionClient = this.prisma.client,
+    boundTotpSecret?: string,
   ): Promise<SessionOutcome> {
     const refreshToken = newOpaqueToken();
     // The token exists only if the password is still the one that was verified. FOR SHARE (not
@@ -826,12 +934,19 @@ export class AuthService implements OnApplicationShutdown {
     // and inserts nothing; a reset arriving later waits for this commit, so its revoke-all sees
     // the token. A family can never outlive a reset (FR-104, FR-107).
     // `?? ''` is deliberate: an empty hash can never equal a stored hash, so it inserts nothing.
+    // A 2FA completion also binds the TOTP secret it checked: an admin reset of the user's 2FA
+    // that lands in between clears it, so no session is opened from the old second factor.
+    const totpBound =
+      boundTotpSecret === undefined
+        ? Prisma.empty
+        : Prisma.sql`AND u.totp_enabled AND u.totp_secret_enc = ${boundTotpSecret}`;
     const inserted = await db.$queryRaw<{ id: string }[]>(Prisma.sql`
       INSERT INTO refresh_tokens (user_id, family_id, token_hash, expires_at)
       SELECT u.id, ${randomUUID()}::uuid, ${sha256Hex(refreshToken)},
              ${new Date(Date.now() + REFRESH_TTL_MS)}::timestamptz
       FROM users u
       WHERE u.id = ${user.id}::uuid AND u.is_active AND u.password_hash = ${user.passwordHash ?? ''}
+        ${totpBound}
       FOR SHARE OF u
       RETURNING id`);
     if (inserted.length !== 1) throw new PasswordChangedSignal();

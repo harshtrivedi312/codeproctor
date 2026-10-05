@@ -1,10 +1,12 @@
-import { Body, Controller, HttpCode, Post, Req, Res } from '@nestjs/common';
+import { Body, Controller, HttpCode, Param, ParseUUIDPipe, Post, Req, Res } from '@nestjs/common';
 import {
   ApiAcceptedResponse,
   ApiBadRequestResponse,
   ApiBearerAuth,
   ApiConflictResponse,
   ApiCookieAuth,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
   ApiNoContentResponse,
   ApiOkResponse,
   ApiOperation,
@@ -23,10 +25,12 @@ import {
   AuthSessionDto,
   ChallengeCodeDto,
   ChallengeDto,
+  CurrentPasswordDto,
   EnrollmentConfirmedDto,
   ForgotPasswordDto,
   LoginDto,
   LoginResultDto,
+  RecoveryCodesDto,
   ResetPasswordDto,
   SetupConfirmDto,
   SetupStartDto,
@@ -169,6 +173,52 @@ export class AuthController {
       ctxOf(req),
     );
     return { recoveryCodes: result.recoveryCodes };
+  }
+
+  @Roles(...ALL_STAFF)
+  @ApiBearerAuth()
+  @Post('2fa/disable')
+  @HttpCode(204)
+  @ApiOperation({ summary: 'Turn 2FA off; needs the current password; not for 2FA-required roles' })
+  @ApiNoContentResponse()
+  @ApiUnauthorizedResponse({ description: 'Missing token, or wrong current password (or locked)' })
+  @ApiForbiddenResponse({ description: 'Two-factor authentication is required for this role' })
+  @ApiConflictResponse({ description: '2FA is not on' })
+  async disable(@Body() dto: CurrentPasswordDto, @Req() req: AuthedRequest): Promise<void> {
+    await this.auth.disableTwoFactor(this.userId(req), dto.currentPassword, ctxOf(req));
+  }
+
+  @Roles(...ALL_STAFF)
+  @ApiBearerAuth()
+  @Post('2fa/recovery-codes/regenerate')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Replace all recovery codes; needs the current password (FR-102)' })
+  @ApiOkResponse({ type: RecoveryCodesDto })
+  @ApiUnauthorizedResponse({ description: 'Missing token, or wrong current password (or locked)' })
+  @ApiConflictResponse({ description: '2FA is not on' })
+  regenerateRecoveryCodes(
+    @Body() dto: CurrentPasswordDto,
+    @Req() req: AuthedRequest,
+  ): Promise<RecoveryCodesDto> {
+    return this.auth.regenerateRecoveryCodes(this.userId(req), dto.currentPassword, ctxOf(req));
+  }
+
+  @Roles(UserRole.SUPER_ADMIN)
+  @ApiBearerAuth()
+  @Post('2fa/reset/:userId')
+  @HttpCode(204)
+  @ApiOperation({ summary: "Super admin clears another user's 2FA and sessions (FR-102)" })
+  @ApiNoContentResponse()
+  @ApiBadRequestResponse({ description: 'Not a UUID, or the caller targeted themselves' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid token' })
+  @ApiForbiddenResponse({ description: 'Caller is not a super admin' })
+  @ApiNotFoundResponse({ description: 'No such user in your organization' })
+  async resetTwoFactor(
+    @Param('userId', new ParseUUIDPipe()) userId: string,
+    @Req() req: AuthedRequest,
+  ): Promise<void> {
+    if (!req.user) throw new Error('Guard did not attach a user');
+    await this.auth.resetTwoFactorOf(req.user, userId, ctxOf(req));
   }
 
   @Public()
