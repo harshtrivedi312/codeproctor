@@ -183,7 +183,7 @@ describe('nested relation writes are denied by default (NFR-04, FR-103; ADR 0006
   });
 
   describe('the org relation (org: { connect })', () => {
-    it('TC-008 org: { connect } is refused on every model with an org_id; services set orgId or let the scope stamp it', () => {
+    it('TC-008 org: { connect } is refused on every model with an org_id; services set the scalar orgId', () => {
       for (const model of [
         'User',
         'Question',

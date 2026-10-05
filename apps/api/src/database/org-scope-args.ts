@@ -99,11 +99,7 @@ function violation(model: string, operation: string, what: string): OrgScopeViol
 
 /** The org relation (`org: { connect }`) is a nested relation write: refused with the others. */
 function orgRelation(model: string, operation: string): OrgScopeViolationError {
-  return violation(
-    model,
-    operation,
-    'the org relation cannot be written; set the scalar orgId, or let the scope stamp it.',
-  );
+  return violation(model, operation, 'the org relation cannot be written; set the scalar orgId.');
 }
 
 /** Create payload of a model with its own org_id: the org is added when missing and must match. */

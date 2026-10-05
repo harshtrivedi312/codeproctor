@@ -241,7 +241,7 @@ describe('org scope arguments (NFR-04, FR-103)', () => {
         name: 'T',
         orgId: ORG_A,
       });
-      // Even naming the caller's own org: services set orgId, or let the scope stamp it.
+      // Even naming the caller's own org: services set the scalar orgId.
       expect(() =>
         scope('Test', 'create', { data: { name: 'T', org: { connect: { id: ORG_A } } } }),
       ).toThrow(/nested relation write refused \(Test\.org\.connect\)/);

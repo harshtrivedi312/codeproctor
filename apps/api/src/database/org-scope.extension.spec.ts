@@ -1,6 +1,7 @@
 // The extension's behaviour that is decided before any SQL is sent: no org context, raw SQL, and
 // payloads for another org. The client points at a closed port and never connects, so this runs
 // without Docker. The queries that do reach Postgres are in tc-008-org-isolation.spec.ts.
+import { Prisma } from '../generated/prisma/client.js';
 import { createPrismaClient } from './create-prisma-client';
 import { OrgContextMissingError, OrgScopeViolationError, RawQueryNotAllowedError } from './errors';
 import { OrgContextService } from './org-context';
@@ -51,6 +52,54 @@ describe('org scope extension without a database (NFR-04, FR-103)', () => {
       await orgContext.runInOrg(ORG_A, () => Promise.resolve());
       expect(orgContext.current()).toBeUndefined();
       await expect(client.session.findMany()).rejects.toBeInstanceOf(OrgContextMissingError);
+    });
+  });
+
+  describe('a relation key inside a createMany row (FU-DB-106)', () => {
+    // The nested-write guard does not walk createMany rows (they are flat, and ingest paths pay
+    // nothing). It relies on Prisma itself refusing a relation in a row, and this pins that: if a
+    // Prisma release accepted one, `connect` through createMany would bypass deny-by-default.
+    const rows = [
+      [
+        'a relation connect',
+        { testId: ORG_A, title: 't', position: 1, test: { connect: { id: ORG_B } } },
+      ],
+      [
+        'a relation create',
+        { testId: ORG_A, title: 't', position: 1, test: { create: { name: 'n' } } },
+      ],
+      [
+        'a back relation',
+        { testId: ORG_A, title: 't', position: 1, questions: { create: [{ position: 0 }] } },
+      ],
+    ] as const;
+
+    it.each(rows)(
+      'TC-008 createMany with %s in a row is rejected by Prisma validation',
+      async (_name, row) => {
+        for (const operation of ['createMany', 'createManyAndReturn'] as const) {
+          const run = (): Promise<unknown> =>
+            (client.testSection[operation] as (args: unknown) => Promise<unknown>)({ data: [row] });
+          await expect(orgContext.runInOrg(ORG_A, run)).rejects.toBeInstanceOf(
+            Prisma.PrismaClientValidationError,
+          );
+          await expect(orgContext.runSystem('BACKGROUND_JOB', run)).rejects.toBeInstanceOf(
+            Prisma.PrismaClientValidationError,
+          );
+        }
+      },
+    );
+
+    it('TC-008 the same holds on a model with its own org_id, for the single-object form too', async () => {
+      const row = { name: 't', durationMinutes: 30, org: { connect: { id: ORG_B } } };
+      for (const data of [[row], row]) {
+        const run = (): Promise<unknown> =>
+          (client.test.createMany as (args: unknown) => Promise<unknown>)({ data });
+        // The extension refuses the org relation itself before Prisma sees it (deny by default).
+        await expect(orgContext.runInOrg(ORG_A, run)).rejects.toThrow(
+          /the org relation cannot be written; set the scalar orgId/,
+        );
+      }
     });
   });
 
