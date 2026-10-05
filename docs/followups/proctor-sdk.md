@@ -225,3 +225,14 @@ The mock handlers and the demo's injected adapters (`packages/proctor-sdk/src/de
 - Evidence presign `purpose` and `evidenceKey` (relative `evidence/<ULID>.jpg`); identity re-check as frame upload plus 202; SDK core must stop emitting client FACE_MISMATCH (the demo adapter reports `matched: true` to stop the relay).
 - `runSystemCheck()` and `POST /candidate/session/system-check`; SCREEN_SHARE detector value; `models:fetch` and `models:update` with `models.lock.json`.
 - Not modelled in the mock: key epochs, SESSION_NOT_ACTIVE, rate limits other than identity (1 per 60 s), org prefixes (fixed `demo`).
+
+## Review round 2 for PR #35 (code-reviewer, not blockers; docs only)
+Should-fix
+- SF1 `api/_lib/handler.ts` `tooLarge`: a chunked upload without Content-Length passes (`Number(null)` is 0) and is fully buffered by `arrayBuffer()` or `json()`. Add a `readCapped(req, max)` helper that reads `req.body` with a reader and answers 413 once the limit is passed.
+- SF2 `api/media/put/[...key]/route.ts` reads the body before checking the chunk was presigned. Do the lookup first and answer 403 without reading.
+
+Nits
+- `mount.test.ts`: add cases for stop() during a delayed `recordAudio` `getUserMedia` (microphone released) and stop() while the screen-share picker is open (late tracks stopped). Note that the existing "no microphone request" assertion would pass even without the stopped checks; `cam.stop` is the real catch.
+- `pipeline.recordScreen` can call `begin('SCREEN')` after `pipeline.stop()` if stop lands during `applyConstraints` or `nextSegment` (`mount.ts` screen-share handler): check `stopped` after `recordScreen` and call `pipeline.stopStream('SCREEN')`.
+- `api/state/route.ts` GET still creates sessions via `sessionState(id)`; use `existingSession` and return an empty summary.
+- `withSession` returns 413 before 401; check auth first.
