@@ -39,10 +39,6 @@ plugins = ["pydantic.mypy"]
 module = ["onnxruntime", "onnxruntime.*", "mediapipe", "mediapipe.*", "PIL", "PIL.*"]
 ignore_missing_imports = true
 
-[tool.coverage.run]
-# The MediaPipe adapter needs the real library and model file (opt-in manual test only).
-omit = ["*/worker/face/detector.py"]
-
 [tool.coverage.report]
 exclude_also = ["if TYPE_CHECKING:"]
 

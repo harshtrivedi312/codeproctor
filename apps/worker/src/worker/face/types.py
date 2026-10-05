@@ -52,6 +52,15 @@ class AlignedFace:
     def __repr__(self) -> str:
         return "AlignedFace(112x112, redacted)"
 
+    def __reduce__(self) -> str | tuple[object, ...]:
+        raise TypeError("Face crops must not be serialized.")
+
+    def __copy__(self) -> AlignedFace:
+        raise TypeError("Face crops must not be copied.")
+
+    def __deepcopy__(self, memo: dict[int, object]) -> AlignedFace:
+        raise TypeError("Face crops must not be copied.")
+
 
 @dataclass(frozen=True, slots=True)
 class MatchResult:
