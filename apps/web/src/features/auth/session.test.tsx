@@ -6,6 +6,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { api, isAuthRequest } from '@/lib/api/client';
 import {
   REQUEST_TIMEOUT_MS,
+  getSessionUserId,
+  invalidateRefreshes,
   refreshSession,
   resetInMemorySignOutFlagForTests,
   settleSession,
@@ -424,8 +426,17 @@ describe('other tabs (shared refresh cookie)', () => {
     expect(getAccessToken()).toBeNull();
   });
 
-  it('FR-103 FR-104: a sign-in in another tab makes this tab re-check, and sign out if the user differs', async () => {
-    renderWithAuth(
+  function refreshCounter(): { count: () => number; stop: () => void } {
+    let n = 0;
+    const listener = ({ request }: { request: Request }) => {
+      if (request.url.endsWith('/v1/auth/refresh')) n++;
+    };
+    server.events.on('request:start', listener);
+    return { count: () => n, stop: () => server.events.removeListener('request:start', listener) };
+  }
+
+  it('FR-103 FR-104 TC-005: a sign-in as someone else in another tab signs two other tabs out with no network call', async () => {
+    const tabA = renderWithAuth(
       <>
         <LoginForm />
         <Who />
@@ -433,14 +444,25 @@ describe('other tabs (shared refresh cookie)', () => {
     );
     await signInAs(MOCK_USERS.recruiter);
     await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
-    seedMockRefresh(MOCK_USERS.author.email);
+    const tabB = renderWithAuth(<Who />);
+    await act(async () => undefined); // let tab B start and finish its first-load refresh
+    await settleSession();
+    const refreshes = refreshCounter();
     act(() => {
-      window.dispatchEvent(new StorageEvent('storage', { key: 'cp.sessionEpoch', newValue: 'n1' }));
+      window.dispatchEvent(
+        new StorageEvent('storage', { key: 'cp.sessionEpoch', newValue: 'n1|someone-else' }),
+      );
     });
-    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('nobody'));
+    await waitFor(() => expect(screen.getAllByTestId('who')[0]).toHaveTextContent('nobody'));
+    expect(screen.getAllByTestId('who')[1]).toHaveTextContent('nobody');
+    expect(getAccessToken()).toBeNull();
+    expect(refreshes.count()).toBe(0);
+    refreshes.stop();
+    tabA.unmount();
+    tabB.unmount();
   });
 
-  it('FR-104: a sign-in in another tab as the same user keeps this tab signed in', async () => {
+  it('FR-104 TC-005: a sign-in in another tab as the same user keeps this tab signed in, with no network call', async () => {
     renderWithAuth(
       <>
         <LoginForm />
@@ -449,12 +471,19 @@ describe('other tabs (shared refresh cookie)', () => {
     );
     await signInAs(MOCK_USERS.recruiter);
     await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
-    seedMockRefresh(MOCK_USERS.recruiter.email);
+    const refreshes = refreshCounter();
     act(() => {
-      window.dispatchEvent(new StorageEvent('storage', { key: 'cp.sessionEpoch', newValue: 'n2' }));
+      window.dispatchEvent(
+        new StorageEvent('storage', {
+          key: 'cp.sessionEpoch',
+          newValue: `n2|${getSessionUserId()}`,
+        }),
+      );
     });
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 50));
     expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER');
+    expect(refreshes.count()).toBe(0);
+    refreshes.stop();
   });
 
   it('FR-104: a sign-in writes a non-secret epoch for other tabs and no token', async () => {
@@ -464,6 +493,8 @@ describe('other tabs (shared refresh cookie)', () => {
     const epoch = localStorage.getItem('cp.sessionEpoch');
     expect(epoch).toBeTruthy();
     expect(epoch).not.toContain(getAccessToken()!);
+    expect(epoch).toMatch(/\|.+$/); // "nonce|userId"
+    expect(epoch!.endsWith(`|${getSessionUserId()}`)).toBe(true);
   });
 
   it('FR-104: when another tab confirms the sign-out, this tab drops the unconfirmed warning', async () => {
@@ -656,6 +687,8 @@ describe('sign-out that the server did not confirm', () => {
 
 describe('settleSession limit', () => {
   it('FR-101 FR-104: a stuck refresh cannot hold a sign-in for longer than the limit', async () => {
+    // The handler never answers. The request's own real-timer abort (10 s) would fire long after
+    // this test, so the finally block invalidates it: a late abort must not sign out a later test.
     server.use(http.post('*/v1/auth/refresh', () => new Promise(() => undefined)));
     void refreshSession();
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
@@ -669,6 +702,7 @@ describe('settleSession limit', () => {
       expect(done).toBe(true);
     } finally {
       vi.useRealTimers();
+      invalidateRefreshes();
     }
   });
 });

@@ -4,8 +4,9 @@ import * as React from 'react';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RequireRole } from '@/features/auth/require-role';
 import { useAuth } from '@/features/auth/auth-provider';
-import type { Schemas } from '@/lib/api/client';
+import { api, type Schemas } from '@/lib/api/client';
 import { apiBaseUrl } from '@/lib/env';
+import { getAccessToken } from '@/lib/auth-token';
 import { defaultSettings } from '@/mocks/admin-handlers';
 import { MOCK_USERS, seedMockRefresh } from '@/mocks/auth-handlers';
 import { server } from '@/mocks/server';
@@ -164,5 +165,75 @@ describe('cached API data does not cross users (FR-103, FR-104)', () => {
     await saving;
     expect((holder.read!() as { retentionDays: number }).retentionDays).toBe(30);
     expect(screen.getByLabelText('Keep recordings and ID images for (days)')).toHaveValue(30);
+  });
+
+  it('FR-103 FR-104 TC-005: after a refresh returns another user, late 401s from the old user do not sign the tab in as them, and a save in flight stays out of the cache', async () => {
+    const holder: {
+      save: ((retentionDays: number) => Promise<unknown>) | null;
+      read: (() => unknown) | null;
+    } = { save: null, read: null };
+    function Saver(): null {
+      const mutation = useUpdateSettings();
+      const qc = useQueryClient();
+      React.useEffect(() => {
+        holder.save = (retentionDays) => mutation.mutateAsync({ retentionDays });
+        holder.read = () => qc.getQueryData(adminKeys.settings);
+      });
+      return null;
+    }
+    renderAsStaff(
+      <>
+        <Capture />
+        <Saver />
+        <RequireRole>
+          <CandidatesPage />
+        </RequireRole>
+      </>,
+      MOCK_USERS.admin,
+    );
+    await screen.findByText('Ada Lovelace');
+
+    const releases: (() => void)[] = [];
+    const gates = [0, 1].map(() => new Promise<void>((resolve) => releases.push(resolve)));
+    let timeCalls = 0;
+    let refreshCalls = 0;
+    let releasePatch: () => void = () => undefined;
+    const patchGate = new Promise<void>((resolve) => (releasePatch = resolve));
+    server.events.on('request:start', ({ request }) => {
+      if (request.url.endsWith('/v1/auth/refresh')) refreshCalls++;
+    });
+    server.use(
+      http.get('*/v1/time', async () => {
+        const mine = timeCalls++;
+        await gates[mine];
+        return new HttpResponse(null, { status: 401 });
+      }),
+      http.patch('*/v1/admin/settings', async () => {
+        await patchGate;
+        return HttpResponse.json({ ...defaultSettings(), retentionDays: 45 }); // org A's value
+      }),
+    );
+    const saving = holder.save!(45);
+    const first = api.GET('/v1/time');
+    const second = api.GET('/v1/time');
+    await waitFor(() => expect(timeCalls).toBe(2));
+
+    // Another tab signed in as the recruiter: the shared cookie now belongs to them.
+    seedMockRefresh(MOCK_USERS.recruiter.email);
+    releases[0]!();
+    expect((await first).response.status).toBe(401);
+    await waitFor(() => expect(screen.queryByText('Ada Lovelace')).not.toBeInTheDocument());
+    expect(refreshCalls).toBe(1);
+
+    // The second 401 (sent as the admin) arrives after the mismatch sign-out.
+    releases[1]!();
+    expect((await second).response.status).toBe(401);
+    expect(refreshCalls).toBe(1); // no second refresh
+    expect(getAccessToken()).toBeNull(); // still signed out, not silently the recruiter
+
+    releasePatch();
+    await saving;
+    expect(holder.read!()).toBeUndefined();
+    server.events.removeAllListeners();
   });
 });

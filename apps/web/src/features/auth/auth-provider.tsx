@@ -10,7 +10,7 @@ import {
   getGeneration,
   getSessionUserId,
   REQUEST_TIMEOUT_MS,
-  invalidateRefreshes,
+  handleSignInElsewhere,
   isSignOutPending,
   SESSION_EPOCH_KEY,
   SIGN_OUT_MARKER_KEY,
@@ -127,10 +127,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
         // Another tab confirmed the sign-out (or signed in): nothing left to retry here.
         setSignOutUnconfirmed(false);
       } else if (event.key === SESSION_EPOCH_KEY && getSessionUserId()) {
-        // Another tab signed in. The refresh cookie is shared, so check that this tab's user is
-        // still the cookie's user; if not, the refresh signs this tab out.
-        invalidateRefreshes();
-        void refreshSession();
+        // Another tab signed in. Compare user ids locally: no network call, so a burst of
+        // refreshes from every tab cannot look like token reuse (TC-005).
+        handleSignInElsewhere(event.newValue);
       }
     };
     window.addEventListener('storage', onStorage);
@@ -145,7 +144,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       setPending(null);
       setSignedOutByUser(false);
       setSignOutUnconfirmed(false);
-      beginSession();
+      beginSession(session.user.id);
       // The listener below clears on a user change; this clears when the same user id signs in
       // again (for example after a sign-out that kept the page mounted), so nothing is reused.
       void queryClient.cancelQueries();

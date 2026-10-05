@@ -28,7 +28,14 @@ export function getSessionUserId(): string | null {
 }
 
 export function publishSession(session: AuthSession | null): void {
-  currentUserId = session ? session.user.id : null;
+  const nextUserId = session ? session.user.id : null;
+  if (nextUserId !== currentUserId) {
+    // The identity changed (including to "nobody"): everything started under the old identity,
+    // such as a request waiting for a 401 or a save in flight, must be dropped (FR-103, FR-104).
+    generation += 1;
+    inFlight = null;
+  }
+  currentUserId = nextUserId;
   setAccessToken(session ? session.accessToken : null);
   for (const listener of listeners) listener(session);
 }
@@ -151,16 +158,43 @@ export function beginSignOut(): Promise<void> {
  * Called on a fresh login. Bumps the generation so a slow first-load refresh that ends in 401
  * cannot sign out the new session, and allows refreshes again.
  */
-export function beginSession(): void {
+export function beginSession(userId?: string): void {
   signingOut = false;
   writeMarker(false);
-  try {
-    // Tell other tabs a sign-in happened, so one still signed in as someone else re-checks.
-    window.localStorage.setItem(SESSION_EPOCH_KEY, crypto.randomUUID());
-  } catch {
-    // Storage blocked: other tabs find out on their next refresh (it returns a different user).
-  }
+  if (userId) announceSignIn(userId);
   invalidateRefreshes();
+}
+
+function makeNonce(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    // crypto.randomUUID needs a secure context; this only has to differ from the last value.
+    return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  }
+}
+
+/**
+ * Tells other tabs who just signed in: "nonce|userId", a user id and no token. They compare it
+ * with their own user locally and sign out on a mismatch, with no network call (a burst of
+ * refreshes from every tab with the same new cookie would look like token reuse, TC-005).
+ */
+function announceSignIn(userId: string): void {
+  try {
+    window.localStorage.setItem(SESSION_EPOCH_KEY, `${makeNonce()}|${userId}`);
+  } catch {
+    // Storage blocked: other tabs find out when one of their requests gets a 401 and the refresh
+    // returns a different user.
+  }
+}
+
+/** Another tab signed in as `userId` (the value of the epoch key). Signs this tab out if it is someone else. */
+export function handleSignInElsewhere(epochValue: string | null): void {
+  const announced = epochValue?.split('|')[1];
+  const mine = currentUserId;
+  if (!announced || !mine || announced === mine) return;
+  // publishSession bumps the generation, dropping work started as the old user.
+  publishSession(null);
 }
 
 /** One refresh at a time; concurrent callers share the result. Returns null when it failed. */
