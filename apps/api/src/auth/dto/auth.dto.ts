@@ -84,7 +84,10 @@ export class AuthUserDto {
   @ApiProperty() name!: string;
   @ApiProperty({ enum: ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'REVIEWER'] }) role!: string;
   @ApiProperty() orgName!: string;
-  @ApiProperty({ description: "Whether the caller's own two-factor authentication is on." })
+  @ApiProperty({
+    readOnly: true,
+    description: "Whether the caller's own two-factor authentication is on.",
+  })
   totpEnabled!: boolean;
 }
 

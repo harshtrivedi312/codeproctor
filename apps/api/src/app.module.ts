@@ -11,6 +11,7 @@ import { validateEnv } from './config/env';
 import type { Env } from './config/env';
 import { AuthModule } from './auth/auth.module';
 import { JwtAuthGuard } from './common/auth/jwt-auth.guard';
+import { LOG_REDACT } from './common/log-redaction';
 import { TokenModule } from './common/auth/token.service';
 import { PrismaModule } from './database/prisma.module';
 import { MailModule } from './mail/mail.module';
@@ -51,10 +52,7 @@ function areaOf(context: ExecutionContext): Area {
             return id;
           },
           // Never log credentials, tokens or cookies.
-          redact: {
-            paths: ['req.headers.authorization', 'req.headers.cookie', 'res.headers["set-cookie"]'],
-            censor: '[redacted]',
-          },
+          redact: LOG_REDACT,
           // The query string may carry tokens, so log the path only.
           serializers: {
             req: (req: { id: string; method: string; url: string }) => ({
