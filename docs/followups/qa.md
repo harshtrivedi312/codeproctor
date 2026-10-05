@@ -168,3 +168,13 @@ Planned (BE-10): `apps/api/test/integration/tc-050.int.test.ts`: duration_ms fil
 
 - After merge: #32 (worker hardening), #30 (DB-05, TC-008), #26 (dedupe harness helpers), ADR 0013 (TC-050), BE-03 (flip the switches, fix assumed names, run, update the matrix from the run).
 - #25 and #27 added tests tagged TC-005 and TC-074; the matrix check passes with them.
+
+### 8.6 Code-reviewer round on PR #42 (approved, no blockers)
+
+Applied in the staged tests: a success on a mutating route must have an effect (`unchanged() === false`); cross-org 404 over every allowed role, with the TC-008 tag in the title; list routes checked for leaks by org A user ids, e-mails and an org A session (for /review/queue), not only the org id; existence-oracle comparison of cross-org 404 against a random-uuid 404; TC-006 runs each route as the least-privileged allowed role first; the harness fake MailPort now records every `send*` method (so the BE-03 invite mail is captured) and the invite test asserts a token was mailed; `entityId` must be defined on every audited route; all actors and fixtures are created before the audit baseline. A trial run with both switches on found and fixed a fixture bug (the `users_check` constraint needs a hash or set-password token).
+
+p1-gate: staged (skipped, pending, todo) tests are counted per TC and printed as "N passing, M staged (skipped)"; `--strict` fails a P1 TC with staged tests; a Jest or Vitest file that failed with no assertion results (compile error, crash) fails the gate and names the file. Checked with synthetic reports. Not done: a BE03_READY canary (it could false-fail when BE-03 merges before the switch is flipped); the switch flip is listed under "After merge" in 8.5.
+
+Nits: the cheap ones were applied with the items above; the remaining nits (the reviewer's list 3, 8 and 9 was not itemised in the message I received) are open, please repeat them if they matter.
+
+Hub request (nit 10, test-cases.md is not QA-owned): TC-002 expected result should add the P-03 behaviour. Proposed wording: "Account locked 15 min; the 6th, correct attempt refused; audit entry written; a SUPER_ADMIN of the org sees the lock (AUTH_ACCOUNT_LOCKED event, locked and lockedUntil on GET /users, never on any auth response or to other roles) and can unlock it with an audited USER_UNLOCKED action, after which the user can sign in and the failed-attempt counter is reset."

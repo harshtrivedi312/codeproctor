@@ -7,11 +7,13 @@
 // set BE03_READY = true in support/be03-routes.ts (or run with BE03_READY=1). Same for
 // "[BE-13 pending]" and BE13_READY. The matrix-only tests at the top always run.
 import jwt from 'jsonwebtoken';
+import { randomUUID } from 'node:crypto';
 import { UserRole } from '../../src/generated/prisma/client';
 import { boot, Harness } from '../support/harness';
 import { actor, Actor, call } from '../support/be03-helpers';
 import {
   allowedRoles,
+  sessionFixture,
   BE03_READY,
   BE03_ROUTES,
   BE13_READY,
@@ -55,13 +57,14 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
     let h: Harness;
     let orgB: string;
     const byRole = {} as Record<UserRole, Actor>;
-    let outsider: Actor; // SUPER_ADMIN and REVIEWER of org B
+    const orgBActors: Partial<Record<UserRole, Actor>> = {};
+    const orgBActor = async (role: UserRole): Promise<Actor> =>
+      (orgBActors[role] ??= await actor(h, role, orgB));
 
     beforeAll(async () => {
       h = await boot();
       for (const role of USER_ROLES) byRole[role] = await actor(h, UserRole[role]);
       orgB = (await h.owner.organization.create({ data: { name: 'QA Org B' } })).id;
-      outsider = await actor(h, UserRole.SUPER_ADMIN, orgB);
     });
     afterAll(async () => {
       await h?.close();
@@ -98,6 +101,8 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
           const res = await call(h, route.method, t.path, byRole[role].token, t.body);
           if (hasPermission(role, route.permission)) {
             expect(route.ok).toContain(res.status);
+            // A success must have an effect; a status code alone proves nothing.
+            if (route.mutating) expect(await t.unchanged()).toBe(false);
           } else {
             expect(res.status).toBe(403);
             expect(await t.unchanged()).toBe(true);
@@ -105,24 +110,61 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
         },
       );
 
-      it(`TC-004: ${label} for a target in another org is 404 and changes nothing`, async () => {
-        const holder = USER_ROLES.find((r) => hasPermission(r, route.permission));
-        if (holder === undefined) throw new Error(`no role holds ${route.permission}`);
-        // The caller is a user of org B who holds the permission; the target lives in org A.
-        const caller = holder === 'SUPER_ADMIN' ? outsider : await actor(h, UserRole[holder], orgB);
-        const t = await route.prepare(h, h.orgId);
-        if (route.template.includes(':id')) {
-          const res = await call(h, route.method, t.path, caller.token, t.body);
-          expect(res.status).toBe(404);
-          expect(JSON.stringify(res.body)).not.toContain(h.orgId);
-          expect(await t.unchanged()).toBe(true);
-        } else {
-          // No id in the path: the call must act inside the caller's org only (list routes).
-          const res = await call(h, route.method, t.path, caller.token, t.body);
-          expect(route.ok).toContain(res.status);
-          expect(JSON.stringify(res.body)).not.toContain(h.orgId);
-        }
-      });
+      const holders = USER_ROLES.filter((r) => hasPermission(r, route.permission));
+      it.each(holders.map((r) => [r] as const))(
+        `TC-004 TC-008: ${label} as org B %s on an org A target is 404, leaks nothing and changes nothing`,
+        async (role) => {
+          const caller = await orgBActor(role);
+          if (route.template.includes(':id')) {
+            const t = await route.prepare(h, h.orgId);
+            const res = await call(h, route.method, t.path, caller.token, t.body);
+            expect(res.status).toBe(404);
+            expect(JSON.stringify(res.body)).not.toContain(h.orgId);
+            expect(await t.unchanged()).toBe(true);
+          } else {
+            // No id in the path: the call must act inside the caller's org only. Seed org A with
+            // known rows and assert none of them appears in the answer (not only the org id).
+            const leaks = Object.values(byRole).flatMap((a) => [a.id, a.email]);
+            if (route.template.startsWith('/review')) {
+              leaks.push((await sessionFixture(h, h.orgId)).sessionId);
+            }
+            const t = await route.prepare(h, orgB);
+            const res = await call(h, route.method, t.path, caller.token, t.body);
+            expect(route.ok).toContain(res.status);
+            const text = JSON.stringify(res.body);
+            for (const x of [...leaks, h.orgId]) expect(text).not.toContain(x);
+          }
+        },
+      );
+
+      if (route.template.includes(':id')) {
+        it(`TC-004 TC-008: ${label} gives the same 404 for another org's id and for a random id (no existence oracle)`, async () => {
+          const holder = holders[0];
+          if (holder === undefined) throw new Error(`no role holds ${route.permission}`);
+          const caller = await orgBActor(holder);
+          const t = await route.prepare(h, h.orgId);
+          const realId = t.entityId ?? '';
+          const randomId = randomUUID();
+          const cross = await call(h, route.method, t.path, caller.token, t.body);
+          const missing = await call(
+            h,
+            route.method,
+            realId ? t.path.replace(realId, randomId) : t.path,
+            caller.token,
+            t.body,
+          );
+          expect(cross.status).toBe(404);
+          expect(missing.status).toBe(404);
+          // Compare the bodies with the volatile and id-bearing parts removed.
+          const norm = (body: unknown, id: string): string => {
+            const o = { ...(body as Record<string, unknown>) };
+            delete o.traceId;
+            delete o.instance;
+            return JSON.stringify(o).split(id).join('ID');
+          };
+          expect(norm(cross.body, realId || 'x')).toBe(norm(missing.body, randomId));
+        });
+      }
     });
   });
 }

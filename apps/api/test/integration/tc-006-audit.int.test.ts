@@ -50,8 +50,11 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
     let h: Harness;
     let orgB: string;
     const staff: Partial<Record<UserRole, Actor>> = {};
+    const orgBStaff: Partial<Record<UserRole, Actor>> = {};
     const roleFor = (r: Be03Route): UserRole => {
-      const role = (['SUPER_ADMIN', 'REVIEWER', 'RECRUITER', 'AUTHOR'] as const).find((x) =>
+      // Least-privileged allowed role first, so a route that is open to REVIEWER is exercised as
+      // REVIEWER, not as SUPER_ADMIN.
+      const role = (['REVIEWER', 'RECRUITER', 'AUTHOR', 'SUPER_ADMIN'] as const).find((x) =>
         hasPermission(x, r.permission),
       );
       if (!role) throw new Error(`no role holds ${r.permission}`);
@@ -103,13 +106,15 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
           expect(row.orgId).toBe(h.orgId);
           expect(row.actorId).toBe(who.id);
           const entityId = t.entityId ?? (await t.resolveEntityId?.());
-          if (entityId) expect(row.entityId).toBe(entityId);
+          expect(entityId).toBeDefined(); // every audited route names its entity
+          expect(row.entityId).toBe(entityId);
           expect(row.ip).toMatch(/^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/);
           // Server time: the DB clock, not a client value. Allow 5 s of skew in the harness.
           expect(row.createdAt.getTime()).toBeGreaterThanOrEqual(t0 - 5000);
           expect(row.createdAt.getTime()).toBeLessThanOrEqual(t1 + 5000);
 
           const mailTokens = h.mails.slice(mailsBefore).map((m) => tokenFromUrl(m.url));
+          if (route.sendsMail) expect(mailTokens.filter((x) => x !== '').length).toBeGreaterThan(0);
           expectNoSecrets(row, [...t.secrets, ...mailTokens, who.token]);
         });
 
@@ -118,15 +123,18 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
           const denied = (['SUPER_ADMIN', 'REVIEWER', 'RECRUITER', 'AUTHOR'] as const).find(
             (x) => !hasPermission(x, route.permission),
           );
+          // Create every actor and fixture BEFORE the baseline: sign-ins may write audit rows.
+          const lowly = denied ? await as(UserRole[denied]) : undefined;
+          const outsider = route.template.includes(':id')
+            ? (orgBStaff[holder] ??= await actor(h, holder, orgB))
+            : undefined;
           const t = await route.prepare(h, h.orgId);
           const before = await lastId();
           await call(h, route.method, t.path, undefined, t.body).expect(401);
-          if (denied) {
-            const lowly = await as(UserRole[denied]);
+          if (lowly) {
             await call(h, route.method, t.path, lowly.token, t.body).expect(403);
           }
-          if (route.template.includes(':id')) {
-            const outsider = await actor(h, holder, orgB);
+          if (outsider) {
             await call(h, route.method, t.path, outsider.token, t.body).expect(404);
           }
           // ASSUMED: BE-03 documents no audit row for refused calls. If it adds one (for example

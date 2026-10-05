@@ -54,6 +54,8 @@ export interface Be03Route {
   /** null: not audited. Reads of candidate data are audited (FR-105). */
   audit: { action: string; entityType: string } | null;
   mutating: boolean;
+  /** true: a successful call sends a mail whose URL carries a token (checked for leaks). */
+  sendsMail?: boolean;
   /** false: the route takes no body, so the invalid-body (400) test does not apply. Default true. */
   takesBody?: boolean;
   /** Status codes accepted as success. */
@@ -68,7 +70,13 @@ const uniq = (): string => `${Date.now().toString(36)}${++n}`;
 async function userTarget(h: Harness, orgId: string): Promise<{ id: string; email: string }> {
   const email = `qa-target-${uniq()}@example.com`;
   const u = await h.owner.user.create({
-    data: { orgId, email, fullName: 'QA Target', role: UserRole.RECRUITER },
+    data: {
+      orgId,
+      email,
+      fullName: 'QA Target',
+      role: UserRole.RECRUITER,
+      passwordHash: 'not-a-real-hash', // the users_check constraint needs a hash or a set-password token
+    },
   });
   return { id: u.id, email };
 }
@@ -130,6 +138,7 @@ export const BE03_ROUTES: Be03Route[] = [
     permission: 'user:manage',
     audit: { action: 'USER_INVITED', entityType: 'user' }, // ASSUMED action and entity type
     mutating: true,
+    sendsMail: true,
     ok: [200, 201], // ASSUMED
     prepare: (h, orgId) => {
       const email = `qa-invitee-${uniq()}@example.com`;

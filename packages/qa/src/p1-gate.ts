@@ -24,7 +24,12 @@ interface Result {
   /** Title with its describe blocks; used only when the leaf names no TC ID. */
   full?: string;
   passed: boolean;
+  /** Skipped, pending or todo: written but switched off (staged). Not evidence, but counted. */
+  staged?: boolean;
 }
+
+/** Test files that failed as a whole with no assertion results (compile error, crash). */
+const suiteFailures: string[] = [];
 
 function priorities(): Map<string, string> {
   const map = new Map<string, string>();
@@ -54,7 +59,12 @@ function levels(): Map<string, string> {
 }
 
 interface VitestReport {
-  testResults?: { assertionResults?: { fullName?: string; title?: string; status?: string }[] }[];
+  testResults?: {
+    name?: string;
+    testFilePath?: string;
+    status?: string;
+    assertionResults?: { fullName?: string; title?: string; status?: string }[];
+  }[];
 }
 interface PwSpec {
   title: string;
@@ -69,7 +79,7 @@ interface PwSuite {
 function walkPlaywright(suite: PwSuite, out: Result[]): void {
   for (const spec of suite.specs ?? []) {
     const skipped = (spec.tests ?? []).every((t) => t.status === 'skipped');
-    if (!skipped) out.push({ title: spec.title, passed: spec.ok === true });
+    out.push({ title: spec.title, passed: skipped || spec.ok === true, staged: skipped });
   }
   for (const child of suite.suites ?? []) walkPlaywright(child, out);
 }
@@ -82,7 +92,6 @@ function loadJunit(xml: string): Result[] {
   const out: Result[] = [];
   for (const m of xml.matchAll(/<testcase\b([^>]*?)(\/>|>([\s\S]*?)<\/testcase>)/g)) {
     const body = m[3] ?? '';
-    if (/<skipped\b/.test(body)) continue;
     // test_tc073_x and TC_073 are read as TC-073
     const norm = (t: string): string =>
       t.replace(/(^|[^A-Za-z0-9])tc[-_]?(\d{3})(?!\d)/gi, '$1TC-$2');
@@ -91,6 +100,7 @@ function loadJunit(xml: string): Result[] {
       title: name,
       full: `${norm(attr(m[1] ?? '', 'classname'))} ${name}`,
       passed: !/<(failure|error)\b/.test(body),
+      staged: /<skipped\b/.test(body),
     });
   }
   return out;
@@ -101,15 +111,22 @@ function load(file: string): Result[] {
   const json = JSON.parse(readFileSync(resolve(file), 'utf8')) as VitestReport & PwSuite;
   const out: Result[] = [];
   if (json.testResults) {
-    for (const f of json.testResults)
-      for (const a of f.assertionResults ?? []) {
-        if (a.status === 'pending' || a.status === 'skipped' || a.status === 'todo') continue;
+    for (const f of json.testResults) {
+      const asserts = f.assertionResults ?? [];
+      // A file that failed to run (compile error, crash) has a failed status and no assertions.
+      if (asserts.length === 0 && f.status === 'failed') {
+        suiteFailures.push(f.name ?? f.testFilePath ?? '(unnamed test file)');
+      }
+      for (const a of asserts) {
+        const staged = a.status === 'pending' || a.status === 'skipped' || a.status === 'todo';
         out.push({
           title: a.title ?? a.fullName ?? '',
           full: a.fullName ?? a.title ?? '',
-          passed: a.status === 'passed',
+          passed: staged || a.status === 'passed',
+          staged,
         });
       }
+    }
   } else {
     walkPlaywright(json, out);
   }
@@ -128,12 +145,20 @@ for (const r of reports) {
   results.push(...load(r));
 }
 
-const state = new Map<string, { passed: number; failed: number; known: number; fixed: number }>();
+const state = new Map<
+  string,
+  { passed: number; failed: number; known: number; fixed: number; staged: number }
+>();
 for (const res of results) {
   const find = (t: string): string[] => t.match(/(?<![A-Za-z0-9])TC-\d{3}(?!\d)/g) ?? [];
   const leaf = find(res.title);
   for (const id of new Set(leaf.length > 0 ? leaf : find(res.full ?? ''))) {
-    const s = state.get(id) ?? { passed: 0, failed: 0, known: 0, fixed: 0 };
+    const s = state.get(id) ?? { passed: 0, failed: 0, known: 0, fixed: 0, staged: 0 };
+    if (res.staged) {
+      s.staged++;
+      state.set(id, s);
+      continue;
+    }
     // Tests written with it.fails carry KNOWN DEFECT in the title and pass while the defect exists.
     // If such a test fails, the defect was fixed or the test broke: either way it is a failure.
     if (/KNOWN DEFECT/.test(res.full ?? res.title)) {
@@ -153,10 +178,12 @@ console.log('P1 test cases');
 for (const [id, p] of [...prio].sort()) {
   if (p !== 'P1') continue;
   const s = state.get(id);
+  const ran = s ? s.passed + s.failed + s.known : 0;
   let line: string;
-  if (!s) {
+  if (!s || ran === 0) {
     const automated = level.get(id) !== 'manual';
     line = automated ? 'no automated run yet' : 'manual (see docs/manual-tests.md)';
+    if (s && s.staged > 0) line = `0 passing, ${s.staged} staged (skipped); no run yet`;
     if (strict && automated) failures++;
     // A row marked Verified must have a run in every mode: no run means the claim is unproven.
     if (/^Verified/i.test(status.get(id) ?? '')) {
@@ -175,8 +202,21 @@ for (const [id, p] of [...prio].sort()) {
     line = /^Verified/i.test(st)
       ? `passed (${s.passed} tests); matrix: verified`
       : `${s.passed} test(s) passing; NOT verified, matrix says: ${st.slice(0, 70)}`;
+    if (s.staged > 0)
+      line =
+        line.replace(/^(passed \(|)(\d+)/, '$1$2') +
+        `; ${s.passed} passing, ${s.staged} staged (skipped)`;
+  }
+  // Staged tests mean the case is not fully covered yet; --strict refuses that for P1.
+  if (strict && s && s.staged > 0) {
+    line += '; FAIL (--strict): staged tests are still skipped';
+    failures++;
   }
   console.log(`  ${id}  ${line}`);
+}
+for (const f of suiteFailures) {
+  console.error(`Test file failed to run (no assertion results): ${f}`);
+  failures++;
 }
 for (const [id, s] of state) {
   if (!prio.has(id)) {
