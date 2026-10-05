@@ -138,7 +138,7 @@ One hook, `query.$allOperations`, sees every model operation and every raw query
 | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `findUnique`, `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `findMany`, `count`, `aggregate`, `groupBy` | org filter ANDed into `where`                                                                                                                                              |
 | `update`, `updateMany`, `updateManyAndReturn`, `delete`, `deleteMany`                                           | org filter ANDed into `where`; on `direct` models an update cannot change `orgId`. `self`: `delete` and `deleteMany` are refused (deleting a tenant is a system operation) |
-| `create`, `createMany`, `createManyAndReturn`                                                                   | `direct`: `orgId` added when missing, refused when it names another org. `path`: passed through. `self`: refused                                                           |
+| `create`, `createMany`, `createManyAndReturn`                                                                   | `direct`: `orgId` checked (refused when it names another org) and, as a safety net, added when missing. `path`: passed through. `self`: refused                            |
 | `upsert`                                                                                                        | filter on `where`, `create` stamped and `update` checked as above                                                                                                          |
 | anything else                                                                                                   | refused (fail closed), and a compile-time check (`OPERATION_COVERAGE`) breaks `typecheck` when Prisma adds an operation                                                    |
 
@@ -369,7 +369,7 @@ await prisma.client.invitation.create({
   },
 });
 
-// Allowed: the unchecked input, scalar foreign keys only. orgId is a scalar too (or let the scope stamp it).
+// Allowed: the unchecked input, scalar foreign keys only. orgId is a scalar too, and you pass it.
 const invitation = await prisma.client.invitation.create({
   data: { orgId, testId, candidateId, tokenHash, windowStart, windowEnd },
 });
@@ -381,6 +381,13 @@ await prisma.client.testSection.createMany({ data: sections.map((s) => ({ testId
 
 Each id you write is a rule (i) id (`RULE_I_REFERENCES`): load the row first. The unchecked forms
 work through the extended client's types without casts (a test compiles the calls above).
+
+**Pass `orgId` explicitly on a create of a model that has one.** Prisma's unchecked create types
+require `orgId` (it is a required scalar), so typed code has to write it, and the extension then
+checks it: a value that is not the caller's org is refused. The extension also **adds `orgId` when
+it is missing**, but that is a safety net for loosely typed calls, not an API: typed services never
+reach it, and nothing should rely on it (FU-DB-100). Take the value from the context
+(`orgContext.requireOrgId()`), never from the request body.
 
 ### Exceptions: `NESTED_WRITE_ALLOWLIST`
 

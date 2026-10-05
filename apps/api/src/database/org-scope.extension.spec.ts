@@ -54,6 +54,36 @@ describe('org scope extension without a database (NFR-04, FR-103)', () => {
     });
   });
 
+  describe('orgId on a create (FU-DB-100)', () => {
+    it('TC-008 the unchecked create types require orgId, so typed code passes it (a type-level pin)', () => {
+      // Never called: this only has to compile. If Prisma made orgId optional, the directive below
+      // would fail the type check, and the README's "pass orgId explicitly" would need a new look.
+      const typeOnly = (): void => {
+        void client.invitation.create({
+          // @ts-expect-error orgId is a required scalar of the unchecked create input
+          data: {
+            testId: ORG_A,
+            candidateId: ORG_B,
+            tokenHash: 'h',
+            windowStart: new Date(),
+            windowEnd: new Date(),
+          },
+        });
+        void client.invitation.create({
+          data: {
+            orgId: ORG_A,
+            testId: ORG_A,
+            candidateId: ORG_B,
+            tokenHash: 'h',
+            windowStart: new Date(),
+            windowEnd: new Date(),
+          },
+        });
+      };
+      expect(typeof typeOnly).toBe('function');
+    });
+  });
+
   describe('lazy queries (a Prisma query sends nothing until it is awaited)', () => {
     it('TC-008 a query returned straight from the callback is started inside the scope', async () => {
       // It reaches the payload check, which only runs in a scope: the scope was active.
