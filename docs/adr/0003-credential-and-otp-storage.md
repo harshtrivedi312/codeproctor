@@ -1,12 +1,12 @@
 # ADR 0003: Credential and OTP storage
 
-| Field | Value |
-| --- | --- |
-| Status | **Accepted** 2026-10-01 (D-16): every recommendation as proposed; amended by D-21 (no OTP lockout during a test) and D-22 (self-service password reset). See section 6. Applied to database.md; deltas in ADR 0008. |
-| Author | architect |
-| Decides | Q-03, Q-04, Q-05, A-11 item 1 |
-| Serves | FR-101, FR-102, FR-104, FR-106, FR-107 (added by D-22); NFR-04; TC-003, TC-005, TC-007, TC-097, TC-098 |
-| Hands off | The OTP pepper and other secrets go into ARC-03's environment inventory. |
+| Field     | Value                                                                                                                                                                                                               |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status    | **Accepted** 2026-10-01 (D-16): every recommendation as proposed; amended by D-21 (no OTP lockout during a test) and D-22 (self-service password reset). See section 6. Applied to database.md; deltas in ADR 0008. |
+| Author    | architect                                                                                                                                                                                                           |
+| Decides   | Q-03, Q-04, Q-05, A-11 item 1                                                                                                                                                                                       |
+| Serves    | FR-101, FR-102, FR-104, FR-106, FR-107 (added by D-22); NFR-04; TC-003, TC-005, TC-007, TC-097, TC-098                                                                                                              |
+| Hands off | The OTP pepper and other secrets go into ARC-03's environment inventory.                                                                                                                                            |
 
 ## 1. Recovery codes (Q-03)
 
@@ -54,15 +54,17 @@ Self-service "forgot password" was a gap; D-22 put it in scope (section 6).
 ## 6. Amendments after acceptance (D-21, D-22)
 
 **D-21: no OTP lockout once a test is in progress.**
+
 - The `otp-block:{invitationId}` key is set only while the session is INVITED, OPENED, CONSENTED or VERIFIED. TC-007 is unchanged for that phase.
 - While the session is IN_PROGRESS or PAUSED, a wrong OTP does three things:
   - sets `otp-cooldown:{invitationId}` with a 30-second TTL;
   - logs the SERVER event RESUME_OTP_FAILED;
   - publishes it to `live:{orgId}` so the proctor is alerted.
 - Attempts during the cooldown get 429 with the seconds left. There is no attempt cap while the test runs (TC-097).
-- *Detail chosen by architect; owner to confirm:* the 30-second cooldown; the event name; no cap.
+- _Detail chosen by architect; owner to confirm:_ the 30-second cooldown; the event name; no cap.
 
 **D-22: self-service staff password reset (new FR-107, TC-098).**
+
 - `POST /auth/password/forgot {email}` always answers 202 with the same body, so it never reveals whether the account exists.
   - It is rate-limited per email and per IP.
   - For an active user it stores the SHA-256 of a 32-byte token in `set_password_token_hash`, sets `set_password_expires_at`, and emails a link (template `password-reset`).
@@ -73,7 +75,7 @@ Self-service "forgot password" was a gap; D-22 put it in scope (section 6).
   - writes an audit row.
 - It never signs the user in, and it never disables TOTP. SUPER_ADMIN and REVIEWER still pass TOTP at their next login (FR-102).
 - The token travels in the URL, so it gets the same never-log and Referer rules as the invitation token (ADR 0001 C-5, A-13).
-- *Detail chosen by architect; owner to confirm:*
+- _Detail chosen by architect; owner to confirm:_
   - reset links expire after 30 minutes (staff invite links after 72 hours);
   - invite and reset share the two `set_password_*` columns;
   - a reset clears the login lockout.

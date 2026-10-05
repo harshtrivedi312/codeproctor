@@ -1,12 +1,12 @@
 # ADR 0004: Identity checks, face embeddings and retention scope
 
-| Field | Value |
-| --- | --- |
-| Status | **Accepted** 2026-10-01 (D-16): every recommendation as proposed (embeddings: option (a), never stored); amended by D-17 (consent PDF retention), D-18 (threshold test set) and D-19 (erasure). See section 8. Applied to database.md; deltas in ADR 0008. |
-| Author | architect |
-| Decides | Q-06, Q-11, Q-12, A-02, A-04, A-09 (retention hold, D-08), A-21 items 2 and 4 |
-| Serves | FR-403, FR-404, FR-606, FR-701, FR-704, FR-904; NFR-05; BR-13; TC-033, TC-034, TC-035, TC-070, TC-072, TC-077, TC-094 |
-| Builds on | ADR 0001 D-05 (AuraFace with MediaPipe, never an automatic rejection) and the model licence table in ADR 0001 section 12 |
+| Field     | Value                                                                                                                                                                                                                                                      |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status    | **Accepted** 2026-10-01 (D-16): every recommendation as proposed (embeddings: option (a), never stored); amended by D-17 (consent PDF retention), D-18 (threshold test set) and D-19 (erasure). See section 8. Applied to database.md; deltas in ADR 0008. |
+| Author    | architect                                                                                                                                                                                                                                                  |
+| Decides   | Q-06, Q-11, Q-12, A-02, A-04, A-09 (retention hold, D-08), A-21 items 2 and 4                                                                                                                                                                              |
+| Serves    | FR-403, FR-404, FR-606, FR-701, FR-704, FR-904; NFR-05; BR-13; TC-033, TC-034, TC-035, TC-070, TC-072, TC-077, TC-094                                                                                                                                      |
+| Builds on | ADR 0001 D-05 (AuraFace with MediaPipe, never an automatic rejection) and the model licence table in ADR 0001 section 12                                                                                                                                   |
 
 Face embeddings and face-geometry data are biometric identifiers under laws such as Illinois BIPA (brd.md §7). This ADR keeps as little of them as the features need.
 
@@ -34,6 +34,7 @@ CHECK ((status = 'REVIEWED') = (manual_decision IS NOT NULL AND reviewed_by IS N
 ```
 
 Flow (TC-033):
+
 - Attempt 1 PASSED: done.
 - Attempt 1 LOW_CONFIDENCE (any `review_reason`): the candidate retries once, with tips such as lighting and framing.
 - Attempt 2 LOW_CONFIDENCE: status MANUAL_REVIEW, and the candidate continues (ADR 0002 §6).
@@ -48,13 +49,14 @@ Alternative: keep `status text` and define the values in packages/shared only. T
 
 Verified on 2026-10-01 from the ONNX graph of AuraFace `glintr100.onnx` (SHA-256 `a7933ea5…`): the input is float32 [N, 3, 112, 112] and the output is float32 [1, 512]. **One embedding is 512 × 4 bytes = 2,048 bytes.**
 
-| Option | DDL | Size | Privacy |
-| --- | --- | --- | --- |
-| **(a) Never persist (accepted)** | none | 2 KB × concurrent sessions in worker memory (200 sessions = 0.4 MB) | No biometric template at rest, in backups or in the API. A model swap needs no migration. |
-| (b) Persist the selfie embedding, encrypted | `face_embeddings` (below) | 2,076 bytes a row (AES-256-GCM: 12-byte nonce + 2,048 + 16-byte tag), stored out of line by TOAST. At most 2 rows a session. 10,000 sessions ≈ 42 MB if never deleted. | Template sits in the database and in 14-day backups. Delete at SUBMITTED, with retention as a backstop. |
-| (c) Persist as `real[]` or with the pgvector extension | a vector column | About 2,072 bytes a row | Adds a vector search we do not need (no search across candidates); pgvector would be a new extension. |
+| Option                                                 | DDL                       | Size                                                                                                                                                                   | Privacy                                                                                                 |
+| ------------------------------------------------------ | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| **(a) Never persist (accepted)**                       | none                      | 2 KB × concurrent sessions in worker memory (200 sessions = 0.4 MB)                                                                                                    | No biometric template at rest, in backups or in the API. A model swap needs no migration.               |
+| (b) Persist the selfie embedding, encrypted            | `face_embeddings` (below) | 2,076 bytes a row (AES-256-GCM: 12-byte nonce + 2,048 + 16-byte tag), stored out of line by TOAST. At most 2 rows a session. 10,000 sessions ≈ 42 MB if never deleted. | Template sits in the database and in 14-day backups. Delete at SUBMITTED, with retention as a backstop. |
+| (c) Persist as `real[]` or with the pgvector extension | a vector column           | About 2,072 bytes a row                                                                                                                                                | Adds a vector search we do not need (no search across candidates); pgvector would be a new extension.   |
 
 For (a):
+
 - The worker computes the ID and selfie embeddings when a match job runs, compares them, and stores only the score, `model_id` and `threshold` on the attempt row.
 - It keeps the selfie embedding in memory, keyed by session, for the periodic FACE_MISMATCH re-checks (FR-606). On a cache miss or restart it recomputes it from the stored selfie image (one extra inference).
 - ID embeddings are never kept.
@@ -72,12 +74,14 @@ CREATE TABLE face_embeddings (            -- only if option (b) is chosen
 Option (a) is accepted. backend.md Step 8's lines "expose the embedding of the selfie" and "Delete embeddings with the session" were amended in Phase B to match.
 
 **Face-matching interface (D-05).** The worker exposes `detect_and_align(image) → faces`, `embed(aligned_face) → vector`, `compare(a, b) → score` and `model_id`.
+
 - MediaPipe finds the face and the landmarks used to align it to the 112×112 crop.
 - AuraFace produces the embedding.
 - Swapping the model changes `model_id` and needs a new threshold; no data migration.
 - The threshold is system configuration, not an org setting.
 
 **Threshold criteria (owner, 2026-10-01).**
+
 - **Pilot entry:** the threshold is tuned on a demographically diverse test set before any real candidate is face-matched.
 - **Pilot exit:** before production, review the pilot's false-match and false-non-match rates and how many identity checks went to manual review. Break these down across groups where that can lawfully be done, and adjust the threshold if needed.
 - Both are listed in build-plan.md DEP-02. `model_id` and `threshold` on each attempt make the exit review possible.
@@ -95,16 +99,19 @@ Option (a) is accepted. backend.md Step 8's lines "expose the embedding of the s
 ## 4. Recording segments and deletion (A-02, A-04)
 
 **Accepted `media_chunks` delta:**
+
 - `object_key text` becomes nullable.
 - Add `deleted_at timestamptz`.
 - Add `segment int NOT NULL DEFAULT 0`.
 
 How segments work:
+
 - `seq` stays monotonic per stream across segments, so `UNIQUE (session_id, stream, seq)` still holds.
 - A new segment starts whenever a recorder restarts, for example after a reload or a re-started screen share. Its lowest `seq` carries the WebM header.
 - Playback (FE-11) and the worker (BE-12) join chunks per (stream, segment) in `seq` order. The SDK uploads each segment's first chunk first (FE-07).
 
 Alternatives:
+
 - Delete the rows instead of nulling the keys. This amends TC-072 and the Data rules, and loses the chunk timeline.
 - Restart the recorder for every chunk. Small gaps, more CPU.
 - Remux on the server after SUBMITTED (worker with ffmpeg). This can be added later on top of the recommendation.
@@ -112,10 +119,12 @@ Alternatives:
 ## 5. Retention scope, clock and hold (Q-11, A-09)
 
 DDL:
+
 - `sessions` add `retention_anchor_at timestamptz`, plus `CREATE INDEX ON sessions (retention_anchor_at) WHERE retention_anchor_at IS NOT NULL`.
 - `candidates` add `erased_at timestamptz`.
 
 Rules, testable in DB-06, BE-09 and BE-13:
+
 - **R-1 Anchor.** SessionStateService sets `retention_anchor_at` when a session becomes COMPLETED, EXPIRED or DECLINED (D-17; DECLINED: the decline time).
   - COMPLETED: the latest of `submitted_at`, the verdict time and, for a VIOLATION verdict, verdict time + 7 days (the FR-904 appeal window).
   - APPEALED sets it back to NULL. Resolving the appeal sets it to the appeal's `resolved_at`.
@@ -167,10 +176,10 @@ Alternative: keep text and define the values in packages/shared only.
 
 - **D-17 consent PDF.** The signed consent PDF lives in object storage under the session (ARC-03 sets the key layout), referenced by `consents.pdf_key`.
   - It is proof of consent, so retention keeps it with the consent record (R-5), and erasure deletes it (R-6).
-  - *Detail chosen by architect; owner and Legal to confirm:* the PDF is kept until erasure, not deleted at `retention_days` with the recordings.
+  - _Detail chosen by architect; owner and Legal to confirm:_ the PDF is kept until erasure, not deleted at `retention_days` with the recordings.
 - **D-18 test set and fallback.** See section 2. The tuning data never enters the CodeProctor database or its backups.
 - **D-19 erasure.** See R-6.
-  - *Detail chosen by architect; owner and Legal to confirm:*
+  - _Detail chosen by architect; owner and Legal to confirm:_
     - the hold setting lives in `organizations.settings.erasure.holdWhileReviewOrAppealOpen` (default true);
     - `candidates.erasure_requested_at` records the pending request;
     - the candidate is told by email (`erasure-delayed`);

@@ -1,12 +1,12 @@
 # ADR 0009: Toolchain: Prisma 7, Node 24 LTS, TypeScript 6.0
 
-| Field | Value |
-| --- | --- |
-| Status | **Accepted** 2026-10-02 (D-31, D-32). Details marked "architect detail" are chosen by the architect, for the owner to confirm. **Amended 2026-10-02 (D-37, D-38, D-39; DB-01 second review):** section 4.4 now describes a policy backed by speed bumps, with the final script texts, the credentials rule and the accepted risks. |
-| Author | architect |
-| Decides | Toolchain versions; where the database URL lives; the Prisma Client generator and driver adapter; the Prisma 7 CLI changes DB-02..DB-04 rely on; how the `db:*` scripts are guarded; how Prisma's AI-agent consent check is handled |
-| Serves | NFR-04 (secrets, least privilege), NFR-03 (no accidental loss of a shared database), FR-105 (the app connects as `app_user`), NFR-01 (driver pool, tuned in BE-15B) |
-| Related | ADR 0006 section 7 (roles through a migration, D-35, same day). DB-01 code review findings S4 (no host guard on `db:reset`) and N14 (init scripts run only on an empty volume). |
+| Field   | Value                                                                                                                                                                                                                                                                                                                              |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status  | **Accepted** 2026-10-02 (D-31, D-32). Details marked "architect detail" are chosen by the architect, for the owner to confirm. **Amended 2026-10-02 (D-37, D-38, D-39; DB-01 second review):** section 4.4 now describes a policy backed by speed bumps, with the final script texts, the credentials rule and the accepted risks. |
+| Author  | architect                                                                                                                                                                                                                                                                                                                          |
+| Decides | Toolchain versions; where the database URL lives; the Prisma Client generator and driver adapter; the Prisma 7 CLI changes DB-02..DB-04 rely on; how the `db:*` scripts are guarded; how Prisma's AI-agent consent check is handled                                                                                                |
+| Serves  | NFR-04 (secrets, least privilege), NFR-03 (no accidental loss of a shared database), FR-105 (the app connects as `app_user`), NFR-01 (driver pool, tuned in BE-15B)                                                                                                                                                                |
+| Related | ADR 0006 section 7 (roles through a migration, D-35, same day). DB-01 code review findings S4 (no host guard on `db:reset`) and N14 (init scripts run only on an empty volume).                                                                                                                                                    |
 
 ## 1. Context
 
@@ -14,17 +14,17 @@ DB-01 (`db/step-1`) pins Prisma CLI 7.10.0, TypeScript ~6.0.3, pnpm 12.8.1 and N
 
 ## 2. Toolchain
 
-| Tool | Pin | Where it is pinned | Why | Support |
-| --- | --- | --- | --- | --- |
-| Node.js | 24 LTS "Krypton" | `.nvmrc` `24`; `engines.node` `>=24 <25`; `@types/node` `^24` | D-32. Current LTS line that still bundles corepack. | Maintenance LTS from 2026-10-20; end of life 2028-04-30 |
-| pnpm | 12.8.1 | `packageManager`, enabled by `corepack enable` (CI and local) | Reproducible installs | Runs on Node >= 18 |
-| TypeScript | ~6.0 (6.0.3) | root devDependency | typescript-eslint supports TypeScript `>=4.8.4 <6.1.0`. TypeScript 7.0 ships no JavaScript API, so typescript-eslint cannot run on it. Revisit when typescript-eslint supports 7.x. | n/a |
-| typescript-eslint | ^8.71 | root devDependency | `no-explicit-any` (CLAUDE.md) | n/a |
-| Prisma CLI, `@prisma/client`, `@prisma/adapter-pg` | 7.10.x, the same exact version for all three | CLI: root devDependency. Client and adapter: `apps/api` dependencies (DB-02) | D-31. CLI and client versions must match. | n/a |
-| `pg` | ^8.16.3, the range `@prisma/adapter-pg` 7.10.0 requires | `apps/api` dependency | Driver behind the adapter | n/a |
-| Python | 3.12 | `apps/worker/pyproject.toml`, CI `setup-python` | CLAUDE.md | Security fixes only; end of life 2028-10 |
-| PostgreSQL | 16 | `postgres:16` in compose; managed hosts (ARC-05) | Already decided | End of life 2028-11-09 |
-| Redis | 8.8 (AGPLv3 option) | `redis:8.8` in compose | Already decided (D-09) | n/a |
+| Tool                                               | Pin                                                     | Where it is pinned                                                           | Why                                                                                                                                                                                 | Support                                                 |
+| -------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| Node.js                                            | 24 LTS "Krypton"                                        | `.nvmrc` `24`; `engines.node` `>=24 <25`; `@types/node` `^24`                | D-32. Current LTS line that still bundles corepack.                                                                                                                                 | Maintenance LTS from 2026-10-20; end of life 2028-04-30 |
+| pnpm                                               | 12.8.1                                                  | `packageManager`, enabled by `corepack enable` (CI and local)                | Reproducible installs                                                                                                                                                               | Runs on Node >= 18                                      |
+| TypeScript                                         | ~6.0 (6.0.3)                                            | root devDependency                                                           | typescript-eslint supports TypeScript `>=4.8.4 <6.1.0`. TypeScript 7.0 ships no JavaScript API, so typescript-eslint cannot run on it. Revisit when typescript-eslint supports 7.x. | n/a                                                     |
+| typescript-eslint                                  | ^8.71                                                   | root devDependency                                                           | `no-explicit-any` (CLAUDE.md)                                                                                                                                                       | n/a                                                     |
+| Prisma CLI, `@prisma/client`, `@prisma/adapter-pg` | 7.10.x, the same exact version for all three            | CLI: root devDependency. Client and adapter: `apps/api` dependencies (DB-02) | D-31. CLI and client versions must match.                                                                                                                                           | n/a                                                     |
+| `pg`                                               | ^8.16.3, the range `@prisma/adapter-pg` 7.10.0 requires | `apps/api` dependency                                                        | Driver behind the adapter                                                                                                                                                           | n/a                                                     |
+| Python                                             | 3.12                                                    | `apps/worker/pyproject.toml`, CI `setup-python`                              | CLAUDE.md                                                                                                                                                                           | Security fixes only; end of life 2028-10                |
+| PostgreSQL                                         | 16                                                      | `postgres:16` in compose; managed hosts (ARC-05)                             | Already decided                                                                                                                                                                     | End of life 2028-11-09                                  |
+| Redis                                              | 8.8 (AGPLv3 option)                                     | `redis:8.8` in compose                                                       | Already decided (D-09)                                                                                                                                                              | n/a                                                     |
 
 ## 3. Options considered
 
@@ -67,6 +67,7 @@ generator client {
 - **Client construction.** In one factory, `apps/api/src/database/create-prisma-client.ts`: `new PrismaClient({ adapter: new PrismaPg({ connectionString }) })`. Nothing else calls `new PrismaClient`.
 
 **What each task must do:**
+
 - **DB-02:**
   - writes the generator block above;
   - adds `@prisma/client` and `@prisma/adapter-pg` (both the CLI's exact version) and `pg` to `apps/api`;
@@ -90,20 +91,21 @@ generator client {
 
 ### 4.3 CLI changes DB-02..DB-04 rely on
 
-| Use | Prisma 7.10 command |
-| --- | --- |
-| Validate and format (no database needed) | `pnpm prisma validate`, `pnpm prisma format` |
-| Generate the client (no database needed) | `pnpm db:generate`. It is never automatic: `migrate dev` and `migrate reset` no longer run it. |
-| Schema to SQL, for the DB-02 check | `pnpm prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script -o <scratch>/init.sql`. `--to-schema-datamodel`, `--from-url`, `--to-url` and `--shadow-database-url` were removed. |
-| Create a migration without applying it | `pnpm db:migrate --create-only --name <name>` |
-| Apply in development | `pnpm db:migrate`. It uses a temporary shadow database and needs CREATEDB. On drift it stops and suggests `migrate reset`; it never resets by itself. |
-| Apply in staging, pilot and production | `prisma migrate deploy`. It needs no shadow database and has no AI-agent check. |
-| Seed | `pnpm db:seed` runs `migrations.seed` from `prisma.config.ts` (`tsx prisma/seed.ts`), and only when called. |
-| Never used in this repo | `prisma db push` (any flag), and `prisma migrate reset` outside `infra/scripts/db-reset` |
+| Use                                      | Prisma 7.10 command                                                                                                                                                                                  |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Validate and format (no database needed) | `pnpm prisma validate`, `pnpm prisma format`                                                                                                                                                         |
+| Generate the client (no database needed) | `pnpm db:generate`. It is never automatic: `migrate dev` and `migrate reset` no longer run it.                                                                                                       |
+| Schema to SQL, for the DB-02 check       | `pnpm prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script -o <scratch>/init.sql`. `--to-schema-datamodel`, `--from-url`, `--to-url` and `--shadow-database-url` were removed. |
+| Create a migration without applying it   | `pnpm db:migrate --create-only --name <name>`                                                                                                                                                        |
+| Apply in development                     | `pnpm db:migrate`. It uses a temporary shadow database and needs CREATEDB. On drift it stops and suggests `migrate reset`; it never resets by itself.                                                |
+| Apply in staging, pilot and production   | `prisma migrate deploy`. It needs no shadow database and has no AI-agent check.                                                                                                                      |
+| Seed                                     | `pnpm db:seed` runs `migrations.seed` from `prisma.config.ts` (`tsx prisma/seed.ts`), and only when called.                                                                                          |
+| Never used in this repo                  | `prisma db push` (any flag), and `prisma migrate reset` outside `infra/scripts/db-reset`                                                                                                             |
 
 ### 4.4 Guards and the AI-agent consent check (D-31, D-37, D-38, D-39; review S4, SF2, SF5, SF6, SF7)
 
 **Policy, backed by speed bumps (D-38).**
+
 - **What agents never run:** `pnpm db:reset`, `pnpm dev:infra:reset`, `prisma migrate reset` or `prisma db push`.
   - An agent that needs one of these stops and asks the human to run it in their own terminal.
   - CLAUDE.md and the db-engineer definition (D-36) say the same.
@@ -115,6 +117,7 @@ generator client {
 - **Time-box (D-39):** the reset guard is complete as of the second DB-01 review (PR #3). It changes only if the code-reviewer finds a blocker.
 
 **How Prisma's check works.** Read in the Prisma 7.10.0 CLI source on 2026-10-02.
+
 - **Commands covered:** `migrate reset` (with or without `--force`), `db push --force-reset` and `db push --accept-data-loss`. Not covered: `migrate dev`, `migrate deploy`, `db seed` and `db execute`.
 - **Detection:**
   - Any of these environment variables: `CLAUDECODE`, `CODEX_THREAD_ID`, `CODEX_CI`, `CODEX_SANDBOX`, `CODEX_SANDBOX_NETWORK_DISABLED`, `GEMINI_CLI`, `QWEN_CODE`, `CURSOR_AGENT`, `COPILOT_CLI`, `OPENCODE`, `OPENCODE_CLIENT`, `CLINE_ACTIVE`, `CRUSH`, `AUGMENT_AGENT`, `ANTIGRAVITY_AGENT`, or `AI_AGENT` with any value.
@@ -127,6 +130,7 @@ generator client {
 - **Re-check the list on every Prisma upgrade.** It changes between versions.
 
 **Rules (D-31).**
+
 1. The check stays on. No script, config, alias or environment file may pre-fill the consent variable or work around it.
 2. The consent variable is set only inside `infra/scripts/db-reset` (the `db:reset` script), only after the S4 localhost guard passes, and only for the one `prisma migrate reset` command, as an inline assignment on that line.
 3. Never set it globally:
@@ -201,6 +205,7 @@ PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION="$answer" pnpm exec prisma migrate r
 ```
 
 **Order of checks in `db-reset`:**
+
 1. Refuse if `CI` is set.
 2. Refuse if an agent marker is set (D-37), and name the variable. The markers:
    - any of `CLAUDECODE`, `CODEX_THREAD_ID`, `CODEX_CI`, `CODEX_SANDBOX`, `CODEX_SANDBOX_NETWORK_DISABLED`, `GEMINI_CLI`, `QWEN_CODE`, `CURSOR_AGENT`, `COPILOT_CLI`, `OPENCODE`, `OPENCODE_CLIENT`, `CLINE_ACTIVE`, `CRUSH`, `AUGMENT_AGENT`, `ANTIGRAVITY_AGENT`, `AI_AGENT` or `AGENT`, set to any value;
@@ -208,6 +213,7 @@ PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION="$answer" pnpm exec prisma migrate r
    - `REPLIT_SESSION` starting with `agent-`.
 
    These are Prisma's environment markers. Prisma's `/opt/.devin` file check is not repeated here. Inside `db-reset` Prisma's own check cannot help, because the script always supplies the consent value; for an agent the script does not detect, only the terminal check and the typed phrase remain (see the accepted risks below). Prisma's check still protects direct `prisma migrate reset` runs outside the script. Keep the list in step with Prisma on every upgrade.
+
 3. Run the localhost guard with `--compose-port` (below).
 4. Refuse if stdin is not a terminal.
 5. Require the exact phrase `reset local database`.
@@ -216,6 +222,7 @@ PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION="$answer" pnpm exec prisma migrate r
 Arguments given to `pnpm db:reset` are ignored, so `--config` cannot reach Prisma. The script's comment "Agents and CI have no terminal" describes the usual case only; see the accepted risks below.
 
 **The localhost guard: `infra/scripts/local-db-guard.mjs` and `infra/scripts/assert-local-db.mjs`.**
+
 - **`local-db-guard.mjs`** holds the checks as pure functions (`findProblems`, `findPortProblems`, `parseComposePort`), the `readComposePort` helper (which runs `docker compose port`), and the constants `CONSENT_VAR` and `LIBPQ_REDIRECT_VARS`. It is the only `.mjs` script that names the consent variable; `db-reset` names it too.
 - **`assert-local-db.mjs`** runs the checks every time it starts. There is no "run only when executed directly" test that could skip them.
   - It refuses unknown arguments.
@@ -232,6 +239,7 @@ Arguments given to `pnpm db:reset` are ignored, so `--config` cannot reach Prism
 - Messages name only hosts and variables, never a URL or a credential.
 
 **`infra/scripts/dev-infra-reset` (`pnpm dev:infra:reset`; review N14, SF5).** It stops the local stack and deletes its volumes, including the roles in that Postgres cluster. Order of checks:
+
 1. Refuse if `CI` is set.
 2. Refuse a Docker engine that could be remote:
    - `DOCKER_HOST` must be unset or a `unix://` socket;
@@ -244,6 +252,7 @@ Arguments given to `pnpm db:reset` are ignored, so `--config` cannot reach Prism
 It does not check agent markers; the policy covers it. Staging and pilot run Compose under their own project names (`codeproctor-staging` and `codeproctor-pilot`; DEP-01, DEP-03), so the local project name never matches their volumes, even on their own hosts.
 
 **Root scripts.**
+
 - `dev:infra:reset`: `sh infra/scripts/dev-infra-reset`.
 - `db:migrate`: `node infra/scripts/assert-local-db.mjs && prisma migrate dev`.
   - From DB-03 it becomes `sh infra/scripts/db-migrate`, which also sets the local `app_user` password.
@@ -253,6 +262,7 @@ It does not check agent markers; the policy covers it. Staging and pilot run Com
 - `db:deploy` (`prisma migrate deploy`) is added by DEP-01. It is not localhost-guarded: it is not destructive, and it runs only in the deploy job, where the credentials live (D-38).
 
 **Defence in depth.**
+
 - `prisma.config.ts` throws if `.env` defines the consent variable. Otherwise loading `.env` would hand it to a direct `prisma migrate reset`.
 - **CI consent check.** It fails if the variable's name appears in any tracked file outside these four: `docs/`, `infra/scripts/db-reset`, `infra/scripts/local-db-guard.mjs` and `prisma.config.ts`.
   - The workflow builds the name from two pieces, so the workflow file does not contain it.
@@ -260,12 +270,14 @@ It does not check agent markers; the policy covers it. Staging and pilot run Com
 - **Other CI steps:** `pnpm exec prisma version` loads `prisma.config.ts`, and `shellcheck` checks `db-reset` and `dev-infra-reset`.
 
 **How agents verify the guards (SF2).**
+
 - Agents verify the refusal paths only through `pnpm test`.
 - The tests in `infra/scripts/*.test.mjs` start each script with an explicit environment, with stand-in `docker` and `pnpm` commands on `PATH`. Nothing reaches a reset, and every case asserts that no stand-in was asked to do anything destructive.
 - Agents never run `pnpm db:reset` or `pnpm dev:infra:reset` themselves, not even to watch a refusal.
 - The owner's one-time interactive `pnpm db:reset` in DB-03 is a human step.
 
 **Accepted risks (D-38).** The owner accepts these. Under the D-39 time-box, the guard changes only for a code-reviewer blocker.
+
 - **Agents with a terminal.** An agent running in an interactive terminal (a tmux or screen pane, `script(1)`, an IDE terminal) has a terminal on stdin. If it also lacks the marker variables (an agent not on the list, or one that unsets them), only the typed phrase remains, and an agent can type it. The policy, and D-38, cover this case.
 - **Local tunnels.** A tunnel on this machine, such as `ssh -L` or a cloud SQL proxy, can make a remote database look local.
   - **What narrows it:** the Compose-port check. The URL must use the exact port Compose publishes for the local Postgres. While the stack runs, that container already holds the port on `127.0.0.1`, so a tunnel cannot bind the same address and port.
@@ -277,6 +289,7 @@ It does not check agent markers; the policy covers it. Staging and pilot run Com
 - **`dev-infra-reset` and agents.** It has no agent-marker check. It refuses only on CI, a non-local Docker engine, a missing terminal or a wrong phrase.
 
 **Trade-off.**
+
 - A human must be at the keyboard for every reset.
 - Agents verify migrations without resets:
   - `pnpm db:migrate` on the existing local volume;
@@ -294,33 +307,33 @@ It does not check agent markers; the policy covers it. Staging and pilot run Com
 
 ## 5. Verification (checked 2026-10-02)
 
-| # | Fact | Status | Source |
-| --- | --- | --- | --- |
-| P1 | `prisma-client-js` is deprecated; use `prisma-client`, whose `output` is required | Verified | [Generators v7](https://www.prisma.io/docs/orm/v7/prisma-schema/overview/generators); [Upgrade to v7](https://www.prisma.io/docs/guides/upgrade-prisma-orm/v7); 7.10.0 CLI labels it "Legacy" |
-| P2 | `PrismaClient` requires a driver adapter; PostgreSQL uses `@prisma/adapter-pg` (`new PrismaPg({ connectionString })`); adapter-pg 7.10.0 depends on `pg` ^8.16.3 | Verified | [Upgrade to v7](https://www.prisma.io/docs/guides/upgrade-prisma-orm/v7); [PostgreSQL connector](https://www.prisma.io/docs/orm/overview/databases/postgresql); [npm registry](https://registry.npmjs.org/@prisma/adapter-pg/7.10.0) |
-| P3 | `url` is rejected in `schema.prisma`; URLs live in `prisma.config.ts`; `.env` is not loaded automatically | Verified | Upgrade guide; schema-engine error text in 7.10.0; [Config reference](https://www.prisma.io/docs/orm/reference/prisma-config-reference) |
-| P4 | `--to-schema-datamodel` was removed ("use `--[from/to]-schema`"), as were `--from-url`, `--to-url` and `--shadow-database-url`; `-o/--output` exists | Verified | [CLI reference v7](https://www.prisma.io/docs/orm/v7/reference/prisma-cli-reference); 7.10.0 source |
-| P5 | `migrate dev` runs neither generate nor seed; `migrate reset` does not seed | Verified | CLI reference; [migrate reset](https://www.prisma.io/docs/cli/v7/migrate/reset) |
-| P6 | `migrate reset` does not run generate; `migrate dev` on drift exits and suggests `migrate reset` | Verified in source only | 7.10.0 `build/cli.js` |
-| P7 | Seed command is `migrations.seed` in `prisma.config.ts`, run only by `prisma db seed` | Verified | Config reference |
-| P8 | AI-agent check: commands, detection list, variable `PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION`, value = the user's exact consent message, presence-only test | Verified | 7.10.0 `build/cli.js`; CLI reference; migrate reset page |
-| P9 | The check was added in Prisma 6.15.0 | Partly verified (issue, not release notes) | [prisma/prisma#28196](https://github.com/prisma/prisma/issues/28196) |
-| P10 | `validate` and `format` need no database URL; `generate` does not either | Verified (generate: in substance) | CLI reference; config reference (`env()` note) |
-| P11 | `migrate dev` needs CREATEDB (or superuser) for its temporary shadow database; `migrate deploy` uses none | Verified | [Shadow database](https://www.prisma.io/docs/orm/prisma-migrate/understanding-prisma-migrate/shadow-database) |
-| P12 | `migrate reset` drops and recreates the schema, which loses PUBLIC's default USAGE on `public` | **Not verified** from docs; schema-engine strings in 7.10.0 show `DROP SCHEMA "…" CASCADE` and `CREATE SCHEMA`. ADR 0006 section 7 grants USAGE explicitly either way. | 7.10.0 `schema_engine_bg.wasm` |
-| P13 | Client middleware (`$use`) removed; use `$extends` | Verified | Upgrade guide |
-| P14 | `moduleFormat = "cjs"` is supported by `prisma-client` | Verified. **Not verified:** the generated client running under the NestJS build on Node 24; DB-05 smoke test | Generators v7 |
-| P15 | Prisma 7.10.0 requires Node `^20.19 \|\| ^22.12 \|\| >=24.0` and TypeScript >= 5.4 | Verified | installed `prisma/package.json` |
-| P16 | `process.loadEnvFile` does not override variables already set in the shell | Verified on Node 22.23.3 (architect) and Node 24.21.0 (db-engineer, DB-01 second review) | local tests |
-| P17 | `migrate dev` accepts `--url` and `--config`; `migrate reset` accepts `--config` but not `--url`. The CLI reference does not list `--url` for `migrate dev`. | Verified in source only | 7.10.0 `build/cli.js` |
-| N1 | Node 24 "Krypton": LTS 2025-10-28, maintenance from 2026-10-20, end of life 2028-04-30; latest v24.21.0 | Verified | [nodejs/Release schedule](https://github.com/nodejs/Release/blob/main/schedule.json); [Previous releases](https://nodejs.org/en/about/previous-releases) |
-| N2 | Corepack is bundled with Node 24 (experimental) and not distributed from Node 25 | Verified | [Node 24 corepack docs](https://nodejs.org/docs/latest-v24.x/api/corepack.html) |
-| N3 | Node 26 LTS from 2026-10-28; Node 22 end of life 2027-04-30 | Verified | nodejs/Release schedule |
-| N4 | pnpm 12.8.1 runs on Node >= 18 | Verified | pnpm `package.json` in the local corepack cache |
-| T1 | typescript-eslint supports TypeScript `>=4.8.4 <6.1.0` and Node `^18.18.0 \|\| ^20.9.0 \|\| >=21.1.0` | Verified | [typescript-eslint dependency versions](https://typescript-eslint.io/users/dependency-versions/); installed 8.71.0 `peerDependencies` |
-| T2 | TypeScript 7.0 (2026-07-08) "does not ship with an API"; 7.1 is expected to add a new one; 6.0 can run side by side | Verified | [Announcing TypeScript 7.0](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/) |
-| O1 | PostgreSQL 16 supported until 2028-11-09 (16.15 current) | Verified | [PostgreSQL versioning](https://www.postgresql.org/support/versioning/) |
-| O2 | Python 3.12 is security-only, end of life 2028-10 | Verified | [Python versions](https://devguide.python.org/versions/) |
+| #   | Fact                                                                                                                                                             | Status                                                                                                                                                                 | Source                                                                                                                                                                                                                               |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| P1  | `prisma-client-js` is deprecated; use `prisma-client`, whose `output` is required                                                                                | Verified                                                                                                                                                               | [Generators v7](https://www.prisma.io/docs/orm/v7/prisma-schema/overview/generators); [Upgrade to v7](https://www.prisma.io/docs/guides/upgrade-prisma-orm/v7); 7.10.0 CLI labels it "Legacy"                                        |
+| P2  | `PrismaClient` requires a driver adapter; PostgreSQL uses `@prisma/adapter-pg` (`new PrismaPg({ connectionString })`); adapter-pg 7.10.0 depends on `pg` ^8.16.3 | Verified                                                                                                                                                               | [Upgrade to v7](https://www.prisma.io/docs/guides/upgrade-prisma-orm/v7); [PostgreSQL connector](https://www.prisma.io/docs/orm/overview/databases/postgresql); [npm registry](https://registry.npmjs.org/@prisma/adapter-pg/7.10.0) |
+| P3  | `url` is rejected in `schema.prisma`; URLs live in `prisma.config.ts`; `.env` is not loaded automatically                                                        | Verified                                                                                                                                                               | Upgrade guide; schema-engine error text in 7.10.0; [Config reference](https://www.prisma.io/docs/orm/reference/prisma-config-reference)                                                                                              |
+| P4  | `--to-schema-datamodel` was removed ("use `--[from/to]-schema`"), as were `--from-url`, `--to-url` and `--shadow-database-url`; `-o/--output` exists             | Verified                                                                                                                                                               | [CLI reference v7](https://www.prisma.io/docs/orm/v7/reference/prisma-cli-reference); 7.10.0 source                                                                                                                                  |
+| P5  | `migrate dev` runs neither generate nor seed; `migrate reset` does not seed                                                                                      | Verified                                                                                                                                                               | CLI reference; [migrate reset](https://www.prisma.io/docs/cli/v7/migrate/reset)                                                                                                                                                      |
+| P6  | `migrate reset` does not run generate; `migrate dev` on drift exits and suggests `migrate reset`                                                                 | Verified in source only                                                                                                                                                | 7.10.0 `build/cli.js`                                                                                                                                                                                                                |
+| P7  | Seed command is `migrations.seed` in `prisma.config.ts`, run only by `prisma db seed`                                                                            | Verified                                                                                                                                                               | Config reference                                                                                                                                                                                                                     |
+| P8  | AI-agent check: commands, detection list, variable `PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION`, value = the user's exact consent message, presence-only test   | Verified                                                                                                                                                               | 7.10.0 `build/cli.js`; CLI reference; migrate reset page                                                                                                                                                                             |
+| P9  | The check was added in Prisma 6.15.0                                                                                                                             | Partly verified (issue, not release notes)                                                                                                                             | [prisma/prisma#28196](https://github.com/prisma/prisma/issues/28196)                                                                                                                                                                 |
+| P10 | `validate` and `format` need no database URL; `generate` does not either                                                                                         | Verified (generate: in substance)                                                                                                                                      | CLI reference; config reference (`env()` note)                                                                                                                                                                                       |
+| P11 | `migrate dev` needs CREATEDB (or superuser) for its temporary shadow database; `migrate deploy` uses none                                                        | Verified                                                                                                                                                               | [Shadow database](https://www.prisma.io/docs/orm/prisma-migrate/understanding-prisma-migrate/shadow-database)                                                                                                                        |
+| P12 | `migrate reset` drops and recreates the schema, which loses PUBLIC's default USAGE on `public`                                                                   | **Not verified** from docs; schema-engine strings in 7.10.0 show `DROP SCHEMA "…" CASCADE` and `CREATE SCHEMA`. ADR 0006 section 7 grants USAGE explicitly either way. | 7.10.0 `schema_engine_bg.wasm`                                                                                                                                                                                                       |
+| P13 | Client middleware (`$use`) removed; use `$extends`                                                                                                               | Verified                                                                                                                                                               | Upgrade guide                                                                                                                                                                                                                        |
+| P14 | `moduleFormat = "cjs"` is supported by `prisma-client`                                                                                                           | Verified. **Not verified:** the generated client running under the NestJS build on Node 24; DB-05 smoke test                                                           | Generators v7                                                                                                                                                                                                                        |
+| P15 | Prisma 7.10.0 requires Node `^20.19 \|\| ^22.12 \|\| >=24.0` and TypeScript >= 5.4                                                                               | Verified                                                                                                                                                               | installed `prisma/package.json`                                                                                                                                                                                                      |
+| P16 | `process.loadEnvFile` does not override variables already set in the shell                                                                                       | Verified on Node 22.23.3 (architect) and Node 24.21.0 (db-engineer, DB-01 second review)                                                                               | local tests                                                                                                                                                                                                                          |
+| P17 | `migrate dev` accepts `--url` and `--config`; `migrate reset` accepts `--config` but not `--url`. The CLI reference does not list `--url` for `migrate dev`.     | Verified in source only                                                                                                                                                | 7.10.0 `build/cli.js`                                                                                                                                                                                                                |
+| N1  | Node 24 "Krypton": LTS 2025-10-28, maintenance from 2026-10-20, end of life 2028-04-30; latest v24.21.0                                                          | Verified                                                                                                                                                               | [nodejs/Release schedule](https://github.com/nodejs/Release/blob/main/schedule.json); [Previous releases](https://nodejs.org/en/about/previous-releases)                                                                             |
+| N2  | Corepack is bundled with Node 24 (experimental) and not distributed from Node 25                                                                                 | Verified                                                                                                                                                               | [Node 24 corepack docs](https://nodejs.org/docs/latest-v24.x/api/corepack.html)                                                                                                                                                      |
+| N3  | Node 26 LTS from 2026-10-28; Node 22 end of life 2027-04-30                                                                                                      | Verified                                                                                                                                                               | nodejs/Release schedule                                                                                                                                                                                                              |
+| N4  | pnpm 12.8.1 runs on Node >= 18                                                                                                                                   | Verified                                                                                                                                                               | pnpm `package.json` in the local corepack cache                                                                                                                                                                                      |
+| T1  | typescript-eslint supports TypeScript `>=4.8.4 <6.1.0` and Node `^18.18.0 \|\| ^20.9.0 \|\| >=21.1.0`                                                            | Verified                                                                                                                                                               | [typescript-eslint dependency versions](https://typescript-eslint.io/users/dependency-versions/); installed 8.71.0 `peerDependencies`                                                                                                |
+| T2  | TypeScript 7.0 (2026-07-08) "does not ship with an API"; 7.1 is expected to add a new one; 6.0 can run side by side                                              | Verified                                                                                                                                                               | [Announcing TypeScript 7.0](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/)                                                                                                                                    |
+| O1  | PostgreSQL 16 supported until 2028-11-09 (16.15 current)                                                                                                         | Verified                                                                                                                                                               | [PostgreSQL versioning](https://www.postgresql.org/support/versioning/)                                                                                                                                                              |
+| O2  | Python 3.12 is security-only, end of life 2028-10                                                                                                                | Verified                                                                                                                                                               | [Python versions](https://devguide.python.org/versions/)                                                                                                                                                                             |
 
 ## 6. Consequences and affected agents
 
@@ -355,7 +368,7 @@ It does not check agent markers; the policy covers it. Staging and pilot run Com
   - `db push`;
   - `prisma-client-js`;
   - a second `new PrismaClient`;
-  - *setting* the consent variable anywhere except `infra/scripts/db-reset`;
+  - _setting_ the consent variable anywhere except `infra/scripts/db-reset`;
   - `MIGRATION_DATABASE_URL` in API code;
   - staging or pilot credentials in any file, log or local environment (D-38).
 - **All agents.**
