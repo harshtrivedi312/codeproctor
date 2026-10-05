@@ -68,4 +68,4 @@ Owner questions are listed in `docs/api-contract.md` section 1 ("Open for the ow
 ### Should-fix (ARC-02 part 2)
 - Add fsd.md §4 rows for `/auth/2fa/setup/*`, disable, regenerate and reset; ask QA for new TC IDs.
 - `reauth` body schema in packages/shared.
-- Nit: say whether a successful re-auth resets the failed-login counter; schema validation (400) runs before the password check.
+- BE-02: decide and document whether a successful re-auth resets the failed-login counter, as a login does.
