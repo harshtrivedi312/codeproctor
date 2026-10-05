@@ -1,12 +1,12 @@
 # ADR 0002: Session lifecycle, section timing, pause and resume
 
-| Field     | Value                                                                                                                                                                                                                                               |
-| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Status    | **Accepted** 2026-10-01 (D-16): A-03 option (a); every other recommendation as proposed; amended by D-17 (consent declined), D-21 (OTP during a test) and D-23 (manual scoring routing). See section 9. Applied to database.md; deltas in ADR 0008. |
-| Author    | architect                                                                                                                                                                                                                                           |
-| Decides   | **A-03 per-section timing**, Q-01, Q-02 (column only), Q-23, Q-24, A-06                                                                                                                                                                             |
-| Serves    | FR-301, FR-303, FR-305, FR-403, FR-505, FR-601, FR-604, FR-609, FR-903, FR-904; NFR-08; TC-021, TC-022, TC-024, TC-033, TC-036, TC-045, TC-046, TC-047, TC-050, TC-055, TC-063, TC-079, TC-080                                                      |
-| Hands off | Candidate token storage, HMAC key delivery and reload recovery: ARC-03. GRADED ordering (Q-22): ARC-04.                                                                                                                                             |
+| Field | Value |
+| --- | --- |
+| Status | **Accepted** 2026-10-01 (D-16): A-03 option (a); every other recommendation as proposed; amended by D-17 (consent declined), D-21 (OTP during a test) and D-23 (manual scoring routing). See section 9. Applied to database.md; deltas in ADR 0008. |
+| Author | architect |
+| Decides | **A-03 per-section timing**, Q-01, Q-02 (column only), Q-23, Q-24, A-06 |
+| Serves | FR-301, FR-303, FR-305, FR-403, FR-505, FR-601, FR-604, FR-609, FR-903, FR-904; NFR-08; TC-021, TC-022, TC-024, TC-033, TC-036, TC-045, TC-046, TC-047, TC-050, TC-055, TC-063, TC-079, TC-080 |
+| Hands off | Candidate token storage, HMAC key delivery and reload recovery: ARC-03. GRADED ordering (Q-22): ARC-04. |
 
 DDL deltas are written against the reference DDL in database.md. No migration exists yet, so DB-02 applies them directly. This ADR is longer than one page because it carries A-03 and the pause and resume policy (D-03, D-08).
 
@@ -14,11 +14,11 @@ DDL deltas are written against the reference DDL in database.md. No migration ex
 
 **Context.** FR-301 asks for "per-section time limits" and FR-505 makes the server timer the source of truth. `test_sections.time_limit_min` exists, but a session stores one `deadline_at` only, and `session_questions` has no link to the test question or section it came from. Section limits could only be enforced in the browser.
 
-| Option                                                       | DDL delta                                                                                                                     | Effect                                                                                                                            |
-| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| **(a) Server-enforced sequential sections (accepted, D-16)** | `session_questions` add `test_question_id uuid NOT NULL REFERENCES test_questions(id)`. New table `session_sections` (below). | The server enforces each section's deadline. Sections run in order and do not reopen.                                             |
-| (b) Defer section limits                                     | `session_questions` add `test_question_id uuid NOT NULL REFERENCES test_questions(id)` only.                                  | Only the total duration is enforced. FE-05 hides `time_limit_min` and BE-06 rejects it. FR-301 is narrowed (owner amends fsd.md). |
-| (c) As (a), stored as `sessions.section_deadlines jsonb`     | One jsonb column instead of the table                                                                                         | Same behaviour as (a), but no foreign key and no row lock per section. Not recommended.                                           |
+| Option | DDL delta | Effect |
+| --- | --- | --- |
+| **(a) Server-enforced sequential sections (accepted, D-16)** | `session_questions` add `test_question_id uuid NOT NULL REFERENCES test_questions(id)`. New table `session_sections` (below). | The server enforces each section's deadline. Sections run in order and do not reopen. |
+| (b) Defer section limits | `session_questions` add `test_question_id uuid NOT NULL REFERENCES test_questions(id)` only. | Only the total duration is enforced. FE-05 hides `time_limit_min` and BE-06 rejects it. FR-301 is narrowed (owner amends fsd.md). |
+| (c) As (a), stored as `sessions.section_deadlines jsonb` | One jsonb column instead of the table | Same behaviour as (a), but no foreign key and no row lock per section. Not recommended. |
 
 ```sql
 CREATE TABLE session_sections (
@@ -35,7 +35,6 @@ CREATE TABLE session_sections (
 ```
 
 Rules for (a), testable in BE-06, BE-07, BE-10 and BE-11:
-
 - **S-1** Sections run in `position` order. Inside the open section the candidate moves freely between its questions. "Finish section" is final, and earlier sections never reopen.
 - **S-2** At VERIFIED → IN_PROGRESS the server writes one `session_sections` row per section and opens position 1.
 - **S-3** Section limit = `time_limit_min` × (1 + extraTimePct / 100), the same factor as the total. TC-024: +50% turns a 60-minute test into 90 minutes and a 20-minute section into 30.
@@ -52,23 +51,23 @@ Rules for (a), testable in BE-06, BE-07, BE-10 and BE-11:
 
 fsd.md §3 has states with no way in or out. This is the proposed full map; ARC-02 copies it into the shared transition map.
 
-| From                                 | To           | When                                                                                                                                   |
-| ------------------------------------ | ------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
-| INVITED                              | OPENED       | Link opened inside the window and email OTP passed                                                                                     |
-| INVITED, OPENED, CONSENTED, VERIFIED | EXPIRED      | `window_end` passed before start. An expiry job runs every 5 minutes, and the check also runs when the link is opened (TC-022).        |
-| OPENED                               | CONSENTED    | Consent document signed (D-17)                                                                                                         |
-| OPENED                               | DECLINED     | Consent document declined (D-17). Terminal: no device access, no recording.                                                            |
-| CONSENTED                            | VERIFIED     | System check passed, identity attempts finished (PASSED or MANUAL_REVIEW, section 6), room scan uploaded, STRICT side camera connected |
-| VERIFIED                             | IN_PROGRESS  | Candidate starts. Sets `started_at`, `deadline_at`, sections, questions and variants, the HMAC key and `invitations.used_at`.          |
-| IN_PROGRESS                          | PAUSED       | A pause reason is added (section 5)                                                                                                    |
-| PAUSED                               | IN_PROGRESS  | The last pause reason is cleared                                                                                                       |
-| IN_PROGRESS, PAUSED                  | SUBMITTED    | Finish, end of the last section, or deadline (auto-submit, TC-046)                                                                     |
-| SUBMITTED                            | GRADED       | Grading and analysis done (order decided in ARC-04, Q-22)                                                                              |
-| GRADED                               | UNDER_REVIEW | Band MEDIUM or HIGH (FR-805), or identity not confirmed (section 6), or a short answer awaits manual scoring (D-23)                    |
-| GRADED                               | COMPLETED    | Band LOW, identity PASSED or confirmed by a reviewer, and nothing awaits manual scoring                                                |
-| UNDER_REVIEW                         | COMPLETED    | Verdict set                                                                                                                            |
-| COMPLETED                            | APPEALED     | Appeal filed within 7 days of a VIOLATION verdict (FR-904)                                                                             |
-| APPEALED                             | COMPLETED    | Appeal resolved (section 7)                                                                                                            |
+| From | To | When |
+| --- | --- | --- |
+| INVITED | OPENED | Link opened inside the window and email OTP passed |
+| INVITED, OPENED, CONSENTED, VERIFIED | EXPIRED | `window_end` passed before start. An expiry job runs every 5 minutes, and the check also runs when the link is opened (TC-022). |
+| OPENED | CONSENTED | Consent document signed (D-17) |
+| OPENED | DECLINED | Consent document declined (D-17). Terminal: no device access, no recording. |
+| CONSENTED | VERIFIED | System check passed, identity attempts finished (PASSED or MANUAL_REVIEW, section 6), room scan uploaded, STRICT side camera connected |
+| VERIFIED | IN_PROGRESS | Candidate starts. Sets `started_at`, `deadline_at`, sections, questions and variants, the HMAC key and `invitations.used_at`. |
+| IN_PROGRESS | PAUSED | A pause reason is added (section 5) |
+| PAUSED | IN_PROGRESS | The last pause reason is cleared |
+| IN_PROGRESS, PAUSED | SUBMITTED | Finish, end of the last section, or deadline (auto-submit, TC-046) |
+| SUBMITTED | GRADED | Grading and analysis done (order decided in ARC-04, Q-22) |
+| GRADED | UNDER_REVIEW | Band MEDIUM or HIGH (FR-805), or identity not confirmed (section 6), or a short answer awaits manual scoring (D-23) |
+| GRADED | COMPLETED | Band LOW, identity PASSED or confirmed by a reviewer, and nothing awaits manual scoring |
+| UNDER_REVIEW | COMPLETED | Verdict set |
+| COMPLETED | APPEALED | Appeal filed within 7 days of a VIOLATION verdict (FR-904) |
+| APPEALED | COMPLETED | Appeal resolved (section 7) |
 
 DISCONNECTED, FOCUS_LOST and TAB_SWITCH are events, not states.
 
@@ -104,14 +103,13 @@ Alternatives: always ask for the OTP on resume, even on reload (no `auth_epoch`;
 
 DDL: new enum `pause_reason AS ENUM ('FULLSCREEN_EXIT','SCREEN_SHARE_STOPPED','SIDE_CAMERA_LOST','PROCTOR')`. `sessions` add `pause_reasons pause_reason[] NOT NULL DEFAULT '{}'` and `proctor_paused_at timestamptz`. `paused_ms` holds credited time only.
 
-| Option                                                                                  | Clock during candidate-caused pauses | Can a candidate gain time?                                                  |
-| --------------------------------------------------------------------------------------- | ------------------------------------ | --------------------------------------------------------------------------- |
-| **(a) Only proctor pauses stop the clock (accepted)**                                   | Runs                                 | No                                                                          |
-| (b) Credit candidate-caused pauses up to an org cap (for example 2 minutes per session) | Stops until the cap                  | A little                                                                    |
-| (c) Credit every pause (backend.md Step 10 as written)                                  | Stops                                | Yes: stop sharing, look things up off the recording, re-share, lose no time |
+| Option | Clock during candidate-caused pauses | Can a candidate gain time? |
+| --- | --- | --- |
+| **(a) Only proctor pauses stop the clock (accepted)** | Runs | No |
+| (b) Credit candidate-caused pauses up to an org cap (for example 2 minutes per session) | Stops until the cap | A little |
+| (c) Credit every pause (backend.md Step 10 as written) | Stops | Yes: stop sharing, look things up off the recording, re-share, lose no time |
 
 Rules for (a):
-
 - **P-1** The session is PAUSED while `pause_reasons` is not empty.
   - Fullscreen exit and share stop add their reason (FR-601, FR-604), and the matching resume event removes it.
   - SIDE_CAMERA_LOST applies to STRICT only (TC-036).
@@ -158,9 +156,9 @@ VERIFIED then means "checks done", as fsd.md §3 says ("System check, ID and roo
   - DECLINED is terminal: no device access, no recording, no HMAC key. `invitations.used_at` stays NULL.
   - SessionStateService sets `retention_anchor_at` at the decline (ADR 0004 R-1).
   - Reopening the link shows the declined page with the contact (L-4). A recruiter who agrees an alternative sends a new invitation.
-  - _Detail chosen by architect; owner to confirm:_ a new terminal status `DECLINED`, rather than reusing EXPIRED or leaving the session in OPENED.
+  - *Detail chosen by architect; owner to confirm:* a new terminal status `DECLINED`, rather than reusing EXPIRED or leaving the session in OPENED.
 - **D-17 sign before CONSENTED.** CONSENTED means the consent document is signed (ADR 0007 §6). Resuming the same session does not ask for a new signature; every new session does.
 - **D-21 OTP during a test.** L-5 above.
-  - _Detail chosen by architect; owner to confirm:_ the event type is `RESUME_OTP_FAILED` (SERVER, MEDIUM, risk weight 0, always pushed to /live); the cooldown is 30 seconds; there is no attempt limit while the test runs, because the cooldown and the 10-minute OTP expiry bound guessing.
+  - *Detail chosen by architect; owner to confirm:* the event type is `RESUME_OTP_FAILED` (SERVER, MEDIUM, risk weight 0, always pushed to /live); the cooldown is 30 seconds; there is no attempt limit while the test runs, because the cooldown and the 10-minute OTP expiry bound guessing.
 - **D-23 manual scoring.** A session with a short answer in `scoring = 'MANUAL_PENDING'` goes to UNDER_REVIEW at GRADED (section 2), and the verdict cannot be set until every such answer is scored.
-  - _Detail chosen by architect; owner to confirm:_ manual scoring happens in the review workspace (REVIEWER or SUPER_ADMIN), and `total_score` is computed when the last answer is scored.
+  - *Detail chosen by architect; owner to confirm:* manual scoring happens in the review workspace (REVIEWER or SUPER_ADMIN), and `total_score` is computed when the last answer is scored.

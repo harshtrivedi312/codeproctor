@@ -1,27 +1,26 @@
 # ADR 0007: Content, scoring, settings and integrations model
 
-| Field     | Value                                                                                                                                                                                                                                       |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Status    | **Accepted** 2026-10-01 (D-16): A-01 option (b); every other recommendation as proposed; amended by D-17 (signed consent document) and D-23 (short answers and manual scoring). See section 10. Applied to database.md; deltas in ADR 0008. |
-| Author    | architect                                                                                                                                                                                                                                   |
-| Decides   | **A-01 variant model**, A-03 test side (decided with ADR 0002 §1), A-23, Q-13, Q-14, Q-16, A-11 items 2 to 5, the LOCKDOWN enum value (D-13, A-30)                                                                                          |
-| Serves    | FR-202, FR-203, FR-205, FR-302, FR-305, FR-401, FR-406, FR-506, FR-804, FR-1001, FR-1003; BR-08, BR-15; TC-011, TC-012, TC-014, TC-030, TC-048, TC-081, TC-095, TC-096, TC-099                                                              |
-| Hands off | Endpoint shapes (org settings, consent texts, practice run, webhooks admin): ARC-02.                                                                                                                                                        |
+| Field | Value |
+| --- | --- |
+| Status | **Accepted** 2026-10-01 (D-16): A-01 option (b); every other recommendation as proposed; amended by D-17 (signed consent document) and D-23 (short answers and manual scoring). See section 10. Applied to database.md; deltas in ADR 0008. |
+| Author | architect |
+| Decides | **A-01 variant model**, A-03 test side (decided with ADR 0002 §1), A-23, Q-13, Q-14, Q-16, A-11 items 2 to 5, the LOCKDOWN enum value (D-13, A-30) |
+| Serves | FR-202, FR-203, FR-205, FR-302, FR-305, FR-401, FR-406, FR-506, FR-804, FR-1001, FR-1003; BR-08, BR-15; TC-011, TC-012, TC-014, TC-030, TC-048, TC-081, TC-095, TC-096, TC-099 |
+| Hands off | Endpoint shapes (org settings, consent texts, practice run, webhooks admin): ARC-02. |
 
 ## 1. Variant model (A-01): accepted option (b)
 
 **Context.**
-
 - FR-203: variants change "array sizes, constants, entity names", and "the reference solution must pass all variants before publishing".
 - TC-012 (P1): publishing is blocked and the failing variant is shown.
 - BR-08 is a Must.
 - `test_cases` belong to the question version, so every variant shares one set of expected outputs. When a variant changes a constant, those outputs are wrong for it.
 
-| Option                                                                     | What a variant may change                                                      | DDL                            | TC-012 and BR-08                                                                                                                                                          |
-| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| (a) Cosmetic variants                                                      | Statement text only (names, story, wording). Inputs and outputs are identical. | none                           | A test that fails, fails for every variant, so "failing variant" means nothing. FR-203 and TC-012 must be reworded. Shared code works on every variant, so BR-08 is weak. |
-| **(b) Parameterized variants with per-variant test data (accepted, D-16)** | Constants, sizes and names, with inputs and expected outputs per variant       | new table `variant_test_cases` | TC-012 works as written. Code copied from another candidate fails when the constants differ.                                                                              |
-| (c) As (b), stored as `question_variants.test_data jsonb`                  | As (b)                                                                         | one jsonb column               | Same behaviour, but no foreign key from the data to the test case, so schema checks live only in code                                                                     |
+| Option | What a variant may change | DDL | TC-012 and BR-08 |
+| --- | --- | --- | --- |
+| (a) Cosmetic variants | Statement text only (names, story, wording). Inputs and outputs are identical. | none | A test that fails, fails for every variant, so "failing variant" means nothing. FR-203 and TC-012 must be reworded. Shared code works on every variant, so BR-08 is weak. |
+| **(b) Parameterized variants with per-variant test data (accepted, D-16)** | Constants, sizes and names, with inputs and expected outputs per variant | new table `variant_test_cases` | TC-012 works as written. Code copied from another candidate fails when the constants differ. |
+| (c) As (b), stored as `question_variants.test_data jsonb` | As (b) | one jsonb column | Same behaviour, but no foreign key from the data to the test case, so schema checks live only in code |
 
 ```sql
 CREATE TABLE variant_test_cases (
@@ -36,7 +35,6 @@ CREATE INDEX ON variant_test_cases (test_case_id);
 ```
 
 Rules for (b):
-
 - **V-1** `test_cases` defines the slots: position, hidden flag, weight, and a default input and output. A `variant_test_cases` row overrides the input and output for one variant; without a row the default applies. Every variant therefore has the same number of tests with the same weights, so the versions stay equivalent and scoring stays fair.
 - **V-2** `statement_md`, `starter_code` and `reference_solution` may contain Mustache placeholders, rendered per variant from `question_variants.params`. Mustache is logic-less, so the template engine runs no code. `rendered_statement` keeps the rendered statement.
 - **V-3** Validation (BE-04 job, BE-05 executor) runs the rendered reference solution on every slot of every active variant with that variant's data. Any wrong answer, runtime error or limit breach blocks publishing. `validation_report` lists the variant, slot and result (TC-012), and FE-04 shows it.
@@ -145,11 +143,11 @@ The payload is not stored, because it carries candidate data. Alternative: defer
 
 ## 8. LOCKDOWN profile with no client (D-13, A-30)
 
-| Option                                        | DDL                                                                                                                           | Effect                                                                                                                                                                                                             |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **(a) Remove the value (accepted)**           | Drop `'LOCKDOWN'` from `proctor_profile`, and `'PROHIBITED_PROCESS'` from `event_type` (only the lockdown client produces it) | The shared zod enums cannot offer it, so there is nothing to hide or reject. The later lockdown ADR adds both back with a one-line `ALTER TYPE ... ADD VALUE` (forward-only). fsd.md FR-302 note added in Phase B. |
-| (b) Keep the value but make it unselectable   | `CHECK (profile <> 'LOCKDOWN')` on `tests`                                                                                    | BE-06 returns 422 and FE-05 hides it. Every switch over the enum still handles a dead value.                                                                                                                       |
-| (c) Keep it, shown disabled as "coming later" | none                                                                                                                          | UI text only, with the same dead value in code.                                                                                                                                                                    |
+| Option | DDL | Effect |
+| --- | --- | --- |
+| **(a) Remove the value (accepted)** | Drop `'LOCKDOWN'` from `proctor_profile`, and `'PROHIBITED_PROCESS'` from `event_type` (only the lockdown client produces it) | The shared zod enums cannot offer it, so there is nothing to hide or reject. The later lockdown ADR adds both back with a one-line `ALTER TYPE ... ADD VALUE` (forward-only). fsd.md FR-302 note added in Phase B. |
+| (b) Keep the value but make it unselectable | `CHECK (profile <> 'LOCKDOWN')` on `tests` | BE-06 returns 422 and FE-05 hides it. Every switch over the enum still handles a dead value. |
+| (c) Keep it, shown disabled as "coming later" | none | UI text only, with the same dead value in code. |
 
 ## 9. Consequences and affected agents
 
@@ -166,7 +164,6 @@ The payload is not stored, because it carries candidate data. Alternative: defer
 ## 10. Amendments after acceptance (D-17, D-23)
 
 **D-17: signed consent document per session.**
-
 - **Document.** `consent_texts.body_md` holds the 2-3 page document.
   - It covers what is recorded (screen, webcam, microphone, keystrokes), the ID image and selfie, face matching, automated detection and human review, how results are used in hiring, retention and deletion, who can access the data, appeals, accommodations and how to withdraw.
   - Until Legal approves it, the text is a clearly marked placeholder and `legal_approved_at` is NULL.
@@ -184,7 +181,7 @@ The payload is not stored, because it carries candidate data. Alternative: defer
   - `GET /candidate/session/consent` returns the document;
   - `POST /candidate/session/consent/sign {consentTextId, signedName}`;
   - `POST /candidate/session/consent/decline`.
-- _Details chosen by architect; owner to confirm:_
+- *Details chosen by architect; owner to confirm:*
   - declining is stored on the same `consents` row (`declined_at`), with a new terminal status DECLINED;
   - the PDF is emailed as an attachment (the email provider becomes a processor of the signed PDF; DPA in DEP-02);
   - the config flag `REQUIRE_LEGAL_APPROVED_CONSENT`;
@@ -192,7 +189,6 @@ The payload is not stored, because it carries candidate data. Alternative: defer
   - no stored "scrolled to end" flag (the client enforces it; the PDF states how the document was signed).
 
 **D-23: short answers.**
-
 - `answer_spec` for SHORT_ANSWER is `{ canonical: string, acceptedVariants: string[] }`.
   - A candidate answer matches if, after normalization, it equals the canonical answer or any accepted variant.
   - Normalization: Unicode NFKC, trim, collapse inner whitespace, lower-case.
@@ -200,7 +196,7 @@ The payload is not stored, because it carries candidate data. Alternative: defer
 - A non-match is **never** scored 0 automatically. It gets `scoring = 'MANUAL_PENDING'` and `score` NULL, and the session goes to UNDER_REVIEW at GRADED (ADR 0002 §9).
 - A REVIEWER (or SUPER_ADMIN) marks it correct or incorrect in the review workspace. That sets `score` to `points` or 0, `scoring = 'MANUAL'`, `scored_by`, `scored_at` and an optional `scoring_note`, and writes an audit row (TC-099).
 - The verdict cannot be set while any answer is MANUAL_PENDING. `sessions.total_score` is computed when the last answer is scored.
-- _Details chosen by architect; owner to confirm:_
+- *Details chosen by architect; owner to confirm:*
   - the normalization steps;
   - manual scoring is all-or-nothing (no partial credit), matching section 3;
   - it is done by reviewers in the review workspace;
