@@ -122,6 +122,7 @@ Rules, testable in DB-06, BE-09 and BE-13:
   - APPEALED sets it back to NULL. Resolving the appeal sets it to the appeal's `resolved_at`.
   - EXPIRED: the expiry time.
 - **R-2 Hold.** A NULL anchor is never eligible. That covers every session that is not COMPLETED or EXPIRED, every UNDER_REVIEW or APPEALED session, and every session with an OPEN appeal. The job also re-checks those states.
+  - *Proposed amendment (section 9.5):* DECLINED and the new terminal status ERASED are not held. The job selects sessions by anchor, never by "COMPLETED or EXPIRED", so ERASED and DECLINED sessions do reach the main tier and R-10. A CLOSED_ERASED appeal counts as closed.
 - **R-3 Eligible** when anchor + `organizations.retention_days` ≤ now. TC-072 sets 7 days and advances the clock.
   - *Proposed amendment (section 9.2, C-27, C-35):* face images (ID image, selfie, sealed mismatch frames) do not use the anchor. They are eligible at face clock + LEAST(`retention_days`, 90 days), where the face clock starts at capture or submission, whatever any review hold says.
 - **R-4 At retention**, delete the objects first, then null the keys in one transaction (only `media_chunks` also gets `deleted_at`):
@@ -233,7 +234,7 @@ Serves FR-401, FR-704, NFR-05, TC-072, TC-094.
 
   If any condition fails, the tier writes no marker and no column changes, raises a warning, and runs again the next day. After 3 failed days in a row it raises an alert. The alert is deduplicated per session and tier (one open incident, not a daily page) and links to a runbook for undeletable objects (AccessDenied, Object Lock, legal hold on the bucket). The marker is then written in the same transaction that nulls the columns. A crash before the marker only means the tier runs again; DeleteObjects on keys that are already gone is harmless.
 - **Only RetentionService writes markers.** The three actions live in one constant, `RETENTION_MARKER_ACTIONS`. A lint rule and a test fail if any other writer uses them, whether as the constant, a string literal or a raw SQL insert. That covers the `@Audited` decorator and erasure (9.5). An unrelated audit row can therefore never suppress a deletion. `ERASURE_EMAIL_SENT` and `ERASURE_COMPLETED` also gate destructive steps, so they are reserved in the same way, to the email worker and the erasure service.
-- **Versioning (pilot gate).** ListObjectsV2 does not show noncurrent versions. At startup, RetentionService calls `GetBucketVersioning` and **fails closed** unless versioning is off, or ARC-05's noncurrent-version lifecycle rule of 1 day or less is confirmed in configuration. ARC-05's versioning decision is a pilot entry gate.
+- **Versioning (pilot gate).** ListObjectsV2 does not show noncurrent versions. At startup, RetentionService calls `GetBucketVersioning` and **fails closed** unless versioning has never been enabled, or `GetBucketLifecycleConfiguration` shows a noncurrent-version expiration of 1 day or less. `Suspended` counts as not off, because older noncurrent versions remain. ARC-05's versioning decision is a pilot entry gate. **Staging (Cloudflare R2):** whether R2 supports `GetBucketVersioning` is not verified. If it does not, staging, which holds synthetic data only, logs a warning and skips the check by configuration. Pilot and production (AWS S3) always fail closed.
 - **Index (ADR 0008 delta).** The daily "eligible and no marker" check is a `NOT EXISTS` against an append-only table. `audit_logs` has only `(org_id, created_at DESC)`, and `entity_id` is text. Add the partial index `CREATE INDEX ON audit_logs (action, entity_id) WHERE action IN ('RETENTION_FACE_DONE','RETENTION_MEDIA_DONE','RETENTION_RESULTS_DONE')`. The `NOT EXISTS` also matches `entity_type = 'session'` and compares `entity_id = sessions.id::text`, so the planner can use the index. It is small, and it keeps the job within NFR-01 and NFR-02 headroom. This is the only DDL in this amendment.
 - The marker also stops R-10 from rescanning every session older than a year every day.
 - The face tier runs on its own clock, which no hold affects (C-35). The main tier waits for the anchor. Even when `retention_days` ≤ 90, the two run together only if no review or appeal is open.
@@ -277,7 +278,7 @@ Results (scores, verdicts, reviewer notes, reports) are kept 1 year after the te
 | Scores deleted | **Recommended option (a), with no schema change:** null `sessions.total_score`, `risk_score` and `risk_band`, `session_questions.score` and `session_reviews.verdict`; delete the `submissions` rows (above) and the `appeals` row (its CHECK ties `new_verdict` to its status) | architect detail |
 | After nulling | Appeal creation refuses a review whose verdict is NULL or whose window has passed, measured from `session_reviews.completed_at`. Once the `appeals` row is gone, the database no longer enforces one appeal per review, so this check does it. BE-13 and dashboards derive "results purged" from the `RETENTION_RESULTS_DONE` marker, **not** from a NULL verdict, because an auto-cleared or older session can have no verdict from day one (fsd.md §3: "verdict set or auto-clean"). A job that finds no `submissions` rows must not treat the session as purged either: MCQ-only sessions have none | architect detail |
 | What remains | The `sessions` row (status, timestamps, test through the invitation) and the audit rows (IDs only). Statistics are counts, such as invitations, completions and per-test volumes. Dashboards (FR-1002) compute score and pass-rate statistics only from sessions still inside their year | owner decision C-26 ("anonymised statistics"); fields: architect detail |
-| Candidate row | Once no session of the candidate still has results, the `candidates` row is anonymised as in R-6, and `erased_at` is set. R-10's anonymisation sends no email. A session stuck in a non-terminal state would block this. The expiry job (not started by `window_end`) and the deadline auto-submit cover INVITED to PAUSED, but a session stuck in SUBMITTED or GRADED (a failed job) stays there. Proposed: the daily job alerts on any session still non-terminal 30 days after `window_end`, except sessions the erasure fence has moved to ERASED (9.5). It also alerts on any session UNDER_REVIEW or APPEALED for more than 60 days, because those hold the anchor, and with it face images past 90 days and results past 1 year | architect detail |
+| Candidate row | Once no session of the candidate still has results, the `candidates` row is anonymised as in R-6, and `erased_at` is set. R-10's anonymisation sends no email. A session stuck in a non-terminal state would block this. The expiry job (not started by `window_end`) and the deadline auto-submit cover INVITED to PAUSED, but a session stuck in SUBMITTED or GRADED (a failed job) stays there. Proposed: the daily job alerts on any session still non-terminal 30 days after `window_end`. It also alerts on any session UNDER_REVIEW or APPEALED for more than 60 days, because those hold the anchor, and with it face images past 90 days and results past 1 year | architect detail |
 | Concurrency with erasure | R-10 does not anonymise a candidate with a pending `erasure_requested_at` (and `erased_at` NULL); erasure does that, and sends the C-06 notice. R-10 and erasure both take a per-candidate transaction advisory lock. It uses the two-int form, `pg_advisory_xact_lock(hashtext('codeproctor/candidate-erasure'), hashtext(candidate_id::text))`. A hash collision only adds serialisation, so it is benign. The call is raw SQL in job (org) scope (ADR 0006 §8.5). Each transaction takes the lock for **one candidate only**, and **before any row lock**, so R-10 and erasure cannot deadlock. Erasure spans several transactions and S3 calls, so the lock serialises only the DB steps | architect detail |
 | Legal hold | None today (OQ-10). Without one, R-10 can delete records that must be kept while a charge is pending (9.8) | open |
 
@@ -302,32 +303,56 @@ Results (scores, verdicts, reviewer notes, reports) are kept 1 year after the te
 | Consent record | Set `signed_name` to 'Erased'; null `ip`, `user_agent`, `pdf_key` | Removed. The record stays as it is until R-9 |
 | What remains | "Only anonymized scores" | Scores, **pseudonymised until the consent proof is deleted**, then anonymised |
 
-**Erasure fence (architect detail; ADR 0002 and ADR 0008 amendments).** The erasure hold covers only UNDER_REVIEW, APPEALED and open appeals. Erasure can therefore run on a session that is live, still being graded, or inside the ingest margin, where a 16 MiB PUT can complete after its URL expires.
+**Erasure run (architect detail; ADR 0002 and ADR 0008 amendments).** The erasure hold covers only UNDER_REVIEW, APPEALED and open appeals. So erasure can run on a session that is live, being graded, already COMPLETED, or inside the ingest margin, where a 16 MiB PUT can complete after its URL has expired. The whole run is one ordered list, keyed to the **erasure request id** `{candidateId}_{epoch seconds of erasure_requested_at}`. That id needs no DDL. Every audit row the run writes carries it.
 
-1. **A new terminal status `ERASED`** is appended to `session_status` (ADR 0008 delta: `ALTER TYPE ... ADD VALUE`, in its own migration; fsd.md §3 gets a row).
-   - The alternative, COMPLETED or EXPIRED with an "erased" reason, was rejected: COMPLETED allows APPEALED, and EXPIRED means "never started".
-2. **Fence every non-held, non-terminal session** of the candidate through `SessionStateService` and `closeIngest`. Each fence bumps `sessions.auth_epoch`, which invalidates the candidate token (ADR 0013), moves the session to ERASED, and **sets `retention_anchor_at` to the fence time** (an R-1 addition).
-   - The fence covers INVITED to VERIFIED, IN_PROGRESS, PAUSED, SUBMITTED and GRADED.
-   - It also covers UNDER_REVIEW and APPEALED when `holdWhileReviewOrAppealOpen` is false. In that case the review **ends**: there is no review on blanked data, and an open appeal is closed with no outcome (audited).
-   - After the fence, no further drafts, presigns, submissions or events are accepted.
-3. **The skip is keyed on the session, not the candidate.**
-   - A session that is not fenced proceeds normally. During a hold, the candidate's other sessions are graded and reviewed as usual until erasure runs and fences them.
-   - Every SERVICE writer re-checks the session inside its own write transaction: grading, analysis, the `face-recheck` outcome, `server-event` and report generation. The first statement is `SessionStateService.guardLive(tx, sessionId)`. That is a model-API `sessions.updateMany({ where: { id, status: <status read> }, data: { status: <same status> } })` under the SessionStateService grant (CS-4.4a). It takes the row lock, which follows the lock-order rule of ADR 0015, and returns 0 rows once the session is ERASED, or if it changed meanwhile. On 0 rows, the job writes nothing and ends.
-   - So a job dequeued before the fence cannot write results, events, a FACE_MISMATCH row or a sealed copy after erasure.
-4. **Delete** as in the table above.
-5. **Re-run** the prefix delete after ingest close plus `STORAGE_SWEEP_MARGIN_SECONDS`, as a delayed job, with the same verification.
-   - If verification fails, the run is retried daily, with the 3-day deduplicated alert, as for the tiers.
-   - When it succeeds, erasure writes `ERASURE_COMPLETED`. **Only then is `erasure-completed` enqueued.**
-6. **QA TCs:**
-   - erasure during IN_PROGRESS with a late PUT;
-   - erasure during SUBMITTED or GRADED with a grading job in flight;
-   - erasure during a hold, with a second session submitted meanwhile.
+1. **A new terminal status `ERASED`** is appended to `session_status` (ADR 0008 delta: `ALTER TYPE ... ADD VALUE`, in its own migration; fsd.md §3 gets a row). ADR 0002 gives ERASED **no exit transition**, so no appeal can be filed afterwards. COMPLETED or EXPIRED with an "erased" reason was rejected: COMPLETED allows APPEALED, and EXPIRED means "never started".
+2. **A new `appeal_status` value `CLOSED_ERASED`** (ADR 0008 delta, also its own migration). It closes an open appeal without recording an outcome; recording UPHELD would claim an outcome that never happened. R-2 and R-9 treat a CLOSED_ERASED appeal as closed.
+3. **Fence every non-held session of the candidate, terminal ones included.** Each fence runs through `SessionStateService` and `closeIngest`. It bumps `sessions.auth_epoch`, which invalidates the candidate token (ADR 0013), and moves the session to ERASED.
+   - Covered states: INVITED to VERIFIED, IN_PROGRESS, PAUSED, SUBMITTED, GRADED, COMPLETED, EXPIRED and DECLINED. COMPLETED and EXPIRED are included because otherwise `guardLive` on them would pass, report generation, analysis re-runs and webhooks could still write, and an appeal could still be filed. DECLINED is included for uniformity.
+   - When `holdWhileReviewOrAppealOpen` is false, UNDER_REVIEW and APPEALED are fenced too. The review **ends**: no one reviews blanked data. An open appeal moves to CLOSED_ERASED (audited).
+   - **Anchor.** A session that already has an anchor keeps the earlier one. A session without one gets the fence time (an R-1 addition).
+   - **Ingest close.** The fence closes ingest at once, with no grace: the epoch bump already makes every candidate call fail with 401. The re-run time below is pinned to the fence time.
+   - After the fence, no drafts, presigns, submissions, events or appeals are accepted.
+4. **SERVICE writers are keyed on the session (`guardLive`).** Grading, the grading reconciler, analysis, the `face-recheck` outcome, `server-event`, report generation and webhook delivery each start their write transaction with `SessionStateService.guardLive(tx, sessionId)`. That call is a model-API `sessions.updateMany({ where: { id, status: <read> }, data: { status: <same> } })` under the SessionStateService grant. It takes the row lock, following ADR 0015's lock order.
+   - **0 rows:** re-read the status. If it is ERASED, write nothing and stop. If it is anything else (a legitimate change such as GRADED → UNDER_REVIEW), retry up to 3 times, then fail the job so BullMQ retries it. Work is never dropped silently. A serialization error at a stricter isolation level is treated the same way (retry).
+   - **Objects too, not only rows.** A writer that writes an object under the session prefix (report PDF, sealed copy, any worker upload) either writes it inside the `guardLive` transaction while holding the lock, or **deletes its own object** when `guardLive` returns 0 or the transaction aborts. The post-margin re-run (step 7) is the backstop.
+   - **Short transactions (NFR-01, NFR-02).** `guardLive` serialises every SERVICE writer on that session and blocks the candidate's `last_heartbeat` UPDATE, which runs with `statement_timeout = 3000`. So after `guardLive`, transactions stay short: chunk long analysis writes, guarding each chunk again; set `lock_timeout` (for example 1 s); and make no external calls while the lock is held, apart from the single bounded object write allowed above. A long hold would otherwise time out heartbeats and create false DISCONNECTED evidence.
+   - During a hold, the candidate's sessions that are not fenced proceed normally.
+5. **Late candidate-scope writes.** A draft or event request that passed the epoch check just before the fence can still commit after the blanking. The re-run (step 7) covers this.
+6. **Delete** as in the table above, and run the database erasure steps.
+7. **Re-run** the prefix delete **and the idempotent database erasure steps** at the fence time plus `STORAGE_SWEEP_MARGIN_SECONDS`, as a delayed job.
+   - Each retry re-lists every session prefix of the candidate, so it never needs per-session markers.
+   - It verifies that the prefixes are empty and that no erased rows remain (events, batches, submissions code, notes and so on).
+   - If verification fails, the re-run is retried daily, with the 3-day deduplicated alert and the runbook, as for the tiers.
+   - When every session verifies, erasure writes `ERASURE_COMPLETED` (request id in metadata). It never writes `RETENTION_*_DONE` markers.
+8. **Tell the candidate.** After `ERASURE_COMPLETED`, and unless an `ERASURE_EMAIL_SENT` row with this request id already exists, enqueue `erasure-completed`.
+   - The payload carries the candidate id only. The job id is `erasure-completed_{candidateId}_{epoch}`, with `_` rather than `:` while ADR 0013's `:` spike is open.
+   - The worker checks again for a SENT row before sending. It writes `ERASURE_EMAIL_SENT` or `ERASURE_EMAIL_FAILED` (request id in metadata). Delivery is at least once: a crash between sending and writing the SENT row can produce a duplicate, which is accepted.
+9. **Anonymise the `candidates` row** (`erased+<id>@invalid`, `erased_at` set) at the **first** of these:
+   - `ERASURE_EMAIL_SENT`;
+   - a SUPER_ADMIN records that the candidate was told another way (audited);
+   - **day 28** of the C-06 deadline (30 days from the request, or from the close of the hold), **whatever the verification or email state**.
 
-   In each case no object remains, the token gets 401, no row is written after `ERASURE_COMPLETED`, and the session ends ERASED with an anchor.
+   On **day 25**, if neither SENT nor a recorded notice exists, an alert asks a person to tell the candidate. This keeps C-06's 30 days even if one session's prefix never verifies (AccessDenied, Object Lock); the object retries continue after anonymisation.
+10. **QA TCs:**
+    - erasure during IN_PROGRESS with a late PUT;
+    - erasure during SUBMITTED or GRADED with grading in flight;
+    - erasure during a hold, with a second session submitted;
+    - **a report job in flight during erasure;**
+    - **an appeal attempt on a COMPLETED session after erasure** (refused);
+    - **an open appeal with the hold off** (CLOSED_ERASED);
+    - **a prefix that never verifies** (anonymised on day 28 anyway).
 
-ADR 0013's statement that erasure-stranded objects go "at the latest by R-10" holds only with this fence, because the fence sets the anchor. This goes to the ADR 0013 agent.
+    In each case, after `ERASURE_COMPLETED` no object or erased row remains, the token gets 401, and every session of the candidate is ERASED.
 
-**Who counts as erased (architect detail).** The rules below apply once the erasure run has completed, that is, when `erasure_requested_at` is set **and** an `ERASURE_COMPLETED` audit row exists. They also apply when `candidates.erased_at` IS NOT NULL, which R-10's anonymisation sets. The address may stay until the email is sent, for at most about 28 days. During that window, the `candidates` row (name and email) is readable only by the email worker and SUPER_ADMIN; recruiters and reviewers see "Erased".
+ADR 0013's statement that erasure-stranded objects go "at the latest by R-10" holds only with this fence, because every fenced session has an anchor.
+
+**Who counts as erased (architect detail).** The rules below apply once **this request's** `ERASURE_COMPLETED` row exists (matched on the request id, so an earlier request's row never counts), or once `candidates.erased_at` IS NOT NULL (also set by R-10's anonymisation).
+- **Before anonymisation** (up to day 28), the `candidates` row (name and email) is readable only by the email worker and SUPER_ADMIN; everyone else sees "Erased".
+  - This is enforced by one candidate read projection, `CandidateProjection.forViewer()`, used by every staff DTO, export, webhook and report.
+  - A lint or test fails on any `candidate` read outside it, apart from the email worker and the SUPER_ADMIN path, on the same pattern as the consent carve-out.
+- **New invitations** for a candidate with an erasure pending or done are refused (409 `CANDIDATE_ERASURE_PENDING`). A fresh invite after anonymisation creates a new candidate row, because the old email no longer matches.
+- `ERASURE_EMAIL_SENT`, `ERASURE_EMAIL_FAILED` and `ERASURE_COMPLETED` all gate destructive steps. They are reserved to the email worker and the erasure service, with the same lint and test as the retention markers.
 
 **Re-identification (architect detail).** The kept consent record (name, IP, user agent, PDF) stays joined to `session_id`. For up to 3 years after signing, the session is therefore pseudonymised, not anonymised. Controls:
 - After erasure, only SUPER_ADMIN can read the consent record and PDF, and every read writes an audit row (FR-105).
@@ -336,17 +361,7 @@ ADR 0013's statement that erasure-stranded objects go "at the latest by R-10" ho
 - decisions.md OQ-1 suggested the PDF "in restricted storage". That remains optional: a separate bucket or prefix policy that only the SUPER_ADMIN path can read (ARC-05).
 - **Owner item (it changes published text).** The C-06 wording "only anonymised scores remain" and retention-schedule.md ("We keep only anonymised scores, which can no longer be linked to you") are untrue while the proof exists. Proposed wording: "scores remain, pseudonymised until the consent proof is deleted, then anonymised". retention-schedule.md also says IP and browser details are "removed if you ask us to delete your data", but the consent proof keeps them.
 
-**Telling the candidate (architect detail).** A new email template, `erasure-completed`, says that the signed consent record (version, name, time, IP, browser, PDF) is kept until its 3-year date to defend legal claims, and then deleted. Ordering in the erasure run:
-1. Erase everything except the `candidates` row's name and email.
-2. Unless an `ERASURE_EMAIL_SENT` audit row already exists for this request, enqueue the email.
-   - **Payload: the candidate id only**, never the address. The worker reads the address from the still-intact row, so Redis (and its AOF or RDB snapshots) never holds it.
-   - **Erasure request id, with no DDL:** `{candidateId}_{epoch seconds of erasure_requested_at}`. Job id: `erasure-completed_{candidateId}_{epoch}`, using `_` because the `:` jobId spike in ADR 0013 is still open.
-   - BullMQ's fixed id deduplicates only while the job record exists, so the worker also checks for an `ERASURE_EMAIL_SENT` row before sending. A crash after completion and removal therefore never sends twice.
-   - Retries use backoff.
-3. The worker writes an audit row with IDs only: `ERASURE_EMAIL_SENT`, or `ERASURE_EMAIL_FAILED` after the final attempt. A failure raises an alert.
-4. **Only then is the `candidates` row anonymised** (`erased+<id>@invalid`). After SENT, this happens at once. After FAILED, it waits until a SUPER_ADMIN records that the candidate was told another way (audited), or until **day 28** of the C-06 deadline (30 days from the request, or from the close of the hold), whichever comes first. The 2-day margin covers a daily job running up to 24 h late. An alert fires on day 25 if the candidate has not been told. The address is therefore available to whoever has to reach the candidate.
-
-The address is never logged. R-10's own anonymisation sends no email. `erasure-delayed` remains for the hold. Delivery is at least once: a crash between the send and the SENT row can send a duplicate email. That is accepted.
+**Telling the candidate (architect detail).** A new email template, `erasure-completed`, says that the signed consent record (version, name, time, IP, browser, PDF) is kept until its 3-year date to defend legal claims, and then deleted. The ordering is steps 8 and 9 of the erasure run above. The address is never put in a payload and never logged. R-10's own anonymisation sends no email. `erasure-delayed` remains for the hold.
 
 **Accommodations (OQ-12).** R-6's "free text about the candidate" does not cover `invitations.accommodations`. Its `notes` field, and the C-19 waiver reason (ADR 0015), can hold health-adjacent information. Proposed, matching OQ-12's suggested answer ("keeping only which settings were used"): erasure and R-10 remove `notes` and the waiver reason (ADR 0015 reduces the waiver to `identityCheckWaived: true`) and keep the setting flags (`extraTimePct`, `disabledDetectors`, `allowedAssistiveTools`). Audit rows keep the record of changes, with IDs only.
 
@@ -356,7 +371,12 @@ ADR 0013 5.7 and its section 8 BE-09 row must state the rules below. The accepta
 - **R-4 at `retention_days`:** delete the session prefix **except `reports/`**.
 - **Face tier, new formula:** face clock + LEAST(`retention_days`, 90), with no hold (C-27, C-35). Face clock = `COALESCE(submitted_at, latest capture, terminal transition time, sessions.created_at)`. It deletes `identity/**` and `evidence/sealed/**`, and nulls the identity keys and the FACE_MISMATCH `evidence_key`. ADR 0013 currently says "the earlier of anchor + LEAST(retention_days, 90) and 90 days after capture or submitted_at". Under a hold the anchor is NULL, so that keeps images for 90 days even when an org sets `retention_days` = 30. ADR 0013 must use this formula instead.
 - **R-10 at anchor + 1 year:** list and delete the whole session prefix, not only `reports/`, and null `report_key`. R-10 does not wait for the earlier markers. Erasure deletes the whole session prefix at once.
-- **New:** the erasure fence (9.5) moves non-held, non-terminal sessions to ERASED and sets the anchor. "At the latest by R-10" holds only with that fence.
+- **New:** the erasure run (9.5) moves every non-held session of the candidate, terminal ones included, to **ERASED**, and keeps or sets the anchor. "At the latest by R-10" holds only with that fence. ADR 0013's text that the status is "still settling" (its fence paragraph and Q21) must name ERASED.
+- **New:** ADR 0013 must name `SessionStateService.guardLive` and list every SERVICE writer that uses it: grading and its reconciler, analysis, `face-recheck`, `server-event`, report generation and webhooks. Object writers write inside the lock or delete their own object. On 0 rows, the job re-reads and stops only on ERASED.
+- **New:** ADR 0013's grading reconciler still skips sessions whose *candidate* has `erasure_requested_at` set. That skip must become session-keyed (ERASED), or a second session submitted during a hold is never recovered.
+- **New:** ADR 0013's face clock must include the FACE_MISMATCH `occurred_at` and the fence time, matching 9.2.
+- **New:** ADR 0013 says R-10 "runs the face and media tiers first if not completed". It must instead say R-10 does not wait for them, and that its own whole-prefix verification covers them (9.2).
+- **New:** the ERASED fence closes ingest at once; the re-run time is pinned to the fence time (ADR 0013's ingest-close grace does not apply).
 - **Selection:** by session, with per-tier completion markers, always listing the prefix (9.2).
 - **New:** a marker is written only after verified deletion (every page listed, no `Errors`, fresh listing empty); `RETENTION_MARKER_ACTIONS` is reserved to RetentionService; erasure never writes markers, fences a live session, and re-runs after ingest close plus the margin (9.5).
 - **New:** the wording "a job finding no `submissions` rows treats the session as past its results clock" is unsafe, because MCQ-only sessions have none. Key on the `RETENTION_RESULTS_DONE` marker instead.
@@ -391,7 +411,7 @@ ADR 0013 5.7 and its section 8 BE-09 row must state the rules below. The accepta
 | 7 | fsd.md FR-401 | Consent record kept 3 years after signing, through erasure (C-17) | hub |
 | 8 | test-cases.md TC-072, TC-094 | TC-072 adds the 90-day cap with `retention_days` > 90 and keeps `reports/` at R-4. TC-094 keeps the consent proof, deletes the report and drops "provisional, Legal to confirm". QA adds TCs for R-9, R-10 (a multi-session candidate: no `session_questions.score`, `submissions` or verdict left on the older session), erasure during IN_PROGRESS with a late PUT, during SUBMITTED or GRADED with grading in flight, and during a hold with a second session; an orphan identity object with no row deleted by day 90; an open identity review at day 90 can record INCONCLUSIVE; a failed DeleteObjects leaving no marker, tier selection by session (orphans in `live/`, missed identity frames, missing media rows), the session-delete refusal, access to the kept proof, and the email ordering | hub, QA |
 | 9 | prompts/database.md Step 6 | RetentionService: the tiers, R-9, R-10. CandidateErasureService: keeps the proof and deletes the report | hub |
-| 10 | DB-06 | Implement 9.2 to 9.5 and 9.7; the `REVOKE DELETE, TRUNCATE ON sessions` migration (ADR 0006 §7.2 and ADR 0008 deltas), with its test and the `has_table_privilege` assertion; per-tier markers written only after verified deletion; the partial index on `audit_logs` (ADR 0008 delta); `RETENTION_MARKER_ACTIONS` reserved, with a lint and a test; the two-int advisory lock between R-10 and erasure; the `ERASED` status migration (ADR 0008 delta); the face clock with its fallbacks; the GetBucketVersioning check at startup | db-engineer |
+| 10 | DB-06 | Implement 9.2 to 9.5 and 9.7; the `REVOKE DELETE, TRUNCATE ON sessions` migration (ADR 0006 §7.2 and ADR 0008 deltas), with its test and the `has_table_privilege` assertion; per-tier markers written only after verified deletion; the partial index on `audit_logs` (ADR 0008 delta); `RETENTION_MARKER_ACTIONS` reserved, with a lint and a test; the two-int advisory lock between R-10 and erasure; the `ERASED` status and `appeal_status` `CLOSED_ERASED` migrations (ADR 0008 deltas); the face clock with its fallbacks; the GetBucketVersioning check at startup | db-engineer |
 | 11 | BE-06 email | New template `erasure-completed`: id-only payload, `_` job id, SENT check before enqueue and in the worker, anonymise only after SENT, or after FAILED plus a recorded notice or the deadline (9.5) | backend-engineer |
 | 12 | BE-09 storage | The object tiers in 9.2 and 9.6; R-9 alone deletes the consent prefix | backend-engineer |
 | 13 | BE-08 and the worker | Embedding cache lifetime (9.1) | integrity-engineer |
@@ -401,6 +421,10 @@ ADR 0013 5.7 and its section 8 BE-09 row must state the rules below. The accepta
 | 17 | retention-schedule.md, consent document | Pseudonymisation wording; the IP and browser row; the C-27 scope; the results row's "1 year after the test", which counts from the anchor (9.4); the face-image "never more than 90 days" is accurate under C-35 | Delivery Lead drafts, owner approves |
 | 18 | DPIA | 3-year rationale and the legal flags (9.8) | Delivery Lead |
 | 19 | ARC-05 | Object versioning (9.7); Redis snapshot retention for email payloads (9.5) | hub |
+| 20 | ADR 0002 | Amendment: terminal status ERASED with no exit transition; fence from every non-held state, terminal ones included; UNDER_REVIEW and APPEALED fenced when the hold is off (the review ends, the appeal becomes CLOSED_ERASED); R-1 keeps or sets the anchor | hub, on acceptance |
+| 21 | fsd.md §3 | An ERASED row in the state table | hub |
+| 22 | database.md | The `session_status` enum line gains `ERASED`; the `appeal_status` enum gains `CLOSED_ERASED` (ADR 0008 deltas) | hub |
+| 23 | Owner-visible | ERASED also covers COMPLETED, EXPIRED and DECLINED sessions; dashboards count ERASED sessions under their own label, not as completions | owner |
 
 ### 9.10 Open owner questions
 
