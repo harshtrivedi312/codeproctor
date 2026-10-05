@@ -3,7 +3,12 @@ import { hash, verify } from '@node-rs/argon2';
 import { randomBytes } from 'node:crypto';
 
 // Argon2id (algorithm 2), OWASP-recommended parameters (FR-101, NFR-04).
-export const ARGON2_OPTIONS = { algorithm: 2, memoryCost: 19_456, timeCost: 2, parallelism: 1 } as const;
+export const ARGON2_OPTIONS = {
+  algorithm: 2,
+  memoryCost: 19_456,
+  timeCost: 2,
+  parallelism: 1,
+} as const;
 
 @Injectable()
 export class PasswordService implements OnModuleInit {

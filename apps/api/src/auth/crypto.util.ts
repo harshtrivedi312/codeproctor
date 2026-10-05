@@ -5,6 +5,11 @@ export function sha256Hex(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+/** Short fingerprint of the current password hash; changes whenever the password does. */
+export function passwordVersion(passwordHash: string): string {
+  return sha256Hex(passwordHash).slice(0, 16);
+}
+
 /** 32 random bytes as base64url: refresh tokens and password-reset tokens. */
 export function newOpaqueToken(): string {
   return randomBytes(32).toString('base64url');

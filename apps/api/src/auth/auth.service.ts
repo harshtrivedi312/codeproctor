@@ -19,7 +19,13 @@ import type { User } from '../generated/prisma/client';
 import { REDIS_CLIENT } from '../infrastructure/infrastructure.module';
 import { MailPort } from '../mail/mail.port';
 import type { AuthSessionDto, LoginResultDto, TotpEnrollmentDto } from './dto/auth.dto';
-import { newOpaqueToken, newRecoveryCode, normalizeRecoveryCode, sha256Hex } from './crypto.util';
+import {
+  newOpaqueToken,
+  newRecoveryCode,
+  normalizeRecoveryCode,
+  passwordVersion,
+  sha256Hex,
+} from './crypto.util';
 import { TokenService } from '../common/auth/token.service';
 import { PasswordService } from './password.service';
 import { TotpService } from './totp.service';
@@ -50,11 +56,6 @@ export interface SessionOutcome {
   body: LoginResultDto;
   /** Raw refresh token for the httpOnly cookie. Absent when no new session started. */
   refreshToken?: string;
-}
-
-/** Short fingerprint of the current password hash; changes whenever the password does. */
-function passwordVersion(passwordHash: string): string {
-  return sha256Hex(passwordHash).slice(0, 16);
 }
 
 class RefreshReuseSignal extends Error {}
@@ -219,7 +220,7 @@ export class AuthService {
     if (user.totpEnabled) throw new ConflictException('Two-factor authentication is already on.');
     // A locked account looks exactly like a wrong code (FU-BE-22, FU-BE-34).
     if (!(await this.reserveAttempt(user.id))) throw this.invalidCode();
-    if (!user.totpSecretEnc || !this.totp.verify(user.totpSecretEnc, code)) {
+    if (!user.totpSecretEnc || !(await this.totp.verify(user.id, user.totpSecretEnc, code))) {
       await this.registerFailure(user, ctx);
       throw this.invalidCode();
     }
@@ -258,7 +259,8 @@ export class AuthService {
     // Same status and message as a wrong code, so a locked account is indistinguishable.
     if (!(await this.reserveAttempt(user.id))) throw this.invalidCode();
     if (/^\d{6}$/.test(code)) {
-      if (!this.totp.verify(user.totpSecretEnc, code)) return this.failCode(user, ctx);
+      if (!(await this.totp.verify(user.id, user.totpSecretEnc, code)))
+        return this.failCode(user, ctx);
     } else {
       const hash = sha256Hex(normalizeRecoveryCode(code));
       // The check and the removal are one statement, so two concurrent uses cannot both win.
@@ -549,7 +551,14 @@ export class AuthService {
 
   private authenticated(user: UserWithOrg): LoginResultDto {
     const accessToken = this.tokens.sign(
-      { sub: user.id, org: user.orgId, role: user.role, kind: 'access' },
+      {
+        sub: user.id,
+        org: user.orgId,
+        role: user.role,
+        kind: 'access',
+        // Bound to the password in force, so a reset ends the token at once (FU-BE-19).
+        pwv: passwordVersion(user.passwordHash ?? ''),
+      },
       ACCESS_TTL_SECONDS,
     );
     return { status: 'authenticated', session: this.session(user, accessToken) };

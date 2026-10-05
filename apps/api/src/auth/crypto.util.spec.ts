@@ -12,7 +12,11 @@ describe('Secret encryption (FR-102, NFR-04, FU-BE-29)', () => {
     const [v, iv, tag, ct] = encryptSecret('JBSWY3DPEHPK3PXP', key).split('.');
     const bytes = Buffer.from(tag ?? '', 'base64url');
     expect(bytes).toHaveLength(16);
-    for (const bad of [bytes.subarray(0, 4), bytes.subarray(0, 12), Buffer.concat([bytes, bytes])]) {
+    for (const bad of [
+      bytes.subarray(0, 4),
+      bytes.subarray(0, 12),
+      Buffer.concat([bytes, bytes]),
+    ]) {
       expect(() => decryptSecret([v, iv, bad.toString('base64url'), ct].join('.'), key)).toThrow(
         'Invalid authentication tag',
       );

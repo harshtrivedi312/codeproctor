@@ -523,6 +523,121 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
     });
   });
 
+  describe('FR-102 TOTP replay protection (FU-BE-20)', () => {
+    const verify2fa = (challengeToken: string, code: string): request.Test =>
+      request(app.getHttpServer()).post(`${API}/2fa/verify`).send({ challengeToken, code });
+
+    it('TC-003: a TOTP code is accepted once; replaying it with a fresh challenge is refused', async () => {
+      const secret = 'JBSWY3DPEHPK3PXP';
+      const u = await createUser({ role: UserRole.REVIEWER, totp: secret });
+      const code = authenticator.generate(secret);
+      const first = ((await login(u.email).expect(200)).body as Body).challengeToken;
+      await verify2fa(first, code).expect(200);
+      const second = ((await login(u.email).expect(200)).body as Body).challengeToken;
+      const replay = await verify2fa(second, code).expect(400);
+      expect(replay.headers['set-cookie']).toBeUndefined();
+    });
+
+    it('TC-003: replaying the code that confirmed enrollment is refused at login', async () => {
+      const u = await createUser({ role: UserRole.SUPER_ADMIN });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      const start = (
+        await request(app.getHttpServer())
+          .post(`${API}/2fa/enroll/start`)
+          .send({ challengeToken })
+          .expect(200)
+      ).body as Body;
+      const code = authenticator.generate(start.manualKey);
+      await request(app.getHttpServer())
+        .post(`${API}/2fa/enroll/confirm`)
+        .send({ challengeToken, code })
+        .expect(200);
+      const next = ((await login(u.email).expect(200)).body as Body).challengeToken;
+      await verify2fa(next, code).expect(400);
+    });
+
+    it('TC-003: when Redis is unavailable a valid code is refused (fail closed)', async () => {
+      const secret = 'JBSWY3DPEHPK3PXP';
+      const u = await createUser({ role: UserRole.REVIEWER, totp: secret });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      const redis = app.get<import('ioredis').Redis>(
+        jest.requireActual<typeof import('../infrastructure/infrastructure.module')>(
+          '../infrastructure/infrastructure.module',
+        ).REDIS_CLIENT,
+      );
+      const realSet = redis.set.bind(redis) as (...args: unknown[]) => Promise<unknown>;
+      // Only the TOTP step marker fails; the challenge marker uses the same client.
+      const setSpy = jest
+        .spyOn(redis, 'set')
+        .mockImplementation(((...args: unknown[]) =>
+          String(args[0]).startsWith('auth:totp:used:')
+            ? Promise.reject(new Error('redis down'))
+            : realSet(...args)) as unknown as typeof redis.set);
+      try {
+        await verify2fa(challengeToken, authenticator.generate(secret)).expect(400);
+      } finally {
+        setSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('FR-104 access token re-check (FU-BE-19)', () => {
+    const setupStart = (accessToken: string): request.Test =>
+      request(app.getHttpServer())
+        .post(`${API}/2fa/setup/start`)
+        .set('Authorization', `Bearer ${accessToken}`);
+
+    it("FR-104: a deactivated user's unexpired access token is refused at once", async () => {
+      const u = await createUser();
+      const { session } = (await login(u.email).expect(200)).body as Body;
+      await setupStart(session.accessToken).expect(200);
+      await prisma.user.update({ where: { id: u.id }, data: { isActive: false } });
+      await setupStart(session.accessToken).expect(401);
+    });
+
+    it('FR-104: an access token is refused after a role change', async () => {
+      const u = await createUser();
+      const { session } = (await login(u.email).expect(200)).body as Body;
+      await prisma.user.update({ where: { id: u.id }, data: { role: UserRole.SUPER_ADMIN } });
+      await setupStart(session.accessToken).expect(401);
+    });
+
+    it('FR-104: an access token is refused after a password reset', async () => {
+      const u = await createUser();
+      const { session } = (await login(u.email).expect(200)).body as Body;
+      const token = `reset-token-${u.id}-padding-padding`;
+      await prisma.user.update({
+        where: { id: u.id },
+        data: {
+          setPasswordTokenHash: sha256Hex(token),
+          setPasswordExpiresAt: new Date(Date.now() + 600_000),
+        },
+      });
+      await request(app.getHttpServer())
+        .post(`${API}/password/reset`)
+        .send({ token, newPassword: 'A-Brand-New-Passphrase-1' })
+        .expect(204);
+      await setupStart(session.accessToken).expect(401);
+    });
+
+    it('FR-104: an access token for a deleted user id is refused', async () => {
+      const { TokenService: Tokens } = jest.requireActual<
+        typeof import('../common/auth/token.service')
+      >('../common/auth/token.service');
+      const forged = app.get(Tokens).sign(
+        {
+          sub: '11111111-1111-4111-8111-111111111111',
+          org: orgId,
+          role: 'RECRUITER',
+          kind: 'access',
+          pwv: 'x',
+        },
+        60,
+      );
+      await setupStart(forged).expect(401);
+    });
+  });
+
   describe('TC-005 (FR-104): refresh token rotation and reuse', () => {
     it('TC-005: the second use of a refresh token is rejected and the whole family is revoked', async () => {
       const u = await createUser();
@@ -706,8 +821,9 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
 
     it('TC-098: forgot-password runs the same single UPDATE for a real and an unknown account (FU-BE-31)', async () => {
       const u = await createUser();
-      const { PrismaService: Prisma } =
-        jest.requireActual<typeof import('../database/prisma.module')>('../database/prisma.module');
+      const { PrismaService: Prisma } = jest.requireActual<
+        typeof import('../database/prisma.module')
+      >('../database/prisma.module');
       const appPrisma = app.get(Prisma).client;
       const spy = jest.spyOn(appPrisma.user, 'updateMany');
       try {
