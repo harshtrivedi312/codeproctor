@@ -4,7 +4,6 @@ export const SECRET_FIELDS = [
   'password',
   'newPassword',
   'totpCode',
-  'code',
   'token',
   'challengeToken',
   'recoveryCode',
@@ -14,13 +13,37 @@ export const SECRET_FIELDS = [
   'secret',
   'manualKey',
   'qrDataUrl',
+  // Sensitive column names, in case a row is ever logged.
+  'passwordHash',
+  'totpSecretEnc',
+  'recoveryCodeHashes',
+  'setPasswordTokenHash',
+  'tokenHash',
 ] as const;
+
+/**
+ * `code` is a secret only as a request or response body member (the TOTP or recovery code). It is
+ * deliberately not redacted under `err`, where it is a Prisma or Node error code (P2002, ...).
+ */
+const BODY_ONLY_FIELDS = ['code'] as const;
 
 const PREFIXES = [
   '',
   '*.',
   '*.*.',
   '*.*.*.',
+  '*.*.*.*.',
+  '*.*.*.*.*.',
+  'req.body.',
+  'req.body.*.',
+  'req.body.*.*.',
+  'body.',
+  'body.*.',
+  'res.body.',
+  'res.body.*.',
+];
+
+const BODY_PREFIXES = [
   'req.body.',
   'req.body.*.',
   'req.body.*.*.',
@@ -37,6 +60,7 @@ export const LOG_REDACT = {
     'req.headers.cookie',
     'res.headers["set-cookie"]',
     ...PREFIXES.flatMap((prefix) => SECRET_FIELDS.map((field) => `${prefix}${field}`)),
+    ...BODY_PREFIXES.flatMap((prefix) => BODY_ONLY_FIELDS.map((field) => `${prefix}${field}`)),
   ],
   censor: '[Redacted]',
 };

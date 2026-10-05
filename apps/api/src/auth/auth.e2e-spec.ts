@@ -1082,10 +1082,13 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         .send({ email: u.email, password: PASSWORD, totpEnabled: true })
         .expect(400);
       const session = (await login(u.email).expect(200)).body as Body;
-      await request(app.getHttpServer())
+      const t = await createUser({ totp: SECRET });
+      const { challengeToken } = (await login(t.email).expect(200)).body as Body;
+      const refused = await request(app.getHttpServer())
         .post(`${API}/2fa/verify`)
-        .send({ challengeToken: 'x', code: '123456', totpEnabled: true })
+        .send({ challengeToken, code: '123456', totpEnabled: true })
         .expect(400);
+      expect(JSON.stringify(refused.body)).toContain('totpEnabled');
       await request(app.getHttpServer())
         .post(`${API}/2fa/setup/confirm`)
         .set('Authorization', `Bearer ${session.session.accessToken}`)
