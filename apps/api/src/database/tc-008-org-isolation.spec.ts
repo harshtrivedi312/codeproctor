@@ -1232,19 +1232,19 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
 
     // ---- no existence oracle -------------------------------------------------------------------
 
+    /** The response headers without the named ones. */
+    const headersWithout = (res: request.Response, names: string[]): Record<string, unknown> =>
+      Object.fromEntries(Object.entries(res.headers).filter(([name]) => !names.includes(name)));
+
     /** The response as an observer sees it, with what legitimately differs per request set aside. */
     const observed = (res: request.Response, requestedId: string, trace: string) => {
-      const {
-        date: _date,
-        etag,
-        'content-length': _length,
-        ...headers
-      } = res.headers as Record<string, string | undefined>;
+      const all = res.headers as Record<string, string | undefined>;
+      const headers = headersWithout(res, ['date', 'etag', 'content-length']);
       const body = res.body as Record<string, unknown>;
       return {
         status: res.status,
         headers,
-        hasEtag: etag !== undefined,
+        hasEtag: all.etag !== undefined,
         keys: Object.keys(body).sort(),
         // instance carries the requested path and traceId the trace header; nothing else may differ.
         body: {
@@ -1345,11 +1345,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         expect([denied.status, missing.status]).toEqual([200, 200]);
         expect([denied.body, missing.body]).toEqual([[], []]);
         // No id in the response, so every header but Date matches, ETag included.
-        const strip = (res: request.Response) => {
-          const { date: _date, ...headers } = res.headers as Record<string, string | undefined>;
-          return headers;
-        };
-        expect(strip(denied)).toEqual(strip(missing));
+        expect(headersWithout(denied, ['date'])).toEqual(headersWithout(missing, ['date']));
         // The same filter for an id that does exist in org A returns A's row: the filter works.
         const own = await get(
           path.includes('sessions?')
