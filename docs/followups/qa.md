@@ -153,6 +153,10 @@ Observation for proctor-sdk-engineer (low, not a data-loss defect; NFR-08 holds)
 - [ ] Owner: qa-engineer. Per-section pause credit (ADR 0013 effectiveDeadline): (1) the deadline variant closes section k while PAUSED past the cap, and k+1 gets no credit for the earlier pause time; (2) a section-finish clicked during a PROCTOR pause does not give k+1 extra time.
 - [ ] Owner: qa-engineer. Erasure serialisation: a `close-section` run interleaved with erasure does not re-insert code (guardLive); a fence after a status read is still seen.
 - [ ] Owner: qa-engineer. A session past its deadline with a lost auto-submit job is submitted by the reconciler.
+- [ ] Owner: qa-engineer. A SERVICE writer that **starts after** the erasure fence writes nothing (face-recheck outcome, server-event, disconnected job, report generation, analyze-session); erasure-compatible jobs (ingest close, sweeps, evidence-expire, consent PDF) still run.
+- [ ] Owner: qa-engineer. A no-limit or clamped next section ends at the session's effective deadline: pause before the section opens (p = 10, open at 15, resume at 20) and cap exhausted at 40 both end with the session.
+- [ ] Owner: qa-engineer. The candidate SUBMIT insert leaves `created_at` to the database default; a no-match with saved code at T alerts and fails.
+- [ ] Owner: qa-engineer. Erasure re-run repeats the database steps and removes a late candidate-scope commit.
 - [ ] Owner: qa-engineer. DeviceInfoService fencing: concurrent writers lose no update; a skip sets resync and the next heartbeat asks for full capabilities; the first write fences on `{}`.
 - [ ] Owner: qa-engineer. `detachForSessionJob` refusals: in any scope, with a raw-SQL hatch open, with a grant present; a discovery processor cannot run a session handler inline.
 - [ ] Owner: qa-engineer. Section finished by the button: the latest saved code is graded (close-section is the only writer of `ended_at`, ADR 0013 5.11).
