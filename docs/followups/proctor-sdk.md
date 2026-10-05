@@ -201,3 +201,18 @@ Nits
 - The global `Permissions-Policy` sets `microphone=()`, which blocks the voice detector everywhere. The demo gets a dev-only per-path override in `next.config.ts`; the real candidate test route needs `microphone=(self)`.
 - The demo files under `public/dev-proctor-models/` would be served by a production build if present on the build machine; the build step must not fetch them.
 - `fetch-models.mjs` now also downloads COCO-SSD lite_mobilenet_v2 (still no SHA-256 pinning).
+
+### Review follow-ups for PR #35 (code-reviewer, not blockers)
+Fixed in the PR: COCO manifest path traversal check (`scripts/safe-path.mjs`, tested), usage comment path, `next.config.test.ts` for the Permissions-Policy override. No model binary was ever committed on the branch (`git log --stat origin/main..HEAD -- apps/web/public` is empty).
+
+Should-fix
+4. Mock server memory: sessions, chunks and batches grow without bound, and chunk `segment`, `seq` and `bytes` accept negative or huge integers. Cap the number of sessions and chunks per session and bound the integers (reuse the limits from the shared schema).
+5. The evidence PUT should require a key that was actually presigned (it currently accepts any `evidence/<session>/...` key).
+
+Nits
+- `api/_lib/handler.ts`: the comment says 401 but the code returns 400 for a missing dev token; make them agree.
+- `mount.ts` capability list is built with `innerHTML`; use `textContent` (values are SDK strings, but keep the habit).
+- Three test names in the new files lack FR/TC IDs, and the duplicate-batch test is tagged TC-063 but is closer to TC-065 (idempotent replay); retag.
+- The `/dev/proctor` chunk still compiles into production bundles (the route 404s at runtime). Consider a prebuild guard that fails the build if `public/dev-proctor-models` exists, and excluding the route from production builds.
+- Root `eslint.config.mjs` `globalIgnores` for `apps/web/public/dev-proctor-models/**` (hub-owned; see above).
+- `api/media/put/[...key]/route.ts`: use a stricter full-key regex (stream, segment and seq shape) instead of matching only the session prefix.

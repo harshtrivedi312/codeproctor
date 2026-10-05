@@ -37,8 +37,9 @@ const nextConfig: NextConfig = {
           },
         ],
       },
-      // Dev only (listed last so it overrides the global policy for this one path): the /dev/proctor demo needs the microphone for the voice detector, which the
-      // global policy blocks. Not emitted in production builds; every other route is unchanged.
+      // Dev only, listed last so it overrides the global policy for this one path. The
+      // /dev/proctor demo needs the microphone for the voice detector, which the global policy
+      // blocks. Not emitted in production builds; every other route is unchanged.
       ...(process.env.NODE_ENV === 'production'
         ? []
         : [
