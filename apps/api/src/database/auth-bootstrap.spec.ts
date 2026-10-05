@@ -18,6 +18,7 @@ import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { Roles } from '../common/auth/decorators';
+import { passwordVersion } from '../auth/crypto.util';
 import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
 import { TokenModule, TokenService } from '../common/auth/token.service';
 import { Prisma } from '../generated/prisma/client.js';
@@ -634,9 +635,16 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
     });
 
     it("NFR-04 an authenticated HTTP request (guard, interceptor, handler) sends only the handler's one statement", async () => {
-      const token = app
-        .get(TokenService)
-        .sign({ sub: A.userId, org: A.orgId, role: 'RECRUITER', kind: 'access' }, 300);
+      const token = app.get(TokenService).sign(
+        {
+          sub: A.userId,
+          org: A.orgId,
+          role: 'RECRUITER',
+          kind: 'access',
+          pwv: passwordVersion('not-a-real-hash'),
+        },
+        300,
+      );
       const get = (): Promise<unknown> =>
         request(app.getHttpServer())
           .get(`/probe/users/${A.userId}`)
@@ -646,7 +654,11 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
         plain.user.findUnique({ where: { id: A.userId, AND: [{ orgId: A.orgId }] } }),
       );
       expect(bare).toHaveLength(1);
-      expect(await measured(get)).toEqual(bare);
+      // Two statements: the guard's per-request user re-check (FU-BE-19) and the handler's own.
+      // Entering the system scope for the guard and the org scope for the handler adds none.
+      const sent = await measured(get);
+      expect(sent).toHaveLength(2);
+      expect(sent[1]).toEqual(bare[0]);
     });
 
     it('NFR-04 connecting and the first scoped query send no statement besides the query', async () => {

@@ -8,7 +8,8 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { PrismaService } from '../../database/prisma.module';
+import { OrgContextService } from '../../database/org-context';
+import { PrismaService } from '../../database/prisma.service';
 import { UserRole } from '../../generated/prisma/client';
 import { passwordVersion } from '../../auth/crypto.util';
 import type { AuthedRequest, AuthUser, TokenKind } from './auth.types';
@@ -41,6 +42,7 @@ export class JwtAuthGuard implements CanActivate {
     private readonly reflector: Reflector,
     private readonly tokens: TokenService,
     private readonly prisma: PrismaService,
+    private readonly orgContext: OrgContextService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -70,10 +72,15 @@ export class JwtAuthGuard implements CanActivate {
     // The token alone is not enough: re-read the user so a deactivation, role change or password
     // reset takes effect at once instead of after the 15 minute token lifetime (FU-BE-19).
     // One primary-key lookup; any database error propagates and the request is refused.
-    const current = await this.prisma.client.user.findUnique({
-      where: { id: claims.sub },
-      select: { isActive: true, role: true, orgId: true, passwordHash: true },
-    });
+    // Guards run before the interceptor that sets the org context, and the token's org is exactly
+    // what this lookup verifies, so it runs in the auth bootstrap system scope (FU-DB-58).
+    const userId = claims.sub;
+    const current = await this.orgContext.runSystem('AUTH_BOOTSTRAP', () =>
+      this.prisma.client.user.findUnique({
+        where: { id: userId },
+        select: { isActive: true, role: true, orgId: true, passwordHash: true },
+      }),
+    );
     if (
       !current?.isActive ||
       !current.passwordHash ||

@@ -507,8 +507,8 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         data: { failedLogins: 5, lockedUntil: new Date(Date.now() + 600_000) },
       });
       const { PrismaService: PrismaSvc } = jest.requireActual<
-        typeof import('../database/prisma.module')
-      >('../database/prisma.module');
+        typeof import('../database/prisma.service')
+      >('../database/prisma.service');
       const client = app.get(PrismaSvc).client;
       const query = jest.spyOn(client, '$queryRaw');
       const exec = jest.spyOn(client, '$executeRaw');
@@ -652,8 +652,8 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         data: { failedLogins: 5, lockedUntil: new Date(Date.now() + 600_000) },
       });
       const { PrismaService: PrismaSvc } = jest.requireActual<
-        typeof import('../database/prisma.module')
-      >('../database/prisma.module');
+        typeof import('../database/prisma.service')
+      >('../database/prisma.service');
       const client = app.get(PrismaSvc).client;
       const query = jest.spyOn(client, '$queryRaw');
       const exec = jest.spyOn(client, '$executeRaw');
@@ -1179,8 +1179,8 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       const inactive = await createUser();
       await prisma.user.update({ where: { id: inactive.id }, data: { isActive: false } });
       const { PrismaService: PrismaSvc } = jest.requireActual<
-        typeof import('../database/prisma.module')
-      >('../database/prisma.module');
+        typeof import('../database/prisma.service')
+      >('../database/prisma.service');
       const { REDIS_CLIENT } = jest.requireActual<
         typeof import('../infrastructure/infrastructure.module')
       >('../infrastructure/infrastructure.module');

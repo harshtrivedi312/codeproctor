@@ -15,6 +15,7 @@ import type { Request } from 'express';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { Public, Roles } from '../common/auth/decorators';
+import { passwordVersion } from '../auth/crypto.util';
 import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
 import { TokenModule, TokenService } from '../common/auth/token.service';
 import type { UserRole } from '../generated/prisma/enums.js';
@@ -22,6 +23,7 @@ import { OrgContextMissingError, OrgScopeViolationError } from './errors';
 import { OrgContextService, SYSTEM_SCOPE_REASONS } from './org-context';
 import type { AuthenticatedUser, SystemScopeReason } from './org-context';
 import { OrgContextInterceptor } from './org-context.interceptor';
+import { PrismaService } from './prisma.service';
 
 const ORG_A = '11111111-1111-4111-8111-111111111111';
 const ORG_B = '22222222-2222-4222-8222-222222222222';
@@ -229,6 +231,7 @@ const SECRET = 'a-secret-for-the-interceptor-tests-only';
 describe('OrgContextInterceptor with the real JwtAuthGuard (BE-02, NFR-04, FR-103)', () => {
   let app: INestApplication<App>;
   let tokens: TokenService;
+  const knownUsers = new Map<string, AuthenticatedUser>();
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
@@ -243,6 +246,28 @@ describe('OrgContextInterceptor with the real JwtAuthGuard (BE-02, NFR-04, FR-10
       controllers: [ProbeController],
       providers: [
         OrgContextService,
+        // The guard re-reads the user on every request (FU-BE-19); answer from the users the
+        // test has minted tokens for.
+        {
+          provide: PrismaService,
+          useValue: {
+            client: {
+              user: {
+                findUnique: ({ where }: { where: { id: string } }) => {
+                  const user = knownUsers.get(where.id);
+                  return Promise.resolve(
+                    user && {
+                      isActive: true,
+                      role: user.role,
+                      orgId: user.orgId,
+                      passwordHash: 'not-a-real-hash',
+                    },
+                  );
+                },
+              },
+            },
+          },
+        },
         // The same order as AppModule: the guard authenticates, then the interceptor reads the user.
         { provide: APP_GUARD, useClass: JwtAuthGuard },
         { provide: APP_INTERCEPTOR, useClass: OrgContextInterceptor },
@@ -258,8 +283,17 @@ describe('OrgContextInterceptor with the real JwtAuthGuard (BE-02, NFR-04, FR-10
   });
 
   /** A real staff token, with the claims BE-02's AuthService signs. */
-  const bearer = (user: AuthenticatedUser, kind: 'access' | 'challenge' = 'access'): string =>
-    `Bearer ${tokens.sign({ sub: user.userId, org: user.orgId, role: user.role, kind }, 60)}`;
+  const bearer = (user: AuthenticatedUser, kind: 'access' | 'challenge' = 'access'): string => {
+    knownUsers.set(user.userId, user);
+    const claims = {
+      sub: user.userId,
+      org: user.orgId,
+      role: user.role,
+      kind,
+      pwv: passwordVersion('not-a-real-hash'),
+    };
+    return `Bearer ${tokens.sign(claims, 60)}`;
+  };
 
   it('TC-008 guards run before interceptors: the handler runs in the org the guard put on request.user', async () => {
     const res = await request(app.getHttpServer())

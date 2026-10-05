@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join, relative, resolve, sep } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { startMigratedDatabase } from './testing/migrated-postgres';
 import type { MigratedDatabase } from './testing/migrated-postgres';
 
@@ -134,17 +134,14 @@ describe('generated Prisma client under the Nest build (ADR 0009 P14)', () => {
     expect(offenders).toEqual(['database/create-prisma-client.ts']);
   });
 
-  it('NFR-04 only auth and AppModule use the unscoped client of database/prisma.module.ts', () => {
-    // prisma.module.ts is BE-02's interim, unscoped client for auth bootstrap. New business
-    // modules must inject PrismaService from database/prisma.service.ts, which is org-scoped.
-    // This fails when another file imports the unscoped one.
-    const allowed = [`auth${sep}`, `database${sep}`, 'app.module.ts'];
+  it('NFR-04 the interim unscoped client is gone: nothing imports database/prisma.module (FU-DB-58)', () => {
+    // BE-02's unscoped client was deleted when auth moved onto the org-scoped PrismaService
+    // inside runSystem('AUTH_BOOTSTRAP'). This fails if the file or an import of it comes back.
+    expect(existsSync(join(SRC, 'database', 'prisma.module.ts'))).toBe(false);
     const importers = sourceFiles(SRC)
-      .filter((file) => file.endsWith('.ts') && !/\.(spec|e2e-spec)\.ts$/.test(file))
-      .filter((file) => !file.includes(`${sep}test${sep}`))
+      .filter((file) => file.endsWith('.ts'))
       .filter((file) => /from\s+['"][^'"]*prisma\.module['"]/.test(readFileSync(file, 'utf8')))
-      .map((file) => relative(SRC, file))
-      .filter((file) => !allowed.some((prefix) => file.startsWith(prefix)));
+      .map((file) => relative(SRC, file));
     expect(importers).toEqual([]);
   });
 });

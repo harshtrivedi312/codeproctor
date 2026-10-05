@@ -16,6 +16,7 @@ import { Client } from 'pg';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { Public, Roles } from '../common/auth/decorators';
+import { passwordVersion } from '../auth/crypto.util';
 import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
 import { TokenModule, TokenService } from '../common/auth/token.service';
 import type { PrismaClient } from '../generated/prisma/client.js';
@@ -77,10 +78,10 @@ const JWT_SECRET = 'a-secret-for-the-tc-008-tests-only';
 // What a staff route does: look a row up by the id in the URL, answer 404 on a miss. BE-02's
 // JwtAuthGuard authenticates (deny by default: @Roles or @Public) and the interceptor sets the org.
 @Controller('probe')
-@Roles(...ALL_ROLES)
 class ProbeController {
   constructor(private readonly prisma: PrismaService) {}
 
+  @Roles(...ALL_ROLES)
   @Get('sessions/:id')
   async session(@Param('id') id: string): Promise<{ id: string; orgId: string }> {
     const row = await this.prisma.client.session.findUnique({ where: { id } });
@@ -88,11 +89,13 @@ class ProbeController {
     return { id: row.id, orgId: row.orgId };
   }
 
+  @Roles(...ALL_ROLES)
   @Get('sessions')
   async sessions(): Promise<string[]> {
     return (await this.prisma.client.session.findMany()).map((s) => s.id);
   }
 
+  @Roles(...ALL_ROLES)
   @Get('events/:id')
   async event(@Param('id') id: string): Promise<{ id: string }> {
     const row = await this.prisma.client.proctorEvent.findUnique({ where: { id: BigInt(id) } });
@@ -100,6 +103,7 @@ class ProbeController {
     return { id: String(row.id) };
   }
 
+  @Roles(...ALL_ROLES)
   @Get('test-cases')
   async testCases(): Promise<string[]> {
     return (await this.prisma.client.testCase.findMany()).map((c) => c.id);
@@ -672,9 +676,16 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
   describe('staff routes: user from org A requests data of org B (TC-008)', () => {
     // A real access token with the claims BE-02's AuthService signs: sub, org, role, kind.
     const asUser = (tenant: TenantFixture): string =>
-      `Bearer ${app
-        .get(TokenService)
-        .sign({ sub: tenant.userId, org: tenant.orgId, role: 'RECRUITER', kind: 'access' }, 300)}`;
+      `Bearer ${app.get(TokenService).sign(
+        {
+          sub: tenant.userId,
+          org: tenant.orgId,
+          role: 'RECRUITER',
+          kind: 'access',
+          pwv: passwordVersion('not-a-real-hash'),
+        },
+        300,
+      )}`;
 
     it("TC-008 GET another org's session is 404 and leaks nothing; own session is 200", async () => {
       const server = app.getHttpServer();

@@ -4,18 +4,15 @@ Everything in this folder serves one rule: **a query can only see or change rows
 org** (ADR 0006, NFR-04, FR-103, TC-008). Services never build a Prisma client of their own. They
 inject `PrismaService` and use `prisma.client`, which runs every model query through the org scope.
 
-**Which `PrismaService`.** There are two classes with that name, in different files:
+**Which `PrismaService`.** There is one:
 
 - `database/prisma.service.ts` (exported from `database/index.ts`, provided by `DatabaseModule`) is
   the org-scoped one. **New business modules must use it.**
-- `database/prisma.module.ts` is BE-02's interim client: an unscoped `PrismaClient` for auth
-  bootstrap only. It stays until `auth.service.ts` moves onto `database/prisma.service.ts` inside
-  `runSystem('AUTH_BOOTSTRAP', ...)` (see the recipe below), and then it is deleted. A test
-  (`prisma-client-smoke.spec.ts`) fails if any file outside `src/auth/`, `src/database/` and
-  `app.module.ts` imports it.
+- The interim unscoped client of BE-02 (`database/prisma.module.ts`) is gone: `AuthService` and
+  `JwtAuthGuard` now use the scoped one inside `runSystem('AUTH_BOOTSTRAP', ...)` (FU-DB-58).
+  `prisma-client-smoke.spec.ts` fails if the file or an import of it comes back.
 
-Nest injects by class reference, not by name, so the two never collide at runtime. Always import
-from the file named above, and check the import line when an editor offers an auto-import.
+Import `PrismaService` from `database/prisma.service.ts` (or `database/index.ts`).
 
 Developer notes:
 
@@ -234,7 +231,6 @@ async login(email: string, password: string) {
 | `org-scope-args.ts`                            | Pure argument rewriting per operation, and the operation coverage check                     |
 | `org-scope.extension.ts`                       | The `$extends` query extension and `OrgScopedPrismaClient`                                  |
 | `org-context.ts`, `org-context.interceptor.ts` | The AsyncLocalStorage context, its API, and the HTTP population point                       |
-| `prisma.module.ts`                             | BE-02's interim unscoped client for auth bootstrap only (not part of DB-05)                 |
 | `errors.ts`                                    | `OrgContextMissingError`, `OrgScopeViolationError`, `RawQueryNotAllowedError`               |
 | `testing/`                                     | Test helpers (excluded from the build): throwaway migrated Postgres, fixtures, scope checks |
 

@@ -1,11 +1,14 @@
 import { ExecutionContext, ForbiddenException, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { UserRole } from '../../generated/prisma/client';
-import type { PrismaService } from '../../database/prisma.module';
+import type { PrismaService } from '../../database/prisma.service';
 import { passwordVersion } from '../../auth/crypto.util';
+import { OrgContextService } from '../../database/org-context';
 import { Public, Roles } from './decorators';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import type { TokenService } from './token.service';
+
+const orgContext = new OrgContextService();
 
 function contextFor(cls: new () => object, method: string): ExecutionContext {
   const handler = (cls.prototype as Record<string, () => void>)[method] as () => void;
@@ -36,7 +39,12 @@ class BothOnMethod {
 }
 
 describe('JwtAuthGuard decorator conflicts (FR-103, FU-BE-35)', () => {
-  const guard = new JwtAuthGuard(new Reflector(), {} as TokenService, {} as PrismaService);
+  const guard = new JwtAuthGuard(
+    new Reflector(),
+    {} as TokenService,
+    {} as PrismaService,
+    orgContext,
+  );
 
   it('FR-103: a class-level @Public() does not open a method that declares @Roles()', async () => {
     await expect(
@@ -88,9 +96,12 @@ describe('JwtAuthGuard user re-check (FR-103, FR-104, FU-BE-19)', () => {
     } as unknown as ExecutionContext;
   };
   const guardWith = (findUnique: jest.Mock): JwtAuthGuard =>
-    new JwtAuthGuard(new Reflector(), tokens, {
-      client: { user: { findUnique } },
-    } as unknown as PrismaService);
+    new JwtAuthGuard(
+      new Reflector(),
+      tokens,
+      { client: { user: { findUnique } } } as unknown as PrismaService,
+      orgContext,
+    );
   const current = { isActive: true, role: UserRole.RECRUITER, orgId: 'org-1', passwordHash: HASH };
 
   it('FR-103: a user that still matches the token is let in', async () => {
