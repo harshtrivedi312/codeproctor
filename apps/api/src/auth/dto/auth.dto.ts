@@ -40,7 +40,15 @@ export class ChallengeCodeDto extends ChallengeDto {
   code!: string;
 }
 
-export class TotpCodeDto {
+/** Re-authentication for the signed-in 2FA setup routes (FU-BE-39). */
+export class SetupStartDto {
+  @ApiProperty({ writeOnly: true, description: 'The signed-in user current password' })
+  @IsString()
+  @Length(1, MAX_PASSWORD_LENGTH)
+  currentPassword!: string;
+}
+
+export class SetupConfirmDto extends SetupStartDto {
   @ApiProperty({ example: '123456', description: '6-digit TOTP code' })
   @Transform(trim)
   @Matches(/^\d{6}$/)

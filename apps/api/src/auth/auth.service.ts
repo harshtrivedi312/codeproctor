@@ -222,6 +222,54 @@ export class AuthService implements OnApplicationShutdown {
     }
   }
 
+  /**
+   * Re-authentication for the signed-in setup routes (FU-BE-39): the current password, checked
+   * on the same reserve, equal-work and lockout path as login. A wrong password and a locked
+   * account get the same generic 401, so the lock state is never revealed. The reservation is
+   * given back on success: the TOTP step reserves its own. Returns the user row whose password
+   * hash was verified, so the caller can bind its final write to that hash.
+   */
+  private async requireCurrentPassword(
+    userId: string,
+    password: string,
+    ctx: RequestContext,
+  ): Promise<UserWithOrg> {
+    const user = await this.loadActive(userId);
+    if (!user.passwordHash) return this.rejectWithSameWork(password, ctx);
+    if ((await this.reserveAttempt(user, ctx)) !== 'granted') {
+      return this.burnAndFail(password, ctx);
+    }
+    if (!(await this.passwords.verify(user.passwordHash, password))) {
+      await this.registerFailure(user, ctx);
+      throw this.invalid();
+    }
+    await this.refundAttempt(user.id);
+    return user;
+  }
+
+  /** A signed-in user begins optional TOTP enrollment; needs the current password (FU-BE-39). */
+  async startSetup(
+    userId: string,
+    password: string,
+    ctx: RequestContext,
+  ): Promise<TotpEnrollmentDto> {
+    const user = await this.requireCurrentPassword(userId, password, ctx);
+    const startHash = user.passwordHash ?? '';
+    const enrollment = await this.totp.createEnrollment(user.email);
+    if (user.totpEnabled) throw new ConflictException('Two-factor authentication is already on.');
+    // The secret is stored only while the verified password is still current.
+    const stored = await this.prisma.client.user.updateMany({
+      where: { id: user.id, passwordHash: startHash, totpEnabled: false },
+      data: { totpSecretEnc: enrollment.encrypted },
+    });
+    if (stored.count !== 1) throw this.invalid();
+    return {
+      manualKey: enrollment.secret,
+      otpauthUri: enrollment.otpauthUrl,
+      qrDataUrl: enrollment.qrDataUrl,
+    };
+  }
+
   async startEnrollment(userId: string): Promise<TotpEnrollmentDto> {
     const user = await this.loadActive(userId);
     if (user.totpEnabled) throw new ConflictException('Two-factor authentication is already on.');
@@ -238,12 +286,22 @@ export class AuthService implements OnApplicationShutdown {
   }
 
   /** A signed-in user confirms optional TOTP (FR-102): recovery codes only, no new session. */
-  confirmEnrollment(
+  async confirmEnrollment(
     userId: string,
+    password: string,
     code: string,
     ctx: RequestContext,
   ): Promise<{ recoveryCodes: string[] }> {
-    return this.doConfirmEnrollment(userId, code, ctx, false);
+    const verified = await this.requireCurrentPassword(userId, password, ctx);
+    // TOTP is switched on only while the verified password hash is still the stored one (FU-BE-39).
+    return this.doConfirmEnrollment(
+      userId,
+      code,
+      ctx,
+      false,
+      undefined,
+      verified.passwordHash ?? '',
+    );
   }
 
   /**
@@ -273,9 +331,13 @@ export class AuthService implements OnApplicationShutdown {
     ctx: RequestContext,
     openSession: boolean,
     challengePwv?: string,
+    boundPasswordHash?: string,
   ): Promise<{ session?: SessionOutcome; recoveryCodes: string[] }> {
     const user = await this.loadActive(userId);
     if (challengePwv !== undefined) this.requireChallengePassword(user, challengePwv);
+    if (boundPasswordHash !== undefined && user.passwordHash !== boundPasswordHash) {
+      throw this.invalid();
+    }
     if (user.totpEnabled) throw new ConflictException('Two-factor authentication is already on.');
     // A locked account looks exactly like a wrong code (FU-BE-22, FU-BE-34).
     if ((await this.reserveAttempt(user, ctx)) !== 'granted') throw this.invalidCode();
@@ -290,10 +352,21 @@ export class AuthService implements OnApplicationShutdown {
       const session = await this.prisma.client.$transaction(async (tx) => {
         const enabled = await tx.user.updateMany({
           // The secret must still be the one the code was checked against.
-          where: { id: user.id, totpEnabled: false, totpSecretEnc: checkedSecret },
+          where: {
+            id: user.id,
+            totpEnabled: false,
+            totpSecretEnc: checkedSecret,
+            ...(boundPasswordHash === undefined ? {} : { passwordHash: boundPasswordHash }),
+          },
           data: { totpEnabled: true, recoveryCodeHashes: codes.map((c) => sha256Hex(c)) },
         });
-        if (enabled.count === 0) throw new AlreadyEnrolledSignal();
+        if (enabled.count === 0) {
+          if (boundPasswordHash !== undefined) {
+            const now = await tx.user.findUnique({ where: { id: user.id } });
+            if (now?.passwordHash !== boundPasswordHash) throw new PasswordChangedSignal();
+          }
+          throw new AlreadyEnrolledSignal();
+        }
         await this.audit(user, 'AUTH_TOTP_ENABLED', ctx, {}, tx);
         if (!openSession) {
           await this.clearFailures(user.id, tx);
@@ -308,7 +381,9 @@ export class AuthService implements OnApplicationShutdown {
       if (e instanceof AlreadyEnrolledSignal) {
         throw new ConflictException('Two-factor authentication could not be turned on. Try again.');
       }
-      if (e instanceof PasswordChangedSignal) throw this.challengeExpired();
+      if (e instanceof PasswordChangedSignal) {
+        throw boundPasswordHash === undefined ? this.challengeExpired() : this.invalid();
+      }
       throw e;
     }
   }

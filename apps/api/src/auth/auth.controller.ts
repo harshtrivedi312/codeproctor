@@ -28,7 +28,8 @@ import {
   LoginDto,
   LoginResultDto,
   ResetPasswordDto,
-  TotpCodeDto,
+  SetupConfirmDto,
+  SetupStartDto,
   TotpEnrollmentDto,
 } from './dto/auth.dto';
 
@@ -144,8 +145,9 @@ export class AuthController {
   @HttpCode(200)
   @ApiOperation({ summary: 'Signed-in user begins optional TOTP enrollment (FR-102)' })
   @ApiOkResponse({ type: TotpEnrollmentDto })
-  setupStart(@Req() req: AuthedRequest): Promise<TotpEnrollmentDto> {
-    return this.auth.startEnrollment(this.userId(req));
+  @ApiUnauthorizedResponse({ description: 'Missing token, or wrong current password (or locked)' })
+  setupStart(@Body() dto: SetupStartDto, @Req() req: AuthedRequest): Promise<TotpEnrollmentDto> {
+    return this.auth.startSetup(this.userId(req), dto.currentPassword, ctxOf(req));
   }
 
   @Roles(...ALL_STAFF)
@@ -155,11 +157,17 @@ export class AuthController {
   @ApiOperation({ summary: 'Signed-in user confirms optional TOTP; returns recovery codes once' })
   @ApiOkResponse({ type: EnrollmentConfirmedDto })
   @ApiBadRequestResponse({ description: 'Wrong code' })
+  @ApiUnauthorizedResponse({ description: 'Missing token, or wrong current password (or locked)' })
   async setupConfirm(
-    @Body() dto: TotpCodeDto,
+    @Body() dto: SetupConfirmDto,
     @Req() req: AuthedRequest,
   ): Promise<EnrollmentConfirmedDto> {
-    const result = await this.auth.confirmEnrollment(this.userId(req), dto.code, ctxOf(req));
+    const result = await this.auth.confirmEnrollment(
+      this.userId(req),
+      dto.currentPassword,
+      dto.code,
+      ctxOf(req),
+    );
     return { recoveryCodes: result.recoveryCodes };
   }
 

@@ -338,15 +338,160 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       const session = (await login(u.email).expect(200)).body as Body;
       const auth = { Authorization: `Bearer ${session.session.accessToken}` };
       const start = (
-        await request(app.getHttpServer()).post(`${API}/2fa/setup/start`).set(auth).expect(200)
+        await request(app.getHttpServer())
+          .post(`${API}/2fa/setup/start`)
+          .set(auth)
+          .send({ currentPassword: PASSWORD })
+          .expect(200)
       ).body as Body;
       const res = await request(app.getHttpServer())
         .post(`${API}/2fa/setup/confirm`)
         .set(auth)
-        .send({ code: authenticator.generate(start.manualKey) })
+        .send({ currentPassword: PASSWORD, code: authenticator.generate(start.manualKey) })
         .expect(200);
       expect((res.body as Body).recoveryCodes).toHaveLength(10);
       expect(((await login(u.email).expect(200)).body as Body).status).toBe('two_factor_required');
+    });
+  });
+
+  describe('TC-003 (FR-102): signed-in 2FA setup needs the current password (FU-BE-39)', () => {
+    const setup = (
+      path: 'start' | 'confirm',
+      accessToken: string,
+      body: Record<string, string>,
+    ): request.Test =>
+      request(app.getHttpServer())
+        .post(`${API}/2fa/setup/${path}`)
+        .set('Authorization', `Bearer ${accessToken}`)
+        .send(body);
+
+    async function signedIn(): Promise<{ id: string; token: string }> {
+      const u = await createUser();
+      const { session } = (await login(u.email).expect(200)).body as Body;
+      return { id: u.id, token: session.accessToken };
+    }
+
+    it('TC-003: setup/start refuses a missing or wrong password with 401, changes nothing and counts the failure', async () => {
+      const u = await signedIn();
+      await setup('start', u.token, {}).expect(400);
+      expect(
+        await setup('start', u.token, { currentPassword: 'wrong-password' }).expect(401),
+      ).toMatchObject({
+        body: { detail: 'Invalid email or password.' },
+      });
+      const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      expect(row.totpSecretEnc).toBeNull();
+      expect(row.failedLogins).toBe(1);
+    });
+
+    it('TC-003: setup/confirm refuses a missing or wrong password even with a valid code, and enables nothing', async () => {
+      const u = await signedIn();
+      const start = (await setup('start', u.token, { currentPassword: PASSWORD }).expect(200))
+        .body as Body;
+      const code = authenticator.generate(start.manualKey);
+      await setup('confirm', u.token, { code }).expect(400);
+      await setup('confirm', u.token, { currentPassword: 'wrong-password', code }).expect(401);
+      const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      expect(row.totpEnabled).toBe(false);
+      expect(row.failedLogins).toBe(1);
+    });
+
+    it('TC-003: a stolen access token alone can no longer enable TOTP', async () => {
+      const u = await signedIn();
+      for (const path of ['start', 'confirm'] as const) {
+        await setup(path, u.token, { code: '123456' }).expect(400);
+      }
+      expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).totpEnabled).toBe(
+        false,
+      );
+    });
+
+    it('TC-003: 5 wrong passwords lock the account, then the correct password is refused with the same generic 401', async () => {
+      const u = await signedIn();
+      const generic = { detail: 'Invalid email or password.' };
+      for (let i = 0; i < 5; i++) {
+        const res = await setup('start', u.token, { currentPassword: `wrong-${i}` }).expect(401);
+        expect(res.body).toMatchObject(generic);
+      }
+      const locked = await setup('start', u.token, { currentPassword: PASSWORD }).expect(401);
+      expect(locked.body).toMatchObject(generic);
+      await setup('confirm', u.token, { currentPassword: PASSWORD, code: '123456' }).expect(401);
+      const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      expect(row.lockedUntil).not.toBeNull();
+      expect(row.totpSecretEnc).toBeNull();
+      // The same lock stops a login too.
+      await login((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).email).expect(401);
+    });
+
+    it('TC-003: a wrong password on setup counts toward the same lockout as login failures', async () => {
+      const u = await signedIn();
+      const email = (await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).email;
+      for (let i = 0; i < 3; i++) await login(email, 'nope').expect(401);
+      for (let i = 0; i < 2; i++) {
+        await setup('start', u.token, { currentPassword: 'nope' }).expect(401);
+      }
+      await setup('start', u.token, { currentPassword: PASSWORD }).expect(401);
+    });
+
+    it('TC-003: the right password succeeds and gives the attempt back', async () => {
+      const u = await signedIn();
+      const start = (await setup('start', u.token, { currentPassword: PASSWORD }).expect(200))
+        .body as Body;
+      const res = await setup('confirm', u.token, {
+        currentPassword: PASSWORD,
+        code: authenticator.generate(start.manualKey),
+      }).expect(200);
+      expect((res.body as Body).recoveryCodes).toHaveLength(10);
+      const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      expect(row.totpEnabled).toBe(true);
+      expect(row.failedLogins).toBe(0);
+    });
+
+    it('TC-003: a password reset that lands while setup/confirm checks the code enables nothing (401)', async () => {
+      const u = await signedIn();
+      const start = (await setup('start', u.token, { currentPassword: PASSWORD }).expect(200))
+        .body as Body;
+      totpVerify.mockImplementationOnce(async () => {
+        await prisma.user.update({
+          where: { id: u.id },
+          data: { passwordHash: await hash('Another-Passphrase-12', ARGON2_OPTIONS) },
+        });
+        return true;
+      });
+      await setup('confirm', u.token, {
+        currentPassword: PASSWORD,
+        code: authenticator.generate(start.manualKey),
+      }).expect(401);
+      const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      expect(row.totpEnabled).toBe(false);
+      expect(row.recoveryCodeHashes).toEqual([]);
+      expect(row.failedLogins).toBe(0);
+    });
+
+    it('TC-003: a refused setup/start costs the same statements for a wrong password and a locked account', async () => {
+      const wrong = await signedIn();
+      const locked = await signedIn();
+      await prisma.user.update({
+        where: { id: locked.id },
+        data: { failedLogins: 5, lockedUntil: new Date(Date.now() + 600_000) },
+      });
+      const { PrismaService: PrismaSvc } = jest.requireActual<
+        typeof import('../database/prisma.module')
+      >('../database/prisma.module');
+      const client = app.get(PrismaSvc).client;
+      const query = jest.spyOn(client, '$queryRaw');
+      const exec = jest.spyOn(client, '$executeRaw');
+      const counts: number[][] = [];
+      try {
+        for (const u of [wrong, locked]) {
+          for (const spy of [query, exec]) spy.mockClear();
+          await setup('start', u.token, { currentPassword: 'not-the-password' }).expect(401);
+          counts.push([query, exec].map((spy) => spy.mock.calls.length));
+        }
+      } finally {
+        for (const spy of [query, exec]) spy.mockRestore();
+      }
+      expect(counts[1]).toEqual(counts[0]);
     });
   });
 
@@ -754,7 +899,8 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
     const setupStart = (accessToken: string): request.Test =>
       request(app.getHttpServer())
         .post(`${API}/2fa/setup/start`)
-        .set('Authorization', `Bearer ${accessToken}`);
+        .set('Authorization', `Bearer ${accessToken}`)
+        .send({ currentPassword: PASSWORD });
 
     it("FR-104: a deactivated user's unexpired access token is refused at once", async () => {
       const u = await createUser();
@@ -1384,17 +1530,15 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       const original = client.$transaction.bind(client);
       const release = makeGate();
       let paused = false;
-      const spy = jest
-        .spyOn(client, '$transaction')
-        .mockImplementationOnce((cb, opts) =>
-          original(async (tx) => {
-            const result = await cb(tx);
-            // Token inserted and old row flipped, nothing committed yet.
-            paused = true;
-            await release.wait;
-            return result;
-          }, opts),
-        );
+      const spy = jest.spyOn(client, '$transaction').mockImplementationOnce((cb, opts) =>
+        original(async (tx) => {
+          const result = await cb(tx);
+          // Token inserted and old row flipped, nothing committed yet.
+          paused = true;
+          await release.wait;
+          return result;
+        }, opts),
+      );
       try {
         const rotation = refresh(cookie).then((r) => r);
         await until(() => paused);
@@ -1422,17 +1566,15 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       const original = client.$transaction.bind(client);
       const release = makeGate();
       let paused = false;
-      const spy = jest
-        .spyOn(client, '$transaction')
-        .mockImplementationOnce((cb, opts) =>
-          original(async (tx) => {
-            const result = await cb(tx);
-            // Token inserted and old row flipped, nothing committed yet.
-            paused = true;
-            await release.wait;
-            return result;
-          }, opts),
-        );
+      const spy = jest.spyOn(client, '$transaction').mockImplementationOnce((cb, opts) =>
+        original(async (tx) => {
+          const result = await cb(tx);
+          // Token inserted and old row flipped, nothing committed yet.
+          paused = true;
+          await release.wait;
+          return result;
+        }, opts),
+      );
       try {
         const rotation = refresh(cookie).then((r) => r);
         await until(() => paused);
@@ -1479,7 +1621,9 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       expect(row.failedLogins).toBe(0);
       expect(await prisma.refreshToken.count({ where: { userId: u.id } })).toBe(0);
       expect(
-        await prisma.auditLog.count({ where: { actorId: u.id, action: 'AUTH_RECOVERY_CODE_USED' } }),
+        await prisma.auditLog.count({
+          where: { actorId: u.id, action: 'AUTH_RECOVERY_CODE_USED' },
+        }),
       ).toBe(0);
     });
 
