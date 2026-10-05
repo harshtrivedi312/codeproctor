@@ -1,5 +1,6 @@
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import * as React from 'react';
 import { http, HttpResponse } from 'msw';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, isAuthRequest } from '@/lib/api/client';
@@ -270,9 +271,12 @@ describe('session handling', () => {
         return new HttpResponse(null, { status: 401 });
       }),
     );
-    let auth: ReturnType<typeof useAuth> | null = null;
+    const captured: { auth: ReturnType<typeof useAuth> | null } = { auth: null };
     function Capture() {
-      auth = useAuth();
+      const value = useAuth();
+      React.useEffect(() => {
+        captured.auth = value;
+      });
       return null;
     }
     renderWithAuth(
@@ -286,7 +290,7 @@ describe('session handling', () => {
       body: { email: MOCK_USERS.recruiter.email, password: MOCK_USERS.recruiter.password },
     });
     if (login.data?.status !== 'authenticated' || !login.data.session) throw new Error('login');
-    auth!.signIn(login.data.session);
+    captured.auth!.signIn(login.data.session);
     await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
     release();
     await new Promise((r) => setTimeout(r, 50));
@@ -328,9 +332,12 @@ describe('session handling', () => {
 
 describe('requests from an earlier session', () => {
   it('FR-104 FR-103: a 401 for user X that arrives after Y signed in is not replayed with Y token', async () => {
-    let auth: ReturnType<typeof useAuth> | null = null;
+    const captured: { auth: ReturnType<typeof useAuth> | null } = { auth: null };
     function Capture() {
-      auth = useAuth();
+      const value = useAuth();
+      React.useEffect(() => {
+        captured.auth = value;
+      });
       return null;
     }
     renderWithAuth(
@@ -363,7 +370,7 @@ describe('requests from an earlier session', () => {
       body: { email: MOCK_USERS.author.email, password: MOCK_USERS.author.password },
     });
     if (login.data?.status !== 'authenticated' || !login.data.session) throw new Error('login');
-    auth!.signIn(login.data.session);
+    captured.auth!.signIn(login.data.session);
     await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('AUTHOR'));
 
     release();

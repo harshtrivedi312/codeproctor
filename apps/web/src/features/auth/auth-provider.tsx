@@ -67,15 +67,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       setUser(session ? session.user : null);
       setStatus(session ? 'authenticated' : 'unauthenticated');
     });
-    if (isSignOutPending()) {
-      // The last sign-out was never confirmed. Do not restore a session; try the logout again.
-      setSignedOutByUser(true);
-      publishSession(null);
-      void confirmLogout();
-    } else {
-      // Silent refresh on first load: the httpOnly cookie restores the session without a login.
-      void refreshSession();
-    }
+    // Runs after the effect body (the marker lives in localStorage, so it cannot be read during
+    // render without a hydration mismatch).
+    const start = async (): Promise<void> => {
+      await Promise.resolve();
+      if (isSignOutPending()) {
+        // The last sign-out was never confirmed. Do not restore a session; try the logout again.
+        setSignedOutByUser(true);
+        publishSession(null);
+        await confirmLogout();
+      } else {
+        // Silent refresh on first load: the httpOnly cookie restores the session without a login.
+        await refreshSession();
+      }
+    };
+    void start();
     return off;
   }, [confirmLogout]);
 
