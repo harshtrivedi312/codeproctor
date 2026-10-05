@@ -19,7 +19,13 @@ from worker.config import IntegrityConfig
 from worker.events import MAX_SOURCE_CODE_LENGTH, CodeLanguage, Finding, KeystrokeBatch
 from worker.keystrokes import analyze_keystrokes
 from worker.risk import RiskResult, ScoredEvent, calculate_risk
-from worker.similarity import AiReference, Submission, find_ai_likeness, find_peer_similarity
+from worker.similarity import (
+    AiReference,
+    Submission,
+    find_ai_likeness,
+    find_peer_similarity,
+    prepare_ai_context,
+)
 
 app = FastAPI(title="CodeProctor analysis worker")
 
@@ -114,9 +120,10 @@ def analyze_similarity_route(req: SimilarityRequest) -> SimilarityResult:
     subs = [Submission(**s.model_dump()) for s in req.submissions]
     result = find_peer_similarity(subs, req.config, req.starter_code)
     refs = [AiReference(**r.model_dump()) for r in req.ai_references]
-    if refs:
+    if refs and req.config.is_enabled("AI_LIKENESS"):
+        ctx = prepare_ai_context(refs, req.config, req.starter_code)  # once per request
         for s in subs:
-            for f in find_ai_likeness(s, refs, req.config, req.starter_code):
+            for f in find_ai_likeness(s, refs, req.config, context=ctx):
                 result.setdefault(s.session_id, []).append(f)
     return SimilarityResult(findings_by_session=result)
 
