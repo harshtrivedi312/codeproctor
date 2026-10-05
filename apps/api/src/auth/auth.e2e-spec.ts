@@ -20,6 +20,9 @@ const PASSWORD = 'Correct-Horse-9';
 // [$queryRaw, $executeRaw] calls for a refused setup/start (reserve and failure register).
 const EXPECTED_SETUP_REFUSED_COUNTS = [2, 0];
 
+// login, password/reset, 2fa/disable, 2fa/verify probe requests.
+const EXPECTED_STATUSES = [401, 400, 401, 400];
+
 /** A re-auth refusal: 403 with the machine code, never a 401 (FU-BE-39). */
 function reauthRefused(res: request.Response): void {
   expect(res.status).toBe(403);
@@ -985,6 +988,212 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         60,
       );
       await setupStart(forged).expect(401);
+    });
+  });
+
+  describe('FR-102: totpEnabled on the session user', () => {
+    type UserBody = { user: { totpEnabled?: boolean } };
+    const SECRET = 'JBSWY3DPEHPK3PXP';
+
+    it('FR-102: login without 2FA reports totpEnabled false, and refresh keeps reporting the real state', async () => {
+      const u = await createUser();
+      const res = await login(u.email).expect(200);
+      expect((res.body as Body).session.user).toMatchObject({ totpEnabled: false });
+      const next = await refresh(refreshCookie(res)).expect(200);
+      expect((next.body as UserBody).user.totpEnabled).toBe(false);
+    });
+
+    it('FR-102: 2fa/verify reports true; after 2FA is disabled the refresh is refused and the next login reports false', async () => {
+      const u = await createUser({ totp: SECRET });
+      const first = (await login(u.email).expect(200)).body as Body;
+      // The previous step's code, so the current step stays unused for the disable call.
+      const previous = authenticator.clone({ epoch: Date.now() - 30_000 }).generate(SECRET);
+      const verified = await request(app.getHttpServer())
+        .post(`${API}/2fa/verify`)
+        .send({ challengeToken: first.challengeToken, code: previous })
+        .expect(200);
+      expect((verified.body as UserBody).user.totpEnabled).toBe(true);
+      const cookie = refreshCookie(verified);
+      const same = await refresh(cookie).expect(200);
+      expect((same.body as UserBody).user.totpEnabled).toBe(true);
+
+      await request(app.getHttpServer())
+        .post(`${API}/2fa/disable`)
+        .set('Authorization', `Bearer ${(same.body as Body).accessToken}`)
+        .send({ currentPassword: PASSWORD, totpCode: authenticator.generate(SECRET) })
+        .expect(204);
+      // Disable signs the user out everywhere.
+      await refresh(refreshCookie(same)).expect(401);
+      const again = (await login(u.email).expect(200)).body as Body;
+      expect(again.status).toBe('authenticated');
+      expect(again.session.user).toMatchObject({ totpEnabled: false });
+    });
+
+    it('FR-102: totpEnabled is not in the access token claims', async () => {
+      const u = await createUser();
+      const body = (await login(u.email).expect(200)).body as Body;
+      const claims = JSON.parse(
+        Buffer.from(body.session.accessToken.split('.')[1] ?? '', 'base64url').toString(),
+      ) as Record<string, unknown>;
+      expect(Object.keys(claims).join(',')).not.toMatch(/totp|twoFactor/i);
+    });
+
+    it("NFR-04: the running app's logger redacts secret fields (proves LOG_REDACT is wired into the live pinoHttp config)", () => {
+      const { Logger } = jest.requireActual<typeof import('nestjs-pino')>('nestjs-pino');
+      const live = app.get(Logger);
+      logged.length = 0;
+      live.log(
+        {
+          // The request serializer needs a url; it drops the body, so the body is also probed bare.
+          req: { id: 'probe-req', method: 'POST', url: '/probe' },
+          body: { password: 'ProbeX-11aa', nested: { totpCode: 'ProbeY-22bb' } },
+          wrapper: { a: { b: { secret: 'ProbeZ-33cc', otpauthUri: 'ProbeW-44dd' } } },
+        },
+        'live-logger-probe',
+      );
+      const output = logged.join('');
+      expect(output).toContain('live-logger-probe');
+      expect(output).toContain('[Redacted]');
+      for (const probe of ['ProbeX-11aa', 'ProbeY-22bb', 'ProbeZ-33cc', 'ProbeW-44dd']) {
+        expect(output).not.toContain(probe);
+      }
+    });
+
+    it('NFR-04: the request serializer keeps bodies and headers out of the request logs (probes sent to login, reset, disable and verify)', async () => {
+      const probes = {
+        password: 'ProbePassword-91ab',
+        currentPassword: 'ProbeCurrent-82cd',
+        newPassword: 'ProbeNewPass-73ef',
+        code: 'ProbeCode-64aa',
+        totpCode: 'ProbeTotp-55bb',
+        token: 'ProbeToken-46cc',
+        challengeToken: 'ProbeChallenge-37dd',
+      };
+      const u = await createUser({ totp: SECRET });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      logged.length = 0;
+      const auth = { Authorization: `Bearer ${challengeToken}` };
+      const statuses = [
+        (await login(u.email, probes.password)).status,
+        (
+          await request(app.getHttpServer()).post(`${API}/password/reset`).send({
+            token: probes.token,
+            newPassword: probes.newPassword,
+          })
+        ).status,
+        (
+          await request(app.getHttpServer())
+            .post(`${API}/2fa/disable`)
+            .set(auth)
+            .send({ currentPassword: probes.currentPassword, totpCode: probes.totpCode })
+        ).status,
+        (
+          await request(app.getHttpServer())
+            .post(`${API}/2fa/verify`)
+            .send({ challengeToken: probes.challengeToken, code: probes.code })
+        ).status,
+      ];
+      expect(statuses).toEqual(EXPECTED_STATUSES);
+      const output = logged.join('');
+      for (const path of ['/auth/login', '/password/reset', '/2fa/disable', '/2fa/verify']) {
+        expect(output).toContain(path);
+      }
+      for (const value of Object.values(probes)) expect(output).not.toContain(value);
+    });
+
+    it('NFR-04: real response secrets (refresh cookie, access token, manualKey, otpauthUri) never appear in the logs', async () => {
+      const u = await createUser();
+      logged.length = 0;
+      const res = await login(u.email).expect(200);
+      const cookieValue = refreshCookie(res).split('=')[1] ?? '';
+      const accessToken = (res.body as Body).session.accessToken;
+      const start = (
+        await request(app.getHttpServer())
+          .post(`${API}/2fa/setup/start`)
+          .set({ Authorization: `Bearer ${accessToken}` })
+          .send({ currentPassword: PASSWORD })
+          .expect(200)
+      ).body as Body;
+      const secrets = [cookieValue, accessToken, start.manualKey, start.otpauthUri];
+      for (const value of secrets) expect(value.length).toBeGreaterThan(10);
+      const output = logged.join('');
+      expect(output).toContain('/auth/login');
+      for (const value of secrets) expect(output).not.toContain(value);
+    });
+
+    it('FR-102: after setup/confirm the very next refresh reports totpEnabled true', async () => {
+      const u = await createUser();
+      const res = await login(u.email).expect(200);
+      const auth = { Authorization: `Bearer ${(res.body as Body).session.accessToken}` };
+      const start = (
+        await request(app.getHttpServer())
+          .post(`${API}/2fa/setup/start`)
+          .set(auth)
+          .send({ currentPassword: PASSWORD })
+          .expect(200)
+      ).body as Body;
+      await request(app.getHttpServer())
+        .post(`${API}/2fa/setup/confirm`)
+        .set(auth)
+        .send({ currentPassword: PASSWORD, code: authenticator.generate(start.manualKey) })
+        .expect(200);
+      const again = await refresh(refreshCookie(res)).expect(200);
+      expect((again.body as UserBody).user.totpEnabled).toBe(true);
+    });
+
+    it('FR-102: enroll/confirm reports totpEnabled true in the session it opens', async () => {
+      const u = await createUser({ role: UserRole.REVIEWER });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      const start = (
+        await request(app.getHttpServer())
+          .post(`${API}/2fa/enroll/start`)
+          .send({ challengeToken })
+          .expect(200)
+      ).body as Body;
+      const done = await request(app.getHttpServer())
+        .post(`${API}/2fa/enroll/confirm`)
+        .send({ challengeToken, code: authenticator.generate(start.manualKey) })
+        .expect(200);
+      expect((done.body as Body).session.user).toMatchObject({ totpEnabled: true });
+    });
+
+    it('FR-102: challenge and failed responses carry no session user and no totpEnabled', async () => {
+      const withTotp = await createUser({ totp: SECRET });
+      const required = await login(withTotp.email).expect(200);
+      const enforced = await createUser({ role: UserRole.REVIEWER });
+      const enrol = await login(enforced.email).expect(200);
+      const wrong = await login(withTotp.email, 'wrong-password-1').expect(401);
+      const badCode = await request(app.getHttpServer())
+        .post(`${API}/2fa/verify`)
+        .send({ challengeToken: (required.body as Body).challengeToken, code: 'ZZZZZZZZZZZZZZZZ' })
+        .expect(400);
+      for (const res of [required, enrol, wrong, badCode]) {
+        expect(JSON.stringify(res.body)).not.toContain('totpEnabled');
+      }
+      expect((required.body as Body).session).toBeUndefined();
+      expect((enrol.body as Body).session).toBeUndefined();
+    });
+
+    it('FR-102: totpEnabled is read-only; sending it in a request body is refused with 400', async () => {
+      const u = await createUser();
+      await request(app.getHttpServer())
+        .post(`${API}/login`)
+        .send({ email: u.email, password: PASSWORD, totpEnabled: true })
+        .expect(400);
+      const session = (await login(u.email).expect(200)).body as Body;
+      const t = await createUser({ totp: SECRET });
+      const { challengeToken } = (await login(t.email).expect(200)).body as Body;
+      const refused = await request(app.getHttpServer())
+        .post(`${API}/2fa/verify`)
+        .send({ challengeToken, code: '123456', totpEnabled: true })
+        .expect(400);
+      expect(JSON.stringify(refused.body)).toContain('totpEnabled');
+      const setupRefused = await request(app.getHttpServer())
+        .post(`${API}/2fa/setup/confirm`)
+        .set('Authorization', `Bearer ${session.session.accessToken}`)
+        .send({ currentPassword: PASSWORD, code: '123456', totpEnabled: true })
+        .expect(400);
+      expect(JSON.stringify(setupRefused.body)).toContain('totpEnabled');
     });
   });
 

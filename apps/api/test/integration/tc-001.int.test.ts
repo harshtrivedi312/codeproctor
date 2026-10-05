@@ -10,9 +10,12 @@ import {
   boot,
   claimsOf,
   createUser,
+  expectNoTotpEnabled,
   Harness,
   login,
+  refresh,
   refreshCookie,
+  sessionUser,
   TOTP_SECRET,
 } from '../support/harness';
 
@@ -37,6 +40,7 @@ describe('TC-001 (FR-101): valid staff login', () => {
       name: expect.any(String) as string,
       role: 'RECRUITER',
       orgName: 'QA Org A',
+      totpEnabled: false,
     });
     const claims = claimsOf(body.session.accessToken);
     expect(claims.exp - claims.iat).toBe(15 * 60);
@@ -48,9 +52,13 @@ describe('TC-001 (FR-101): valid staff login', () => {
     'TC-001: a %s without 2FA reaches a session directly (no 2FA prompt)',
     async (role) => {
       const u = await createUser(h, { role });
-      const body = (await login(h, u.email).expect(200)).body as Body;
+      const res = await login(h, u.email).expect(200);
+      const body = res.body as Body;
       expect(body.status).toBe('authenticated');
       expect(body.challengeToken).toBeUndefined();
+      expect(sessionUser(body, 'nested').totpEnabled).toBe(false);
+      const refreshed = await refresh(h, refreshCookie(res)).expect(200);
+      expect(sessionUser(refreshed.body, 'flat').totpEnabled).toBe(false);
     },
   );
 
@@ -62,6 +70,7 @@ describe('TC-001 (FR-101): valid staff login', () => {
     expect(body.session).toBeUndefined();
     expect(body.accessToken).toBeUndefined();
     expect(first.headers['set-cookie']).toBeUndefined();
+    expectNoTotpEnabled(first);
     // A challenge token is not a session.
     await request(h.app.getHttpServer())
       .post(`${API}/auth/2fa/setup/start`)
@@ -73,7 +82,9 @@ describe('TC-001 (FR-101): valid staff login', () => {
       .send({ challengeToken: body.challengeToken, code: authenticator.generate(TOTP_SECRET) })
       .expect(200);
     expect((done.body as Body).accessToken).toEqual(expect.any(String));
-    expect(refreshCookie(done)).toMatch(/^cp_refresh=/);
+    expect(sessionUser(done.body, 'flat').totpEnabled).toBe(true);
+    const again = await refresh(h, refreshCookie(done)).expect(200);
+    expect(sessionUser(again.body, 'flat').totpEnabled).toBe(true);
   });
 
   it('TC-001: the refresh token is an httpOnly, Secure, SameSite=Strict cookie that expires in 7 days and is stored only as a hash (FR-104)', async () => {
@@ -121,6 +132,7 @@ describe('TC-001 (FR-101): valid staff login', () => {
     for (const a of answers) {
       expect((a.body as Body).detail).toBe((answers[0]?.body as Body).detail);
       expect(a.headers['set-cookie']).toBeUndefined();
+      expectNoTotpEnabled(a);
     }
   });
 

@@ -351,3 +351,6 @@ The gate has no api-unit-specific code: the apps/api unit Jest JSON (`api-unit.j
 ```
 
 Until it lands the gate does not read `api-unit.json` and TC-008 stays Planned in the matrix.
+## TC-003 disable freshness depends on backend PR #51
+
+The tc-003 "turn 2FA off" test proves `totpEnabled` is fresh after a disable through a new login and a refresh of that new session, not through the pre-disable cookie, because #51 revokes every refresh family on disable. The later "already off" check (409) still reuses the pre-disable access token; if BE-03 or #51 invalidates access tokens on disable, switch it to the new session's token. Owner: qa-engineer.
