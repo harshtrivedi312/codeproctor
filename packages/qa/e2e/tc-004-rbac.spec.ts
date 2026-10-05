@@ -60,7 +60,12 @@ for (const role of ['RECRUITER', 'AUTHOR', 'REVIEWER', 'SUPER_ADMIN'] as const) 
     for (const { path, allowed } of PAGES) {
       // A hard navigation drops the in-memory token; the silent refresh signs the user back in.
       await page.goto(path);
+      // Wait for the page to settle (a heading, or the denial message) so an empty page cannot pass.
       const denied = page.getByText(/Your role does not have access/);
+      await expect(
+        page.getByRole('main').getByRole('heading').first().or(denied).first(),
+        `${role} ${path}`,
+      ).toBeVisible();
       if (allowed.includes(role)) {
         await expect(page.getByRole('main'), `${role} ${path}`).toBeVisible();
         await expect(denied, `${role} ${path} must not be denied`).toHaveCount(0);

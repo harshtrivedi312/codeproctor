@@ -1,4 +1,5 @@
 // TC-005 (FR-104): refresh token reuse. Expected: second use rejected; whole token family revoked.
+import request from 'supertest';
 import { UserRole } from '../../src/generated/prisma/client';
 import { Body, boot, createUser, Harness, login, refresh, refreshCookie } from '../support/harness';
 
@@ -78,7 +79,7 @@ describe('TC-005 (FR-104): refresh token rotation and reuse', () => {
     await refresh(h, 'other=1').expect(401);
   });
 
-  it('FR-104: logout revokes the token; a deactivated user cannot refresh; a role downgrade shows in the next access token', async () => {
+  it('FR-104: a role downgrade shows in the next access token and a deactivated user cannot refresh', async () => {
     const u = await createUser(h, { role: UserRole.AUTHOR });
     const c = refreshCookie(await login(h, u.email).expect(200));
     await h.owner.user.update({ where: { id: u.id }, data: { role: UserRole.RECRUITER } });
@@ -89,5 +90,19 @@ describe('TC-005 (FR-104): refresh token rotation and reuse', () => {
     expect(claims.role).toBe('RECRUITER');
     await h.owner.user.update({ where: { id: u.id }, data: { isActive: false } });
     await refresh(h, refreshCookie(next)).expect(401);
+  });
+
+  it('FR-104: logout revokes the family and clears the cookie', async () => {
+    const u = await createUser(h);
+    const c1 = refreshCookie(await login(h, u.email).expect(200));
+    const c2 = refreshCookie(await refresh(h, c1).expect(200));
+    const res = await request(h.app.getHttpServer())
+      .post('/api/v1/auth/logout')
+      .set('Cookie', c2)
+      .expect(204);
+    expect(String(res.headers['set-cookie'])).toMatch(/cp_refresh=;/);
+    await refresh(h, c2).expect(401);
+    const rows = await h.owner.refreshToken.findMany({ where: { userId: u.id } });
+    expect(rows.every((r) => r.revokedAt !== null)).toBe(true);
   });
 });

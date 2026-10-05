@@ -25,7 +25,7 @@ Owner: qa-engineer. Written 2026-10-02 (QA-01). Items are tagged **must-fix** (b
 4. **should-fix (frontend-engineer):** vitest in apps/web has no coverage provider. QA installs `@vitest/coverage-v8` in packages/qa and points it at apps/web (`--root`). If the frontend wants `pnpm test:coverage` in its own package, move the dev dependency there.
 5. **should-fix (frontend-engineer):** apps/web's `vitest.config.mts` and `playwright` dependency: apps/web has `@playwright/test` as a devDependency but no Playwright config. QA owns the e2e config in packages/qa, so the web dependency can be removed to avoid two versions drifting.
 6. **should-fix (architect):** an `apps/api` test layout is needed for the planned integration tests: QA assumes `apps/api/test/integration/tc-NNN.int.test.ts` and `apps/api/src/**/*.unit.test.ts` with Vitest (the DB-05 brief says "unit tests" without a runner). Confirm or change the paths in the matrix.
-7. **should-fix (db-engineer):** TC-008, TC-072 and TC-094 need Testcontainers PostgreSQL 16 with `prisma migrate deploy` (never `db push`). DB-03 migrations are not merged yet, so no DB test could be written. Please expose a helper (for example `apps/api/test/support/postgres.ts`) that starts the container, applies migrations and returns a client as `app_user`, so every integration test shares one setup.
+7. **CLOSED 2026-10-05 (QA-02):** TC-008, TC-072 and TC-094 need Testcontainers PostgreSQL 16 with `prisma migrate deploy` (never `db push`). DB-03 migrations are not merged yet, so no DB test could be written. Please expose a helper (for example `apps/api/test/support/postgres.ts`) that starts the container, applies migrations and returns a client as `app_user`, so every integration test shares one setup.
 8. **nit:** Node 22 is installed on the QA machine while `engines` asks for Node 24; the local runs above passed on Node 22. CI uses Node 24 from `.nvmrc`.
 
 ## 3. Defects and observations from the first run
@@ -77,7 +77,7 @@ Setup needed from a human: create the GitHub environment `staging` (with the sec
 | FU-QA-06 | nit | qa-engineer | TC-041 e2e clicks with `force: true` after the first run and relies on the 5 s cooldown; the "e2e runs wait" for the first run result is a fixed `findByText`. Use an explicit wait for the run to finish before counting requests. |
 | FU-QA-07 | nit | qa-engineer | The P1 gate prints "passed (N tests; partial coverage is listed in docs/test-matrix.md)" for partial coverage. Print "partial, see matrix" and read the status column so a partial pass cannot be mistaken for verified. |
 | FU-QA-08 | nit | qa-engineer | `--strict` mode: date-stamp the rule in the matrix, and decide when it is switched on (BE-15A/QA-01B). |
-| FU-QA-09 | nit | qa-engineer | The gate scans only `*.test.ts`, `*.test.tsx`, `*.spec.ts`, `*.test.mjs` and `*.js`; add `*.py` so TC IDs in `apps/worker` tests (pytest) are checked and reported. |
+| FU-QA-09 (CLOSED 2026-10-05: gate reads pytest JUnit, matrix check scans worker tests) | nit | qa-engineer | The gate scans only `*.test.ts`, `*.test.tsx`, `*.spec.ts`, `*.test.mjs` and `*.js`; add `*.py` so TC IDs in `apps/worker` tests (pytest) are checked and reported. |
 | FU-QA-10 | nit | qa-engineer | TC-045 is listed at level e2e in the matrix but the passing tests are hook-level unit tests. Re-level to unit plus e2e once BE-11 and FE-10 give a real reopen test. |
 | FU-QA-11 | nit | qa-engineer | The k6 comment in TC-091 says "stay under one run per 5 s": it sleeps 5.5 s; keep the number and the comment in step. |
 | FU-QA-12 | nit | qa-engineer | Playwright has only a Chromium project. Add a Firefox project for TC-031 (unsupported browser) when FE-09 merges. |
@@ -120,4 +120,14 @@ Added: `apps/api/test/` (harness, Jest config, 9 integration files), `packages/p
 | TC-076, TC-074 (API), TC-078..081 | BE-12, BE-13, BE-14 |
 | TC-090, TC-091, TC-093 | staging (DEP-01), BE-15B |
 | Manual: TC-054..056, 058, 059, 034, 036, 060, 061, 064 | a person with the right hardware; scripts in docs/manual-tests.md |
+
+### 7.4 Code-reviewer round on PR #28 (2026-10-05)
+
+Fixed in QA's own files: the gate now fails a row marked Verified that has no run (all modes); a KNOWN DEFECT test that fails counts as a failure (the defect was fixed or the test broke); TC IDs are read from the leaf test title and fall back to the full title only when the leaf names none; TC-001, TC-003 and TC-098 are relabelled "Verified (API); UI mocked, pending QA-D-02" and TC-003 is level integration; the TC-065 rogue-detector test asserts the hook exists; the misleading TC-030 tag was dropped from the SDK consent test; the RBAC e2e waits for the page heading before asserting there is no denial; TC-005 now has a real logout test; the harness stops the containers and closes the app if `boot` fails half way. Review item 5 was not spelled out in the message I received and is not addressed; please repeat it.
+
+Backend-owned nits (backend-engineer):
+
+1. `apps/api/src/test/containers.ts` pulls `postgres:16` and `redis:8.8` by tag; pin them by digest like the QA workflow images.
+2. The config module reads `.env` through `envFilePath`; in tests it should use `ignoreEnvFile` so a developer's `.env` can never leak into an integration run.
+3. Add a `test:integration` script (see 7.2 item 3).
 

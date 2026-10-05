@@ -66,62 +66,77 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     : undefined;
 
   const infra = await startInfraWithRetry();
-  await applyMigrations(infra);
-
-  // app_user is created by the audit_append_only migration without a password (ADR 0006 7.4).
-  const appPassword = randomBytes(18).toString('hex');
-  const admin = new Client({ connectionString: infra.postgres.getConnectionUri() });
-  await admin.connect();
-  await admin.query(`ALTER ROLE app_user PASSWORD '${appPassword}'`);
-  await admin.end();
-  const appUserUrl = `postgresql://app_user:${appPassword}@${infra.postgres.getHost()}:${infra.postgres.getMappedPort(5432)}/${infra.postgres.getDatabase()}`;
-
-  applyEnv(infra, {
-    DATABASE_URL: appUserUrl,
-    THROTTLE_AUTH_LIMIT: '100000',
-    LOG_LEVEL: opts.captureLogs ? 'info' : 'silent',
-    ...opts.env,
-  });
-  const owner = createPrismaClient(infra.postgres.getConnectionUri());
-  const orgId = (await owner.organization.create({ data: { name: 'QA Org A' } })).id;
-
+  let app: INestApplication<App> | undefined;
+  let owner: PrismaClient | undefined;
+  let appUserUrl: string;
+  let orgId: string;
   const mails: SentMail[] = [];
-  const fakeMail: Pick<MailPort, 'sendPasswordReset'> = {
-    sendPasswordReset: (to, url) => {
-      mails.push({ to, url });
-      return Promise.resolve();
-    },
-  };
+  try {
+    await applyMigrations(infra);
 
-  jest.resetModules();
-  const { AppModule } =
-    jest.requireActual<typeof import('../../src/app.module')>('../../src/app.module');
-  const { Test } = jest.requireActual<typeof import('@nestjs/testing')>('@nestjs/testing');
-  const { configureApp } =
-    jest.requireActual<typeof import('../../src/bootstrap')>('../../src/bootstrap');
-  const { MailPort: MailToken } = jest.requireActual<typeof import('../../src/mail/mail.port')>(
-    '../../src/mail/mail.port',
-  );
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
-    .overrideProvider(MailToken)
-    .useValue(fakeMail)
-    .compile();
-  const app = moduleRef.createNestApplication<INestApplication<App>>();
-  configureApp(app);
-  await app.init();
+    // app_user is created by the audit_append_only migration without a password (ADR 0006 7.4).
+    const appPassword = randomBytes(18).toString('hex');
+    const admin = new Client({ connectionString: infra.postgres.getConnectionUri() });
+    await admin.connect();
+    await admin.query(`ALTER ROLE app_user PASSWORD '${appPassword}'`);
+    await admin.end();
+    appUserUrl = `postgresql://app_user:${appPassword}@${infra.postgres.getHost()}:${infra.postgres.getMappedPort(5432)}/${infra.postgres.getDatabase()}`;
 
+    applyEnv(infra, {
+      DATABASE_URL: appUserUrl,
+      THROTTLE_AUTH_LIMIT: '100000',
+      LOG_LEVEL: opts.captureLogs ? 'info' : 'silent',
+      ...opts.env,
+    });
+    owner = createPrismaClient(infra.postgres.getConnectionUri());
+    orgId = (await owner.organization.create({ data: { name: 'QA Org A' } })).id;
+
+    const fakeMail: Pick<MailPort, 'sendPasswordReset'> = {
+      sendPasswordReset: (to, url) => {
+        mails.push({ to, url });
+        return Promise.resolve();
+      },
+    };
+
+    jest.resetModules();
+    const { AppModule } =
+      jest.requireActual<typeof import('../../src/app.module')>('../../src/app.module');
+    const { Test } = jest.requireActual<typeof import('@nestjs/testing')>('@nestjs/testing');
+    const { configureApp } =
+      jest.requireActual<typeof import('../../src/bootstrap')>('../../src/bootstrap');
+    const { MailPort: MailToken } = jest.requireActual<typeof import('../../src/mail/mail.port')>(
+      '../../src/mail/mail.port',
+    );
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(MailToken)
+      .useValue(fakeMail)
+      .compile();
+    app = moduleRef.createNestApplication<INestApplication<App>>();
+    configureApp(app);
+    await app.init();
+  } catch (error) {
+    stdout?.mockRestore();
+    await app?.close().catch(() => undefined);
+    await owner?.$disconnect().catch(() => undefined);
+    await infra.stop();
+    throw error;
+  }
+
+  const startedApp = app;
+  const startedOwner = owner;
+  if (!startedApp || !startedOwner) throw new Error('harness did not start');
   return {
     infra,
-    app,
-    owner,
+    app: startedApp,
+    owner: startedOwner,
     appUserUrl,
     orgId,
     mails,
     logged,
     close: async () => {
       stdout?.mockRestore();
-      await app.close();
-      await owner.$disconnect();
+      await startedApp.close();
+      await startedOwner.$disconnect();
       await infra.stop();
     },
   };

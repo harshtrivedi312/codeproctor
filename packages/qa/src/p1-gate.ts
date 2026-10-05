@@ -19,7 +19,10 @@ const strict = args.includes('--strict');
 const reports = args.filter((a) => !a.startsWith('--'));
 
 interface Result {
+  /** Leaf test title; TC IDs are read from here first. */
   title: string;
+  /** Title with its describe blocks; used only when the leaf names no TC ID. */
+  full?: string;
   passed: boolean;
 }
 
@@ -80,10 +83,15 @@ function loadJunit(xml: string): Result[] {
   for (const m of xml.matchAll(/<testcase\b([^>]*?)(\/>|>([\s\S]*?)<\/testcase>)/g)) {
     const body = m[3] ?? '';
     if (/<skipped\b/.test(body)) continue;
-    const name = `${attr(m[1] ?? '', 'classname')} ${attr(m[1] ?? '', 'name')}`
-      // test_tc073_x and TC_073 are read as TC-073
-      .replace(/(^|[^A-Za-z0-9])tc[-_]?(\d{3})(?!\d)/gi, '$1TC-$2');
-    out.push({ title: name, passed: !/<(failure|error)\b/.test(body) });
+    // test_tc073_x and TC_073 are read as TC-073
+    const norm = (t: string): string =>
+      t.replace(/(^|[^A-Za-z0-9])tc[-_]?(\d{3})(?!\d)/gi, '$1TC-$2');
+    const name = norm(attr(m[1] ?? '', 'name'));
+    out.push({
+      title: name,
+      full: `${norm(attr(m[1] ?? '', 'classname'))} ${name}`,
+      passed: !/<(failure|error)\b/.test(body),
+    });
   }
   return out;
 }
@@ -96,7 +104,11 @@ function load(file: string): Result[] {
     for (const f of json.testResults)
       for (const a of f.assertionResults ?? []) {
         if (a.status === 'pending' || a.status === 'skipped' || a.status === 'todo') continue;
-        out.push({ title: a.fullName ?? a.title ?? '', passed: a.status === 'passed' });
+        out.push({
+          title: a.title ?? a.fullName ?? '',
+          full: a.fullName ?? a.title ?? '',
+          passed: a.status === 'passed',
+        });
       }
   } else {
     walkPlaywright(json, out);
@@ -118,11 +130,16 @@ for (const r of reports) {
 
 const state = new Map<string, { passed: number; failed: number; known: number }>();
 for (const res of results) {
-  for (const id of new Set(res.title.match(/(?<![A-Za-z0-9])TC-\d{3}(?!\d)/g) ?? [])) {
+  const find = (t: string): string[] => t.match(/(?<![A-Za-z0-9])TC-\d{3}(?!\d)/g) ?? [];
+  const leaf = find(res.title);
+  for (const id of new Set(leaf.length > 0 ? leaf : find(res.full ?? ''))) {
     const s = state.get(id) ?? { passed: 0, failed: 0, known: 0 };
     // Tests written with it.fails carry KNOWN DEFECT in the title and pass while the defect exists.
-    if (/KNOWN DEFECT/.test(res.title)) s.known++;
-    else if (res.passed) s.passed++;
+    // If such a test fails, the defect was fixed or the test broke: either way it is a failure.
+    if (/KNOWN DEFECT/.test(res.full ?? res.title)) {
+      if (res.passed) s.known++;
+      else s.failed++;
+    } else if (res.passed) s.passed++;
     else s.failed++;
     state.set(id, s);
   }
@@ -138,6 +155,11 @@ for (const [id, p] of [...prio].sort()) {
     const automated = level.get(id) !== 'manual';
     line = automated ? 'no automated run yet' : 'manual (see docs/manual-tests.md)';
     if (strict && automated) failures++;
+    // A row marked Verified must have a run in every mode: no run means the claim is unproven.
+    if (/^Verified/i.test(status.get(id) ?? '')) {
+      line = 'matrix says Verified but no test ran';
+      failures++;
+    }
   } else if (s.failed > 0) {
     line = `FAILED (${s.failed} failing, ${s.passed} passing)`;
     failures++;

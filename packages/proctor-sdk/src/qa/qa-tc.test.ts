@@ -265,7 +265,7 @@ describe('TC-054 / TC-055 (FR-604): screen share', () => {
     expect(DEFAULT_EVENT_SEVERITY.SCREEN_SHARE_STOPPED).toBe('HIGH');
   });
 
-  it('D-17, TC-030: the screen picker is never opened before consent is recorded', async () => {
+  it('D-17: a session without recorded consent refuses to start, so no detector runs and the screen picker is never opened', async () => {
     const getDisplayMedia = vi.fn();
     const monitor = new ScreenShareMonitor({ getDisplayMedia });
     await expect(
@@ -313,7 +313,13 @@ describe('TC-063 (FR-609, NFR-08): network drop', () => {
     }
     online = true;
     // Allow the retry backoff (capped at 30 s) plus the IndexedDB writes under fake timers.
-    for (let i = 0; i < 60; i++) await vi.advanceTimersByTimeAsync(1000);
+    // IndexedDB runs on real timers, so give it real turns between fake seconds and stop as soon
+    // as everything arrived. 600 fake seconds is far beyond the 30 s backoff cap.
+    for (let i = 0; i < 600 && sent.length < 9; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(sent).toHaveLength(9);
     expect(sent.map((b) => b.seq)).toEqual([...sent.map((b) => b.seq)].sort((a, b) => a - b));
     const lengths = sent.flatMap((b) =>
       (JSON.parse(b.body) as ProctorEventBatch).events.map(
@@ -393,6 +399,7 @@ describe('TC-065 (security): forged events', () => {
       detectors: [rogue],
       store: new IdbStore(indexedDB, `qa-forge-${++dbN}`),
     });
+    expect(hooked).toBeDefined();
     hooked?.('RESUME_OTP_FAILED', {});
     hooked?.('CODE_SIMILARITY', {});
     hooked?.('PASTE_ATTEMPT', { length: -5 });
