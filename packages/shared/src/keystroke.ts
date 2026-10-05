@@ -20,8 +20,17 @@ export const MAX_KEYSTROKE_EVENTS_PER_BATCH = 1000;
 export const MAX_KEYSTROKE_OFFSET_MS = 600_000;
 /** Max inserted text (EDIT events only) across one batch; equal to the source code limit. */
 export const MAX_KEYSTROKE_BATCH_TEXT = MAX_SOURCE_CODE_LENGTH;
-/** Suggested JSON body limit for POST /candidate/session/keystrokes (worst case UTF-8 plus JSON). */
-export const MAX_KEYSTROKE_BATCH_BODY_BYTES = 1024 * 1024;
+/**
+ * Max text across all RESET and EDIT events in one batch: one maximum-size RESET plus a full batch
+ * of edits. Keeps the schema self-bounding without relying on the transport limit.
+ */
+export const MAX_KEYSTROKE_BATCH_TOTAL_TEXT = 2 * MAX_SOURCE_CODE_LENGTH;
+/**
+ * JSON body limit BE-12 must enforce on POST /candidate/session/keystrokes before the HMAC check
+ * and parsing. Worst case: 200,000 characters each escaped as \uXXXX (6 bytes) is 1.2 MB, plus
+ * up to 1000 event envelopes. SDK batches must stay under it.
+ */
+export const MAX_KEYSTROKE_BATCH_BODY_BYTES = 2 * 1024 * 1024;
 
 const offsetMsSchema = z.int().min(0).max(MAX_KEYSTROKE_OFFSET_MS);
 /** Character offset into the editor model (UTF-16 code units, as Monaco reports them). */
@@ -80,6 +89,7 @@ export const keystrokeBatchSchema = z
   .superRefine((batch, ctx) => {
     let previous = 0;
     let totalText = 0;
+    let totalAllText = 0;
     batch.events.forEach((e, i) => {
       if (e.t < previous) {
         ctx.addIssue({
@@ -91,12 +101,20 @@ export const keystrokeBatchSchema = z
       previous = e.t;
       // RESET has its own limit (textSchema, MAX_SOURCE_CODE_LENGTH); only EDIT text counts here.
       if (e.kind === 'EDIT') totalText += e.text.length;
+      if (e.kind !== 'CURSOR') totalAllText += e.text.length;
     });
     if (totalText > MAX_KEYSTROKE_BATCH_TEXT) {
       ctx.addIssue({
         code: 'custom',
         path: ['events'],
         message: 'Too much inserted text in one batch.',
+      });
+    }
+    if (totalAllText > MAX_KEYSTROKE_BATCH_TOTAL_TEXT) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['events'],
+        message: 'Too much text (resets and edits) in one batch.',
       });
     }
   });
