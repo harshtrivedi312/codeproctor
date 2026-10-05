@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from helpers import batches, cursor, edit, human_intervals, typed
 from worker.app import app
 from worker.keystrokes import analyze_question
-from worker.risk import route_for_review
+from worker.risk import QueueItem, order_review_queue, route_for_review
 
 client = TestClient(app)
 AUTH = {"X-Internal-Token": "qa-token"}
@@ -213,3 +213,33 @@ def test_TC_076_the_risk_route_band_for_a_medium_session_feeds_routing() -> None
     assert route_for_review("MEDIUM").reasons == ["RISK_MEDIUM"]
     assert out["needs_review"] is True and out["review_path"] == "full"
     assert out["review_reasons"] == ["RISK_MEDIUM"] and out["queue_rank"] == 1
+
+
+def test_TC_076_C28_queue_is_high_then_medium_then_low_whatever_the_scores_and_input_order() -> (
+    None
+):
+    items = [
+        QueueItem("low-old", "LOW", 19.0, 1),  # a LOW session never jumps a higher band
+        QueueItem("med", "MEDIUM", 20.0, 5),
+        QueueItem("high", "HIGH", 60.0, 9),
+        QueueItem("low-new", "LOW", 1.0, 8),
+    ]
+    for seed in range(5):
+        shuffled = items[:]
+        random.Random(seed).shuffle(shuffled)
+        ids = [i.session_id for i in order_review_queue(shuffled)]
+        assert ids[0] == "high" and ids[1] == "med" and set(ids[2:]) == {"low-old", "low-new"}
+
+
+def test_TC_076_C28_only_a_low_session_with_no_hold_gets_the_fast_path_and_nothing_is_auto_cleared() -> (
+    None
+):
+    for band in ("LOW", "MEDIUM", "HIGH"):
+        for ident in (False, True):
+            for short in (False, True):
+                r = route_for_review(
+                    band, identity_review_pending=ident, short_answer_pending=short
+                )
+                assert r.needs_review is True  # C-28: no session is cleared automatically
+                fast = band == "LOW" and not ident and not short
+                assert r.review_path == ("fast" if fast else "full"), (band, ident, short)
