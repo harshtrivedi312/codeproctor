@@ -65,7 +65,7 @@ export class ChunkRecorder {
       new MediaRecorder(s, o) as unknown as MediaRecorderLike,
   ) {}
 
-  start(media: MediaStream, onEnded?: () => void): void {
+  start(media: MediaStream, hooks: { onEnded?: () => void; onError?: () => void } = {}): void {
     const p = PROFILES[this.stream];
     const rec = this.factory(media, {
       mimeType: p.mimeType,
@@ -97,10 +97,11 @@ export class ChunkRecorder {
     this.stopped = new Promise<void>((resolve) => {
       rec.onstop = () => {
         resolve();
-        onEnded?.();
+        hooks.onEnded?.();
       };
     });
     rec.onerror = () => {
+      hooks.onError?.();
       if (rec.state !== 'inactive') rec.stop();
     };
     rec.start(CHUNK_MS);

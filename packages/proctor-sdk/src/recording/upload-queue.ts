@@ -1,4 +1,5 @@
 import { IdbStore, STORES, padSeq } from '../core/idb';
+import { SessionTouch, sweepStaleSessions } from '../core/sweep';
 import {
   MAX_BUFFER_BYTES,
   MediaApiError,
@@ -46,6 +47,12 @@ export interface UploadQueueOptions {
   backoffMaxMs?: number;
   jitter?: number;
   onHealth?: (h: RecorderHealth) => void;
+  /** Called once when IndexedDB stops working and the queue falls back to memory. */
+  onStorageDegraded?: (reason: 'OPEN_FAILED' | 'WRITE_FAILED') => void;
+  /** Max bytes held in memory when IndexedDB is unusable (default 32 MiB). */
+  maxMemoryBytes?: number;
+  /** Other sessions' leftovers older than this are deleted on start (default 24 h). */
+  staleAfterMs?: number;
 }
 
 const defaultPut = async (
@@ -83,6 +90,10 @@ export class UploadQueue {
   private droppedChunks = 0;
   private droppedBytes = 0;
   private running = false;
+  private readonly touch: SessionTouch;
+  /** Chunks that could not be written to IndexedDB, uploaded from memory. */
+  private readonly memory = new Map<string, ArrayBuffer>();
+  private storageDegraded = false;
 
   constructor(private readonly o: UploadQueueOptions) {
     this.concurrency = o.concurrency ?? 2;
@@ -91,6 +102,7 @@ export class UploadQueue {
     this.baseMs = o.backoffBaseMs ?? 1000;
     this.maxMs = o.backoffMaxMs ?? 30_000;
     this.jitter = o.jitter ?? 0.2;
+    this.touch = new SessionTouch(o.store, o.sessionId);
   }
 
   private prefix(): string {
@@ -99,9 +111,14 @@ export class UploadQueue {
 
   /** Pick up chunks left by a previous page load and start uploading. */
   async start(): Promise<void> {
-    for (const key of await this.o.store.keys(STORES.chunks, this.prefix())) {
-      const ref = parseChunkKey(key);
-      if (ref) this.pending.set(key, ref);
+    try {
+      for (const key of await this.o.store.keys(STORES.chunks, this.prefix())) {
+        const ref = parseChunkKey(key);
+        if (ref) this.pending.set(key, ref);
+      }
+      await sweepStaleSessions(this.o.store, this.o.sessionId, Date.now(), this.o.staleAfterMs);
+    } catch {
+      this.degrade('OPEN_FAILED');
     }
     this.running = true;
     this.report();
@@ -122,10 +139,41 @@ export class UploadQueue {
       return;
     }
     await this.makeRoom(chunk.bytes);
-    await this.o.store.put<StoredChunk>(STORES.chunks, key, { data });
+    let stored = false;
+    if (!this.storageDegraded) {
+      try {
+        await this.o.store.put<StoredChunk>(STORES.chunks, key, { data });
+        stored = true;
+      } catch {
+        this.degrade('WRITE_FAILED');
+      }
+    }
+    if (!stored) {
+      // IndexedDB failed (quota, private mode, closed): keep the chunk in memory so the upload can
+      // still happen; past the memory cap it is a counted drop, never a silent one.
+      if (this.memoryBytes() + chunk.bytes > (this.o.maxMemoryBytes ?? 32 * 1024 * 1024)) {
+        this.drop(chunk);
+        this.report();
+        return;
+      }
+      this.memory.set(key, data);
+    }
     this.pending.set(key, chunk);
+    void this.touch.touch();
     this.report();
     this.pump();
+  }
+
+  private degrade(reason: 'OPEN_FAILED' | 'WRITE_FAILED'): void {
+    if (this.storageDegraded) return;
+    this.storageDegraded = true;
+    this.o.onStorageDegraded?.(reason);
+  }
+
+  private memoryBytes(): number {
+    let b = 0;
+    for (const d of this.memory.values()) b += d.byteLength;
+    return b;
   }
 
   private bytesPending(): number {
@@ -146,7 +194,8 @@ export class UploadQueue {
       if (!victim) return;
       const ref = this.pending.get(victim);
       this.pending.delete(victim);
-      await this.o.store.delete(STORES.chunks, victim);
+      this.memory.delete(victim);
+      await this.o.store.delete(STORES.chunks, victim).catch(() => undefined);
       if (ref) this.drop(ref);
     }
   }
@@ -183,7 +232,10 @@ export class UploadQueue {
     const ref = this.pending.get(key);
     try {
       if (!ref) return;
-      const stored = await this.o.store.get<StoredChunk>(STORES.chunks, key);
+      const mem = this.memory.get(key);
+      const stored: StoredChunk | undefined = mem
+        ? { data: mem }
+        : await this.o.store.get<StoredChunk>(STORES.chunks, key).catch(() => undefined);
       if (!stored) {
         this.pending.delete(key);
         return;
@@ -199,11 +251,13 @@ export class UploadQueue {
         throw new MediaApiError('RETRY', `PUT failed with ${status}`);
       }
       await this.o.api.confirm(ref);
-      await this.o.store.delete(STORES.chunks, key);
+      this.memory.delete(key);
+      await this.o.store.delete(STORES.chunks, key).catch(() => undefined);
       this.pending.delete(key);
       this.attempts.delete(key);
       this.notBefore.delete(key);
       this.lastOk = Date.now();
+      void this.touch.touch();
       this.failures = 0;
     } catch (err) {
       if (err instanceof MediaApiError && err.kind === 'FATAL') {
@@ -245,7 +299,9 @@ export class UploadQueue {
       consecutiveFailures: this.failures,
       droppedChunks: this.droppedChunks,
       droppedBytes: this.droppedBytes,
-      degraded: this.failures > 0,
+      degraded: this.failures > 0 || this.storageDegraded,
+      storageDegraded: this.storageDegraded,
+      memoryBytes: this.memoryBytes(),
       bytesPendingByStream: byStream,
     };
   }
@@ -287,9 +343,10 @@ export class UploadQueue {
       bytes += c.bytes;
     }
     this.pending.clear();
+    this.memory.clear();
     this.attempts.clear();
     this.notBefore.clear();
-    await this.o.store.deletePrefix(STORES.chunks, this.prefix());
+    await this.o.store.deletePrefix(STORES.chunks, this.prefix()).catch(() => 0);
     this.report();
     return bytes;
   }
