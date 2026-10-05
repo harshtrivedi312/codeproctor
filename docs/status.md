@@ -294,6 +294,7 @@ Decisions taken by the Delivery Lead under the owner's delegation (order, priori
 | DL-10 | 2026-10-05 | build-plan.md section 6 merge rule aligned with CLAUDE.md rules 6, 8 and 9: sessions merge their own PRs; humans no longer merge. | CLAUDE.md wins; the plan contradicted it |
 | DL-11 | 2026-10-05 | TC-065 seq test flake (packages/proctor-sdk/src/qa/qa-tc.test.ts, failed on #40): QA fixes it as its own test-only PR, reviewed by the SDK session; any SDK runtime change comes back to the Delivery Lead first. | It blocks #40 (main's flake fix) and can hit any PR |
 | DL-12 | 2026-10-05 | QA's TC-008 review of #30: the no-existence-oracle assertion (cross-org id gets the same 404 problem body as a missing id) and fail-closed public-route handling are blockers in #30. Real-route TC-008 cases go to BE-03. The /live and candidate-token cases are follow-ups for BE-13 and BE-07. QA makes the P1 gate read the apps/api unit Jest report. | CLAUDE.md rule 3 (authorization) |
+| DL-13 | 2026-10-05 | PR #30: nested cursors (B1-nested) and nested writes through RULE_I relations (S-A) are blockers. After that round, any finding that is not an authorization, session or data-access weakness goes to docs/followups/database.md, not into #30. The architect approved at 769d8f5. | CLAUDE.md rule 3; a time-box on the review loop |
 
 ### Parked for the owner
 
