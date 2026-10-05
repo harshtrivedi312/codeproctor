@@ -176,11 +176,20 @@ function walkSelection(walk: Walk, model: ModelName, args: PlainObject, depth: n
       }
       const side = relationOf(model, field);
       if (side === undefined) continue; // not a relation: nothing to page
-      if (depth >= MAX_DEPTH) throw refuse(walk, `${model}.${field} is nested too deeply`);
+      if (depth >= MAX_DEPTH) throw selectionTooDeep(walk, model, field);
       if (value.cursor !== undefined) throw nestedCursor(walk, model, field);
       walkSelection(walk, side.target, value, depth + 1);
     }
   }
+}
+
+/** The selection itself is refused (it is a read, not a write): it cannot be walked to the end. */
+function selectionTooDeep(walk: Walk, model: ModelName, field: string): OrgScopeViolationError {
+  return new OrgScopeViolationError(
+    `${walk.root}.${walk.operation}: selection refused at ${model}.${field}: include and select ` +
+      `are nested more than ${MAX_DEPTH} relations deep, which the scope cannot check for ` +
+      'nested cursors. Select fewer levels, or load the deeper rows with their own call.',
+  );
 }
 
 function nestedCursor(walk: Walk, model: ModelName, field: string): OrgScopeViolationError {

@@ -9,5 +9,12 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/prisma/client.js';
 
 export function createPrismaClient(connectionString: string): PrismaClient {
-  return new PrismaClient({ adapter: new PrismaPg({ connectionString }) });
+  return new PrismaClient({
+    adapter: new PrismaPg({ connectionString }),
+    // No code frame in error messages (FU-DB-70). Never add `log: ['query']` or a query event
+    // listener here: they print every query with its parameters. 'minimal' still leaves values in
+    // some errors, so the org-scoped client scrubs them (error-scrub.ts). Both are tested in
+    // error-hygiene.spec.ts.
+    errorFormat: 'minimal',
+  });
 }

@@ -94,6 +94,12 @@ export function findRelationProblems(input: RelationInputs): string[] {
     if (back === undefined || back.type !== key.model || back.holdsForeignKey) {
       problems.push(`${id}: ${key.target}.${key.back} is not the relation that points back.`);
     }
+    if (key.fkClass === 'SCOPE_HOP' && field.foreignKeyFields.join(',') !== `${key.field}Id`) {
+      // scopeHopColumn() derives the column from the relation field name.
+      problems.push(
+        `${id} is a SCOPE_HOP key held in ${field.foreignKeyFields.join(', ')}, not ${key.field}Id.`,
+      );
+    }
     const expected = expectedClass(key.model, field, scope);
     if (expected.fkClass !== key.fkClass) {
       problems.push(`${id} is classified ${key.fkClass} but its class is ${expected.fkClass}.`);
