@@ -1,15 +1,17 @@
 // Reads the reference DDL in docs/database.md (the authoritative schema, ADR 0008) so the schema
 // tests compare the database with the document and not with a copy of it. Not a test file.
+// A statement it does not understand throws: silently skipping it would leave part of the schema
+// unchecked.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { REPO_ROOT } from './test-support.mjs';
 
-/** Splits on commas that are not inside parentheses. */
+/** Splits on commas that are not inside parentheses or quotes. */
 function splitTopLevel(text) {
   const parts = [];
   let depth = 0;
-  let current = '';
   let quoted = false;
+  let current = '';
   for (const ch of text) {
     if (ch === "'") quoted = !quoted;
     if (!quoted && ch === '(') depth++;
@@ -24,14 +26,42 @@ function splitTopLevel(text) {
 }
 
 const TABLE_CONSTRAINT = /^(PRIMARY|UNIQUE|CHECK|FOREIGN|CONSTRAINT)\b/i;
-const RULES = { 'ON DELETE CASCADE': 'CASCADE', 'ON DELETE SET NULL': 'SET NULL' };
+const list = (s) => s.split(',').map((c) => c.trim());
+const onDelete = (text) => {
+  if (/ON DELETE CASCADE/i.test(text)) return 'CASCADE';
+  if (/ON DELETE SET NULL/i.test(text)) return 'SET NULL';
+  return 'NO ACTION';
+};
+
+/** The type a column has in pg_attribute / information_schema (udt_name). */
+export function udtName(docType) {
+  const t = docType.toLowerCase().replace(/\(.*\)/, '');
+  const array = t.endsWith('[]');
+  const base = array ? t.slice(0, -2) : t;
+  const map = {
+    int: 'int4',
+    integer: 'int4',
+    bigint: 'int8',
+    smallint: 'int2',
+    boolean: 'bool',
+    varchar: 'varchar',
+  };
+  const udt = map[base] ?? base;
+  return array ? `_${udt}` : udt;
+}
+
+/** Words that identify a partial-index predicate without PostgreSQL's re-printing (casts, parentheses). */
+export function predicateKey(text) {
+  const words = text.replace(/::\w+/g, '').match(/'[^']*'|\b[a-z_][a-z0-9_]*\b/gi) ?? [];
+  return words
+    .filter((w) => !/^(where|in|any|array|and|or|not|is|null)$/i.test(w))
+    .sort()
+    .join(' ');
+}
 
 /**
- * @returns {{
- *   tables: Map<string, { columns: Map<string, { notNull: boolean }>, foreignKeys: { columns: string[], parent: string, onDelete: string }[], primaryKey: string[] }>,
- *   enums: Map<string, string[]>,
- *   indexes: { table: string, columns: string, partial: boolean }[],
- * }}
+ * @typedef {{ type: string, notNull: boolean, boolDefault: string | null }} Column
+ * @typedef {{ columns: string[], parent: string, parentColumns: string[], onDelete: string }} ForeignKey
  */
 export function parseReferenceDdl() {
   const doc = readFileSync(join(REPO_ROOT, 'docs/database.md'), 'utf8');
@@ -39,11 +69,22 @@ export function parseReferenceDdl() {
     .map((m) => m[1])
     .join('\n')
     .replace(/--[^\n]*/g, '');
+  /** @type {Map<string, { columns: Map<string, Column>, foreignKeys: ForeignKey[], primaryKey: string[] }>} */
   const tables = new Map();
+  /** @type {Map<string, string[]>} */
   const enums = new Map();
+  /** @type {{ table: string, columns: string, predicate: string | null }[]} */
   const indexes = [];
-  for (const statement of sql.split(';').map((s) => s.trim())) {
-    let m = /^CREATE TYPE (\w+)\s+AS ENUM\s*\(([\s\S]*)\)$/i.exec(statement);
+  /** @type {Set<string>} "table|col,col" */
+  const uniques = new Set();
+
+  for (const statement of sql
+    .split(';')
+    .map((s) => s.trim())
+    .filter((s) => s !== '')) {
+    let m = /^CREATE EXTENSION\b/i.exec(statement);
+    if (m) continue;
+    m = /^CREATE TYPE (\w+)\s+AS ENUM\s*\(([\s\S]*)\)$/i.exec(statement);
     if (m) {
       enums.set(
         m[1],
@@ -51,67 +92,90 @@ export function parseReferenceDdl() {
       );
       continue;
     }
-    m = /^CREATE (?:UNIQUE )?INDEX (?:\w+ )?ON (\w+)\s*\(([^)]*)\)(\s+WHERE[\s\S]*)?$/i.exec(
-      statement,
-    );
+    m =
+      /^CREATE (UNIQUE )?INDEX (?:\w+ )?ON (\w+)\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)(?:\s+WHERE\s+([\s\S]*))?$/i.exec(
+        statement,
+      );
     if (m) {
-      indexes.push({
-        table: m[1],
-        columns: m[2].replace(/\s+/g, ' ').trim().toLowerCase(),
-        partial: Boolean(m[3]),
-        unique: /^CREATE UNIQUE/i.test(statement),
-      });
+      const columns = m[3].replace(/\s+/g, ' ').trim().toLowerCase();
+      if (m[1]) uniques.add(`${m[2]}|${columns}`);
+      else indexes.push({ table: m[2], columns, predicate: m[4] ? predicateKey(m[4]) : null });
       continue;
     }
     m = /^CREATE TABLE (\w+)\s*\(([\s\S]*)\)$/i.exec(statement);
     if (m) {
+      const name = m[1];
       const table = { columns: new Map(), foreignKeys: [], primaryKey: [] };
       for (const item of splitTopLevel(m[2])) {
-        const tc = TABLE_CONSTRAINT.test(item);
-        if (!tc) {
-          const [name] = item.split(/\s+/);
+        if (!TABLE_CONSTRAINT.test(item)) {
+          const [col, ...rest] = item.split(/\s+/);
+          const type = /^(\w+(?:\([^)]*\))?(?:\[\])?)/.exec(rest.join(' '))?.[1];
+          if (!type) throw new Error(`database.md: cannot read the type of ${name}.${col}`);
           const pk = /\bPRIMARY KEY\b/i.test(item);
-          table.columns.set(name, { notNull: pk || /\bNOT NULL\b/i.test(item) });
-          if (pk) table.primaryKey = [name];
-          const ref = /\bREFERENCES (\w+)\s*\(([^)]*)\)\s*(ON DELETE (?:CASCADE|SET NULL))?/i.exec(
-            item,
-          );
+          const def = /\bDEFAULT\s+(true|false)\b/i.exec(item);
+          table.columns.set(col, {
+            type,
+            notNull: pk || /\bNOT NULL\b/i.test(item),
+            boolDefault: def ? def[1].toLowerCase() : null,
+          });
+          if (pk) table.primaryKey = [col];
+          if (/\bUNIQUE\b/i.test(item.replace(/CHECK\s*\(.*\)/i, '')))
+            uniques.add(`${name}|${col}`);
+          const ref = /\bREFERENCES (\w+)\s*\(([^)]*)\)/i.exec(item);
           if (ref) {
             table.foreignKeys.push({
-              columns: [name],
+              columns: [col],
               parent: ref[1],
-              onDelete: ref[3] ? RULES[ref[3].toUpperCase().replace(/\s+/g, ' ')] : 'NO ACTION',
+              parentColumns: list(ref[2]),
+              onDelete: onDelete(item),
             });
           }
           continue;
         }
-        const pk = /^PRIMARY KEY\s*\(([^)]*)\)/i.exec(item);
-        if (pk) table.primaryKey = pk[1].split(',').map((c) => c.trim());
-        const fk = /^FOREIGN KEY\s*\(([^)]*)\)\s*REFERENCES (\w+)/i.exec(item);
-        if (fk) {
-          table.foreignKeys.push({
-            columns: fk[1].split(',').map((c) => c.trim()),
-            parent: fk[2],
-            onDelete: 'NO ACTION',
-          });
+        let c = /^PRIMARY KEY\s*\(([^)]*)\)/i.exec(item);
+        if (c) {
+          table.primaryKey = list(c[1]);
+          continue;
         }
+        c = /^UNIQUE\s*\(([^)]*)\)/i.exec(item);
+        if (c) {
+          uniques.add(`${name}|${list(c[1]).join(',')}`);
+          continue;
+        }
+        c = /^FOREIGN KEY\s*\(([^)]*)\)\s*REFERENCES (\w+)\s*\(([^)]*)\)/i.exec(item);
+        if (c) {
+          table.foreignKeys.push({
+            columns: list(c[1]),
+            parent: c[2],
+            parentColumns: list(c[3]),
+            onDelete: onDelete(item),
+          });
+          continue;
+        }
+        if (!/^CHECK\b/i.test(item))
+          throw new Error(`database.md: unrecognised constraint in ${name}: ${item.slice(0, 60)}`);
       }
-      tables.set(m[1], table);
+      tables.set(name, table);
       continue;
     }
     m =
-      /^ALTER TABLE (\w+)\s+ADD\s+(?:CONSTRAINT \w+\s+)?FOREIGN KEY\s*\(([^)]*)\)\s*REFERENCES (\w+)[^)]*\)\s*(ON DELETE (?:CASCADE|SET NULL))?/i.exec(
+      /^ALTER TABLE (\w+)\s+ADD\s+(?:CONSTRAINT \w+\s+)?FOREIGN KEY\s*\(([^)]*)\)\s*REFERENCES (\w+)\s*\(([^)]*)\)/i.exec(
         statement,
       );
     if (m) {
       tables.get(m[1])?.foreignKeys.push({
-        columns: m[2].split(',').map((c) => c.trim()),
+        columns: list(m[2]),
         parent: m[3],
-        onDelete: m[4] ? RULES[m[4].toUpperCase().replace(/\s+/g, ' ')] : 'NO ACTION',
+        parentColumns: list(m[4]),
+        onDelete: onDelete(statement),
       });
-      // Nothing is added to indexes: a foreign key is not an index.
+      continue;
+    }
+    if (/^(CREATE|ALTER)\b/i.test(statement)) {
+      throw new Error(
+        `database.md: the schema test does not understand: ${statement.slice(0, 80)}`,
+      );
     }
   }
-  indexes.forEach((i) => void i);
-  return { tables, enums, indexes };
+  return { tables, enums, indexes, uniques };
 }
