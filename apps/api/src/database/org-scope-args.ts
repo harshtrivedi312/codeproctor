@@ -222,7 +222,27 @@ function namesOtherOrg(cursor: PlainObject, orgId: string): boolean {
  *   stamp, so the parent id in the payload must follow ADR 0006 section 2 rule (i).
  * - An unknown operation is refused.
  *
- * Nested writes (`create`, `connect` inside `data`) are not inspected; see the README.
+ * What it does NOT cover (README "Limits"). Only the top-level model, its `where`, its `cursor`
+ * and its create/update `orgId` are looked at. Everything reached through a relation is not:
+ *
+ * (a) Nested writes. `connect`, `set`, `connectOrCreate` and nested `create` or `update` in `data`
+ *     are passed through. A parent-side nested write can change another org's rows, for example
+ *     `organization.update({ where: { id: A }, data: { users: { connect: { id: userOfB } } } })`
+ *     moves B's user into A. Until FU-DB-63 adds a guard, every id in a nested write follows
+ *     rule (i): load it through the scoped client first.
+ * (b) Re-parenting. An update that changes a path model's first-hop foreign key
+ *     (`testSection.update({ data: { testId } })`) is the same as a path create: rule (i).
+ * (c) Nested reads. `include`, `select`, the fluent API, relation filters, `orderBy` on a relation
+ *     and `_count` follow foreign keys blindly and are not filtered. Any foreign key that crosses
+ *     orgs leaks: `sessionReview.findUnique({ include: { reviewer: true } })` returns the reviewer
+ *     user row of another org, password hash included, if reviewer_id points there.
+ * (d) The foreign keys that rule (i) has to cover are many more than the staff references
+ *     (`created_by`, `reviewer_id`, `assigned_to`, `collected_by`) and
+ *     `test_questions.question_version_id`: FU-DB-64 lists 25, among them the cross-chain ones
+ *     (session_questions to test_questions, question_versions and variants; session_sections to
+ *     test_sections; consents to consent_texts; keystroke_batches to session_questions).
+ * (e) The raw SQL hatch (OrgContextService.runRawSql) stays open inside a scope started within
+ *     it; see its JSDoc.
  */
 export function applyOrgScope(input: OrgScopeInput): PlainObject {
   const { model, rule, operation, orgId } = input;

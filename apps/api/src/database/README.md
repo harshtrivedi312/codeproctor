@@ -175,9 +175,11 @@ runs before the caller's org is known:
    is still refused, even in system scope.
 3. **Once the user is known, switch to `runAsUser({ orgId, userId, role }, ...)`** (or
    `runInOrg(orgId, ...)` when there is no user). Narrowing from system scope to an org scope is
-   allowed, so no `runInOrg` workaround is needed. Inside the inner scope queries are filtered and
-   raw SQL needs `runRawSql` again; when it ends you are back in system scope. The reverse is
-   refused: `runSystem` inside an org scope throws.
+   allowed, so no `runInOrg` workaround is needed. Inside the inner scope queries are filtered, and
+   raw SQL is refused again **unless a `runRawSql` is still open around it**: an open hatch carries
+   into nested scopes (see Limits (e)), so keep `runRawSql` around the single statement only. When
+   the inner scope ends you are back in system scope. The reverse is refused: `runSystem` inside an
+   org scope throws.
 4. **Transactions work in system scope** (interactive and batch), keep the scope, and accept raw SQL
    through `runRawSql`.
 5. **`runSystem`, `runAsUser`, `runInOrg` and `runRawSql` add no queries**, and the extension never
@@ -204,13 +206,41 @@ async login(email: string, password: string) {
 
 ## Limits (read before relying on it)
 
-- **Nested writes are not inspected.** `data: { children: { create: ... } }` and `connect` go
-  through as written. The composite foreign keys (ADR 0006 section 2 ii) cover the delivery chain;
-  everything else relies on rule (i). A `create` on a `path` model cannot be stamped (there is no
-  `org_id` column), so the parent id in the payload must have been loaded through the scoped client
-  first.
-- Prisma queries are lazy. The context services start a returned query inside the context, so
-  `runInOrg(id, () => client.x.findMany())` works. Inside the callback, `await` queries as usual.
+The extension looks only at the top-level model: its `where`, its `cursor`, and the `orgId` of a
+create or update. Everything reached through a relation is **not** looked at.
+
+- **(a) Nested writes are passed through.** A parent-side `connect`, `set`, `connectOrCreate`,
+  nested `create` or nested `update` in `data` can change another org's rows. Example:
+  `organization.update({ where: { id: A }, data: { users: { connect: { id: userOfB } } } })` moves
+  B's user into A, and the filter on Organization does not see it. (The composite foreign keys of
+  ADR 0006 section 2 ii cover only the delivery chain.) Until a guard exists (FU-DB-63), **every id
+  in a nested write follows rule (i)**: load it through the scoped client first, and answer 404 on
+  a miss.
+- **(b) Re-parenting.** An update that changes a path model's first-hop foreign key, for example
+  `testSection.update({ data: { testId } })`, is the same as a path create: rule (i). A `create` on
+  a `path` model cannot be stamped either (there is no `org_id` column), so the parent id in the
+  payload must have been loaded through the scoped client first.
+- **(c) Nested reads are not filtered.** `include`, `select`, the fluent API, relation filters,
+  `orderBy` on a relation and `_count` follow foreign keys blindly. Any foreign key that crosses
+  orgs leaks. Example: if `session_reviews.reviewer_id` points at another org's user,
+  `sessionReview.findUnique({ where: { id }, include: { reviewer: true } })` returns that user row,
+  password hash included. Select only the fields you need, and never `include` a user.
+  (`tc-008-org-isolation.spec.ts` pins this behaviour; it documents the limit and is not a fix.)
+- **(d) Rule (i) covers 25 foreign keys**, not only the staff references (`created_by`,
+  `reviewer_id`, `assigned_to`, `collected_by`, `scored_by`, `reviewed_by`, `actor_id`) and
+  `test_questions.question_version_id` (FU-DB-64 lists them all). The main cross-chain ones:
+  `session_questions` to `test_questions`, `question_versions` and `question_variants`;
+  `session_sections` to `test_sections`; `consents` to `consent_texts`; `keystroke_batches` to
+  `session_questions`; `webhook_deliveries` to `sessions`; `organizations.current_consent_text_id`
+  to `consent_texts`.
+- **(e) An open `runRawSql` carries into nested scopes.** A `runAsUser`, `runInOrg` or `runSystem`
+  started inside it keeps the hatch, so raw SQL there is not refused. Wrap only the single raw
+  statement, never a block that also does model work.
+- **Cursors.** In an org scope a cursor is given the caller's org on models with `org_id`, accepted
+  only for the caller's own row on Organization, and **refused on models without `org_id`** (Prisma
+  finds the cursor row by its own fields, so there is no way to scope it). Page those with `where`
+  plus `orderBy`, for example `where: { id: { gt: lastId } }, orderBy: { id: 'asc' }`.
+- Prisma queries are lazy. See "Writing queries inside the scope" below.
 - Prisma returns `BigInt` for the identity ids and `Decimal` for scores (FU-DB-06): serialise them
   before sending JSON.
 

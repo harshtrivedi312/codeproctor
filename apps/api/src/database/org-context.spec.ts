@@ -171,6 +171,24 @@ describe('OrgContextService (NFR-04, FR-103)', () => {
     );
   });
 
+  it('TC-008 an open runRawSql carries into a nested scope (so wrap only the single statement)', () => {
+    const reason = 'one reviewed raw statement, nothing else';
+    svc.runSystem('BACKGROUND_JOB', () => {
+      svc.runRawSql(reason, () => {
+        svc.runInOrg(ORG_A, () => {
+          expect(svc.current()?.rawSqlReason).toBe(reason);
+        });
+        svc.runAsUser(USER_A, () => {
+          expect(svc.current()?.rawSqlReason).toBe(reason);
+        });
+      });
+      // Outside the block the hatch is closed again.
+      svc.runInOrg(ORG_A, () => {
+        expect(svc.current()?.rawSqlReason).toBeUndefined();
+      });
+    });
+  });
+
   it('TC-008 runRawSql needs a written reason, and keeps the org scope that is active', () => {
     expect(() => svc.runRawSql('', () => undefined)).toThrow(OrgScopeViolationError);
     expect(() => svc.runRawSql('short', () => undefined)).toThrow(OrgScopeViolationError);
