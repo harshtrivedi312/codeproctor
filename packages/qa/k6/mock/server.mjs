@@ -186,7 +186,7 @@ function sortKeys(v) {
   return v;
 }
 
-server.listen(port, () =>
+server.listen(port, process.env.MOCK_HOST || '127.0.0.1', () =>
   console.log(`mock candidate API on http://localhost:${port}/api/v1 with ${count} sessions`),
 );
 setInterval(() => console.log(JSON.stringify(stats)), 15000).unref();
