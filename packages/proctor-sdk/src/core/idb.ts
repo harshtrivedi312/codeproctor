@@ -69,6 +69,13 @@ export class IdbStore {
     return keys.map((key, i) => ({ key, value: values[i] as T }));
   }
 
+  /** Delete every entry whose key starts with `prefix`; returns how many were removed. */
+  async deletePrefix(name: StoreName, prefix: string): Promise<number> {
+    const keys = await this.keys(name, prefix);
+    for (const k of keys) await this.delete(name, k);
+    return keys.length;
+  }
+
   /** Keys only (cheap even when values are large chunks). */
   async keys(name: StoreName, prefix: string): Promise<string[]> {
     const s = await this.store(name, 'readonly');

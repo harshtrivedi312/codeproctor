@@ -252,6 +252,46 @@ export class UploadQueue {
 
   private report(): void {
     this.o.onHealth?.(this.health());
+    if (this.pending.size === 0) {
+      for (const w of this.idleWaiters.splice(0)) w();
+    }
+  }
+
+  private readonly idleWaiters: (() => void)[] = [];
+
+  /** Resolves true when everything is uploaded, false when `timeoutMs` ran out first. */
+  waitUntilIdle(timeoutMs: number): Promise<boolean> {
+    if (this.pending.size === 0) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        const i = this.idleWaiters.indexOf(done);
+        if (i >= 0) this.idleWaiters.splice(i, 1);
+        resolve(false);
+      }, timeoutMs);
+      const done = (): void => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+      this.idleWaiters.push(done);
+    });
+  }
+
+  /**
+   * Delete everything still buffered for this session (end of session: recorded media must not
+   * stay on the candidate's disk, FR-702). Leftovers count as dropped. Returns the dropped bytes.
+   */
+  async purge(): Promise<number> {
+    let bytes = 0;
+    for (const c of this.pending.values()) {
+      this.drop(c);
+      bytes += c.bytes;
+    }
+    this.pending.clear();
+    this.attempts.clear();
+    this.notBefore.clear();
+    await this.o.store.deletePrefix(STORES.chunks, this.prefix());
+    this.report();
+    return bytes;
   }
 
   /** Stop scheduling. Chunks stay in IndexedDB and resume on the next page load. */
