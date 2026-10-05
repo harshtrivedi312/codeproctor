@@ -47,7 +47,7 @@ needs BE-04 to implement `ValidationReportSink` (FU-BEB-01).
 ## Integration tests (TC-042, TC-043, TC-044)
 
 ```sh
-JUDGE0_URL=http://127.0.0.1:2358 JUDGE0_AUTH_TOKEN=... JUDGE0_INTEGRATION=true \
+JUDGE0_URL=http://127.0.0.1:2358 JUDGE0_AUTH_TOKEN=... JUDGE0_AUTHZ_TOKEN=... JUDGE0_INTEGRATION=true \
   pnpm --filter @codeproctor/api test judge0.integration
 ```
 
