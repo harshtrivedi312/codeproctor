@@ -214,26 +214,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
-  /v1/auth/2fa/status:
-    get:
-      operationId: getTwoFactorStatus
-      summary: Whether the signed-in user has TOTP turned on (placeholder, see ARC-02 note in docs/followups/frontend.md)
-      responses:
-        '200':
-          description: Current status
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [enabled]
-                properties:
-                  enabled: { type: boolean }
-        '401':
-          description: Not signed in
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ProblemDetails'
   /v1/auth/2fa/setup/start:
     post:
       operationId: startTwoFactorSetup
@@ -760,13 +740,15 @@ components:
       enum: [SUPER_ADMIN, RECRUITER, AUTHOR, REVIEWER]
     AuthUser:
       type: object
-      required: [id, email, name, role, orgName]
+      required: [id, email, name, role, orgName, totpEnabled]
       properties:
         id: { type: string }
         email: { type: string }
         name: { type: string }
         role: { $ref: '#/components/schemas/StaffRole' }
         orgName: { type: string }
+        # Backend adds this to AuthUserDto (login, 2fa/verify, enroll-confirm, refresh).
+        totpEnabled: { type: boolean }
     AuthSession:
       type: object
       required: [accessToken, user]

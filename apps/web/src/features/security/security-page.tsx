@@ -1,12 +1,10 @@
 'use client';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
 import * as React from 'react';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { PageHeader } from '@/features/admin/page-header';
 import { useAuth } from '@/features/auth/auth-provider';
 import { ActionDialog, type SecurityAction, type SecurityResult } from './action-dialog';
-import { fetchTwoFactorStatus } from './api';
 import { isTwoFactorMandatory } from './schemas';
 
 const NOTICES: Record<SecurityResult, string> = {
@@ -18,18 +16,12 @@ const NOTICES: Record<SecurityResult, string> = {
 /** FR-102: set up, turn off and refresh recovery codes for TOTP. Open to every signed-in staff role. */
 export function SecurityPage(): React.JSX.Element {
   const { user, role } = useAuth();
-  const queryClient = useQueryClient();
   const [action, setAction] = React.useState<SecurityAction | null>(null);
   const [notice, setNotice] = React.useState<SecurityResult | null>(null);
-  const userId = user?.id ?? null;
-  const status = useQuery({
-    queryKey: ['2fa-status', userId],
-    enabled: userId !== null,
-    queryFn: fetchTwoFactorStatus,
-    retry: false,
-  });
+  // The session user carries `totpEnabled`; undefined (an older session) is treated as unknown.
+  const known = typeof user?.totpEnabled === 'boolean';
   const mandatory = isTwoFactorMandatory(role);
-  const enabled = status.data === true;
+  const enabled = user?.totpEnabled === true;
 
   return (
     <>
@@ -49,13 +41,9 @@ export function SecurityPage(): React.JSX.Element {
         <h2 id="two-factor-heading" className="font-medium">
           Two-factor sign-in (2FA)
         </h2>
-        {status.isError ? (
-          <Alert tone="error" role="alert" title="We could not load your 2FA status">
-            Check your connection and reload the page.
-          </Alert>
-        ) : status.data === undefined ? (
+        {!known ? (
           <p role="status" className="text-sm text-muted-foreground">
-            Loading…
+            Checking your two-factor status…
           </p>
         ) : (
           <>
@@ -97,7 +85,6 @@ export function SecurityPage(): React.JSX.Element {
           onDone={(result) => {
             setAction(null);
             setNotice(result);
-            void queryClient.invalidateQueries({ queryKey: ['2fa-status', userId] });
           }}
         />
       ) : null}

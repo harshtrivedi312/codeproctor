@@ -405,6 +405,21 @@ describe('Security page: PR #26 error contract (FR-102, FU-BE-39)', () => {
   });
 });
 
+describe('Session user carries totpEnabled (FR-102)', () => {
+  const sessionOf = async (email: string) => {
+    seedMockRefresh(email);
+    const res = await fetch(`${base}/refresh`, { method: 'POST' });
+    return ((await res.json()) as { user: { totpEnabled: boolean } }).user.totpEnabled;
+  };
+
+  it('FR-102: the mock refresh reflects the per-user 2FA state: seeded for admin, off for recruiter until set up', async () => {
+    expect(await sessionOf(MOCK_USERS.admin.email)).toBe(true);
+    expect(await sessionOf(MOCK_USERS.recruiter.email)).toBe(false);
+    seedMockTwoFactor(MOCK_USERS.recruiter.email);
+    expect(await sessionOf(MOCK_USERS.recruiter.email)).toBe(true);
+  });
+});
+
 describe('Security page: recovery codes are shown once (FR-102)', () => {
   it('FR-102: a reload or tab close is warned about while the codes show, and not after Done', async () => {
     const u = await pageAs(MOCK_USERS.admin, { twoFactorOn: true });
@@ -423,18 +438,52 @@ describe('Security page: recovery codes are shown once (FR-102)', () => {
     expect(unload()).toBe(false);
   });
 
-  it('FR-102: the status is refreshed as soon as set-up succeeds, before the dialog is closed', async () => {
-    let statusCalls = 0;
-    server.events.on('request:start', ({ request }) => {
-      if (new URL(request.url).pathname.endsWith('/2fa/status')) statusCalls += 1;
-    });
+  it('FR-102: the session user (totpEnabled) is re-read as soon as set-up succeeds, before the dialog is closed, and again after disable', async () => {
+    const calls = watchSessionCalls();
     const u = await pageAs(MOCK_USERS.recruiter);
-    const before = statusCalls;
+    const before = calls.refresh;
     await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
     await u.type(await within(dialog()).findByLabelText('6-digit code'), MOCK_TOTP_CODE);
     await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
     await within(dialog()).findByTestId('recovery-codes');
-    await waitFor(() => expect(statusCalls).toBeGreaterThan(before));
+    // The page behind the open dialog already shows the new state.
+    expect(
+      await screen.findByRole('button', { name: 'Disable 2FA', hidden: true }),
+    ).toBeInTheDocument();
+    expect(calls.refresh).toBe(before + 1);
+    await u.click(within(dialog()).getByRole('checkbox'));
+    await u.click(within(dialog()).getByRole('button', { name: 'Done' }));
+
+    await openAndSubmit(u, 'Disable 2FA', MOCK_USERS.recruiter.password);
+    expect(await screen.findByRole('button', { name: 'Set up 2FA' })).toBeVisible();
+    expect(calls.refresh).toBe(before + 2);
+    expect(screen.queryByRole('button', { name: 'Disable 2FA' })).not.toBeInTheDocument();
+  });
+
+  it('FR-102: an older session without totpEnabled shows a neutral checking state and no actions, without crashing', async () => {
+    server.use(
+      http.post(`${base}/refresh`, () =>
+        HttpResponse.json({
+          accessToken: 'mock-access-RECRUITER-old',
+          user: {
+            id: 'user-recruiter',
+            email: MOCK_USERS.recruiter.email,
+            name: 'Riley Recruiter',
+            role: 'RECRUITER',
+            orgName: 'Acme Hiring (demo)',
+          },
+        }),
+      ),
+    );
+    seedMockRefresh(MOCK_USERS.recruiter.email);
+    renderAsStaff(
+      <main>
+        <SecurityPage />
+      </main>,
+      MOCK_USERS.recruiter,
+    );
+    expect(await screen.findByText('Checking your two-factor status…')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /2FA|recovery/i })).not.toBeInTheDocument();
   });
 });
 

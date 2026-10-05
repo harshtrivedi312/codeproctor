@@ -76,12 +76,6 @@ export interface SetupStart {
   qrDataUrl: string;
 }
 
-export const fetchTwoFactorStatus = async (): Promise<boolean> => {
-  const out = await run(() => api.GET('/v1/auth/2fa/status'));
-  if (!out.ok) throw new Error(out.failure);
-  return out.data.enabled;
-};
-
 export const startSetup = (currentPassword: string) =>
   run<SetupStart>(() => api.POST('/v1/auth/2fa/setup/start', { body: { currentPassword } }));
 

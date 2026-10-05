@@ -1,6 +1,5 @@
 'use client';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { useQueryClient } from '@tanstack/react-query';
 import * as React from 'react';
 import { useForm } from 'react-hook-form';
 import { Alert } from '@/components/ui/alert';
@@ -9,6 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { useAuth } from '@/features/auth/auth-provider';
+import { captureSessionStamp, refreshForReplay } from '@/lib/auth-session';
 import { RecoveryCodesPanel } from '@/features/auth/recovery-codes-panel';
 import {
   confirmSetup,
@@ -99,7 +99,8 @@ export function ActionDialog({
   onDone: (result: SecurityResult) => void;
 }): React.JSX.Element {
   const { user } = useAuth();
-  const queryClient = useQueryClient();
+  // Who this dialog was opened by: the re-read below only runs for that same user.
+  const stampRef = React.useRef(captureSessionStamp());
   const [stage, setStage] = React.useState<Stage>({ kind: 'password', passwordWrong: false });
   // The password sits in this component state between set-up start and set-up confirm because
   // the confirm call needs it again. It is cleared once confirm succeeds or fails on the password,
@@ -124,6 +125,7 @@ export function ActionDialog({
     if (action === 'disable') {
       const out = await disableTwoFactor(values.currentPassword);
       if (!out.ok) return fail(out.failure);
+      refreshStatus();
       onDone('disabled');
       return 'ok';
     }
@@ -134,9 +136,13 @@ export function ActionDialog({
     return 'ok';
   }
 
-  /** 2FA state changed on the server: refresh it now, not only when the dialog is closed. */
+  /**
+   * 2FA state changed on the server: re-read the session user (it carries `totpEnabled`) through
+   * the shared silent-refresh guard at once, not only when the dialog closes. It never runs for
+   * a different user than the one who opened the dialog.
+   */
   function refreshStatus(): void {
-    void queryClient.invalidateQueries({ queryKey: ['2fa-status', user?.id ?? null] });
+    void refreshForReplay(stampRef.current);
   }
 
   function fail(f: Failure): 'wrong' | 'invalid' | 'failed' {

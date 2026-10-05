@@ -164,6 +164,8 @@ function sessionFor(user: MockUser): Schemas['AuthSession'] {
       name: user.name,
       role: user.role,
       orgName: 'Acme Hiring (demo)',
+      // Read from the per-user mock 2FA state at the time of the call, like the real session user.
+      totpEnabled: twoFactorOn(user, load()),
     },
   };
 }
@@ -388,15 +390,6 @@ export function createAuthHandlers() {
     }),
 
     // Signed-in 2FA management (FR-102). Every call re-asks the current password.
-    http.get(`${base}/2fa/status`, ({ request }) => {
-      const role = mockRoleFromToken(request.headers.get('Authorization'));
-      const user = role
-        ? Object.values<MockUser>(MOCK_USERS).find((u) => u.role === role)
-        : undefined;
-      if (!user) return problem(request, 401, 'Unauthorized');
-      return HttpResponse.json({ enabled: twoFactorOn(user, load()) });
-    }),
-
     http.post(`${base}/2fa/setup/start`, async ({ request }) => {
       const checked = await reauth(request);
       if (checked instanceof Response) return checked;

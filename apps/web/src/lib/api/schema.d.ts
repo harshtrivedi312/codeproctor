@@ -157,23 +157,6 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  '/v1/auth/2fa/status': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /** Whether the signed-in user has TOTP turned on (placeholder, see ARC-02 note in docs/followups/frontend.md) */
-    get: operations['getTwoFactorStatus'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
   '/v1/auth/2fa/setup/start': {
     parameters: {
       query?: never;
@@ -461,6 +444,7 @@ export interface components {
       name: string;
       role: components['schemas']['StaffRole'];
       orgName: string;
+      totpEnabled: boolean;
     };
     AuthSession: {
       accessToken: string;
@@ -930,37 +914,6 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ApiError'];
-        };
-      };
-    };
-  };
-  getTwoFactorStatus: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Current status */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            enabled: boolean;
-          };
-        };
-      };
-      /** @description Not signed in */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
         };
       };
     };
