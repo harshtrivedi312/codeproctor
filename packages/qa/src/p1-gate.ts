@@ -13,7 +13,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-const root = resolve(import.meta.dirname, '../../..');
+// P1_GATE_ROOT lets the gate's own tests point it at a fixture tree with a fake docs folder.
+const root = process.env.P1_GATE_ROOT ?? resolve(import.meta.dirname, '../../..');
 const args = process.argv.slice(2);
 const strict = args.includes('--strict');
 const reports = args.filter((a) => !a.startsWith('--'));

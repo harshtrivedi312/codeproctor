@@ -113,6 +113,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: pnpm --filter @codeproctor/api exec node --experimental-vm-modules node_modules/jest/bin/jest.js -c test/jest.integration.config.js --runInBand --forceExit --json --outputFile=../../packages/qa/test-results/api-int.json
 
+      # The apps/api unit config also holds TC-008 (org isolation, src/database/tc-008-org-isolation.spec.ts
+      # once DB PR #30 is on main). Its JSON goes to the gate so TC-008 is read like any other P1 case.
+      - name: API unit and org-isolation tests (TC-008)
+        if: ${{ !cancelled() }}
+        run: pnpm --filter @codeproctor/api exec node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --forceExit --json --outputFile=../../packages/qa/test-results/api-unit.json
+
       - name: Install the Playwright browser
         if: ${{ !cancelled() }}
         run: pnpm --filter @codeproctor/qa exec playwright install --with-deps chromium
@@ -125,7 +131,7 @@ jobs:
       # own as well; the gate makes the P1 verdict explicit and prints one line per P1 case.
       - name: P1 gate
         if: ${{ !cancelled() }}
-        run: pnpm --filter @codeproctor/qa run gate test-results/web.json test-results/qa.json test-results/sdk.json test-results/shared.xml test-results/worker.xml test-results/api-int.json test-results/e2e.json
+        run: pnpm --filter @codeproctor/qa run gate test-results/web.json test-results/qa.json test-results/sdk.json test-results/shared.xml test-results/worker.xml test-results/api-int.json test-results/api-unit.json test-results/e2e.json
 
       - name: Upload test reports
         if: ${{ !cancelled() }}
