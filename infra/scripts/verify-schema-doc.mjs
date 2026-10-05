@@ -53,8 +53,10 @@ export function udtName(docType) {
 /** Words that identify a partial-index predicate without PostgreSQL's re-printing (casts, parentheses). */
 export function predicateKey(text) {
   const words = text.replace(/::\w+/g, '').match(/'[^']*'|\b[a-z_][a-z0-9_]*\b/gi) ?? [];
+  // IS, NOT and NULL stay in the key: IS NULL and IS NOT NULL are different predicates.
   return words
-    .filter((w) => !/^(where|in|any|array|and|or|not|is|null)$/i.test(w))
+    .filter((w) => !/^(where|in|any|array)$/i.test(w))
+    .map((w) => w.toLowerCase())
     .sort()
     .join(' ');
 }

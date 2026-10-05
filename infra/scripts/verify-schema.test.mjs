@@ -2,8 +2,9 @@
 // A real PostgreSQL 16 in a throwaway container, the repository's migrations, and docs/database.md
 // as the reference. Nothing here runs `prisma migrate reset` or `db push` (ADR 0009); the only
 // Prisma commands are `migrate deploy` and `migrate diff` against the throwaway server.
-// Skipped with a message when docker or psql is missing; CI sets REQUIRE_DB_DRILL=1 to make that
-// a failure (FU-DBB-03).
+// Skipped with a message when docker, psql or the postgres:16 image is missing. REQUIRE_DB_DRILL=1
+// turns that, and a missing origin/main for the migration guard, into a failure. CI does not set it
+// yet: it needs the hub's CI change in FU-DBB-03 (pull the image, fetch-depth: 0, set the flag).
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -23,7 +24,7 @@ import {
 
 const skip = drillUnavailable(['psql']) ?? false;
 if (skip) console.log(`# DB-08 verification skipped: ${skip}`);
-const required = process.env.REQUIRE_DB_DRILL === '1' || process.env.CI === 'true';
+const required = process.env.REQUIRE_DB_DRILL === '1';
 it('DB-08: the verification can run when it is required', { skip: !(skip && required) }, () => {
   assert.fail(`the verification cannot run: ${skip}`);
 });
@@ -84,7 +85,16 @@ describe('DB-08 migrations are forward-only (FR-105)', () => {
     const changed = diff.stdout
       .trim()
       .split('\n')
-      .filter((l) => l !== '' && !l.startsWith('A\t'));
+      .filter((l) => {
+        if (l === '') return false;
+        if (!l.startsWith('A\t')) return true;
+        // A new file is fine only inside a NEW migration directory.
+        const dir = l.split('\t')[1].split('/').slice(0, 3).join('/');
+        return (
+          spawnSync('git', ['cat-file', '-e', `origin/main:${dir}`], { cwd: REPO_ROOT }).status ===
+          0
+        );
+      });
     assert.deepEqual(
       changed,
       [],
@@ -241,7 +251,7 @@ describe('DB-08 schema against docs/database.md (FR-105)', { skip }, () => {
     q(
       `INSERT INTO users (org_id, email, full_name, password_hash, role) VALUES ('${org}', 'trigger@example.test', 'T', 'x', 'REVIEWER')`,
     );
-    const before = q("SELECT updated_at FROM users WHERE email = 'trigger@example.test'");
+    const first = q("SELECT updated_at FROM users WHERE email = 'trigger@example.test'");
     q(
       "UPDATE users SET full_name = 'T2', updated_at = '2000-01-01' WHERE email = 'trigger@example.test'",
     );
@@ -251,7 +261,7 @@ describe('DB-08 schema against docs/database.md (FR-105)', { skip }, () => {
       ),
       't',
     );
-    assert.notEqual(q("SELECT updated_at FROM users WHERE email = 'trigger@example.test'"), before);
+    assert.notEqual(q("SELECT updated_at FROM users WHERE email = 'trigger@example.test'"), first);
   });
 });
 
@@ -401,8 +411,8 @@ describe('DB-08 CHECK constraints and cascades on real rows (FR-105, NFR-05)', {
     q(
       `INSERT INTO webhook_deliveries (endpoint_id, session_id, event, attempt) VALUES ('bbbbbbbb-0000-4000-8000-000000000001', '${keptSession}', 'session.completed', 1)`,
     );
-    const sessionChildren = q(`SELECT s.id FROM sessions s WHERE s.id = '${keptSession}'`);
-    assert.equal(sessionChildren, keptSession);
+    const sessionId = q(`SELECT s.id FROM sessions s WHERE s.id = '${keptSession}'`);
+    assert.equal(sessionId, keptSession);
     q(
       `DELETE FROM appeals WHERE session_review_id IN (SELECT id FROM session_reviews WHERE session_id = '${keptSession}')`,
     );

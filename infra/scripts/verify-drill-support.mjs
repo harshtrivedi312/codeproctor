@@ -55,7 +55,8 @@ export function startPostgres() {
   try {
     portLine = execFileSync('docker', ['port', id, '5432/tcp'], { encoding: 'utf8' });
   } catch (error) {
-    sweep();
+    spawnSync('docker', ['rm', '-f', id], { stdio: 'ignore' });
+    started.delete(id);
     throw error;
   }
   const port = Number(portLine.trim().split('\n')[0].split(':').pop());
@@ -83,7 +84,8 @@ export function startPostgres() {
     });
     if (r.status === 0 && r.stdout.trim() === '1') break;
     if (Date.now() > deadline) {
-      spawnSync('docker', ['rm', '-f', id]);
+      spawnSync('docker', ['rm', '-f', id], { stdio: 'ignore' });
+      started.delete(id);
       throw new Error('throwaway postgres did not become ready');
     }
     spawnSync('sleep', ['1']);
