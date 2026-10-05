@@ -7,8 +7,14 @@ export interface HttpJudge0Options {
   readonly authToken?: string;
   /** Per HTTP request timeout. */
   readonly requestTimeoutMs: number;
-  /** Total time allowed for one batch to finish, polling included. */
+  /**
+   * Slack added to the whole runBatch deadline. The deadline is
+   * pollDeadlineMs + ceil(submissions / workerConcurrency) * longest wall limit, shared by every
+   * chunk, so a big batch cannot wait chunks x pollDeadlineMs.
+   */
   readonly pollDeadlineMs: number;
+  /** Sandboxes Judge0 runs at once (COUNT in infra/judge0). Default 2. */
+  readonly workerConcurrency?: number;
   /** Judge0 default MAX_SUBMISSION_BATCH_SIZE is 20. */
   readonly maxBatchSize?: number;
   readonly initialPollDelayMs?: number;
@@ -32,6 +38,7 @@ interface RawJudge0Json {
 }
 
 const FIELDS = 'token,status,stdout,stderr,compile_output,message,time,wall_time,memory,exit_code';
+const TOKEN_RE = /^[0-9a-f-]{36}$/i;
 const b64 = (s: string): string => Buffer.from(s, 'utf8').toString('base64');
 
 /** Judge0 CE over HTTP: batch submit, poll with backoff, base64 on the wire. */
@@ -51,14 +58,23 @@ export class HttpJudge0Client implements Judge0Client {
 
   async runBatch(submissions: readonly Judge0Submission[]): Promise<Judge0RawResult[]> {
     const size = this.options.maxBatchSize ?? 20;
+    const concurrency = Math.max(1, this.options.workerConcurrency ?? 2);
+    const longestWall = submissions.reduce((m, s) => Math.max(m, s.limits.wallMs), 0);
+    const deadline =
+      this.now() +
+      this.options.pollDeadlineMs +
+      Math.ceil(submissions.length / concurrency) * longestWall;
     const results: Judge0RawResult[] = [];
     for (let i = 0; i < submissions.length; i += size) {
-      results.push(...(await this.runChunk(submissions.slice(i, i + size))));
+      results.push(...(await this.runChunk(submissions.slice(i, i + size), deadline)));
     }
     return results;
   }
 
-  private async runChunk(chunk: readonly Judge0Submission[]): Promise<Judge0RawResult[]> {
+  private async runChunk(
+    chunk: readonly Judge0Submission[],
+    deadline: number,
+  ): Promise<Judge0RawResult[]> {
     const created = await this.request<{ token?: string }[]>(
       'POST',
       '/submissions/batch?base64_encoded=true',
@@ -78,11 +94,23 @@ export class HttpJudge0Client implements Judge0Client {
       },
     );
     const tokens = created.map((c) => c.token);
-    if (tokens.length !== chunk.length || tokens.some((t) => typeof t !== 'string' || t === '')) {
-      throw new Judge0UnavailableError('Code runner returned an unexpected response');
+    const valid = tokens.filter((t): t is string => typeof t === 'string' && TOKEN_RE.test(t));
+    try {
+      if (tokens.length !== chunk.length || valid.length !== tokens.length) {
+        throw new Judge0UnavailableError('Code runner returned an unexpected response');
+      }
+      return await this.poll(chunk, valid, deadline);
+    } finally {
+      // Judge0 keeps source, stdin and expected output until deleted: remove them on every path.
+      await this.deleteAll(valid);
     }
+  }
 
-    const deadline = this.now() + this.options.pollDeadlineMs;
+  private async poll(
+    chunk: readonly Judge0Submission[],
+    tokens: readonly string[],
+    deadline: number,
+  ): Promise<Judge0RawResult[]> {
     let delay = this.options.initialPollDelayMs ?? 200;
     const maxDelay = this.options.maxPollDelayMs ?? 2000;
     for (;;) {
@@ -106,12 +134,23 @@ export class HttpJudge0Client implements Judge0Client {
     }
   }
 
+  /** Best effort: never throws. Needs ENABLE_SUBMISSION_DELETE=true on the server. */
+  private async deleteAll(tokens: readonly string[]): Promise<void> {
+    const outcomes = await Promise.allSettled(
+      tokens.map((t) => this.send('DELETE', `/submissions/${t}?fields=token`)),
+    );
+    const failed = outcomes.filter((o) => o.status === 'rejected' || !o.value.ok).length;
+    if (failed > 0) this.logger.warn(`Judge0 could not delete ${failed} of ${tokens.length} submissions`);
+  }
+
   private decode(raw: RawJudge0Json, cap: number): Judge0RawResult {
     const text = (v: string | null | undefined): string | null => {
       if (v === null || v === undefined) return null;
-      // Decode at most cap bytes: 4 base64 chars carry 3 bytes.
+      // Judge0 wraps base64 in newlines: strip whitespace first, then keep at most cap bytes
+      // (4 base64 chars carry 3 bytes).
+      const clean = v.replace(/\s+/g, '');
       const limit = Math.ceil((cap * 4) / 3) + 4;
-      return Buffer.from(v.slice(0, limit), 'base64').subarray(0, cap).toString('utf8');
+      return Buffer.from(clean.slice(0, limit), 'base64').subarray(0, cap).toString('utf8');
     };
     const ms = (v: string | number | null | undefined): number | null => {
       if (v === null || v === undefined) return null;
@@ -132,18 +171,22 @@ export class HttpJudge0Client implements Judge0Client {
     };
   }
 
-  private async request<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
+  private async send(method: 'GET' | 'POST' | 'DELETE', path: string, body?: unknown): Promise<Response> {
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (this.options.authToken) headers['X-Auth-Token'] = this.options.authToken;
+    return this.fetchFn(`${this.base}${path}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(this.options.requestTimeoutMs),
+    });
+  }
+
+  private async request<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
     let response: Response;
     try {
-      response = await this.fetchFn(`${this.base}${path}`, {
-        method,
-        headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(this.options.requestTimeoutMs),
-      });
+      response = await this.send(method, path, body);
     } catch {
       // The error text can echo the URL; log the class of failure only.
       this.logger.warn(`Judge0 ${method} failed: network error or timeout`);
