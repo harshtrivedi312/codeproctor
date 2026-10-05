@@ -53,7 +53,7 @@ Face images and face templates are **biometric data**. We use them **only to con
 
 If the faces don't match well enough, **a person compares them. You are never rejected automatically** by the face match.
 
-### 5. Automated detection, and people making every decision
+### 5. Automated detection, and people making the decisions
 
 During the test, software looks for signs that a test may not have been taken fairly. Examples:
 - more than one face on camera;
@@ -128,7 +128,7 @@ We record the document version, your typed name, the date and time from our serv
 4. **Section 6 processors** must match the processor register (processors.md) and the P-10 choice (email and error tracker). Owner fill-ins applied 2026-10-05: company name, privacy email and region are still placeholders; access by role; one selfie; 30-day erasure with the C-06 hold; withdrawal before or during the test by ending the session, and after the test as an erasure request; SCC transfer wording; consent proof kept 3 years (C-17).
 5. **Section 7 transfer wording** uses SCCs, as the owner decided. If a processor relies on DPF instead, add it here.
 6. **The section 10 example questions** must match the FAIR-01 form once it is designed. Some categories (for example ethnicity) are special-category data under GDPR, and the separate consent covers them.
-7. **Job postings (C-14)** should carry a one-line notice, for example: "This role includes a proctored online coding assessment. Automated tools flag possible issues, and a person makes every decision."
+7. **Job postings (C-14)** should carry a one-line notice, for example: "This role includes a proctored online coding assessment. Automated tools flag possible issues; nothing is rejected automatically, and a person makes every hiring decision."
 8. **Reading level.** The aim is plain language at about a US grade 8 reading level. A final readability pass is recommended after your edits.
 9. **Auto-clear of low-risk sessions (OQ-8).** The current design (ADR 0002, fsd.md §3) marks LOW-band sessions with confirmed identity as COMPLETED without a reviewer. Section 5 says so. If you want a person to look at every session, that is a design change.
 10. **Re-check frames** follow ADR 0013, which is still a proposal and changes FR-606 (from an in-browser check to a server check). Keep sections 3 and 4 in step with the accepted ADR.

@@ -1,6 +1,6 @@
 # Data protection impact assessment: CodeProctor pilot
 
-Status: **DRAFT v0.1 for owner approval** (C-03a, C-14). Drafted 2026-10-05 by the Delivery Lead from the project documents (BRD, FSD, architecture, accepted ADRs 0001 to 0010, proposed ADRs 0011 to 0013, compliance decisions C-01 to C-16). Approver: Harsh Trivedi. **This DPIA has not had professional legal review (C-15, R-17).** Statements about laws are a first-pass reading for planning and need verification, especially the items marked *verify*.
+Status: **DRAFT v0.1 for owner approval** (C-03a, C-14). Drafted 2026-10-05 by the Delivery Lead from the project documents (BRD, FSD, architecture, accepted ADRs 0001 to 0010, proposed ADRs 0011 to 0013, compliance decisions C-01 to C-20). Approver: Harsh Trivedi. **This DPIA has not had professional legal review (C-15, R-17).** Statements about laws are a first-pass reading for planning and need verification, especially the items marked *verify*.
 
 Approval of this DPIA is a pilot entry blocker for EU/UK candidates (C-03a; status.md B-05 item 5).
 
@@ -23,7 +23,7 @@ The GDPR and UK GDPR require a DPIA where processing is likely to result in a hi
 | Data | Identity: name, email, invitation details. Identity check: ID image, selfie, liveness result, match score (face templates are calculated in memory and **never stored**, ADR 0004). Monitoring: screen, webcam and microphone recordings, room scan, identity re-check frames (kept only on mismatch, C-08), evidence snapshots, browser and integrity events, keystroke timing and edits, IP address, device details. Results: code, answers, scores, risk score and band, reviewer decisions and notes, appeals. Consent record: version, typed name, timestamp, IP, user agent, signed PDF. Optional demographics (C-13), separate and aggregate only |
 | Data flow | Browser to API (HTTPS); browser to object storage directly through short-lived presigned URLs, so media never passes through the API; API to Postgres; worker reads media from storage for analysis; Judge0 (self-hosted) runs code; reviewers watch through 15-minute signed playback URLs |
 | Where | One US AWS region for all data, EU/UK included (C-03). Web front end served by Cloudflare Pages. Processors: [processors.md](processors.md) |
-| Retention | [retention-schedule.md](retention-schedule.md): media and biometric data 90 days after the assessment is finished; consent records 3 years; results [OQ-4]; backups 14 days |
+| Retention | [retention-schedule.md](retention-schedule.md): media and biometric data [N] days after the assessment is finished (the organisation's setting, default 90; biometric items capped at 90 if OQ-5 is decided as proposed); consent records 3 years, also after erasure (C-17); consent records 3 years; results [OQ-4]; backups 14 days |
 | Who decides | Nothing negative is decided automatically. LOW-band sessions with confirmed identity are marked clear without a reviewer (ADR 0002, fsd.md §3); every other session goes to a trained reviewer; a person makes every hiring decision (BRD §7, FR-805, FR-902, C-14; OQ-8 asks whether every session needs a person) |
 
 ## 3. Lawful basis
@@ -33,7 +33,7 @@ The GDPR and UK GDPR require a DPIA where processing is likely to result in a hi
 | Biometric identity check and re-checks | Art. 6(1)(a) consent and **Art. 9(2)(a) explicit consent** (C-02), given by signing the consent document | Consent must be freely given; see risk R5 and section 6 |
 | Recording, monitoring, integrity detection, scoring | Current design: consent, through the same signed document. **Alternative to consider (OQ-6):** Art. 6(1)(f) legitimate interests (a fair and secure assessment), or Art. 6(1)(b) (steps before entering a contract), with consent kept only for biometrics. Under consent, withdrawal stops further processing (data already collected follows the retention schedule or is erased on request); under legitimate interests, the record of the attempt could be kept for integrity. The consent document's withdrawal text waits for this choice | Choose one basis per purpose and state it in the consent document and privacy notice |
 | Optional demographics (C-13) | Art. 9(2)(a) explicit consent, separate from the test consent | Aggregate reporting only, with a minimum group size of 10 |
-| Consent records kept 3 years | Art. 6(1)(c)/(f) and Art. 17(3)(e) (proving consent; legal claims) | OQ-1 decides what happens on erasure |
+| Consent records kept 3 years | Art. 6(1)(c)/(f) and Art. 17(3)(e) (proving consent; legal claims) | Kept for 3 years even after an erasure request (C-17) |
 
 US laws:
 - **Illinois BIPA:** written notice of purpose and retention period; a written release; a public retention and destruction schedule (C-05); no selling or profiting (C-05); no disclosure without consent (the consent document names the processors); reasonable security.
@@ -50,7 +50,7 @@ US laws:
   - The ID photo is used only for the identity check (FR-403).
 - **Retention limits:**
   - automatic daily deletion jobs;
-  - 90 days for media and biometrics;
+  - [N] days for media and biometrics (default 90; the cap for biometric items is OQ-5);
   - a proposed cap that stops organisations from extending biometric retention (OQ-5);
   - erasure on request within the approved timeline (C-06).
 - **Transparency:** a plain-language consent document read to the end before anything is recorded (FR-401, C-09), the public retention schedule, and notices in job postings (C-14).
@@ -75,7 +75,7 @@ Likelihood and severity are before the measures. Residual risk is after them.
 | R1 | Unauthorised access to recordings or ID images (a breach, or misuse by insiders) | Possible / severe | Encryption at rest; private buckets; 15-minute playback URLs; two-factor for reviewers; org scoping; audit log of every access; least-privilege roles; incident response plan (DEP-02) | Medium |
 | R2 | A false face mismatch, more often for some groups (lighting, skin tone, eye conditions, disability) | Likely / significant | Never auto-reject; manual comparison by a person; threshold tuned on a diverse volunteer set with a per-group breakdown (C-11, C-12); pilot exit review of error rates by group (D-05); fairness monitoring (C-13) | Medium |
 | R3 | False integrity flags (gaze, voice, pastes, AI-likeness), with disabled or neurodivergent candidates possibly affected more | Likely / significant | Flags are evidence only; trained reviewers; accommodations that turn detectors off; appeal; configurable thresholds and weights | Medium |
-| R4 | Recording of bystanders and the private home (household members, room contents, notifications on screen) | Likely / moderate | Tell candidates in advance to use a private space and close other apps; the room scan is the candidate's own action; access limited to reviewers; 90-day deletion | Medium |
+| R4 | Recording of bystanders and the private home (household members, room contents, notifications on screen) | Likely / moderate | Tell candidates in advance to use a private space and close other apps; the room scan is the candidate's own action; access limited to reviewers; deletion after [N] days (default 90) | Medium |
 | R5 | Consent not freely given, because the candidate needs the job (GDPR Art. 7(4), recital 43; status.md R-18) | Possible / significant (lawful basis invalid) | Alternative path through accommodations (C-02); a statement that declining is not a failed assessment (consent document drafting note 2); consider legitimate interests for non-biometric processing (OQ-6) | Medium: **owner decision needed** |
 | R6 | Inferring special-category data from video or audio (health, religion, ethnicity) | Possible / significant | No such processing; reviewer guidance not to note such observations; free-text notes erased on erasure | Low |
 | R7 | Function creep: recordings or biometric data used for other purposes (security, other hiring, training models) | Unlikely / severe | Purpose limitation in the consent document; no model training on candidate data; access logging; the retention schedule | Low |
@@ -83,12 +83,12 @@ Likelihood and severity are before the measures. Residual risk is after them.
 | R9 | Over-retention (results kept with no limit; organisation settings up to 730 days) | Likely / moderate | Decide OQ-4 (a results retention period) and OQ-5 (cap biometric items at 90 days) | Medium until decided, then low |
 | R10 | Automated decision-making in effect, because reviewers rubber-stamp the score or risk band | Possible / significant | A verdict requires a decision on every HIGH flag (ADR 0001 F7, FR-902); reviewer training; monitoring of how often reviewers agree with the risk band; appeals | Medium |
 | R11 | Under-18 candidates (for example, interns) | Unlikely / moderate | Add an age confirmation, or a parental-consent path, if minors can apply (OQ-7) | Low after OQ-7 |
-| R12 | Misuse of the optional demographic data, or re-identification from small groups | Unlikely / severe | Separate store; never visible to staff; never used in decisions; aggregate only with a minimum group of 10; deleted at 90 days (C-13) | Low |
+| R12 | Misuse of the optional demographic data, or re-identification from small groups | Unlikely / severe | Separate store; never visible to staff; never used in decisions; aggregate only with a minimum group of 10; deleted with the recordings after [N] days (default 90; C-13) | Low |
 | R13 | Candidate data reaching third parties not listed (error tracking, fonts, model CDNs) | Possible / moderate | Processor register boundary; PII scrubbing; self-hosted fonts and model files (ADR 0013) | Low |
 
 ## 6. Measures still to put in place
 
-1. Decide OQ-1, OQ-4, OQ-5, OQ-6 and OQ-7.
+1. Decide OQ-4, OQ-5, OQ-6, OQ-7 and OQ-8 (OQ-1 to OQ-3 were decided by C-17 to C-19).
 2. Sign or accept the DPAs, with SCCs or DPF, for every processor ([processors.md](processors.md)), and choose the email provider and error tracker (P-10).
 3. Write a reviewer guide covering bias awareness, not rubber-stamping, and what not to record in notes.
 4. Write a breach and incident response procedure (in DEP-02's checklist), including the 72-hour notification under GDPR Art. 33, and US state breach rules.
@@ -159,7 +159,7 @@ Art. 22 covers decisions based **solely** on automated processing. Because a per
 
 | Item | Value |
 | --- | --- |
-| Overall residual risk | Medium, acceptable for a pilot **if** OQ-1, OQ-4, OQ-5, OQ-6 and OQ-7 are decided, the processor agreements are in place, and the human-review evidence (R10) is collected |
+| Overall residual risk | Medium, acceptable for a pilot **if** OQ-4, OQ-5, OQ-6, OQ-7 and OQ-8 are decided, the processor agreements are in place, and the human-review evidence (R10) is collected |
 | Prior consultation with a supervisory authority (Art. 36) | Not needed if the residual risks above are accepted as medium or low. Revisit if R5 or R2 cannot be brought down |
 | Review date | At the pilot exit review, and before production |
 | Approved by | Harsh Trivedi, product owner: ____________ date: ________ |

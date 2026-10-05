@@ -16,7 +16,6 @@ C-03 requires a DPA with Standard Contractual Clauses (SCCs), or DPF certificati
 | Email provider (**not chosen yet, P-10**) | Invitation emails, OTP codes, consent PDF copy, erasure notices | Name, email address, OTP codes, the signed consent PDF (attachment or link) | Depends on the provider | AWS SES: covered by the AWS DPA. Brevo: EU provider with a DPA. Resend: US provider; check DPA and SCCs | Decide P-10, then sign or accept that provider's DPA |
 | Error tracking (**not chosen yet, P-10**) | Server and browser error reports | Should receive no personal data once scrubbing is on; in practice, IP addresses, browser details and anything that slips past scrubbing | Depends | Self-hosted GlitchTip on our AWS: no new processor. Sentry SaaS: DPA with SCCs; check DPF | Decide P-10; require PII, token and media-key scrubbing (CLAUDE.md) |
 | Cloudflare: Pages | Serving the web app to candidates and staff | IP addresses and request metadata of every visitor; no candidate media (uploads go straight to S3) | Global network | Cloudflare DPA with SCCs; Cloudflare DPF certification | Accept the Cloudflare DPA on the account; check the DPF entry |
-
 | Applicant tracking system (webhooks and CSV export, FR-1003) [if used] | Receiving results | Candidate name and email, status, scores and verdict | Depends | The ATS vendor is the company's own processor; check its DPA and SCCs | List the ATS used, or confirm none for the pilot |
 
 ## Services that must not receive candidate data
