@@ -186,6 +186,37 @@ describe('org scope completeness check can fail (NFR-04)', () => {
     ]);
   });
 
+  it('TC-008 fails for a path hop into User other than the composition parent RefreshToken.user (FU-DB-69)', () => {
+    // A staff reference (created_by, reviewer_id, ...) is rule (i), never a scope path, even though
+    // User has org_id and the path would end there.
+    const withUser: Record<string, ModelMeta> = {
+      ...models,
+      User: { name: 'User', fields: [field('id'), orgId] },
+      RefreshToken: { name: 'RefreshToken', fields: [relation('user', 'User')] },
+      Note: { name: 'Note', fields: [relation('createdBy', 'User')] },
+    };
+    const base = {
+      User: { kind: 'direct' } as const,
+      Widget: { kind: 'unscoped', reason: 'Global.' } as const,
+    };
+    const only = (extra: Record<string, OrgScopeRule>) =>
+      findScopeProblems({ ...rules({}), ...base, ...extra }, withUser);
+    expect(
+      only({
+        RefreshToken: { kind: 'path', path: ['user'] },
+        Note: { kind: 'unscoped', reason: 'x' },
+      }),
+    ).toEqual([]);
+    expect(
+      only({
+        RefreshToken: { kind: 'unscoped', reason: 'x' },
+        Note: { kind: 'path', path: ['createdBy'] },
+      }),
+    ).toEqual([
+      expect.stringContaining('Note.createdBy hops into User; only RefreshToken.user may'),
+    ]);
+  });
+
   it('TC-008 fails for a path that passes a model that already has org_id', () => {
     const deeper = {
       ...models,

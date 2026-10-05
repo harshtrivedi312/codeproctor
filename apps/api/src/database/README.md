@@ -114,11 +114,16 @@ root and is scoped by its own id. An `unscoped` entry (with a written reason) ex
 a future decision; the architect decides, and `org-scope-map.spec.ts` fails until the test list is
 updated.
 
-A path follows the parent chain (the relation that owns the row), not staff references such as
-`created_by` or `collected_by`. Those, and `test_questions.question_version_id`, rely on ADR 0006
-section 2 rule (i): load every foreign id through the scoped client first, answer 404 on a miss.
-The test checks each hop is a required to-one relation held on the child side, that the path ends at
-a model with `org_id`, and that it does not pass a model that already has one (nearest ancestor).
+**The composition-parent rule.** A path follows the **composition parent**: the row that owns the
+child and goes with it (a test owns its sections, a session its events, a question version its test
+cases). It never follows a staff reference such as `created_by`, `reviewer_id` or `collected_by`: a
+user is a person who acts, not an owner. Those references, and `test_questions.question_version_id`
+and the other cross-chain keys, rely on ADR 0006 section 2 rule (i): load every foreign id through
+the scoped client first, answer 404 on a miss. The one path that ends in `User` is
+`RefreshToken.user`, because a refresh token belongs to its user and is deleted with it; the test
+refuses a hop into `User` anywhere else (FU-DB-69). It also checks each hop is a required to-one
+relation held on the child side, that the path ends at a model with `org_id`, and that it does not
+pass a model that already has one (nearest ancestor).
 
 ## What the extension does
 

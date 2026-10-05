@@ -5,6 +5,9 @@
 import type { OrgScopeRule } from '../org-scope-map';
 import type { ModelMeta } from './data-model';
 
+/** The one scope-path hop into User: a refresh token belongs to its user and goes with it. */
+export const COMPOSITION_INTO_USER = 'RefreshToken.user';
+
 function hasOrgIdColumn(model: ModelMeta): boolean {
   return model.fields.some((f) => f.kind === 'scalar' && f.dbName === 'org_id');
 }
@@ -80,6 +83,14 @@ export function findScopeProblems(
               `${name}: ${from.name}.${relation} points to unknown model ${field.type}.`,
             );
             break;
+          }
+          // A path follows the composition parent: the row that owns the child and goes with it. A
+          // user is a person who acts (created_by, reviewer_id, ...), not an owner, so a hop into
+          // User is allowed only for the one row a user owns (FU-DB-69).
+          if (target.name === 'User' && `${from.name}.${relation}` !== COMPOSITION_INTO_USER) {
+            problems.push(
+              `${name}: ${from.name}.${relation} hops into User; only ${COMPOSITION_INTO_USER} may (a staff reference is rule (i), not a scope path).`,
+            );
           }
           const isLast = index === rule.path.length - 1;
           if (isLast && !hasOrgIdColumn(target)) {
