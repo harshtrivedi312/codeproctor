@@ -88,14 +88,57 @@ describe('Users (FR-103)', () => {
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('already has an account');
   });
 
-  it('FR-103: changes a role', async () => {
+  function countPatches(): { count: () => number; stop: () => void } {
+    let n = 0;
+    const listener = ({ request }: { request: Request }) => {
+      if (request.method === 'PATCH' && request.url.includes('/users/')) n++;
+    };
+    server.events.on('request:start', listener);
+    return { count: () => n, stop: () => server.events.removeListener('request:start', listener) };
+  }
+
+  it('FR-103: changing a role needs confirmation, then sends one request', async () => {
     const u = userEvent.setup();
     renderAsStaff(<UsersPage />, MOCK_USERS.admin);
     await findRow('Casey Newhire');
+    const patches = countPatches();
     await u.selectOptions(screen.getByLabelText('Role for Avery Author'), 'RECRUITER');
+    const dialog = await screen.findByRole('dialog');
+    expect(patches.count()).toBe(0);
+    expect(screen.getByLabelText('Role for Avery Author')).toHaveValue('AUTHOR');
+    await u.click(within(dialog).getByRole('button', { name: 'Change role' }));
     await waitFor(() =>
       expect(screen.getByLabelText('Role for Avery Author')).toHaveValue('RECRUITER'),
     );
+    expect(patches.count()).toBe(1);
+    patches.stop();
+  });
+
+  it('FR-103: cancelling the role confirmation sends nothing and keeps the role', async () => {
+    const u = userEvent.setup();
+    renderAsStaff(<UsersPage />, MOCK_USERS.admin);
+    await findRow('Casey Newhire');
+    const patches = countPatches();
+    await u.selectOptions(screen.getByLabelText('Role for Avery Author'), 'REVIEWER');
+    const dialog = await screen.findByRole('dialog');
+    await u.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(patches.count()).toBe(0);
+    expect(screen.getByLabelText('Role for Avery Author')).toHaveValue('AUTHOR');
+    patches.stop();
+  });
+
+  it('FR-103: promoting someone to Super Admin shows a clear warning before anything is sent', async () => {
+    const u = userEvent.setup();
+    renderAsStaff(<UsersPage />, MOCK_USERS.admin);
+    await findRow('Casey Newhire');
+    const patches = countPatches();
+    await u.selectOptions(screen.getByLabelText('Role for Avery Author'), 'SUPER_ADMIN');
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('Super Admin');
+    expect(dialog).toHaveTextContent('manage users, settings');
+    expect(patches.count()).toBe(0);
+    patches.stop();
   });
 
   it('FR-103: you cannot change your own role or deactivate yourself', async () => {
