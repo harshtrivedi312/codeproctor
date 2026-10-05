@@ -133,7 +133,7 @@ describe('Users (FR-103)', () => {
       within(await screen.findByRole('dialog')).getByRole('button', { name: 'Change role' }),
     );
     await waitFor(() => expect(toast.error).toHaveBeenCalled());
-    const message = String(vi.mocked(toast.error).mock.calls[0]?.[0]);
+    const message = vi.mocked(toast.error).mock.calls[0]?.[0] as string;
     expect(message).toContain('This role change is not allowed');
     expect(message).toContain('last Super Admin');
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());

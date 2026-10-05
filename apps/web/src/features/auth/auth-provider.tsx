@@ -52,7 +52,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
 
   /** Asks the server to end the session. Only a success clears the pending marker. */
   const confirmLogout = React.useCallback(async () => {
-    let ok = false;
+    let ok: boolean;
     try {
       ok = (await api.POST('/v1/auth/logout')).response.ok;
     } catch {
