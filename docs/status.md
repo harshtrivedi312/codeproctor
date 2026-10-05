@@ -290,9 +290,10 @@ Decisions taken by the Delivery Lead under the owner's delegation (order, priori
 | P-03 | FU-BE-24: a known staff email can be kept locked out by 5 failed logins (FR-101 lockout as written). Changing this changes FR-101 | Requirement / security trade-off |
 | P-04 | B-05 Legal pilot entry items (unchanged) | Legal |
 | P-05 | Production CSP: allow `'wasm-unsafe-eval'` (never `'unsafe-eval'`), only on the candidate test route, so that MediaPipe, onnxruntime and the tfjs wasm backends run. Hub recommends yes, with a CSP test proving the directive is absent elsewhere | Security trade-off that loosens CSP |
+| P-06 | Auto-fix on PRs: D-40 (2026-10-02) says it stays off; CLAUDE.md rule 4 (2026-10-05) says switch it on. Sessions follow CLAUDE.md (it is newer and says it wins); the DB session switched it on for #30. Confirm, or say which one should change | Shared rules / owner decision conflict |
 
 ## 10. Next 3 tasks, blockers, decisions
 
 - **Next 3 tasks on the critical path:** #26 merge (BE-02 hardening); #30 merge (DB-05, after DL-01 fixes); BE-03 (DL-02).
 - **Blockers:** GitHub Actions outage (external; affects every merge). B-05 blocks only the pilot.
-- **Decisions needed from the owner:** section 9b "Parked for the owner" (P-01 to P-05).
+- **Decisions needed from the owner:** section 9b "Parked for the owner" (P-01 to P-06).
