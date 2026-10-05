@@ -3,7 +3,7 @@
  * the matrix with a valid level and a status, and every TC ID named in a test file exists.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -45,16 +45,46 @@ describe('test matrix (QA-01)', () => {
   it('only names TC IDs that exist in tests', () => {
     const files = execFileSync(
       'git',
-      ['ls-files', '*.test.ts', '*.test.tsx', '*.spec.ts', '*.test.mjs', '*.js'],
+      [
+        'ls-files',
+        '*.test.ts',
+        '*.test.tsx',
+        '*.spec.ts',
+        '*.test.mjs',
+        '*.js',
+        'apps/worker/tests/*.py',
+      ],
       { cwd: root, encoding: 'utf8' },
     )
       .split('\n')
       .filter((f) => f !== '' && !f.startsWith('docs/') && !f.includes('matrix.test.ts'));
     const known = new Set(cases);
     for (const f of files) {
-      for (const m of read(f).matchAll(/\bTC-\d{3}\b/g)) {
-        expect(known.has(m[0]), `${f} names ${m[0]}`).toBe(true);
+      for (const m of read(f).matchAll(/(?<![A-Za-z0-9])TC[-_]?(\d{3})(?!\d)/gi)) {
+        const id = `TC-${m[1]}`;
+        expect(known.has(id), `${f} names ${m[0]}`).toBe(true);
       }
+    }
+  });
+
+  it('lists no test file in a Verified or Partial row that does not exist', () => {
+    const missing: string[] = [];
+    for (const row of matrixRows) {
+      const cells = row.split('|').map((c) => c.trim());
+      if (!/^(Verified|Partial)/i.test(cells[9] ?? '')) continue;
+      for (const m of (cells[8] ?? '').matchAll(/`([^`#]+?)(?:#[^`]*)?`/g)) {
+        const path = (m[1] ?? '').replace(/ \(.*$/, '');
+        if (/^(apps|packages|docs)\//.test(path) && !existsSync(resolve(root, path)))
+          missing.push(`${cells[1]}: ${path}`);
+      }
+    }
+    expect(missing).toEqual([]);
+  });
+
+  it('marks a row Verified only when the notes say what was run', () => {
+    for (const row of matrixRows) {
+      const cells = row.split('|').map((c) => c.trim());
+      if (/^Verified/i.test(cells[9] ?? '')) expect(cells[10], row).not.toBe('');
     }
   });
 });

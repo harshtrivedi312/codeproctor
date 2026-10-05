@@ -30,7 +30,14 @@ describe('TC-001 (FR-101): valid staff login', () => {
     const res = await login(h, u.email).expect(200);
     const body = res.body as Body;
     expect(body.status).toBe('authenticated');
-    expect(body.session.user).toMatchObject({ email: u.email, role: 'RECRUITER' });
+    // The shape the web app's OpenAPI contract expects (AuthSession).
+    expect(body.session.user).toEqual({
+      id: u.id,
+      email: u.email,
+      name: expect.any(String),
+      role: 'RECRUITER',
+      orgName: 'QA Org A',
+    });
     const claims = claimsOf(body.session.accessToken);
     expect(claims.exp - claims.iat).toBe(15 * 60);
     expect(claims.role).toBe('RECRUITER');
