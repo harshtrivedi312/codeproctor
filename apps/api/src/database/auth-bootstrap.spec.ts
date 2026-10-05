@@ -24,12 +24,14 @@ import { Prisma } from '../generated/prisma/client.js';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import { createPrismaClient } from './create-prisma-client';
 import { DatabaseModule } from './database.module';
+import { PrismaModule } from './prisma.module';
 import { OrgContextMissingError, OrgScopeViolationError, RawQueryNotAllowedError } from './errors';
 import { OrgContextService } from './org-context';
 import type { AuthenticatedUser } from './org-context';
 import { PrismaService } from './prisma.service';
 import { startMigratedDatabase } from './testing/migrated-postgres';
 import type { MigratedDatabase, StatementCount } from './testing/migrated-postgres';
+import { staffBearer } from './testing/staff-token';
 import { createTenant } from './testing/tenant-fixtures';
 import type { TenantFixture } from './testing/tenant-fixtures';
 
@@ -88,6 +90,8 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
           load: [() => ({ DATABASE_URL: db.appUserUrl, JWT_ACCESS_SECRET: JWT_SECRET })],
         }),
         TokenModule,
+        // BE-02's unscoped client: the real guard re-reads the user through it on every request.
+        PrismaModule,
         DatabaseModule,
       ],
       controllers: [ProbeController],
@@ -634,20 +638,38 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
       expect(filtered[0]?.query).toContain('org_id');
     });
 
-    it("NFR-04 an authenticated HTTP request (guard, interceptor, handler) sends only the handler's one statement", async () => {
-      const token = app
-        .get(TokenService)
-        .sign({ sub: A.userId, org: A.orgId, role: 'RECRUITER', kind: 'access' }, 300);
+    it("NFR-04 an authenticated HTTP request sends two statements: the guard's user re-check, then the handler's one", async () => {
+      // BE-02's JwtAuthGuard re-reads the user on every request (FU-BE-19) through its own unscoped
+      // client. Neither the interceptor nor the extension adds anything on top of that.
+      const bearer = staffBearer(app.get(TokenService), A);
       const get = (): Promise<unknown> =>
         request(app.getHttpServer())
           .get(`/probe/users/${A.userId}`)
-          .set('Authorization', `Bearer ${token}`)
+          .set('Authorization', bearer)
           .expect(200);
-      const bare = await measured(() =>
+      // The guard's lookup, run alone on the plain client, as the guard writes it.
+      const guardLookup = await measured(() =>
+        plain.user.findUnique({
+          where: { id: A.userId },
+          select: { isActive: true, role: true, orgId: true, passwordHash: true },
+        }),
+      );
+      // The handler's lookup, as the scoped client sends it: the same call with the filter by hand.
+      const handlerLookup = await measured(() =>
         plain.user.findUnique({ where: { id: A.userId, AND: [{ orgId: A.orgId }] } }),
       );
-      expect(bare).toHaveLength(1);
-      expect(await measured(get)).toEqual(bare);
+      expect(guardLookup).toHaveLength(1);
+      expect(handlerLookup).toHaveLength(1);
+      expect(guardLookup[0]?.query).toContain('password_hash');
+      expect(guardLookup[0]?.query).not.toBe(handlerLookup[0]?.query);
+
+      const request2 = await measured(get);
+      expect(request2).toHaveLength(2);
+      expect(request2.reduce((total, row) => total + row.calls, 0)).toBe(2);
+      // Exactly the guard's lookup and the handler's lookup, each once, and nothing else.
+      expect(request2).toEqual(
+        [...guardLookup, ...handlerLookup].sort((x, y) => x.query.localeCompare(y.query)),
+      );
     });
 
     it('NFR-04 upsert is the one operation whose statements differ: native in system scope, SELECT then INSERT or UPDATE in an org scope', async () => {

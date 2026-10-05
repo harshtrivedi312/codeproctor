@@ -37,6 +37,7 @@ import { TokenModule, TokenService } from '../common/auth/token.service';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import { createPrismaClient } from './create-prisma-client';
 import { DatabaseModule } from './database.module';
+import { PrismaModule } from './prisma.module';
 import { OrgContextMissingError, OrgScopeViolationError, RawQueryNotAllowedError } from './errors';
 import { OrgContextService } from './org-context';
 import { ORG_SCOPE } from './org-scope-map';
@@ -44,6 +45,7 @@ import type { ModelName } from './org-scope-map';
 import { PrismaService } from './prisma.service';
 import { startMigratedDatabase } from './testing/migrated-postgres';
 import type { MigratedDatabase } from './testing/migrated-postgres';
+import { staffBearer } from './testing/staff-token';
 import { createTenant } from './testing/tenant-fixtures';
 import type { TenantFixture } from './testing/tenant-fixtures';
 
@@ -91,13 +93,15 @@ const ALL_ROLES = ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'REVIEWER'] as const;
 const JWT_SECRET = 'a-secret-for-the-tc-008-tests-only';
 
 // What a staff route does: look a row up by the id in the URL, answer 404 on a miss. BE-02's
-// JwtAuthGuard authenticates (deny by default: @Roles or @Public) and the interceptor sets the org.
+// JwtAuthGuard authenticates (deny by default: @Roles or @Public; both on one route is refused) and
+// the interceptor sets the org. Roles are declared per method, and the public route lives in its own
+// controller, because the merged guard refuses a @Public() method inside a @Roles() class.
 @Controller('probe')
-@Roles(...ALL_ROLES)
 class ProbeController {
   constructor(private readonly prisma: PrismaService) {}
 
   @Get('sessions/:id')
+  @Roles(...ALL_ROLES)
   async session(@Param('id') id: string): Promise<{ id: string; orgId: string }> {
     const row = await this.prisma.client.session.findUnique({ where: { id } });
     if (row === null) throw new NotFoundException();
@@ -105,6 +109,7 @@ class ProbeController {
   }
 
   @Get('sessions')
+  @Roles(...ALL_ROLES)
   async sessions(@Query('id') id?: string): Promise<string[]> {
     const where = id === undefined ? undefined : { id };
     return (await this.prisma.client.session.findMany({ where })).map((s) => s.id);
@@ -112,6 +117,7 @@ class ProbeController {
 
   // A filtered list on a model scoped through its parent chain.
   @Get('events')
+  @Roles(...ALL_ROLES)
   async events(@Query('sessionId') sessionId?: string): Promise<string[]> {
     const where = sessionId === undefined ? undefined : { sessionId };
     return (await this.prisma.client.proctorEvent.findMany({ where, orderBy: { id: 'asc' } })).map(
@@ -120,6 +126,7 @@ class ProbeController {
   }
 
   @Get('events/:id')
+  @Roles(...ALL_ROLES)
   async event(@Param('id') id: string): Promise<{ id: string }> {
     const row = await this.prisma.client.proctorEvent.findUnique({ where: { id: BigInt(id) } });
     if (row === null) throw new NotFoundException();
@@ -127,13 +134,19 @@ class ProbeController {
   }
 
   @Get('test-cases')
+  @Roles(...ALL_ROLES)
   async testCases(): Promise<string[]> {
     return (await this.prisma.client.testCase.findMany()).map((c) => c.id);
   }
+}
 
-  // A public route (no request.user, so no org context) that tries to read org data.
+// A public route (no request.user, so no org context) that tries to read org data.
+@Controller('probe')
+@Public()
+class PublicProbeController {
+  constructor(private readonly prisma: PrismaService) {}
+
   @Get('public-sessions')
-  @Public()
   async publicSessions(): Promise<string[]> {
     return (await this.prisma.client.session.findMany()).map((s) => s.id);
   }
@@ -158,9 +171,12 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
           load: [() => ({ DATABASE_URL: url, JWT_ACCESS_SECRET: JWT_SECRET })],
         }),
         TokenModule,
+        // BE-02's unscoped client: the real guard re-reads the user through it on every request
+        // (FU-DB-58 moves that to the scoped client in BE-03). DatabaseModule is the scoped one.
+        PrismaModule,
         DatabaseModule,
       ],
-      controllers: [ProbeController],
+      controllers: [ProbeController, PublicProbeController],
       // BE-02's guard. DatabaseModule registers the interceptor that runs after it.
       providers: [{ provide: APP_GUARD, useClass: JwtAuthGuard }],
     }).compile();
@@ -1434,11 +1450,9 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
   });
 
   describe('staff routes: user from org A requests data of org B (TC-008)', () => {
-    // A real access token with the claims BE-02's AuthService signs: sub, org, role, kind.
-    const asUser = (tenant: TenantFixture): string =>
-      `Bearer ${app
-        .get(TokenService)
-        .sign({ sub: tenant.userId, org: tenant.orgId, role: 'RECRUITER', kind: 'access' }, 300)}`;
+    // A real access token with the claims BE-02's AuthService signs (sub, org, role, kind, pwv). The
+    // guard re-reads the user, so the fixture user's role, org and password hash back the token.
+    const asUser = (tenant: TenantFixture): string => staffBearer(app.get(TokenService), tenant);
 
     it("TC-008 GET another org's session is 404 and leaks nothing; own session is 200", async () => {
       const server = app.getHttpServer();
