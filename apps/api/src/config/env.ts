@@ -49,6 +49,11 @@ export const envSchema = z
     ENCRYPTION_KEY: aesKey,
     // Issuer label shown in authenticator apps.
     TOTP_ISSUER: z.string().min(1).default('CodeProctor'),
+    // Code runner (BE-05, FR-503). Unset means runs fail as "unavailable". Token is a secret.
+    JUDGE0_URL: z.url().optional(),
+    JUDGE0_AUTH_TOKEN: z.string().min(1).optional(),
+    JUDGE0_REQUEST_TIMEOUT_MS: positiveInt.default(10_000),
+    JUDGE0_POLL_DEADLINE_MS: positiveInt.default(60_000),
   })
   .superRefine((env, ctx) => {
     const live = env.APP_ENV === 'pilot' || env.APP_ENV === 'production';
