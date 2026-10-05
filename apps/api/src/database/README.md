@@ -459,9 +459,26 @@ tokens, OTPs, hashes and media keys must never reach a log. Three rules:
   arguments, and the SQLSTATE stays. A unique, foreign key, not-found, check or not-null violation
   keeps its message, which names a constraint or table and never a value. It sends no query.
 
+**A bare `DriverAdapterError` is scrubbed too** (PR #82 review S1). Prisma wraps the adapter errors it
+can map into a known request error (the adapter error then sits in `meta.driverAdapterError`), but
+an error it cannot map is rethrown raw, and the commit of a transaction is not wrapped at all. Found
+on Prisma 7.10 and Postgres 16: a `Serializable` transaction that fails at COMMIT (SQLSTATE 40001)
+reaches the caller as a bare `DriverAdapterError` with `cause.kind` `TransactionWriteConflict`.
+Its message and its `cause` (`originalMessage`, `detail`, `hint`) are the database's text, so
+`scrubPrismaError` also takes an error with `name === 'DriverAdapterError'` and an object `cause`
+(Prisma's own test; the class is not a dependency of this app). It keeps the class, the name, the
+kind and the codes, drops the message, `detail`, `hint` and every other text whatever the SQLSTATE,
+and puts a fixed sentence in the message. Two limits. The org-scoped client's extension does not see
+`$transaction` itself, so **a commit failure is not scrubbed on its way out**: its text is the
+database's fixed wording today (40001 names no value), and a caller or exception filter that logs an
+error it did not get from a query call should pass it through `scrubPrismaError` first. And from
+reading the 7.10 runtime (not reproduced): an adapter kind the runtime does not know becomes a plain
+`Error` whose message is the cause as JSON; that is only possible if `@prisma/client` and
+`@prisma/adapter-pg` drift apart, which the lockfile prevents.
+
 `error-hygiene.spec.ts` proves it against Postgres: a unique violation on a known token hash, an
 id that is not a uuid, a check and a foreign key violation, a record not found, validation errors, a
-failing raw query, an interactive and a batch transaction. The plain factory client (the seed, and
+failing raw query, an interactive and a batch transaction, and a Serializable transaction that fails at commit. The plain factory client (the seed, and
 BE-02's interim `PrismaModule` until FU-DB-58) does **not** scrub: do not log its errors as they are.
 
 ## `upsert` in an org scope is not a native upsert

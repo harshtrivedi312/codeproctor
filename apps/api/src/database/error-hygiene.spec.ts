@@ -43,6 +43,21 @@ const known = (
     meta: meta as Record<string, unknown>,
   });
 
+/**
+ * The adapter's own error (`DriverAdapterError` of @prisma/driver-adapter-utils, which is not a
+ * dependency of this app), built the way the adapter builds it: the message is the payload's
+ * `message` or its `kind`, the payload becomes `cause`. Prisma tells it by `name` and an object
+ * `cause`.
+ */
+class DriverAdapterError extends Error {
+  override name = 'DriverAdapterError';
+  override cause: Record<string, unknown>;
+  constructor(payload: Record<string, unknown>) {
+    super(typeof payload.message === 'string' ? payload.message : String(payload.kind));
+    this.cause = payload;
+  }
+}
+
 describe('scrubPrismaError (NFR-04)', () => {
   it('TC-008 a check violation loses the failing row, and keeps its class, code and constraint name', () => {
     const error = known(
@@ -173,6 +188,122 @@ describe('scrubPrismaError (NFR-04)', () => {
     expect(error.stack).toContain(error.message);
     expect(frames.length).toBeGreaterThan(0);
     for (const frame of frames) expect(error.stack).toContain(frame);
+  });
+
+  describe('a bare DriverAdapterError, which Prisma did not wrap (PR #82 review S1)', () => {
+    const check = (): DriverAdapterError =>
+      new DriverAdapterError({
+        kind: 'postgres',
+        code: '23514',
+        originalCode: '23514',
+        severity: 'ERROR',
+        message: `new row for relation "invitations" violates check constraint "invitations_check" for ${SECRET}`,
+        originalMessage: `new row for relation "invitations" violates check constraint "invitations_check" for ${SECRET}`,
+        detail: `Failing row contains (a, b, ${SECRET}, 2026-10-06, 2026-10-05).`,
+        hint: `Check the value ${SECRET}.`,
+        table: 'invitations',
+        constraint: 'invitations_check',
+      });
+
+    it('TC-008 a value in its message, detail and hint is gone, and the name, kind and code are kept', () => {
+      const error = check();
+      expect(asLogged(error)).toContain(SECRET); // as built, before the scrub
+      expect(scrubPrismaError(error)).toBe(error);
+      expect(asLogged(error)).not.toContain(SECRET);
+      expect(asLogged(error)).not.toContain('Failing row');
+      expect(error).toBeInstanceOf(DriverAdapterError);
+      expect(error.name).toBe('DriverAdapterError');
+      expect(error.cause).toEqual({
+        kind: 'postgres',
+        code: '23514',
+        originalCode: '23514',
+        severity: 'ERROR',
+        table: 'invitations',
+        constraint: 'invitations_check',
+      });
+      expect(error.message).toBe(
+        "Database driver error postgres (SQLSTATE 23514). The database's message is withheld because it can contain argument values.",
+      );
+      expect(error.stack).toContain(error.message);
+    });
+
+    it('TC-008 its text is dropped even for a SQLSTATE that is usually value-free: nothing has classified this error', () => {
+      const error = new DriverAdapterError({
+        kind: 'TransactionWriteConflict',
+        originalCode: '40001',
+        originalMessage: `could not serialize access ${SECRET}`,
+        message: `could not serialize access ${SECRET}`,
+        detail: `Reason code: ${SECRET}.`,
+      });
+      scrubPrismaError(error);
+      expect(asLogged(error)).not.toContain(SECRET);
+      expect(error.cause).toEqual({ kind: 'TransactionWriteConflict', originalCode: '40001' });
+      expect(error.message).toContain('TransactionWriteConflict (SQLSTATE 40001)');
+    });
+
+    it('TC-008 a kind with nothing but the kind (its own message is the kind name) is kept readable', () => {
+      const error = new DriverAdapterError({ kind: 'TransactionWriteConflict' });
+      expect(error.message).toBe('TransactionWriteConflict');
+      scrubPrismaError(error);
+      expect(error.cause).toEqual({ kind: 'TransactionWriteConflict' });
+      expect(error.message).toMatch(/^Database driver error TransactionWriteConflict\./);
+    });
+
+    it('TC-008 keys the adapter adds for other kinds (cause, reason, user, host, db) are dropped, and a kind with odd characters is dropped too', () => {
+      const error = new DriverAdapterError({
+        kind: `Odd kind ${SECRET}`,
+        cause: `value "${SECRET}" is out of range for type integer`,
+        reason: SECRET,
+        user: SECRET,
+        host: SECRET,
+        db: SECRET,
+      });
+      scrubPrismaError(error);
+      expect(asLogged(error)).not.toContain(SECRET);
+      expect(asLogged(error)).not.toContain('is out of range');
+      expect(error.cause).toEqual({});
+      expect(error.message).toMatch(/^Database driver error\. /);
+    });
+
+    it('TC-008 it is an error Prisma recognises by name and an object cause only: other errors are untouched', () => {
+      const named = Object.assign(new Error(`text ${SECRET}`), { name: 'DriverAdapterError' });
+      expect(scrubPrismaError(named)).toBe(named);
+      expect(named.message).toContain(SECRET); // no object cause: not an adapter error
+      const withCause = new Error(`text ${SECRET}`, { cause: { detail: SECRET } });
+      expect(scrubPrismaError(withCause)).toBe(withCause);
+      expect(withCause.message).toContain(SECRET); // not named DriverAdapterError
+      const stringCause = Object.assign(new Error(`text ${SECRET}`), {
+        name: 'DriverAdapterError',
+        cause: SECRET,
+      });
+      scrubPrismaError(stringCause);
+      expect(stringCause.message).toContain(SECRET);
+    });
+
+    it('TC-008 scrubbing twice gives the same error', () => {
+      const error = check();
+      scrubPrismaError(error);
+      const once = { message: error.message, cause: JSON.stringify(error.cause) };
+      scrubPrismaError(error);
+      expect({ message: error.message, cause: JSON.stringify(error.cause) }).toEqual(once);
+    });
+
+    it('TC-008 the same adapter error inside a known request error (what Prisma wraps) is scrubbed as before', () => {
+      const adapter = new DriverAdapterError({
+        kind: 'InvalidInputValue',
+        originalCode: '22P02',
+        originalMessage: `invalid input syntax for type uuid: "${SECRET}"`,
+        message: `invalid input syntax for type uuid: "${SECRET}"`,
+      });
+      const wrapped = known('P2007', `Invalid input value: ${adapter.message}`, {
+        modelName: 'User',
+        driverAdapterError: adapter,
+      });
+      scrubPrismaError(wrapped);
+      expect(asLogged(wrapped)).not.toContain(SECRET);
+      expect(wrapped.code).toBe('P2007');
+      expect(adapter.cause).toEqual({ kind: 'InvalidInputValue', originalCode: '22P02' });
+    });
   });
 
   it('TC-008 anything that is not a Prisma request or validation error comes back untouched', () => {
@@ -375,6 +506,53 @@ describe('failing queries against Postgres carry no argument values (NFR-04, FU-
     );
     expect(asLogged(error)).not.toContain(SECRET);
   });
+
+  it('TC-008 a Serializable transaction that fails at COMMIT surfaces as a bare DriverAdapterError, which scrubPrismaError handles (PR #82 review S1)', async () => {
+    // Found against Prisma 7.10 and Postgres 16: the runtime wraps an adapter error into a known
+    // request error (P20xx, with the adapter error in meta.driverAdapterError) while a statement
+    // runs, but a commit is not wrapped, so a serialization failure there (SQLSTATE 40001, kind
+    // TransactionWriteConflict) reaches the caller as the adapter's own error. The org-scoped
+    // client's extension does not see $transaction itself, so it does not scrub this error; its
+    // text is the database's fixed wording today, and scrubPrismaError is the defence if a caller
+    // logs it or if another kind ever arrives this way. If Prisma starts wrapping it, this test
+    // fails on the first assertion: review the README "Errors and logging" paragraph then.
+    // Both transactions have read and written before either commits (a barrier, not a sleep, so
+    // load cannot reorder them); the second to commit fails.
+    let arrived = 0;
+    let release: () => void = () => undefined;
+    const bothWritten = new Promise<void>((resolveGate) => {
+      release = resolveGate;
+    });
+    const overlapping = (c: ReturnType<typeof createPrismaClient>, name: string) =>
+      c.$transaction(
+        async (tx) => {
+          await tx.test.count({ where: { orgId: T.orgId } });
+          await tx.test.create({ data: { orgId: T.orgId, name, durationMinutes: 5 } });
+          arrived += 1;
+          if (arrived === 2) release();
+          await Promise.race([bothWritten, new Promise((r) => setTimeout(r, 3_000))]);
+        },
+        { isolationLevel: 'Serializable' },
+      );
+    const results = await Promise.allSettled([
+      overlapping(factory, 'serializable-one'),
+      overlapping(factory, 'serializable-two'),
+    ]);
+    const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(failed).toHaveLength(1);
+    const error = failed[0]?.reason as Error & { cause: Record<string, unknown> };
+    expect(error).not.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    expect(error.name).toBe('DriverAdapterError');
+    expect(error.cause).toMatchObject({ kind: 'TransactionWriteConflict', originalCode: '40001' });
+
+    expect(scrubPrismaError(error)).toBe(error);
+    expect(error.name).toBe('DriverAdapterError');
+    expect(error.cause).toEqual({ kind: 'TransactionWriteConflict', originalCode: '40001' });
+    expect(error.message).toBe(
+      "Database driver error TransactionWriteConflict (SQLSTATE 40001). The database's message is withheld because it can contain argument values.",
+    );
+    expect(asLogged(error)).not.toContain('could not serialize');
+  }, 60_000);
 
   it('TC-008 the scrub does not hide the failure: class, code and the constraint name survive', async () => {
     const error = (await caught(() =>

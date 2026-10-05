@@ -15,6 +15,11 @@
 // meta.driverAdapterError is an Error whose own message is the database's text; util.inspect (what
 // console prints) shows it even though JSON does not.
 //
+// A bare DriverAdapterError (PR #82 review S1) is the same adapter error when Prisma did not wrap
+// it: its message and cause (`originalMessage`, `detail`, `hint`) then reach the log as they are.
+// Seen on Prisma 7.10 with a Serializable transaction that fails at COMMIT (SQLSTATE 40001, kind
+// TransactionWriteConflict); see "Errors and logging" in README.md.
+//
 // scrubPrismaError rewrites such an error IN PLACE, so it keeps its class and `code` and callers'
 // `instanceof` and `error.code` checks still work: free text that can hold values is replaced by a
 // fixed sentence, and the cause of a driver error keeps only codes and names. It sends no query.
@@ -137,6 +142,39 @@ function scrubValidation(error: Prisma.PrismaClientValidationError): void {
   );
 }
 
+/**
+ * A DriverAdapterError the Prisma runtime did not wrap. Prisma wraps the adapter errors it can map
+ * into a known request error (and keeps the adapter error in `meta.driverAdapterError`), but it
+ * rethrows the raw one when it cannot (`throw isGenericKind ? wrap(e) : e`), and the commit of a
+ * transaction is not wrapped at all. Its `message` is the database's text, or the kind name, and
+ * its `cause` is the adapter's payload: `originalMessage`, `detail`, `hint` and the like. Prisma
+ * recognises it by `name === 'DriverAdapterError'` and an object `cause`, and so does this.
+ */
+function isBareDriverAdapterError(error: unknown): error is Error & { cause: PlainObject } {
+  return isObject(error) && error.name === 'DriverAdapterError' && isObject(error.cause);
+}
+
+/** Keeps the name, the cause's codes and names and the class; the database's text is replaced. */
+function scrubBareDriverError(error: Error & { cause: PlainObject }): void {
+  // The kind is one of the adapter's fixed names ('TransactionWriteConflict'); anything else in
+  // its place is not trusted, and is dropped.
+  const kind =
+    typeof error.cause.kind === 'string' && /^[A-Za-z]{1,40}$/.test(error.cause.kind)
+      ? error.cause.kind
+      : undefined;
+  const sqlstate = sqlstateOf(error.cause);
+  // Strict: the text of the cause is dropped whatever the SQLSTATE says, because nothing has
+  // classified this error. The kind and the SQLSTATE stay, which is what a retry decision needs.
+  scrubCause(error.cause, false);
+  if (kind === undefined) delete error.cause.kind;
+  setMessage(
+    error,
+    `Database driver error${kind === undefined ? '' : ` ${kind}`}` +
+      `${sqlstate === undefined ? '' : ` (SQLSTATE ${sqlstate})`}. The database's message is ` +
+      'withheld because it can contain argument values.',
+  );
+}
+
 function scrubUnknown(error: Error): void {
   setMessage(
     error,
@@ -147,13 +185,15 @@ function scrubUnknown(error: Error): void {
 
 /**
  * Scrubs a Prisma error in place and returns it. Anything that is not a Prisma request or
- * validation error comes back untouched (a connection error names a host, not a value).
+ * validation error, or a driver adapter error, comes back untouched (a connection error names a
+ * host, not a value).
  */
 export function scrubPrismaError(error: unknown): unknown {
   try {
     if (error instanceof Prisma.PrismaClientKnownRequestError) scrubKnownRequest(error);
     else if (error instanceof Prisma.PrismaClientValidationError) scrubValidation(error);
     else if (error instanceof Prisma.PrismaClientUnknownRequestError) scrubUnknown(error);
+    else if (isBareDriverAdapterError(error)) scrubBareDriverError(error);
   } catch {
     // The error is rethrown as it is: scrubbing must never hide the original failure.
   }
