@@ -19,6 +19,7 @@ import {
   ApiNotFoundResponse,
   ApiNoContentResponse,
   ApiOkResponse,
+  ApiServiceUnavailableResponse,
   ApiOperation,
   ApiTags,
   ApiTooManyRequestsResponse,
@@ -36,6 +37,7 @@ import {
   ChallengeCodeDto,
   ChallengeDto,
   CurrentPasswordDto,
+  DisableTwoFactorDto,
   EnrollmentConfirmedDto,
   ForgotPasswordDto,
   LoginDto,
@@ -205,16 +207,35 @@ export class AuthController {
   @ApiBearerAuth()
   @Post('2fa/disable')
   @HttpCode(204)
-  @ApiOperation({ summary: 'Turn 2FA off; needs the current password; not for 2FA-required roles' })
-  @ApiNoContentResponse()
+  @ApiOperation({
+    summary:
+      'Turn 2FA off; needs the current password and a current TOTP code; signs the user out everywhere (refresh cookie cleared); not for 2FA-required roles',
+  })
+  @ApiNoContentResponse({ description: 'Refresh cookie cleared; every session is revoked' })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
   @ApiForbiddenResponse({
     description:
-      "Wrong or locked current password: code 'REAUTH_FAILED' (not a session expiry). 2FA required for this role: code 'TWO_FACTOR_REQUIRED_FOR_ROLE', checked after the password",
+      "Wrong or locked current password, or a wrong or replayed TOTP code (same body): code 'REAUTH_FAILED' (not a session expiry). 2FA required for this role: code 'TWO_FACTOR_REQUIRED_FOR_ROLE', checked after the password",
   })
   @ApiConflictResponse({ description: '2FA is not on' })
-  async disable(@Body() dto: CurrentPasswordDto, @Req() req: AuthedRequest): Promise<void> {
-    await this.auth.disableTwoFactor(this.userId(req), dto.currentPassword, ctxOf(req));
+  @ApiServiceUnavailableResponse({ description: 'Code verification is temporarily unavailable' })
+  async disable(
+    @Body() dto: DisableTwoFactorDto,
+    @Req() req: AuthedRequest,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<void> {
+    await this.auth.disableTwoFactor(
+      this.userId(req),
+      dto.currentPassword,
+      dto.totpCode,
+      ctxOf(req),
+    );
+    res.clearCookie(REFRESH_COOKIE, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'strict',
+      path: cookieOptions.path,
+    });
   }
 
   @Roles(...ALL_STAFF)
