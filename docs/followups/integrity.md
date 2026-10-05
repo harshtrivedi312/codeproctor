@@ -23,6 +23,7 @@ Non-blocking findings. Only blockers stop a merge.
 - `X-Internal-Token` / `WORKER_INTERNAL_TOKEN` is provisional pending the architect decision on API-to-worker auth (ADR 0001 TB-6, OI-1, Q-21). Document the env var in the deploy env template once decided.
 - `compare` confidence `size_factor` uses raw token counts including starter code (should use non-ignored size).
 - A stray unterminated `/*` hides the rest of the file from similarity, which a candidate could use to evade; consider falling back to line-based comment stripping.
+- `prepare_ai_context` builds starter ignore sets for every language passed, not only those present in the references; the route could limit them. A `ParamSpec` wrapper for the call-counting monkeypatches in `test_app.py` would remove the `type: ignore`.
 - Starlette TestClient emits a deprecation warning about httpx.
 - Nits: `/risk` response drops the breakdown; `/docs` and `/openapi.json` are open; 422 responses echo input (candidate code); camelCase vs snake_case in route bodies; peer cap is applied one-sided; `deleted_chars` stat counts replaced text; `speaker_min_voiced_ms // 4` is a magic number; `test_contracts.py` has a hard-coded language set and a module-wide skipif that could hide drift.
 

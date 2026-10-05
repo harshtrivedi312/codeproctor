@@ -303,8 +303,8 @@ class AiContext:
     k-gram hash per language.
     """
 
-    refs: dict[CodeLanguage, list[tuple[AiReference, PreparedCode]]]
-    ignore: dict[CodeLanguage, frozenset[int]]
+    refs: Mapping[CodeLanguage, tuple[tuple[AiReference, PreparedCode], ...]]
+    ignore: Mapping[CodeLanguage, frozenset[int]]
 
 
 def prepare_ai_context(
@@ -312,10 +312,12 @@ def prepare_ai_context(
     config: IntegrityConfig | None = None,
     starter_code: Mapping[CodeLanguage, str] | None = None,
 ) -> AiContext:
+    """Prepare references and starter ignore sets once; pass the result as `context=`."""
     sc = (config or IntegrityConfig()).similarity
-    refs: dict[CodeLanguage, list[tuple[AiReference, PreparedCode]]] = {}
+    grouped: dict[CodeLanguage, list[tuple[AiReference, PreparedCode]]] = {}
     for r in sorted(references, key=lambda r: not r.is_variant_match):
-        refs.setdefault(r.language, []).append((r, prepare(r.code, r.language, sc)))
+        grouped.setdefault(r.language, []).append((r, prepare(r.code, r.language, sc)))
+    refs = {lang: tuple(rows) for lang, rows in grouped.items()}
     ignore = {
         lang: all_kgram_hashes(code, lang, sc.k) for lang, code in (starter_code or {}).items()
     }
@@ -334,7 +336,8 @@ def find_ai_likeness(
     Compares only references in the submission's language, variant rows first, and cites the
     best-matching row. Never used for grading (AI-3). One finding at most, so a question with many
     reference rows cannot flood the timeline. Pass `context` (from `prepare_ai_context`) when
-    checking many submissions so references and starter code are prepared once, not per call.
+    checking many submissions so references and starter code are prepared once, not per call; when
+    `context` is given, `references` and `starter_code` are ignored.
     """
     cfg = config or IntegrityConfig()
     if not cfg.is_enabled("AI_LIKENESS"):
@@ -345,7 +348,7 @@ def find_ai_likeness(
     prep = prepare(submission.code, lang, sc)
     ignore = ctx.ignore.get(lang, frozenset())
     best: tuple[Comparison, AiReference] | None = None
-    for ref, ref_prep in ctx.refs.get(lang, []):
+    for ref, ref_prep in ctx.refs.get(lang, ()):
         c = compare(prep, ref_prep, sc, ignore)
         if c is not None and (best is None or c.similarity > best[0].similarity):
             best = (c, ref)

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import random
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -110,8 +113,6 @@ def test_nfr04_starter_code_at_exact_limit_is_accepted() -> None:
 
 
 def _many_submission_body(n: int, refs: int) -> dict[str, object]:
-    import random
-
     from test_similarity import MULTI_TODO
     from test_similarity_large_starter import _solution
 
@@ -161,12 +162,11 @@ def test_nfr01_fr803_starter_and_references_are_prepared_once_per_request(
 
 
 def test_nfr01_fr803_request_with_many_submissions_and_large_starter_is_fast_enough() -> None:
-    import time
-
     body = _many_submission_body(120, 6)
     start = time.perf_counter()
     r = client.post("/analyze/similarity", json=body, headers=AUTH)
     elapsed = time.perf_counter() - start
     assert r.status_code == 200
-    # Measured about 1.0 s on a laptop; a generous bound that still catches per-submission re-prep.
+    # Gross-slowdown guard only (measured about 1.2 s on a laptop). The call-count test above is
+    # what catches per-submission re-preparation.
     assert elapsed < 10.0, f"{elapsed:.2f}s for 120 submissions"

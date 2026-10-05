@@ -22,8 +22,11 @@ BEFORE PILOT in docs/followups/integrity.md.
 
 ## Approach (preferred direction)
 
-1. Per language, diff the submission against the starter on normalized lines (fall back to tokens
-   inside changed lines): `difflib`-style longest matching blocks, bounded (see Cost).
+1. Per language, match starter lines by content: build a multiset of normalized-line hashes of the
+   starter, and walk the submission's lines, consuming each starter line at most once. Matched lines
+   are unchanged wherever they sit, so reordered or moved starter blocks stay unchanged. Unmatched
+   lines are changed. Only inside changed lines (a TODO line completed in place) use a token-level
+   `difflib` pass. This is a linear hash-map pass in the common case.
 2. Take the changed spans (inserted or replaced code) plus a context margin of `k + window - 2`
    tokens on each side so k-grams that straddle a region edge are not lost; merge spans whose
    margins overlap.
@@ -31,7 +34,9 @@ BEFORE PILOT in docs/followups/integrity.md.
    that lies entirely inside starter text is dropped).
 4. Apply the size gate to changed-region fingerprints. `minFingerprints` then means "distinct
    fingerprints the candidate contributed", so it can drop (about 4-6) without admitting scaffold
-   text. Add a floor `minChangedTokens` (about 12).
+   text. Add a floor `minChangedTokens` (about 12). The existing whole-file `minTokens` (40) stays as the
+   outer gate on total size and is checked first; `minChangedTokens` is a separate, stricter check
+   on the candidate's own contribution, so a long file with a tiny change is still skipped.
 5. Compare as today (containment), same thresholds, same idiom filter; matched lines still refer to
    the candidate's own code.
 6. The AI path does the same: the reference solution is diffed against the starter too, so both
@@ -40,7 +45,9 @@ BEFORE PILOT in docs/followups/integrity.md.
 ## Edge cases to handle and test
 
 - Candidate deletes or reorders starter lines: deletions contribute nothing; reordered starter
-  blocks count as moved, not changed (match blocks regardless of position).
+  blocks stay unchanged (multiset match ignores position).
+- Candidate duplicates a starter line: the first copy consumes the starter line, the second copy
+  counts as changed.
 - Edits inside a starter line (a TODO line completed in place): token-level diff inside the line.
 - A starter line moved elsewhere: matched by content, not position.
 - Whitespace-only or formatter changes: normalization removes them, so no changed span.
@@ -90,7 +97,9 @@ before and after. Acceptance criteria:
 
 - weak row (1 site x 1 statement) recall >= 0.90 with peer and AI FP <= 0.05;
 - no regression on the other three rows, nor on the existing TC-074 / FR-803 tests;
-- 150-submission request within the current budget (peer 1.2 s, AI 0.3 s on a laptop).
+- 150-submission request within the current budget (peer 1.2 s, AI 0.3 s on a laptop; timings come
+  from the throwaway script that generates 150 synthetic submissions with `_solution(...)` from
+  `tests/test_similarity_large_starter.py`, and from `test_nfr01_fr803_request_with_many_submissions_and_large_starter_is_fast_enough`; promote the script to `tests/bench_similarity.py` when this is implemented).
 
 Plan: raise the floors in the test to the new measured values minus one pair (do not lower any),
 and mark the weak-row assertion as `xfail(strict=True)` against the target before the change, so

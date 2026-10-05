@@ -113,7 +113,7 @@ def test_tc074_fr803_fixture_starter_is_large_but_bounded() -> None:
         (3, 2, 0.98, 0.02),  # measured 1.00 / 0.00
         (3, 1, 0.96, 0.02),  # measured 0.98 / 0.00
         (1, 2, 0.95, 0.04),  # measured 0.97 / 0.02
-        (1, 1, 0.45, 0.05),  # measured 0.48 / 0.03: POOR recall, the documented gap
+        (1, 1, 0.46, 0.05),  # measured 0.483 / 0.033: POOR recall, the documented gap
     ],
 )
 def test_tc074_fr803_large_starter_recall_and_false_positive_floors(
