@@ -233,7 +233,7 @@ Roles belong to the whole Postgres cluster, not to one database. So the `IF NOT 
 - Candidate session scope (from the candidate token to its session) is decided in ADR 0013 section 5.10 (proposed, PR #39), with ADR 0001 C-1. This section states only how it meets the org scope (8.4, 8.5).
 
 Each item is tagged:
-- **(owner decision)** when the owner or the Delivery Lead decided it. The Delivery Lead's two decisions (8.3, and provisioning by CLI in 8.9) are also pending a D-xx id.
+- **(owner decision)** when the owner or the Delivery Lead decided it. The Delivery Lead's three decisions are also pending a D-xx id: nested writes denied by default (8.2), no schema change (8.3), and provisioning by CLI (8.9).
 - **(architect detail)** when the architect chose it for the owner to confirm.
 
 ### 8.1 Foreign-key classification (architect detail)
@@ -253,30 +253,56 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
   - It fails for a key that is missing, unclassified, classified twice or in the wrong class. So a new foreign key must be classified in the PR that adds it.
 - Rule (i) proves only that the target is in the same org. It does not prove that a cross-chain target belongs to the same parent: for example `variant_test_cases.test_case_id` and `variant_id` may point to different question versions. Tracked in docs/followups/architecture.md.
 
-### 8.2 Write invariant (architect detail)
+### 8.2 Write invariant (architect detail; nested writes: owner decision, Delivery Lead, pending D-xx)
 
 - An org-scoped write changes only the rows its filter selected, or the rows it creates.
-- **Nested-write guard (today, PR #30, FU-DB-63 done).** In an org scope, at any depth, with zero extra queries.
-  - It refuses:
-    - parent-side `connect`, `connectOrCreate` and `set`;
-    - a nested `create`, `update`, `upsert`, `createMany` or `updateMany` of a model with its own `org_id` that names another org;
-    - a nested `Organization` create or `id` change;
-    - an unknown nested operation;
-    - nesting deeper than 16 levels.
-  - It allows a child-side `connect` (rule (i)), and nested `create`, `update`, `delete`, `deleteMany`, `disconnect` and `upsert` under an in-scope parent.
+
+**Nested writes are denied by default.** This is the Delivery Lead's decision.
+- **Scopes:** every scope the extension applies to: STAFF, plain org, SERVICE and system scope. ADR 0013 CS-4 already does the same for CANDIDATE scope.
+- **What is refused:** every nested relation write inside `data`, at every depth, through every relation class, on both sides of the relation:
+  - `connect`, `connectOrCreate`, `create`, `createMany`, `update`, `updateMany`, `upsert`, `delete`, `deleteMany`, `set` and `disconnect`;
+  - this includes `org: { connect }`.
+- **How services write instead:**
+  - They use scalar foreign keys and separate top-level scoped calls.
+  - The COMPOSITE keys (`invitations.test_id`, `invitations.candidate_id`, `sessions.invitation_id`) are written only as scalars, so the composite foreign key in Postgres checks the org.
+- **Allowlist:** a named list of nested-write patterns.
+  - It starts empty. BE-02 (on main) and BE-03 (`backend/step-3`) use no nested relation writes today.
+  - Every entry needs its own cross-org test.
+- **Why:**
+  - Through a COMPOSITE relation, a `connect` makes Prisma copy `org_id` from the connected row, which moves the row across orgs.
+  - A to-one `connect` combined with `update` can write a row in another org.
+  - Both belong to the same class as FU-DB-63. Deny by default closes the class at zero query cost.
+- **Unchanged:**
+  - scalar fields and scalar foreign keys;
+  - scalar-list `{ set }`;
+  - Json columns;
+  - flat `createMany`.
+- **Today (PR #30, FU-DB-63):** the guard decides per relation class, and only in an org scope, at any depth.
+  - It refuses parent-side `connect`, `connectOrCreate` and `set`; nested rows of a direct model that name another org; nested `Organization` create or `id` change; unknown nested operations; and nesting deeper than 16 levels.
+  - It allows a child-side `connect`, and nested `create`, `update`, `delete`, `deleteMany`, `disconnect` and `upsert` under an in-scope parent.
   - It is not applied in system scope.
-  - A flat `createMany` is not walked.
-- **Cursors (today, PR #30).**
-  - On a model with `org_id`, the cursor gets `orgId` added, and a cursor naming another org is refused.
-  - On `Organization`, the cursor must be the caller's own id.
-  - On a path model, a cursor is refused. Page with `where` plus `orderBy` (keyset paging) instead.
-- **What the extension does not check (rule (i), documented in the PR #30 README).**
-  - Child-side `connect`, scalar foreign-key writes and re-parenting stay under rule (i): load the target through the scoped client first, and answer 404 on a miss.
-  - Nested reads (`include`, `select`, the fluent API, relation filters, relation `orderBy`, `_count`) follow foreign keys without the org filter. One TC-008 test pins this behaviour (FU-DB-78).
-  - CS-4 refuses all six vectors in a CANDIDATE scope: `include`, `select` of a relation, the fluent API, relation filters, relation `orderBy` and `_count` (ADR 0013). In STAFF, plain org and SERVICE scopes they remain a rule (i) review item: select only the fields needed, and never `include` a user.
-- **Where these rules apply.**
-  - In a CANDIDATE scope, ADR 0013 CS-4 is stricter. It refuses every nested write, and all six nested-read vectors listed above, outright.
-  - The nested-write rules here, and those in 8.6, still apply to STAFF scopes, plain org scopes, SERVICE scopes and system scope.
+- **Planned (db-engineer):**
+  - replace the per-class guard with the deny-by-default rule and the empty allowlist;
+  - apply it in system scope too;
+  - add one test per operation, both sides of a relation, and the COMPOSITE `connect` case.
+
+**No write moves a row to another org.**
+- With nested relation writes refused, the remaining path is a scalar `orgId`. On `create`, `update` and `upsert` (both branches), the extension refuses a scalar `orgId` whose value is not `ctx.orgId`.
+- In system scope there is no `ctx.orgId`. There, an update may not set `orgId`, and a create may name only an org already loaded in the same unit of work (rule (i)).
+- **Today (PR #30):** in an org scope, for direct models.
+- **Planned:** the system-scope rule.
+
+**Cursors (today, PR #30).**
+- On a model with `org_id`, the cursor gets `orgId` added, and a cursor naming another org is refused.
+- On `Organization`, the cursor must be the caller's own id.
+- On a path model, a cursor is refused; page with `where` plus `orderBy` (keyset paging) instead.
+- Nested cursors are refused.
+
+**What the extension does not check (rule (i)).**
+- Scalar foreign-key writes and re-parenting stay under rule (i): load the target through the scoped client first, and answer 404 on a miss. The 58-key classification (`FK_CLASSES`, `RULE_I_REFERENCES`, 8.1) is the review checklist for this.
+- Nested reads without a cursor follow foreign keys without the org filter. This covers `include`, `select`, the fluent API, relation filters, relation `orderBy` and `_count`. One TC-008 test pins this behaviour (FU-DB-78).
+  - CS-4 refuses all six of these vectors in a CANDIDATE scope (ADR 0013).
+  - In STAFF, plain org and SERVICE scopes they remain a rule (i) review item: select only the fields needed, and never `include` a user.
 
 ### 8.3 Schema and row-level security (owner decision: Delivery Lead)
 
@@ -294,7 +320,7 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 | STAFF | `runAsUser({ orgId, userId, role })` | no scope, system, or the same user (no change) | `OrgContextInterceptor`, and auth code once the user is known |
 | Org scope, no session | `runInOrg(orgId)` | no scope, or system. Inside any org scope of the same org it is allowed and changes nothing; the actor, user and session stay (rows below). | Cross-session jobs (similarity, dashboards, retention follow-up), and narrowing from system scope |
 | CANDIDATE (ADR 0013 CS-4) | `runAsCandidate(oid, sid)` | no scope only | `CandidateSessionGuard` only |
-| SERVICE (ADR 0013 CS-4) | `runAsSessionJob(oid, sid)` | no scope only. The processor first leaves any inherited context through `orgContext.detachForSessionJob()` (8.5; ADR 0013 CS-4.1). | `SessionJobProcessor`, the one job-processor base class, only |
+| SERVICE (ADR 0013 CS-4) | `runAsSessionJob(oid, sid)` | no scope only (after detach; see 8.5). The handler runs only from the BullMQ worker callback, and the processor calls `orgContext.detachForSessionJob()` first (ADR 0013 CS-4.1). | `SessionJobProcessor`, the one job-processor base class, only |
 | SYSTEM | `runSystem(reason)` | no scope | The three reasons below |
 
 **A scope only narrows.** Each row below has its own test. A row not listed is refused.
@@ -304,6 +330,10 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
 | None | `runAsUser`, `runInOrg`, `runSystem(reason)` | Allowed |
 | None | `runAsCandidate(A, S)` | Allowed (the guard) |
 | None | `runAsSessionJob(A, S)` | Allowed (`SessionJobProcessor`) |
+| None | `detachForSessionJob(fn)` | Allowed (`SessionJobProcessor`). It runs `fn` with an empty store. |
+| Any org scope (STAFF, plain org, CANDIDATE, SERVICE) | `detachForSessionJob` | Refused |
+| SYSTEM, any reason | `detachForSessionJob` | Refused |
+| Any scope with an open `runRawSql` hatch | `detachForSessionJob` | Refused |
 | SYSTEM, reason R | `runAsUser` or `runInOrg(A)` | Allowed (narrows) |
 | SYSTEM, any reason | `runAsSessionJob` | Refused. A session scope starts from no scope only, so no open `runRawSql` hatch (8.5) can carry into it. Discovery enqueues per-session jobs, and retention narrows with `runInOrg(orgId)` or enqueues per-session jobs. |
 | SYSTEM, any reason | `runAsCandidate` | Refused |
@@ -377,11 +407,18 @@ There is no org-provisioning reason (8.6, 8.9).
   - Only two call sites may enter a session scope: `runAsCandidate` in the `CandidateSessionGuard` file, and `runAsSessionJob` in the `SessionJobProcessor` base class. Both start from no scope only.
 - **Leaving a scope.** `AsyncLocalStorage.exit()`, `enterWith()` and `disable()` would let code leave its scope and bypass every "only narrows" row. So:
   - The OrgContext `AsyncLocalStorage` instance stays private to `org-context.ts`. It is never exported, and never reachable through a getter.
-  - The only way to leave a scope is `orgContext.detachForSessionJob(fn)`, called only by the `SessionJobProcessor` base class. It runs `fn` with no scope.
-    - It is allowed only when there is no scope, or in system scope with `BACKGROUND_JOB`.
-    - It throws inside any org scope: STAFF, plain org, SERVICE and above all CANDIDATE. A candidate scope therefore cannot leave itself.
-    - A test covers each case.
-  - The call-site allow-list and its test (FU-DB-67) also cover `exit`, `enterWith` and `disable` on the OrgContext store, and `detachForSessionJob`. Any use outside `org-context.ts`, or any call of `detachForSessionJob` outside the `SessionJobProcessor` file, fails the test or the lint rule.
+  - The only way to leave a scope is `orgContext.detachForSessionJob(fn)`. Only the `SessionJobProcessor` base class calls it.
+    - It empties the whole store, including any `runRawSql` hatch and any system reason, and runs `fn` with an empty store.
+    - It is allowed from no scope only. It throws inside any org scope (STAFF, plain org, SERVICE and CANDIDATE), in system scope, and while a `runRawSql` hatch is open. So a candidate scope cannot leave itself, and nothing can reach a session scope in two steps.
+    - Workers are built at module init, outside any scope. `SessionJobProcessor` asserts that there is no scope, and its handler runs only from the BullMQ worker callback. A discovery processor never calls a session handler inline; it enqueues the session job.
+    - The 8.4 rows for `detachForSessionJob` each have a test.
+  - The call-site allow-list and its test (FU-DB-67) also cover:
+    - `exit`, `enterWith` and `disable` on the OrgContext store;
+    - `detachForSessionJob`;
+    - the per-column grant entry sites of ADR 0013 CS-4.4: `SessionStateService`, `KeyService`, `CandidateSessionGuard`, `DeviceInfoService`, `StorageService`, `OrgSettingsService`, `TestSettingsService`, `AccommodationsService` and `SectionGateService`.
+  - The grant-entry API stays private to `org-context.ts` or the extension, like the store.
+  - Any use outside those files fails the test or the lint rule.
+  - The FU-DB-67 row in docs/followups/database.md (PR #30) still lists only `runSystem`, `runInOrg` and `runRawSql`. The db-engineer extends it to everything above.
   - A new call site updates the list, and code-reviewer checks it.
 
 ### 8.6 Organization (architect detail)
@@ -406,25 +443,13 @@ There is no org-provisioning reason (8.6, 8.9).
 - Refused: `create`, `createMany`, `createManyAndReturn`, `upsert`, `delete` and `deleteMany`.
 - Any operation the extension does not recognise throws.
 
-**Nested writes.** A query extension sees only the top-level model, so the extension walks the `data` of every write at any depth. In a CANDIDATE scope, ADR 0013 CS-4 already refuses every nested write and relation operation. The rules below matter for STAFF, plain org, SERVICE and system scopes.
-
-- **Today (PR #30, 8.2):** nested `Organization` create and `id` change are refused, in an org scope only.
-- **Planned:**
-  - refuse every other nested `Organization` write listed below;
-  - apply the guard in system scope too.
-- On any relation whose target is `Organization` it refuses `create`, `createMany`, `connectOrCreate`, `upsert`, `update`, `updateMany`, `delete`, `deleteMany`, `set` and `disconnect`.
+**Nested writes.** The general deny-by-default rule (8.2) covers `Organization` too.
+- Every nested write on a relation to `Organization` is refused, in every scope: `create`, `connect`, `connectOrCreate`, `update` (including one that sets `id`), `upsert`, `delete`, `set` and `disconnect`.
+- Examples: `user.create({ data: { organization: { create: … } } })` and `test.update({ data: { organization: { update: { id } } } })`.
 - Org settings change only through a top-level `organization.update`, in the service that holds the authorization check for org settings.
-- Examples it refuses: `user.create({ data: { organization: { create: … } } })` and `test.update({ data: { organization: { update: { id } } } })`.
+- **Today (PR #30):** only a nested `Organization` create or `id` change is refused, and only in an org scope.
 
-**No write moves a row to another org.**
-
-- **Today (PR #30):** in an org scope this is covered for direct models (8.2).
-- **Planned:** the system-scope rule below, and `organization` `connectOrCreate` on any model.
-- At any depth, on `create`, `update` and `upsert` (both branches), the extension refuses:
-  - a scalar `orgId` whose value is not `ctx.orgId`;
-  - an `organization` `connect` or `connectOrCreate` whose id is not `ctx.orgId`.
-- In system scope there is no `ctx.orgId`. There, an update may not set `orgId` or the `organization` relation at all, and a create may name only an org already loaded in the same unit of work (rule (i)).
-- There is one test per case.
+**No write moves a row to another org.** This is the scalar `orgId` rule in 8.2.
 
 **The raw client.** The raw, unextended factory client is the 8.9 exemption. A lint rule or test ensures that only these files import `createPrismaClient`:
 - `prisma.service.ts`, which extends it;
@@ -538,7 +563,8 @@ How the check runs:
   - Rule (i) stays a service-level guard for 25 foreign keys until RLS is revisited (FU-DB-77).
   - Session jobs run in a `sessionId` scope, so they cannot use raw SQL (8.5). This is deliberate. It covers BE-12 risk scoring, BE-14 report generation, and DB-06 per-session deletion when it runs as a session job. All of them must use the model API. If one of them needs raw SQL, that needs an amendment to this ADR.
 - **db-engineer:**
-  - 8.1 and 8.2 are done in PR #30 (FU-DB-63, FU-DB-64).
+  - 8.1 is done in PR #30 (FU-DB-64).
+  - 8.2: replace the per-class nested-write guard (FU-DB-63) with deny by default in every scope, with an empty named allowlist, apply it in system scope, and add one test per operation and side plus the COMPOSITE `connect` case.
   - Nested reads stay open (FU-DB-78).
   - 8.5: the raw-SQL hatch does not carry into nested scopes.
   - FU-DB-67: the call-site allow-list.
@@ -546,10 +572,13 @@ How the check runs:
   - FU-DB-71 and FU-DB-72: DB-06 and the job rules. Update FU-DB-72 so that session jobs use `runAsSessionJob`.
   - 8.4: the actor in the scope (STAFF, plain org, CANDIDATE, SERVICE, SYSTEM), set by the entry function.
   - 8.4: both session entries, `runAsCandidate` (guard only, from no scope) and `runAsSessionJob` (`SessionJobProcessor` only, from no scope only, after `detachForSessionJob`), per ADR 0013 CS-4.
-  - 8.5: keep the `AsyncLocalStorage` instance private, add `detachForSessionJob` (refused in every org scope, CANDIDATE included), and extend FU-DB-67 to `exit`, `enterWith`, `disable` and `detachForSessionJob`.
+  - 8.5: keep the `AsyncLocalStorage` instance private.
+  - 8.5: add `detachForSessionJob`, allowed from no scope only and refused in any org scope, in system scope and with an open hatch; it empties the store.
+  - 8.5: make `SessionJobProcessor` assert there is no scope.
+  - 8.5: extend FU-DB-67 to `exit`, `enterWith`, `disable`, `detachForSessionJob` and the CS-4.4 grant entry sites, and update its row in docs/followups/database.md.
   - 8.4: the transition table, with one test per row.
   - 8.5: refuse raw SQL in a `sessionId` scope (the scope requirement is done).
-  - 8.6: `Organization` deny by default, no nested `Organization` writes, no write that moves a row to another org, and a limit on importers of the raw factory client.
+  - 8.6: deny by default for `Organization` operations (its nested writes are covered by 8.2), the scalar `orgId` rule in system scope, and a limit on importers of the raw factory client.
   - 8.8: FU-DB-65 and FU-DB-66, including the REPLICATION, membership and ownership checks.
   - 8.9: the provisioning CLI (org and first admin, placeholder hash, enqueue and re-issue, audit rows).
 - **backend-engineer:**
