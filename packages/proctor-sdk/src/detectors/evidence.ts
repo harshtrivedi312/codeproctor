@@ -22,7 +22,6 @@ export interface EvidenceApi {
   }>;
 }
 
-/** Encode a video frame as a JPEG, scaled to at most `maxWidth`. */
 /** Output size of a snapshot: scaled down to `maxWidth`, never up, aspect ratio kept. */
 export function scaledSize(
   sourceWidth: number,
@@ -36,6 +35,7 @@ export function scaledSize(
   };
 }
 
+/** Encode a video frame as a JPEG, scaled to at most `maxWidth`. */
 export async function captureJpeg(
   source: CanvasImageSource,
   sourceWidth: number,
