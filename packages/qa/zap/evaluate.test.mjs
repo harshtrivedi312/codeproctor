@@ -70,6 +70,7 @@ void test('TC-093: a null site or non-array alerts is an unusable report, not a 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tc093-'));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+// Creating a symlink needs privileges on Windows (developer mode or admin); CI runs on Linux.
 const link = path.join(tmp, 'link.mjs');
 fs.symlinkSync(path.join(here, 'cli.mjs'), link);
 const write = (name, body) => {
@@ -79,6 +80,7 @@ const write = (name, body) => {
 };
 const run = (script, cwd, args) =>
   spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8' });
+const T = ['--target-host', 'a.example'];
 const site = (...alerts) => JSON.stringify({ site: [{ '@host': 'a.example', alerts }] });
 
 for (const [label, script, cwd] of [
@@ -91,23 +93,24 @@ for (const [label, script, cwd] of [
     assert.equal(run(script, cwd, [write('empty.json', '{"site":[]}')]).status, 2);
     assert.equal(run(script, cwd, []).status, 2);
     const ok = write('ok.json', site());
-    const good = run(script, cwd, [ok]);
+    const good = run(script, cwd, [ok, '--target-host', 'a.example']);
     assert.equal(good.status, 0);
     assert.match(good.stdout, /TC-093 PASS/);
     assert.equal(run(script, cwd, [ok, '--target-host', 'b.example']).status, 2);
-    assert.equal(run(script, cwd, [ok, '--target-host', 'a.example']).status, 0);
-    const high = run(script, cwd, [write('high.json', site({ riskcode: '3', name: 'h' }))]);
+    const high = run(script, cwd, [write('high.json', site({ riskcode: '3', name: 'h' })), ...T]);
     assert.equal(high.status, 1);
     assert.match(high.stdout, /TC-093 FAIL/);
     const med = write('med.json', site({ riskcode: '2', name: 'm' }));
-    assert.equal(run(script, cwd, [med]).status, 0);
-    assert.equal(run(script, cwd, [med, '--fail-on-medium']).status, 1);
+    assert.equal(run(script, cwd, [med, ...T]).status, 0);
+    assert.equal(run(script, cwd, [med, '--fail-on-medium', ...T]).status, 1);
   });
 
   void test(`TC-093: CLI via ${label} rejects unknown options and --flag=value forms`, () => {
     const ok = write('ok2.json', site());
+    assert.equal(run(script, cwd, [ok]).status, 2, 'missing --target-host');
     for (const bad of [
       ['--bogus'],
+      [],
       ['--fail-on-medium=true'],
       ['--target-host=a.example'],
       ['--target-host'],
@@ -118,3 +121,10 @@ for (const [label, script, cwd] of [
     assert.equal(run(script, cwd, [ok, ok]).status, 2);
   });
 }
+
+void test('TC-093: a URL in an alert name is not printed, a non-numeric count is tolerated', () => {
+  const a = { riskcode: '1', name: 'see https://x.example/?token=secret now', count: 'many' };
+  const out = evaluate({ site: [{ alerts: [a] }] }).lines.join('\n');
+  assert.doesNotMatch(out, /secret|https?:/);
+  assert.doesNotMatch(out, /NaN/);
+});

@@ -1,10 +1,10 @@
 // Command line for the TC-093 verdict (logic in evaluate.mjs).
-//   node packages/qa/zap/cli.mjs zap/report.json [--fail-on-medium] [--target-host <host>]
-// Exit codes as in evaluate.mjs; any other option, or a --flag=value form, is a usage error (exit 2).
+//   node packages/qa/zap/cli.mjs zap/report.json [--fail-on-medium] --target-host <host>
+// --target-host is required (a report for the wrong or unreached host must not pass). Exit codes as in evaluate.mjs; any other option, or a --flag=value form, is a usage error (exit 2).
 import fs from 'node:fs';
 import { evaluate } from './evaluate.mjs';
 
-const USAGE = 'Usage: node cli.mjs <report.json> [--fail-on-medium] [--target-host <host>]';
+const USAGE = 'Usage: node cli.mjs <report.json> [--fail-on-medium] --target-host <host>';
 
 function parse(argv) {
   let file;
@@ -20,7 +20,7 @@ function parse(argv) {
     } else if (a.startsWith('--') || file !== undefined) return null;
     else file = a;
   }
-  return file === undefined ? null : { file, failOnMedium, targetHost };
+  return file === undefined || targetHost === undefined ? null : { file, failOnMedium, targetHost };
 }
 
 const opts = parse(process.argv.slice(2));

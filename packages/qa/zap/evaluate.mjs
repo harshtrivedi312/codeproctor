@@ -14,6 +14,9 @@
 
 const RISK = { 0: 'Informational', 1: 'Low', 2: 'Medium', 3: 'High' };
 
+// A URL in an alert name could carry a token; never print one.
+const strip = (t) => t.replace(/https?:\/\/\S+/gi, '<url>');
+
 export function evaluate(report, { failOnMedium = false, targetHost } = {}) {
   const sites = Array.isArray(report?.site) ? report.site : [];
   if (sites.length === 0) {
@@ -43,9 +46,15 @@ export function evaluate(report, { failOnMedium = false, targetHost } = {}) {
       if (raw === '' || !Number.isInteger(risk) || risk < 0 || risk > 3) {
         return { code: 2, lines: ['An alert has a missing or invalid riskcode: unusable report.'] };
       }
-      const n = Number(a.count ?? (a.instances ? a.instances.length : 1));
+      const rawN = Number(a.count ?? (a.instances ? a.instances.length : 1));
+      const n = Number.isFinite(rawN) ? rawN : 0;
       counts[risk] += 1;
-      rows.push({ risk, name: String(a.name ?? a.alert ?? '?'), id: String(a.pluginid ?? '?'), n });
+      rows.push({
+        risk,
+        name: strip(String(a.name ?? a.alert ?? '?')),
+        id: strip(String(a.pluginid ?? '?')),
+        n,
+      });
     }
   }
   rows.sort((x, y) => y.risk - x.risk || x.name.localeCompare(y.name));
