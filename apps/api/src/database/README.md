@@ -233,7 +233,8 @@ create or update. Everything reached through a relation is **not** looked at.
   (`tc-008-org-isolation.spec.ts` pins this behaviour; it documents the limit and is not a fix.)
 - **(d) Rule (i) covers 25 foreign keys**, not only the staff references (`created_by`,
   `reviewer_id`, `assigned_to`, `collected_by`, `scored_by`, `reviewed_by`, `actor_id`) and
-  `test_questions.question_version_id` (FU-DB-64 lists them all). The main cross-chain ones:
+  `test_questions.question_version_id`. The list is `RULE_I_REFERENCES` in
+  `org-scope-relations.ts` (see "Foreign keys and rule (i)" below). The main cross-chain ones:
   `session_questions` to `test_questions`, `question_versions` and `question_variants`;
   `session_sections` to `test_sections`; `consents` to `consent_texts`; `keystroke_batches` to
   `session_questions`; `webhook_deliveries` to `sessions`; `organizations.current_consent_text_id`
@@ -248,6 +249,28 @@ create or update. Everything reached through a relation is **not** looked at.
 - Prisma queries are lazy. See "Writing queries inside the scope" below.
 - Prisma returns `BigInt` for the identity ids and `Decimal` for scores (FU-DB-06): serialise them
   before sending JSON.
+
+## Foreign keys and rule (i)
+
+`org-scope-relations.ts` classifies **every foreign key in the schema** (`FK_CLASSES`, 58 of them),
+and `org-scope-relations.spec.ts` derives the keys from `prisma/schema.prisma` and fails when one
+is missing, unclassified, classified twice, or of the wrong kind. A new foreign key breaks the build
+until it is classified.
+
+| Kind          | Count | What it is                                                              | Who guards it                                          |
+| ------------- | ----- | ----------------------------------------------------------------------- | ------------------------------------------------------ |
+| `org-column`  | 9     | the `org_id` column of a model with its own org                         | the scope (filter and stamp)                           |
+| `scope-hop`   | 21    | the first hop of a path model's scope path (its own parent)             | the scope filter; creating or re-parenting is rule (i) |
+| `composite`   | 3     | `(id, org_id)` keys on `invitations` and `sessions` (ADR 0006 2 ii)     | the database                                           |
+| `staff-ref`   | 12    | a reference to a user (`created_by`, `reviewer_id`, `assigned_to`, ...) | **rule (i)**                                           |
+| `cross-chain` | 13    | a reference into another chain or to a second parent                    | **rule (i)**                                           |
+
+`RULE_I_REFERENCES` (the last two kinds, 25 keys) is the list a service must follow: **before
+writing an id into any of these columns, load the row through the scoped client and answer 404 on a
+miss.** Module tests and code review take their checklist from it, for example "every write of
+`session_questions.test_question_id` loads the test question first".
+
+The same table says which side of each relation holds the key.
 
 ## Writing queries inside the scope
 
