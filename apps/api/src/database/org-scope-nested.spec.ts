@@ -391,6 +391,26 @@ describe('nested cursors in include and select (NFR-04, FR-103)', () => {
       }
     });
 
+    it('TC-008 a selection nested more than 16 relations deep is refused with its own message (FU-DB-99)', () => {
+      const include = (depth: number): Args =>
+        depth === 0 ? {} : { include: { replaces: include(depth - 1) } };
+      expect(() => scope('RefreshToken', 'findMany', include(10))).not.toThrow();
+      refused('RefreshToken', 'findMany', include(20));
+      let message = '';
+      try {
+        scope('RefreshToken', 'findMany', include(20));
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      // A selection is a read: the message does not talk about a nested write.
+      expect(message).toContain(
+        'RefreshToken.findMany: selection refused at RefreshToken.replaces',
+      );
+      expect(message).toContain('nested more than 16 relations deep');
+      expect(message).not.toContain('nested write');
+      expect(message).not.toContain('nested relation write refused');
+    });
+
     it('TC-008 a nested cursor is refused at any depth, in include, select and _count', () => {
       refused('Test', 'findMany', {
         include: { sections: { include: { questions: { cursor: { id: 'q' } } } } },
