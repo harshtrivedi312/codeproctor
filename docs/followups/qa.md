@@ -354,3 +354,43 @@ Until it lands the gate does not read `api-unit.json` and TC-008 stays Planned i
 ## TC-003 disable freshness depends on backend PR #51
 
 The tc-003 "turn 2FA off" test proves `totpEnabled` is fresh after a disable through a new login and a refresh of that new session, not through the pre-disable cookie, because #51 revokes every refresh family on disable. The later "already off" check (409) still reuses the pre-disable access token; if BE-03 or #51 invalidates access tokens on disable, switch it to the new session's token. Owner: qa-engineer.
+
+
+## QA B (ops) follow-ups (2026-10-05)
+
+Owner: qa-engineer (QA B session). Items for QA A and the hub; QA B does not edit the matrix, `packages/qa/src`, `apps/*/test` or CI.
+
+### B.1 Matrix rows for QA A (manual scripts added in docs/manual-tests.md)
+
+The manual script is a secondary level for TCs that already have an automated level; QA A decides the primary level and status. Status for all rows below is Planned until a person runs the script.
+
+| TC or ref | Script | Level to add | Pri | Note |
+| --- | --- | --- | --- | --- |
+| TC-095 | M-01 | manual (secondary) | P1 | 18+ confirmation (C-30), server timestamp, emailed copy, retention link (C-05), new signature per session |
+| TC-030 | M-01 steps 1 and 4 | manual (secondary) | P1 | no media request before signing or without the 18+ confirmation |
+| TC-096 | M-02 | manual (secondary) | P1 | decline screen shows the recruiter contact (C-02) |
+| TC-075, TC-076 | M-04 | manual (secondary) | P1 | C-28: every session reviewed; band LOW still goes to UNDER_REVIEW. The current text of TC-076 ("Session scores MEDIUM") and FR-805 predates C-28 (see B.3) |
+| TC-072, TC-094 | M-05 | manual (secondary) | P1/P2 | tiers C-26, C-27, C-35; consent proof kept (C-17); erasure waits for an open appeal (C-06) |
+| Compliance proposal (a), (h), (m) | M-03 | manual (secondary) | P1 | waived identity check, two accommodation settings; TC ID pending from the hub |
+| Compliance proposal (k) | M-01 | manual (secondary) | P1 | age confirmation; TC ID pending |
+| Compliance proposal (b), (d) | M-02, M-01 step 9 | manual (secondary) | P2 | decline contact, retention link; TC ID pending |
+| Compliance proposal (e) | M-06 | manual (secondary) | P1 (privacy) | demographics, blocked until FAIR-01; TC ID pending |
+| TC-090 | packages/qa/load | load (k6) | P1 | script added by QA B (see B.2); status stays Planned until DEP-01 |
+| TC-091 | packages/qa/load | load (k6) | P2 | same |
+| TC-093 | packages/qa/zap | scan (ZAP) | P1 | config added by QA B; status stays Planned until DEP-01 |
+| TC-065, TC-053, TC-054, TC-056, TC-064, TC-036 | docs/qa/redteam-plan.md | manual / red team | P1/P2 | QA-02 adversarial re-attempts; report goes to docs/red-team-report.md after DEP-01 |
+
+### B.2 Notes on the existing k6 scripts (packages/qa/k6, QA A)
+
+`packages/qa/k6/tc-090-load.js` and `tc-091-code-run.js` use placeholder paths (`/v1/sessions/current/...`) that match neither FSD section 4 nor ADR 0013, and they do not send presign, confirm, keystrokes or signed batches. QA B's scripts in `packages/qa/load/` use the ADR 0013 routes and the real cadence (R-02) and are meant to replace them. Once they merge, QA A or the hub should point `.github/workflows/qa.yml` at `packages/qa/load/` (see the CI list in B.4) and delete `packages/qa/k6/`.
+
+### B.3 Doc disagreements found (for the hub)
+
+1. FSD FR-805 and TC-076 say only MEDIUM and HIGH sessions go to the review queue; C-28 says a person reviews every session and GRADED always goes to UNDER_REVIEW. FSD section 3 (COMPLETED "Verdict set or auto-clean") has the same old wording.
+2. FSD FR-401 has no age confirmation (C-30), and FR-305 has no "no identity check" or "face detectors off" accommodation (C-02, C-25).
+3. TC-094 still says "provisional, Legal to confirm"; C-06 made the erasure hold final.
+4. TC-063 (45 s) versus FR-609 (60 s) is still open (already listed above; ADR 0013 section 5.3 flags it as Q13).
+
+### B.4 CI changes needed (hub, rule 12; none made by QA B)
+
+Listed after the load and ZAP PRs below.

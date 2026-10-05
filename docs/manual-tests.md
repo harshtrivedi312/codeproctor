@@ -9,13 +9,17 @@ Owner: qa-engineer. For test cases that need real people or hardware (see /docs/
 - Use only test accounts and synthetic faces or volunteers who signed the volunteer consent form (B-05 item 3 in /docs/status.md). Never use a real candidate's data.
 - Open the staff review page for the session in another browser profile (not on the test laptop) so you can read the events as they arrive.
 - Record for each run: date, build or commit, browser and version, OS, pass or fail, and the event IDs seen. A failed step is a defect: file it with the step number, expected and actual result, and name the owner agent from the matrix.
-- Every script ends with a clean-up step. Delete the test session through the admin deletion flow (TC-094) afterwards.
+- Every script ends with a clean-up step. Delete the test session through the admin deletion flow (TC-094) afterwards. Erasure keeps the signed consent record and its PDF for 3 years (C-17) and waits while a review or appeal is open (C-06); this is expected, not a failed clean-up.
+- Consent now includes the 18-or-older confirmation (C-30): every script that says "sign the consent document" means tick the confirmation, scroll to the end, type the full legal name and sign (script M-01).
+- Every session is reviewed by a person (C-28): after a test finishes, the session waits in the review queue and the recruiter sees no result until a reviewer sets the verdict (script M-04). Do not expect a result on the recruiter side before then.
+- Never write an OTP, token, presigned URL, object key or recording URL in a run record, a defect or a chat. Write the event ID, the prefix kind and the time only.
+- Candidates with a waived identity check or with face detectors off must produce no face-based events and no re-check (C-25, C-34); scripts TC-034, TC-057, TC-058 and TC-060 do not apply to such a session (script M-03).
 
 ## TC-034 Liveness spoof (FR-403, P2, STANDARD)
 
 Needs: a printed colour photo of the face of the person in the ID photo (A5 or larger), a phone showing a still photo of the same face, the real person.
 
-1. Open the invite link, pass the OTP, sign the consent document.
+1. Open the invite link, pass the OTP, sign the consent document (18+ confirmation, scroll, typed name: script M-01).
 2. At the identity step, upload an ID photo of the real person.
 3. When the selfie step starts, hold the printed photo in front of the webcam so the face fills the oval. Move the print slightly. Expected: the liveness check fails with a clear message and a retry is offered.
 4. Retry with the phone showing the still photo. Expected: the liveness check fails.
@@ -146,11 +150,127 @@ Needs: OBS Studio with its Virtual Camera.
 
 Pass: step 3 logs the event; step 4 does not.
 
+## Compliance and review flows (C-01 to C-35)
+
+These scripts cover the owner decisions in /docs/compliance/decisions.md. Script IDs start with `M-`. A script carries the TC ID it belongs to when one exists in /docs/test-cases.md. Where the decision has no TC yet, the hub is still to assign one (see "Proposed TC cases" in /docs/followups/qa.md) and the heading says "TC pending"; the matrix row is added by QA A when the ID exists. Wording on screen is not yet fixed by the FSD for several of these flows, so the expected results name the meaning, not the exact text; record the exact text seen.
+
+Status of the product text these scripts rely on, checked 2026-10-05 against main: FSD FR-305, FR-401 and FR-805 do not yet carry C-02, C-28 and C-30 (the hub applies them), and ADR 0015 (waived identity check, PR #49) is still proposed. Where a script says "per C-xx", the decision is the source until the FSD lands. If the build disagrees with the decision, file a defect against the owner named in the "Applied to" column of decisions.md.
+
+Common set-up for M-01 to M-06: a staging organisation with a reviewer account (2FA on), a recruiter account, and one test per script. The candidate mailbox is one you can read. Use the approved consent version, or on staging the placeholder version (the placeholder guard blocks pilot and production only, C-09).
+
+### M-01 Consent with the 18+ confirmation (TC-095, TC-030; FR-401; C-07, C-09, C-29, C-30, C-05, C-31; STANDARD)
+
+Needs: a candidate mailbox; browser developer tools open on the Network tab and a second browser profile for the staff side; permission to look at the browser's site settings.
+
+1. Open the invite link and pass the email OTP. Keep the Network tab open and the site settings (camera, microphone, screen) visible. Expected (TC-030): the consent document is shown; no camera, microphone or screen permission prompt appears; no request to a media, presign or events route is made; nothing is uploaded.
+2. Look for the 18-or-older confirmation (C-30). Expected: it is a required, separate control that is not ticked by default, with a label that says the candidate is 18 or older.
+3. Without scrolling to the end, try to sign. Expected (TC-095): Sign is disabled, the 18+ control cannot make it enabled.
+4. Scroll to the end, type the full legal name, leave the 18+ confirmation unticked and try to sign. Expected (C-30): signing is refused, with a message that names the missing confirmation, and focus moves to it. Check the Network tab: if the browser sent a sign request, the server must answer 400 and nothing is stored. The candidate cannot continue and no media was requested.
+5. Tick the 18+ confirmation and sign. Expected: success; the status moves to CONSENTED; the next step (system check) is reachable.
+6. In another browser profile open the staff side and find the consents record for the session (or ask the admin to read it). Expected (C-07, C-30): document version, the typed name, a server timestamp (compare with the staff clock, not the candidate laptop), IP address, user agent, and the stored 18+ confirmation. No field holds a password, a token or an OTP.
+7. Change the candidate laptop clock one hour forward before step 5 on a second run. Expected: the stored timestamp is the server time, not the laptop time.
+8. Open the candidate mailbox. Expected (C-07, C-31): a copy of the signed document arrives (PDF attached or linked). Record the sender domain and the delivery time. The mail contains no OTP and no link that carries a token you did not expect.
+9. Check the links on the consent step and the candidate portal. Expected (C-05): a link to the retention and destruction schedule; it opens, it is reachable by keyboard, and its numbers match /docs/compliance/retention-schedule.md.
+10. Read the consent document against C-29 and C-14. Expected: it separates what is done on legitimate interests from what the candidate consents to; it says software only flags and a person makes every decision; it names the identity re-check (one 640 px frame every 2 minutes, C-08); it names US storage and the transfer of EU and UK data (C-03); it gives the accommodation contact.
+11. Start a second test for the same candidate email (a new invitation). Expected (TC-095, FR-401): the candidate must sign again; the 18+ confirmation is asked again; the old signature is not reused.
+
+Pass: steps 1 to 6 and 8 to 11 as described; step 7 shows server time. Any media request before step 5 is a P1 defect (TC-030).
+
+### M-02 Decline path (TC-096; FR-401; C-02; STANDARD)
+
+Needs: as M-01, an invitation created by a recruiter whose name and email you know.
+
+1. Open the invite link, pass the OTP, open the consent document and choose Decline. Keep the Network tab and the site settings visible from the start.
+2. Expected: a confirmation step or message, then the declined page. The status is DECLINED on the staff side (the Dashboard or the session page).
+3. Expected (C-02): the declined page shows the recruiter's contact from the invitation (name and email), and says how to ask for an alternative or an accommodation. Check it is the recruiter of this invitation, not another organisation's contact.
+4. Expected (TC-096): no camera, microphone or screen request appeared at any time, before or after declining; no upload and no event batch was sent (Network tab).
+5. Reopen the invite link, in the same browser and in another browser. Expected: the declined page again; no OTP prompt that starts a test; no new session.
+6. On the staff side, check the recruiter view. Expected: the session shows DECLINED with the decline time and document version; there is no recording, no identity check, no risk score. No data was stored beyond the decline record (OQ-11 is open: record how long the staff side says it keeps the record).
+7. As the recruiter, change the invitation so the candidate can try again with an accommodation (create a new invitation with the "no identity check" or "face detectors off" setting, see M-03). Expected: the new invitation starts a new session; the declined one stays DECLINED.
+
+Pass: steps 2 to 6 as described. A media request, an upload or a way to restart the declined session is a P1 defect.
+
+### M-03 Waived identity check and the two accommodation settings (TC pending; FR-305, FR-403, FR-606; C-02, C-19, C-25, C-34; ADR 0015 proposed; STANDARD)
+
+Needs: a recruiter account, a reviewer account (2FA), a super admin account, three invitations (A, B, C) for candidate mailboxes you control, and a laptop with a webcam. Reason codes in ADR 0015: REFUSED_BIOMETRIC_PROCESSING, CANNOT_COMPLETE_ID_CHECK, OTHER (with a note). Expected UI wording is open; record what you see.
+
+Part 1: setting the waiver (recruiter side)
+1. Create invitation A with "no identity check" on and no reason. Expected (C-19): refused (400 or an inline error); nothing is saved.
+2. Choose reason OTHER with an empty note. Expected: refused. Choose a reason with a note longer than 500 characters. Expected: refused.
+3. Choose CANNOT_COMPLETE_ID_CHECK and save. Expected: saved; the invitation shows the waiver and the reason. Open the audit log as the super admin. Expected: one audit row for the change, with organisation, actor (the recruiter), invitation id, IP and no secret.
+4. Change and then clear the setting on a scratch invitation. Expected: one audit row per change (set, change, clear).
+5. Log in as a user without invitation rights (for example the reviewer) and try to change the accommodation through the page or by pasting the request in the developer tools. Expected: 403. Log in as a recruiter of another organisation (if you have one) and request the invitation. Expected: 404.
+
+Part 2: the candidate flow with the waiver (invitation A)
+6. Open A as the candidate, pass the OTP, sign the consent document (M-01). Expected: the ID photo and selfie steps are skipped or shown as not required; the system check, room scan and recordings still run; the candidate is told what still runs.
+7. Start the test. Wait 5 minutes. Expected (C-34): no identity re-check frame is sent (Network tab: no request to the identity re-check route or an evidence presign for the re-check) and no FACE_MISMATCH event appears.
+8. Finish the test. As the reviewer open the session. Expected (C-19, OQ-13): the review screen shows "identity check waived" (or equivalent); the reviewer does not see the reason text (OQ-13 is open: record what the reviewer sees). As the recruiter or super admin open the same session. Expected: the reason is visible.
+9. As the recruiter record "video ID check done: yes" and then "no" on a copy. Expected (C-19): the field saves, the reviewer sees the result, each save writes an audit row.
+10. Expected: the waived session is not rejected anywhere and is not auto-cleared (see M-04).
+
+Part 3: face detectors off, identity check still on (invitation B)
+11. Create B with "face detectors off" only. Run the candidate flow. Expected (C-25): ID photo, selfie and the initial face match still run; during the test, no NO_FACE or MULTIPLE_FACES events appear even if you leave the frame for 15 seconds or a second person enters; the identity re-check does not run (C-34): no re-check request, no FACE_MISMATCH. GAZE_AWAY: record whether it still fires (ADR 0015: GAZE stays unless it is also off).
+12. Expected: the review screen shows that the face detectors and the re-check were off (ADR 0015 review projection `recheck: OFF_FACE_DETECTORS`); record the text.
+
+Part 4: both settings (invitation C)
+13. Create C with both settings and reason REFUSED_BIOMETRIC_PROCESSING. Expected (OQ-15, ADR 0015): FACE and GAZE are switched off together with the waiver; the recruiter cannot switch them back on once the candidate has passed the OTP.
+14. Run the candidate flow. Expected: no ID step, no face detection, no gaze events, no re-check; recordings still run.
+
+Pass: parts 1 to 4 as described, every setting change audited, no FACE_MISMATCH or face event where the settings forbid it. A face request sent after a waiver, or a missing audit row, is a P1 defect.
+
+### M-04 Every session reviewed (TC-075, TC-076; FR-805, FR-902, FR-904; C-14, C-28; STANDARD)
+
+Needs: a recruiter, a reviewer, and a webhook receiver you control that logs the signed deliveries (staging only, for example a request bin you own; synthetic data only). Run a clean session: no leaving fullscreen, no paste, face centred throughout.
+
+1. Take the clean test as the candidate and finish it. Wait until grading is done. Expected (C-28, FR-805 per C-28): the risk band is LOW and the session is in UNDER_REVIEW, in the reviewer queue. It is not COMPLETED and not cleared automatically.
+2. As the recruiter open the session. Expected (C-28): no score, verdict or report is visible yet; the page says the review is pending.
+3. As the recruiter try the CSV export and the report download for that session. Expected: the session is not included or the report is refused until the verdict exists.
+4. Check the webhook receiver. Expected (FR-1003, C-28): no session.completed delivery yet. (If one arrived before the verdict, that is a defect.)
+5. As the reviewer open the queue. Expected: the session is listed with its band; a fast-review path exists: a summary view and a one-click verdict, with the full timeline still reachable (C-28). Time the review from opening the page to saving the verdict and write the time in the run record (capacity planning).
+6. Set a verdict (CLEAN) with the one-click control. Expected: the status moves to COMPLETED; an audit row records the reviewer; the reviewer's note, if any, is kept.
+7. Expected after the verdict: the recruiter sees the result and the report; the export includes it; the signed webhook delivers session.completed (verify the signature with the shared secret on your receiver).
+8. Repeat with a session that produced 2 HIGH and 3 MEDIUM events (leave fullscreen, paste attempts, tab switches, as in the other scripts). Expected (TC-075): the band matches the configured weights; the session is in the queue; the verdict cannot be completed while a HIGH flag is undecided (TC-078).
+9. Repeat with a waived identity check (M-03) and with an identity check that goes to manual approval (TC-033). Expected: both appear in the queue and cannot be cleared automatically.
+10. Open a VIOLATION verdict as the candidate (appeal link, 7 days, TC-080). Expected: the appeal goes to a different reviewer.
+
+Pass: no session reaches COMPLETED without a reviewer action; no result is visible to a recruiter, export or webhook before the verdict. Any early result is a P1 defect (C-28; security-relevant because it exposes candidate results).
+
+### M-05 Retention, erasure and the consent proof (TC-072, TC-094; FR-704; NFR-05; C-04, C-05, C-06, C-17, C-26, C-27, C-35; STANDARD)
+
+The time-based checks need either a staging test hook from DB-06 (a way to run the retention job with a shifted clock) or the integration tests; do not change the staging server clock by hand. If no hook exists on the build under test, run only steps 1 to 4 and 7 to 10, mark steps 5 and 6 "not manually verifiable" and point to the integration results for TC-072.
+
+Needs: a super admin, a finished session with recordings, an ID photo, a selfie and a signed consent (use M-01 and M-04 data), access to the staging bucket listing through the operator console (read-only; do not copy any object key or URL into the run record or a chat, write only the prefix kind such as "identity/" and the object count).
+
+1. Open the published retention and destruction schedule (C-05). Expected: the tiers match decisions.md: ID image, selfie, re-check frames and evidence frames showing the face, 90 days from capture whatever the organisation setting (C-27, C-35); recordings and keystrokes at the organisation's days, capped at 90 (confirm with OQ-18's answer); results 1 year (C-26); signed consent records 3 years (C-04). Write any difference as a documentation defect.
+2. In the bucket listing, before any deletion, note the prefix kinds present for the session: media, identity, evidence, reports, consent PDF.
+3. Request erasure for the candidate as the super admin while an appeal or review is open (set the session UNDER_REVIEW first, or a VIOLATION with an appeal). Expected (C-06, TC-094): the candidate is told that erasure waits; nothing is deleted yet; an audit row records the request.
+4. Close the review or appeal. Expected: erasure runs as soon as it closes; the candidate is told it is done.
+5. Using the test hook, set the organisation retention to 7 days and run the job at 8 days. Expected (TC-072, C-27): ID image, selfie and mismatch frames are deleted at 7 days (shortened), recordings and keystroke batches are deleted, the object keys are nulled, an audit row is written per job. Repeat with 365 days at 91 days. Expected: face items are gone at 90 days while other media follow the setting (subject to OQ-18).
+6. Run the job at 1 year and 1 day. Expected (C-26): scores, verdicts, notes and reports are deleted, only anonymised statistics remain, with no candidate id; at 3 years and 1 day the consent record and PDF are deleted (C-04).
+7. After the erasure in step 4, list the bucket again. Expected (C-17, TC-094): recordings, ID image, selfie, evidence, code, answers and keystrokes are gone; the only personal item left is the signed consent record and its PDF, until 3 years after signing. The confirmation to the candidate says so.
+8. Open the candidate record as the recruiter and the reviewer. Expected: no code, answers, name or email remain beyond what C-17 keeps; the accommodation notes are cleared or you record what is left (OQ-12 is open).
+9. Try to open an old playback link for the erased session after 20 minutes. Expected (TC-071): access denied.
+10. Check the audit log. Expected: the erasure request, hold, completion and each retention run appear, with no object key and no personal data in the audit detail.
+
+Pass: steps as described. Anything personal left beyond the consent proof, or any deletion while a review or appeal is open, is a P1 defect.
+
+### M-06 Optional demographics (TC pending; C-13, FAIR-01; STANDARD)
+
+Not yet runnable: FAIR-01 is not built. Run when it lands. Needs: a finished test, a reviewer, a recruiter, a super admin, and at least 10 finished synthetic sessions for the aggregate check.
+
+1. Finish a test. Expected: after the test the candidate is offered an optional form with its own explicit consent and a "prefer not to say" choice; the test result does not depend on answering.
+2. Skip the form. Expected: nothing is stored; the session behaves exactly as without it.
+3. Answer with consent. As the reviewer, recruiter, author and super admin open the session, the export and the webhook payload. Expected (C-13): no individual answer is visible anywhere.
+4. Check the aggregate report with fewer than 10 candidates in a group. Expected: the group is not shown.
+5. Erase the candidate (M-05). Expected: the answers are deleted with the session data.
+
+Pass: steps as described. Any staff-visible individual answer is a P1 privacy defect.
+
 ## Accessibility with a screen reader (NFR-06, part of TC-092, P1)
 
 Needs: NVDA with Firefox or Chrome on Windows, and VoiceOver with Safari or Chrome on macOS. The axe scan runs automatically; this covers what axe cannot.
 
-1. Walk the whole candidate flow with the keyboard only (Tab, Shift+Tab, Enter, Space, Esc): invite link, OTP, consent, system check, test, submit. Expected: every control reachable, visible focus, no keyboard trap (apart from the intended fullscreen lock overlay, which must still have a focusable Re-enter button).
+1. Walk the whole candidate flow with the keyboard only (Tab, Shift+Tab, Enter, Space, Esc): invite link, OTP, consent (including the 18+ confirmation and the retention schedule link, C-30, C-05), the decline screen and its recruiter contact (C-02), system check, test, submit, and the optional demographics form once FAIR-01 exists (C-13). Expected: every control reachable, visible focus, no keyboard trap (apart from the intended fullscreen lock overlay, which must still have a focusable Re-enter button).
 2. Repeat with NVDA, then VoiceOver. Expected: headings and landmarks announced, form errors announced and linked to their fields, the timer announces time left only at thresholds (5 minutes, 1 minute, time up), the lock overlay and finish dialog are announced as dialogs.
 3. Zoom to 200 percent and 400 percent width reflow. Expected: nothing cut off, no horizontal scrolling in the form screens.
 4. Record every issue with the WCAG success criterion.
