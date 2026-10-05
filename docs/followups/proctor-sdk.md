@@ -139,4 +139,6 @@ Nits
 - `sweep.ts`: `sessionOfKey` assumes session ids contain no `:`; assert or document it. A future keystroke queue must not use a `${sid}:ks` session id.
 - Sweep tests carry FR-702 only; add the TC id if one exists.
 - The `/dev/proctor` demo does not call `attachStream()` or `onDeviceLost` yet.
-- `event-queue.ts`: the flush timer callback never resets `flushTimer`, so an event enqueued between the timer firing and `cutAll()` gets no new timer and joins the earlier batch. This is the likely cause of the TC-065 seq flake (batch count, not delivery). Add `this.flushTimer = null` at the start of the timer callback; held until QA's PR #46 merges to avoid conflicting with it.
+
+## Decision needed: flush timer window (TC-065 flake, confirmed cause)
+Observation (confirmed): the fired flush-timer callback in `event-queue.ts` never resets `flushTimer`. An event enqueued while a flush is on the chain (after the timer fired, before `cutAll()` ran) gets no new timer and joins the earlier batch, so 3 pastes can produce 2 batches instead of 3. No event is lost or delivered out of order (proved in PR #47); only the batch count differs. Decision for the Delivery Lead or hub: should a late event open a new 5 s window (reset `flushTimer = null` when the timer fires, and start a timer after a cut if events remain), or is joining the earlier batch acceptable? Not changed in PR #47 on purpose.
