@@ -40,7 +40,7 @@ A restore brings back rows that were erased after the backup was taken. To undo 
 erased candidates are kept in the backup bucket under `<prefix>erasure-list/`, outside the
 database and its dumps. One object per erasure request, named `<UTC stamp>-<candidate uuid>.json`,
 holding the id and time only (no name or email). `restore.sh` re-applies **every** entry after the
-restore; the SQL is idempotent (`infra/backup/reapply-erasures.sql`), it follows C-17 (the consent
+restore; the SQL is idempotent except that `sessions.auth_epoch` only increases (`infra/backup/reapply-erasures.sql`), it follows C-17 (the consent
 record is kept), it also raises `sessions.auth_epoch` by 1,000,000 (past any epoch issued between the backup and the erasure) and clears `hmac_key_enc` and `report_key` so
 old candidate tokens and keys do not come back, and it does not touch object storage (objects
 already deleted stay deleted). Restored rows can still point at deleted objects until the retention
@@ -55,6 +55,10 @@ The erasure service (DB-06) calls, in this order:
    the fence, anonymisation at day 28), and every backup taken until then still holds the personal
    data. So `backup.sh` prunes an entry only when its **completion** is more than a day older than the oldest remaining
    backup, and never prunes an entry without a completion marker.
+
+`restore.sh` also raises `auth_epoch` by 1,000,000 on **every** restored session, so a token revoked since the backup (a device that lost its session to another device) does not work again; candidates sign in again.
+
+A zero-byte "folder" object at `<prefix>erasure-list/` (some consoles create one) makes every restore stop, by design: any key there that is not `<stamp>-<uuid>.json` could be an erasure. Delete the folder object.
 
 Known gaps until DB-06 lands (FU-DBB-01): re-application erases every session of the candidate even if a
 review or appeal hold still protects it, anonymises the candidate at once instead of at day 28, and sets

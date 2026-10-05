@@ -131,6 +131,13 @@ else
   status=2
 fi
 
+# 4b. Session fence for every session, erased or not. The restore puts back the epochs of the backup
+#     time, and a device that lost its session to another device since then would get a valid token
+#     again. Every OTP success raises the epoch, so a jump of a million passes anything issued since.
+#     Candidates sign in again. (Sessions only; staff refresh tokens are not touched here.)
+psql --no-psqlrc -X -q -v ON_ERROR_STOP=1 -d "$target" -c 'UPDATE sessions SET auth_epoch = auth_epoch + 1000000' > /dev/null ||
+  die "could not raise the session epochs. Do not use database $target: old candidate tokens may work again."
+
 # 5. Re-apply the erasures (ADR 0004 R-7). Every entry on the list is applied, not just those
 #    after the backup stamp: re-applying one that is already in the backup changes nothing.
 if [ "$reapply" = yes ]; then
@@ -144,7 +151,7 @@ if [ "$reapply" = yes ]; then
       iso=$(printf '%s' "$stamp" | sed 's/^\(....\)\(..\)\(..\)T\(..\)\(..\)\(..\)Z$/\1-\2-\3T\4:\5:\6Z/')
       printf "INSERT INTO _reapply_erasures VALUES ('%s', '%s') ON CONFLICT DO NOTHING;\n" "$id" "$iso"
     done < "$WORK/erasures.txt"
-    printf '\\i '"'"'%s/reapply-erasures.sql'"'"'\n' "$here"
+    cat "$here/reapply-erasures.sql"
   } > "$WORK/reapply.sql"
   psql --no-psqlrc -X -q -v ON_ERROR_STOP=1 -d "$target" -f "$WORK/reapply.sql" > /dev/null ||
     die "erasures were NOT re-applied. Do not use database $target: it holds personal data that was erased."

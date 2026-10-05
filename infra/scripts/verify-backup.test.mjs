@@ -63,7 +63,12 @@ describe('DB-07 guards (NFR-03)', () => {
 
   it('backup.sh refuses a retention below one day or that is not a number', async () => {
     const base = { PGHOST: 'h', PGUSER: 'u', PGDATABASE: 'd', S3_BACKUP_BUCKET: 'b' };
-    assert.equal((await run(BACKUP, [], { ...base, BACKUP_RETENTION_DAYS: '0' })).status, 1);
+    assert.equal(
+      (await run(BACKUP, [], { ...base, BACKUP_RETENTION_DAYS: '0' })).stderr.includes(
+        'at least 1',
+      ),
+      true,
+    );
     assert.match(
       (await run(BACKUP, [], { ...base, BACKUP_RETENTION_DAYS: '1; rm' })).stderr,
       /whole number/,
@@ -162,6 +167,7 @@ describe('DB-07 guards (NFR-03)', () => {
     for (const bad of ['../x', '/abs', 'a//b', 'a#b', 'a b']) {
       const r = await run(ERASURES, ['list'], { S3_BACKUP_BUCKET: 'b', BACKUP_PREFIX: bad });
       assert.equal(r.status, 1, bad);
+      assert.match(r.stderr, /BACKUP_PREFIX/, bad);
     }
   });
 });
@@ -213,7 +219,7 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
   const keys = () => [...s3.objects.keys()].map((k) => k.replace('drill-backups/', ''));
   const put = (key) => s3.objects.set(`drill-backups/${key}`, Buffer.from('x'));
 
-  it('NFR-03: uploads dump, checksum and counts, prunes dumps past 14 days, keeps the newest', async () => {
+  it('NFR-03: uploads dump, checksum and counts, prunes dumps past 14 days', async () => {
     const old = stampDaysAgo(20);
     const recent = stampDaysAgo(3);
     put(`db/dumps/codeproctor-${old}.dump.gz`);
@@ -356,13 +362,13 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
       q(
         `SELECT auth_epoch || '|' || (hmac_key_enc IS NULL) || '|' || (report_key IS NULL) || '|' || (retention_anchor_at IS NOT NULL) FROM sessions WHERE id IN (${erasedSessions})`,
       ),
-      '1000000|true|true|true',
+      '2000000|true|true|true',
     );
     assert.equal(
       q(
         `SELECT auth_epoch || '|' || (hmac_key_enc IS NULL) FROM sessions WHERE id NOT IN (${erasedSessions})`,
       ),
-      '0|false',
+      '1000000|false',
     );
     // consent proof kept (C-17)
     assert.equal(
@@ -489,6 +495,7 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
     s3.faults.failList = false;
     assert.equal(r.status, 1);
     assert.match(r.stderr, /cannot list|cannot read the erasure list/);
+    assert.match(r.stderr, /Do not use database restored_nolist/);
     assert.doesNotMatch(r.stderr, /re-applied 0 erasure/);
   });
 

@@ -1,7 +1,7 @@
 -- Re-applies erasures after a restore (ADR 0004 R-7 and 9.7, DB-07). restore.sh runs this in one
 -- psql session after it created the temp table
 --   _reapply_erasures (candidate_id uuid, erased_at timestamptz)
--- from the erasure list kept outside the backup. Idempotent: running it twice changes nothing.
+-- from the erasure list kept outside the backup. Idempotent, except that sessions.auth_epoch only ever increases.
 --
 -- It mirrors the database part of erasure (docs/database.md "Erasure on request", C-17). Objects
 -- are not touched: those deleted at erasure time stay deleted. The consent record is KEPT (C-17).
