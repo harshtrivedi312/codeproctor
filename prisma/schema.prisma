@@ -120,6 +120,7 @@ enum SessionStatus {
   EXPIRED
   APPEALED
   DECLINED
+  ERASED
 
   @@map("session_status")
 }
