@@ -53,14 +53,14 @@ Proposed; the owner accepts. Apply these once ADR 0004 §9 and ADR 0001 §12.4 a
 - [hub] fsd.md FR-704: 90-day face-image cap, 3-year consent clock and 1-year results clock. NFR-05: the C-06 wording, dropping "Provisional (D-19, Legal to confirm)". FR-401: consent proof kept through erasure.
 - [hub] test-cases.md TC-072 (cap) and TC-094 (keeps the consent proof). QA adds TCs for R-9, R-10 and access to the kept proof.
 - [hub] prompts/database.md Step 6: two-tier R-4, R-9, R-10; the erasure service keeps the consent proof.
-- [hub, with or before #39] ADR 0013: the 5.7 consent PDF row ("kept until erasure"), the 5.7 erasure bullet (it deletes the consent prefix), the §8 BE-09 row (consent PDF prefix), and the CS-4 actor and column allowlists for erased candidates' consents.
-- [hub, #39, gates acceptance of ADR 0004 §9] ADR 0013 object deletion: R-4 deletes the session prefix except `reports/`; the face tier deletes `identity/**` and `evidence/sealed/**` at LEAST(retention_days, 90); R-10 and erasure delete `reports/**` and null `report_key`; the BE-09 row says the same; the R-9 cite becomes ADR 0004 §9.3.
+- ~~[hub, with or before #39] ADR 0013: the 5.7 consent PDF row, the 5.7 erasure bullet, the §8 BE-09 consent prefix, and CS-4 for erased candidates' consents.~~ Done in ADR 0013 (PR #39, head 75de77c). No CS-4 change is needed: CANDIDATE scope already excludes these columns, and the SERVICE carve-out is enforced in the service layer (ADR 0004 §9.5).
+- [hub, #39, gates acceptance of ADR 0004 §9] ADR 0013 object deletion is aligned at head 75de77c: tiers selected by session with completion markers; R-4 excludes `reports/`; the face tier at LEAST(retention_days, 90); R-10 runs the earlier tiers first, then deletes `reports/` and `submissions`; erasure deletes `reports/`; the R-9 cite is §9.3. Keep the two ADRs in step until both are accepted.
 - [hub, #39] ADR 0013 licence gate: one unit per named model (the COCO-SSD manifest plus every shard). Each `licence-acceptances` line carries D-28. There is no deploy-config override.
-- [hub] ADR 0006 §7.2 and ADR 0008 deltas: `REVOKE DELETE ON sessions FROM app_user` (ADR 0004 §9.3).
-- [hub] ARC-05: S3 versioning must not keep noncurrent copies of deleted face images, reports or consent PDFs (ADR 0004 §9.7).
+- [hub] ADR 0006 §7.2 and ADR 0008 deltas: `REVOKE DELETE, TRUNCATE ON sessions FROM app_user`, with a `has_table_privilege` test so a later re-grant is caught (ADR 0004 §9.3).
+- [hub] ARC-05: S3 versioning must not keep noncurrent copies of deleted face images, reports or consent PDFs (ADR 0004 §9.7). Redis AOF and RDB snapshot retention for email job payloads (ADR 0004 §9.5).
 - [Delivery Lead] status.md §9: one entry citing C-10 and D-28 that lists the exact `name@sha256` of every AuraFace and COCO-SSD file (the gate reads it). retention-schedule.md: pseudonymisation wording and the IP and browser row. DPIA: 3-year rationale and the legal flags in ADR 0004 §9.8.
 - [database] DB-06: ADR 0004 §9.2 to §9.5 and §9.7.
-- [backend] BE-06 `erasure-completed` template; BE-09 two-tier deletion and prefixes; BE-13 and BE-14 hide erased candidates' consent fields.
+- [backend] BE-06 `erasure-completed` template (deterministic job id, sent and failed audit rows); BE-09 tiers selected by session with markers; BE-13 and BE-14 hide erased candidates' consent fields, treat a NULL verdict as "results purged", and refuse appeals on purged reviews.
 - [integrity] BE-08 embedding cache lifetime (ADR 0004 §9.1).
 - [frontend] FE-03 erase confirmation text.
 - [owner] OQ-10 (legal hold), OQ-11 (declined consents), OQ-12 (accommodations on erasure); the embedding cache under C-18; C-27 scope; the pseudonymisation wording; the BIPA 5-year flag.
