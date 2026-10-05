@@ -22,7 +22,7 @@ Owner: Delivery Lead (from 2026-10-05, owner-requested CLAUDE.md change in PR #3
 | --- | --- |
 | Tasks done (merged) | 14 of 50: ARC-01, DB-01, DB-02, DB-03, DB-04, BE-01, BE-02, FE-01, FE-02, FE-03, FE-06, FE-07, FE-08, QA-01A |
 | Tasks in progress | 5: ARC-02 (contract ADRs 0011 and 0012 open), ARC-03 (ADR 0013 pending), DB-05 (#30, in review), BE-12 worker part (#32), QA-01B early automation (merged as #28) |
-| Open PRs | 12: #39 ADR 0013, #40 web admin-table flake fix, the eslint-ignore config PR, #26 BE-02 hardening, #30 DB-05 (draft), #31 ADR 0011, #32 worker hardening, #33 ADR 0012, #34 CLAUDE.md (Delivery Lead owns status docs), #35 /dev/proctor (draft), #36 Security page, plus this docs PR |
+| Open PRs | 13: #42 QA-03 BE-03 acceptance tests, #39 ADR 0013, #40 web admin-table flake fix, the eslint-ignore config PR, #26 BE-02 hardening, #30 DB-05 (draft), #31 ADR 0011, #32 worker hardening, #33 ADR 0012, #34 CLAUDE.md (Delivery Lead owns status docs), #35 /dev/proctor (draft), #36 Security page, plus this docs PR |
 | Test cases verified | 6 of 72 marked Verified in /docs/test-matrix.md (TC-002, TC-005, TC-075 fully; TC-001, TC-003 and TC-098 on the API with the UI mocked) |
 | Open risks | 15 (section 5) |
 
@@ -284,6 +284,8 @@ Decisions taken by the Delivery Lead under the owner's delegation (order, priori
 | DL-08 | 2026-10-05 | No Postgres RLS (and so no RLS-related schema change) for the build or the pilot; ADR 0006 stands, and its option (b) already says RLS is not for the pilot. FU-DB-77 (revisit RLS) is a pre-production item for the hub under ARC-05/DEP-02. | No accepted ADR requires RLS; this keeps the current design |
 | DL-09 | 2026-10-05 | The main CI red from 20:12 UTC is the GitHub Actions outage. No code change; sessions re-run cancelled checks once Actions recovers. | Jobs were cancelled without getting a runner |
 | DL-10 | 2026-10-05 | build-plan.md section 6 merge rule aligned with CLAUDE.md rules 6, 8 and 9: sessions merge their own PRs; humans no longer merge. | CLAUDE.md wins; the plan contradicted it |
+| DL-11 | 2026-10-05 | TC-065 seq test flake (packages/proctor-sdk/src/qa/qa-tc.test.ts, failed on #40): QA fixes it as its own test-only PR, reviewed by the SDK session; any SDK runtime change comes back to the Delivery Lead first. | It blocks #40 (main's flake fix) and can hit any PR |
+| DL-12 | 2026-10-05 | QA's TC-008 review of #30: the no-existence-oracle assertion (cross-org id gets the same 404 problem body as a missing id) and fail-closed public-route handling are blockers in #30. Real-route TC-008 cases go to BE-03. The /live and candidate-token cases are follow-ups for BE-13 and BE-07. QA makes the P1 gate read the apps/api unit Jest report. | CLAUDE.md rule 3 (authorization) |
 
 ### Parked for the owner
 
