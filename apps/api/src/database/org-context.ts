@@ -115,6 +115,10 @@ export class OrgContextService implements ScopeSource {
    * filtered by the extension, so the SQL itself must filter by org_id. The reason is free text,
    * for the reviewer: say what the query does and why the model API cannot. The org scope that is
    * active stays in force for model queries inside `fn`.
+   *
+   * The hatch stays open for the whole of `fn`, including any runAsUser, runInOrg or runSystem
+   * started inside it (a nested scope keeps the outer hatch). So wrap only the single raw
+   * statement, never a block that also does model work.
    */
   runRawSql<T>(reason: string, fn: () => T): T {
     if (reason.trim().length < MIN_RAW_REASON_LENGTH) {
