@@ -252,6 +252,7 @@ The init migration has 58 foreign keys. Nine are the `org_id` columns of the `di
   - `org-scope-relations.spec.ts` asserts `{ ORG_ID: 9, SCOPE_HOP: 21, COMPOSITE: 3, RULE_I: 25, total: 58 }`.
   - It fails for a key that is missing, unclassified, classified twice or in the wrong class. So a new foreign key must be classified in the PR that adds it.
 - Rule (i) proves only that the target is in the same org. It does not prove that a cross-chain target belongs to the same parent: for example `variant_test_cases.test_case_id` and `variant_id` may point to different question versions. Tracked in docs/followups/architecture.md.
+- **Proposed change (ADR 0015, PR #49).** `identity_checks.video_check_by` would be a new staff rule (i) reference. Staff references would go from 12 to 13, `RULE_I` from 25 to 26, and the total from 58 to 59. `FK_CLASSES`, `RULE_I_REFERENCES` and the count test change in the PR that adds the column.
 
 ### 8.2 Write invariant (architect detail; nested writes: owner decision, Delivery Lead, pending D-xx)
 
@@ -424,16 +425,20 @@ There is no org-provisioning reason (8.6, 8.9).
 - **Leaving a scope.** `AsyncLocalStorage.exit()`, `enterWith()` and `disable()` would let code leave its scope and bypass every "only narrows" row. So:
   - The OrgContext `AsyncLocalStorage` instance stays private to `org-context.ts`. It is never exported, and never reachable through a getter.
   - The only way to leave a scope is `orgContext.detachForSessionJob(fn)`. Only the `SessionJobProcessor` base class calls it.
-    - It asserts an empty store, then runs `fn` in a fresh empty store. No hatch, system reason or grant carries over, and grants cannot exist outside a scope (as in ADR 0013).
+    - It asserts an empty store, then runs `fn` in a fresh empty store. It throws on any scope, raw-SQL hatch or grant. Grants cannot exist outside a scope (as in ADR 0013).
     - It is allowed from no scope only. It throws inside any org scope (STAFF, plain org, SERVICE and CANDIDATE), in system scope, and while a `runRawSql` hatch is open. So a candidate scope cannot leave itself, and nothing can reach a session scope in two steps.
     - Workers are built at module init, outside any scope. `SessionJobProcessor` asserts that there is no scope, and its handler runs only from the BullMQ worker callback. A discovery processor never calls a session handler inline; it enqueues the session job.
     - The 8.4 rows for `detachForSessionJob` each have a test.
   - The call-site allow-list and its test (FU-DB-67) also cover:
     - `exit`, `enterWith` and `disable` on the OrgContext store;
     - `detachForSessionJob`;
-    - the per-column grant entry sites of ADR 0013 CS-4.4: `SessionStateService`, `KeyService`, `CandidateSessionGuard`, `DeviceInfoService`, `StorageService`, `OrgSettingsService`, `TestSettingsService`, `AccommodationsService` and `SectionGateService`.
-    - the private candidate-context setter for `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. Only `CandidateSessionGuard` may call it, once per scope, and the values are immutable afterwards.
-  - The grant-entry API and the candidate-context setter stay private to `org-context.ts` or the extension, like the store.
+    - the ten grant entry sites of ADR 0013 CS-4.4: `SessionStateService`, `KeyService`, `CandidateSessionGuard`, `DeviceInfoService`, `StorageService`, `OrgSettingsService`, `TestSettingsService`, `AccommodationsService`, `SectionGateService` and `ConsentService` (`consent_texts`: two ids);
+    - the private candidate-facts setter for `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. Only `CandidateSessionGuard` may call it, once per scope, and the values are immutable afterwards.
+  - The grant-entry API and the candidate-facts setter stay private to `org-context.ts` or the extension, like the store.
+  - **How grants work.**
+    - A grant carries a set of ids. The extension ANDs it into the query itself (`id IN grant.ids`).
+    - An empty set throws.
+    - Grants exist only inside a scope and end with it.
   - Any use outside those files fails the test or the lint rule.
   - The FU-DB-67 row in docs/followups/database.md (PR #30) still lists only `runSystem`, `runInOrg` and `runRawSql`. The db-engineer extends it to everything above.
   - A new call site updates the list, and code-reviewer checks it.
@@ -592,7 +597,7 @@ How the check runs:
   - 8.5: keep the `AsyncLocalStorage` instance private.
   - 8.5: add `detachForSessionJob`, allowed from no scope only and refused in any org scope, in system scope and with an open hatch; it empties the store.
   - 8.5: make `SessionJobProcessor` assert there is no scope.
-  - 8.5: extend FU-DB-67 to `exit`, `enterWith`, `disable`, `detachForSessionJob`, the CS-4.4 grant entry sites and the candidate-context setter, and update its row in docs/followups/database.md.
+  - 8.5: extend FU-DB-67 to `exit`, `enterWith`, `disable`, `detachForSessionJob`, the ten CS-4.4 grant entry sites (`ConsentService` included) and the candidate-facts setter, and update its row in docs/followups/database.md.
   - 8.4: the transition table, with one test per row.
   - 8.5: refuse raw SQL in a `sessionId` scope (the scope requirement is done).
   - 8.6: deny by default for `Organization` operations (its nested writes are covered by 8.2), the scalar `orgId` rule in system scope, and a limit on importers of the raw factory client.
