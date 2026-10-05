@@ -43,6 +43,19 @@ export interface BootOptions {
   captureLogs?: boolean;
 }
 
+/** Docker Desktop sometimes misses the 10 s port-binding window; retry the start, never skip it. */
+async function startInfraWithRetry(attempts = 3): Promise<TestInfra> {
+  let last: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await startInfra();
+    } catch (error) {
+      last = error;
+    }
+  }
+  throw last instanceof Error ? last : new Error('Testcontainers did not start');
+}
+
 export async function boot(opts: BootOptions = {}): Promise<Harness> {
   const logged: string[] = [];
   const stdout = opts.captureLogs
@@ -52,7 +65,7 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
       })
     : undefined;
 
-  const infra = await startInfra();
+  const infra = await startInfraWithRetry();
   await applyMigrations(infra);
 
   // app_user is created by the audit_append_only migration without a password (ADR 0006 7.4).
