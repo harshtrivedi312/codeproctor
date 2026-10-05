@@ -1,6 +1,6 @@
 # Project status
 
-Owner: Delivery Lead (from 2026-10-05, owner-requested CLAUDE.md change in PR #34; this PR merges only after #34; previously project-manager and the architecture hub). As of 2026-10-05 21:00 UTC. Sources: /docs/build-plan.md, /docs/requirements-trace.md, GitHub PRs and CI.
+Owner: Delivery Lead (CLAUDE.md rules 16 and 18, merged in #34 on 2026-10-05; previously project-manager and the architecture hub). As of 2026-10-05 21:00 UTC. Sources: /docs/build-plan.md, /docs/requirements-trace.md, GitHub PRs and CI.
 
 ## 1. Blocked and needs a human (read first)
 
@@ -299,17 +299,19 @@ Decisions taken by the Delivery Lead under the owner's delegation (order, priori
 | ID | Item | Why it is the owner's |
 | --- | --- | --- |
 | P-01 | Accept or reject ADR 0011 (2FA re-authentication, PR #31) and ADR 0012 (generated OpenAPI as the single source of truth, PR #33) | Accepting an ADR |
-| P-02 | Decided: D-43 | |
+| P-02 | Decided: D-43; #34 merged 2026-10-05 | |
 | P-03 | Decided: D-44 (alert and unlock in BE-03; per-IP or progressive lockout before production) | |
 | P-04 | Decided: C-01..C-16 (D-47). Open from them: OQ-1 (erasure vs the 3-year consent proof), OQ-2 (confirm embeddings are never stored), OQ-3 (fallback when the face match is waived) | Legal, privacy |
 | P-05 | Decided: D-45 (Frontend implements, with a test that the directive is absent elsewhere) | |
 | P-06 | Decided: D-46 | |
 | P-07 | May the Integrity session download AuraFace `glintr100.onnx` (fal/AuraFace-v1, pinned SHA-256, Apache 2.0 per D-05) for a local, opt-in real-model test run? Until then the face-match PR ships with a fake backend only | File download from an external source |
 | P-09 | Accept the ADR 0006 §8 amendment (PR #41: FK classification, write invariant, system-scope reasons, raw-SQL allow-list, pilot org provisioning). Review BLOCK on 2 text blockers; comes to the owner once clean | Amending an accepted ADR |
+| P-10 | Choose the email provider and the error tracker. Both are processors of candidate data (C-03) and may cost money. **Recommendation:** email through AWS SES in the same US region, so it is covered by the existing AWS DPA with no new processor; error tracking through self-hosted GlitchTip (open source, Sentry-SDK compatible) on our AWS host, so no third party receives error data. Alternatives: Brevo (EU-based) or Resend for email, and Sentry SaaS (DPA with SCCs, PII scrubbing) for errors | Paid services; new processors |
+| P-11 | Create a separate GitHub identity for the agent sessions, plus CODEOWNERS and branch protection on the model licence allowlist and CI config (ADR 0013 control 0). Until then an agent working under the owner's login could change the licence gate, and ADR 0013 will say so | Accounts and credentials; a human action |
 | P-08 | Accept ADR 0013 (ARC-03 part 1: HMAC key lifecycle, candidate API wire tables, candidate-session scope CS-1..CS-5, model-file lock; PR #39) and answer its section 9 owner questions. The main ones: lost key means OTP resume vs re-issue; 300 s ingest grace after submit; unsigned system-check findings unscored; consent covering a 640 px re-check frame every 2 min, kept only on mismatch; repeated FACE_MISMATCH goes to manual review; SCREEN_SHARE weight; COCO-SSD for the pilot (override after Legal, deploy without object detection, or swap the detector); the sessionId scope control. Code on the key and media routes waits for acceptance; mocks may follow the tables Status 2026-10-05: security review BLOCK (3 blockers: licence-override controls, upload size and integrity, re-check frames outliving the delete promise); the architect is revising, and it comes to the owner once clean. | Accepting an ADR; consent and licensing questions |
 
 ## 10. Next 3 tasks, blockers, decisions
 
 - **Next 3 tasks on the critical path:** #26 merge (BE-02 hardening); #30 merge (DB-05, after DL-01 fixes); BE-03 (DL-02).
 - **Blockers:** GitHub Actions outage (external; affects every merge). B-05 blocks only the pilot.
-- **Decisions needed from the owner:** section 9b "Parked for the owner" (open: P-01, P-07, P-08, P-09, and OQ-1..OQ-3 in /docs/compliance/decisions.md).
+- **Decisions needed from the owner:** section 9b "Parked for the owner" (open: P-01, P-07, P-08, P-09, P-10, P-11, and OQ-1..OQ-3 in /docs/compliance/decisions.md).
