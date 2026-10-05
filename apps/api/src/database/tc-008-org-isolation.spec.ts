@@ -294,6 +294,17 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         });
         expect(await d.updateMany?.({ where: b.filter, data: TOUCH[model] })).toEqual({ count: 0 });
         expect(await d.updateManyAndReturn?.({ where: b.filter, data: TOUCH[model] })).toEqual([]);
+        if (model === 'Organization') {
+          // An org scope cannot delete an organization at all, its own or another (FU-DB-68):
+          // refused before any query, so the answer is not P2025 or a count of 0.
+          await expect(d.delete?.({ where: b.unique })).rejects.toBeInstanceOf(
+            OrgScopeViolationError,
+          );
+          await expect(d.deleteMany?.({ where: b.filter })).rejects.toBeInstanceOf(
+            OrgScopeViolationError,
+          );
+          return;
+        }
         await expect(d.delete?.({ where: b.unique })).rejects.toMatchObject({ code: 'P2025' });
         expect(await d.deleteMany?.({ where: b.filter })).toEqual({ count: 0 });
       });
