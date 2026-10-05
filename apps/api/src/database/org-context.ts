@@ -10,34 +10,26 @@
 // matters: it lives for exactly one unit of work and cannot leak to the next.
 //
 // How the context is set:
-// - Staff HTTP routes: OrgContextInterceptor reads `request.user` (filled by the auth guard, BE-02)
-//   and calls runAsUser.
+// - Staff HTTP routes: OrgContextInterceptor reads `request.user` (BE-02's JwtAuthGuard sets an
+//   AuthUser there) and calls runAsUser.
 // - Candidate routes, jobs, sockets: the code that resolves the org (the token's session, the job's
 //   session) calls runInOrg.
 // - Work that has no org yet or spans orgs: runSystem, with one of the named reasons below.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Injectable } from '@nestjs/common';
-import { z } from 'zod';
-import { UserRole } from '../generated/prisma/enums.js';
+import type { UserRole } from '../generated/prisma/enums.js';
 import { OrgContextMissingError, OrgScopeViolationError } from './errors';
 
 /**
- * What the auth layer (BE-02) must put on `request.user` for a signed-in staff member. Extra
- * fields are ignored. The orgId comes from the verified token or the user row, never from the
- * request body, a header or a query string.
+ * Who is asking, inside the context. The interceptor builds it from BE-02's `AuthUser`
+ * (`id` becomes `userId`). The orgId comes from the verified token, never from the request body, a
+ * header or a query string.
  */
 export interface AuthenticatedUser {
   readonly orgId: string;
   readonly userId: string;
   readonly role: UserRole;
 }
-
-// z.guid() accepts any 8-4-4-4-12 hex id, which is all a Postgres uuid column needs.
-export const authenticatedUserSchema = z.object({
-  orgId: z.guid(),
-  userId: z.guid(),
-  role: z.enum(UserRole),
-});
 
 /**
  * The only reasons to run without an org filter. A new reason is a reviewed change to this list
@@ -46,8 +38,8 @@ export const authenticatedUserSchema = z.object({
 export const SYSTEM_SCOPE_REASONS = {
   AUTH_BOOTSTRAP:
     "Lookups before the caller's org is known: staff login by email, refresh-token rotation, " +
-    'set-password tokens, resolving a candidate token to its session. Switch to runInOrg as soon ' +
-    'as the org is known.',
+    'set-password tokens, resolving a candidate token to its session. Switch to runAsUser or ' +
+    'runInOrg as soon as the org is known.',
   BACKGROUND_JOB:
     "Queue and worker jobs that find work across orgs before narrowing to the job's own org " +
     '(ADR 0001 C-1).',
