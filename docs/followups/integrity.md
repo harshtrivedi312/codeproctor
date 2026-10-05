@@ -54,3 +54,12 @@ With a single short fill-in, MORE THAN HALF of genuine copies are missed. Not a 
 
 ### Other nits folded in
 - Per-request preparation (NFR-01/02): the starter ignore set and AI references are rebuilt per submission in `/analyze/similarity`; build once per language per request.
+
+## Face-match worker module (branch integrity/face-match-worker)
+- **INT-01 tuning.** `face.matchThreshold` 0.75 is a placeholder; tune on the diverse test set before any real candidate is face-matched (ADR 0004, D-18). Record per-group false match / false non-match for the pilot-exit review.
+- **Real-model checks are manual.** `AURAFACE_MODEL_PATH` test is skipped by default (P-07 parked). The MediaPipe adapter (`face/detector.py`) is untested and excluded from coverage; the `mediapipe==0.10.21` pin was not installed or verified here. Run both once models are approved; check the landmark indices (33/133, 362/263, 1, 61/291) and the AuraFace input name/shape against the real file.
+- **Landmarker reports no per-face score**, so `minDetectionConfidence` does not apply to it; consider the full Face Detector alongside, or accept this (ADR 0001 12.2 notes on card-sized faces).
+- **Alignment is numpy**, not OpenCV (ADR 0001 lists OpenCV for the warp). Correct and tested, but slower than cv2; swap if profiling needs it.
+- **Pillow limits are global** (`Image.MAX_IMAGE_PIXELS` is set per call); fine for a single-config worker, revisit with concurrent differing configs.
+- **ARC-04** owns the API-to-worker contract and auth; no route was added (app.py untouched). The integration should call `FaceMatcher.match` / `recheck` / `end_session` and handle `ModelLoadError` via `review_for_model_error`.
+- **Threshold ownership.** ADR 0004 says system configuration; the worker accepts it in `IntegrityConfig.face` for symmetry with other settings. Hub decide whether orgs may override.

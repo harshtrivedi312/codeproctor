@@ -118,3 +118,35 @@ The worker has no face-based detectors, so poor lighting and glasses do not affe
 9. **Offsets beyond the BMP.** The SDK reports UTF-16 offsets; the worker replays with Python code
    points, so text with emoji or astral characters can desynchronize replay-based checks (not the
    counts). Logged in docs/followups/integrity.md.
+
+## 7. Face matching (FR-403, TC-033; ADR 0004, D-05) `face.*`
+
+Code: `src/worker/face/`. Interface (ADR 0004 section 2): `detect_and_align(image)`, `embed(aligned)`,
+`compare(a, b)`, `model_id`. Detector (MediaPipe Face Landmarker, Apache 2.0) and embedder (AuraFace
+`glintr100.onnx` only, F-1) are swappable; tests use fakes. Output is MATCH or MANUAL_REVIEW with a
+reason from `identity_review_reason`. **There is no reject outcome**: no face, multiple faces, low
+detection confidence, bad/oversized/corrupt image, model error, hash mismatch, failed liveness and
+score below threshold are all MANUAL_REVIEW.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| matchThreshold | **0.75 (PLACEHOLDER, NOT TUNED)** | Cosine at or above is MATCH. Valid range 0.30-1.0. Waits for INT-01 tuning on the diverse test set (ADR 0004 section 2, D-18). Deliberately high so doubt goes to a human. ADR 0004 calls the threshold system configuration, not an org setting: the API should pass it from system config, not `organizations.settings`. |
+| minDetectionConfidence | 0.7 | Reported detector confidence below this is treated as no usable face (NO_FACE). The MediaPipe landmarker reports none, so it only applies to other detectors |
+| maxImageBytes / maxImagePixels | 10 MiB / 25,000,000 | Larger images are MANUAL_REVIEW (MATCH_ERROR, IMAGE_SIZE); decompression-bomb guard |
+| selfieCacheMaxSessions | 256 | Bounded LRU of selfie embeddings for FR-606 re-checks; cleared at session end; ID embeddings are never kept |
+
+Model files (never committed, never downloaded by code; download needs owner approval P-07):
+`AURAFACE_MODEL_PATH` -> `glintr100.onnx`, SHA-256 `a7933ea5330113b01c9b60351d8f4c33003f145d8470ac5f0e52ee2effe25c60`
+(ADR 0001 section 12.2); any other file name or digest is refused. `FACE_LANDMARKER_MODEL_PATH` ->
+`face_landmarker.task` (SHA-256 `64184e22...` in ADR 0001 section 12.2). `model_id` = `auraface-v1:a7933ea5`.
+Optional extra: `pip install -e '.[face]'` (mediapipe, onnxruntime, pillow).
+
+Privacy: embeddings, aligned crops and the selfie cache have redacted repr/str, cannot be pickled or
+copied, are never logged, and nothing is written to disk (tests). Logs carry fixed codes only.
+
+False negatives (a genuine candidate sent to review): poor lighting, glasses glare, head pose,
+low-resolution or old ID photos, heavy ID security patterns over the face, webcam blur, and groups
+the model covers less well (AuraFace card, F-6). False positives (a wrong person matched): look-alikes
+and family members; a threshold that is too low. Manual review and the pilot-exit review of false
+match and false non-match rates (ADR 0004) are the safeguards; no automatic rejection exists.
+An ID card held up to a webcam is small for the BlazeFace short-range model (ADR 0001 12.2 notes).
