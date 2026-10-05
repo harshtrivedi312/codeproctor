@@ -322,6 +322,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@codeproctor/proctor-sdk':
+        specifier: workspace:^
+        version: link:../../packages/proctor-sdk
       '@codeproctor/shared':
         specifier: workspace:^
         version: link:../../packages/shared
