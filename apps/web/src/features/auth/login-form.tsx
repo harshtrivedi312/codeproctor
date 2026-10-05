@@ -10,22 +10,25 @@ import { Button } from '@/components/ui/button';
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { api } from '@/lib/api/client';
+import { settleRefresh } from '@/lib/auth-session';
 import { useAuth } from './auth-provider';
 import { safeNextPath } from './schemas';
 
-type Banner =
-  { kind: 'wrong' } | { kind: 'locked'; lockedUntil: string } | { kind: 'network' } | null;
+type Banner = { kind: 'failed' } | { kind: 'network' } | null;
 
-export function formatTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
+/**
+ * One neutral message for every failed sign-in (wrong password, unknown email, locked account), so
+ * the screen never reveals which one it was (FR-101, TC-002).
+ */
+export const SIGN_IN_FAILED_MESSAGE =
+  'Sign-in failed. If this keeps happening, wait 15 minutes or contact your administrator.';
 
 /** FR-101 login form. TOTP (FR-102) and enrollment are separate screens reached from the result. */
 export function LoginForm(): React.JSX.Element {
   const router = useRouter();
   const params = useSearchParams();
   const next = safeNextPath(params.get('next'));
-  const { signIn, setPending, status } = useAuth();
+  const { signIn, setPending, status, signOutUnconfirmed, retrySignOut } = useAuth();
   const [banner, setBanner] = React.useState<Banner>(null);
 
   const {
@@ -49,12 +52,15 @@ export function LoginForm(): React.JSX.Element {
     setBanner(null);
     let result;
     try {
+      // A silent refresh from first load may still be running. Let it finish first, so it cannot
+      // overwrite the refresh cookie this login is about to set (FR-101, FR-104).
+      await settleRefresh();
       result = await api.POST('/v1/auth/login', { body: values });
     } catch {
       setBanner({ kind: 'network' });
       return;
     }
-    const { data, error, response } = result;
+    const { data, response } = result;
     if (data) {
       if (data.status === 'authenticated' && data.session) {
         signIn(data.session);
@@ -70,10 +76,8 @@ export function LoginForm(): React.JSX.Element {
       }
       return;
     }
-    if (response.status === 423 && error && 'lockedUntil' in error) {
-      setBanner({ kind: 'locked', lockedUntil: error.lockedUntil });
-    } else if (response.status === 401) {
-      setBanner({ kind: 'wrong' });
+    if (response.status === 401) {
+      setBanner({ kind: 'failed' });
       setFocus('password');
     } else {
       setBanner({ kind: 'network' });
@@ -91,22 +95,29 @@ export function LoginForm(): React.JSX.Element {
           for a code next.
         </Alert>
       ) : null}
+      {signOutUnconfirmed ? (
+        <Alert tone="warning" role="alert" title="We could not confirm you were signed out">
+          Your sign-out may not have reached the server. Check your connection, then try again. Do
+          this before leaving a shared computer.
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="mt-2"
+            onClick={() => void retrySignOut()}
+          >
+            Retry sign-out
+          </Button>
+        </Alert>
+      ) : null}
       {expired && !banner ? (
         <Alert tone="info" role="status">
           Your session ended. Sign in again to continue.
         </Alert>
       ) : null}
-      {banner?.kind === 'wrong' ? (
-        <Alert tone="error" role="alert" title="Email or password is incorrect">
-          Check for typing mistakes and that Caps Lock is off. If you forgot your password, use
-          &ldquo;Forgot password&rdquo; below.
-        </Alert>
-      ) : null}
-      {banner?.kind === 'locked' ? (
-        <Alert tone="warning" role="alert" title="This account is temporarily locked">
-          There were too many incorrect sign-in attempts. You can try again after{' '}
-          <strong>{formatTime(banner.lockedUntil)}</strong> (about 15 minutes). To sign in sooner,
-          reset your password with &ldquo;Forgot password&rdquo; below.
+      {banner?.kind === 'failed' ? (
+        <Alert tone="error" role="alert">
+          {SIGN_IN_FAILED_MESSAGE}
         </Alert>
       ) : null}
       {banner?.kind === 'network' ? (
