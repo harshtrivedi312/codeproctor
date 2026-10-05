@@ -12,12 +12,27 @@ confirming the host (R-01). Until then, unit tests use `FakeJudge0Client`.
 ```sh
 export JUDGE0_AUTH_TOKEN=...   # same value the API uses
 export JUDGE0_DB_PASSWORD=...
+export JUDGE0_REDIS_PASSWORD=...
 docker compose -f infra/judge0/docker-compose.judge0.yml up -d
 curl -H "X-Auth-Token: $JUDGE0_AUTH_TOKEN" http://127.0.0.1:2358/languages | head
 ```
 
 Check that language ids 100 (Python), 102 (JavaScript) and 91 (Java) exist in `/languages`; the table
 is `apps/api/src/judge0/language-map.ts`.
+
+## Data retention
+
+Judge0 stores source code, stdin and expected output per submission. `ENABLE_SUBMISSION_DELETE=true`
+is set (behind `X-Auth-Token`) and `HttpJudge0Client` DELETEs every submission token after its
+results are read, and on timeout or failure. Deletion is best effort: if it fails a warning is
+logged and the row stays, so operations should also purge old rows from Judge0's Postgres on a
+schedule (follow-up FU-BEB-08). Callbacks are disabled and Judge0's Redis needs a password.
+
+## Scope note
+
+This step delivers the execution service and reference validation only. FR-203 publish gating
+(storing `validation_report` and refusing to publish without a passing one) is NOT done yet: it
+needs BE-04 to implement `ValidationReportSink` (FU-BEB-01).
 
 ## Isolation
 

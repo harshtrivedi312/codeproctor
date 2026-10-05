@@ -5,7 +5,7 @@
 # on the Linux x86 runner or VM that ARC-05 confirms. It is not started by CI.
 #
 # Use:  docker compose -f infra/judge0/docker-compose.judge0.yml --env-file .env up -d
-# Needs JUDGE0_AUTH_TOKEN and JUDGE0_DB_PASSWORD in the environment (no defaults on purpose).
+# Needs JUDGE0_AUTH_TOKEN, JUDGE0_DB_PASSWORD and JUDGE0_REDIS_PASSWORD in the environment (no defaults on purpose).
 #
 # Isolation:
 #   - judge0_internal is `internal: true`: no route to the internet. db, redis and the workers are
