@@ -143,6 +143,8 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     app = moduleRef.createNestApplication<INestApplication<App>>();
     configureApp(app);
     await app.init();
+    // Listen once on a free port so supertest reuses it instead of listen(0)/close per request.
+    await app.listen(0, '127.0.0.1');
     const authService = app.get(AuthService);
     settle = () => authService.settleDeferred();
   } catch (error) {
