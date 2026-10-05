@@ -32,7 +32,7 @@ Several sessions work on this repo at once, each in its own worktree. These rule
 
 ### Merging
 8. Never enable GitHub auto-merge (no `gh pr merge --auto`, no `set_auto_merge`, no UI toggle).
-9. Merge only with an explicit `gh pr merge`, only your own PRs, only after your final push, and never while the PR is a draft or has pending work. After your final push and review, mark the PR ready with `gh pr ready`. Before merging, confirm you have no unpushed or pending commits, and that the head SHA is the one that was reviewed and CI-green. If auto-fix or your own fixes pushed after the review, re-run code-reviewer on the new commits.
+9. Merge only with an explicit `gh pr merge`, only your own PRs, only after your final push, and never while the PR is a draft or has pending work. After your final push and review, mark the PR ready with `gh pr ready`. Before merging, confirm you have no unpushed or pending commits, and that the head SHA is the one that was reviewed and CI-green. If auto-fix or your own fixes pushed after the review, re-run code-reviewer on the new commits. After merging, leave a PR comment: "Merged by <session name> session after review and green CI (reviewed head <short SHA>)." Agents use the owner's GitHub account, so this comment is the record of which session merged (C-33).
 10. If you have waited on CI for more than 30 minutes without a CI status update or notification, check it with `gh pr checks`.
 
 ### Coordination
