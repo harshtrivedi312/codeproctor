@@ -449,29 +449,31 @@ There is no org-provisioning reason (8.6, 8.9).
   - The call-site allow-list and its test (FU-DB-67) also cover:
     - `exit`, `enterWith` and `disable` on the OrgContext store;
     - `detachForSessionJob`;
-    - the ten grant entry sites of ADR 0013 CS-4.4: `SessionStateService`, `KeyService`, `CandidateSessionGuard`, `DeviceInfoService`, `StorageService`, `OrgSettingsService`, `TestSettingsService`, `AccommodationsService`, `SectionGateService` and `ConsentService` (`consent_texts`: two ids);
-    - the private candidate-facts setter for `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. Only `CandidateSessionGuard` may call it, once per scope, and the values are immutable afterwards.
+    - the eleven grant sites in the ADR 0013 CS-4.4 grant-site table:
+      - `SessionStateService`
+      - `KeyService`
+      - `CandidateSessionGuard`
+      - `DeviceInfoService`
+      - `StorageService`
+      - `OrgSettingsService`
+      - `TestSettingsService`
+      - `AccommodationsService`
+      - `SectionGateService` (two grants)
+      - `ConsentService`
+      - the private candidate-facts setter for `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. Only `CandidateSessionGuard` may call it, once per scope, and the values are immutable afterwards.
+
+      ADR 0013 CS-4.4 defines each site's model, columns and ids. This ADR does not repeat them.
   - The grant-entry API and the candidate-facts setter stay private to `org-context.ts` or the extension, like the store.
   - **How grants work.** This is the normative grant spec; ADR 0013 uses the same wording.
-    - A grant names its model, its columns and its ids. All three are mandatory: `withGrant({ model, columns, ids }, fn)`.
-      - Session-row grants use `ids: [ctx.sessionId]`.
-      - Org-settings grants use `ids: [ctx.orgId]`.
-      - Test-settings grants use `ids: [ctx.testId]`.
-    - It is entered as a nested AsyncLocalStorage run inside the current scope, and it ends when `fn` settles.
-    - **Lifetime is enforced.** AsyncLocalStorage keeps the store in async work that was started inside `fn` and not awaited: a promise, `setTimeout`, an emitter or a stream callback. Without a check, that work would keep the grant's columns unlocked after `fn` settles. So:
-      - the grant object carries an `active` flag, which is set to false in `finally` when `fn` settles;
-      - the extension refuses any query that runs under an inactive grant;
-      - a test checks that a detached query started inside `fn` throws once `fn` has resolved.
-    - The extension checks all three:
-      - the query is on the named model;
-      - only the named columns are read or written;
-      - the extension itself ANDs `id IN grant.ids` into the query.
-    - An empty id set throws.
-    - The ids are values read inside the same scope, never raw request input. An id that came from the request counts only after it has been resolved within the session through ADR 0013 CS-2 and CS-4.2. For example, `SectionGateService`'s step-1 id comes from the URL, after that resolution.
-    - Grants cannot exist outside a scope.
-    - Examples (ADR 0013):
-      - `SectionGateService` needs two grants. Step 1 uses the id set `{sessionQuestionId}` on `session_questions.test_question_id`. Step 2 uses `{test_question_id}`, the value read in step 1, on `test_questions`.
-      - `ConsentService` sets `consent_text_id` server-side to `organizations.current_consent_text_id`, never from the request body.
+    - `withGrant({ model, columns, ids }, fn)`. All three fields are mandatory, and an empty `ids` throws.
+    - The extension checks the model and the columns, and adds `id IN ids` to the query itself.
+    - A grant is a nested AsyncLocalStorage run inside the current scope. It carries an `active` flag that is cleared in `finally` when `fn` settles, and the extension refuses any query under an inactive grant. So async work started inside `fn` and not awaited (a promise, `setTimeout`, an emitter or a stream callback) cannot use the grant after `fn` settles. A test checks that such a detached query throws.
+    - Grants exist only inside a scope.
+    - `ids` are never request input. They are values read inside the same scope, or ids resolved within the session through ADR 0013 CS-2 and CS-4.2. For example, `SectionGateService`'s step-1 id comes from the URL after that resolution.
+    - Typical ids:
+      - `[ctx.sessionId]` for session-row grants;
+      - `[ctx.orgId]` for org settings;
+      - `[ctx.testId]` for test settings.
   - Any use outside those files fails the test or the lint rule.
   - The FU-DB-67 row in docs/followups/database.md (PR #30) still lists only `runSystem`, `runInOrg` and `runRawSql`. The db-engineer extends it to everything above.
   - A new call site updates the list, and code-reviewer checks it.
@@ -510,9 +512,10 @@ There is no org-provisioning reason (8.6, 8.9).
 - `prisma.service.ts`, which extends it;
 - the seed;
 - the provisioning CLI;
-- BE-02's interim `prisma.module.ts`, until FU-DB-58 deletes it.
+- BE-02's interim `prisma.module.ts`, until FU-DB-58 deletes it;
+- the candidate-write datasource (ADR 0013): a second client with `pool_timeout=2` and `options=-c statement_timeout=3000`. It exists because `SET LOCAL` is raw SQL and is refused in session scopes, and it must carry the same extension.
 
-Without that check, the exemption would be a bypass inside `apps/api`.
+This list is part of the FU-DB-67 importer test. Without that check, the exemption would be a bypass inside `apps/api`.
 
 ### 8.7 Path rule (architect detail)
 
@@ -623,8 +626,8 @@ How the check runs:
   - 8.2, DB-05 gate item 4, landing in PR #30 before merge:
     - refuse a scalar `orgId` in system-scope `update`, `updateMany`, `updateManyAndReturn` and `upsert.update` on direct models;
     - make an unrecognised write operation throw in system scope.
-  - 8.5: build `withGrant` with mandatory ids and the `active` flag, plus the test for a detached query.
-  - **Second client.** A dedicated candidate-write datasource with `statement_timeout` (ADR 0013 S6, because `SET LOCAL` is raw SQL and is refused in session scopes) would be a second client. It must also carry the extension, and the FU-DB-67 importer test must cover it.
+  - 8.5: build `withGrant({ model, columns, ids }, fn)` per the grant spec: mandatory ids, the extension adds `id IN ids`, and the `active` flag, plus the test for a detached query.
+  - **Second client.** Build the candidate-write datasource (`pool_timeout=2`, `options=-c statement_timeout=3000`; ADR 0013) with the same extension, and list it as an allowed importer in the FU-DB-67 importer test (8.6, "The raw client").
   - 8.2: the relation side table and its completeness test replace any use of Prisma's runtime data model in production code (FU-DB-103, FU-DB-61).
   - 8.2: add the `createMany` relation-key test.
   - Nested reads stay open (FU-DB-78).
@@ -637,8 +640,7 @@ How the check runs:
   - 8.5: keep the `AsyncLocalStorage` instance private.
   - 8.5: add `detachForSessionJob`, allowed from no scope only and refused in any org scope, in system scope and with an open hatch; it empties the store.
   - 8.5: make `SessionJobProcessor` assert there is no scope.
-  - 8.5: implement `withGrant(spec, fn)` per the grant spec (model, columns, ids; the extension checks all three).
-  - 8.5: extend FU-DB-67 to `exit`, `enterWith`, `disable`, `detachForSessionJob`, the ten CS-4.4 grant entry sites (`ConsentService` included) and the candidate-facts setter, and update its row in docs/followups/database.md.
+  - 8.5: extend FU-DB-67 to `exit`, `enterWith`, `disable`, `detachForSessionJob`, the eleven CS-4.4 grant sites (with the candidate-facts setter), and update its row in docs/followups/database.md.
   - 8.4: the transition table, with one test per row.
   - 8.5: refuse raw SQL in a `sessionId` scope (the scope requirement is done).
   - 8.6: deny by default for `Organization` operations (its nested writes are covered by 8.2), the scalar `orgId` rule in system scope, and a limit on importers of the raw factory client.
