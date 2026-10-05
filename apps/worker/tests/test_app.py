@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import random
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -107,3 +110,64 @@ def test_nfr04_oversized_starter_code_is_422_on_starter_code() -> None:
 def test_nfr04_starter_code_at_exact_limit_is_accepted() -> None:
     r = client.post("/analyze/similarity", json=_starter_body(MAX_SOURCE_CODE_LENGTH), headers=AUTH)
     assert r.status_code == 200
+
+
+def _many_submission_body(n: int, refs: int) -> dict[str, object]:
+    from test_similarity import MULTI_TODO
+    from test_similarity_large_starter import _solution
+
+    return {
+        "submissions": [
+            {
+                "session_id": f"s{i}",
+                "session_question_id": f"q{i}",
+                "language": "python",
+                "code": _solution(random.Random(i), 3, 2),
+            }
+            for i in range(n)
+        ],
+        "starter_code": {"python": MULTI_TODO},
+        "ai_references": [
+            {"id": f"r{i}", "language": "python", "code": _solution(random.Random(900 + i), 3, 2)}
+            for i in range(refs)
+        ],
+    }
+
+
+def test_nfr01_fr803_starter_and_references_are_prepared_once_per_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from worker import similarity
+
+    n, refs = 20, 5
+    calls = {"prepare": 0, "starter": 0}
+    real_prepare, real_kgrams = similarity.prepare, similarity.all_kgram_hashes
+
+    def counting_prepare(*a, **k):  # type: ignore[no-untyped-def]
+        calls["prepare"] += 1
+        return real_prepare(*a, **k)
+
+    def counting_kgrams(*a, **k):  # type: ignore[no-untyped-def]
+        calls["starter"] += 1
+        return real_kgrams(*a, **k)
+
+    monkeypatch.setattr(similarity, "prepare", counting_prepare)
+    monkeypatch.setattr(similarity, "all_kgram_hashes", counting_kgrams)
+    r = client.post("/analyze/similarity", json=_many_submission_body(n, refs), headers=AUTH)
+    assert r.status_code == 200
+    # Starter: once for the peer pass, once for the AI pass (one language), never per submission.
+    assert calls["starter"] == 2
+    # Each submission once for peers and once for AI, each reference exactly once.
+    assert calls["prepare"] == 2 * n + refs
+
+
+def test_nfr01_fr803_request_with_many_submissions_and_large_starter_is_fast_enough() -> None:
+    body = _many_submission_body(120, 6)
+    start = time.perf_counter()
+    r = client.post("/analyze/similarity", json=body, headers=AUTH)
+    elapsed = time.perf_counter() - start
+    assert r.status_code == 200
+    # Hang/runaway guard only. Measured about 1.2 s on a laptop but 10.9 s on a shared CI runner,
+    # so the bound is deliberately loose; the call-count test above is what catches
+    # per-submission re-preparation.
+    assert elapsed < 60.0, f"{elapsed:.2f}s for 120 submissions"
