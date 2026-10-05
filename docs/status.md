@@ -1,6 +1,6 @@
 # Project status
 
-Owner: project-manager. As of 2026-10-02. Sources: /docs/build-plan.md, /docs/requirements-trace.md.
+Owner: Delivery Lead (CLAUDE.md rules 16 and 18, merged in #34 on 2026-10-05; previously project-manager and the architecture hub). As of 2026-10-05 21:00 UTC. Sources: /docs/build-plan.md, /docs/requirements-trace.md, GitHub PRs and CI.
 
 ## 1. Blocked and needs a human (read first)
 
@@ -10,25 +10,25 @@ Owner: project-manager. As of 2026-10-02. Sources: /docs/build-plan.md, /docs/re
 | B-02 | **Cleared 2026-10-01.** ADRs 0002 to 0007 accepted (D-16, amended by D-17..D-23) and the schema freeze list ADR 0008 exists. DB-02 now waits only for DB-01 to merge. | — | Review and merge the `arch/adr-schema-gaps` branch. |
 | B-03 | **Cleared 2026-10-01.** PA-01..PA-08 approved (PA-07 by D-16, PA-08 by D-24, PA-01..PA-06 by D-25). | — | — |
 | B-04 | **Cleared 2026-10-01 (D-26).** DEP-01, DEP-02 and DEP-03 are owned by backend-engineer with architect review. FE-14 is out of scope for this build (D-13). | — | — |
-| B-05 | **Pilot entry blockers (Legal and human; added 2026-10-01).** None of these blocks the build; no real candidate may start until all are cleared: (1) Legal supplies and approves the consent document text (D-17, Q-43); (2) Legal confirms the e-signature format: typed full legal name, server timestamp, IP, user agent, signed PDF (D-17); (3) Legal approves the volunteer consent form for the face-match test set and the lawful basis for the per-group breakdown (D-18), or a licensed dataset is bought; (4) the face-match threshold is tuned on that set (D-05, INT-01); (5) Legal confirms the erasure-hold rule and the proposed NFR-05 wording (D-19, D-27, R-15); (6) Legal reviews licence flags F-2 (AuraFace training data) and F-3 (COCO-SSD weights), accepted as documented risks (D-28). | DEP-03 pilot use, the pilot itself (BRD section 10) | Engage Legal; record each item as cleared in section 9. |
+| B-05 | **Pilot entry blockers (updated 2026-10-05 by the owner's compliance decisions C-01..C-16, /docs/compliance/decisions.md (PR #44)).** The owner, Harsh Trivedi, is the approver for every item (C-15). The build is not blocked; no real candidate may start until these are cleared. **All candidates:** (1) consent document final text approved (C-09): Delivery Lead drafts, owner approves, FE-09 loads it; (2) retention and destruction schedule approved, published and linked from the consent document and the candidate portal (C-05): Delivery Lead drafts, owner approves, frontend links it; (3) face-match threshold tuned on the volunteer set (D-05, C-11, C-12): volunteer form approval and recruiting (owner), then INT-01 (integrity; needs BE-08 and the model download P-07); (4) the model licence gate passes the two accepted files, AuraFace and COCO-SSD (C-10): hub (ADR 0013) and backend (deploy config). **EU/UK candidates also:** (5) DPIA approved (C-03a): Delivery Lead drafts, owner approves; (6) transfer mechanism in place for every processor, DPAs with SCCs or DPF (C-03b): Delivery Lead drafts the processor register, owner signs. **Not pilot-start blockers:** optional demographics self-report (C-13, FAIR-01) before the pilot exit review; professional legal review recommended before production (C-15, R-17); job-posting wording (C-14, recruiting). Cleared: e-signature format (C-07), erasure wording (C-06), volunteer-set lawful basis (C-12), licence flags F-2 and F-3 (C-10), Legal owner (C-15). | DEP-03 pilot use, the pilot itself (BRD section 10) | Approve the drafts in /docs/compliance/ as they arrive; recruit volunteers; sign the processor DPAs before the first EU/UK candidate. |
 
 ## 2. Current phase and progress
 
-- **Current phase:** Phase 1, Database track. ARC-01 merged 2026-10-01. DB-01 merged as PR #1 (scaffold, 2026-10-02 16:05 UTC) and PR #2 (review fixes, Node 24, ADR 0009 and guards; CI green on Node 24; merged 16:43 UTC). The second review round's fixes (SF1 to SF8) are in PR #3 on `db/step-1-fixes`; DB-02 starts only after PR #3 merges.
-- **Next milestone:** M0 (schema freeze list approved: done on 2026-10-01; contracts v0 published; first commit on main: done).
+- **Current phase:** Phases 1 to 3 run in parallel by track. Database is on DB-05. The backend critical path is at BE-02 hardening, with BE-03 next. Staff web is FE-03 done and FE-04 next. Proctor SDK has done FE-06 to FE-08. The integrity worker's analysis modules have merged; their API integration waits for BE-08 to BE-11 and ARC-04.
+- **Main CI (2026-10-05, late):** green again on f4f20bc (CI and QA). The red runs after #25, #27 and #29 were cancelled for lack of runners during the GitHub Actions outage; newer green runs supersede them. The TC-065 flake fix (#46) merged; the web admin-table flake fix (#40) is next.
+- **Next milestone:** BE-03 (RBAC and audit), which unlocks BE-04 onward and TC-004, TC-006 and TC-008.
 
 | Measure | Value |
 | --- | --- |
-| Tasks started | 2 of 50 (ARC-01, DB-01) |
-| Tasks done (merged) | 2 of 50 (ARC-01; DB-01 via PR #2, D-41; review follow-up PR #3 open) |
-| Test cases verified | 0 of 72 (0 of 51 P1) |
-| Requirements Done | 0 of 82 (15 BR, 58 FR, 9 NFR) |
-| Branches open | 1 (`db/step-1-fixes`, PR #3) |
-| Open questions | 21 open of 44 (section 6). Closed: Q-01..Q-17, Q-23, Q-24 (ADRs 0002 to 0007, D-16), Q-27 (D-05), Q-41 (D-13), Q-43 (D-29, placeholder name) and Q-44 (D-30, placeholder domains). Review findings A-01..A-31 in /docs/adr/review-2026-09-30-plan-and-schema.md: the schema findings routed to ARC-01 are decided in ADRs 0002 to 0008 |
-| Open risks | 15 (section 5) |
+| Tasks done (merged) | 14 of 52: ARC-01, DB-01, DB-02, DB-03, DB-04, BE-01, BE-02, FE-01, FE-02, FE-03, FE-06, FE-07, FE-08, QA-01A (COMP-01 and FAIR-01 added 2026-10-05, D-47) |
+| Tasks in progress | 5: ARC-02 (contract ADRs 0011 and 0012 open), ARC-03 (ADR 0013 pending), DB-05 (#30, in review), BE-12 worker part (#32), QA-01B early automation (merged as #28) |
+| Open PRs (2026-10-05 evening) | 16: #26 BE-02 hardening, #30 DB-05, #31 ADR 0011, #32 worker hardening, #33 ADR 0012, #35 /dev/proctor, #36 Security page, #38 this docs PR, #39 ADR 0013, #40 web admin-table flake fix, #41 ADR 0006 §8, #42 QA-03, #43 SDK review fixes, #44 compliance decisions and drafts, #45 CSP wasm-unsafe-eval (D-45), #47 SDK stop() in-flight proof. Merged since cycle 1: #34 (CLAUDE.md rules 16 and 18), #37 (dev-proctor-models ignore), #46 (TC-065 flake fix) |
+| Test cases verified | 6 of 72 marked Verified in /docs/test-matrix.md (TC-002, TC-005, TC-075 fully; TC-001, TC-003 and TC-098 on the API with the UI mocked) |
+| Open risks | 17 open (R-01..R-19 less accepted R-15 and R-16; section 5) |
 
 ## 3. Done this period
 
+- 2026-10-02 to 2026-10-05 (merged): #3 DB-01 review round 2; #5 DB-02; #6 ARC-02 shared contracts v0; #4 FE-01; #7 QA-01A; #8 FE-02; #9 DB-03; #10 BE-01; #12 allowBuilds decisions; #13 DB-04; #14 DB follow-ups; #11 per-track follow-up files; #15 BE-02; #16 ADR 0010 accepted; #17 FE-03; #18 FE-06; #19 and #24 keystroke cap; #20 and #27 worker analysis modules (FR-802..FR-805); #21 FE-07; #22 and #25 FE-03 follow-ups; #23 FE-08; #28 QA automated suites and gate; #29 CLAUDE.md parallel-work rules.
 - Read CLAUDE.md, all /docs files, all four prompt playbooks and all agent definitions.
 - Wrote /docs/build-plan.md (48 tasks, 7 phases, dependency graph, gates).
 - Wrote /docs/requirements-trace.md (81 requirements, 67 TCs, gap lists).
@@ -44,9 +44,15 @@ Owner: project-manager. As of 2026-10-02. Sources: /docs/build-plan.md, /docs/re
 
 ## 4. Next up
 
-1. PR #3 (`db/step-1-fixes`): second-round review fixes SF1 to SF8 and the cheap nits. Merge only with code-reviewer approval and green CI (D-41).
-2. DB-02 (db-engineer) after PR #3 merges, against the accepted freeze list ADR 0008.
-3. QA-01A (qa-engineer, docs only; 72 TCs) and ARC-02, ARC-03, ARC-05 (architect) can use idle slots.
+Sequencing set by the Delivery Lead (section 9b):
+
+1. **Database:** PR #30 (DB-05). It merges only after B1 (unscoped `cursor`) and FU-DB-63 (nested-write guard) are fixed in the PR, with the FU-DB-64 FK-classification test (DL-01). Then FU-DB-65/68/69, DB-06, DB-07 and DB-08.
+2. **Backend:** merge #26 when CI is green. BE-03 starts now against #30's interface, and it does not merge before #30 and FU-DB-58 (DL-02).
+3. **Frontend:** the admin-table flake fix as its own PR first (DL-03), then #36 after #26, then FE-04.
+4. **Proctor SDK:** #35 gets a full review. It merges after the frontend flake PR and #36, with the Frontend session's OK on its apps/web config changes (DL-04). Then the PR #21/#23 should-fix items. QA-D-01 needs no SDK change (hub, 2026-10-05).
+5. **Integrity:** merge #32, then the worker-side BE-08 face-matching module (DL-05).
+6. **QA:** TC-004 and TC-006 acceptance tests ahead of BE-03, plus matrix updates (DL-06).
+7. **Architecture hub queue (DL-07), in order:** QA-D-01 event shape (answered 2026-10-05), ADR 0013, ARC-03 candidate-session scope, ARC-04, the integrity starter-diff proposal, the DB-05 gate items, then small items.
 
 ## 5. Risks
 
@@ -57,9 +63,13 @@ Owner: project-manager. As of 2026-10-02. Sources: /docs/build-plan.md, /docs/re
 | R-03 | Storage volume: roughly 0.3-0.4 GB per 60 minute session (PM estimate) with 90 day retention. Staging uses the R2 free tier (10 GB) with synthetic data only; pilot and production pay for AWS S3, and their DB backups also go to S3 | A 20 candidate pilot may use 7 GB or more; S3 cost against the approved budget (BO-5) | Keep staging test data under the R2 free tier; decide budget in DEP-02; tune bitrates in FE-07 |
 | R-04 | Detectors and the HMAC key live in the candidate's browser; a motivated candidate can forge events or disable detectors | Integrity claims overstated | Server-side checks in BE-12; QA-02 documents bypasses; state the limit to stakeholders |
 | R-05 | Liveness and face checks run client-side; `identity_checks.liveness_passed` is client-reported | TC-034 weak | ARC-04 decision; manual review path |
-| R-06 | False positives and bias (BRD section 7 and 9); no task monitors flag rates across groups (Q-34) | Legal and reputational | Configurable thresholds, human verdicts, pilot tuning |
-| R-07 | Legal approval is on the path to pilot (BIPA, GDPR, CCPA). **Pilot entry blockers (B-05):** consent document text (D-17), e-signature format (D-17), volunteer consent form and lawful basis for the per-group breakdown (D-18). Also a Legal item, not designated a blocker: the provisional erasure-hold rule (D-19). Until approved, the consent text is a marked placeholder that pilot and production refuse. | Pilot start | Human action, Q-43; DEP-02 and DEP-03 list them; B-05 |
-| R-15 | The erasure hold (D-19) waits while a review or appeal is open, which can push erasure past the 30 days in NFR-05 | Legal non-compliance if a review or appeal stays open long | Hold is configurable (`erasure.holdWhileReviewOrAppealOpen`). Proposed NFR-05 wording for Legal (D-27): erasure completes within 30 days of the request, or within 30 days after an open review or appeal closes, whichever is later; the candidate is told about any delay. Legal item and pilot entry blocker (B-05 item 5); reviewers close appeals promptly (ADR 0004) |
+| R-06 | False positives and bias (BRD sections 7 and 9) | Legal and reputational | Configurable thresholds, human verdicts, pilot tuning; per-group tuning results (C-12, INT-01); fairness monitoring through the optional demographic self-report (C-13, FAIR-01) before the pilot exit review |
+| R-07 | Privacy and biometric law applies from day one (C-01: GDPR, UK GDPR, BIPA, CCPA; candidates worldwide). The pilot entry blockers are now owner approvals of drafts and the DPIA and transfer steps for EU/UK candidates (B-05). | Pilot start | Owner approves drafts in /docs/compliance/; B-05 |
+| R-15 | **Accepted 2026-10-05 (C-06).** The erasure hold can push erasure past 30 days. The approved NFR-05 wording covers it: "within 30 days of the request, or within 30 days after an open review or appeal closes, whichever is later"; the candidate is told about any delay | Low | Hub applies the NFR-05 wording |
+| R-16 | **Accepted risk, owned by Harsh Trivedi (C-10).** AuraFace's training data is not disclosed (F-2), and the COCO-SSD weights have no stated licence (F-3). Object detection stays on in the pilot | Licence or provenance challenge | Pinned by SHA-256; the licence gate passes only these two files; revisit before production |
+| R-17 | The consent text, DPIA and retention schedule have had no professional legal review (C-15) | Non-compliance found late | Professional review recommended before production |
+| R-18 | GDPR consent in a hiring context may not count as freely given (Art. 7(4), recital 43), and C-02 makes face matching required, with explicit consent as the lawful basis | The lawful basis could be challenged for EU/UK candidates | The audited case-by-case accommodation path (C-02) gives an alternative; the DPIA assesses it |
+| R-19 | Automated-decision and AI-in-hiring laws may apply: NYC Local Law 144 (bias audit, notices), EU AI Act Annex III employment systems (high-risk duties), and others such as the Colorado AI Act and the CCPA rules on automated decision-making | New obligations before or during the pilot | Assessed in the DPIA (C-14); human decision only, no auto-reject |
 | R-08 | Next.js App Router with nonce-based CSP middleware on Cloudflare Pages needs an adapter and edge runtime constraints; self-hosted MediaPipe and TF.js model files are large | FE-01, DEP-01 | ARC-05 decision before FE-01 is finished |
 | R-09 | Merge hot spots: packages/shared (events.ts, permission matrix), apps/api app module, apps/worker shared by BE-08 and BE-12, prisma schema after freeze | Conflicts, rework | Architect owns shared; merge order by dependency; PR notes |
 | R-10 | Frontend builds on MSW mocks; drift from the real API | Late integration bugs | ARC-02 contract; FE-13 unmock sweep |
@@ -124,7 +134,7 @@ CLAUDE.md says if code and docs disagree, stop and ask. No code exists yet, so t
 | Q-31 | NFR-03, NFR-07, NFR-08, NFR-09 have no direct TC. | fsd.md section 5; test-cases.md | QA-01A | Human |
 | Q-32 | FRs with no parent BR; BR-12 sits under M4 in FSD section 1 while accommodations (FR-305) are in M3 and "screen-reader support" has no FR; BR-08 has no TC for variant assignment. | fsd.md section 1; brd.md section 6 | Trace accuracy | Human |
 | Q-33 | 14 TCs are named by no prompt step (TC-007, 032, 034, 035, 036, 053, 054, 056, 057, 058, 059, 060, 064, 093); 7 are P1. The plan assigns owners (PM-assigned in the trace). | test-cases.md; all four prompts | Plan accuracy | Human |
-| Q-34 | BRD section 7 says flag rates are monitored across groups. No FR, TC or task implements this, and FR-1002 reports flag rate by type only. | brd.md section 7; fsd.md FR-1002 | Compliance | Human (legal) |
+| Q-34 | **Closed 2026-10-05 by C-13:** optional post-test demographic self-report with separate consent, aggregate reporting only (minimum group of 10); build task FAIR-01, needed before the pilot exit review. | brd.md section 7 | FAIR-01 | Harsh Trivedi |
 | Q-35 | Partial build coverage: FR-904 (no candidate appeal page, reviewer appeal UI or verdict email; email templates list has none), FR-1003 (session.reviewed, CSV and webhook admin UI), FR-1103 (server attestation), NFR-09 (per-session trace ID; BE-01 has per-request). | fsd.md FR-904, FR-1003, FR-1103, NFR-09; backend.md Steps 1, 6, 13, 14; frontend.md Steps 13, 14 | Plan accuracy | Human |
 
 ### E. Process, agents and infrastructure
@@ -138,7 +148,7 @@ CLAUDE.md says if code and docs disagree, stop and ask. No code exists yet, so t
 | Q-40 | No step creates baseline lint, type-check, test scripts or CI, yet DB-08 says "passes in CI", Step 15 says "secrets scanning in CI", QA 1 adds a CI job, and every agent's DoD says run lint and type-check. Proposed as PA-01. | prompts/database.md Step 8; backend.md Step 15; agents-qa-deploy.md QA 1; architecture.md layout | DB-01 | Human |
 | Q-41 | **Closed 2026-10-01 (D-13): out of scope for this build; FE-14 moves to a later phase.** **LOCKDOWN enum value removed until the lockdown client exists: accepted in ADR 0007 §8 (D-16).** Lockdown scope. Frontend Step 14, FR-1101..FR-1103, BR-11 (Should, Phase 3); orchestrator omits Step 14; no TC; server attestation has no backend step. In or out of this build? | frontend.md Step 14; agents-qa-deploy.md; brd.md section 5; fsd.md M11 | FE-14 | Human |
 | Q-42 | STRICT profile uses a phone as side camera, but NFR-07 blocks Safari, recorders use webm (VP8/Opus), which iOS Safari does not record, and BRD puts mobile test-taking out of scope. | fsd.md FR-405, NFR-07; frontend.md Steps 7, 9; brd.md section 5 | FE-07, FE-09 | Human + architect |
-| Q-43 | **Answered with a placeholder (D-29): the owner gave the Legal owner as "[NAME / ROLE]"; the actual name and role are still to be supplied.** Earlier (D-17): Legal supplies and approves the consent document text and confirms the e-signature format. Until then a clearly marked placeholder is used, and pilot and production refuse it. Who in Legal, and when, is still open. Pilot entry blocker (B-05).** Who supplies and approves the consent text and retention wording (BRD says Legal must approve before launch)? Needed for real copy in FE-09 and for the consent version. | brd.md section 7, section 10; fsd.md FR-401; frontend.md Step 9 | FE-09, DEP-02 | Human (legal) |
+| Q-43 | **Closed 2026-10-05 by C-15:** Harsh Trivedi approves the consent text, retention wording, DPIA and volunteer form; external Legal review is not a blocker (R-17). | brd.md section 7 | — | Harsh Trivedi |
 | Q-44 | **Answered with placeholder domains (D-30): candidates use `assess.yourcompany.com`; staging uses `staging.assess.yourcompany.com`. These are placeholders in config until confirmed. ARC-05 sets the API host and cookie domain under the same registrable domain so the SameSite=Strict refresh cookie works.** Refresh cookie is `SameSite=Strict` (Step 2, FE-02) but web (Cloudflare Pages) and API (VM) are on separate origins on staging; Strict cookies are not sent cross-site, so silent refresh would fail unless both share one registrable domain. | backend.md Step 2; frontend.md Step 2; architecture.md Deployment | ARC-05, FE-02, DEP-01 | Human + architect |
 
 ## 7. Task table
@@ -148,55 +158,57 @@ Status values: Not started, In progress, In review, Changes requested, Done (mer
 | ID | Title | Owner | Status | Blocked by | Review | Merged |
 | --- | --- | --- | --- | --- | --- | --- |
 | ARC-01 | Schema readiness review (widened, D-03, D-08) | architect | Done (merged to main 2026-10-01) | ADRs 0002 to 0008 accepted (D-16) | | |
-| ARC-02 | Shared contracts and API contract v0 | architect | Not started | DB-01, ARC-01 | | |
-| ARC-03 | Security model ADRs | architect | Not started | ARC-01 | | |
+| ARC-02 | Shared contracts and API contract v0 | architect | In progress: shared contracts v0 merged (#6), ADR 0010 accepted (#16); ADR 0011 (#31) and ADR 0012 (#33) await owner acceptance | owner acceptance | | #6, #16 |
+| ARC-03 | Security model ADRs | architect | In progress: ADR 0013 proposed (#39), awaiting owner acceptance (P-08); candidate-session scope to decide before BE-07 (DL-07) | | | |
 | ARC-04 | Worker and async integration ADR | architect | Not started | ARC-01, ARC-03 | | |
 | ARC-05 | Deployment and Judge0 host feasibility | architect | Not started | human-provisioned x86 host | | |
-| DB-01 | Monorepo and local infrastructure | db-engineer | Done 2026-10-02 (PR #1 and PR #2 merged; D-41). Review follow-up PR #3 open | none | | |
-| DB-02 | Prisma schema | db-engineer | Not started | DB-01 review follow-up PR #3 merged (freeze list ADR 0008 accepted) | | |
-| DB-03 | Migrations | db-engineer | Not started | DB-02 | | |
-| DB-04 | Seed data | db-engineer | Not started | DB-03 | | |
-| DB-05 | Org scoping helpers | db-engineer | Not started | DB-03 | | |
+| DB-01 | Monorepo and local infrastructure | db-engineer | Done (#1, #2, #3) | none | | 2026-10-02 |
+| DB-02 | Prisma schema | db-engineer | Done (#5) | | | 2026-10-02 |
+| DB-03 | Migrations | db-engineer | Done (#9) | | | 2026-10-05 |
+| DB-04 | Seed data | db-engineer | Done (#13, #14) | | | 2026-10-05 |
+| DB-05 | Org scoping helpers | db-engineer | In review (#30, draft): reviewer B1 plus FU-DB-63 must be fixed before merge (DL-01); architect gate approved with conditions | | code-reviewer REQUEST CHANGES | |
 | DB-06 | Retention and erasure services | db-engineer | Not started | DB-05 | | |
 | DB-07 | Backups and restore | db-engineer | Not started | DB-03 | | |
 | DB-08 | Database verification | db-engineer | Not started | DB-03..DB-07 | | |
-| BE-01 | API foundation | backend-engineer | Not started | DB-08 | | |
-| BE-02 | Staff authentication | backend-engineer | Not started | BE-01, ARC-03 | | |
-| BE-03 | RBAC and audit logging | backend-engineer | Not started | BE-02, ARC-02 | | |
+| BE-01 | API foundation | backend-engineer | Done (#10) | | | 2026-10-05 |
+| BE-02 | Staff authentication | backend-engineer | Done (#15); hardening and 2FA re-auth in review (#26) | CI (Actions outage) | code-reviewer no blockers | 2026-10-05 |
+| BE-03 | RBAC and audit logging | backend-engineer | Starting 2026-10-05 against #30's interface (DL-02) | merge waits on #30 and FU-DB-58 | | |
 | BE-04 | Question bank | backend-engineer | Not started | BE-03 | | |
 | BE-05 | Code execution with Judge0 | backend-engineer | Not started | BE-04, ARC-05 | | |
 | BE-06 | Tests, invitations and email | backend-engineer | Not started | BE-05 | | |
 | BE-07 | Candidate session and state machine | backend-engineer | Not started | BE-06, ARC-03 | | |
-| BE-08 | Identity verification service | integrity-engineer | Not started | BE-07, BE-09, ARC-04 | | |
+| BE-08 | Identity verification service | integrity-engineer | Worker-side face-match module starting after #32 (DL-05); API side waits | BE-07, BE-09, ARC-04 | | |
 | BE-09 | Media storage (S3-compatible) | backend-engineer | Not started | BE-07, ARC-03 | | |
 | BE-10 | Proctor events and keystroke ingestion | integrity-engineer | Not started | BE-07, ARC-02, ARC-03 | | |
 | BE-11 | Run, submit and grading | backend-engineer | Not started | BE-07 | | |
-| BE-12 | Integrity analysis worker | integrity-engineer | Not started | BE-08..BE-11, ARC-04 | | |
+| BE-12 | Integrity analysis worker | integrity-engineer | In progress: worker modules merged (#20, #27), hardening in review (#32); API integration waits on BE-08..BE-11 and ARC-04 | BE-08..BE-11, ARC-04 | | |
 | BE-13 | Review and live proctoring API | backend-engineer | Not started | BE-12, ARC-02 | | |
 | BE-14 | Reports and integrations | backend-engineer | Not started | BE-13 | | |
 | BE-15A | Security review and fixes | backend-engineer | Not started | BE-14 | | |
 | BE-15B | Staging load tuning | backend-engineer | Not started | BE-15A, DEP-01 | | |
-| FE-01 | Web app foundation | frontend-engineer | Not started | DB-08, ARC-02 | | |
-| FE-02 | Staff authentication screens | frontend-engineer | Not started | FE-01 | | |
-| FE-03 | Staff shell and navigation | frontend-engineer | Not started | FE-02 | | |
-| FE-04 | Question bank UI | frontend-engineer | Not started | FE-03 | | |
+| FE-01 | Web app foundation | frontend-engineer | Done (#4) | | | 2026-10-02 |
+| FE-02 | Staff authentication screens | frontend-engineer | Done (#8); Security page with 2FA re-auth in review (#36) | #26 | | 2026-10-05 |
+| FE-03 | Staff shell and navigation | frontend-engineer | Done (#17, follow-ups #22, #25) | | | 2026-10-05 |
+| FE-04 | Question bank UI | frontend-engineer | Next, after the flake PR and #36 | | | |
 | FE-05 | Tests and invitations UI | frontend-engineer | Not started | FE-04 | | |
-| FE-06 | Proctor SDK: browser lock and events | proctor-sdk-engineer | Not started | DB-08, ARC-02, ARC-03 | | |
-| FE-07 | Proctor SDK: recording pipeline | proctor-sdk-engineer | Not started | FE-06 | | |
-| FE-08 | Proctor SDK: in-browser AI detectors | proctor-sdk-engineer | Not started | FE-07 | | |
+| FE-06 | Proctor SDK: browser lock and events | proctor-sdk-engineer | Done (#18); QA-D-01 answered by the hub 2026-10-05: no SDK change, the server fills the EXIT duration on restore or at session end; QA rewords TC-050 | | | 2026-10-05 |
+| FE-07 | Proctor SDK: recording pipeline | proctor-sdk-engineer | Done (#21) | | | 2026-10-05 |
+| FE-08 | Proctor SDK: in-browser AI detectors | proctor-sdk-engineer | Done (#23); /dev/proctor demo page in review (#35, draft) | | | 2026-10-05 |
 | FE-09 | Candidate pre-test flow | frontend-engineer | Not started | BE-07, FE-01, FE-08 | | |
 | FE-10 | Candidate test screen | frontend-engineer | Not started | FE-09 | | |
 | FE-11 | Review workspace | frontend-engineer | Not started | FE-03, FE-10 | | |
 | FE-12 | Live proctoring | frontend-engineer | Not started | FE-03, FE-10 | | |
 | FE-13 | Dashboard, reports, polish | frontend-engineer | Not started | FE-09..FE-12, BE-14 | | |
 | FE-14 | Lockdown client (later phase) | TBD | Out of scope (D-13) | | | |
-| QA-01A | Test matrix and manual scripts | qa-engineer | Not started | none | | |
-| QA-01B | Automation, CI gate, scans | qa-engineer | Not started | BE-14, FE-13, DEP-01 | | |
+| QA-01A | Test matrix and manual scripts | qa-engineer | Done (#7) | | | 2026-10-02 |
+| QA-01B | Automation, CI gate, scans | qa-engineer | In progress: early suites and the P1 gate merged (#28, titled "QA-02" in the PR; it is QA-01B work); BE-03 acceptance tests next (DL-06) | BE-14, FE-13, DEP-01 for completion | | |
 | QA-02 | Red team | qa-engineer | Not started | DEP-01, BE-15A, FE-13 | | |
 | DEP-01 | Staging on AWS | backend-engineer (architect review, D-26) | Not started | ARC-05, BE-12, FE-10 | | |
 | DEP-02 | Production readiness review | backend-engineer (architect review, D-26) | Not started | BE-15B, QA-01B, QA-02 | | |
 | DEP-03 | Pilot stack (PA-07, D-16) | backend-engineer (architect review, D-26) | Not started | ARC-05, DEP-01, BE-15A, QA-02; pilot use also needs B-05 | | |
-| INT-01 | Face-match threshold tuning (PA-08, D-24) | integrity-engineer (architect review) | Not started | BE-08, ARC-04; Legal items B-05 (3) | | |
+| INT-01 | Face-match threshold tuning (PA-08, D-24) | integrity-engineer (architect review) | Not started | BE-08, ARC-04; owner-approved volunteer form (C-11) and volunteers; model download P-07 | | |
+| COMP-01 | Compliance documents (C-03, C-05, C-09, C-11): volunteer form, retention schedule, consent document, DPIA, processor register | Delivery Lead drafts; owner approves | In progress (#44): volunteer form draft v0.1 done | owner approval | | |
+| FAIR-01 | Optional demographic self-report and aggregate fairness report (C-13) | hub ADR, then db-engineer, backend-engineer, frontend-engineer | Not started | ADR for separate storage; BE-07, FE-10 | | |
 
 ## 8. Change requests (plan additions awaiting human approval)
 
@@ -231,9 +243,9 @@ Status values: Not started, In progress, In review, Changes requested, Done (mer
 | D-14 | 2026-10-01 | brd.md BO-5 and the section 8 constraint, and fsd.md FR-401, updated to match D-04, D-06, D-10 and D-11. | Harsh Trivedi |
 | D-15 | 2026-10-01 | Storage wording applied everywhere, including CLAUDE.md: staging uses Cloudflare R2 with synthetic data only; pilot and production use AWS S3; storage stays behind one S3-compatible interface, so only configuration differs between environments. | Harsh Trivedi |
 | D-16 | 2026-10-01 | ARC-01 ADRs 0002 to 0007 accepted: A-01 option (b) per-variant test data; A-03 option (a) server-enforced sequential sections; every other recommendation as proposed, amended by D-17 to D-23. Also approved: PA-07 (DEP-03 Pilot stack) and licence rule F-1 (load only `glintr100.onnx`, pinned by SHA-256). F-2 and F-3 remain open. | Harsh Trivedi |
-| D-17 | 2026-10-01 | Consent: a signed consent document replaces the checkbox and is required before every test session, never reused across sessions or tests. It is 2-3 pages, versioned and stored, and covers what is recorded (screen, webcam, microphone, keystrokes), ID image and selfie, face matching, automated detection and human review, how results are used in hiring, retention and deletion, who can access the data, appeals, accommodations and how to withdraw. Flow: rules page, email OTP, consent document, system check. The candidate scrolls to the end and signs by typing their full legal name; the server records the date and time; nothing touches camera, mic or screen before signing. Stored per session: document version, signed name, signed timestamp, IP, user agent, and a generated PDF of the signed document in object storage; the candidate is emailed a copy. Declining ends the session without any recording and shows a contact for alternatives or accommodations. The document text is a clearly marked placeholder until Legal supplies and approves it, and Legal confirms the e-signature format: both are pilot entry blockers. | Harsh Trivedi |
-| D-18 | 2026-10-01 | Face-match threshold test set: an internal set from volunteers who sign a separate short consent for this purpose only. Demographic data is self-reported, optional, stored separately and deleted after tuning. Fallback: buy a licensed dataset. The volunteer consent form and the lawful basis for the per-group breakdown are Legal items and pilot entry blockers. | Harsh Trivedi |
-| D-19 | 2026-10-01 | Erasure (provisional default, for Legal to confirm): erasure waits only while a review or appeal is open; the candidate is told; erasure runs as soon as it closes. The candidate's code is erased too; only anonymized scores are kept. The hold behaviour is configurable. Legal item. | Harsh Trivedi |
+| D-17 | 2026-10-01 | Consent: a signed consent document replaces the checkbox and is required before every test session, never reused across sessions or tests. It is 2-3 pages, versioned and stored, and covers what is recorded (screen, webcam, microphone, keystrokes), ID image and selfie, face matching, automated detection and human review, how results are used in hiring, retention and deletion, who can access the data, appeals, accommodations and how to withdraw. Flow: rules page, email OTP, consent document, system check. The candidate scrolls to the end and signs by typing their full legal name; the server records the date and time; nothing touches camera, mic or screen before signing. Stored per session: document version, signed name, signed timestamp, IP, user agent, and a generated PDF of the signed document in object storage; the candidate is emailed a copy. Declining ends the session without any recording and shows a contact for alternatives or accommodations. The document text is a clearly marked placeholder until Legal supplies and approves it, and Legal confirms the e-signature format: both are pilot entry blockers. **Updated 2026-10-05 by C-07 (signature format confirmed) and C-09 (consent text drafted by the Delivery Lead, approved by the owner).** | Harsh Trivedi |
+| D-18 | 2026-10-01 | Face-match threshold test set: an internal set from volunteers who sign a separate short consent for this purpose only. Demographic data is self-reported, optional, stored separately and deleted after tuning. Fallback: buy a licensed dataset. The volunteer consent form and the lawful basis for the per-group breakdown are Legal items and pilot entry blockers. **Updated 2026-10-05 by C-11 and C-12.** | Harsh Trivedi |
+| D-19 | 2026-10-01 | Erasure (provisional default, for Legal to confirm): erasure waits only while a review or appeal is open; the candidate is told; erasure runs as soon as it closes. The candidate's code is erased too; only anonymized scores are kept. The hold behaviour is configurable. Legal item. **Updated 2026-10-05 by C-06 (confirmed; no longer provisional).** | Harsh Trivedi |
 | D-20 | 2026-10-01 | AI reference solutions for Python, JavaScript and Java only, from two assistants on business or team plans that do not train on inputs. More languages are added only when a role needs them. | Harsh Trivedi |
 | D-21 | 2026-10-01 | No 30-minute OTP lockout once a test is in progress. A failed OTP attempt during a test logs an event, alerts the proctor and allows a retry after a short cooldown. | Harsh Trivedi |
 | D-22 | 2026-10-01 | Self-service staff password reset is in scope: emailed single-use link with a short expiry; 2FA is still required for roles that have it. | Harsh Trivedi |
@@ -241,9 +253,9 @@ Status values: Not started, In progress, In review, Changes requested, Done (mer
 | D-24 | 2026-10-01 | PA-08 approved: task INT-01 face-match threshold tuning, owned by integrity-engineer. | Harsh Trivedi |
 | D-25 | 2026-10-01 | PA-01 to PA-06 approved. DB-01 includes the baseline CI workflow (PA-01). | Harsh Trivedi |
 | D-26 | 2026-10-01 | DEP-01, DEP-02 and DEP-03 are owned by backend-engineer with architect review. | Harsh Trivedi |
-| D-27 | 2026-10-01 | The erasure hold (D-19) is a Legal item and a pilot entry blocker, not a build blocker; it stays configurable. Proposed NFR-05 wording for Legal: erasure completes within 30 days of the request, or within 30 days after an open review or appeal closes, whichever is later; the candidate is told about any delay. R-15 is recorded against it. | Harsh Trivedi |
-| D-28 | 2026-10-01 | Licence flags F-2 (AuraFace training data) and F-3 (COCO-SSD weights) are accepted as documented risks; Legal reviews both before the pilot. Not build blockers. | Harsh Trivedi |
-| D-29 | 2026-10-01 | Q-43: the consent text owner in Legal is "[NAME / ROLE]" as supplied; the actual name and role are still needed. | Harsh Trivedi |
+| D-27 | 2026-10-01 | The erasure hold (D-19) is a Legal item and a pilot entry blocker, not a build blocker; it stays configurable. Proposed NFR-05 wording for Legal: erasure completes within 30 days of the request, or within 30 days after an open review or appeal closes, whichever is later; the candidate is told about any delay. R-15 is recorded against it. **Updated 2026-10-05 by C-06 (wording approved).** | Harsh Trivedi |
+| D-28 | 2026-10-01 | Licence flags F-2 (AuraFace training data) and F-3 (COCO-SSD weights) are accepted as documented risks; Legal reviews both before the pilot. Not build blockers. **Updated 2026-10-05 by C-10 (accepted risks owned by the owner; object detection on).** | Harsh Trivedi |
+| D-29 | 2026-10-01 | Q-43: the consent text owner in Legal is "[NAME / ROLE]" as supplied; the actual name and role are still needed. **Updated 2026-10-05 by C-15 (the owner is the approver).** | Harsh Trivedi |
 | D-30 | 2026-10-01 | Q-44: candidates use assess.yourcompany.com; staging uses staging.assess.yourcompany.com. Placeholders in config until confirmed. | Harsh Trivedi |
 | D-31 | 2026-10-02 | Prisma 7 is the ORM toolchain (recorded in ADR 0009). The database URL lives in `prisma.config.ts`, not `schema.prisma`. Prisma's AI-agent consent check on `migrate reset` stays on: its consent variable may be set only inside the localhost-guarded `db:reset` script (review S4), never globally and never for staging or pilot databases. The architect updates the DB-02 and DB-03 briefs and the repository layout in architecture.md. | Harsh Trivedi |
 | D-32 | 2026-10-02 | Node 24 LTS replaces Node 22 (recorded in ADR 0009): CI, `.nvmrc`, `engines` and the docs. | Harsh Trivedi |
@@ -254,19 +266,54 @@ Status values: Not started, In progress, In review, Changes requested, Done (mer
 | D-37 | 2026-10-02 | Review SF7: `db-reset` also refuses when an AI agent's environment variables are set, and allows only the local Compose Postgres port. | Harsh Trivedi |
 | D-38 | 2026-10-02 | Staging and pilot database credentials never exist on developer machines or in agent sessions; they live only in GitHub Actions secrets and on the servers. Recorded in ADR 0009 and CLAUDE.md. ADR 0009 is reworded as a policy backed by speed bumps; the remaining risks (agents in interactive terminals, local tunnels) are accepted. | Harsh Trivedi |
 | D-39 | 2026-10-02 | Time-box: after this round the reset guard is done. Fix SF2 to SF8 and the cheap nits; no new hardening work on it unless the code-reviewer finds a blocker. | Harsh Trivedi |
-| D-40 | 2026-10-02 | Auto-fix stays off for pull requests. | Harsh Trivedi |
+| D-40 | 2026-10-02 | Auto-fix stays off for pull requests. **Superseded 2026-10-05 by D-46.** | Harsh Trivedi |
 | D-41 | 2026-10-02 | Merge only when the code-reviewer approves and CI is green. DB-01 is marked done when PR #2 merges. (PR #2 merged 2026-10-02 16:43 UTC with CI green and before this rule; the remaining review fixes go through PR #3 under this rule.) | Harsh Trivedi |
 | D-42 | 2026-10-02 | Code review round 3 on PR #3: APPROVE WITH NITS. Option (a): apply the four nits in one commit, then merge PR #3 once CI passes and start DB-02. CLAUDE.md gains the rule that agents never run `pnpm db:reset`, `pnpm dev:infra:reset`, `prisma migrate reset` or `db push`; the db-engineer definition of done adds `pnpm dev:infra:reset`. | Harsh Trivedi |
+| D-43 | 2026-10-05 | P-02: PR #34 approved (Delivery Lead owns docs/status.md, docs/build-plan.md and docs/requirements-trace.md); the hub merges it on green. | Harsh Trivedi |
+| D-44 | 2026-10-05 | P-03 / FU-BE-24: FR-101 lockout stays as written for the pilot. Added: an admin alert when a staff account is locked, and an audited admin unlock action (BE-03 and the admin Users page). Pre-production follow-up: per-IP or progressive lockout before production. The hub adds the FSD text (FR-101a) and API rows. | Harsh Trivedi |
+| D-45 | 2026-10-05 | P-05: the CSP allows `'wasm-unsafe-eval'` on the candidate test route only, with a code comment explaining why; every other route and directive stays strict. | Harsh Trivedi |
+| D-46 | 2026-10-05 | P-06: auto-fix is on for all sessions; CLAUDE.md rule 4 supersedes D-40. | Harsh Trivedi |
+| D-47 | 2026-10-05 | Compliance decisions C-01 to C-16 recorded in /docs/compliance/decisions.md (PR #44), with open questions OQ-1 to OQ-3. They clear Legal brief items 1 to 8 as decisions; what remains is in /docs/compliance/legal-brief.md and B-05. | Harsh Trivedi |
+| D-48 | 2026-10-05 | Follow-up compliance decisions C-17 to C-20 (/docs/compliance/decisions.md, PR #44): the minimal consent proof is kept 3 years even after erasure (OQ-1); face embeddings are never stored, confirming ADR 0004 (OQ-2); a waived face match needs a recorded reason, reviewers see "identity check waived", and the recruiter records whether an ID video check was done, all audited (OQ-3); volunteers are recruited by open call, never through managers. Owner fill-ins applied to the consent document draft. | Harsh Trivedi |
+
+## 9b. Delivery Lead decision log
+
+Decisions taken by the Delivery Lead under the owner's delegation (order, priority, unblocking, implementation details where the docs are silent). None changes an accepted ADR, a requirement or the scope.
+
+| ID | Date | Decision | Reason |
+| --- | --- | --- | --- |
+| DL-01 | 2026-10-05 | FU-DB-63 (a parent-side nested `connect`/`set`/`connectOrCreate` can move another org's rows) is reclassified as a blocker for PR #30. It is fixed in the PR together with B1 and the FU-DB-64 FK-classification test that proves it. | CLAUDE.md "Working in parallel" rule 3: authorization weaknesses always block a merge |
+| DL-02 | 2026-10-05 | BE-03 development starts now against PR #30's `PrismaService`/`OrgContext` interface. FU-DB-58 (auth onto the scoped client, delete the interim module) lands inside BE-03. BE-03 merges only after #30 is merged and FU-DB-58 is in. | BE-03 is on the critical path; the interface is architect-approved and the open fixes do not change it |
+| DL-03 | 2026-10-05 | The frontend admin-table flake fix (`table-utils.ts`) moves out of #36 into its own PR, and merges first. | It caused the last real failure on main and affects every track's CI |
+| DL-04 | 2026-10-05 | PR #35 (/dev/proctor) gets a full review. It merges after the flake PR and #36, and only with the Frontend session's OK on its apps/web config changes. | Cross-track edits to apps/web (`next.config.ts`, `package.json`, vitest config) |
+| DL-05 | 2026-10-05 | Integrity starts the worker side of BE-08 (MediaPipe alignment and pinned AuraFace `glintr100.onnx` behind an interface; synthetic images only; no stored embeddings). The API side waits for BE-07, BE-09 and ARC-04. | Keeps an idle track on approved work that INT-01 needs |
+| DL-06 | 2026-10-05 | QA writes the TC-004 and TC-006 acceptance tests ahead of BE-03, staged as todo, and fixes the TC-008 path in the matrix (FU-DB-59). | Shortens BE-03's review loop |
+| DL-07 | 2026-10-05 | Hub priority order: QA-D-01 event shape (answered the same day), ADR 0013, ARC-03 candidate-session scope (before BE-07), ARC-04 worker contract and token, the integrity starter-diff proposal, the DB-05 gate items, then small items. | Ordered by which track is waiting |
+| DL-08 | 2026-10-05 | No Postgres RLS (and so no RLS-related schema change) for the build or the pilot; ADR 0006 stands, and its option (b) already says RLS is not for the pilot. FU-DB-77 (revisit RLS) is a pre-production item for the hub under ARC-05/DEP-02. | No accepted ADR requires RLS; this keeps the current design |
+| DL-09 | 2026-10-05 | The main CI red from 20:12 UTC is the GitHub Actions outage. No code change; sessions re-run cancelled checks once Actions recovers. | Jobs were cancelled without getting a runner |
+| DL-10 | 2026-10-05 | build-plan.md section 6 merge rule aligned with CLAUDE.md rules 6, 8 and 9: sessions merge their own PRs; humans no longer merge. | CLAUDE.md wins; the plan contradicted it |
+| DL-11 | 2026-10-05 | TC-065 seq test flake (packages/proctor-sdk/src/qa/qa-tc.test.ts, failed on #40): QA fixes it as its own test-only PR, reviewed by the SDK session; any SDK runtime change comes back to the Delivery Lead first. | It blocks #40 (main's flake fix) and can hit any PR |
+| DL-12 | 2026-10-05 | QA's TC-008 review of #30: the no-existence-oracle assertion (cross-org id gets the same 404 problem body as a missing id) and fail-closed public-route handling are blockers in #30. Real-route TC-008 cases go to BE-03. The /live and candidate-token cases are follow-ups for BE-13 and BE-07. QA makes the P1 gate read the apps/api unit Jest report. | CLAUDE.md rule 3 (authorization) |
+| DL-13 | 2026-10-05 | PR #30: nested cursors (B1-nested) and nested writes through RULE_I relations (S-A) are blockers. After that round, any finding that is not an authorization, session or data-access weakness goes to docs/followups/database.md, not into #30. The architect approved at 769d8f5. | CLAUDE.md rule 3; a time-box on the review loop |
+
+### Parked for the owner
+
+| ID | Item | Why it is the owner's |
+| --- | --- | --- |
+| P-01 | Accept or reject ADR 0011 (2FA re-authentication, PR #31) and ADR 0012 (generated OpenAPI as the single source of truth, PR #33) | Accepting an ADR |
+| P-02 | Decided: D-43; #34 merged 2026-10-05 | |
+| P-03 | Decided: D-44 (alert and unlock in BE-03; per-IP or progressive lockout before production) | |
+| P-04 | Decided: C-01..C-16 (D-47). OQ-1..OQ-3 answered by C-17..C-19 (D-48); open: OQ-4 (results retention), OQ-5 (90-day cap on biometrics), OQ-6 (lawful basis for non-biometric processing), OQ-7 (minimum age), OQ-8 (auto-clear of LOW-band sessions vs "a human makes every decision") | Legal, privacy |
+| P-05 | Decided: D-45 (Frontend implements, with a test that the directive is absent elsewhere) | |
+| P-06 | Decided: D-46 | |
+| P-07 | May the Integrity session download AuraFace `glintr100.onnx` (fal/AuraFace-v1, pinned SHA-256, Apache 2.0 per D-05) for a local, opt-in real-model test run? Until then the face-match PR ships with a fake backend only | File download from an external source |
+| P-08 | Accept ADR 0013 (ARC-03 part 1: HMAC key lifecycle, candidate API wire tables, candidate-session scope CS-1..CS-5, model-file lock; PR #39) and answer its section 9 owner questions. The main ones: lost key means OTP resume vs re-issue; 300 s ingest grace after submit; unsigned system-check findings unscored; consent covering a 640 px re-check frame every 2 min, kept only on mismatch; repeated FACE_MISMATCH goes to manual review; SCREEN_SHARE weight; the sessionId scope control. Code on the key and media routes waits for acceptance; mocks may follow the tables. Status 2026-10-05: security review BLOCK (3 blockers: licence-override controls, upload size and integrity, re-check frames outliving the delete promise); the architect is revising, and it comes to the owner once clean. (COCO-SSD for the pilot is decided by C-10.) | Accepting an ADR; consent and licensing questions |
+| P-09 | Accept the ADR 0006 §8 amendment (PR #41: FK classification, write invariant, system-scope reasons, raw-SQL allow-list, pilot org provisioning). Review BLOCK on 2 text blockers; comes to the owner once clean | Amending an accepted ADR |
+| P-10 | Choose the email provider and the error tracker. Both are processors of candidate data (C-03) and may cost money. **Recommendation:** email through AWS SES in the same US region, so it is covered by the existing AWS DPA with no new processor; error tracking through self-hosted GlitchTip (open source, Sentry-SDK compatible) on our AWS host, so no third party receives error data. Alternatives: Brevo (EU-based) or Resend for email, and Sentry SaaS (DPA with SCCs, PII scrubbing) for errors | Paid services; new processors |
+| P-11 | Create a separate GitHub identity for the agent sessions, plus CODEOWNERS and branch protection on the model licence allowlist and CI config (ADR 0013 control 0). Until then an agent working under the owner's login could change the licence gate, and ADR 0013 will say so | Accounts and credentials; a human action |
 
 ## 10. Next 3 tasks, blockers, decisions
 
-- **Next 3 tasks:**
-  1. Merge PR #3 (`db/step-1-fixes`): code-reviewer APPROVE WITH NITS, nits applied (D-42), merged once CI is green (D-41).
-  2. DB-02 (db-engineer, branch `db/step-2` from `main` after PR #3) against the accepted freeze list ADR 0008 and ADR 0009.
-  3. DB-03 (db-engineer) after DB-02. It includes the owner's one-time interactive `pnpm db:reset` with `pnpm dev:infra` running.
-  QA-01A and ARC-02, ARC-03 and ARC-05 can use idle slots.
-- **Blockers:** none for the build. B-05 (Legal pilot entry items) blocks only the pilot. B-01 to B-04 are cleared.
-- **Decisions still needed from a human:**
-  - Legal pilot entry items (B-05), including the actual consent-text owner (Q-43 has a placeholder, D-29);
-  - confirm the details the architect chose in ADRs 0002 to 0007 and 0009 (each marked "detail chosen by architect; owner to confirm");
-  - confirm the placeholder domains (D-30) before DEP-01.
+- **Next 3 tasks on the critical path:** #26 merge (BE-02 hardening); #30 merge (DB-05, after DL-01 fixes); BE-03 (DL-02).
+- **Blockers:** GitHub Actions outage (external; affects every merge). B-05 blocks only the pilot.
+- **Decisions needed from the owner:** section 9b "Parked for the owner" (open: P-01, P-07, P-08, P-09, P-10, P-11, and OQ-4..OQ-8 in /docs/compliance/decisions.md (PR #44)).
