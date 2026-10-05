@@ -155,7 +155,7 @@ Status values: Not started, In progress, In review, Changes requested, Done (mer
 | --- | --- | --- | --- | --- | --- | --- |
 | ARC-01 | Schema readiness review (widened, D-03, D-08) | architect | Done (merged to main 2026-10-01) | ADRs 0002 to 0008 accepted (D-16) | | |
 | ARC-02 | Shared contracts and API contract v0 | architect | In progress: shared contracts v0 merged (#6), ADR 0010 accepted (#16); ADR 0011 (#31) and ADR 0012 (#33) await owner acceptance | owner acceptance | | #6, #16 |
-| ARC-03 | Security model ADRs | architect | In progress: ADR 0013 (candidate API contract) pending; candidate-session scope to decide before BE-07 (DL-07) | | | |
+| ARC-03 | Security model ADRs | architect | In progress: ADR 0013 proposed (#39), awaiting owner acceptance (P-08); candidate-session scope to decide before BE-07 (DL-07) | | | |
 | ARC-04 | Worker and async integration ADR | architect | Not started | ARC-01, ARC-03 | | |
 | ARC-05 | Deployment and Judge0 host feasibility | architect | Not started | human-provisioned x86 host | | |
 | DB-01 | Monorepo and local infrastructure | db-engineer | Done (#1, #2, #3) | none | | 2026-10-02 |
@@ -292,9 +292,10 @@ Decisions taken by the Delivery Lead under the owner's delegation (order, priori
 | P-05 | Production CSP: allow `'wasm-unsafe-eval'` (never `'unsafe-eval'`), only on the candidate test route, so that MediaPipe, onnxruntime and the tfjs wasm backends run. Hub recommends yes, with a CSP test proving the directive is absent elsewhere | Security trade-off that loosens CSP |
 | P-06 | Auto-fix on PRs: D-40 (2026-10-02) says it stays off; CLAUDE.md rule 4 (2026-10-05) says switch it on. Sessions follow CLAUDE.md (it is newer and says it wins); the DB session switched it on for #30. Confirm, or say which one should change | Shared rules / owner decision conflict |
 | P-07 | May the Integrity session download AuraFace `glintr100.onnx` (fal/AuraFace-v1, pinned SHA-256, Apache 2.0 per D-05) for a local, opt-in real-model test run? Until then the face-match PR ships with a fake backend only | File download from an external source |
+| P-08 | Accept ADR 0013 (ARC-03 part 1: HMAC key lifecycle, candidate API wire tables, candidate-session scope CS-1..CS-5, model-file lock; PR #39) and answer its section 9 owner questions. The main ones: lost key means OTP resume vs re-issue; 300 s ingest grace after submit; unsigned system-check findings unscored; consent covering a 640 px re-check frame every 2 min, kept only on mismatch; repeated FACE_MISMATCH goes to manual review; SCREEN_SHARE weight; COCO-SSD for the pilot (override after Legal, deploy without object detection, or swap the detector); the sessionId scope control. Code on the key and media routes waits for acceptance; mocks may follow the tables | Accepting an ADR; consent and licensing questions |
 
 ## 10. Next 3 tasks, blockers, decisions
 
 - **Next 3 tasks on the critical path:** #26 merge (BE-02 hardening); #30 merge (DB-05, after DL-01 fixes); BE-03 (DL-02).
 - **Blockers:** GitHub Actions outage (external; affects every merge). B-05 blocks only the pilot.
-- **Decisions needed from the owner:** section 9b "Parked for the owner" (P-01 to P-07).
+- **Decisions needed from the owner:** section 9b "Parked for the owner" (P-01 to P-08).
