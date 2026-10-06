@@ -14,6 +14,23 @@ const aesKey = z
 // HMAC/JWT secrets: at least 32 characters so a placeholder such as change-me is refused.
 const secret = z.string().min(32, 'must be at least 32 characters');
 
+/** True for http(s) URLs with no credentials, path (other than "/"), query or fragment. */
+function isBareOrigin(value: string): boolean {
+  try {
+    const u = new URL(value);
+    return (
+      (u.protocol === 'http:' || u.protocol === 'https:') &&
+      u.username === '' &&
+      u.password === '' &&
+      u.pathname === '/' &&
+      u.search === '' &&
+      u.hash === ''
+    );
+  } catch {
+    return false;
+  }
+}
+
 export const envSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -23,7 +40,12 @@ export const envSchema = z
     API_PORT: port.default(4000),
     DATABASE_URL: z.string().min(1),
     REDIS_URL: z.string().min(1),
-    WEB_ORIGIN: z.url(),
+    // Bare origin of the web app, e.g. https://app.example.com. A trailing slash is normalised away;
+    // a path, query, fragment or credentials are refused (FU-BE-11).
+    WEB_ORIGIN: z
+      .url()
+      .refine(isBareOrigin, 'must be a bare http(s) origin such as https://app.example.com')
+      .transform((v) => new URL(v).origin),
     LOG_LEVEL: z
       .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
       .default('info'),
@@ -38,9 +60,21 @@ export const envSchema = z
     CLIENT_ERROR_GLOBAL_LIMIT: positiveInt.default(300),
     // How long a client may take to send the (at most 16 KB) report body (C-32).
     CLIENT_ERROR_BODY_TIMEOUT_MS: positiveInt.default(10_000),
+    // Node HTTP server timeouts, the server-wide slowloris defence (FU-BE-98). The headers timeout
+    // must be below the request timeout (headers plus body). keepAliveTimeout must exceed the
+    // reverse proxy's idle upstream timeout (Caddy: set `keepalive` below it).
+    HTTP_HEADERS_TIMEOUT_MS: positiveInt.default(10_000),
+    HTTP_REQUEST_TIMEOUT_MS: positiveInt.default(30_000),
+    HTTP_KEEPALIVE_TIMEOUT_MS: positiveInt.max(600_000).default(65_000),
+    // How often Node checks connections against those timeouts (its own default is 30 s).
+    HTTP_TIMEOUT_CHECK_INTERVAL_MS: positiveInt.default(2_000),
     THROTTLE_TTL_MS: positiveInt.default(60_000),
     HEALTH_TIMEOUT_MS: positiveInt.default(2_000),
     // Number of reverse proxies in front of the API (0 locally, 1 behind Caddy). FU-BE-08.
+    // Pilot and production (APP_ENV pilot/production, or NODE_ENV production) must set it to at
+    // least 1: with 0 every client shares the proxy address and the per-IP throttles collapse into
+    // one bucket (FU-BE-97). Staging also runs behind Caddy but is not enforced, matching how the
+    // other pilot/production-only guards below treat it. Local, development and test stay at 0.
     TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
     // Staff invites per organization per hour (FR-103); a stolen admin session cannot mass-create.
     INVITE_RATE_LIMIT_PER_ORG_HOUR: positiveInt.default(20),
@@ -64,10 +98,37 @@ export const envSchema = z
     JUDGE0_AUTHZ_TOKEN: z.string().min(1).optional(),
     JUDGE0_REQUEST_TIMEOUT_MS: positiveInt.default(10_000),
     JUDGE0_POLL_DEADLINE_MS: positiveInt.default(60_000),
+    // Email (C-31): Amazon SES, or noop (drops mail) for local and test. Pilot and production
+    // require ses. No secrets here: credentials come from the AWS SDK default chain (instance
+    // role). SES_ENDPOINT is for tests only and is refused outside development and test.
+    EMAIL_PROVIDER: z.enum(['ses', 'noop']).default('noop'),
+    AWS_REGION: z
+      .string()
+      .regex(/^[a-z]{2}(-[a-z]+)+-\d+$/, 'must look like us-east-1')
+      .default('us-east-1'),
+    // Static AWS credentials are refused in pilot and production (instance role only). Declared
+    // here only so the guard below can see them; nothing reads their values.
+    AWS_ACCESS_KEY_ID: z.string().optional(),
+    AWS_SECRET_ACCESS_KEY: z.string().optional(),
+    AWS_SESSION_TOKEN: z.string().optional(),
+    // Profile and credential-file settings would also bypass the instance role.
+    AWS_PROFILE: z.string().optional(),
+    AWS_SHARED_CREDENTIALS_FILE: z.string().optional(),
+    AWS_CONFIG_FILE: z.string().optional(),
+    SES_FROM_ADDRESS: z.email().optional(),
+    SES_CONFIGURATION_SET: z.string().min(1).optional(),
+    SES_ENDPOINT: z.url().optional(),
   })
   .superRefine((env, ctx) => {
-    const live = env.APP_ENV === 'pilot' || env.APP_ENV === 'production';
-    if (live || env.NODE_ENV === 'production') {
+    const live = isLiveEnv(env);
+    if (env.HTTP_HEADERS_TIMEOUT_MS >= env.HTTP_REQUEST_TIMEOUT_MS) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['HTTP_HEADERS_TIMEOUT_MS'],
+        message: 'must be less than HTTP_REQUEST_TIMEOUT_MS',
+      });
+    }
+    if (live) {
       // The code runner holds candidate source and test data: it must be configured, authenticated
       // with a strong token, and not reached over plain HTTP unless it is on this host.
       if (!env.JUDGE0_URL) {
@@ -102,7 +163,67 @@ export const envSchema = z
         });
       }
     }
-    if ((live || env.NODE_ENV === 'production') && env.ENABLE_API_DOCS) {
+    if (live && env.EMAIL_PROVIDER !== 'ses') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['EMAIL_PROVIDER'],
+        message: 'must be ses in pilot and production',
+      });
+    }
+    if (live && env.AWS_REGION !== 'us-east-1') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['AWS_REGION'],
+        message: 'must be us-east-1 in pilot and production (C-31)',
+      });
+    }
+    if (live) {
+      for (const name of [
+        'AWS_ACCESS_KEY_ID',
+        'AWS_SECRET_ACCESS_KEY',
+        'AWS_SESSION_TOKEN',
+        'AWS_PROFILE',
+        'AWS_SHARED_CREDENTIALS_FILE',
+        'AWS_CONFIG_FILE',
+      ] as const) {
+        if (env[name] !== undefined && env[name] !== '') {
+          ctx.addIssue({
+            code: 'custom',
+            path: [name],
+            message: 'must not be set in pilot or production (use the instance role, C-31)',
+          });
+        }
+      }
+    }
+    if (env.EMAIL_PROVIDER === 'ses' && !env.SES_FROM_ADDRESS) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['SES_FROM_ADDRESS'],
+        message: 'is required when EMAIL_PROVIDER is ses',
+      });
+    }
+    if (env.SES_ENDPOINT && (live || env.APP_ENV === 'staging')) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['SES_ENDPOINT'],
+        message: 'is for tests only and must not be set in staging, pilot or production',
+      });
+    }
+    if (live && !env.WEB_ORIGIN.startsWith('https://')) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['WEB_ORIGIN'],
+        message: 'must be an https origin in pilot and production',
+      });
+    }
+    if (live && env.TRUST_PROXY_HOPS < 1) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['TRUST_PROXY_HOPS'],
+        message: 'must be an integer of at least 1 in pilot and production (API runs behind Caddy)',
+      });
+    }
+    if (live && env.ENABLE_API_DOCS) {
       ctx.addIssue({
         code: 'custom',
         path: ['ENABLE_API_DOCS'],
@@ -112,6 +233,11 @@ export const envSchema = z
   });
 
 export type Env = z.infer<typeof envSchema>;
+
+/** Pilot or production, by the same test the guards above use. */
+export function isLiveEnv(env: Pick<Env, 'APP_ENV' | 'NODE_ENV'>): boolean {
+  return env.APP_ENV === 'pilot' || env.APP_ENV === 'production' || env.NODE_ENV === 'production';
+}
 
 export function validateEnv(raw: Record<string, unknown>): Env {
   const result = envSchema.safeParse(raw);

@@ -60,7 +60,19 @@ function parseRetryAfter(header: string | null, body: unknown): number | null {
 async function request<T>(
   schema: ZodType<T>,
   path: string,
-  options: { method?: 'GET' | 'POST'; body?: unknown; authed: boolean },
+  options: { method?: 'GET' | 'POST' | 'PUT'; body?: unknown; authed: boolean },
+): Promise<ApiResult<T>> {
+  return requestAt(schema, `/session${path}`, options);
+}
+
+/**
+ * Same rules for any route under /v1/candidate (questions, answers, sections): `path` starts with
+ * a slash and is relative to /v1/candidate.
+ */
+export async function requestAt<T>(
+  schema: ZodType<T>,
+  path: string,
+  options: { method?: 'GET' | 'POST' | 'PUT'; body?: unknown; authed: boolean },
 ): Promise<ApiResult<T>> {
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.body !== undefined) headers['Content-Type'] = 'application/json';
@@ -73,7 +85,7 @@ async function request<T>(
   let response: Response;
   try {
     await mockingReady;
-    response = await fetch(`${apiBaseUrl}/v1/candidate/session${path}`, {
+    response = await fetch(`${apiBaseUrl}/v1/candidate${path}`, {
       method: options.method ?? 'POST',
       headers,
       body: options.body === undefined ? null : JSON.stringify(options.body),

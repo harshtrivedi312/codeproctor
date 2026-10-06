@@ -46,6 +46,47 @@ describe('NFR-04 environment validation', () => {
     expect(() => validateEnv({ ...valid, TRUST_PROXY_HOPS: '-1' })).toThrow(/TRUST_PROXY_HOPS/);
   });
 
+  it('FU-BE-97: pilot and production refuse TRUST_PROXY_HOPS of 0 or missing, and name only the variable', () => {
+    const live = {
+      WEB_ORIGIN: 'https://app.example.com',
+      JUDGE0_URL: 'https://judge0.example.com',
+      JUDGE0_AUTH_TOKEN: 't'.repeat(32),
+      JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
+      EMAIL_PROVIDER: 'ses',
+      SES_FROM_ADDRESS: 'no-reply@example.com',
+    };
+    for (const APP_ENV of ['pilot', 'production']) {
+      const base = { ...valid, ...live, APP_ENV };
+      expect(() => validateEnv(base)).toThrow(/TRUST_PROXY_HOPS/);
+      expect(() => validateEnv({ ...base, TRUST_PROXY_HOPS: '0' })).toThrow(/TRUST_PROXY_HOPS/);
+      expect(validateEnv({ ...base, TRUST_PROXY_HOPS: '1' }).TRUST_PROXY_HOPS).toBe(1);
+      expect(validateEnv({ ...base, TRUST_PROXY_HOPS: '2' }).TRUST_PROXY_HOPS).toBe(2);
+    }
+    expect(() =>
+      validateEnv({ ...valid, ...live, NODE_ENV: 'production', TRUST_PROXY_HOPS: '0' }),
+    ).toThrow(/TRUST_PROXY_HOPS/);
+    let text = '';
+    expect(() => {
+      try {
+        validateEnv({ ...valid, ...live, APP_ENV: 'pilot', TRUST_PROXY_HOPS: '0' });
+      } catch (e) {
+        text = String(e);
+        throw e;
+      }
+    }).toThrow(/TRUST_PROXY_HOPS/);
+    expect(text).not.toContain(valid.JWT_ACCESS_SECRET);
+    expect(text).not.toContain(valid.DATABASE_URL);
+  });
+
+  it('FU-BE-97: local, development and test keep TRUST_PROXY_HOPS at 0; staging is not enforced (like the other pilot/production guards)', () => {
+    for (const APP_ENV of ['development', 'test', 'staging']) {
+      expect(validateEnv({ ...valid, APP_ENV }).TRUST_PROXY_HOPS).toBe(0);
+    }
+    expect(
+      validateEnv({ ...valid, NODE_ENV: 'test', TRUST_PROXY_HOPS: '0' }).TRUST_PROXY_HOPS,
+    ).toBe(0);
+  });
+
   it('FU-BE-10: API docs are off by default and refused in pilot and production', () => {
     expect(validateEnv(valid).ENABLE_API_DOCS).toBe(false);
     expect(
@@ -67,9 +108,13 @@ describe('NFR-04 environment validation', () => {
     const live = {
       ...valid,
       APP_ENV: 'pilot',
+      WEB_ORIGIN: 'https://app.example.com',
+      TRUST_PROXY_HOPS: '1',
       JUDGE0_URL: 'https://judge0.example.com',
       JUDGE0_AUTH_TOKEN: token,
       JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
+      EMAIL_PROVIDER: 'ses',
+      SES_FROM_ADDRESS: 'no-reply@example.com',
     };
     expect(validateEnv(live).JUDGE0_URL).toBe('https://judge0.example.com');
     expect(() => validateEnv({ ...live, JUDGE0_URL: undefined })).toThrow(/JUDGE0_URL/);
@@ -101,5 +146,169 @@ describe('NFR-04 environment validation', () => {
       validateEnv({ ...valid, APP_ENV: 'staging', JUDGE0_URL: 'http://judge0-server:2358' })
         .APP_ENV,
     ).toBe('staging');
+  });
+
+  it('FU-BE-11: WEB_ORIGIN is normalised to a bare origin; paths, queries and credentials are refused', () => {
+    expect(validateEnv({ ...valid, WEB_ORIGIN: 'https://app.example.com/' }).WEB_ORIGIN).toBe(
+      'https://app.example.com',
+    );
+    expect(validateEnv({ ...valid, WEB_ORIGIN: 'HTTPS://App.Example.com:8443' }).WEB_ORIGIN).toBe(
+      'https://app.example.com:8443',
+    );
+    for (const bad of [
+      'https://app.example.com/app',
+      'https://app.example.com/?x=1',
+      'https://app.example.com/#f',
+      'https://user:pw@app.example.com',
+      'ftp://app.example.com',
+    ]) {
+      expect(() => validateEnv({ ...valid, WEB_ORIGIN: bad })).toThrow(/WEB_ORIGIN/);
+    }
+  });
+
+  it('FU-BE-98: HTTP server timeouts have bounded defaults, and headers must be below request', () => {
+    const env = validateEnv(valid);
+    expect(env.HTTP_HEADERS_TIMEOUT_MS).toBe(10_000);
+    expect(env.HTTP_REQUEST_TIMEOUT_MS).toBe(30_000);
+    expect(env.HTTP_KEEPALIVE_TIMEOUT_MS).toBe(65_000);
+    expect(env.HTTP_HEADERS_TIMEOUT_MS).toBeLessThan(env.HTTP_REQUEST_TIMEOUT_MS);
+    expect(() =>
+      validateEnv({ ...valid, HTTP_HEADERS_TIMEOUT_MS: '30000', HTTP_REQUEST_TIMEOUT_MS: '30000' }),
+    ).toThrow(/HTTP_HEADERS_TIMEOUT_MS/);
+    expect(() => validateEnv({ ...valid, HTTP_KEEPALIVE_TIMEOUT_MS: '0' })).toThrow(
+      /HTTP_KEEPALIVE_TIMEOUT_MS/,
+    );
+    expect(() => validateEnv({ ...valid, HTTP_KEEPALIVE_TIMEOUT_MS: '9999999' })).toThrow(
+      /HTTP_KEEPALIVE_TIMEOUT_MS/,
+    );
+  });
+
+  it('FU-BE-11: pilot and production require an https WEB_ORIGIN; local http stays valid', () => {
+    const live = {
+      ...valid,
+      TRUST_PROXY_HOPS: '1',
+      JUDGE0_URL: 'https://judge0.example.com',
+      JUDGE0_AUTH_TOKEN: 't'.repeat(32),
+      JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
+      EMAIL_PROVIDER: 'ses',
+      SES_FROM_ADDRESS: 'no-reply@example.com',
+    };
+    for (const APP_ENV of ['pilot', 'production']) {
+      expect(() => validateEnv({ ...live, APP_ENV, WEB_ORIGIN: 'http://app.example.com' })).toThrow(
+        /WEB_ORIGIN/,
+      );
+      expect(
+        validateEnv({ ...live, APP_ENV, WEB_ORIGIN: 'https://app.example.com' }).WEB_ORIGIN,
+      ).toBe('https://app.example.com');
+    }
+    expect(validateEnv(valid).WEB_ORIGIN).toBe('http://localhost:3000');
+  });
+  describe('C-31 email settings', () => {
+    const live = {
+      ...valid,
+      APP_ENV: 'pilot',
+      WEB_ORIGIN: 'https://app.example.com',
+      TRUST_PROXY_HOPS: '1',
+      JUDGE0_URL: 'https://judge0.example.com',
+      JUDGE0_AUTH_TOKEN: 't'.repeat(32),
+      JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
+      EMAIL_PROVIDER: 'ses',
+      SES_FROM_ADDRESS: 'no-reply@example.com',
+    };
+
+    it('C-31: defaults to noop and us-east-1 locally', () => {
+      const env = validateEnv(valid);
+      expect(env.EMAIL_PROVIDER).toBe('noop');
+      expect(env.AWS_REGION).toBe('us-east-1');
+      expect(env.SES_FROM_ADDRESS).toBeUndefined();
+    });
+
+    it('C-31: pilot and production require ses and name the variable', () => {
+      for (const APP_ENV of ['pilot', 'production']) {
+        expect(validateEnv({ ...live, APP_ENV }).EMAIL_PROVIDER).toBe('ses');
+        expect(() => validateEnv({ ...live, APP_ENV, EMAIL_PROVIDER: 'noop' })).toThrow(
+          /EMAIL_PROVIDER/,
+        );
+        expect(() => validateEnv({ ...live, APP_ENV, EMAIL_PROVIDER: undefined })).toThrow(
+          /EMAIL_PROVIDER/,
+        );
+      }
+      expect(() =>
+        validateEnv({
+          ...live,
+          APP_ENV: 'development',
+          NODE_ENV: 'production',
+          EMAIL_PROVIDER: 'noop',
+        }),
+      ).toThrow(/EMAIL_PROVIDER/);
+    });
+
+    it('C-31: ses needs a valid SES_FROM_ADDRESS', () => {
+      expect(() => validateEnv({ ...live, SES_FROM_ADDRESS: undefined })).toThrow(
+        /SES_FROM_ADDRESS/,
+      );
+      expect(() => validateEnv({ ...live, SES_FROM_ADDRESS: 'not-an-address' })).toThrow(
+        /SES_FROM_ADDRESS/,
+      );
+      expect(() =>
+        validateEnv({ ...valid, EMAIL_PROVIDER: 'ses', SES_FROM_ADDRESS: undefined }),
+      ).toThrow(/SES_FROM_ADDRESS/);
+    });
+
+    it('C-31: SES_ENDPOINT is refused in staging, pilot and production, allowed in development and test', () => {
+      const endpoint = 'http://127.0.0.1:4566';
+      for (const APP_ENV of ['staging', 'pilot', 'production']) {
+        expect(() => validateEnv({ ...live, APP_ENV, SES_ENDPOINT: endpoint })).toThrow(
+          /SES_ENDPOINT/,
+        );
+      }
+      expect(() =>
+        validateEnv({ ...valid, NODE_ENV: 'production', SES_ENDPOINT: endpoint }),
+      ).toThrow(/SES_ENDPOINT/);
+      for (const APP_ENV of ['development', 'test']) {
+        expect(validateEnv({ ...valid, APP_ENV, SES_ENDPOINT: endpoint }).SES_ENDPOINT).toBe(
+          endpoint,
+        );
+      }
+    });
+
+    it('C-31: static AWS credentials are refused in live environments, naming only the variable', () => {
+      for (const name of [
+        'AWS_ACCESS_KEY_ID',
+        'AWS_SECRET_ACCESS_KEY',
+        'AWS_SESSION_TOKEN',
+        'AWS_PROFILE',
+        'AWS_SHARED_CREDENTIALS_FILE',
+        'AWS_CONFIG_FILE',
+      ]) {
+        for (const APP_ENV of ['pilot', 'production']) {
+          let text = '';
+          try {
+            validateEnv({ ...live, APP_ENV, [name]: 'SUPERSECRETVALUE' });
+          } catch (e) {
+            text = String(e);
+          }
+          expect(text).toContain(name);
+          expect(text).not.toContain('SUPERSECRETVALUE');
+        }
+        // Developers may hold credentials locally.
+        expect(() => validateEnv({ ...valid, [name]: 'x' })).not.toThrow();
+      }
+    });
+
+    it('C-31: AWS_REGION must look like a region and is pinned to us-east-1 in live environments', () => {
+      for (const bad of ['us_east_1', 'US-EAST-1', 'useast1', 'us-east', '']) {
+        expect(() => validateEnv({ ...valid, AWS_REGION: bad })).toThrow(/AWS_REGION/);
+      }
+      expect(validateEnv({ ...valid, AWS_REGION: 'eu-west-1' }).AWS_REGION).toBe('eu-west-1');
+      for (const APP_ENV of ['pilot', 'production']) {
+        expect(() => validateEnv({ ...live, APP_ENV, AWS_REGION: 'eu-west-1' })).toThrow(
+          /AWS_REGION/,
+        );
+        expect(validateEnv({ ...live, APP_ENV, AWS_REGION: 'us-east-1' }).AWS_REGION).toBe(
+          'us-east-1',
+        );
+      }
+    });
   });
 });

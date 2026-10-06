@@ -1,16 +1,20 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
-import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
+import type { Redis } from 'ioredis';
 import type { ExecutionContext } from '@nestjs/common';
 import type { Request } from 'express';
 import { LoggerModule } from 'nestjs-pino';
 import { API_PREFIX } from './bootstrap';
-import { validateEnv } from './config/env';
+import { isLiveEnv, validateEnv } from './config/env';
 import type { Env } from './config/env';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
+import { OrgSettingsModule } from './org-settings/org-settings.module';
 import { UsersModule } from './users/users.module';
+import { TestsModule } from './tests/tests.module';
+import { QuestionsModule } from './questions/questions.module';
 import { JwtAuthGuard } from './common/auth/jwt-auth.guard';
 import { buildPinoHttpOptions } from './common/pino-http.config';
 import { TokenModule } from './common/auth/token.service';
@@ -20,7 +24,9 @@ import { MailModule } from './mail/mail.module';
 import { ipBucket } from './client-errors/ip-bucket';
 import { ClientErrorsModule } from './client-errors/client-errors.module';
 import { HealthModule } from './health/health.module';
-import { InfrastructureModule } from './infrastructure/infrastructure.module';
+import { InfrastructureModule, REDIS_CLIENT } from './infrastructure/infrastructure.module';
+import { AppThrottlerGuard } from './throttle/redis-throttler.guard';
+import { RedisThrottlerStorage } from './throttle/redis-throttler-storage';
 
 type Area = 'auth' | 'candidate' | 'client-errors' | 'other';
 
@@ -48,10 +54,25 @@ function areaOf(context: ExecutionContext): Area {
       }),
     }),
     ThrottlerModule.forRootAsync({
-      inject: [ConfigService],
-      useFactory: (config: ConfigService<Env, true>) => {
+      inject: [ConfigService, { token: REDIS_CLIENT, optional: true }],
+      useFactory: (config: ConfigService<Env, true>, redis: Redis | undefined) => {
         const ttl = config.get('THROTTLE_TTL_MS', { infer: true });
+        // Shared Redis store so limits hold across instances and restarts (FU-BE-1). Only a context
+        // with no Redis client at all (a bare unit-test module) falls back to the in-memory store;
+        // pilot and production refuse to boot without Redis rather than throttle per instance.
+        if (
+          !redis &&
+          isLiveEnv({
+            APP_ENV: config.get('APP_ENV', { infer: true }),
+            NODE_ENV: config.get('NODE_ENV', { infer: true }),
+          })
+        ) {
+          throw new Error(
+            'Throttling needs Redis in pilot and production (REDIS_CLIENT is missing)',
+          );
+        }
         return {
+          ...(redis ? { storage: new RedisThrottlerStorage(redis) } : {}),
           // Five named throttlers; each applies to exactly one area of the API.
           throttlers: [
             {
@@ -101,13 +122,16 @@ function areaOf(context: ExecutionContext): Area {
     AuditModule,
     AuthModule,
     UsersModule,
+    OrgSettingsModule,
+    TestsModule,
+    QuestionsModule,
     HealthModule,
     ClientErrorsModule,
     ExecutionModule,
   ],
   // Order matters: throttle first, then authenticate (deny by default).
   providers: [
-    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: AppThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
   ],
 })

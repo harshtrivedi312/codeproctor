@@ -44,9 +44,9 @@ test.describe('candidate link hand-off (FU-FEB-23)', () => {
     await expect(page).toHaveURL(/\/t\/link$/);
     await expect(page.getByRole('heading', { level: 1, name: /welcome/i })).toBeVisible();
     await expectNoToken(page, TOKEN);
-    // Back must not return to the token URL (it leaves the app: the token entry was replaced).
+    // Back must not return to the token URL: the entry before the goto is about:blank.
     await page.goBack();
-    expect(page.url()).not.toContain(TOKEN);
+    expect(page.url()).toBe('about:blank');
   });
 
   test('/t/start#<token> ends at /t/link with no token anywhere', async ({ page }) => {
@@ -55,6 +55,8 @@ test.describe('candidate link hand-off (FU-FEB-23)', () => {
     await expect(page).toHaveURL(/\/t\/link$/);
     await expect(page.getByRole('heading', { level: 1, name: /welcome/i })).toBeVisible();
     await expectNoToken(page, TOKEN);
+    await page.goBack();
+    expect(page.url()).toBe('about:blank');
   });
 
   test('a hand-typed /t/link#<token> is refused and sends no API request', async ({ page }) => {
@@ -78,5 +80,7 @@ test.describe('candidate link hand-off (FU-FEB-23)', () => {
       page.getByRole('button', { name: /turn on the camera and connect/i }),
     ).toBeVisible();
     await expectNoToken(page, PHONE_TOKEN);
+    await page.goBack();
+    expect(page.url()).toBe('about:blank');
   });
 });

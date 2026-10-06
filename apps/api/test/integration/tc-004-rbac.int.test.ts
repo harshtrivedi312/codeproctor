@@ -19,6 +19,7 @@ import {
   Harness,
   login,
   PASSWORD,
+  settleValidation,
   signIn,
   stableProblem,
 } from '../support/harness';
@@ -28,23 +29,225 @@ import {
   allowedRoles,
   BE03_READY,
   BE03_ROUTES,
+  BE04_READY,
+  BE06_READY,
   BE13_READY,
   Be03Route,
+  CANDIDATE_ROUTES,
+  candidateRegistryProblems,
+  isCandidatePath,
   COVERED_ELSEWHERE,
   hasPathId,
+  AnyMatrixEntry,
+  CandidateRoute,
+  isCandidateEntry,
+  ListedRoute,
+  isStaffEntry,
   loadBackendRegistry,
+  questionFixture,
   PRINCIPALS,
   randomIdOf,
   routeKey,
   routeLabel,
   routesFor,
   sessionFixture,
+  testFixture,
   USER_ROLES,
   withReplacedId,
 } from '../support/be03-routes';
-import { hasPermission } from '../../../../packages/shared/src/permissions';
+import {
+  hasPermission,
+  PERMISSIONS,
+  ROLE_PERMISSIONS,
+} from '../../../../packages/shared/src/permissions';
 
-describe('TC-004 (FR-103): permission matrix and route list agree (always runs)', () => {
+describe('TC-004 (FR-103, FU-BE-91): candidate and staff permissions never mix, and the candidate registry check reports every violation (always runs)', () => {
+  const candidatePerms = PERMISSIONS.filter((p) => p.startsWith('candidate_'));
+
+  it('TC-004: no staff role holds a candidate_* permission, CANDIDATE holds exactly the candidate_* permissions, and no staff route lists one', () => {
+    expect(candidatePerms.length).toBeGreaterThan(0);
+    for (const role of USER_ROLES) {
+      expect([role, ROLE_PERMISSIONS[role].filter((p) => p.startsWith('candidate_'))]).toEqual([
+        role,
+        [],
+      ]);
+    }
+    expect([...ROLE_PERMISSIONS.CANDIDATE].sort()).toEqual([...candidatePerms].sort());
+    for (const r of BE03_ROUTES)
+      expect([routeKey(r), r.permission.startsWith('candidate_')]).toEqual([routeKey(r), false]);
+  });
+
+  const staff = { roles: ['RECRUITER'], permission: 'test:read' };
+  const cand = { principal: 'CANDIDATE', permission: 'candidate_session:read' } as const;
+  const served = (over: Partial<ListedRoute> = {}): ListedRoute => ({
+    key: 'GET /candidate/session',
+    handler: 'h',
+    roles: [],
+    audited: false,
+    candidatePermission: 'candidate_session:read',
+    ...over,
+  });
+  const run = (
+    matrix: Record<string, AnyMatrixEntry>,
+    over: { route?: ListedRoute; bootstrap?: string[]; listed?: CandidateRoute[] } = {},
+  ): string[] =>
+    candidateRegistryProblems({
+      matrix,
+      routes: new Map([
+        ['GET /candidate/session', over.route ?? served()],
+        [
+          'GET /tests',
+          { key: 'GET /tests', handler: 's', roles: ['RECRUITER'], candidatePermission: null },
+        ],
+      ]),
+      bootstrap: over.bootstrap ?? ['POST /candidate/session/link'],
+      listed: over.listed ?? [
+        { key: 'GET /candidate/session', permission: 'candidate_session:read' },
+        { key: 'POST /candidate/session/link', permission: 'public' },
+      ],
+    });
+  const clean = (): Record<string, AnyMatrixEntry> => ({
+    'POST /candidate/session/link': 'public',
+    'GET /candidate/session': { ...cand },
+    'GET /tests': { ...staff },
+  });
+
+  it('TC-004: a clean synthetic matrix has no problems', () => {
+    expect(run(clean())).toEqual([]);
+  });
+
+  it('TC-004: a CANDIDATE entry with an extra roles or audited key is reported', () => {
+    expect(
+      run({
+        ...clean(),
+        'GET /candidate/session': { ...cand, roles: ['RECRUITER'] },
+      }).join(),
+    ).toMatch(/extra keys roles/);
+    expect(
+      run({ ...clean(), 'GET /candidate/session': { ...cand, audited: true } }).join(),
+    ).toMatch(/extra keys audited/);
+  });
+
+  it('TC-004: a CANDIDATE entry with a non candidate_ permission is reported', () => {
+    expect(
+      run({
+        ...clean(),
+        'GET /candidate/session': { principal: 'CANDIDATE', permission: 'test:read' },
+      }).join(),
+    ).toMatch(/not a candidate_\* permission/);
+  });
+
+  it('TC-004: a candidate route with roles, @Audited or a different @CandidateRoute permission is reported', () => {
+    expect(
+      run(clean(), { route: served({ candidatePermission: 'candidate_session:key' }) }).join(),
+    ).toMatch(/differs from the matrix/);
+    expect(run(clean(), { route: served({ roles: ['RECRUITER'] }) }).join()).toMatch(
+      /carries roles/,
+    );
+    expect(run(clean(), { route: served({ audited: true }) }).join()).toMatch(/@Audited/);
+    expect(run(clean(), { route: served({ candidatePermission: null }) }).join()).toMatch(
+      /differs from the matrix/,
+    );
+  });
+
+  it('TC-004: a CANDIDATE entry whose principal is not CANDIDATE is reported', () => {
+    const bad = {
+      principal: 'STAFF',
+      permission: 'candidate_session:read',
+    } as unknown as AnyMatrixEntry;
+    expect(run({ ...clean(), 'GET /candidate/session': bad }).join()).toMatch(
+      /principal is not CANDIDATE/,
+    );
+  });
+
+  it('TC-004: an unknown candidate_ permission, absent from shared PERMISSIONS, is reported', () => {
+    expect(
+      run({
+        ...clean(),
+        'GET /candidate/session': { principal: 'CANDIDATE', permission: 'candidate_bogus:x' },
+      }).join(),
+    ).toMatch(/candidate_bogus:x is not a candidate_\* permission/);
+  });
+
+  it('TC-004: a candidate matrix key the backend does not serve is reported', () => {
+    expect(run({ ...clean(), 'GET /candidate/gone': { ...cand } }).join()).toMatch(
+      /GET \/candidate\/gone: not served by the backend/,
+    );
+  });
+
+  it('TC-004: a staff route carrying @CandidateRoute is reported', () => {
+    const m = clean();
+    expect(
+      candidateRegistryProblems({
+        matrix: m,
+        routes: new Map([
+          ['GET /candidate/session', served()],
+          [
+            'GET /tests',
+            {
+              key: 'GET /tests',
+              handler: 's',
+              roles: ['RECRUITER'],
+              candidatePermission: 'candidate_session:read',
+            },
+          ],
+        ]),
+        bootstrap: ['POST /candidate/session/link'],
+        listed: [
+          { key: 'GET /candidate/session', permission: 'candidate_session:read' },
+          { key: 'POST /candidate/session/link', permission: 'public' },
+        ],
+      }).join(),
+    ).toMatch(/GET \/tests: staff route carries @CandidateRoute/);
+  });
+
+  it('TC-004: a bootstrap key outside /candidate/ is reported even when listed public', () => {
+    expect(
+      run(
+        { ...clean(), 'POST /auth/login': 'public' },
+        {
+          bootstrap: ['POST /candidate/session/link', 'POST /auth/login'],
+        },
+      ).join(),
+    ).toMatch(/POST \/auth\/login: bootstrap route must be a \/candidate\//);
+  });
+
+  it('TC-004: a /Candidate/ route listed public outside the bootstrap list is reported', () => {
+    const m = { ...clean(), 'GET /Candidate/x': 'public' as const };
+    expect(run(m).join()).toMatch(/GET \/Candidate\/x: .*not a bootstrap route/);
+  });
+
+  it('TC-004: a staff entry with a candidate permission, or a bootstrap key not listed public, is reported', () => {
+    expect(
+      run({
+        ...clean(),
+        'GET /tests': { roles: ['RECRUITER'], permission: 'candidate_session:read' },
+      }).join(),
+    ).toMatch(/staff entry carries candidate permission/);
+    expect(
+      run({ ...clean(), 'GET /tests': { roles: ['CANDIDATE'], permission: 'test:read' } }).join(),
+    ).toMatch(/non-staff roles CANDIDATE/);
+    expect(run({ ...clean(), 'POST /candidate/session/link': cand }).join()).toMatch(
+      /bootstrap route must be/,
+    );
+  });
+
+  it('TC-004: a candidate key in the matrix that the QA list lacks, or lists with another permission, is reported', () => {
+    expect(
+      run(clean(), {
+        listed: [{ key: 'POST /candidate/session/link', permission: 'public' }],
+      }).join(),
+    ).toMatch(/GET \/candidate\/session: candidate route not in CANDIDATE_ROUTES/);
+    expect(
+      run(clean(), {
+        listed: [
+          { key: 'GET /candidate/session', permission: 'candidate_session:key' },
+          { key: 'POST /candidate/session/link', permission: 'public' },
+        ],
+      }).join(),
+    ).toMatch(/QA list says candidate_session:key/);
+  });
+
   it('TC-004: every route in the BE-03 list names a permission that exists, and some role holds it', () => {
     for (const r of BE03_ROUTES) {
       expect(PRINCIPALS.some((p) => hasPermission(p, r.permission))).toBe(true);
@@ -143,6 +346,7 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
           const res = await call(h, route.method, t.path, byRole[role].token, t.body);
           if (hasPermission(role, route.permission)) {
             expect(route.ok).toContain(res.status);
+            await settleValidation(h); // the validate job writes its FINISHED row asynchronously
             // A success must have an effect; a status code alone proves nothing.
             if (route.mutating) expect(await t.unchanged()).toBe(false);
           } else {
@@ -171,6 +375,16 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
             // No id in the path: the call must act inside the caller's org only. Seed org A with
             // known rows and assert none of them appears in the answer (not only the org id).
             const leaks = Object.values(byRole).flatMap((a) => [a.id, a.email]);
+            if (route.template.startsWith('/questions')) {
+              // Org A questions (id and title) must not show in an org B list or create answer.
+              const f = await questionFixture(h, h.orgId, { published: true });
+              leaks.push(f.id, f.title);
+            }
+            if (route.template.startsWith('/tests')) {
+              // Org A tests (id and name) must not show in an org B list or create answer.
+              const f = await testFixture(h, h.orgId);
+              leaks.push(f.id, f.name);
+            }
             if (route.template.startsWith('/review')) {
               leaks.push((await sessionFixture(h, h.orgId)).sessionId);
             }
@@ -179,6 +393,19 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
             expect(route.ok).toContain(res.status);
             const text = JSON.stringify(res.body);
             for (const x of [...leaks, h.orgId]) expect(text).not.toContain(x);
+            if (route.template.startsWith('/questions') && route.method === 'POST') {
+              // A created question belongs to the caller's org, never to the org named elsewhere.
+              const id = await t.resolveEntityId?.();
+              expect(id).toBeDefined();
+              const row = await h.owner.question.findUniqueOrThrow({ where: { id: id as string } });
+              expect(row.orgId).toBe(orgB);
+            }
+            if (route.template.startsWith('/tests') && route.method === 'POST') {
+              const id = await t.resolveEntityId?.();
+              expect(id).toBeDefined();
+              const row = await h.owner.test.findUniqueOrThrow({ where: { id: id as string } });
+              expect([row.orgId, row.createdById]).toEqual([orgB, caller.id]);
+            }
           }
         },
       );
@@ -250,6 +477,16 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
 
 rbacSuite('TC-004: BE-03 routes by role (401, 403, 404, success)', BE03_READY, routesFor('BE-03'));
 rbacSuite(
+  'TC-004 (FR-103, FR-201, FR-202, FR-204): BE-04 question routes by role (401, 403, 404, success)',
+  BE04_READY,
+  routesFor('BE-04'),
+);
+rbacSuite(
+  'TC-004 (FR-103, FR-301, FR-302): BE-06 test builder routes by role (401, 403, 404, success)',
+  BE06_READY,
+  routesFor('BE-06'),
+);
+rbacSuite(
   'TC-004 [BE-13 pending]: review routes by role (401, 403, 404, success)',
   BE13_READY,
   routesFor('BE-13'),
@@ -276,35 +513,63 @@ rbacSuite(
       expect([key, key in ROUTE_PERMISSIONS]).toEqual([key, true]);
     // BE-13 routes count only once the BE-13 switch is on (they do not exist before).
     const listed = new Set(
-      [...routesFor('BE-03'), ...(BE13_READY ? routesFor('BE-13') : [])].map(routeKey),
+      [
+        ...routesFor('BE-03'),
+        ...routesFor('BE-04'),
+        ...routesFor('BE-06'),
+        ...(BE13_READY ? routesFor('BE-13') : []),
+      ].map(routeKey),
     );
     const missing = Object.entries(ROUTE_PERMISSIONS)
-      .filter(([key, access]) => access !== 'public' && !(key in COVERED_ELSEWHERE))
+      .filter(
+        ([key, access]) =>
+          access !== 'public' && !isCandidateEntry(access) && !(key in COVERED_ELSEWHERE),
+      )
       .map(([key]) => key)
       .filter((key) => !listed.has(key));
     // A new backend route with no QA entry fails here: add it to be03-routes.ts with its audit
     // action, body and fixtures (or to COVERED_ELSEWHERE, next to the file that tests it).
     expect(missing).toEqual([]);
 
-    // Every BE-03 route QA lists is served, with the permission QA expects.
-    for (const r of routesFor('BE-03')) {
+    // Every BE-03, BE-04 and BE-06 route QA lists is served, with the permission QA expects.
+    for (const r of [...routesFor('BE-03'), ...routesFor('BE-04'), ...routesFor('BE-06')]) {
       const entry = ROUTE_PERMISSIONS[routeKey(r)];
       expect(entry).toBeDefined();
       expect(entry === 'public' ? 'public' : entry?.permission).toBe(r.permission);
+      expect(isStaffEntry(entry)).toBe(true);
     }
     // Staff user routes are SUPER_ADMIN only in the matrix itself.
     for (const [key, access] of Object.entries(ROUTE_PERMISSIONS)) {
-      if (access !== 'public' && access.permission === 'user:manage') {
+      if (isStaffEntry(access) && access.permission === 'user:manage') {
         expect([key, access.roles]).toEqual([key, ['SUPER_ADMIN']]);
       }
     }
+  });
+
+  it('TC-004 (FR-103, FU-BE-91): the real matrix has no candidate-route problems (shape, bootstrap-only public, registry agreement, QA list complete)', () => {
+    const { ROUTE_PERMISSIONS, CANDIDATE_BOOTSTRAP_ROUTES, listRoutes } = loadBackendRegistry();
+    const { ModulesContainer } = jest.requireActual<typeof import('@nestjs/core')>('@nestjs/core');
+    const routes = new Map(listRoutes(h.app.get(ModulesContainer)).map((r) => [r.key, r]));
+    expect(
+      candidateRegistryProblems({
+        matrix: ROUTE_PERMISSIONS,
+        routes,
+        bootstrap: CANDIDATE_BOOTSTRAP_ROUTES ?? [],
+        listed: CANDIDATE_ROUTES,
+      }),
+    ).toEqual([]);
+    // Not vacuous: whatever candidate keys the matrix has, QA lists the same number.
+    const inMatrix = Object.entries(ROUTE_PERMISSIONS).filter(
+      ([k, a]) => isCandidateEntry(a) || (isCandidatePath(k) && a === 'public'),
+    );
+    expect(CANDIDATE_ROUTES.length).toBe(inMatrix.length);
   });
 
   it('TC-006: the list routes carry audited === true in the matrix', () => {
     const { ROUTE_PERMISSIONS } = loadBackendRegistry();
     for (const key of ['GET /admin/users', 'GET /admin/users/lock-events']) {
       const entry = ROUTE_PERMISSIONS[key];
-      expect([key, entry !== 'public' && entry?.audited]).toEqual([key, true]);
+      expect([key, isStaffEntry(entry) && entry.audited]).toEqual([key, true]);
     }
   });
 
@@ -312,7 +577,7 @@ rbacSuite(
     const { ROUTE_PERMISSIONS } = loadBackendRegistry();
     const known = ['audited', 'candidateData', 'permission', 'roles'];
     for (const [key, access] of Object.entries(ROUTE_PERMISSIONS)) {
-      if (access === 'public') continue;
+      if (access === 'public' || isCandidateEntry(access)) continue;
       // A renamed or new matrix field must fail here, not be silently ignored.
       expect([key, Object.keys(access).filter((k) => !known.includes(k))]).toEqual([key, []]);
       const mine = BE03_ROUTES.filter((r) => routeKey(r) === key);
@@ -326,6 +591,84 @@ rbacSuite(
     }
   });
 });
+
+(BE04_READY ? describe : describe.skip)(
+  'TC-004 (FR-103, FR-204): the TC-004 scenario as written',
+  () => {
+    let h: Harness;
+    beforeAll(async () => {
+      h = await boot();
+    });
+    afterAll(async () => {
+      await h?.close();
+    });
+
+    it('TC-004: a recruiter calling PATCH /questions/:id directly gets 403, the question and its version rows are unchanged, and no audit row is written', async () => {
+      const recruiter = await actor(h, UserRole.RECRUITER);
+      for (const published of [false, true]) {
+        const f = await questionFixture(h, h.orgId, { published });
+        const dump = async (): Promise<string> =>
+          JSON.stringify(
+            {
+              q: await h.owner.question.findUniqueOrThrow({ where: { id: f.id } }),
+              v: await h.owner.questionVersion.findMany({ where: { questionId: f.id } }),
+              t: await h.owner.testCase.findMany({
+                where: { questionVersion: { questionId: f.id } },
+              }),
+            },
+            (_k, x: unknown) => (typeof x === 'bigint' ? String(x) : x),
+          );
+        const before = await dump();
+        const audits = await h.owner.auditLog.count({ where: { entityId: f.id } });
+        const res = await call(h, 'PATCH', `/questions/${f.id}`, recruiter.token, {
+          title: 'recruiter edit',
+          statementMd: 'recruiter statement',
+          tags: ['hacked'],
+        });
+        expect(res.status).toBe(403);
+        expect(await dump()).toBe(before);
+        expect(await h.owner.auditLog.count({ where: { entityId: f.id } })).toBe(audits);
+      }
+    });
+  },
+);
+
+(BE06_READY ? describe : describe.skip)(
+  'TC-004 (FR-103, FR-301): the TC-004 reviewer scenario on POST /tests',
+  () => {
+    let h: Harness;
+    beforeAll(async () => {
+      h = await boot();
+    });
+    afterAll(async () => {
+      await h?.close();
+    });
+
+    it('TC-004: a reviewer (and an author) calling POST /tests directly gets 403, no test row is created and no audit row is written', async () => {
+      const reviewer = await actor(h, UserRole.REVIEWER);
+      const author = await actor(h, UserRole.AUTHOR);
+      const f = await questionFixture(h, h.orgId, { published: true });
+      for (const who of [reviewer, author]) {
+        const name = `QA-REVIEWER-ATTEMPT-${who.role}`;
+        const tests = await h.owner.test.count({ where: { orgId: h.orgId } });
+        const sections = await h.owner.testSection.count();
+        const audits = await h.owner.auditLog.count({ where: { action: 'TEST_CREATED' } });
+        const res = await call(h, 'POST', '/tests', who.token, {
+          name,
+          durationMinutes: 60,
+          sections: [
+            { title: 'S', questions: [{ questionVersionId: f.versionIds[1], points: 100 }] },
+          ],
+        });
+        expect(res.status).toBe(403);
+        expect(await h.owner.test.count({ where: { orgId: h.orgId } })).toBe(tests);
+        expect(await h.owner.test.count({ where: { name } })).toBe(0);
+        expect(await h.owner.testSection.count()).toBe(sections);
+        expect(await h.owner.auditLog.count({ where: { action: 'TEST_CREATED' } })).toBe(audits);
+      }
+    });
+  },
+);
 
 (BE03_READY ? describe : describe.skip)('TC-004: guard coverage', () => {
   let h: Harness;

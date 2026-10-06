@@ -1,11 +1,26 @@
-import { ForbiddenException } from '@nestjs/common';
+import { ConflictException, ForbiddenException } from '@nestjs/common';
 
 /** Machine-readable codes the problem filter copies into the RFC 7807 body as `code`. */
-export const PROBLEM_CODES = ['REAUTH_FAILED', 'TWO_FACTOR_REQUIRED_FOR_ROLE'] as const;
+export const PROBLEM_CODES = [
+  'REAUTH_FAILED',
+  'TWO_FACTOR_REQUIRED_FOR_ROLE',
+  'SETTINGS_CONFLICT',
+  'VARIANT_HAS_AI_REFERENCES',
+] as const;
 export type ProblemCode = (typeof PROBLEM_CODES)[number];
 
 /** A 403 that carries a stable machine code, so clients never have to match on `detail`. */
 export class CodedForbiddenException extends ForbiddenException {
+  constructor(
+    message: string,
+    readonly code: ProblemCode,
+  ) {
+    super({ message, code });
+  }
+}
+
+/** A 409 that carries a stable machine code (e.g. SETTINGS_CONFLICT after a lost compare-and-set). */
+export class CodedConflictException extends ConflictException {
   constructor(
     message: string,
     readonly code: ProblemCode,
@@ -22,4 +37,15 @@ export class CodedForbiddenException extends ForbiddenException {
 export const REAUTH_FAILED_DETAIL = 'The current password is incorrect.';
 export function reauthFailed(): CodedForbiddenException {
   return new CodedForbiddenException(REAUTH_FAILED_DETAIL, 'REAUTH_FAILED');
+}
+
+/**
+ * Every refusal on POST /auth/2fa/disable (wrong password, wrong or replayed code, locked
+ * account, password changed meanwhile) carries this one detail, so it never says which factor was
+ * wrong and never tells the user to retype a password that was right (FU-BE-58). Status and code
+ * stay 403 REAUTH_FAILED. A code that already signed the user in is a replay: wait for the next one.
+ */
+export const DISABLE_REFUSED_DETAIL = 'The password or code is incorrect.';
+export function disableRefused(): CodedForbiddenException {
+  return new CodedForbiddenException(DISABLE_REFUSED_DETAIL, 'REAUTH_FAILED');
 }

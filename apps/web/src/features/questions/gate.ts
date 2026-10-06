@@ -2,7 +2,9 @@ import { AI_REFERENCE_LANGUAGES, type CodeLanguage } from '@codeproctor/shared';
 import type { Schemas } from '@/lib/api/client';
 
 export type AiReference = Schemas['AiReference'];
-export type AiPolicy = Schemas['AiReferencePolicy'];
+
+/** The organisation's policy as `GET /questions/ai-policy` answers it. */
+export type AiPolicy = Schemas['AiPolicy'];
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -25,7 +27,8 @@ function key(assistant: string): string {
 export function aiGate(
   allowedLanguages: readonly CodeLanguage[],
   refs: readonly AiReference[],
-  policy: AiPolicy,
+  /** null while the policy is unknown (loading or unavailable): the gate fails closed. */
+  policy: Pick<AiPolicy, 'minAssistants'> | null,
 ): LanguageGate[] {
   return allowedLanguages
     .filter((language) => AI_REFERENCE_LANGUAGES.includes(language))
@@ -40,8 +43,8 @@ export function aiGate(
       return {
         language,
         assistants,
-        required: policy.minAssistants,
-        ok: assistants.length >= policy.minAssistants,
+        required: policy?.minAssistants ?? 0,
+        ok: policy !== null && assistants.length >= policy.minAssistants,
       };
     });
 }
@@ -50,11 +53,19 @@ export function aiGatePassed(gates: readonly LanguageGate[]): boolean {
   return gates.every((g) => g.ok);
 }
 
-/** ADR 0005 AI-4: "refresh due" when the newest row is older than `refreshDays`. No rows, no badge. */
-export function aiRefreshDue(refs: readonly AiReference[], policy: AiPolicy, now: Date): boolean {
-  if (refs.length === 0) return false;
+/**
+ * ADR 0005 AI-4: "refresh due" when the newest row is older than the policy's refresh interval.
+ * The API sends `refreshIntervalDays: null` until it implements the setting; then there is no
+ * badge (the web does not invent an interval). No rows, no badge.
+ */
+export function aiRefreshDue(
+  refs: readonly AiReference[],
+  refreshIntervalDays: number | null,
+  now: Date,
+): boolean {
+  if (refreshIntervalDays === null || refs.length === 0) return false;
   const newest = Math.max(...refs.map((r) => new Date(r.collectedAt).getTime()));
-  return now.getTime() - newest > policy.refreshDays * DAY_MS;
+  return now.getTime() - newest > refreshIntervalDays * DAY_MS;
 }
 
 export interface PublishInput {
@@ -63,10 +74,12 @@ export interface PublishInput {
   dirty: boolean;
   validationPassed: boolean;
   aiGates: readonly LanguageGate[];
+  /** What the server checks on the tests (coding only); omitted for the other types. */
+  tests?: { count: number; hasVisible: boolean; hasHidden: boolean; weightsOk: boolean };
 }
 
 export interface PublishCheck {
-  id: 'saved' | 'validated' | 'ai';
+  id: 'saved' | 'tests' | 'validated' | 'ai';
   label: string;
   ok: boolean;
   hint: string;
@@ -79,22 +92,33 @@ export function publishChecks(input: PublishInput): PublishCheck[] {
       id: 'saved',
       label: 'All changes saved',
       ok: !input.dirty,
-      hint: 'Save your changes first. Validation and publishing use the saved version.',
-    },
-    {
-      id: 'validated',
-      label: 'Validation passed on every variant and test',
-      ok: input.validationPassed,
-      hint: 'Press Validate. Any edit after a validation clears it.',
+      hint: 'Save your changes first. Publishing uses the saved version.',
     },
   ];
+  // Only coding questions are validated (TC-012); the API publishes a complete multiple-choice or
+  // short-answer question without a validation run.
   if (input.type === 'CODING') {
-    checks.push({
-      id: 'ai',
-      label: 'AI reference solutions collected',
-      ok: aiGatePassed(input.aiGates),
-      hint: 'Add solutions from enough different AI assistants for each language on the AI reference solutions tab.',
-    });
+    const t = input.tests ?? { count: 0, hasVisible: false, hasHidden: false, weightsOk: true };
+    checks.push(
+      {
+        id: 'tests',
+        label: 'At least one visible and one hidden test, every weight above 0',
+        ok: t.count > 0 && t.hasVisible && t.hasHidden && t.weightsOk,
+        hint: 'Candidates see the visible tests as samples and are graded on all of them: add at least one of each on the Test cases tab.',
+      },
+      {
+        id: 'validated',
+        label: 'Validation passed on every variant and test',
+        ok: input.validationPassed,
+        hint: 'Press Validate. Any edit after a validation clears it.',
+      },
+      {
+        id: 'ai',
+        label: 'AI reference solutions collected',
+        ok: aiGatePassed(input.aiGates),
+        hint: 'Add solutions from enough different AI assistants for each language on the AI reference solutions tab.',
+      },
+    );
   }
   return checks;
 }
