@@ -61,8 +61,8 @@ export async function deleteVerified(
 }
 
 export class VersioningUnsafeError extends Error {
-  constructor() {
-    super('the object store may keep deleted objects as noncurrent versions');
+  constructor(message = 'the object store may keep deleted objects as noncurrent versions') {
+    super(message);
     this.name = 'VersioningUnsafeError';
   }
 }
@@ -85,7 +85,7 @@ export async function assertVersioningSafe(
   try {
     state = await store.versioning();
   } catch {
-    throw new VersioningUnsafeError();
+    throw new VersioningUnsafeError('the object store could not report its versioning state');
   }
   if (!versioningIsSafe(state)) throw new VersioningUnsafeError();
 }

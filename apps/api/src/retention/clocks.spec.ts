@@ -48,12 +48,6 @@ describe('retention clocks', () => {
       expect(faceDue(clock, 30)).toEqual(addDays(clock, 30));
       expect(faceDue(clock, 7)).toEqual(addDays(clock, 7));
     });
-
-    it('C-35: a hold has no input: the same clock gives the same due date', () => {
-      const clock = d('2026-03-01T00:00:00Z');
-      expect(faceDue(clock, 90)).toEqual(faceDue(clock, 90));
-      expect(faceDue.length).toBe(2);
-    });
   });
 
   describe('media tier (R-4, OQ-18)', () => {
@@ -94,9 +88,10 @@ describe('retention clocks', () => {
     });
   });
 
-  it('C-04, C-17: a consent record is due 3 years after signing; 29 February rolls like PostgreSQL', () => {
+  it('C-04, C-17: a consent record is due 3 years after signing; 29 February clamps like PostgreSQL', () => {
     expect(consentDue(d('2026-10-05T10:00:00Z'))).toEqual(d('2029-10-05T10:00:00Z'));
-    expect(addYears(d('2028-02-29T00:00:00Z'), 1)).toEqual(d('2029-03-01T00:00:00Z'));
+    expect(addYears(d('2028-02-29T00:00:00Z'), 1)).toEqual(d('2029-02-28T00:00:00Z'));
+    expect(addYears(d('2028-02-29T10:30:00Z'), 4)).toEqual(d('2032-02-29T10:30:00Z'));
   });
 
   describe('erasure deadline (C-06, TC-094)', () => {

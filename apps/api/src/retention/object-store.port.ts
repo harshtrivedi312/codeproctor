@@ -1,6 +1,8 @@
 // The object store as RetentionService needs it (ADR 0004 9.2, ADR 0013 5.7). One S3-compatible
-// interface: Cloudflare R2 on staging, AWS S3 on pilot and production. BE-09 provides the real
-// implementation; until then nothing is bound and a run refuses to start (fail closed).
+// interface: Cloudflare R2 on staging, AWS S3 on pilot and production. BE-09's MediaModule provides
+// the real implementation (S3ObjectStore) and exports it; RetentionModule.forRoot takes that module.
+// `UnconfiguredObjectStore` below is for code that must construct a service without a store and
+// fail closed when it is used.
 // Implementations must never log an object key: keys name sessions and candidates' media.
 import { Injectable } from '@nestjs/common';
 
@@ -31,7 +33,7 @@ export abstract class ObjectStorePort {
   abstract versioning(): Promise<VersioningState>;
 }
 
-/** Bound until BE-09 provides the real store: every call refuses, so nothing runs without one. */
+/** Refuses every call, so nothing runs without a real store. Not bound by RetentionModule. */
 @Injectable()
 export class UnconfiguredObjectStore extends ObjectStorePort {
   listPage(): Promise<ListPage> {

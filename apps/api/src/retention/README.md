@@ -52,9 +52,10 @@ Environment variables, defaults in brackets. They map to the owner's open questi
 
 ## Not wired yet
 
-`RetentionModule` is not imported by `AppModule`. A run needs a real `ObjectStorePort` (BE-09; until
-then `UnconfiguredObjectStore` refuses every call, so a run fails closed) and a scheduler that calls
-`RetentionService.runDaily()` (the BullMQ module). Tests use `testing/in-memory-object-store.ts`.
+`RetentionModule` is not imported by `AppModule`. Wire it with `RetentionModule.forRoot({ objectStore:
+MediaModule })`: BE-09's module exports `ObjectStorePort` (its `S3ObjectStore` adapter); the port is
+never bound inside this folder. A scheduler (the BullMQ module) calls `RetentionService.runDaily()`
+through a single-flight job. Tests use `testing/in-memory-object-store.ts`.
 
 ## Reserved audit actions
 

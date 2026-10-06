@@ -17,10 +17,12 @@ export const addDays = (date: Date, days: number): Date => {
   return d;
 };
 
-/** Adds calendar years in UTC; 29 February rolls to 1 March like PostgreSQL's interval arithmetic. */
+/** Adds calendar years in UTC; 29 February clamps to 28 February like PostgreSQL's interval arithmetic. */
 export const addYears = (date: Date, years: number): Date => {
   const d = new Date(date.getTime());
+  const month = d.getUTCMonth();
   d.setUTCFullYear(d.getUTCFullYear() + years);
+  if (d.getUTCMonth() !== month) d.setUTCDate(0); // rolled into the next month: back to its last day
   return d;
 };
 

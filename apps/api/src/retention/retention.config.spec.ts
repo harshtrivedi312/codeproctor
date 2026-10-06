@@ -2,13 +2,13 @@
 import { loadRetentionConfig } from './retention.config';
 
 describe('loadRetentionConfig', () => {
-  it('FR-704: the defaults are the ADR 0004 section 9 behaviour', () => {
+  it('FR-704: the defaults are the ADR 0004 section 9 behaviour (evidence frames stay with the media tier: OQ-19 is open)', () => {
     expect(loadRetentionConfig({})).toEqual({
       RETENTION_LEGAL_HOLD: false,
       RETENTION_DECLINED_CONSENTS_EXPIRE: true,
       RETENTION_REDUCE_ACCOMMODATIONS: true,
       RETENTION_MEDIA_CAP_DAYS: undefined,
-      RETENTION_EVIDENCE_IN_FACE_TIER: true,
+      RETENTION_EVIDENCE_IN_FACE_TIER: false,
       RETENTION_RESULTS_CLOCK: 'anchor',
       RETENTION_CONSENT_THROUGH_ERASURE: 'keep',
       RETENTION_VERSIONING_CHECK: 'enforce',
@@ -39,10 +39,27 @@ describe('loadRetentionConfig', () => {
     });
   });
 
+  it('NFR-05: the versioning check can be skipped on staging only, never in pilot or production (ADR 0004 9.2)', () => {
+    expect(
+      loadRetentionConfig({ RETENTION_VERSIONING_CHECK: 'skip', APP_ENV: 'staging' })
+        .RETENTION_VERSIONING_CHECK,
+    ).toBe('skip');
+    for (const env of [
+      { APP_ENV: 'pilot' },
+      { APP_ENV: 'production' },
+      { NODE_ENV: 'production' },
+    ]) {
+      expect(() => loadRetentionConfig({ RETENTION_VERSIONING_CHECK: 'skip', ...env })).toThrow(
+        /not allowed in pilot or production/,
+      );
+    }
+    expect(loadRetentionConfig({ APP_ENV: 'pilot' }).RETENTION_VERSIONING_CHECK).toBe('enforce');
+  });
+
   it('NFR-05: an invalid value stops the process instead of silently using a default', () => {
     for (const bad of [
       { RETENTION_LEGAL_HOLD: 'yes' },
-      { RETENTION_MEDIA_CAP_DAYS: '0' },
+      { RETENTION_MEDIA_CAP_DAYS: '6' },
       { RETENTION_MEDIA_CAP_DAYS: '9999' },
       { RETENTION_RESULTS_CLOCK: 'test-date' },
       { RETENTION_CONSENT_THROUGH_ERASURE: 'maybe' },
