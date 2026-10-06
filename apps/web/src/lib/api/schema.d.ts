@@ -886,19 +886,6 @@ export interface components {
       pageSize: number;
       total: number;
     };
-    /**
-     * @description The executor's verdicts, plus MISSING_REFERENCE when an allowed language has no reference solution.
-     * @enum {string}
-     */
-    ValidationVerdict:
-      | 'FAILED'
-      | 'COMPILE_ERROR'
-      | 'TIME_LIMIT'
-      | 'MEMORY_LIMIT'
-      | 'OUTPUT_LIMIT'
-      | 'RUNTIME_ERROR'
-      | 'INTERNAL_ERROR'
-      | 'MISSING_REFERENCE';
     ValidationCell: {
       language: components['schemas']['Language'];
       passed: boolean;
@@ -909,7 +896,8 @@ export interface components {
       language: components['schemas']['Language'];
       testCaseId: string | null;
       position: number | null;
-      verdict: components['schemas']['ValidationVerdict'];
+      /** @description A string on the API. Known values: FAILED, COMPILE_ERROR, TIME_LIMIT, MEMORY_LIMIT, OUTPUT_LIMIT, RUNTIME_ERROR, INTERNAL_ERROR, MISSING_REFERENCE. A client must cope with a value it does not know. */
+      verdict: string;
       /** @description Only for a visible (sample) slot, never a hidden one */
       actualOutput?: string;
       diagnostic?: string;

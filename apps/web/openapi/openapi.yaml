@@ -1689,20 +1689,6 @@ components:
         page: { type: integer }
         pageSize: { type: integer }
         total: { type: integer }
-    ValidationVerdict:
-      type: string
-      description: The executor's verdicts, plus MISSING_REFERENCE when an allowed language has no reference solution.
-      enum:
-        [
-          FAILED,
-          COMPILE_ERROR,
-          TIME_LIMIT,
-          MEMORY_LIMIT,
-          OUTPUT_LIMIT,
-          RUNTIME_ERROR,
-          INTERNAL_ERROR,
-          MISSING_REFERENCE,
-        ]
     ValidationCell:
       type: object
       required: [language, passed, testsPassed, testsTotal]
@@ -1718,7 +1704,12 @@ components:
         language: { $ref: '#/components/schemas/Language' }
         testCaseId: { type: string, nullable: true }
         position: { type: integer, nullable: true, minimum: 0 }
-        verdict: { $ref: '#/components/schemas/ValidationVerdict' }
+        verdict:
+          type: string
+          description: >-
+            A string on the API. Known values: FAILED, COMPILE_ERROR, TIME_LIMIT, MEMORY_LIMIT,
+            OUTPUT_LIMIT, RUNTIME_ERROR, INTERNAL_ERROR, MISSING_REFERENCE. A client must cope with
+            a value it does not know.
         actualOutput:
           { type: string, description: 'Only for a visible (sample) slot, never a hidden one' }
         diagnostic: { type: string }
