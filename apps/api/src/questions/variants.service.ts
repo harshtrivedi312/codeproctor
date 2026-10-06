@@ -365,6 +365,6 @@ export class VariantsService {
     const row = variants.find((x) => x.id === variantId);
     if (!row) throw new NotFoundException(VARIANT_NOT_FOUND);
     const variant: VariantDto = toVariantDto(row, cases);
-    return { variant, revision: computeRevision(v, cases, variants) };
+    return { variant, revision: await currentRevision(tx, v.id) };
   }
 }

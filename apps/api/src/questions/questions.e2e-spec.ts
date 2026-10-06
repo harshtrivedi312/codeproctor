@@ -2769,8 +2769,15 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       );
       expect(results.map((r) => r.status)).toEqual([201, 201, 201, 201]);
       const revs = results.map((r) => (r.body as Json).revision as string);
-      expect(new Set(revs).size).toBe(4);
-      expect(revs).toContain(await persistedRevision(id));
+      // Writes are serialised by the question lock and take positions 0..3 in lock order, so the
+      // committed states are the first k cases (k = 1..4): each returned revision is exactly one.
+      const head = await owner.questionVersion.findFirstOrThrow({ where: { questionId: id } });
+      const rows = await owner.testCase.findMany({
+        where: { questionVersionId: head.id },
+        orderBy: { position: 'asc' },
+      });
+      const states = [1, 2, 3, 4].map((k) => computeRevision(head, rows.slice(0, k)));
+      expect([...revs].sort()).toEqual([...states].sort());
     });
 
     it('TC-011, FR-103: a recruiter reaches none of these routes (403) and no revision appears in any body', async () => {
@@ -2784,6 +2791,7 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       const created = await http().post(vbase(q)).set(a.auth).send({ params }).expect(201);
       const vid = (created.body as { variant: { id: string } }).variant.id;
       const calls = [
+        http().post(vbase(q)).send({ params }),
         http().post(`${API}/questions/${id}/versions/1/test-cases`).send(sampleCase),
         http().patch(`${API}/questions/${id}/versions/1/test-cases/${slot.id}`).send({ weight: 2 }),
         http().delete(`${API}/questions/${id}/versions/1/test-cases/${slot.id}`),
