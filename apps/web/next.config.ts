@@ -1,4 +1,5 @@
 import type { NextConfig } from 'next';
+import { PHASE_PRODUCTION_BUILD } from 'next/constants';
 
 /**
  * Mock mode must never be baked into a production build: it would serve fake data and unlock demo
@@ -21,7 +22,7 @@ export function assertNoMockingInProductionBuild(env: NodeJS.ProcessEnv): void {
   }
 }
 
-const nextConfig: NextConfig = {
+export const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
   // Always inline the mock flag, even when it is unset at build time. An unset NEXT_PUBLIC_ variable
@@ -84,8 +85,11 @@ const nextConfig: NextConfig = {
   },
 };
 
-// Only for `next build` (Next does not set NEXT_PHASE while loading this file): `next start` of an
-// already built (allowed) mock build must still run, and tests import this file.
-if (process.argv.includes('build')) assertNoMockingInProductionBuild(process.env);
-
-export default nextConfig;
+// Only for `next build`: Next passes the phase, so `next start` of an already built (allowed) mock
+// build still runs, `next dev` is unaffected, and tests can load this file. The override is read
+// from the build environment here and nowhere else: it is never put in `env` or any NEXT_PUBLIC_
+// alias, so it cannot reach a bundle.
+export default function config(phase: string): NextConfig {
+  if (phase === PHASE_PRODUCTION_BUILD) assertNoMockingInProductionBuild(process.env);
+  return nextConfig;
+}
