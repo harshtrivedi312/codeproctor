@@ -6,27 +6,49 @@ import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Field } from '@/components/ui/field';
-import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import type { Schemas } from '@/lib/api/client';
-import { LANGUAGE_LABELS, newId, type VariantValues } from '../draft';
+import { LANGUAGE_LABELS, newId, variantName, type VariantValues } from '../draft';
 import { MarkdownPreview } from '../markdown-preview';
-import { checkParams, parseParams, undeclaredPlaceholders } from '../params';
-import { usePrefill } from '../queries';
+import { checkParams, missingPlaceholders, parseParams } from '../params';
+import { usePrefill, usePreviewVariant } from '../queries';
 import { placeholdersOf, renderTemplate } from '../template';
 import { errorAt, useDraftField, type ApiTabProps } from '../use-draft-field';
 
 type Proposal = Schemas['PrefillResponse']['proposals'][number];
 
+/** Ids the form makes for variants that are not saved yet (the API's ids never start like this). */
+const DRAFT_VARIANT_PREFIX = 'draft-var';
+
 /**
- * FR-203, ADR 0007: declared parameters, variants with their own parameter values, a rendered
+ * FR-203, ADR 0007: variants with their own explicit parameter values, a rendered
  * preview, and per-variant input and expected-output overrides for each test slot. Prefilling
  * expected outputs from the reference solution only PROPOSES values; they change nothing until the
  * author accepts them.
  */
-export function VariantsTab({ form, readOnly, questionId }: ApiTabProps): React.JSX.Element {
-  const [defs, setDefs] = useDraftField(form, 'paramSchema');
+export function VariantsTab({
+  form,
+  readOnly,
+  questionId,
+  version,
+}: ApiTabProps & { version: number }): React.JSX.Element {
+  if (questionId === null) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        Save the question first. Variants belong to a saved draft; add them after the first save.
+      </p>
+    );
+  }
+  return <VariantsBody form={form} readOnly={readOnly} questionId={questionId} version={version} />;
+}
+
+function VariantsBody({
+  form,
+  readOnly,
+  questionId,
+  version,
+}: Omit<ApiTabProps, 'questionId'> & { questionId: string; version: number }): React.JSX.Element {
   const [variants, setVariants] = useDraftField(form, 'variants');
   const statement = useWatch({ control: form.control, name: 'statementMd' });
   const starter = useWatch({ control: form.control, name: 'starterCode' });
@@ -34,7 +56,6 @@ export function VariantsTab({ form, readOnly, questionId }: ApiTabProps): React.
   const used = placeholdersOf(
     [statement, ...Object.values(starter), ...Object.values(reference)].join('\n'),
   );
-  const undeclared = undeclaredPlaceholders(used, defs);
 
   function patchVariant(id: string, patch: Partial<VariantValues>): void {
     setVariants(variants.map((v) => (v.id === id ? { ...v, ...patch } : v)));
@@ -49,91 +70,16 @@ export function VariantsTab({ form, readOnly, questionId }: ApiTabProps): React.
         pass all of them before the question can be published.
       </Alert>
 
-      <section aria-labelledby="params-heading" className="space-y-2">
-        <h3 id="params-heading" className="text-sm font-medium">
-          Parameters
-        </h3>
-        <p className="text-sm text-muted-foreground">
-          Declare every placeholder the statement, starter code or reference solution uses.
+      <p className="text-sm text-muted-foreground" data-testid="placeholders-used">
+        {used.length > 0
+          ? `Placeholders used by this question: ${used.map((n) => `{{${n}}}`).join(', ')}. Give each variant a value for every one of them.`
+          : 'This question uses no {{name}} placeholders yet, so a variant can only override test data.'}
+      </p>
+      {errorAt(form, 'variants') ? (
+        <p role="alert" className="text-sm text-destructive">
+          {errorAt(form, 'variants')}
         </p>
-        {undeclared.length > 0 ? (
-          <Alert tone="warning" role="status">
-            Used but not declared: {undeclared.map((n) => `"${n}"`).join(', ')}.
-          </Alert>
-        ) : null}
-        {errorAt(form, 'paramSchema') ? (
-          <p role="alert" className="text-sm text-destructive">
-            {errorAt(form, 'paramSchema')}
-          </p>
-        ) : null}
-        <ul className="space-y-2">
-          {defs.map((d, i) => (
-            <li key={d.key} className="flex flex-wrap items-start gap-2">
-              <Field
-                id={`param-name-${i}`}
-                label={`Parameter ${i + 1} name`}
-                error={errorAt(form, `paramSchema.${i}.name`)}
-              >
-                {(aria) => (
-                  <Input
-                    {...aria}
-                    className="w-48 font-mono"
-                    value={d.name}
-                    disabled={readOnly}
-                    onChange={(e) =>
-                      setDefs(defs.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))
-                    }
-                  />
-                )}
-              </Field>
-              <Field id={`param-type-${i}`} label={`Parameter ${i + 1} type`}>
-                {(aria) => (
-                  <Select
-                    {...aria}
-                    value={d.type}
-                    disabled={readOnly}
-                    onChange={(e) =>
-                      setDefs(
-                        defs.map((x, j) =>
-                          j === i ? { ...x, type: e.target.value as typeof d.type } : x,
-                        ),
-                      )
-                    }
-                  >
-                    <option value="string">string</option>
-                    <option value="number">number</option>
-                    <option value="boolean">boolean</option>
-                    <option value="array">array</option>
-                  </Select>
-                )}
-              </Field>
-              {readOnly ? null : (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="mt-7"
-                  aria-label={`Remove parameter ${d.name || i + 1}`}
-                  onClick={() => setDefs(defs.filter((_, j) => j !== i))}
-                >
-                  <Trash2 className="size-4" aria-hidden="true" />
-                </Button>
-              )}
-            </li>
-          ))}
-        </ul>
-        {readOnly ? null : (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => setDefs([...defs, { name: '', type: 'number', key: newId('param') }])}
-          >
-            <Plus className="size-4" aria-hidden="true" />
-            Add parameter
-          </Button>
-        )}
-      </section>
+      ) : null}
 
       <section aria-labelledby="variants-heading" className="space-y-4">
         <h3 id="variants-heading" className="text-sm font-medium">
@@ -152,7 +98,8 @@ export function VariantsTab({ form, readOnly, questionId }: ApiTabProps): React.
             form={form}
             readOnly={readOnly}
             questionId={questionId}
-            defs={defs}
+            version={version}
+            used={used}
             statement={statement}
             reference={reference}
             onChange={(patch) => patchVariant(v.id, patch)}
@@ -167,24 +114,8 @@ export function VariantsTab({ form, readOnly, questionId }: ApiTabProps): React.
               setVariants([
                 ...variants,
                 {
-                  id: newId('var'),
-                  label: `Variant ${variants.length + 1}`,
-                  paramsText: JSON.stringify(
-                    Object.fromEntries(
-                      defs.map((d) => [
-                        d.name,
-                        d.type === 'number'
-                          ? 0
-                          : d.type === 'boolean'
-                            ? false
-                            : d.type === 'array'
-                              ? []
-                              : '',
-                      ]),
-                    ),
-                    null,
-                    2,
-                  ),
+                  id: newId(DRAFT_VARIANT_PREFIX),
+                  paramsText: JSON.stringify(Object.fromEntries(used.map((n) => [n, ''])), null, 2),
                   active: true,
                   overrides: [],
                 },
@@ -201,9 +132,10 @@ export function VariantsTab({ form, readOnly, questionId }: ApiTabProps): React.
 }
 
 interface CardProps extends Pick<ApiTabProps, 'form' | 'readOnly' | 'questionId'> {
+  version: number;
   index: number;
   variant: VariantValues;
-  defs: Schemas['ParamDef'][];
+  used: string[];
   statement: string;
   reference: Record<string, string>;
   onChange: (patch: Partial<VariantValues>) => void;
@@ -216,7 +148,8 @@ function VariantCard({
   form,
   readOnly,
   questionId,
-  defs,
+  version,
+  used,
   statement,
   reference,
   onChange,
@@ -225,10 +158,19 @@ function VariantCard({
   const [tests] = useDraftField(form, 'testCases');
   const [languages] = useDraftField(form, 'allowedLanguages');
   const parsed = parseParams(variant.paramsText);
-  const problems = parsed.ok ? checkParams(parsed.value, defs) : [parsed.error];
+  const missing = parsed.ok ? missingPlaceholders(parsed.value, used) : [];
+  const problems = parsed.ok
+    ? [
+        ...checkParams(parsed.value),
+        ...(missing.length > 0
+          ? [`Needs a value for ${missing.map((m) => `"${m}"`).join(', ')}.`]
+          : []),
+      ]
+    : [parsed.error];
   const formError = errorAt(form, `variants.${index}.paramsText`);
   const rendered = parsed.ok ? renderTemplate(statement, parsed.value) : null;
   const headingId = `variant-${variant.id}`;
+  const name = variantName(index);
 
   const [language, setLanguage] = React.useState('');
   const withReference = languages.filter((l) => (reference[l] ?? '').trim() !== '');
@@ -237,6 +179,8 @@ function VariantCard({
   const [proposed, setProposed] = React.useState<{ key: string; items: Proposal[] } | null>(null);
   const requestId = React.useRef(0);
   const prefill = usePrefill(questionId ?? '');
+  const candidate = usePreviewVariant(questionId ?? '', version);
+  const isSaved = !variant.id.startsWith(DRAFT_VARIANT_PREFIX);
 
   const overrideOf = (testCaseId: string) =>
     variant.overrides.find((o) => o.testCaseId === testCaseId);
@@ -331,22 +275,10 @@ function VariantCard({
   return (
     <section aria-labelledby={headingId} className="space-y-4 rounded-md border bg-card p-4">
       <div className="flex flex-wrap items-start gap-3">
-        <Field
-          id={`${headingId}-label`}
-          label="Variant name"
-          error={errorAt(form, `variants.${index}.label`)}
-        >
-          {(aria) => (
-            <Input
-              {...aria}
-              className="w-64"
-              value={variant.label}
-              disabled={readOnly}
-              onChange={(e) => onChange({ label: e.target.value })}
-            />
-          )}
-        </Field>
-        <label className="mt-7 flex items-center gap-2 text-sm">
+        <h4 id={headingId} className="mt-1 text-base font-medium">
+          {name}
+        </h4>
+        <label className="mt-1 flex items-center gap-2 text-sm">
           <input
             type="checkbox"
             className="size-4"
@@ -357,21 +289,18 @@ function VariantCard({
           Active (candidates can get it; validation runs it)
         </label>
         {readOnly ? null : (
-          <Button type="button" variant="ghost" size="sm" className="mt-7" onClick={onRemove}>
+          <Button type="button" variant="ghost" size="sm" onClick={onRemove}>
             <Trash2 className="size-4" aria-hidden="true" />
             Remove variant
           </Button>
         )}
       </div>
-      <h4 id={headingId} className="sr-only">
-        {variant.label || `Variant ${index + 1}`}
-      </h4>
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Field
           id={`${headingId}-params`}
           label="Parameters (JSON)"
-          hint='An object with one value per declared parameter, for example {"count": 4}.'
+          hint='An object with one value per placeholder the question uses, for example {"count": 4}.'
           error={problems.length > 0 ? problems.join(' ') : formError}
         >
           {(aria) => (
@@ -405,6 +334,39 @@ function VariantCard({
         </div>
       </div>
 
+      {isSaved && questionId ? (
+        <div className="space-y-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={candidate.isPending}
+            onClick={() => candidate.mutate(variant.id)}
+          >
+            {candidate.isPending ? 'Loading…' : 'Show what a candidate sees'}
+          </Button>
+          {candidate.isError ? (
+            <Alert tone="error" role="alert" title="We could not show this variant">
+              Check that the parameters cover every placeholder, then save and try again.
+            </Alert>
+          ) : null}
+          {candidate.data ? (
+            <div
+              role="region"
+              aria-label={`Candidate view of ${name}`}
+              className="space-y-2 rounded-md border p-3"
+            >
+              <MarkdownPreview>{candidate.data.statementMd}</MarkdownPreview>
+              <p className="text-sm text-muted-foreground">
+                {candidate.data.samples.length} sample case
+                {candidate.data.samples.length === 1 ? '' : 's'} are shown to the candidate. This is
+                the saved variant; save your edits to see them here.
+              </p>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="space-y-2">
         <h5 className="text-sm font-medium">Test data of this variant</h5>
         {tests.length === 0 ? (
@@ -432,7 +394,7 @@ function VariantCard({
                         onChange={(e) => setOverride(t.id, e.target.checked ? {} : null)}
                       />
                       <span>
-                        Override slot {ti + 1} for {variant.label || `variant ${index + 1}`}
+                        Override slot {ti + 1} for {name}
                       </span>
                     </label>
                   </div>
@@ -534,11 +496,7 @@ function VariantCard({
             </Alert>
           ) : null}
           {proposals ? (
-            <div
-              role="region"
-              aria-label={`Proposed outputs for ${variant.label}`}
-              className="space-y-2"
-            >
+            <div role="region" aria-label={`Proposed outputs for ${name}`} className="space-y-2">
               {proposals.length === 0 ? <p className="text-sm">All proposals handled.</p> : null}
               <ul className="space-y-2">
                 {proposals.map((p) => {

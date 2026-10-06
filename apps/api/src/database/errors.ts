@@ -25,12 +25,18 @@ export class OrgContextMissingError extends OrgScopeError {
 /** A payload or call that would read or write another org's data, or that the scope cannot check. */
 export class OrgScopeViolationError extends OrgScopeError {}
 
-/** Raw SQL outside OrgContextService.runRawSql. */
+/**
+ * Raw SQL outside OrgContextService.runRawSql, or in a session scope (ADR 0006 section 8.5, ADR 0013
+ * CS-4.2), where it is refused even inside runRawSql.
+ */
 export class RawQueryNotAllowedError extends OrgScopeError {
-  constructor(operation: string) {
+  constructor(operation: string, inSessionScope = false) {
     super(
-      `${operation} is not allowed: raw SQL bypasses org scoping. ` +
-        'Wrap a reviewed query in OrgContextService.runRawSql(reason, fn) and filter by org_id yourself.',
+      inSessionScope
+        ? `${operation} is not allowed: raw SQL is refused in a session scope (a candidate or ` +
+            'session-job scope), even inside runRawSql. Use the model API (ADR 0006 section 8.5).'
+        : `${operation} is not allowed: raw SQL bypasses org scoping. ` +
+            'Wrap a reviewed query in OrgContextService.runRawSql(reason, fn) and filter by org_id yourself.',
     );
   }
 }

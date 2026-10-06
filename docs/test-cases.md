@@ -1,6 +1,6 @@
 # Test cases
 
-72 test cases cover every FSD module; the 51 marked P1 must pass before the pilot. Types: F = functional, S = security, I = integrity (anti-cheating), P = performance, A = accessibility, R = resilience.
+73 test cases cover every FSD module; the 52 marked P1 must pass before the pilot. Types: F = functional, S = security, I = integrity (anti-cheating), P = performance, A = accessibility, R = resilience.
 
 Updated 2026-10-01 (ARC-01 Phase B, D-16..D-23). Changed: TC-007, TC-012, TC-030, TC-048, TC-094. Added: TC-095..TC-099, each marked "added 2026-10-01" and placed in its module table.
 
@@ -28,6 +28,7 @@ Updated 2026-10-01 (ARC-01 Phase B, D-16..D-23). Changed: TC-007, TC-012, TC-030
 | TC-012 | FR-203 | Variant validation | Publish a question whose reference solution passes the default tests but fails one variant's own test data (for example a constant that only that variant changes) | Publish blocked; the validation report shows the failing variant and test | F | P1 |
 | TC-013 | FR-204 | Versioning | Edit a published question used in a past session | New version created; past session still shows old version | F | P1 |
 | TC-014 | FR-205 | MCQ question | Create MCQ, include in test, answer | Auto-scored correctly | F | P3 |
+| TC-100 | FR-202, FR-301 | Staff/recruiter redaction (extends TC-011; DL-32, DL-34; added 2026-10-06) | A recruiter reads questions (list, filters, search, random pick, by-id GET, preview) including a draft-only question, a published question with a draft version 2, a cross-org id and a missing id | Published versions only, through the allowlisted DTO; list, filters, search and random picks never reveal draft-only questions (titles, tags, counts); hidden inputs and outputs, reference solutions, AI references, answer_spec, variant params and validation reports never; an identical 404 for a draft, missing or cross-org id | S | P1 |
 | TC-099 | FR-205 | Short answer needing manual scoring (added 2026-10-01, D-23) | Short-answer question with an answer and one accepted variant; three candidates answer with the variant in different case and spacing, with the exact answer, and with an unlisted correct wording | First two auto-scored full points; the third is not scored 0 but marked for manual scoring; the session goes to the review queue; the verdict is blocked until a reviewer marks it; the reviewer's decision sets the score and is audited | F | P3 |
 
 ## Tests & invitations (M3)

@@ -132,18 +132,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
   }, [confirmLogout]);
 
   React.useEffect(() => {
-    let lastUserId: string | null = null;
+    let lastIdentity: string | null = null;
     const off = onSessionChange((session) => {
-      // Cached API data belongs to one user. When the user changes (sign-out, a different person
-      // signing in, a lost session) drop everything, so the next user never sees it (FR-103).
-      const id = session ? session.user.id : null;
-      if (id !== lastUserId) {
+      // Cached API data belongs to one user AND one role. When either changes (sign-out, a
+      // different person signing in, a lost session, or a role change that arrives with a refresh)
+      // drop everything, so the next user, or the same person with less access (an Author demoted
+      // to Recruiter), never sees what the old access allowed (FR-103, rule 3). Mounted screens
+      // refetch and decide again from what the API now answers.
+      const identity = session ? `${session.user.id}|${session.user.role}` : null;
+      if (identity !== lastIdentity) {
         void queryClient.cancelQueries();
         queryClient.clear();
-        // Question code (starter, reference and AI solutions) must not outlive the user in Monaco's
-        // model store either.
+        // Question code (starter, reference and AI solutions) must not outlive the access in
+        // Monaco's model store either.
         disposeModels(MODEL_ROOT);
-        lastUserId = id;
+        lastIdentity = identity;
       }
       setUser(session ? session.user : null);
       setStatus(session ? 'authenticated' : 'unauthenticated');

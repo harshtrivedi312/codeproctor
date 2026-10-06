@@ -14,6 +14,13 @@ const ALLOWED: Record<string, string> = {
   'retention/consent-retention.repository.ts': 'the one repository, with a fixed select',
   'test/retention/retention-harness.ts': 'test helper: sets up fixtures with the owner role',
   'test/retention/consent-access-scan.ts': 'the scanner names what it looks for',
+  // ADR 0013 CS-4.4 (#126). The CANDIDATE scope names the column to ALLOW the candidate to write its own
+  // consent (signing) and to REFUSE any read of it; neither reads the column, and neither can see
+  // another candidate's consent (the session filter). One reviewed place each.
+  'database/session-scope-map.ts':
+    'names the column in the candidate write allowlist; never reads it',
+  'database/candidate-interim.ts':
+    'names the column in the read deny list (hides it from candidate reads); never reads it',
 };
 
 function files(dir: string): string[] {
@@ -75,5 +82,14 @@ describe('consent access (FR-105, NFR-05, C-17)', () => {
     expect(text.replace(/\/\/.*|\/\*[\s\S]*?\*\//g, '')).not.toMatch(
       /signedName|userAgent|\bip\b\s*:/,
     );
+  });
+
+  it('the two candidate-scope files name signedName and nothing else of the consent data (a later read there fails)', () => {
+    for (const rel of ['database/session-scope-map.ts', 'database/candidate-interim.ts']) {
+      expect({ rel, hits: consentAccessHits(readFileSync(join(SRC, rel), 'utf8')) }).toEqual({
+        rel,
+        hits: ['signedName'],
+      });
+    }
   });
 });

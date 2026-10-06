@@ -48,6 +48,31 @@ jobs:
         with:
           persist-credentials: false
 
+      # Fails first, with the NAMES of the missing secrets (never a value), so the owner knows exactly
+      # what to add under Settings > Environments > staging > Environment secrets.
+      - name: Check the staging secrets are set
+        env:
+          STAGING_S3_BACKUP_BUCKET: ${{ secrets.STAGING_S3_BACKUP_BUCKET }}
+          STAGING_S3_ENDPOINT: ${{ secrets.STAGING_S3_ENDPOINT }}
+          STAGING_S3_BACKUP_ACCESS_KEY_ID: ${{ secrets.STAGING_S3_BACKUP_ACCESS_KEY_ID }}
+          STAGING_S3_BACKUP_SECRET_ACCESS_KEY: ${{ secrets.STAGING_S3_BACKUP_SECRET_ACCESS_KEY }}
+          STAGING_BACKUP_PGHOST: ${{ secrets.STAGING_BACKUP_PGHOST }}
+          STAGING_BACKUP_PGUSER: ${{ secrets.STAGING_BACKUP_PGUSER }}
+          STAGING_BACKUP_PGPASSWORD: ${{ secrets.STAGING_BACKUP_PGPASSWORD }}
+          STAGING_BACKUP_PGDATABASE: ${{ secrets.STAGING_BACKUP_PGDATABASE }}
+        run: |
+          missing=""
+          for name in STAGING_S3_BACKUP_BUCKET STAGING_S3_ENDPOINT STAGING_S3_BACKUP_ACCESS_KEY_ID \
+            STAGING_S3_BACKUP_SECRET_ACCESS_KEY STAGING_BACKUP_PGHOST STAGING_BACKUP_PGUSER \
+            STAGING_BACKUP_PGPASSWORD STAGING_BACKUP_PGDATABASE; do
+            eval "value=\${$name:-}"
+            [ -n "$value" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error title=Staging backup secrets missing::Add these secrets to the GitHub environment 'staging' (names only here, never paste values in a ticket or chat):$missing. STAGING_BACKUP_PGPORT is optional (default 5432). See docs/runbook.md, Staging database setup (DEP-01)."
+            exit 1
+          fi
+
       - name: Install the PostgreSQL 16 client
         run: |
           sudo apt-get update -qq

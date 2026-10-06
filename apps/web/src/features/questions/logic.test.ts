@@ -4,11 +4,12 @@ import {
   draftSchema,
   emptyDraft,
   normalizeShortAnswer,
-  toContent,
+  toUpdate,
+  toVariants,
   type DraftValues,
 } from './draft';
 import { aiGate, aiRefreshDue, canPublish, publishChecks } from './gate';
-import { checkParams, parseParams } from './params';
+import { checkParams, missingPlaceholders, parseParams } from './params';
 import { hasUnsupportedSyntax, placeholdersOf, renderTemplate } from './template';
 
 const NOW = new Date('2026-10-05T00:00:00Z');
@@ -24,9 +25,12 @@ const ref = (
   assistant,
   modelLabel: 'm',
   solutionCode: 'x',
+  variantId: null,
+  promptText: null,
   collectedAt,
-  collectedByName: 'a',
+  collectedById: 'a',
   supersededAt,
+  createdAt: collectedAt,
 });
 
 describe('templates (FR-203, ADR 0007 V-2)', () => {
@@ -48,23 +52,33 @@ describe('templates (FR-203, ADR 0007 V-2)', () => {
   });
 });
 
-describe('variant parameters (FR-203)', () => {
-  const defs: Schemas['ParamDef'][] = [
-    { name: 'n', type: 'number' },
-    { name: 'xs', type: 'array' },
-  ];
+describe('variant parameters (FR-203, DL-32)', () => {
   it('FR-203: parses only JSON objects', () => {
     expect(parseParams('{"n": 1}')).toEqual({ ok: true, value: { n: 1 } });
     expect(parseParams('').ok).toBe(false);
     expect(parseParams('[1]').ok).toBe(false);
     expect(parseParams('{').ok).toBe(false);
   });
-  it('FR-203: checks types, missing and undeclared keys', () => {
-    expect(checkParams({ n: 1, xs: [] }, defs)).toEqual([]);
-    expect(checkParams({ n: '1', xs: [] }, defs)).toEqual(['"n" must be a number.']);
-    expect(checkParams({ xs: [] }, defs)[0]).toMatch(/"n" is missing/);
-    expect(checkParams({ n: 1, xs: [], z: 1 }, defs)[0]).toMatch(/"z" is not a declared parameter/);
-    expect(checkParams({ n: Number.NaN, xs: [] }, defs)).toEqual(['"n" must be a number.']);
+  it('FR-203 BE-04b: values are strings, numbers or booleans with the API name and size rules', () => {
+    expect(checkParams({ n: 1, s: 'x', ok: true })).toEqual([]);
+    expect(checkParams({ xs: [1] })[0]).toMatch(/"xs" must be a string, a number or true or false/);
+    expect(checkParams({ n: Number.NaN })[0]).toMatch(/"n" must be a string, a number/);
+    expect(checkParams({ n: null })[0]).toMatch(/"n" must be a string, a number/);
+    expect(checkParams({ 'bad name': 1 })[0]).toMatch(/not a valid name/);
+    expect(checkParams({ __proto__x: 1, constructor: 1 })).toHaveLength(2);
+    expect(checkParams({ s: 'x'.repeat(1001) })[0]).toMatch(/too long/);
+    expect(checkParams({ ['a'.repeat(41)]: 1 })[0]).toMatch(/not a valid name/);
+  });
+  it('FR-203 BE-04b: the template syntax is the API subset: an escaped brace is text, other tags are errors', () => {
+    expect(placeholdersOf('\\{{not}} but {{yes}}')).toEqual(['yes']);
+    expect(renderTemplate('\\{{a}} {{b}}', { b: true }).text).toBe('{{a}} true');
+    expect(hasUnsupportedSyntax('{{a.b}}')).toBe(true);
+    expect(hasUnsupportedSyntax('{{ a')).toBe(true);
+    expect(hasUnsupportedSyntax('\\{{ok')).toBe(false);
+  });
+  it('FR-203: finds the placeholders a variant gives no value, against its own keys', () => {
+    expect(missingPlaceholders({ a: 1 }, ['a', 'b'])).toEqual(['b']);
+    expect(missingPlaceholders({ a: 1, b: 'x' }, ['a', 'b'])).toEqual([]);
   });
 });
 
@@ -118,7 +132,6 @@ describe('AI reference gate (D-20, ADR 0005 AI-4, AI-5)', () => {
     // Other types have no AI gate.
     expect(publishChecks({ ...base, type: 'MCQ', aiGates: [] }).map((c) => c.id)).toEqual([
       'saved',
-      'validated',
     ]);
     expect(canPublish({ ...base, type: 'MCQ', aiGates: [] })).toBe(true);
   });
@@ -142,16 +155,14 @@ describe('question draft (FR-201..FR-205)', () => {
     ).toBe(false);
     expect(draftSchema.safeParse(valid({ testCases: [{ ...tc, weight: 2 }] })).success).toBe(true);
   });
-  it('FR-203: toContent keeps only overrides of existing slots and drops other languages', () => {
+  it('FR-203: toVariants keeps only overrides of existing slots; toUpdate drops other languages and sends no test cases', () => {
     const d = valid({
       allowedLanguages: ['python'],
       starterCode: { python: 'a', java: 'b' },
       testCases: [{ id: 't1', input: '', expectedOutput: '', isHidden: false, weight: 1 }],
-      paramSchema: [{ name: 'n', type: 'number', key: 'k' }],
       variants: [
         {
           id: 'v',
-          label: ' V ',
           paramsText: '{"n": 2}',
           active: true,
           overrides: [
@@ -161,9 +172,51 @@ describe('question draft (FR-201..FR-205)', () => {
         },
       ],
     });
-    const c = toContent(d);
-    expect(c.starterCode).toEqual({ python: 'a' });
-    expect(c.variants[0]).toMatchObject({ label: 'V', params: { n: 2 } });
-    expect(c.variants[0]?.overrides).toHaveLength(1);
+    const update = toUpdate(d);
+    expect(update.starterCode).toEqual({ python: 'a' });
+    expect(update).not.toHaveProperty('testCases');
+    expect(update).not.toHaveProperty('answerSpec');
+    const [variant] = toVariants(d);
+    expect(variant).toMatchObject({ params: { n: 2 }, isActive: true });
+    expect(variant?.overrides).toHaveLength(1);
+  });
+
+  it('FR-205: an answer spec has no `type` key (the question type decides) and option ids fit the API rule', () => {
+    const mcq = valid({ type: 'MCQ', allowedLanguages: [] });
+    mcq.mcq = {
+      options: [
+        { id: 'a', text: 'A' },
+        { id: 'b', text: 'B' },
+      ],
+      correctOptionIds: ['a'],
+      multiple: false,
+    };
+    expect(toUpdate(mcq).answerSpec).toEqual({
+      options: [
+        { id: 'a', text: 'A' },
+        { id: 'b', text: 'B' },
+      ],
+      correctOptionIds: ['a'],
+      multiple: false,
+    });
+    expect(emptyDraft('MCQ').mcq.options.every((o) => /^[A-Za-z0-9_-]{1,32}$/.test(o.id))).toBe(
+      true,
+    );
+    const short = valid({ type: 'SHORT_ANSWER', allowedLanguages: [] });
+    short.short = { canonical: ' 201 ', acceptedVariants: [{ key: 'k', value: ' ok ' }] };
+    expect(toUpdate(short).answerSpec).toEqual({ canonical: '201', acceptedVariants: ['ok'] });
+  });
+
+  it('FR-201: limits and tags follow the API rules', () => {
+    expect(
+      draftSchema.safeParse(valid({ limits: { cpuMs: 2000, wallMs: 25_000, memoryKb: 262_144 } }))
+        .success,
+    ).toBe(false);
+    expect(
+      draftSchema.safeParse(valid({ limits: { cpuMs: 2000, wallMs: 1000, memoryKb: 262_144 } }))
+        .success,
+    ).toBe(false);
+    expect(draftSchema.safeParse(valid({ tagsText: 'arrays, Sorting' })).success).toBe(true);
+    expect(draftSchema.safeParse(valid({ tagsText: '!bad' })).success).toBe(false);
   });
 });

@@ -11,6 +11,8 @@ import type { Env } from './config/env';
 import { ProblemFilter } from './common/problem.filter';
 
 export const API_PREFIX = 'api/v1';
+/** JSON body limit (FR-201): the largest valid question body is a few hundred KB. */
+export const JSON_BODY_LIMIT = '1mb';
 export const DOCS_PATH = 'api/docs';
 
 export function configureApp(app: INestApplication): void {
@@ -42,6 +44,11 @@ export function configureApp(app: INestApplication): void {
     `/${API_PREFIX}/client-errors`,
     createClientErrorBody(config.get('CLIENT_ERROR_BODY_TIMEOUT_MS', { infer: true })),
   );
+  // Question bank bodies carry up to 50 KB of statement and 100 KB per code map and test case, so
+  // they exceed Express's default 100 KB JSON limit. `express` is not a direct dependency, so the
+  // limit is raised for the one global JSON parser (every route has its own DTO length bounds).
+  // /client-errors is parsed before it by its own 16 KB middleware and is unaffected.
+  express.useBodyParser('json', { limit: JSON_BODY_LIMIT });
   app.useGlobalFilters(new ProblemFilter());
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),

@@ -11,7 +11,7 @@ import {
 import type { Request, Response } from 'express';
 import { OrgContextMissingError } from '../database/errors';
 import { scrubPrismaError } from '../database/error-scrub';
-import { CodedForbiddenException } from './coded.exception';
+import { CodedConflictException, CodedForbiddenException } from './coded.exception';
 import type { ProblemCode } from './coded.exception';
 
 export interface ProblemDetails {
@@ -85,7 +85,11 @@ export class ProblemFilter implements ExceptionFilter {
         }
       }
       // Only our own coded exceptions may set `code`, and never on a 5xx.
-      if (exception instanceof CodedForbiddenException && status < 500) {
+      if (
+        (exception instanceof CodedForbiddenException ||
+          exception instanceof CodedConflictException) &&
+        status < 500
+      ) {
         problem.code = exception.code;
       }
       if (status >= 500) {

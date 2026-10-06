@@ -28,13 +28,58 @@ export interface RowSelector {
  */
 export const FIXTURE_PASSWORD_HASH = 'not-a-real-hash';
 
+/** The models a CS-4 session scope can reach: the ten session-path models and the six read-only ones. */
+export type ChainModel =
+  | 'Organization'
+  | 'Candidate'
+  | 'Invitation'
+  | 'Test'
+  | 'TestSection'
+  | 'Question'
+  | 'Session'
+  | 'SessionQuestion'
+  | 'SessionSection'
+  | 'IdentityCheck'
+  | 'MediaChunk'
+  | 'ProctorEventBatch'
+  | 'ProctorEvent'
+  | 'KeystrokeBatch'
+  | 'Consent'
+  | 'Submission';
+
+/**
+ * One candidate's whole chain inside an org (ADR 0013 CS-4 tests): the candidate, an invitation to
+ * the candidate's own test (with its own section, test question, question and version), the session
+ * with its section, question, submission, consent, identity check, media chunk, event batch, event
+ * and keystroke batch. Two chains in one org share nothing but the org, the staff user and the
+ * consent text, so a filter that lets one candidate see the other's row shows up in every model.
+ */
+export interface SessionChain {
+  readonly label: string;
+  readonly orgId: string;
+  readonly candidateId: string;
+  readonly invitationId: string;
+  readonly testId: string;
+  readonly sectionId: string;
+  readonly testQuestionId: string;
+  readonly questionId: string;
+  readonly questionVersionId: string;
+  readonly sessionId: string;
+  readonly sessionQuestionId: string;
+  /** The selector of this chain's row in each model a CS-4 scope can reach. */
+  readonly rows: Record<ChainModel, RowSelector>;
+}
+
 export interface TenantFixture {
   readonly label: string;
   readonly orgId: string;
   readonly userId: string;
   readonly userRole: UserRole;
   readonly passwordHash: string;
+  readonly consentTextId: string;
   readonly rows: Record<ModelName, RowSelector>;
+  /** The chain of the tenant's own candidate (the one `rows` is made of). */
+  readonly chain: SessionChain;
 }
 
 const byId = (id: string | bigint): RowSelector => ({ unique: { id }, filter: { id } });
@@ -174,7 +219,7 @@ export async function createTenant(client: PrismaClient, label: string): Promise
       occurredAt: NOW,
     },
   });
-  const keystrokeBatch = await client.keystrokeBatch.create({
+  await client.keystrokeBatch.create({
     data: {
       sessionId: session.id,
       seq: 0,
@@ -217,6 +262,47 @@ export async function createTenant(client: PrismaClient, label: string): Promise
     userId: user.id,
     userRole: 'RECRUITER',
     passwordHash: FIXTURE_PASSWORD_HASH,
+    consentTextId: consentText.id,
+    chain: {
+      label,
+      orgId,
+      candidateId: candidate.id,
+      invitationId: invitation.id,
+      testId: test.id,
+      sectionId: section.id,
+      testQuestionId: testQuestion.id,
+      questionId: question.id,
+      questionVersionId: questionVersion.id,
+      sessionId: session.id,
+      sessionQuestionId: sessionQuestion.id,
+      rows: {
+        Organization: byId(orgId),
+        Candidate: byId(candidate.id),
+        Invitation: byId(invitation.id),
+        Test: byId(test.id),
+        TestSection: byId(section.id),
+        Question: byId(question.id),
+        Session: byId(session.id),
+        SessionQuestion: byId(sessionQuestion.id),
+        SessionSection: {
+          unique: { sessionId_sectionId: { sessionId: session.id, sectionId: section.id } },
+          filter: { sessionId: session.id, sectionId: section.id },
+        },
+        IdentityCheck: byId(identityCheck.id),
+        MediaChunk: byId(mediaChunk.id),
+        ProctorEventBatch: {
+          unique: { sessionId_seq: { sessionId: session.id, seq: 0 } },
+          filter: { sessionId: session.id, seq: 0 },
+        },
+        ProctorEvent: byId(proctorEvent.id),
+        KeystrokeBatch: {
+          unique: { sessionId_seq: { sessionId: session.id, seq: 0 } },
+          filter: { sessionId: session.id, seq: 0 },
+        },
+        Consent: byId(consent.id),
+        Submission: byId(submission.id),
+      },
+    },
     rows: {
       Organization: byId(orgId),
       User: byId(user.id),
@@ -252,12 +338,185 @@ export async function createTenant(client: PrismaClient, label: string): Promise
         filter: { sessionId: session.id, seq: 0 },
       },
       ProctorEvent: byId(proctorEvent.id),
-      KeystrokeBatch: byId(keystrokeBatch.id),
+      KeystrokeBatch: {
+        unique: { sessionId_seq: { sessionId: session.id, seq: 0 } },
+        filter: { sessionId: session.id, seq: 0 },
+      },
       SessionReview: byId(review.id),
       FlagDecision: byId(flagDecision.id),
       Appeal: byId(appeal.id),
       WebhookEndpoint: byId(endpoint.id),
       WebhookDelivery: byId(delivery.id),
+    },
+  };
+}
+
+/** Options of createCandidateChain. */
+export interface CandidateChainOptions {
+  /**
+   * Take the test, its section, its test question and the question (with its version) of this chain
+   * instead of creating them: two candidates who sit the SAME test (nit 6). Each still gets an
+   * invitation, a session, session sections and session questions of their own, so a filter that
+   * follows the test cannot tell them apart, and one that follows the session can.
+   */
+  readonly shareTestWith?: SessionChain;
+}
+
+/**
+ * A second candidate in an existing tenant, with a whole chain of its own (see SessionChain): its own
+ * test, section, question and invitation, so that two candidates of one org can be told apart in
+ * every model; or, with `shareTestWith`, the same test as another chain. Created through `client`,
+ * which must be allowed to write every table (the owner).
+ */
+export async function createCandidateChain(
+  client: PrismaClient,
+  tenant: TenantFixture,
+  label: string,
+  options: CandidateChainOptions = {},
+): Promise<SessionChain> {
+  const { orgId } = tenant;
+  const shared = options.shareTestWith;
+
+  const question =
+    shared === undefined
+      ? await client.question.create({ data: { orgId, slug: `q-${label}` } })
+      : { id: shared.questionId };
+  const questionVersion =
+    shared === undefined
+      ? await client.questionVersion.create({
+          data: {
+            questionId: question.id,
+            version: 1,
+            title: `Question ${label}`,
+            statementMd: 'Subtract two numbers.',
+            difficulty: 'EASY',
+            allowedLanguages: ['python'],
+          },
+        })
+      : { id: shared.questionVersionId };
+  const test =
+    shared === undefined
+      ? await client.test.create({ data: { orgId, name: `Test ${label}`, durationMinutes: 45 } })
+      : { id: shared.testId };
+  const section =
+    shared === undefined
+      ? await client.testSection.create({
+          data: { testId: test.id, title: `Section ${label}`, position: 0 },
+        })
+      : { id: shared.sectionId };
+  const testQuestion =
+    shared === undefined
+      ? await client.testQuestion.create({
+          data: { sectionId: section.id, questionVersionId: questionVersion.id, position: 0 },
+        })
+      : { id: shared.testQuestionId };
+  const candidate = await client.candidate.create({
+    data: { orgId, email: `candidate-${label}@example.test`, fullName: `Candidate ${label}` },
+  });
+  const invitation = await client.invitation.create({
+    data: {
+      orgId,
+      testId: test.id,
+      candidateId: candidate.id,
+      tokenHash: `inv-${label}-${randomUUID()}`,
+      windowStart: NOW,
+      windowEnd: new Date(NOW.getTime() + 86_400_000),
+    },
+  });
+  const session = await client.session.create({ data: { orgId, invitationId: invitation.id } });
+  await client.sessionSection.create({
+    data: { sessionId: session.id, sectionId: section.id, position: 0 },
+  });
+  const sessionQuestion = await client.sessionQuestion.create({
+    data: {
+      sessionId: session.id,
+      testQuestionId: testQuestion.id,
+      questionVersionId: questionVersion.id,
+      position: 0,
+      points: 100,
+    },
+  });
+  const submission = await client.submission.create({
+    data: {
+      sessionQuestionId: sessionQuestion.id,
+      kind: 'RUN',
+      language: 'python',
+      sourceCode: 'print(1)',
+    },
+  });
+  const consent = await client.consent.create({
+    data: {
+      sessionId: session.id,
+      consentTextId: tenant.consentTextId,
+      signedName: `Candidate ${label}`,
+      signedAt: NOW,
+    },
+  });
+  const identityCheck = await client.identityCheck.create({ data: { sessionId: session.id } });
+  const mediaChunk = await client.mediaChunk.create({
+    data: { sessionId: session.id, stream: 'SCREEN', seq: 0, startedAt: NOW, durationMs: 10_000 },
+  });
+  await client.proctorEventBatch.create({
+    data: { sessionId: session.id, seq: 0, signature: Buffer.from('sig'), eventCount: 1 },
+  });
+  const proctorEvent = await client.proctorEvent.create({
+    data: {
+      sessionId: session.id,
+      batchSeq: 0,
+      type: 'TAB_SWITCH',
+      severity: 'LOW',
+      occurredAt: NOW,
+    },
+  });
+  await client.keystrokeBatch.create({
+    data: {
+      sessionId: session.id,
+      sessionQuestionId: sessionQuestion.id,
+      seq: 0,
+      signature: Buffer.from('sig'),
+      startedAt: NOW,
+      events: [],
+    },
+  });
+
+  return {
+    label,
+    orgId,
+    candidateId: candidate.id,
+    invitationId: invitation.id,
+    testId: test.id,
+    sectionId: section.id,
+    testQuestionId: testQuestion.id,
+    questionId: question.id,
+    questionVersionId: questionVersion.id,
+    sessionId: session.id,
+    sessionQuestionId: sessionQuestion.id,
+    rows: {
+      Organization: byId(orgId),
+      Candidate: byId(candidate.id),
+      Invitation: byId(invitation.id),
+      Test: byId(test.id),
+      TestSection: byId(section.id),
+      Question: byId(question.id),
+      Session: byId(session.id),
+      SessionQuestion: byId(sessionQuestion.id),
+      SessionSection: {
+        unique: { sessionId_sectionId: { sessionId: session.id, sectionId: section.id } },
+        filter: { sessionId: session.id, sectionId: section.id },
+      },
+      IdentityCheck: byId(identityCheck.id),
+      MediaChunk: byId(mediaChunk.id),
+      ProctorEventBatch: {
+        unique: { sessionId_seq: { sessionId: session.id, seq: 0 } },
+        filter: { sessionId: session.id, seq: 0 },
+      },
+      ProctorEvent: byId(proctorEvent.id),
+      KeystrokeBatch: {
+        unique: { sessionId_seq: { sessionId: session.id, seq: 0 } },
+        filter: { sessionId: session.id, seq: 0 },
+      },
+      Consent: byId(consent.id),
+      Submission: byId(submission.id),
     },
   };
 }
