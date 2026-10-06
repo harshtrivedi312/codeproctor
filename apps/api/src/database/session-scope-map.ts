@@ -510,7 +510,9 @@ export const CANDIDATE_MODELS: Readonly<Partial<Record<ModelName, CandidateModel
     },
     // CS-4.4: "none". Its writers are SERVICE jobs and the staff proctor-resume.
     SessionSection: { kind: 'session' },
-    // CS-4.4: create only.
+    // CS-4.4: create only. `status` is not on the list, so a candidate never creates a WAIVED row (ADR 0015
+    // section 4: the accommodations path writes it, in a staff scope), and `video_check_done`,
+    // `video_check_by` and `video_check_at` are not writable either.
     IdentityCheck: {
       kind: 'session',
       create: ['sessionId', 'attempt', 'idImageKey', 'selfieKey', 'livenessPassed'],

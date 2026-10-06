@@ -36,18 +36,18 @@ describe('foreign key classification (NFR-04, FR-103; FU-DB-64)', () => {
     expect(findRelationProblems(real())).toEqual([]);
   });
 
-  it('TC-008 the schema has 58 foreign keys: 9 ORG_ID, 21 SCOPE_HOP, 3 COMPOSITE and 25 RULE_I', () => {
-    const expected = { ORG_ID: 9, SCOPE_HOP: 21, COMPOSITE: 3, RULE_I: 25, total: 58 };
-    // Counted from schema.prisma and the scope map alone, and from the table: both are 58.
-    expect(schemaForeignKeys(readSchemaModels())).toHaveLength(58);
+  it('TC-008 the schema has 59 foreign keys: 9 ORG_ID, 21 SCOPE_HOP, 3 COMPOSITE and 26 RULE_I', () => {
+    const expected = { ORG_ID: 9, SCOPE_HOP: 21, COMPOSITE: 3, RULE_I: 26, total: 59 };
+    // Counted from schema.prisma and the scope map alone, and from the table: both are 59.
+    expect(schemaForeignKeys(readSchemaModels())).toHaveLength(59);
     expect(countClasses(readSchemaModels(), ORG_SCOPE)).toEqual(expected);
     expect(tally(FK_CLASSES)).toEqual(expected);
   });
 
-  it('TC-008 the 25 RULE_I references are 12 staff references and 13 cross-chain references', () => {
+  it('TC-008 the 26 RULE_I references are 13 staff references and 13 cross-chain references', () => {
     const kinds = (kind: RuleIKind): number => FK_CLASSES.filter((k) => k.ruleI === kind).length;
     expect({ staff: kinds('staff'), crossChain: kinds('cross-chain') }).toEqual({
-      staff: 12,
+      staff: 13,
       crossChain: 13,
     });
     // Only RULE_I keys carry a kind.
@@ -55,8 +55,8 @@ describe('foreign key classification (NFR-04, FR-103; FU-DB-64)', () => {
     expect(FK_CLASSES.filter((k) => k.fkClass === 'RULE_I' && k.ruleI === undefined)).toEqual([]);
   });
 
-  it('TC-008 RULE_I_REFERENCES is the 25 foreign keys rule (i) applies to', () => {
-    expect(RULE_I_REFERENCES).toHaveLength(25);
+  it('TC-008 RULE_I_REFERENCES is the 26 foreign keys rule (i) applies to', () => {
+    expect(RULE_I_REFERENCES).toHaveLength(26);
     expect(RULE_I_REFERENCES.every((k) => k.fkClass === 'RULE_I')).toBe(true);
     const ids = RULE_I_REFERENCES.map((k) => `${k.model}.${k.field}`);
     // The ones the review and the follow-ups name.
@@ -75,8 +75,49 @@ describe('foreign key classification (NFR-04, FR-103; FU-DB-64)', () => {
         'Question.createdBy',
         'SessionReview.reviewer',
         'AuditLog.actor',
+        'IdentityCheck.reviewedBy',
+        'IdentityCheck.videoCheckBy',
       ]),
     );
+  });
+
+  it('TC-008 FR-305 ADR 0015 4: identity_checks.video_check_by is a staff rule (i) reference, not org-composite, with its own back relation', () => {
+    const key = FK_CLASSES.find((k) => k.model === 'IdentityCheck' && k.field === 'videoCheckBy');
+    expect(key).toEqual({
+      model: 'IdentityCheck',
+      field: 'videoCheckBy',
+      target: 'User',
+      back: 'videoCheckedIdentityChecks',
+      fkClass: 'RULE_I',
+      ruleI: 'staff',
+    });
+    expect(RULE_I_REFERENCES).toContain(key);
+    // The key is held in one column, video_check_by, and is told apart from reviewed_by by name.
+    const schema = readSchemaModels();
+    expect(schema['IdentityCheck']?.['videoCheckBy']?.foreignKeyFields).toEqual(['videoCheckById']);
+    expect(schema['IdentityCheck']?.['reviewedBy']?.foreignKeyFields).toEqual(['reviewedById']);
+    // Both sides of both IdentityCheck to User relations are in the side table, as RULE_I.
+    expect(relationOf('IdentityCheck', 'videoCheckBy')).toEqual({
+      target: 'User',
+      holdsFk: true,
+      fkClass: 'RULE_I',
+    });
+    expect(relationOf('User', 'videoCheckedIdentityChecks')).toEqual({
+      target: 'IdentityCheck',
+      holdsFk: false,
+      fkClass: 'RULE_I',
+    });
+    expect(relationOf('IdentityCheck', 'reviewedBy')?.fkClass).toBe('RULE_I');
+    expect(relationOf('User', 'reviewedIdentityChecks')?.fkClass).toBe('RULE_I');
+  });
+
+  it('TC-008 FR-305 ADR 0015 4: a model with two relations to the same target is classified once per relation', () => {
+    const toUser = FK_CLASSES.filter((k) => k.model === 'IdentityCheck' && k.target === 'User');
+    expect(toUser.map((k) => k.field).sort()).toEqual(['reviewedBy', 'videoCheckBy']);
+    expect(toUser.map((k) => k.back).sort()).toEqual([
+      'reviewedIdentityChecks',
+      'videoCheckedIdentityChecks',
+    ]);
   });
 
   it('TC-008 every model that has a scope path has exactly one scope-hop foreign key, its first hop', () => {
