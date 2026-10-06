@@ -161,9 +161,11 @@ export class ErasureService {
 
     // Purge what is ERASED: the whole prefix first, verified, then the rows.
     const fresh = await inOrg(() => this.repo.sessionsOf(candidateId));
+    // Once completed, the purge does not repeat on the daily sweeps that wait for day 28 or a notice.
+    const wasCompleted = await inOrg(() => this.repo.isCompleted(requestId, candidateId));
     let allClean = fresh.every((s) => s.status === 'ERASED');
     let settled = true;
-    for (const s of fresh) {
+    for (const s of wasCompleted ? [] : fresh) {
       if (s.status !== 'ERASED') continue;
       const fencedAt = await inOrg(() =>
         this.repo.fenceTime({ orgId, candidateId, sessionId: s.id, requestId, now: current() }),

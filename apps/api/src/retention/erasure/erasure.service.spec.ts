@@ -496,7 +496,7 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
     await setup(h.A, { submittedDaysAgo: 3, anchorDaysAgo: 3 });
     const cid = await candidateOf(h.A);
     h.store.failDeleteFor.add(keys(h.A).media);
-    const { svc, repo } = service();
+    const { svc, repo, notices } = service();
     const listedIds = async () => (await repo.findRequested(1000)).map((c) => c.candidateId);
     await svc.requestErasure({ orgId: h.A.orgId, candidateId: cid, actorId: ACTOR(), now: NOW });
     await svc.runDue(at(28 * 86_400_000));
@@ -507,7 +507,9 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
     expect(await listedIds()).toContain(cid);
     expect(await completedRows(cid)).toHaveLength(0);
     h.store.failDeleteFor.clear();
+    const mails = notices.completed;
     await svc.runDue(at(30 * 86_400_000));
+    expect(notices.completed).toBe(mails); // anonymised first: no completion mail
     expect(await completedRows(cid)).toHaveLength(1);
     expect(await listedIds()).not.toContain(cid);
   });

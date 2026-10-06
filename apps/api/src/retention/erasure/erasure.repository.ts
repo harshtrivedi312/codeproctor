@@ -272,6 +272,8 @@ export class ErasureRepository {
           action: ERASURE_RESERVED_ACTIONS.FENCED,
           entityId: sessionId,
           entityType: SESSION_ENTITY_TYPE,
+          actorId: null,
+          metadata: { path: ['requestId'], equals: requestId },
         },
         orderBy: { createdAt: 'asc' },
         select: { metadata: true },
