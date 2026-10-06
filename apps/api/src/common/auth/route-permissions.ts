@@ -26,7 +26,7 @@ export type CandidatePermission = Extract<Permission, `candidate_${string}`>;
  * Candidate routes the matrix may list as plain 'public': the pre-JWT bootstrap routes that run
  * without CandidateSessionGuard (ADR 0013 section 5.10: invitation-link resolve, OTP send, OTP
  * verify). Any other /candidate/ key listed 'public' is a matrix problem.
- * TODO(FU-BE-88): fill in the three real keys when BE-07 defines them; empty until then.
+ * TODO(FU-BE-90): fill in the three real keys when BE-07 defines them; empty until then.
  */
 export const CANDIDATE_BOOTSTRAP_ROUTES: readonly string[] = [];
 

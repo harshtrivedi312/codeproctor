@@ -114,7 +114,7 @@ export function matrixProblems(routes: readonly RegisteredRoute[]): string[] {
           `${route.key} is a CANDIDATE route in the matrix but not @Public(), so the staff guard would refuse it`,
         );
       }
-      // TODO(FU-BE-88): require CandidateSessionGuard specifically once BE-07 lands
+      // TODO(FU-BE-90): require CandidateSessionGuard specifically once BE-07 lands
       // (guards.includes(CandidateSessionGuard)).
       if (route.guards.length === 0) {
         problems.push(
