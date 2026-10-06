@@ -21,6 +21,15 @@ export const ERASURE_RESERVED_ACTIONS = {
   COMPLETED: 'ERASURE_COMPLETED',
 } as const;
 
+/** Non-reserved audit actions of the erasure run (ids and the request id only). */
+export const ERASURE_AUDIT_ACTIONS = {
+  SESSION_PURGED: 'ERASURE_SESSION_PURGED',
+  DELAY_NOTIFIED: 'ERASURE_DELAY_NOTIFIED',
+  NOTICE_RECORDED: 'ERASURE_NOTICE_RECORDED',
+  ALERT_RAISED: 'ERASURE_ALERT_RAISED',
+  REQUESTED: 'ERASURE_REQUESTED',
+} as const;
+
 export type RetentionTier = keyof typeof RETENTION_MARKER_ACTIONS;
 
 /** Audit rows about a session carry this entity type; `entity_id` is the session id as text. */
@@ -57,3 +66,7 @@ export const consentPrefix = (orgId: string, sessionId: string): string =>
 export const FACE_SUBPREFIXES = ['identity/', 'evidence/sealed/'] as const;
 /** The report objects: kept by the media tier, deleted by the results tier (C-26). */
 export const REPORTS_SUBPREFIX = 'reports/';
+
+/** The re-run waits for the fence time + this + the storage sweep margin, so in-flight uploads have landed (ADR 0004 9.5 step 7). */
+export const ERASURE_RERUN_BASE_SECONDS = 60;
+export const STORAGE_SWEEP_MARGIN_SECONDS = 30;

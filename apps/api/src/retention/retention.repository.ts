@@ -53,6 +53,7 @@ export const POST_CAPTURE_STATUSES = [
   'EXPIRED',
   'APPEALED',
   'DECLINED',
+  'ERASED',
 ];
 /** A review or appeal is open: the media tier never visits them (ADR 0004 R-2, re-checked here). */
 const HELD_STATUSES = ['UNDER_REVIEW', 'APPEALED'];
@@ -698,7 +699,7 @@ export class RetentionRepository {
   }
 }
 
-type Tx = Parameters<Parameters<PrismaService['client']['$transaction']>[0]>[0];
+export type Tx = Parameters<Parameters<PrismaService['client']['$transaction']>[0]>[0];
 
 function marker(tier: RetentionTier, orgId: string, sessionId: string, runId: string) {
   return {

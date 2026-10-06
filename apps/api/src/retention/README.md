@@ -6,8 +6,8 @@ C-35). The schema is Database A's; this folder is Database B's (DL-27).
 **Built so far (slices 1 and 2):** the clocks, the switches, the object-store port with verified
 deletion and the versioning gate, the face tier, the media tier (R-4), the results tier (R-10) with
 candidate anonymisation and the accommodation reductions, consent records (R-9), the per-run audit row,
-and the guards that keep the markers reserved and consent data behind one repository. **Next slice:**
-erasure (the fence through BE-07's SessionStateService via a port, the hold, the re-run, the notice).
+and the guards that keep the markers reserved and consent data behind one repository. **Slice 3 (this
+folder's `erasure/`):** erasure on request (below).
 
 ## How a tier runs
 
@@ -65,3 +65,26 @@ through a single-flight job. Tests use `../test/retention/in-memory-object-store
 `consent-access.spec.ts` fails on any other access to the consent model, an include or select of it, `signedName`, or raw SQL on `consents`. `retention-markers.spec.ts` fails if any file outside the allowlist mentions `RETENTION_*_DONE`,
 `ERASURE_EMAIL_SENT`, `ERASURE_EMAIL_FAILED`, `ERASURE_COMPLETED` or their constants (as a
 constant, a string literal or inside raw SQL). Add a legitimate writer to the allowlist in the same PR.
+
+## Erasure on request (`erasure/`, ADR 0004 9.5, C-06, C-17)
+
+`ErasureService.run(orgId, candidateId)` is idempotent and re-runnable. Request id =
+`{candidateId}_{epoch seconds of erasure_requested_at}`.
+
+1. Hold (`organizations.settings.erasure.holdWhileReviewOrAppealOpen`, default **true**, anything but a
+   boolean counts as true): a session that is UNDER_REVIEW or APPEALED, or has an open appeal, is skipped
+   and the candidate is told once (`ERASURE_DELAY_NOTIFIED`). With the switch off the fence closes the
+   open appeal (`CLOSED_ERASED`).
+2. Fence each other session through `SessionFencePort` (BE-07 implements it; retention never writes
+   `sessions.status`), then schedule a re-run after fence + 60 s + the storage sweep margin.
+3. For each ERASED session: delete the whole prefix with verification, then one transaction (candidate
+   lock first) applies R-6: delete events, batches, keystrokes, media chunks and identity checks;
+   blank submissions, answers, scoring notes, review notes and appeal text; clear device info and the
+   report key; reduce accommodations. **Scores, verdicts and the session row stay** (R-10 anonymises them).
+4. `ERASURE_COMPLETED` once per request, only when every session is ERASED and verified clean.
+5. The candidate row is anonymised at the first of: the worker's email-sent row, a recorded manual notice
+   (`recordManualNotice`, audited), or day 28 of the deadline (request or last review/appeal close,
+   whichever is later). Day 25 with no notice raises one alert. The consent record is never touched.
+
+`RetentionModule.forRoot({ ..., erasure })` takes a module exporting the four ports; without it every
+erasure call is refused (fail closed).

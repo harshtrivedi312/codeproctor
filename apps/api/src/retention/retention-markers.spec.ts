@@ -26,6 +26,10 @@ const EXTENSIONS = ['.ts', '.mjs', '.js', '.py', '.sh', '.sql'];
 const ALLOWED: Record<string, string> = {
   'apps/api/src/retention/retention.constants.ts': 'defines them',
   'apps/api/src/retention/retention.repository.ts': 'RetentionService writes and reads the markers',
+  'apps/api/src/retention/erasure/erasure.repository.ts':
+    'erasure writes ERASURE_COMPLETED and reads the email markers (never RETENTION_*_DONE)',
+  'apps/api/src/retention/erasure/erasure.ports.ts':
+    'prose only: the notice port documents who writes ERASURE_EMAIL_SENT and ERASURE_EMAIL_FAILED',
   'infra/backup/erasure-list.sh':
     'prose only: its comment names the ERASURE_COMPLETED event; it writes no audit row',
   'apps/api/src/test/retention/retention-harness.ts':
