@@ -1,6 +1,6 @@
 // ADR 0015 section 4 (waived identity check; FR-305, FR-403): the database guards of an
-// identity_checks row. Migrations 20261005235956_identity_check_waived_enum and
-// 20261005235957_identity_check_waiver_columns add the WAIVED status, the three video_check columns,
+// identity_checks row. Migrations 20261006174615_identity_check_waived_enum and
+// 20261006174715_identity_check_waiver_columns add the WAIVED status, the three video_check columns,
 // the video_check_by foreign key and two CHECK constraints (identity_checks_waived_check and
 // identity_checks_video_check_check). The existing identity_checks_check is unchanged.
 //
