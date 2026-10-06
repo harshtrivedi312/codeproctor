@@ -143,7 +143,7 @@ describe('DB-08 schema against docs/database.md (FR-105)', { skip }, () => {
     for (const [name, values] of doc.enums) assert.equal(db.get(name), values.join(','), name);
   });
 
-  it('the non-unique indexes match the document, with their WHERE predicates (24)', () => {
+  it('the non-unique indexes match the document, with their WHERE predicates (25)', () => {
     const wanted = doc.indexes
       .map((i) => `${i.table}|${norm(i.columns)}|${i.predicate ?? ''}`)
       .sort();
@@ -157,8 +157,9 @@ describe('DB-08 schema against docs/database.md (FR-105)', { skip }, () => {
         return `${table}|${norm(m[1])}|${m[2] ? predicateKey(m[2].replace(/^ WHERE /, '')) : ''}`;
       })
       .sort();
-    assert.equal(wanted.length, 24);
-    assert.equal(wanted.filter((w) => !w.endsWith('|')).length, 2, 'two partial indexes');
+    // 24 + audit_logs_retention_marker_idx (ADR 0004 §9.2, #91).
+    assert.equal(wanted.length, 25);
+    assert.equal(wanted.filter((w) => !w.endsWith('|')).length, 3, 'three partial indexes');
     assert.deepEqual(have, wanted);
   });
 
