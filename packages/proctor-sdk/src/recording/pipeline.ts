@@ -53,10 +53,12 @@ export class RecordingPipeline {
       ...(o.onHealth ? { onHealth: o.onHealth } : {}),
       ...(o.staleAfterMs === undefined ? {} : { staleAfterMs: o.staleAfterMs }),
       ...(o.maxMemoryBytes === undefined ? {} : { maxMemoryBytes: o.maxMemoryBytes }),
+      onStorageRecovered: () => o.onCapability?.({ id: 'recording-storage', status: 'SUPPORTED' }),
       onStorageDegraded: (reason) =>
         o.onCapability?.({
           id: 'recording-storage',
-          status: 'UNSUPPORTED',
+          // A failed open means no IndexedDB at all; a failed write may be transient (quota).
+          status: reason === 'OPEN_FAILED' ? 'UNSUPPORTED' : 'UNVERIFIABLE',
           detail:
             reason === 'OPEN_FAILED'
               ? 'IndexedDB unavailable: recording is buffered in memory only (a reload loses unsent chunks).'
@@ -184,14 +186,16 @@ export class RecordingPipeline {
       if (reported || this.recorders.get(stream) !== rec) return;
       reported = true;
       // Flush what we have, then tell the UI; the caller restarts as a new segment.
-      void this.stopStream(stream).then(() => {
-        this.o.onCapability?.({
-          id: `record-${stream.toLowerCase()}`,
-          status: 'UNVERIFIABLE',
-          detail: `Recording stopped (${reason}).`,
+      void this.stopStream(stream)
+        .catch(() => undefined) // a failing stop must not hide the device loss
+        .then(() => {
+          this.o.onCapability?.({
+            id: `record-${stream.toLowerCase()}`,
+            status: 'UNVERIFIABLE',
+            detail: `Recording stopped (${reason}).`,
+          });
+          this.o.onDeviceLost?.({ stream, reason });
         });
-        this.o.onDeviceLost?.({ stream, reason });
-      });
     };
     for (const t of media.getTracks())
       t.addEventListener('ended', () => lost('TRACK_ENDED'), { once: true });

@@ -49,6 +49,10 @@ export interface UploadQueueOptions {
   onHealth?: (h: RecorderHealth) => void;
   /** Called once when IndexedDB stops working and the queue falls back to memory. */
   onStorageDegraded?: (reason: 'OPEN_FAILED' | 'WRITE_FAILED') => void;
+  /** Called when IndexedDB writes work again after a degraded period. */
+  onStorageRecovered?: () => void;
+  /** While degraded, try IndexedDB again at most this often (default 30 s). */
+  storageProbeMs?: number;
   /** Max bytes held in memory when IndexedDB is unusable (default 32 MiB). */
   maxMemoryBytes?: number;
   /** Other sessions' leftovers older than this are deleted on start (default 24 h). */
@@ -94,6 +98,8 @@ export class UploadQueue {
   /** Chunks that could not be written to IndexedDB, uploaded from memory. */
   private readonly memory = new Map<string, ArrayBuffer>();
   private storageDegraded = false;
+  private lastStorageProbe = -Infinity;
+  private memBytes = 0;
 
   constructor(private readonly o: UploadQueueOptions) {
     this.concurrency = o.concurrency ?? 2;
@@ -140,10 +146,19 @@ export class UploadQueue {
     }
     await this.makeRoom(chunk.bytes);
     let stored = false;
-    if (!this.storageDegraded) {
+    const now = Date.now();
+    const probe =
+      this.storageDegraded && now - this.lastStorageProbe >= (this.o.storageProbeMs ?? 30_000);
+    if (!this.storageDegraded || probe) {
+      if (probe) this.lastStorageProbe = now;
       try {
         await this.o.store.put<StoredChunk>(STORES.chunks, key, { data });
         stored = true;
+        if (this.storageDegraded) {
+          // A transient quota or open error is over: stop living in memory only.
+          this.storageDegraded = false;
+          this.o.onStorageRecovered?.();
+        }
       } catch {
         this.degrade('WRITE_FAILED');
       }
@@ -157,6 +172,7 @@ export class UploadQueue {
         return;
       }
       this.memory.set(key, data);
+      this.memBytes += data.byteLength;
     }
     this.pending.set(key, chunk);
     void this.touch.touch();
@@ -167,13 +183,18 @@ export class UploadQueue {
   private degrade(reason: 'OPEN_FAILED' | 'WRITE_FAILED'): void {
     if (this.storageDegraded) return;
     this.storageDegraded = true;
+    this.lastStorageProbe = Date.now();
     this.o.onStorageDegraded?.(reason);
   }
 
+  private dropMemory(key: string): void {
+    const d = this.memory.get(key);
+    if (d) this.memBytes -= d.byteLength;
+    this.memory.delete(key);
+  }
+
   private memoryBytes(): number {
-    let b = 0;
-    for (const d of this.memory.values()) b += d.byteLength;
-    return b;
+    return this.memBytes;
   }
 
   private bytesPending(): number {
@@ -194,7 +215,7 @@ export class UploadQueue {
       if (!victim) return;
       const ref = this.pending.get(victim);
       this.pending.delete(victim);
-      this.memory.delete(victim);
+      this.dropMemory(victim);
       await this.o.store.delete(STORES.chunks, victim).catch(() => undefined);
       if (ref) this.drop(ref);
     }
@@ -251,7 +272,7 @@ export class UploadQueue {
         throw new MediaApiError('RETRY', `PUT failed with ${status}`);
       }
       await this.o.api.confirm(ref);
-      this.memory.delete(key);
+      this.dropMemory(key);
       await this.o.store.delete(STORES.chunks, key).catch(() => undefined);
       this.pending.delete(key);
       this.attempts.delete(key);
@@ -262,6 +283,7 @@ export class UploadQueue {
     } catch (err) {
       if (err instanceof MediaApiError && err.kind === 'FATAL') {
         // The server will never take this chunk (session over, chunk not allowed).
+        this.dropMemory(key);
         await this.o.store.delete(STORES.chunks, key).catch(() => undefined);
         if (ref) this.drop(ref);
         this.pending.delete(key);
@@ -344,6 +366,7 @@ export class UploadQueue {
     }
     this.pending.clear();
     this.memory.clear();
+    this.memBytes = 0;
     this.attempts.clear();
     this.notBefore.clear();
     await this.o.store.deletePrefix(STORES.chunks, this.prefix()).catch(() => 0);
