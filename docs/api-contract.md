@@ -124,3 +124,24 @@ Rules:
 - **Revocation on PATCH:** a role change or deactivation changes the `users` row first and then revokes the refresh tokens in one transaction; access tokens issued so far stop working through a Redis marker, and a Redis outage rolls the whole change back with a 503.
 - **Throttle and audit:** the default staff throttle applies. Every write above is audited, request-driven, with actor and IP; no audit metadata contains a password, a token or a link.
 - **Tests (QA assigns TC IDs):** each non-SUPER_ADMIN role gets 403; a wrong or locked password is 403 `REAUTH_FAILED` with the same body for every target (existing or not, own or other organisation); a missing `currentPassword` is 400; other-organisation and unknown users are the same 404; the three reachable 409 cases; the invite limit (429) and the Redis-down 503; a role change or deactivation revokes sessions at once (FR-104); the link is never in a response, a log line or an audit row (planted-token scan).
+
+## 7. Manual scoring of short answers (BE-13; D-23, FR-205, TC-099)
+
+Proposed by Backend B (BE-11 review) and shaped by the hub on 2026-10-06. The FSD section 4 row is the owner's, through the Delivery Lead's batch.
+
+| Method and path                                                    | Who                                          | Body                                              | Success                          |
+| ------------------------------------------------------------------ | -------------------------------------------- | ------------------------------------------------- | -------------------------------- |
+| `PATCH /review/sessions/:sessionId/answers/:sessionQuestionId`     | REVIEWER, SUPER_ADMIN (`review_verdict:set`) | `{ correct: boolean, note?: string (1..1000) }`   | 200 `{ sessionQuestionId, correct, score }` |
+
+Rules:
+
+- **Permission:** the existing `review_verdict:set`. The reviewer who sets the verdict also scores the answers that block it (TC-099), so no new permission is needed. Any other role is 403; a non-staff token is 401.
+- **Org scope and ids:** the organisation comes from the token. An unknown `sessionId`, another organisation's session, or a `sessionQuestionId` that does not belong to that session is the same 404.
+- **Which answers:** only a short-answer question whose result is `MANUAL_PENDING` (an answer that did not match after normalisation, D-23). Any other question (MCQ, coding, or a short answer already auto-scored) is 409 `ANSWER_NOT_MANUAL`.
+- **When:** the session must be UNDER_REVIEW (C-28: `route-session` moves every session there after grading, ADR 0014). Any other status is 409 `SESSION_NOT_UNDER_REVIEW`. Once the verdict is set the decision is final: 409 `VERDICT_ALREADY_SET`. Until then a reviewer may change a decision (the last one wins; every change is audited).
+- **Score:** `correct: true` gives the question's full points (`session_questions` points, as for an auto-scored match); `correct: false` gives 0. There is no partial credit.
+- **Effect on the verdict:** `POST /review/sessions/:id/verdict` answers 409 while any short answer of the session is still `MANUAL_PENDING` (TC-099). Setting a decision updates the session's total score in the same transaction.
+- **Note:** `note` is stored with the decision and shown in the review bundle. It is staff-written free text and is not copied into the audit metadata.
+- **Audit:** `ANSWER_SCORED_MANUALLY`, request-driven, with actor, IP, `entity_id` the session id, and metadata `{ sessionQuestionId, correct, previousCorrect }` (ids and booleans only, never the answer text or the note). A staff change to candidate data, so FR-105 applies.
+- **Errors:** 400 for a non-UUID id, a missing or non-boolean `correct`, a note outside 1..1000 characters or any unknown key; 401; 403; 404; 409 as above. The default staff throttle applies.
+- **Tests (QA assigns TC IDs):** each non-reviewer role gets 403; cross-organisation and cross-session ids are the same 404; a non-manual question is 409; a decision before UNDER_REVIEW and after the verdict are 409; the verdict is blocked until every manual answer is decided, and the total score follows each change; the audit row has the ids and booleans and no answer text or note.
