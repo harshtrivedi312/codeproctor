@@ -23,12 +23,13 @@
 //         metadata ONLY {method, route '/api/v1/admin/users/:userId/invite'}, NOT @Audited (no `audited`
 //         flag in the matrix). Listed ONLY when the backend's ROUTE_PERMISSIONS has the key (see below).
 //
-// BE-04 (slice 4a, question bank): 11 routes under /questions (slice 4b adds 7 variant routes below), listed below in the same table so the
+// BE-04 (question bank): 18 routes (4a: 11 under /questions, 4b: 7 variant routes), listed below in the same table so the
 // generic 401, 403, cross-org 404, effect and audit tests drive them. The audit rows are written by
 // the service in the mutation's own transaction (NOT @Audited, so no `audited` flag in the matrix):
 // entity `question`, entity id the question, metadata of ids and changed field NAMES only (never
 // content), listed per route in `metadataKeys`. Reads are not audited (a question is not candidate
-// data). Question reads: SUPER_ADMIN, RECRUITER, AUTHOR; writes: SUPER_ADMIN, AUTHOR.
+// data). Question reads: SUPER_ADMIN, RECRUITER, AUTHOR; writes: SUPER_ADMIN, AUTHOR. The variant
+// list GET is question:update (author data); only the variant preview is question:read.
 //
 // Switches: the BE-03 and BE-04 tests run by default (BE03_DEFAULT, BE04_DEFAULT = true). The
 // review routes (BE-13) stay off until BE13_DEFAULT is flipped, or `BE13_READY=1` in the environment for a trial run. The BE-13
@@ -826,7 +827,11 @@ const BE04_ROUTES: Be03Route[] = [
     permission: 'question:update',
     audit: { action: 'QUESTION_VARIANT_UPDATED', entityType: 'question' },
     metadataKeys: ['fields', 'variantId', 'version'],
-    metadataShape: { fields: isFieldList, variantId: isUuid, version: isInt },
+    metadataShape: {
+      fields: (v) => isFieldList(v) && JSON.stringify(v) === '["params","isActive"]',
+      variantId: isUuid,
+      version: isInt,
+    },
     mutating: true,
     ok: [200],
     prepare: async (h, orgId) => {
