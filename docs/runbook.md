@@ -121,8 +121,16 @@ NFR-03. Staging holds synthetic data only (Cloudflare R2, no real candidates). S
 live only in GitHub Actions secrets (environment `staging`) and on the staging server (D-38); no
 step below is run from a developer machine or an agent session.
 
-The steps run in this order. A person does steps 1, 4 and 6 (they handle credentials); the deploy
+The steps run in this order. A person does steps 0, 1, 4 and 6 (they handle credentials); the deploy
 job does 3 and 5.
+
+### 0. Lock the `staging` environment first (a person, before any secret exists)
+
+In GitHub, create the `staging` environment and allow deployments from the `main` branch only, with no
+required reviewers (they would stall the schedule). Only then create secrets. Until this is done, a
+branch pushed by any session could run a workflow that names the environment and read its secrets.
+Every workflow job that uses a staging secret also guards on `github.ref == 'refs/heads/main'`, as the
+nightly backup does; the restriction on the environment is what stops a different workflow file.
 
 ### 1. The database and its owner role (a person, once)
 
@@ -130,7 +138,12 @@ job does 3 and 5.
   deploy` needs session features that Supabase and Neon poolers do not give).
 - A migration owner role that owns the database. It needs `CREATE` on the database and must be able
   to create the `citext` and `pgcrypto` extensions (both are trusted extensions in PostgreSQL 13 and
-  later, so the database owner may create them).
+  later, so the database owner may create them). Give it `CREATEDB` as well if it is also the role that
+  runs an incident restore (see "Restoring for real"); otherwise name who grants it at that time.
+- **Supabase only:** its default privileges may expose new `public` tables to `anon` and `authenticated`
+  through the Data API. Turn the Data API off, or revoke those roles on `public` (including their default
+  privileges), **before step 3** (ADR 0006 section 7.5). On RDS, also check `rds.restrict_password_commands`
+  before step 4 (same section).
 - If that role can create roles (RDS master, Neon default owner, Postgres on EC2), the first
   `migrate deploy` creates `app_user` itself. If it cannot, create the role first as an administrator:
   `CREATE ROLE app_user LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;`
@@ -140,8 +153,14 @@ job does 3 and 5.
 
 ### 2. Network
 
-The deploy job and the nightly backup job must reach the database over TLS. Use
-`PGSSLMODE=verify-full` with a trusted root certificate (FU-DBB-04). If the database is not reachable
+Every connection must use TLS **with certificate verification**, for each client separately:
+`PGSSLMODE=verify-full` with a trusted root certificate (`PGSSLROOTCERT=system` or a CA from a secret)
+for psql and `pg_dump` (the backup and the drill), and the equivalent parameters in the two database URLs
+for Prisma's migration engine (`STAGING_MIGRATION_DATABASE_URL`) and the API's node-postgres driver
+(`STAGING_DATABASE_URL`). `PGSSLMODE` does not reach those two clients, and `sslmode=require` encrypts
+without checking the server, so a man-in-the-middle could capture the owner or `app_user` login. The
+deploy job fails if a URL lacks the verifying parameter (FU-DBB-04); confirm the exact spelling for
+Prisma 7 and `pg` before the first deploy. If the database is not reachable
 from GitHub-hosted runners, the job runs over SSH on the staging server or on a self-hosted runner
 inside the network; decide this before step 3 (DEP-01).
 
@@ -166,7 +185,7 @@ on a command line or in a workflow input. To rotate: repeat, update the secret, 
 ### 5. Check the role (the deploy job, after every migrate)
 
 Run these as the owner role; each must give the shown result. They are the same checks DB-08 runs
-(`infra/scripts/verify-schema.test.mjs`) and that the API's readiness check repeats at runtime.
+(`infra/scripts/verify-schema.test.mjs`); the API's readiness check will repeat them at runtime (FU-DB-66).
 
 ```sql
 SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls
@@ -174,6 +193,11 @@ SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrl
 SELECT count(*) FROM pg_auth_members WHERE member = 'app_user'::regrole;       -- 0
 SELECT has_database_privilege('app_user', current_database(), 'CREATE');       -- f
 SELECT has_schema_privilege('app_user', 'public', 'CREATE');                   -- f
+SELECT (SELECT count(*) FROM pg_database WHERE datdba = r.oid)
+     + (SELECT count(*) FROM pg_namespace WHERE nspowner = r.oid)
+     + (SELECT count(*) FROM pg_class WHERE relowner = r.oid)
+     + (SELECT count(*) FROM pg_proc WHERE proowner = r.oid)
+  FROM pg_roles r WHERE r.rolname = 'app_user';                                 -- 0 (owns nothing)
 SELECT has_table_privilege('app_user', 'audit_logs', 'UPDATE');                -- f
 SELECT has_table_privilege('app_user', '_prisma_migrations', 'SELECT');        -- f
 SELECT has_database_privilege('app_user', current_database(), 'TEMPORARY');    -- f once the TEMP migration (FU-DBB-18) is applied
@@ -183,23 +207,30 @@ SELECT has_database_privilege('app_user', current_database(), 'TEMPORARY');    -
 
 1. Create a private bucket on Cloudflare R2 for backups. No public access, and **no object versioning**
    (noncurrent copies would outlive the 14-day limit, ADR 0004 section 9.7).
-2. Create an R2 token limited to that bucket, and a read-only database role for the backup
-   (`pg_read_all_data` or equivalent).
+   (Stricter than the general rule above, which allows versioning with a short noncurrent-version
+   lifecycle rule: on R2 we simply do not turn it on.)
+2. Create an R2 token limited to that bucket. Create the backup's database role as a person: `LOGIN`
+   with `pg_read_all_data`, not `app_user` and not the owner (a read-only role cannot dump a table it
+   cannot read, so check the first run). Set its password as in step 4 (`\password`, never on a
+   command line) and connect it with the same certificate-verifying TLS settings as step 2.
 3. Create the nine secrets in the `staging` environment (names in FU-DBB-04): the bucket and endpoint,
-   the access key id and secret, and the database host, port, user, password and name. Restrict the
-   `staging` environment to the `main` branch, with no required reviewers.
+   the access key id and secret, and the database host, port, user, password and name. The environment
+   was locked to `main` in step 0; check that still holds.
 4. Run the nightly workflow once by hand (`workflow_dispatch` on `main`). A green run means: a dump, its
    `.sha256` and `.counts.tsv` are in `staging/dumps/` in the bucket, and the restore drill step restored
    it into the throwaway Postgres service with matching row counts.
-5. Check the bucket now holds one dump. After 14 days it should hold about 14 (never more than 15), and
-   `staging/erasure-list/` holds only candidate ids.
+5. Check the bucket now holds one dump. After 14 days it should hold about 14, plus any manual runs.
+   `staging/erasure-list/` and `staging/erasure-completed/` hold only `<stamp>-<candidate uuid>.json`
+   objects (an id and a time, no names or emails).
 
 ### 7. The restore drill
 
 The nightly workflow restores each new backup into a throwaway server and fails the job when the row
 counts differ (exit code 2) or anything else goes wrong (exit code 1). Treat a red run as an incident:
-until a restore works, there is no backup. Once a quarter, and before the pilot, run the drill by hand
-from the workflow with a **named older backup** (not the newest) to prove that old backups restore too.
+until a restore works, there is no backup. Once a quarter, and before the pilot, also prove that an **older** backup restores: run `restore.sh
+--backup <older dump file>` into a throwaway server (a person, with the staging store settings). The
+nightly workflow only restores the newest backup and takes no input; a workflow input for this is a
+proposal for the hub (FU-DBB-24).
 For a real restore, follow "Restoring for real (an incident)" above; it runs as the migration owner role
 and re-applies erasures.
 
