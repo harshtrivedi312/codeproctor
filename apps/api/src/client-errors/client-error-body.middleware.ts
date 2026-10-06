@@ -52,7 +52,7 @@ export function exceedsJsonDepth(text: string, max: number): boolean {
 
 /**
  * Reads and parses the JSON body of POST /client-errors itself, so the limit holds whatever the
- * framing (Content-Length, chunked, HTTP/2): bytes are counted as they stream in and the request is
+ * framing (Content-Length or chunked): bytes are counted as they stream in and the request is
  * refused at the cap (413), or after `timeoutMs` of reading (408, slowloris). A body that is not
  * JSON is 415 (so a cross-site form post cannot reach the global urlencoded parser) and a
  * compressed body is 415 (never inflated). A request with no body falls through and validation
