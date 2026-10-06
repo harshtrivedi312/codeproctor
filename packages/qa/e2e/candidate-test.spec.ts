@@ -53,8 +53,9 @@ test.describe('candidate test screen (mocked)', () => {
     // (flaky, 2 of 5 runs). Wait for the real theme, then two animation frames; the check itself
     // is unchanged.
     await expect(page.locator('.monaco-editor.vs-dark .view-lines')).toBeVisible();
+    // A string expression: this package has no DOM types, so a callback would not type-check.
     await page.evaluate(
-      () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+      'new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))',
     );
     const results = await new AxeBuilder({ page })
       .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
