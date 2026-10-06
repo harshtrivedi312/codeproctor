@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react';
+import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { axe } from 'vitest-axe';
@@ -7,6 +7,7 @@ import { api } from '@/lib/api/client';
 import { getAccessToken } from '@/lib/auth-token';
 import { apiBaseUrl } from '@/lib/env';
 import { MOCK_USERS } from '@/mocks/auth-handlers';
+import { setMockQuestionScenario } from '@/mocks/question-handlers';
 import { server } from '@/mocks/server';
 import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
 import { full } from '@/test/question-api';
@@ -324,7 +325,15 @@ describe('Answer tab (FR-205)', () => {
 });
 
 describe('AI reference solutions (D-20, ADR 0005)', () => {
-  it('D-20: shows the refresh-due badge when the newest solution is older than the refresh window', async () => {
+  it('D-20: shows the refresh-due badge only when the API sends a refresh interval and the newest solution is older', async () => {
+    // The API sends refreshIntervalDays: null until it implements AI-4: no badge, no invented one.
+    const none = await openEditor('q-merge');
+    await goTab(none, 'AI reference solutions');
+    await screen.findByText('Collected solutions');
+    expect(screen.getAllByText('Ready')).toHaveLength(3);
+    expect(screen.queryByTestId('refresh-due')).not.toBeInTheDocument();
+    cleanup();
+    setMockQuestionScenario({ aiRefreshDays: 90 });
     const u = await openEditor('q-merge');
     await goTab(u, 'AI reference solutions');
     expect(await screen.findByTestId('refresh-due')).toHaveTextContent('Refresh due');

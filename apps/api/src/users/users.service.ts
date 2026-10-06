@@ -27,6 +27,7 @@ import { AuthService } from '../auth/auth.service';
 import { newOpaqueToken, sha256Hex } from '../auth/crypto.util';
 import { TokenValidityService } from '../common/auth/token-validity.service';
 import { reauthFailed } from '../common/coded.exception';
+import { hitWindowCounter } from '../common/redis-counter';
 import { errorName } from '../common/request-context';
 import type { RequestContext } from '../common/request-context';
 import { ensureConnected } from '../infrastructure/redis-ready';
@@ -292,10 +293,9 @@ export class UsersService {
     let count: number;
     try {
       await ensureConnected(this.redis);
-      // SET NX EX creates the key with its expiry in one command, so no counter is ever left
-      // without a TTL; INCR then keeps that TTL.
-      await this.redis.set(key, '0', 'EX', INVITE_WINDOW_SECONDS, 'NX');
-      count = await this.redis.incr(key);
+      // One atomic script (INCR plus the expiry when the key is new or has none), so no counter is
+      // ever left without a TTL, not even if the key expires between two commands (FU-BE-64).
+      count = (await hitWindowCounter(this.redis, key, INVITE_WINDOW_SECONDS)).count;
     } catch {
       throw new ServiceUnavailableException('Verification is temporarily unavailable.');
     }

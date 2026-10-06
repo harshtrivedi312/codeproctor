@@ -270,12 +270,15 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
               await settleValidation(h);
               const body = res.body as { version: number; revision: string };
               const rows = await since(before);
+              // Exactly the STARTED row and the FINISHED row, so the lookup below cannot be undefined.
+              expect(rows.map((r) => r.action).sort()).toEqual([
+                'QUESTION_VALIDATION_FINISHED',
+                'QUESTION_VALIDATION_STARTED',
+              ]);
               const started = rows.find(
                 (r) => r.action === 'QUESTION_VALIDATION_STARTED',
               ) as AuditLog;
-              const finished = rows.filter((r) => r.action === 'QUESTION_VALIDATION_FINISHED');
-              expect(finished).toHaveLength(1);
-              const row = finished[0] as AuditLog;
+              const row = rows.find((r) => r.action === 'QUESTION_VALIDATION_FINISHED') as AuditLog; // exactly one, by the pair check above
               expect([row.actorId, row.ip, row.entityId, row.orgId]).toEqual([
                 null,
                 null,
@@ -295,6 +298,7 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
               });
               expect(version.validatedAt).not.toBeNull();
             } finally {
+              await settleValidation(h).catch(() => undefined);
               h.resetValidationPort();
             }
           });

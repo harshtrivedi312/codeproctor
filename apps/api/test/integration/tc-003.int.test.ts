@@ -9,6 +9,7 @@ import {
   Body,
   boot,
   createUser,
+  expectDisableReauthFailed,
   expectNoTotpEnabled,
   expectReauthFailed,
   Harness,
@@ -432,9 +433,9 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       const u = await createUser(h, { role: UserRole.AUTHOR, totp: TOTP_SECRET });
       const { auth } = await signInPrevStep(u.email);
       const wrongPw = await disable(auth, { currentPassword: 'Nope-Nope-1', totpCode: goodCode() });
-      expectReauthFailed(wrongPw);
+      expectDisableReauthFailed(wrongPw);
       const wrongCode = await disable(auth, { currentPassword: PASSWORD, totpCode: badCode() });
-      expectReauthFailed(wrongCode);
+      expectDisableReauthFailed(wrongCode);
       expect(stableProblem(wrongCode)).toEqual(stableProblem(wrongPw));
       expect(wrongCode.headers['set-cookie']).toBeUndefined();
       expect(await twoFactorOn(u.id)).toBe(true);
@@ -447,7 +448,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
         currentPassword: 'Nope-Nope-1',
         totpCode: goodCode(),
       });
-      expectReauthFailed(wrongPwRes);
+      expectDisableReauthFailed(wrongPwRes);
       const wrongPw = stableProblem(wrongPwRes);
       await stepSafe();
       const { challengeToken } = (await login(h, u.email).expect(200)).body as Body;
@@ -455,7 +456,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       const done = await post('2fa/verify').send({ challengeToken, code }).expect(200);
       const auth = { Authorization: `Bearer ${(done.body as Body).accessToken}` };
       const replay = await disable(auth, { currentPassword: PASSWORD, totpCode: code });
-      expectReauthFailed(replay);
+      expectDisableReauthFailed(replay);
       expect(stableProblem(replay)).toEqual(wrongPw);
       expect(await twoFactorOn(u.id)).toBe(true);
     });
@@ -463,7 +464,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
     it('TC-003: with 2FA already off, disable is 409 after the password check (wrong password is REAUTH_FAILED), before the code is looked at', async () => {
       const u = await createUser(h, { role: UserRole.AUTHOR });
       const auth = await signIn(h, u.email);
-      expectReauthFailed(
+      expectDisableReauthFailed(
         await disable(auth, { currentPassword: 'Nope-Nope-1', totpCode: goodCode() }),
       );
       await disable(auth, { currentPassword: PASSWORD, totpCode: goodCode() }).expect(409);
@@ -480,12 +481,12 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
             ? { currentPassword: 'Nope-Nope-1', totpCode: goodCode() }
             : { currentPassword: PASSWORD, totpCode: badCode() };
         const r = await disable(auth, body);
-        expectReauthFailed(r);
+        expectDisableReauthFailed(r);
         wrongBody ??= stableProblem(r);
         expect(stableProblem(r)).toEqual(wrongBody);
       }
       const locked = await disable(auth, { currentPassword: PASSWORD, totpCode: goodCode() });
-      expectReauthFailed(locked);
+      expectDisableReauthFailed(locked);
       expect(stableProblem(locked)).toEqual(wrongBody);
       expect(await twoFactorOn(u.id)).toBe(true);
       await login(h, u.email).expect(401);
@@ -497,10 +498,12 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
         const u = await createUser(h, { role, totp: TOTP_SECRET });
         const { auth, cookie } = await signInPrevStep(u.email);
         const before = await h.owner.user.findUniqueOrThrow({ where: { id: u.id } });
-        expectReauthFailed(
+        expectDisableReauthFailed(
           await disable(auth, { currentPassword: 'Nope-Nope-1', totpCode: goodCode() }),
         );
-        expectReauthFailed(await disable(auth, { currentPassword: PASSWORD, totpCode: badCode() }));
+        expectDisableReauthFailed(
+          await disable(auth, { currentPassword: PASSWORD, totpCode: badCode() }),
+        );
         await disable(auth, {}).expect(400);
         await disable(auth, { currentPassword: PASSWORD }).expect(400);
         const failedBefore = await failedLogins(u.id); // the two refusals above counted
@@ -604,7 +607,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       );
     });
 
-    it('FR-102: a locked admin, or a wrong password, gets the identical REAUTH_FAILED body on reset, disable and regenerate', async () => {
+    it('FR-102: a locked admin, or a wrong password, gets the identical REAUTH_FAILED body within each of reset, disable (own fixed detail) and regenerate', async () => {
       const admin = await createUser(h, { role: UserRole.SUPER_ADMIN, totp: TOTP_SECRET });
       const target = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
       await stepSafe();
@@ -624,12 +627,16 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       for (let i = 0; i < 5; i++) {
         const route = routes[i % 3];
         const r = await route!('Nope-Nope-1');
-        expectReauthFailed(r);
+        // Disable has its own fixed detail (FU-BE-58); reset and regenerate keep the old one.
+        if (i % 3 === 1) expectDisableReauthFailed(r);
+        else expectReauthFailed(r);
         wrong[i % 3] = stableProblem(r);
       }
       for (let i = 0; i < 3; i++) {
         const r = await routes[i]!(PASSWORD); // correct password, but the account is locked now
-        expectReauthFailed(r);
+        if (i === 1) expectDisableReauthFailed(r);
+        else expectReauthFailed(r);
+        expect((r.body as Body).code).toBe('REAUTH_FAILED');
         expect(stableProblem(r)).toEqual(wrong[i]);
       }
       expect((await h.owner.user.findUniqueOrThrow({ where: { id: target.id } })).totpEnabled).toBe(
@@ -693,47 +700,179 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       ).toBe(true);
     });
   });
+});
 
-  // Last in the file on purpose: the Redis container is stopped for good (a restart would change
-  // its mapped port). A paused container is not usable here, the client just waits.
-  describe('FR-102: replay store outage', () => {
-    it('TC-003: with Redis down, /2fa/verify and /2fa/disable answer 503 "temporarily unavailable" (not 500) and issues no session', async () => {
-      const u = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
-      const { challengeToken } = (await login(h, u.email).expect(200)).body as Body;
-      await stepSafe();
-      const d = await createUser(h, { role: UserRole.AUTHOR, totp: TOTP_SECRET });
-      const dChallenge = ((await login(h, d.email).expect(200)).body as Body).challengeToken;
-      const dSession = await post('2fa/verify')
-        .send({
-          challengeToken: dChallenge,
-          code: authenticator.clone({ epoch: Date.now() - 30_000 }).generate(TOTP_SECRET),
-        })
-        .expect(200);
-      const failedBefore = await failedLogins(d.id);
-      await h.infra.redis.stop();
-      // Disable with correct factors: the replay store is down, so 503 and nothing changes.
-      const dis = await post('2fa/disable')
-        .set({ Authorization: `Bearer ${(dSession.body as Body).accessToken}` })
-        .send({ currentPassword: PASSWORD, totpCode: authenticator.generate(TOTP_SECRET) })
-        .timeout({ response: 30000, deadline: 40000 });
-      expect(dis.status).toBe(503);
-      expect(JSON.stringify(dis.body)).toContain('temporarily unavailable');
-      expect(dis.headers['set-cookie']).toBeUndefined();
-      expect(await twoFactorOn(d.id)).toBe(true);
-      expect(await failedLogins(d.id)).toBe(failedBefore); // an outage counts as no failure
-      expect(await h.owner.refreshToken.count({ where: { userId: d.id, revokedAt: null } })).toBe(
-        1,
-      );
-      expect(
-        await h.owner.auditLog.count({ where: { actorId: d.id, action: 'AUTH_2FA_DISABLED' } }),
-      ).toBe(0);
-      const res = await post('2fa/verify')
-        .send({ challengeToken, code: authenticator.generate(TOTP_SECRET) })
-        .timeout({ response: 30000, deadline: 40000 });
-      expect(res.status).toBe(503);
-      expect(JSON.stringify(res.body)).toContain('temporarily unavailable');
-      expect(res.headers['set-cookie']).toBeUndefined();
-      expect(await h.owner.refreshToken.count({ where: { userId: u.id } })).toBe(0);
-    }, 90000);
+// Last in the file on purpose: the Redis container is stopped for good (a restart would change
+// its mapped port). A paused container is not usable here, the client just waits.
+//
+// Since #175 the global throttle guard keeps its counters in Redis and answers 503 "Service is
+// temporarily unavailable." BEFORE any handler runs. So these tests boot with memoryThrottle
+// (in-memory throttle store) and skipFreshnessCheck (the JWT guard's own Redis freshness check
+// shares the handlers' wording), so the request reaches the HANDLER and its own fail-closed branch
+// is what answers. They assert the handler wording, which the throttler 503 does not contain.
+describe('TC-003 (FR-102): replay store outage reaches the handlers', () => {
+  const HANDLER_503 = 'Verification is temporarily unavailable.';
+  let h: Harness;
+  let spy: jest.SpyInstance | undefined;
+  beforeAll(async () => {
+    h = await boot({ memoryThrottle: true });
+  });
+  afterAll(async () => {
+    spy?.mockRestore();
+    await h?.close();
+  });
+  const post = (path: string): request.Test =>
+    request(h.app.getHttpServer()).post(`${API}/auth/${path}`);
+  const slow = (t: request.Test): request.Test => t.timeout({ response: 30000, deadline: 40000 });
+  const row = (id: string): ReturnType<typeof h.owner.user.findUniqueOrThrow> =>
+    h.owner.user.findUniqueOrThrow({ where: { id } });
+  const expectHandler503 = (res: request.Response): void => {
+    expect(res.status).toBe(503);
+    expect(res.headers['content-type']).toContain('application/problem+json');
+    expect((res.body as Body).detail).toBe(HANDLER_503);
+    expect(JSON.stringify(res.body)).not.toContain('Service is temporarily unavailable.');
+    expect(res.headers['set-cookie']).toBeUndefined();
+    expect((res.body as Body).accessToken).toBeUndefined();
+    expect((res.body as Body).session).toBeUndefined();
+  };
+
+  // Fixtures that need Redis are made first; then Redis is stopped for the three tests below.
+  let verifyCase: { id: string; challengeToken: string };
+  let disableCase: { id: string; accessToken: string };
+  let confirmCase: { id: string; challengeToken: string; code: string };
+  let recoveryCase: { id: string; challengeToken: string; code: string };
+  let recruiterToken: string;
+  let auditBefore: number;
+  beforeAll(async () => {
+    const rec = await createUser(h, { role: UserRole.RECRUITER });
+    recruiterToken = (await signIn(h, rec.email)).Authorization.replace('Bearer ', '');
+    const r = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
+    const code = 'QRSTUVWXYZABCDEF';
+    await h.owner.user.update({
+      where: { id: r.id },
+      data: { recoveryCodeHashes: [sha256Hex(code)] },
+    });
+    recoveryCase = {
+      id: r.id,
+      code,
+      challengeToken: ((await login(h, r.email).expect(200)).body as Body).challengeToken,
+    };
+    const u = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
+    verifyCase = {
+      id: u.id,
+      challengeToken: ((await login(h, u.email).expect(200)).body as Body).challengeToken,
+    };
+    const d = await createUser(h, { role: UserRole.AUTHOR, totp: TOTP_SECRET });
+    const dChallenge = ((await login(h, d.email).expect(200)).body as Body).challengeToken;
+    const dSession = await post('2fa/verify')
+      .send({
+        challengeToken: dChallenge,
+        code: authenticator.clone({ epoch: Date.now() - 30_000 }).generate(TOTP_SECRET),
+      })
+      .expect(200);
+    disableCase = { id: d.id, accessToken: (dSession.body as Body).accessToken ?? '' };
+    const e = await createUser(h, { role: UserRole.REVIEWER });
+    const eChallenge = ((await login(h, e.email).expect(200)).body as Body).challengeToken;
+    const eStart = (await post('2fa/enroll/start').send({ challengeToken: eChallenge }).expect(200))
+      .body as Body;
+    confirmCase = {
+      id: e.id,
+      challengeToken: eChallenge,
+      code: authenticator.generate(eStart.manualKey),
+    };
+    auditBefore = await h.owner.auditLog.count();
+    await h.infra.redis.stop();
+  }, 120000);
+
+  // No isFresh spy here: the JWT guard's own freshness check is the layer under test. A valid token
+  // on a route whose handler never touches Redis must NOT be served (a fail-open guard would 200).
+  it('TC-003: with Redis down and no bypass, a valid access token on GET /tests is refused by the guard with 503 and no data', async () => {
+    const res = await slow(
+      request(h.app.getHttpServer())
+        .get(`${API}/tests`)
+        .set('Authorization', `Bearer ${recruiterToken}`),
+    );
+    expect(res.status).toBe(503);
+    expect(res.headers['content-type']).toContain('application/problem+json');
+    expect((res.body as Body).detail).toBe(HANDLER_503);
+    expect(Array.isArray(res.body)).toBe(false);
+    expect((res.body as { items?: unknown }).items).toBeUndefined();
+  }, 90000);
+
+  it('TC-003: with Redis down, /2fa/disable with correct factors answers the handler 503, keeps 2FA on, revokes nothing and counts no failure', async () => {
+    const before = await row(disableCase.id);
+    spy = h.skipFreshnessCheck();
+    expectHandler503(
+      await slow(
+        post('2fa/disable')
+          .set({ Authorization: `Bearer ${disableCase.accessToken}` })
+          .send({ currentPassword: PASSWORD, totpCode: authenticator.generate(TOTP_SECRET) }),
+      ),
+    );
+    expect(spy).toHaveBeenCalled(); // the bypass took effect, so the handler is what answered
+    const after = await row(disableCase.id);
+    expect(after.totpEnabled).toBe(true);
+    expect(after.totpSecretEnc).toBe(before.totpSecretEnc);
+    expect(after.failedLogins).toBe(before.failedLogins); // an outage counts as no failure
+    expect(
+      await h.owner.refreshToken.count({ where: { userId: disableCase.id, revokedAt: null } }),
+    ).toBe(1);
+    expect(
+      await h.owner.auditLog.count({
+        where: { actorId: disableCase.id, action: 'AUTH_2FA_DISABLED' },
+      }),
+    ).toBe(0);
+  }, 90000);
+
+  it('TC-003: with Redis down, /2fa/verify with a correct code answers the handler 503 and issues no session, cookie or refresh row', async () => {
+    const before = await row(verifyCase.id);
+    expectHandler503(
+      await slow(
+        post('2fa/verify').send({
+          challengeToken: verifyCase.challengeToken,
+          code: authenticator.generate(TOTP_SECRET),
+        }),
+      ),
+    );
+    expect(await h.owner.refreshToken.count({ where: { userId: verifyCase.id } })).toBe(0);
+    expect((await row(verifyCase.id)).failedLogins).toBe(before.failedLogins);
+  }, 90000);
+
+  it('TC-003: with Redis down, /2fa/verify with a correct RECOVERY code answers the handler 503: no session, the code is not consumed, nothing counted', async () => {
+    const before = await row(recoveryCase.id);
+    expect(before.recoveryCodeHashes).toHaveLength(1);
+    expectHandler503(
+      await slow(
+        post('2fa/verify').send({
+          challengeToken: recoveryCase.challengeToken,
+          code: recoveryCase.code,
+        }),
+      ),
+    );
+    const after = await row(recoveryCase.id);
+    expect(after.recoveryCodeHashes).toEqual(before.recoveryCodeHashes);
+    expect(after.failedLogins).toBe(before.failedLogins);
+    expect(await h.owner.refreshToken.count({ where: { userId: recoveryCase.id } })).toBe(0);
+  }, 90000);
+
+  it('TC-003: with Redis down, /2fa/enroll/confirm with a correct code answers the handler 503: 2FA stays off, no recovery codes, no session', async () => {
+    const before = await row(confirmCase.id);
+    expectHandler503(
+      await slow(
+        post('2fa/enroll/confirm').send({
+          challengeToken: confirmCase.challengeToken,
+          code: confirmCase.code,
+        }),
+      ),
+    );
+    const after = await row(confirmCase.id);
+    expect(after.totpEnabled).toBe(false);
+    expect(after.recoveryCodeHashes).toEqual(before.recoveryCodeHashes);
+    expect(after.failedLogins).toBe(before.failedLogins);
+    expect(await h.owner.refreshToken.count({ where: { userId: confirmCase.id } })).toBe(0);
+  }, 90000);
+
+  it('TC-003: none of the refused outage calls wrote an audit row', async () => {
+    expect(await h.owner.auditLog.count()).toBe(auditBefore);
   });
 });
