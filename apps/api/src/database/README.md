@@ -706,6 +706,12 @@ The errors are plain `Error`s with fixed messages and **no value in them**, neve
 higher isolation level turns the compare-and-set into serialization errors) and keep the transaction short:
 the lock is held until it commits, and nothing may do I/O inside it (ADR 0013 5.7).
 
+- **Pass the `tx` of the interactive transaction, never `prisma.client`.** On the client itself the read and
+  the write would commit one by one and the lock would be gone at once, with the caller believing it holds
+  it. `SessionLockTx` types `$connect` and `$disconnect` as `never` (Prisma removes them from a transaction
+  client), so `guardLive(prisma.client, id)` does not compile, and both functions throw an
+  `OrgScopeViolationError` at run time if they see either (a test checks both). `$transaction` cannot be the
+  discriminator: Prisma 7 leaves it on the transaction client.
 - SERVICE session scope (`detachForSessionJob`, then `runAsSessionJob`), STAFF scope (`runAsUser`, the
   proctor-resume route) and plain org scope (`runInOrg`): the extension filters the read and the write by
   org (and by session, in a session scope), so another org's session, another session of the same org

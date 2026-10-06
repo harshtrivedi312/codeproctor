@@ -42,7 +42,12 @@
 //   absent   the condition and the checks are left out, which is equivalent on such a database. The
 //            moment #91 regenerates the client, the first branch is live with no code change.
 import { SessionStatus } from '../generated/prisma/enums.js';
-import { AccommodationLockedError, SessionLockRetryError, SessionNotFoundError } from './errors';
+import {
+  AccommodationLockedError,
+  OrgScopeViolationError,
+  SessionLockRetryError,
+  SessionNotFoundError,
+} from './errors';
 
 /** What guardLive says: the session is still live (the lock is held), or it was erased (nothing written). */
 export type GuardLiveResult = 'LIVE' | 'ERASED';
@@ -64,8 +69,15 @@ export interface SessionLockWhere {
  * What the two functions need of a transaction client: two calls on `session`. The interactive
  * transaction client of the org-scoped client (`prisma.client.$transaction(async (tx) => ...)`) fits,
  * and so does a hand-made fake in a test. Nothing else of the client is reachable from here.
+ *
+ * `$connect` and `$disconnect` are typed `never`: Prisma removes them from an interactive transaction
+ * client and the client itself has them. (`$transaction` is no discriminator: Prisma 7 leaves it on the
+ * transaction client.) Passing `prisma.client` would take the lock and release it at once, because each
+ * statement commits alone, so it does not compile, and both functions refuse it at run time too.
  */
 export interface SessionLockTx {
+  readonly $connect?: never;
+  readonly $disconnect?: never;
   readonly session: {
     findUnique(args: {
       readonly where: { readonly id: string };
@@ -96,6 +108,22 @@ type LockOutcome =
   | { readonly outcome: 'erased' }
   | { readonly outcome: 'exhausted' };
 
+/**
+ * The lock is held only until the transaction ends, so it must be taken on the interactive transaction
+ * client. The client itself (it has `$connect` and `$disconnect`, which a transaction client lacks) would
+ * run the read and the write as two statements that commit alone: no lock is held afterwards, and the
+ * caller would believe it is. Fails closed.
+ */
+function assertTransactionClient(tx: SessionLockTx): void {
+  const connection = tx as { readonly $connect?: unknown; readonly $disconnect?: unknown };
+  if (typeof connection.$connect === 'function' || typeof connection.$disconnect === 'function') {
+    throw new OrgScopeViolationError(
+      'The session lock needs the transaction client of prisma.client.$transaction(async (tx) => ...), ' +
+        'not the client itself: outside a transaction the lock is released at once.',
+    );
+  }
+}
+
 /** The status of the session in the caller's scope. No row (another org, unknown id) throws. */
 async function readStatus(tx: SessionLockTx, sessionId: string): Promise<SessionStatus> {
   const row = await tx.session.findUnique({ where: { id: sessionId }, select: { status: true } });
@@ -118,6 +146,7 @@ async function lockSession(
   sessionId: string,
   excluded: SessionStatus | undefined,
 ): Promise<LockOutcome> {
+  assertTransactionClient(tx);
   let status = await readStatus(tx, sessionId);
   for (let attempt = 1; attempt <= MAX_LOCK_ATTEMPTS; attempt += 1) {
     if (excluded !== undefined && status === excluded) return { outcome: 'erased' };
@@ -172,8 +201,9 @@ export function guardLive(tx: SessionLockTx, sessionId: string): Promise<GuardLi
  * accommodations must run. The first row lock of the transaction (lock order: the ADR 0004 advisory
  * lock where used, then this, then `invitations`).
  *
- * @returns the status the session had when it was locked, so the caller can apply the refusal list
- *   (ERASED, the erasure markers, RETENTION_RESULTS_DONE) on a value that cannot change under it.
+ * @returns the status the session had when it was locked, so the caller can apply the refusal list of
+ *   ADR 0015 section 6 (c) (an ERASED status, the erasure facts, the results marker) on a status that
+ *   cannot change under it.
  * @throws SessionNotFoundError      no such session in this scope: the route answers 404.
  * @throws AccommodationLockedError  the status changed under it three times in a row: 409
  *   ACCOMMODATION_LOCKED, or a BullMQ retry for a job.

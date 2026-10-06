@@ -402,6 +402,23 @@ describe('guardLive and lockForAccommodation against Postgres (FR-704, NFR-04, T
   });
 
   // ================================================================================================
+  describe.each(LOCKS)('%s: the client itself is not a transaction client', (_name, lock) => {
+    it('TC-008 is refused before any statement: outside a transaction the lock would be released at once', async () => {
+      const chain = await freshChain('notx');
+      const xmin = await xminOf(chain.sessionId);
+      await db.statements.reset();
+      await expect(
+        asService(chain, () =>
+          // @ts-expect-error the client has $connect, so it is not a SessionLockTx: this does not compile
+          lock(client, chain.sessionId),
+        ),
+      ).rejects.toBeInstanceOf(OrgScopeViolationError);
+      expect(await db.statements.read()).toEqual([]);
+      expect(await xminOf(chain.sessionId)).toBe(xmin);
+    });
+  });
+
+  // ================================================================================================
   describe('statement counts (pg_stat_statements): nothing extra', () => {
     it('TC-008 guardLive on the happy path sends exactly 1 SELECT and 1 UPDATE inside BEGIN and COMMIT', async () => {
       const chain = await freshChain('count-g');

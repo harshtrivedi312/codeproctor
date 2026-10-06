@@ -12,6 +12,7 @@ import { SessionStatus } from '../generated/prisma/enums.js';
 import {
   AccommodationLockedError,
   OrgScopeError,
+  OrgScopeViolationError,
   SessionLockRetryError,
   SessionNotFoundError,
 } from './errors';
@@ -364,6 +365,70 @@ describe('lockForAccommodation (ADR 0015 section 6): the lock call, FR-704, NFR-
       expect((error as Error).stack ?? '').not.toContain(SID);
       expect(error).not.toBeInstanceOf(OrgScopeError);
     }
+  });
+});
+
+describe('the lock needs a transaction client, not the client itself (ADR 0013 section 5.7)', () => {
+  /**
+   * The shape of `prisma.client`: the two calls, and the connection methods that Prisma removes from an
+   * interactive transaction client (`$transaction` is no discriminator: Prisma 7 leaves it on `tx`).
+   */
+  function clientItself(connection: '$connect' | '$disconnect') {
+    const calls: string[] = [];
+    const session = {
+      findUnique: () => {
+        calls.push('R');
+        return Promise.resolve({ status: 'OPENED' as const });
+      },
+      updateMany: () => {
+        calls.push('U');
+        return Promise.resolve({ count: 1 });
+      },
+    };
+    const client =
+      connection === '$connect'
+        ? { $connect: () => Promise.resolve(), session }
+        : { $disconnect: () => Promise.resolve(), session };
+    return { client, calls };
+  }
+
+  it.each(['$connect', '$disconnect'] as const)(
+    'TC-008 guardLive refuses an object with %s (the client itself) before any statement: the lock would be released at once',
+    async (connection) => {
+      const { client, calls } = clientItself(connection);
+      // @ts-expect-error the client has $connect or $disconnect, so it is not a SessionLockTx
+      await expect(guardLive(client, SID)).rejects.toBeInstanceOf(OrgScopeViolationError);
+      // @ts-expect-error the same for the inner function
+      await expect(guardLiveWith(client, SID, FAKE_ERASED)).rejects.toBeInstanceOf(
+        OrgScopeViolationError,
+      );
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it.each(['$connect', '$disconnect'] as const)(
+    'TC-008 lockForAccommodation refuses an object with %s before any statement',
+    async (connection) => {
+      const { client, calls } = clientItself(connection);
+      // @ts-expect-error the client has $connect or $disconnect, so it is not a SessionLockTx
+      await expect(lockForAccommodation(client, SID)).rejects.toBeInstanceOf(
+        OrgScopeViolationError,
+      );
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it('TC-008 the refusal names no value, and a transaction-shaped object (no $connect) is accepted', async () => {
+    const { client } = clientItself('$connect');
+    // @ts-expect-error not a SessionLockTx
+    const error = await guardLive(client, SID).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(`${(error as Error).message}`).not.toContain(SID);
+    const { tx } = fakeTx(steady('OPENED'));
+    expect(Object.hasOwn(tx, '$connect') || Object.hasOwn(tx, '$disconnect')).toBe(false);
+    await expect(guardLive(tx, SID)).resolves.toBe('LIVE');
   });
 });
 
