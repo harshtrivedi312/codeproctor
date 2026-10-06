@@ -5,12 +5,20 @@ import { cn } from '@/lib/utils';
 import { STEP_IDS, STEP_LABELS, type StepId } from './steps';
 
 /** Progress list: text and a check mark, never colour alone. The current step has aria-current. */
-export function Stepper({ current }: { current: StepId }): React.JSX.Element {
-  const index = STEP_IDS.indexOf(current);
+export function Stepper({
+  current,
+  hidden = [],
+}: {
+  current: StepId;
+  /** Steps this candidate does not have (for example the phone camera outside STRICT). */
+  hidden?: readonly StepId[];
+}): React.JSX.Element {
+  const ids = STEP_IDS.filter((id) => !hidden.includes(id) || id === current);
+  const index = ids.indexOf(current);
   return (
     <nav aria-label="Progress">
       <ol className="flex flex-wrap gap-x-4 gap-y-2 text-sm">
-        {STEP_IDS.map((id, i) => {
+        {ids.map((id, i) => {
           const state = i < index ? 'done' : i === index ? 'current' : 'todo';
           return (
             <li
