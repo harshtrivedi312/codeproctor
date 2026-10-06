@@ -243,6 +243,38 @@ describe('NFR-04 environment validation', () => {
       ).toThrow(/EMAIL_PROVIDER/);
     });
 
+    it('C-31: empty optional SES settings count as unset when the provider is noop', () => {
+      const env = validateEnv({
+        ...valid,
+        SES_FROM_ADDRESS: '',
+        SES_CONFIGURATION_SET: '',
+        SES_ENDPOINT: '',
+      });
+      expect(env.SES_FROM_ADDRESS).toBeUndefined();
+      expect(env.SES_CONFIGURATION_SET).toBeUndefined();
+      expect(env.SES_ENDPOINT).toBeUndefined();
+    });
+
+    it('C-31: an empty SES_FROM_ADDRESS fails with ses and in live environments, naming only the variable', () => {
+      expect(() => validateEnv({ ...valid, EMAIL_PROVIDER: 'ses', SES_FROM_ADDRESS: '' })).toThrow(
+        /SES_FROM_ADDRESS/,
+      );
+      for (const APP_ENV of ['pilot', 'production']) {
+        expect(() => validateEnv({ ...live, APP_ENV, SES_FROM_ADDRESS: '' })).toThrow(
+          /SES_FROM_ADDRESS/,
+        );
+      }
+    });
+
+    it('C-31: an empty SES_ENDPOINT or SES_CONFIGURATION_SET is unset, a non-empty endpoint is still refused in live', () => {
+      const ok = validateEnv({ ...live, SES_ENDPOINT: '', SES_CONFIGURATION_SET: '' });
+      expect(ok.SES_ENDPOINT).toBeUndefined();
+      expect(ok.SES_CONFIGURATION_SET).toBeUndefined();
+      expect(() => validateEnv({ ...live, SES_ENDPOINT: 'http://127.0.0.1:4566' })).toThrow(
+        /SES_ENDPOINT/,
+      );
+    });
+
     it('C-31: ses needs a valid SES_FROM_ADDRESS', () => {
       expect(() => validateEnv({ ...live, SES_FROM_ADDRESS: undefined })).toThrow(
         /SES_FROM_ADDRESS/,
