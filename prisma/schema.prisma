@@ -14,14 +14,21 @@
 //
 // TODO for DB-03: DDL features Prisma cannot express.
 // `prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script` was loaded next to
-// the reference DDL and the two catalogs were diffed. Tables (31), columns (294), enums (20, with
-// values and order), primary keys (31), foreign keys (58, with ON DELETE and ON UPDATE), unique
+// the reference DDL and the two catalogs were diffed. Tables (31), columns (297), enums (20, with
+// values and order), primary keys (31), foreign keys (59, with ON DELETE and ON UPDATE), unique
 // indexes (20) and the 22 non-partial indexes match. The differences are exactly these:
+//
+// Totals include the ADR 0015 deltas (waived identity check; migrations
+// ..._identity_check_waived_enum and ..._identity_check_waiver_columns): +3 columns
+// (identity_checks.video_check_done, video_check_by, video_check_at), +1 foreign key
+// (identity_checks.video_check_by to users, NO ACTION, not org-composite) and +2 CHECKs (item 2).
+// identity_check_status gains WAIVED, last; the enum count stays 20.
 //
 //  1. Extensions. Prisma emits none. Put these first in the init migration, before any CITEXT column:
 //       CREATE EXTENSION IF NOT EXISTS pgcrypto;
 //       CREATE EXTENSION IF NOT EXISTS citext;
-//  2. 12 CHECK constraints (ADR 0008 section 5). Postgres names an unnamed inline CHECK as shown:
+//  2. 14 CHECK constraints: 12 from ADR 0008 section 5 and 2 from ADR 0015 (the last two below).
+//     Postgres names an unnamed inline CHECK as shown:
 //       organizations_retention_days_check  retention_days BETWEEN 7 AND 730
 //       users_check                         password_hash IS NOT NULL OR set_password_token_hash IS NOT NULL
 //       tests_duration_minutes_check        duration_minutes BETWEEN 5 AND 480
@@ -35,6 +42,15 @@
 //       identity_checks_check               (status = 'REVIEWED') = (manual_decision IS NOT NULL AND
 //                                             reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL)
 //       appeals_check                       (status = 'OVERTURNED') = (new_verdict IS NOT NULL)
+//       identity_checks_waived_check        status <> 'WAIVED' OR (attempt = 1 AND id_image_key IS NULL AND
+//                                             selfie_key IS NULL AND face_match_score IS NULL AND model_id IS
+//                                             NULL AND threshold IS NULL AND liveness_passed IS NULL AND
+//                                             review_reason IS NULL AND manual_decision IS NULL AND
+//                                             reviewed_by IS NULL AND reviewed_at IS NULL AND review_note IS
+//                                             NULL)                                              (ADR 0015)
+//       identity_checks_video_check_check   (video_check_done IS NULL) = (video_check_by IS NULL) AND
+//                                             (video_check_done IS NULL) = (video_check_at IS NULL) AND
+//                                             (video_check_done IS NULL OR status = 'WAIVED')    (ADR 0015)
 //  3. 3 partial indexes (the other 22 indexes are declared below):
 //       sessions_risk_band_idx            ON sessions (risk_band) WHERE status IN ('GRADED','UNDER_REVIEW')
 //       sessions_retention_anchor_at_idx  ON sessions (retention_anchor_at) WHERE retention_anchor_at IS NOT NULL
@@ -267,6 +283,7 @@ enum IdentityCheckStatus {
   LOW_CONFIDENCE
   MANUAL_REVIEW
   REVIEWED
+  WAIVED
 
   @@map("identity_check_status")
 }
@@ -348,7 +365,8 @@ model User {
   collectedAiReferenceSolutions AiReferenceSolution[]
   scoredSessionQuestions        SessionQuestion[]
   createdConsentTexts           ConsentText[]
-  reviewedIdentityChecks        IdentityCheck[]
+  reviewedIdentityChecks        IdentityCheck[]       @relation("IdentityCheckReviewedBy")
+  videoCheckedIdentityChecks    IdentityCheck[]       @relation("IdentityCheckVideoCheckBy")
   sessionReviews                SessionReview[]
   flagDecisions                 FlagDecision[]
   assignedAppeals               Appeal[]
@@ -779,9 +797,13 @@ model IdentityCheck {
   reviewedAt     DateTime?               @map("reviewed_at") @db.Timestamptz(6)
   reviewNote     String?                 @map("review_note")
   createdAt      DateTime                @default(now()) @map("created_at") @db.Timestamptz(6)
+  videoCheckDone Boolean?                @map("video_check_done")
+  videoCheckById String?                 @map("video_check_by") @db.Uuid
+  videoCheckAt   DateTime?               @map("video_check_at") @db.Timestamptz(6)
 
-  session    Session @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  reviewedBy User?   @relation(fields: [reviewedById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  session      Session @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  reviewedBy   User?   @relation("IdentityCheckReviewedBy", fields: [reviewedById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  videoCheckBy User?   @relation("IdentityCheckVideoCheckBy", fields: [videoCheckById], references: [id], onDelete: NoAction, onUpdate: NoAction)
 
   @@unique([sessionId, attempt])
   @@map("identity_checks")
