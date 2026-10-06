@@ -1,5 +1,5 @@
 import { ROUTE_PERMISSIONS, isCandidate, isPublic, isStaff } from './route-permissions';
-import { Controller, Get, Post } from '@nestjs/common';
+import { Controller, Get, Post, UseGuards } from '@nestjs/common';
 import type { ModulesContainer } from '@nestjs/core';
 import { Audited } from '../../audit/audited.decorator';
 import { CandidateRoute } from './candidate-route.decorator';
@@ -13,7 +13,8 @@ const everyRoute = (): RegisteredRoute[] =>
     handler: 'X.y',
     isPublic: isPublic(access) || isCandidate(access),
     roles: isStaff(access) ? access.roles : [],
-    audited: !isPublic(access) && access.audited === true,
+    audited: !isPublic(access) && !isCandidate(access) && access.audited === true,
+    guards: isCandidate(access) ? [class G {}] : [],
     candidatePermission: isCandidate(access) ? access.permission : null,
   }));
 
@@ -31,6 +32,7 @@ describe('route permission matrix (FR-103, TC-004)', () => {
         isPublic: false,
         roles: ['AUTHOR' as const],
         audited: false,
+        guards: [],
         candidatePermission: null,
       },
     ];
@@ -51,6 +53,7 @@ describe('route permission matrix (FR-103, TC-004)', () => {
       isPublic: true,
       roles: ['SUPER_ADMIN'],
       audited: false,
+      guards: [],
       candidatePermission: null,
     });
     const problems = matrixProblems(routes).join('\n');
@@ -90,6 +93,7 @@ describe('matrix edge cases (FR-103, FR-105)', () => {
           isPublic: false,
           roles: ['REVIEWER'],
           audited: false,
+          guards: [],
           candidatePermission: null,
         },
       ];
@@ -159,7 +163,8 @@ describe('route registry walk (FR-103, FR-105)', () => {
       handler: 'X.y',
       isPublic: isPublic(access) || isCandidate(access),
       roles: isStaff(access) ? access.roles : [],
-      audited: !isPublic(access) && access.audited === true,
+      audited: !isPublic(access) && !isCandidate(access) && access.audited === true,
+      guards: isCandidate(access) ? [class G {}] : [],
       candidatePermission: isCandidate(access) ? access.permission : null,
     }));
     const flipped = routes.map((r) =>
@@ -175,8 +180,8 @@ describe('route registry walk (FR-103, FR-105)', () => {
   });
 });
 
-describe('candidate route variant (FR-103, NFR-04, ADR 0010 section 6, ADR 0013)', () => {
-  const KEY = 'POST /candidate/sessions/:id/run';
+describe('candidate route variant (FR-103, ADR 0010 section 6, ADR 0013)', () => {
+  const KEY = 'POST /candidate/answers/:questionId/run';
   const candidate = {
     principal: 'CANDIDATE',
     permission: 'candidate_answer:run',
@@ -187,6 +192,7 @@ describe('candidate route variant (FR-103, NFR-04, ADR 0010 section 6, ADR 0013)
     isPublic: true,
     roles: [],
     audited: false,
+    guards: [class FakeCandidateGuard {}],
     candidatePermission: 'candidate_answer:run',
   };
   const withEntry = (entry: unknown, routes: RegisteredRoute[]): string[] => {
@@ -215,7 +221,7 @@ describe('candidate route variant (FR-103, NFR-04, ADR 0010 section 6, ADR 0013)
     expect([isPublic(staff), isStaff(staff), isCandidate(staff)]).toEqual([false, true, false]);
   });
 
-  it('NFR-04: a CANDIDATE route that is @Public() and carries @CandidateRoute() has no problems', () => {
+  it('FR-103: ADR 0013: a CANDIDATE route that is @Public() and carries @CandidateRoute() has no problems', () => {
     expect(withEntry(candidate, [base])).toEqual([]);
   });
 
@@ -251,14 +257,14 @@ describe('candidate route variant (FR-103, NFR-04, ADR 0010 section 6, ADR 0013)
     expect(problems).toContain('is a CANDIDATE route but carries @Roles()');
   });
 
-  it('NFR-04: @Audited() on a CANDIDATE route fails unless the matrix says audited (ADR 0013)', () => {
+  it('FR-103: ADR 0013: @Audited() on a CANDIDATE route is always a problem', () => {
     expect(withEntry(candidate, [{ ...base, audited: true }]).join('\n')).toContain(
       'candidate routes write no audit rows (ADR 0013)',
     );
-    expect(withEntry({ ...candidate, audited: true }, [{ ...base, audited: true }])).toEqual([]);
-    expect(withEntry({ ...candidate, audited: true }, [base]).join('\n')).toContain(
-      'is audited in the matrix but has no @Audited()',
-    );
+    // Even a matrix entry that tries the old escape hatch is still a problem.
+    expect(
+      withEntry({ ...candidate, audited: true }, [{ ...base, audited: true }]).join('\n'),
+    ).toContain('write no audit rows');
   });
 
   it('FR-103: listRoutes reads @CandidateRoute from synthetic controllers, and a staff route has none', () => {
@@ -283,5 +289,57 @@ describe('candidate route variant (FR-103, NFR-04, ADR 0010 section 6, ADR 0013)
       candidatePermission: 'candidate_answer:run',
     });
     expect(routes.find((r) => r.key === 'GET /candidate/staff')?.candidatePermission).toBeNull();
+  });
+
+  it('FR-103: ADR 0013: a CANDIDATE route with no route guard fails closed, one with a guard passes', () => {
+    expect(withEntry(candidate, [{ ...base, guards: [] }]).join('\n')).toContain(
+      `${KEY} is a CANDIDATE route with no route guard (@UseGuards(CandidateSessionGuard))`,
+    );
+    expect(withEntry(candidate, [base])).toEqual([]);
+  });
+
+  it('FR-103: listRoutes reads @UseGuards from the handler and the class', () => {
+    class SomeGuard {}
+    @Controller('candidate')
+    @UseGuards(SomeGuard)
+    @CandidateRoute('candidate_answer:run')
+    class ClassLevel {
+      @Get('mixed')
+      @Roles('AUTHOR')
+      mixed(): void {}
+    }
+    const modules = {
+      values: () => [{ controllers: new Map([['c', { metatype: ClassLevel }]]) }],
+    } as unknown as ModulesContainer;
+    const route = listRoutes(modules).find((r) => r.key === 'GET /candidate/mixed');
+    expect(route?.guards).toEqual([SomeGuard]);
+    expect(route?.candidatePermission).toBe('candidate_answer:run');
+    expect(
+      withEntry(
+        'public',
+        [route as RegisteredRoute].map((r) => ({ ...r, key: KEY })),
+      ).join('\n'),
+    ).toContain('is a staff route (@Roles()) but carries @CandidateRoute()');
+  });
+
+  it('FR-103: a CANDIDATE entry whose permission CANDIDATE does not hold is reported', () => {
+    const problems = withEntry({ principal: 'CANDIDATE', permission: 'question:read' }, [base]);
+    expect(problems.join('\n')).toContain('which CANDIDATE does not hold');
+  });
+
+  it('FR-103: ADR 0013: a /candidate/ route listed plain public is reported unless it is a bootstrap route', () => {
+    const key = 'GET /candidate/session/consent';
+    const matrix = ROUTE_PERMISSIONS as Record<string, unknown>;
+    matrix[key] = 'public';
+    try {
+      const route = { ...base, key, candidatePermission: null, guards: [] };
+      expect(
+        matrixProblems([route])
+          .filter((p) => p.includes(key))
+          .join('\n'),
+      ).toContain('is a /candidate/ route listed public but is not a bootstrap route');
+    } finally {
+      delete matrix[key];
+    }
   });
 });

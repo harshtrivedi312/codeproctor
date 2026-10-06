@@ -19,12 +19,21 @@ export interface StaffAccess {
   readonly candidateData?: true;
 }
 
+/** The permissions of the CANDIDATE pseudo-role (ADR 0010 section 6). */
+export type CandidatePermission = Extract<Permission, `candidate_${string}`>;
+
+/**
+ * Candidate routes the matrix may list as plain 'public': the pre-JWT bootstrap routes that run
+ * without CandidateSessionGuard (ADR 0013 section 5.10: invitation-link resolve, OTP send, OTP
+ * verify). Any other /candidate/ key listed 'public' is a matrix problem.
+ * TODO(FU-BE-88): fill in the three real keys when BE-07 defines them; empty until then.
+ */
+export const CANDIDATE_BOOTSTRAP_ROUTES: readonly string[] = [];
+
 /** A candidate route (pseudo-role CANDIDATE): @Public() to the staff guard plus @CandidateRoute(). */
 export interface CandidateAccess {
   readonly principal: 'CANDIDATE';
-  readonly permission: Permission;
-  /** Candidate routes write no audit rows (ADR 0013); set only if the matrix says otherwise. */
-  readonly audited?: true;
+  readonly permission: CandidatePermission;
 }
 
 export type RouteAccess = 'public' | StaffAccess | CandidateAccess;
@@ -35,12 +44,16 @@ export const isCandidate = (access: RouteAccess): access is CandidateAccess =>
 export const isStaff = (access: RouteAccess): access is StaffAccess =>
   typeof access === 'object' && 'roles' in access;
 
-// How to add a candidate route (BE-07 onwards):
-//   1. On the handler put @Public() (so the staff JwtAuthGuard lets it through) and
-//      @CandidateRoute('candidate_answer:run') (the Permission from packages/shared; the
-//      CandidateSessionGuard reads it). Do not add @Roles() or @Audited().
-//   2. Here add 'POST /sessions/:id/run': { principal: 'CANDIDATE', permission: 'candidate_answer:run' }.
-//   3. route-registry.spec.ts and the TC-004 e2e fail if the decorators and this entry disagree.
+// How to add a candidate route (BE-07 onwards). All of 1 to 3 are mandatory: @Public() only
+// switches the staff guard off, so without the guard the route is unauthenticated.
+//   1. On the handler put @Public(), @CandidateRoute('candidate_answer:run') (a candidate_*
+//      permission from packages/shared) and @UseGuards(CandidateSessionGuard) (BE-07; until it
+//      exists, do not merge a candidate route). No @Roles(), no @Audited() (ADR 0013).
+//   2. Here add 'POST /candidate/answers/:questionId/run':
+//      { principal: 'CANDIDATE', permission: 'candidate_answer:run' }.
+//   3. The registry tests fail when the decorators, the guard and this entry disagree.
+// The three pre-JWT bootstrap routes are the only /candidate/ routes listed 'public'
+// (CANDIDATE_BOOTSTRAP_ROUTES).
 
 const ALL_STAFF: readonly UserRole[] = ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'REVIEWER'];
 const SUPER_ADMIN: readonly UserRole[] = ['SUPER_ADMIN'];
