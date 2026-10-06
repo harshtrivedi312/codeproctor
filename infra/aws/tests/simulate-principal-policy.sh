@@ -120,7 +120,7 @@ for b in media releases; do
   case "$v" in None|"") pass=$((pass+1)); printf 'PASS  %-70s unversioned\n' "${b} bucket versioning" ;; *) fail=$((fail+1)); printf 'FAIL  %-70s expected unversioned, got "%s"\n' "${b} bucket versioning" "$v" ;; esac
 done
 
-echo "Every codeproctor-pilot-* role must be tagged Environment=pilot (made by CI or the owner template) or Environment=owner"
+echo "Every codeproctor-pilot-* role must be tagged Environment=pilot or Environment=owner"
 for r in $(aws iam list-roles --profile "$PROFILE" --query "Roles[?starts_with(RoleName, 'codeproctor-pilot-')].RoleName" --output text 2>/dev/null); do
   env="$(aws iam list-role-tags --profile "$PROFILE" --role-name "$r" --query "Tags[?Key=='Environment']|[0].Value" --output text 2>/dev/null)"
   rpath="$(aws iam get-role --profile "$PROFILE" --role-name "$r" --query 'Role.Path' --output text 2>/dev/null)"

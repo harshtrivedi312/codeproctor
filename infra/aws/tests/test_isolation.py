@@ -5,10 +5,11 @@ The CI role may do exactly two things: push images to ECR repositories codeproct
 and s3:PutObject on the two release manifest prefixes. Everything else must be denied.
 
 Parses the CloudFormation template, resolves intrinsic functions with fixed test values, and
-evaluates a matrix of (principal, action, resource, context) against the identity policies, the
-permissions boundary, the state bucket policy, the state key policy and the role trust policies,
-using a small implementation of IAM evaluation semantics (explicit Deny wins, implicit deny,
-wildcards, condition operators, boundary intersection, resource-policy deny).
+evaluates a matrix of (action, resource, context) against the CI role's managed policies and the
+role trust policy, using a small implementation of IAM evaluation semantics (explicit Deny wins,
+implicit deny, wildcards, condition operators). Expectations: ALLOW; DENY means an EXPLICIT deny (so
+removing a guard statement fails the case); DENY-IMPLICIT means no Allow matches; DENY-ANY accepts
+either. The data template and its bucket and key policies are tested in test_data_buckets.py.
 
 It approximates IAM. It cannot model every service-specific behaviour (for example which actions
 really support a condition key). The owner script simulate-principal-policy.sh, run against the
@@ -292,7 +293,7 @@ def trust_decision(doc, token, federated=OIDC_ARN):
 
 # ---------------------------------------------------------------- build the world
 A = ACCT
-TF_REL = f"arn:aws:s3:::codeproctor-pilot-releases-{A}"
+REL_BUCKET = f"arn:aws:s3:::codeproctor-pilot-releases-{A}"
 DEPLOY = f"arn:aws:iam::{A}:role/codeproctor-guardrails/codeproctor-pilot-deploy"
 FOREIGN = {"aws:ResourceAccount": "999999999999"}
 ZARN = lambda z: f"arn:aws:route53:::hostedzone/{z}"
@@ -310,21 +311,21 @@ def cases():
 
     # --- the two allowed things
     for pfx in ("main", "judge0"):
-        add(f"Releases: put manifest under {pfx}/", "s3:PutObject", f"{TF_REL}/{pfx}/manifest-000123.json", {}, "ALLOW")
-    add("Releases: put signature bundle under main/", "s3:PutObject", f"{TF_REL}/main/manifest-000123.json.sigstore", {}, "ALLOW")
-    add("Releases: put under a third prefix", "s3:PutObject", f"{TF_REL}/other/manifest.json", {}, "DENY")
-    add("Releases: put at the bucket root", "s3:PutObject", f"{TF_REL}/manifest.json", {}, "DENY")
+        add(f"Releases: put manifest under {pfx}/", "s3:PutObject", f"{REL_BUCKET}/{pfx}/manifest-000123.json", {}, "ALLOW")
+    add("Releases: put signature bundle under main/", "s3:PutObject", f"{REL_BUCKET}/main/manifest-000123.json.sigstore", {}, "ALLOW")
+    add("Releases: put under a third prefix", "s3:PutObject", f"{REL_BUCKET}/other/manifest.json", {}, "DENY")
+    add("Releases: put at the bucket root", "s3:PutObject", f"{REL_BUCKET}/manifest.json", {}, "DENY")
     add("Releases: put into another bucket", "s3:PutObject", "arn:aws:s3:::codeproctor-pilot-media-111111111111/main/x", {}, "DENY")
-    add("Releases: put, bucket in another account", "s3:PutObject", f"{TF_REL}/main/x", FOREIGN, "DENY")
-    add("Releases: read a manifest", "s3:GetObject", f"{TF_REL}/main/manifest-000123.json", {}, "DENY")
-    add("Releases: delete a manifest", "s3:DeleteObject", f"{TF_REL}/main/manifest-000123.json", {}, "DENY")
-    add("Releases: delete a manifest version", "s3:DeleteObjectVersion", f"{TF_REL}/judge0/manifest-000123.json", {}, "DENY")
-    add("Releases: put object ACL", "s3:PutObjectAcl", f"{TF_REL}/main/manifest-000123.json", {}, "DENY")
-    add("Releases: list the bucket", "s3:ListBucket", TF_REL, {}, "DENY")
-    add("Releases: change the bucket policy", "s3:PutBucketPolicy", TF_REL, {}, "DENY")
-    add("Releases: read the bucket policy", "s3:GetBucketPolicy", TF_REL, {}, "DENY")
-    add("Releases: change lifecycle", "s3:PutLifecycleConfiguration", TF_REL, {}, "DENY")
-    add("Releases: tag a manifest", "s3:PutObjectTagging", f"{TF_REL}/main/manifest-000123.json", {}, "DENY")
+    add("Releases: put, bucket in another account (no allow matches: implicit)", "s3:PutObject", f"{REL_BUCKET}/main/x", FOREIGN, "DENY-IMPLICIT")
+    add("Releases: read a manifest", "s3:GetObject", f"{REL_BUCKET}/main/manifest-000123.json", {}, "DENY")
+    add("Releases: delete a manifest", "s3:DeleteObject", f"{REL_BUCKET}/main/manifest-000123.json", {}, "DENY")
+    add("Releases: delete a manifest version", "s3:DeleteObjectVersion", f"{REL_BUCKET}/judge0/manifest-000123.json", {}, "DENY")
+    add("Releases: put object ACL", "s3:PutObjectAcl", f"{REL_BUCKET}/main/manifest-000123.json", {}, "DENY")
+    add("Releases: list the bucket", "s3:ListBucket", REL_BUCKET, {}, "DENY")
+    add("Releases: change the bucket policy", "s3:PutBucketPolicy", REL_BUCKET, {}, "DENY")
+    add("Releases: read the bucket policy", "s3:GetBucketPolicy", REL_BUCKET, {}, "DENY")
+    add("Releases: change lifecycle", "s3:PutLifecycleConfiguration", REL_BUCKET, {}, "DENY")
+    add("Releases: tag a manifest", "s3:PutObjectTagging", f"{REL_BUCKET}/main/manifest-000123.json", {}, "DENY")
     ecr = arn("ecr", "repository/codeproctor-pilot-api")
     add("ECR: get authorization token", "ecr:GetAuthorizationToken", "*", {}, "ALLOW")
     for act in ("BatchCheckLayerAvailability", "InitiateLayerUpload", "UploadLayerPart", "CompleteLayerUpload", "PutImage"):
@@ -390,7 +391,7 @@ def cases():
         add(f"Denied service: {act}", act, "*", {}, "DENY")
     # tags
     add("Tag guard: request tags Environment=staging on ECR push", "ecr:PutImage", ecr, {"aws:RequestTag/Environment": "staging"}, "DENY")
-    add("Tag guard: release put, resource tagged Environment=staging", "s3:PutObject", f"{TF_REL}/main/x", {"aws:ResourceTag/Environment": "staging"}, "DENY")
+    add("Tag guard: release put, resource tagged Environment=staging", "s3:PutObject", f"{REL_BUCKET}/main/x", {"aws:ResourceTag/Environment": "staging"}, "DENY")
     add("Tag guard: ECR push, repository tagged pilot", "ecr:PutImage", ecr, {"aws:ResourceTag/Environment": "pilot"}, "ALLOW")
     # route 53
     add("Route53: change records in another hosted zone", "route53:ChangeResourceRecordSets", ZARN(OTHERZONE), {}, "DENY")
@@ -470,7 +471,9 @@ def main():
             ctx["aws:ResourceAccount"] = ACCT
             dflt.append("aws:ResourceAccount")
         got, why = evaluate(ident, None, [], DEPLOY, act, rsrc, ctx)
-        ok = (exp == got) or (exp == "DENY-IMPLICIT" and got == "DENY" and why == "implicit deny")
+        ok = ((exp == "ALLOW" and got == "ALLOW") or (exp == "DENY" and got == "DENY" and why.startswith("explicit"))
+              or (exp == "DENY-ANY" and got == "DENY") or (exp == "DENY-IMPLICIT" and got == "DENY" and why == "implicit deny"))
+        why = f"{got}: {why}"
         keys = ",".join(sorted(k for k in ctx if k not in dflt)) + (" *" + ",".join(dflt) if dflt else "")
         rows.append((n, act, exp, got if not ok else exp, ok, why, keys))
     good = {"token.actions.githubusercontent.com:sub": "repo:example-owner/example-repo:environment:pilot", "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"}

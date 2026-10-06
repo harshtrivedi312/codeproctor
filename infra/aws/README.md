@@ -128,41 +128,58 @@ access instance-role-only.
 ### Backups (ADR 0017 5.3, C-55)
 
 - **Dumps.** The instance writes every dump to the one key `db/dump/latest.dump` in a single `PutObject` that
-  carries its checksum and row counts. Each overwrite leaves the previous version as a noncurrent version
+  carries its checksum and row counts (`aws s3 cp` switches to multipart above 8 MB, so the uploader must use a
+  single `put-object` or set the multipart threshold). Each overwrite leaves the previous version as a noncurrent version
   (the bucket is versioned, and the instance role cannot delete). The lifecycle rule on `db/dump/` has
   `NewerNoncurrentVersions` **2** and `NoncurrentDays` **1** and **no current-version expiry**: the current
   version plus the 2 newest noncurrent versions (the newest 3 dumps) survive at any age. An older dump goes at
   the later of its creation plus 12 days (Object Lock) and its replacement plus 1 day, plus S3's delay.
   There is **no day-30 expiry**: day 30 is the owner's decision (the 28 day alarm fires).
-- **Object Lock.** GOVERNANCE, 12 days, set when the bucket is created. It needs versioning. **Enabling Object
-  Lock on an existing bucket is not verified, so do not rely on it: if a backup bucket was ever made without
-  it, replace it, do not reconfigure it.** No role the instance or CI can assume holds
+- **Object Lock.** GOVERNANCE, 12 days, set when the bucket is created. It needs versioning. **S3 has allowed
+  enabling Object Lock on an existing versioned bucket since late 2023, but the cautious advice stays: if a
+  backup bucket was ever made without it, replace it, do not reconfigure it.** An Object Lock bucket needs
+  Content-MD5 or a checksum on every upload and every part. No role the instance or CI can assume holds
   `s3:BypassGovernanceRetention` (denied in the CI policy and, for every `codeproctor-*` role, in the bucket
   policy); only the owner's own principal can bypass. A lifecycle expiry of a locked version is skipped and
   happens once the lock ends (documented S3 behaviour: modelled offline, unverified, listed in the first-apply
   checks). **Limit:** the lock runs from each version's own creation, so it protects recent dumps only. If
-  backups stalled for more than 12 days and 3 junk versions then displace the real dumps, they expire at once:
-  only the alarms below help (offline model case).
+  backups stalled for more than 12 days and 3 junk versions then displace the real dumps, the older displaced versions expire at once and the newest displaced one after 1 day; only the alarms below
+  help (offline model case).
 - **Physical repository (`db/wal/`).** No lifecycle rule. An owner-applied expiry function (never on the
-  instance, role `codeproctor-pilot-backup-expiry` created here, list and delete only, trust limited to the
-  Lambda service for that function by `aws:SourceArn`: not verified that Lambda accepts it) keeps everything
-  younger than 12 days plus the newest 3 full base backups and the WAL from the oldest of them, and deletes the
-  rest. Only full base backups are taken. The function, its daily schedule and the code are a later owner
-  template (database track). The same function prunes the erasure-list entries (the instance cannot delete).
-- **Alarms** (CloudWatch, namespace `codeproctor-pilot`; they notify `AlarmTopicArn`, the owner's SNS email and
-  SMS topic; with no topic the alarms exist without an action):
+  instance; role `codeproctor-pilot-backup-expiry` is created here) keeps everything younger than 12 days
+  plus the newest 3 full base backups and the WAL from the oldest of them, and deletes the rest. Only full
+  base backups are taken. The role can list the bucket and delete **only under `db/wal/`,
+  `db/erasure-list/` and `db/erasure-completed/`**; a bucket-policy deny stops it deleting under `db/dump/`,
+  which lifecycle owns. It also carries the Route 53 deny for every zone but the assess zone
+  (`AssessHostedZoneId`). The function, its daily schedule and the code are a later owner template (database
+  track). The same function prunes the erasure-list entries (the instance cannot delete).
+- **Expiry role trust (not verified, may fail closed).** The trust names the Lambda service with
+  `aws:SourceAccount` and `aws:SourceArn`. Lambda probably does not populate those keys when it assumes an
+  execution role, so the condition may fail closed (the function cannot be created and backups never
+  expire). If so, **the fallback is to remove the condition** (not to keep only `aws:SourceAccount`, which
+  fails the same way). The real guard is then: **no `codeproctor-*` role may hold `iam:PassRole` on the expiry
+  role, or `lambda:CreateFunction`, `UpdateFunctionCode` or `UpdateFunctionConfiguration`.** CI already denies
+  `iam:*` and `lambda:*`; this is a requirement on the owner's later templates.
+- **Alarms** (CloudWatch; they notify `AlarmTopicArn`, the owner's SNS email and SMS topic; with no topic the
+  alarms exist without an action). **The threat is a compromised main instance, so the instance is not the
+  producer of any alarmed metric.** The owner-applied expiry Lambda is the only producer of every metric in
+  namespace `codeproctor-pilot`, all computed from `ListObjectVersions` on `db/dump/` and `db/wal/` (Size,
+  LastModified):
 
-  | Alarm                                            | Metric (producer)                                  | Fires                                                                                            |
-  | ------------------------------------------------ | -------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-  | `codeproctor-pilot-backup-stale-2d`              | `BackupSuccess` (uploader)                         | No new verified backup for 2 days (missing data breaches)                                        |
-  | `codeproctor-pilot-backup-age-28d`               | `OldestKeptBackupAgeDays` (expiry function)        | A kept backup reaches 28 days (the owner decides; nothing deletes)                               |
-  | `codeproctor-pilot-backup-dump-size-anomaly`     | `DumpSizeChangeFactor` (uploader)                  | A dump differs from the previous one by more than `DumpSizeChangeFactor` (3)                     |
-  | `codeproctor-pilot-backup-dump-versions-per-day` | `DumpVersionsPerDay` (uploader or expiry function) | More than `MaxDumpVersionsPerDay` (3) new dump versions in a day                                 |
-  | `codeproctor-pilot-backup-base-backup-count`     | `FullBaseBackupCountChange` (expiry function)      | The number of full base backups changes by more than `MaxFullBaseBackupCountChange` (2) in a day |
+  | Alarm                                            | Metric (producer)                                                           | Fires                                                              |
+  | ------------------------------------------------ | --------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+  | `codeproctor-pilot-backup-stale-2d`              | `NewestDumpAgeHours`, Maximum (expiry Lambda)                               | The newest dump is older than 48 hours (missing data breaches)     |
+  | `codeproctor-pilot-backup-age-28d`               | `OldestKeptBackupAgeDays` (expiry Lambda)                                   | A kept backup reaches 28 days (the owner decides; nothing deletes) |
+  | `codeproctor-pilot-backup-dump-size-anomaly`     | `DumpSizeChangeFactor` = max(new/old, old/new), always >= 1 (expiry Lambda) | More than `DumpSizeChangeFactor` (3)                               |
+  | `codeproctor-pilot-backup-dump-versions-per-day` | `DumpVersionsPerDay` (expiry Lambda)                                        | More than `MaxDumpVersionsPerDay` (3) new dump versions in a day   |
+  | `codeproctor-pilot-backup-base-backup-count`     | `FullBaseBackupCountChange`, the ABSOLUTE change (expiry Lambda)            | More than `MaxFullBaseBackupCountChange` (2) in a day, up or down  |
+  | `codeproctor-pilot-backup-uploader-silent-2d`    | `BackupSuccess` in namespace `codeproctor-pilot-instance` (the uploader)    | Secondary signal only: no success reported for 2 days              |
 
-  The metrics have **producers outside this template** (the uploader on the main instance and the expiry
-  function, database track): the alarms exist, but they cannot fire until those producers publish. The
-  anomaly alarms are the real guard against junk-version push-out; their design is not verified.
+  **Requirement for the owner's instance template:** the instance role's `cloudwatch:PutMetricData` carries
+  the condition `cloudwatch:namespace` = `codeproctor-pilot-instance`, so the instance cannot inflate any
+  alarmed metric. The Lambda is a dependency outside this template (database track): until it exists the
+  freshness and age alarms sit in ALARM (missing data breaches), so the first email is expected. The
+  anomaly alarms' design is not verified.
 
 - **Erasure and the exception.** Kept backups can hold an erased person's rows beyond 14 days in a stall; ADR
   0004 9.7 re-applies the erasure list after a restore (DPIA note).
@@ -192,8 +209,7 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ```
 
 `test_isolation.py` runs 154 cases and 16 structural checks on the CI role, the Route 53 guard and the trust
-policy (owner `example-owner`, repo `example-repo`, account `111111111111`). `test_data_buckets.py` runs 147
-cases and 40 structural checks on the buckets, the key, the expiry role, the alarms, a model of the backup
+policy (a DENY expectation means an explicit deny, so removing a guard statement fails cases) (owner `example-owner`, repo `example-repo`, account `111111111111`). `test_data_buckets.py` runs 153 cases and 44 structural checks on the buckets, the key, the expiry role, the alarms, a model of the backup
 lifecycle, and the proof (with the real CI policies) that CI can only put the two manifests. A case can expect
 "no explicit deny" or "implicit deny" when the real allow is a policy the test does not model. Each case row
 lists the context keys supplied by hand. TC IDs are for QA to allocate (`docs/test-cases.md` has no DEP
@@ -225,6 +241,11 @@ presigned URLs; whether `ec2messages` is needed.
   sections 3, 4.1 and 8 exactly (the old workload boundary could not host the main role: it allowed delete on
   every bucket, denied `iam:*` so `PassRole` to the scheduler roles was impossible, and had no ECR pull or
   Route 53 allow). The smallest correct template is none.
+
+- **Signing is the real gate for deployed code.** CI can push images and write manifests; what stops CI from
+  deciding which code reaches candidate data is who produces the manifest signature (ADR 0017 section 6). If
+  signing is keyless inside CI, CI effectively decides what code runs: keep the identity check and the
+  environment gate (above) as the control.
 
 ## Open items
 

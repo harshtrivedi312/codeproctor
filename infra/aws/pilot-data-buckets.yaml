@@ -27,30 +27,38 @@ Description: >-
 #     the newest 3 goes at the later of (its creation + 12 days, the Object Lock) and (its replacement
 #     + 1 day), plus S3's delay.
 #   - OBJECT LOCK: the bucket is created with Object Lock ENABLED (ObjectLockEnabled: true) and a
-#     default retention in GOVERNANCE mode of 12 days. Object Lock needs versioning. Enabling it on an
-#     existing bucket is NOT VERIFIED, so do not rely on that: a bucket made without it must be replaced,
-#     not reconfigured. No role the instance or CI can assume holds s3:BypassGovernanceRetention (denied
+#     default retention in GOVERNANCE mode of 12 days. Object Lock needs versioning. S3 has allowed enabling it on an
+#     existing versioned bucket since late 2023, but the cautious advice stays: a bucket made without it
+#     should be replaced, not reconfigured (and it needs Content-MD5 or a checksum on every upload and part). No role the instance or CI can assume holds s3:BypassGovernanceRetention (denied
 #     in the CI policy and in this bucket policy for every codeproctor-* role); only the owner's own
 #     principal has it. A compromised host therefore cannot delete or shorten any version for 12 days,
 #     which is the floor for the junk-version push-out attack. A lifecycle expiry of a locked version is
-#     deferred until the lock ends, not an error. With NoncurrentDays 13 and a 12 day lock a lifecycle
+#     deferred until the lock ends, not an error. With NoncurrentDays 1 and a 12 day lock a lifecycle
 #     expiry that falls inside the lock is skipped and happens once the lock ends (documented S3 behaviour;
 #     UNVERIFIED here, modelled offline and listed in the first-apply checks).
 #     Limit: the lock runs from a version's own creation, so it protects recent dumps only. If backups
-#     stalled for more than 12 days and junk versions then displace the real dumps, they expire one day
-#     later: the alarms must page the owner first. Day 30 is the owner's decision: NOTHING deletes
+#     stalled for more than 12 days and junk versions then displace the real dumps, the older displaced
+#     versions expire at once and the newest displaced one after 1 day: the alarms must page the owner
+#     first. Day 30 is the owner's decision: NOTHING deletes
 #     automatically at day 30 (no expiry rule), only the 28 day alarm fires.
-#   - ANOMALY ALARMS (the real guard against junk versions): DumpSizeChangeFactor and
-#     DumpVersionsPerDay (metrics below). Their PRODUCER is outside this template (the uploader on the
-#     main instance and the expiry function, database track): dependency, not built here.
+#   - ALARMS (the real guard against junk versions). The threat is a compromised main instance, so the
+#     instance must NOT be the producer of any alarmed metric. The owner-applied expiry Lambda is the ONLY
+#     producer of NewestDumpAgeHours, DumpSizeChangeFactor, DumpVersionsPerDay, FullBaseBackupCountChange
+#     and OldestKeptBackupAgeDays (namespace codeproctor-pilot), all computed from ListObjectVersions on
+#     db/dump/ and db/wal/ (Size, LastModified). The uploader's BackupSuccess goes to a DIFFERENT namespace
+#     (codeproctor-pilot-instance) and is a secondary signal only. REQUIREMENT for the owner's instance
+#     template: the instance role's cloudwatch:PutMetricData must carry the condition
+#     cloudwatch:namespace = codeproctor-pilot-instance, so it cannot inflate any alarmed metric. The
+#     Lambda is a dependency outside this template (code owned by the database track).
 #   - Base backups and WAL (db/wal/, pgBackRest or WAL-G repository, full base backups only): NO age
 #     lifecycle rule. An owner-applied expiry function, with its own role (codeproctor-pilot-backup-expiry,
 #     created here), run daily by a schedule and never on the instance, keeps everything younger than
-#     12 days (the lock makes earlier deletion impossible anyway) plus the newest 3 full base backups and the WAL from the oldest of them, and deletes the
-#     rest. The function and its schedule (code owned by the database track) belong to a later owner
+#     12 days (the lock makes earlier deletion impossible anyway) plus the newest 3 full base backups and
+#     the WAL from the oldest of them, and deletes the rest. It may delete only under db/wal/,
+#     db/erasure-list/ and db/erasure-completed/ (never db/dump/, which lifecycle owns). The function and its schedule (code owned by the database track) belong to a later owner
 #     template, ADR 0017 section 7; this stack builds only the role and the bucket policy that permits it.
 #   - 30 day cap: nothing is kept past 30 days without the owner's decision. Alarms: no new backup for
-#     2 days, and a kept backup reaching 28 days (metrics below).
+#     2 days (Lambda-side metric), and a kept backup reaching 28 days (metrics below).
 #   - ADR 0004 9.2 (versioning off or noncurrent expired within 1 day) was written for the media bucket,
 #     whose RetentionService fails closed on it; it does not read the backup bucket. It does conflict with
 #     the letter of ADR 0017 section 5.1 (versioning off) for this bucket, which section 5.3 resolves.
@@ -80,6 +88,7 @@ Metadata:
           - DumpSizeChangeFactor
           - MaxDumpVersionsPerDay
           - MaxFullBaseBackupCountChange
+          - AssessHostedZoneId
           - AlarmTopicArn
 
 Parameters:
@@ -117,6 +126,11 @@ Parameters:
     Default: 2
     MinValue: 1
     Description: Anomaly alarm. A change in the number of full base backups in the physical repository larger than this within a day pages the owner. Needs the expiry function to publish FullBaseBackupCountChange
+  AssessHostedZoneId:
+    Type: String
+    Default: ''
+    AllowedPattern: ^$|^Z[A-Z0-9]{5,32}$
+    Description: Same value as in github-oidc-roles.yaml. The expiry role carries the Route 53 deny for every zone except this one (empty means none)
   AlarmTopicArn:
     Type: String
     Default: ''
@@ -215,6 +229,9 @@ Resources:
               - 'kms:TagResource'
               - 'kms:UntagResource'
               - 'kms:UpdateKeyDescription'
+              - 'kms:CreateAlias'
+              - 'kms:UpdateAlias'
+              - 'kms:DeleteAlias'
               - 'kms:ImportKeyMaterial'
               - 'kms:DeleteImportedKeyMaterial'
             Resource: '*'
@@ -566,6 +583,16 @@ Resources:
                 aws:PrincipalArn:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+          - Sid: 'DenyExpiryRoleOnDumps'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:DeleteObject'
+              - 's3:DeleteObjectVersion'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/dump/*'
+            Condition:
+              ArnEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-pilot-backup-expiry'
           - Sid: 'DenyInstanceRoleDeletes'
             Effect: 'Deny'
             Principal: '*'
@@ -742,7 +769,7 @@ Resources:
                 aws:PrincipalArn:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
-  # Expiry role for the owner-applied expiry function (never on the instance, trust limited to the Lambda service for that one function by aws:SourceArn: NOT VERIFIED that Lambda accepts aws:SourceArn in an execution role trust; if the first apply refuses, fall back to aws:SourceAccount only and tell the hub). It holds NO s3:BypassGovernanceRetention (the bucket policy denies it to every codeproctor-* role); with the 13 day Object Lock it deletes only what is past the lock. list and delete on the backups bucket ONLY, nothing else (the bucket policy denies every other action to it). The function and its daily schedule come in a later owner template (code owned by the database track, ADR 0017 section 7).
+  # Expiry role for the owner-applied expiry function (never on the instance, trust limited to the Lambda service for that one function by aws:SourceArn: see below). It holds NO s3:BypassGovernanceRetention (the bucket policy denies it to every codeproctor-* role); with the 12 day Object Lock it deletes only what is past the lock. It can list the backups bucket and delete ONLY under db/wal/, db/erasure-list/ and db/erasure-completed/ (the bucket policy denies it everything else, and any delete under db/dump/). TRUST: Lambda probably does not populate aws:SourceArn or aws:SourceAccount when it assumes an execution role, so the condition below may fail closed (the function cannot be created and backups never expire). If so, the fallback is to REMOVE the condition. The real guard is then: no codeproctor-* role may hold iam:PassRole on this role or lambda:CreateFunction, UpdateFunctionCode or UpdateFunctionConfiguration (CI already denies iam:* and lambda:*; this is a requirement on the owner templates). The function and its daily schedule come in a later owner template (code owned by the database track, ADR 0017 section 7).
   BackupExpiryRole:
     Type: 'AWS::IAM::Role'
     Properties:
@@ -777,7 +804,16 @@ Resources:
                 Action:
                   - 's3:DeleteObject'
                   - 's3:DeleteObjectVersion'
-                Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/*'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/wal/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/erasure-list/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/erasure-completed/*'
+              - Sid: 'DenyRoute53OutsideAssessZone'
+                Effect: 'Deny'
+                Action:
+                  - 'route53:*'
+                  - 'route53domains:*'
+                NotResource: !Sub 'arn:${AWS::Partition}:route53:::hostedzone/${AssessHostedZoneId}'
               - Sid: 'OwnLogs'
                 Effect: 'Allow'
                 Action:
@@ -796,13 +832,27 @@ Resources:
           Value: 'pilot'
         - Key: 'ManagedBy'
           Value: 'codeproctor-pilot-data-buckets'
-  # Backup alarms (C-55). The metrics: BackupSuccess = 1 after each verified backup, published by the uploader on the main instance (database track); OldestKeptBackupAgeDays = age in days of the oldest kept backup, published by the expiry function. Missing data counts as breaching, so a stalled instance alarms too. Note: ADR 0017 section 14 item 2 says a 7 day freshness alarm; the owner decision C-55 says 2 days. 2 is used here; the hub should reconcile.
+  # Backup alarms (C-55, ADR 0017 5.3). Every alarmed metric (namespace codeproctor-pilot) is produced ONLY by the owner-applied expiry Lambda, from ListObjectVersions (Size, LastModified), because the threat is a compromised main instance that could keep publishing normal values. The instance's own BackupSuccess uses another namespace (codeproctor-pilot-instance) and is a secondary signal only. The producer is a dependency outside this template (database track). Until it exists the freshness and age alarms sit in ALARM (missing data breaches), so the first email is expected. ADR 0017 section 14 item 2 says a 7 day freshness alarm; C-55 says 2 days: 2 is used.
   BackupFreshnessAlarm:
     Type: 'AWS::CloudWatch::Alarm'
     Properties:
       AlarmName: 'codeproctor-pilot-backup-stale-2d'
-      AlarmDescription: 'No new verified backup for 2 days'
+      AlarmDescription: 'The newest dump is older than 2 days (Lambda-side metric)'
       Namespace: 'codeproctor-pilot'
+      MetricName: 'NewestDumpAgeHours'
+      Statistic: 'Maximum'
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 48
+      ComparisonOperator: 'GreaterThanThreshold'
+      TreatMissingData: 'breaching'
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref AWS::NoValue]
+  BackupUploaderSignalAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: 'codeproctor-pilot-backup-uploader-silent-2d'
+      AlarmDescription: 'Secondary signal only: the uploader on the instance reported no success for 2 days'
+      Namespace: 'codeproctor-pilot-instance'
       MetricName: 'BackupSuccess'
       Statistic: 'Sum'
       Period: 86400
@@ -811,12 +861,11 @@ Resources:
       ComparisonOperator: 'LessThanThreshold'
       TreatMissingData: 'breaching'
       AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref AWS::NoValue]
-  # Anomaly alarms against junk-version push-out (ADR 0017 5.3). NOT VERIFIED design; the producers of both metrics are outside this template (uploader on the main instance and the expiry function, database track). Missing data does not alarm (no dump, no ratio); the freshness alarm covers silence.
   DumpSizeAnomalyAlarm:
     Type: 'AWS::CloudWatch::Alarm'
     Properties:
       AlarmName: 'codeproctor-pilot-backup-dump-size-anomaly'
-      AlarmDescription: 'A new dump differs in size from the previous one by more than the allowed factor'
+      AlarmDescription: 'A new dump differs in size from the previous one by more than the allowed factor. The metric is max(new/old, old/new), always >= 1'
       Namespace: 'codeproctor-pilot'
       MetricName: 'DumpSizeChangeFactor'
       Statistic: 'Maximum'
@@ -844,7 +893,7 @@ Resources:
     Type: 'AWS::CloudWatch::Alarm'
     Properties:
       AlarmName: 'codeproctor-pilot-backup-base-backup-count'
-      AlarmDescription: 'The number of full base backups changed by more than allowed in a day'
+      AlarmDescription: 'The number of full base backups changed by more than allowed in a day. The metric is the ABSOLUTE change, so drops alarm too'
       Namespace: 'codeproctor-pilot'
       MetricName: 'FullBaseBackupCountChange'
       Statistic: 'Maximum'

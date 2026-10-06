@@ -310,7 +310,6 @@ Resources:
               - 'sns:*'
               - 'sqs:*'
               - 'ses:*'
-              - 'ses:Send*'
               - 'budgets:*'
               - 'rds:*'
               - 'rds-db:*'
@@ -358,6 +357,7 @@ Resources:
     Type: 'AWS::IAM::ManagedPolicy'
     Properties:
       ManagedPolicyName: 'codeproctor-pilot-instance-ssm'
+      Path: '/codeproctor-guardrails/'
       Description: 'SSM agent registration and Session Manager channels for the instance roles. Not attached by this stack'
       PolicyDocument:
         Version: '2012-10-17'
