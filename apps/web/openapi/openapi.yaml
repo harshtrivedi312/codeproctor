@@ -2237,9 +2237,22 @@ components:
         expectedRevision: { type: string, pattern: '^[0-9a-f]{64}$' }
     ProblemCode:
       type: string
-      description: The machine codes the API's problem filter can set (problem.filter.ts PROBLEM_CODES). Guard 403s carry none.
+      description: >-
+        The machine codes of docs/api-contract.md (preamble). Guard 403s carry none. BUSY is the 503
+        with Retry-After the problem filter answers on database lock contention (DL-37, D-56); a
+        client retries it automatically after Retry-After. Candidate-route codes such as
+        SESSION_NOT_ACTIVE (ADR 0013 section 5.1) are not staff codes and are not listed here.
       enum:
-        [REAUTH_FAILED, TWO_FACTOR_REQUIRED_FOR_ROLE, SETTINGS_CONFLICT, VARIANT_HAS_AI_REFERENCES]
+        [
+          REAUTH_FAILED,
+          TWO_FACTOR_REQUIRED_FOR_ROLE,
+          SETTINGS_CONFLICT,
+          VARIANT_HAS_AI_REFERENCES,
+          BUSY,
+          ANSWER_NOT_MANUAL,
+          SESSION_NOT_UNDER_REVIEW,
+          VERDICT_ALREADY_SET,
+        ]
     Problem:
       type: object
       description: >-

@@ -626,3 +626,7 @@ None of this exists in the API yet. Every route, body, limit and error word belo
 - **Could not verify:** the real BE-06b invitations API (CSV re-upload 'already invited' behaviour, 429 Retry-After, REASON_NOT_ENABLED), because it does not exist yet; whether the regenerated openapi types match a future API spec.
 
 - **Next section opening state (ADR 0013 5.11, FU-BEB-112).** After a deadline close, section k+1 opens at the job's own time N, so for a short gap the heartbeat still returns section k's past `sectionDeadlineAt` and a read of k+1 answers 409 `SECTION_NOT_OPEN`. FE-10 shows a "next section opening" state and retries with a short backoff instead of an error (hub, 2026-10-06).
+
+### FU-BE-193: ProblemCode enum (PR frontend/problem-code-busy)
+
+- `ProblemCode` in `apps/web/openapi/openapi.yaml` now lists BUSY (DL-37 / D-56: 503 with `Retry-After` on database lock contention; a client retries it after the stated delay, never on a 500 of a staff write) and the section 7 codes ANSWER_NOT_MANUAL, SESSION_NOT_UNDER_REVIEW and VERDICT_ALREADY_SET, so the enum equals the staff codes of the `docs/api-contract.md` preamble; `schema.d.ts` regenerated. `apps/web/src/lib/problem-codes.test.ts` fails if the contract preamble or the API's `PROBLEM_CODES` (`coded.exception.ts`) names a code the web enum lacks. Candidate-route codes (SESSION_NOT_ACTIVE, ADR 0013 section 5.1) are not staff codes and live with the candidate wire. The automatic BUSY retry itself is the separate 503 PR after Backend A's #216.
