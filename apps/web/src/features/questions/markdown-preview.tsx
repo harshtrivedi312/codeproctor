@@ -6,7 +6,23 @@ import remarkGfm from 'remark-gfm';
 const Flat = ({ children }: { children?: React.ReactNode }) => (
   <p className="mt-4 text-base font-semibold">{children}</p>
 );
-const COMPONENTS: Components = { h1: Flat, h2: Flat, h3: Flat, h4: Flat, h5: Flat, h6: Flat };
+// Remote images are not loaded in the preview: a statement could point at a third-party server and
+// this page holds private question content (hidden tests, reference solutions) next to it. The alt
+// text is shown instead. Links keep react-markdown's default URL filter, which drops `javascript:`.
+const Img = ({ alt }: { alt?: string }) => (
+  <span className="rounded border border-dashed px-1 text-sm text-muted-foreground">
+    [image{alt ? `: ${alt}` : ''} (not loaded in the preview)]
+  </span>
+);
+const COMPONENTS: Components = {
+  h1: Flat,
+  h2: Flat,
+  h3: Flat,
+  h4: Flat,
+  h5: Flat,
+  h6: Flat,
+  img: Img,
+};
 
 /**
  * Renders a question statement for the author's live preview. Same rule as the candidate screen:

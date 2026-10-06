@@ -466,7 +466,7 @@ export interface paths {
     delete?: never;
     options?: never;
     head?: never;
-    /** Save the content. A published version is immutable, so this creates the next draft version (FR-204). */
+    /** Save the content. A published version is immutable, so this creates the next draft version (FR-204). Needs the revision the editor started from; 409 stale_version when someone saved since. */
     patch: operations['updateQuestion'];
     trace?: never;
   };
@@ -578,7 +578,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Publish the current draft version. Refused (409) without a passing validation of the saved content (TC-012) or without the AI reference solutions of the publish gate (ADR 0005 AI-5). */
+    /** Publish the current draft version. Refused (409) without a passing validation of the saved content (TC-012), without the AI reference solutions of the publish gate (ADR 0005 AI-5), or when the revision is not the current one (stale_version). */
     post: operations['publishQuestion'];
     delete?: never;
     options?: never;
@@ -742,6 +742,13 @@ export interface components {
       variants: components['schemas']['Variant'][];
       answerSpec: components['schemas']['AnswerSpec'] | null;
     };
+    QuestionUpdate: components['schemas']['QuestionContent'] & {
+      expectedRevision: number;
+    };
+    PublishRequest: {
+      /** @description The revision that was validated; 409 stale_version if the question was saved since */
+      expectedRevision: number;
+    };
     QuestionCreate: components['schemas']['QuestionContent'] & {
       type: components['schemas']['QuestionType'];
     };
@@ -766,9 +773,13 @@ export interface components {
     };
     ValidationJobRef: {
       jobId: string;
+      /** @description The content revision the job validates */
+      revision: number;
     };
     ValidationJob: {
       jobId: string;
+      /** @description The content revision the job validated; a report for an older revision must never be shown as current */
+      revision: number;
       /** @enum {string} */
       status: 'queued' | 'running' | 'done' | 'failed';
       report?: components['schemas']['ValidationReport'];
@@ -781,6 +792,8 @@ export interface components {
     };
     QuestionVersion: components['schemas']['QuestionContent'] & {
       version: number;
+      /** @description Content revision of the question */
+      revision: number;
       isPublished: boolean;
       /** Format: date-time */
       createdAt: string;
@@ -2153,7 +2166,7 @@ export interface operations {
     };
     requestBody: {
       content: {
-        'application/json': components['schemas']['QuestionContent'];
+        'application/json': components['schemas']['QuestionUpdate'];
       };
     };
     responses: {
@@ -2178,6 +2191,15 @@ export interface operations {
       403: components['responses']['Forbidden'];
       /** @description Not found */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+      /** @description stale_version, the question was saved by someone else since the editor loaded it */
+      409: {
         headers: {
           [name: string]: unknown;
         };
@@ -2364,7 +2386,11 @@ export interface operations {
       };
       cookie?: never;
     };
-    requestBody?: never;
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['PublishRequest'];
+      };
+    };
     responses: {
       /** @description Published */
       200: {
@@ -2385,7 +2411,7 @@ export interface operations {
           'application/json': components['schemas']['ApiError'];
         };
       };
-      /** @description validation_required, or ai_references_missing */
+      /** @description validation_required, ai_references_missing, or stale_version */
       409: {
         headers: {
           [name: string]: unknown;

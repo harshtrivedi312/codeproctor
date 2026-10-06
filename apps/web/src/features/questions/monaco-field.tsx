@@ -9,8 +9,15 @@ import * as React from 'react';
  */
 const Inner = React.lazy(() => import('./monaco-inner'));
 
+/**
+ * The model-path prefix of one editor mount: `q/<question id>/<nonce>`. Every Monaco model of that
+ * editor lives under it, so one question's or one session's code can never reuse another's model,
+ * and the whole set can be disposed by prefix (monaco-registry.ts).
+ */
+export const MonacoScope = React.createContext<string | null>(null);
+
 export interface MonacoFieldProps {
-  /** Unique per field: Monaco keeps one model per path. */
+  /** Unique per field inside the editor. */
   path: string;
   language: 'python' | 'javascript' | 'java';
   value: string;
@@ -21,6 +28,10 @@ export interface MonacoFieldProps {
 }
 
 export function MonacoField(props: MonacoFieldProps): React.JSX.Element {
+  const scope = React.useContext(MonacoScope);
+  // A field outside an editor scope still gets a private path.
+  const [own] = React.useState(() => `q/standalone/${Math.random().toString(36).slice(2, 10)}`);
+  const path = `${scope ?? own}/${props.path}`;
   return (
     <div
       className="overflow-hidden rounded-md border"
@@ -30,7 +41,7 @@ export function MonacoField(props: MonacoFieldProps): React.JSX.Element {
       <React.Suspense
         fallback={<p className="p-3 text-sm text-muted-foreground">Loading the editor…</p>}
       >
-        <Inner {...props} />
+        <Inner {...props} path={path} />
       </React.Suspense>
     </div>
   );

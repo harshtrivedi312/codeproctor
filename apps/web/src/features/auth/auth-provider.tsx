@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import * as React from 'react';
 import { api, type Schemas } from '@/lib/api/client';
+import { disposeModels, MODEL_ROOT } from '@/features/questions/monaco-registry';
 import {
   beginSession,
   beginSignOut,
@@ -139,6 +140,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       if (id !== lastUserId) {
         void queryClient.cancelQueries();
         queryClient.clear();
+        // Question code (starter, reference and AI solutions) must not outlive the user in Monaco's
+        // model store either.
+        disposeModels(MODEL_ROOT);
         lastUserId = id;
       }
       setUser(session ? session.user : null);

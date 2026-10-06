@@ -37,19 +37,21 @@ export function useQuestions() {
   });
 }
 
+export async function fetchQuestion(id: string): Promise<Schemas['QuestionDetail']> {
+  const { data, error, response } = await api.GET('/v1/questions/{questionId}', {
+    params: { path: { questionId: id } },
+  });
+  if (!data) fail(response, error);
+  return data;
+}
+
 export function useQuestion(id: string) {
   return useQuery({
     queryKey: questionKeys.detail(id),
     // The editor owns its draft in form state; do not refetch over it.
     staleTime: Infinity,
     refetchOnWindowFocus: false,
-    queryFn: async () => {
-      const { data, error, response } = await api.GET('/v1/questions/{questionId}', {
-        params: { path: { questionId: id } },
-      });
-      if (!data) fail(response, error);
-      return data;
-    },
+    queryFn: () => fetchQuestion(id),
   });
 }
 
@@ -101,10 +103,10 @@ export function useCreateQuestion() {
 export function useSaveQuestion(id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (body: Schemas['QuestionContent']) => {
+    mutationFn: async (vars: { content: Schemas['QuestionContent']; expectedRevision: number }) => {
       const { data, error, response } = await api.PATCH('/v1/questions/{questionId}', {
         params: { path: { questionId: id } },
-        body,
+        body: { ...vars.content, expectedRevision: vars.expectedRevision },
       });
       if (!data) fail(response, error);
       return data;
@@ -124,7 +126,7 @@ export function useStartValidation(id: string) {
         params: { path: { questionId: id } },
       });
       if (!data) fail(response, error);
-      return data.jobId;
+      return data;
     },
   });
 }
@@ -144,9 +146,10 @@ export async function fetchValidationJob(
 export function usePublishQuestion(id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async () => {
+    mutationFn: async (expectedRevision: number) => {
       const { data, error, response } = await api.POST('/v1/questions/{questionId}/publish', {
         params: { path: { questionId: id } },
+        body: { expectedRevision },
       });
       if (!data) fail(response, error);
       return data;
@@ -175,6 +178,8 @@ export function usePrefill(id: string) {
 export function useAiReferences(id: string) {
   return useQuery({
     queryKey: questionKeys.ai(id),
+    // No question yet (create mode, or a type without AI solutions): no request.
+    enabled: id !== '',
     queryFn: async () => {
       const { data, error, response } = await api.GET('/v1/questions/{questionId}/ai-references', {
         params: { path: { questionId: id } },

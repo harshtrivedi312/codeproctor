@@ -1,20 +1,13 @@
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { http, HttpResponse } from 'msw';
 import { axe } from 'vitest-axe';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { apiBaseUrl } from '@/lib/env';
 import { MOCK_USERS } from '@/mocks/auth-handlers';
 import { server } from '@/mocks/server';
 import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
-import { nav, router } from '@/test/nav-mock';
+import { nav } from '@/test/nav-mock';
 import { QuestionsPage } from './questions-page';
-import {
-  NewQuestionRoute,
-  QuestionEditorRoute,
-  QuestionVersionRoute,
-  QuestionVersionsRoute,
-} from './question-pages';
+import { QuestionEditorRoute } from './question-pages';
 
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
 vi.mock('./monaco-inner', async () => (await import('@/test/monaco-stub')).monacoModule());
@@ -23,8 +16,6 @@ beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 beforeEach(() => resetAuthTestState());
-
-const base = `${apiBaseUrl}/v1/questions`;
 
 function Main({ children }: { children: React.ReactNode }) {
   return <main>{children}</main>;
@@ -123,7 +114,7 @@ describe('Question list (FR-201..FR-205)', () => {
     expect(await screen.findByText(/Your role does not have access/)).toBeInTheDocument();
   });
 
-  it('TC-011: the mock refuses the detail routes to a recruiter, so reference solutions never reach other roles', async () => {
+  it('FR-103 TC-004: the mock refuses the detail routes to a recruiter, so reference solutions never reach other roles', async () => {
     renderAsStaff(<div />, MOCK_USERS.recruiter);
     const { api } = await import('@/lib/api/client');
     await waitFor(async () => {
@@ -229,12 +220,3 @@ describe('Question editor: tabs and statement (FR-201)', () => {
     expect(window.location.href).not.toContain('referenceSolution');
   });
 });
-
-void act;
-void router;
-void NewQuestionRoute;
-void QuestionVersionRoute;
-void QuestionVersionsRoute;
-void http;
-void HttpResponse;
-void base;

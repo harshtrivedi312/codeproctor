@@ -6,10 +6,12 @@ export function MonacoStub(props: {
   onChange: (value: string) => void;
   readOnly?: boolean;
   ariaLabel: string;
+  path?: string;
 }): React.JSX.Element {
   return (
     <textarea
       aria-label={props.ariaLabel}
+      data-path={props.path}
       value={props.value}
       readOnly={props.readOnly ?? false}
       onChange={(e) => props.onChange(e.target.value)}

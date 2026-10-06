@@ -796,12 +796,12 @@ paths:
               schema: { $ref: '#/components/schemas/ApiError' }
     patch:
       operationId: updateQuestion
-      summary: Save the content. A published version is immutable, so this creates the next draft version (FR-204).
+      summary: Save the content. A published version is immutable, so this creates the next draft version (FR-204). Needs the revision the editor started from; 409 stale_version when someone saved since.
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/QuestionContent' }
+            schema: { $ref: '#/components/schemas/QuestionUpdate' }
       responses:
         '200':
           description: Saved; the returned version is the one that was edited or created
@@ -816,6 +816,11 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '409':
+          description: stale_version, the question was saved by someone else since the editor loaded it
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ApiError' }
@@ -951,7 +956,12 @@ paths:
         schema: { type: string }
     post:
       operationId: publishQuestion
-      summary: Publish the current draft version. Refused (409) without a passing validation of the saved content (TC-012) or without the AI reference solutions of the publish gate (ADR 0005 AI-5).
+      summary: Publish the current draft version. Refused (409) without a passing validation of the saved content (TC-012), without the AI reference solutions of the publish gate (ADR 0005 AI-5), or when the revision is not the current one (stale_version).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PublishRequest' }
       responses:
         '200':
           description: Published
@@ -965,7 +975,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ApiError' }
         '409':
-          description: validation_required, or ai_references_missing
+          description: validation_required, ai_references_missing, or stale_version
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ApiError' }
@@ -1236,6 +1246,23 @@ components:
           nullable: true
           allOf:
             - $ref: '#/components/schemas/AnswerSpec'
+    QuestionUpdate:
+      allOf:
+        - $ref: '#/components/schemas/QuestionContent'
+        - type: object
+          required: [expectedRevision]
+          properties:
+            expectedRevision: { type: integer, minimum: 1 }
+    PublishRequest:
+      type: object
+      required: [expectedRevision]
+      properties:
+        expectedRevision:
+          {
+            type: integer,
+            minimum: 1,
+            description: The revision that was validated; 409 stale_version if the question was saved since,
+          }
     QuestionCreate:
       allOf:
         - $ref: '#/components/schemas/QuestionContent'
@@ -1266,14 +1293,21 @@ components:
         results: { type: array, items: { $ref: '#/components/schemas/ValidationResult' } }
     ValidationJobRef:
       type: object
-      required: [jobId]
+      required: [jobId, revision]
       properties:
         jobId: { type: string }
+        revision: { type: integer, minimum: 1, description: The content revision the job validates }
     ValidationJob:
       type: object
-      required: [jobId, status]
+      required: [jobId, revision, status]
       properties:
         jobId: { type: string }
+        revision:
+          {
+            type: integer,
+            minimum: 1,
+            description: The content revision the job validated; a report for an older revision must never be shown as current,
+          }
         status: { type: string, enum: [queued, running, done, failed] }
         report: { $ref: '#/components/schemas/ValidationReport' }
         error: { type: string }
@@ -1288,9 +1322,16 @@ components:
       allOf:
         - $ref: '#/components/schemas/QuestionContent'
         - type: object
-          required: [version, isPublished, createdAt, validatedAt, validationReport]
+          required: [version, revision, isPublished, createdAt, validatedAt, validationReport]
           properties:
             version: { type: integer, minimum: 1 }
+            revision:
+              {
+                type: integer,
+                minimum: 1,
+                description: Content revision of the question,
+                monotonic and bumped by every save (also when a save creates the next version). Used for optimistic concurrency and to tie a validation to the exact content.,
+              }
             isPublished: { type: boolean }
             createdAt: { type: string, format: date-time }
             validatedAt:

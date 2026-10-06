@@ -9,16 +9,16 @@ export interface TabProps {
   readOnly: boolean;
 }
 
-/**
- * A whole form value (usually an array) read with `useWatch` and written with one `setValue`.
- * The editor's arrays are small, so replacing them wholesale keeps the code simple and avoids
- * useFieldArray, which owns the `id` key that test cases and variants use themselves.
- */
 /** Props of tabs that call the API for the saved question (`null` while it is still unsaved). */
 export interface ApiTabProps extends TabProps {
   questionId: string | null;
 }
 
+/**
+ * A whole form value (usually an array) read with `useWatch` and written with one `setValue`.
+ * The editor's arrays are small, so replacing them wholesale keeps the code simple and avoids
+ * useFieldArray, which owns the `id` key that test cases and variants use themselves.
+ */
 export function useDraftField<K extends keyof DraftValues>(
   form: UseFormReturn<DraftValues>,
   name: K,

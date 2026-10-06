@@ -41,18 +41,28 @@ const Loading = () => (
 export function QuestionEditorRoute({
   id,
   pollMs,
+  maxPolls,
 }: {
   id: string;
   pollMs?: number;
+  maxPolls?: number;
 }): React.JSX.Element {
   return (
     <RequireRole roles={rolesWith('question:update')}>
-      <EditorLoader id={id} {...(pollMs ? { pollMs } : {})} />
+      <EditorLoader id={id} {...(pollMs ? { pollMs } : {})} {...(maxPolls ? { maxPolls } : {})} />
     </RequireRole>
   );
 }
 
-function EditorLoader({ id, pollMs }: { id: string; pollMs?: number }): React.JSX.Element {
+function EditorLoader({
+  id,
+  pollMs,
+  maxPolls,
+}: {
+  id: string;
+  pollMs?: number;
+  maxPolls?: number;
+}): React.JSX.Element {
   const question = useQuestion(id);
   if (question.isPending) return <Loading />;
   if (question.isError) return <LoadError error={question.error} />;
@@ -66,7 +76,13 @@ function EditorLoader({ id, pollMs }: { id: string; pollMs?: number }): React.JS
           Version history
         </Link>
       </p>
-      <QuestionEditor key={id} mode="edit" detail={question.data} {...(pollMs ? { pollMs } : {})} />
+      <QuestionEditor
+        key={id}
+        mode="edit"
+        detail={question.data}
+        {...(pollMs ? { pollMs } : {})}
+        {...(maxPolls ? { maxPolls } : {})}
+      />
     </>
   );
 }

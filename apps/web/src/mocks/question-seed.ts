@@ -10,6 +10,8 @@ export type ValidationReport = Schemas['ValidationReport'];
 
 export interface MockVersion extends Content {
   version: number;
+  /** Question-wide content revision, bumped by every save (also when a save creates a version). */
+  revision: number;
   isPublished: boolean;
   createdAt: string;
   createdByName: string;
@@ -285,6 +287,7 @@ prints
   ): MockVersion => ({
     ...structuredClone(c),
     version,
+    revision: version,
     isPublished: false,
     createdAt: daysAgo(30 - version),
     createdByName: o.by ?? 'Avery Author',

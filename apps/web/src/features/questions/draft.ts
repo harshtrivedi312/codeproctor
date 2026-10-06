@@ -46,11 +46,12 @@ export interface DraftValues {
   limits: { cpuMs: number; wallMs: number; memoryKb: number };
   starterCode: Record<string, string>;
   referenceSolution: Record<string, string>;
-  paramSchema: Schemas['ParamDef'][];
+  /** `key` is a stable React key, never sent to the API. */
+  paramSchema: (Schemas['ParamDef'] & { key: string })[];
   testCases: TestCase[];
   variants: VariantValues[];
   mcq: { options: { id: string; text: string }[]; correctOptionIds: string[]; multiple: boolean };
-  short: { canonical: string; acceptedVariants: string[] };
+  short: { canonical: string; acceptedVariants: { key: string; value: string }[] };
 }
 
 export const DEFAULT_LIMITS = { cpuMs: 2000, wallMs: 5000, memoryKb: 262_144 };
@@ -122,7 +123,7 @@ export function toDraft(
     limits: { ...v.limits },
     starterCode: { ...v.starterCode },
     referenceSolution: { ...v.referenceSolution },
-    paramSchema: v.paramSchema.map((p) => ({ ...p })),
+    paramSchema: v.paramSchema.map((p) => ({ ...p, key: newId('param') })),
     testCases: v.testCases.map((t) => ({ ...t })),
     variants: v.variants.map((x) => ({
       id: x.id,
@@ -139,7 +140,10 @@ export function toDraft(
         }
       : base.mcq,
     short: short
-      ? { canonical: short.canonical, acceptedVariants: [...short.acceptedVariants] }
+      ? {
+          canonical: short.canonical,
+          acceptedVariants: short.acceptedVariants.map((value) => ({ key: newId('sv'), value })),
+        }
       : base.short,
   };
 }
@@ -165,7 +169,7 @@ export function toContent(d: DraftValues): QuestionContent {
     answerSpec = {
       type: 'SHORT_ANSWER',
       canonical: d.short.canonical.trim(),
-      acceptedVariants: d.short.acceptedVariants.map((a) => a.trim()),
+      acceptedVariants: d.short.acceptedVariants.map((a) => a.value.trim()),
     };
   }
   return {
@@ -177,7 +181,7 @@ export function toContent(d: DraftValues): QuestionContent {
     limits: d.limits,
     starterCode: keep(d.starterCode),
     referenceSolution: keep(d.referenceSolution),
-    paramSchema: coding ? d.paramSchema : [],
+    paramSchema: coding ? d.paramSchema.map(({ name, type }) => ({ name, type })) : [],
     testCases: coding ? d.testCases : [],
     variants: coding
       ? d.variants.map((v) => {
@@ -251,6 +255,7 @@ export const draftSchema = z
           .string()
           .regex(PARAM_NAME, 'Use letters, digits and underscores, starting with a letter.'),
         type: z.enum(['string', 'number', 'boolean', 'array']),
+        key: z.string(),
       }),
     ),
     testCases: z.array(testCaseSchema),
@@ -274,7 +279,10 @@ export const draftSchema = z
       correctOptionIds: z.array(z.string()),
       multiple: z.boolean(),
     }),
-    short: z.object({ canonical: z.string(), acceptedVariants: z.array(z.string()) }),
+    short: z.object({
+      canonical: z.string(),
+      acceptedVariants: z.array(z.object({ key: z.string(), value: z.string() })),
+    }),
   })
   .superRefine((d, ctx) => {
     const issue = (path: (string | number)[], message: string) =>
@@ -346,12 +354,15 @@ export const draftSchema = z
       }
       const seen = new Set<string>([normalizeShortAnswer(d.short.canonical)]);
       d.short.acceptedVariants.forEach((a, i) => {
-        const n = normalizeShortAnswer(a);
+        const n = normalizeShortAnswer(a.value);
         if (n === '')
-          issue(['short', 'acceptedVariants', i], 'Write the accepted answer or remove it.');
+          issue(
+            ['short', 'acceptedVariants', i, 'value'],
+            'Write the accepted answer or remove it.',
+          );
         else if (seen.has(n)) {
           issue(
-            ['short', 'acceptedVariants', i],
+            ['short', 'acceptedVariants', i, 'value'],
             'This matches the canonical answer or another variant once case and spacing are ignored.',
           );
         }

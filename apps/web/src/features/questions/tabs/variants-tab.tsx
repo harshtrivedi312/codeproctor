@@ -68,7 +68,7 @@ export function VariantsTab({ form, readOnly, questionId }: ApiTabProps): React.
         ) : null}
         <ul className="space-y-2">
           {defs.map((d, i) => (
-            <li key={i} className="flex flex-wrap items-start gap-2">
+            <li key={d.key} className="flex flex-wrap items-start gap-2">
               <Field
                 id={`param-name-${i}`}
                 label={`Parameter ${i + 1} name`}
@@ -127,7 +127,7 @@ export function VariantsTab({ form, readOnly, questionId }: ApiTabProps): React.
             type="button"
             variant="outline"
             size="sm"
-            onClick={() => setDefs([...defs, { name: '', type: 'number' }])}
+            onClick={() => setDefs([...defs, { name: '', type: 'number', key: newId('param') }])}
           >
             <Plus className="size-4" aria-hidden="true" />
             Add parameter
@@ -233,11 +233,28 @@ function VariantCard({
   const [language, setLanguage] = React.useState('');
   const withReference = languages.filter((l) => (reference[l] ?? '').trim() !== '');
   const chosen = language || withReference[0] || '';
-  const [proposals, setProposals] = React.useState<Proposal[] | null>(null);
+  // Proposals remember what they were computed from; if any of it changes they are stale.
+  const [proposed, setProposed] = React.useState<{ key: string; items: Proposal[] } | null>(null);
+  const requestId = React.useRef(0);
   const prefill = usePrefill(questionId ?? '');
 
   const overrideOf = (testCaseId: string) =>
     variant.overrides.find((o) => o.testCaseId === testCaseId);
+
+  const snapshotKey = JSON.stringify([
+    chosen,
+    variant.paramsText,
+    reference[chosen] ?? '',
+    tests.map((t) => [t.id, overrideOf(t.id)?.input ?? t.input]),
+  ]);
+  const stale = proposed !== null && proposed.key !== snapshotKey;
+  const proposals = proposed && !stale ? proposed.items : null;
+  const setProposals = (update: (all: Proposal[] | null) => Proposal[] | null): void =>
+    setProposed((p) => {
+      if (!p) return p;
+      const items = update(p.items);
+      return items === null ? null : { ...p, items };
+    });
 
   function setOverride(
     testCaseId: string,
@@ -264,13 +281,20 @@ function VariantCard({
 
   async function runPrefill(): Promise<void> {
     if (!parsed.ok || !questionId || chosen === '') return;
-    const result = await prefill.mutateAsync({
-      language: chosen as Schemas['Language'],
-      params: parsed.value,
-      referenceSolution: reference[chosen] ?? '',
-      slots: tests.map((t) => ({ testCaseId: t.id, input: overrideOf(t.id)?.input ?? t.input })),
-    });
-    setProposals(result);
+    const id = (requestId.current += 1);
+    const key = snapshotKey;
+    try {
+      const items = await prefill.mutateAsync({
+        language: chosen as Schemas['Language'],
+        params: parsed.value,
+        referenceSolution: reference[chosen] ?? '',
+        slots: tests.map((t) => ({ testCaseId: t.id, input: overrideOf(t.id)?.input ?? t.input })),
+      });
+      // A newer request (or a dismiss) replaced this one: ignore the old answer.
+      if (id === requestId.current) setProposed({ key, items });
+    } catch {
+      // prefill.isError shows the message; nothing was changed.
+    }
   }
 
   function accept(p: Proposal): void {
@@ -491,6 +515,24 @@ function VariantCard({
               Check the reference solution and try again. Your test data was not changed.
             </Alert>
           ) : null}
+          {stale ? (
+            <Alert tone="warning" role="status">
+              The parameters, the inputs or the reference solution changed since these outputs were
+              proposed, so they were set aside. Run the prefill again.
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="ml-2"
+                onClick={() => {
+                  requestId.current += 1;
+                  setProposed(null);
+                }}
+              >
+                Dismiss
+              </Button>
+            </Alert>
+          ) : null}
           {proposals ? (
             <div
               role="region"
@@ -548,7 +590,10 @@ function VariantCard({
                   type="button"
                   variant="outline"
                   size="sm"
-                  onClick={() => setProposals(null)}
+                  onClick={() => {
+                    requestId.current += 1;
+                    setProposed(null);
+                  }}
                 >
                   Dismiss
                 </Button>

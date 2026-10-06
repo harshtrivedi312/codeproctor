@@ -25,6 +25,8 @@ const POLICY: Schemas['AiReferencePolicy'] = { refreshDays: 90, minAssistants: 2
 interface Job {
   questionId: string;
   version: number;
+  /** The content revision this job validates. */
+  revision: number;
   polls: number;
   report: Report;
 }
@@ -48,7 +50,7 @@ const problem = (status: number, code: string, message: string) =>
 
 function allowed(
   request: Request,
-  permission: 'question:read' | 'question:update',
+  permission: 'question:read' | 'question:create' | 'question:update',
 ): Role | Response {
   const role = mockRoleFromToken(request.headers.get('authorization'));
   if (!role) return problem(401, 'unauthenticated', 'Sign in again.');
@@ -93,6 +95,7 @@ function detail(q: MockQuestion, v: MockVersion): Detail {
       ...structuredClone(content(v)),
       tags: structuredClone(v.tags),
       version: v.version,
+      revision: v.revision,
       isPublished: v.isPublished,
       createdAt: v.createdAt,
       validatedAt: v.validatedAt,
@@ -249,7 +252,7 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
 
     http.post(base, async ({ request }) => {
       await wait();
-      const role = allowed(request, 'question:update');
+      const role = allowed(request, 'question:create');
       if (role instanceof Response) return role;
       const body = (await request.json()) as Content & { type: Schemas['QuestionType'] };
       const err = contentError(body, body.type);
@@ -271,6 +274,7 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
           {
             ...rest,
             version: 1,
+            revision: 1,
             isPublished: false,
             createdAt: new Date().toISOString(),
             createdByName: actor(role),
@@ -292,11 +296,19 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
     http.patch(`${base}/:id`, async ({ request, params }) => {
       const r = await author(request, String(params.id));
       if (r instanceof Response) return r;
-      const body = (await request.json()) as Content;
+      const { expectedRevision, ...body } = (await request.json()) as Content & {
+        expectedRevision: number;
+      };
+      const current = latest(r.q);
+      // Optimistic concurrency: someone saved since this editor loaded the question.
+      if (expectedRevision !== current.revision) {
+        return problem(409, 'stale_version', 'This question changed since you opened it.');
+      }
       const err = contentError(body, r.q.type);
       if (err) return problem(400, 'invalid_content', err);
-      const current = latest(r.q);
-      const fields = { ...body, validatedAt: null, validationReport: null };
+      const revision = current.revision + 1;
+      // Any save clears the validation: it was about the old content.
+      const fields = { ...body, revision, validatedAt: null, validationReport: null };
       if (current.isPublished) {
         // A published version never changes: the edit becomes the next draft (FR-204).
         r.q.versions.push({
@@ -341,10 +353,11 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       state.jobs.set(jobId, {
         questionId: r.q.id,
         version: v.version,
+        revision: v.revision,
         polls: 0,
         report: runValidation(v),
       });
-      return HttpResponse.json({ jobId }, { status: 202 });
+      return HttpResponse.json({ jobId, revision: v.revision }, { status: 202 });
     }),
 
     http.get(`${base}/:id/validation/:jobId`, async ({ request, params }) => {
@@ -356,16 +369,22 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       if (job.polls < 2) {
         return HttpResponse.json({
           jobId: String(params.jobId),
+          revision: job.revision,
           status: job.polls === 1 ? 'queued' : 'running',
         });
       }
       const v = r.q.versions.find((x) => x.version === job.version);
       // Only the still-current saved version takes the result (an edit after Validate clears it).
-      if (v && v === latest(r.q) && v.validationReport === null) {
+      if (v && v === latest(r.q) && v.revision === job.revision && v.validationReport === null) {
         v.validationReport = job.report;
         v.validatedAt = job.report.passed ? job.report.finishedAt : null;
       }
-      return HttpResponse.json({ jobId: String(params.jobId), status: 'done', report: job.report });
+      return HttpResponse.json({
+        jobId: String(params.jobId),
+        revision: job.revision,
+        status: 'done',
+        report: job.report,
+      });
     }),
 
     http.post(`${base}/:id/prefill`, async ({ request, params }) => {
@@ -389,6 +408,11 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       const r = await author(request, String(params.id));
       if (r instanceof Response) return r;
       const v = latest(r.q);
+      const body = (await request.json().catch(() => ({}))) as { expectedRevision?: number };
+      // The validation belongs to one revision: publishing any other is refused (TC-012).
+      if (body.expectedRevision !== v.revision) {
+        return problem(409, 'stale_version', 'This question changed since it was validated.');
+      }
       if (v.isPublished)
         return problem(409, 'already_published', 'This version is already published.');
       if (!v.validatedAt || !v.validationReport?.passed) {

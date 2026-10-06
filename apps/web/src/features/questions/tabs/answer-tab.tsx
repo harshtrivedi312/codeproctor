@@ -174,30 +174,30 @@ function ShortAnswer({ form, readOnly }: TabProps): React.JSX.Element {
         </p>
         <ul className="space-y-2">
           {short.acceptedVariants.map((a, i) => (
-            <li key={i} className="flex flex-wrap items-start gap-2">
+            <li key={a.key} className="flex flex-wrap items-start gap-2">
               <Field
                 id={`short-var-${i}`}
                 label={`Accepted variant ${i + 1}`}
                 hint={
-                  a.trim() ? (
+                  a.value.trim() ? (
                     <>
-                      Matches as: <code>{normalizeShortAnswer(a)}</code>
+                      Matches as: <code>{normalizeShortAnswer(a.value)}</code>
                     </>
                   ) : undefined
                 }
-                error={errorAt(form, `short.acceptedVariants.${i}`)}
+                error={errorAt(form, `short.acceptedVariants.${i}.value`)}
               >
                 {(aria) => (
                   <Input
                     {...aria}
                     className="w-96"
-                    value={a}
+                    value={a.value}
                     disabled={readOnly}
                     onChange={(e) =>
                       setShort({
                         ...short,
                         acceptedVariants: short.acceptedVariants.map((x, j) =>
-                          j === i ? e.target.value : x,
+                          j === i ? { ...x, value: e.target.value } : x,
                         ),
                       })
                     }
@@ -230,7 +230,10 @@ function ShortAnswer({ form, readOnly }: TabProps): React.JSX.Element {
             variant="outline"
             size="sm"
             onClick={() =>
-              setShort({ ...short, acceptedVariants: [...short.acceptedVariants, ''] })
+              setShort({
+                ...short,
+                acceptedVariants: [...short.acceptedVariants, { key: newId('sv'), value: '' }],
+              })
             }
           >
             <Plus className="size-4" aria-hidden="true" />

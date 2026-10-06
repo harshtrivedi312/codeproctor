@@ -147,7 +147,7 @@ describe('question draft (FR-201..FR-205)', () => {
       allowedLanguages: ['python'],
       starterCode: { python: 'a', java: 'b' },
       testCases: [{ id: 't1', input: '', expectedOutput: '', isHidden: false, weight: 1 }],
-      paramSchema: [{ name: 'n', type: 'number' }],
+      paramSchema: [{ name: 'n', type: 'number', key: 'k' }],
       variants: [
         {
           id: 'v',

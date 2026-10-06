@@ -20,11 +20,14 @@ export function ValidationPanel({
   report,
   isCoding,
   stale,
+  fresh,
 }: {
   report: Report;
   isCoding: boolean;
   /** The report is older than the form (edits since). Shown as a note. */
   stale: boolean;
+  /** Just returned from a job in this session: announce it as an alert. A report loaded with the page is a status. */
+  fresh: boolean;
 }): React.JSX.Element {
   const failed = report.results.filter((r) => r.outcome !== 'pass');
   const groups = new Map<string, Report['results']>();
@@ -54,7 +57,7 @@ export function ValidationPanel({
             : 'The answer key is valid.'}
         </Alert>
       ) : (
-        <Alert tone="error" role="alert" title="Validation failed">
+        <Alert tone="error" role={fresh ? 'alert' : 'status'} title="Validation failed">
           {failed.length} of {report.results.length} checks failed
           {failedVariants.length > 0 ? `, in: ${failedVariants.join(', ')}` : ''}. Fix them and
           validate again. Publishing stays blocked until every check passes.

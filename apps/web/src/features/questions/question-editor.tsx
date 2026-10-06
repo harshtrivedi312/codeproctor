@@ -1,5 +1,6 @@
 'use client';
 import { zodResolver } from '@hookform/resolvers/zod';
+import { useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import * as React from 'react';
 import { useForm, useWatch, type FieldErrors } from 'react-hook-form';
@@ -18,8 +19,12 @@ import {
   type QuestionDetail,
 } from './draft';
 import { aiGate, canPublish, publishChecks } from './gate';
+import { disposeModels } from './monaco-registry';
+import { MonacoScope } from './monaco-field';
 import { STATUS_LABEL, TYPE_LABEL } from './labels';
 import {
+  fetchQuestion,
+  questionKeys,
   useAiReferences,
   useCreateQuestion,
   usePublishQuestion,
@@ -88,12 +93,16 @@ export interface QuestionEditorProps {
   type?: Schemas['QuestionType'];
   /** Validation poll interval; tests pass a small value. */
   pollMs?: number;
+  /** Most polls of one validation job before giving up. */
+  maxPolls?: number;
 }
 
 interface Meta {
   questionId: string | null;
   status: Schemas['QuestionStatus'];
   version: number;
+  /** Content revision of the question: ties a validation to the exact saved content. */
+  revision: number;
   isPublished: boolean;
   validatedAt: string | null;
   report: Report | null;
@@ -104,6 +113,7 @@ function metaOf(detail: QuestionDetail | undefined): Meta {
     questionId: detail?.id ?? null,
     status: detail?.status ?? 'DRAFT',
     version: detail?.current.version ?? 1,
+    revision: detail?.current.revision ?? 1,
     isPublished: detail?.current.isPublished ?? false,
     validatedAt: detail?.current.validatedAt ?? null,
     report: detail?.current.validationReport ?? null,
@@ -115,6 +125,8 @@ const PUBLISH_REFUSAL: Record<string, string> = {
     'The saved version has no passing validation. Press Validate and fix every failing test.',
   ai_references_missing: 'AI reference solutions are missing.',
   already_published: 'This version is already published.',
+  stale_version:
+    'This question changed after it was validated. Reload the latest version, then validate again.',
 };
 
 /**
@@ -128,8 +140,10 @@ export function QuestionEditor({
   detail,
   type,
   pollMs = 1000,
+  maxPolls = 90,
 }: QuestionEditorProps): React.JSX.Element {
   const router = useRouter();
+  const qc = useQueryClient();
   const readOnly = mode === 'view';
   const questionType = detail?.type ?? type ?? 'CODING';
   const initial = React.useMemo(
@@ -156,6 +170,18 @@ export function QuestionEditor({
   const [notice, setNotice] = React.useState<string | null>(null);
   const [problem, setProblem] = React.useState<string | null>(null);
   const [publishProblem, setPublishProblem] = React.useState<string | null>(null);
+  /** The server has a newer revision than this editor started from (409 stale_version). */
+  const [conflict, setConflict] = React.useState(false);
+  /** True only for a report that just came back from a job (an alert), not one loaded with the page. */
+  const [reportFresh, setReportFresh] = React.useState(false);
+  const revisionRef = React.useRef(meta.revision);
+  // Double clicks on Validate or Publish start one action, not two.
+  const busy = React.useRef(false);
+  // Every Monaco model of this editor lives under this prefix and is disposed with the editor.
+  const [scope] = React.useState(
+    () => `q/${detail?.id ?? 'new'}/${Math.random().toString(36).slice(2, 10)}`,
+  );
+  React.useEffect(() => () => void disposeModels(`${scope}/`), [scope]);
 
   const create = useCreateQuestion();
   const save = useSaveQuestion(meta.questionId ?? '');
@@ -163,6 +189,9 @@ export function QuestionEditor({
   const startValidation = useStartValidation(meta.questionId ?? '');
   const [validating, setValidating] = React.useState(false);
   const alive = React.useRef(true);
+  React.useEffect(() => {
+    revisionRef.current = meta.revision;
+  }, [meta.revision]);
   React.useEffect(() => {
     alive.current = true;
     return () => {
@@ -196,9 +225,9 @@ export function QuestionEditor({
         return 'Your role cannot do this. Ask a Super Admin if you think this is a mistake.';
       if (error.status === 404) return 'This question no longer exists. Go back to the list.';
       if (error.status === 401)
-        return 'Your session expired. Sign in again; your edits on this page are still here until then.';
+        return 'Your session ended before this could be saved. You will be asked to sign in again, and the edits on this page will be lost. Copy anything you need first.';
     }
-    return 'We could not reach the server. Your edits are still here. Check your connection and try again.';
+    return 'We could not reach the server. Your edits are still on this page. Check your connection and try again.';
   }
 
   async function onValid(values: DraftValues): Promise<void> {
@@ -214,17 +243,38 @@ export function QuestionEditor({
         router.replace(`/admin/questions/${created.id}`);
         return;
       }
-      const saved = await save.mutateAsync(content);
+      const saved = await save.mutateAsync({ content, expectedRevision: meta.revision });
       form.reset(toDraft(saved.type, saved.current.tags, saved.current));
       const newVersion = saved.current.version !== meta.version;
       setMeta(metaOf(saved));
       setPolicy(saved.aiReferencePolicy);
       setPublishProblem(null);
+      setConflict(false);
+      setReportFresh(false);
       setNotice(
         newVersion
           ? `Saved as version ${saved.current.version} (draft). The published version ${meta.version} is unchanged.`
           : 'Saved. Validate again before publishing.',
       );
+    } catch (e) {
+      if (e instanceof ApiFailure && e.status === 409 && e.code === 'stale_version') {
+        setConflict(true);
+      } else setProblem(describe(e));
+    }
+  }
+
+  /** Throws the edits away and loads what is saved now. Only after the author chose to. */
+  async function reloadLatest(): Promise<void> {
+    try {
+      const latest = await fetchQuestion(meta.questionId ?? '');
+      qc.setQueryData(questionKeys.detail(latest.id), latest);
+      form.reset(toDraft(latest.type, latest.current.tags, latest.current));
+      setMeta(metaOf(latest));
+      setPolicy(latest.aiReferencePolicy);
+      setConflict(false);
+      setProblem(null);
+      setReportFresh(false);
+      setNotice('Loaded the latest saved version.');
     } catch (e) {
       setProblem(describe(e));
     }
@@ -245,40 +295,72 @@ export function QuestionEditor({
   }
 
   async function onValidate(): Promise<void> {
+    if (busy.current) return;
+    busy.current = true;
     setProblem(null);
     setPublishProblem(null);
     setValidating(true);
     try {
       const questionId = meta.questionId ?? '';
-      const jobId = await startValidation.mutateAsync();
-      // Poll the job until it is done; stop quietly if the page was left meanwhile.
-      for (;;) {
-        await new Promise((resolve) => setTimeout(resolve, pollMs));
+      // The result only counts for the exact content revision it was started on (TC-012).
+      const started = await startValidation.mutateAsync();
+      const startedRevision = revisionRef.current;
+      if (started.revision !== startedRevision) {
+        setProblem('The question changed on the server. Reload the latest version, then validate.');
+        return;
+      }
+      // Poll with a gentle backoff and a cap; stop quietly if the page was left meanwhile.
+      for (let attempt = 0; attempt < maxPolls; attempt += 1) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(pollMs * (1 + attempt * 0.25), pollMs * 5)),
+        );
         if (!alive.current) return;
-        const state = await fetchValidationJob(questionId, jobId);
+        const state = await fetchValidationJob(questionId, started.jobId);
         if (!alive.current) return;
         if (state.status === 'failed') {
           setProblem(state.error ?? 'The validation job failed. Try again in a moment.');
           return;
         }
-        if (state.status === 'done' && state.report) {
-          const report = state.report;
-          setMeta((m) => ({ ...m, report, validatedAt: report.passed ? report.finishedAt : null }));
+        if (state.status !== 'done') continue;
+        const report = state.report;
+        if (!report) {
+          setProblem('The validation finished without a report. Press Validate to try again.');
           return;
         }
+        if (state.revision !== startedRevision || revisionRef.current !== startedRevision) {
+          setProblem(
+            'The question changed while it was being validated, so that result was dropped. Press Validate again.',
+          );
+          return;
+        }
+        const validatedAt = report.passed ? report.finishedAt : null;
+        setMeta((m) => ({ ...m, report, validatedAt }));
+        setReportFresh(true);
+        // Keep the cache in step with what the editor shows, and the history's "validated" column.
+        qc.setQueryData<QuestionDetail>(questionKeys.detail(questionId), (old) =>
+          old && old.current.revision === startedRevision
+            ? { ...old, current: { ...old.current, validatedAt, validationReport: report } }
+            : old,
+        );
+        void qc.invalidateQueries({ queryKey: questionKeys.versions(questionId) });
+        return;
       }
+      setProblem('Validation is taking longer than expected. Press Validate to try again.');
     } catch (e) {
       if (alive.current) setProblem(describe(e));
     } finally {
+      busy.current = false;
       if (alive.current) setValidating(false);
     }
   }
 
   async function onPublish(): Promise<void> {
+    if (busy.current) return;
+    busy.current = true;
     setPublishProblem(null);
     setNotice(null);
     try {
-      const done = await publish.mutateAsync();
+      const done = await publish.mutateAsync(meta.revision);
       setMeta(metaOf(done));
       setNotice(
         `Version ${done.current.version} is published. Editing it later creates a new version.`,
@@ -289,13 +371,16 @@ export function QuestionEditor({
           `${PUBLISH_REFUSAL[e.code] ?? 'Publishing was refused.'}${e.code === 'ai_references_missing' && e.message ? ` ${e.message}` : ''}`,
         );
       } else setPublishProblem(describe(e));
+    } finally {
+      busy.current = false;
     }
   }
 
   const tabs: TabDef[] = (isCoding ? CODING_TABS : OTHER_TABS).map((t) =>
     badTabs.has(t.id) ? { ...t, badge: 'needs attention' } : t,
   );
-  const tabProps = { form, readOnly };
+  // While a validation runs the content is frozen: the result must be about what is on screen.
+  const tabProps = { form, readOnly: readOnly || validating };
 
   return (
     <form
@@ -320,7 +405,7 @@ export function QuestionEditor({
         </div>
         {readOnly ? null : (
           <div className="flex flex-wrap gap-2">
-            <Button type="submit" disabled={!isDirty || form.formState.isSubmitting}>
+            <Button type="submit" disabled={!isDirty || form.formState.isSubmitting || validating}>
               {form.formState.isSubmitting ? 'Saving…' : 'Save'}
             </Button>
             {mode === 'edit' ? (
@@ -328,7 +413,7 @@ export function QuestionEditor({
                 <Button
                   type="button"
                   variant="outline"
-                  disabled={isDirty || validating}
+                  disabled={isDirty || validating || conflict}
                   aria-describedby="publish-checks"
                   onClick={() => void onValidate()}
                 >
@@ -336,7 +421,7 @@ export function QuestionEditor({
                 </Button>
                 <Button
                   type="button"
-                  disabled={!canPublish(input) || publish.isPending}
+                  disabled={!canPublish(input) || publish.isPending || validating || conflict}
                   aria-describedby="publish-checks"
                   onClick={() => void onPublish()}
                 >
@@ -366,6 +451,21 @@ export function QuestionEditor({
           </Alert>
         ) : null}
       </div>
+      {conflict ? (
+        <Alert tone="warning" role="alert" title="This question changed since you opened it">
+          Someone saved a newer version. Your edits are still on this page, but they cannot be saved
+          on top of it. Copy what you need, then reload to continue.
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="mt-2"
+            onClick={() => void reloadLatest()}
+          >
+            Reload the latest version (discards my edits)
+          </Button>
+        </Alert>
+      ) : null}
       {problem ? (
         <Alert tone="error" role="alert" title="That did not work">
           {problem}
@@ -402,31 +502,38 @@ export function QuestionEditor({
         </p>
       ) : null}
       {meta.report && !readOnly ? (
-        <ValidationPanel report={meta.report} isCoding={isCoding} stale={isDirty} />
+        <ValidationPanel
+          report={meta.report}
+          isCoding={isCoding}
+          stale={isDirty}
+          fresh={reportFresh}
+        />
       ) : null}
 
-      <Tabs label="Question sections" tabs={tabs} value={tab} onValueChange={setTab}>
-        {(id) => {
-          switch (id) {
-            case 'statement':
-              return <StatementTab {...tabProps} />;
-            case 'languages':
-              return <LanguagesTab {...tabProps} />;
-            case 'reference':
-              return <ReferenceTab {...tabProps} />;
-            case 'tests':
-              return <TestsTab {...tabProps} />;
-            case 'variants':
-              return <VariantsTab {...tabProps} questionId={meta.questionId} />;
-            case 'ai':
-              return <AiTab {...tabProps} questionId={meta.questionId} policy={policy} />;
-            case 'limits':
-              return <LimitsTab {...tabProps} />;
-            default:
-              return <AnswerTab {...tabProps} />;
-          }
-        }}
-      </Tabs>
+      <MonacoScope.Provider value={scope}>
+        <Tabs label="Question sections" tabs={tabs} value={tab} onValueChange={setTab}>
+          {(id) => {
+            switch (id) {
+              case 'statement':
+                return <StatementTab {...tabProps} />;
+              case 'languages':
+                return <LanguagesTab {...tabProps} />;
+              case 'reference':
+                return <ReferenceTab {...tabProps} />;
+              case 'tests':
+                return <TestsTab {...tabProps} />;
+              case 'variants':
+                return <VariantsTab {...tabProps} questionId={meta.questionId} />;
+              case 'ai':
+                return <AiTab {...tabProps} questionId={meta.questionId} policy={policy} />;
+              case 'limits':
+                return <LimitsTab {...tabProps} />;
+              default:
+                return <AnswerTab {...tabProps} />;
+            }
+          }}
+        </Tabs>
+      </MonacoScope.Provider>
     </form>
   );
 }
