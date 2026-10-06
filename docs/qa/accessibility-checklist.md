@@ -10,22 +10,26 @@ Sources: docs/test-cases.md (TC-030, TC-031, TC-032, TC-040, TC-041, TC-046, TC-
 
 Verification marks used below: "(doc)" means the requirement is written in a doc; "(code)" means I saw it in the code on main and it is only a hint for where to look; "(unverified)" means I could not confirm it from the docs or code and the tester must check it and record what they see.
 
-## 1. State of the product against this checklist (checked 2026-10-05 on main)
+## 1. State of the product against this checklist (checked 2026-10-06 on main)
 
 | Screen group | Built? | Evidence |
 | --- | --- | --- |
-| Landing, OTP, consent, decline, system check, identity, room scan, QR, practice, final checklist (the stepper, frontend.md Step 9) | No. `/t/[token]` is a placeholder page ("Your test opens here once the invitation steps are built"). | apps/web/src/app/(candidate)/t/[token]/page.tsx |
-| Test screen (editor, output, timers, overlays, finish section) | Yes, mocked at `/t/demo/test` (FE-01) | apps/web/src/features/candidate-test, packages/qa/e2e/candidate-test.spec.ts |
-| Error pages (expired, used, forbidden) | Yes | apps/web/src/app/(public)/errors/[kind]/page.tsx |
-| Submit/finish after the last section, "Already used", declined page, session-expired page | Not found (unverified); the section-finished status and the "Time is up" banner exist | test-screen.tsx |
+| Link entry: `/t/[token]` renders TokenHandoff, which moves the token into memory and replaces the URL with `/t/link` | Yes (FE-09) | apps/web/src/app/(candidate)/t/[token]/page.tsx, apps/web/src/features/candidate-flow/token-handoff.tsx |
+| Stepper at `/t/link`: welcome (landing), start, OTP, consent (with decline), system check, identity, room scan, phone (QR, STRICT), practice, start step, then the test | Yes (FE-09), wired in `candidate-flow.tsx` with ConsentStep, SystemCheckStep, IdentityStep, RoomScanStep, PhoneStep, PracticeStep, StartStep and TestScreen | apps/web/src/features/candidate-flow/candidate-flow.tsx; routes `/t/start`, `/t/link`, `/t/phone`, `/t/phone/enter` under apps/web/src/app/(candidate)/t/ |
+| Phone side-camera page (STRICT) | Yes | apps/web/src/app/(candidate)/t/phone/page.tsx, apps/web/src/features/candidate-phone |
+| Terminal screens: already used, expired, not yet open, blocked (link paused), declined, session ended, service unavailable, invalid link | Yes | apps/web/src/features/candidate-flow/terminal-screens.tsx |
+| Test screen (editor, output, timers, overlays, finish section) | Yes: real source after the stepper, and mocked at `/t/demo/test` (FE-10) | apps/web/src/features/candidate-test, apps/web/src/app/(candidate)/t/[token]/test/page.tsx, packages/qa/e2e/candidate-test.spec.ts |
+| Submitted screen after the last section ("Your test is submitted", focus on the `h1`, leaves fullscreen) | Yes | `SubmittedPanel` in apps/web/src/features/candidate-test/test-screen.tsx |
+| Public error pages (expired, used, forbidden) | Yes | apps/web/src/app/(public)/errors/[kind]/page.tsx |
+| Final checklist as a list of items with status before Start (A11Y-STEP-05) | Not confirmed (unverified): a StartStep exists; the tester checks that it lists the items and the Start button reason | apps/web/src/features/candidate-flow/start-step.tsx |
 
-Sections 4.1 to 4.8 can only be run when the stepper lands. Run what exists now (4.9, the finish parts of 4.10 that the mocked screen has, and the three error pages in 4.11) and keep the rest as the acceptance checklist for the stepper PR. Record "not built" in the result record rather than "pass".
+Run every screen that exists, in sections 4.1 to 4.11. Record "not built" in the result record only for a screen or state that is truly missing when you run it (for example the optional demographic form, A11Y-FIN-07, and the appeal screen, A11Y-FIN-08), never "pass" for something you did not see.
 
 ## 2. What automation covers and what it does not
 
-Automation today: `packages/qa/e2e/candidate-test.spec.ts` runs `@axe-core/playwright` with tags wcag2a, wcag2aa, wcag21a, wcag21aa on two states of the mocked test screen (the start gate and the running screen), titled TC-092. `apps/web/e2e/axe.ts` is a helper for the staff screens. Component-level vitest-axe tests also exist (code): `apps/web/src/features/candidate-test/qa-tc.test.tsx` (TC-092 start gate and running screen, the `region` rule switched off because jsdom has no `main`) and `test-screen.test.tsx` (lock overlay and finish dialog). jsdom has no layout or computed colours, so these tests cannot find contrast (1.4.3, 1.4.11), reflow, focus-ring or visibility problems; only a real-browser axe run can. States covered only in jsdom (lock overlay, finish dialog) still need the real-browser run.
+Automation today: `packages/qa/e2e/candidate-test.spec.ts` runs `@axe-core/playwright` with tags wcag2a, wcag2aa, wcag21a, wcag21aa on two states of the mocked test screen (the start gate and the running screen), titled TC-092. `apps/web/e2e/axe.ts` is a helper for the staff screens. Component-level vitest-axe tests exist (code) for the test screen: `apps/web/src/features/candidate-test/qa-tc.test.tsx` (TC-092 start gate and running screen, the `region` rule switched off because jsdom has no `main`) and `test-screen.test.tsx` (lock overlay and finish dialog). Since the stepper landed (FE-09) the pre-test screens also have component-level axe tests (code): `consent-step.test.tsx`, `system-check-step.test.tsx`, `identity-step.test.tsx`, `room-scan-step.test.tsx`, `practice-step.test.tsx`, `phone.test.tsx`, `flow.test.tsx` and `entry-otp.test.tsx`. I did not find a real-browser axe run for the stepper screens (`apps/web/e2e/candidate-handoff.spec.ts` does not use axe). jsdom has no layout or computed colours, so these tests cannot find contrast (1.4.3, 1.4.11), reflow, focus-ring or visibility problems; only a real-browser axe run can. States covered only in jsdom (every stepper screen, lock overlay, finish dialog) still need the real-browser run.
 
-The CI rule: any axe failure fails CI whatever its impact level (`toHaveNoViolations` and the Playwright `toEqual([])` both fail on minor too); the severity table in section 9 applies to manual findings. Every candidate screen and every state with its own DOM (dialog open, error shown, overlay shown, disabled button, results shown) gets a real-browser axe check titled `TC-092 <screen and state> has no WCAG 2.1 AA violations`. The stepper PR should add one per step and per failure state. Matrix rows for these are listed in section 10 (QA A owns /docs/test-matrix.md).
+The CI rule: any axe failure fails CI whatever its impact level (`toHaveNoViolations` and the Playwright `toEqual([])` both fail on minor too); the severity table in section 9 applies to manual findings. Every candidate screen and every state with its own DOM (dialog open, error shown, overlay shown, disabled button, results shown) gets a real-browser axe check titled `TC-092 <screen and state> has no WCAG 2.1 AA violations`. The owner of the stepper (frontend, FE-09 follow-up) should add one per step and per failure state. Matrix rows for these are listed in section 10 (QA A owns /docs/test-matrix.md).
 
 What axe finds reliably (about a third of WCAG issues): missing names and roles (4.1.2), label and form association (1.3.1, 3.3.2), contrast of text (1.4.3) where colours are computable, duplicate ids, invalid ARIA, landmark and heading structure basics, image alt presence (1.1.1), scrollable region focus.
 
@@ -43,7 +47,7 @@ What axe cannot find, and so must be manual (sections 5 to 8):
 | Camera and microphone flows (permission prompts, liveness prompts, meters) | browser UI and hardware | 1.1.1, 1.4.1, 2.5.x, 4.1.3 |
 | Media alternatives for any instruction video | not in docs; flagged | 1.2.1 to 1.2.5 |
 
-Automated checks that are not axe (suggested for the stepper PR, owner frontend, QA A to add the tests): a Vitest or Playwright check that the three timer thresholds (timerWarning in timer.ts, 5 minutes, 1 minute, expired) produce exactly one announcement each (one per threshold per timer, plus one time-up alert); a Playwright check that the lock overlay takes focus and returns it; a check at viewport width 320 px that `document.documentElement.scrollWidth <= clientWidth` on each form screen.
+Automated checks that are not axe (suggested as a FE-09/FE-10 follow-up, owner frontend, QA A to add the tests): a Vitest or Playwright check that the three timer thresholds (timerWarning in timer.ts, 5 minutes, 1 minute, expired) produce exactly one announcement each (one per threshold per timer, plus one time-up alert); a Playwright check that the lock overlay takes focus and returns it; a check at viewport width 320 px that `document.documentElement.scrollWidth <= clientWidth` on each form screen.
 
 ## 3. Test environment and data rules
 
@@ -114,7 +118,7 @@ Information only; no device access (frontend.md Step 9.1).
 | A11Y-OTP-02 | best practice (1.3.5 covers personal data fields, not one-time codes) | The field has `autocomplete="one-time-code"` and `inputmode="numeric"`; paste of the full code works (the paste block, FR-603, applies only inside the test). | N |
 | A11Y-OTP-03 | 3.3.1, 3.3.3, 4.1.3 | A wrong code shows a text error that names the field, says what to do, is linked with `aria-describedby` and `aria-invalid`, is announced once without moving focus away from the field, and does not reveal the code. | N |
 | A11Y-OTP-04 | 3.3.1, 4.1.3, 2.2.1 | The cooldown after a wrong code during a test (D-21, TC-097, "cooldown seconds") is shown as text; the countdown is announced at the start and the end only, not every second; the control re-enables and the end of the cooldown is announced. | N |
-| A11Y-OTP-05 | 2.2.1 | The code has an expiry (value not found in the docs, unverified). The expiry is stated in text, and a "send a new code" action is keyboard reachable before and after expiry. No message vanishes on its own in under a suggested 5 seconds. | N |
+| A11Y-OTP-05 | 2.2.1 | The code expires after 10 minutes (doc: ADR 0003, `otp:{invitationId}` TTL 10 minutes; ADR 0002 D-21 repeats the 10-minute OTP expiry and the 30 s cooldown). The expiry is stated in text, and a "send a new code" action is keyboard reachable before and after expiry. No message vanishes on its own in under a suggested 5 seconds. | N |
 | A11Y-OTP-06 | 3.3.1 | The 30-minute link block after 5 wrong codes (TC-007) is explained in text with what to do next (contact the recruiter, whose contact is shown; unverified that the contact is shown on this screen). | N |
 | A11Y-OTP-07 | 3.3.8 is WCAG 2.2, not required | Accessible authentication is a 2.2 criterion; record only. The OTP can be pasted, which is the helpful behaviour. | N |
 
@@ -180,7 +184,7 @@ Frontend.md Step 9.5: ID photo capture with a framing guide, selfie with livenes
 | A11Y-ID-07 | 2.3.1, 2.2.2 (2.3.3 is AAA) | No flashing and no fast motion in the prompt animation; any animation can be paused or is shorter than 5 seconds. Respect `prefers-reduced-motion`. | N |
 | A11Y-ID-08 | 4.1.3 | The result ("Your photo matched", "Sent for manual review", "We could not check; a person will look at it") is announced once in a status region; the match score is not read out; text does not say "failed" in a way that suggests rejection (the system never rejects, C-14). | N |
 | A11Y-ID-09 | 1.3.1, 2.4.3 | Focus order inside the step: instruction, preview, capture button, retake, continue. Focus is placed on the heading when the step opens and on the result when the result appears. | N |
-| A11Y-ID-10 | 3.3.2, 1.3.1 | Waived variant (C-19, C-25, M-03 Part 2): the ID and selfie steps are skipped or shown as "not required for you"; the page says in text what still runs (system check, room scan, recordings) and what does not (ID photo, selfie, re-check), The accommodation reason is recorded by the recruiter (C-19) and may hold health information (OQ-13): it must never appear in the candidate's page, page source, candidate-facing API responses or announcements. Any appearance is a blocker (candidate data, CLAUDE.md rule 3). The step is absent from the stepper progress or named "Skipped", consistently for every AT. The stepper progress count ("Step 4 of 8") is still correct. | N |
+| A11Y-ID-10 | 3.3.2, 1.3.1 | Waived variant (C-19, C-25, M-03 Part 2): the ID and selfie steps are skipped or shown as "not required for you"; the page says in text what still runs (system check, room scan, recordings) and what does not (ID photo, selfie, re-check), The accommodation reason is recorded by the recruiter (C-19) and may hold health information (OQ-13): it must never appear in the candidate's page, page source, candidate-facing API responses or announcements. Any appearance is a blocker (candidate data, CLAUDE.md, Working in parallel, rule 3). The step is absent from the stepper progress or named "Skipped", consistently for every AT. The stepper progress count ("Step 4 of 8") is still correct. | N |
 | A11Y-ID-11 | 3.3.4 | Privacy notice for the ID image ("never used for other purposes", FR-403) is visible text before capture, and the camera is not opened until the candidate activates the capture button (C-02 and consent ordering). | N |
 | A11Y-ID-12 | 2.1.1 | The camera permission prompt for this step (if it is the first camera use) follows A11Y-SYS-05. | N |
 
@@ -293,7 +297,7 @@ Fullscreen, proctoring warnings and re-entry (FR-601, FR-604, FR-609; TC-050, TC
 
 ### 4.11 Error, timeout and terminal states
 
-Existing pages: expired, used, forbidden (apps/web errors, code). Others named in the docs: declined (4.4), "Already used" after a finished session (frontend.md Step 9), the global error boundary, 404, rate-limit and server errors.
+Existing pages: public errors (expired, used, forbidden; apps/web/src/app/(public)/errors) and the candidate terminal screens in apps/web/src/features/candidate-flow/terminal-screens.tsx (already used, expired, not yet open, blocked, declined, session ended, service unavailable, invalid link). The submitted screen is `SubmittedPanel` in test-screen.tsx (4.10). Run each. Not confirmed built: the global error boundary, 404 and rate-limit pages (unverified; check apps/web/src/app).
 
 | ID | WCAG | Check | Auto |
 | --- | --- | --- | --- |
@@ -308,7 +312,7 @@ Existing pages: expired, used, forbidden (apps/web errors, code). Others named i
 
 ## 5. Manual script: keyboard only (run on every screen first)
 
-Needs: Chrome (current) and Edge on Windows or macOS, no mouse and no trackpad (unplug it or do not touch it), the screens in section 4 that exist. Also run once with the OS "Full keyboard access" on macOS (System Settings, Keyboard) so buttons and selects are reachable.
+Needs: Chrome (current) and Edge on Windows or macOS, no mouse and no trackpad (unplug it or do not touch it), every screen in section 4 that exists. Also run once with the OS "Full keyboard access" on macOS (System Settings, Keyboard) so buttons and selects are reachable.
 
 1. Load the screen. Press Tab once. Expected: a skip link or the first control gets a visible focus ring (A11Y-C-04). Press Tab through the whole page. Expected: order matches the visual and reading order; nothing is skipped; nothing hidden receives focus.
 2. Press Shift+Tab back to the start. Expected: reverse order, no trap.
@@ -331,8 +335,8 @@ Needs: NVDA current release, Chrome, a speech viewer on (NVDA menu, Tools, Speec
 2. Press H, 1 to 6, D (landmarks) and K (links), B (buttons), F (form fields). Expected: headings in order; landmarks `main` and labelled regions; links have names that make sense out of context.
 3. Consent: in browse mode move through the document with the Down arrow to the last paragraph; do not scroll with the mouse. Expected: Sign becomes enabled and the SR says so (A11Y-CON-03). Then Tab to the 18+ box. Expected: "I confirm I am 18 years old or older, checkbox, not checked, required" (the exact words differ). Type the synthetic name (never your own); leave 18+ unticked; activate Sign. Expected: the error is spoken once and focus is on the checkbox (A11Y-CON-06).
 4. Decline: Expected announcements per A11Y-DEC-02 and 03. The declined page is announced with the recruiter's name and email.
-5. System check (when built): trigger each check. Expected per A11Y-SYS-02: one polite message per result. Deny the camera at the browser prompt. Expected: a fix-it message is announced (A11Y-SYS-03).
-6. Identity (when built): reach the selfie step. Expected: the instruction is spoken, then each liveness prompt once (A11Y-ID-05), then the result (A11Y-ID-08).
+5. System check: trigger each check. Expected per A11Y-SYS-02: one polite message per result. Deny the camera at the browser prompt. Expected: a fix-it message is announced (A11Y-SYS-03).
+6. Identity: reach the selfie step. Expected: the instruction is spoken, then each liveness prompt once (A11Y-ID-05), then the result (A11Y-ID-08).
 7. Test screen: Expected on load: test title (`h1`), section text, two timers with names ("Section time left, 14:05"), saved status. Press Tab to the editor. Expected: its name and role are spoken (A11Y-ED-03). Type two lines and use Up and Down. Expected: each line is read. Use NVDA+Ctrl+Space to switch to focus mode if NVDA did not switch itself, and record this. Press Alt+F1 in the editor and record what is spoken or displayed (A11Y-ED-04).
 8. Press Run (Enter on the button). Expected: "Running" once, then one summary line (A11Y-RUN-01/02). Press Run again within 5 seconds. Expected: one message about waiting (A11Y-RUN-03), no repetition each second.
 9. Leave the test running. Let the section timer cross five minutes, one minute and zero (use a short test, or the demo with the clock sped up, never by changing the OS clock; the server timer is the source of truth, TC-047). Expected: exactly "Five minutes left in this section.", "One minute left in this section." and the time-up alert (A11Y-TIM-01). Count the timer messages in the speech viewer.
@@ -406,7 +410,7 @@ Result:            pass | pass with should-fix | fail (blocker)
 Clean-up done:    <session deleted through TC-094 flow yes|no>
 ```
 
-The TC-092 matrix row stays "manual-partial" until every screen in section 4 has a passing record for the P1 combinations in section 3 and axe passes for all of them; QA A sets the row status from the records.
+The TC-092 matrix row stays "Partial pass" until every screen in section 4 has a passing record for the P1 combinations in section 3 and axe passes for all of them; QA A sets the row status from the records.
 
 ## 10. Test matrix rows to add (QA A; QA B does not edit /docs/test-matrix.md)
 
@@ -415,7 +419,7 @@ TC-092 is one case in the docs; this file splits it into the following evidence 
 | Proposed row | Level | Notes |
 | --- | --- | --- |
 | TC-092 (existing) | e2e (axe, partial) plus manual | Add "manual: docs/qa/accessibility-checklist.md" to the location column. |
-| TC-092 consent and decline screens, axe | e2e | When the stepper lands: default, error, dialog open. |
+| TC-092 consent and decline screens, axe | e2e | Stepper is built (FE-09); real-browser run needed: default, error, dialog open. |
 | TC-092 system check, identity (including waived), room scan, QR, practice, final checklist, axe | e2e | Each state with its own DOM. |
 | TC-092 test screen states: lock overlay, finish dialog, time-up banner, error banner, output with results, MCQ, locked editor, axe | e2e | Today only start gate and running state. |
 | TC-092 timer announcements | unit or e2e | Threshold count (A11Y-TIM-01). |
@@ -435,7 +439,7 @@ Follow-up entries for the hub and owners are in docs/followups/qa.md (FU-QAB-10)
 | OQ-A11Y-2 | Time allowed per liveness prompt and per retry is not specified. | WCAG 2.2.1; the prompt may be impossible for some | integrity / frontend |
 | OQ-A11Y-3 | No rule for a candidate who cannot use a microphone (deaf or speech-impaired users may still be recorded; a mic is only an input to FR-607). FR-402 requires the microphone check; C-02 mentions a candidate who "cannot use the microphone". | Same dead-end risk | Delivery Lead, hub |
 | OQ-A11Y-4 | The STRICT QR link has no stated text alternative. | A blind candidate cannot scan a QR code | frontend |
-| OQ-A11Y-5 | Pre-test inactivity timeout, OTP expiry length and session-token lifetime for candidates are not found in the docs I read (ADR 0002 covers the invitation window and the OTP block). | WCAG 2.2.1 needs a warning and extension for adjustable limits | backend / hub |
+| OQ-A11Y-5 | Pre-test inactivity timeout and candidate session-token lifetime are not found in the docs I read (ADR 0002 covers the invitation window and the OTP block; the OTP expiry is documented as 10 minutes in ADR 0003 and ADR 0002 D-21). | WCAG 2.2.1 needs a warning and extension for adjustable limits | backend / hub |
 | OQ-A11Y-6 | FR-305 says "allowed assistive tools" but does not list them or say how the integrity layer treats them. BR-12 says "screen-reader support". Which tools are expected (NVDA, VoiceOver, JAWS, magnifiers, dictation, switch devices)? | Defines what this checklist must accept as allowed | Delivery Lead, hub |
 | OQ-A11Y-7 | Paste, drop and context-menu blocking (FR-603) and the PASTE_BURST analysis may flag assistive input (dictation, on-screen keyboards, text-expansion for motor disabilities; the red-team plan RT-23 already lists "accessibility dictation" as a bypass). How do reviewers tell the difference, and is there an accommodation switch (a per-candidate "assistive input" allowance that changes the flag but never removes it)? | Fairness: BR-12, C-14 (flags only; a human decides) | integrity, hub |
 | OQ-A11Y-8 | Authoring guidance and a publish check for question statements (alt text for images, table headers, no information in colour). | Problem statements are staff content shown to candidates | frontend (authoring screens), hub |
@@ -446,4 +450,4 @@ Follow-up entries for the hub and owners are in docs/followups/qa.md (FU-QAB-10)
 | OQ-A11Y-13 | The wording on screen is not fixed by the FSD for most flows (manual-tests.md, compliance section intro). Announcements in the scripts are written as meaning, not as exact strings; testers record the text heard. | Expected results are tolerant | frontend |
 | OQ-A11Y-14 | Scope of TC-092: "candidate flow" in the docs; NFR-06 also names "staff screens". This checklist covers the candidate screens only, as asked; staff screens (review page with video and timeline, live view, question editor) need their own checklist. | Gap | QA A / hub |
 
-Not verified (could not confirm from docs or code): the exact Monaco shortcut for Tab-focus mode per OS; whether standalone Monaco opens an accessibility help dialog with Alt+F1 in this build; which keys the proctor SDK blocks; the Chromium behaviour of the screen picker with each screen reader; the order of the browser check and consent screens; the existence of the declined page, "already used" page and final submit page (not found in the code).
+Not verified (could not confirm from docs or code): the exact Monaco shortcut for Tab-focus mode per OS; whether standalone Monaco opens an accessibility help dialog with Alt+F1 in this build; which keys the proctor SDK blocks; the Chromium behaviour of the screen picker with each screen reader; the order of the browser check and consent screens; the existence of the global error boundary, 404 and rate-limit pages (the declined, already used and submitted screens exist: terminal-screens.tsx, SubmittedPanel).
