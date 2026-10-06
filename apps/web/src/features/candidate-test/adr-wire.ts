@@ -112,11 +112,11 @@ export const runResultSchema = z.object({
 });
 
 /**
- * PROVISIONAL path (ADR 0013 5.11 names "the section-finish route" without a path). Finishing the
- * last section submits the session (ADR 0002 S-5), so `submitted` is true then.
+ * `POST /candidate/session/section/finish` (ADR 0013 section 5.11; BE-11, documented, not yet
+ * implemented on main). Body `{ position }`: the position of the section the candidate is looking
+ * at, never an id. It only enqueues the close and is idempotent: 202 `{ accepted: true }` for the
+ * open section and for an already closing or closed one (the no-op repeat), 409 SECTION_NOT_OPEN
+ * for a section that has not opened, 404 for an unknown position, 400 for a bad body. It says
+ * nothing about the next section: that opens when the close job runs, so the client re-reads.
  */
-export const sectionFinishedSchema = z.object({
-  finishedAt: z.string(),
-  nextSectionId: z.string().nullable(),
-  submitted: z.boolean().default(false),
-});
+export const sectionFinishAcceptedSchema = z.object({ accepted: z.literal(true) });

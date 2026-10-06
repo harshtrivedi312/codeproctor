@@ -32,6 +32,10 @@ export interface TestRunState {
   /** Signed event batches accepted, in order. */
   batches: { seq: number; signature: string; events: { type: string }[] }[];
   heartbeats: number;
+  /** How long the close job takes to open the next section (0 = at once). */
+  closeDelayMs: number;
+  /** A close the server accepted whose effect (next section or submit) has not happened yet. */
+  pendingClose: { position: number; at: number } | null;
 }
 
 const states = new WeakMap<object, TestRunState>();
@@ -53,6 +57,8 @@ export function testState(session: object): TestRunState {
       keyIssued: false,
       batches: [],
       heartbeats: 0,
+      closeDelayMs: 0,
+      pendingClose: null,
     };
     states.set(session, s);
   }
@@ -62,6 +68,19 @@ export function testState(session: object): TestRunState {
 /** True while events and media are accepted: running, or submitted within the grace. */
 export function ingestOpen(s: TestRunState, now = Date.now()): boolean {
   return s.started && (!s.submitted || now - s.submittedAt <= MOCK_INGEST_GRACE_MS);
+}
+
+/** Applies a close whose time has come: the next section opens, or the last one submits. */
+export function settleClose(s: TestRunState, now = Date.now()): void {
+  const p = s.pendingClose;
+  if (!p || now < p.at) return;
+  s.pendingClose = null;
+  if (p.position >= 2) {
+    s.submitted = true;
+    s.submittedAt = p.at;
+  } else {
+    s.sectionStarts.set(p.position + 1, p.at);
+  }
 }
 
 export function startMockTest(session: object, now = Date.now()): TestRunState {
@@ -137,6 +156,7 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
     const session = bearer(request);
     if (!session) return problem(401, 'UNAUTHENTICATED');
     const s = testState(session);
+    settleClose(s);
     if (!s.started || s.submitted) return problem(409, 'SESSION_NOT_ACTIVE');
     return { session, s };
   };
@@ -154,6 +174,7 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
       const session = bearer(request);
       if (!session) return problem(401, 'UNAUTHENTICATED');
       const s = testState(session);
+      settleClose(s);
       const open = s.started ? openPosition(s) : null;
       const sectionStart = open === null ? null : (s.sectionStarts.get(open) ?? null);
       return HttpResponse.json({
@@ -270,8 +291,7 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
       });
     }),
 
-    http.put(`${cand}/questions/:id/draft`, async ({ request, params }) => {
-      if (notCandidate(request)) return undefined;
+    http.put(`${cand}/answers/:id/draft`, async ({ request, params }) => {
       const r = live(request);
       if (isResponse(r)) return r;
       const id = String(params.id);
@@ -317,25 +337,31 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
       });
     }),
 
-    http.post(`${cand}/sections/:position/finish`, ({ request, params }) => {
-      if (notCandidate(request)) return undefined;
+    // ADR 0013 section 5.11 (BE-11): enqueue-only and idempotent, answers 202 { accepted: true }.
+    http.post(`${cand}/session/section/finish`, async ({ request }) => {
       const r = live(request);
       if (isResponse(r)) return r;
-      const position = Number(params.position);
-      if (position !== openPosition(r.s)) return problem(409, 'SECTION_NOT_OPEN');
-      if (r.s.pauseReasons.includes('PROCTOR')) return problem(409, 'SESSION_PAUSED');
-      const now = Date.now();
-      if (position >= 2) {
-        r.s.submitted = true;
-        r.s.submittedAt = now;
-        return HttpResponse.json({ finishedAt: iso(now), nextSectionId: null, submitted: true });
+      let body: { position?: unknown } = {};
+      try {
+        body = (await request.json()) as { position?: unknown };
+      } catch {
+        return problem(400, 'VALIDATION_FAILED');
       }
-      r.s.sectionStarts.set(position + 1, now);
-      return HttpResponse.json({
-        finishedAt: iso(now),
-        nextSectionId: String(position + 1),
-        submitted: false,
-      });
+      const position = body.position;
+      if (typeof position !== 'number' || !Number.isInteger(position) || position < 1) {
+        return problem(400, 'VALIDATION_FAILED');
+      }
+      if (position > 2) return problem(404, 'NOT_FOUND');
+      const open = openPosition(r.s);
+      // A section that has not opened yet is refused; one that is closing or closed is a no-op 202.
+      if (position > open) return problem(409, 'SECTION_NOT_OPEN');
+      if (position < open || r.s.pendingClose?.position === position) {
+        return HttpResponse.json({ accepted: true }, { status: 202 });
+      }
+      if (r.s.pauseReasons.includes('PROCTOR')) return problem(409, 'SESSION_PAUSED');
+      r.s.pendingClose = { position, at: Date.now() + r.s.closeDelayMs };
+      settleClose(r.s);
+      return HttpResponse.json({ accepted: true }, { status: 202 });
     }),
   ];
 }

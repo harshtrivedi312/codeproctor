@@ -80,6 +80,8 @@ interface FinishedSection {
   nextSectionId: string | null;
   /** The server submitted the whole test with this finish (it was the last section). */
   submitted: boolean;
+  /** The close was accepted but the next section is not open yet: the candidate re-checks. */
+  pending?: boolean;
   /** The session as re-read from the server, when the finish was confirmed that way. */
   next?: Schemas['CandidateSession'];
 }
@@ -112,6 +114,7 @@ export function TestScreen({
   const [lock, dispatchLock] = React.useReducer(lockReducer, initialLockState);
   const [finishedSection, setFinishedSection] = React.useState<FinishedSection | null>(null);
   const [advancing, setAdvancing] = React.useState(false);
+  const [advanceNote, setAdvanceNote] = React.useState<string | null>(null);
 
   const finishedNow =
     finishedSection !== null && finishedSection.sectionId === session.data?.section.id;
@@ -153,10 +156,23 @@ export function TestScreen({
   const advance = async () => {
     if (!finishedSection) return;
     setAdvancing(true);
+    setAdvanceNote(null);
     try {
-      if (finishedSection.next)
+      if (finishedSection.next) {
         queryClient.setQueryData(['candidate-session'], finishedSection.next);
-      else await session.refetch();
+      } else if (finishedSection.pending) {
+        // The close was accepted; the next section opens when the server's job runs.
+        const fresh = await source.readSession();
+        if (fresh && 'submitted' in fresh) {
+          setFinishedSection({ ...finishedSection, submitted: true, pending: false });
+        } else if (fresh && fresh.section.id !== finishedSection.sectionId) {
+          queryClient.setQueryData(['candidate-session'], fresh);
+        } else {
+          setAdvanceNote(
+            'The next section is not open yet. Wait a moment and press the button again. Your time keeps running.',
+          );
+        }
+      } else await session.refetch();
     } finally {
       setAdvancing(false);
     }
@@ -184,10 +200,13 @@ export function TestScreen({
             <CheckCircle2 className="mr-2 inline h-5 w-5 text-success" aria-hidden />
             The {finishedHere.title} section is finished and cannot be reopened.
           </p>
-          {finishedHere.nextSectionId || finishedHere.next ? (
-            <Button className="mt-3" onClick={() => void advance()} disabled={advancing}>
-              Continue to the next section
-            </Button>
+          {finishedHere.nextSectionId || finishedHere.next || finishedHere.pending ? (
+            <>
+              <Button className="mt-3" onClick={() => void advance()} disabled={advancing}>
+                Continue to the next section
+              </Button>
+              {advanceNote ? <p className="mt-2 text-sm">{advanceNote}</p> : null}
+            </>
           ) : (
             source.isDemo && (
               <p className="mt-1 text-sm text-muted-foreground">
@@ -434,8 +453,16 @@ function TestScreenInner({
       nextSectionId: string | null,
       next?: Schemas['CandidateSession'],
       submitted = false,
+      pending = false,
     ) => {
-      onFinished({ sectionId: section.id, title: section.title, nextSectionId, next, submitted });
+      onFinished({
+        sectionId: section.id,
+        title: section.title,
+        nextSectionId,
+        next,
+        submitted,
+        pending,
+      });
       setFinishOpen(false);
     };
     // After a failure, or a 409 (which can also mean a paused or inactive session), we cannot tell
@@ -475,6 +502,15 @@ function TestScreenInner({
       // trusted by itself (the contract does not say which conflict it is); it goes through the
       // verified re-read below.
       if (outcome.kind === 'finished') {
+        if (outcome.acceptedOnly) {
+          // Accepted (202): finished for good. The server does not say what is next, so look: the
+          // next open section, the end of the test, or "not open yet" (the candidate re-checks).
+          const fresh = await source.readSession();
+          if (fresh && 'submitted' in fresh) markFinished(null, undefined, true);
+          else if (fresh && fresh.section.id !== section.id) markFinished(fresh.section.id, fresh);
+          else markFinished(null, undefined, false, true);
+          return;
+        }
         markFinished(outcome.nextSectionId, undefined, outcome.submitted);
         return;
       }

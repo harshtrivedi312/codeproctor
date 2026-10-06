@@ -23,7 +23,16 @@ export type RunOutcome =
   | { kind: 'error' };
 
 export type FinishOutcome =
-  | { kind: 'finished'; nextSectionId: string | null; submitted: boolean }
+  | {
+      kind: 'finished';
+      nextSectionId: string | null;
+      submitted: boolean;
+      /**
+       * The server only accepted the close (202): it does not say what comes next, so the screen
+       * re-reads to find the next open section or the end of the test.
+       */
+      acceptedOnly?: boolean;
+    }
   /** A 409: not trusted by itself (paused, inactive, or already finished); the screen re-reads. */
   | { kind: 'conflict' }
   | { kind: 'failed' }
