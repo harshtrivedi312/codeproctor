@@ -478,7 +478,7 @@ There is no org-provisioning reason (8.6, 8.9).
     - If the status read is ERASED, the writer returns without writing.
   - **0 rows.** The status changed in the meantime. The writer re-reads it and stops on ERASED; otherwise it retries a bounded number of times.
   - **Jobs that work on ERASED sessions** use a separate entry, `withAnySession(sid, fn)`, not `guardLive`: ingest-close and key destruction, the sweep passes, evidence-expire, and the consent-PDF job.
-  - **Where it lives.** `SessionJobProcessor` provides the write-transaction wrapper that calls `guardLive`, a database primitive in `apps/api/src/database/session-locks.ts` (Database A, as is `lockForAccommodation`). Writers do not call it by hand.
+  - **Where it lives.** `SessionJobProcessor` provides the write-transaction wrapper that calls `SessionStateService.guardLive`, a thin wrapper over the lock cores in `apps/api/src/database/session-locks.ts` (Database A: `guardLive`, `lockForAccommodation`, `lockAnySession`). Those database primitives may be imported only by `SessionStateService` and its tests. Writers do not call it by hand.
   - **Lock timeout.** If ADR 0004 keeps a `lock_timeout`, it is set without raw SQL: either a SERVICE pool whose pg options include `-c lock_timeout=...`, or the Prisma interactive-transaction `timeout`.
 - **Second model-API lock: `lockForAccommodation` (ADR 0015).**
   - It is the same same-value `sessions.updateMany` with `status: <the status read>` in the `where`, but without the ERASED exclusion. It works in any status, ERASED included.
@@ -522,7 +522,7 @@ There is no org-provisioning reason (8.6, 8.9).
 
       ADR 0013 CS-4.4 defines each site's model, columns and ids. This ADR does not repeat them.
     - the private candidate-facts setter for `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. Only `CandidateSessionGuard` may call it, once per scope, before any other query in the scope; it throws if called twice or with any id missing, and the values are immutable afterwards.
-    - the two model-API lock call sites, `guardLive` (only from the `SessionJobProcessor` write-transaction wrapper) and `lockForAccommodation` (only from one `SessionStateService` method, which only the ADR 0015 accommodation writers call).
+    - the two model-API lock call sites, `SessionStateService.guardLive` (only from the `SessionJobProcessor.withLiveSession` write-transaction wrapper), `SessionStateService.lockForAccommodation` (only from the ADR 0015 accommodation writers and the erasure, R-4 and R-10 jobs, which take it themselves and never `guardLive`) and `lockAnySession` (only from `SessionJobProcessor.withAnySession`).
     - the two session-job write entries, `withLiveSession` and `withAnySession`, both only in the `SessionJobProcessor` base class (ADR 0013 5.7).
   - The grant-entry API and the candidate-facts setter stay private to `org-context.ts` or the extension, like the store.
   - **How grants work.** This is the normative grant spec; ADR 0013 uses the same wording.
