@@ -108,7 +108,7 @@ export class TestsService {
       throw new BadRequestException('The page is too deep; narrow the filters instead.');
     }
     const where: Prisma.TestWhereInput = {
-      ...(q.search ? { name: { contains: q.search, mode: 'insensitive' } } : {}),
+      ...(q.search ? { name: { contains: escapeLike(q.search), mode: 'insensitive' } } : {}),
       ...(q.profile ? { profile: q.profile } : {}),
       ...(q.used === true ? { invitations: { some: {} } } : {}),
       ...(q.used === false ? { invitations: { none: {} } } : {}),
@@ -329,17 +329,17 @@ export class TestsService {
         where: { id: { in: versionIds } },
         select: { id: true, isPublished: true, question: { select: { isArchived: true } } },
       });
-      if (found.length !== versionIds.length) {
+      // A draft is the same 404 as a missing or other-org id: a caller without question:update
+      // must not be able to tell that a draft exists (DL-34).
+      if (found.length !== versionIds.length || found.some((v) => !v.isPublished)) {
         throw new NotFoundException('A question version was not found.');
       }
-      const bad = found.filter((v) => !v.isPublished || v.question.isArchived);
+      const bad = found.filter((v) => v.question.isArchived);
       if (bad.length) {
         throw new UnprocessableEntityException({
           message: slots
             .filter((s) => s.versionId && bad.some((b) => b.id === s.versionId))
-            .map(
-              (s) => `${s.at}: the question version is not published or its question is archived`,
-            ),
+            .map((s) => `${s.at}: the question is archived`),
         });
       }
     }
@@ -521,4 +521,9 @@ export class TestsService {
       },
     });
   }
+}
+
+/** `%`, `_` and `\` are LIKE wildcards or escapes; Prisma's `contains` does not escape them. */
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (c) => `\\${c}`);
 }
