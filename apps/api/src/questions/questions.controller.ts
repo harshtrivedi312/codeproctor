@@ -33,6 +33,7 @@ import { UserRole } from '../generated/prisma/client';
 import {
   CandidateQuestionPreviewDto,
   CreateQuestionDto,
+  CreateTestCaseDto,
   PublishQuestionDto,
   QuestionDetailDto,
   QuestionIdParamDto,
@@ -40,13 +41,13 @@ import {
   QuestionListQueryDto,
   QuestionSummaryDto,
   TestCaseDto,
-  TestCaseFieldsDto,
   TestCaseParamDto,
   UpdateQuestionDto,
   UpdateTestCaseDto,
   VersionParamDto,
   VersionQueryDto,
 } from './dto/questions.dto';
+import { RevisionQueryDto } from './dto/variants.dto';
 import { QuestionsService } from './questions.service';
 import type { Actor } from './questions.service';
 import type { CandidateQuestionView } from './candidate-view';
@@ -203,12 +204,13 @@ export class QuestionsController {
   @ApiCreatedResponse({ type: TestCaseDto })
   @ApiNotFoundResponse({ description: 'No such question or version in your organization' })
   @ApiConflictResponse({
-    description: 'The version is published (immutable), or the question is archived',
+    description:
+      'The version is published (immutable), the question is archived, or stale expectedRevision',
   })
   @ApiUnprocessableEntityResponse({ description: 'Not a coding question, or too many test cases' })
   addTestCase(
     @Param() params: VersionParamDto,
-    @Body() dto: TestCaseFieldsDto,
+    @Body() dto: CreateTestCaseDto,
     @Req() req: AuthedRequest,
   ): Promise<TestCaseDto> {
     return this.questions.addTestCase(
@@ -229,7 +231,8 @@ export class QuestionsController {
     description: 'No such question, version or test case in your organization',
   })
   @ApiConflictResponse({
-    description: 'The version is published (immutable), or the question is archived',
+    description:
+      'The version is published (immutable), the question is archived, or stale expectedRevision',
   })
   updateTestCase(
     @Param() params: TestCaseParamDto,
@@ -256,10 +259,12 @@ export class QuestionsController {
     description: 'No such question, version or test case in your organization',
   })
   @ApiConflictResponse({
-    description: 'The version is published (immutable), or the question is archived',
+    description:
+      'The version is published (immutable), the question is archived, or stale expectedRevision',
   })
   async removeTestCase(
     @Param() params: TestCaseParamDto,
+    @Query() q: RevisionQueryDto,
     @Req() req: AuthedRequest,
   ): Promise<void> {
     await this.questions.removeTestCase(
@@ -267,6 +272,7 @@ export class QuestionsController {
       params.id,
       params.version,
       params.testCaseId,
+      q.expectedRevision,
       ctxOf(req),
     );
   }

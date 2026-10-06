@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ExecutionModule } from '../execution/execution.module';
+import { AiPolicyController } from './ai-policy.controller';
 import { AiReferencesController } from './ai-references.controller';
 import { AiReferencesService } from './ai-references.service';
 import { ExecutionValidationAdapter } from './execution-validation.adapter';
@@ -14,6 +15,8 @@ import { VariantsService } from './variants.service';
 @Module({
   imports: [ExecutionModule],
   controllers: [
+    // Before QuestionsController: GET /questions/ai-policy must not match GET /questions/:id.
+    AiPolicyController,
     QuestionsController,
     VariantsController,
     ValidationController,

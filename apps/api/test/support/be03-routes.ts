@@ -543,6 +543,17 @@ const BE04_ROUTES: Be03Route[] = [
       Promise.resolve({ path: `${QUESTIONS}?page=1&pageSize=50`, secrets: [], unchanged: noop }),
   }),
   q04({
+    id: 'ai-policy-read',
+    method: 'GET',
+    template: `${QUESTIONS}/ai-policy`,
+    permission: 'ai_reference:read',
+    audit: null,
+    mutating: false,
+    ok: [200],
+    prepare: () =>
+      Promise.resolve({ path: `${QUESTIONS}/ai-policy`, secrets: [], unchanged: noop }),
+  }),
+  q04({
     id: 'questions-create',
     method: 'POST',
     template: QUESTIONS,

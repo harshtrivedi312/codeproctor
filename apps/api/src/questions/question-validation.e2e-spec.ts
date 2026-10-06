@@ -591,6 +591,171 @@ describe('Validate job and AI references (FR-202, FR-203, TC-011, TC-012)', () =
 
   // ---- AI reference solutions -----------------------------------------------------------------
 
+  describe('FR-203, ADR 0005 AI-1: a variant with AI reference rows is never deleted', () => {
+    const delVariant = (who: Made, id: string, variantId: string): request.Test =>
+      http().delete(`${API}/questions/${id}/versions/1/variants/${variantId}`).set(who.auth);
+    const removedAudits = (id: string): Promise<number> =>
+      owner.auditLog.count({ where: { entityId: id, action: 'QUESTION_VARIANT_REMOVED' } });
+    const aiCount = (variantId: string): Promise<number> =>
+      owner.aiReferenceSolution.count({ where: { variantId } });
+    const settled = (p: Promise<unknown>): Promise<boolean> =>
+      Promise.race([
+        p.then(() => true),
+        new Promise<boolean>((r) => setTimeout(() => r(false), 600)),
+      ]);
+
+    async function held(id: string): Promise<Client> {
+      const c = new Client({ connectionString: infra.postgres.getConnectionUri() });
+      await c.connect();
+      await c.query('BEGIN');
+      await c.query('UPDATE questions SET is_archived = is_archived WHERE id = $1', [id]);
+      return c;
+    }
+
+    it('FR-203, ADR 0005 AI-1: a variant with a current AI row is 409 (detail only), nothing is deleted, no audit row', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const id = await create(a);
+      const variantId = await addVariant(a, id, 1);
+      await addAi(a, id, { variantId }).expect(201);
+      const res = await delVariant(a, id, variantId);
+      expect(res.status).toBe(409);
+      expect(JSON.stringify(res.body)).toMatch(/AI reference/);
+      expect(await owner.questionVariant.count({ where: { id: variantId } })).toBe(1);
+      expect(await aiCount(variantId)).toBe(1);
+      expect(await removedAudits(id)).toBe(0);
+    });
+
+    it('FR-203, ADR 0005 AI-1: a variant whose only AI row is superseded is also 409', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const id = await create(a);
+      const variantId = await addVariant(a, id, 2);
+      const row = (await addAi(a, id, { variantId }).expect(201)).body as Json;
+      await http()
+        .post(`${API}/questions/${id}/versions/1/ai-references/${row.id as string}/supersede`)
+        .set(a.auth)
+        .send({})
+        .expect(200);
+      await delVariant(a, id, variantId).expect(409);
+      expect(await owner.questionVariant.count({ where: { id: variantId } })).toBe(1);
+      expect(await aiCount(variantId)).toBe(1);
+      expect(await removedAudits(id)).toBe(0);
+    });
+
+    it('FR-203: a variant without AI rows (a base-level row does not count) is still 204 and audited', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const id = await create(a);
+      const variantId = await addVariant(a, id, 3);
+      await addAi(a, id).expect(201);
+      await delVariant(a, id, variantId).expect(204);
+      expect(await owner.questionVariant.count({ where: { id: variantId } })).toBe(0);
+      expect(
+        await owner.aiReferenceSolution.count({ where: { questionVersion: { questionId: id } } }),
+      ).toBe(1);
+      expect(await removedAudits(id)).toBe(1);
+    });
+
+    it('FR-203, ADR 0005 AI-1: a delete racing an uncommitted AI insert waits on the variant lock, then ends 409 with variant and row intact', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const id = await create(a);
+      const variantId = await addVariant(a, id, 4);
+      const ver = await owner.questionVersion.findFirstOrThrow({ where: { questionId: id } });
+      const c = new Client({ connectionString: infra.postgres.getConnectionUri() });
+      await c.connect();
+      try {
+        await c.query('BEGIN');
+        // No question lock here on purpose: only the FK lock on the variant row protects it.
+        await c.query(
+          `INSERT INTO ai_reference_solutions (question_version_id, variant_id, assistant, model_label, language, solution_code, collected_at, collected_by)
+           VALUES ($1, $2, 'ChatGPT', 'm', 'python', 'x', now(), $3)`,
+          [ver.id, variantId, a.id],
+        );
+        const del = delVariant(a, id, variantId).then((r) => r);
+        expect(await settled(del)).toBe(false);
+        await c.query('COMMIT');
+        expect((await del).status).toBe(409);
+      } finally {
+        await c.query('ROLLBACK').catch(() => undefined);
+        await c.end();
+      }
+      expect(await owner.questionVariant.count({ where: { id: variantId } })).toBe(1);
+      expect(await aiCount(variantId)).toBe(1);
+      expect(await removedAudits(id)).toBe(0);
+    });
+
+    it('FR-203, ADR 0005 AI-1: an AI create racing a variant delete that holds the lock gets 404, never a 500, and no row survives without its variant', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const id = await create(a);
+      const variantId = await addVariant(a, id, 5);
+      const c = await held(id);
+      try {
+        await c.query('DELETE FROM question_variants WHERE id = $1', [variantId]);
+        const create$ = addAi(a, id, { variantId }).then((r) => r);
+        expect(await settled(create$)).toBe(false);
+        await c.query('COMMIT');
+        expect((await create$).status).toBe(404);
+      } finally {
+        await c.query('ROLLBACK').catch(() => undefined);
+        await c.end();
+      }
+      expect(await aiCount(variantId)).toBe(0);
+    });
+
+    it('FR-203, ADR 0005 AI-1: concurrent create and delete end consistent over many rounds (never a created row with its variant gone)', async () => {
+      const a = await make(UserRole.AUTHOR);
+      for (let round = 0; round < 6; round++) {
+        const id = await create(a);
+        const variantId = await addVariant(a, id, 6);
+        const [del, add] = await Promise.all([
+          delVariant(a, id, variantId).then((r) => r),
+          addAi(a, id, { variantId }).then((r) => r),
+        ]);
+        expect(`${del.status}/${add.status}`).toMatch(/^(204\/404|409\/201)$/);
+        const variants = await owner.questionVariant.count({ where: { id: variantId } });
+        expect(variants).toBe(add.status === 201 ? 1 : 0);
+        expect(await aiCount(variantId)).toBe(add.status === 201 ? 1 : 0);
+      }
+    });
+  });
+
+  describe('FR-203, ADR 0005 AI-5: GET /questions/ai-policy', () => {
+    const policy = (who: Made): request.Test =>
+      http().get(`${API}/questions/ai-policy`).set(who.auth);
+
+    it('FR-203: authors and admins read it; it is not taken for a question id (no 400 from ParseUUIDPipe)', async () => {
+      const org = (await owner.organization.create({ data: { name: 'Policy org' } })).id;
+      for (const role of [UserRole.AUTHOR, UserRole.SUPER_ADMIN]) {
+        const who = await make(role, org);
+        const res = await policy(who);
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({ minAssistants: 2, isDefault: true, refreshIntervalDays: null });
+      }
+    });
+
+    it('FR-203, FR-103: recruiters and reviewers get 403, no token 401', async () => {
+      for (const role of [UserRole.RECRUITER, UserRole.REVIEWER]) {
+        expect((await policy(await make(role))).status).toBe(403);
+      }
+      await http().get(`${API}/questions/ai-policy`).expect(401);
+    });
+
+    it('FR-203, TC-008: a configured value is returned, isolated per org; an invalid value falls back to the default', async () => {
+      const o1 = (await owner.organization.create({ data: { name: 'P1' } })).id;
+      const o2 = (await owner.organization.create({ data: { name: 'P2' } })).id;
+      await setGate(o1, 3);
+      await setGate(o2, 0);
+      const a1 = await make(UserRole.AUTHOR, o1);
+      const a2 = await make(UserRole.AUTHOR, o2);
+      expect((await policy(a1)).body).toMatchObject({ minAssistants: 3, isDefault: false });
+      expect((await policy(a2)).body).toMatchObject({ minAssistants: 0, isDefault: false });
+      const o3 = (await owner.organization.create({ data: { name: 'P3' } })).id;
+      await setGate(o3, 99);
+      expect((await policy(await make(UserRole.AUTHOR, o3))).body).toMatchObject({
+        minAssistants: 2,
+        isDefault: true,
+      });
+    });
+  });
+
   describe('ADR 0005: AI reference solutions', () => {
     it('FR-202: create, list and supersede are append-only; rows keep their history', async () => {
       const a = await make(UserRole.AUTHOR);
