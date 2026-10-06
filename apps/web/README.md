@@ -127,9 +127,10 @@ Playwright: `e2e/security.spec.ts`.
 ## Question bank (FE-04, FR-201..FR-205, mock mode)
 
 Sign in as `author@example.test` (`Author-Pass-12345`) or the super admin, then open Questions.
-`recruiter@example.test` can list questions (`question:read`) but has no links into the editor; the
-mock answers 403 to the detail routes for anyone without `question:update` (reference solutions,
-hidden tests and answer keys never reach other roles, TC-011).
+`recruiter@example.test` can list questions (`question:read`) and open `/admin/questions/q-merge` for a
+read-only summary: the mock answers the detail routes for anyone without `question:update` with an
+allowlisted view (statement and visible samples only; reference solutions, hidden tests and answer
+keys never reach other roles, TC-011, DL-32) and 403 on every other route.
 
 | Route                                      | What it is                                                         |
 | ------------------------------------------ | ------------------------------------------------------------------ |
@@ -140,8 +141,8 @@ hidden tests and answer keys never reach other roles, TC-011).
 | `/admin/questions/[id]/versions/[version]` | An older version, read-only                                        |
 
 Coding editor tabs: Statement (Markdown, live preview, no raw HTML), Languages and starter code
-(Monaco, self-hosted), Reference solution, Test cases (hidden toggle, weight), Variants (declared
-parameters, per-variant JSON checked against them, rendered preview, per-slot input and output
+(Monaco, self-hosted), Reference solution, Test cases (hidden toggle, weight), Variants (explicit
+parameters per variant as JSON of strings and numbers, rendered preview, per-slot input and output
 overrides, "Prefill from reference solution" that only proposes values until you accept them),
 AI reference solutions (add, supersede, refresh-due badge, publish requirement), Limits. Multiple
 choice and short-answer questions have Statement and Answer.
@@ -150,7 +151,8 @@ Mock questions to try: **Merge intervals** (published, 2 versions, variants, ref
 **Rotate an array** (draft; its variant "Rotate by 3" fails validation, TC-012: fix the expected
 output of slot 2, Save, Validate, add two AI solutions for Python, Publish), **Running average**
 (validated, one AI assistant per language), **Cost of binary search** (MCQ), **Status code for a
-created resource** (short answer). The mock "executor" is fake: a slot fails when its expected
+created resource** (short answer), **Publishing unavailable (scenario)** (a validated draft whose
+publish answers 501, to see the failure handling). The mock "executor" is fake: a slot fails when its expected
 output is blank or starts with `TODO`. State is in memory; reload to reset.
 
 Code map: `src/features/questions` (pages, editor, `tabs/`, `draft.ts` schemas and conversions,

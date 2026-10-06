@@ -8,7 +8,7 @@ import {
   type DraftValues,
 } from './draft';
 import { aiGate, aiRefreshDue, canPublish, publishChecks } from './gate';
-import { checkParams, parseParams } from './params';
+import { checkParams, missingPlaceholders, parseParams } from './params';
 import { hasUnsupportedSyntax, placeholdersOf, renderTemplate } from './template';
 
 const NOW = new Date('2026-10-05T00:00:00Z');
@@ -48,23 +48,24 @@ describe('templates (FR-203, ADR 0007 V-2)', () => {
   });
 });
 
-describe('variant parameters (FR-203)', () => {
-  const defs: Schemas['ParamDef'][] = [
-    { name: 'n', type: 'number' },
-    { name: 'xs', type: 'array' },
-  ];
+describe('variant parameters (FR-203, DL-32)', () => {
   it('FR-203: parses only JSON objects', () => {
     expect(parseParams('{"n": 1}')).toEqual({ ok: true, value: { n: 1 } });
     expect(parseParams('').ok).toBe(false);
     expect(parseParams('[1]').ok).toBe(false);
     expect(parseParams('{').ok).toBe(false);
   });
-  it('FR-203: checks types, missing and undeclared keys', () => {
-    expect(checkParams({ n: 1, xs: [] }, defs)).toEqual([]);
-    expect(checkParams({ n: '1', xs: [] }, defs)).toEqual(['"n" must be a number.']);
-    expect(checkParams({ xs: [] }, defs)[0]).toMatch(/"n" is missing/);
-    expect(checkParams({ n: 1, xs: [], z: 1 }, defs)[0]).toMatch(/"z" is not a declared parameter/);
-    expect(checkParams({ n: Number.NaN, xs: [] }, defs)).toEqual(['"n" must be a number.']);
+  it('FR-203: values must be strings or numbers; there is no declared schema to check against', () => {
+    expect(checkParams({ n: 1, s: 'x' })).toEqual([]);
+    expect(checkParams({ ok: true })[0]).toMatch(/"ok" must be a string or a number/);
+    expect(checkParams({ xs: [1] })[0]).toMatch(/"xs" must be a string or a number/);
+    expect(checkParams({ n: Number.NaN })[0]).toMatch(/"n" must be a string or a number/);
+    expect(checkParams({ n: null })[0]).toMatch(/"n" must be a string or a number/);
+    expect(checkParams({ 'bad name': 1 })[0]).toMatch(/not a valid name/);
+  });
+  it('FR-203: finds the placeholders a variant gives no value, against its own keys', () => {
+    expect(missingPlaceholders({ a: 1 }, ['a', 'b'])).toEqual(['b']);
+    expect(missingPlaceholders({ a: 1, b: 'x' }, ['a', 'b'])).toEqual([]);
   });
 });
 
@@ -147,7 +148,6 @@ describe('question draft (FR-201..FR-205)', () => {
       allowedLanguages: ['python'],
       starterCode: { python: 'a', java: 'b' },
       testCases: [{ id: 't1', input: '', expectedOutput: '', isHidden: false, weight: 1 }],
-      paramSchema: [{ name: 'n', type: 'number', key: 'k' }],
       variants: [
         {
           id: 'v',

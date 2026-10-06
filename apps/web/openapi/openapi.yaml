@@ -771,7 +771,7 @@ paths:
           description: Invalid content
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/Problem' }
         '403': { $ref: '#/components/responses/Forbidden' }
   /v1/questions/{questionId}:
     parameters:
@@ -781,22 +781,25 @@ paths:
         schema: { type: string }
     get:
       operationId: getQuestion
-      summary: The current version with its tests, variants, reference solutions and answer key. Author only, never sent to candidates (TC-011).
+      summary: The current version. Callers with question:update get the full QuestionDetail (tests, variants, reference solutions, answer key); every other reader (Recruiter) gets the allowlisted QuestionDetailRedacted (DL-32). Never sent to candidates (TC-011).
       responses:
         '200':
           description: Question
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/QuestionDetail' }
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/QuestionDetail'
+                  - $ref: '#/components/schemas/QuestionDetailRedacted'
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: Not found
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/Problem' }
     patch:
       operationId: updateQuestion
-      summary: Save the content. A published version is immutable, so this creates the next draft version (FR-204). Needs the revision the editor started from; 409 stale_version when someone saved since.
+      summary: Save the content. A published version is immutable, so this creates the next draft version (FR-204). Needs expectedUpdatedAt (the version's updatedAt the editor loaded); 409 when it changed since.
       requestBody:
         required: true
         content:
@@ -812,18 +815,18 @@ paths:
           description: Invalid content
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/Problem' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: Not found
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: stale_version, the question was saved by someone else since the editor loaded it
+          description: The question changed since the editor loaded it (detail and errors[] only, no code)
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/Problem' }
   /v1/questions/{questionId}/versions:
     parameters:
       - name: questionId
@@ -850,7 +853,7 @@ paths:
           description: Not found
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/Problem' }
   /v1/questions/{questionId}/versions/{version}:
     parameters:
       - name: questionId
@@ -869,13 +872,16 @@ paths:
           description: Version
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/QuestionDetail' }
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/QuestionDetail'
+                  - $ref: '#/components/schemas/QuestionDetailRedacted'
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: Not found
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/Problem' }
   /v1/questions/{questionId}/validate:
     parameters:
       - name: questionId
@@ -896,7 +902,7 @@ paths:
           description: Not found
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/Problem' }
   /v1/questions/{questionId}/prefill:
     parameters:
       - name: questionId
@@ -921,7 +927,7 @@ paths:
           description: Invalid
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/Problem' }
         '403': { $ref: '#/components/responses/Forbidden' }
   /v1/questions/{questionId}/validation/{jobId}:
     parameters:
@@ -947,7 +953,7 @@ paths:
           description: Not found
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/Problem' }
   /v1/questions/{questionId}/publish:
     parameters:
       - name: questionId
@@ -956,7 +962,7 @@ paths:
         schema: { type: string }
     post:
       operationId: publishQuestion
-      summary: Publish the current draft version. Refused (409) without a passing validation of the saved content (TC-012), without the AI reference solutions of the publish gate (ADR 0005 AI-5), or when the revision is not the current one (stale_version).
+      summary: Publish the current draft version. Refused with 422 (detail and errors[] only) without a passing validation of the saved content (TC-012) or without the AI reference solutions of the publish gate (ADR 0005 AI-5), and with 409 when updatedAt is not the current one. Fails closed until BE-04c (422, or 501-style).
       requestBody:
         required: true
         content:
@@ -973,12 +979,22 @@ paths:
           description: Not found
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
-        '409':
-          description: validation_required, ai_references_missing, or stale_version
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: The gate is not met (no passing validation, missing AI reference solutions); detail and errors[] only
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/Problem' }
+        '501':
+          description: Publishing is not available yet (until BE-04c)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: The version changed since it was validated (expectedUpdatedAt)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
   /v1/questions/{questionId}/ai-references:
     parameters:
       - name: questionId
@@ -1005,7 +1021,7 @@ paths:
           description: Not found
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/Problem' }
     post:
       operationId: addAiReference
       summary: Add a solution collected from an AI assistant (audited as ai_reference.create)
@@ -1024,13 +1040,13 @@ paths:
           description: Invalid
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/Problem' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: Not found
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/Problem' }
   /v1/questions/{questionId}/ai-references/{referenceId}/supersede:
     parameters:
       - name: questionId
@@ -1059,13 +1075,13 @@ paths:
           description: Invalid
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/Problem' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: Not found
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/Problem' }
 
 components:
   responses:
@@ -1141,15 +1157,6 @@ components:
         status: { $ref: '#/components/schemas/QuestionStatus' }
         version: { type: integer, description: Latest version number }
         updatedAt: { type: string, format: date-time }
-    ParamType:
-      type: string
-      enum: [string, number, boolean, array]
-    ParamDef:
-      type: object
-      required: [name, type]
-      properties:
-        name: { type: string, pattern: '^[A-Za-z_][A-Za-z0-9_]*$' }
-        type: { $ref: '#/components/schemas/ParamType' }
     Limits:
       type: object
       required: [cpuMs, wallMs, memoryKb]
@@ -1179,7 +1186,13 @@ components:
       properties:
         id: { type: string }
         label: { type: string }
-        params: { type: object, additionalProperties: true }
+        params:
+          type: object
+          description: Explicit values per placeholder (ADR 0007), no parameter schema
+          additionalProperties:
+            oneOf:
+              - { type: string }
+              - { type: number }
         active: { type: boolean }
         overrides: { type: array, items: { $ref: '#/components/schemas/VariantOverride' } }
     McqOption:
@@ -1219,7 +1232,6 @@ components:
           limits,
           starterCode,
           referenceSolution,
-          paramSchema,
           testCases,
           variants,
           answerSpec,
@@ -1230,8 +1242,7 @@ components:
           {
             type: string,
             maxLength: 50000,
-            description: Markdown,
-            no raw HTML; may contain Mustache placeholders,
+            description: 'Markdown, no raw HTML; may contain Mustache placeholders',
           }
         difficulty: { $ref: '#/components/schemas/Difficulty' }
         tags: { type: array, items: { type: string } }
@@ -1239,7 +1250,6 @@ components:
         limits: { $ref: '#/components/schemas/Limits' }
         starterCode: { type: object, additionalProperties: { type: string } }
         referenceSolution: { type: object, additionalProperties: { type: string } }
-        paramSchema: { type: array, items: { $ref: '#/components/schemas/ParamDef' } }
         testCases: { type: array, items: { $ref: '#/components/schemas/TestCase' } }
         variants: { type: array, items: { $ref: '#/components/schemas/Variant' } }
         answerSpec:
@@ -1250,19 +1260,20 @@ components:
       allOf:
         - $ref: '#/components/schemas/QuestionContent'
         - type: object
-          required: [expectedRevision]
+          required: [expectedUpdatedAt]
           properties:
-            expectedRevision: { type: integer, minimum: 1 }
+            expectedUpdatedAt:
+              type: string
+              format: date-time
+              description: 'The updatedAt of the version the editor loaded (opaque); 409 if it changed since'
     PublishRequest:
       type: object
-      required: [expectedRevision]
+      required: [expectedUpdatedAt]
       properties:
-        expectedRevision:
-          {
-            type: integer,
-            minimum: 1,
-            description: The revision that was validated; 409 stale_version if the question was saved since,
-          }
+        expectedUpdatedAt:
+          type: string
+          format: date-time
+          description: 'The updatedAt of the version that was validated; 409 if it changed since'
     QuestionCreate:
       allOf:
         - $ref: '#/components/schemas/QuestionContent'
@@ -1293,21 +1304,22 @@ components:
         results: { type: array, items: { $ref: '#/components/schemas/ValidationResult' } }
     ValidationJobRef:
       type: object
-      required: [jobId, revision]
+      required: [jobId, validatedForUpdatedAt]
       properties:
         jobId: { type: string }
-        revision: { type: integer, minimum: 1, description: The content revision the job validates }
+        validatedForUpdatedAt:
+          type: string
+          format: date-time
+          description: 'The updatedAt of the content the job validates'
     ValidationJob:
       type: object
-      required: [jobId, revision, status]
+      required: [jobId, validatedForUpdatedAt, status]
       properties:
         jobId: { type: string }
-        revision:
-          {
-            type: integer,
-            minimum: 1,
-            description: The content revision the job validated; a report for an older revision must never be shown as current,
-          }
+        validatedForUpdatedAt:
+          type: string
+          format: date-time
+          description: 'The updatedAt of the content the job validated; a report for older content must never be shown as current'
         status: { type: string, enum: [queued, running, done, failed] }
         report: { $ref: '#/components/schemas/ValidationReport' }
         error: { type: string }
@@ -1322,16 +1334,13 @@ components:
       allOf:
         - $ref: '#/components/schemas/QuestionContent'
         - type: object
-          required: [version, revision, isPublished, createdAt, validatedAt, validationReport]
+          required: [version, updatedAt, isPublished, createdAt, validatedAt, validationReport]
           properties:
             version: { type: integer, minimum: 1 }
-            revision:
-              {
-                type: integer,
-                minimum: 1,
-                description: Content revision of the question,
-                monotonic and bumped by every save (also when a save creates the next version). Used for optimistic concurrency and to tie a validation to the exact content.,
-              }
+            updatedAt:
+              type: string
+              format: date-time
+              description: 'Changes on every save of this version; used as the opaque concurrency token and to tie a validation to the exact content'
             isPublished: { type: boolean }
             createdAt: { type: string, format: date-time }
             validatedAt:
@@ -1351,6 +1360,68 @@ components:
         latestVersion: { type: integer, minimum: 1 }
         aiReferencePolicy: { $ref: '#/components/schemas/AiReferencePolicy' }
         current: { $ref: '#/components/schemas/QuestionVersion' }
+    QuestionDetailRedacted:
+      type: object
+      additionalProperties: false
+      description: >-
+        What a caller without question:update (a Recruiter) gets from the detail routes: an allowlist,
+        never a denylist. PROVISIONAL list pending BE-04a. No reference solution, answer key,
+        validation report, variant parameters, AI reference solutions or hidden tests.
+      required:
+        [
+          id,
+          slug,
+          title,
+          type,
+          status,
+          difficulty,
+          tags,
+          statementMd,
+          version,
+          updatedAt,
+          starterCode,
+          limits,
+          allowedLanguages,
+          sampleTestCases,
+        ]
+      properties:
+        id: { type: string }
+        slug: { type: string }
+        title: { type: string }
+        type: { $ref: '#/components/schemas/QuestionType' }
+        status: { $ref: '#/components/schemas/QuestionStatus' }
+        difficulty: { $ref: '#/components/schemas/Difficulty' }
+        tags: { type: array, items: { type: string } }
+        statementMd: { type: string }
+        version: { type: integer, minimum: 1 }
+        updatedAt: { type: string, format: date-time }
+        starterCode: { type: object, additionalProperties: { type: string } }
+        limits: { $ref: '#/components/schemas/Limits' }
+        allowedLanguages: { type: array, items: { $ref: '#/components/schemas/Language' } }
+        sampleTestCases:
+          type: array
+          description: Visible (non-hidden) cases only
+          items:
+            type: object
+            additionalProperties: false
+            required: [input, expectedOutput]
+            properties:
+              input: { type: string }
+              expectedOutput: { type: string }
+    Problem:
+      type: object
+      description: >-
+        RFC 7807 problem body of the question routes. 409 and 422 carry detail and errors[] only: no
+        machine code, the caller tells cases apart by endpoint and status.
+      required: [type, title, status]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        traceId: { type: string }
+        errors: { type: array, items: { type: string } }
     QuestionVersionSummary:
       type: object
       required: [version, isPublished, createdAt, createdByName, validatedAt]
