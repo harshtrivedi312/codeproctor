@@ -1,23 +1,29 @@
-// INTERIM column safety for a CANDIDATE scope (ADR 0013 CS-4.4 is PR 2; rule 3 of CLAUDE.md).
+// INTERIM READ safety for a CANDIDATE scope (ADR 0013 CS-4.4 is PR 2; rule 3 of CLAUDE.md).
 //
-// PR 1 has no CS-4.4 column allowlists, so without this file a candidate could `select` the sealed
-// session key, `include`-free but all-columns, or write `sessions.status`. Until PR 2's allowlists
-// replace it, a CANDIDATE scope fails closed on a fixed list:
+// The WRITE side is no longer interim: it is CS-4.4's "Write" column as an allowlist, in
+// session-scope-map.ts (anything not listed throws, and so does an update on a create-only model).
+// What is interim here is the READ side. PR 1 has no `omit` and no grants, so until PR 2 builds the
+// CS-4.4 read allowlists, a CANDIDATE scope fails closed like this:
 //
 //   1. Every call that returns rows names an explicit `select` (no default all-columns result):
 //      findUnique, findUniqueOrThrow, findFirst, findFirstOrThrow, findMany, create,
 //      createManyAndReturn, update, updateManyAndReturn, upsert and delete. A new column therefore
 //      stays hidden until a route lists it. `include` is refused by CS-4.5 (candidate-relations.ts).
-//   2. CANDIDATE_INTERIM_DENY.read is refused in `select`, `where`, `having`, `orderBy`, `distinct`,
-//      `by` (groupBy), the aggregates (`_count`, `_sum`, `_avg`, `_min`, `_max`) and the `select` of
-//      `count`, so a hidden column cannot act as a boolean or ordering oracle either.
-//   3. CANDIDATE_INTERIM_DENY.write (the read list plus the state columns) is refused in the data of
-//      every write.
+//   2. CANDIDATE_INTERIM_DENY, per model, is refused in `select`, `where`, `having`, `orderBy`,
+//      `distinct`, `by` (groupBy), the aggregates (`_count`, `_sum`, `_avg`, `_min`, `_max`) and the
+//      `select` of `count`, so a hidden column cannot act as a boolean or ordering oracle either. A
+//      compound unique selector (`orgId_slug`) is read through to its columns.
 //
-// It is a deny list, so it is only as complete as its entries. It is NOT the CS-4.4 allowlist: a column
-// that is not named here (for example `sessions.retentionAnchorAt`, `session_questions.points`,
-// `proctor_events.severity`, `media_chunks.objectKey`) is still readable or writable. BE-07 may rely on
-// CANDIDATE column safety only after PR 2 merges (FU-DB-190).
+// The deny list is the COMPLEMENT of CS-4.4's read column, model by model: every column of a model on the
+// CANDIDATE allowlist is either readable by CS-4.4, or a key that ties the row to its own scope (below), or
+// named here. candidate-interim.spec.ts holds the CS-4.4 read column and fails for a column that is none of
+// the three, so a new column breaks the build until it is classified. The keys that are not hidden are
+// `id`, `orgId`, `sessionId`, `sessionQuestionId` and, on the two section tables, `testId` and `sectionId`:
+// the ids of the candidate's own org, session and test, which the scope fixes anyway. Columns CS-4.4 opens
+// only under a grant (`sessions.invitationId`, `hmacKeyEnc`, `deviceInfo`, `session_questions.
+// testQuestionId`, `media_chunks.objectKey`, the two `settings`, `invitations.accommodations`) and the
+// RUN-row columns of submissions (`results`, `passed`, `total`) are hidden until PR 2 builds the grants
+// and the RUN filter. BE-07 may rely on CANDIDATE column safety after PR 2 merges (FU-DB-190).
 //
 // Names are Prisma's field names (`hmacKeyEnc`), not column names. A test checks each entry against the
 // generated client. Messages name the model, the column and the place, never a value.
@@ -27,62 +33,105 @@ import type { ModelName } from './org-scope-map';
 type PlainObject = Record<string, unknown>;
 
 interface InterimDeny {
-  /** Refused in select, where, orderBy, distinct, groupBy and the aggregates. */
+  /** Refused in select, where, having, orderBy, distinct, groupBy and the aggregates. */
   readonly read: readonly string[];
-  /** Refused in the data of a write: `read` plus the state and review columns. */
-  readonly write: readonly string[];
 }
 
-const READ_DENIED: Readonly<Partial<Record<ModelName, readonly string[]>>> = {
-  Session: ['hmacKeyEnc', 'deviceInfo', 'totalScore', 'riskScore', 'riskBand', 'reportKey'],
-  Invitation: ['accommodations'],
-  IdentityCheck: [
+const deny = (...read: string[]): InterimDeny => ({ read });
+
+/**
+ * INTERIM. PR 2 of ADR 0013 CS-4 (the CS-4.4 read allowlists, `omit` and grants) replaces this; it
+ * exists only so that PR 1 does not ship a CANDIDATE scope with no read control. Each entry is the
+ * complement of the CS-4.4 read column of that model (see the header).
+ */
+export const CANDIDATE_INTERIM_DENY: Readonly<Partial<Record<ModelName, InterimDeny>>> = {
+  // Readable: id, status, startedAt, deadlineAt, pauseReasons, pausedMs, proctorPausedAt, submittedAt,
+  // authEpoch (CS-4.4; the last six feed `effectiveDeadline`).
+  Session: deny(
+    'invitationId',
+    'hmacKeyEnc',
+    'deviceInfo',
+    'clientKind',
+    'totalScore',
+    'riskScore',
+    'riskBand',
+    'lastHeartbeat',
+    'retentionAnchorAt',
+    'reportKey',
+    'reportGeneratedAt',
+    'createdAt',
+  ),
+  // Readable: id, sessionId, position, points, finalCode, finalLanguage, answer.
+  SessionQuestion: deny(
+    'testQuestionId',
+    'questionVersionId',
+    'variantId',
+    'score',
+    'scoring',
+    'scoredById',
+    'scoredAt',
+    'scoringNote',
+  ),
+  // Readable: every column.
+  SessionSection: deny(),
+  // Readable: id, sessionQuestionId, kind, language, createdAt. `results`, `passed` and `total` are
+  // CS-4.4's RUN-row columns (the RUN filter is PR 2); `sourceCode` is written, never read back.
+  Submission: deny('sourceCode', 'results', 'passed', 'total', 'score'),
+  // Readable: id, attempt, status, createdAt.
+  IdentityCheck: deny(
+    'idImageKey',
+    'selfieKey',
     'faceMatchScore',
     'modelId',
     'threshold',
+    'livenessPassed',
     'reviewReason',
     'manualDecision',
     'reviewedById',
     'reviewedAt',
     'reviewNote',
-  ],
-  Organization: ['settings'],
-  Test: ['settings'],
-  // `results`, `passed` and `total` hold the hidden-test outcome of a SUBMIT row (TC-011). CS-4.4 lets a
-  // candidate read them on RUN rows only, which is a row filter that PR 2 builds; until then they are
-  // closed (FU-DB-195).
-  Submission: ['score', 'results', 'passed', 'total'],
-  SessionQuestion: ['score', 'scoringNote'],
-};
-
-/** Columns a candidate may read but not write: the session state and the identity review. */
-const WRITE_ONLY_DENIED: Readonly<Partial<Record<ModelName, readonly string[]>>> = {
-  Session: [
-    'status',
-    'pauseReasons',
-    'submittedAt',
-    'authEpoch',
-    'startedAt',
-    'deadlineAt',
-    'pausedMs',
-  ],
-  IdentityCheck: ['status'],
+  ),
+  // Readable: id, stream, segment, seq, sizeBytes, uploadedAt. `objectKey` is explicit-only.
+  MediaChunk: deny('objectKey', 'startedAt', 'durationMs', 'deletedAt'),
+  // Readable: seq, signature, eventCount.
+  ProctorEventBatch: deny('receivedAt'),
+  // Readable: seq, signature, startedAt.
+  KeystrokeBatch: deny('events'),
+  // Readable: id, type, occurredAt, durationMs, batchSeq, createdAt. The SERVER rows are filtered out.
+  ProctorEvent: deny('source', 'severity', 'confidence', 'payload', 'evidenceKey'),
+  // Readable: id, consentTextId, signedAt, declinedAt.
+  Consent: deny('signedName', 'ip', 'userAgent', 'pdfKey', 'pdfGeneratedAt', 'copyEmailedAt'),
+  // Readable: id, name, retentionDays, currentConsentTextId. `settings` is explicit-only.
+  Organization: deny('settings', 'createdAt'),
+  // Readable: id, fullName, email.
+  Candidate: deny('externalRef', 'erasureRequestedAt', 'erasedAt', 'createdAt'),
+  // Readable: id, testId, candidateId, windowStart, windowEnd, usedAt. `accommodations` is explicit-only.
+  Invitation: deny('tokenHash', 'accommodations', 'sentAt', 'createdById', 'createdAt'),
+  // Readable: id, name, description, durationMinutes, profile. `settings` is explicit-only.
+  Test: deny('passScore', 'settings', 'createdById', 'createdAt'),
+  // Readable: id, title, position, timeLimitMin.
+  TestSection: deny(),
+  // Readable: id, type.
+  Question: deny('slug', 'tags', 'currentVersionId', 'isArchived', 'createdById', 'createdAt'),
 };
 
 /**
- * INTERIM. PR 2 of ADR 0013 CS-4 (the CS-4.4 column allowlists, `omit` and grants) replaces this list;
- * it exists only so that PR 1 does not ship a CANDIDATE scope with no column control at all.
+ * The compound unique selectors of the models on the CANDIDATE allowlist (`@@unique` and `@@id` of
+ * schema.prisma, named `a_b` by Prisma). A `where` that names one is read through to its columns, so
+ * `orgId_slug: { orgId, slug }` is not a way round the deny list. candidate-interim.spec.ts checks the
+ * table against schema.prisma.
  */
-export const CANDIDATE_INTERIM_DENY: Readonly<Partial<Record<ModelName, InterimDeny>>> =
-  Object.fromEntries(
-    [...new Set([...Object.keys(READ_DENIED), ...Object.keys(WRITE_ONLY_DENIED)])].map((model) => {
-      const read = READ_DENIED[model as ModelName] ?? [];
-      return [
-        model,
-        { read, write: [...read, ...(WRITE_ONLY_DENIED[model as ModelName] ?? [])] },
-      ] as const;
-    }),
-  );
+export const COMPOUND_UNIQUES: Readonly<Partial<Record<ModelName, readonly string[]>>> = {
+  Candidate: ['orgId_email', 'id_orgId'],
+  Invitation: ['id_orgId'],
+  Test: ['id_orgId'],
+  Question: ['orgId_slug'],
+  SessionSection: ['sessionId_sectionId', 'sessionId_position'],
+  IdentityCheck: ['sessionId_attempt'],
+  MediaChunk: ['sessionId_stream_seq'],
+  ProctorEventBatch: ['sessionId_seq'],
+  KeystrokeBatch: ['sessionId_seq'],
+};
 
 /** The operations whose result carries rows: they must name their `select`. */
 export const ROW_RETURNING_OPERATIONS: readonly string[] = [
@@ -106,52 +155,86 @@ function isPlainObject(value: unknown): value is PlainObject {
 function refuse(model: string, operation: string, field: string, where: string) {
   return new OrgScopeViolationError(
     `${model}.${operation}: the column ${field} is not available to a candidate in ${where} ` +
-      '(interim deny list CANDIDATE_INTERIM_DENY; ADR 0013 CS-4.4 column allowlists are PR 2).',
+      '(interim deny list CANDIDATE_INTERIM_DENY; ADR 0013 CS-4.4 read allowlists are PR 2).',
   );
 }
 
-// A where nests AND, OR and NOT. Anything beyond this is refused, as in candidate-relations.ts.
+// A where nests AND, OR and NOT, and arrays. Anything beyond this is refused, as in candidate-relations.ts.
 const MAX_DEPTH = 32;
 
-/** The field names a where or having mentions: its own keys, through AND, OR, NOT and `_avg`-style keys. */
-function whereFields(value: unknown, into: Set<string>, depth: number): void {
+function tooDeep(model: string, operation: string, what: string): OrgScopeViolationError {
+  return new OrgScopeViolationError(
+    `${model}.${operation}: ${what} nested more than ${MAX_DEPTH} levels deep is refused in a ` +
+      'CANDIDATE scope.',
+  );
+}
+
+/**
+ * The field names a where or having mentions: its own keys, through AND, OR, NOT and `_avg`-style
+ * keys, and through the compound unique selectors of the model. Arrays count toward the depth.
+ */
+function whereFields(
+  model: ModelName,
+  operation: string,
+  value: unknown,
+  into: Set<string>,
+  depth: number,
+): void {
+  if ((Array.isArray(value) || isPlainObject(value)) && depth > MAX_DEPTH) {
+    throw tooDeep(model, operation, 'a where');
+  }
   if (Array.isArray(value)) {
-    for (const item of value) whereFields(item, into, depth);
+    for (const item of value) whereFields(model, operation, item, into, depth + 1);
     return;
   }
   if (!isPlainObject(value)) return;
-  if (depth > MAX_DEPTH) {
-    throw new OrgScopeViolationError(
-      `a where nested more than ${MAX_DEPTH} levels deep is refused in a CANDIDATE scope.`,
-    );
-  }
+  const compound = COMPOUND_UNIQUES[model] ?? [];
   for (const [key, inner] of Object.entries(value)) {
     if (inner === undefined) continue;
-    if (key === 'AND' || key === 'OR' || key === 'NOT') whereFields(inner, into, depth + 1);
-    else if (key.startsWith('_') && isPlainObject(inner)) {
+    if (key === 'AND' || key === 'OR' || key === 'NOT') {
+      whereFields(model, operation, inner, into, depth + 1);
+    } else if (compound.includes(key) && isPlainObject(inner)) {
+      for (const field of Object.keys(inner)) into.add(field); // orgId_slug: { orgId, slug }
+    } else if (key.startsWith('_') && isPlainObject(inner)) {
       for (const field of Object.keys(inner)) into.add(field); // having: { _avg: { riskScore: ... } }
     } else into.add(key);
   }
 }
 
 /** The field names an orderBy mentions, including `{ _min: { field: 'asc' } }` (groupBy). */
-function orderByFields(value: unknown, into: Set<string>): void {
+function orderByFields(
+  model: ModelName,
+  operation: string,
+  value: unknown,
+  into: Set<string>,
+  depth: number,
+): void {
+  if (Array.isArray(value) && depth > MAX_DEPTH) throw tooDeep(model, operation, 'an orderBy');
   if (Array.isArray(value)) {
-    for (const item of value) orderByFields(item, into);
+    for (const item of value) orderByFields(model, operation, item, into, depth + 1);
     return;
   }
   if (!isPlainObject(value)) return;
   for (const [key, inner] of Object.entries(value)) {
     if (inner === undefined) continue;
-    if (key.startsWith('_') && isPlainObject(inner))
+    if (key.startsWith('_') && isPlainObject(inner)) {
       for (const field of Object.keys(inner)) into.add(field);
-    else into.add(key);
+    } else into.add(key);
   }
 }
 
-function listFields(value: unknown, into: Set<string>): void {
+function listFields(
+  model: ModelName,
+  operation: string,
+  value: unknown,
+  into: Set<string>,
+  depth: number,
+): void {
   if (typeof value === 'string') into.add(value);
-  else if (Array.isArray(value)) for (const item of value) listFields(item, into);
+  else if (Array.isArray(value)) {
+    if (depth > MAX_DEPTH) throw tooDeep(model, operation, 'a field list');
+    for (const item of value) listFields(model, operation, item, into, depth + 1);
+  }
 }
 
 function assertNotDenied(
@@ -166,18 +249,13 @@ function assertNotDenied(
   }
 }
 
-function rowsOf(data: unknown): unknown[] {
-  return Array.isArray(data) ? data : [data];
-}
-
 /**
- * The interim column control for a CANDIDATE scope. Pure: it reads the caller's arguments (after
- * CS-4.5 has refused relations, so `select` holds scalar fields only) and sends no query.
+ * The interim read control for a CANDIDATE scope. Pure: it reads the caller's arguments (after
+ * CS-4.5 has refused relations, so `select` holds scalar fields only) and sends no query. The write
+ * columns are checked separately, against the CS-4.4 write allowlist (session-scope-args.ts).
  */
 export function assertInterimColumns(model: ModelName, operation: string, args: PlainObject): void {
-  const deny = CANDIDATE_INTERIM_DENY[model];
-  const denyRead = deny?.read ?? [];
-  const denyWrite = deny?.write ?? [];
+  const denyRead = CANDIDATE_INTERIM_DENY[model]?.read ?? [];
 
   // 1. Rows only through an explicit select.
   if (ROW_RETURNING_OPERATIONS.includes(operation)) {
@@ -194,47 +272,22 @@ export function assertInterimColumns(model: ModelName, operation: string, args: 
     assertNotDenied(model, operation, denyRead, Object.keys(args.select), 'select');
   }
   const where = new Set<string>();
-  whereFields(args.where, where, 0);
+  whereFields(model, operation, args.where, where, 0);
   assertNotDenied(model, operation, denyRead, where, 'where');
   const having = new Set<string>();
-  whereFields(args.having, having, 0);
+  whereFields(model, operation, args.having, having, 0);
   assertNotDenied(model, operation, denyRead, having, 'having');
   const ordered = new Set<string>();
-  orderByFields(args.orderBy, ordered);
+  orderByFields(model, operation, args.orderBy, ordered, 0);
   assertNotDenied(model, operation, denyRead, ordered, 'orderBy');
   for (const key of ['distinct', 'by'] as const) {
     const listed = new Set<string>();
-    listFields(args[key], listed);
+    listFields(model, operation, args[key], listed, 0);
     assertNotDenied(model, operation, denyRead, listed, key === 'by' ? 'groupBy' : key);
   }
   for (const key of ['_count', '_sum', '_avg', '_min', '_max'] as const) {
     if (isPlainObject(args[key])) {
       assertNotDenied(model, operation, denyRead, Object.keys(args[key]), key);
     }
-  }
-
-  // 3. The write list in the data of every write.
-  const payloads: unknown[] = [];
-  switch (operation) {
-    case 'create':
-    case 'update':
-    case 'updateMany':
-    case 'updateManyAndReturn':
-    case 'createMany':
-    case 'createManyAndReturn':
-      payloads.push(...rowsOf(args.data));
-      break;
-    case 'upsert':
-      payloads.push(args.create, args.update);
-      break;
-    default:
-      break;
-  }
-  for (const payload of payloads) {
-    if (!isPlainObject(payload)) continue;
-    const written = Object.entries(payload)
-      .filter(([, value]) => value !== undefined)
-      .map(([key]) => key);
-    assertNotDenied(model, operation, denyWrite, written, 'a write');
   }
 }

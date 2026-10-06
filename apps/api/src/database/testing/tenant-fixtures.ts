@@ -345,38 +345,65 @@ export async function createTenant(client: PrismaClient, label: string): Promise
   };
 }
 
+/** Options of createCandidateChain. */
+export interface CandidateChainOptions {
+  /**
+   * Take the test, its section, its test question and the question (with its version) of this chain
+   * instead of creating them: two candidates who sit the SAME test (nit 6). Each still gets an
+   * invitation, a session, session sections and session questions of their own, so a filter that
+   * follows the test cannot tell them apart, and one that follows the session can.
+   */
+  readonly shareTestWith?: SessionChain;
+}
+
 /**
  * A second candidate in an existing tenant, with a whole chain of its own (see SessionChain): its own
  * test, section, question and invitation, so that two candidates of one org can be told apart in
- * every model. Created through `client`, which must be allowed to write every table (the owner).
+ * every model; or, with `shareTestWith`, the same test as another chain. Created through `client`,
+ * which must be allowed to write every table (the owner).
  */
 export async function createCandidateChain(
   client: PrismaClient,
   tenant: TenantFixture,
   label: string,
+  options: CandidateChainOptions = {},
 ): Promise<SessionChain> {
   const { orgId } = tenant;
+  const shared = options.shareTestWith;
 
-  const question = await client.question.create({ data: { orgId, slug: `q-${label}` } });
-  const questionVersion = await client.questionVersion.create({
-    data: {
-      questionId: question.id,
-      version: 1,
-      title: `Question ${label}`,
-      statementMd: 'Subtract two numbers.',
-      difficulty: 'EASY',
-      allowedLanguages: ['python'],
-    },
-  });
-  const test = await client.test.create({
-    data: { orgId, name: `Test ${label}`, durationMinutes: 45 },
-  });
-  const section = await client.testSection.create({
-    data: { testId: test.id, title: `Section ${label}`, position: 0 },
-  });
-  const testQuestion = await client.testQuestion.create({
-    data: { sectionId: section.id, questionVersionId: questionVersion.id, position: 0 },
-  });
+  const question =
+    shared === undefined
+      ? await client.question.create({ data: { orgId, slug: `q-${label}` } })
+      : { id: shared.questionId };
+  const questionVersion =
+    shared === undefined
+      ? await client.questionVersion.create({
+          data: {
+            questionId: question.id,
+            version: 1,
+            title: `Question ${label}`,
+            statementMd: 'Subtract two numbers.',
+            difficulty: 'EASY',
+            allowedLanguages: ['python'],
+          },
+        })
+      : { id: shared.questionVersionId };
+  const test =
+    shared === undefined
+      ? await client.test.create({ data: { orgId, name: `Test ${label}`, durationMinutes: 45 } })
+      : { id: shared.testId };
+  const section =
+    shared === undefined
+      ? await client.testSection.create({
+          data: { testId: test.id, title: `Section ${label}`, position: 0 },
+        })
+      : { id: shared.sectionId };
+  const testQuestion =
+    shared === undefined
+      ? await client.testQuestion.create({
+          data: { sectionId: section.id, questionVersionId: questionVersion.id, position: 0 },
+        })
+      : { id: shared.testQuestionId };
   const candidate = await client.candidate.create({
     data: { orgId, email: `candidate-${label}@example.test`, fullName: `Candidate ${label}` },
   });

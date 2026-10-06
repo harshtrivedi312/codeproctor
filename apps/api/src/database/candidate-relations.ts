@@ -72,14 +72,16 @@ function assertSelection(
 
 /** Vector 3: a relation filter anywhere in a `where` (or `having`), through AND, OR and NOT. */
 function assertWhere(model: ModelName, operation: string, where: unknown, depth: number): void {
+  // Arrays count toward the depth as objects do (nit 3): `AND: [[[[...]]]]` would otherwise recurse
+  // without a limit and end in a RangeError instead of this refusal.
+  if ((Array.isArray(where) || isPlainObject(where)) && depth > MAX_DEPTH) {
+    throw refuse(model, operation, `a where nested more than ${MAX_DEPTH} levels deep`);
+  }
   if (Array.isArray(where)) {
-    for (const item of where) assertWhere(model, operation, item, depth);
+    for (const item of where) assertWhere(model, operation, item, depth + 1);
     return;
   }
   if (!isPlainObject(where)) return;
-  if (depth > MAX_DEPTH) {
-    throw refuse(model, operation, `a where nested more than ${MAX_DEPTH} levels deep`);
-  }
   for (const [key, value] of Object.entries(where)) {
     if (value === undefined) continue;
     if (key === 'AND' || key === 'OR' || key === 'NOT') {
@@ -93,9 +95,12 @@ function assertWhere(model: ModelName, operation: string, where: unknown, depth:
 }
 
 /** Vector 4: a relation field in `orderBy` (one object, or a list of them). */
-function assertOrderBy(model: ModelName, operation: string, orderBy: unknown): void {
+function assertOrderBy(model: ModelName, operation: string, orderBy: unknown, depth: number): void {
+  if (Array.isArray(orderBy) && depth > MAX_DEPTH) {
+    throw refuse(model, operation, `an orderBy nested more than ${MAX_DEPTH} levels deep`);
+  }
   if (Array.isArray(orderBy)) {
-    for (const item of orderBy) assertOrderBy(model, operation, item);
+    for (const item of orderBy) assertOrderBy(model, operation, item, depth + 1);
     return;
   }
   if (!isPlainObject(orderBy)) return;
@@ -119,5 +124,5 @@ export function assertNoRelationVectors(model: ModelName, operation: string, arg
   assertSelection(model, operation, 'select', args.select);
   assertWhere(model, operation, args.where, 0);
   assertWhere(model, operation, args.having, 0);
-  assertOrderBy(model, operation, args.orderBy);
+  assertOrderBy(model, operation, args.orderBy, 0);
 }

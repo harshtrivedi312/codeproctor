@@ -367,10 +367,14 @@ describe('session scopes through the real client, without a database (ADR 0013 C
             select: { id: true },
           }),
       ];
-      for (const run of [asCandidate, asService]) {
-        for (const call of nested) {
-          await expect(run(call)).rejects.toThrow(/nested relation write refused/);
-        }
+      for (const call of nested) {
+        // The job: the nested-write refusal of every scope (ADR 0006 section 8.2).
+        await expect(asService(call)).rejects.toThrow(/nested relation write refused/);
+        // A candidate: the write allowlist refuses a relation key first (it is not a listed column),
+        // and the nested-write refusal is behind it. Either way nothing is written.
+        await expect(asCandidate(call)).rejects.toThrow(
+          /nested relation write refused|cannot be written by a candidate/,
+        );
       }
     });
   });
@@ -514,7 +518,7 @@ describe('session scopes through the real client, without a database (ADR 0013 C
       // A read and an update ask nothing either; both are allowed and reach the closed port.
       const allowedCalls: Array<() => Promise<unknown>> = [
         () => scoped.submission.findMany({ select: { id: true } }),
-        () => scoped.submission.updateMany({ where: {}, data: { language: 'x' } }),
+        () => scoped.sessionQuestion.updateMany({ where: {}, data: { finalCode: 'x' } }),
         () =>
           scoped.proctorEvent.create({
             data: { type: 'TAB_SWITCH', severity: 'LOW', occurredAt: new Date() } as never,
@@ -527,7 +531,16 @@ describe('session scopes through the real client, without a database (ADR 0013 C
         expect(error).not.toBeInstanceOf(OrgScopeError);
       }
 
-      // A create that names a hidden column is refused by the interim rule, before any lookup.
+      // A submission is create only for a candidate: its update is refused, before any lookup.
+      const rewrite = await refusal(
+        asCandidate(() => scoped.submission.updateMany({ where: {}, data: { language: 'x' } })),
+      );
+      expect(rewrite).toBeInstanceOf(OrgScopeViolationError);
+      expect((rewrite as Error).message).toMatch(
+        /cannot update this row: CS-4\.4 grants create only/,
+      );
+
+      // A create that names a column off the CS-4.4 write list is refused before any lookup.
       const hidden = await refusal(
         asCandidate(() =>
           scoped.submission.create({
@@ -537,7 +550,9 @@ describe('session scopes through the real client, without a database (ADR 0013 C
         ),
       );
       expect(hidden).toBeInstanceOf(OrgScopeViolationError);
-      expect((hidden as Error).message).toMatch(/the column score is not available/);
+      expect((hidden as Error).message).toMatch(
+        /score cannot be written by a candidate create here/,
+      );
 
       expect(count).not.toHaveBeenCalled();
     });

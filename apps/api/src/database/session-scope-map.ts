@@ -13,13 +13,15 @@
 // Model names are Prisma's (`SessionQuestion`), not table names (`session_questions`). The tests
 // check this file against the generated client.
 //
-// In this file from CS-4.4: the `proctor_events` rules (source = 'CLIENT' row filter, creates carry
-// it, updates write `duration_ms` only), and which writes a candidate has on each model (updates only
-// on sessions and session_questions, none on session_sections).
+// In this file from CS-4.4: the WRITE column as an allowlist (which columns a candidate create and a
+// candidate update may carry, per model; updates only on sessions, session_questions and consents,
+// create only on submissions, identity_checks and the two batch tables, none on session_sections),
+// and the `proctor_events` rules (source = 'CLIENT' row filter, creates carry it).
 //
-// Out of this file, on purpose (ADR 0013 CS-4 PR 2): the column allowlists, `omit`, grants and the
-// `submissions` RUN filter (CS-4.4). Until PR 2, candidate-interim.ts closes the columns on a fixed
-// list. The fluent API (CS-4.5 vector 6) arrives as a relation select and is refused by vector 2.
+// Out of this file, on purpose (ADR 0013 CS-4 PR 2): the READ column allowlists and `omit`, grants,
+// and the `submissions` RUN filter (CS-4.4). Until PR 2, candidate-interim.ts closes the read columns
+// on a list that is the complement of CS-4.4's read column. The fluent API (CS-4.5 vector 6) arrives as
+// a relation select and is refused by vector 2.
 import type { CandidateFacts } from './org-context';
 import { OrgScopeViolationError } from './errors';
 import type { ModelName } from './org-scope-map';
@@ -117,32 +119,47 @@ export type CandidateReadFilter =
   /** `questions`: `versions: { some: { sessionQuestions: { some: { sessionId } } } }`. */
   | 'questions';
 
-/** Which writes CS-4.4 grants a candidate on a session-path model. */
-export type CandidateWrites =
-  /** Creates and updates (the default: the per-column limits are PR 2). */
-  | 'any'
-  /** Updates only: a candidate never creates the row (sessions, session_questions). */
-  | 'no-create'
-  /** No write at all (session_sections: its writers are SERVICE jobs and the staff proctor-resume). */
-  | 'none';
+/**
+ * Columns that no candidate write names, ever (the review's rule): the primary key (a create that names
+ * `id` is also an existence oracle, because the primary-key collision answers P2002), the org, and the
+ * timestamps the server keeps.
+ */
+export const NEVER_WRITTEN_BY_CANDIDATE: readonly string[] = [
+  'id',
+  'orgId',
+  'createdAt',
+  'updatedAt',
+];
 
 export type CandidateModelRule =
-  /** A session-path model (CS-4.2). Its columns are limited by CS-4.4 (PR 2) and the interim deny list. */
+  /**
+   * A session-path model (CS-4.2). Its WRITE columns are the CS-4.4 "Write" column, as an allowlist:
+   * `create` and `update` list the columns a candidate create and a candidate update may carry. A
+   * missing list means the operation is refused (`update` missing: create only; `create` missing:
+   * update only; both missing: the model is read-only). Anything not listed throws. Its READ columns
+   * are limited by CANDIDATE_INTERIM_DENY (candidate-interim.ts) until PR 2.
+   *
+   * What is interim here is the grants: columns CS-4.4 opens only under a grant (`sessions.status`,
+   * `pauseReasons`, `submittedAt` and `deviceInfo`; `session_questions.testQuestionId`) are refused
+   * until PR 2 adds `withGrant`.
+   */
   | {
       readonly kind: 'session';
-      readonly writes: CandidateWrites;
+      /** Columns a candidate create may carry (the session key `sessionId` included, which must match). */
+      readonly create?: readonly string[];
+      /** Columns a candidate update may write. The session keys are never among them. */
+      readonly update?: readonly string[];
       /**
        * Scalars a CANDIDATE may not write on update, on top of SessionModelRule.immutable: keys that
        * decide what the injected filters of OTHER models reach. `session_questions.questionVersionId`
        * feeds the `questions` filter, `testQuestionId` and `variantId` the question content (CS-4.6).
+       * The update allowlist already refuses them; this keeps the sharper message (S1).
        */
       readonly immutable?: readonly string[];
       /** A CS-4.4 row filter ANDed on top of the session filter (proctor_events: source = 'CLIENT'). */
       readonly rowFilter?: PlainObject;
       /** Values a create must carry: stamped when missing, refused when different (CS-4.4). */
       readonly createFixed?: PlainObject;
-      /** An update may write only these columns (CS-4.4: proctor_events `duration_ms` only). */
-      readonly updateOnly?: readonly string[];
     }
   /** Read-only: every write operation throws. */
   | { readonly kind: 'read'; readonly filter: CandidateReadFilter }
@@ -153,31 +170,91 @@ export type CandidateModelRule =
    */
   | { readonly kind: 'grant-only'; readonly grantSite: string };
 
-/** CS-4.3: the CANDIDATE allowlist. A model that is not here throws (deny by default). */
+/**
+ * CS-4.3: the CANDIDATE allowlist. A model that is not here throws (deny by default). The write
+ * columns are CS-4.4's "Write" column, by Prisma field name (a name that differs from the ADR's
+ * snake_case follows the schema; `sourceCode` is `source_code`).
+ */
 export const CANDIDATE_MODELS: Readonly<Partial<Record<ModelName, CandidateModelRule>>> = {
   // Session-path models (CS-4.2).
-  Session: { kind: 'session', writes: 'no-create' },
+  // CS-4.4: `last_heartbeat`; `device_info` (DeviceInfoService grant) and `status`, `pause_reasons`,
+  // `submitted_at` (SessionStateService grant) come with PR 2. No create, no delete.
+  Session: { kind: 'session', update: ['lastHeartbeat'] },
+  // CS-4.4: `final_code`, `final_language`, `answer`. No create.
   SessionQuestion: {
     kind: 'session',
-    writes: 'no-create',
+    update: ['finalCode', 'finalLanguage', 'answer'],
     immutable: ['questionVersionId', 'testQuestionId', 'variantId'],
   },
-  SessionSection: { kind: 'session', writes: 'none' },
-  IdentityCheck: { kind: 'session', writes: 'any' },
-  MediaChunk: { kind: 'session', writes: 'any' },
-  ProctorEventBatch: { kind: 'session', writes: 'any' },
+  // CS-4.4: "none". Its writers are SERVICE jobs and the staff proctor-resume.
+  SessionSection: { kind: 'session' },
+  // CS-4.4: create only.
+  IdentityCheck: {
+    kind: 'session',
+    create: ['sessionId', 'attempt', 'idImageKey', 'selfieKey', 'livenessPassed'],
+  },
+  MediaChunk: {
+    kind: 'session',
+    create: [
+      'sessionId',
+      'stream',
+      'segment',
+      'seq',
+      'startedAt',
+      'durationMs',
+      'sizeBytes',
+      'uploadedAt',
+      'objectKey',
+    ],
+    update: [
+      'stream',
+      'segment',
+      'seq',
+      'startedAt',
+      'durationMs',
+      'sizeBytes',
+      'uploadedAt',
+      'objectKey',
+    ],
+  },
+  // CS-4.4: create only.
+  ProctorEventBatch: { kind: 'session', create: ['sessionId', 'seq', 'signature', 'eventCount'] },
   // CS-4.4: reads and writes only `source = 'CLIENT'` rows (SERVER events stay hidden), creates carry
-  // `source = 'CLIENT'`, and an update writes `duration_ms` only.
+  // `source = 'CLIENT'`, and an update writes `duration_ms` only. `severity` is assigned server-side by
+  // the batch route, which writes it.
   ProctorEvent: {
     kind: 'session',
-    writes: 'any',
+    create: [
+      'sessionId',
+      'type',
+      'occurredAt',
+      'durationMs',
+      'confidence',
+      'payload',
+      'evidenceKey',
+      'batchSeq',
+      'severity',
+      'source',
+    ],
+    update: ['durationMs'],
     rowFilter: { source: 'CLIENT' },
     createFixed: { source: 'CLIENT' },
-    updateOnly: ['durationMs'],
   },
-  KeystrokeBatch: { kind: 'session', writes: 'any' },
-  Consent: { kind: 'session', writes: 'any' },
-  Submission: { kind: 'session', writes: 'any' },
+  // CS-4.4: create only.
+  KeystrokeBatch: {
+    kind: 'session',
+    create: ['sessionId', 'sessionQuestionId', 'seq', 'signature', 'startedAt', 'events'],
+  },
+  // CS-4.4: `signed_name`, `signed_at`, `declined_at`, `ip`, `user_agent`. `consent_text_id` is set
+  // server-side and `pdf_key` by the consent-PDF job, so neither is writable here, which also means a
+  // candidate cannot create the row (its `consentTextId` is required): update only.
+  Consent: { kind: 'session', update: ['signedName', 'signedAt', 'declinedAt', 'ip', 'userAgent'] },
+  // CS-4.4: create only: `session_question_id`, `kind` (RUN or SUBMIT), `language`, `source_code`.
+  // `results`, `passed` and `total` are CS-4.4's RUN-row columns: refused until the RUN filter of PR 2.
+  Submission: {
+    kind: 'session',
+    create: ['sessionQuestionId', 'kind', 'language', 'sourceCode'],
+  },
   // Read-only.
   Organization: { kind: 'read', filter: 'org' },
   Candidate: { kind: 'read', filter: 'candidate' },

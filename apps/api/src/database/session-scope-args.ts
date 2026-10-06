@@ -6,23 +6,24 @@
 //
 // Order of the checks, which matters:
 //   1. CANDIDATE only (candidateGate): the model is on the allowlist (deny by default), a model that
-//      is readable only under a grant is refused (grants are PR 2), no cursor, a read-only model and
-//      a model with no candidate writes get no write, a model a candidate may not create gets no
-//      create, a candidate deletes nothing; then the caller's arguments use no relation (vectors 1 to
+//      is readable only under a grant is refused (grants are PR 2), no cursor, a candidate deletes
+//      nothing, a read-only model and a model with no candidate writes get no write, a model a
+//      candidate may not create gets no create and one it may not update gets no update; then the caller's arguments use no relation (vectors 1 to
 //      5, candidate-relations.ts), then the interim column control (candidate-interim.ts).
 //      The relation check runs on the caller's arguments, BEFORE any filter is added, so the relation
 //      filters the extension injects itself (the org path, `sessionQuestion: { sessionId }`,
 //      `sessionSections: { some }`) never trip it.
 //   2. Both actors: a create takes the session from the context (stamped when missing, refused when
 //      it names another), and an update may not write a session key. CANDIDATE also: the keys that
-//      feed other models' filters are immutable, a create carries the fixed values of CS-4.4
-//      (`source = 'CLIENT'`), and an update writes only the columns CS-4.4 allows.
+//      feed other models' filters are immutable, a create and an update carry only the columns of
+//      the CS-4.4 write allowlist of the model (`id`, `orgId` and the timestamps never), a create
+//      carries the fixed values of CS-4.4 (`source = 'CLIENT'`).
 //   3. The org scope (applyOrgScope: org filter, orgId stamp and check, nested writes refused).
 //   4. The session filter (CS-4.2) and, for a CANDIDATE, the CS-4.4 row filter and the CS-4.3 row
 //      filter of the model are ANDed into `where`. Creates have no `where`.
 //
-// What this file does NOT do (ADR 0013 CS-4 PR 2 and 3): the CS-4.4 column allowlists, `omit`, grants,
-// the submissions RUN filter. Until PR 2, candidate-interim.ts keeps the columns closed on a fixed list.
+// What this file does NOT do (ADR 0013 CS-4 PR 2): the CS-4.4 READ allowlists and `omit`, grants, the
+// submissions RUN filter. Until PR 2, candidate-interim.ts keeps the read columns closed on a list.
 import { OrgScopeViolationError } from './errors';
 import type { CandidateFacts, SessionBinding } from './org-context';
 import { andWhere, applyOrgScope } from './org-scope-args';
@@ -34,6 +35,7 @@ import {
   candidateReadFilter,
   candidateRuleFor,
   isReadOperation,
+  NEVER_WRITTEN_BY_CANDIDATE,
   sessionRuleFor,
 } from './session-scope-map';
 import type { CandidateModelRule, SessionModelRule } from './session-scope-map';
@@ -148,29 +150,41 @@ function candidateGate(input: SessionScopeInput, args: PlainObject): CandidateGa
         'reading, FU-DB-184).',
     );
   }
-  if (!isRead && (rule.kind === 'read' || rule.writes === 'none')) {
+  if (!isRead && rule.kind === 'read') {
     throw violation(
       model,
       operation,
-      rule.kind === 'read'
-        ? 'this model is read-only in a CANDIDATE scope (ADR 0013 CS-4.3); every write operation is refused.'
-        : 'a candidate writes nothing here: CS-4.4 grants no write on this model (its writers are ' +
-            'SERVICE jobs), so every write operation is refused.',
+      'this model is read-only in a CANDIDATE scope (ADR 0013 CS-4.3); every write operation is refused.',
     );
   }
-  if (
-    rule.kind === 'session' &&
-    rule.writes === 'no-create' &&
-    CREATE_OPERATIONS.includes(operation)
-  ) {
-    // A planted row would widen the filters of other models (a session_question reaches `questions`
-    // through its question version) and is not a candidate action: CS-4.4 grants updates only.
-    throw violation(
-      model,
-      operation,
-      'a candidate cannot create this row: CS-4.4 grants updates only (ADR 0013 CS-4.4; rows are ' +
-        'created by the session job or the staff route).',
-    );
+  if (!isRead && rule.kind === 'session') {
+    // The write allowlist of CS-4.4 (session-scope-map.ts): which operations, then which columns.
+    if (rule.create === undefined && rule.update === undefined) {
+      throw violation(
+        model,
+        operation,
+        'a candidate writes nothing here: CS-4.4 grants no write on this model (its writers are ' +
+          'SERVICE jobs), so every write operation is refused.',
+      );
+    }
+    if (rule.create === undefined && CREATE_OPERATIONS.includes(operation)) {
+      // A planted row would widen the filters of other models (a session_question reaches `questions`
+      // through its question version) and is not a candidate action: CS-4.4 grants updates only.
+      throw violation(
+        model,
+        operation,
+        'a candidate cannot create this row: CS-4.4 grants updates only (ADR 0013 CS-4.4; rows are ' +
+          'created by the session job or the staff route).',
+      );
+    }
+    if (rule.update === undefined && UPDATE_OPERATIONS.includes(operation)) {
+      throw violation(
+        model,
+        operation,
+        'a candidate cannot update this row: CS-4.4 grants create only (ADR 0013 CS-4.4); a row ' +
+          'that was written is not rewritten by the candidate.',
+      );
+    }
   }
   // CS-4.5: the caller's arguments, before the extension adds its own relation filters.
   assertNoRelationVectors(model, operation, args);
@@ -246,21 +260,37 @@ function assertSessionKeysKept(
   }
 }
 
-/** A CANDIDATE update writes only the columns CS-4.4 lists for the model (proctor_events: duration_ms). */
-function assertUpdateColumns(
+/**
+ * The write allowlist of CS-4.4 for a CANDIDATE: a create or an update carries only the listed columns.
+ * Anything else throws, including `id`, `orgId` and the timestamps, which no candidate write names
+ * (NEVER_WRITTEN_BY_CANDIDATE: a create that names `id` is also a P2002 existence oracle). A key whose
+ * value is `undefined` is not a write. The message names the model, the column and the list, never a
+ * value.
+ */
+function assertWriteColumns(
   model: string,
   operation: string,
+  kind: 'create' | 'update',
   allowed: readonly string[],
   data: unknown,
 ): void {
   if (!isPlainObject(data)) return;
   for (const [key, value] of Object.entries(data)) {
-    if (value !== undefined && !allowed.includes(key)) {
+    if (value === undefined) continue;
+    if (NEVER_WRITTEN_BY_CANDIDATE.includes(key)) {
       throw violation(
         model,
         operation,
-        `${key} cannot be written by a candidate update here: CS-4.4 allows ` +
-          `${allowed.join(', ')} only.`,
+        `${key} is never written by a candidate (the primary key, the org and the timestamps belong ` +
+          'to the server; ADR 0013 CS-4.4).',
+      );
+    }
+    if (!allowed.includes(key)) {
+      throw violation(
+        model,
+        operation,
+        `${key} cannot be written by a candidate ${kind} here: CS-4.4 lists ${allowed.join(', ')} ` +
+          '(interim write allowlist; ADR 0013 CS-4.4).',
       );
     }
   }
@@ -297,6 +327,9 @@ function stageArgs(
 ): { args: PlainObject; sessionQuestionIds: string[] } {
   const ids: string[] = [];
   const stamp = (data: unknown): unknown => {
+    if (candidate?.create !== undefined) {
+      assertWriteColumns(model, operation, 'create', candidate.create, data);
+    }
     const id = questionRefOf(model, operation, rule, data);
     if (id !== undefined) ids.push(id);
     const stamped = stampSession(model, operation, rule, data, sessionId);
@@ -309,8 +342,8 @@ function stageArgs(
     const data = operation === 'upsert' ? args.update : args.data;
     const keys = [...rule.immutable, ...(candidate?.immutable ?? [])];
     assertSessionKeysKept(model, operation, keys, data);
-    if (candidate?.updateOnly !== undefined) {
-      assertUpdateColumns(model, operation, candidate.updateOnly, data);
+    if (candidate?.update !== undefined) {
+      assertWriteColumns(model, operation, 'update', candidate.update, data);
     }
   }
   if (!CREATE_OPERATIONS.includes(operation)) {

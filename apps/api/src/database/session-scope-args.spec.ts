@@ -78,9 +78,10 @@ function expectFilter(args: Record<string, unknown>, filter: unknown): void {
 }
 
 /**
- * Whether a CANDIDATE may attempt `operation` on `model` at all, before arguments are looked at:
- * on the allowlist, no delete, no write on a read-only model or on session_sections, and no create
- * of a session or a session_question.
+ * Whether a CANDIDATE may attempt `operation` on `model` at all, before arguments are looked at: on
+ * the allowlist, no delete, no write on a read-only model, and only the creates and updates the
+ * CS-4.4 write allowlist of the model grants (updates only on sessions, session_questions and
+ * consents; create only on submissions, identity_checks and the batches; nothing on session_sections).
  */
 function candidateAllows(model: ModelName, operation: string): boolean {
   const rule = CANDIDATE_MODELS[model];
@@ -88,12 +89,13 @@ function candidateAllows(model: ModelName, operation: string): boolean {
   if (READ_OPERATIONS.includes(operation)) return true;
   if (rule.kind === 'read') return false;
   if (['delete', 'deleteMany'].includes(operation)) return false;
-  if (rule.writes === 'none') return false;
-  if (rule.writes === 'no-create' && CREATE_LIKE.includes(operation)) return false;
+  if (CREATE_LIKE.includes(operation) && rule.create === undefined) return false;
+  if (UPDATE_LIKE.includes(operation) && rule.update === undefined) return false;
   return true;
 }
 
 const CREATE_LIKE = ['create', 'createMany', 'createManyAndReturn', 'upsert'];
+const UPDATE_LIKE = ['update', 'updateMany', 'updateManyAndReturn', 'upsert'];
 
 /** The operations an actor may attempt on `model`: SERVICE all, a candidate those it is granted. */
 function opsFor(actor: SessionActor, model: ModelName, operations: readonly string[]): string[] {
@@ -114,17 +116,17 @@ function creatableModels(actor: SessionActor): ModelName[] {
   );
 }
 
-/** A harmless column to update on `model` (proctor_events: duration_ms only). */
-const harmless = (model: ModelName): Record<string, unknown> =>
-  model === 'ProctorEvent' ? { durationMs: 1 } : { note: 'x' };
+/** A column `actor` may update on `model`: the first of the model's CS-4.4 update list for a candidate. */
+const harmless = (actor: SessionActor, model: ModelName): Record<string, unknown> => {
+  const rule = CANDIDATE_MODELS[model];
+  const column = rule?.kind === 'session' ? rule.update?.[0] : undefined;
+  return actor === 'CANDIDATE' && column !== undefined ? { [column]: 1 } : { note: 'x' };
+};
 
 const lowerFirst = (name: string): string => name.charAt(0).toLowerCase() + name.slice(1);
 
-/** The write data each model takes in a create (only the keys these tests look at matter). */
-const sessionRow = (model: ModelName, key: string, value: string): Record<string, unknown> => ({
-  [key]: value,
-  ...(model === 'Session' ? {} : {}),
-});
+/** A create row naming one key. */
+const sessionRow = (key: string, value: string): Record<string, unknown> => ({ [key]: value });
 
 describe('CS-4.2 and CS-4.3 tables against the generated client (NFR-04, TC-008)', () => {
   const tables = {
@@ -311,7 +313,7 @@ describe('CS-4.2 creates take the session from the context (NFR-04, TC-008)', ()
         const key = SESSION_SCOPE[model]?.createKey as string;
         expect(apply(actor, model, 'create', { data: {} }).args.data).toMatchObject({ [key]: SID });
         expect(
-          apply(actor, model, 'create', { data: sessionRow(model, key, SID) }).args.data,
+          apply(actor, model, 'create', { data: sessionRow(key, SID) }).args.data,
         ).toMatchObject({
           [key]: SID,
         });
@@ -320,7 +322,7 @@ describe('CS-4.2 creates take the session from the context (NFR-04, TC-008)', ()
 
     it.each(direct)('TC-008 %s: a create naming another session throws', (model) => {
       const key = SESSION_SCOPE[model]?.createKey as string;
-      const other = sessionRow(model, key, OTHER_SID);
+      const other = sessionRow(key, OTHER_SID);
       expect(() => apply(actor, model, 'create', { data: other })).toThrow(OrgScopeViolationError);
       expect(() => apply(actor, model, 'createMany', { data: [other] })).toThrow(
         OrgScopeViolationError,
@@ -340,7 +342,7 @@ describe('CS-4.2 creates take the session from the context (NFR-04, TC-008)', ()
       const key = SESSION_SCOPE[model]?.createKey as string;
       for (const operation of ['createMany', 'createManyAndReturn']) {
         const rows = apply(actor, model, operation, {
-          data: [{}, { n: 1 }, sessionRow(model, key, SID)],
+          data: [{}, sessionRow(key, SID), {}],
         }).args.data as Array<Record<string, unknown>>;
         expect(rows.map((r) => r[key])).toEqual([SID, SID, SID]);
         const single = apply(actor, model, operation, { data: {} }).args.data as Record<
@@ -351,7 +353,7 @@ describe('CS-4.2 creates take the session from the context (NFR-04, TC-008)', ()
       }
     });
 
-    it.each(direct)(
+    it.each(direct.filter((m) => actor === 'SERVICE' || candidateAllows(m, 'upsert')))(
       'TC-008 %s: the create branch of upsert is stamped, the where is filtered',
       (model) => {
         const key = SESSION_SCOPE[model]?.createKey as string;
@@ -380,12 +382,15 @@ describe('CS-4.2 creates take the session from the context (NFR-04, TC-008)', ()
         ],
       });
       expect(many.sessionQuestionIds).toEqual([SQ, OTHER_SQ, SQ]);
-      const upsert = apply(actor, 'KeystrokeBatch', 'upsert', {
-        where: { id: 1n },
-        update: {},
-        create: { sessionQuestionId: SQ },
-      });
-      expect(upsert.sessionQuestionIds).toEqual([SQ]);
+      // An upsert is a create and an update: the job has both, a candidate has no update on a batch.
+      for (const operation of opsFor(actor, 'KeystrokeBatch', ['upsert'])) {
+        const upsert = apply(actor, 'KeystrokeBatch', operation, {
+          where: { id: 1n },
+          update: {},
+          create: { sessionQuestionId: SQ },
+        });
+        expect(upsert.sessionQuestionIds).toEqual([SQ]);
+      }
       const batch = apply(actor, 'KeystrokeBatch', 'create', { data: { sessionQuestionId: SQ } });
       expect(batch.sessionQuestionIds).toEqual([SQ]);
       expect(batch.args.data).toMatchObject({ sessionId: SID, sessionQuestionId: SQ });
@@ -406,7 +411,8 @@ describe('CS-4.2 creates take the session from the context (NFR-04, TC-008)', ()
     });
 
     it('TC-008 reads and updates ask for no existence check', () => {
-      for (const operation of [...READ_OPERATIONS, ...UPDATES]) {
+      // A candidate has no update on submissions (create only): the job has.
+      for (const operation of opsFor(actor, 'Submission', [...READ_OPERATIONS, ...UPDATES])) {
         expect(
           apply(actor, 'Submission', operation, { where: { sessionQuestionId: SQ }, data: {} })
             .sessionQuestionIds,
@@ -418,9 +424,10 @@ describe('CS-4.2 creates take the session from the context (NFR-04, TC-008)', ()
       for (const model of creatableModels(actor).filter(
         (m) => !['Submission', 'KeystrokeBatch'].includes(m),
       )) {
-        expect(
-          apply(actor, model, 'create', { data: { sessionQuestionId: SQ } }).sessionQuestionIds,
-        ).toEqual([]);
+        // The data names a session_question: a model that does not carry the column reports none
+        // (a candidate create may not name it at all, so it names nothing).
+        const data = actor === 'SERVICE' ? { sessionQuestionId: SQ } : {};
+        expect(apply(actor, model, 'create', { data }).sessionQuestionIds).toEqual([]);
       }
     });
   });
@@ -461,7 +468,7 @@ describe('CS-4.2 session keys are immutable, both actors (NFR-04, TC-008)', () =
       for (const model of SESSION_MODELS) {
         for (const operation of opsFor(actor, model, UPDATES)) {
           const data = {
-            ...harmless(model),
+            ...harmless(actor, model),
             ...Object.fromEntries(
               (SESSION_SCOPE[model]?.immutable ?? []).map((k) => [k, undefined]),
             ),
@@ -574,13 +581,13 @@ describe('CS-4.1 SERVICE: org filter plus session filter only (NFR-04, TC-008)',
               // A candidate update of proctor_events is limited to duration_ms first (CS-4.4): the
               // nested write is refused either way.
               expect(() => apply(actor, model, operation, { where: { id: 'x' }, data })).toThrow(
-                /nested relation write refused|CS-4\.4 allows durationMs only/,
+                /nested relation write refused|cannot be written by a candidate/,
               );
             }
             for (const operation of opsFor(actor, model, ['upsert'])) {
               expect(() =>
                 apply(actor, model, operation, { where: { id: 'x' }, create: {}, update: data }),
-              ).toThrow(/nested relation write refused|CS-4\.4 allows durationMs only/);
+              ).toThrow(/nested relation write refused|cannot be written by a candidate/);
             }
           }
         }
@@ -963,7 +970,7 @@ describe('CS-4.5 a CANDIDATE scope refuses relation vectors 1 to 5 (NFR-04, TC-0
         where: {
           AND: [{ status: 'IN_PROGRESS' }, { OR: [{ id: { in: [SID] } }, { NOT: { id: 'x' } }] }],
         },
-        orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+        orderBy: [{ startedAt: 'desc' }, { id: 'asc' }],
         take: 5,
       }),
     ).not.toThrow();
