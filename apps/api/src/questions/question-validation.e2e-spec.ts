@@ -520,10 +520,27 @@ describe('Validate job and AI references (FR-202, FR-203, TC-011, TC-012)', () =
         'QUESTION_VALIDATION_FINISHED',
       ]);
       expect(rows[0]?.metadata).toEqual({ version: 1, variants: 1 });
-      const finished = rows[1]?.metadata as { version: number; outcome: string; revision: string };
-      expect([finished.version, finished.outcome]).toEqual([1, 'PASSED']);
+      const finished = rows[1]?.metadata as Record<string, unknown>;
+      expect(Object.keys(finished).sort()).toEqual([
+        'initiatedBy',
+        'outcome',
+        'revision',
+        'startedAuditId',
+        'system',
+        'version',
+      ]);
+      expect([finished.system, finished.initiatedBy, finished.version, finished.outcome]).toEqual([
+        true,
+        a.id,
+        1,
+        'PASSED',
+      ]);
+      expect(finished.startedAuditId).toBe(String(rows[0]?.id));
       expect(finished.revision).toMatch(/^[0-9a-f]{12}$/);
-      expect(rows.every((r) => r.actorId === a.id && r.orgId === orgA)).toBe(true);
+      // The STARTED row is request-driven (actor, ip); the FINISHED row is job-written (ADR 0001 C-3).
+      expect(rows[0]?.actorId).toBe(a.id);
+      expect([rows[1]?.actorId, rows[1]?.ip]).toEqual([null, null]);
+      expect(rows.every((r) => r.orgId === orgA)).toBe(true);
       expect(
         JSON.stringify(rows, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v)),
       ).not.toMatch(/REFERENCE-SECRET|HIDDEN/);
