@@ -180,6 +180,9 @@ describe('API foundation in production (NFR-04)', () => {
       // Pilot and production require SES (C-31); nothing is sent in this suite.
       EMAIL_PROVIDER: 'ses',
       SES_FROM_ADDRESS: 'no-reply@test.invalid',
+      // Object storage (BE-09) is required in production too.
+      S3_REGION: 'eu-west-2',
+      S3_MEDIA_BUCKET: 'cp-test-media',
     });
     app = await createApp();
   });
