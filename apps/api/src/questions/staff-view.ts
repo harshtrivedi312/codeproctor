@@ -3,13 +3,21 @@
 //   toFullVersion      callers with question:update (authors, super admins): everything.
 //   toStaffReadVersion everyone else who may read (recruiters, FR-103): an allowlist that leaves out
 //                      the reference solution, answer_spec, the validation report, the input and
-//                      expected output of hidden test cases (and, from slice 4b, variant params,
-//                      rendered reference solutions and variant_test_cases overrides on hidden
-//                      slots: ADR 0007 V-1, V-2, V-5). Keys are absent, not null.
+//                      expected output of hidden test cases, and the whole `variants` key (variant
+//                      params, rendered statements and variant_test_cases overrides: ADR 0007 V-1,
+//                      V-2, V-5; a recruiter sees a variant only through the candidate-shaped
+//                      variant preview). Keys are absent, not null.
 // The choice is made once, in the controller (`canSeeAnswers`), and passed down as `full`.
 import { computeRevision } from './revision';
 import { limitsFromStored } from './question-content';
-import type { QuestionVersionDto, QuestionVersionRefDto, TestCaseDto } from './dto/questions.dto';
+import { paramsFromStored } from './variant-template';
+import type { VariantRow } from './question-tx';
+import type {
+  QuestionVersionDto,
+  QuestionVersionRefDto,
+  TestCaseDto,
+  VariantDto,
+} from './dto/questions.dto';
 import type { Difficulty } from '../generated/prisma/client';
 
 /** The columns a version ref needs; list and archive load only these. */
@@ -91,9 +99,37 @@ export function toTestCaseDto(t: TestCaseRow, full: boolean): TestCaseDto {
   return dto;
 }
 
+export function toVariantDto(x: VariantRow, cases: readonly TestCaseRow[]): VariantDto {
+  const slot = new Map(cases.map((c) => [c.id, c]));
+  return {
+    id: x.id,
+    isActive: x.isActive,
+    params: { ...(paramsFromStored(x.params) ?? {}) },
+    renderedStatement: x.renderedStatement,
+    testCaseOverrides: x.testCaseOverrides.flatMap((o) => {
+      const c = slot.get(o.testCaseId);
+      return c
+        ? [
+            {
+              testCaseId: o.testCaseId,
+              isHidden: c.isHidden,
+              position: c.position,
+              input: o.input,
+              expectedOutput: o.expectedOutput,
+            },
+          ]
+        : [];
+    }),
+  };
+}
+
+const byVariantId = (a: VariantRow, b: VariantRow): number =>
+  a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+
 export function toFullVersion(
   v: VersionContentRow,
   cases: readonly TestCaseRow[],
+  variants: readonly VariantRow[] = [],
 ): QuestionVersionDto {
   return {
     ...toVersionRef(v),
@@ -101,8 +137,9 @@ export function toFullVersion(
     allowedLanguages: [...v.allowedLanguages],
     limits: limitsFromStored(v.limits),
     starterCode: stringMap(v.starterCode),
-    revision: computeRevision(v, cases),
+    revision: computeRevision(v, cases, variants),
     testCases: cases.map((t) => toTestCaseDto(t, true)),
+    variants: [...variants].sort(byVariantId).map((x) => toVariantDto(x, cases)),
     referenceSolution: stringMap(v.referenceSolution),
     answerSpec: asRecord(v.answerSpec),
     validationReport: asRecord(v.validationReport),
