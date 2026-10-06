@@ -25,21 +25,24 @@ from worker.face.matcher import FaceMatcher
 MODEL = os.environ.get("AURAFACE_MODEL_PATH", "")
 
 pytestmark = pytest.mark.skipif(
-    not MODEL or not Path(MODEL).is_file(), reason="AURAFACE_MODEL_PATH is not set (opt-in test)"
+    not MODEL or not Path(MODEL).is_file(),
+    reason="opt-in: AURAFACE_MODEL_PATH is unset or is not a file",
 )
 
 
-def real_world() -> World:
-    matcher = FaceMatcher(
-        FakeDetector(), AuraFaceEmbedder.from_env(), FaceConfig.model_validate({})
-    )
-    return World(matcher)
+@pytest.fixture(scope="module")
+def embedder() -> AuraFaceEmbedder:
+    return AuraFaceEmbedder.from_env()  # the 260 MB model is loaded once for this module
+
+
+def real_world(embedder: AuraFaceEmbedder) -> World:
+    return World(FaceMatcher(FakeDetector(), embedder, FaceConfig.model_validate({})))
 
 
 def test_fr403_tc033_real_model_identical_images_match_through_the_signed_route(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, embedder: AuraFaceEmbedder
 ) -> None:
-    w = real_world()
+    w = real_world(embedder)
     r = w.post("/v1/face/match", match_req(w, ID_A, ID_A), monkeypatch)
     j = r.json()
     assert r.status_code == 200 and j["decision"] == "MATCH" and j["score"] > 0.99
@@ -48,18 +51,18 @@ def test_fr403_tc033_real_model_identical_images_match_through_the_signed_route(
 
 
 def test_fr403_tc033_real_model_never_rejects_whatever_the_score(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, embedder: AuraFaceEmbedder
 ) -> None:
-    w = real_world()
+    w = real_world(embedder)
     r = w.post("/v1/face/match", match_req(w, ID_A, ID_B), monkeypatch)
     assert r.json()["decision"] in ("MATCH", "MANUAL_REVIEW")
     assert r.json()["score"] is not None and -1.0 <= r.json()["score"] <= 1.0
 
 
 def test_fr606_real_model_recheck_computes_both_embeddings_and_keeps_nothing(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, embedder: AuraFaceEmbedder
 ) -> None:
-    w = real_world()
+    w = real_world(embedder)
     r = w.post("/v1/face/recheck", recheck_req(w, ID_A, ID_A), monkeypatch)
     assert r.json()["outcome"] == "MATCH" and r.json()["cache"] == "OFF"
     assert w.matcher.selfie_cache.get("sess-SENTINEL-1") is None

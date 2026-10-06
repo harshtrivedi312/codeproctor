@@ -4,16 +4,19 @@
 
 The manifest (outside the repository) has the columns `subject,kind,reference,probe`: `reference`
 is the volunteer's cropped ID portrait, `probe` a selfie; `kind` is genuine (same person) or
-impostor (the reference belongs to someone else); `subject` is the probe's random volunteer code.
-Relative paths are resolved against the manifest's folder.
+impostor (the reference belongs to someone else); `subject` is the probe's random volunteer code
+(letters, digits and dashes). Relative paths are resolved against the manifest's folder, and
+images must stay inside it unless `--allow-outside-manifest-dir` is given.
 
 Each pair goes through the worker's own `FaceMatcher.match`, the same decision flow production
 uses, with the pinned AuraFace model. Embeddings live in memory for one comparison and are never
-written: the output holds scores only. A genuine pair that cannot be scored (no face, a model
-error) would go to manual review in production, so it is recorded as score -1.0 and counts as a
-false non-match; an impostor pair that cannot be scored cannot be a false match and is only
-counted. The tool refuses paths inside a git tree, a model outside ~/.cache/codeproctor/models
-(C-22), and never downloads anything.
+written: the output holds scores only (0600). A pair that cannot be scored gets status
+`unscored`. An unscored genuine pair would go to manual review in production, so it is stored
+as -1.0 and counts as a false non-match; an unscored impostor pair cannot be a false match and
+is left out of the FMR. The evaluator reports both counts. A missing or unreadable image file is
+different (usually a typo): the run stops unless `--allow-missing` is given. The tool refuses
+paths inside a git tree and model files outside ~/.cache/codeproctor/models (C-22), prints only
+fixed text (never a path or a subject code), and never downloads anything.
 """
 
 from __future__ import annotations
@@ -21,19 +24,23 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import re
+import stat
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 from tools.int01.safety import inside_git_tree
 from worker.face.matcher import FaceMatcher
-from worker.face.types import FaceDecision, ReviewReason
+from worker.face.types import ReviewReason
 
 MODELS_DIR: Final = Path("~/.cache/codeproctor/models").expanduser()
 UNSCORED_GENUINE: Final = -1.0
+MAX_IMAGE_FILE_BYTES: Final = 10 * 1024 * 1024
 _COLUMNS: Final = {"subject", "kind", "reference", "probe"}
+_SUBJECT: Final = re.compile(r"[A-Za-z0-9-]{1,64}")  # no leading "=", "+", "@": spreadsheet-safe
 
 
 class ScoringError(Exception):
@@ -51,88 +58,131 @@ class PairSpec:
 @dataclass(frozen=True, slots=True)
 class ScoringSummary:
     scored: int
-    genuine_unscored: int  # recorded as -1.0 (they would go to manual review)
-    impostor_unscored: int  # dropped (they cannot be false matches)
+    genuine_unscored: int  # stored as -1.0 (they would go to manual review)
+    impostor_unscored: int  # left out of the FMR
+    unreadable: int  # image files that could not be read at all (counted among the unscored)
 
 
-def load_manifest(path: Path) -> list[PairSpec]:
+Row = tuple[str, str, float | None, bool]  # subject, kind, score (None: none), unscored?
+
+
+def load_manifest(path: Path, *, allow_outside: bool = False) -> list[PairSpec]:
     if inside_git_tree(path):
         raise ScoringError("the manifest must be stored outside the repository")
     base = path.resolve().parent
     specs: list[PairSpec] = []
-    with path.open(newline="") as fh:
+    with path.open(newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         if set(reader.fieldnames or ()) != _COLUMNS:
             raise ScoringError("manifest columns must be exactly: subject,kind,reference,probe")
         for row in reader:
             subject = (row["subject"] or "").strip()
-            if not subject or row["kind"] not in ("genuine", "impostor"):
-                raise ScoringError("each row needs a subject and kind genuine or impostor")
+            if not _SUBJECT.fullmatch(subject) or row["kind"] not in ("genuine", "impostor"):
+                raise ScoringError(
+                    "each row needs a plain subject code and kind genuine or impostor"
+                )
             ref, probe = (base / row["reference"]).resolve(), (base / row["probe"]).resolve()
             if inside_git_tree(ref) or inside_git_tree(probe):
                 raise ScoringError("images must be stored outside the repository")
+            if not allow_outside and not (ref.is_relative_to(base) and probe.is_relative_to(base)):
+                raise ScoringError("images must be inside the manifest's folder")
             specs.append(PairSpec(subject, row["kind"], ref, probe))
     if not specs:
         raise ScoringError("the manifest has no rows")
     return specs
 
 
+def _read_image(path: Path) -> bytes:
+    if path.stat().st_size > MAX_IMAGE_FILE_BYTES:  # before reading a huge file into memory
+        raise OSError("too large")
+    return path.read_bytes()
+
+
 def score_pairs(
     specs: Sequence[PairSpec], matcher: FaceMatcher
-) -> tuple[list[tuple[str, str, float]], ScoringSummary]:
-    rows: list[tuple[str, str, float]] = []
-    genuine_unscored = impostor_unscored = 0
+) -> tuple[list[Row], ScoringSummary]:
+    rows: list[Row] = []
+    genuine_unscored = impostor_unscored = unreadable = 0
     for spec in specs:
         score: float | None = None
         try:
             result = matcher.match(
-                spec.reference.read_bytes(),
-                spec.probe.read_bytes(),
-                liveness_confirmed=True,  # liveness is a client signal, not part of tuning
+                _read_image(spec.reference),
+                _read_image(spec.probe),
+                liveness_confirmed=True,  # a client signal, not part of tuning (see the report)
             )
-            if result.score is not None and result.reason in (None, ReviewReason.BELOW_THRESHOLD):
-                score = result.score
-            elif result.decision is FaceDecision.MATCH and result.score is not None:
+            if result.reason in (None, ReviewReason.BELOW_THRESHOLD):
                 score = result.score
         except OSError:
-            score = None  # unreadable file: unscored, and the message never carries the path
-        if score is None:
-            if spec.kind == "genuine":
+            unreadable += 1  # the message never carries the path
+        if spec.kind == "genuine":
+            if score is None:
                 genuine_unscored += 1
-                rows.append((spec.subject, "genuine", UNSCORED_GENUINE))
-            else:
-                impostor_unscored += 1
+            value = UNSCORED_GENUINE if score is None else score
+            rows.append((spec.subject, "genuine", value, score is None))
+        elif score is None:
+            impostor_unscored += 1
+            rows.append((spec.subject, "impostor", None, True))
         else:
-            rows.append((spec.subject, spec.kind, score))
-    return rows, ScoringSummary(len(rows) - genuine_unscored, genuine_unscored, impostor_unscored)
+            rows.append((spec.subject, "impostor", score, False))
+    scored = len(rows) - genuine_unscored - impostor_unscored
+    return rows, ScoringSummary(scored, genuine_unscored, impostor_unscored, unreadable)
 
 
-def write_scores(path: Path, rows: Sequence[tuple[str, str, float]]) -> None:
+def write_scores(path: Path, rows: Sequence[Row]) -> None:
+    """0600 even over an existing file; refuses a symlink and anything that is not a plain file."""
     if inside_git_tree(path):
         raise ScoringError("the scores file must be stored outside the repository")
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", newline="") as fh:
+    # O_NONBLOCK: opening a FIFO with no reader must fail, not hang the tool.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+    try:
+        fd = os.open(path, flags, 0o600)  # no O_TRUNC yet: check what it is before touching it
+    except OSError:
+        raise ScoringError("the scores file cannot be written") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ScoringError("the scores file must be a plain file")
+        os.fchmod(fd, 0o600)
+        os.ftruncate(fd, 0)
+        fh = os.fdopen(fd, "w", newline="", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+    with fh:
         writer = csv.writer(fh)
-        writer.writerow(["subject", "kind", "score"])
-        writer.writerows((s, k, f"{v:.6f}") for s, k, v in rows)
+        writer.writerow(["subject", "kind", "score", "status"])
+        for subject, kind, score, unscored in rows:
+            shown = "" if score is None else f"{score:.6f}"
+            writer.writerow([subject, kind, shown, "unscored" if unscored else "scored"])
 
 
-def check_model_location(environ: dict[str, str] | os._Environ[str] | None = None) -> None:
-    """C-22: the model is used only from ~/.cache/codeproctor/models."""
+def check_model_location(environ: Mapping[str, str] | None = None) -> None:
+    """C-22: models are used only from ~/.cache/codeproctor/models, never from git."""
     env = os.environ if environ is None else environ
-    raw = env.get("AURAFACE_MODEL_PATH", "")
-    if not raw or not Path(raw).expanduser().resolve().is_relative_to(MODELS_DIR.resolve()):
-        raise ScoringError("AURAFACE_MODEL_PATH must point into ~/.cache/codeproctor/models")
+    if MODELS_DIR.is_symlink():
+        raise ScoringError("the models folder must not be a symlink")
+    folder = MODELS_DIR.resolve()
+    for var in ("AURAFACE_MODEL_PATH", "FACE_LANDMARKER_MODEL_PATH"):
+        raw = env.get(var, "")
+        if not raw and var == "FACE_LANDMARKER_MODEL_PATH":
+            continue  # absent: the matcher build reports it
+        target = Path(raw).expanduser().resolve() if raw else None
+        if target is None or not target.is_relative_to(folder) or inside_git_tree(target):
+            raise ScoringError(f"{var} must point into ~/.cache/codeproctor/models")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--manifest", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument(
+        "--allow-missing", action="store_true", help="treat unreadable images as unscored"
+    )
+    ap.add_argument("--allow-outside-manifest-dir", action="store_true")
     args = ap.parse_args(argv)
     try:
         check_model_location()
-        specs = load_manifest(args.manifest)
+        specs = load_manifest(args.manifest, allow_outside=args.allow_outside_manifest_dir)
         from worker.face.factory import build_face_matcher
         from worker.face.modelfile import ModelLoadError
 
@@ -141,13 +191,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ModelLoadError as e:  # the code is fixed text (for example MODEL_PATH_NOT_SET)
             raise ScoringError(f"face model not usable: {e.code}") from None
         rows, summary = score_pairs(specs, matcher)
+        if summary.unreadable and not args.allow_missing:
+            print(
+                f"error: {summary.unreadable} image file(s) could not be read; nothing written "
+                "(fix the manifest, or use --allow-missing)",
+                file=sys.stderr,
+            )
+            return 2
         write_scores(args.out, rows)
     except ScoringError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    print(  # fixed-format counts only
-        f"scored: {summary.scored}; genuine unscored (recorded as -1.0): "
-        f"{summary.genuine_unscored}; impostor unscored (dropped): {summary.impostor_unscored}"
+    except (OSError, RuntimeError, csv.Error, UnicodeError, ValueError):
+        # Paths and cell values can hold volunteer codes: say what failed, never with what.
+        print("error: an input or output file could not be read or written", file=sys.stderr)
+        return 2
+    cfg = matcher.config
+    print(  # fixed-format counts and the settings that decide which pairs are unscorable
+        f"scored: {summary.scored}; genuine unscored (stored as -1.0): "
+        f"{summary.genuine_unscored}; impostor unscored (left out of FMR): "
+        f"{summary.impostor_unscored}; unreadable files: {summary.unreadable}; "
+        f"min detection confidence {cfg.min_detection_confidence}, "
+        f"ID secondary face ratio {cfg.id_secondary_face_ratio}"
     )
     return 0
 

@@ -6,7 +6,7 @@
 Times one embedding (the model only, on a synthetic 112x112 crop, no photos) sequentially and
 with several threads, then works out what a re-check costs at 200 concurrent candidates: one
 frame every 120 s each gives about 1.7 re-checks per second, and with no selfie cache each
-re-check computes TWO embeddings (about 3.4 per second), on top of the initial matches.
+re-check computes TWO embeddings (about 3.3 per second), on top of the initial matches.
 Face DETECTION (MediaPipe) is not timed here: it needs `face_landmarker.task`, which is not
 downloaded (C-22 approves glintr100.onnx only). Numbers are for the machine that ran this, not
 the ARC-05 instance type; rerun there before DEP-03. Prints numbers only: no paths, no images.
@@ -22,7 +22,6 @@ import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 
@@ -72,7 +71,7 @@ def time_embeddings(embedder: AuraFaceEmbedder, runs: int, threads: int) -> Timi
         threads,
         runs,
         statistics.median(ordered),
-        ordered[max(0, int(len(ordered) * 0.95) - 1)],
+        statistics.quantiles(ordered, n=20)[-1],
         runs / wall,
     )
 
@@ -85,10 +84,13 @@ def required_rate() -> tuple[float, float]:
 
 
 def check_model_location() -> None:
-    raw = os.environ.get("AURAFACE_MODEL_PATH", "")
-    models = Path("~/.cache/codeproctor/models").expanduser().resolve()
-    if not raw or not Path(raw).expanduser().resolve().is_relative_to(models):
-        raise SystemExit("AURAFACE_MODEL_PATH must point into ~/.cache/codeproctor/models (C-22)")
+    from tools.int01.score_pairs import ScoringError
+    from tools.int01.score_pairs import check_model_location as check
+
+    try:
+        check({"AURAFACE_MODEL_PATH": os.environ.get("AURAFACE_MODEL_PATH", "")})
+    except ScoringError as e:
+        raise SystemExit(f"{e} (C-22)") from None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
