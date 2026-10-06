@@ -1899,13 +1899,13 @@ export interface operations {
           };
         };
       };
-      /** @description Challenge expired, sign in again */
+      /** @description The challenge is stale or unknown. detail is "Your sign-in has expired. Sign in again." */
       401: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
     };
@@ -2129,7 +2129,7 @@ export interface operations {
           'application/json': components['schemas']['ProblemDetails'];
         };
       };
-      /** @description REAUTH_FAILED for a wrong or locked password or a wrong or replayed code (one identical body), otherwise TWO_FACTOR_REQUIRED_FOR_ROLE for Super Admin and Reviewer (checked last) */
+      /** @description REAUTH_FAILED for a wrong or locked password or a wrong or replayed code (one identical body with the fixed detail "The password or code is incorrect.", so it never says which factor failed), otherwise TWO_FACTOR_REQUIRED_FOR_ROLE for Super Admin and Reviewer (checked last) */
       403: {
         headers: {
           [name: string]: unknown;

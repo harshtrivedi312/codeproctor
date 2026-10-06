@@ -30,6 +30,13 @@ function groupKey(key: string): string {
  * confirmed, so no staff page can load before this is done. Step 1 scan or type the key, step 2
  * confirm a code, step 3 save the recovery codes.
  */
+/** enroll/start answered something other than the secret: only the status matters here. */
+class StartFailure extends Error {
+  constructor(readonly status: number) {
+    super(String(status));
+  }
+}
+
 export function TwoFactorEnroll(): React.JSX.Element | null {
   const router = useRouter();
   const next = safeNextPath(useSearchParams().get('next'));
@@ -40,8 +47,11 @@ export function TwoFactorEnroll(): React.JSX.Element | null {
   const [serverError, setServerError] = React.useState<'wrong' | 'network' | null>(null);
 
   const challengeToken = pending?.kind === 'enroll' ? pending.challengeToken : null;
+  // Set once this page has sent the user back to sign-in with a reason: clearing `pending` would
+  // otherwise make the "no challenge" effect replace `?reason=expired` with plain /admin/login.
+  const leavingRef = React.useRef(false);
   React.useEffect(() => {
-    if (!challengeToken && !result) router.replace('/admin/login');
+    if (!challengeToken && !result && !leavingRef.current) router.replace('/admin/login');
   }, [challengeToken, result, router]);
 
   const start = useQuery({
@@ -55,10 +65,19 @@ export function TwoFactorEnroll(): React.JSX.Element | null {
       const { data, response } = await api.POST('/v1/auth/2fa/enroll/start', {
         body: { challengeToken: challengeToken ?? '' },
       });
-      if (!data) throw new Error(String(response.status));
+      // A stale or unknown challenge is a 401: the sign-in step is over, so go back to sign-in.
+      if (!data) throw new StartFailure(response.status);
       return { ...data, qr: await QRCode.toDataURL(data.otpauthUri, { margin: 1, width: 192 }) };
     },
   });
+
+  const startExpired = start.error instanceof StartFailure && start.error.status === 401;
+  React.useEffect(() => {
+    if (!startExpired || leavingRef.current) return;
+    leavingRef.current = true;
+    router.replace('/admin/login?reason=expired');
+    setPending(null);
+  }, [startExpired, router, setPending]);
 
   const {
     register,
@@ -95,6 +114,7 @@ export function TwoFactorEnroll(): React.JSX.Element | null {
         setResult({ session: data.session, codes: data.recoveryCodes });
         setPending(null);
       } else if (response.status === 401) {
+        leavingRef.current = true;
         setPending(null);
         router.replace('/admin/login?reason=expired');
       } else {
@@ -107,6 +127,7 @@ export function TwoFactorEnroll(): React.JSX.Element | null {
     }
   }
 
+  if (startExpired) return null; // on its way to the sign-in page, which says the step expired
   if (start.isError) {
     return (
       <Alert tone="error" role="alert" title="We could not start set-up">

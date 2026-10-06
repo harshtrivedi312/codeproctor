@@ -170,11 +170,11 @@ paths:
                   manualKey: { type: string }
                   otpauthUri: { type: string }
         '401':
-          description: Challenge expired, sign in again
+          description: The challenge is stale or unknown. detail is "Your sign-in has expired. Sign in again."
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ApiError'
+                $ref: '#/components/schemas/ProblemDetails'
   /v1/auth/2fa/enroll/confirm:
     post:
       operationId: confirmTwoFactorEnrollment
@@ -344,7 +344,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ProblemDetails'
         '403':
-          description: REAUTH_FAILED for a wrong or locked password or a wrong or replayed code (one identical body), otherwise TWO_FACTOR_REQUIRED_FOR_ROLE for Super Admin and Reviewer (checked last)
+          description: REAUTH_FAILED for a wrong or locked password or a wrong or replayed code (one identical body with the fixed detail "The password or code is incorrect.", so it never says which factor failed), otherwise TWO_FACTOR_REQUIRED_FOR_ROLE for Super Admin and Reviewer (checked last)
           content:
             application/json:
               schema:
