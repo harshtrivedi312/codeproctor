@@ -165,7 +165,11 @@ access instance-role-only.
   `db/erasure-list/` and `db/erasure-completed/`**; a bucket-policy deny stops it deleting under `db/dump/`,
   which lifecycle owns. It also carries the Route 53 deny for every zone but the assess zone
   (`AssessHostedZoneId`). The function, its daily schedule and the code are a later owner template (database
-  track). The same function prunes the erasure-list entries (the instance cannot delete).
+  track). The same function prunes the erasure-list entries (the instance cannot delete) **only** by the ADR 0017 5.3
+  "Erasure-list pruning" rule: an entry only when its completion marker is more than one day older than the
+  oldest dump version or full base backup still in the bucket, never one without a marker (FU-QA-19 has the
+  exact text; it also covers the ADR 0015 redaction list and the R-7 log, and an alarm on odd objects under
+  those prefixes).
 - **Expiry role trust (decided).** The trust names the Lambda service only, **with no `aws:SourceArn` or
   `aws:SourceAccount` condition**: Lambda probably does not populate those keys when it assumes an execution
   role (the ADR has no `aws:SourceArn` here either), and with them the function could not be created. The

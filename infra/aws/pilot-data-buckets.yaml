@@ -69,7 +69,8 @@ Description: >-
 #     db/dump/latest.dump, db/wal/*, db/erasure-list/* and db/erasure-completed/*. A dump under another
 #     key would never expire (a current version never expires and the expiry role is denied under
 #     db/dump/), and nothing deletes outside those prefixes.
-#   - db/erasure-list/ and db/erasure-completed/ never age-expire. The instance role cannot delete there
+#   - db/erasure-list/ and db/erasure-completed/ never age-expire; they are pruned ONLY by the expiry
+#     function under the ADR 0017 5.3 "Erasure-list pruning" rule. The instance role cannot delete there
 #     either (the ADR gives it no delete on the backups bucket), so erasure-list.sh prune cannot run on the
 #     instance: flagged for the database track.
 #
@@ -879,8 +880,7 @@ Resources:
   # instance's own BackupSuccess uses another namespace (codeproctor-pilot-instance) and is a
   # secondary signal only. The producer is a dependency outside this template (database track).
   # Until it exists the freshness and age alarms sit in ALARM (missing data breaches), so the first
-  # email is expected. ADR 0017 section 14 item 2 says a 7 day freshness alarm; C-55 says 2 days: 2
-  # is used.
+  # email is expected. The freshness alarm is 2 days (C-55).
   BackupFreshnessAlarm:
     Type: 'AWS::CloudWatch::Alarm'
     Properties:
