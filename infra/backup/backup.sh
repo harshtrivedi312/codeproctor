@@ -47,7 +47,7 @@ case "$RETENTION_DAYS" in '' | *[!0-9]*) die "BACKUP_RETENTION_DAYS must be a wh
 [ "$RETENTION_DAYS" -ge 1 ] || die "BACKUP_RETENTION_DAYS must be at least 1."
 KEEP_NEWEST=${BACKUP_KEEP_NEWEST:-3}
 case "$KEEP_NEWEST" in '' | *[!0-9]*) die "BACKUP_KEEP_NEWEST must be a whole number." ;; esac
-[ "$KEEP_NEWEST" -ge 1 ] && [ "$KEEP_NEWEST" -le 1000 ] || die "BACKUP_KEEP_NEWEST must be between 1 and 1000."
+if [ "$KEEP_NEWEST" -lt 1 ] || [ "$KEEP_NEWEST" -gt 1000 ]; then die "BACKUP_KEEP_NEWEST must be between 1 and 1000."; fi
 
 WORK=$(mktemp -d)
 # The work directory holds a plaintext dump of candidate data: remove it on every way out,
