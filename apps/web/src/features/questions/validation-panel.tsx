@@ -29,9 +29,10 @@ export function ValidationPanel({
   /** Just returned from a job in this session: announce it as an alert. A report loaded with the page is a status. */
   fresh: boolean;
 }): React.JSX.Element {
-  const failed = report.results.filter((r) => r.outcome !== 'pass');
-  const groups = new Map<string, Report['results']>();
-  for (const r of report.results) {
+  const results = report.results ?? [];
+  const failed = results.filter((r) => r.outcome !== 'pass');
+  const groups = new Map<string, NonNullable<Report['results']>>();
+  for (const r of results) {
     const key = `${r.variantId ?? 'base'}|${r.variantLabel}`;
     groups.set(key, [...(groups.get(key) ?? []), r]);
   }
@@ -53,12 +54,12 @@ export function ValidationPanel({
       {report.passed ? (
         <Alert tone="success" role="status" title="Validation passed">
           {isCoding
-            ? `The reference solution passed all ${report.results.length} checks on every variant.`
+            ? `The reference solution passed all ${results.length} checks on every variant.`
             : 'The answer key is valid.'}
         </Alert>
       ) : (
         <Alert tone="error" role={fresh ? 'alert' : 'status'} title="Validation failed">
-          {failed.length} of {report.results.length} checks failed
+          {failed.length} of {results.length} checks failed
           {failedVariants.length > 0 ? `, in: ${failedVariants.join(', ')}` : ''}. Fix them and
           validate again. Publishing stays blocked until every check passes.
         </Alert>
@@ -90,7 +91,7 @@ export function ValidationPanel({
                 <tbody>
                   {rows.map((r) => (
                     <tr key={`${r.language}-${r.testCaseId}`} className="border-b last:border-0">
-                      <td className="px-3 py-1.5">Test {r.position}</td>
+                      <td className="px-3 py-1.5">Test {r.position + 1}</td>
                       <td className="px-3 py-1.5">{LANGUAGE_LABELS[r.language]}</td>
                       <td className="px-3 py-1.5">
                         <Badge tone={r.outcome === 'pass' ? 'success' : 'error'}>

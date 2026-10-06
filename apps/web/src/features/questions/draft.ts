@@ -12,9 +12,18 @@ import { hasUnsupportedSyntax, placeholdersOf } from './template';
 
 export type QuestionType = Schemas['QuestionType'];
 export type Difficulty = Schemas['Difficulty'];
-export type QuestionContent = Schemas['QuestionContent'];
 export type QuestionDetail = Schemas['QuestionDetail'];
-export type TestCase = Schemas['TestCase'];
+export type QuestionVersion = Schemas['QuestionVersion'];
+export type Variant = Schemas['Variant'];
+
+/** A test case in the form. Its position is its place in the list (the API stores `position`). */
+export interface TestCase {
+  id: string;
+  input: string;
+  expectedOutput: string;
+  isHidden: boolean;
+  weight: number;
+}
 
 export const LANGUAGE_LABELS: Record<CodeLanguage, string> = {
   python: 'Python',
@@ -25,7 +34,13 @@ export const LANGUAGE_LABELS: Record<CodeLanguage, string> = {
 export const MAX_TITLE = 200;
 export const MAX_STATEMENT = 50_000;
 export const MAX_TEST_TEXT = 100_000;
-export const MAX_WEIGHT = 1000;
+export const MAX_WEIGHT = 9999.99;
+export const MAX_TEST_CASES = 100;
+export const MAX_TAGS = 20;
+/** The API's tag rule (BE-04a): lower case, starts with a letter or digit, at most 40 characters. */
+export const TAG_PATTERN = /^[a-z0-9][a-z0-9 _.+#-]{0,39}$/;
+/** The API's option id rule: 1 to 32 letters, digits, underscores or dashes. */
+export const OPTION_ID_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 
 export interface VariantValues {
   id: string;
@@ -67,6 +82,11 @@ export function newId(prefix: string): string {
   return `${prefix}-${random}`;
 }
 
+/** A short option id the API accepts (at most 32 characters). */
+export function newOptionId(): string {
+  return `o${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export function emptyDraft(type: QuestionType): DraftValues {
   return {
     type,
@@ -82,8 +102,8 @@ export function emptyDraft(type: QuestionType): DraftValues {
     variants: [],
     mcq: {
       options: [
-        { id: newId('opt'), text: '' },
-        { id: newId('opt'), text: '' },
+        { id: newOptionId(), text: '' },
+        { id: newOptionId(), text: '' },
       ],
       correctOptionIds: [],
       multiple: false,
@@ -101,14 +121,23 @@ export function parseTags(text: string): string[] {
   return tags;
 }
 
-/** Server version to form values. */
+/** The answer spec of a version as the form edits it. The question type says which shape applies. */
+function mcqOf(spec: Schemas['AnswerSpec'] | null): Schemas['McqAnswerSpec'] | null {
+  return spec && 'options' in spec ? spec : null;
+}
+function shortOf(spec: Schemas['AnswerSpec'] | null): Schemas['ShortAnswerSpec'] | null {
+  return spec && 'canonical' in spec ? spec : null;
+}
+
+/** Server version (writer view), its question tags and its variants to form values. */
 export function toDraft(
   type: QuestionType,
   tags: readonly string[],
-  v: QuestionContent,
+  v: QuestionVersion,
+  variants: readonly Variant[] = [],
 ): DraftValues {
-  const mcq = v.answerSpec?.type === 'MCQ' ? v.answerSpec : null;
-  const short = v.answerSpec?.type === 'SHORT_ANSWER' ? v.answerSpec : null;
+  const mcq = type === 'MCQ' ? mcqOf(v.answerSpec) : null;
+  const short = type === 'SHORT_ANSWER' ? shortOf(v.answerSpec) : null;
   const base = emptyDraft(type);
   return {
     ...base,
@@ -120,8 +149,16 @@ export function toDraft(
     limits: { ...v.limits },
     starterCode: { ...v.starterCode },
     referenceSolution: { ...v.referenceSolution },
-    testCases: v.testCases.map((t) => ({ ...t })),
-    variants: v.variants.map((x) => ({
+    testCases: [...v.testCases]
+      .sort((a, b) => a.position - b.position)
+      .map((t) => ({
+        id: t.id,
+        input: t.input ?? '',
+        expectedOutput: t.expectedOutput ?? '',
+        isHidden: t.isHidden,
+        weight: t.weight,
+      })),
+    variants: variants.map((x) => ({
       id: x.id,
       label: x.label,
       paramsText: JSON.stringify(x.params, null, 2),
@@ -153,60 +190,87 @@ function scalarsOf(value: Record<string, unknown>): Record<string, string | numb
   return out;
 }
 
-/** Form values to the content sent on save. Call only with values that passed `draftSchema`. */
-export function toContent(d: DraftValues): QuestionContent {
+/** The content fields of a save (PATCH). Call only with values that passed `draftSchema`. */
+export function toUpdate(d: DraftValues): Omit<Schemas['UpdateQuestion'], 'expectedRevision'> {
   const coding = d.type === 'CODING';
   const languages = coding ? d.allowedLanguages : [];
   const keep = (map: Record<string, string>) =>
     Object.fromEntries(
       Object.entries(map).filter(([lang]) => languages.includes(lang as CodeLanguage)),
     );
-  const slotIds = new Set(d.testCases.map((t) => t.id));
-  let answerSpec: QuestionContent['answerSpec'] = null;
-  if (d.type === 'MCQ') {
-    answerSpec = {
-      type: 'MCQ',
-      options: d.mcq.options.map((o) => ({ id: o.id, text: o.text.trim() })),
-      correctOptionIds: d.mcq.correctOptionIds,
-      multiple: d.mcq.multiple,
-    };
-  } else if (d.type === 'SHORT_ANSWER') {
-    answerSpec = {
-      type: 'SHORT_ANSWER',
-      canonical: d.short.canonical.trim(),
-      acceptedVariants: d.short.acceptedVariants.map((a) => a.value.trim()),
-    };
-  }
   return {
     title: d.title.trim(),
     statementMd: d.statementMd,
     difficulty: d.difficulty,
     tags: parseTags(d.tagsText),
     allowedLanguages: languages,
-    limits: d.limits,
+    limits: { ...d.limits },
     starterCode: keep(d.starterCode),
     referenceSolution: keep(d.referenceSolution),
-    testCases: coding ? d.testCases : [],
-    variants: coding
-      ? d.variants.map((v) => {
-          const parsed = parseParams(v.paramsText);
-          return {
-            id: v.id,
-            label: v.label.trim(),
-            params: parsed.ok ? scalarsOf(parsed.value) : {},
-            active: v.active,
-            overrides: v.overrides.filter((o) => slotIds.has(o.testCaseId)),
-          };
-        })
-      : [],
-    answerSpec,
+    ...(d.type === 'CODING' ? {} : { answerSpec: answerSpecOf(d) }),
   };
+}
+
+/** The answer spec for an MCQ or short-answer question (no `type` key: the question type decides). */
+function answerSpecOf(d: DraftValues): Schemas['AnswerSpec'] {
+  if (d.type === 'MCQ') {
+    return {
+      options: d.mcq.options.map((o) => ({ id: o.id, text: o.text.trim() })),
+      correctOptionIds: d.mcq.correctOptionIds,
+      multiple: d.mcq.multiple,
+    };
+  }
+  return {
+    canonical: d.short.canonical.trim(),
+    acceptedVariants: d.short.acceptedVariants.map((a) => a.value.trim()),
+  };
+}
+
+/** The body of a create (POST): the content plus the type and the test cases. */
+export function toCreate(d: DraftValues): Schemas['CreateQuestion'] {
+  const update = toUpdate(d);
+  const { title, statementMd, difficulty } = update;
+  return {
+    ...update,
+    type: d.type,
+    title: title ?? '',
+    statementMd: statementMd ?? '',
+    difficulty: difficulty ?? 'EASY',
+    ...(d.type === 'CODING'
+      ? {
+          testCases: d.testCases.map((t, position) => ({
+            input: t.input,
+            expectedOutput: t.expectedOutput,
+            isHidden: t.isHidden,
+            weight: t.weight,
+            position,
+          })),
+        }
+      : {}),
+  };
+}
+
+/** The variants of a coding question for the (web-only) variants route. */
+export function toVariants(d: DraftValues): Variant[] {
+  if (d.type !== 'CODING') return [];
+  const slotIds = new Set(d.testCases.map((t) => t.id));
+  return d.variants.map((v) => {
+    const parsed = parseParams(v.paramsText);
+    return {
+      id: v.id,
+      label: v.label.trim(),
+      params: parsed.ok ? scalarsOf(parsed.value) : {},
+      active: v.active,
+      overrides: v.overrides.filter((o) => slotIds.has(o.testCaseId)),
+    };
+  });
 }
 
 const weight = z
   .number({ error: 'Enter a weight.' })
-  .gt(0, 'The weight must be greater than 0.')
-  .max(MAX_WEIGHT, `The weight cannot be more than ${MAX_WEIGHT}.`);
+  .gte(0.01, 'The weight must be at least 0.01.')
+  .max(MAX_WEIGHT, `The weight cannot be more than ${MAX_WEIGHT}.`)
+  .refine((w) => Math.round(w * 100) / 100 === w, 'Use at most 2 decimals.');
 
 const testCaseSchema = z.object({
   id: z.string().min(1),
@@ -221,17 +285,17 @@ const limitsSchema = z.object({
     .number({ error: 'Enter the CPU time in milliseconds.' })
     .int('Use a whole number.')
     .min(100, 'At least 100 ms.')
-    .max(60_000, 'At most 60 000 ms.'),
+    .max(10_000, 'At most 10 000 ms.'),
   wallMs: z
     .number({ error: 'Enter the wall time in milliseconds.' })
     .int('Use a whole number.')
     .min(100, 'At least 100 ms.')
-    .max(120_000, 'At most 120 000 ms.'),
+    .max(20_000, 'At most 20 000 ms.'),
   memoryKb: z
     .number({ error: 'Enter the memory in kilobytes.' })
     .int('Use a whole number.')
     .min(16_384, 'At least 16 384 KB.')
-    .max(2_097_152, 'At most 2 097 152 KB.'),
+    .max(524_288, 'At most 524 288 KB.'),
 });
 
 export const draftSchema = z
@@ -248,7 +312,7 @@ export const draftSchema = z
       .min(1, 'Write the statement.')
       .max(MAX_STATEMENT, 'The statement is too long.'),
     difficulty: z.enum(['EASY', 'MEDIUM', 'HARD']),
-    tagsText: z.string().max(500, 'Too many tags.'),
+    tagsText: z.string().max(1000, 'Too many tags.'),
     allowedLanguages: z.array(z.enum(CODE_LANGUAGES)),
     limits: limitsSchema,
     starterCode: z.record(z.string(), z.string().max(MAX_TEST_TEXT)),
@@ -287,6 +351,15 @@ export const draftSchema = z
       ...Object.values(d.starterCode),
       ...Object.values(d.referenceSolution),
     ];
+    const tags = parseTags(d.tagsText);
+    if (tags.length > MAX_TAGS) issue(['tagsText'], `Use at most ${MAX_TAGS} tags.`);
+    const badTag = tags.find((t) => !TAG_PATTERN.test(t));
+    if (badTag !== undefined) {
+      issue(
+        ['tagsText'],
+        `"${badTag}" is not a valid tag. Start with a letter or digit, at most 40 characters, using letters, digits, spaces and _ . + # -.`,
+      );
+    }
     if (text.some(hasUnsupportedSyntax)) {
       issue(
         ['statementMd'],
@@ -296,6 +369,12 @@ export const draftSchema = z
     if (d.type === 'CODING') {
       if (d.allowedLanguages.length === 0)
         issue(['allowedLanguages'], 'Pick at least one language.');
+      if (d.limits.wallMs < d.limits.cpuMs) {
+        issue(['limits', 'wallMs'], 'The wall time cannot be below the CPU time.');
+      }
+      if (d.testCases.length > MAX_TEST_CASES) {
+        issue(['testCases'], `Use at most ${MAX_TEST_CASES} test cases.`);
+      }
       const ids = d.testCases.map((t) => t.id);
       d.testCases.forEach((t, i) => {
         if (ids.indexOf(t.id) !== i) issue(['testCases', i, 'id'], 'Duplicate test case.');
@@ -332,6 +411,16 @@ export const draftSchema = z
           issue(['mcq', 'options', i, 'text'], 'Two options have the same text.');
       });
       if (d.mcq.options.length < 2) issue(['mcq', 'options'], 'Add at least two options.');
+      if (d.mcq.options.length > 10) issue(['mcq', 'options'], 'Use at most 10 options.');
+      d.mcq.options.forEach((o, i) => {
+        if (o.text.length > 1000)
+          issue(['mcq', 'options', i, 'text'], 'Keep the option under 1000 characters.');
+        if (!OPTION_ID_PATTERN.test(o.id))
+          issue(
+            ['mcq', 'options', i, 'text'],
+            'This option has an invalid id. Remove it and add it again.',
+          );
+      });
       const optionIds = new Set(d.mcq.options.map((o) => o.id));
       const correct = d.mcq.correctOptionIds.filter((id) => optionIds.has(id));
       if (correct.length === 0) {
@@ -345,6 +434,12 @@ export const draftSchema = z
     } else {
       if (normalizeShortAnswer(d.short.canonical) === '') {
         issue(['short', 'canonical'], 'Enter the canonical answer.');
+      }
+      if (d.short.canonical.trim().length > 500) {
+        issue(['short', 'canonical'], 'Keep the canonical answer under 500 characters.');
+      }
+      if (d.short.acceptedVariants.length > 20) {
+        issue(['short', 'acceptedVariants'], 'Use at most 20 accepted variants.');
       }
       const seen = new Set<string>([normalizeShortAnswer(d.short.canonical)]);
       d.short.acceptedVariants.forEach((a, i) => {

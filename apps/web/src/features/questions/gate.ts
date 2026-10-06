@@ -79,22 +79,26 @@ export function publishChecks(input: PublishInput): PublishCheck[] {
       id: 'saved',
       label: 'All changes saved',
       ok: !input.dirty,
-      hint: 'Save your changes first. Validation and publishing use the saved version.',
-    },
-    {
-      id: 'validated',
-      label: 'Validation passed on every variant and test',
-      ok: input.validationPassed,
-      hint: 'Press Validate. Any edit after a validation clears it.',
+      hint: 'Save your changes first. Publishing uses the saved version.',
     },
   ];
+  // Only coding questions are validated (TC-012); the API publishes a complete multiple-choice or
+  // short-answer question without a validation run.
   if (input.type === 'CODING') {
-    checks.push({
-      id: 'ai',
-      label: 'AI reference solutions collected',
-      ok: aiGatePassed(input.aiGates),
-      hint: 'Add solutions from enough different AI assistants for each language on the AI reference solutions tab.',
-    });
+    checks.push(
+      {
+        id: 'validated',
+        label: 'Validation passed on every variant and test',
+        ok: input.validationPassed,
+        hint: 'Press Validate. Any edit after a validation clears it.',
+      },
+      {
+        id: 'ai',
+        label: 'AI reference solutions collected',
+        ok: aiGatePassed(input.aiGates),
+        hint: 'Add solutions from enough different AI assistants for each language on the AI reference solutions tab.',
+      },
+    );
   }
   return checks;
 }
