@@ -245,7 +245,13 @@ function countFailure(state: MockAuthState, key: string): void {
 }
 /** A TOTP code accepted once is refused again for this long (the real window is about 30 s). */
 const TOTP_REPLAY_MS = 30_000;
-const reauthFailed = (request: Request) => problem(request, 403, REAUTH_DETAIL, 'REAUTH_FAILED');
+/**
+ * POST /2fa/disable answers ONE fixed detail for every failure of the password or the code, so it
+ * never reveals which factor failed (Backend #184); the other re-auth routes name the password.
+ */
+const REAUTH_DISABLE_DETAIL = 'The password or code is incorrect.';
+const reauthFailed = (request: Request, detail = REAUTH_DETAIL) =>
+  problem(request, 403, detail, 'REAUTH_FAILED');
 const totpCodeOnly = (body: Record<string, unknown>): string[] =>
   typeof body.totpCode === 'string' && /^\d{6}$/.test(body.totpCode.trim())
     ? []
@@ -263,6 +269,7 @@ async function reauth(
   extra?: (body: Record<string, unknown>) => string[],
   /** False when the caller still has a second factor to check and gives the attempt back itself. */
   resetOnSuccess = true,
+  failDetail = REAUTH_DETAIL,
 ): Promise<{ user: MockUser; body: Record<string, unknown> } | Response> {
   const role = mockRoleFromToken(request.headers.get('Authorization'));
   const user = role ? Object.values<MockUser>(MOCK_USERS).find((u) => u.role === role) : undefined;
@@ -284,7 +291,7 @@ async function reauth(
   const locked = (state.lockExpiresAt[key] ?? 0) > Date.now();
   if (locked || body.currentPassword !== user.password) {
     if (!locked) countFailure(state, key);
-    return problem(request, 403, REAUTH_DETAIL, 'REAUTH_FAILED');
+    return problem(request, 403, failDetail, 'REAUTH_FAILED');
   }
   if (resetOnSuccess) {
     state.failed[key] = 0;
@@ -361,7 +368,10 @@ export function createAuthHandlers() {
 
     http.post(`${base}/2fa/enroll/start`, async ({ request }) => {
       const { challengeToken } = (await request.json()) as { challengeToken: string };
-      if (!userFromChallenge(challengeToken)) return expired();
+      // A stale or unknown challenge: 401 problem body (Backend #184), the same words as everywhere.
+      if (!userFromChallenge(challengeToken)) {
+        return problem(request, 401, 'Your sign-in has expired. Sign in again.');
+      }
       return HttpResponse.json({
         manualKey: 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP',
         otpauthUri:
@@ -440,7 +450,7 @@ export function createAuthHandlers() {
     // Backend PR #51: needs the current password AND a 6-digit TOTP code (never a recovery code).
     // Order: password, 409 if off, code, role refusal. Success revokes every refresh token.
     http.post(`${base}/2fa/disable`, async ({ request }) => {
-      const checked = await reauth(request, totpCodeOnly, false);
+      const checked = await reauth(request, totpCodeOnly, false, REAUTH_DISABLE_DETAIL);
       if (checked instanceof Response) return checked;
       const { user, body } = checked;
       const state = load();
@@ -449,7 +459,7 @@ export function createAuthHandlers() {
       const replayed = Date.now() - (state.disableCodeAt[user.email] ?? 0) < TOTP_REPLAY_MS;
       if (code !== MOCK_TOTP_CODE || replayed) {
         countFailure(state, user.email);
-        return reauthFailed(request);
+        return reauthFailed(request, REAUTH_DISABLE_DETAIL);
       }
       // The code is spent even if the role then refuses the request.
       state.disableCodeAt[user.email] = Date.now();

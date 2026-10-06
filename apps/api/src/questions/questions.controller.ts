@@ -17,7 +17,6 @@ import {
   ApiConflictResponse,
   ApiCreatedResponse,
   ApiForbiddenResponse,
-  ApiNoContentResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
@@ -40,7 +39,9 @@ import {
   QuestionListDto,
   QuestionListQueryDto,
   QuestionSummaryDto,
-  TestCaseDto,
+  QuestionUpdateResultDto,
+  RevisionResultDto,
+  TestCaseMutationDto,
   TestCaseParamDto,
   UpdateQuestionDto,
   UpdateTestCaseDto,
@@ -135,7 +136,7 @@ export class QuestionsController {
     summary:
       'Edit a question: updates the latest draft in place; if the latest version is published, creates the next version as a draft (FR-204)',
   })
-  @ApiOkResponse({ type: QuestionDetailDto })
+  @ApiOkResponse({ type: QuestionUpdateResultDto })
   @ApiBadRequestResponse({ description: 'Validation failed, or no field sent' })
   @ApiNotFoundResponse({ description: 'No such question in your organization' })
   @ApiConflictResponse({ description: 'The question is archived, or a concurrent change won' })
@@ -143,8 +144,8 @@ export class QuestionsController {
     @Param() params: QuestionIdParamDto,
     @Body() dto: UpdateQuestionDto,
     @Req() req: AuthedRequest,
-  ): Promise<QuestionDetailDto> {
-    return this.questions.update(actorOf(req), params.id, dto, ctxOf(req), canSeeAnswers(req));
+  ): Promise<QuestionUpdateResultDto> {
+    return this.questions.update(actorOf(req), params.id, dto, ctxOf(req));
   }
 
   @Post(':id/publish')
@@ -201,7 +202,7 @@ export class QuestionsController {
   @Roles(...WRITERS)
   @HttpCode(201)
   @ApiOperation({ summary: 'Add a test case to a draft version (FR-202)' })
-  @ApiCreatedResponse({ type: TestCaseDto })
+  @ApiCreatedResponse({ type: TestCaseMutationDto })
   @ApiNotFoundResponse({ description: 'No such question or version in your organization' })
   @ApiConflictResponse({
     description:
@@ -212,21 +213,14 @@ export class QuestionsController {
     @Param() params: VersionParamDto,
     @Body() dto: CreateTestCaseDto,
     @Req() req: AuthedRequest,
-  ): Promise<TestCaseDto> {
-    return this.questions.addTestCase(
-      actorOf(req),
-      params.id,
-      params.version,
-      dto,
-      ctxOf(req),
-      canSeeAnswers(req),
-    );
+  ): Promise<TestCaseMutationDto> {
+    return this.questions.addTestCase(actorOf(req), params.id, params.version, dto, ctxOf(req));
   }
 
   @Patch(':id/versions/:version/test-cases/:testCaseId')
   @Roles(...WRITERS)
   @ApiOperation({ summary: 'Change a test case of a draft version (FR-202)' })
-  @ApiOkResponse({ type: TestCaseDto })
+  @ApiOkResponse({ type: TestCaseMutationDto })
   @ApiNotFoundResponse({
     description: 'No such question, version or test case in your organization',
   })
@@ -238,7 +232,7 @@ export class QuestionsController {
     @Param() params: TestCaseParamDto,
     @Body() dto: UpdateTestCaseDto,
     @Req() req: AuthedRequest,
-  ): Promise<TestCaseDto> {
+  ): Promise<TestCaseMutationDto> {
     return this.questions.updateTestCase(
       actorOf(req),
       params.id,
@@ -246,15 +240,17 @@ export class QuestionsController {
       params.testCaseId,
       dto,
       ctxOf(req),
-      canSeeAnswers(req),
     );
   }
 
   @Delete(':id/versions/:version/test-cases/:testCaseId')
   @Roles(...WRITERS)
-  @HttpCode(204)
-  @ApiOperation({ summary: 'Remove a test case from a draft version (FR-202)' })
-  @ApiNoContentResponse()
+  @HttpCode(200)
+  @ApiOperation({
+    summary:
+      'Remove a test case from a draft version; answers the new revision of the version (FR-202)',
+  })
+  @ApiOkResponse({ type: RevisionResultDto })
   @ApiNotFoundResponse({
     description: 'No such question, version or test case in your organization',
   })
@@ -262,12 +258,12 @@ export class QuestionsController {
     description:
       'The version is published (immutable), the question is archived, or stale expectedRevision',
   })
-  async removeTestCase(
+  removeTestCase(
     @Param() params: TestCaseParamDto,
     @Query() q: RevisionQueryDto,
     @Req() req: AuthedRequest,
-  ): Promise<void> {
-    await this.questions.removeTestCase(
+  ): Promise<RevisionResultDto> {
+    return this.questions.removeTestCase(
       actorOf(req),
       params.id,
       params.version,

@@ -4,10 +4,10 @@
 // There is no `count`: one test_questions row picks one question. This module is pure.
 import { z } from 'zod';
 import { Difficulty, QuestionType } from '../generated/prisma/enums';
-import { isStorableText } from './text-rules';
+import { isStorableText } from '../questions/text-rules';
+import { TAG_PATTERN } from '../questions/dto/questions.dto';
 
 export const MAX_RULE_TAGS = 20;
-export const TAG_PATTERN = /^[a-z0-9][a-z0-9 _.+#-]{0,39}$/;
 
 const tag = z
   .string()
