@@ -255,6 +255,7 @@ export class RetentionRepository {
   async stillEligible(
     sessionId: string,
     clock: 'anchor' | 'submitted' = 'anchor',
+    results?: { now: Date },
   ): Promise<boolean> {
     const session = await this.prisma.client.session.findUnique({
       where: { id: sessionId },
@@ -266,6 +267,14 @@ export class RetentionRepository {
         ? session.retentionAnchorAt
         : (session.submittedAt ?? session.retentionAnchorAt);
     if (start === null) return false;
+    // R-10 only: the clock date itself, BEFORE anything is deleted (the whole prefix includes reports/,
+    // which nothing but R-10 may remove). An anchor cleared and set again after selection fails here.
+    if (results !== undefined) {
+      const dueAt = resultsDue(session.retentionAnchorAt, session.submittedAt, {
+        RETENTION_RESULTS_CLOCK: clock,
+      });
+      if (dueAt === null || dueAt > results.now) return false;
+    }
     if (HELD_STATUSES.includes(session.status)) return false;
     const open = await this.prisma.client.appeal.count({
       where: { status: 'OPEN', sessionReview: { sessionId } },
@@ -345,15 +354,17 @@ export class RetentionRepository {
     const { orgId, sessionId, evidenceAll, runId } = args;
     return this.prisma.client.$transaction(async (tx) => {
       if (!(await this.lockAndCheck(tx, 'FACE', sessionId))) return false;
-      await tx.identityCheck.updateMany({
-        where: { sessionId },
-        data: { idImageKey: null, selfieKey: null },
-      });
+      // One table order in every tier (proctor_events, batches, keystrokes, media, identity), so two
+      // replicas on different tiers of one session cannot deadlock on row locks.
       await tx.proctorEvent.updateMany({
         where: evidenceAll
           ? { sessionId, evidenceKey: { not: null } }
           : { sessionId, type: 'FACE_MISMATCH' },
         data: { evidenceKey: null },
+      });
+      await tx.identityCheck.updateMany({
+        where: { sessionId },
+        data: { idImageKey: null, selfieKey: null },
       });
       await tx.auditLog.create({ data: marker('FACE', orgId, sessionId, runId) });
       return true;
@@ -371,19 +382,19 @@ export class RetentionRepository {
     return this.prisma.client.$transaction(async (tx) => {
       if (!(await this.lockAndCheck(tx, 'MEDIA', sessionId))) return false;
       if (!(await this.holdsInTx(tx, sessionId, { tier: 'MEDIA' }))) return false;
-      await tx.mediaChunk.updateMany({
-        where: { sessionId, objectKey: { not: null } },
-        data: { objectKey: null, deletedAt: now },
-      });
       await tx.proctorEvent.updateMany({
         where: { sessionId, evidenceKey: { not: null } },
         data: { evidenceKey: null },
+      });
+      await tx.keystrokeBatch.deleteMany({ where: { sessionId } });
+      await tx.mediaChunk.updateMany({
+        where: { sessionId, objectKey: { not: null } },
+        data: { objectKey: null, deletedAt: now },
       });
       await tx.identityCheck.updateMany({
         where: { sessionId },
         data: { idImageKey: null, selfieKey: null },
       });
-      await tx.keystrokeBatch.deleteMany({ where: { sessionId } });
       // ADR 0015 section 7: R-4 removes the waiver's reason note (health details), compare-and-set.
       await this.casAccommodations(tx, sessionId, redactReasonNote);
       await tx.auditLog.create({ data: marker('MEDIA', orgId, sessionId, runId) });
@@ -522,14 +533,18 @@ export class RetentionRepository {
       select: { id: true },
     });
     if (sessions.length === 0) return false;
-    const marked = await tx.auditLog.count({
+    // Distinct sessions, not marker rows: `audit_logs` has no unique index on markers, and a duplicate
+    // on one session must not stand in for another session's marker.
+    const marked = await tx.auditLog.findMany({
       where: {
         action: RETENTION_MARKER_ACTIONS.RESULTS,
         entityType: MARKER_ENTITY_TYPE,
         entityId: { in: sessions.map((x) => x.id) },
       },
+      select: { entityId: true },
+      distinct: ['entityId'],
     });
-    if (marked < sessions.length) return false;
+    if (marked.length < sessions.length) return false;
     await tx.candidate.update({
       where: { id: candidateId },
       data: {
@@ -559,15 +574,23 @@ export class RetentionRepository {
    * anonymised and with no pending erasure request, who have sessions that ALL carry a results marker.
    * Selection only; each candidate is then anonymised in their own org scope.
    */
-  findCandidatesToAnonymise(limit: number): Promise<{ candidateId: string; orgId: string }[]> {
+  findCandidatesToAnonymise(
+    limit: number,
+    afterId?: string,
+  ): Promise<{ candidateId: string; orgId: string; sessionId: string }[]> {
+    const action = Prisma.raw(`'${RETENTION_MARKER_ACTIONS.RESULTS}'`);
+    const entityType = Prisma.raw(`'${MARKER_ENTITY_TYPE}'`);
+    const after = afterId ? Prisma.sql`AND c.id > ${afterId}::uuid` : Prisma.empty;
     return this.orgContext.runSystem('RETENTION_ERASURE', () =>
       this.orgContext.runRawSql(
         'candidate anonymisation backstop selection (ADR 0004 9.4)',
         async () => {
-          const rows = await this.prisma.client.$queryRaw<
-            { candidateId: string; orgId: string }[]
+          return this.prisma.client.$queryRaw<
+            { candidateId: string; orgId: string; sessionId: string }[]
           >(Prisma.sql`
-          SELECT c.id AS "candidateId", c.org_id AS "orgId"
+          SELECT c.id AS "candidateId", c.org_id AS "orgId",
+                 (SELECT s.id FROM invitations i JOIN sessions s ON s.invitation_id = i.id
+                   WHERE i.candidate_id = c.id ORDER BY s.created_at, s.id LIMIT 1) AS "sessionId"
           FROM candidates c
           WHERE c.erased_at IS NULL AND c.erasure_requested_at IS NULL
             AND EXISTS (SELECT 1 FROM invitations i JOIN sessions s ON s.invitation_id = i.id WHERE i.candidate_id = c.id)
@@ -576,11 +599,11 @@ export class RetentionRepository {
               WHERE i.candidate_id = c.id
                 AND NOT EXISTS (
                   SELECT 1 FROM audit_logs m
-                  WHERE m.action = 'RETENTION_RESULTS_DONE' AND m.entity_type = 'session'
+                  WHERE m.action = ${action} AND m.entity_type = ${entityType}
                     AND m.entity_id = s.id::text AND m.org_id = s.org_id))
-          ORDER BY c.created_at, c.id
+            ${after}
+          ORDER BY c.id
           LIMIT ${limit}`);
-          return rows;
         },
       ),
     );

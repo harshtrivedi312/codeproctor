@@ -385,6 +385,7 @@ describe('RetentionService: results tier R-10 (FR-704, NFR-05, TC-072)', () => {
     } finally {
       warn.mockRestore();
       await h.owner.$executeRawUnsafe('DROP TRIGGER fail_anonymise_trigger ON candidates');
+      await h.owner.$executeRawUnsafe('DROP FUNCTION fail_anonymise()');
     }
     // Nothing happened: the results are still there and there is no marker, so tomorrow's run still selects it.
     expect(
@@ -468,6 +469,113 @@ describe('RetentionService: results tier R-10 (FR-704, NFR-05, TC-072)', () => {
     expect((await build().service.runDaily(new Date('2025-02-27T12:00:00.000Z'))).results.due).toBe(
       0,
     ); // 365 days
+    expect(
+      (await build().service.runDaily(new Date('2025-02-28T12:00:00.000Z'))).results.completed,
+    ).toBe(1);
+  });
+
+  it('S2: R-10 checks the clock date BEFORE deleting anything: a stale selection leaves the report and every row alone', async () => {
+    await due(h.A, { anchorDaysAgo: 10 }); // not due: the anchor was cleared and set again after selection
+    const { repo, service } = build();
+    jest.spyOn(repo, 'findDueResults').mockResolvedValueOnce([
+      {
+        sessionId: sessionIdOf(h.A),
+        orgId: h.A.orgId,
+        createdAtCursor: '2020-01-01T00:00:00.000000Z',
+      },
+    ]);
+    const summary = await service.runDaily(NOW);
+    expect(summary.results).toMatchObject({ due: 1, completed: 0, retryLater: 1 });
+    expect(h.store.keys.has(keys(h.A).report)).toBe(true); // reports/ is R-10's, and it is not due
+    expect(
+      await h.owner.submission.count({
+        where: { sessionQuestion: { sessionId: sessionIdOf(h.A) } },
+      }),
+    ).toBeGreaterThan(0);
+  });
+
+  it('OQ-10: the candidate backstop honours the legal hold: a held candidate is not anonymised', async () => {
+    await due(h.A);
+    const id = (
+      await h.owner.session.findUniqueOrThrow({
+        where: { id: sessionIdOf(h.A) },
+        select: { invitation: { select: { candidateId: true } } },
+      })
+    ).invitation.candidateId;
+    await h.owner.auditLog.create({
+      data: {
+        orgId: h.A.orgId,
+        action: 'RETENTION_RESULTS_DONE',
+        entityType: 'session',
+        entityId: sessionIdOf(h.A),
+      },
+    });
+    const held = { isHeld: jest.fn().mockResolvedValue(true) };
+    const summary = await build({ RETENTION_LEGAL_HOLD: 'true' }, held).service.runDaily(NOW);
+    expect(summary.candidatesAnonymised).toBe(0);
+    expect((await h.owner.candidate.findUniqueOrThrow({ where: { id } })).erasedAt).toBeNull();
+    held.isHeld.mockRejectedValue(new Error('down')); // an unreadable hold counts as held
+    expect(
+      (await build({ RETENTION_LEGAL_HOLD: 'true' }, held).service.runDaily(NOW))
+        .candidatesAnonymised,
+    ).toBe(0);
+  });
+
+  it("S3: a duplicate marker on one session does not stand in for another session's marker", async () => {
+    await due(h.A);
+    const id = (
+      await h.owner.session.findUniqueOrThrow({
+        where: { id: sessionIdOf(h.A) },
+        select: { invitation: { select: { candidateId: true } } },
+      })
+    ).invitation.candidateId;
+    const inv = await h.owner.invitation.findFirstOrThrow({ where: { candidateId: id } });
+    const second = await h.owner.invitation.create({
+      data: {
+        orgId: h.A.orgId,
+        testId: inv.testId,
+        candidateId: id,
+        tokenHash: `dup-${id}`,
+        windowStart: daysAgo(500),
+        windowEnd: daysAgo(499),
+      },
+    });
+    await h.owner.session.create({
+      data: { orgId: h.A.orgId, invitationId: second.id, status: 'COMPLETED' },
+    });
+    for (let i = 0; i < 2; i++) {
+      await h.owner.auditLog.create({
+        data: {
+          orgId: h.A.orgId,
+          action: 'RETENTION_RESULTS_DONE',
+          entityType: 'session',
+          entityId: sessionIdOf(h.A),
+        },
+      });
+    }
+    const { repo } = build();
+    const did = await repo.inOrg(h.A.orgId, () =>
+      repo.anonymiseCandidateIfDone({
+        orgId: h.A.orgId,
+        candidateId: id,
+        now: NOW,
+        runId: 'run-test',
+      }),
+    );
+    expect(did).toBe(false); // the second session has no marker
+    expect((await h.owner.candidate.findUniqueOrThrow({ where: { id } })).erasedAt).toBeNull();
+  });
+
+  it('S7: a 29 February anchor clamps to 28 February in SQL and in JS alike', async () => {
+    await due(h.A, { submittedDaysAgo: 800, anchorDaysAgo: 800 });
+    const anchor = new Date('2024-02-29T12:00:00.000Z');
+    await h.owner.session.update({
+      where: { id: sessionIdOf(h.A) },
+      data: { retentionAnchorAt: anchor, submittedAt: anchor },
+    });
+    expect((await build().service.runDaily(new Date('2025-02-27T12:00:00.000Z'))).results.due).toBe(
+      0,
+    );
     expect(
       (await build().service.runDaily(new Date('2025-02-28T12:00:00.000Z'))).results.completed,
     ).toBe(1);

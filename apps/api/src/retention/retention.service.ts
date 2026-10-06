@@ -58,8 +58,6 @@ type Outcome = 'completed' | 'alreadyDone' | 'retryLater';
 @Injectable()
 export class RetentionService {
   private readonly log = new Logger(RetentionService.name);
-  /** Candidates anonymised in the current run (a run is not re-entrant per instance; the count is a summary only). */
-  private anonymised = 0;
 
   constructor(
     private readonly repo: RetentionRepository,
@@ -80,17 +78,17 @@ export class RetentionService {
       perOrg.set(orgId, row);
     };
 
-    this.anonymised = 0;
-    const face = await this.runTier('FACE', now, runId, count);
-    const media = await this.runTier('MEDIA', now, runId, count);
-    const results = await this.runTier('RESULTS', now, runId, count);
+    const ctx = { anonymised: 0 };
+    const face = await this.runTier('FACE', now, runId, count, ctx);
+    const media = await this.runTier('MEDIA', now, runId, count, ctx);
+    const results = await this.runTier('RESULTS', now, runId, count, ctx);
     const consent = await this.runConsent(now, runId, count);
-    await this.sweepCandidates(now, runId, count);
+    await this.sweepCandidates(now, runId, count, ctx);
 
     for (const [orgId, counts] of perOrg) {
       await this.repo.inOrg(orgId, () => this.repo.writeRunSummary(orgId, runId, counts));
     }
-    return { runId, face, media, results, consent, candidatesAnonymised: this.anonymised };
+    return { runId, face, media, results, consent, candidatesAnonymised: ctx.anonymised };
   }
 
   private async runTier(
@@ -98,6 +96,7 @@ export class RetentionService {
     now: Date,
     runId: string,
     count: (orgId: string, key: string) => void,
+    ctx: { anonymised: number },
   ): Promise<TierSummary> {
     const limit = this.config.RETENTION_BATCH_SIZE;
     const tally = { due: 0, completed: 0, alreadyDone: 0, retryLater: 0 };
@@ -115,7 +114,7 @@ export class RetentionService {
                 after,
               );
       for (const session of due) {
-        const outcome = await this.processSession(tier, session, now, runId);
+        const outcome = await this.processSession(tier, session, now, runId, ctx);
         tally.due++;
         tally[outcome]++;
         count(
@@ -137,6 +136,7 @@ export class RetentionService {
     session: DueSession,
     now: Date,
     runId: string,
+    ctx: { anonymised: number },
   ): Promise<Outcome> {
     const { orgId, sessionId } = session;
     try {
@@ -155,7 +155,7 @@ export class RetentionService {
           return 'retryLater';
         if (
           tier === 'RESULTS' &&
-          !(await this.repo.stillEligible(sessionId, this.config.RETENTION_RESULTS_CLOCK))
+          !(await this.repo.stillEligible(sessionId, this.config.RETENTION_RESULTS_CLOCK, { now }))
         ) {
           return 'retryLater';
         }
@@ -201,7 +201,7 @@ export class RetentionService {
           // R-2 held it again inside the transaction (a review or appeal opened meanwhile).
           if (done.kind === 'notEligible') return 'retryLater';
           if (done.kind === 'alreadyDone') return 'alreadyDone';
-          if (done.anonymised) this.anonymised++;
+          if (done.anonymised) ctx.anonymised++;
           return 'completed';
         }
         const wrote =
@@ -299,29 +299,43 @@ export class RetentionService {
   /**
    * The daily backstop for candidate anonymisation (ADR 0004 9.4): a candidate whose sessions all have
    * their results marker but who was not anonymised (an older marker, or a session added later) is
-   * anonymised here, one per transaction, in their own org.
+   * anonymised here, one per transaction, in their own org. The legal hold (OQ-10) applies: it is a
+   * per-candidate port, asked through one of the candidate's sessions. Paged by candidate id, so a
+   * candidate that keeps failing is stepped past.
    */
   private async sweepCandidates(
     now: Date,
     runId: string,
     count: (orgId: string, key: string) => void,
+    ctx: { anonymised: number },
   ): Promise<void> {
-    const found = await this.repo.findCandidatesToAnonymise(this.config.RETENTION_BATCH_SIZE);
-    for (const { candidateId, orgId } of found) {
-      try {
-        const did = await this.repo.inOrg(orgId, () =>
-          this.repo.anonymiseCandidateIfDone({ orgId, candidateId, now, runId }),
-        );
-        if (did) {
-          this.anonymised++;
-          count(orgId, 'candidatesAnonymised');
+    const limit = this.config.RETENTION_BATCH_SIZE;
+    let afterId: string | undefined;
+    for (let page = 0; page < MAX_PAGES_PER_TIER; page++) {
+      const found = await this.repo.findCandidatesToAnonymise(limit, afterId);
+      for (const { candidateId, orgId, sessionId } of found) {
+        try {
+          if (this.config.RETENTION_LEGAL_HOLD && (await this.isHeld(orgId, sessionId))) {
+            count(orgId, 'candidatesRetryLater');
+            continue;
+          }
+          const did = await this.repo.inOrg(orgId, () =>
+            this.repo.anonymiseCandidateIfDone({ orgId, candidateId, now, runId }),
+          );
+          if (did) {
+            ctx.anonymised++;
+            count(orgId, 'candidatesAnonymised');
+          }
+        } catch (error) {
+          const code = (error as { code?: unknown } | null)?.code;
+          this.log.warn(
+            `retention candidate anonymisation failed (${typeof code === 'string' ? code : 'error'})`,
+          );
         }
-      } catch (error) {
-        const code = (error as { code?: unknown } | null)?.code;
-        this.log.warn(
-          `retention candidate anonymisation failed (${typeof code === 'string' ? code : 'error'})`,
-        );
       }
+      const last = found.at(-1);
+      if (found.length < limit || last === undefined) break;
+      afterId = last.candidateId;
     }
   }
 
