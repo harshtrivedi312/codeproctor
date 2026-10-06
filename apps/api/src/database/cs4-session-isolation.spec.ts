@@ -1150,7 +1150,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       ['ProctorEventBatch', 'signature', { signature: Buffer.from('forged') }],
       ['KeystrokeBatch', 'events', { events: [] }],
       ['KeystrokeBatch', 'startedAt', { startedAt: WHEN }],
-      // Consent: signedName, signedAt, declinedAt, ip and userAgent only.
+      // Consent: signedName, signedAt, declinedAt, ageConfirmedAt, ip and userAgent only.
       ['Consent', 'consentTextId', { consentTextId: randomUUID() }],
       ['Consent', 'pdfKey', { pdfKey: 'consents/forged.pdf' }],
       ['Consent', 'pdfGeneratedAt', { pdfGeneratedAt: WHEN }],

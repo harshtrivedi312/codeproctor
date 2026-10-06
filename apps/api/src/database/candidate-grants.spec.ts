@@ -109,7 +109,16 @@ describe('the eleven CS-4.4 grant sites (ADR 0013 CS-4.4; ADR 0006 section 8.5; 
       ],
       'ConsentService (create)': [
         'Consent',
-        ['sessionId', 'consentTextId', 'signedName', 'signedAt', 'declinedAt', 'ip', 'userAgent'],
+        [
+          'sessionId',
+          'consentTextId',
+          'signedName',
+          'signedAt',
+          'declinedAt',
+          'ageConfirmedAt',
+          'ip',
+          'userAgent',
+        ],
       ],
     };
     for (const s of GRANT_SITES) {
