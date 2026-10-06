@@ -1,6 +1,6 @@
 // One guard that keeps five things out of new code (architect condition Q9, review S4, FU-DB-91).
 // Each of them reaches Postgres without the org scope:
-//   - database/prisma.module: BE-02's interim unscoped Prisma client, for auth only (FU-DB-58);
+//   - database/prisma.module: BE-02's interim unscoped Prisma client, removed (FU-DB-58); it must not come back;
 //   - database/create-prisma-client: building a client of your own;
 //   - PG_POOL: BE-01's raw pg Pool token;
 //   - the `pg` package: a raw connection or pool of your own;
@@ -28,20 +28,14 @@ export const RULES: readonly GuardRule[] = [
   {
     name: 'database/prisma.module',
     module: 'database/prisma.module',
-    why: "BE-02's interim unscoped client, for auth only (FU-DB-58). Inject PrismaService from database/prisma.service.ts.",
-    allowed: [
-      'auth/auth.service.ts',
-      // BE-02 guard user re-check (auth bootstrap); moves to the scoped client in BE-03 (FU-DB-58).
-      'common/auth/jwt-auth.guard.ts',
-      'database/prisma.module.ts',
-      'app.module.ts',
-    ],
+    why: "BE-02's interim unscoped client was removed (FU-DB-58) and must not come back. Inject PrismaService from database/prisma.service.ts.",
+    allowed: [], // deleted with FU-DB-58: auth and the guard run on the scoped client
   },
   {
     name: 'database/create-prisma-client',
     module: 'database/create-prisma-client',
     why: 'Building a client of your own skips the org scope. Inject PrismaService from database/prisma.service.ts.',
-    allowed: ['database/prisma.module.ts', 'database/prisma.service.ts'],
+    allowed: ['database/prisma.service.ts'],
   },
   {
     name: 'pg',
@@ -113,8 +107,6 @@ describe('import guard: nothing new reaches Postgres around the org scope (NFR-0
     for (const path of rule.allowed) {
       const file = files.find((f) => f.path === path);
       expect({ path, exists: file !== undefined }).toEqual({ path, exists: true });
-      if (path === 'database/prisma.module.ts' && rule.module === 'database/prisma.module')
-        continue;
       const uses = findViolations([file as SourceFile], { ...rule, allowed: [] });
       expect({ path, uses: uses.length }).toEqual({ path, uses: 1 });
     }
@@ -230,7 +222,11 @@ describe('import guard patterns (NFR-04)', () => {
   });
 
   it('TC-008 the guard accepts the allowlisted files and unrelated imports', () => {
-    const rule = ruleNamed('database/prisma.module');
+    // The real list is empty since FU-DB-58, so test the matching with a synthetic allowlist.
+    const rule: GuardRule = {
+      ...ruleNamed('database/prisma.module'),
+      allowed: ['auth/auth.service.ts'],
+    };
     const allowed: SourceFile = {
       path: 'auth/auth.service.ts',
       text: "import { PrismaService } from '../database/prisma.module';",

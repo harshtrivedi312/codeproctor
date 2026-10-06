@@ -35,10 +35,10 @@ import { Public, Roles } from '../common/auth/decorators';
 import { ProblemFilter } from '../common/problem.filter';
 import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
 import { TokenModule, TokenService } from '../common/auth/token.service';
+import { TokenValidityService } from '../common/auth/token-validity.service';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import { createPrismaClient } from './create-prisma-client';
 import { DatabaseModule } from './database.module';
-import { PrismaModule } from './prisma.module';
 import { OrgContextMissingError, OrgScopeViolationError, RawQueryNotAllowedError } from './errors';
 import { OrgContextService } from './org-context';
 import { ORG_SCOPE } from './org-scope-map';
@@ -165,23 +165,28 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
   let B: TenantFixture;
 
   function compileApp(url: string) {
-    return Test.createTestingModule({
-      imports: [
-        ConfigModule.forRoot({
-          isGlobal: true,
-          ignoreEnvFile: true,
-          load: [() => ({ DATABASE_URL: url, JWT_ACCESS_SECRET: JWT_SECRET })],
-        }),
-        TokenModule,
-        // BE-02's unscoped client: the real guard re-reads the user through it on every request
-        // (FU-DB-58 moves that to the scoped client in BE-03). DatabaseModule is the scoped one.
-        PrismaModule,
-        DatabaseModule,
-      ],
-      controllers: [ProbeController, PublicProbeController],
-      // BE-02's guard. DatabaseModule registers the interceptor that runs after it.
-      providers: [{ provide: APP_GUARD, useClass: JwtAuthGuard }],
-    }).compile();
+    return (
+      Test.createTestingModule({
+        imports: [
+          ConfigModule.forRoot({
+            isGlobal: true,
+            ignoreEnvFile: true,
+            load: [() => ({ DATABASE_URL: url, JWT_ACCESS_SECRET: JWT_SECRET })],
+          }),
+          TokenModule,
+          // BE-02's unscoped client: the real guard re-reads the user through it on every request
+          // (FU-DB-58 moves that to the scoped client in BE-03). DatabaseModule is the scoped one.
+          DatabaseModule,
+        ],
+        controllers: [ProbeController, PublicProbeController],
+        // BE-02's guard. DatabaseModule registers the interceptor that runs after it.
+        providers: [{ provide: APP_GUARD, useClass: JwtAuthGuard }],
+      })
+        // The guard's Redis marker check (S1) is not under test here: no token is invalidated.
+        .overrideProvider(TokenValidityService)
+        .useValue({ isFresh: () => Promise.resolve(true) })
+        .compile()
+    );
   }
 
   const asA = <T>(fn: () => Promise<T>): Promise<T> => orgContext.runInOrg(A.orgId, fn);
@@ -2275,23 +2280,30 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expect(await db.statements.read()).toEqual([]);
     });
 
-    it('TC-008 a public route that reads org data fails closed: exactly the defined 500 problem, nothing leaked, no query sent', async () => {
+    it('TC-008 a public route that reads org data fails closed: exactly the defined 403 problem, nothing leaked, no query sent', async () => {
       await db.statements.reset();
       const res = await request(app.getHttpServer())
         .get('/probe/public-sessions')
         .set('x-request-id', 'trace-public-1');
 
       // Exactly the defined status and shape (ProblemFilter, an unhandled error), field by field.
-      expect(res.status).toBe(500);
+      expect(res.status).toBe(403);
       expect(res.headers['content-type']).toMatch(/^application\/problem\+json/);
       const body = res.body as Record<string, unknown>;
-      expect(Object.keys(body).sort()).toEqual(['instance', 'status', 'title', 'traceId', 'type']);
+      expect(Object.keys(body).sort()).toEqual([
+        'detail',
+        'instance',
+        'status',
+        'title',
+        'traceId',
+        'type',
+      ]);
       expect(body.type).toBe('about:blank');
-      expect(body.title).toBe('Internal Server Error');
-      expect(body.status).toBe(500);
+      expect(body.title).toBe('Forbidden');
+      expect(body.detail).toBe('Access denied.');
+      expect(body.status).toBe(403);
       expect(body.instance).toBe('/probe/public-sessions');
       expect(body.traceId).toBe('trace-public-1');
-      expect(body).not.toHaveProperty('detail');
       expect(body).not.toHaveProperty('errors');
 
       // No row data, ids, org names or error internals anywhere in the response.
