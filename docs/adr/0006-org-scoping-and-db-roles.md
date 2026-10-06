@@ -471,14 +471,14 @@ There is no org-provisioning reason (8.6, 8.9).
       - Its key is derived only from ids already read in the scope.
       - It is refused in any `sessionId` scope, like all raw SQL.
   - **Any scope carrying a `sessionId`:** raw SQL is refused, for actor CANDIDATE (`runAsCandidate`) and actor SERVICE (`runAsSessionJob`) alike. A session job that needs raw SQL needs an amendment to this ADR; a named call site alone is not enough. ADR 0013 CS-4 must say the same.
-- **Per-session write lock for SERVICE writers: `guardLive` (ADR 0004 section 9.5; ADR 0013).**
-  - SERVICE writers do not use the advisory lock. They take the lock through the model API with `guardLive`, the first statement of the write transaction.
+- **Per-session write lock: `guardLive` (ADR 0004 section 9.5; ADR 0013), for SERVICE writers and one STAFF method.**
+  - SERVICE writers do not use the advisory lock. They take the lock through the model API with `guardLive`, the first statement of the write transaction. The one STAFF caller is `SessionStateService.proctorResume` (ADR 0013 5.7). The lock cores have **one allow-list each**, and everything not named throws at run time (CANDIDATE scope, system scope, any future scope kind), while an actor-less `runInOrg` that is not an erasure or R-10 call site is enforced statically by FU-DB-67 (the call sites are pinned to those job files), because a run-time check cannot tell them apart: `guardLive` passes for SERVICE (`runAsSessionJob`, through `withLiveSession`) and STAFF (`runAsUser`, `proctorResume` only); `lockAnySession` passes for SERVICE (`runAsSessionJob`, through `withAnySession`) only; `lockForAccommodation` passes for STAFF (`runAsUser`: the accommodations PATCH, redact-note and the video-check PUT), for SERVICE (R-4), and for the session-less **org job scope** (`runInOrg(orgId)`, the scope that holds the ADR 0004 per-candidate advisory lock, which is refused in any `sessionId` scope) at the call sites of the erasure and R-10 jobs, pinned by FU-DB-67 to those job files. The target session must belong to the organisation (the scoped status read finds no row for a session of another organisation, and that empty read throws).
   - **The lock.** `guardLive` is `sessions.updateMany({ where: { id, status: <the status read>, NOT: { status: 'ERASED' } }, data: { status: <the same status> } })`. It writes the status to its current value, which takes the row lock without raw SQL.
     - It does not require a "live" status. Writers on GRADED or COMPLETED sessions, such as reports, use it too.
     - If the status read is ERASED, the writer returns without writing.
   - **0 rows.** The status changed in the meantime. The writer re-reads it and stops on ERASED; otherwise it retries a bounded number of times.
   - **Jobs that work on ERASED sessions** use a separate entry, `withAnySession(sid, fn)`, not `guardLive`: ingest-close and key destruction, the sweep passes, evidence-expire, and the consent-PDF job.
-  - **Where it lives.** `SessionJobProcessor` provides the write-transaction wrapper that calls `SessionStateService.guardLive`, a thin wrapper over the lock cores in `apps/api/src/database/session-locks.ts` (Database A: `guardLive`, `lockForAccommodation`, `lockAnySession`). Those database primitives may be imported only by `SessionStateService` and its tests. Writers do not call it by hand.
+  - **Where it lives.** `SessionJobProcessor` provides the write-transaction wrapper that calls `SessionStateService.guardLive` (the only other caller is the STAFF `proctorResume` method), a thin wrapper over the lock cores in `apps/api/src/database/session-locks.ts` (Database A: `guardLive`, `lockForAccommodation`, `lockAnySession`). Those database primitives may be imported only by `SessionStateService` and its tests. Writers do not call it by hand.
   - **Lock timeout.** If ADR 0004 keeps a `lock_timeout`, it is set without raw SQL: either a SERVICE pool whose pg options include `-c lock_timeout=...`, or the Prisma interactive-transaction `timeout`.
 - **Second model-API lock: `lockForAccommodation` (ADR 0015).**
   - It is the same same-value `sessions.updateMany` with `status: <the status read>` in the `where`, but without the ERASED exclusion. It works in any status, ERASED included.
@@ -491,7 +491,8 @@ There is no org-provisioning reason (8.6, 8.9).
   - On 0 rows, the writer re-reads the status and retries a bounded number of times.
 - **Lock order** (both locks):
   - the ADR 0004 advisory lock (where used), then the `sessions` row lock (`guardLive` or `lockForAccommodation`), then `invitations`;
-  - a writer that touches several sessions takes one session per transaction. Where it cannot, it locks them in ascending id order.
+  - a writer that touches several sessions takes one session per transaction. Where it cannot, it locks them in ascending id order;
+  - candidate transactions never call the lock cores; they must not lock another row before `transition()`'s own compare-and-set `UPDATE` on `sessions` (ADR 0013 5.7).
 - **Never on organizations.** Raw SQL never writes `organizations`, in any scope.
 - Model queries inside `runRawSql` stay scoped.
 - The `runRawSql` reason stays free text for the reviewer.
@@ -522,7 +523,7 @@ There is no org-provisioning reason (8.6, 8.9).
 
       ADR 0013 CS-4.4 defines each site's model, columns and ids. This ADR does not repeat them.
     - the private candidate-facts setter for `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. Only `CandidateSessionGuard` may call it, once per scope, before any other query in the scope; it throws if called twice or with any id missing, and the values are immutable afterwards.
-    - the three model-API lock call sites, `SessionStateService.guardLive` (only from the `SessionJobProcessor.withLiveSession` write-transaction wrapper), `SessionStateService.lockForAccommodation` (only from the ADR 0015 accommodation writers and the erasure, R-4 and R-10 jobs, which take it themselves and never `guardLive`) and `SessionStateService.lockAnySession` (only from `SessionJobProcessor.withAnySession`), each a thin wrapper over the same-named core in session-locks.ts.
+    - the three model-API lock call sites, `SessionStateService.guardLive` (only from the `SessionJobProcessor.withLiveSession` write-transaction wrapper and the one STAFF proctor-resume method of `SessionStateService`, ADR 0013 5.7), `SessionStateService.lockForAccommodation` (only from the ADR 0015 accommodation writers and the erasure, R-4 and R-10 jobs, which take it themselves and never `guardLive`) and `SessionStateService.lockAnySession` (only from `SessionJobProcessor.withAnySession`), each a thin wrapper over the same-named core in session-locks.ts.
     - the two session-job write entries, `withLiveSession` and `withAnySession`, both only in the `SessionJobProcessor` base class (ADR 0013 5.7).
   - The grant-entry API and the candidate-facts setter stay private to `org-context.ts` or the extension, like the store.
   - **How grants work.** This is the normative grant spec; ADR 0013 uses the same wording.
