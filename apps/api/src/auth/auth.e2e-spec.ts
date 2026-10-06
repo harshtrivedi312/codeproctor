@@ -1217,6 +1217,60 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
     });
   });
 
+  // P-37 carve-out: a failed post-commit audit write on an auth route is only logged; the response
+  // is the normal one, so no 500 can tell an existing account from an unknown one.
+  describe('DL-37 (FR-101, FR-104): a failed post-commit audit write never changes an auth response', () => {
+    const failAudit = (): jest.SpyInstance =>
+      jest
+        .spyOn(authService as unknown as { audit: () => Promise<void> }, 'audit')
+        .mockRejectedValue(new Error('audit insert failed: secret-marker-9d2'));
+
+    it('FR-101: the lockout audit failing leaves the 401 answers and the lock in place, and logs only the class name', async () => {
+      const u = await createUser();
+      const spy = failAudit();
+      const from = logged.length;
+      try {
+        for (let i = 0; i < 5; i++) await login(u.email, `wrong-password-${i}`).expect(401);
+        await login(u.email).expect(401);
+        const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+        expect(row.lockedUntil).not.toBeNull();
+        const lines = logged.slice(from).join('');
+        expect(lines).toContain('Audit write after commit failed (Error) for AUTH_ACCOUNT_LOCKED');
+        expect(lines).not.toContain('secret-marker');
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('FR-104: refresh reuse with a failing audit write is still the 401 and the family is revoked', async () => {
+      const u = await createUser();
+      const cookie1 = refreshCookie(await login(u.email).expect(200));
+      const cookie2 = refreshCookie(await refresh(cookie1).expect(200));
+      const spy = failAudit();
+      try {
+        await refresh(cookie1).expect(401);
+        await refresh(cookie2).expect(401);
+        const rows = await prisma.refreshToken.findMany({ where: { userId: u.id } });
+        expect(rows.every((r) => r.revokedAt !== null)).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('FR-104: logout with a failing audit write is still 204 and revokes the family', async () => {
+      const u = await createUser();
+      const cookie = refreshCookie(await login(u.email).expect(200));
+      const spy = failAudit();
+      try {
+        await request(app.getHttpServer()).post(`${API}/logout`).set('Cookie', cookie).expect(204);
+        const rows = await prisma.refreshToken.findMany({ where: { userId: u.id } });
+        expect(rows.every((r) => r.revokedAt !== null)).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
   describe('FR-104 access token re-check (FU-BE-19)', () => {
     const setupStart = (accessToken: string): request.Test =>
       request(app.getHttpServer())

@@ -862,7 +862,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       // A rotated or revoked token came back: assume theft and kill the whole family (TC-005).
       const revoked = await this.revokeFamily(existing.familyId);
       // Audit only when the reuse actually killed live tokens, not on every later retry.
-      if (revoked > 0) await this.audit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
+      if (revoked > 0) await this.auditAfterCommit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
       throw new UnauthorizedException('Authentication required.');
     }
     if (existing.expiresAt.getTime() <= Date.now()) {
@@ -921,7 +921,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         // Only a real reuse kills live tokens; a reset that revoked the family first does not
         // raise a theft alert (FU-BE-41).
         const revoked = await this.revokeFamily(existing.familyId);
-        if (revoked > 0) await this.audit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
+        if (revoked > 0) await this.auditAfterCommit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
         throw new UnauthorizedException('Authentication required.');
       }
       throw e;
@@ -940,7 +940,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       if (!user) return;
       await this.asUser(user, async () => {
         await this.revokeFamily(existing.familyId);
-        await this.audit(user, 'AUTH_LOGOUT', ctx);
+        await this.auditAfterCommit(user, 'AUTH_LOGOUT', ctx);
       });
     });
   }
@@ -1246,7 +1246,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
    * SUPER_ADMINs of the same org (FU-BE-22).
    */
   private async recordLock(user: User, ctx: RequestContext): Promise<void> {
-    await this.audit(user, 'AUTH_ACCOUNT_LOCKED', ctx, { minutes: LOCKOUT_MINUTES });
+    await this.auditAfterCommit(user, 'AUTH_ACCOUNT_LOCKED', ctx, { minutes: LOCKOUT_MINUTES });
     const { orgId, email, fullName } = user;
     this.defer('lock-alert', () => this.alertAdmins(orgId, email, fullName));
   }
@@ -1270,6 +1270,25 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         }
       }
     });
+  }
+
+  /**
+   * An audit row written after the state change committed, on an auth route (login lockout,
+   * re-auth failure lockout, refresh reuse, logout). A failure here is logged by class name (the
+   * alert hook, FU-BE-181) and NEVER changes the response: a 500 on these paths would tell an
+   * existing account from an unknown one (api-contract section 8, P-37).
+   */
+  private async auditAfterCommit(
+    user: User,
+    action: string,
+    ctx: RequestContext,
+    metadata: Prisma.InputJsonObject = {},
+  ): Promise<void> {
+    try {
+      await this.audit(user, action, ctx, metadata);
+    } catch (e) {
+      this.logger.error(`Audit write after commit failed (${errorName(e)}) for ${action}`);
+    }
   }
 
   private async audit(

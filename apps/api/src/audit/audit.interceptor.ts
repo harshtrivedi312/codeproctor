@@ -17,6 +17,7 @@ import { Observable, mergeMap } from 'rxjs';
 import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
 import type { AuthUser } from '../common/auth/auth.types';
+import { AuditWriteAfterCommitError } from './audit-write-after-commit.error';
 import { AUDITED } from './audited.decorator';
 import type { AuditedOptions } from './audited.decorator';
 
@@ -25,14 +26,6 @@ function normaliseId(id: string): string {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
     ? id.toLowerCase()
     : id;
-}
-
-/** Fixed, message-free and cause-free: nothing from the database error travels with it. */
-class AuditWriteFailedError extends Error {
-  constructor() {
-    super('Audit write failed');
-    this.name = 'AuditWriteFailedError';
-  }
 }
 
 type AuditedRequest = Request & { user?: AuthUser };
@@ -70,7 +63,7 @@ export class AuditInterceptor implements NestInterceptor {
             { errorName: e instanceof Error ? e.name : 'NonError' },
             'Audit write failed after the handler committed',
           );
-          throw e instanceof InternalServerErrorException ? e : new AuditWriteFailedError();
+          throw new AuditWriteAfterCommitError();
         }
         return data;
       }),

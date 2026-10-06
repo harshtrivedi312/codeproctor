@@ -1,6 +1,7 @@
 // DL-37, FU-BE-42: database lock contention is 503 + Retry-After on every route.
 import { ArgumentsHost, ConflictException, HttpException, Logger } from '@nestjs/common';
 import { CodedConflictException, CodedForbiddenException } from './coded.exception';
+import { AuditWriteAfterCommitError } from '../audit/audit-write-after-commit.error';
 import { Prisma } from '../generated/prisma/client.js';
 import { lockContentionCode } from './db-contention';
 import { ProblemFilter } from './problem.filter';
@@ -207,6 +208,22 @@ describe('ProblemFilter database lock contention (DL-37, FU-BE-42, NFR-04)', () 
     const forbidden = run(new CodedForbiddenException('x', busy));
     expect(forbidden.status).toBe(403);
     expect(forbidden.body.code).toBeUndefined();
+  });
+
+  it('DL-37 (P-37): an audit write failure after commit is a fixed 500: no Retry-After, no code, no detail, never 503', () => {
+    const { status, body, headers } = run(new AuditWriteAfterCommitError());
+    expect(status).toBe(500);
+    expect(headers['Retry-After']).toBeUndefined();
+    expect(body).toEqual({
+      type: 'about:blank',
+      title: 'Internal Server Error',
+      status: 500,
+      instance: '/api/v1/x',
+      traceId: 'trace-1',
+    });
+    // Even when something lock-shaped is attached, the type wins and nothing is remapped.
+    const withCode = Object.assign(new AuditWriteAfterCommitError(), { code: '55P03' });
+    expect(run(withCode).status).toBe(500);
   });
 
   it('FU-BE-42: a cyclic or very deep cause chain terminates', () => {

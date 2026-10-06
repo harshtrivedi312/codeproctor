@@ -16,6 +16,7 @@ import {
   LOCK_CONTENTION_RETRY_AFTER_SECONDS,
   lockContentionCode,
 } from './db-contention';
+import { AuditWriteAfterCommitError } from '../audit/audit-write-after-commit.error';
 import { getEarlyRejection } from './early-rejection';
 import { resolveRequestId } from './request-id';
 import { OrgContextMissingError, OrgScopeError } from '../database/errors';
@@ -73,7 +74,9 @@ export class ProblemFilter implements ExceptionFilter {
     // Database lock contention (DL-37, FU-BE-42): 503 + Retry-After on every route. An
     // HttpException is never reclassified.
     const lockCode =
-      exception instanceof HttpException || exception instanceof OrgScopeError
+      exception instanceof HttpException ||
+      exception instanceof OrgScopeError ||
+      exception instanceof AuditWriteAfterCommitError
         ? undefined
         : lockContentionCode(exception);
     const status = noScope
@@ -95,6 +98,11 @@ export class ProblemFilter implements ExceptionFilter {
     if (noScope) {
       this.logger.error({ traceId, errorName: exception.name }, 'Query without an org context');
       problem.detail = 'Access denied.';
+    } else if (exception instanceof AuditWriteAfterCommitError) {
+      // The action committed; the audit row did not (P-37 carve-out). A fixed 500 with no detail,
+      // no code and no Retry-After, so a client never retries a non-idempotent action. Logged by
+      // class name and trace id only (the interceptor logged the failure).
+      this.logger.error({ traceId, errorName: exception.name }, 'Audit write after commit failed');
     } else if (lockCode !== undefined) {
       // Class name and the fixed code token only: the message can hold SQL and parameters.
       // P2028 also means a closed or unknown transaction (a code bug), so it is logged at error
