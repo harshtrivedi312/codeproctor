@@ -178,3 +178,4 @@ The architecture hub session hasn't been running since 2026-10-06 02:25 UTC, so 
   - ADR 0008 §11: the consents D-55 delta row and the 298-column total (FU-DB-261).
   - Residual gap, for Database B and BE-07 (not the hub): SERVICE scope has no column limits, so the consent-PDF job could write `age_confirmed_at`.
 - [hub] Process hygiene (Delivery Lead, 2026-10-06): sessions use unique scratchpad filenames, for example `pr-body-<session>-<pr>.md`, or pass the body inline with `gh pr create --body`. A shared `pr-body.md` was overwritten by another session and briefly put the wrong text on PR #222. A CLAUDE.md rule would need the owner, so this note stands for now.
+- [hub] ADR 0004 section 9.2 clarification (owner approval): its "no versioning" applies to the buckets RetentionService deletes from (the media bucket); the pilot backups bucket is versioned with Object Lock (ADR 0017 5.1, C-55). Draft the one-sentence amendment for the owner.
