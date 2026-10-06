@@ -38,3 +38,42 @@ describe('computeRevision (FR-203, FR-204)', () => {
     }
   });
 });
+
+describe('computeRevision with variants (FR-203, TC-012)', () => {
+  const variant = {
+    id: 'v1',
+    params: { n: 1 },
+    isActive: true,
+    testCaseOverrides: [{ testCaseId: 'a', input: 'i2', expectedOutput: 'o2' }],
+  };
+
+  it('FR-203: no variants hashes as in slice 4a', () => {
+    expect(computeRevision(v, [tc], [])).toBe(computeRevision(v, [tc]));
+  });
+
+  it('FR-203: any variant, params, active flag or override change changes it; order does not', () => {
+    const base = computeRevision(v, [tc], [variant]);
+    expect(base).not.toBe(computeRevision(v, [tc]));
+    for (const other of [
+      computeRevision(v, [tc], [{ ...variant, params: { n: 2 } }]),
+      computeRevision(v, [tc], [{ ...variant, isActive: false }]),
+      computeRevision(v, [tc], [{ ...variant, testCaseOverrides: [] }]),
+      computeRevision(
+        v,
+        [tc],
+        [
+          {
+            ...variant,
+            testCaseOverrides: [{ testCaseId: 'a', input: 'i2', expectedOutput: 'o3' }],
+          },
+        ],
+      ),
+      computeRevision(v, [tc], [variant, { ...variant, id: 'v2' }]),
+    ]) {
+      expect(other).not.toBe(base);
+    }
+    expect(computeRevision(v, [tc], [{ ...variant, params: { n: 1 } }])).toBe(base);
+    const two = [variant, { ...variant, id: 'v2' }];
+    expect(computeRevision(v, [tc], two)).toBe(computeRevision(v, [tc], [...two].reverse()));
+  });
+});
