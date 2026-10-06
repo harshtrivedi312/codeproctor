@@ -1,4 +1,4 @@
--- retention_marker_index_and_no_session_delete: ADR 0004 §9 (proposed). Prisma cannot express a
+-- retention_marker_index_and_no_session_delete: ADR 0004 §9 (accepted, D-54). Prisma cannot express a
 -- partial index predicate or a REVOKE, so both statements are hand-written. Nothing else differs from
 -- what Prisma would generate (it generates nothing for this migration).
 --   - The partial index for the retention markers (§9.2; ADR 0008 delta).
