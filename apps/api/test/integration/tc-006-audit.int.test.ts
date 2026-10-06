@@ -20,6 +20,7 @@ import {
   ADMIN_USERS,
   BE03_READY,
   BE03_ROUTES,
+  BE04_READY,
   BE13_READY,
   Be03Route,
   hasPathId,
@@ -155,6 +156,14 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
               expect(meta?.method).toBe(route.method);
               expect(meta?.route).toBe(`/api/v1${route.template}`);
             }
+            if (route.metadataKeys) {
+              // Service-written row (BE-04): ids and changed field NAMES only, never content.
+              const meta = row.metadata as Record<string, unknown> | null;
+              expect(Object.keys(meta ?? {}).sort()).toEqual([...route.metadataKeys].sort());
+              for (const [k, ok] of Object.entries(route.metadataShape ?? {})) {
+                expect([k, meta?.[k], ok(meta?.[k])]).toEqual([k, meta?.[k], true]);
+              }
+            }
             const entityId = t.entityId ?? (await t.resolveEntityId?.());
             expect(entityId).toBeDefined(); // every audited route names its entity
             expect(row.entityId).toBe(entityId);
@@ -171,19 +180,21 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
 
         it(`TC-006: ${label} writes no audit row when refused (401, 403) or when the target is in another org (404)`, async () => {
           const holder = roleFor(route);
-          const denied = (['SUPER_ADMIN', 'REVIEWER', 'RECRUITER', 'AUTHOR'] as const).find(
+          const denied = (['SUPER_ADMIN', 'REVIEWER', 'RECRUITER', 'AUTHOR'] as const).filter(
             (x) => !hasPermission(x, route.permission),
           );
           // Create every actor and fixture BEFORE the baseline: sign-ins may write audit rows.
-          const lowly = denied ? await as(UserRole[denied]) : undefined;
+          const lowly: Actor[] = [];
+          for (const d of denied) lowly.push(await as(UserRole[d])); // one at a time (cold Redis)
           const outsider = hasPathId(route)
             ? (orgBStaff[holder] ??= await actor(h, holder, orgB))
             : undefined;
           const t = await route.prepare(h, h.orgId);
           const before = await lastId();
           await call(h, route.method, t.path, undefined, t.body).expect(401);
-          if (lowly) {
-            await call(h, route.method, t.path, lowly.token, t.body).expect(403);
+          // Every role without the permission (RECRUITER holds question:read but not question:update).
+          for (const who of lowly) {
+            await call(h, route.method, t.path, who.token, t.body).expect(403);
           }
           if (outsider) {
             await call(h, route.method, t.path, outsider.token, t.body).expect(404);
@@ -242,6 +253,11 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
 }
 
 auditSuite('TC-006: staff user routes are audited', BE03_READY, routesFor('BE-03'));
+auditSuite(
+  'TC-006 (FR-105, FR-201..FR-204): question routes write one audit row per mutation, reads none',
+  BE04_READY,
+  routesFor('BE-04'),
+);
 auditSuite(
   'TC-006 [BE-13 pending]: review routes are audited (a reviewer opening a review)',
   BE13_READY,
