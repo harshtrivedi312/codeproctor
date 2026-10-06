@@ -6,7 +6,6 @@ import type { CheckOutcome, SystemChecker } from '@/features/precheck/checks';
 import { MOCK_TOKENS } from '@/mocks/candidate/handlers';
 import { CandidateFlow } from './candidate-flow';
 import { getSessionToken } from './session-store';
-import { testRoutePath } from './start-step';
 import {
   expectHeadingFocused,
   fakeRoomDeps,
@@ -62,19 +61,18 @@ const identity = {
   upload: () => Promise.resolve(true),
 };
 
-function open(token: string, navigate: (path: string) => void = vi.fn()) {
+function open(token: string) {
   startAtStepper(token);
   return renderWithQuery(
-    <CandidateFlow overrides={{ checker, identity, room: fakeRoomDeps().deps, navigate }} />,
+    <CandidateFlow overrides={{ checker, identity, room: fakeRoomDeps().deps }} />,
   );
 }
 
 describe('stepper end to end (FR-401 to FR-403)', () => {
   it('FR-401: walks welcome, OTP, consent, system check, identity and start, and enters the test by a full navigation', async () => {
-    const navigate = vi.fn();
     const seen = recordRequests();
     const user = userEvent.setup();
-    open(MOCK_TOKENS.open, navigate);
+    open(MOCK_TOKENS.open);
 
     await expectHeadingFocused(/welcome to your proctored coding test/i);
     await passOtp(user);
@@ -134,10 +132,10 @@ describe('stepper end to end (FR-401 to FR-403)', () => {
     await expectHeadingFocused(/you are ready to start/i);
     expect(screen.getAllByText(/\(done\)/i)).toHaveLength(4);
     await user.click(screen.getByRole('button', { name: /start the test/i }));
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith(testRoutePath()));
+    // Start hands over to the test screen in the same document (FU-FEB-10, option (c)).
+    expect(await screen.findByText(/enter fullscreen to begin/i)).toBeInTheDocument();
 
-    // CSP: only a full document navigation gets the test route's WebAssembly allowance (D-45).
-    expect(navigate).toHaveBeenCalledTimes(1);
+    expect(window.location.pathname).toBe('/t/link');
     const order = seen.map((r) => new URL(r.url).pathname.split('/').pop());
     expect(order.indexOf('consent')).toBeGreaterThan(order.indexOf('start'));
     expect(order.indexOf('system-check')).toBeGreaterThan(order.indexOf('sign'));
@@ -190,14 +188,16 @@ describe('stepper end to end (FR-401 to FR-403)', () => {
     expect(getSessionToken()).toBeNull();
   });
 
-  it('D-45: the start button builds a full-document navigation, not a router push', async () => {
+  it('FR-505 ADR 0002: a resumed test (OTP while IN_PROGRESS) opens the running test, with no second start call', async () => {
+    const seen = recordRequests();
     const user = userEvent.setup();
-    const navigate = vi.fn();
-    open(MOCK_TOKENS.resume, navigate);
+    open(MOCK_TOKENS.resume);
     await passOtp(user);
     await user.click(await screen.findByRole('button', { name: /continue my test/i }));
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith(testRoutePath()));
-    expect(testRoutePath()).toMatch(/^\/t\/[^/]+\/test$/);
+    expect(await screen.findByText(/enter fullscreen to begin/i)).toBeInTheDocument();
+    expect(seen.some((r) => r.url.endsWith('/test/start'))).toBe(false);
+    expect(window.location.pathname).toBe('/t/link');
+    expect(localStorage.length + sessionStorage.length).toBe(0);
   });
 
   it('NFR-06: no axe violations on the start step', async () => {

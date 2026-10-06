@@ -9,29 +9,16 @@ import { candidateApi } from './api';
 import { StepFrame } from './step-frame';
 
 /**
- * The test screen needs WebAssembly for the in-browser detectors, and only /t/[token]/test gets
- * the CSP that allows it (D-45, lib/csp.ts). A client-side router push would keep this page's CSP,
- * so entry is a full document navigation.
+ * Start hands over to the test screen in the SAME document (FU-FEB-10, option (c)): the candidate
+ * session token stays in memory and nothing is written to storage or a URL. The cost is the CSP:
+ * the document keeps the stepper's policy, which has no WebAssembly allowance (D-45 limits that to
+ * /t/[token]/test), so the in-browser ML detectors cannot run and report DETECTOR_UNAVAILABLE.
+ * Owner decision still open: extend the CSP allowance to /t/link, or pick option (a) or (b).
  *
- * Open question (ARC-03 part 2): a full navigation drops the in-memory session token, and the test
- * route has no transport for it yet. Nothing is written to storage here. See
- * docs/followups/frontend.md.
- */
-export function testRoutePath(): string {
-  // The segment is a placeholder: the real token never goes back into the address bar.
-  return mockingEnabled ? '/t/demo/test' : '/t/session/test';
-}
-
-/**
- * Until ARC-03 part 2 decides how the candidate token reaches the test route (FU-FEB-10), a real
- * start would run the timer and then land on a page that cannot authenticate. So Start is only
- * available with mocks on, where the demo test screen takes over.
+ * Until the real backend serves the test routes, Start is only available with mocks on, where the
+ * whole path works end to end.
  */
 export const START_ENABLED: boolean = mockingEnabled;
-
-export function defaultNavigate(path: string): void {
-  window.location.assign(path);
-}
 
 const DONE_ITEMS = [
   'You signed the consent document',
@@ -42,11 +29,11 @@ const DONE_ITEMS = [
 
 export function StartStep({
   resuming,
-  navigate = defaultNavigate,
+  onStarted,
   onSessionEnded,
 }: {
   resuming: boolean;
-  navigate?: (path: string) => void;
+  onStarted: () => void;
   onSessionEnded: () => void;
 }): React.JSX.Element {
   const start = useMutation({
@@ -56,7 +43,7 @@ export function StartStep({
       return resuming ? ({ ok: true } as const) : candidateApi.startTest();
     },
     onSuccess: (result) => {
-      if (result.ok) navigate(testRoutePath());
+      if (result.ok) onStarted();
       else if (result.kind === 'problem' && result.status === 401) onSessionEnded();
     },
   });

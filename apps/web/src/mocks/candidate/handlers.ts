@@ -1,4 +1,5 @@
 import { http, HttpResponse } from 'msw';
+import { createTestRunHandlers, startMockTest } from './test-handlers';
 import { apiBaseUrl } from '@/lib/env';
 import type {
   ConsentDocument,
@@ -37,6 +38,8 @@ export const MOCK_TOKENS = {
   cooldown: 'mock-cooldown-invitation-token-0012',
   /** Already CONSENTED: resumes at the system check. */
   consented: 'mock-consented-invitation-token-0013',
+  /** Resumes into a running test that a proctor has paused. */
+  paused: 'mock-paused-invitation-token-0017',
   /** STRICT profile: a phone side camera is required. */
   strict: 'mock-strict-invitation-token-0014',
   /** Already VERIFIED (room scan done): resumes at the phone and practice steps. */
@@ -205,7 +208,7 @@ export function createCandidateHandlers() {
       };
       const scenario = scenarioOf(invitationToken);
       const rec = link(invitationToken);
-      const running = scenario === 'resume';
+      const running = scenario === 'resume' || scenario === 'paused';
       if (otp !== MOCK_OTP) {
         if (otp === MOCK_EXPIRED_OTP) return problem(400, 'OTP_NOT_REQUESTED');
         if (running) {
@@ -223,14 +226,14 @@ export function createCandidateHandlers() {
       counter += 1;
       const sessionToken = `mock-session-token-${counter}`;
       const status: SessionStatus =
-        scenario === 'resume'
+        scenario === 'resume' || scenario === 'paused'
           ? 'IN_PROGRESS'
           : scenario === 'verified' || scenario === 'strictVerified'
             ? 'VERIFIED'
             : scenario === 'consented'
               ? 'CONSENTED'
               : 'OPENED';
-      sessions.set(sessionToken, {
+      const record: SessionRecord = {
         scenario,
         status,
         identityAttempts: 0,
@@ -238,7 +241,13 @@ export function createCandidateHandlers() {
         roomScans: 0,
         roomChunks: new Map(),
         sideCameraPaired: false,
-      });
+      };
+      sessions.set(sessionToken, record);
+      // A running test: the OTP resumes it (ADR 0002). `paused` resumes into a proctor pause.
+      if (scenario === 'resume' || scenario === 'paused') {
+        const run = startMockTest(record);
+        if (scenario === 'paused') run.pauseReasons = ['PROCTOR'];
+      }
       return HttpResponse.json({
         sessionToken,
         sessionTokenExpiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
@@ -460,7 +469,15 @@ export function createCandidateHandlers() {
     http.post(`${base}/test/start`, ({ request }) => {
       const s = bearer(request);
       if (!s) return problem(401, 'UNAUTHENTICATED');
-      return HttpResponse.json({ status: 'IN_PROGRESS', serverTime: new Date().toISOString() });
+      const run = startMockTest(s);
+      s.status = 'IN_PROGRESS';
+      return HttpResponse.json({
+        status: 'IN_PROGRESS',
+        serverTime: new Date().toISOString(),
+        startedAt: new Date(run.startedAt).toISOString(),
+      });
     }),
+
+    ...createTestRunHandlers({ bearer, problem }),
   ];
 }
