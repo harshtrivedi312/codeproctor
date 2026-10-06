@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # Shared helpers for backup.sh, restore.sh and erasure-list.sh (DB-07). Sourced, never run.
 # POSIX sh. Nothing here prints a secret: no URL, key, password or token ever reaches a log line.
 
@@ -35,14 +36,19 @@ init_s3() {
     printf '[default]\ns3 =\n    addressing_style = path\n' > "$AWS_CONFIG_FILE"
     export AWS_CONFIG_FILE
   fi
+  # shellcheck disable=SC2034
   BUCKET=$S3_BACKUP_BUCKET
   PREFIX=${BACKUP_PREFIX:-db/}
   case "$PREFIX" in */) ;; *) PREFIX="$PREFIX/" ;; esac
   # The prefix goes into sed patterns, so only plain path characters are allowed.
   printf '%s' "$PREFIX" | grep -q '^[A-Za-z0-9_/-]*$' || die "BACKUP_PREFIX may hold only letters, digits, underscore, hyphen and slash."
   case "$PREFIX" in /* | *//*) die "BACKUP_PREFIX must be a relative path." ;; esac
+  # These are read by the scripts that source this file.
+  # shellcheck disable=SC2034
   DUMP_PREFIX="${PREFIX}dumps/"
+  # shellcheck disable=SC2034
   ERASURE_PREFIX="${PREFIX}erasure-list/"
+  # shellcheck disable=SC2034
   COMPLETED_PREFIX="${PREFIX}erasure-completed/"
 }
 
@@ -72,6 +78,13 @@ load_keys() {
 }
 # keys_grep <grep args>: greps KEYS.
 keys_grep() { printf '%s\n' "$KEYS" | grep "$@"; }
+
+# stamp_lt <a> <b>: true when stamp a is earlier than stamp b. Stamps look like 20261005T020000Z; with
+# the T and Z removed they are 14-digit numbers, so the comparison is numeric (POSIX test has no
+# string ordering).
+stamp_lt() {
+  [ "$(printf '%s' "$1" | tr -d 'TZ')" -lt "$(printf '%s' "$2" | tr -d 'TZ')" ]
+}
 
 utc_stamp() { date -u +%Y%m%dT%H%M%SZ; }
 
