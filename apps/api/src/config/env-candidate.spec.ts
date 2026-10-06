@@ -8,7 +8,9 @@ const valid = {
   COOKIE_SECRET: 'b'.repeat(40),
   ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64'),
 };
+// Settings pilot and production need besides the candidate ones (FR-503, FU-BE-97).
 const judge0 = {
+  TRUST_PROXY_HOPS: '1',
   JUDGE0_URL: 'https://judge0.example.com',
   JUDGE0_AUTH_TOKEN: 't'.repeat(32),
   JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),

@@ -51,6 +51,11 @@ describe('NFR-04 environment validation', () => {
       JUDGE0_URL: 'https://judge0.example.com',
       JUDGE0_AUTH_TOKEN: 't'.repeat(32),
       JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
+      // Candidate settings (BE-07) are also required in pilot and production.
+      JWT_CANDIDATE_SECRET: 'c'.repeat(48),
+      OTP_PEPPER: 'p'.repeat(48),
+      SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 3).toString('base64'),
+      REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
     };
     for (const APP_ENV of ['pilot', 'production']) {
       const base = { ...valid, ...live, APP_ENV };
