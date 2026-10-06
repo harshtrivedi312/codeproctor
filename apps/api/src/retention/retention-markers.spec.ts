@@ -28,6 +28,8 @@ const ALLOWED: Record<string, string> = {
   'apps/api/src/retention/retention.repository.ts': 'RetentionService writes and reads the markers',
   'infra/backup/erasure-list.sh':
     'prose only: its comment names the ERASURE_COMPLETED event; it writes no audit row',
+  'apps/api/src/retention/testing/retention-harness.ts':
+    'test helper: reads markers with the owner role',
   // Documentation of the rule itself and the tests of it:
   'apps/api/src/retention/testing/reserved-actions-scan.ts': 'the scanner names what it looks for',
 };

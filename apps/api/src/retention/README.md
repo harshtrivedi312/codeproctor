@@ -3,10 +3,11 @@
 The service logic of DB-06 (ADR 0004 section 9, compliance decisions C-04, C-06, C-17, C-26, C-27,
 C-35). The schema is Database A's; this folder is Database B's (DL-27).
 
-**Built so far (slice 1):** the clocks, the switches, the object-store port with verified deletion
-and the versioning gate, the face tier and the media tier (R-4), the per-run audit row, and the
-guard that keeps the markers reserved. **Next slices:** results (R-10), consent (R-9), erasure (the
-fence, the hold, the re-run, anonymisation), each with its own PR.
+**Built so far (slices 1 and 2):** the clocks, the switches, the object-store port with verified
+deletion and the versioning gate, the face tier, the media tier (R-4), the results tier (R-10) with
+candidate anonymisation and the accommodation reductions, consent records (R-9), the per-run audit row,
+and the guards that keep the markers reserved and consent data behind one repository. **Next slice:**
+erasure (the fence through BE-07's SessionStateService via a port, the hold, the re-run, the notice).
 
 ## How a tier runs
 
@@ -59,6 +60,6 @@ through a single-flight job. Tests use `testing/in-memory-object-store.ts`.
 
 ## Reserved audit actions
 
-`retention-markers.spec.ts` fails if any file outside the allowlist mentions `RETENTION_*_DONE`,
+`consent-access.spec.ts` fails on any other access to the consent model, an include or select of it, `signedName`, or raw SQL on `consents`. `retention-markers.spec.ts` fails if any file outside the allowlist mentions `RETENTION_*_DONE`,
 `ERASURE_EMAIL_SENT`, `ERASURE_EMAIL_FAILED`, `ERASURE_COMPLETED` or their constants (as a
 constant, a string literal or inside raw SQL). Add a legitimate writer to the allowlist in the same PR.
