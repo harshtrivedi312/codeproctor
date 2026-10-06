@@ -40,8 +40,28 @@ const sources = DIRS.flatMap((d) => files(join(SRC, d)));
 function methodRange(text: string, name: string): [number, number] {
   const at = text.search(new RegExp(`async ${name}\\(`));
   if (at < 0) throw new Error(`method ${name} not found`);
-  const open = text.indexOf('{', text.indexOf(')', text.indexOf('(', at)) + 1);
+  // Match the parameter list's own parentheses (a default object or call may sit inside it).
   let depth = 0;
+  let close = -1;
+  for (let i = text.indexOf('(', at); i < text.length; i++) {
+    if (text[i] === '(') depth += 1;
+    else if (text[i] === ')' && --depth === 0) {
+      close = i;
+      break;
+    }
+  }
+  // Skip a return type such as Promise<{ a: string }> before the body's opening brace.
+  let angle = 0;
+  let open = -1;
+  for (let i = close + 1; i < text.length; i++) {
+    if (text[i] === '<') angle += 1;
+    else if (text[i] === '>' && text[i - 1] !== '=') angle -= 1;
+    else if (text[i] === '{' && angle <= 0) {
+      open = i;
+      break;
+    }
+  }
+  depth = 0;
   for (let i = open; i < text.length; i++) {
     if (text[i] === '{') depth += 1;
     else if (text[i] === '}' && --depth === 0) return [at, i + 1];
@@ -120,18 +140,21 @@ describe('ADR 0013 CS-4 interim: nothing a client sends picks a row', () => {
     const unfiltered: string[] = [];
     for (const f of sources) {
       // Only the two discovery methods read across orgs on purpose, under runSystem('BACKGROUND_JOB').
+      // The random-rule scan of the question bank is org-scoped by the extension and bounded.
       const exempt =
         f.path === 'candidate/session-jobs.service.ts'
           ? ['discoverDisconnected', 'sweepConsentPdfs'].map((m) => methodRange(f.text, m))
-          : [];
+          : f.path === 'candidate/test-start.service.ts'
+            ? [methodRange(f.text, 'resolveRandom')]
+            : [];
       for (const { call, args, index } of prismaCalls(f.text)) {
         if (exempt.some(([a, b]) => index >= a && index < b)) continue;
         if (!PREDICATE.test(args)) unfiltered.push(`${f.path}: ${call}`);
       }
     }
-    // The only calls without a predicate are the discovery/sweep jobs (skipped above) and the
-    // question bank scan for a random rule, which is org-scoped by the extension and bounded.
-    expect(unfiltered.filter((u) => !u.endsWith('question.findMany'))).toEqual([]);
+    // The only calls without a predicate are the discovery and sweep methods and resolveRandom,
+    // all exempted by method above.
+    expect(unfiltered).toEqual([]);
   });
 
   it('CS-4 interim: the scan finds the calls it is meant to judge', () => {
@@ -140,6 +163,11 @@ describe('ADR 0013 CS-4 interim: nothing a client sends picks a row', () => {
       prismaCalls('this.prisma.client.session.update({ where: { id }, data: { a: dto.x } })'),
     ).toHaveLength(1);
     expect(prismaCalls('x.session.update(dto.sessionId)')).toHaveLength(0);
+    const sample =
+      "class A {\n  async m(opts = { a: 1 }): Promise<{ b: string }> {\n    return { b: 'x' };\n  }\n  async n() {}\n}";
+    const [a, b] = methodRange(sample, 'm');
+    expect(sample.slice(a, b)).toContain("return { b: 'x' };");
+    expect(sample.slice(a, b)).not.toContain('async n');
   });
 
   it('CS-4 interim, DL-31: in all of apps/api/src outside database/, only candidate-scope.ts calls runAsCandidate or setCandidateFacts or imports candidate-facts', () => {

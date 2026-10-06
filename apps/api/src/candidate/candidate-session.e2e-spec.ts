@@ -2237,7 +2237,6 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       });
 
       expect(calls.length).toBeGreaterThan(30);
-      const all = calls.map((c) => `${c.model}.${c.op} ${c.json}`);
       // 1. No query names any id or token of the other sessions or of the other org, anywhere.
       //    The two 401 probes above carry the foreign ids in the TOKEN and are expected to
       //    query the session by that id inside the token's own org only: they are the one allowed
@@ -2250,6 +2249,10 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
           [...probeSessionIds].some((id) => c.json.includes(id)),
       );
       expect(probeCalls).toHaveLength(2);
+      // The probes are token lookups in the plain org scope of the token's own org, for no subject.
+      for (const c of probeCalls) {
+        expect([c.subject, c.scope, c.actor]).toEqual([null, 'org', 'ORG']);
+      }
       const rest = calls.filter((c) => !probeCalls.includes(c));
       for (const c of rest) {
         for (const id of forbidden) expect(`${c.model}.${c.op} ${c.json}`).not.toContain(id);
@@ -2312,7 +2315,6 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         else if (c.model === 'question')
           expect([label, c.json.includes('isArchived')]).toEqual([label, true]); // random-rule scan, org scope by the extension
         else throw new Error(`unreviewed model in a candidate route: ${label}`);
-        expect(all.length).toBeGreaterThan(0);
       }
       // 4. CS-4 scope adoption (DL-31). Every candidate-scope query ran after the facts were set,
       //    names only readable columns, and none of the org-scope-only data is touched there.
@@ -2497,7 +2499,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
           }),
         ).status,
       ).toBe(409);
-      // A's token with B's session id in it is not A's token: refused.
+      // Org mismatch: a token whose sid is B's session but whose oid is another org's is refused.
       expect(
         keep(
           await authed(

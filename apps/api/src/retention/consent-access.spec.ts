@@ -119,4 +119,85 @@ describe('consent access (FR-105, NFR-05, C-17)', () => {
       });
     }
   });
+
+  /** Text of the balanced brackets that start at `open`. */
+  function balanced(text: string, open: number): string {
+    const pairs: Record<string, string> = { '(': ')', '{': '}', '[': ']' };
+    const close = pairs[text[open] ?? ''] ?? ')';
+    let depth = 0;
+    for (let i = open; i < text.length; i++) {
+      if (text[i] === text[open]) depth += 1;
+      else if (text[i] === close && --depth === 0) return text.slice(open, i + 1);
+    }
+    return text.slice(open);
+  }
+
+  /** Top-level keys of the object that follows `key:` in `args`, or null when there is none. */
+  function keysOf(args: string, key: string): string[] | null {
+    const at = args.search(new RegExp(`\\b${key}\\s*:\\s*\\{`));
+    if (at < 0) return null;
+    const body = balanced(args, args.indexOf('{', at));
+    const keys: string[] = [];
+    let depth = 0;
+    let expectKey = false;
+    for (let i = 0; i < body.length; i++) {
+      const c = body[i] as string;
+      if (c === '{' || c === '[' || c === '(') {
+        depth += 1;
+        if (depth === 1) expectKey = true;
+      } else if (c === '}' || c === ']' || c === ')') depth -= 1;
+      else if (depth === 1 && c === ',') expectKey = true;
+      else if (depth === 1 && expectKey && /[\w$]/.test(c)) {
+        const m = /^[\w$]+/.exec(body.slice(i));
+        keys.push(m?.[0] ?? '');
+        i += (m?.[0].length ?? 1) - 1;
+        expectKey = false;
+      }
+    }
+    return keys.sort();
+  }
+
+  /** Every `.consent.<method>(` call of a file, in order, with its select and data key sets. */
+  function consentCalls(
+    rel: string,
+  ): Array<{ method: string; select: string[] | null; data: string[] | null }> {
+    const text = readFileSync(join(SRC, rel), 'utf8');
+    return [...text.matchAll(/\.consent\s*\.\s*(\w+)\s*\(/g)].map((m) => {
+      const args = balanced(text, (m.index ?? 0) + m[0].length - 1);
+      return { method: m[1] ?? '', select: keysOf(args, 'select'), data: keysOf(args, 'data') };
+    });
+  }
+
+  it('the BE-07 candidate files are pinned to their consent call sites, in order, with their select and data keys', () => {
+    expect(consentCalls('candidate/consent.service.ts')).toEqual([
+      // The candidate-scope read: the text id and signedAt only, never name, ip or user agent.
+      { method: 'findUnique', select: ['consentTextId', 'signedAt'], data: null },
+      // Sign: the write-once create (the DB grant later verifies sessionId and consentTextId).
+      {
+        method: 'create',
+        select: null,
+        data: ['consentTextId', 'ip', 'sessionId', 'signedAt', 'signedName', 'userAgent'],
+      },
+      // Decline.
+      {
+        method: 'create',
+        select: null,
+        data: ['consentTextId', 'declinedAt', 'ip', 'sessionId', 'userAgent'],
+      },
+    ]);
+    expect(consentCalls('candidate/consent-pdf.service.ts')).toEqual([
+      // The PDF job reads the name once, to print it; it writes only the PDF and email columns.
+      {
+        method: 'findUnique',
+        select: ['consentTextId', 'copyEmailedAt', 'id', 'pdfKey', 'signedAt', 'signedName'],
+        data: null,
+      },
+      { method: 'updateMany', select: null, data: ['pdfGeneratedAt', 'pdfKey'] },
+      { method: 'updateMany', select: null, data: ['copyEmailedAt'] },
+    ]);
+    // The sweep lists signed consents by id: ids only.
+    expect(consentCalls('candidate/session-jobs.service.ts')).toEqual([
+      { method: 'findMany', select: ['session', 'sessionId'], data: null },
+    ]);
+  });
 });
