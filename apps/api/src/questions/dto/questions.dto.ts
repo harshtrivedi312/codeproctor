@@ -399,6 +399,29 @@ export class TestCaseDto {
   expectedOutput?: string;
 }
 
+type VariantParamValue = string | number | boolean;
+
+export class VariantTestCaseOverrideDto {
+  @ApiProperty({ format: 'uuid' }) testCaseId!: string;
+  @ApiProperty({ description: 'Follows the slot of the base version.' }) isHidden!: boolean;
+  @ApiProperty() position!: number;
+  @ApiProperty() input!: string;
+  @ApiProperty() expectedOutput!: string;
+}
+
+export class VariantDto {
+  @ApiProperty({ format: 'uuid' }) id!: string;
+  @ApiProperty() isActive!: boolean;
+  @ApiProperty({ type: 'object', additionalProperties: true }) params!: Record<
+    string,
+    VariantParamValue
+  >;
+  @ApiProperty({ description: 'The statement rendered with params (kept for the author).' })
+  renderedStatement!: string;
+  @ApiProperty({ type: [VariantTestCaseOverrideDto] })
+  testCaseOverrides!: VariantTestCaseOverrideDto[];
+}
+
 export class QuestionVersionDto extends QuestionVersionRefDto {
   @ApiProperty() statementMd!: string;
   @ApiProperty({ type: [String] }) allowedLanguages!: string[];
@@ -417,6 +440,12 @@ export class QuestionVersionDto extends QuestionVersionRefDto {
   })
   revision?: string;
   @ApiProperty({ type: [TestCaseDto] }) testCases!: TestCaseDto[];
+  @ApiPropertyOptional({
+    type: [VariantDto],
+    description:
+      'Variants with their params and per-slot overrides (question:update only; absent for the staff read view, ADR 0007 V-5).',
+  })
+  variants?: VariantDto[];
 }
 
 export class QuestionDetailDto extends QuestionSummaryDto {

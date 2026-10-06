@@ -145,11 +145,18 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       orderBy: { version: 'desc' },
     });
     const cases = await owner.testCase.findMany({ where: { questionVersionId: head.id } });
+    const variants = await owner.questionVariant.findMany({
+      where: { questionVersionId: head.id },
+      include: { testCaseOverrides: true },
+    });
     await owner.questionVersion.update({
       where: { id: head.id },
       data: {
         validatedAt: new Date(),
-        validationReport: { passed: true, revision: revision ?? computeRevision(head, cases) },
+        validationReport: {
+          passed: true,
+          revision: revision ?? computeRevision(head, cases, variants),
+        },
       },
     });
   }
@@ -1071,6 +1078,8 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
 
       const urls = [
         `${API}/questions?includeArchived=true&pageSize=100`,
+        // Slice 4b: the candidate-shaped variant preview shows no params, override or key.
+        `${API}/questions/${id}/versions/1/variants/${variant.id}/preview`,
         ...[id, idOf(sa), idOf(mcq)].flatMap((qid) => [
           `${API}/questions/${qid}`,
           `${API}/questions/${qid}?version=1`,
@@ -1085,6 +1094,18 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
         for (const secret of secrets) expect([url, text.includes(secret)]).toEqual([url, false]);
         const keys = /referenceSolution|answerSpec|validationReport|correctOptionIds|revision/;
         expect([url, keys.test(text)]).toEqual([url, false]);
+      }
+      // A recruiter cannot list the variants (params, overrides): 403, not an empty list.
+      for (const url of [
+        `${API}/questions/${id}/versions/1/variants`,
+        `${API}/questions/${id}/versions/2/variants`,
+      ]) {
+        const res = await http().get(url).set(recruiter.auth);
+        expect([url, res.status, JSON.stringify(res.body).includes('SECRET')]).toEqual([
+          url,
+          403,
+          false,
+        ]);
       }
       // The draft version 2 is not reachable for a recruiter at all.
       for (const url of [
@@ -1108,6 +1129,10 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
         'SECRET-HIDDEN-IN',
         'SECRET-HIDDEN-OUT',
         'SECRET-REPORT',
+        // Slice 4b: the writer view carries variant params and overrides.
+        'SECRET-PARAM',
+        'SECRET-OVERRIDE-IN',
+        'SECRET-OVERRIDE-OUT',
       ]) {
         expect(full).toContain(secret);
       }
@@ -1589,6 +1614,869 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
     });
   });
 
+  // ---- FR-203: variants (slice 4b) ---------------------------------------------------------------
+
+  describe('FR-203, TC-011, TC-012 (partial: render and publish rules; execution is slice 4c): variants', () => {
+    const vbase = (q: Json, version = 1): string =>
+      `${API}/questions/${idOf(q)}/versions/${version}/variants`;
+    const templated = (over: Json = {}): Json =>
+      codingBody({
+        statementMd: 'Sum {{a}} and {{b}} for {{name}}.',
+        starterCode: { python: 'A = {{a}}' },
+        referenceSolution: { python: 'REFERENCE-SECRET {{a}}' },
+        ...over,
+      });
+    const params = { a: 2, b: 3, name: 'Ada' };
+
+    async function addVariant(
+      who: Made,
+      q: Json,
+      p: Json = params,
+      extra: Json = {},
+    ): Promise<{ id: string; revision: string; body: Json }> {
+      const res = await http()
+        .post(vbase(q))
+        .set(who.auth)
+        .send({ params: p, ...extra });
+      expect([res.status, res.body]).toEqual([201, expect.anything()]);
+      const body = res.body as { variant: { id: string }; revision: string };
+      return { id: body.variant.id, revision: body.revision, body: res.body as Json };
+    }
+
+    const slotsOf = (q: Json): Promise<{ id: string; isHidden: boolean }[]> =>
+      owner.testCase.findMany({
+        where: { questionVersion: { questionId: idOf(q) } },
+        orderBy: { position: 'asc' },
+        select: { id: true, isHidden: true },
+      });
+
+    const liveRevision = async (who: Made, q: Json): Promise<string> =>
+      versionOf(
+        (
+          await http()
+            .get(`${API}/questions/${idOf(q)}`)
+            .set(who.auth)
+            .expect(200)
+        ).body as Json,
+      ).revision as string;
+
+    it('FR-203: adding a variant renders the statement, stores params, audits ids only, and the revision follows', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, templated());
+      const before = await liveRevision(a, q);
+      const v = await addVariant(a, q);
+      const variant = (v.body as { variant: Json }).variant;
+      expect(variant).toEqual({
+        id: v.id,
+        isActive: true,
+        params,
+        renderedStatement: 'Sum 2 and 3 for Ada.',
+        testCaseOverrides: [],
+      });
+      expect(v.revision).not.toBe(before);
+      expect(await liveRevision(a, q)).toBe(v.revision);
+      const row = await owner.questionVariant.findUniqueOrThrow({ where: { id: v.id } });
+      expect(row.params).toEqual(params);
+      expect(row.renderedStatement).toBe('Sum 2 and 3 for Ada.');
+      const rows = await audit('QUESTION_VARIANT_ADDED', idOf(q));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.metadata).toEqual({ version: 1, variantId: v.id, isActive: true });
+      expect(JSON.stringify(rows)).not.toContain('Ada');
+      // The writer view lists it with the version.
+      const list = await http().get(vbase(q)).set(a.auth).expect(200);
+      expect((list.body as { items: Json[] }).items).toHaveLength(1);
+      expect((list.body as Json).revision).toBe(v.revision);
+      const detail = versionOf(
+        (
+          await http()
+            .get(`${API}/questions/${idOf(q)}`)
+            .set(a.auth)
+            .expect(200)
+        ).body as Json,
+      );
+      expect((detail.variants as Json[]).map((x) => x.id)).toEqual([v.id]);
+    });
+
+    it('FR-203: a variant change clears the last validation result', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, templated());
+      await markValidated(idOf(q));
+      const v = await addVariant(a, q);
+      const head = await owner.questionVersion.findFirstOrThrow({ where: { questionId: idOf(q) } });
+      expect([head.validatedAt, head.validationReport]).toEqual([null, null]);
+      await markValidated(idOf(q));
+      await http()
+        .patch(`${vbase(q)}/${v.id}`)
+        .set(a.auth)
+        .send({ isActive: false })
+        .expect(200);
+      const after = await owner.questionVersion.findFirstOrThrow({
+        where: { questionId: idOf(q) },
+      });
+      expect(after.validatedAt).toBeNull();
+    });
+
+    it('FR-203: a placeholder with no param is 400 listing it, never rendered empty; nothing is written', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, templated());
+      const res = await http()
+        .post(vbase(q))
+        .set(a.auth)
+        .send({ params: { a: 1, b: 2 } });
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(res.body)).toContain('unknown placeholder \\"name\\"');
+      expect(JSON.stringify(res.body)).toContain('statementMd');
+      expect(
+        await owner.questionVariant.count({ where: { questionVersion: { questionId: idOf(q) } } }),
+      ).toBe(0);
+      expect(await audit('QUESTION_VARIANT_ADDED', idOf(q))).toHaveLength(0);
+    });
+
+    it('FR-203: unsupported Mustache features in the template are refused when a variant renders it', async () => {
+      const a = await make(UserRole.AUTHOR);
+      for (const statementMd of ['{{#a}}x{{/a}}', '{{{a}}}', '{{> p}}', '{{a.b}}', 'open {{a']) {
+        const q = await create(a, codingBody({ statementMd }));
+        const res = await http()
+          .post(vbase(q))
+          .set(a.auth)
+          .send({ params: { a: 1 } });
+        expect([statementMd, res.status]).toEqual([statementMd, 400]);
+      }
+      // A literal brace pair is written \{{ and renders as {{.
+      const q = await create(a, codingBody({ statementMd: 'Use \\{{x}} and {{a}}' }));
+      const v = await addVariant(a, q, { a: 1 });
+      expect(
+        (await owner.questionVariant.findUniqueOrThrow({ where: { id: v.id } })).renderedStatement,
+      ).toBe('Use {{x}} and 1');
+    });
+
+    it('FR-203: params are validated (DTO): bad names, nesting, null, NUL, size, types; nothing is written', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, templated());
+      const long = 'x'.repeat(1001);
+      const bad: Json[] = [
+        {},
+        { params: null },
+        { params: 'x' },
+        { params: [] },
+        { params: { ...params, __x: 1 } },
+        { params: { ...params, 'a.b': 1 } },
+        { params: { ...params, nested: { x: 1 } } },
+        { params: { ...params, list: [1] } },
+        { params: { ...params, n: null } },
+        { params: { ...params, name: 'a\u0000b' } },
+        { params: { ...params, name: 'a\ud800b' } },
+        { params: { ...params, name: long } },
+        { params, isActive: null },
+        { params, isActive: 'yes' },
+        { params, expectedRevision: 'abc' },
+        { params, extra: 1 },
+      ];
+      for (const body of bad) {
+        const res = await http().post(vbase(q)).set(a.auth).send(body);
+        expect([JSON.stringify(body).slice(0, 80), res.status]).toEqual([
+          JSON.stringify(body).slice(0, 80),
+          400,
+        ]);
+      }
+      const many = Object.fromEntries(Array.from({ length: 51 }, (_, i) => [`p${i}`, 1]));
+      await http()
+        .post(vbase(q))
+        .set(a.auth)
+        .send({ params: { ...params, ...many } })
+        .expect(400);
+      expect(
+        await owner.questionVariant.count({ where: { questionVersion: { questionId: idOf(q) } } }),
+      ).toBe(0);
+    });
+
+    it('FR-203: a __proto__ key in the JSON body never pollutes a prototype and is never stored', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, codingBody({ statementMd: 'Plain.' }));
+      const res = await http()
+        .post(vbase(q))
+        .set(a.auth)
+        .set('Content-Type', 'application/json')
+        .send('{"params":{"x":1,"__proto__":{"polluted":"YES"}}}');
+      expect([201, 400]).toContain(res.status);
+      expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+      // `constructor` and `__proto__` keys are dropped by the body transformer before validation
+      // (class-transformer skips them, `prototype` too), so they are never stored either way.
+      const viaCtor = await http()
+        .post(vbase(q))
+        .set(a.auth)
+        .set('Content-Type', 'application/json')
+        .send('{"params":{"x":1,"prototype":1,"constructor":{"prototype":{"polluted":"YES"}}}}');
+      expect([201, 400]).toContain(viaCtor.status);
+      expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+      const rows = await owner.questionVariant.findMany({
+        where: { questionVersion: { questionId: idOf(q) } },
+      });
+      expect(JSON.stringify(rows)).not.toContain('polluted');
+      expect(JSON.stringify(rows)).not.toMatch(/constructor|prototype/);
+      // The same on the way in through a rendered statement: a prototype name is an unknown placeholder.
+      const q2 = await create(a, codingBody({ statementMd: '{{constructor}} {{__proto__}}' }));
+      await http()
+        .post(vbase(q2))
+        .set(a.auth)
+        .send({ params: { x: 1 } })
+        .expect(400);
+    });
+
+    it('FR-203: PATCH changes params and re-renders; an empty PATCH is 400; an inactive variant is not rendered until reactivated', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, templated());
+      const v = await addVariant(a, q);
+      await http()
+        .patch(`${vbase(q)}/${v.id}`)
+        .set(a.auth)
+        .send({})
+        .expect(400);
+      await http()
+        .patch(`${vbase(q)}/${v.id}`)
+        .set(a.auth)
+        .send({ params: { ...params, a: 9 } })
+        .expect(200);
+      expect(
+        (await owner.questionVariant.findUniqueOrThrow({ where: { id: v.id } })).renderedStatement,
+      ).toBe('Sum 9 and 3 for Ada.');
+      // Missing param while active: 400, unchanged.
+      await http()
+        .patch(`${vbase(q)}/${v.id}`)
+        .set(a.auth)
+        .send({ params: { a: 1 } })
+        .expect(400);
+      expect(
+        (await owner.questionVariant.findUniqueOrThrow({ where: { id: v.id } })).params,
+      ).toEqual({ ...params, a: 9 });
+      // Inactive: the incomplete params are kept without rendering; reactivating is refused.
+      await http()
+        .patch(`${vbase(q)}/${v.id}`)
+        .set(a.auth)
+        .send({ params: { a: 1 }, isActive: false })
+        .expect(200);
+      await http()
+        .patch(`${vbase(q)}/${v.id}`)
+        .set(a.auth)
+        .send({ isActive: true })
+        .expect(400);
+      await http()
+        .patch(`${vbase(q)}/${v.id}`)
+        .set(a.auth)
+        .send({ params, isActive: true })
+        .expect(200);
+      const rows = await audit('QUESTION_VARIANT_UPDATED', idOf(q));
+      expect(rows.map((r) => r.metadata)).toEqual([
+        { version: 1, variantId: v.id, fields: ['params'] },
+        { version: 1, variantId: v.id, fields: ['params', 'isActive'] },
+        { version: 1, variantId: v.id, fields: ['params', 'isActive'] },
+      ]);
+    });
+
+    it('FR-203: editing the base statement must still render for every active variant (400, unchanged), and refreshes the stored statement otherwise', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, templated());
+      const v = await addVariant(a, q);
+      await http()
+        .patch(`${API}/questions/${idOf(q)}`)
+        .set(a.auth)
+        .send({ statementMd: 'Needs {{missing}}.' })
+        .expect(400);
+      expect(
+        (await owner.questionVersion.findFirstOrThrow({ where: { questionId: idOf(q) } }))
+          .statementMd,
+      ).toBe('Sum {{a}} and {{b}} for {{name}}.');
+      await http()
+        .patch(`${API}/questions/${idOf(q)}`)
+        .set(a.auth)
+        .send({ referenceSolution: { python: 'uses {{nope}}' } })
+        .expect(400);
+      await http()
+        .patch(`${API}/questions/${idOf(q)}`)
+        .set(a.auth)
+        .send({ statementMd: 'Only {{name}}.' })
+        .expect(200);
+      expect(
+        (await owner.questionVariant.findUniqueOrThrow({ where: { id: v.id } })).renderedStatement,
+      ).toBe('Only Ada.');
+    });
+
+    it('FR-203: removing a variant removes its overrides; a missing or foreign variant id is 404', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, templated());
+      const other = await create(a, templated());
+      const v = await addVariant(a, q);
+      const [sample] = await slotsOf(q);
+      await http()
+        .put(`${vbase(q)}/${v.id}/test-cases/${sample?.id}`)
+        .set(a.auth)
+        .send({ input: '5 6', expectedOutput: '11' })
+        .expect(200);
+      // The variant belongs to another question: 404 through this one.
+      await http()
+        .delete(`${vbase(other)}/${v.id}`)
+        .set(a.auth)
+        .expect(404);
+      await http()
+        .delete(`${vbase(q)}/${GHOST}`)
+        .set(a.auth)
+        .expect(404);
+      await http()
+        .delete(`${vbase(q)}/${v.id}`)
+        .set(a.auth)
+        .expect(204);
+      expect(await owner.questionVariant.count({ where: { id: v.id } })).toBe(0);
+      expect(await owner.variantTestCase.count({ where: { variantId: v.id } })).toBe(0);
+      expect(await audit('QUESTION_VARIANT_REMOVED', idOf(q))).toHaveLength(1);
+    });
+
+    it('FR-203, ADR 0007 V-1, V-6: an override replaces one slot, the hidden flag and weight follow the slot, and only slots of this version are allowed', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, templated());
+      const other = await create(a, templated());
+      const v = await addVariant(a, q);
+      const [sample, hidden] = await slotsOf(q);
+      const [foreign] = await slotsOf(other);
+      const put = (slot: string | undefined, body: Json = { input: '5 6', expectedOutput: '11' }) =>
+        http()
+          .put(`${vbase(q)}/${v.id}/test-cases/${slot}`)
+          .set(a.auth)
+          .send(body);
+      const first = await put(sample?.id);
+      expect([first.status, first.body]).toEqual([
+        200,
+        {
+          testCaseId: sample?.id,
+          isHidden: false,
+          position: 0,
+          input: '5 6',
+          expectedOutput: '11',
+        },
+      ]);
+      // Replaced, not duplicated.
+      await put(sample?.id, { input: '7 8', expectedOutput: '15' }).expect(200);
+      expect(await owner.variantTestCase.count({ where: { variantId: v.id } })).toBe(1);
+      const hid = await put(hidden?.id, { input: 'HID-IN', expectedOutput: 'HID-OUT' });
+      expect((hid.body as Json).isHidden).toBe(true);
+      // A slot of another question (V-6), a random id and an unknown variant are the same 404.
+      for (const res of [await put(foreign?.id), await put(GHOST)]) {
+        expect(res.status).toBe(404);
+      }
+      await http()
+        .put(`${vbase(q)}/${GHOST}/test-cases/${sample?.id}`)
+        .set(a.auth)
+        .send({ input: 'x', expectedOutput: 'y' })
+        .expect(404);
+      expect(await owner.variantTestCase.count({ where: { testCaseId: foreign?.id } })).toBe(0);
+      // Body validation.
+      for (const body of [
+        {},
+        { input: 'x' },
+        { input: 1, expectedOutput: 'y' },
+        { input: 'a\u0000', expectedOutput: 'y' },
+        { input: 'x', expectedOutput: null },
+        { input: 'x'.repeat(100_001), expectedOutput: 'y' },
+        { input: 'x', expectedOutput: 'y', isHidden: false },
+      ]) {
+        await put(sample?.id, body).expect(400);
+      }
+      // The slot's own flag is the one shown: flip the slot to hidden and the override follows it.
+      await http()
+        .patch(`${API}/questions/${idOf(q)}/versions/1/test-cases/${sample?.id}`)
+        .set(a.auth)
+        .send({ isHidden: true })
+        .expect(200);
+      const list = await http().get(vbase(q)).set(a.auth).expect(200);
+      const overrides = (list.body as { items: { testCaseOverrides: Json[] }[] }).items[0]
+        ?.testCaseOverrides as Json[];
+      expect(overrides.map((o) => [o.testCaseId, o.isHidden]).sort()).toEqual(
+        [
+          [sample?.id, true],
+          [hidden?.id, true],
+        ].sort(),
+      );
+      // Remove one: the default applies again; removing it twice is 404.
+      await http()
+        .delete(`${vbase(q)}/${v.id}/test-cases/${hidden?.id}`)
+        .set(a.auth)
+        .expect(204);
+      await http()
+        .delete(`${vbase(q)}/${v.id}/test-cases/${hidden?.id}`)
+        .set(a.auth)
+        .expect(404);
+      expect(await owner.variantTestCase.count({ where: { variantId: v.id } })).toBe(1);
+      expect((await audit('QUESTION_VARIANT_TEST_CASE_SET', idOf(q))).length).toBe(3);
+      const set = (await audit('QUESTION_VARIANT_TEST_CASE_SET', idOf(q)))[0];
+      expect(Object.keys(set?.metadata as Json).sort()).toEqual([
+        'isHidden',
+        'testCaseId',
+        'variantId',
+        'version',
+      ]);
+      expect(JSON.stringify(await audit('QUESTION_VARIANT_TEST_CASE_SET', idOf(q)))).not.toContain(
+        'HID-IN',
+      );
+      // Removing a slot removes the overrides on it (cascade).
+      await http()
+        .delete(`${API}/questions/${idOf(q)}/versions/1/test-cases/${sample?.id}`)
+        .set(a.auth)
+        .expect(204);
+      expect(await owner.variantTestCase.count({ where: { variantId: v.id } })).toBe(0);
+    });
+
+    it('FR-203, TC-013: a published version is immutable for variants (409); editing forks version 2 with copies of variants and overrides on the new slots', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, templated());
+      const v = await addVariant(a, q);
+      const [sample] = await slotsOf(q);
+      await http()
+        .put(`${vbase(q)}/${v.id}/test-cases/${sample?.id}`)
+        .set(a.auth)
+        .send({ input: '5 6', expectedOutput: '11' })
+        .expect(200);
+      await markValidated(idOf(q));
+      await http()
+        .post(`${API}/questions/${idOf(q)}/publish`)
+        .set(a.auth)
+        .expect(200);
+      const v1 = await owner.questionVersion.findFirstOrThrow({
+        where: { questionId: idOf(q), version: 1 },
+      });
+      const frozen = JSON.stringify([
+        await owner.questionVariant.findMany({ where: { questionVersionId: v1.id } }),
+        await owner.variantTestCase.findMany({ where: { variantId: v.id } }),
+      ]);
+      const auditsBefore = await pg.query('SELECT count(*)::int AS n FROM audit_logs');
+      const calls = [
+        http().post(vbase(q)).set(a.auth).send({ params }),
+        http()
+          .patch(`${vbase(q)}/${v.id}`)
+          .set(a.auth)
+          .send({ isActive: false }),
+        http()
+          .delete(`${vbase(q)}/${v.id}`)
+          .set(a.auth),
+        http()
+          .put(`${vbase(q)}/${v.id}/test-cases/${sample?.id}`)
+          .set(a.auth)
+          .send({ input: 'x', expectedOutput: 'y' }),
+        http()
+          .delete(`${vbase(q)}/${v.id}/test-cases/${sample?.id}`)
+          .set(a.auth),
+      ];
+      for (const c of calls) expect((await c).status).toBe(409);
+      expect(
+        JSON.stringify([
+          await owner.questionVariant.findMany({ where: { questionVersionId: v1.id } }),
+          await owner.variantTestCase.findMany({ where: { variantId: v.id } }),
+        ]),
+      ).toBe(frozen);
+      expect((await pg.query('SELECT count(*)::int AS n FROM audit_logs')).rows[0]).toEqual(
+        auditsBefore.rows[0],
+      );
+      // Forking: the next version is a draft with its own copies, version 1 is untouched.
+      const forked = await http()
+        .patch(`${API}/questions/${idOf(q)}`)
+        .set(a.auth)
+        .send({ statementMd: 'Fork {{name}}.' })
+        .expect(200);
+      expect((forked.body as Json).createdNewVersion).toBe(true);
+      const v2 = await owner.questionVersion.findFirstOrThrow({
+        where: { questionId: idOf(q), version: 2 },
+      });
+      const copies = await owner.questionVariant.findMany({
+        where: { questionVersionId: v2.id },
+        include: { testCaseOverrides: true },
+      });
+      expect(copies).toHaveLength(1);
+      expect(copies[0]?.id).not.toBe(v.id);
+      expect(copies[0]?.params).toEqual(params);
+      expect(copies[0]?.renderedStatement).toBe('Fork Ada.');
+      const newSlots = await owner.testCase.findMany({ where: { questionVersionId: v2.id } });
+      expect(copies[0]?.testCaseOverrides).toHaveLength(1);
+      expect(newSlots.map((s) => s.id)).toContain(copies[0]?.testCaseOverrides[0]?.testCaseId);
+      expect(copies[0]?.testCaseOverrides[0]?.testCaseId).not.toBe(sample?.id);
+      expect(copies[0]?.testCaseOverrides[0]?.input).toBe('5 6');
+      // Version 1 kept its own variant row and statement.
+      expect(
+        (await owner.questionVariant.findUniqueOrThrow({ where: { id: v.id } })).renderedStatement,
+      ).toBe('Sum 2 and 3 for Ada.');
+      // The draft version 2 accepts variant writes.
+      await http().post(vbase(q, 2)).set(a.auth).send({ params }).expect(201);
+    });
+
+    it('FR-203, TC-012 (partial: render rules only; running the reference is slice 4c): publish needs every active variant to render and every override on a slot of the version', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, templated());
+      const v = await addVariant(a, q);
+      const head = await owner.questionVersion.findFirstOrThrow({ where: { questionId: idOf(q) } });
+      const publish = (): request.Test =>
+        http()
+          .post(`${API}/questions/${idOf(q)}/publish`)
+          .set(a.auth);
+      // A variant whose params went bad behind the API's back (here: a direct database write).
+      await owner.questionVariant.update({ where: { id: v.id }, data: { params: { a: 1 } } });
+      await markValidated(idOf(q));
+      const blocked = await publish();
+      expect(blocked.status).toBe(422);
+      expect(JSON.stringify(blocked.body)).toContain(`variants[${v.id}]`);
+      expect(
+        (await owner.questionVersion.findUniqueOrThrow({ where: { id: head.id } })).isPublished,
+      ).toBe(false);
+      // Inactive: not rendered, does not block.
+      await owner.questionVariant.update({ where: { id: v.id }, data: { isActive: false } });
+      await markValidated(idOf(q));
+      // An override on a slot of another version is refused (V-6), even for an inactive variant.
+      const other = await create(a, templated());
+      const [foreign] = await slotsOf(other);
+      await owner.variantTestCase.create({
+        data: {
+          variantId: v.id,
+          testCaseId: foreign?.id as string,
+          input: 'i',
+          expectedOutput: 'o',
+        },
+      });
+      await markValidated(idOf(q));
+      const v6 = await publish();
+      expect(v6.status).toBe(422);
+      expect(JSON.stringify(v6.body)).toContain(
+        'overrides a test slot that is not in this version',
+      );
+      await owner.variantTestCase.deleteMany({ where: { variantId: v.id } });
+      await markValidated(idOf(q));
+      await publish().expect(200);
+    });
+
+    it('FR-203: publish stores the freshly rendered statement of each active variant; a stale validation (variant added after) is refused', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, templated());
+      const v = await addVariant(a, q);
+      await owner.questionVariant.update({
+        where: { id: v.id },
+        data: { renderedStatement: 'STALE' },
+      });
+      // markValidated binds to the revision WITHOUT the variant added next: publish must refuse.
+      const head = await owner.questionVersion.findFirstOrThrow({ where: { questionId: idOf(q) } });
+      const cases = await owner.testCase.findMany({ where: { questionVersionId: head.id } });
+      await markValidated(idOf(q), computeRevision(head, cases));
+      const res = await http()
+        .post(`${API}/questions/${idOf(q)}/publish`)
+        .set(a.auth);
+      expect(res.status).toBe(422);
+      expect(JSON.stringify(res.body)).toContain('validation');
+      await markValidated(idOf(q));
+      await http()
+        .post(`${API}/questions/${idOf(q)}/publish`)
+        .set(a.auth)
+        .expect(200);
+      expect(
+        (await owner.questionVariant.findUniqueOrThrow({ where: { id: v.id } })).renderedStatement,
+      ).toBe('Sum 2 and 3 for Ada.');
+    });
+
+    it('FR-204: expectedRevision on variant routes: stale is 409 and changes nothing; the returned revision is current', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, templated());
+      const first = await addVariant(a, q);
+      const stale = first.revision;
+      const second = await addVariant(a, q, params, { expectedRevision: stale });
+      expect(second.revision).not.toBe(stale);
+      const res = await http().post(vbase(q)).set(a.auth).send({ params, expectedRevision: stale });
+      expect(res.status).toBe(409);
+      expect(Object.keys(res.body as Json)).not.toContain('code');
+      await http()
+        .patch(`${vbase(q)}/${first.id}`)
+        .set(a.auth)
+        .send({ isActive: false, expectedRevision: stale })
+        .expect(409);
+      await http()
+        .delete(`${vbase(q)}/${first.id}?expectedRevision=${stale}`)
+        .set(a.auth)
+        .expect(409);
+      const [sample] = await slotsOf(q);
+      await http()
+        .put(`${vbase(q)}/${first.id}/test-cases/${sample?.id}`)
+        .set(a.auth)
+        .send({ input: 'x', expectedOutput: 'y', expectedRevision: stale })
+        .expect(409);
+      await http()
+        .delete(`${vbase(q)}/${first.id}/test-cases/${sample?.id}?expectedRevision=${stale}`)
+        .set(a.auth)
+        .expect(409);
+      expect(
+        await owner.questionVariant.count({ where: { questionVersion: { questionId: idOf(q) } } }),
+      ).toBe(2);
+      await http()
+        .delete(`${vbase(q)}/${first.id}?expectedRevision=${second.revision}`)
+        .set(a.auth)
+        .expect(204);
+      // The base PATCH sees a variant change too.
+      const current = await liveRevision(a, q);
+      await addVariant(a, q);
+      await http()
+        .patch(`${API}/questions/${idOf(q)}`)
+        .set(a.auth)
+        .send({ title: 'T', expectedRevision: current })
+        .expect(409);
+    });
+
+    it('FR-203: at most 50 variants per version (422); non-coding questions have none (422)', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, templated());
+      const head = await owner.questionVersion.findFirstOrThrow({ where: { questionId: idOf(q) } });
+      await owner.questionVariant.createMany({
+        data: Array.from({ length: 50 }, () => ({
+          questionVersionId: head.id,
+          params,
+          renderedStatement: 'x',
+        })),
+      });
+      await http().post(vbase(q)).set(a.auth).send({ params }).expect(422);
+      const mcq = await create(a, {
+        type: 'MCQ',
+        title: 'M',
+        statementMd: 'S',
+        difficulty: 'EASY',
+        answerSpec: mcqSpec,
+      });
+      await http().post(vbase(mcq)).set(a.auth).send({ params }).expect(422);
+    });
+
+    it('FR-203: concurrent variant creates and a base statement edit never leave an active variant that cannot render', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, codingBody({ statementMd: 'Plain.' }));
+      const results = await Promise.all([
+        ...Array.from({ length: 6 }, (_, i) =>
+          http()
+            .post(vbase(q))
+            .set(a.auth)
+            .send({ params: { n: i } }),
+        ),
+        http()
+          .patch(`${API}/questions/${idOf(q)}`)
+          .set(a.auth)
+          .send({ statementMd: 'Size {{n}}.' }),
+      ]);
+      for (const r of results) expect([201, 200, 400]).toContain(r.status);
+      expect(results[6]?.status).toBe(200); // every variant has n, so the edit is always valid
+      const head = await owner.questionVersion.findFirstOrThrow({ where: { questionId: idOf(q) } });
+      expect(head.statementMd).toBe('Size {{n}}.');
+      const rows = await owner.questionVariant.findMany({ where: { questionVersionId: head.id } });
+      expect(rows.filter((r) => r.isActive).length).toBe(
+        results.filter((r) => r.status === 201).length,
+      );
+      for (const r of rows) {
+        const n = (r.params as { n: number }).n;
+        // Created before the edit: its own text is stored as it was then; after: rendered with n.
+        expect(['Plain.', `Size ${n}.`]).toContain(r.renderedStatement);
+      }
+      // The invariant: after the edit settled, publish-time rendering is clean for each variant.
+      await http()
+        .patch(`${API}/questions/${idOf(q)}`)
+        .set(a.auth)
+        .send({ title: 'again' })
+        .expect(200);
+    });
+
+    it('FR-203, V-5, TC-011: the variant preview is candidate-shaped: rendered text, its own samples, no params, hidden data, reference solution or key', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const r = await make(UserRole.RECRUITER);
+      const q = await create(
+        a,
+        templated({
+          testCases: [
+            sampleCase,
+            hiddenCase,
+            { input: 'S2', expectedOutput: 'S2-OUT', isHidden: false, position: 5 },
+          ],
+        }),
+      );
+      const v = await addVariant(a, q, { a: 2, b: 3, name: 'SECRET-NAME-PARAM' });
+      const slots = await slotsOf(q);
+      await http()
+        .put(`${vbase(q)}/${v.id}/test-cases/${slots[0]?.id}`)
+        .set(a.auth)
+        .send({ input: 'V-SAMPLE-IN', expectedOutput: 'V-SAMPLE-OUT' })
+        .expect(200);
+      await http()
+        .put(`${vbase(q)}/${v.id}/test-cases/${slots[1]?.id}`)
+        .set(a.auth)
+        .send({ input: 'V-HIDDEN-IN', expectedOutput: 'V-HIDDEN-OUT' })
+        .expect(200);
+      const path = `${vbase(q)}/${v.id}/preview`;
+      // The author sees the draft; a recruiter gets 404 until it is published.
+      const draft = await http().get(path).set(a.auth).expect(200);
+      expect(Object.keys(draft.body as Json).sort()).toEqual([
+        'languages',
+        'limits',
+        'samples',
+        'starterCode',
+        'statementMd',
+        'title',
+        'type',
+      ]);
+      expect(draft.body).toMatchObject({
+        statementMd: 'Sum 2 and 3 for SECRET-NAME-PARAM.',
+        starterCode: { python: 'A = 2' },
+        samples: [
+          { input: 'V-SAMPLE-IN', expectedOutput: 'V-SAMPLE-OUT' },
+          { input: 'S2', expectedOutput: 'S2-OUT' },
+        ],
+      });
+      await http().get(path).set(r.auth).expect(404);
+      await markValidated(idOf(q));
+      await http()
+        .post(`${API}/questions/${idOf(q)}/publish`)
+        .set(a.auth)
+        .expect(200);
+      const res = await http().get(path).set(r.auth).expect(200);
+      expect(res.body).toEqual(draft.body);
+      const text = JSON.stringify(res.body);
+      for (const secret of [
+        'V-HIDDEN-IN',
+        'V-HIDDEN-OUT',
+        'HIDDEN-IN-9',
+        'HIDDEN-OUT-9',
+        'REFERENCE-SECRET',
+        'params',
+        'referenceSolution',
+        'answerSpec',
+        'revision',
+      ]) {
+        expect([secret, text.includes(secret)]).toEqual([secret, false]);
+      }
+      // An inactive variant is invisible to a recruiter (404) and still previewable by an author.
+      await owner.questionVariant.update({ where: { id: v.id }, data: { isActive: false } });
+      await http().get(path).set(r.auth).expect(404);
+      await http().get(path).set(a.auth).expect(200);
+      // Unknown variant, wrong version: 404.
+      await http()
+        .get(`${vbase(q)}/${GHOST}/preview`)
+        .set(r.auth)
+        .expect(404);
+      await http()
+        .get(`${vbase(q, 9)}/${v.id}/preview`)
+        .set(a.auth)
+        .expect(404);
+    });
+
+    it('FR-203: a variant that no longer renders is 422 with reasons for an author and a plain 422 for others', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const r = await make(UserRole.RECRUITER);
+      const q = await create(a, templated());
+      const v = await addVariant(a, q);
+      await markValidated(idOf(q));
+      await http()
+        .post(`${API}/questions/${idOf(q)}/publish`)
+        .set(a.auth)
+        .expect(200);
+      // Corrupt the published row directly (the API cannot).
+      await owner.questionVariant.update({ where: { id: v.id }, data: { params: { a: 1 } } });
+      const path = `${vbase(q)}/${v.id}/preview`;
+      const author = await http().get(path).set(a.auth);
+      const recruiter = await http().get(path).set(r.auth);
+      expect([author.status, recruiter.status]).toEqual([422, 422]);
+      expect(JSON.stringify(author.body)).toContain('unknown placeholder');
+      expect(JSON.stringify(recruiter.body)).not.toContain('placeholder');
+    });
+
+    it('FR-103, TC-004: roles on the variant routes: REVIEWER is 403 everywhere, RECRUITER only previews, org B gets 404 and nothing changes', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const recruiter = await make(UserRole.RECRUITER);
+      const reviewer = await make(UserRole.REVIEWER);
+      const q = await create(a, templated());
+      const v = await addVariant(a, q);
+      const [sample] = await slotsOf(q);
+      const base = vbase(q);
+      const calls: [string, string, Json | undefined][] = [
+        ['get', base, undefined],
+        ['post', base, { params }],
+        ['patch', `${base}/${v.id}`, { isActive: false }],
+        ['delete', `${base}/${v.id}`, undefined],
+        ['put', `${base}/${v.id}/test-cases/${sample?.id}`, { input: 'x', expectedOutput: 'y' }],
+        ['delete', `${base}/${v.id}/test-cases/${sample?.id}`, undefined],
+      ];
+      const send = (who: Made, [m, url, body]: [string, string, Json | undefined]) => {
+        const req = (http() as unknown as Record<string, (u: string) => request.Test>)[m]?.(url);
+        if (!req) throw new Error('bad method');
+        return body ? req.set(who.auth).send(body) : req.set(who.auth);
+      };
+      for (const call of calls) {
+        expect([call[0], call[1], (await send(recruiter, call)).status]).toEqual([
+          call[0],
+          call[1],
+          403,
+        ]);
+        expect([call[0], (await send(reviewer, call)).status]).toEqual([call[0], 403]);
+      }
+      await http().get(`${base}/${v.id}/preview`).set(reviewer.auth).expect(403);
+      const outsider = await make(UserRole.AUTHOR, orgB);
+      for (const call of calls) {
+        expect([call[0], call[1], (await send(outsider, call)).status]).toEqual([
+          call[0],
+          call[1],
+          404,
+        ]);
+      }
+      await http().get(`${base}/${v.id}/preview`).set(outsider.auth).expect(404);
+      const row = await owner.questionVariant.findUniqueOrThrow({ where: { id: v.id } });
+      expect([row.isActive, row.params]).toEqual([true, params]);
+      expect(await owner.variantTestCase.count({ where: { variantId: v.id } })).toBe(0);
+      // The same 404 as for a random question id.
+      const a404 = await http().get(base).set(outsider.auth);
+      const ghost = await http()
+        .get(`${API}/questions/${GHOST}/versions/1/variants`)
+        .set(outsider.auth);
+      expect(stable(a404)).toEqual({ ...stable(ghost), instance: undefined });
+    });
+
+    it('TC-011, FR-203: a recruiter never receives variant params or overrides in the detail view, and the version keys do not change', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const r = await make(UserRole.RECRUITER);
+      const q = await create(a, templated());
+      const v = await addVariant(a, q, { a: 1, b: 2, name: 'SECRET-PARAM-ZED' });
+      const [, hidden] = await slotsOf(q);
+      await http()
+        .put(`${vbase(q)}/${v.id}/test-cases/${hidden?.id}`)
+        .set(a.auth)
+        .send({ input: 'SECRET-OV-IN', expectedOutput: 'SECRET-OV-OUT' })
+        .expect(200);
+      await markValidated(idOf(q));
+      await http()
+        .post(`${API}/questions/${idOf(q)}/publish`)
+        .set(a.auth)
+        .expect(200);
+      for (const url of [
+        `${API}/questions/${idOf(q)}`,
+        `${API}/questions/${idOf(q)}?version=1`,
+        `${API}/questions?includeArchived=true`,
+        `${API}/questions/${idOf(q)}/preview`,
+      ]) {
+        const res = await http().get(url).set(r.auth).expect(200);
+        const text = JSON.stringify(res.body);
+        for (const s of [
+          'SECRET-PARAM-ZED',
+          'SECRET-OV',
+          'variants',
+          'params',
+          'renderedStatement',
+        ]) {
+          expect([url, s, text.includes(s)]).toEqual([url, s, false]);
+        }
+      }
+      const full = JSON.stringify(
+        (
+          await http()
+            .get(`${API}/questions/${idOf(q)}`)
+            .set(a.auth)
+        ).body,
+      );
+      expect(full).toContain('SECRET-PARAM-ZED');
+      expect(full).toContain('SECRET-OV-OUT');
+    });
+  });
+
   // ---- route matrix ----------------------------------------------------------------------------
 
   it('TC-004: every question route is in the permission matrix with matching access (FR-103)', () => {
@@ -1597,7 +2485,7 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       typeof import('../common/auth/route-registry')
     >('../common/auth/route-registry');
     const routes = listRoutes(app.get(ModulesContainer));
-    expect(routes.filter((r) => r.key.includes('/questions')).length).toBe(11);
+    expect(routes.filter((r) => r.key.includes('/questions')).length).toBe(18);
     expect(matrixProblems(routes)).toEqual([]);
   });
 });
