@@ -17,3 +17,14 @@ CREATE INDEX "audit_logs_retention_marker_idx" ON "audit_logs"("action", "entity
 -- has_table_privilege('app_user', 'sessions', 'DELETE' / 'TRUNCATE') = false, because a later migration
 -- that repeats the audit_append_only pattern (GRANT ... ON ALL TABLES) would silently undo this REVOKE.
 REVOKE DELETE, TRUNCATE ON "sessions" FROM app_user;
+
+-- ADR 0004 §9 edit: REVOKE only warns when it cannot revoke (another grantor, or an out-of-band grant),
+-- so check the result instead of trusting it, as app_user_no_temp does for TEMPORARY.
+DO $$
+BEGIN
+  IF has_table_privilege('app_user', 'sessions', 'DELETE')
+     OR has_table_privilege('app_user', 'sessions', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'app_user still has DELETE or TRUNCATE on sessions (ADR 0004 section 9.3). Revoke it as the table owner and every grantor, then deploy again.';
+  END IF;
+END
+$$;

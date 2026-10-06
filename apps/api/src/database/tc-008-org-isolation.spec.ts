@@ -295,13 +295,17 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         if (model === 'AuditLog') {
           // The database refuses UPDATE and DELETE on audit_logs for app_user whatever the filter.
           await expect(d.update?.({ where: b.unique, data: TOUCH[model] })).rejects.toThrow(
-            /permission denied/i,
+            /permission denied for table audit_logs/i,
           );
-          await expect(d.delete?.({ where: b.unique })).rejects.toThrow(/permission denied/i);
+          await expect(d.delete?.({ where: b.unique })).rejects.toThrow(
+            /permission denied for table audit_logs/i,
+          );
           await expect(d.updateMany?.({ where: b.filter, data: TOUCH[model] })).rejects.toThrow(
-            /permission denied/i,
+            /permission denied for table audit_logs/i,
           );
-          await expect(d.deleteMany?.({ where: b.filter })).rejects.toThrow(/permission denied/i);
+          await expect(d.deleteMany?.({ where: b.filter })).rejects.toThrow(
+            /permission denied for table audit_logs/i,
+          );
           return;
         }
         await expect(d.update?.({ where: b.unique, data: TOUCH[model] })).rejects.toMatchObject({
@@ -314,8 +318,12 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
           // sessions, so the database refuses both statements whatever the filter, before it looks
           // for a row. Deleting a session would cascade to its consent row, which R-9 keeps for
           // 3 years. The check after these attempts shows that B's row is still there.
-          await expect(d.delete?.({ where: b.unique })).rejects.toThrow(/permission denied/i);
-          await expect(d.deleteMany?.({ where: b.filter })).rejects.toThrow(/permission denied/i);
+          await expect(d.delete?.({ where: b.unique })).rejects.toThrow(
+            /permission denied for table sessions/i,
+          );
+          await expect(d.deleteMany?.({ where: b.filter })).rejects.toThrow(
+            /permission denied for table sessions/i,
+          );
           return;
         }
         if (model === 'Organization') {
@@ -353,8 +361,12 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         );
         if (model === 'Session') {
           // The same-org control for delete is a refusal (see the cross-org test above).
-          await expect(d.delete?.({ where: a.unique })).rejects.toThrow(/permission denied/i);
-          await expect(d.deleteMany?.({ where: a.filter })).rejects.toThrow(/permission denied/i);
+          await expect(d.delete?.({ where: a.unique })).rejects.toThrow(
+            /permission denied for table sessions/i,
+          );
+          await expect(d.deleteMany?.({ where: a.filter })).rejects.toThrow(
+            /permission denied for table sessions/i,
+          );
           expect(await d.count?.({ where: a.filter })).toBe(1);
         }
       });
