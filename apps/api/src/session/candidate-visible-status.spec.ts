@@ -16,7 +16,7 @@ describe('candidateVisibleStatus (hub decision Q17, FR-401)', () => {
     APPEALED: 'SUBMITTED',
     EXPIRED: 'EXPIRED',
     DECLINED: 'DECLINED',
-    // After SUBMITTED, so shown as SUBMITTED until the hub's contract PR decides ERASED handling (FU-BEB-132).
+    // After SUBMITTED, so shown as SUBMITTED until the hub's contract PR decides ERASED handling (FU-BEB-133).
     ERASED: 'SUBMITTED',
   };
 

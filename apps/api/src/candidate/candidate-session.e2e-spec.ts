@@ -536,6 +536,30 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       }
     });
 
+    it('NFR-05, TC-021: the link, the OTP route and a refused /start read no candidate data (no name, no address) for a used, erased, expired or declined link; a code that is sent reads it once', async () => {
+      const read = jest.spyOn(prisma.client.candidate, 'findUnique');
+      for (const status of ['SUBMITTED', 'ERASED', 'DECLINED', 'EXPIRED'] as SessionStatus[]) {
+        const inv = await invite({ status });
+        read.mockClear();
+        const link = await post('/link', { invitationToken: inv.token }).expect(200);
+        expect(link.body).toMatchObject({
+          state: status === 'SUBMITTED' || status === 'ERASED' ? 'ALREADY_USED' : status,
+        });
+        await post('/otp', { invitationToken: inv.token }).expect(200);
+        expect((await post('/start', { invitationToken: inv.token, otp: '123456' })).status).toBe(
+          409,
+        );
+        expect([status, read.mock.calls.length]).toEqual([status, 0]);
+      }
+      const open = await invite();
+      read.mockClear();
+      await post('/link', { invitationToken: open.token }).expect(200);
+      expect(read.mock.calls.length).toBe(0);
+      await post('/otp', { invitationToken: open.token }).expect(200);
+      expect(read.mock.calls.length).toBe(1);
+      read.mockRestore();
+    });
+
     it('TC-022: after window_end an unstarted link is EXPIRED, the status is stored, and no OTP is sent', async () => {
       const inv = await invite({
         windowEnd: new Date(Date.now() - 60_000),
@@ -2046,14 +2070,51 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       }
     });
 
+    it('NFR-05, ADR 0004 section 9.5, ADR 0013 5.7, TC-008: a token with a MATCHING epoch for an ERASED session gets a plain 401 on every guarded route, with no session data, no status and no side effect', async () => {
+      const heartbeatAt = new Date(Date.now() - 120_000);
+      const inv = await invite({
+        status: 'ERASED',
+        session: { authEpoch: 1, lastHeartbeat: heartbeatAt },
+      });
+      const token = tokenFor(inv);
+      const routes: Array<['get' | 'post', string, object?]> = [
+        ['get', ''],
+        ['get', '/consent'],
+        [
+          'post',
+          '/consent/sign',
+          { consentTextId: tenant.consentTextId, signedName: 'Ada Lovelace', confirmedAge18: true },
+        ],
+        ['post', '/consent/decline'],
+        ['post', '/test/start'],
+        ['post', '/heartbeat'],
+        ['post', '/proctor-key'],
+      ];
+      // The answer after the fence's epoch bump (the token is behind the new epoch), for comparison.
+      const bumped = await authed(
+        'get',
+        '',
+        tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch: 0 }).token,
+      );
+      for (const [method, path, body] of routes) {
+        const res = await authed(method, path, token, body);
+        expect([method, path, res.status]).toEqual([method, path, 401]);
+        expect(res.body).not.toHaveProperty('sessionStatus');
+        expect(res.body).not.toHaveProperty('status', 'SUBMITTED');
+        expect(JSON.stringify(res.body)).not.toMatch(/startedAt|deadlineAt|pauseReasons|ERASED/);
+        // Identical to the stale-epoch answer apart from per-request members.
+        const strip = (b: object): object => ({ ...b, instance: undefined, traceId: undefined });
+        if (path === '') expect(strip(res.body as object)).toEqual(strip(bumped.body as object));
+      }
+      const row = await sessionRow(inv.sessionId);
+      expect(row.lastHeartbeat?.getTime()).toBe(heartbeatAt.getTime());
+      expect(row.status).toBe('ERASED');
+      expect(await redis.keys(`pkey:${inv.sessionId}:*`)).toEqual([]);
+      expect(await owner.consent.count({ where: { sessionId: inv.sessionId } })).toBe(0);
+    });
+
     it('Q17: review and outcome statuses read SUBMITTED on the state route, in problem bodies and in the start response; EXPIRED and DECLINED are shown as they are', async () => {
-      for (const status of [
-        'GRADED',
-        'UNDER_REVIEW',
-        'COMPLETED',
-        'APPEALED',
-        'ERASED',
-      ] as SessionStatus[]) {
+      for (const status of ['GRADED', 'UNDER_REVIEW', 'COMPLETED', 'APPEALED'] as SessionStatus[]) {
         const inv = await invite({ status, session: { authEpoch: 1 } });
         const token = tokenFor(inv);
         const state = await authed('get', '', token).expect(200);

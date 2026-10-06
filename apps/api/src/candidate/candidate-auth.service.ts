@@ -62,7 +62,12 @@ interface ResolvedLink {
     windowEnd: Date;
   };
   readonly session: { id: string; status: SessionStatus };
-  readonly candidate: { fullName: string; email: string };
+  /**
+   * The candidate's name and address, loaded on demand and only where they are used (sending a
+   * code, the lockout notice). The link and the refusal paths never read them: a used or erased
+   * link must answer from the session status alone (L-3), and read no personal data.
+   */
+  readonly candidate: () => Promise<{ fullName: string; email: string }>;
   readonly testName: string;
   readonly orgName: string;
   readonly orgSettings: unknown;
@@ -134,14 +139,10 @@ export class CandidateAuthService {
       if (invitation === null) return invalidLink();
       // Narrow to the invitation's org before any other read (system scope is only for the lookup).
       return this.orgContext.runInOrg(invitation.orgId, async () => {
-        const [session, candidate, test, org] = await Promise.all([
+        const [session, test, org] = await Promise.all([
           this.prisma.client.session.findUnique({
             where: { invitationId: invitation.id },
             select: { id: true, status: true },
-          }),
-          this.prisma.client.candidate.findUnique({
-            where: { id: invitation.candidateId },
-            select: { fullName: true, email: true },
           }),
           this.prisma.client.test.findUnique({
             where: { id: invitation.testId },
@@ -152,11 +153,20 @@ export class CandidateAuthService {
             select: { name: true, settings: true },
           }),
         ]);
-        if (!session || !candidate || !test || !org) return invalidLink();
+        if (!session || !test || !org) return invalidLink();
+        let loaded: { fullName: string; email: string } | undefined;
         return then({
           invitation,
           session,
-          candidate,
+          candidate: async () => {
+            loaded ??=
+              (await this.prisma.client.candidate.findUnique({
+                where: { id: invitation.candidateId },
+                select: { fullName: true, email: true },
+              })) ?? undefined;
+            if (loaded === undefined) return invalidLink();
+            return loaded;
+          },
           testName: test.name,
           orgName: org.name,
           orgSettings: org.settings,
@@ -242,8 +252,10 @@ export class CandidateAuthService {
           { retryAfterSeconds: issued.retryAfterSeconds },
         );
       }
+      // The candidate is read only now that a code really goes out.
+      const candidate = await link.candidate();
       try {
-        await this.mail.sendOtp(link.candidate.email, {
+        await this.mail.sendOtp(candidate.email, {
           code: issued.code,
           testName: link.testName,
           expiresInMinutes: OTP_TTL_SECONDS / 60,
@@ -259,7 +271,7 @@ export class CandidateAuthService {
           'MAIL_UNAVAILABLE',
         );
       }
-      return { view, sent: true, maskedEmail: maskEmail(link.candidate.email) };
+      return { view, sent: true, maskedEmail: maskEmail(candidate.email) };
     });
   }
 
@@ -436,10 +448,12 @@ export class CandidateAuthService {
       select: { email: true, isActive: true },
     });
     if (!recruiter?.isActive) return;
+    // The candidate's name and address are read only here, for the notice.
+    const candidate = await link.candidate();
     try {
       await this.mail.sendOtpLockout(recruiter.email, {
-        candidateName: link.candidate.fullName,
-        candidateEmail: link.candidate.email,
+        candidateName: candidate.fullName,
+        candidateEmail: candidate.email,
         testName: link.testName,
         blockedMinutes: OTP_BLOCK_SECONDS / 60,
       });
