@@ -26,10 +26,11 @@ describe('RetentionService with ERASED sessions and CLOSED_ERASED appeals (FR-70
 
   it('TC-094: a CLOSED_ERASED appeal does not hold the media or results tier', async () => {
     await setup(h.A, { submittedDaysAgo: 400, anchorDaysAgo: 366, retentionDays: 90 });
-    await h.owner.appeal.updateMany({
+    const closed = await h.owner.appeal.updateMany({
       where: { sessionReview: { sessionId: sessionIdOf(h.A) } },
       data: { status: 'CLOSED_ERASED' },
     });
+    expect(closed.count).toBe(1);
     const summary = await build().service.runDaily(NOW);
     expect(summary.media).toMatchObject({ due: 1, completed: 1 });
     expect(summary.results).toMatchObject({ due: 1, completed: 1 });
