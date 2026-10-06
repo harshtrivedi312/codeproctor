@@ -25,11 +25,12 @@ import {
   FACE_MATCH_BACKOFF_MS,
   FACE_MATCH_JOB,
   IDENTITY_QUEUE,
-  MAX_BUSY_REDELAYS,
+  MAX_BUSY_MS,
   PENDING_RECONCILE_AFTER_MS,
   RECONCILE_EVERY_MS,
 } from './identity.constants';
 import { IdentityFacts } from './identity-facts';
+import { IdentityPurgeService } from './identity-purge.service';
 import { WorkerBusyError, WorkerRetryableError, WorkerUnrecoverableError } from './worker-client';
 
 const uuid = z.guid();
@@ -37,7 +38,7 @@ const faceMatchData = z.object({
   orgId: uuid,
   sessionId: uuid,
   attempt: z.number().int().min(1).max(2),
-  busy: z.number().int().min(0).optional(),
+  busySince: z.number().int().positive().optional(),
 });
 
 const SHUTDOWN_WAIT_MS = 3_000;
@@ -60,6 +61,7 @@ export class IdentityJobsService
     private readonly orgContext: OrgContextService,
     private readonly faceMatch: FaceMatchService,
     private readonly facts: IdentityFacts,
+    private readonly purge: IdentityPurgeService,
   ) {
     super();
   }
@@ -134,7 +136,8 @@ export class IdentityJobsService
         attempts: FACE_MATCH_ATTEMPTS,
         backoff: { type: 'fixed', delay: FACE_MATCH_BACKOFF_MS },
         removeOnComplete: { age: 3_600 },
-        removeOnFail: { age: 86_400 },
+        // A failed job must not block its own id: the reconciler re-adds it if the row is PENDING.
+        removeOnFail: true,
       },
     );
   }
@@ -155,14 +158,14 @@ export class IdentityJobsService
       await this.faceMatch.run(data);
     } catch (e) {
       if (e instanceof WorkerBusyError) {
-        const busy = data.busy ?? 0;
-        if (busy >= MAX_BUSY_REDELAYS) {
+        const since = data.busySince ?? Date.now();
+        if (Date.now() - since >= MAX_BUSY_MS) {
           await this.faceMatch.resolveAsMatchError(data);
           return;
         }
         // Re-delay without using an attempt (ADR 0014 6.4).
         if (job.updateData && job.moveToDelayed && token !== undefined) {
-          await job.updateData({ ...data, busy: busy + 1 });
+          await job.updateData({ ...data, busySince: since });
           await job.moveToDelayed(Date.now() + e.retryAfterSeconds * 1000, token);
           throw new DelayedError();
         }
@@ -189,7 +192,13 @@ export class IdentityJobsService
     const cutoff = new Date(now.getTime() - PENDING_RECONCILE_AFTER_MS);
     const stuck = await this.orgContext.runSystem('BACKGROUND_JOB', () =>
       this.prisma.client.identityCheck.findMany({
-        where: { status: 'PENDING', createdAt: { lt: cutoff } },
+        where: {
+          status: 'PENDING',
+          createdAt: { lt: cutoff },
+          // A purged row (keys null) has nothing to match: leave it out so it cannot crowd the batch.
+          idImageKey: { not: null },
+        },
+        orderBy: { createdAt: 'asc' },
         select: { attempt: true, sessionId: true, session: { select: { orgId: true } } },
         take: RECONCILE_BATCH,
       }),
@@ -200,8 +209,13 @@ export class IdentityJobsService
       const skip = await this.orgContext.runInOrg(orgId, async () => {
         const session = await this.facts.session(row.sessionId);
         if (session === null || session.imagesGone) return true; // erased or face tier run: leave it
-        return (await this.facts.policy(row.sessionId)).waived;
+        return (await this.facts.policy(row.sessionId)).waived ? 'WAIVED' : false;
       });
+      if (skip === 'WAIVED') {
+        // The waiver won a race with an upload whose job was lost: delete what it left (DL-30).
+        await this.purge.purgeAfterWaiver(orgId, row.sessionId).catch(() => undefined);
+        continue;
+      }
       if (skip) continue;
       await this.enqueue(orgId, row.sessionId, row.attempt);
       queued += 1;

@@ -7,7 +7,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 
 const SRC = resolve(__dirname, '..');
-const DIRS = ['candidate', 'session'];
+const DIRS = ['candidate', 'session', 'identity'];
 
 function files(dir: string): Array<{ path: string; text: string }> {
   return readdirSync(dir).flatMap((name) => {

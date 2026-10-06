@@ -194,8 +194,29 @@ export const envSchema = z
     if (env.WORKER_BASE_URL !== undefined) {
       const url = new URL(env.WORKER_BASE_URL);
       const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+      // Only the origin: `new URL(path, base)` would silently drop a base path, and a userinfo or
+      // query would put a credential in the config.
+      if (
+        !['http:', 'https:'].includes(url.protocol) ||
+        url.username !== '' ||
+        url.password !== '' ||
+        url.search !== '' ||
+        url.hash !== '' ||
+        url.pathname !== '/'
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['WORKER_BASE_URL'],
+          message: 'must be an http(s) origin with no user, path or query',
+        });
+      }
       // ADR 0014 4.4: plain HTTP only on the single-host internal network; anywhere else TLS.
-      if (live && url.protocol !== 'https:' && !loopback && !/^[a-z0-9-]+$/.test(url.hostname)) {
+      if (
+        (live || env.NODE_ENV === 'production') &&
+        url.protocol !== 'https:' &&
+        !loopback &&
+        !/^[a-z0-9-]+$/.test(url.hostname)
+      ) {
         ctx.addIssue({
           code: 'custom',
           path: ['WORKER_BASE_URL'],

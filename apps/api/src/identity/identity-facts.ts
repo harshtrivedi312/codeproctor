@@ -56,9 +56,12 @@ export class PrismaIdentityFacts extends IdentityFacts {
     const obj = typeof acc === 'object' && acc !== null && !Array.isArray(acc) ? acc : {};
     const waiver = (obj as Record<string, unknown>).identityCheckWaiver;
     const detectors = (obj as Record<string, unknown>).disabledDetectors;
+    // Set by the server at erasure and R-10 (ADR 0015 table): the waiver reason was reduced away.
+    const reduced = (obj as Record<string, unknown>).identityCheckWaived === true;
     return {
       waived:
         (typeof waiver === 'object' && waiver !== null) ||
+        reduced ||
         (waivedRow !== null && String(waivedRow.status) === 'WAIVED'),
       faceDetectorsOff: Array.isArray(detectors) && detectors.includes('FACE'),
     };

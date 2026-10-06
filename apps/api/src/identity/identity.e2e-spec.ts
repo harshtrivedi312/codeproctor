@@ -35,6 +35,7 @@ class IdentityStorage extends FakeStorage {
     return Promise.resolve();
   }
   override deletePrefix(prefix: string): Promise<PrefixDeleteResult> {
+    if (this.leaveBehind) return Promise.resolve({ deleted: 0, errors: 1, remaining: 1 });
     let deleted = 0;
     for (const key of [...this.objects.keys()]) {
       if (key.startsWith(prefix)) {
@@ -44,6 +45,8 @@ class IdentityStorage extends FakeStorage {
     }
     return Promise.resolve({ deleted, errors: 0, remaining: 0 });
   }
+  /** Simulates a delete that leaves objects behind (a storage error). */
+  leaveBehind = false;
   keysUnder(fragment: string): string[] {
     return [...this.objects.keys()].filter((k) => k.includes(fragment));
   }
@@ -381,7 +384,7 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
 
   // ---------- idempotency keyed on the names ----------
 
-  it('a repeat POST of the same names returns the same row; two concurrent identical POSTs make one row and one job', async () => {
+  it('FR-403/TC-033: a repeat POST of the same names returns the same row; two concurrent identical POSTs make one row and one job', async () => {
     const c = await session();
     let release: () => void = () => undefined;
     worker.gate = new Promise((r) => (release = r));
@@ -399,22 +402,37 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
     expect(repeat.body.status).toBe('PASSED');
   });
 
-  it('new names while attempt 1 is PENDING are refused with 409 and their uploads are deleted', async () => {
+  it('FR-403/TC-033: new names while attempt 1 is PENDING are refused with 409 and their uploads are deleted', async () => {
     const c = await session();
     let release: () => void = () => undefined;
     worker.gate = new Promise((r) => (release = r));
     const first = await upload(c);
+    const second = await upload(c); // both sets are issued for attempt 1 before the first submit
     await submit(c, first);
-    // A second set of names is only issued for attempt 2, so presign refuses; craft names by hand.
-    const res = await post('/presign', c, {
-      purpose: 'SELFIE',
-      contentType: 'image/jpeg',
-      bytes: MIB,
-    });
+    const res = await submit(c, second);
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('IDENTITY_CHECK_PENDING');
+    expect(await nameState(c, second.idImageName)).toBe('EXPIRED');
+    expect(storage.keysUnder(second.idImageName.slice('identity/1/'.length))).toEqual([]);
+    expect(await rows(c.sessionId)).toHaveLength(1);
     release();
     await settled(c.sessionId);
+  });
+
+  it('FR-403: a lost enqueue leaves a PENDING row that a repeat POST of the same names recovers', async () => {
+    const c = await session();
+    const jobs = app.get(
+      jest.requireActual<typeof import('./identity-jobs.service')>('./identity-jobs.service')
+        .IdentityJobsService,
+    );
+    const spy = jest.spyOn(jobs, 'enqueue').mockRejectedValueOnce(new Error('redis down'));
+    const n = await upload(c);
+    const first = await submit(c, n);
+    expect(first.status).toBe(202); // the request does not fail: the row is the record
+    spy.mockRestore();
+    expect((await rows(c.sessionId))[0]?.status).toBe('PENDING');
+    expect((await submit(c, n)).status).toBe(202); // a repeat queues the job again
+    expect((await settled(c.sessionId))?.status).toBe('PASSED');
   });
 
   // ---------- the waiver (C-02, C-19, C-25, ADR 0015, N3, DL-30) ----------
@@ -443,7 +461,7 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
     expect((await get(c)).body).toEqual({ attempt: 0, status: 'WAIVED', canRetry: false });
   });
 
-  it('a waived session answers 409 on a repeat POST of an accepted attempt too, never 202; and for a VERIFIED session', async () => {
+  it('C-02/FR-403: a waived session answers 409 on a repeat POST of an accepted attempt too, never 202; and for a VERIFIED session', async () => {
     const c = await session();
     const n = await upload(c);
     await submit(c, n);
@@ -487,7 +505,7 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
     expect((await rows(c.sessionId)).map((r) => r.status)).toEqual(['LOW_CONFIDENCE', 'PASSED']);
   });
 
-  it('a waiver that lands while the job waits: the job deletes the images and writes no result', async () => {
+  it('DL-30/C-02: a waiver that lands while the job waits: the job deletes the images and writes no result', async () => {
     const c = await session();
     let release: () => void = () => undefined;
     worker.gate = new Promise((r) => (release = r));
@@ -562,6 +580,134 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
     expect(worker.calls).toHaveLength(0);
   });
 
+  it('DL-30/B1: a purge that lands after the job pre-check cannot be overwritten by the late result', async () => {
+    const c = await session();
+    let release: () => void = () => undefined;
+    worker.gate = new Promise((r) => (release = r));
+    await submit(c, await upload(c));
+    await eventually(
+      () => Promise.resolve(worker.calls.length),
+      (n) => n > 0,
+    );
+    // The waiver flow purges while the worker call is in flight, but the waiver is not yet visible
+    // to the job's own re-read (it only sees the nulled keys): the compare-and-set must still lose.
+    await owner.identityCheck.updateMany({
+      where: { sessionId: c.sessionId },
+      data: { idImageKey: null, selfieKey: null },
+    });
+    release();
+    await eventually(
+      () => Promise.resolve(verify.calls.length),
+      (n) => n > 0,
+      3_000,
+    );
+    const [row] = await rows(c.sessionId);
+    expect(row?.status).toBe('PENDING');
+    expect([row?.faceMatchScore, row?.modelId, row?.reviewReason]).toEqual([null, null, null]);
+    expect(verify.calls).toHaveLength(0);
+  });
+
+  it('ADR 0004 9.5/B1: an erasure request that lands during the worker call writes no result', async () => {
+    const c = await session();
+    const candidateId = (
+      await owner.session.findUniqueOrThrow({
+        where: { id: c.sessionId },
+        select: { invitation: { select: { candidateId: true } } },
+      })
+    ).invitation.candidateId;
+    let release: () => void = () => undefined;
+    worker.gate = new Promise((r) => (release = r));
+    await submit(c, await upload(c));
+    await eventually(
+      () => Promise.resolve(worker.calls.length),
+      (n) => n > 0,
+    );
+    await owner.candidate.update({
+      where: { id: candidateId },
+      data: { erasureRequestedAt: new Date() },
+    });
+    release();
+    await eventually(
+      () => Promise.resolve(verify.calls.length),
+      (n) => n > 0,
+      3_000,
+    );
+    const [row] = await rows(c.sessionId);
+    expect(row?.status).toBe('PENDING');
+    expect(row?.faceMatchScore).toBeNull();
+    expect(verify.calls).toHaveLength(0);
+  });
+
+  it('DL-30/B2: the reconciler deletes what a waived session left when its job was lost', async () => {
+    const c = await session();
+    const sealedId = identitySealedKey(
+      { orgId: c.orgId, sessionId: c.sessionId },
+      1,
+      'id',
+      '2'.repeat(26),
+    );
+    const sealedSelfie = identitySealedKey(
+      { orgId: c.orgId, sessionId: c.sessionId },
+      1,
+      'selfie',
+      '2'.repeat(26),
+    );
+    storage.upload(sealedId, MIB, 'image/jpeg');
+    storage.upload(sealedSelfie, MIB, 'image/jpeg');
+    await owner.identityCheck.create({
+      data: {
+        sessionId: c.sessionId,
+        attempt: 1,
+        status: 'PENDING',
+        idImageKey: sealedId,
+        selfieKey: sealedSelfie,
+        livenessPassed: true,
+        createdAt: new Date(Date.now() - 10 * 60_000),
+      },
+    });
+    await waive(c);
+    const jobs = app.get(
+      jest.requireActual<typeof import('./identity-jobs.service')>('./identity-jobs.service')
+        .IdentityJobsService,
+    );
+    await jobs.reconcilePending();
+    expect(storage.keysUnder(`${c.sessionId}/identity/`)).toEqual([]);
+    const [row] = await rows(c.sessionId);
+    expect([row?.idImageKey, row?.selfieKey]).toEqual([null, null]);
+    expect(worker.calls).toHaveLength(0);
+  });
+
+  it('DL-30/B3: a purge that leaves objects behind keeps the keys and fails, so it is retried', async () => {
+    const c = await session();
+    const sealedId = identitySealedKey(
+      { orgId: c.orgId, sessionId: c.sessionId },
+      1,
+      'id',
+      '3'.repeat(26),
+    );
+    storage.upload(sealedId, MIB, 'image/jpeg');
+    await owner.identityCheck.create({
+      data: {
+        sessionId: c.sessionId,
+        attempt: 1,
+        status: 'PASSED',
+        idImageKey: sealedId,
+        selfieKey: sealedId,
+      },
+    });
+    storage.leaveBehind = true;
+    await expect(identity.purgeAfterWaiver(c.orgId, c.sessionId)).rejects.toThrow(
+      'IDENTITY_PURGE_INCOMPLETE',
+    );
+    storage.leaveBehind = false;
+    const [kept] = await rows(c.sessionId);
+    expect(kept?.idImageKey).toBe(sealedId); // the record of the object that still exists
+    await identity.purgeAfterWaiver(c.orgId, c.sessionId); // the retry finishes
+    const [done] = await rows(c.sessionId);
+    expect(done?.idImageKey).toBeNull();
+    expect(storage.keysUnder(`${c.sessionId}/identity/`)).toEqual([]);
+  });
+
   // ---------- a failing worker never blocks the candidate (D-05) ----------
 
   it('TC-033: a worker that is down ends in MANUAL_REVIEW with MATCH_ERROR after the retries, with the event and verify-session', async () => {
@@ -582,7 +728,7 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
     expect(verify.calls).toHaveLength(1);
   });
 
-  it('an unrecoverable worker failure (a key mistake) resolves at once, with no retry', async () => {
+  it('TC-033/D-05: an unrecoverable worker failure (a key mistake) resolves at once, with no retry', async () => {
     const c = await session();
     worker.next = () => {
       throw new errors.WorkerUnrecoverableError('WORKER_AUTH_FAILED');
@@ -593,7 +739,7 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
     expect(worker.calls).toHaveLength(1);
   });
 
-  it('a verified WORKER_BUSY re-delays without using an attempt, then the match goes through', async () => {
+  it('TC-033/ADR 0014 6.4: a verified WORKER_BUSY re-delays without using an attempt, then the match goes through', async () => {
     const c = await session();
     let n = 0;
     worker.next = () => {
@@ -609,7 +755,7 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
 
   // ---------- uploads and names ----------
 
-  it('submitting before the upload gives 409 UPLOAD_NOT_FOUND and leaves the names usable', async () => {
+  it('FR-403: submitting before the upload gives 409 UPLOAD_NOT_FOUND and leaves the names usable', async () => {
     const c = await session();
     const names: Record<string, string> = {};
     for (const purpose of ['ID_IMAGE', 'SELFIE'] as const) {
@@ -624,7 +770,7 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
     expect(await rows(c.sessionId)).toHaveLength(0);
   });
 
-  it('a wrong object (not a JPEG) is refused with 400, deleted, and its name is spent', async () => {
+  it('FR-403/ADR 0013 5.6: a wrong object (not a JPEG) is refused with 400, deleted, and its name is spent', async () => {
     const c = await session();
     const n = await upload(c, { idType: 'text/html' });
     const res = await submit(c, n);
@@ -635,7 +781,7 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
     expect(await rows(c.sessionId)).toHaveLength(0);
   });
 
-  it('names are validated: foreign, unknown, swapped, reused and bad-format names are 400 and nothing is copied', async () => {
+  it('FR-403/CS-3: names are validated: foreign, unknown, swapped, reused and bad-format names are 400 and nothing is copied', async () => {
     const c = await session();
     const n = await upload(c);
     const swapped = await submit(c, { idImageName: n.selfieName, selfieName: n.idImageName });
@@ -660,7 +806,7 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
     expect(await rows(c.sessionId)).toHaveLength(0);
   });
 
-  it('presign refuses a bad size, the wrong type and a session that is not CONSENTED', async () => {
+  it('FR-403: presign refuses a bad size, the wrong type and a session that is not CONSENTED', async () => {
     const c = await session();
     for (const body of [
       { purpose: 'ID_IMAGE', contentType: 'image/jpeg', bytes: 5 * MIB + 1 },
@@ -683,7 +829,7 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
     ).toBe(409);
   });
 
-  it('a lost enqueue is recovered by the reconciler: a PENDING row with no job gets one again', async () => {
+  it('FR-403: a lost enqueue is recovered by the reconciler: a PENDING row with no job gets one again', async () => {
     const c = await session();
     const old = new Date(Date.now() - 10 * 60_000);
     await owner.identityCheck.create({
@@ -718,15 +864,22 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
 
   // ---------- scope, secrecy ----------
 
-  it('org scope: another organisation sees no row and cannot use these names', async () => {
+  it('FR-403/TC-008: org scope: another organisation sees no row and cannot use these names', async () => {
     const c = await session();
     await submit(c, await upload(c));
     await settled(c.sessionId);
     const o = await session({}, other);
     expect((await get(o)).body).toEqual({ attempt: 0, status: 'NOT_STARTED', canRetry: false });
+    // The other organisation's token cannot claim this session's names or reach its images.
+    const fresh = await session();
+    const mine = await upload(fresh);
+    const theirs = await submit(o, mine);
+    expect(theirs.status).toBe(400);
+    expect(await nameState(fresh, mine.idImageName)).toBe('ISSUED'); // untouched
+    expect(await rows(o.sessionId)).toHaveLength(0);
   });
 
-  it('a staff token and no token are refused', async () => {
+  it('FR-403: no token and a bad token are refused', async () => {
     const res = await reply(request(app.getHttpServer()).get(API));
     expect(res.status).toBe(401);
     const bad = await reply(
@@ -735,7 +888,7 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
     expect(bad.status).toBe(401);
   });
 
-  it('logs hold session ids and outcomes only: no URL, key, name or score', () => {
+  it('NFR-04: logs hold session ids and outcomes only: no URL, key, name or score', () => {
     const text = logged.join('\n');
     expect(text).not.toMatch(
       /storage\.invalid|identity\/\d\/(?:id|selfie)-|sealed\/|0\.93|auraface/i,

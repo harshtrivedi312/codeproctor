@@ -74,8 +74,6 @@ const nameInvalid = (): CodedHttpException =>
 interface LatestRow {
   readonly attempt: number;
   readonly status: string;
-  readonly idImageKey: string | null;
-  readonly selfieKey: string | null;
 }
 
 @Injectable()
@@ -153,7 +151,7 @@ export class IdentityService {
     // 3. Idempotency keyed on the names: the same two names return their row with its real status.
     const sealedId = this.media.sealedKey(scope, id.attempt, 'id', id.ulid);
     const sealedSelfie = this.media.sealedKey(scope, id.attempt, 'selfie', selfie.ulid);
-    const existing = await this.byKeys(ctx.sessionId, id.attempt, sealedId, sealedSelfie);
+    const existing = await this.byNames(ctx, id.attempt, refs);
     if (existing !== null) return this.repeat(ctx, scope, refs, existing);
 
     // 4. A new attempt needs CONSENTED.
@@ -175,7 +173,7 @@ export class IdentityService {
       if (state === 'ISSUED') continue;
       if (state === 'USED') {
         // An identical POST holds the names (or finished): give its row a moment, then judge.
-        const same = await this.waitForRow(ctx, id.attempt, sealedId, sealedSelfie);
+        const same = await this.waitForRow(ctx, id.attempt, refs);
         if (same !== null) return this.repeat(ctx, scope, refs, same);
       }
       throw nameInvalid();
@@ -189,7 +187,7 @@ export class IdentityService {
     for (const [i, head] of heads.entries()) {
       if (head === null) {
         // A concurrent identical POST may have finished and deleted the originals: that is a repeat.
-        const done = await this.byKeys(ctx.sessionId, id.attempt, sealedId, sealedSelfie);
+        const done = await this.byNames(ctx, id.attempt, refs);
         if (done !== null) return this.repeat(ctx, scope, refs, done);
         throw problem(
           HttpStatus.CONFLICT,
@@ -215,11 +213,12 @@ export class IdentityService {
     try {
       for (const [i, key] of uploads.entries()) await this.media.copy(key, sealed[i] as string);
     } catch (e) {
-      await this.dropSealedUnlessReferenced(ctx, id.attempt, sealedId, sealedSelfie);
+      await this.dropSealedUnlessClaimed(ctx, refs, sealedId, sealedSelfie);
       throw e;
     }
     // (c) Claim both names, then insert the row. A failure releases the claims and removes the
     //     sealed copies before the race rules below judge what happened.
+    const liveness = input.livenessConfirmed === true; // client-reported (R-05); a plain value
     const claimed: NameRef[] = [];
     try {
       for (const r of refs) {
@@ -234,7 +233,7 @@ export class IdentityService {
           attempt: id.attempt,
           idImageKey: sealedId,
           selfieKey: sealedSelfie,
-          livenessPassed: input.livenessConfirmed,
+          livenessPassed: liveness,
           status: 'PENDING',
         },
         select: { id: true },
@@ -242,7 +241,7 @@ export class IdentityService {
     } catch (e) {
       await this.release(ctx, claimed);
       if (!(e instanceof ClaimLost) && !isUniqueViolation(e)) {
-        await this.dropSealedUnlessReferenced(ctx, id.attempt, sealedId, sealedSelfie);
+        await this.dropSealedUnlessClaimed(ctx, refs, sealedId, sealedSelfie);
         throw e;
       }
       return this.lostRace(ctx, scope, refs, id.attempt, sealedId, sealedSelfie);
@@ -307,14 +306,14 @@ export class IdentityService {
     sealedSelfie: string,
   ): Promise<IdentityStatusDto> {
     if ((await this.facts.policy(ctx.sessionId)).waived) {
-      await this.dropSealedUnlessReferenced(ctx, attempt, sealedId, sealedSelfie);
+      await this.dropSealedUnlessClaimed(ctx, refs, sealedId, sealedSelfie);
       await this.refuse(ctx, scope, refs);
       throw waived();
     }
     // A concurrent identical POST holds the names: give it a moment to commit its row.
-    const same = await this.waitForRow(ctx, attempt, sealedId, sealedSelfie);
+    const same = await this.waitForRow(ctx, attempt, refs);
     if (same !== null) return this.repeat(ctx, scope, refs, same);
-    await this.dropSealedUnlessReferenced(ctx, attempt, sealedId, sealedSelfie);
+    await this.dropSealedUnlessClaimed(ctx, refs, sealedId, sealedSelfie);
     const latest = await this.latest(ctx.sessionId);
     if (latest !== null) {
       await this.refuse(ctx, scope, refs);
@@ -327,25 +326,30 @@ export class IdentityService {
   private async waitForRow(
     ctx: CandidateContext,
     attempt: number,
-    sealedId: string,
-    sealedSelfie: string,
+    refs: readonly NameRef[],
   ): Promise<LatestRow | null> {
     for (let i = 0; i < RACE_POLLS; i++) {
-      const row = await this.byKeys(ctx.sessionId, attempt, sealedId, sealedSelfie);
+      const row = await this.byNames(ctx, attempt, refs);
       if (row !== null) return row;
       if (i < RACE_POLLS - 1) await new Promise((r) => setTimeout(r, RACE_POLL_MS));
     }
     return null;
   }
 
-  /** Deletes the sealed pair unless a row points at it (an identical concurrent POST owns it). */
-  private async dropSealedUnlessReferenced(
+  /**
+   * Deletes the sealed pair unless an identical request holds the names (USED): those copies are
+   * its own and a row will point at them. Best effort: a request between its copy and its claim
+   * is not visible here, and the ingest-close sweep removes any sealed object no row references.
+   */
+  private async dropSealedUnlessClaimed(
     ctx: CandidateContext,
-    attempt: number,
+    refs: readonly NameRef[],
     sealedId: string,
     sealedSelfie: string,
   ): Promise<void> {
-    if ((await this.byKeys(ctx.sessionId, attempt, sealedId, sealedSelfie)) !== null) return;
+    for (const r of refs) {
+      if ((await this.names.state(ctx.sessionId, r.name, r.purpose)) === 'USED') return;
+    }
     await this.media.deleteQuietly(sealedId, sealedSelfie);
   }
 
@@ -386,23 +390,31 @@ export class IdentityService {
     }
   }
 
+  /** Candidate scope reads only attempt and status of an identity row (ADR 0013 CS-4.4). */
   private latest(sessionId: string): Promise<LatestRow | null> {
     return this.prisma.client.identityCheck.findFirst({
       where: { sessionId },
       orderBy: { attempt: 'desc' },
-      select: { attempt: true, status: true, idImageKey: true, selfieKey: true },
+      select: { attempt: true, status: true },
     });
   }
 
-  private byKeys(
-    sessionId: string,
+  /**
+   * The row an identical POST created: both names are USED (a name is claimed only by the request
+   * that then inserts the row, and released if the insert fails) and a row exists for that attempt.
+   * Keyed on the names, not on the stored keys, so the candidate scope reads no hidden column.
+   */
+  private async byNames(
+    ctx: CandidateContext,
     attempt: number,
-    idKey: string,
-    selfieKey: string,
+    refs: readonly NameRef[],
   ): Promise<LatestRow | null> {
+    for (const r of refs) {
+      if ((await this.names.state(ctx.sessionId, r.name, r.purpose)) !== 'USED') return null;
+    }
     return this.prisma.client.identityCheck.findFirst({
-      where: { sessionId, attempt, idImageKey: idKey, selfieKey },
-      select: { attempt: true, status: true, idImageKey: true, selfieKey: true },
+      where: { sessionId: ctx.sessionId, attempt },
+      select: { attempt: true, status: true },
     });
   }
 

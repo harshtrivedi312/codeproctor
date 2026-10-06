@@ -55,7 +55,7 @@ export function resolve(attempt: number, response: FaceMatchResponse | null): Re
       threshold: null,
     };
   }
-  if (response.decision === 'MATCH' && response.reason === null) {
+  if (response.decision === 'MATCH' && response.reason === null && response.score !== null) {
     return {
       status: 'PASSED',
       reason: null,
@@ -64,8 +64,18 @@ export function resolve(attempt: number, response: FaceMatchResponse | null): Re
       threshold: response.threshold,
     };
   }
-  // MANUAL_REVIEW with no reason (or a MATCH with one) is not a valid answer: a match error.
-  const reason: ReviewReason = response.reason ?? 'MATCH_ERROR';
+  // An invalid answer (a MATCH that carries a reason, or a MANUAL_REVIEW with none) is not trusted:
+  // it is a match error, which goes to manual review at once (design notes section 4).
+  if (response.decision === 'MATCH' || response.reason === null) {
+    return {
+      status: 'MANUAL_REVIEW',
+      reason: 'MATCH_ERROR',
+      score: null,
+      modelId: null,
+      threshold: null,
+    };
+  }
+  const reason: ReviewReason = response.reason;
   const retryable = reason !== 'MATCH_ERROR' && attempt < MAX_ATTEMPTS;
   return {
     status: retryable ? 'LOW_CONFIDENCE' : 'MANUAL_REVIEW',
@@ -165,13 +175,39 @@ export class FaceMatchService {
       if (session === null || session.imagesGone) return 'GONE' as const;
       if ((await this.facts.policy(data.sessionId)).waived) return 'WAIVED' as const;
       return this.prisma.client.$transaction(async (tx) => {
+        // Re-read the erasure fence inside the transaction (guardLive's job once it exists).
+        const live = await tx.session.findUnique({
+          where: { id: data.sessionId },
+          select: {
+            invitation: {
+              select: { candidate: { select: { erasureRequestedAt: true, erasedAt: true } } },
+            },
+          },
+        });
+        const fence = live?.invitation.candidate;
+        if (live === null || fence?.erasureRequestedAt != null || fence?.erasedAt != null) {
+          return 'GONE' as const;
+        }
+        // The keys still being there is part of the compare-and-set: a waiver's purge nulls them
+        // under the row lock, so a result computed before the purge updates nothing (DL-30).
         const target = await tx.identityCheck.findFirst({
-          where: { sessionId: data.sessionId, attempt: data.attempt, status: 'PENDING' },
+          where: {
+            sessionId: data.sessionId,
+            attempt: data.attempt,
+            status: 'PENDING',
+            idImageKey: { not: null },
+            selfieKey: { not: null },
+          },
           select: { id: true },
         });
-        if (target === null) return 'LOST' as const; // another run resolved it first
+        if (target === null) return 'LOST' as const; // resolved, or purged, since the pre-check
         const updated = await tx.identityCheck.updateMany({
-          where: { id: target.id, status: 'PENDING' },
+          where: {
+            id: target.id,
+            status: 'PENDING',
+            idImageKey: { not: null },
+            selfieKey: { not: null },
+          },
           data: {
             status: result.status,
             reviewReason: result.reason,
@@ -207,7 +243,8 @@ export class FaceMatchService {
     // After the commit: the gate is PASSED or MANUAL_REVIEW, never LOW_CONFIDENCE.
     if (result.status === 'PASSED' || result.status === 'MANUAL_REVIEW') {
       await this.verify.enqueue(data.orgId, data.sessionId).catch(() => {
-        this.logger.warn('verify-session could not be queued; the reconciler will retry');
+        // Nothing here retries it: the CONSENTED reconciler (ADR 0015 section 11, BE-07) does.
+        this.logger.warn('verify-session could not be queued');
       });
     }
     this.logger.log({

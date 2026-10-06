@@ -18,10 +18,16 @@ export class IdentityPurgeService {
     private readonly media: IdentityMedia,
   ) {}
 
-  /** Idempotent. `deleted` is false while any identity object remains (the caller must retry). */
+  /** Idempotent. Throws IDENTITY_PURGE_INCOMPLETE while any identity object remains. */
   async purgeAfterWaiver(orgId: string, sessionId: string): Promise<{ deleted: boolean }> {
     const scope: SessionScope = { orgId, sessionId };
     const imagesGone = await this.media.deleteSessionIdentityImages(scope);
+    if (!imagesGone) {
+      // Objects remain: keep the keys (the rows still say where they are) and fail, so the job or
+      // the waiver flow retries. Never drop the only record of a biometric object that still exists.
+      this.logger.warn({ event: 'identity.purge-incomplete', sessionId });
+      throw new Error('IDENTITY_PURGE_INCOMPLETE');
+    }
     await this.orgContext.runInOrg(orgId, () =>
       this.prisma.client.identityCheck.updateMany({
         where: { sessionId },

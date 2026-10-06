@@ -10,7 +10,7 @@ export const IDENTITY_PURPOSES: readonly IdentityPurpose[] = ['ID_IMAGE', 'SELFI
 /** A candidate may retry once: attempt 1, then attempt 2 (ADR 0004 section 1). */
 export const MAX_ATTEMPTS = 2;
 
-/** Presigned PUT URL life for the identity images: the same 60 s as every upload (ADR 0013 5.5). */
+/** How long a single-use upload name stays valid (Redis TTL of the name record). */
 export const NAME_TTL_SECONDS = 3 * 24 * 3600;
 
 /** The wire name of an identity upload, session relative: `identity/{attempt}/{id|selfie}-{ULID}.jpg`. */
@@ -24,8 +24,8 @@ export const FACE_MATCH_BACKOFF_MS = 2_000;
 /** A pending row older than this with no job is re-enqueued by the reconciler (design notes 3.6). */
 export const PENDING_RECONCILE_AFTER_MS = 2 * 60_000;
 export const RECONCILE_EVERY_MS = 60_000;
-/** WORKER_BUSY re-delays are capped for face-match (ADR 0014 bounds only face-recheck). */
-export const MAX_BUSY_REDELAYS = 20;
+/** WORKER_BUSY re-delays are capped by elapsed time (ADR 0014 bounds the re-check at 5 minutes). */
+export const MAX_BUSY_MS = 5 * 60_000;
 
 /** The presigned GET for the worker lives 60 s for face calls (ADR 0014 5.1). */
 export const WORKER_GET_TTL_SECONDS = 60;
