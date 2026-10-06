@@ -9,18 +9,25 @@ class StoreModule {}
 class HoldModule {}
 
 describe('RetentionModule.forRoot', () => {
-  const saved = process.env.RETENTION_LEGAL_HOLD;
+  const names = ['RETENTION_LEGAL_HOLD', 'RETENTION_VERSIONING_CHECK', 'APP_ENV', 'NODE_ENV'];
+  const saved = Object.fromEntries(names.map((n) => [n, process.env[n]]));
+  beforeEach(() => {
+    // The test must not depend on the CI environment.
+    for (const n of names.filter((x) => x !== 'NODE_ENV')) delete process.env[n];
+  });
   afterEach(() => {
-    if (saved === undefined) delete process.env.RETENTION_LEGAL_HOLD;
-    else process.env.RETENTION_LEGAL_HOLD = saved;
+    for (const n of names) {
+      if (saved[n] === undefined) delete process.env[n];
+      else process.env[n] = saved[n];
+    }
   });
 
-  it('builds with an object store module and no legal hold switched on', () => {
+  it('FR-704: builds with an object store module and no legal hold switched on', () => {
     delete process.env.RETENTION_LEGAL_HOLD;
     expect(RetentionModule.forRoot({ objectStore: StoreModule }).exports).toBeDefined();
   });
 
-  it('refuses to build when RETENTION_LEGAL_HOLD is on and no legalHold module is given', () => {
+  it('NFR-05, OQ-10: refuses to build when RETENTION_LEGAL_HOLD is on and no legalHold module is given', () => {
     process.env.RETENTION_LEGAL_HOLD = 'true';
     expect(() => RetentionModule.forRoot({ objectStore: StoreModule })).toThrow(
       /no legalHold module/,

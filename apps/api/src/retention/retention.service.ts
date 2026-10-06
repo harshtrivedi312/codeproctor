@@ -139,7 +139,7 @@ export class RetentionService {
           )
         ) {
           this.log.warn(
-            `retention ${tier} found a stored key outside the session prefix for session ${sessionId}`,
+            `retention ${tier} found a stored key outside the tier prefixes for session ${sessionId}`,
           );
           return 'retryLater';
         }
