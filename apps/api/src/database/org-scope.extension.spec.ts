@@ -56,6 +56,21 @@ describe('org scope extension without a database (NFR-04, FR-103)', () => {
     });
   });
 
+  describe('an unknown operation through the real client (FU-DB-160, ADR 0006 section 8.2)', () => {
+    // Every delegate has findRaw and aggregateRaw at runtime, even on PostgreSQL.
+    it.each(['findRaw', 'aggregateRaw'])(
+      'TC-008 %s is refused before any query, in system scope, in an org scope and with no scope',
+      async (operation) => {
+        const call = (): Promise<unknown> =>
+          delegate('Session')[operation]?.({}) as Promise<unknown>;
+        const refused = new RegExp(`Session\\.${operation}: unknown operation`);
+        await expect(orgContext.runSystem('BACKGROUND_JOB', call)).rejects.toThrow(refused);
+        await expect(orgContext.runInOrg(ORG_A, call)).rejects.toThrow(refused);
+        await expect(call()).rejects.toThrow(refused);
+      },
+    );
+  });
+
   describe('a relation key inside a createMany row (FU-DB-106)', () => {
     // The nested-write guard does not walk createMany rows (they are flat, and ingest paths pay
     // nothing). It relies on Prisma itself refusing a relation in a row, and this pins that: if a
