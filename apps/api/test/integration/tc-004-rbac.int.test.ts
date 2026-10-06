@@ -29,6 +29,7 @@ import {
   BE03_READY,
   BE03_ROUTES,
   BE04_READY,
+  BE06_READY,
   BE13_READY,
   Be03Route,
   COVERED_ELSEWHERE,
@@ -41,6 +42,7 @@ import {
   routeLabel,
   routesFor,
   sessionFixture,
+  testFixture,
   USER_ROLES,
   withReplacedId,
 } from '../support/be03-routes';
@@ -178,6 +180,11 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
               const f = await questionFixture(h, h.orgId, { published: true });
               leaks.push(f.id, f.title);
             }
+            if (route.template.startsWith('/tests')) {
+              // Org A tests (id and name) must not show in an org B list or create answer.
+              const f = await testFixture(h, h.orgId);
+              leaks.push(f.id, f.name);
+            }
             if (route.template.startsWith('/review')) {
               leaks.push((await sessionFixture(h, h.orgId)).sessionId);
             }
@@ -269,6 +276,11 @@ rbacSuite(
   routesFor('BE-04'),
 );
 rbacSuite(
+  'TC-004 (FR-103, FR-301, FR-302): BE-06 test builder routes by role (401, 403, 404, success)',
+  BE06_READY,
+  routesFor('BE-06'),
+);
+rbacSuite(
   'TC-004 [BE-13 pending]: review routes by role (401, 403, 404, success)',
   BE13_READY,
   routesFor('BE-13'),
@@ -295,9 +307,12 @@ rbacSuite(
       expect([key, key in ROUTE_PERMISSIONS]).toEqual([key, true]);
     // BE-13 routes count only once the BE-13 switch is on (they do not exist before).
     const listed = new Set(
-      [...routesFor('BE-03'), ...routesFor('BE-04'), ...(BE13_READY ? routesFor('BE-13') : [])].map(
-        routeKey,
-      ),
+      [
+        ...routesFor('BE-03'),
+        ...routesFor('BE-04'),
+        ...routesFor('BE-06'),
+        ...(BE13_READY ? routesFor('BE-13') : []),
+      ].map(routeKey),
     );
     const missing = Object.entries(ROUTE_PERMISSIONS)
       .filter(([key, access]) => access !== 'public' && !(key in COVERED_ELSEWHERE))
@@ -307,8 +322,8 @@ rbacSuite(
     // action, body and fixtures (or to COVERED_ELSEWHERE, next to the file that tests it).
     expect(missing).toEqual([]);
 
-    // Every BE-03 and BE-04 route QA lists is served, with the permission QA expects.
-    for (const r of [...routesFor('BE-03'), ...routesFor('BE-04')]) {
+    // Every BE-03, BE-04 and BE-06 route QA lists is served, with the permission QA expects.
+    for (const r of [...routesFor('BE-03'), ...routesFor('BE-04'), ...routesFor('BE-06')]) {
       const entry = ROUTE_PERMISSIONS[routeKey(r)];
       expect(entry).toBeDefined();
       expect(entry === 'public' ? 'public' : entry?.permission).toBe(r.permission);
@@ -384,6 +399,43 @@ rbacSuite(
         expect(res.status).toBe(403);
         expect(await dump()).toBe(before);
         expect(await h.owner.auditLog.count({ where: { entityId: f.id } })).toBe(audits);
+      }
+    });
+  },
+);
+
+(BE06_READY ? describe : describe.skip)(
+  'TC-004 (FR-103, FR-301): the TC-004 reviewer scenario on POST /tests',
+  () => {
+    let h: Harness;
+    beforeAll(async () => {
+      h = await boot();
+    });
+    afterAll(async () => {
+      await h?.close();
+    });
+
+    it('TC-004: a reviewer (and an author) calling POST /tests directly gets 403, no test row is created and no audit row is written', async () => {
+      const reviewer = await actor(h, UserRole.REVIEWER);
+      const author = await actor(h, UserRole.AUTHOR);
+      const f = await questionFixture(h, h.orgId, { published: true });
+      for (const who of [reviewer, author]) {
+        const name = `QA-REVIEWER-ATTEMPT-${who.role}`;
+        const tests = await h.owner.test.count({ where: { orgId: h.orgId } });
+        const sections = await h.owner.testSection.count();
+        const audits = await h.owner.auditLog.count({ where: { action: 'TEST_CREATED' } });
+        const res = await call(h, 'POST', '/tests', who.token, {
+          name,
+          durationMinutes: 60,
+          sections: [
+            { title: 'S', questions: [{ questionVersionId: f.versionIds[1], points: 100 }] },
+          ],
+        });
+        expect(res.status).toBe(403);
+        expect(await h.owner.test.count({ where: { orgId: h.orgId } })).toBe(tests);
+        expect(await h.owner.test.count({ where: { name } })).toBe(0);
+        expect(await h.owner.testSection.count()).toBe(sections);
+        expect(await h.owner.auditLog.count({ where: { action: 'TEST_CREATED' } })).toBe(audits);
       }
     });
   },

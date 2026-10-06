@@ -464,3 +464,32 @@ None confirmed. Every assertion in the three acceptance files and the 123 table-
 - **Pending hub decision FU-BE-109:** a published archived question is still readable by id by a recruiter (200, allowlisted keys). Tests assert today's behaviour and are marked; flip with one edit.
 - **Test stand-in:** coding publish needs a passing validation of the current content (FU-BE-101); until the validate job (slice 4c) exists, tests record it directly in the database (`markValidated` in be03-routes.ts) and then publish through the API.
 - Replaces the 15.3 #5 note on drafts visible to recruiters (resolved by DL-34).
+
+## 16. QA-08 (2026-10-06): BE-06 slice 6a test builder (branch qa/be06a on backend/step-6a-tests @2493b6c; no PR, co-landed with the backend PR #147)
+
+### 16.1 What was added
+
+- The 4 routes (`GET /tests`, `POST /tests`, `GET /tests/:id`, `PATCH /tests/:id`) are in `BE03_ROUTES` as `step: 'BE-06'` (`BE06_DEFAULT = true`, no environment switch), so the registry test, the table-driven TC-004 (401 x 6 token kinds, 403 for AUTHOR and REVIEWER, success for RECRUITER and SUPER_ADMIN with an effect check, cross-org 404 identical to a random id, org B list and create leak nothing) and TC-006 (exactly one TEST_CREATED or TEST_UPDATED row with org, actor, IP, DB time, exact metadata `{questions, sections}` or `{fields}`, no name, title, description or reference solution in the row, no row for 400, 401, 403, 404) machinery drive them. One PATCH entry only: the audit test requires one action per entry and the route has one action. Fixtures: `testFixture` (owner role) in be03-routes.ts, `be06-helpers.ts` for the acceptance files.
+- The TC-004 reviewer scenario is real: `TC-004: a reviewer (and an author) calling POST /tests directly gets 403, no test row is created and no audit row is written` in tc-004-rbac.int.test.ts. The old it.todo in tc-004.int.test.ts now covers only the BE-13 half (author on the verdict route).
+- New files: `tc-020.int.test.ts` (24 + 1 todo), `fr-301-test-builder.int.test.ts` (106), `fr-301-test-builder-scope.int.test.ts` (14). Both fr-301 files boot with `THROTTLE_DEFAULT_LIMIT=100000`: the default 100 requests a minute per IP (non-auth routes) makes a validation table of this size fail with 429.
+- Full API integration run: 21 suites, 569 passed, 0 failed, 40 skipped (`[BE-13 pending]`), 3 todo. Lint, prettier and the API test typecheck are clean.
+
+### 16.2 Verified vs Partial
+
+- **Verified at API level (behaviour in the docs, ran and passed):** FR-301 create, read, list, PATCH (shapes, bounds, defaults, position ordering, section replacement, `used`, pagination, filters, 409 after an invitation or a session, same 404 for another org's used test), FR-302 profile (STANDARD and STRICT saved, LOCKDOWN 400 on create, PATCH and list filter), no copy, duplicate, clone, archive, unarchive, DELETE or PUT route (404), TC-004 and TC-006 and TC-008 for the 4 routes, TC-013 test side (pinned version), TC-100 test-builder half.
+- **Partial: TC-020.** Configuration half only. Missing: starting 10 sessions and the distribution (needs BE-07 start flow and BE-11 sessions); recorded as `it.todo`. Also not covered: the pool is checked at SAVE time only; archiving or unpublishing a matching question later makes the saved test unsatisfiable and nothing in this slice notices. BE-07 must re-check at start and test it.
+- **Partial: TC-004** (BE-13 half), **TC-006** (BE-13 review route), **TC-013** (session screen), **TC-008** (BE-13 and `/live`).
+
+### 16.3 Defects
+
+1. **nit to should-fix, backend-engineer (BE-06, `GET /tests?search=`):** `search` goes to Prisma `contains`, which does not escape the SQL LIKE wildcards, so `search=%` and `search=_` match every test instead of the literal character. Reproduce: create tests named `100% Coverage` and `Plain test`, `GET /tests?search=%25` returns both (expected: only the first); `search=_` returns both (expected: none). Own org only, no cross-org leak, so not a security finding. Encoded as `it.failing` in fr-301-test-builder.int.test.ts: it passes while the defect exists and FAILS when it is fixed; then change it to a plain `it`. The same pattern probably exists wherever the API uses `contains` for user input (question and staff user lists): not checked here.
+2. No other defect. Every other assertion passed against @2493b6c.
+
+### 16.4 Observations (not defects)
+
+1. **Proposed test case for the hub (no id invented):** "FR-301, FR-302 | Test builder rules | Recruiter creates tests with duration 4 and 481, 21 sections, 51 questions in a section, pass score above total points, section limits above the duration, profile LOCKDOWN, a draft or archived question, another org's question version; then PATCHes a test that has an invitation | 400 for shape and bound violations, 422 for draft or archived questions and unsatisfiable rules, identical 404 for another org's version, 409 on PATCH after the first invitation or session; nothing saved on any refusal | F | P1". Until the hub allocates an id these tests are named `FR-301` / `FR-302` and are not counted in the P1 gate.
+2. A draft version of the caller's own org is 422 while a missing or other-org version is 404, so a recruiter who guesses a draft version UUID learns it exists in the org. UUIDs are not guessable and the recruiter cannot list drafts (DL-34); noted only.
+3. `POST /tests` with extra properties such as `orgId` or `createdById`: the test accepts either a 400 or an ignored property and asserts the row has the caller's org and creator. The actual answer is 400 (whitelist). If the hub wants "ignored" instead, nothing breaks.
+4. The audit metadata keys for a PATCH are the DTO field names that were sent (`name`, `description`, `durationMinutes`, `profile`, `passScore`, `sections`), never values. Confirmed in tc-006 and in fr-301-test-builder.
+5. fsd.md section 4 lists `/tests` for role "Recruiter"; ADR 0010 (and the code) also give SUPER_ADMIN test:read, test:create, test:update. Docs row should say "Recruiter, Super admin" (hub, docs).
+6. Concurrency: one test races PATCH against an invitation insert (the backend locks the test row FOR UPDATE). It asserts the final state is one of the two consistent outcomes; a single run cannot prove the lock. The backend's own e2e spec holds the deterministic version.

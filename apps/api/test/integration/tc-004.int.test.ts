@@ -179,7 +179,6 @@ describe('TC-004 (FR-103): RBAC enforcement', () => {
     }
   });
 
-  it.todo(
-    'TC-004: reviewer cannot POST /tests, author cannot POST /review/sessions/:id/verdict (needs BE-04, BE-06, BE-13)',
-  );
+  // The reviewer POST /tests case runs in tc-004-rbac.int.test.ts since BE-06 (slice 6a).
+  it.todo('TC-004: author cannot POST /review/sessions/:id/verdict (needs BE-13)');
 });

@@ -30,7 +30,14 @@
 // content), listed per route in `metadataKeys`. Reads are not audited (a question is not candidate
 // data). Question reads: SUPER_ADMIN, RECRUITER, AUTHOR; writes: SUPER_ADMIN, AUTHOR.
 //
-// Switches: the BE-03 and BE-04 tests run by default (BE03_DEFAULT, BE04_DEFAULT = true). The
+// BE-06 (slice 6a, test builder): 4 routes under /tests (GET list, POST, GET by id, PATCH) in the same
+// table. Permissions test:read, test:create, test:update; SUPER_ADMIN and RECRUITER only (AUTHOR and
+// REVIEWER get 403). The audit rows TEST_CREATED and TEST_UPDATED are written by the service in the
+// mutation's transaction (NOT @Audited, no `audited` flag): entity `test`, metadata ids and field names
+// only, never names, titles or descriptions. Reads are not audited. There is one PATCH entry because
+// the matrix test requires one audit action per entry.
+//
+// Switches: the BE-03, BE-04 and BE-06 tests run by default (BE03_DEFAULT, BE04_DEFAULT, BE06_DEFAULT = true). The
 // review routes (BE-13) stay off until BE13_DEFAULT is flipped, or `BE13_READY=1` in the environment for a trial run. The BE-13
 // entries are still ASSUMED.
 import { hasPermission, PRINCIPALS, USER_ROLES } from '../../../../packages/shared/src/permissions';
@@ -44,9 +51,12 @@ const BE03_DEFAULT = true;
 // BE-04 (slice 4a) is always on: the registry test fails when a backend route is missing from the QA
 // list, so these tests must run whenever the routes exist. There is no environment switch.
 const BE04_DEFAULT = true;
+// BE-06 (slice 6a) is always on for the same reason as BE-04.
+const BE06_DEFAULT = true;
 const BE13_DEFAULT = false; // flip to true when BE-13 is merged
 export const BE03_READY: boolean = BE03_DEFAULT || process.env.BE03_READY === '1';
 export const BE04_READY: boolean = BE04_DEFAULT;
+export const BE06_READY: boolean = BE06_DEFAULT;
 export const BE13_READY: boolean = BE13_DEFAULT || process.env.BE13_READY === '1';
 
 export { PRINCIPALS, USER_ROLES };
@@ -115,7 +125,7 @@ export interface Target {
 
 export interface Be03Route {
   id: string;
-  step: 'BE-03' | 'BE-04' | 'BE-13';
+  step: 'BE-03' | 'BE-04' | 'BE-06' | 'BE-13';
   method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   /** Path template as the backend registry writes it (no query string), under /api/v1. */
   template: string;
@@ -722,9 +732,198 @@ const BE04_ROUTES: Be03Route[] = [
   }),
 ];
 
+// ---- BE-06 test builder fixtures (owner role) -----------------------------------------------------
+export const TESTS = '/tests';
+export const TEST_NAME_SECRET = 'QA-CREATED-TEST-SECRET';
+export const TEST_RENAMED_SECRET = 'QA-RENAMED-TEST-SECRET';
+export const TEST_DESC_SECRET = 'QA-TEST-DESCRIPTION-SECRET';
+export const TEST_SECTION_SECRET = 'QA-SECTION-TITLE-SECRET';
+export const TEST_FIXTURE_NAME = 'QA test fixture';
+const tSecrets = [
+  TEST_NAME_SECRET,
+  TEST_RENAMED_SECRET,
+  TEST_DESC_SECRET,
+  TEST_SECTION_SECRET,
+  TEST_FIXTURE_NAME,
+  REF_SECRET,
+];
+const TEST_FIELD_NAMES = [
+  'name',
+  'description',
+  'durationMinutes',
+  'profile',
+  'passScore',
+  'sections',
+];
+const isTestFieldList = (v: unknown): boolean =>
+  Array.isArray(v) &&
+  v.length > 0 &&
+  v.every((x) => typeof x === 'string' && TEST_FIELD_NAMES.includes(x));
+const isPositiveCount = (v: unknown): boolean => Number.isInteger(v) && (v as number) >= 1;
+
+export interface TestFix {
+  id: string;
+  name: string;
+  sectionId: string;
+  testQuestionId: string;
+  question: QuestionFix;
+}
+
+/**
+ * A test template in `orgId` built with the owner role: one section (30 min limit), one fixed question
+ * (a published version), duration 60, pass score 50. `used` adds an invitation (and `session` a
+ * session on it), which locks the test against edits (ADR 0002 S-6).
+ */
+export async function testFixture(
+  h: Harness,
+  orgId: string,
+  opts: { used?: boolean; session?: boolean; createdById?: string } = {},
+): Promise<TestFix> {
+  const t = uniq();
+  const question = await questionFixture(h, orgId, { published: true });
+  const name = `${TEST_FIXTURE_NAME} ${t}`;
+  const test = await h.owner.test.create({
+    data: {
+      orgId,
+      name,
+      durationMinutes: 60,
+      passScore: 50,
+      createdById: opts.createdById ?? null,
+    },
+  });
+  const section = await h.owner.testSection.create({
+    data: { testId: test.id, title: 'Section one', position: 1, timeLimitMin: 30 },
+  });
+  const tq = await h.owner.testQuestion.create({
+    data: {
+      sectionId: section.id,
+      questionVersionId: question.versionIds[1] as string,
+      points: 100,
+      position: 1,
+    },
+  });
+  if (opts.used || opts.session) {
+    const candidate = await h.owner.candidate.create({
+      data: { orgId, email: `qa-t06-${t}@example.com`, fullName: 'QA T06 Candidate' },
+    });
+    const invitation = await h.owner.invitation.create({
+      data: {
+        orgId,
+        testId: test.id,
+        candidateId: candidate.id,
+        tokenHash: `qa-t06-token-hash-${t}`,
+        windowStart: new Date(Date.now() - 3_600_000),
+        windowEnd: new Date(Date.now() + 3_600_000),
+      },
+    });
+    if (opts.session) {
+      await h.owner.session.create({
+        data: { orgId, invitationId: invitation.id, status: 'INVITED' },
+      });
+    }
+  }
+  return { id: test.id, name, sectionId: section.id, testQuestionId: tq.id, question };
+}
+
+/** The create body for a one-section test with one fixed question. */
+export const testBody = (
+  name: string,
+  versionId: string,
+  over: Record<string, unknown> = {},
+): Record<string, unknown> => ({
+  name,
+  description: TEST_DESC_SECRET,
+  durationMinutes: 60,
+  passScore: 50,
+  sections: [
+    {
+      title: TEST_SECTION_SECRET,
+      timeLimitMin: 30,
+      questions: [{ questionVersionId: versionId, points: 100 }],
+    },
+  ],
+  ...over,
+});
+
+const t06 = (r: Omit<Be03Route, 'step'>): Be03Route => ({ step: 'BE-06', ...r });
+
+const BE06_ROUTES: Be03Route[] = [
+  t06({
+    id: 'tests-list',
+    method: 'GET',
+    template: TESTS,
+    permission: 'test:read',
+    audit: null,
+    mutating: false,
+    ok: [200],
+    prepare: () =>
+      Promise.resolve({ path: `${TESTS}?page=1&pageSize=50`, secrets: [], unchanged: noop }),
+  }),
+  t06({
+    id: 'tests-create',
+    method: 'POST',
+    template: TESTS,
+    permission: 'test:create',
+    audit: { action: 'TEST_CREATED', entityType: 'test' },
+    metadataKeys: ['questions', 'sections'],
+    metadataShape: { questions: isPositiveCount, sections: isPositiveCount },
+    mutating: true,
+    ok: [201],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId, { published: true });
+      const name = `${TEST_NAME_SECRET} ${uniq()}`;
+      const lookup = (): Promise<{ id: string } | null> =>
+        h.owner.test.findFirst({ where: { orgId, name }, select: { id: true } });
+      return {
+        path: TESTS,
+        body: testBody(name, f.versionIds[1] as string),
+        secrets: tSecrets,
+        resolveEntityId: async () => (await lookup())?.id,
+        unchanged: async () => (await lookup()) === null,
+      };
+    },
+  }),
+  t06({
+    id: 'tests-get',
+    method: 'GET',
+    template: `${TESTS}/:id`,
+    permission: 'test:read',
+    audit: null,
+    mutating: false,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await testFixture(h, orgId);
+      return { path: `${TESTS}/${f.id}`, entityId: f.id, secrets: [], unchanged: noop };
+    },
+  }),
+  t06({
+    id: 'tests-update',
+    method: 'PATCH',
+    template: `${TESTS}/:id`,
+    permission: 'test:update',
+    audit: { action: 'TEST_UPDATED', entityType: 'test' },
+    metadataKeys: ['fields'],
+    metadataShape: { fields: isTestFieldList },
+    mutating: true,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await testFixture(h, orgId);
+      return {
+        path: `${TESTS}/${f.id}`,
+        body: { name: `${TEST_RENAMED_SECRET} ${uniq()}` },
+        entityId: f.id,
+        secrets: tSecrets,
+        unchanged: async () =>
+          (await h.owner.test.findUniqueOrThrow({ where: { id: f.id } })).name === f.name,
+      };
+    },
+  }),
+];
+
 export const BE03_ROUTES: Be03Route[] = [
   ...reissueRoutes,
   ...BE04_ROUTES,
+  ...BE06_ROUTES,
   {
     id: 'users-list',
     step: 'BE-03',
