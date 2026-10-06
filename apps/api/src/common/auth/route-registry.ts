@@ -1,12 +1,20 @@
 // Walks the Nest module graph and lists every controller route with the access its decorators
 // declare, so the matrix can be checked against what is really registered.
-import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { hasPermission } from '@codeproctor/shared';
+import type { CanActivate, Type } from '@nestjs/common';
 import { RequestMethod } from '@nestjs/common';
 import { ModulesContainer } from '@nestjs/core';
 import type { UserRole } from '../../generated/prisma/client';
 import { AUDITED } from '../../audit/audited.decorator';
+import { CANDIDATE_ROUTE } from './candidate-route.decorator';
 import { IS_PUBLIC, ROLES } from './decorators';
-import { ROUTE_PERMISSIONS } from './route-permissions';
+import {
+  CANDIDATE_BOOTSTRAP_ROUTES,
+  ROUTE_PERMISSIONS,
+  isCandidate,
+  isPublic,
+} from './route-permissions';
 
 export interface RegisteredRoute {
   /** "METHOD /path", without the global prefix, e.g. "POST /auth/2fa/reset/:userId". */
@@ -16,6 +24,10 @@ export interface RegisteredRoute {
   roles: readonly UserRole[];
   /** The handler or its class carries @Audited. */
   audited: boolean;
+  /** Guards from @UseGuards on the handler and its class. */
+  guards: readonly (Type<CanActivate> | CanActivate)[];
+  /** Permission set by @CandidateRoute, or null when the route does not carry the marker. */
+  candidatePermission: string | null;
 }
 
 function join(...parts: string[]): string {
@@ -67,6 +79,13 @@ export function listRoutes(modules: ModulesContainer): RegisteredRoute[] {
               isPublic: pick<boolean>(IS_PUBLIC) === true,
               roles: pick<UserRole[]>(ROLES) ?? [],
               audited: pick<unknown>(AUDITED) !== undefined,
+              guards: [
+                ...((Reflect.getMetadata(GUARDS_METADATA, cls) as
+                  (Type<CanActivate> | CanActivate)[] | undefined) ?? []),
+                ...((Reflect.getMetadata(GUARDS_METADATA, handler) as
+                  (Type<CanActivate> | CanActivate)[] | undefined) ?? []),
+              ],
+              candidatePermission: pick<string>(CANDIDATE_ROUTE) ?? null,
             });
           }
         }
@@ -81,10 +100,10 @@ export function matrixProblems(routes: readonly RegisteredRoute[]): string[] {
   const problems: string[] = [];
   const seen = new Set<string>();
   for (const route of routes) {
-    if (seen.has(route.key)) {
+    if (seen.has(route.key.toLowerCase())) {
       problems.push(`${route.key} (${route.handler}) is served by more than one handler`);
     }
-    seen.add(route.key);
+    seen.add(route.key.toLowerCase());
     const entry = Object.hasOwn(ROUTE_PERMISSIONS, route.key)
       ? ROUTE_PERMISSIONS[route.key]
       : undefined;
@@ -92,7 +111,55 @@ export function matrixProblems(routes: readonly RegisteredRoute[]): string[] {
       problems.push(`${route.key} (${route.handler}) is not in ROUTE_PERMISSIONS`);
     } else if (route.isPublic && route.roles.length > 0) {
       problems.push(`${route.key} (${route.handler}) carries both @Public() and @Roles()`);
-    } else if (entry === 'public') {
+    } else if (isCandidate(entry)) {
+      if (!route.isPublic) {
+        problems.push(
+          `${route.key} is a CANDIDATE route in the matrix but not @Public(), so the staff guard would refuse it`,
+        );
+      }
+      // TODO(FU-BE-90): require CandidateSessionGuard specifically once BE-07 lands
+      // (guards.includes(CandidateSessionGuard)).
+      if (route.guards.length === 0) {
+        problems.push(
+          `${route.key} is a CANDIDATE route with no route guard (@UseGuards(CandidateSessionGuard))`,
+        );
+      }
+      if (!hasPermission('CANDIDATE', entry.permission)) {
+        problems.push(`${route.key} lists ${entry.permission}, which CANDIDATE does not hold`);
+      }
+      // The marker value is compared with the matrix, never trusted on its own.
+      if (route.candidatePermission === null) {
+        problems.push(
+          `${route.key} is a CANDIDATE route in the matrix but has no @CandidateRoute()`,
+        );
+      } else if (route.candidatePermission !== entry.permission) {
+        problems.push(`${route.key} @CandidateRoute() permission differs from the matrix`);
+      }
+      if (route.roles.length > 0) {
+        problems.push(`${route.key} is a CANDIDATE route but carries @Roles()`);
+      }
+      if (route.audited) {
+        problems.push(
+          `${route.key} is a CANDIDATE route with @Audited(); candidate routes write no audit rows (ADR 0013)`,
+        );
+      }
+    } else if (route.candidatePermission !== null) {
+      problems.push(
+        route.roles.length > 0
+          ? `${route.key} (${route.handler}) is a staff route (@Roles()) but carries @CandidateRoute()`
+          : `${route.key} (${route.handler}) carries @CandidateRoute() but the matrix does not list it as CANDIDATE`,
+      );
+    } else if (isPublic(entry)) {
+      // Express routing is case-insensitive and '/candidate' has no trailing slash: match the segment.
+      const path = route.key.slice(route.key.indexOf(' ') + 1).toLowerCase();
+      if (
+        (path === '/candidate' || path.startsWith('/candidate/')) &&
+        !CANDIDATE_BOOTSTRAP_ROUTES.includes(route.key)
+      ) {
+        problems.push(
+          `${route.key} is a /candidate/ route listed public but is not a bootstrap route; list it as CANDIDATE`,
+        );
+      }
       if (!route.isPublic) problems.push(`${route.key} is public in the matrix but not @Public()`);
     } else if (route.isPublic) {
       problems.push(`${route.key} is @Public() but the matrix lists roles for it`);
@@ -114,7 +181,8 @@ export function matrixProblems(routes: readonly RegisteredRoute[]): string[] {
     }
   }
   for (const key of Object.keys(ROUTE_PERMISSIONS)) {
-    if (!seen.has(key)) problems.push(`${key} is in ROUTE_PERMISSIONS but no controller serves it`);
+    if (!seen.has(key.toLowerCase()))
+      problems.push(`${key} is in ROUTE_PERMISSIONS but no controller serves it`);
   }
   return problems;
 }
