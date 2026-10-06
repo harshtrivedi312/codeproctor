@@ -98,6 +98,14 @@ export const envSchema = z
     JUDGE0_AUTHZ_TOKEN: z.string().min(1).optional(),
     JUDGE0_REQUEST_TIMEOUT_MS: positiveInt.default(10_000),
     JUDGE0_POLL_DEADLINE_MS: positiveInt.default(60_000),
+    // Email (C-31): Amazon SES, or noop (drops mail) for local and test. Pilot and production
+    // require ses. No secrets here: credentials come from the AWS SDK default chain (instance
+    // role). SES_ENDPOINT is for tests only and is refused outside development and test.
+    EMAIL_PROVIDER: z.enum(['ses', 'noop']).default('noop'),
+    AWS_REGION: z.string().min(1).default('us-east-1'),
+    SES_FROM_ADDRESS: z.email().optional(),
+    SES_CONFIGURATION_SET: z.string().min(1).optional(),
+    SES_ENDPOINT: z.url().optional(),
   })
   .superRefine((env, ctx) => {
     const live = isLiveEnv(env);
@@ -142,6 +150,27 @@ export const envSchema = z
           message: 'is required in pilot and production, at least 32 characters',
         });
       }
+    }
+    if (live && env.EMAIL_PROVIDER !== 'ses') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['EMAIL_PROVIDER'],
+        message: 'must be ses in pilot and production',
+      });
+    }
+    if (env.EMAIL_PROVIDER === 'ses' && !env.SES_FROM_ADDRESS) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['SES_FROM_ADDRESS'],
+        message: 'is required when EMAIL_PROVIDER is ses',
+      });
+    }
+    if (env.SES_ENDPOINT && (live || env.APP_ENV === 'staging')) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['SES_ENDPOINT'],
+        message: 'is for tests only and must not be set in staging, pilot or production',
+      });
     }
     if (live && !env.WEB_ORIGIN.startsWith('https://')) {
       ctx.addIssue({

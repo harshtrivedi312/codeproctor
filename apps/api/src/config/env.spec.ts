@@ -52,6 +52,8 @@ describe('NFR-04 environment validation', () => {
       JUDGE0_URL: 'https://judge0.example.com',
       JUDGE0_AUTH_TOKEN: 't'.repeat(32),
       JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
+      EMAIL_PROVIDER: 'ses',
+      SES_FROM_ADDRESS: 'no-reply@example.com',
     };
     for (const APP_ENV of ['pilot', 'production']) {
       const base = { ...valid, ...live, APP_ENV };
@@ -111,6 +113,8 @@ describe('NFR-04 environment validation', () => {
       JUDGE0_URL: 'https://judge0.example.com',
       JUDGE0_AUTH_TOKEN: token,
       JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
+      EMAIL_PROVIDER: 'ses',
+      SES_FROM_ADDRESS: 'no-reply@example.com',
     };
     expect(validateEnv(live).JUDGE0_URL).toBe('https://judge0.example.com');
     expect(() => validateEnv({ ...live, JUDGE0_URL: undefined })).toThrow(/JUDGE0_URL/);
@@ -186,6 +190,8 @@ describe('NFR-04 environment validation', () => {
       JUDGE0_URL: 'https://judge0.example.com',
       JUDGE0_AUTH_TOKEN: 't'.repeat(32),
       JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
+      EMAIL_PROVIDER: 'ses',
+      SES_FROM_ADDRESS: 'no-reply@example.com',
     };
     for (const APP_ENV of ['pilot', 'production']) {
       expect(() => validateEnv({ ...live, APP_ENV, WEB_ORIGIN: 'http://app.example.com' })).toThrow(
@@ -196,5 +202,84 @@ describe('NFR-04 environment validation', () => {
       ).toBe('https://app.example.com');
     }
     expect(validateEnv(valid).WEB_ORIGIN).toBe('http://localhost:3000');
+  });
+  describe('C-31 email settings', () => {
+    const live = {
+      ...valid,
+      APP_ENV: 'pilot',
+      WEB_ORIGIN: 'https://app.example.com',
+      TRUST_PROXY_HOPS: '1',
+      JUDGE0_URL: 'https://judge0.example.com',
+      JUDGE0_AUTH_TOKEN: 't'.repeat(32),
+      JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
+      EMAIL_PROVIDER: 'ses',
+      SES_FROM_ADDRESS: 'no-reply@example.com',
+    };
+
+    it('C-31: defaults to noop and us-east-1 locally', () => {
+      const env = validateEnv(valid);
+      expect(env.EMAIL_PROVIDER).toBe('noop');
+      expect(env.AWS_REGION).toBe('us-east-1');
+      expect(env.SES_FROM_ADDRESS).toBeUndefined();
+    });
+
+    it('C-31: pilot and production require ses and name the variable', () => {
+      for (const APP_ENV of ['pilot', 'production']) {
+        expect(validateEnv({ ...live, APP_ENV }).EMAIL_PROVIDER).toBe('ses');
+        expect(() => validateEnv({ ...live, APP_ENV, EMAIL_PROVIDER: 'noop' })).toThrow(
+          /EMAIL_PROVIDER/,
+        );
+        expect(() => validateEnv({ ...live, APP_ENV, EMAIL_PROVIDER: undefined })).toThrow(
+          /EMAIL_PROVIDER/,
+        );
+      }
+      expect(() =>
+        validateEnv({
+          ...live,
+          APP_ENV: 'development',
+          NODE_ENV: 'production',
+          EMAIL_PROVIDER: 'noop',
+        }),
+      ).toThrow(/EMAIL_PROVIDER/);
+    });
+
+    it('C-31: ses needs a valid SES_FROM_ADDRESS', () => {
+      expect(() => validateEnv({ ...live, SES_FROM_ADDRESS: undefined })).toThrow(
+        /SES_FROM_ADDRESS/,
+      );
+      expect(() => validateEnv({ ...live, SES_FROM_ADDRESS: 'not-an-address' })).toThrow(
+        /SES_FROM_ADDRESS/,
+      );
+      expect(() =>
+        validateEnv({ ...valid, EMAIL_PROVIDER: 'ses', SES_FROM_ADDRESS: undefined }),
+      ).toThrow(/SES_FROM_ADDRESS/);
+    });
+
+    it('C-31: SES_ENDPOINT is refused in staging, pilot and production, allowed in development and test', () => {
+      const endpoint = 'http://127.0.0.1:4566';
+      for (const APP_ENV of ['staging', 'pilot', 'production']) {
+        expect(() => validateEnv({ ...live, APP_ENV, SES_ENDPOINT: endpoint })).toThrow(
+          /SES_ENDPOINT/,
+        );
+      }
+      expect(() =>
+        validateEnv({ ...valid, NODE_ENV: 'production', SES_ENDPOINT: endpoint }),
+      ).toThrow(/SES_ENDPOINT/);
+      for (const APP_ENV of ['development', 'test']) {
+        expect(validateEnv({ ...valid, APP_ENV, SES_ENDPOINT: endpoint }).SES_ENDPOINT).toBe(
+          endpoint,
+        );
+      }
+    });
+
+    it('C-31: there is no static AWS key setting in the schema', () => {
+      const env = validateEnv({
+        ...valid,
+        AWS_ACCESS_KEY_ID: 'AKIAFAKE',
+        AWS_SECRET_ACCESS_KEY: 'fake',
+      }) as Record<string, unknown>;
+      expect(env['AWS_ACCESS_KEY_ID']).toBeUndefined();
+      expect(env['AWS_SECRET_ACCESS_KEY']).toBeUndefined();
+    });
   });
 });
