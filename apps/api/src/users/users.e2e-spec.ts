@@ -410,6 +410,31 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       expect(after.setPasswordTokenHash).toBe(row.setPasswordTokenHash);
     });
 
+    it('FR-103, TC-006: a duplicate email is 409 and leaves one USER_INVITE_CONFLICT row with no email and no user id (DL-36)', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const other = await make(UserRole.RECRUITER, { orgId: orgB });
+      const before = await owner.auditLog.count({ where: { action: 'USER_INVITE_CONFLICT' } });
+      const res = await http()
+        .post(`${API}/admin/users`)
+        .set(admin.auth)
+        .send({ currentPassword: PASSWORD, email: other.email, name: 'Dup', role: 'RECRUITER' })
+        .expect(409);
+      expect(JSON.stringify(res.body)).not.toContain(other.email);
+      const rows = await owner.auditLog.findMany({
+        where: { action: 'USER_INVITE_CONFLICT', actorId: admin.id },
+      });
+      expect(await owner.auditLog.count({ where: { action: 'USER_INVITE_CONFLICT' } })).toBe(
+        before + 1,
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ orgId: orgA, entityId: null, metadata: {} });
+      // The rolled-back invite left no USER_INVITED row and no user.
+      expect(JSON.stringify(rows[0]?.metadata)).not.toContain(other.email);
+      expect(
+        await owner.auditLog.count({ where: { action: 'USER_INVITED', actorId: admin.id } }),
+      ).toBe(0);
+    });
+
     it('FR-103: a duplicate email is 409; a bad body is 400', async () => {
       const admin = await make(UserRole.SUPER_ADMIN);
       const other = await make(UserRole.RECRUITER, { orgId: orgB });
