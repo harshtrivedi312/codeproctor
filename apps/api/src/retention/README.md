@@ -62,9 +62,7 @@ through a single-flight job. Tests use `../test/retention/in-memory-object-store
 
 ## Reserved audit actions
 
-`consent-access.spec.ts` fails on any other access to the consent model, an include or select of it, `signedName`, or raw SQL on `consents`. `retention-markers.spec.ts` fails if any file outside the allowlist mentions `RETENTION_*_DONE`,
-`ERASURE_EMAIL_SENT`, `ERASURE_EMAIL_FAILED`, `ERASURE_COMPLETED` or their constants (as a
-constant, a string literal or inside raw SQL). Add a legitimate writer to the allowlist in the same PR.
+`consent-access.spec.ts` fails on any other access to the consent model, an include or select of it, `signedName`, or raw SQL on `consents`. `retention-markers.spec.ts` fails if any file outside the allowlist mentions `RETENTION_*_DONE`, `ERASURE_EMAIL_SENT`, `ERASURE_EMAIL_FAILED`, `ERASURE_COMPLETED`, `ERASURE_NOTICE_RECORDED`, `ERASURE_SESSION_FENCED`, `ERASURE_SESSION_PURGED`, `ERASURE_LIST_COMPLETED`, their constants, or a fragment they could be assembled from (as a constant, a string literal or inside raw SQL). Add a legitimate writer to the allowlist in the same PR.
 
 ## Erasure on request (`erasure/`, ADR 0004 9.5, C-06, C-17)
 
@@ -81,10 +79,10 @@ constant, a string literal or inside raw SQL). Add a legitimate writer to the al
 3. For each ERASED session: delete the whole prefix with verification, then one transaction (candidate
    lock first) applies R-6: delete events, batches, keystrokes, media chunks and identity checks;
    blank submissions, answers, scoring notes, review notes and appeal text; clear device info and the
-   report key; reduce accommodations. **Scores, verdicts and the session row stay** (R-10 anonymises them).
+   report key; reduce accommodations. After completion a session is skipped only if a purge row exists whose `at` (the pass start) is at or after its fence + 60 s + the margin. **Scores, verdicts and the session row stay** (R-10 anonymises them).
 4. `ERASURE_COMPLETED` once per request, only when every session is ERASED, and a verified pass ran at or after fence + 60 s + the sweep margin (the fence time is recorded per session).
 5. The candidate row is anonymised at the first of: the worker's email-sent row, a recorded manual notice
-   (`recordManualNotice`, audited), or day 28 of the deadline (request or last review/appeal close,
+   (`recordManualNotice`, audited; once per request whoever asks), or day 28 of the deadline (request or last review/appeal close,
    whichever is later; it does not run while a hold is open). Day 25 with no notice raises one alert. The consent record is never touched.
 
 `RetentionModule.forRoot({ ..., erasure })` takes a module exporting the five ports (fence, scheduler, notices, alerts, erasure list); without it every

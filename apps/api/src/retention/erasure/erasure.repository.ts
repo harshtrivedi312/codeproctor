@@ -78,7 +78,8 @@ export class ErasureRepository {
             AND (c.erased_at IS NULL
               OR NOT EXISTS (
                 SELECT 1 FROM audit_logs a
-                WHERE a.action = ${completed} AND a.org_id = c.org_id
+                WHERE a.action = ${completed} AND a.org_id = c.org_id AND a.actor_id IS NULL
+                  AND a.entity_id = c.id::text
                   AND a.metadata->>'requestId' = c.id::text || '_' || floor(extract(epoch FROM c.erasure_requested_at))::bigint::text)
               OR NOT EXISTS (
                 SELECT 1 FROM audit_logs a
@@ -273,9 +274,30 @@ export class ErasureRepository {
     requestId: string;
     actorId: string;
   }): Promise<void> {
-    // Once per request, whoever asks: the row carries the actor, so the generic check (system rows only) does not apply.
-    if (await this.noticeRecorded(args.requestId, args.candidateId)) return;
-    await this.writeOnce({ ...args, action: ERASURE_RESERVED_ACTIONS.NOTICE_RECORDED });
+    const { orgId, candidateId, requestId, actorId } = args;
+    await this.prisma.client.$transaction(async (tx) => {
+      await this.retentionRepo.candidateLock(tx, candidateId);
+      // Once per request whoever asks (the row carries the actor), checked under the candidate lock.
+      const existing = await tx.auditLog.findFirst({
+        where: {
+          action: ERASURE_RESERVED_ACTIONS.NOTICE_RECORDED,
+          entityId: candidateId,
+          metadata: { path: ['requestId'], equals: requestId },
+        },
+        select: { id: true },
+      });
+      if (existing !== null) return;
+      await tx.auditLog.create({
+        data: {
+          orgId,
+          actorId,
+          action: ERASURE_RESERVED_ACTIONS.NOTICE_RECORDED,
+          entityType: 'candidate',
+          entityId: candidateId,
+          metadata: { requestId },
+        },
+      });
+    });
   }
 
   /**

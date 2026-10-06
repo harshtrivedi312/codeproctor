@@ -209,10 +209,19 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
       now: NOW,
     });
     expect(r.anonymised).toBe(true);
+    const other = await h.owner.user.create({
+      data: {
+        orgId: h.A.orgId,
+        email: `second-admin-${cid}@example.test`,
+        fullName: 'Second Admin',
+        passwordHash: 'x',
+        role: 'RECRUITER',
+      },
+    });
     await svc.recordManualNotice({
       orgId: h.A.orgId,
       candidateId: cid,
-      actorId: ACTOR(),
+      actorId: other.id,
       now: NOW,
     });
     const c = await h.owner.candidate.findUniqueOrThrow({ where: { id: cid } });
@@ -676,6 +685,7 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
     let offset = 0;
     svc.clock = () => offset;
     const realDelete = h.store.deleteKeys.bind(h.store);
+    // Patched on this test's own store only (the harness builds a new one per test).
     h.store.deleteKeys = (keys) => {
       offset += 120_000; // the delete takes longer than the settle window
       return realDelete(keys);

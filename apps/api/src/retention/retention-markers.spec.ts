@@ -79,6 +79,8 @@ describe('reserved retention and erasure audit actions (FR-704, NFR-05)', () => 
       'const a = `RETENTION_${tier}_DONE`;',
       "const a = ['ERASURE_', 'EMAIL_SENT'].join('');",
       "const a = 'ERASURE_' + 'EMAIL_FAILED';",
+      "const a = 'ERASURE_SESSION' + '_PURGED';",
+      "const a = 'ERASURE_LIST' + '_COMPLETED';",
     ];
     for (const sample of offenders) expect(reservedActionHits(sample)).not.toEqual([]);
     expect(reservedActionHits("action: 'RETENTION_RUN'")).toEqual([]);
