@@ -140,7 +140,7 @@ export class VariantsController {
   @ApiNotFoundResponse({ description: 'No such question, version or variant in your organization' })
   @ApiConflictResponse({
     description:
-      'The version is published (immutable), the question is archived, or stale revision',
+      'The version is published (immutable), the question is archived, stale revision, or the variant has AI reference rows (ADR 0005 AI-1; it cannot be deleted, set it inactive)',
   })
   async remove(
     @Param() p: VariantParamDto,

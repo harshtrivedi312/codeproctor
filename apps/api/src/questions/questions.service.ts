@@ -54,7 +54,7 @@ import type {
   QuestionListQueryDto,
   QuestionSummaryDto,
   TestCaseDto,
-  TestCaseFieldsDto,
+  CreateTestCaseDto,
   UpdateQuestionDto,
   UpdateTestCaseDto,
 } from './dto/questions.dto';
@@ -539,12 +539,13 @@ export class QuestionsService {
     actor: Actor,
     id: string,
     version: number,
-    dto: TestCaseFieldsDto,
+    dto: CreateTestCaseDto,
     ctx: RequestContext,
     full: boolean,
   ): Promise<TestCaseDto> {
     return this.prisma.client.$transaction(async (tx) => {
       const v = await lockDraft(tx, id, version);
+      await checkRevision(tx, v, dto.expectedRevision);
       const count = await tx.testCase.count({ where: { questionVersionId: v.id } });
       if (count >= MAX_TEST_CASES) {
         throw new UnprocessableEntityException(
@@ -588,11 +589,12 @@ export class QuestionsService {
     full: boolean,
   ): Promise<TestCaseDto> {
     const fields = (Object.keys(dto) as (keyof UpdateTestCaseDto)[]).filter(
-      (k) => dto[k] !== undefined,
+      (k) => k !== 'expectedRevision' && dto[k] !== undefined,
     );
     if (fields.length === 0) throw new BadRequestException('Send at least one field to change.');
     return this.prisma.client.$transaction(async (tx) => {
       const v = await lockDraft(tx, id, version);
+      await checkRevision(tx, v, dto.expectedRevision);
       const { count } = await tx.testCase.updateMany({
         where: { id: testCaseId, questionVersionId: v.id },
         data: {
@@ -622,10 +624,12 @@ export class QuestionsService {
     id: string,
     version: number,
     testCaseId: string,
+    expectedRevision: string | undefined,
     ctx: RequestContext,
   ): Promise<void> {
     await this.prisma.client.$transaction(async (tx) => {
       const v = await lockDraft(tx, id, version);
+      await checkRevision(tx, v, expectedRevision);
       const { count } = await tx.testCase.deleteMany({
         where: { id: testCaseId, questionVersionId: v.id },
       });

@@ -123,6 +123,7 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   // AUTHOR (ADR 0010 section 3). Publish, archive and test cases are changes: question:update.
   'GET /questions': questionRead,
   'POST /questions': questionCreate,
+  'GET /questions/ai-policy': aiRefRead,
   'GET /questions/:id': questionRead,
   'GET /questions/:id/preview': questionRead,
   'PATCH /questions/:id': questionUpdate,

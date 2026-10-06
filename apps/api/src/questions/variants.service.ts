@@ -17,6 +17,7 @@
 // params, no hidden cases, no reference solution, no answer_spec (candidate-view.ts).
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
   UnprocessableEntityException,
@@ -190,6 +191,16 @@ export class VariantsService {
     await this.prisma.client.$transaction(async (tx) => {
       const v = await lockDraft(tx, id, version, 'variants');
       await checkRevision(tx, v, expectedRevision);
+      // ADR 0005 AI-1: AI reference rows are append-only, and variant_id cascades on delete, so a
+      // variant that any row (current or superseded) points to is never deleted (permanent 409;
+      // retire the variant with isActive=false instead). Read after the question lock, which
+      // every AI write also takes, so no row can appear between this check and the delete.
+      const aiRows = await tx.aiReferenceSolution.count({ where: { variantId } });
+      if (aiRows > 0) {
+        throw new ConflictException(
+          'The variant has AI reference rows, which are never deleted; set it inactive instead.',
+        );
+      }
       // Overrides go with it (ON DELETE CASCADE).
       const { count } = await tx.questionVariant.deleteMany({
         where: { id: variantId, questionVersionId: v.id },

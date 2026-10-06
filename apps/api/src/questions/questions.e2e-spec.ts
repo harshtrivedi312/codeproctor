@@ -1460,6 +1460,78 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
         .expect(200);
     });
 
+    it('FR-204, FR-202 (FU-BE-106): test-case routes take expectedRevision: stale is 409 (no code) and changes nothing, matching passes, omitted works, malformed is 400, nested create body rejects it', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const b = await make(UserRole.AUTHOR);
+      const id = idOf(await create(a, codingBody({ testCases: [] })));
+      const base = `${API}/questions/${id}/versions/1/test-cases`;
+      const t1 = await http()
+        .post(base)
+        .set(a.auth)
+        .send({ input: 'a', expectedOutput: 'b' })
+        .expect(201);
+      const tid = (t1.body as Json).id as string;
+      expect(t1.body).not.toHaveProperty('revision');
+      const loaded = await revisionOf(a, id);
+      await http().patch(`${base}/${tid}`).set(b.auth).send({ expectedOutput: 'B' }).expect(200);
+      const count = (): Promise<number> => owner.testCase.count({ where: { questionVersionId: undefined, questionVersion: { questionId: id } } });
+      const stalePatch = await http()
+        .patch(`${base}/${tid}`)
+        .set(a.auth)
+        .send({ expectedOutput: 'A', expectedRevision: loaded });
+      expect(stalePatch.status).toBe(409);
+      expect(stalePatch.body).not.toHaveProperty('code');
+      expect((await owner.testCase.findUniqueOrThrow({ where: { id: tid } })).expectedOutput).toBe(
+        'B',
+      );
+      const stalePost = await http()
+        .post(base)
+        .set(a.auth)
+        .send({ input: 'c', expectedOutput: 'd', expectedRevision: loaded });
+      expect(stalePost.status).toBe(409);
+      expect(await count()).toBe(1);
+      const staleDelete = await http()
+        .delete(`${base}/${tid}?expectedRevision=${loaded}`)
+        .set(a.auth);
+      expect(staleDelete.status).toBe(409);
+      expect(staleDelete.body).not.toHaveProperty('code');
+      expect(await count()).toBe(1);
+      const fresh = await revisionOf(a, id);
+      await http()
+        .patch(`${base}/${tid}`)
+        .set(a.auth)
+        .send({ expectedOutput: 'A', expectedRevision: fresh })
+        .expect(200);
+      const t2 = await http()
+        .post(base)
+        .set(a.auth)
+        .send({ input: 'c', expectedOutput: 'd', expectedRevision: await revisionOf(a, id) })
+        .expect(201);
+      expect(t2.body).not.toHaveProperty('expectedRevision');
+      await http()
+        .patch(`${base}/${tid}`)
+        .set(a.auth)
+        .send({ expectedRevision: await revisionOf(a, id) })
+        .expect(400);
+      await http().patch(`${base}/${tid}`).set(a.auth).send({ expectedRevision: 'nope' }).expect(400);
+      await http().delete(`${base}/${tid}?expectedRevision=nope`).set(a.auth).expect(400);
+      await http()
+        .delete(`${base}/${tid}?expectedRevision=${await revisionOf(a, id)}`)
+        .set(a.auth)
+        .expect(204);
+      await http()
+        .delete(`${base}/${(t2.body as Json).id as string}`)
+        .set(a.auth)
+        .expect(204);
+      expect(await count()).toBe(0);
+      // The create-question body keeps its strict shape: no expectedRevision inside testCases.
+      await http()
+        .post(`${API}/questions`)
+        .set(a.auth)
+        .send(codingBody({ testCases: [{ ...sampleCase, expectedRevision: fresh }] }))
+        .expect(400);
+    });
+
     it('FR-204: concurrent in-place edits of different fields are all kept (no lost update)', async () => {
       const a = await make(UserRole.AUTHOR);
       for (let round = 0; round < 3; round++) {
