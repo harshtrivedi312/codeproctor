@@ -125,10 +125,10 @@ export class ProblemFilter implements ExceptionFilter {
     }
 
     // A request refused before the throttler never had its body read: close the connection after
-    // the answer so the unread bytes are dropped (client-errors, FU-BE-100).
+    // the answer (no immediate destroy: that can RST and hide the answer; the leftover is capped by
+    // the server requestTimeout) (client-errors, FU-BE-100).
     if (getEarlyRejection(req)) {
       res.setHeader('Connection', 'close');
-      res.once('finish', () => req.destroy());
     }
     res.status(status).type('application/problem+json').json(problem);
   }

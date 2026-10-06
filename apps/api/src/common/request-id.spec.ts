@@ -28,6 +28,13 @@ describe('resolveRequestId (NFR-09, FU-BE-12, FU-BE-95)', () => {
     ]) {
       expect(resolveRequestId('victim-trace-0001', url)).toMatch(uuid);
     }
+    // Absolute-form request target still routes to /client-errors.
+    for (const url of [
+      'http://host/api/v1/client-errors',
+      'https://host:8443/API/v1/Client-Errors?x=1',
+    ]) {
+      expect(resolveRequestId('victim-trace-0001', url)).toMatch(uuid);
+    }
     expect(resolveRequestId('victim-trace-0001', '/api/v1/client-errors-x')).toBe(
       'victim-trace-0001',
     );

@@ -89,6 +89,25 @@ describe('HTTP hardening (FU-BE-98, FU-BE-103, FU-BE-104, FU-BE-12, FU-BE-13)', 
     expect(over.headers['content-type']).toMatch(/application\/problem\+json/);
   });
 
+  it('FU-BE-104: an urlencoded body over 100 KB is 413, globally and on /questions', async () => {
+    const big = `a=${'x'.repeat(150_000)}`;
+    for (const path of ['/api/v1/hardening', '/api/v1/questions']) {
+      const res = await request(app.getHttpServer())
+        .post(path)
+        .set('content-type', 'application/x-www-form-urlencoded')
+        .send(big)
+        .expect(413);
+      expect(res.headers['content-type']).toMatch(/application\/problem\+json/);
+    }
+  });
+
+  it('FU-BE-104: a path that only starts with /questions keeps the 100 KB limit', async () => {
+    await request(app.getHttpServer())
+      .post('/api/v1/questions-x')
+      .send({ a: 'x'.repeat(150_000) })
+      .expect(413);
+  });
+
   it('FU-BE-103: malformed JSON is 400 problem+json that echoes neither body nor parser message', async () => {
     const res = await request(app.getHttpServer())
       .post('/api/v1/hardening')

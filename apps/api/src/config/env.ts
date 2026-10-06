@@ -143,6 +143,13 @@ export const envSchema = z
         });
       }
     }
+    if (live && !env.WEB_ORIGIN.startsWith('https://')) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['WEB_ORIGIN'],
+        message: 'must be an https origin in pilot and production',
+      });
+    }
     if (live && env.TRUST_PROXY_HOPS < 1) {
       ctx.addIssue({
         code: 'custom',

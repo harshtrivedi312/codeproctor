@@ -48,6 +48,7 @@ describe('NFR-04 environment validation', () => {
 
   it('FU-BE-97: pilot and production refuse TRUST_PROXY_HOPS of 0 or missing, and name only the variable', () => {
     const live = {
+      WEB_ORIGIN: 'https://app.example.com',
       JUDGE0_URL: 'https://judge0.example.com',
       JUDGE0_AUTH_TOKEN: 't'.repeat(32),
       JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
@@ -105,6 +106,7 @@ describe('NFR-04 environment validation', () => {
     const live = {
       ...valid,
       APP_ENV: 'pilot',
+      WEB_ORIGIN: 'https://app.example.com',
       TRUST_PROXY_HOPS: '1',
       JUDGE0_URL: 'https://judge0.example.com',
       JUDGE0_AUTH_TOKEN: token,
@@ -175,5 +177,24 @@ describe('NFR-04 environment validation', () => {
     expect(() => validateEnv({ ...valid, HTTP_KEEPALIVE_TIMEOUT_MS: '9999999' })).toThrow(
       /HTTP_KEEPALIVE_TIMEOUT_MS/,
     );
+  });
+
+  it('FU-BE-11: pilot and production require an https WEB_ORIGIN; local http stays valid', () => {
+    const live = {
+      ...valid,
+      TRUST_PROXY_HOPS: '1',
+      JUDGE0_URL: 'https://judge0.example.com',
+      JUDGE0_AUTH_TOKEN: 't'.repeat(32),
+      JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
+    };
+    for (const APP_ENV of ['pilot', 'production']) {
+      expect(() => validateEnv({ ...live, APP_ENV, WEB_ORIGIN: 'http://app.example.com' })).toThrow(
+        /WEB_ORIGIN/,
+      );
+      expect(
+        validateEnv({ ...live, APP_ENV, WEB_ORIGIN: 'https://app.example.com' }).WEB_ORIGIN,
+      ).toBe('https://app.example.com');
+    }
+    expect(validateEnv(valid).WEB_ORIGIN).toBe('http://localhost:3000');
   });
 });

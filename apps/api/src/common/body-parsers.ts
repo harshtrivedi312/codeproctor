@@ -33,9 +33,9 @@ function captureParser(
   const express = app as NestExpressApplication;
   const adapter = express.getHttpAdapter() as unknown as { use: (...args: unknown[]) => unknown };
   const original = Object.getOwnPropertyDescriptor(adapter, 'use');
-  let captured: RequestHandler | undefined;
+  const captured: unknown[] = [];
   adapter.use = (...args: unknown[]): unknown => {
-    captured = args[0] as RequestHandler;
+    captured.push(args[0]);
     return adapter;
   };
   try {
@@ -44,8 +44,12 @@ function captureParser(
     if (original) Object.defineProperty(adapter, 'use', original);
     else delete (adapter as { use?: unknown }).use;
   }
-  if (!captured) throw new Error('Could not build the body parser');
-  return captured;
+  // Fail at startup if Nest ever changes how useBodyParser registers the parser.
+  const [parser] = captured;
+  if (captured.length !== 1 || typeof parser !== 'function') {
+    throw new Error('Could not build the body parser');
+  }
+  return parser as RequestHandler;
 }
 
 /**

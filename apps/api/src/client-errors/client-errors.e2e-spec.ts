@@ -474,4 +474,42 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
     expect((res.body as ProblemDetails).traceId).not.toBe('victim-trace-0001');
     expect(res.headers['x-request-id']).toBe((res.body as ProblemDetails).traceId);
   });
+
+  it('C-32, FU-BE-100: a rejected report carries Connection: close and the client still reads the 413 while streaming a declared 1 MB body slowly', async () => {
+    await restart({});
+    const server = app.getHttpServer() as unknown as Server;
+    if (server.address() === null) await new Promise<void>((resolve) => server.listen(0, resolve));
+    const { port } = server.address() as AddressInfo;
+    const total = 1024 * 1024;
+    const result = await new Promise<{ status: number; connection: string | undefined }>(
+      (resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: '127.0.0.1',
+            port,
+            path: '/api/v1/client-errors',
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'content-length': String(total) },
+          },
+          (res) => {
+            res.resume();
+            res.on('end', () =>
+              resolve({ status: res.statusCode ?? 0, connection: res.headers['connection'] }),
+            );
+            res.on('error', reject);
+          },
+        );
+        req.on('error', reject);
+        let sent = 0;
+        const timer = setInterval(() => {
+          if (sent >= total || req.destroyed) return clearInterval(timer);
+          sent += 64 * 1024;
+          req.write(Buffer.alloc(64 * 1024, 0x61));
+        }, 20);
+        timer.unref();
+      },
+    );
+    expect(result.status).toBe(413);
+    expect(result.connection).toBe('close');
+  });
 });
