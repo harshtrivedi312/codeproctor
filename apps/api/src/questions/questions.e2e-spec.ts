@@ -1474,7 +1474,10 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       expect(t1.body).not.toHaveProperty('revision');
       const loaded = await revisionOf(a, id);
       await http().patch(`${base}/${tid}`).set(b.auth).send({ expectedOutput: 'B' }).expect(200);
-      const count = (): Promise<number> => owner.testCase.count({ where: { questionVersionId: undefined, questionVersion: { questionId: id } } });
+      const count = (): Promise<number> =>
+        owner.testCase.count({
+          where: { questionVersionId: undefined, questionVersion: { questionId: id } },
+        });
       const stalePatch = await http()
         .patch(`${base}/${tid}`)
         .set(a.auth)
@@ -1513,7 +1516,11 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
         .set(a.auth)
         .send({ expectedRevision: await revisionOf(a, id) })
         .expect(400);
-      await http().patch(`${base}/${tid}`).set(a.auth).send({ expectedRevision: 'nope' }).expect(400);
+      await http()
+        .patch(`${base}/${tid}`)
+        .set(a.auth)
+        .send({ expectedRevision: 'nope' })
+        .expect(400);
       await http().delete(`${base}/${tid}?expectedRevision=nope`).set(a.auth).expect(400);
       await http()
         .delete(`${base}/${tid}?expectedRevision=${await revisionOf(a, id)}`)
@@ -2564,7 +2571,7 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       typeof import('../common/auth/route-registry')
     >('../common/auth/route-registry');
     const routes = listRoutes(app.get(ModulesContainer));
-    expect(routes.filter((r) => r.key.includes('/questions')).length).toBe(23);
+    expect(routes.filter((r) => r.key.includes('/questions')).length).toBe(24);
     expect(matrixProblems(routes)).toEqual([]);
   });
 });

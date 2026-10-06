@@ -550,7 +550,8 @@ const BE04_ROUTES: Be03Route[] = [
     audit: null,
     mutating: false,
     ok: [200],
-    prepare: () => Promise.resolve({ path: `${QUESTIONS}/ai-policy`, secrets: [], unchanged: noop }),
+    prepare: () =>
+      Promise.resolve({ path: `${QUESTIONS}/ai-policy`, secrets: [], unchanged: noop }),
   }),
   q04({
     id: 'questions-create',
