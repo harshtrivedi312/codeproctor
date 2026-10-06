@@ -1,5 +1,6 @@
 'use client';
 import { useQuery } from '@tanstack/react-query';
+import { useRouter } from 'next/navigation';
 import * as React from 'react';
 import { ConsentStep } from '@/features/consent/consent-step';
 import type { IdentityDeps } from '@/features/identity/capture';
@@ -15,7 +16,8 @@ import {
   clearCandidateCredentials,
   clearInvitationToken,
   getInvitationToken,
-  scrubTokenFromUrl,
+  SCRUBBED_PATH,
+  urlNeedsScrub,
   setSessionToken,
 } from './session-store';
 import { Stepper } from './step-frame';
@@ -26,13 +28,16 @@ import { WelcomeStep, terminalFromLinkState, type CodeSentInfo } from './welcome
 import type { LinkView, SessionTokenResponse } from './wire';
 
 /**
- * The candidate pre-test stepper under /t/[token] (FR-401 to FR-403; ADR 0002, 0003, 0013).
+ * The candidate pre-test stepper (FR-401 to FR-403; ADR 0002, 0003, 0013), served from the static
+ * route /t/link.
  *
- * Credentials: the invitation token is read from the URL once, kept in memory, and the address bar
- * is rewritten at once, so it does not stay in the address bar, the history list or any later
- * Referer. It is sent only in POST bodies. The session token lives in memory only. A reload loses
- * both: the candidate opens the link again and enters a new code, which is what resuming means
- * (ADR 0002). Progress is the server's session status, so a candidate resumes at the right step.
+ * Credentials: a link shaped /t/<token> opens a thin page (TokenHandoff) that moves the token into
+ * memory and replaces the route with /t/link, so Next's route tree and history state never hold it.
+ * A link shaped /t/link#<token> is read here; the fragment never reaches the server, and is removed
+ * through router.replace. The token is sent only in POST bodies. The session token lives in memory
+ * only. A reload loses both: the candidate opens the link again and enters a new code, which is what
+ * resuming means (ADR 0002). Progress is the server's session status, so a candidate resumes at the
+ * right step.
  */
 export interface FlowOverrides {
   checker?: SystemChecker;
@@ -49,6 +54,7 @@ export function CandidateFlow({
   /** Test seam: real browsers never pass this. */
   overrides?: FlowOverrides;
 }): React.JSX.Element {
+  const router = useRouter();
   const [terminal, setTerminal] = React.useState<Terminal | null>(null);
   const [step, setStep] = React.useState<StepId>('welcome');
   const [sent, setSent] = React.useState<CodeSentInfo | null>(null);
@@ -72,12 +78,13 @@ export function CandidateFlow({
     seedRef.current ??= readTokenFromHash() ?? getInvitationToken() ?? token ?? null;
     const t = seedRef.current;
     if (t !== null) captureInvitationToken(t);
-    scrubTokenFromUrl(t);
+    // Through the router, so Next's own copy of the URL (fragment included) is cleaned too.
+    if (urlNeedsScrub(t)) router.replace(SCRUBBED_PATH);
     return () => {
       // Leaving the flow forgets everything held in memory.
       clearCandidateCredentials();
     };
-  }, [token]);
+  }, [token, router]);
 
   const link = useQuery({
     queryKey: ['candidate', 'link'],

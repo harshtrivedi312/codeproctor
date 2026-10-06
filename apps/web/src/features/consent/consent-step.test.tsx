@@ -10,6 +10,7 @@ import {
   passOtp,
   recordRequests,
   renderWithQuery,
+  startAtStepper,
   server,
   spyOnMedia,
   setupCandidateServer,
@@ -17,12 +18,14 @@ import {
 import { apiBaseUrl } from '@/lib/env';
 import { MOCK_CONSENT_ID, MOCK_RECRUITER_CONTACT, MOCK_TOKENS } from '@/mocks/candidate/handlers';
 
+vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
+
 setupCandidateServer();
 
 async function toConsent(token: string = MOCK_TOKENS.open) {
   const user = userEvent.setup();
-  window.history.replaceState(null, '', `/t/${token}`);
-  const view = renderWithQuery(<CandidateFlow token={token} />);
+  startAtStepper(token);
+  const view = renderWithQuery(<CandidateFlow />);
   await passOtp(user);
   await expectHeadingFocused(/please read and sign|not available yet/i);
   return { user, ...view };
@@ -197,9 +200,9 @@ describe('consent step (FR-401, D-17, C-30)', () => {
   });
 
   it('FR-401: if the API says the text is already signed, the candidate moves on without a second signature', async () => {
-    window.history.replaceState(null, '', `/t/${MOCK_TOKENS.consented}`);
+    startAtStepper(MOCK_TOKENS.consented);
     const user = userEvent.setup();
-    renderWithQuery(<CandidateFlow token={MOCK_TOKENS.consented} />);
+    renderWithQuery(<CandidateFlow />);
     await passOtp(user);
     await expectHeadingFocused(/check your computer/i);
   });
@@ -259,8 +262,8 @@ describe('consent step (FR-401, D-17, C-30)', () => {
       ),
     );
     const user = userEvent.setup();
-    window.history.replaceState(null, '', `/t/${MOCK_TOKENS.open}`);
-    renderWithQuery(<CandidateFlow token={MOCK_TOKENS.open} />);
+    startAtStepper(MOCK_TOKENS.open);
+    renderWithQuery(<CandidateFlow />);
     await passOtp(user);
     expect(
       await screen.findByRole('heading', { level: 1, name: /your session ended/i }),

@@ -1,6 +1,10 @@
 import type { Metadata } from 'next';
 
-export const metadata: Metadata = { title: 'Retention schedule', robots: { index: false } };
+export const metadata: Metadata = {
+  title: 'Retention schedule',
+  robots: { index: false, follow: false },
+  referrer: 'no-referrer',
+};
 
 /**
  * C-05: the candidate portal links to the written retention and destruction schedule. The text in
@@ -9,7 +13,7 @@ export const metadata: Metadata = { title: 'Retention schedule', robots: { index
  */
 export default function RetentionSchedulePage() {
   return (
-    <main id="main" className="mx-auto max-w-2xl space-y-4 px-4 py-16">
+    <main id="main" className="mx-auto min-h-dvh max-w-2xl space-y-4 px-4 py-16">
       <h1 className="text-2xl font-semibold">Retention and destruction schedule</h1>
       <p>
         The schedule that says what we keep from your test, for how long, and how we destroy it has

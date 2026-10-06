@@ -1,7 +1,12 @@
 import { render, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MOCK_TOKENS } from '@/mocks/candidate/handlers';
-import { clearCandidateCredentials, getInvitationToken, scrubTokenFromUrl } from './session-store';
+import {
+  clearCandidateCredentials,
+  getInvitationToken,
+  SCRUBBED_PATH,
+  urlNeedsScrub,
+} from './session-store';
 import { TokenHandoff } from './token-handoff';
 
 const replace = vi.fn();
@@ -34,33 +39,34 @@ describe('token hand-off from /t/[token] (FR-401, ADR 0003)', () => {
   });
 });
 
-describe('history state scrub (FR-401, ADR 0003)', () => {
-  it('FR-401: a Next-like history state that holds the token in its route tree is dropped', () => {
-    const nextState = {
-      __NA: true,
-      __PRIVATE_NEXTJS_INTERNALS_TREE: [
-        '',
-        {
-          children: [
-            't',
-            { children: [['token', MOCK_TOKENS.open, 'd'], { children: ['__PAGE__', {}] }] },
-          ],
-        },
-      ],
-    };
-    window.history.replaceState(nextState, '', `/t/${MOCK_TOKENS.open}`);
-    expect(JSON.stringify(window.history.state)).toContain(MOCK_TOKENS.open);
-    scrubTokenFromUrl(MOCK_TOKENS.open);
-    expect(window.history.state).toBeNull();
-    expect(JSON.stringify(window.history.state)).not.toContain(MOCK_TOKENS.open);
-    expect(window.location.href).not.toContain(MOCK_TOKENS.open);
-    expect(window.location.pathname).toBe('/t/link');
+describe('when the URL needs a router replace (FR-401, ADR 0003)', () => {
+  const nextState = {
+    __NA: true,
+    __PRIVATE_NEXTJS_INTERNALS_TREE: [
+      '',
+      { children: ['t', { children: [['token', MOCK_TOKENS.open, 'd'], {}] }] },
+    ],
+  };
+
+  it('FR-401: a history state that holds the token in its route tree is flagged', () => {
+    window.history.replaceState(nextState, '', SCRUBBED_PATH);
+    expect(urlNeedsScrub(MOCK_TOKENS.open)).toBe(true);
   });
 
-  it('FR-401: a clean state (already on /t/link) is kept so the router keeps working', () => {
-    const clean = { __NA: true, __PRIVATE_NEXTJS_INTERNALS_TREE: ['', { children: ['t', {}] }] };
-    window.history.replaceState(clean, '', '/t/link');
-    scrubTokenFromUrl(MOCK_TOKENS.open);
-    expect(window.history.state).toEqual(clean);
+  it('FR-401: a fragment or another path is flagged, because the router keeps its own copy', () => {
+    window.history.replaceState(null, '', `${SCRUBBED_PATH}#${MOCK_TOKENS.open}`);
+    expect(urlNeedsScrub(MOCK_TOKENS.open)).toBe(true);
+    window.history.replaceState(null, '', `/t/${MOCK_TOKENS.open}`);
+    expect(urlNeedsScrub(MOCK_TOKENS.open)).toBe(true);
+  });
+
+  it('FR-401: a clean /t/link with a clean state is left alone', () => {
+    window.history.replaceState(
+      { __NA: true, __PRIVATE_NEXTJS_INTERNALS_TREE: ['', {}] },
+      '',
+      SCRUBBED_PATH,
+    );
+    expect(urlNeedsScrub(MOCK_TOKENS.open)).toBe(false);
+    expect(urlNeedsScrub(null)).toBe(false);
   });
 });

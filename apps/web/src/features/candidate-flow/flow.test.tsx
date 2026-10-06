@@ -13,6 +13,7 @@ import {
   passOtp,
   recordRequests,
   renderWithQuery,
+  startAtStepper,
   setupCandidateServer,
 } from './test-helpers';
 import { fireEvent } from '@testing-library/react';
@@ -26,6 +27,8 @@ vi.mock('@/lib/mock-ready', () => ({
   mockingReady: Promise.resolve(),
   markMockingReady: () => undefined,
 }));
+
+vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
 
 setupCandidateServer();
 
@@ -54,10 +57,8 @@ const identity = {
 };
 
 function open(token: string, navigate: (path: string) => void = vi.fn()) {
-  window.history.replaceState(null, '', `/t/${token}`);
-  return renderWithQuery(
-    <CandidateFlow token={token} overrides={{ checker, identity, navigate }} />,
-  );
+  startAtStepper(token);
+  return renderWithQuery(<CandidateFlow overrides={{ checker, identity, navigate }} />);
 }
 
 describe('stepper end to end (FR-401 to FR-403)', () => {

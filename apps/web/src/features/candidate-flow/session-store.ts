@@ -42,20 +42,18 @@ export function clearCandidateCredentials(): void {
 }
 
 /**
- * Replaces the address-bar URL (and so the history entry) with a neutral path, and drops any
- * history state that still holds the token. Next.js keeps the route tree, including dynamic
- * segment values, in history.state, and browsers persist it, so a state that mentions the token is
- * replaced by null instead of being carried over. The stepper is served from the static path
- * /t/link (the /t/[token] page hands the token over and navigates there), so on the normal path the
- * state is already clean; this is the safety net.
+ * True when the address bar or the history state still carries something other than the clean
+ * /t/link: a fragment, another path, or a state that mentions the token. The fix is always
+ * router.replace(SCRUBBED_PATH): Next.js keeps its own copy of the URL (with the fragment) and of
+ * the route tree in history.state and re-writes them on the next router update, so changing the
+ * URL behind the router's back with history.replaceState does not hold.
  */
-export function scrubTokenFromUrl(
-  token: string | null = null,
-  win: Pick<Window, 'history'> = window,
-): void {
-  const state = win.history.state as unknown;
-  const dirty = token !== null && (JSON.stringify(state) ?? '').includes(token);
-  win.history.replaceState(dirty ? null : state, '', SCRUBBED_PATH);
+export function urlNeedsScrub(
+  token: string | null,
+  win: Pick<Window, 'history' | 'location'> = window,
+): boolean {
+  if (win.location.hash !== '' || win.location.pathname !== SCRUBBED_PATH) return true;
+  return token !== null && (JSON.stringify(win.history.state as unknown) ?? '').includes(token);
 }
 
 /**

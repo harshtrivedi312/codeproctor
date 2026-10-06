@@ -23,6 +23,11 @@ export function TokenHandoff(): React.JSX.Element {
       <p role="status" className="py-10 text-center">
         Opening your invitation...
       </p>
+      <noscript>
+        <p>
+          This page needs JavaScript. Turn it on, or use Chrome or Edge, then open the link again.
+        </p>
+      </noscript>
     </main>
   );
 }

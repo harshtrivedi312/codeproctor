@@ -1,4 +1,5 @@
 import { screen, waitFor } from '@testing-library/react';
+import { router } from '@/test/nav-mock';
 import userEvent from '@testing-library/user-event';
 import { axe } from 'vitest-axe';
 import { describe, expect, it, vi } from 'vitest';
@@ -11,19 +12,21 @@ import {
   passOtp,
   recordRequests,
   renderWithQuery,
+  startAtStepper,
   setupCandidateServer,
 } from './test-helpers';
+
+vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
 
 setupCandidateServer();
 
 function open(token: string) {
-  window.history.replaceState(null, '', `/t/${token}`);
-  return renderWithQuery(<CandidateFlow token={token} />);
+  startAtStepper(token);
+  return renderWithQuery(<CandidateFlow />);
 }
 
 describe('invitation link and token handling (FR-303, FR-401, ADR 0003)', () => {
-  it('FR-401: the token is removed from the address bar and history as soon as it is read', async () => {
-    const replace = vi.spyOn(window.history, 'replaceState');
+  it('FR-401: on the clean /t/link no router replace is needed and nothing holds the token', async () => {
     open(MOCK_TOKENS.open);
     await screen.findByRole('heading', {
       level: 1,
@@ -31,10 +34,10 @@ describe('invitation link and token handling (FR-303, FR-401, ADR 0003)', () => 
     });
     expect(window.location.pathname).toBe(SCRUBBED_PATH);
     expect(window.location.href).not.toContain(MOCK_TOKENS.open);
-    expect(replace).toHaveBeenLastCalledWith(null, '', SCRUBBED_PATH);
+    expect(router.replace).not.toHaveBeenCalled();
+    expect(JSON.stringify(window.history.state)).not.toContain(MOCK_TOKENS.open);
     // The token lives in memory only.
     expect(getInvitationToken()).toBe(MOCK_TOKENS.open);
-    replace.mockRestore();
   });
 
   it('FR-401: the token is only ever sent in a POST body, never in a URL, storage, or the console', async () => {
@@ -69,13 +72,16 @@ describe('invitation link and token handling (FR-303, FR-401, ADR 0003)', () => 
   it('FR-401: a token in the URL fragment is read and removed too, and never reaches the server', async () => {
     const seen = recordRequests();
     window.history.replaceState(null, '', `/t/link#${MOCK_TOKENS.open}`);
-    renderWithQuery(<CandidateFlow token="link" />);
+    renderWithQuery(<CandidateFlow />);
     await screen.findByRole('heading', {
       level: 1,
       name: /welcome to your proctored coding test/i,
     });
+    // The fragment is removed through the router, so Next's own copy of the URL loses it too.
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(SCRUBBED_PATH));
     expect(window.location.hash).toBe('');
     expect(window.location.href).not.toContain(MOCK_TOKENS.open);
+    expect(JSON.stringify(window.history.state)).not.toContain(MOCK_TOKENS.open);
     expect(getInvitationToken()).toBe(MOCK_TOKENS.open);
     expect(seen.some((r) => r.url.includes(MOCK_TOKENS.open))).toBe(false);
   });

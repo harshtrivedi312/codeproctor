@@ -4,9 +4,17 @@ import { describe, expect, it, vi } from 'vitest';
 import { MOCK_TOKENS } from '@/mocks/candidate/handlers';
 import { CandidateFlow } from './candidate-flow';
 import { defaultNavigate, START_ENABLED } from './start-step';
-import { passOtp, recordRequests, renderWithQuery, setupCandidateServer } from './test-helpers';
+import {
+  passOtp,
+  recordRequests,
+  renderWithQuery,
+  setupCandidateServer,
+  startAtStepper,
+} from './test-helpers';
 
 // Mock mode is OFF in this file (the default), as in a real build.
+vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
+
 setupCandidateServer();
 
 describe('start is held back until the token hand-off is decided (FU-FEB-10)', () => {
@@ -15,8 +23,8 @@ describe('start is held back until the token hand-off is decided (FU-FEB-10)', (
     const seen = recordRequests();
     const navigate = vi.fn();
     const user = userEvent.setup();
-    window.history.replaceState(null, '', `/t/${MOCK_TOKENS.resume}`);
-    renderWithQuery(<CandidateFlow token={MOCK_TOKENS.resume} overrides={{ navigate }} />);
+    startAtStepper(MOCK_TOKENS.resume);
+    renderWithQuery(<CandidateFlow overrides={{ navigate }} />);
     await passOtp(user);
     const button = await screen.findByRole('button', { name: /continue my test/i });
     expect(button).toBeDisabled();

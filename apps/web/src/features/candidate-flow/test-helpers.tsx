@@ -10,7 +10,8 @@ import {
   createCandidateHandlers,
   resetMockCandidateState,
 } from '@/mocks/candidate/handlers';
-import { clearCandidateCredentials } from './session-store';
+import { router } from '@/test/nav-mock';
+import { captureInvitationToken, clearCandidateCredentials } from './session-store';
 
 /**
  * Shared test setup for the candidate flow. Call `setupCandidateServer()` at the top of a describe
@@ -24,6 +25,11 @@ export const server = setupServer(
 export function setupCandidateServer(): void {
   beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
   beforeEach(() => {
+    router.replace.mockReset();
+    // Like Next's router: replacing the route rewrites the address bar and history entry.
+    router.replace.mockImplementation((path: string) =>
+      window.history.replaceState(null, '', path),
+    );
     resetMockCandidateState();
     clearCandidateCredentials();
   });
@@ -91,4 +97,10 @@ export function spyOnMedia() {
     value: { getUserMedia, getDisplayMedia, enumerateDevices: vi.fn(() => Promise.resolve([])) },
   });
   return { getUserMedia, getDisplayMedia };
+}
+
+/** Production shape: /t/<token> hands the token to memory and the stepper starts at /t/link. */
+export function startAtStepper(token: string): void {
+  captureInvitationToken(token);
+  window.history.replaceState(null, '', '/t/link');
 }
