@@ -280,6 +280,13 @@ describe('DB-08 CHECK constraints and cascades on real rows (FR-105, NFR-05)', {
     consents_check1: ['UPDATE consents SET signed_name = NULL WHERE signed_at IS NOT NULL'],
     identity_checks_attempt_check: ['UPDATE identity_checks SET attempt = 3'],
     identity_checks_check: ["UPDATE identity_checks SET status = 'REVIEWED'"],
+    // ADR 0015 section 4: a WAIVED row is the first attempt and holds no identity data.
+    identity_checks_waived_check: ["UPDATE identity_checks SET status = 'WAIVED'"],
+    // The video check is all or nothing, and only a WAIVED row can carry one.
+    identity_checks_video_check_check: [
+      'UPDATE identity_checks SET video_check_done = true',
+      'UPDATE identity_checks SET video_check_done = true, video_check_by = (SELECT id FROM users LIMIT 1), video_check_at = now()',
+    ],
     appeals_check: ["UPDATE appeals SET status = 'OVERTURNED'"],
   };
 
@@ -290,13 +297,13 @@ describe('DB-08 CHECK constraints and cascades on real rows (FR-105, NFR-05)', {
   });
   after(() => pg?.stop());
 
-  it('the schema holds exactly the 12 named CHECK constraints this suite exercises', () => {
+  it('the schema holds exactly the 14 named CHECK constraints this suite exercises', () => {
     const names = q(
       "SELECT conname FROM pg_constraint WHERE contype = 'c' AND connamespace = 'public'::regnamespace ORDER BY 1",
     )
       .split('\n')
       .filter((l) => l !== '');
-    assert.equal(names.length, 12);
+    assert.equal(names.length, 14);
     assert.deepEqual(names, Object.keys(CHECKS).sort());
   });
 
