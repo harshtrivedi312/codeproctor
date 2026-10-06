@@ -10,6 +10,11 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { BODY_PARSER_DETAIL, bodyParserStatus } from './body-parsers';
+import {
+  LOCK_CONTENTION_DETAIL,
+  LOCK_CONTENTION_RETRY_AFTER_SECONDS,
+  lockContentionCode,
+} from './db-contention';
 import { getEarlyRejection } from './early-rejection';
 import { resolveRequestId } from './request-id';
 import { OrgContextMissingError } from '../database/errors';
@@ -64,11 +69,17 @@ export class ProblemFilter implements ExceptionFilter {
     // the trace id, so the bug is not masked (FR-103, TC-008).
     const noScope = exception instanceof OrgContextMissingError;
     const parserStatus = bodyParserStatus(exception);
+    // Database lock contention (DL-37, FU-BE-42): 503 + Retry-After on every route. An
+    // HttpException is never reclassified.
+    const lockCode =
+      exception instanceof HttpException || noScope ? undefined : lockContentionCode(exception);
     const status = noScope
       ? HttpStatus.FORBIDDEN
       : exception instanceof HttpException
         ? exception.getStatus()
-        : (parserStatus ?? HttpStatus.INTERNAL_SERVER_ERROR);
+        : lockCode !== undefined
+          ? HttpStatus.SERVICE_UNAVAILABLE
+          : (parserStatus ?? HttpStatus.INTERNAL_SERVER_ERROR);
 
     const problem: ProblemDetails = {
       type: 'about:blank',
@@ -81,6 +92,16 @@ export class ProblemFilter implements ExceptionFilter {
     if (noScope) {
       this.logger.error({ traceId, errorName: exception.name }, 'Query without an org context');
       problem.detail = 'Access denied.';
+    } else if (lockCode !== undefined) {
+      // Class name and the fixed code token only: the message can hold SQL and parameters.
+      this.logger.warn(
+        { traceId, errorName: exception instanceof Error ? exception.name : 'NonError', lockCode },
+        'Database lock contention',
+      );
+      problem.detail = LOCK_CONTENTION_DETAIL;
+      if (!res.headersSent) {
+        res.setHeader('Retry-After', String(LOCK_CONTENTION_RETRY_AFTER_SECONDS));
+      }
     } else if (parserStatus !== undefined) {
       problem.detail = BODY_PARSER_DETAIL[parserStatus];
     } else if (exception instanceof HttpException) {
@@ -124,6 +145,9 @@ export class ProblemFilter implements ExceptionFilter {
       );
     }
 
+    // Headers already sent (a lock error while the response was streaming): nothing more can be
+    // written, and writing would throw.
+    if (res.headersSent) return;
     // A request refused before the throttler never had its body read: close the connection after
     // the answer (no immediate destroy: that can RST and hide the answer; the leftover is capped by
     // the server requestTimeout) (client-errors, FU-BE-100).
