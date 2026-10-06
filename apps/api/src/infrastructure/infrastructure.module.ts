@@ -46,6 +46,10 @@ class ShutdownService implements OnApplicationShutdown {
           maxRetriesPerRequest: 1,
           enableOfflineQueue: false,
           connectTimeout: config.get('HEALTH_TIMEOUT_MS', { infer: true }),
+          // A connected but hanging Redis must fail a command quickly, so the disable, reset and
+          // role-change transactions that call it cannot hold row locks until Prisma's 5 s timeout.
+          // The callers turn the error into the existing 503 (fail closed).
+          commandTimeout: config.get('HEALTH_TIMEOUT_MS', { infer: true }),
         });
         redis.on('error', () => undefined);
         return redis;

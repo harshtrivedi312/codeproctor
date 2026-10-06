@@ -108,5 +108,16 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      # The backup restore drill (infra/scripts/verify-backup.test.mjs) needs docker, the postgres:16
+      # image, the PostgreSQL 16 client and the aws CLI. REQUIRE_DB_DRILL=1 makes a missing tool fail
+      # the test instead of skipping it.
+      - name: Prepare the backup restore drill
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-16
+          docker pull -q postgres:16
+
       - name: Test
+        env:
+          REQUIRE_DB_DRILL: '1'
         run: pnpm test

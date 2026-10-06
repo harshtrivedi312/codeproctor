@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import logging
 import threading
+import time
 from collections import OrderedDict
 from typing import Final, Literal
 
@@ -96,21 +97,27 @@ class SelfieCache:
         if max_sessions < 1:
             raise ValueError("max_sessions must be at least 1.")
         self._max = max_sessions
-        self._items: OrderedDict[str, Embedding] = OrderedDict()
+        self._items: OrderedDict[str, tuple[Embedding, float | None]] = OrderedDict()
         self._lock = threading.Lock()
 
-    def put(self, session_id: str, emb: Embedding) -> None:
+    def put(self, session_id: str, emb: Embedding, expires_at: float | None = None) -> None:
+        """`expires_at` is epoch seconds (ADR 0014 6.3 TTL backstop); None means no expiry."""
         with self._lock:
-            self._items[session_id] = emb
+            self._items[session_id] = (emb, expires_at)
             self._items.move_to_end(session_id)
             while len(self._items) > self._max:
                 self._items.popitem(last=False)
 
     def get(self, session_id: str) -> Embedding | None:
         with self._lock:
-            emb = self._items.get(session_id)
-            if emb is not None:
-                self._items.move_to_end(session_id)
+            item = self._items.get(session_id)
+            if item is None:
+                return None
+            emb, expires_at = item
+            if expires_at is not None and expires_at <= time.time():
+                del self._items[session_id]  # expired entries are dropped, not served
+                return None
+            self._items.move_to_end(session_id)
             return emb
 
     def clear_session(self, session_id: str) -> None:
@@ -173,6 +180,7 @@ class FaceMatcher:
         *,
         liveness_confirmed: bool,
         session_id: str | None = None,
+        expires_at: float | None = None,
     ) -> MatchResult:
         """ID photo vs selfie. The ID embedding is dropped as soon as the score is computed.
 
@@ -190,17 +198,30 @@ class FaceMatcher:
             selfie_emb = self._embed_single(selfie_image, "SELFIE")
             score = self.compare(id_emb, selfie_emb)
             if session_id is not None:
-                self.selfie_cache.put(session_id, selfie_emb)
+                self.selfie_cache.put(session_id, selfie_emb, expires_at)
             return self._decide(score)
         except Exception as e:
             return self._failure(e, "match")
 
-    def prime_selfie(self, session_id: str, selfie_image: bytes) -> MatchResult | None:
+    def recheck_with_selfie(self, frame_image: bytes, selfie_image: bytes) -> MatchResult:
+        """FR-606 re-check with no cache (ADR 0014 6.3 default): both embeddings are computed for
+        this one comparison and dropped. Selfie problems carry a SELFIE_ detail prefix."""
+        try:
+            frame_emb = self._embed_single(frame_image, "FRAME")
+            selfie_emb = self._embed_single(selfie_image, "SELFIE")
+            return self._decide(self.compare(frame_emb, selfie_emb))
+        except Exception as e:
+            return self._failure(e, "recheck")
+
+    def prime_selfie(
+        self, session_id: str, selfie_image: bytes, expires_at: float | None = None
+    ) -> MatchResult | None:
         """Recompute and cache just the selfie embedding after a cache miss or restart (ADR 0004
         section 2), through the strict single-face SELFIE path. The ID image is not touched.
         Returns None on success, or a MANUAL_REVIEW result if the selfie cannot be used."""
         try:
-            self.selfie_cache.put(session_id, self._embed_single(selfie_image, "SELFIE"))
+            emb = self._embed_single(selfie_image, "SELFIE")
+            self.selfie_cache.put(session_id, emb, expires_at)
             return None
         except Exception as e:
             return self._failure(e, "prime")

@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import hmac
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from worker.config import IntegrityConfig
+from worker.config import IntegrityConfig, ReviewPathConfig
 from worker.events import (
     MAX_SOURCE_CODE_LENGTH,
     CodeLanguage,
@@ -25,6 +27,7 @@ from worker.events import (
 )
 from worker.keystrokes import analyze_keystrokes
 from worker.risk import ReviewPath, RiskResult, ScoredEvent, calculate_risk, route_for_review
+from worker.routes_face import install_face_routes
 from worker.similarity import (
     AiReference,
     Submission,
@@ -33,7 +36,15 @@ from worker.similarity import (
     prepare_ai_context,
 )
 
-app = FastAPI(title="CodeProctor analysis worker")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Validate system config once at startup: a bad value stops the deploy, not the requests."""
+    ReviewPathConfig.from_env()  # RISK_FAST_REVIEW_BANDS
+    yield
+
+
+app = FastAPI(title="CodeProctor analysis worker", lifespan=lifespan)
 
 
 def require_internal_token(
@@ -144,9 +155,7 @@ def analyze_similarity_route(req: SimilarityRequest) -> SimilarityResult:
 @app.post("/risk", dependencies=[Internal])
 def risk_route(req: RiskRequest) -> RiskResultOut:
     r: RiskResult = calculate_risk(req.events, req.config)
-    routing = route_for_review(
-        r.band, req.identity_review_pending, req.short_answer_pending, req.config
-    )
+    routing = route_for_review(r.band, req.identity_review_pending, req.short_answer_pending)
     return RiskResultOut(
         score=r.score,
         band=r.band,
@@ -156,3 +165,6 @@ def risk_route(req: RiskRequest) -> RiskResultOut:
         queue_rank=routing.queue_rank,
         review_reasons=routing.reasons,
     )
+
+
+install_face_routes(app)  # signed /v1 face routes (BE-08a, ADR 0014); the one line Integrity B owns

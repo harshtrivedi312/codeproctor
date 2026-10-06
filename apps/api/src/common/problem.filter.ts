@@ -9,6 +9,8 @@ import {
   Logger,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
+import { OrgContextMissingError } from '../database/errors';
+import { scrubPrismaError } from '../database/error-scrub';
 import { CodedForbiddenException, CodedHttpException } from './coded.exception';
 import type { CandidateProblemCode, ProblemCode } from './coded.exception';
 
@@ -50,8 +52,15 @@ export class ProblemFilter implements ExceptionFilter {
     const inbound = req.headers['x-request-id'];
     const traceId =
       typeof req.id === 'string' ? req.id : typeof inbound === 'string' ? inbound : '';
-    const status =
-      exception instanceof HttpException ? exception.getStatus() : HttpStatus.INTERNAL_SERVER_ERROR;
+    // A query ran with no org context (a bug, or a public route that touches org data). It fails
+    // closed with a fixed 403 that names nothing; the cause is logged by error name only, with
+    // the trace id, so the bug is not masked (FR-103, TC-008).
+    const noScope = exception instanceof OrgContextMissingError;
+    const status = noScope
+      ? HttpStatus.FORBIDDEN
+      : exception instanceof HttpException
+        ? exception.getStatus()
+        : HttpStatus.INTERNAL_SERVER_ERROR;
 
     const problem: ProblemDetails = {
       type: 'about:blank',
@@ -61,7 +70,10 @@ export class ProblemFilter implements ExceptionFilter {
       traceId,
     };
 
-    if (exception instanceof HttpException) {
+    if (noScope) {
+      this.logger.error({ traceId, errorName: exception.name }, 'Query without an org context');
+      problem.detail = 'Access denied.';
+    } else if (exception instanceof HttpException) {
       const body = exception.getResponse();
       if (typeof body === 'string') {
         problem.detail = body;
@@ -86,10 +98,17 @@ export class ProblemFilter implements ExceptionFilter {
         const wait = exception.extensions.retryAfterSeconds;
         if (typeof wait === 'number') res.setHeader('Retry-After', String(wait));
       }
+      if (status >= 500) {
+        // Fixed message, class name and trace id only: never the body, which may carry values.
+        this.logger.error({ traceId, errorName: exception.name, status }, 'Request failed');
+      }
       if (status >= 500 && status !== 503) problem.detail = 'The service is unavailable or failed';
     } else {
+      // A Prisma or driver error can carry argument values (a passwordHash, a token hash) in its
+      // message and meta: scrub it before it reaches the log (FU-DB-70, FU-DB-112).
+      const err = exception instanceof Error ? scrubPrismaError(exception) : undefined;
       this.logger.error(
-        { err: exception instanceof Error ? exception : new Error('Non-Error thrown'), traceId },
+        { err: err instanceof Error ? err : new Error('Non-Error thrown'), traceId },
         'Unhandled exception',
       );
     }
