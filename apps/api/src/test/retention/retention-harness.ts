@@ -12,12 +12,16 @@ import { startMigratedDatabase } from '../../database/testing/migrated-postgres'
 import type { MigratedDatabase } from '../../database/testing/migrated-postgres';
 import { createTenant } from '../../database/testing/tenant-fixtures';
 import type { TenantFixture } from '../../database/testing/tenant-fixtures';
-import { ConsentRetentionRepository } from '../consent-retention.repository';
-import { LegalHoldPort, NoLegalHold } from '../legal-hold.port';
-import { loadRetentionConfig } from '../retention.config';
-import { RETENTION_MARKER_ACTIONS, consentPrefix, sessionPrefix } from '../retention.constants';
-import { RetentionRepository } from '../retention.repository';
-import { RetentionService } from '../retention.service';
+import { ConsentRetentionRepository } from '../../retention/consent-retention.repository';
+import { LegalHoldPort, NoLegalHold } from '../../retention/legal-hold.port';
+import { loadRetentionConfig } from '../../retention/retention.config';
+import {
+  RETENTION_MARKER_ACTIONS,
+  consentPrefix,
+  sessionPrefix,
+} from '../../retention/retention.constants';
+import { RetentionRepository } from '../../retention/retention.repository';
+import { RetentionService } from '../../retention/retention.service';
 import { InMemoryObjectStore } from './in-memory-object-store';
 
 export const DAY = 86_400_000;

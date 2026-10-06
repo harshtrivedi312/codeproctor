@@ -7,7 +7,7 @@
 // the allowlist in the PR that builds it, which is the review point).
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
-import { reservedActionHits } from './testing/reserved-actions-scan';
+import { reservedActionHits } from '../test/retention/reserved-actions-scan';
 
 const REPO = resolve(__dirname, '../../../..');
 const ROOTS = ['apps/api/src', 'prisma', 'infra', 'apps/worker'];
@@ -28,10 +28,10 @@ const ALLOWED: Record<string, string> = {
   'apps/api/src/retention/retention.repository.ts': 'RetentionService writes and reads the markers',
   'infra/backup/erasure-list.sh':
     'prose only: its comment names the ERASURE_COMPLETED event; it writes no audit row',
-  'apps/api/src/retention/testing/retention-harness.ts':
+  'apps/api/src/test/retention/retention-harness.ts':
     'test helper: reads markers with the owner role',
   // Documentation of the rule itself and the tests of it:
-  'apps/api/src/retention/testing/reserved-actions-scan.ts': 'the scanner names what it looks for',
+  'apps/api/src/test/retention/reserved-actions-scan.ts': 'the scanner names what it looks for',
 };
 
 function files(dir: string): string[] {

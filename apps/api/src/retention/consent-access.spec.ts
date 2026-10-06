@@ -6,14 +6,14 @@
 // the allowlist in the PR that builds it (which is the review point).
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
-import { consentAccessHits } from './testing/consent-access-scan';
+import { consentAccessHits } from '../test/retention/consent-access-scan';
 
 const SRC = resolve(__dirname, '..');
 
 const ALLOWED: Record<string, string> = {
   'retention/consent-retention.repository.ts': 'the one repository, with a fixed select',
-  'retention/testing/retention-harness.ts': 'test helper: sets up fixtures with the owner role',
-  'retention/testing/consent-access-scan.ts': 'the scanner names what it looks for',
+  'test/retention/retention-harness.ts': 'test helper: sets up fixtures with the owner role',
+  'test/retention/consent-access-scan.ts': 'the scanner names what it looks for',
 };
 
 function files(dir: string): string[] {

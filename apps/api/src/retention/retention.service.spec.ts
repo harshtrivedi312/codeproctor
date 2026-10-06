@@ -25,7 +25,7 @@ import {
 import { ConsentRetentionRepository } from './consent-retention.repository';
 import { SessionStatus as SessionStatusEnum } from '../generated/prisma/enums.js';
 import { RetentionService } from './retention.service';
-import { InMemoryObjectStore } from './testing/in-memory-object-store';
+import { InMemoryObjectStore } from '../test/retention/in-memory-object-store';
 
 const DAY = 86_400_000;
 const NOW = new Date('2026-10-05T12:00:00.000Z');

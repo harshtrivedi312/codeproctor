@@ -2,7 +2,7 @@
 // with the real migrations and app_user, an in-memory object store. Docker is required. Synthetic data only.
 import { Logger } from '@nestjs/common';
 import type { TenantFixture } from '../database/testing/tenant-fixtures';
-import { NOW, daysAgo, useRetentionDatabase } from './testing/retention-harness';
+import { NOW, daysAgo, useRetentionDatabase } from '../test/retention/retention-harness';
 
 const THREE_YEARS_AGO = new Date('2023-10-05T12:00:00.000Z'); // exactly 3 years before NOW
 

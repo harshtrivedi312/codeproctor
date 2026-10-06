@@ -3,7 +3,7 @@
 // app_user, an in-memory object store. Docker is required. Synthetic data only.
 import { Logger } from '@nestjs/common';
 import type { TenantFixture } from '../database/testing/tenant-fixtures';
-import { DAY, NOW, daysAgo, useRetentionDatabase } from './testing/retention-harness';
+import { DAY, NOW, daysAgo, useRetentionDatabase } from '../test/retention/retention-harness';
 
 describe('RetentionService: results tier R-10 (FR-704, NFR-05, TC-072)', () => {
   const { h, build, setup, keys, sessionIdOf, markers } = useRetentionDatabase();
