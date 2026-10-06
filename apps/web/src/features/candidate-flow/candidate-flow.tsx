@@ -55,6 +55,7 @@ export function CandidateFlow({
   const [step, setStep] = React.useState<StepId>('welcome');
   const [sent, setSent] = React.useState<CodeSentInfo | null>(null);
   const [resuming, setResuming] = React.useState(false);
+  const [urlCheck, setUrlCheck] = React.useState<'pending' | 'ok' | 'fragment'>('pending');
 
   // Where the token comes from: memory (handed over by the entry routes), then a test seam. Held in
   // a ref so it can be dropped once the code is verified, and so a development double-mount (which
@@ -78,7 +79,6 @@ export function CandidateFlow({
     // router rewrites the address bar in the same commit, after this component first renders. A
     // fragment only matters when no token was handed over (a hand-typed or bookmarked
     // /t/link#<token>): that is refused, never read.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setUrlCheck(t === null && hasUrlFragment() ? 'fragment' : 'ok');
     return () => {
       // Leaving the flow forgets everything held in memory.
@@ -88,7 +88,6 @@ export function CandidateFlow({
 
   // The entry routes hand the token over (in memory) and navigate here. A fragment with no token in
   // memory means something unexpected (an old link, a bookmark): do not read or trust it.
-  const [urlCheck, setUrlCheck] = React.useState<'pending' | 'ok' | 'fragment'>('pending');
   const fragmentPresent = urlCheck === 'fragment';
 
   const link = useQuery({
