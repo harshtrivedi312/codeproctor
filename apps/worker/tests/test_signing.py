@@ -428,4 +428,4 @@ def test_fr403_websocket_on_an_exempt_path_is_still_closed_and_all_docs_paths_fo
     for path in ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"):
         assert call(app, path, {}, b"", method="GET").status_code == 401
         mw = signing.SigningMiddleware(inner, {"k1": KEY_A}, docs_exempt=True)
-        assert call(mw, path, {}, b"", method="GET").status_code != 401
+        assert call(mw, path, {}, b"", method="GET").status_code == 200

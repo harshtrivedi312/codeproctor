@@ -23,7 +23,8 @@ FACE_MAX_URL_LIFETIME: Final = 60
 ANALYSIS_MAX_URL_LIFETIME: Final = 300
 CLOCK_SKEW_SECONDS: Final = 60
 MAX_URL_LENGTH: Final = 2048
-# One object must arrive within this, however slowly the store sends (the API gives up at 15-20 s).
+# Time allowed for one object (the API gives up at 15-20 s). Hard once the body starts; the TLS
+# handshake, header parsing and DNS are bounded per socket call only (FU-INB-24).
 FACE_FETCH_DEADLINE: Final = 5.5  # two downloads must fit the API's 15 s with room to compute
 _AMZ_DATE: Final = re.compile(r"[0-9]{8}T[0-9]{6}Z")
 _EXPIRES: Final = re.compile(r"[0-9]{1,7}")

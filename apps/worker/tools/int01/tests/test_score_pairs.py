@@ -333,3 +333,4 @@ def test_c11_images_are_read_safely_and_short_rows_and_hard_links_are_refused(
     os.link(out, tmp_path / "second-name.csv")
     with pytest.raises(score_pairs.ScoringError, match="one name"):
         score_pairs.write_scores(out, [])
+    assert out.read_text() == "old"  # nothing was truncated before the refusal

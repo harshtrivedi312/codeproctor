@@ -319,7 +319,7 @@ def test_fr403_a_slow_sender_is_cut_off_by_the_total_deadline() -> None:
             return b"x"
 
     ticks: list[int] = []
-    # the deadline is 5.5 s after the first reading; the third read finds it long past
+    # readings: deadline, request, getresponse, two reads, then the third loop check sees 9.0
     clock = iter([0.0, 0.1, 0.2, 0.3, 1.0, 9.0])
     conn = FakeConn(Slow(200, b""))
     with pytest.raises(FetchError) as ei:
@@ -409,3 +409,49 @@ def test_fr403_each_socket_wait_is_capped_by_what_is_left_of_the_deadline() -> N
         and max(conn.timeouts) <= 5.5
         and conn.timeouts == sorted(conn.timeouts, reverse=True)
     )
+
+
+def test_fr403_a_stall_after_the_headers_is_cut_by_the_socket_timeout_reaching_the_response() -> (
+    None
+):
+    """Only a timeout that reaches the response's own socket ends this in time: every recv
+    would otherwise wait for the server's 2.5 s stall."""
+    import http.server
+    import socketserver
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Length", "100000")
+            self.end_headers()
+            try:
+                self.wfile.write(b"x")
+                self.wfile.flush()
+                time.sleep(2.5)  # the stall
+            except OSError:
+                return
+
+        def log_message(self, *args: object) -> None:
+            return
+
+    class Server(http.server.HTTPServer):
+        def server_bind(self) -> None:
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+
+    server = Server(("127.0.0.1", 0), Handler)
+    port = server.server_port
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        cfg = FetchConfig((Origin("http", "127.0.0.1", port),), BUCKET, allow_http=True)
+        u = f"http://127.0.0.1:{port}/{BUCKET}/stall.jpg?{amz(time.time())}"
+        started = time.monotonic()
+        with pytest.raises(FetchError) as ei:
+            fetchguard.fetch(
+                u, cfg, max_bytes=200_000, max_lifetime=60, timeout=10.0, total_timeout=0.5
+            )
+        assert ei.value.code == "MEDIA_UNAVAILABLE"
+        assert time.monotonic() - started < 1.8  # not the 2.5 s stall, nor the 10 s timeout
+    finally:
+        server.shutdown()

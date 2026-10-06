@@ -19,11 +19,12 @@ import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Final
 
 from tools.int01 import groups, metrics, report, synthetic
 from tools.int01.safety import inside_git_tree
 
-UNSCORED_GENUINE = (
+UNSCORED_GENUINE: Final = (
     -1.0
 )  # same value score_pairs stores; kept here so the evaluator never trusts the cell
 
@@ -126,10 +127,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         ap.error("--dimension is required with --demographics (one dimension per report)")
     try:
         return _run_cli(args)
+    except UnicodeError:  # a ValueError too: handled first so the position is not printed
+        print("error: an input file is not valid UTF-8 text", file=sys.stderr)
     except ValueError as e:  # our messages are fixed text; JSON errors carry only a position
         print(f"error: {e}", file=sys.stderr)
-    except (OSError, csv.Error, UnicodeError):
-        # A path or a cell can hold a volunteer code: say what failed, never with what.
+    except (OSError, RuntimeError, csv.Error):
+        # A path or a cell can hold a volunteer code (RuntimeError: a symlink loop names its
+        # path): say what failed, never with what.
         print("error: an input or output file could not be read or written", file=sys.stderr)
     return 2
 
