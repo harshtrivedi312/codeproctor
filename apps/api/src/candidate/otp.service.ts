@@ -158,7 +158,9 @@ if redis.call('PTTL', KEYS[4]) > 0 then return 0 end
 if not redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2], 'NX') then return 0 end
 if ARGV[5] == 'PRE_START' and tonumber(ARGV[3]) > 0 then
   -- Wrong guesses confirmed since the consume (it deleted the counter) are ADDED to the restored
-  -- count, so nothing is forgiven; capped at 4 so the restore never leaves the link unusable.
+  -- count, so nothing is forgiven. The cap at 4 only ever drops the +1 kept for the correct guess,
+  -- never a real wrong guess (a fifth real one would have set the block, and a block refuses the
+  -- restore above): that is why it is safe, and it keeps the restore from leaving the link unusable.
   local cur = tonumber(redis.call('GET', KEYS[2])) or 0
   local total = math.min(cur + tonumber(ARGV[3]), 4)
   if cur > 0 then

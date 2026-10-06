@@ -2986,19 +2986,25 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       // Hold the WRONG evals of two in-flight wrong guesses until the correct guess has consumed.
       let release: () => void = () => undefined;
       const gate = new Promise<void>((resolve) => (release = resolve));
+      // Resolved by the spy when BOTH wrong guesses have reserved and reached their WRONG step, so
+      // the correct guess consumes only after both are in flight (no sleep, no load dependence).
+      let bothReached: () => void = () => undefined;
+      const reached = new Promise<void>((resolve) => (bothReached = resolve));
+      let wrongCalls = 0;
       const real = appRedis.eval.bind(appRedis) as (...a: unknown[]) => Promise<unknown>;
-      jest
-        .spyOn(appRedis, 'eval')
-        .mockImplementation((...args: unknown[]) =>
-          String(args[0]).includes("local n = redis.call('INCR', KEYS[2])")
-            ? gate.then(() => real(...args))
-            : real(...args),
-        );
+      jest.spyOn(appRedis, 'eval').mockImplementation((...args: unknown[]) => {
+        if (String(args[0]).includes("local n = redis.call('INCR', KEYS[2])")) {
+          wrongCalls += 1;
+          if (wrongCalls === 2) bothReached();
+          return gate.then(() => real(...args));
+        }
+        return real(...args);
+      });
       const inFlight = [
         otp.verify(inv.invitationId, wrong, 'PRE_START'),
         otp.verify(inv.invitationId, wrong, 'PRE_START'),
       ];
-      await new Promise((r) => setTimeout(r, 100));
+      await reached;
       const ok = await otp.verify(inv.invitationId, code, 'PRE_START');
       expect(ok).toMatchObject({ kind: 'ok', attempts: 3 });
       release();
