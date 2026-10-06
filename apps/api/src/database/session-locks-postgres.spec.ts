@@ -302,28 +302,57 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
   });
 
   // ================================================================================================
-  describe.each(LOCKS)('%s: a session that is not in this scope', (_name, lock) => {
-    it("TC-008 another org's session throws SessionNotFoundError, sends no UPDATE and leaves the row untouched (STAFF scope, and the plain org scope for lockForAccommodation)", async () => {
-      const before = await xminOf(O.sessionId);
-      const statusBefore = await statusOf(O.sessionId);
-      // lockForAccommodation also runs in a plain org job scope (hub ruling): another org's session reads
-      // no row there either, so it never locks a row of another org.
-      const runs: Array<<R>(orgId: string, fn: () => Promise<R>) => Promise<R>> =
-        lock === lockForAccommodation ? [asStaff, asOrg] : lock === guardLive ? [asStaff] : [];
-      for (const run of runs) {
-        await db.statements.reset();
-        await expect(run(T.orgId, () => lockIn(lock, O.sessionId))).rejects.toBeInstanceOf(
-          SessionNotFoundError,
-        );
-        const c = await counts();
-        expect(c.update).toBe(0);
-        expect(c.select).toBe(1);
-      }
-      // lockAnySession has no STAFF or org scope: its other-org case is the SERVICE one below.
-      expect(await xminOf(O.sessionId)).toBe(before);
-      expect(await statusOf(O.sessionId)).toBe(statusBefore);
-    });
+  // The locks that run in a STAFF scope (guardLive, lockForAccommodation): lockAnySession has no STAFF scope, and is
+  // not in this table (its other-org case is the SERVICE one below).
+  describe.each(LOCKS.filter(([, lock]) => lock !== lockAnySession))(
+    "%s: another org's session in a STAFF scope",
+    (_name, lock) => {
+      it('TC-008 throws SessionNotFoundError, sends no UPDATE and leaves the row untouched (STAFF scope, and the plain org scope for lockForAccommodation)', async () => {
+        const before = await xminOf(O.sessionId);
+        const statusBefore = await statusOf(O.sessionId);
+        // lockForAccommodation also runs in a plain org job scope (hub ruling): another org's session reads
+        // no row there either, so it never locks a row of another org.
+        const runs: Array<<R>(orgId: string, fn: () => Promise<R>) => Promise<R>> =
+          lock === lockForAccommodation ? [asStaff, asOrg] : [asStaff];
+        expect(runs.length).toBeGreaterThan(0);
+        for (const run of runs) {
+          await db.statements.reset();
+          await expect(run(T.orgId, () => lockIn(lock, O.sessionId))).rejects.toBeInstanceOf(
+            SessionNotFoundError,
+          );
+          const c = await counts();
+          expect(c.update).toBe(0);
+          expect(c.select).toBe(1);
+        }
+        expect(await xminOf(O.sessionId)).toBe(before);
+        expect(await statusOf(O.sessionId)).toBe(statusBefore);
+      });
+    },
+  );
 
+  // The locks that run in a SERVICE session scope (guardLive, lockAnySession): lockForAccommodation is refused there.
+  describe.each(LOCKS.filter(([, lock]) => lock !== lockForAccommodation))(
+    "%s: another session's id in a SERVICE session scope",
+    (_name, lock) => {
+      it("TC-008 another session's id (same org, or another org) and an unknown id are not found", async () => {
+        const mine = await freshChain('scope-mine');
+        const other = await freshChain('scope-other');
+        const before = { other: await xminOf(other.sessionId), org2: await xminOf(O.sessionId) };
+        for (const id of [other.sessionId, O.sessionId, randomUUID()]) {
+          await db.statements.reset();
+          await expect(asService(mine, () => lockIn(lock, id))).rejects.toBeInstanceOf(
+            SessionNotFoundError,
+          );
+          expect((await counts()).update).toBe(0);
+        }
+        expect(await xminOf(other.sessionId)).toBe(before.other);
+        expect(await xminOf(O.sessionId)).toBe(before.org2);
+      });
+    },
+  );
+
+  // ================================================================================================
+  describe.each(LOCKS)('%s: a session that is not in its scope', (_name, lock) => {
     it('TC-008 an unknown id throws SessionNotFoundError and sends no UPDATE', async () => {
       const chain = await freshChain('unknown');
       await db.statements.reset();
@@ -332,22 +361,6 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
       );
       const c = await counts();
       expect({ select: c.select, update: c.update }).toEqual({ select: 1, update: 0 });
-    });
-
-    it("TC-008 in a SERVICE session scope another session's id (same org, or another org) is not found either (guardLive and lockAnySession)", async () => {
-      if (lock === lockForAccommodation) return; // refused in a SERVICE scope: its tests are the scope tests below
-      const mine = await freshChain('scope-mine');
-      const other = await freshChain('scope-other');
-      const before = { other: await xminOf(other.sessionId), org2: await xminOf(O.sessionId) };
-      for (const id of [other.sessionId, O.sessionId, randomUUID()]) {
-        await db.statements.reset();
-        await expect(asService(mine, () => lockIn(lock, id))).rejects.toBeInstanceOf(
-          SessionNotFoundError,
-        );
-        expect((await counts()).update).toBe(0);
-      }
-      expect(await xminOf(other.sessionId)).toBe(before.other);
-      expect(await xminOf(O.sessionId)).toBe(before.org2);
     });
 
     it('TC-008 the error message carries no id', async () => {

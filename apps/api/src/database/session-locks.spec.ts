@@ -402,6 +402,37 @@ describe('each lock passes only in its own scopes (the merged ADR 0006 section 8
   });
 });
 
+describe('nesting: the STAFF and plain-org split is advisory until the ADR 0006 nesting rows are built (N-e, FU-DB-241): NFR-04, TC-008', () => {
+  const orgContext = new OrgContextService();
+  const user = { orgId: ORG, userId: SID, role: 'RECRUITER' } as const;
+
+  it('TC-008 a runInOrg nested in STAFF drops the user: it is a plain org scope (ADR 0006 says the actor stays STAFF; Planned)', async () => {
+    const { tx, calls } = fakeTx(steady('OPENED'));
+    // guardLive passes in STAFF but is refused in the plain org scope the nesting produces today.
+    await expect(
+      orgContext.runAsUser(user, () => orgContext.runInOrg(ORG, () => guardLive(tx, SID))),
+    ).rejects.toBeInstanceOf(OrgScopeViolationError);
+    expect(calls).toEqual([]);
+    // lockForAccommodation passes in both, so the nesting is invisible to it.
+    await expect(
+      orgContext.runAsUser(user, () =>
+        orgContext.runInOrg(ORG, () => lockForAccommodation(tx, SID)),
+      ),
+    ).resolves.toBe('OPENED');
+  });
+
+  it('TC-008 runAsUser from a plain org scope is a STAFF scope (ADR 0006 says a plain org scope never becomes a user scope; Planned)', async () => {
+    const { tx } = fakeTx(steady('OPENED'));
+    await expect(
+      orgContext.runInOrg(ORG, () => orgContext.runAsUser(user, () => guardLive(tx, SID))),
+    ).resolves.toBe('LIVE');
+    // lockAnySession is refused for STAFF, so the escalation gains nothing there.
+    await expect(
+      orgContext.runInOrg(ORG, () => orgContext.runAsUser(user, () => lockAnySession(tx, SID))),
+    ).rejects.toBeInstanceOf(OrgScopeViolationError);
+  });
+});
+
 describe('the lock needs a transaction client, not the client itself (ADR 0013 section 5.7)', () => {
   /**
    * The shape of `prisma.client`: the two calls, and the connection methods that Prisma removes from an
