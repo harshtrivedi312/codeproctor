@@ -717,8 +717,9 @@ looked at.
   (`tc-008-org-isolation.spec.ts` pins this behaviour; it documents the limit and is not a fix.)
   **In a CANDIDATE scope (ADR 0013 CS-4.5) all six vectors throw** (the fluent API arrives as vector 2),
   and in a SERVICE scope they stay a review item: see "Candidate and session-job scopes".
-- **(d) Rule (i) covers 25 foreign keys**, not only the staff references (`created_by`,
-  `reviewer_id`, `assigned_to`, `collected_by`, `scored_by`, `reviewed_by`, `actor_id`) and
+- **(d) Rule (i) covers 26 foreign keys**, not only the staff references (`created_by`,
+  `reviewer_id`, `assigned_to`, `collected_by`, `scored_by`, `reviewed_by`, `video_check_by`,
+  `actor_id`) and
   `test_questions.question_version_id`. The list is `RULE_I_REFERENCES` in
   `org-scope-relations.ts` (see "Foreign keys and rule (i)" below). The main cross-chain ones:
   `session_questions` to `test_questions`, `question_versions` and `question_variants`;
@@ -741,9 +742,9 @@ looked at.
 ## Foreign keys and rule (i)
 
 `org-scope-relations.ts` classifies **every foreign key in the schema**, one class each
-(`FK_CLASSES`, **58 foreign keys**). `org-scope-relations.spec.ts` derives the keys from
+(`FK_CLASSES`, **59 foreign keys**). `org-scope-relations.spec.ts` derives the keys from
 `prisma/schema.prisma`, asserts the total and each class count
-(`{ ORG_ID: 9, SCOPE_HOP: 21, COMPOSITE: 3, RULE_I: 25, total: 58 }`), and fails for a key that is
+(`{ ORG_ID: 9, SCOPE_HOP: 21, COMPOSITE: 3, RULE_I: 26, total: 59 }`), and fails for a key that is
 missing, unclassified, classified twice, or in the wrong class. A new foreign key breaks the build
 until it is classified.
 
@@ -752,12 +753,12 @@ until it is classified.
 | `ORG_ID`    | 9     | the `org_id` key of a model with its own org (to `organizations`)                                                                                                      | the scope (filter and stamp)                                                                                  |
 | `SCOPE_HOP` | 21    | the first hop of a path model's scope path (its own parent)                                                                                                            | the scope filter; creating, and re-parenting in an org scope, is rule (i) (system scope refuses to re-parent) |
 | `COMPOSITE` | 3     | `(id, org_id)` keys on `invitations` (2) and `sessions` (1), ADR 0006 2 ii                                                                                             | the database                                                                                                  |
-| `RULE_I`    | 25    | references the scope cannot check: **12 staff** (to users: `created_by`, `reviewer_id`, `assigned_to`, ...) and **13 cross-chain** (another chain, or a second parent) | **rule (i)**                                                                                                  |
+| `RULE_I`    | 26    | references the scope cannot check: **13 staff** (to users: `created_by`, `reviewer_id`, `assigned_to`, ...) and **13 cross-chain** (another chain, or a second parent) | **rule (i)**                                                                                                  |
 
-`SCOPE_HOP + COMPOSITE + RULE_I` is 49; the 9 `ORG_ID` keys make 58. Each `RULE_I` entry also says
+`SCOPE_HOP + COMPOSITE + RULE_I` is 50; the 9 `ORG_ID` keys make 59. Each `RULE_I` entry also says
 whether it is `staff` or `cross-chain` (`ruleI`).
 
-`RULE_I_REFERENCES` (the 25 `RULE_I` keys) is the list a service must follow: **before writing an
+`RULE_I_REFERENCES` (the 26 `RULE_I` keys) is the list a service must follow: **before writing an
 id into any of these columns, load the row through the scoped client and answer 404 on a miss.**
 Module tests and code review take their checklist from it, for example "every write of
 `session_questions.test_question_id` loads the test question first".
