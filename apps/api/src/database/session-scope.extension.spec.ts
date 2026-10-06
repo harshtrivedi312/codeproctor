@@ -34,7 +34,7 @@ const FACTS = {
 
 type Delegate = Record<string, (args?: unknown) => Promise<unknown>>;
 
-/** One harmless column per model, so a candidate read names its select (candidate-interim.ts). */
+/** One harmless column per model for the `select` of a probe query (a bare read would get the default `omit`). */
 const KEY_COLUMN: Record<string, string> = {
   SessionSection: 'position',
   ProctorEventBatch: 'seq',

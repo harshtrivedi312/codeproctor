@@ -428,9 +428,17 @@ and when a column of the schema is none of the five (a new column breaks the bui
   hidden until it is listed, not visible until it is denied. A caller's own `omit` is merged and ours wins
   (`omit: { hmacKeyEnc: false }` brings nothing back); a `select` together with an `omit` is refused (Prisma
   refuses it too); a `select` or an `omit` that is not an object is refused. The row that a write returns has
-  the same shape as a read. **PR 1's rule "every read must name its `select`" is dropped** (FU-DB-190): the
-  `omit` is enforced at runtime on all ten operations and tested through Postgres on all of them for every
-  model (`cs4-session-isolation.spec.ts`: a bare read of each model returns exactly its default columns).
+  the same shape as a read. **PR 1's rule "every read must name its `select`" is dropped** (FU-DB-190). The
+  `omit` is added for all **eleven** row-returning operations (the ten above and `delete`, which a candidate
+  never reaches: it is refused on every model first). What the tests cover, exactly:
+  `candidate-interim.spec.ts` checks the added `omit` of every model for every one of those operations that
+  the model allows; the Postgres sweep (`cs4-session-isolation.spec.ts`) runs a bare `findMany`, `findFirst`,
+  `findFirstOrThrow`, `findUnique` and `findUniqueOrThrow` on each of the 16 session and org models and
+  compares the returned columns with the default select; `cs4-columns-grants.spec.ts` runs a bare `update`
+  (`sessions`, `session_questions`, `media_chunks`: no `objectKey`), `updateManyAndReturn` (`sessions`),
+  `create` (`proctor_events`, `submissions`, `consents`), `createManyAndReturn` (`proctor_events`) and `upsert`
+  (`media_chunks`), and a bare read of `test_questions` and `consent_texts` under their grants.
+  `createManyAndReturn` and `updateManyAndReturn` on the other models are covered by the pure layer only.
   Services should still name a `select` for what they need, because the TypeScript result type does not know
   about the `omit`.
 - **The read list governs everything that can leak a value**: `select`, `where` (a JSON-path filter on a
@@ -455,6 +463,26 @@ and when a column of the schema is none of the five (a new column breaks the bui
 - **A candidate sees nothing until the facts are set.** In CANDIDATE scope every query on every model throws
   while the candidate facts are unset (ADR 0013 CS-4.4); PR 1 threw only on the three models whose filters use a
   fact (FU-DB-214).
+- **A `select` names at least one column with `true`** (review of #185, S2). `select: {}`, `{ id: false }` and
+  `{ id: undefined }` are refused in a CANDIDATE scope with no statement; a value other than `true`, `false` or
+  `undefined` is refused too. Prisma 7.10 answers those shapes with a validation error today, which is a Prisma
+  detail and not a promise, so the scope does not rely on it. A hidden column named `false` is still refused by
+  name.
+- **Arguments must be plain, in every scope** (review of #185, B1; `plain-args.ts`). Prisma 7.10 clones the
+  arguments before the extension sees them: an inherited key is copied to an own key (so every check sees it),
+  but a key named `__proto__` that `JSON.parse` made an own property becomes the **prototype** of the top-level
+  args, and stays an own key in a nested object. The checks read own keys and then forward a spread copy, which
+  keeps own keys only, so `{"__proto__":{"select":{"id":true}}}` used to make the CANDIDATE scope see a `select`,
+  add no `omit`, and let Prisma return every column (the sealed key, `accommodations`, SUBMIT `results`, `score`,
+  a consent's private columns). The hook now refuses, **before any other check and in every scope** (candidate,
+  job, staff, plain org, system): top-level args whose prototype is not `Object.prototype` or `null` or that carry
+  an own `__proto__`; a structure object (`where`, `select`, `orderBy`, `having`, `cursor`, `omit`, `include`,
+  the aggregates, walked to a depth of 64) with a foreign prototype, an own `__proto__` or an inherited key; and
+  a `data` row (each row of a `createMany`) and one level below a column with an own `__proto__` or an inherited
+  key. Json contents are not walked, so an ingest path pays O(columns). Dates, byte arrays, Decimals, the Json
+  null sentinels and field references are values, not structure; a class instance with no enumerable inherited
+  key (a DTO) passes as a `data` row. The checks themselves read `select`, `omit`, `where`, `data` and the rest
+  through `ownValue` and an own-key copy of the args, so a key that is not the caller's own is never seen.
 
 **Writes are CS-4.4's "Write" column as an allowlist** (`CANDIDATE_MODELS` in `session-scope-map.ts`): a
 create and an update carry only the columns listed for the model, anything else throws, an update on a
@@ -529,8 +557,12 @@ orgContext.withGrant<T>(
 
 `model` is the **Prisma model name** (`Session`, `MediaChunk`, `Consent`; not `sessions`), `columns` are Prisma
 field names (`hmacKeyEnc`, `legalApprovedAt`), `ids` are primary keys. **Private to the grant sites below**:
-FU-DB-67 pins the call sites (FU-DB-189). It is a method of `OrgContextService`, so a service calls it with the
-service it already has:
+`call-sites.spec.ts` pins them (a slice of FU-DB-67, FU-DB-189): it scans every non-test file under
+`apps/api/src` for `withGrant`, `claimCandidateFactsSetter`, `setCandidateFacts` and `detachForSessionJob`, and a
+file that is not on its per-file list fails. **Today the list holds the database folder only**: BE-07's guard,
+`SessionJobProcessor` and the grant-site services are added to `CALL_SITES` in the PR that builds them, one entry
+per file, with the CS-4.4 grant site(s) it holds. It is a method of `OrgContextService`, so a service calls it
+with the service it already has:
 
 ```ts
 // KeyService: read the sealed key of the context's session.
@@ -595,6 +627,8 @@ reaches only a test question that one of this session's questions points to
 ### Tests
 
 `org-context-session.spec.ts` (actors, nesting, detach, facts, reflection, lower-casing; no database),
+`plain-args.spec.ts` (the plain-arguments guard through the real client in every scope, no database) and
+`call-sites.spec.ts` (the call-site allowlist),
 `database-boot.spec.ts` (the facts setter is claimed when `DatabaseModule` loads),
 `session-scope-args.spec.ts` and `candidate-interim.spec.ts` (every model and operation on the rewritten
 arguments: the read allowlist and `omit` for all 18 models, the write allowlist, the consents create, the
@@ -928,6 +962,7 @@ which stays one statement, and be ready to retry on `P2002` elsewhere.
 | `candidate-relations.ts`                       | CS-4.5 relation vectors 1 to 5 refused in a CANDIDATE scope                                                                                                                                                                                                                                                    |
 | `candidate-facts.ts`                           | `setCandidateFacts`: **CandidateSessionGuard only**, not exported from `index.ts`                                                                                                                                                                                                                              |
 | `deep-freeze.ts`                               | `deepFreeze`: the scope tables are frozen when their module loads                                                                                                                                                                                                                                              |
+| `plain-args.ts`                                | `assertPlainArgs` (the hook refuses arguments Prisma and the checks would read differently), `ownValue` and `ownArgs` (own-key reads), `isFieldRef`                                                                                                                                                            |
 | `candidate-interim.ts`                         | `CANDIDATE_READ` (CS-4.4's read column per model: readable, key, explicit-only, RUN-only), `omit`, the RUN filter, `COMPOUND_UNIQUES`, the field-reference refusal. Not interim any more: the name stays because `retention/consent-access.spec.ts` pins the path (FU-DB-211)                                  |
 | `errors.ts`                                    | `OrgContextMissingError`, `OrgScopeViolationError`, `RawQueryNotAllowedError`                                                                                                                                                                                                                                  |
 | `error-scrub.ts`                               | Keeps argument values out of the Prisma errors that are logged (FU-DB-70)                                                                                                                                                                                                                                      |

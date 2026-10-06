@@ -16,9 +16,11 @@
 //   - review fixes: S1 (keys behind the filters), S2 (wrong facts only narrow), S3 (the interim column
 //     control and the proctor_events source filter), S7 (same-tick findUnique of two candidates).
 //   - statement counts (pg_stat_statements): entering a scope sends no SQL.
-// A CANDIDATE call that returns rows names its select (candidate-interim.ts), so every candidate read
-// and write here does. The pure rules are in session-scope-args.spec.ts, candidate-interim.spec.ts and
-// org-context-session.spec.ts. NFR-04, TC-008.
+// A CANDIDATE call that returns rows and names no select gets the default `omit` (candidate-interim.ts);
+// most calls here still name a select, so the rows can be told apart, and the bare reads of every model are
+// in the S3 block. The pure rules are in session-scope-args.spec.ts, candidate-interim.spec.ts and
+// org-context-session.spec.ts; grants, the RUN filter and the consents create are in cs4-columns-grants.spec.ts.
+// NFR-04, TC-008.
 import { randomUUID } from 'node:crypto';
 import { setCandidateFacts } from './candidate-facts';
 import { createPrismaClient } from './create-prisma-client';
