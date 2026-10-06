@@ -273,3 +273,7 @@ list uses it), `src/mocks/admin-handlers.ts` (in-memory mock; reload the page to
 The mock environment allows placeholder consent texts; to see the "approval required" state (pilot
 and production), call `resetMockAdminState({ legalApprovalRequired: true })` as the Vitest tests do.
 Playwright: `e2e/staff-shell.spec.ts`.
+
+## Tests and invitations (FE-05, FR-301..FR-305)
+
+Sign in as `recruiter@example.test` (`Recruiter-Pass-1`) or the super admin and open Tests. The test builder follows the real BE-06a API (`/v1/tests`): sections you can reorder with the mouse or the Move buttons, fixed questions picked from the published bank, random picks (tags, difficulty, type; one slot picks one question, so "3 random questions" is 3 slots), a STANDARD or STRICT proctoring profile with a plain explanation of what each records, a pass score, and the rule that section limits must fit the duration. A test that already has invitations is read-only: build a new one from it. Mock tests to try: **Backend engineer screening** (in use), **Frontend and algorithms (strict)**, **Random arrays round**. Code: `src/features/tests`, `src/mocks/test-handlers.ts`. Playwright: `e2e/test-builder.spec.ts`. What is real and what is not: `docs/followups/frontend.md`, section "frontend/fe-05".
