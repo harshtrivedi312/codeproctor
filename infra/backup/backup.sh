@@ -18,7 +18,6 @@
 # (ADR 0009). Never run this against them from a developer machine or an agent session.
 #
 # The dump runs as a role that can read every table (the migration owner, not app_user).
-# Note on `[ a \< b ]` below: dash and bash accept it; a shell that did not would never prune, which is safe.
 # Objects uploaded: <prefix>dumps/codeproctor-<stamp>.dump.gz, .sha256, .counts.tsv
 set -eu
 here=$(dirname "$0")
@@ -77,7 +76,10 @@ gzip -dc "$file" | pg_restore --file=/dev/null || die "the dump is truncated or 
 # An empty or partial dump must never replace a good one: every table counted above needs a data entry.
 tables=$(wc -l < "$WORK/counts.tsv" | tr -d ' ')
 data=$(grep -c ' TABLE DATA ' "$WORK/toc.txt" || true)
-[ "$tables" -gt 0 ] && [ "$data" -ge "$tables" ] || die "the dump holds $data table data entries but the database has $tables tables."
+# Fail closed: a test that errors (a non-integer) must also stop the upload.
+if ! { [ "$tables" -gt 0 ] && [ "$data" -ge "$tables" ]; }; then
+  die "the dump holds $data table data entries but the database has $tables tables."
+fi
 sha256_of "$file" > "$WORK/$name.sha256"
 size=$(wc -c < "$file" | tr -d ' ')
 
@@ -104,8 +106,8 @@ printf '%s\n' "$KEYS" | while read -r key; do
   keystamp=$(printf '%s' "$base" | sed -n "s#^codeproctor-\\($STAMP_RE\\)\\..*#\\1#p")
   [ -n "$keystamp" ] || continue
   [ "codeproctor-$keystamp" != "$newest" ] || continue
-  if [ "$keystamp" \< "$cutoff" ]; then
-    s3api delete-object --bucket "$BUCKET" --key "$key" > /dev/null
+  if stamp_lt "$keystamp" "$cutoff"; then
+    s3api delete-object --bucket "$BUCKET" --key "$key" > /dev/null < /dev/null
     log "pruned $key."
   fi
 done

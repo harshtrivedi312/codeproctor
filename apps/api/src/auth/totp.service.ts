@@ -57,6 +57,8 @@ export class TotpService {
       return false;
     }
     try {
+      // A command that timed out but was applied makes the retry look like a replay: it is refused
+      // (fails closed), and the user waits for the next code.
       await ensureConnected(this.redis);
       const claimed = await this.redis.set(
         `auth:totp:used:${userId}:${step}`,

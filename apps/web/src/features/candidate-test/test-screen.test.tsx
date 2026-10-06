@@ -10,6 +10,16 @@ import { FinishSectionDialog, FullscreenLockOverlay } from './overlays';
 import { TestScreen } from './test-screen';
 
 // Monaco needs a real browser; a textarea stands in for it in jsdom.
+vi.hoisted(() => {
+  process.env.NEXT_PUBLIC_API_MOCKING = 'enabled';
+});
+
+// Mock mode is on for this file (for the demo controls), but there is no browser worker in jsdom.
+vi.mock('@/lib/mock-ready', () => ({
+  mockingReady: Promise.resolve(),
+  markMockingReady: () => undefined,
+}));
+
 vi.mock('next/dynamic', () => ({
   default: () =>
     function EditorStub(props: {
@@ -45,7 +55,7 @@ describe('candidate test screen (mocked, FR-501 to FR-505)', () => {
   it('shows the demo banner, both timers seeded from the server, and the start gate', async () => {
     renderScreen();
     expect(await screen.findByText('Enter fullscreen to begin')).toBeInTheDocument();
-    expect(screen.getByTestId('demo-banner')).toHaveTextContent('Demo — mocked data');
+    expect(await screen.findByTestId('demo-banner')).toHaveTextContent('Demo — mocked data');
     await waitFor(() =>
       expect(screen.getByRole('timer', { name: 'Test time left', hidden: true })).toHaveTextContent(
         /5\d:\d\d/,

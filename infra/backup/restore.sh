@@ -70,6 +70,8 @@ WORK=$(mktemp -d)
 # command under `set -e` passes on its own status (psql and aws can return 2), and the runbook
 # reads 2 as "restored, counts differ", so every other failure is mapped to 1.
 deliberate=0
+# It runs through the EXIT trap, which shellcheck cannot see (SC2317).
+# shellcheck disable=SC2317
 finish() {
   rc=$?
   rm -rf "$WORK"
@@ -109,8 +111,19 @@ fi
 
 # 3. Restore. A failure leaves the new database in place for inspection; nothing is dropped.
 psql_admin -c "CREATE DATABASE \"$target\"" > /dev/null
+# A new database starts with PUBLIC's default TEMPORARY privilege, and pg_restore applies the
+# archived database ACL only with --create, which restore.sh does not use. ADR 0006 8.8 says
+# app_user has no TEMP, so revoke it here, as the role that owns the new database. (FU-DB-163)
+psql_admin -c "REVOKE TEMPORARY ON DATABASE \"$target\" FROM PUBLIC" > /dev/null ||
+  die "could not revoke TEMPORARY on database $target. Do not use it."
 gzip -dc "$WORK/$backup" | pg_restore --no-owner --exit-on-error --dbname "$target" ||
   die "pg_restore failed. Database $target was left in place for inspection."
+
+# 3b. The role must end up without TEMPORARY or CREATE (ADR 0006 8.8). Checked as well as set, because a
+#     restore into a server where app_user is granted it directly or through a role would still pass.
+temp_ok=$(psql_admin -c "SELECT NOT has_database_privilege('app_user', '$target', 'TEMPORARY') AND NOT has_database_privilege('app_user', '$target', 'CREATE')") ||
+  die "could not check the TEMPORARY privilege on database $target. Do not use it."
+[ "$temp_ok" = "t" ] || die "app_user still has TEMPORARY or CREATE on database $target. Do not use it."
 
 # 4. Compare row counts with the counts taken at backup time, BEFORE erasures are re-applied.
 psql --no-psqlrc -X -q -At -v ON_ERROR_STOP=1 -d "$target" > "$WORK/actual-counts.tsv" <<'SQL'
@@ -149,7 +162,7 @@ if [ "$reapply" = yes ]; then
   {
     printf 'CREATE TEMP TABLE _reapply_erasures (candidate_id uuid PRIMARY KEY, erased_at timestamptz NOT NULL);\n'
     while read -r stamp id; do
-      is_uuid "$id" && is_stamp "$stamp" || die "the erasure list holds a malformed entry."
+      if ! is_uuid "$id" || ! is_stamp "$stamp"; then die "the erasure list holds a malformed entry."; fi
       iso=$(printf '%s' "$stamp" | sed 's/^\(....\)\(..\)\(..\)T\(..\)\(..\)\(..\)Z$/\1-\2-\3T\4:\5:\6Z/')
       printf "INSERT INTO _reapply_erasures VALUES ('%s', '%s') ON CONFLICT DO NOTHING;\n" "$id" "$iso"
     done < "$WORK/erasures.txt"

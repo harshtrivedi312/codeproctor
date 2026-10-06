@@ -20,11 +20,11 @@ import type { App } from 'supertest/types';
 import { Roles } from '../common/auth/decorators';
 import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
 import { TokenModule, TokenService } from '../common/auth/token.service';
+import { TokenValidityService } from '../common/auth/token-validity.service';
 import { Prisma } from '../generated/prisma/client.js';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import { createPrismaClient } from './create-prisma-client';
 import { DatabaseModule } from './database.module';
-import { PrismaModule } from './prisma.module';
 import { OrgContextMissingError, OrgScopeViolationError, RawQueryNotAllowedError } from './errors';
 import { OrgContextService } from './org-context';
 import type { AuthenticatedUser } from './org-context';
@@ -91,12 +91,15 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
         }),
         TokenModule,
         // BE-02's unscoped client: the real guard re-reads the user through it on every request.
-        PrismaModule,
         DatabaseModule,
       ],
       controllers: [ProbeController],
       providers: [{ provide: APP_GUARD, useClass: JwtAuthGuard }],
-    }).compile();
+    })
+      // The guard's Redis marker check (S1) is not under test here: no token is invalidated.
+      .overrideProvider(TokenValidityService)
+      .useValue({ isFresh: () => Promise.resolve(true) })
+      .compile();
     app = moduleRef.createNestApplication<INestApplication<App>>({ logger: false });
     await app.listen(0);
     prisma = app.get(PrismaService);
@@ -638,18 +641,18 @@ describe('auth bootstrap on the scoped client (NFR-04, FR-104)', () => {
     });
 
     it("NFR-04 an authenticated HTTP request sends two statements: the guard's user re-check, then the handler's one", async () => {
-      // BE-02's JwtAuthGuard re-reads the user on every request (FU-BE-19) through its own unscoped
-      // client. Neither the interceptor nor the extension adds anything on top of that.
+      // BE-02's JwtAuthGuard re-reads the user on every request (FU-BE-19), now in the token's own
+      // org scope (FU-DB-102). Neither the interceptor nor the extension adds anything on top.
       const bearer = staffBearer(app.get(TokenService), A);
       const get = (): Promise<unknown> =>
         request(app.getHttpServer())
           .get(`/probe/users/${A.userId}`)
           .set('Authorization', bearer)
           .expect(200);
-      // The guard's lookup, run alone on the plain client, as the guard writes it.
+      // The guard's lookup, run alone on the plain client with the org filter written by hand.
       const guardLookup = await measured(() =>
         plain.user.findUnique({
-          where: { id: A.userId },
+          where: { id: A.userId, AND: [{ orgId: A.orgId }] },
           select: { isActive: true, role: true, orgId: true, passwordHash: true },
         }),
       );

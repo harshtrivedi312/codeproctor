@@ -1,0 +1,89 @@
+{
+  "schema": 1,
+  "files": [
+    {
+      "name": "auraface-v1/glintr100.onnx",
+      "component": "FACE_EMBED",
+      "source": "https://huggingface.co/fal/AuraFace-v1",
+      "version": "fal/AuraFace-v1 (revision pinned by models:update)",
+      "sha256": "a7933ea5330113b01c9b60351d8f4c33003f145d8470ac5f0e52ee2effe25c60",
+      "bytes": 260694151,
+      "licence": "unverified",
+      "licenceUrl": "https://huggingface.co/fal/AuraFace-v1",
+      "flag": "F-2",
+      "status": "unverified"
+    },
+    {
+      "name": "mediapipe/face_landmarker.task",
+      "component": "FACE_LANDMARK",
+      "source": "https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker",
+      "version": "face_landmarker v1",
+      "sha256": "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff",
+      "bytes": 3758596,
+      "licence": "Apache-2.0",
+      "licenceUrl": null,
+      "flag": "F-4",
+      "status": "approved"
+    },
+    {
+      "name": "silero-vad/silero_vad.onnx",
+      "component": "VAD",
+      "source": "https://github.com/snakers4/silero-vad",
+      "version": "v6.2.3",
+      "sha256": "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3",
+      "bytes": 2327524,
+      "licence": "MIT",
+      "licenceUrl": "https://github.com/snakers4/silero-vad/blob/master/LICENSE",
+      "flag": "F-5",
+      "status": "approved"
+    },
+    {
+      "name": "auraface-v1/scrfd_10g_bnkps.onnx",
+      "component": "NONE",
+      "source": "https://huggingface.co/fal/AuraFace-v1",
+      "version": "InsightFace antelopev2",
+      "sha256": null,
+      "bytes": null,
+      "licence": "InsightFace non-commercial research only",
+      "licenceUrl": null,
+      "flag": "F-1",
+      "status": "blocked"
+    },
+    {
+      "name": "auraface-v1/2d106det.onnx",
+      "component": "NONE",
+      "source": "https://huggingface.co/fal/AuraFace-v1",
+      "version": "InsightFace antelopev2",
+      "sha256": null,
+      "bytes": null,
+      "licence": "InsightFace non-commercial research only",
+      "licenceUrl": null,
+      "flag": "F-1",
+      "status": "blocked"
+    },
+    {
+      "name": "auraface-v1/1k3d68.onnx",
+      "component": "NONE",
+      "source": "https://huggingface.co/fal/AuraFace-v1",
+      "version": "InsightFace antelopev2",
+      "sha256": null,
+      "bytes": null,
+      "licence": "InsightFace non-commercial research only",
+      "licenceUrl": null,
+      "flag": "F-1",
+      "status": "blocked"
+    },
+    {
+      "name": "auraface-v1/genderage.onnx",
+      "component": "NONE",
+      "source": "https://huggingface.co/fal/AuraFace-v1",
+      "version": "InsightFace antelopev2",
+      "sha256": null,
+      "bytes": null,
+      "licence": "InsightFace non-commercial research only",
+      "licenceUrl": null,
+      "flag": "F-1",
+      "status": "blocked"
+    }
+  ]
+}

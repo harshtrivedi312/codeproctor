@@ -49,3 +49,115 @@ describe('ProblemFilter code extension (ADR 0001 C-9)', () => {
     expect(run(new HttpException('down', 503)).body.code).toBeUndefined();
   });
 });
+
+describe('ProblemFilter org-scope failure (FR-103, TC-008)', () => {
+  it('TC-008: a query without an org context is a fixed 403 that leaks nothing', () => {
+    const { OrgContextMissingError } =
+      jest.requireActual<typeof import('../database/errors')>('../database/errors');
+    const { status, body } = run(new OrgContextMissingError('Session.findMany'));
+    expect(status).toBe(403);
+    expect(body).toEqual({
+      type: 'about:blank',
+      title: 'Forbidden',
+      status: 403,
+      detail: 'Access denied.',
+      instance: '/api/v1/x',
+      traceId: 'trace-1',
+    });
+    const text = JSON.stringify(body);
+    expect(text).not.toMatch(/Session|findMany|OrgContext|runAsUser|README/);
+  });
+
+  it('TC-008: other org-scope errors stay a generic 500', () => {
+    const { OrgScopeViolationError } =
+      jest.requireActual<typeof import('../database/errors')>('../database/errors');
+    expect(run(new OrgScopeViolationError('x')).status).toBe(500);
+  });
+});
+
+describe('ProblemFilter logging of failures (S8)', () => {
+  it('FR-103: a missing org context and a 5xx are logged at error level by name and trace id only', () => {
+    const { OrgContextMissingError } =
+      jest.requireActual<typeof import('../database/errors')>('../database/errors');
+    const { Logger } = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    try {
+      run(new OrgContextMissingError('Session.findMany'));
+      run(new HttpException('boom with a secret value', 500));
+      const logged = JSON.stringify(error.mock.calls);
+      expect(error).toHaveBeenCalledTimes(2);
+      expect(logged).toContain('OrgContextMissingError');
+      expect(logged).toContain('trace-1');
+      expect(logged).not.toMatch(/Session|findMany|secret value/);
+    } finally {
+      error.mockRestore();
+    }
+  });
+});
+
+describe('ProblemFilter scrubs Prisma errors before logging (TC-003, NFR-04, FU-BE-83)', () => {
+  it('TC-003, NFR-04: a validation error whose message holds an argument value is logged without that value', () => {
+    const { Prisma } = jest.requireActual<typeof import('../generated/prisma/client')>(
+      '../generated/prisma/client',
+    );
+    const { Logger } = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+    const secret = '$argon2id$v=19$m=19456,t=2,p=1$c2VjcmV0$leaked-hash-value';
+    const error = new Prisma.PrismaClientValidationError(
+      `Invalid \`prisma.user.update()\` invocation:\n{ data: { passwordHash: "${secret}" } }`,
+      { clientVersion: '7.10.0' },
+    );
+    const spy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    try {
+      const { status, body } = run(error);
+      expect(status).toBe(500);
+      expect(JSON.stringify(body)).not.toContain(secret);
+      const logged = JSON.stringify(
+        spy.mock.calls.map(([first]) => {
+          const e = (first as { err: Error }).err;
+          return {
+            message: e.message,
+            stack: e.stack,
+            name: e.name,
+            traceId: (first as { traceId: string }).traceId,
+          };
+        }),
+      );
+      expect(logged).not.toContain(secret);
+      expect(logged).toContain('PrismaClientValidationError');
+      expect(logged).toContain('trace-1');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('TC-003, NFR-04: a bare driver adapter error from a failed transaction commit is logged without its values, keeping kind and SQLSTATE', () => {
+    const { Logger } = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+    const secret = 'leaked-token-hash-4f9c';
+    const error = Object.assign(new Error(`could not serialize: ${secret}`), {
+      name: 'DriverAdapterError',
+      cause: {
+        kind: 'TransactionWriteConflict',
+        originalCode: '40001',
+        originalMessage: `row (${secret}) conflicted`,
+        detail: `Key (token_hash)=(${secret})`,
+      },
+    });
+    const spy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    try {
+      const { status, body } = run(error);
+      expect(status).toBe(500);
+      expect(JSON.stringify(body)).not.toContain(secret);
+      const logged = JSON.stringify(
+        spy.mock.calls.map(([first]) => {
+          const e = (first as { err: Error & { cause?: unknown } }).err;
+          return { message: e.message, stack: e.stack, name: e.name, cause: e.cause };
+        }),
+      );
+      expect(logged).not.toContain(secret);
+      expect(logged).toContain('TransactionWriteConflict');
+      expect(logged).toContain('40001');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

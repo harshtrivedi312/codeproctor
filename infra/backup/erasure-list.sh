@@ -84,7 +84,7 @@ case "$cmd" in
       sed -n "s#^$COMPLETED_PREFIX\\($STAMP_RE\\)-\\([0-9a-f-]\\{36\\}\\)\\.json\$#\\1 \\2#p" > "$WORK/completed"
     load_keys "$ERASURE_PREFIX"
     while read -r done_stamp id; do
-      if [ "$done_stamp" \< "$before" ]; then
+      if stamp_lt "$done_stamp" "$before"; then
         # The request entry goes first: if it fails the marker stays, and the next run retries.
         printf '%s\n' "$KEYS" | { grep -- "-$id\.json\$" || true; } > "$WORK/request-keys"
         while read -r key; do

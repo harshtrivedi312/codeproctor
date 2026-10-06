@@ -11,15 +11,8 @@ import { REPO_ROOT } from './test-support.mjs';
 export const POSTGRES_IMAGE = 'postgres:16';
 
 /** Why the drill cannot run here, or null. */
-export function drillUnavailable() {
-  for (const [cmd, args] of [
-    ['docker', ['info']],
-    ['psql', ['--version']],
-    ['pg_dump', ['--version']],
-    ['pg_restore', ['--version']],
-    ['aws', ['--version']],
-    ['gzip', ['--version']],
-  ]) {
+export function drillUnavailable(tools = ['psql', 'pg_dump', 'pg_restore', 'aws', 'gzip']) {
+  for (const [cmd, args] of [['docker', ['info']], ...tools.map((t) => [t, ['--version']])]) {
     const r = spawnSync(cmd, args, { stdio: 'ignore' });
     if (r.error || r.status !== 0) return `${cmd} is not available`;
   }
@@ -29,6 +22,16 @@ export function drillUnavailable() {
 }
 
 /** @returns {{ env: Record<string,string>, port: number, psql: (db: string, sql: string) => string, stop: () => void }} */
+// Every container this process starts carries a label and is removed when the process exits,
+// including after a failed test or an interrupt, so no drill container is left running.
+const started = new Set();
+const sweep = () => {
+  for (const id of started) spawnSync('docker', ['rm', '-f', id], { stdio: 'ignore' });
+  started.clear();
+};
+process.on('exit', sweep);
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => process.exit(1));
+
 export function startPostgres() {
   const password = randomBytes(12).toString('hex');
   const id = execFileSync(
@@ -37,6 +40,8 @@ export function startPostgres() {
       'run',
       '-d',
       '--rm',
+      '--label',
+      'codeproctor.drill=1',
       '-e',
       `POSTGRES_PASSWORD=${password}`,
       '-p',
@@ -45,7 +50,15 @@ export function startPostgres() {
     ],
     { encoding: 'utf8' },
   ).trim();
-  const portLine = execFileSync('docker', ['port', id, '5432/tcp'], { encoding: 'utf8' });
+  started.add(id);
+  let portLine;
+  try {
+    portLine = execFileSync('docker', ['port', id, '5432/tcp'], { encoding: 'utf8' });
+  } catch (error) {
+    spawnSync('docker', ['rm', '-f', id], { stdio: 'ignore' });
+    started.delete(id);
+    throw error;
+  }
   const port = Number(portLine.trim().split('\n')[0].split(':').pop());
   const env = {
     PGHOST: '127.0.0.1',
@@ -65,13 +78,14 @@ export function startPostgres() {
   // The image restarts once during init, so wait for a query on the final server.
   const deadline = Date.now() + 60_000;
   for (;;) {
-    const r = spawnSync('psql', ['--no-psqlrc', '-At', '-d', 'postgres', '-c', 'SELECT 1'], {
-      env: { PATH: process.env.PATH ?? '', ...env },
+    const r = spawnSync('psql', ['--no-psqlrc', '-X', '-At', '-d', 'postgres', '-c', 'SELECT 1'], {
+      env: { PATH: process.env.PATH ?? '', PGCONNECT_TIMEOUT: '3', ...env },
       encoding: 'utf8',
     });
     if (r.status === 0 && r.stdout.trim() === '1') break;
     if (Date.now() > deadline) {
-      spawnSync('docker', ['rm', '-f', id]);
+      spawnSync('docker', ['rm', '-f', id], { stdio: 'ignore' });
+      started.delete(id);
       throw new Error('throwaway postgres did not become ready');
     }
     spawnSync('sleep', ['1']);
@@ -81,7 +95,10 @@ export function startPostgres() {
     env,
     port,
     psql,
-    stop: () => void spawnSync('docker', ['rm', '-f', id], { stdio: 'ignore' }),
+    stop: () => {
+      spawnSync('docker', ['rm', '-f', id], { stdio: 'ignore' });
+      started.delete(id);
+    },
   };
 }
 
@@ -121,11 +138,12 @@ export function clientShims(pg, dir) {
   const installed = spawnSync('pg_dump', ['--version'], { encoding: 'utf8' }).stdout;
   mkdirSync(dir, { recursive: true });
   // A psql wrapper that fails when the arguments contain FAKE_PSQL_FAIL_ON, so a test can break
-  // one step (for example the erasure re-application) and nothing else.
+  // one step (for example the erasure re-application) and nothing else, or that prints
+  // FAKE_PSQL_OUTPUT instead of running when the arguments contain FAKE_PSQL_OUTPUT_ON.
   const realPsql = spawnSync('sh', ['-c', 'command -v psql'], { encoding: 'utf8' }).stdout.trim();
   writeFileSync(
     join(dir, 'psql'),
-    `#!/bin/sh\ncase "$*" in *"\${FAKE_PSQL_FAIL_ON:-@@never@@}"*) echo "psql: simulated failure" >&2; exit "\${FAKE_PSQL_FAIL_STATUS:-3}" ;; esac\nexec ${realPsql} "$@"\n`,
+    `#!/bin/sh\ncase "$*" in *"\${FAKE_PSQL_FAIL_ON:-@@never@@}"*) echo "psql: simulated failure" >&2; exit "\${FAKE_PSQL_FAIL_STATUS:-3}" ;; esac\ncase "$*" in *"\${FAKE_PSQL_OUTPUT_ON:-@@never@@}"*) printf '%s\\n' "\${FAKE_PSQL_OUTPUT:-}"; exit 0 ;; esac\nexec ${realPsql} "$@"\n`,
     { mode: 0o755 },
   );
   if (installed.match(/\) (\d+)/)?.[1] === String(major)) {
