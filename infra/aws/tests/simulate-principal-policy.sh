@@ -35,7 +35,7 @@ BOUNDARY="arn:aws:iam::${ACCOUNT}:policy/codeproctor-guardrails/codeproctor-pilo
 TF="arn:aws:s3:::codeproctor-pilot-tfstate-${ACCOUNT}"
 pass=0; fail=0
 
-# check <role-arn> <expect allowed|denied> <name> <action> <resource> [Key=Value ...]
+# check <role-arn> <expect allowed|denied|explicit|implicit|notexplicit> <name> <action> <resource> [Key=Value ...]
 check() {
   role="$1"; expect="$2"; name="$3"; action="$4"; resource="$5"; shift 5
   entries=()
@@ -48,8 +48,22 @@ check() {
   errfile="$(mktemp)"
   got="$(aws "${args[@]}" 2>"$errfile")" || got="ERROR"
   firsterr="$(head -n 1 "$errfile")"; rm -f "$errfile"
-  if [ "$got" = "allowed" ]; then actual=allowed; elif [ "$got" = "ERROR" ]; then actual=ERROR; else actual=denied; fi
-  if [ "$actual" = "$expect" ]; then pass=$((pass+1)); printf 'PASS  %-62s %s\n' "$name" "$expect"
+  # Expectations: allowed | denied (explicit or implicit) | explicit | implicit | notexplicit (allowed or implicit)
+  case "$got" in
+    allowed) actual=allowed ;;
+    explicitDeny) actual=explicit ;;
+    implicitDeny) actual=implicit ;;
+    ERROR) actual=ERROR ;;
+    *) actual="$got" ;;
+  esac
+  ok=0
+  case "$expect" in
+    allowed) [ "$actual" = allowed ] && ok=1 ;;
+    denied) { [ "$actual" = explicit ] || [ "$actual" = implicit ]; } && ok=1 ;;
+    notexplicit) { [ "$actual" = allowed ] || [ "$actual" = implicit ]; } && ok=1 ;;
+    explicit|implicit) [ "$actual" = "$expect" ] && ok=1 ;;
+  esac
+  if [ "$ok" -eq 1 ]; then pass=$((pass+1)); printf 'PASS  %-62s %s\n' "$name" "$expect"
   else
     fail=$((fail+1)); printf 'FAIL  %-62s expected %s, got %s (%s)\n' "$name" "$expect" "$actual" "$got"
     if [ -n "$firsterr" ]; then printf '      aws said: %s\n' "$firsterr"; fi
@@ -140,24 +154,33 @@ check "$DEPLOY" denied  "Route 53 delete hosted zone" route53:DeleteHostedZone "
 check "$DEPLOY" denied  "SSM start session" ssm:StartSession "$INST" "$PILOT_TAG"
 check "$DEPLOY" denied  "SSM send command" ssm:SendCommand "$INST" "$PILOT_TAG"
 check "$DEPLOY" denied  "EC2 import key pair (Session Manager only, no SSH)" ec2:ImportKeyPair "arn:aws:ec2:${REGION}:${ACCOUNT}:key-pair/k" "$REQ_TAG"
+check "$DEPLOY" explicit "Route 53 ListHostedZones on * is explicitly denied" route53:ListHostedZones "*"
+check "$DEPLOY" notexplicit "KMS CreateGrant through EC2 for an AWS service is not explicitly denied (EBS carve-out)" kms:CreateGrant "arn:aws:kms:${REGION}:${ACCOUNT}:key/00000000-0000-0000-0000-000000000000" "kms:ViaService=ec2.us-east-1.amazonaws.com" "kms:GrantIsForAWSResource=true"
 if [ -n "$ZONE_ID" ]; then
-  check "$DEPLOY" denied "Route 53 other zone (assess zone id is ${ZONE_ID})" route53:ChangeResourceRecordSets "arn:aws:route53:::hostedzone/Z0OTHERZONE0000"
+  check "$DEPLOY" explicit "Route 53 other zone is explicitly denied (assess zone id is ${ZONE_ID})" route53:ChangeResourceRecordSets "arn:aws:route53:::hostedzone/Z0OTHERZONE0000"
+  check "$DEPLOY" implicit "Route 53 assess zone ${ZONE_ID} is implicitly denied (no allow yet, not an explicit deny)" route53:ChangeResourceRecordSets "arn:aws:route53:::hostedzone/${ZONE_ID}"
 fi
 
 # Roles created later by CI (compute template): each must carry the boundary and the pilot tag.
-for r in "$INSTANCE_ROLE"; do
-  if aws iam get-role --profile "$PROFILE" --role-name "$r" >/dev/null 2>&1; then
-    pb="$(aws iam get-role --profile "$PROFILE" --role-name "$r" --query 'Role.PermissionsBoundary.PermissionsBoundaryArn' --output text 2>/dev/null)"
-    case "$pb" in
-      *policy/codeproctor-guardrails/codeproctor-pilot-boundary) pass=$((pass+1)); printf 'PASS  %-62s boundary set\n' "role $r permissions boundary" ;;
-      *) fail=$((fail+1)); printf 'FAIL  %-62s boundary is "%s" (must be codeproctor-pilot-boundary)\n' "role $r permissions boundary" "$pb" ;;
-    esac
-    env="$(aws iam list-role-tags --profile "$PROFILE" --role-name "$r" --query "Tags[?Key=='Environment']|[0].Value" --output text 2>/dev/null)"
-    if [ "$env" = "pilot" ]; then pass=$((pass+1)); printf 'PASS  %-62s tagged pilot\n' "role $r tag"; else fail=$((fail+1)); printf 'FAIL  %-62s Environment tag is "%s"\n' "role $r tag" "$env"; fi
-  else
-    echo "Role $r not created yet: boundary and tag checks skipped (re-run after the compute template)"
+for r in $(aws iam list-roles --profile "$PROFILE" --query "Roles[?starts_with(RoleName, 'codeproctor-pilot-')].RoleName" --output text 2>/dev/null); do
+  case "$r" in codeproctor-pilot-deploy|codeproctor-pilot-plan) continue ;; esac
+  pb="$(aws iam get-role --profile "$PROFILE" --role-name "$r" --query 'Role.PermissionsBoundary.PermissionsBoundaryArn' --output text 2>/dev/null)"
+  env="$(aws iam list-role-tags --profile "$PROFILE" --role-name "$r" --query "Tags[?Key=='Environment']|[0].Value" --output text 2>/dev/null)"
+  rpath="$(aws iam get-role --profile "$PROFILE" --role-name "$r" --query 'Role.Path' --output text 2>/dev/null)"
+  good=0
+  case "$env" in
+    owner) good=1 ;;
+    pilot) case "$pb" in *policy/codeproctor-guardrails/codeproctor-pilot-boundary|*policy/codeproctor-guardrails/codeproctor-pilot-boundary-scheduler) good=1 ;; esac ;;
+  esac
+  if [ "$good" -eq 1 ]; then pass=$((pass+1)); printf 'PASS  %-62s tag=%s boundary=%s\n' "role $r" "$env" "${pb##*/}"
+  else fail=$((fail+1)); printf 'FAIL  %-62s needs (pilot boundary or scheduler boundary) and Environment=pilot, or Environment=owner; tag=%s boundary=%s\n' "role $r" "$env" "$pb"; fi
+  if [ "$r" = "$INSTANCE_ROLE" ]; then
+    if [ "$rpath" = "/" ]; then pass=$((pass+1)); printf 'PASS  %-62s path /\n' "instance role $r path"; else fail=$((fail+1)); printf 'FAIL  %-62s path is "%s" (must be /)\n' "instance role $r path" "$rpath"; fi
   fi
 done
+if ! aws iam get-role --profile "$PROFILE" --role-name "$INSTANCE_ROLE" >/dev/null 2>&1; then
+  echo "Instance role $INSTANCE_ROLE not created yet: its checks are skipped (re-run after the compute template)"
+fi
 echo "Every codeproctor-pilot-* role in the account (each must show the boundary and Environment=pilot, or Environment=owner):"
 aws iam list-roles --profile "$PROFILE" --query "Roles[?starts_with(RoleName, 'codeproctor-pilot-')].RoleName" --output text 2>/dev/null | tr '\t' '\n' | sed 's/^/  /'
 

@@ -39,7 +39,7 @@ Every role and policy of the stack sits under the IAM path `/codeproctor-guardra
 therefore never match the `codeproctor-pilot-*` allow patterns (the deploy role cannot edit its own
 policies), and explicit denies cover them as well. The role name stays `codeproctor-pilot-deploy`;
 use the ARN from the stack Outputs, which includes the path. Reserved names (denied to CI):
-`codeproctor-pilot-deploy`, `-plan`, `codeproctor-pilot-deploy-*`, `codeproctor-pilot-plan-*`,
+`codeproctor-pilot-deploy`, `-plan`, `codeproctor-pilot-instance-ssm`, `codeproctor-pilot-deploy-*`, `codeproctor-pilot-plan-*`,
 `codeproctor-pilot-boundary*`.
 
 ## What CI can and cannot do
@@ -92,6 +92,7 @@ You type the repository values yourself. This document uses the placeholders `<o
    - `CreateStateBucket` = `false` and `CreatePlanRole` = `false` (recommended; see the optional sections)
    - `AllowedInstanceTypes` = default `m7i.large,t3.small,t3.medium`, or narrow it
    - `MaxVolumeSizeGiB` = default `100`
+   - `AssessHostedZoneId` = leave **empty** (no hosted zone is permitted to any agent-managed role until the hub's ADR 0017 decides)
 5. Tick **I acknowledge that AWS CloudFormation might create IAM resources with custom names**
    (`CAPABILITY_NAMED_IAM`). Review and create.
 6. When the stack is `CREATE_COMPLETE`, open Outputs and copy `PilotDeployRoleArn`, the two boundary
@@ -112,13 +113,15 @@ You type the repository values yourself. This document uses the placeholders `<o
 10. Apply PR 1b (below), then verify with your own credentials (AWS CLI v2, a named or SSO profile):
 
     ```sh
-    infra/aws/tests/simulate-principal-policy.sh --account-id <12 digits> --profile <profile>
+    infra/aws/tests/simulate-principal-policy.sh --account-id <12 digits> --profile <profile> \
+      [--instance-role-name <name>] [--assess-zone-id <id>]
     ```
 
     Also list the roles: IAM, Roles, search `codeproctor-pilot-`. Every one must be tagged
     `Environment=pilot` **and** carry the permissions boundary `codeproctor-pilot-boundary` (or
-    `-boundary-scheduler` for the scheduler role), or be tagged `Environment=owner`. The script also checks
-    the boundary and tag of the instance role once it exists. Set up a CloudTrail or Access Analyzer alert
+    `-boundary-scheduler` for the scheduler role), or be tagged `Environment=owner`. The script loops over
+    every `codeproctor-pilot-*` role and fails unless it has a pilot or scheduler boundary plus
+    `Environment=pilot`, or `Environment=owner`; it also checks that the instance role path is `/`. Set up a CloudTrail or Access Analyzer alert
     on `UpdateAssumeRolePolicy` for the instance role.
 
 11. Update: Update stack, read the change set. Rollback: a failed update rolls back by itself; after a
@@ -176,13 +179,32 @@ because RDS is not used.
   `DeleteVolume`) and delete secrets within their recovery window. Bucket lifecycle and data
   configuration are out of CI's reach, but a terminated instance loses anything not on S3. Recommended:
   a CloudTrail alert (EventBridge rule to SNS) for `TerminateInstances`, `DeleteVolume`, `DeleteSecret`,
-  `ScheduleKeyDeletion`, `PutBucketPolicy`, `PutLifecycleConfiguration`.
-- **Indirect data access.** A deploy role that can launch an instance with a role and user data can
-  indirectly reach what that role reaches. The deploy role is isolated from everything else in the
-  account, not from the pilot's own data. Required reviewers are the control.
+  `ScheduleKeyDeletion`, `PutBucketPolicy`, `PutLifecycleConfiguration`, and, for the data-access routes
+  below, `ModifyInstanceAttribute`, `AttachVolume`, `RunInstances` and `AssociateIamInstanceProfile`.
+- **Indirect data access.** Stated plainly: **the deploy role effectively has full read access to pilot
+  candidate data**, gated only by the `pilot` environment's required reviewers. The explicit data-plane
+  denies stop mistakes and direct reads; they do not stop these routes: (a) launching a new instance with
+  the app instance profile and its own user data (`ModifyInstanceAttribute` user data is allowed);
+  (b) changing the user data of the stopped app host with `ModifyInstanceAttribute`, then
+  `StartInstances`; (c) `DetachVolume` and `AttachVolume` of the Postgres EBS volume onto another pilot
+  instance. The role is isolated from everything else in the account, not from the pilot's own data.
 - **Account-wide metadata reads.** `ec2:Describe*`, `ssm:DescribeParameters`, `scheduler:List*`,
   `cloudwatch:DescribeAlarms`, `kms:ListAliases` cannot be filtered by IAM.
 - **Listing.** CI has `s3:ListBucket` on the optional state bucket only. It cannot list the data buckets, so candidate media keys are not visible to it. Bucket configuration is read with `GetBucket*` and the `Get*Configuration` actions.
+
+### Notes for ADR 0017 and for maintainers
+
+- **Route 53 allows, when they are added later,** must be scoped to `ChangeResourceRecordSets`,
+  `ListResourceRecordSets` and `GetChange` on the assess zone only, with explicit denies on
+  `DeleteHostedZone`, DNSSEC actions, VPC association and tag changes. Today `GetChange` and
+  `ListHostedZonesByName` are denied (they are not on a hosted zone ARN, so the guard denies them).
+  `DeleteHostedZone` and `AssociateVPCWithHostedZone` are per-zone actions: on the assess zone they are
+  only implicitly denied, on every other zone explicitly.
+- **Policy size.** `codeproctor-pilot-deploy-guard` is at 5898 of 6144 characters. Keep
+  `AllowedInstanceTypes` short (about 3 to 4 types) because the list is repeated in the policy, and put any
+  further guard in another managed policy (attach it to the role; the limit is 10 per role).
+- Hold-listed items not built here: the owner-applied hosted zone, the instance role's record update, TLS,
+  and the GitHub environment change (a workflow change that goes through the hub).
 
 ## Optional: Terraform state (`CreateStateBucket`, default false)
 
@@ -306,11 +328,11 @@ bucket with the ADR 0013 section 5.7 prefixes, plus a backup bucket.
 Every bucket: Block Public Access (all four), ownership enforced, TLS-only policy, default SSE-KMS with
 the one key, `Retain` on delete, no versioning.
 
-- **Face-image margin (owner question: 88, 90 or 91?).** S3 rounds expiry up to the next midnight UTC and
-  deletes asynchronously, and the sealing CopyObject creates a new object, so the clock restarts at
-  sealing, not at capture. 88 days leaves a margin under the 90 day cap; RetentionService remains the
-  real clock. BE-09, BE-13 and the worker presign path must treat a 404 on a face key as already deleted
-  (FU-QA-15).
+- **Face-image margin (owner question: 88, 90 or 91?).** The rule is **not** a hard "90 days from capture"
+  cap. The real bound is the capture-to-seal delay (the sealing CopyObject creates a new object, so the
+  clock restarts at sealing) plus 88 days plus up to 1 day of S3 rounding (expiry is rounded up to the next
+  midnight UTC and runs asynchronously). RetentionService is the real clock for C-27 and C-35. BE-09,
+  BE-13 and the worker presign path must treat a 404 on a face key as already deleted (FU-QA-15).
 - **Retention.** RetentionService owns every data-class clock (C-04, C-26, C-35, the 3-year consent
   clock). The only age rule on the media bucket is the face-image backstop. It filters on the tag
   `RetentionClass=face`, so the API must tag those objects: `x-amz-tagging` on the identity presign and

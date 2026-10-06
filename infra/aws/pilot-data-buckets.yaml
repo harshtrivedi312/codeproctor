@@ -14,11 +14,12 @@ Description: >-
 #
 # Retention: RetentionService owns EVERY data-class clock (C-04, C-26, C-35, 3 year consent). The
 # only age-based rules here are backstops that cannot be wrong:
-#   media bucket   objects tagged RetentionClass=face expire 88 days after creation (C-27, C-35: face
-#                  images are capped at 90 days from capture whatever any hold says; 88 leaves room
-#                  for S3 rounding up to the next midnight UTC and for the sealing CopyObject, which
-#                  creates a new object and restarts the clock). Nothing else
-#                  expires by age. The API must tag them (follow-up in docs/followups/qa.md).
+#   media bucket   objects tagged RetentionClass=face expire 88 days after creation of the object. This
+#                  is NOT a hard 90-days-from-capture cap: the real bound is the capture-to-seal delay
+#                  (the sealing CopyObject creates a new object and restarts the clock) plus 88 days
+#                  plus up to 1 day of S3 rounding (next midnight UTC, asynchronous). RetentionService
+#                  is the real clock for C-27 and C-35. Nothing else expires by age. The API must tag
+#                  the objects (follow-up in docs/followups/qa.md).
 #   backup bucket  db/dumps/ 13 days (14 days is the schedule; S3 rounds expiry up to the next
 #                  midnight UTC and deletes asynchronously, so 13 keeps objects inside 14 days)
 #                  db/wal/ WalRetentionDays, default equal to the dumps (needs a physical base backup:

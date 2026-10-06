@@ -309,7 +309,7 @@ Resources:
                 cloudwatch:namespace: 'codeproctor-pilot'
               'Null':
                 ec2:SourceInstanceARN: 'false'
-            # No agent-managed role may hold any permission on any hosted zone except the assess zone (AssessHostedZoneId; empty means none). Account-wide actions (ListHostedZones, CreateHostedZone, DeleteHostedZone, AssociateVPCWithHostedZone, ChangeResourceRecordSets on other zones, route53domains) are denied whether or not the main zone is in this account (OQ-22).
+            # No agent-managed role may hold any permission on any hosted zone except the assess zone (AssessHostedZoneId; empty means none). Account-wide actions (ListHostedZones, CreateHostedZone, route53domains) and every action on any other zone (ChangeResourceRecordSets, and the per-zone DeleteHostedZone and AssociateVPCWithHostedZone) are denied whether or not the main zone is in this account (OQ-22). On the assess zone itself the per-zone actions are only implicitly denied (no allow exists), not explicitly.
           - Sid: 'DenyRoute53OutsideAssessZone'
             Effect: 'Deny'
             Action:
@@ -382,7 +382,7 @@ Resources:
             Condition:
               Bool:
                 kms:GrantIsForAWSResource: 'false'
-            # No agent-managed role may hold any permission on any hosted zone except the assess zone (AssessHostedZoneId; empty means none). Account-wide actions (ListHostedZones, CreateHostedZone, DeleteHostedZone, AssociateVPCWithHostedZone, ChangeResourceRecordSets on other zones, route53domains) are denied whether or not the main zone is in this account (OQ-22).
+            # No agent-managed role may hold any permission on any hosted zone except the assess zone (AssessHostedZoneId; empty means none). Account-wide actions (ListHostedZones, CreateHostedZone, route53domains) and every action on any other zone (ChangeResourceRecordSets, and the per-zone DeleteHostedZone and AssociateVPCWithHostedZone) are denied whether or not the main zone is in this account (OQ-22). On the assess zone itself the per-zone actions are only implicitly denied (no allow exists), not explicitly.
           - Sid: 'DenyRoute53OutsideAssessZone'
             Effect: 'Deny'
             Action:
@@ -1307,7 +1307,7 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          # No agent-managed role may hold any permission on any hosted zone except the assess zone (AssessHostedZoneId; empty means none). Account-wide actions (ListHostedZones, CreateHostedZone, DeleteHostedZone, AssociateVPCWithHostedZone, ChangeResourceRecordSets on other zones, route53domains) are denied whether or not the main zone is in this account (OQ-22).
+          # No agent-managed role may hold any permission on any hosted zone except the assess zone (AssessHostedZoneId; empty means none). Account-wide actions (ListHostedZones, CreateHostedZone, route53domains) and every action on any other zone (ChangeResourceRecordSets, and the per-zone DeleteHostedZone and AssociateVPCWithHostedZone) are denied whether or not the main zone is in this account (OQ-22). On the assess zone itself the per-zone actions are only implicitly denied (no allow exists), not explicitly.
           - Sid: 'DenyRoute53OutsideAssessZone'
             Effect: 'Deny'
             Action:
@@ -1578,7 +1578,7 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          # No agent-managed role may hold any permission on any hosted zone except the assess zone (AssessHostedZoneId; empty means none). Account-wide actions (ListHostedZones, CreateHostedZone, DeleteHostedZone, AssociateVPCWithHostedZone, ChangeResourceRecordSets on other zones, route53domains) are denied whether or not the main zone is in this account (OQ-22).
+          # No agent-managed role may hold any permission on any hosted zone except the assess zone (AssessHostedZoneId; empty means none). Account-wide actions (ListHostedZones, CreateHostedZone, route53domains) and every action on any other zone (ChangeResourceRecordSets, and the per-zone DeleteHostedZone and AssociateVPCWithHostedZone) are denied whether or not the main zone is in this account (OQ-22). On the assess zone itself the per-zone actions are only implicitly denied (no allow exists), not explicitly.
           - Sid: 'DenyRoute53OutsideAssessZone'
             Effect: 'Deny'
             Action:
