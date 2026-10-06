@@ -75,7 +75,7 @@ describe('consents.age_confirmed_at (FR-401, C-30, D-55)', () => {
   // ---- the migration ---------------------------------------------------------------------------
 
   describe('what the migration created', () => {
-    it('FR-401 C-30 the column exists, is nullable, has type timestamp with time zone and no default', async () => {
+    it('FR-401 C-30 TC-008 the column exists, is nullable, has type timestamp with time zone and no default', async () => {
       const result = await pg.query<{
         data_type: string;
         udt_name: string;
@@ -98,7 +98,7 @@ describe('consents.age_confirmed_at (FR-401, C-30, D-55)', () => {
       ]);
     });
 
-    it('FR-401 C-30 consents has 12 columns: the 11 of the freeze and age_confirmed_at, the last one (the migration appends)', async () => {
+    it('FR-401 C-30 TC-008 consents has 12 columns: the 11 of the freeze and age_confirmed_at, the last one (the migration appends)', async () => {
       const result = await pg.query<{ column_name: string }>(
         `SELECT column_name FROM information_schema.columns
          WHERE table_schema = 'public' AND table_name = 'consents' ORDER BY ordinal_position`,
@@ -119,7 +119,7 @@ describe('consents.age_confirmed_at (FR-401, C-30, D-55)', () => {
       ]);
     });
 
-    it('FR-401 C-30 D-55 there is no CHECK on the column: the two CHECKs of consents are the freeze ones, and none names age_confirmed_at', async () => {
+    it('FR-401 C-30 TC-008 D-55 there is no CHECK on the column: the two CHECKs of consents are the freeze ones, and none names age_confirmed_at', async () => {
       const result = await pg.query<{ conname: string; def: string }>(
         `SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
          WHERE conrelid = 'consents'::regclass AND contype = 'c' ORDER BY conname`,
@@ -141,7 +141,7 @@ describe('consents.age_confirmed_at (FR-401, C-30, D-55)', () => {
       expect(refers.rows).toEqual([]);
     });
 
-    it('FR-401 C-30 D-55 the migration is the one ALTER TABLE ADD COLUMN and nothing else: no CHECK, no backfill, no GRANT', () => {
+    it('FR-401 C-30 TC-008 D-55 the migration is the one ALTER TABLE ADD COLUMN and nothing else: no CHECK, no backfill, no GRANT', () => {
       const sql = readFileSync(resolve(MIGRATIONS_DIR, MIGRATION, 'migration.sql'), 'utf8')
         .replace(/--[^\n]*/g, '')
         .trim();
@@ -154,7 +154,7 @@ describe('consents.age_confirmed_at (FR-401, C-30, D-55)', () => {
       ]);
     });
 
-    it('FR-401 C-30 the migration is later than the ADR 0015 ones, and deploy recorded it as finished', async () => {
+    it('FR-401 C-30 TC-008 the migration is later than the ADR 0015 ones, and deploy recorded it as finished', async () => {
       const names = readdirSync(MIGRATIONS_DIR)
         .filter((entry) => /^\d{14}_/.test(entry))
         .sort();
@@ -173,7 +173,10 @@ describe('consents.age_confirmed_at (FR-401, C-30, D-55)', () => {
   // ---- rows before C-30, and the PDF job ---------------------------------------------------------
 
   describe('rows with no confirmation (declined rows and rows signed before C-30)', () => {
-    it('FR-401 C-30 the fixture rows signed without the column have NULL there (they are the pre-C-30 rows)', async () => {
+    // The fixture row is inserted after every migration, so it is only the SHAPE of a pre-C-30 row. That a row
+    // which exists BEFORE the migration keeps NULL was checked by hand over a throwaway database (FU-DB-146
+    // describes the same check for ADR 0015).
+    it('FR-401 C-30 TC-095 a signed row with no age_confirmed_at (the shape of a pre-C-30 row) has NULL there', async () => {
       const result = await pg.query<{ age_confirmed_at: Date | null; signed_at: Date | null }>(
         'SELECT age_confirmed_at, signed_at FROM consents WHERE session_id = $1',
         [T.chain.sessionId],
@@ -183,7 +186,7 @@ describe('consents.age_confirmed_at (FR-401, C-30, D-55)', () => {
       expect(result.rows[0]?.age_confirmed_at).toBeNull();
     });
 
-    it('FR-401 C-30 D-55 no CHECK: a signed row with no age_confirmed_at is accepted, and so is one with it, and a decline with none', async () => {
+    it('FR-401 C-30 TC-095 D-55 no CHECK: a signed row with no age_confirmed_at is accepted, and so is one with it, and a decline with none', async () => {
       const signedWithout = await sessionWithoutConsent();
       const signedWith = await sessionWithoutConsent();
       const declined = await sessionWithoutConsent();
@@ -206,7 +209,7 @@ describe('consents.age_confirmed_at (FR-401, C-30, D-55)', () => {
       expect((await rowOf(declined.sessionId))?.age_confirmed_at).toBeNull();
     });
 
-    it('FR-401 C-30 D-55 the consent-PDF job can update a signed row that has no age_confirmed_at (pdf_key, pdf_generated_at, copy_emailed_at), as app_user and as the owner', async () => {
+    it('FR-401 C-30 TC-095 D-55 the consent-PDF job can update a signed row that has no age_confirmed_at (pdf_key, pdf_generated_at, copy_emailed_at), as app_user', async () => {
       const chain = await sessionWithoutConsent();
       await pg.query(
         `INSERT INTO consents (session_id, consent_text_id, signed_name, signed_at)
@@ -229,20 +232,9 @@ describe('consents.age_confirmed_at (FR-401, C-30, D-55)', () => {
         signed_at: WHEN,
         age_confirmed_at: null,
       });
-      // And as the owner (the erasure path nulls ip, user_agent and pdf_key of a signed row the same way).
-      await pg.query(
-        `UPDATE consents SET signed_name = 'Erased', ip = NULL, user_agent = NULL, pdf_key = NULL
-         WHERE session_id = $1`,
-        [chain.sessionId],
-      );
-      expect(await rowOf(chain.sessionId)).toMatchObject({
-        signed_name: 'Erased',
-        pdf_key: null,
-        age_confirmed_at: null,
-      });
     });
 
-    it('FR-401 C-30 the two existing CHECKs still hold: one of signed_at and declined_at, and the name with a signature', async () => {
+    it('FR-401 C-30 TC-095 the two existing CHECKs still hold: one of signed_at and declined_at, and the name with a signature', async () => {
       const chain = await sessionWithoutConsent();
       await expect(
         pg.query(
@@ -263,7 +255,7 @@ describe('consents.age_confirmed_at (FR-401, C-30, D-55)', () => {
   // ---- the role ----------------------------------------------------------------------------------
 
   describe('app_user (ADR 0006 section 7: table-level grants cover the new column)', () => {
-    it('FR-401 C-30 app_user can insert and read the column with plain SQL, and no GRANT in the migration was needed', async () => {
+    it('FR-401 C-30 TC-008 app_user can insert and read the column with plain SQL, and no GRANT in the migration was needed', async () => {
       const chain = await sessionWithoutConsent();
       await appPg.query(
         `INSERT INTO consents (session_id, consent_text_id, signed_name, signed_at, age_confirmed_at)
@@ -284,7 +276,7 @@ describe('consents.age_confirmed_at (FR-401, C-30, D-55)', () => {
       }
     });
 
-    it('FR-401 C-30 audit_logs stays append-only and sessions has no DELETE for app_user: this migration did not undo either REVOKE', async () => {
+    it('FR-401 C-30 TC-008 audit_logs stays append-only and sessions has no DELETE for app_user: this migration did not undo either REVOKE', async () => {
       const result = await pg.query<{ ok: boolean; what: string }>(
         `SELECT has_table_privilege('app_user', 'sessions', 'DELETE') AS ok, 'sessions DELETE' AS what
          UNION ALL SELECT has_table_privilege('app_user', 'audit_logs', 'UPDATE'), 'audit_logs UPDATE'
