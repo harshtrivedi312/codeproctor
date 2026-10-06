@@ -35,6 +35,13 @@ void describe('permission matrix skeleton (FR-103)', () => {
         assert.equal(p.startsWith('candidate_'), false, `${role} ${p}`);
     }
     assert.equal(hasPermission('SUPER_ADMIN', 'candidate_session:key'), false);
+    // Every candidate_* permission belongs to CANDIDATE: one that is in PERMISSIONS but missing from
+    // CANDIDATE_PERMISSIONS would fall to SUPER_ADMIN through the subtraction.
+    for (const p of PERMISSIONS) {
+      if (p.startsWith('candidate_')) assert.equal(hasPermission('CANDIDATE', p), true, p);
+    }
+    assert.equal(hasPermission('CANDIDATE', 'candidate_answer:draft'), true);
+    assert.equal(hasPermission('SUPER_ADMIN', 'candidate_answer:draft'), false);
     assert.equal(hasPermission('CANDIDATE', 'candidate_session:heartbeat'), true);
     assert.equal(hasPermission('CANDIDATE', 'review_session:read'), false);
     assert.equal(hasPermission('CANDIDATE', 'candidate_events:write'), true);
