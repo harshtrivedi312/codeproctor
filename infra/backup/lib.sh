@@ -36,7 +36,6 @@ init_s3() {
     printf '[default]\ns3 =\n    addressing_style = path\n' > "$AWS_CONFIG_FILE"
     export AWS_CONFIG_FILE
   fi
-  # shellcheck disable=SC2034
   BUCKET=$S3_BACKUP_BUCKET
   PREFIX=${BACKUP_PREFIX:-db/}
   case "$PREFIX" in */) ;; *) PREFIX="$PREFIX/" ;; esac

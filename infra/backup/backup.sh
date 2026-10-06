@@ -76,7 +76,8 @@ gzip -dc "$file" | pg_restore --file=/dev/null || die "the dump is truncated or 
 # An empty or partial dump must never replace a good one: every table counted above needs a data entry.
 tables=$(wc -l < "$WORK/counts.tsv" | tr -d ' ')
 data=$(grep -c ' TABLE DATA ' "$WORK/toc.txt" || true)
-if [ "$tables" -le 0 ] || [ "$data" -lt "$tables" ]; then
+# Fail closed: a test that errors (a non-integer) must also stop the upload.
+if ! { [ "$tables" -gt 0 ] && [ "$data" -ge "$tables" ]; }; then
   die "the dump holds $data table data entries but the database has $tables tables."
 fi
 sha256_of "$file" > "$WORK/$name.sha256"
@@ -106,7 +107,7 @@ printf '%s\n' "$KEYS" | while read -r key; do
   [ -n "$keystamp" ] || continue
   [ "codeproctor-$keystamp" != "$newest" ] || continue
   if stamp_lt "$keystamp" "$cutoff"; then
-    s3api delete-object --bucket "$BUCKET" --key "$key" > /dev/null
+    s3api delete-object --bucket "$BUCKET" --key "$key" > /dev/null < /dev/null
     log "pruned $key."
   fi
 done
