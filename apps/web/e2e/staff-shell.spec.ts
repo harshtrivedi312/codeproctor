@@ -75,7 +75,11 @@ test.describe('FR-103 role-based navigation', () => {
   }) => {
     await signInAt(page, ADMIN, '/admin');
     await expectNoAxeViolations(page);
-    for (const href of ['/admin/questions', '/admin/review', '/admin/live', '/admin/reports']) {
+    // Questions is the real question bank now (FE-04; its own spec runs axe on it).
+    await mainNav(page).locator('a[href="/admin/questions"]').click();
+    await expect(page.getByRole('heading', { name: 'Question bank' })).toBeVisible();
+    await expectNoAxeViolations(page);
+    for (const href of ['/admin/review', '/admin/live', '/admin/reports']) {
       await mainNav(page).locator(`a[href="${href}"]`).click();
       await expect(page.getByTestId('section-placeholder')).toBeVisible();
       await expectNoAxeViolations(page);

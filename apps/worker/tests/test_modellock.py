@@ -125,6 +125,7 @@ def test_f1_startup_refuses_unlisted_blocked_renamed_mismatched_and_symlinked_fi
         {"schema": 1, "files": [entry("a", b"x"), entry("a", b"y")]},
         {"schema": 1, "files": [entry("../a", b"x")]},
         {"schema": 1, "files": [entry("/abs", b"x")]},
+        {"schema": 1, "files": [entry(".", b"x")]},
         {"schema": 1, "files": [entry("./a", b"x")]},
         {"schema": 1, "files": [entry("a//b", b"x")]},
         {"schema": 1, "files": [{**entry("a", b"x"), "sha256": None}]},

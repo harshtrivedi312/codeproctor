@@ -28,6 +28,7 @@ def render(
     unscored_genuine: int = 0,
     genuine_total: int = 0,
     dropped_impostor: int = 0,
+    missing_pairs: int = 0,
 ) -> str:
     lines = ["# Face-match threshold report (INT-01)", ""]
     if synthetic:
@@ -64,6 +65,15 @@ def render(
         f"the FNMR column. {dropped_impostor} impostor pairs could not be scored; they cannot be "
         "false matches and are left out of the FMR.",
         "",
+        *(
+            [
+                f"{missing_pairs} pairs named image files that could not be read (usually a "
+                "manifest error). They are left out of every rate.",
+                "",
+            ]
+            if missing_pairs
+            else []
+        ),
         "Scope: the manual-review rate excludes liveness failures (liveness is a client signal and "
         "is assumed confirmed here), and the FMR covers zero-effort impostors only, not "
         "presentation attacks or morphs.",

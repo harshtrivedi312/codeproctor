@@ -44,7 +44,7 @@ _DIGITS: Final = re.compile(r"[0-9]{1,12}")  # ASCII only: str.isdigit() accepts
 # Paths that keep their own authentication or none (everything else needs a signature, 4.2).
 UNSIGNED_PATHS: Final = frozenset({"/health", "/risk"})
 # The docs routes are exempt only in local development (ADR 0014 4.2), by `docs_exempt=True`.
-DOCS_PATHS: Final = frozenset({"/docs", "/redoc", "/openapi.json"})
+DOCS_PATHS: Final = frozenset({"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"})
 UNSIGNED_PREFIXES: Final = ("/analyze/",)  # legacy X-Internal-Token routes until BE-12
 log = logging.getLogger(__name__)
 

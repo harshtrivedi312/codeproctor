@@ -345,6 +345,7 @@ def recheck(body: RecheckRequest, request: Request) -> RecheckResponse | Respons
             failed = review_for_model_error(
                 error or ModelLoadError("MODEL_UNAVAILABLE"), rt.face_config
             )
+            log.info("face route=recheck outcome=%s", failed.detail)
             return _recheck_body(rt, failed, "OFF")
         cache_mode: Literal["HIT", "MISS", "OFF"] = "OFF"
         try:
