@@ -3092,7 +3092,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         ).toBe(0);
       });
 
-      it('TC-003: two admins resetting each other at the same time both finish with no deadlock or 500', async () => {
+      it('TC-003: two admins resetting each other at the same time neither deadlock nor 500; a refused request changes nothing', async () => {
         for (let round = 0; round < 5; round++) {
           const a = await admin();
           const b = await admin();
@@ -3100,18 +3100,33 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
             post(`2fa/reset/${b.id}`, a.token, OK),
             post(`2fa/reset/${a.id}`, b.token, OK),
           ]);
-          // A reset ends the target's access tokens at once (the Redis marker also refuses a token
-          // issued in the same second). Each admin's own request races the other admin's reset, so
-          // the loser of that race is refused 401 by the guard before the route runs. That is the
-          // designed behaviour, not a lock problem: what must never happen is a 5xx (deadlock,
-          // lock timeout) or an audit row for a request that did not finish.
+          // A reset ends the target's access tokens at once (the Redis marker is written before the
+          // other transaction commits, and it also refuses a token issued in the same second). Each
+          // admin's own request races the other admin's reset, so the loser of that race is
+          // refused 401 by the guard before the route runs. That is the designed behaviour, not a
+          // lock problem. What must never happen: a 5xx (deadlock, lock timeout), both requests
+          // refused, or a state change or audit row that does not match the response.
+          const outcome = JSON.stringify({ ra: [ra.status, ra.body], rb: [rb.status, rb.body] });
           for (const r of [ra, rb]) expect([204, 401]).toContain(r.status);
-          const finished = [ra, rb].filter((r) => r.status === 204).length;
-          expect(
-            await prisma.auditLog.count({
-              where: { action: 'AUTH_2FA_RESET_BY_ADMIN', entityId: { in: [a.id, b.id] } },
-            }),
-          ).toBe(finished);
+          // Jest's expect takes no message: carry the outcome inside the compared value instead.
+          expect([[ra, rb].some((r) => r.status === 204), outcome]).toEqual([true, outcome]);
+          for (const [requester, target, res] of [
+            [a, b, ra],
+            [b, a, rb],
+          ] as const) {
+            const done = res.status === 204;
+            const audits = await prisma.auditLog.count({
+              where: {
+                action: 'AUTH_2FA_RESET_BY_ADMIN',
+                actorId: requester.id,
+                entityId: target.id,
+              },
+            });
+            const { totpEnabled } = await prisma.user.findUniqueOrThrow({
+              where: { id: target.id },
+            });
+            expect([audits, totpEnabled, outcome]).toEqual([done ? 1 : 0, !done, outcome]);
+          }
         }
       });
     });
