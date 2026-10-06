@@ -11,13 +11,13 @@ import { describe, expect, it } from 'vitest';
 const root = resolve(import.meta.dirname, '../../../..');
 const spec = readFileSync(resolve(root, 'apps/web/openapi/openapi.yaml'), 'utf8');
 const contract = readFileSync(resolve(root, 'docs/api-contract.md'), 'utf8');
-const problemFilterCodes = readFileSync(
+const codedExceptionSource = readFileSync(
   resolve(root, 'apps/api/src/common/coded.exception.ts'),
   'utf8',
 );
 
 const CODE = '[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*';
-/** The codes written between backticks, like `BUSY` (the contract) . */
+/** The codes written between backticks, like `BUSY` (the contract). */
 const ticked = (text: string): string[] =>
   [...text.matchAll(new RegExp('`(' + CODE + ')`', 'g'))].map((m) => m[1] ?? '');
 /** The codes written as quoted strings, like 'BUSY' (the API source). */
@@ -37,6 +37,7 @@ function enumCodes(): string[] {
   const block = spec.slice(start + 1);
   const end = block.slice(1).search(/\n {4}[A-Za-z]+:\n/);
   const text = end === -1 ? block : block.slice(0, end + 1);
+  expect(text.indexOf('enum:'), 'ProblemCode has an enum list').toBeGreaterThan(-1);
   const list = text.slice(text.indexOf('enum:') + 'enum:'.length);
   return listed(list);
 }
@@ -55,16 +56,20 @@ describe('FU-BE-193 ProblemCode enum matches the contract', () => {
       (c) => c !== 'PROBLEM_CODES',
     );
     expect(named.length).toBeGreaterThan(5);
-    expect(named.filter((c) => !enumCodes().includes(c))).toEqual([]);
+    const inEnum = enumCodes();
+    expect(named.filter((c) => !inEnum.includes(c))).toEqual([]);
+    // And the other way: the enum invents no staff code the contract does not name.
+    expect(inEnum.filter((c) => !named.includes(c))).toEqual([]);
   });
 
-  it('FU-BE-193 lists every code the API problem filter can set', () => {
-    const block = problemFilterCodes.slice(
-      problemFilterCodes.indexOf('PROBLEM_CODES = ['),
-      problemFilterCodes.indexOf('] as const'),
+  it('FU-BE-193 lists every code in the API PROBLEM_CODES list (coded.exception.ts)', () => {
+    const block = codedExceptionSource.slice(
+      codedExceptionSource.indexOf('PROBLEM_CODES = ['),
+      codedExceptionSource.indexOf('] as const', codedExceptionSource.indexOf('PROBLEM_CODES = [')),
     );
     const apiCodes = quoted(block);
     expect(apiCodes.length).toBeGreaterThan(2);
-    expect(apiCodes.filter((c) => !enumCodes().includes(c))).toEqual([]);
+    const inEnum = enumCodes();
+    expect(apiCodes.filter((c) => !inEnum.includes(c))).toEqual([]);
   });
 });

@@ -1155,7 +1155,7 @@ export interface components {
       expectedRevision?: string;
     };
     /**
-     * @description The machine codes of docs/api-contract.md (preamble). Guard 403s carry none. BUSY is the 503 with Retry-After the problem filter answers on database lock contention (DL-37, D-56); a client retries it automatically after Retry-After. Candidate-route codes such as SESSION_NOT_ACTIVE (ADR 0013 section 5.1) are not staff codes and are not listed here.
+     * @description The machine codes of docs/api-contract.md (preamble). Guard 403s carry none. BUSY is the 503 with Retry-After the problem filter answers on database lock contention (DL-37, D-56); a client should retry it after Retry-After (the web's automatic retry is a separate change). Candidate-route codes such as SESSION_NOT_ACTIVE (ADR 0013 section 5.1) are not staff codes and are not listed here.
      * @enum {string}
      */
     ProblemCode:
