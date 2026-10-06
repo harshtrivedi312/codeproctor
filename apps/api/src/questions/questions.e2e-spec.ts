@@ -719,7 +719,7 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       await http()
         .delete(`${base}/${(t1.body as Json).id as string}`)
         .set(a.auth)
-        .expect(204);
+        .expect(200);
       await http()
         .delete(`${base}/${(t1.body as Json).id as string}`)
         .set(a.auth)
@@ -1471,7 +1471,8 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
         .send({ input: 'a', expectedOutput: 'b' })
         .expect(201);
       const tid = (t1.body as Json).id as string;
-      expect(t1.body).not.toHaveProperty('revision');
+      // The create answer carries the revision computed in its own transaction (Q4).
+      expect((t1.body as Json).revision).toMatch(/^[0-9a-f]{64}$/);
       const loaded = await revisionOf(a, id);
       await http().patch(`${base}/${tid}`).set(b.auth).send({ expectedOutput: 'B' }).expect(200);
       const count = (): Promise<number> =>
@@ -1525,11 +1526,11 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       await http()
         .delete(`${base}/${tid}?expectedRevision=${await revisionOf(a, id)}`)
         .set(a.auth)
-        .expect(204);
+        .expect(200);
       await http()
         .delete(`${base}/${(t2.body as Json).id as string}`)
         .set(a.auth)
-        .expect(204);
+        .expect(200);
       expect(await count()).toBe(0);
       // The create-question body keeps its strict shape: no expectedRevision inside testCases.
       await http()
@@ -2010,7 +2011,7 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       await http()
         .delete(`${vbase(q)}/${v.id}`)
         .set(a.auth)
-        .expect(204);
+        .expect(200);
       expect(await owner.questionVariant.count({ where: { id: v.id } })).toBe(0);
       expect(await owner.variantTestCase.count({ where: { variantId: v.id } })).toBe(0);
       expect(await audit('QUESTION_VARIANT_REMOVED', idOf(q))).toHaveLength(1);
@@ -2037,8 +2038,10 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
           position: 0,
           input: '5 6',
           expectedOutput: '11',
+          revision: (first.body as Json).revision,
         },
       ]);
+      expect((first.body as Json).revision).toMatch(/^[0-9a-f]{64}$/);
       // Replaced, not duplicated.
       await put(sample?.id, { input: '7 8', expectedOutput: '15' }).expect(200);
       expect(await owner.variantTestCase.count({ where: { variantId: v.id } })).toBe(1);
@@ -2085,7 +2088,7 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       await http()
         .delete(`${vbase(q)}/${v.id}/test-cases/${hidden?.id}`)
         .set(a.auth)
-        .expect(204);
+        .expect(200);
       await http()
         .delete(`${vbase(q)}/${v.id}/test-cases/${hidden?.id}`)
         .set(a.auth)
@@ -2106,7 +2109,7 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       await http()
         .delete(`${API}/questions/${idOf(q)}/versions/1/test-cases/${sample?.id}`)
         .set(a.auth)
-        .expect(204);
+        .expect(200);
       expect(await owner.variantTestCase.count({ where: { variantId: v.id } })).toBe(0);
     });
 
@@ -2296,7 +2299,7 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       await http()
         .delete(`${vbase(q)}/${first.id}?expectedRevision=${second.revision}`)
         .set(a.auth)
-        .expect(204);
+        .expect(200);
       // The base PATCH sees a variant change too.
       const current = await liveRevision(a, q);
       await addVariant(a, q);
@@ -2560,6 +2563,244 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       );
       expect(full).toContain('SECRET-PARAM-ZED');
       expect(full).toContain('SECRET-OV-OUT');
+    });
+  });
+
+  // ---- Q4: the revision of every version-content write, computed inside its transaction --------
+
+  describe('FR-201..FR-205, TC-011 (FU-BE-123, Frontend Q4): writes answer the revision computed in their own transaction', () => {
+    const REV = /^[0-9a-f]{64}$/;
+    const vbase = (q: Json): string => `${API}/questions/${idOf(q)}/versions/1/variants`;
+    const templated = (): Json =>
+      codingBody({
+        statementMd: 'Sum {{a}} for {{name}}.',
+        starterCode: { python: 'A = {{a}}' },
+        referenceSolution: { python: 'REFERENCE-SECRET {{a}}' },
+      });
+    const params = { a: 2, name: 'Ada' };
+
+    /** The revision of the LATEST version straight from the database rows. */
+    async function persistedRevision(id: string, version?: number): Promise<string> {
+      const v = await owner.questionVersion.findFirstOrThrow({
+        where: { questionId: id, ...(version === undefined ? {} : { version }) },
+        orderBy: { version: 'desc' },
+      });
+      const cases = await owner.testCase.findMany({ where: { questionVersionId: v.id } });
+      const variants = await owner.questionVariant.findMany({
+        where: { questionVersionId: v.id },
+        include: { testCaseOverrides: true },
+      });
+      return computeRevision(v, cases, variants);
+    }
+
+    const writerRevision = async (who: Made, id: string, version?: number): Promise<string> =>
+      (
+        (
+          await http()
+            .get(`${API}/questions/${id}${version === undefined ? '' : `?version=${version}`}`)
+            .set(who.auth)
+            .expect(200)
+        ).body as { version: { revision: string } }
+      ).version.revision;
+
+    async function expectCurrent(
+      who: Made,
+      id: string,
+      returned: unknown,
+      version?: number,
+    ): Promise<void> {
+      expect(returned).toMatch(REV);
+      expect(returned).toBe(await writerRevision(who, id, version));
+      expect(returned).toBe(await persistedRevision(id, version));
+    }
+
+    it('FR-202, FU-BE-106: test-case POST, PATCH and DELETE return the revision as of the end of their transaction', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const id = idOf(await create(a, codingBody({ testCases: [] })));
+      const base = `${API}/questions/${id}/versions/1/test-cases`;
+      const post = await http().post(base).set(a.auth).send(sampleCase).expect(201);
+      const body = post.body as Json;
+      expect(body).toMatchObject({ position: 0, isHidden: false, input: '1 2' });
+      await expectCurrent(a, id, body.revision);
+      const patch = await http()
+        .patch(`${base}/${body.id as string}`)
+        .set(a.auth)
+        .send({ expectedOutput: '4', expectedRevision: body.revision })
+        .expect(200);
+      expect(patch.body).toMatchObject({ id: body.id, expectedOutput: '4' });
+      await expectCurrent(a, id, (patch.body as Json).revision);
+      expect((patch.body as Json).revision).not.toBe(body.revision);
+      const del = await http()
+        .delete(
+          `${base}/${body.id as string}?expectedRevision=${(patch.body as Json).revision as string}`,
+        )
+        .set(a.auth)
+        .expect(200);
+      expect(Object.keys(del.body as Json)).toEqual(['revision']);
+      await expectCurrent(a, id, (del.body as Json).revision);
+    });
+
+    it('FR-203: variant PATCH, override PUT and DELETE, and variant DELETE return the revision inside their transaction; POST and PATCH keep {variant, revision}', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, templated());
+      const id = idOf(q);
+      const created = await http().post(vbase(q)).set(a.auth).send({ params }).expect(201);
+      const cb = created.body as { variant: { id: string }; revision: string };
+      expect(Object.keys(cb).sort()).toEqual(['revision', 'variant']);
+      await expectCurrent(a, id, cb.revision);
+      const vid = cb.variant.id;
+      const upd = await http()
+        .patch(`${vbase(q)}/${vid}`)
+        .set(a.auth)
+        .send({ params: { a: 9, name: 'Bo' } })
+        .expect(200);
+      expect(Object.keys(upd.body as Json).sort()).toEqual(['revision', 'variant']);
+      await expectCurrent(a, id, (upd.body as Json).revision);
+      const slot = await owner.testCase.findFirstOrThrow({
+        where: { questionVersion: { questionId: id } },
+        orderBy: { position: 'asc' },
+      });
+      const put = await http()
+        .put(`${vbase(q)}/${vid}/test-cases/${slot.id}`)
+        .set(a.auth)
+        .send({ input: '5', expectedOutput: '6' })
+        .expect(200);
+      expect(put.body).toMatchObject({ testCaseId: slot.id, input: '5', expectedOutput: '6' });
+      await expectCurrent(a, id, (put.body as Json).revision);
+      const delOv = await http()
+        .delete(`${vbase(q)}/${vid}/test-cases/${slot.id}`)
+        .set(a.auth)
+        .expect(200);
+      expect(Object.keys(delOv.body as Json)).toEqual(['revision']);
+      await expectCurrent(a, id, (delOv.body as Json).revision);
+      expect((delOv.body as Json).revision).not.toBe((put.body as Json).revision);
+      const delVar = await http()
+        .delete(`${vbase(q)}/${vid}`)
+        .set(a.auth)
+        .expect(200);
+      expect(Object.keys(delVar.body as Json)).toEqual(['revision']);
+      await expectCurrent(a, id, (delVar.body as Json).revision);
+    });
+
+    it('FR-204: content PATCH returns the revision of the draft edited in place, and of the new version when it forks', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a);
+      const id = idOf(q);
+      const inPlace = await http()
+        .patch(`${API}/questions/${id}`)
+        .set(a.auth)
+        .send({ title: 'Edited' })
+        .expect(200);
+      const b = inPlace.body as Json;
+      expect(b.createdNewVersion).toBe(false);
+      expect(b.revision).toBe(versionOf(b).revision);
+      await expectCurrent(a, id, b.revision);
+      const tagsOnly = await http()
+        .patch(`${API}/questions/${id}`)
+        .set(a.auth)
+        .send({ tags: ['x'] })
+        .expect(200);
+      expect((tagsOnly.body as Json).revision).toBe(b.revision);
+      await markValidated(id);
+      await http()
+        .post(`${API}/questions/${id}/publish`)
+        .set(a.auth)
+        .send({ expectedRevision: await writerRevision(a, id) })
+        .expect(200);
+      const fork = await http()
+        .patch(`${API}/questions/${id}`)
+        .set(a.auth)
+        .send({ title: 'Forked' })
+        .expect(200);
+      const fb = fork.body as Json;
+      expect(fb.createdNewVersion).toBe(true);
+      expect(versionOf(fb).version).toBe(2);
+      expect(fb.revision).toBe(versionOf(fb).revision);
+      await expectCurrent(a, id, fb.revision, 2);
+      // The published version 1 keeps its own revision, which differs.
+      expect(await writerRevision(a, id, 1)).not.toBe(fb.revision);
+    });
+
+    it('FR-204: two sequential writes return different revisions and the second reflects both changes; a stale base is 409', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const b = await make(UserRole.AUTHOR);
+      const id = idOf(await create(a, codingBody({ testCases: [] })));
+      const base = `${API}/questions/${id}/versions/1/test-cases`;
+      const first = await http().post(base).set(a.auth).send(sampleCase).expect(201);
+      const r1 = (first.body as Json).revision as string;
+      const second = await http()
+        .post(base)
+        .set(b.auth)
+        .send({ ...hiddenCase, expectedRevision: r1 })
+        .expect(201);
+      const r2 = (second.body as Json).revision as string;
+      expect(r2).not.toBe(r1);
+      // r2 covers A's case and B's case: it equals the revision of the content with both rows.
+      expect(await owner.testCase.count({ where: { questionVersion: { questionId: id } } })).toBe(
+        2,
+      );
+      await expectCurrent(b, id, r2);
+      // A still holds r1: its next write is refused, so B's change is never adopted silently.
+      await http()
+        .patch(`${base}/${(first.body as Json).id as string}`)
+        .set(a.auth)
+        .send({ weight: 3, expectedRevision: r1 })
+        .expect(409);
+      const third = await http()
+        .patch(`${base}/${(first.body as Json).id as string}`)
+        .set(a.auth)
+        .send({ weight: 3, expectedRevision: r2 })
+        .expect(200);
+      expect((third.body as Json).revision).not.toBe(r2);
+      await expectCurrent(a, id, (third.body as Json).revision);
+    });
+
+    it('FR-204: concurrent test-case writes each return a distinct revision, and exactly one of them is the final state', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const id = idOf(await create(a, codingBody({ testCases: [] })));
+      const base = `${API}/questions/${id}/versions/1/test-cases`;
+      const results = await Promise.all(
+        [0, 1, 2, 3].map((n) =>
+          http()
+            .post(base)
+            .set(a.auth)
+            .send({ ...sampleCase, input: `in${n}` }),
+        ),
+      );
+      expect(results.map((r) => r.status)).toEqual([201, 201, 201, 201]);
+      const revs = results.map((r) => (r.body as Json).revision as string);
+      expect(new Set(revs).size).toBe(4);
+      expect(revs).toContain(await persistedRevision(id));
+    });
+
+    it('TC-011, FR-103: a recruiter reaches none of these routes (403) and no revision appears in any body', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const r = await make(UserRole.RECRUITER);
+      const q = await create(a, templated());
+      const id = idOf(q);
+      const slot = await owner.testCase.findFirstOrThrow({
+        where: { questionVersion: { questionId: id } },
+      });
+      const created = await http().post(vbase(q)).set(a.auth).send({ params }).expect(201);
+      const vid = (created.body as { variant: { id: string } }).variant.id;
+      const calls = [
+        http().post(`${API}/questions/${id}/versions/1/test-cases`).send(sampleCase),
+        http().patch(`${API}/questions/${id}/versions/1/test-cases/${slot.id}`).send({ weight: 2 }),
+        http().delete(`${API}/questions/${id}/versions/1/test-cases/${slot.id}`),
+        http().patch(`${API}/questions/${id}`).send({ title: 'x' }),
+        http()
+          .patch(`${vbase(q)}/${vid}`)
+          .send({ isActive: false }),
+        http().delete(`${vbase(q)}/${vid}`),
+        http()
+          .put(`${vbase(q)}/${vid}/test-cases/${slot.id}`)
+          .send({ input: 'a', expectedOutput: 'b' }),
+        http().delete(`${vbase(q)}/${vid}/test-cases/${slot.id}`),
+      ];
+      for (const call of calls) {
+        const res = await call.set(r.auth);
+        expect([res.status, JSON.stringify(res.body).includes('revision')]).toEqual([403, false]);
+      }
     });
   });
 

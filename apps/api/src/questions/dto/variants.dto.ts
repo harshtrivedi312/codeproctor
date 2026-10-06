@@ -13,7 +13,12 @@ import type { ValidationArguments } from 'class-validator';
 import { isStorableText } from '../text-rules';
 import { paramsProblems } from '../variant-template';
 import type { ParamValue } from '../variant-template';
-import { MAX_TEST_IO_LENGTH, VariantDto, VersionParamDto } from './questions.dto';
+import {
+  MAX_TEST_IO_LENGTH,
+  VariantDto,
+  VariantTestCaseOverrideDto,
+  VersionParamDto,
+} from './questions.dto';
 
 /** Like @IsOptional(), but only `undefined` skips validation: an explicit null is a 400. */
 const Opt = (): PropertyDecorator => ValidateIf((_o: unknown, v: unknown) => v !== undefined);
@@ -133,4 +138,11 @@ export class VariantListDto {
 export class VariantMutationDto {
   @ApiProperty({ type: VariantDto }) variant!: VariantDto;
   @ApiProperty({ description: 'The new revision of the version.' }) revision!: string;
+}
+
+export class VariantOverrideMutationDto extends VariantTestCaseOverrideDto {
+  @ApiProperty({
+    description: 'The new revision of the version, computed inside the same transaction.',
+  })
+  revision!: string;
 }

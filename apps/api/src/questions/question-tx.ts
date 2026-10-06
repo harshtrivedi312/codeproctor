@@ -71,6 +71,19 @@ export function loadVariants(db: Db, questionVersionId: string): Promise<Variant
   });
 }
 
+/**
+ * The revision of a version as it is NOW, read through `db` (call it inside the mutation's
+ * transaction, after the change, still under the question row lock): the version row, its test
+ * cases and its variants with overrides are all re-read, so the answer includes the change just
+ * made and no other editor's write can fall between the mutation and this read.
+ */
+export async function currentRevision(db: Db, questionVersionId: string): Promise<string> {
+  const v = await db.questionVersion.findUnique({ where: { id: questionVersionId } });
+  if (!v) throw new NotFoundException(NOT_FOUND);
+  const cases = await db.testCase.findMany({ where: { questionVersionId } });
+  return computeRevision(v, cases, await loadVariants(db, questionVersionId));
+}
+
 /** Optimistic concurrency: a client that loaded an older revision must reload (409, no code). */
 export async function checkRevision(
   db: Db,

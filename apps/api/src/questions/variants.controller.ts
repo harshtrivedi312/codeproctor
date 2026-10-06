@@ -17,7 +17,6 @@ import {
   ApiConflictResponse,
   ApiCreatedResponse,
   ApiForbiddenResponse,
-  ApiNoContentResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
@@ -38,10 +37,11 @@ import {
   VariantListDto,
   VariantMutationDto,
   VariantOverrideFieldsDto,
+  VariantOverrideMutationDto,
   VariantParamDto,
   VariantTestCaseParamDto,
 } from './dto/variants.dto';
-import { VariantTestCaseOverrideDto } from './dto/questions.dto';
+import { RevisionResultDto } from './dto/questions.dto';
 import type { CandidateQuestionView } from './candidate-view';
 import type { Actor } from './question-tx';
 import { VariantsService } from './variants.service';
@@ -134,9 +134,11 @@ export class VariantsController {
 
   @Delete(':variantId')
   @Roles(...WRITERS)
-  @HttpCode(204)
-  @ApiOperation({ summary: 'Remove a variant and its overrides from a draft' })
-  @ApiNoContentResponse()
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Remove a variant and its overrides from a draft; answers the new revision',
+  })
+  @ApiOkResponse({ type: RevisionResultDto })
   @ApiNotFoundResponse({ description: 'No such question, version or variant in your organization' })
   @ApiConflictResponse({
     description:
@@ -146,8 +148,8 @@ export class VariantsController {
     @Param() p: VariantParamDto,
     @Query() q: RevisionQueryDto,
     @Req() req: AuthedRequest,
-  ): Promise<void> {
-    await this.variants.remove(
+  ): Promise<RevisionResultDto> {
+    return this.variants.remove(
       actorOf(req),
       p.id,
       p.version,
@@ -163,7 +165,7 @@ export class VariantsController {
     summary:
       "Override the input and expected output of one test slot for a variant (ADR 0007 V-1). The slot must belong to the same version (V-6); its hidden flag and weight stay the slot's",
   })
-  @ApiOkResponse({ type: VariantTestCaseOverrideDto })
+  @ApiOkResponse({ type: VariantOverrideMutationDto })
   @ApiBadRequestResponse({ description: 'Validation failed' })
   @ApiNotFoundResponse({
     description: 'No such question, version, variant or test slot in your organization',
@@ -176,7 +178,7 @@ export class VariantsController {
     @Param() p: VariantTestCaseParamDto,
     @Body() dto: VariantOverrideFieldsDto,
     @Req() req: AuthedRequest,
-  ): Promise<VariantTestCaseOverrideDto> {
+  ): Promise<VariantOverrideMutationDto> {
     return this.variants.setOverride(
       actorOf(req),
       p.id,
@@ -190,9 +192,12 @@ export class VariantsController {
 
   @Delete(':variantId/test-cases/:testCaseId')
   @Roles(...WRITERS)
-  @HttpCode(204)
-  @ApiOperation({ summary: "Remove an override: the slot's default input and output apply again" })
-  @ApiNoContentResponse()
+  @HttpCode(200)
+  @ApiOperation({
+    summary:
+      "Remove an override: the slot's default input and output apply again; answers the new revision",
+  })
+  @ApiOkResponse({ type: RevisionResultDto })
   @ApiNotFoundResponse({
     description: 'No such question, version, variant or override in your organization',
   })
@@ -204,8 +209,8 @@ export class VariantsController {
     @Param() p: VariantTestCaseParamDto,
     @Query() q: RevisionQueryDto,
     @Req() req: AuthedRequest,
-  ): Promise<void> {
-    await this.variants.removeOverride(
+  ): Promise<RevisionResultDto> {
+    return this.variants.removeOverride(
       actorOf(req),
       p.id,
       p.version,
