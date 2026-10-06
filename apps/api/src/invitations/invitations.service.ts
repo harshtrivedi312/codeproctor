@@ -41,7 +41,7 @@ import { ConfigService } from '@nestjs/config';
 import type { Redis } from 'ioredis';
 import { newOpaqueToken, sha256Hex } from '../auth/crypto.util';
 import type { RequestContext } from '../common/request-context';
-import { hitWindowCounter } from '../common/redis-counter';
+import { hitWindowCounter, refundWindowCounter } from '../common/redis-counter';
 import type { Env } from '../config/env';
 import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
@@ -262,7 +262,7 @@ export class InvitationsService {
   /** Gives one slot back. Never throws and never logs the key. */
   private async refundSlot(key: string): Promise<void> {
     try {
-      await this.redis.decr(key);
+      await refundWindowCounter(this.redis, key);
     } catch {
       this.log.warn('Invitation rate slot could not be refunded.');
     }
@@ -277,9 +277,9 @@ export class InvitationsService {
     if (!(e instanceof Prisma.PrismaClientKnownRequestError)) return e;
     const cause = (e.meta as { driverAdapterError?: { cause?: { code?: unknown } } } | undefined)
       ?.driverAdapterError?.cause;
-    return e.code === 'P2028' || cause?.code === '55P03'
-      ? new ServiceUnavailableException('The invitation could not be saved in time. Try again.')
-      : e;
+    if (e.code !== 'P2028' && cause?.code !== '55P03') return e;
+    this.log.warn('Invitation transaction timed out or lock wait cut.');
+    return new ServiceUnavailableException('The invitation could not be saved in time. Try again.');
   }
 
   /** Server time is the only clock: the rules compare against `now`, never a client value. */

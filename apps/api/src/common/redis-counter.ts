@@ -42,3 +42,17 @@ export async function hitWindowCounter(
   }
   return { count, ttlSeconds };
 }
+
+// KEYS[1] counter. Gives one hit back, but only to a live counter above zero: DECR on a key that
+// expired in the meantime would create it at -1 with no TTL, and a counter never goes below zero.
+export const REFUND_COUNTER_SCRIPT = `
+local v = tonumber(redis.call('GET', KEYS[1]))
+if v and v > 0 then
+  return redis.call('DECR', KEYS[1])
+end
+return 0`;
+
+/** Takes one hit back from a live window counter. Throws when Redis fails. */
+export async function refundWindowCounter(redis: Redis, key: string): Promise<void> {
+  await redis.eval(REFUND_COUNTER_SCRIPT, 1, key);
+}

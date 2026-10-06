@@ -1,7 +1,7 @@
 // FU-BE-64: windowed counters are one atomic script, against a real Redis.
 import { RedisContainer, StartedRedisContainer } from '@testcontainers/redis';
 import { Redis } from 'ioredis';
-import { hitWindowCounter } from './redis-counter';
+import { hitWindowCounter, refundWindowCounter } from './redis-counter';
 
 describe('hitWindowCounter (FU-BE-64, NFR-04)', () => {
   let container: StartedRedisContainer;
@@ -78,5 +78,29 @@ describe('hitWindowCounter (FU-BE-64, NFR-04)', () => {
     const down = new Redis(container.getConnectionUrl(), { lazyConnect: true });
     down.disconnect();
     await expect(hitWindowCounter(down, fresh(), 60)).rejects.toThrow();
+  });
+
+  it('FR-303: a refund decrements a live counter, keeps its TTL and never goes below zero', async () => {
+    const key = fresh();
+    await hitWindowCounter(redis, key, 60);
+    await hitWindowCounter(redis, key, 60);
+    await refundWindowCounter(redis, key);
+    expect(await redis.get(key)).toBe('1');
+    expect(await redis.ttl(key)).toBeGreaterThan(0);
+    await refundWindowCounter(redis, key);
+    await refundWindowCounter(redis, key);
+    expect(await redis.get(key)).toBe('0');
+    expect((await hitWindowCounter(redis, key, 60)).count).toBe(1);
+  });
+
+  it('FR-303: a refund on an expired counter leaves the key absent (no -1 without a TTL)', async () => {
+    const key = fresh();
+    await refundWindowCounter(redis, key);
+    expect(await redis.exists(key)).toBe(0);
+    await hitWindowCounter(redis, key, 60);
+    await redis.pexpire(key, 1);
+    await new Promise((r) => setTimeout(r, 20));
+    await refundWindowCounter(redis, key);
+    expect(await redis.exists(key)).toBe(0);
   });
 });

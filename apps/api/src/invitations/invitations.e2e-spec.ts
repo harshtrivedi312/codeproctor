@@ -65,7 +65,7 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
     await pg.connect();
     await pg.query(`ALTER ROLE app_user PASSWORD '${appPassword}'`);
     const url = `postgresql://app_user:${appPassword}@${infra.postgres.getHost()}:${infra.postgres.getMappedPort(5432)}/${infra.postgres.getDatabase()}`;
-    applyEnv(infra, { DATABASE_URL: url, LOG_LEVEL: 'silent', THROTTLE_DEFAULT_LIMIT: '100000' });
+    applyEnv(infra, { DATABASE_URL: url, LOG_LEVEL: 'silent', THROTTLE_DEFAULT_LIMIT: '10000' });
     owner = createPrismaClient(infra.postgres.getConnectionUri());
     orgA = (await owner.organization.create({ data: { name: 'Org A' } })).id;
     orgB = (await owner.organization.create({ data: { name: 'Org B' } })).id;
@@ -765,6 +765,73 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
       }
     });
 
+    it('FR-303: a lock wait cut by lock_timeout (55P03) gives the slot back', async () => {
+      const { who, testId, restore } = await limited();
+      const service = svc();
+      const before = Reflect.get(service, 'lockTimeoutMs') as number;
+      Reflect.set(service, 'lockTimeoutMs', 500);
+      const holder = new Client({ connectionString: infra.postgres.getConnectionUri() });
+      await holder.connect();
+      try {
+        await holder.query('BEGIN');
+        await holder.query('SELECT id FROM tests WHERE id = $1 FOR UPDATE', [testId]);
+        await invite(who, testId, goodBody()).expect(503);
+        await holder.query('COMMIT');
+        Reflect.set(service, 'lockTimeoutMs', before);
+        await invite(who, testId, goodBody()).expect(201);
+        await invite(who, testId, goodBody()).expect(201);
+        await invite(who, testId, goodBody()).expect(429);
+      } finally {
+        Reflect.set(service, 'lockTimeoutMs', before);
+        await holder.end();
+        restore();
+      }
+    });
+
+    it('FR-303: a 404 and a 422 keep their slot', async () => {
+      const { who, restore } = await limited();
+      try {
+        await invite(who, GHOST, goodBody()).expect(404);
+        const tag = `slot-${++seq}`;
+        // The limited org has no questions: a random slot nobody can fill is a 422.
+        const test = await owner.test.findFirstOrThrow({ where: { createdById: who.id } });
+        const section = await owner.testSection.create({
+          data: { testId: test.id, title: 'S', position: 1 },
+        });
+        await owner.testQuestion.create({
+          data: { sectionId: section.id, position: 1, points: 10, randomRule: { tags: [tag] } },
+        });
+        await invite(who, test.id, goodBody()).expect(422);
+        await invite(who, test.id, goodBody()).expect(429);
+      } finally {
+        restore();
+      }
+    });
+
+    it('FR-303: a failing refund does not mask the original 503', async () => {
+      const { who, testId, restore } = await limited();
+      const { REDIS_CLIENT } = jest.requireActual<
+        typeof import('../infrastructure/infrastructure.module')
+      >('../infrastructure/infrastructure.module');
+      const redis = app.get<import('ioredis').Redis>(REDIS_CLIENT);
+      const realEval = redis.eval.bind(redis) as (...a: unknown[]) => Promise<unknown>;
+      let calls = 0;
+      const spy = jest.spyOn(redis, 'eval').mockImplementation((...a: unknown[]) => {
+        calls += 1;
+        return calls === 1 ? realEval(...a) : Promise.reject(new Error('redis down'));
+      });
+      try {
+        portMode = 'fail';
+        const res = await invite(who, testId, goodBody());
+        expect(res.status).toBe(503);
+        expect((res.body as Json).detail).toBe('Invitations are not available yet.');
+        expect(calls).toBe(2);
+      } finally {
+        spy.mockRestore();
+        restore();
+      }
+    });
+
     it('FR-303: a 409 keeps its slot (a legitimate attempt)', async () => {
       const { who, testId, restore } = await limited();
       try {
@@ -931,10 +998,13 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
       // LOG_LEVEL is read when app.module is first loaded, so load a fresh module graph. This test
       // is the last in the file because it resets the module registry.
       process.env.LOG_LEVEL = 'trace';
+      // Independent of the shared org A hourly counter.
+      process.env.INVITATION_RATE_LIMIT_PER_ORG_HOUR = '10000';
       jest.resetModules();
       const Nest = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
       const traced = await build();
       process.env.LOG_LEVEL = 'silent';
+      delete process.env.INVITATION_RATE_LIMIT_PER_ORG_HOUR;
       const inviteT = (t: string, b: Json): request.Test =>
         request(traced.getHttpServer()).post(`${API}/tests/${t}/invitations`).set(who.auth).send(b);
       const realWrite = fs.write.bind(fs);
