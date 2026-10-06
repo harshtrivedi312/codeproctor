@@ -98,8 +98,14 @@ async function prepare(language, source) {
 // The JVM's own diagnostics must never be read as the program's answer. HotSpot unified logging
 // (-Xlog) writes warnings to stdout by default, so a hsperfdata warning ("Cannot use file
 // /tmp/hsperfdata_...") once landed in the compared output. -XX:-UsePerfData stops the hsperfdata
-// file altogether, and -Xlog:all=warning:stderr sends any remaining JVM warning to stderr.
-const JAVA_RUN_FLAGS = Object.freeze(['-XX:-UsePerfData', '-Xlog:all=warning:stderr', '-Xss64m']);
+// file altogether. -Xlog:disable turns off the default stdout output (JEP 158: -Xlog:...:stderr
+// alone only ADDS an output), then -Xlog:all=warning:stderr sends any JVM warning to stderr.
+const JAVA_RUN_FLAGS = Object.freeze([
+  '-XX:-UsePerfData',
+  '-Xlog:disable',
+  '-Xlog:all=warning:stderr',
+  '-Xss64m',
+]);
 
 /** @returns {Promise<string[]>} one message per wrong answer; empty when every slot passes */
 async function check(label, language, source, slots) {
@@ -202,6 +208,11 @@ test('FR-203 / ADR-0007 V-3: the Java runner keeps JVM diagnostics out of the co
   // A hsperfdata warning once reached stdout and failed a correct solution (main CI, 9495f05).
   assert.ok(JAVA_RUN_FLAGS.includes('-XX:-UsePerfData'));
   assert.ok(JAVA_RUN_FLAGS.includes('-Xlog:all=warning:stderr'));
+  // -Xlog:disable must come first, or the default stdout output stays (JEP 158).
+  assert.ok(JAVA_RUN_FLAGS.indexOf('-Xlog:disable') >= 0);
+  assert.ok(
+    JAVA_RUN_FLAGS.indexOf('-Xlog:disable') < JAVA_RUN_FLAGS.indexOf('-Xlog:all=warning:stderr'),
+  );
   if (!AVAILABLE.java) return t.skip(MISSING_TOOL.java);
   // With the flags, a program's stdout is exactly what it prints, with no JVM output mixed in.
   const dir = mkdtempSync(join(tmpdir(), 'codeproctor-seed-jvm-'));
