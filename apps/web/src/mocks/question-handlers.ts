@@ -3,16 +3,20 @@ import { delay, http, HttpResponse } from 'msw';
 import type { Schemas } from '@/lib/api/client';
 import { apiBaseUrl } from '@/lib/env';
 import { mockRoleFromToken } from './auth-handlers';
+import { redactQuestion } from './question-redaction';
 import { seedQuestions, type Content, type MockQuestion, type MockVersion } from './question-seed';
 
 /*
- * Mock question bank API (FE-04, FR-201..FR-205). In memory: survives navigation, not a page
- * reload. Authors and Super Admins read and write; a Recruiter only lists (question:read); the
- * detail routes answer 403 to anyone without question:update, because reference solutions, hidden
- * tests and answer keys must never reach other roles (TC-011).
+ * Mock question bank API (FE-04, FR-201..FR-205, DL-32). In memory: survives navigation, not a page
+ * reload. Authors and Super Admins read and write. Any other reader (a Recruiter, question:read)
+ * gets 200 with an ALLOWLISTED view on the detail and version routes (question-redaction.ts) and
+ * 403 on every other route, because reference solutions, hidden tests and answer keys must never
+ * reach other roles (TC-011). Errors are RFC 7807 bodies; 409 and 422 carry detail and errors[]
+ * only, no machine code. Concurrency uses the opaque `updatedAt` of the saved version.
  *
  * The validation "executor" is fake: a test slot fails when its expected output is blank or starts
  * with "TODO" (the seed "Rotate an array" has such a variant, to show TC-012). No code is run.
+ * Scenario: publishing the seed question `q-publish-unavailable` answers 501.
  */
 
 type Role = Schemas['StaffRole'];
@@ -25,8 +29,8 @@ const POLICY: Schemas['AiReferencePolicy'] = { refreshDays: 90, minAssistants: 2
 interface Job {
   questionId: string;
   version: number;
-  /** The content revision this job validates. */
-  revision: number;
+  /** The updatedAt of the content this job validates. */
+  validatedForUpdatedAt: string;
   polls: number;
   report: Report;
 }
@@ -45,18 +49,45 @@ export function resetMockQuestionState(): void {
   state = fresh();
 }
 
-const problem = (status: number, code: string, message: string) =>
-  HttpResponse.json({ code, message }, { status });
+const TITLES: Record<number, string> = {
+  400: 'Bad Request',
+  401: 'Unauthorized',
+  403: 'Forbidden',
+  404: 'Not Found',
+  409: 'Conflict',
+  422: 'Unprocessable Entity',
+  501: 'Not Implemented',
+};
+
+/** RFC 7807 problem body. 409 and 422 carry detail and errors[] only: no machine code (DL-32). */
+const problem = (status: number, detail: string, errors?: string[]) =>
+  HttpResponse.json(
+    {
+      type: 'about:blank',
+      title: TITLES[status] ?? 'Error',
+      status,
+      detail,
+      instance: '/mock',
+      traceId: 'mock-trace',
+      ...(errors ? { errors } : {}),
+    },
+    { status },
+  );
+
+let lastStamp = 0;
+/** A fresh, strictly increasing timestamp: the opaque updatedAt token changes on every save. */
+function stamp(): string {
+  lastStamp = Math.max(Date.now(), lastStamp + 1);
+  return new Date(lastStamp).toISOString();
+}
 
 function allowed(
   request: Request,
   permission: 'question:read' | 'question:create' | 'question:update',
 ): Role | Response {
   const role = mockRoleFromToken(request.headers.get('authorization'));
-  if (!role) return problem(401, 'unauthenticated', 'Sign in again.');
-  return hasPermission(role, permission)
-    ? role
-    : problem(403, 'forbidden', 'Your role does not allow this.');
+  if (!role) return problem(401, 'Sign in again.');
+  return hasPermission(role, permission) ? role : problem(403, 'Your role does not allow this.');
 }
 
 const latest = (q: MockQuestion): MockVersion => q.versions[q.versions.length - 1]!;
@@ -66,7 +97,8 @@ function statusOf(q: MockQuestion): Schemas['QuestionStatus'] {
   return latest(q).isPublished ? 'PUBLISHED' : 'DRAFT';
 }
 
-function content(v: MockVersion): Content {
+/** The editable content only: a whitelist, so a client cannot set isPublished, version or the like. */
+function content(v: Content): Content {
   return {
     title: v.title,
     statementMd: v.statementMd,
@@ -76,7 +108,6 @@ function content(v: MockVersion): Content {
     limits: v.limits,
     starterCode: v.starterCode,
     referenceSolution: v.referenceSolution,
-    paramSchema: v.paramSchema,
     testCases: v.testCases,
     variants: v.variants,
     answerSpec: v.answerSpec,
@@ -95,7 +126,7 @@ function detail(q: MockQuestion, v: MockVersion): Detail {
       ...structuredClone(content(v)),
       tags: structuredClone(v.tags),
       version: v.version,
-      revision: v.revision,
+      updatedAt: v.updatedAt,
       isPublished: v.isPublished,
       createdAt: v.createdAt,
       validatedAt: v.validatedAt,
@@ -127,6 +158,19 @@ function contentError(c: Content, type: Schemas['QuestionType']): string | null 
     return 'A short-answer question needs a canonical answer.';
   }
   return null;
+}
+
+/** The AI reference input fields only: whatever else the client sends is ignored. */
+function pickAiInput(b: Schemas['AiReferenceInput']): Schemas['AiReferenceInput'] {
+  return {
+    assistant: b.assistant,
+    modelLabel: b.modelLabel,
+    language: b.language,
+    solutionCode: b.solutionCode,
+    collectedAt: b.collectedAt,
+    ...(b.promptText !== undefined ? { promptText: b.promptText } : {}),
+    variantId: b.variantId ?? null,
+  };
 }
 
 function render(text: string, params: Record<string, unknown>): string {
@@ -224,8 +268,22 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
     const role = allowed(request, 'question:update');
     if (role instanceof Response) return role;
     const q = find(id);
-    return q ? { role, q } : problem(404, 'not_found', 'No such question.');
+    return q ? { role, q } : problem(404, 'No such question.');
   }
+  /** Readers (question:read): the question, or 404. The caller decides what they may see of it. */
+  async function reader(
+    request: Request,
+    id: string,
+  ): Promise<{ role: Role; q: MockQuestion } | Response> {
+    await wait();
+    const role = allowed(request, 'question:read');
+    if (role instanceof Response) return role;
+    const q = find(id);
+    return q ? { role, q } : problem(404, 'No such question.');
+  }
+  /** Writers get everything; every other reader gets the allowlisted view (DL-32). */
+  const view = (role: Role, q: MockQuestion, v: MockVersion) =>
+    hasPermission(role, 'question:update') ? detail(q, v) : redactQuestion(q, v, statusOf(q));
   const actor = (role: Role) => (role === 'SUPER_ADMIN' ? 'Alex Admin' : 'Avery Author');
 
   return [
@@ -244,7 +302,7 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
           tags: v.tags,
           status: statusOf(q),
           version: v.version,
-          updatedAt: v.createdAt,
+          updatedAt: v.updatedAt,
         };
       });
       return HttpResponse.json({ items });
@@ -256,7 +314,7 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       if (role instanceof Response) return role;
       const body = (await request.json()) as Content & { type: Schemas['QuestionType'] };
       const err = contentError(body, body.type);
-      if (err) return problem(400, 'invalid_content', err);
+      if (err) return problem(400, err);
       const { type, ...rest } = body;
       state.seq += 1;
       const slug = `${rest.title
@@ -272,9 +330,9 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
         aiRefs: [],
         versions: [
           {
-            ...rest,
+            ...content(rest),
             version: 1,
-            revision: 1,
+            updatedAt: stamp(),
             isPublished: false,
             createdAt: new Date().toISOString(),
             createdByName: actor(role),
@@ -288,27 +346,27 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
     }),
 
     http.get(`${base}/:id`, async ({ request, params }) => {
-      const r = await author(request, String(params.id));
+      const r = await reader(request, String(params.id));
       if (r instanceof Response) return r;
-      return HttpResponse.json(detail(r.q, latest(r.q)));
+      return HttpResponse.json(view(r.role, r.q, latest(r.q)));
     }),
 
     http.patch(`${base}/:id`, async ({ request, params }) => {
       const r = await author(request, String(params.id));
       if (r instanceof Response) return r;
-      const { expectedRevision, ...body } = (await request.json()) as Content & {
-        expectedRevision: number;
+      const { expectedUpdatedAt, ...body } = (await request.json()) as Content & {
+        expectedUpdatedAt: string;
       };
       const current = latest(r.q);
       // Optimistic concurrency: someone saved since this editor loaded the question.
-      if (expectedRevision !== current.revision) {
-        return problem(409, 'stale_version', 'This question changed since you opened it.');
+      if (expectedUpdatedAt !== current.updatedAt) {
+        return problem(409, 'This question changed since you opened it.');
       }
       const err = contentError(body, r.q.type);
-      if (err) return problem(400, 'invalid_content', err);
-      const revision = current.revision + 1;
+      if (err) return problem(400, err);
+      const updatedAt = stamp();
       // Any save clears the validation: it was about the old content.
-      const fields = { ...body, revision, validatedAt: null, validationReport: null };
+      const fields = { ...content(body), updatedAt, validatedAt: null, validationReport: null };
       if (current.isPublished) {
         // A published version never changes: the edit becomes the next draft (FR-204).
         r.q.versions.push({
@@ -338,10 +396,10 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
     }),
 
     http.get(`${base}/:id/versions/:version`, async ({ request, params }) => {
-      const r = await author(request, String(params.id));
+      const r = await reader(request, String(params.id));
       if (r instanceof Response) return r;
       const v = r.q.versions.find((x) => x.version === Number(params.version));
-      return v ? HttpResponse.json(detail(r.q, v)) : problem(404, 'not_found', 'No such version.');
+      return v ? HttpResponse.json(view(r.role, r.q, v)) : problem(404, 'No such version.');
     }),
 
     http.post(`${base}/:id/validate`, async ({ request, params }) => {
@@ -353,35 +411,40 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       state.jobs.set(jobId, {
         questionId: r.q.id,
         version: v.version,
-        revision: v.revision,
+        validatedForUpdatedAt: v.updatedAt,
         polls: 0,
         report: runValidation(v),
       });
-      return HttpResponse.json({ jobId, revision: v.revision }, { status: 202 });
+      return HttpResponse.json({ jobId, validatedForUpdatedAt: v.updatedAt }, { status: 202 });
     }),
 
     http.get(`${base}/:id/validation/:jobId`, async ({ request, params }) => {
       const r = await author(request, String(params.id));
       if (r instanceof Response) return r;
       const job = state.jobs.get(String(params.jobId));
-      if (!job || job.questionId !== r.q.id) return problem(404, 'not_found', 'No such job.');
+      if (!job || job.questionId !== r.q.id) return problem(404, 'No such job.');
       job.polls += 1;
       if (job.polls < 2) {
         return HttpResponse.json({
           jobId: String(params.jobId),
-          revision: job.revision,
+          validatedForUpdatedAt: job.validatedForUpdatedAt,
           status: job.polls === 1 ? 'queued' : 'running',
         });
       }
       const v = r.q.versions.find((x) => x.version === job.version);
       // Only the still-current saved version takes the result (an edit after Validate clears it).
-      if (v && v === latest(r.q) && v.revision === job.revision && v.validationReport === null) {
+      if (
+        v &&
+        v === latest(r.q) &&
+        v.updatedAt === job.validatedForUpdatedAt &&
+        v.validationReport === null
+      ) {
         v.validationReport = job.report;
         v.validatedAt = job.report.passed ? job.report.finishedAt : null;
       }
       return HttpResponse.json({
         jobId: String(params.jobId),
-        revision: job.revision,
+        validatedForUpdatedAt: job.validatedForUpdatedAt,
         status: 'done',
         report: job.report,
       });
@@ -392,7 +455,7 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       if (r instanceof Response) return r;
       const body = (await request.json()) as Schemas['PrefillRequest'];
       if (body.referenceSolution.trim() === '') {
-        return problem(400, 'no_reference', 'There is no reference solution for this language.');
+        return problem(400, 'There is no reference solution for this language.');
       }
       // Fake: the "run" renders the default expected output with this variant's parameters.
       const proposals = body.slots.map((s) => {
@@ -408,22 +471,23 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       const r = await author(request, String(params.id));
       if (r instanceof Response) return r;
       const v = latest(r.q);
-      const body = (await request.json().catch(() => ({}))) as { expectedRevision?: number };
-      // The validation belongs to one revision: publishing any other is refused (TC-012).
-      if (body.expectedRevision !== v.revision) {
-        return problem(409, 'stale_version', 'This question changed since it was validated.');
+      // Scenario: publishing not wired yet on the server (fails closed, DL-32 point 4).
+      if (r.q.id === 'q-publish-unavailable') {
+        return problem(501, 'Publishing is not available yet.');
       }
-      if (v.isPublished)
-        return problem(409, 'already_published', 'This version is already published.');
+      const body = (await request.json().catch(() => ({}))) as { expectedUpdatedAt?: string };
+      // The validation belongs to one saved state: publishing any other is refused (TC-012).
+      if (body.expectedUpdatedAt !== v.updatedAt) {
+        return problem(409, 'This question changed since it was validated.');
+      }
+      if (v.isPublished) return problem(409, 'This version is already published.');
       if (!v.validatedAt || !v.validationReport?.passed) {
-        return problem(
-          409,
-          'validation_required',
-          'Validate the saved version and fix every failing test first.',
-        );
+        return problem(422, 'Validation is required before publishing.', [
+          'The saved version has no passing validation. Validate it and fix every failing test.',
+        ]);
       }
       const missing = aiGateMissing(r.q, v);
-      if (missing) return problem(409, 'ai_references_missing', missing);
+      if (missing) return problem(422, 'The AI reference solutions are not complete.', [missing]);
       v.isPublished = true;
       return HttpResponse.json(detail(r.q, v));
     }),
@@ -439,15 +503,11 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       if (r instanceof Response) return r;
       const body = (await request.json()) as Schemas['AiReferenceInput'];
       if (!AI_REFERENCE_LANGUAGES.includes(body.language)) {
-        return problem(
-          400,
-          'invalid_language',
-          'AI reference solutions exist for Python, JavaScript and Java only.',
-        );
+        return problem(400, 'AI reference solutions exist for Python, JavaScript and Java only.');
       }
       state.seq += 1;
       const row: AiReference = {
-        ...body,
+        ...pickAiInput(body),
         id: `ai-new-${state.seq}`,
         collectedByName: actor(r.role),
         supersededAt: null,
@@ -460,20 +520,15 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       const r = await author(request, String(params.id));
       if (r instanceof Response) return r;
       const old = r.q.aiRefs.find((x) => x.id === String(params.refId));
-      if (!old || old.supersededAt !== null)
-        return problem(404, 'not_found', 'No such current solution.');
+      if (!old || old.supersededAt !== null) return problem(404, 'No such current solution.');
       const body = (await request.json()) as Schemas['AiReferenceInput'];
       if (!AI_REFERENCE_LANGUAGES.includes(body.language)) {
-        return problem(
-          400,
-          'invalid_language',
-          'AI reference solutions exist for Python, JavaScript and Java only.',
-        );
+        return problem(400, 'AI reference solutions exist for Python, JavaScript and Java only.');
       }
       state.seq += 1;
       old.supersededAt = new Date().toISOString();
       const row: AiReference = {
-        ...body,
+        ...pickAiInput(body),
         id: `ai-new-${state.seq}`,
         collectedByName: actor(r.role),
         supersededAt: null,

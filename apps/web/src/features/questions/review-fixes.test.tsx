@@ -9,6 +9,7 @@ import { apiBaseUrl } from '@/lib/env';
 import { MOCK_USERS, seedMockRefresh } from '@/mocks/auth-handlers';
 import { server } from '@/mocks/server';
 import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
+import { full } from '@/test/question-api';
 import { nav } from '@/test/nav-mock';
 import { QuestionEditorRoute } from './question-pages';
 import { disposeModels, registerModelHost, resetModelHostForTests } from './monaco-registry';
@@ -55,15 +56,19 @@ async function setText(u: User, el: HTMLElement, text: string): Promise<void> {
   await u.click(el);
   if (text !== '') await u.paste(text);
 }
-const detail = (id: string) =>
-  api.GET('/v1/questions/{questionId}', { params: { path: { questionId: id } } });
+const detail = async (id: string) => {
+  const r = await api.GET('/v1/questions/{questionId}', { params: { path: { questionId: id } } });
+  return { response: r.response, data: r.data ? full(r.data) : undefined };
+};
 
 describe('A stale validation never opens the publish gate (TC-012)', () => {
   it('TC-012: while a validation runs, Save is off and the content is read-only', async () => {
     let release = false;
     server.use(
       http.get(`${base}/q-rotate/validation/:jobId`, () =>
-        release ? undefined : HttpResponse.json({ jobId: 'x', revision: 1, status: 'running' }),
+        release
+          ? undefined
+          : HttpResponse.json({ jobId: 'x', validatedForUpdatedAt: 'x', status: 'running' }),
       ),
     );
     const { u } = await openEditor('q-rotate');
@@ -77,12 +82,12 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
     expect(screen.getByLabelText('Title')).toBeEnabled();
   });
 
-  it('TC-012: a result for another revision is dropped, with an explanation, and Publish stays off', async () => {
+  it('TC-012: a result for other content is dropped, with an explanation, and Publish stays off', async () => {
     server.use(
       http.get(`${base}/q-running/validation/:jobId`, ({ params }) =>
         HttpResponse.json({
           jobId: String(params.jobId),
-          revision: 999,
+          validatedForUpdatedAt: '2000-01-01T00:00:00.000Z',
           status: 'done',
           report: { passed: true, finishedAt: new Date().toISOString(), results: [] },
         }),
@@ -100,23 +105,24 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
     expect(screen.getByRole('button', { name: 'Publish' })).toBeDisabled();
   });
 
-  it('TC-012: the API writes no report onto content saved after Validate started, and publishing the old revision is 409 stale_version', async () => {
+  it('TC-012: the API writes no report onto content saved after Validate started, and publishing stale content is 409 with no machine code', async () => {
     renderAsStaff(<div />, MOCK_USERS.author);
     await waitFor(async () => expect((await detail('q-running')).response.status).toBe(200));
     const before = (await detail('q-running')).data!;
     const started = await api.POST('/v1/questions/{questionId}/validate', {
       params: { path: { questionId: 'q-running' } },
     });
-    const { jobId, revision } = started.data!;
-    expect(revision).toBe(before.current.revision);
+    const { jobId, validatedForUpdatedAt } = started.data!;
+    expect(validatedForUpdatedAt).toBe(before.current.updatedAt);
 
     // Someone saves new content while the job runs.
     const content = { ...before.current, title: 'Running average (changed)' };
     const saved = await api.PATCH('/v1/questions/{questionId}', {
       params: { path: { questionId: 'q-running' } },
-      body: { ...content, expectedRevision: revision },
+      body: { ...content, expectedUpdatedAt: validatedForUpdatedAt },
     });
-    expect(saved.data?.current.revision).toBe(revision + 1);
+    const savedAt = saved.data!.current.updatedAt;
+    expect(savedAt).not.toBe(validatedForUpdatedAt);
     const poll = () =>
       api.GET('/v1/questions/{questionId}/validation/{jobId}', {
         params: { path: { questionId: 'q-running', jobId } },
@@ -124,23 +130,27 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
     await poll();
     const done = await poll();
     expect(done.data?.status).toBe('done');
-    expect(done.data?.revision).toBe(revision);
+    expect(done.data?.validatedForUpdatedAt).toBe(validatedForUpdatedAt);
     // The report was NOT written onto the newer content.
     const after = (await detail('q-running')).data!;
     expect(after.current.validationReport).toBeNull();
     expect(after.current.validatedAt).toBeNull();
 
-    const publish = (expectedRevision: number) =>
+    const publish = (expectedUpdatedAt: string) =>
       api.POST('/v1/questions/{questionId}/publish', {
         params: { path: { questionId: 'q-running' } },
-        body: { expectedRevision },
+        body: { expectedUpdatedAt },
       });
-    const stale = await publish(revision);
+    const stale = await publish(validatedForUpdatedAt);
     expect(stale.response.status).toBe(409);
-    expect((stale.error as { code: string }).code).toBe('stale_version');
-    // Even the current revision is refused without a validation of it.
-    const unvalidated = await publish(revision + 1);
-    expect((unvalidated.error as { code: string }).code).toBe('validation_required');
+    // 409 and 422 carry detail (and errors[]) only: no machine code to branch on.
+    expect(stale.error).not.toHaveProperty('code');
+    expect(stale.error).toHaveProperty('detail');
+    // Even the current content is refused without a validation of it: 422 with errors[].
+    const unvalidated = await publish(savedAt);
+    expect(unvalidated.response.status).toBe(422);
+    expect(unvalidated.error).not.toHaveProperty('code');
+    expect((unvalidated.error as { errors: string[] }).errors.length).toBeGreaterThan(0);
   });
 
   it("TC-012 TC-013: a new draft version does not inherit the previous version's validation", async () => {
@@ -150,7 +160,7 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
     expect(v2.current.validationReport?.passed).toBe(true);
     const saved = await api.PATCH('/v1/questions/{questionId}', {
       params: { path: { questionId: 'q-merge' } },
-      body: { ...v2.current, title: 'Merge intervals 2', expectedRevision: v2.current.revision },
+      body: { ...v2.current, title: 'Merge intervals 2', expectedUpdatedAt: v2.current.updatedAt },
     });
     expect(saved.data?.current.version).toBe(3);
     expect(saved.data?.current.validationReport).toBeNull();
@@ -160,7 +170,11 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
   it('TC-012: a validation that finishes without a report, or never finishes, ends with a retry message', async () => {
     server.use(
       http.get(`${base}/q-running/validation/:jobId`, ({ params }) =>
-        HttpResponse.json({ jobId: String(params.jobId), revision: 1, status: 'done' }),
+        HttpResponse.json({
+          jobId: String(params.jobId),
+          validatedForUpdatedAt: 'x',
+          status: 'done',
+        }),
       ),
     );
     const first = await openEditor('q-running');
@@ -170,7 +184,11 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
 
     server.use(
       http.get(`${base}/q-running/validation/:jobId`, ({ params }) =>
-        HttpResponse.json({ jobId: String(params.jobId), revision: 1, status: 'running' }),
+        HttpResponse.json({
+          jobId: String(params.jobId),
+          validatedForUpdatedAt: 'x',
+          status: 'running',
+        }),
       ),
     );
     const second = await openEditor('q-running', { maxPolls: 3 });
@@ -228,7 +246,7 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
   });
 });
 
-describe('Concurrent edits (revision, 409 stale_version)', () => {
+describe('Concurrent edits (expectedUpdatedAt, 409)', () => {
   it("FR-204: saving over someone else's newer save is refused; the edit stays on screen and Reload loads theirs", async () => {
     const { u } = await openEditor('q-twosum');
     const current = (await detail('q-twosum')).data!;
@@ -238,7 +256,7 @@ describe('Concurrent edits (revision, 409 stale_version)', () => {
       body: {
         ...current.current,
         title: 'Two sum (by someone else)',
-        expectedRevision: current.current.revision,
+        expectedUpdatedAt: current.current.updatedAt,
       },
     });
     await u.type(screen.getByLabelText('Title'), ' mine');

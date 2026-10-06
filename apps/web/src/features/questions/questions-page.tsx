@@ -56,17 +56,15 @@ function QuestionsContent(): React.JSX.Element {
         header: 'Question',
         sortValue: (q) => q.title.toLowerCase(),
         searchValue: (q) => `${q.title} ${q.slug} ${q.tags.join(' ')}`,
-        cell: (q) =>
-          editable ? (
-            <Link
-              href={`/admin/questions/${q.id}`}
-              className="font-medium text-primary underline-offset-4 hover:underline"
-            >
-              {q.title}
-            </Link>
-          ) : (
-            <span className="font-medium">{q.title}</span>
-          ),
+        // Every reader opens the question: writers get the editor, others the read-only summary.
+        cell: (q) => (
+          <Link
+            href={`/admin/questions/${q.id}`}
+            className="font-medium text-primary underline-offset-4 hover:underline"
+          >
+            {q.title}
+          </Link>
+        ),
       },
       {
         id: 'type',

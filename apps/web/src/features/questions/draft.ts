@@ -1,7 +1,7 @@
 import { CODE_LANGUAGES, type CodeLanguage } from '@codeproctor/shared';
 import { z } from 'zod';
 import type { Schemas } from '@/lib/api/client';
-import { checkParams, PARAM_NAME, parseParams, undeclaredPlaceholders } from './params';
+import { checkParams, missingPlaceholders, parseParams } from './params';
 import { hasUnsupportedSyntax, placeholdersOf } from './template';
 
 /*
@@ -46,8 +46,6 @@ export interface DraftValues {
   limits: { cpuMs: number; wallMs: number; memoryKb: number };
   starterCode: Record<string, string>;
   referenceSolution: Record<string, string>;
-  /** `key` is a stable React key, never sent to the API. */
-  paramSchema: (Schemas['ParamDef'] & { key: string })[];
   testCases: TestCase[];
   variants: VariantValues[];
   mcq: { options: { id: string; text: string }[]; correctOptionIds: string[]; multiple: boolean };
@@ -80,7 +78,6 @@ export function emptyDraft(type: QuestionType): DraftValues {
     limits: { ...DEFAULT_LIMITS },
     starterCode: {},
     referenceSolution: {},
-    paramSchema: [],
     testCases: [],
     variants: [],
     mcq: {
@@ -123,7 +120,6 @@ export function toDraft(
     limits: { ...v.limits },
     starterCode: { ...v.starterCode },
     referenceSolution: { ...v.referenceSolution },
-    paramSchema: v.paramSchema.map((p) => ({ ...p, key: newId('param') })),
     testCases: v.testCases.map((t) => ({ ...t })),
     variants: v.variants.map((x) => ({
       id: x.id,
@@ -146,6 +142,15 @@ export function toDraft(
         }
       : base.short,
   };
+}
+
+/** Keeps the string and number values (the check on save has already rejected anything else). */
+function scalarsOf(value: Record<string, unknown>): Record<string, string | number> {
+  const out: Record<string, string | number> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (typeof v === 'string' || typeof v === 'number') out[k] = v;
+  }
+  return out;
 }
 
 /** Form values to the content sent on save. Call only with values that passed `draftSchema`. */
@@ -181,7 +186,6 @@ export function toContent(d: DraftValues): QuestionContent {
     limits: d.limits,
     starterCode: keep(d.starterCode),
     referenceSolution: keep(d.referenceSolution),
-    paramSchema: coding ? d.paramSchema.map(({ name, type }) => ({ name, type })) : [],
     testCases: coding ? d.testCases : [],
     variants: coding
       ? d.variants.map((v) => {
@@ -189,7 +193,7 @@ export function toContent(d: DraftValues): QuestionContent {
           return {
             id: v.id,
             label: v.label.trim(),
-            params: parsed.ok ? parsed.value : {},
+            params: parsed.ok ? scalarsOf(parsed.value) : {},
             active: v.active,
             overrides: v.overrides.filter((o) => slotIds.has(o.testCaseId)),
           };
@@ -249,15 +253,6 @@ export const draftSchema = z
     limits: limitsSchema,
     starterCode: z.record(z.string(), z.string().max(MAX_TEST_TEXT)),
     referenceSolution: z.record(z.string(), z.string().max(MAX_TEST_TEXT)),
-    paramSchema: z.array(
-      z.object({
-        name: z
-          .string()
-          .regex(PARAM_NAME, 'Use letters, digits and underscores, starting with a letter.'),
-        type: z.enum(['string', 'number', 'boolean', 'array']),
-        key: z.string(),
-      }),
-    ),
     testCases: z.array(testCaseSchema),
     variants: z.array(
       z.object({
@@ -301,23 +296,16 @@ export const draftSchema = z
     if (d.type === 'CODING') {
       if (d.allowedLanguages.length === 0)
         issue(['allowedLanguages'], 'Pick at least one language.');
-      const names = d.paramSchema.map((p) => p.name);
-      d.paramSchema.forEach((p, i) => {
-        if (names.indexOf(p.name) !== i)
-          issue(['paramSchema', i, 'name'], 'This parameter is declared twice.');
-      });
       const ids = d.testCases.map((t) => t.id);
       d.testCases.forEach((t, i) => {
         if (ids.indexOf(t.id) !== i) issue(['testCases', i, 'id'], 'Duplicate test case.');
       });
       const used = placeholdersOf(text.join('\n'));
-      const missing = undeclaredPlaceholders(used, d.paramSchema);
-      if (missing.length > 0) {
+      const names = (list: string[]) => list.map((m) => `"${m}"`).join(', ');
+      if (used.length > 0 && d.variants.length === 0) {
         issue(
-          ['paramSchema'],
-          `Declare ${missing.map((m) => `"${m}"`).join(', ')} on the Variants tab: the question uses ${
-            missing.length === 1 ? 'it' : 'them'
-          } as a placeholder.`,
+          ['variants'],
+          `The question uses ${names(used)} as placeholder${used.length === 1 ? '' : 's'}. Add a variant that gives ${used.length === 1 ? 'it' : 'them'} a value.`,
         );
       }
       d.variants.forEach((v, i) => {
@@ -326,7 +314,13 @@ export const draftSchema = z
           issue(['variants', i, 'paramsText'], parsed.error);
           return;
         }
-        const errors = checkParams(parsed.value, d.paramSchema);
+        const errors = checkParams(parsed.value);
+        const missing = missingPlaceholders(parsed.value, used);
+        if (missing.length > 0) {
+          errors.push(
+            `Needs a value for ${names(missing)}: the question uses ${missing.length === 1 ? 'it' : 'them'} as a placeholder.`,
+          );
+        }
         if (errors.length > 0) issue(['variants', i, 'paramsText'], errors.join(' '));
       });
     } else if (d.type === 'MCQ') {

@@ -21,6 +21,7 @@ import {
   BE03_READY,
   BE03_ROUTES,
   BE04_READY,
+  BE06_READY,
   BE13_READY,
   Be03Route,
   hasPathId,
@@ -257,6 +258,11 @@ auditSuite(
   'TC-006 (FR-105, FR-201..FR-204): question routes write one audit row per mutation, reads none',
   BE04_READY,
   routesFor('BE-04'),
+);
+auditSuite(
+  'TC-006 (FR-105, FR-301, FR-302): test builder routes write one audit row per mutation, reads none',
+  BE06_READY,
+  routesFor('BE-06'),
 );
 auditSuite(
   'TC-006 [BE-13 pending]: review routes are audited (a reviewer opening a review)',

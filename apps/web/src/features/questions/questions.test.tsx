@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react';
+import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { axe } from 'vitest-axe';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -97,11 +97,15 @@ describe('Question list (FR-201..FR-205)', () => {
     expect(screen.queryByRole('row', { name: /Rotate an array/ })).not.toBeInTheDocument();
   });
 
-  it('FR-103 TC-004: a recruiter can read the list but has no links into the editor and no New button', async () => {
+  it('FR-103 TC-004: a recruiter can open every question (the summary page), but has no New button and no history link', async () => {
     await openList(MOCK_USERS.recruiter);
     await screen.findByRole('row', { name: /Merge intervals/ });
-    expect(screen.queryByRole('link', { name: 'Merge intervals' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Merge intervals' })).toHaveAttribute(
+      'href',
+      '/admin/questions/q-merge',
+    );
     expect(screen.queryByRole('link', { name: 'New question' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Version history of/ })).not.toBeInTheDocument();
   });
 
   it('FR-103 TC-004: a reviewer gets an explanation, not the list', async () => {
@@ -112,17 +116,6 @@ describe('Question list (FR-201..FR-205)', () => {
       MOCK_USERS.reviewer,
     );
     expect(await screen.findByText(/Your role does not have access/)).toBeInTheDocument();
-  });
-
-  it('FR-103 TC-004: the mock refuses the detail routes to a recruiter, so reference solutions never reach other roles', async () => {
-    renderAsStaff(<div />, MOCK_USERS.recruiter);
-    const { api } = await import('@/lib/api/client');
-    await waitFor(async () => {
-      const { response } = await api.GET('/v1/questions/{questionId}', {
-        params: { path: { questionId: 'q-merge' } },
-      });
-      expect(response.status).toBe(403);
-    });
   });
 
   it('WCAG 2.1 AA: the list has no axe violations', async () => {
