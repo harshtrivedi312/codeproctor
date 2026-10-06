@@ -31,6 +31,11 @@ function isBareOrigin(value: string): boolean {
   }
 }
 
+/** Optional setting where '' means "not set". */
+function emptyAsUnset<T extends z.ZodType>(schema: T) {
+  return z.preprocess((v) => (v === '' ? undefined : v), schema.optional());
+}
+
 export const envSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -119,9 +124,18 @@ export const envSchema = z
     AWS_PROFILE: z.string().optional(),
     AWS_SHARED_CREDENTIALS_FILE: z.string().optional(),
     AWS_CONFIG_FILE: z.string().optional(),
-    SES_FROM_ADDRESS: z.email().optional(),
-    SES_CONFIGURATION_SET: z.string().min(1).optional(),
-    SES_ENDPOINT: z.url().optional(),
+    // Container and web-identity credential sources (ECS, EKS). C-31 says instance role only (EC2
+    // instance profile), so pilot and production refuse them; relax if the hub moves to ECS.
+    AWS_CONTAINER_CREDENTIALS_FULL_URI: z.string().optional(),
+    AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: z.string().optional(),
+    AWS_CONTAINER_AUTHORIZATION_TOKEN: z.string().optional(),
+    AWS_WEB_IDENTITY_TOKEN_FILE: z.string().optional(),
+    AWS_ROLE_ARN: z.string().optional(),
+    // An empty value (a copied .env template line such as `SES_FROM_ADDRESS=`) counts as unset;
+    // the checks below still require a non-empty valid SES_FROM_ADDRESS when the provider is ses.
+    SES_FROM_ADDRESS: emptyAsUnset(z.email()),
+    SES_CONFIGURATION_SET: emptyAsUnset(z.string().min(1)),
+    SES_ENDPOINT: emptyAsUnset(z.url()),
   })
   .superRefine((env, ctx) => {
     const live = isLiveEnv(env);
@@ -189,12 +203,20 @@ export const envSchema = z
         'AWS_PROFILE',
         'AWS_SHARED_CREDENTIALS_FILE',
         'AWS_CONFIG_FILE',
+        'AWS_CONTAINER_CREDENTIALS_FULL_URI',
+        'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
+        'AWS_CONTAINER_AUTHORIZATION_TOKEN',
+        'AWS_WEB_IDENTITY_TOKEN_FILE',
+        'AWS_ROLE_ARN',
       ] as const) {
+        // `!== ''` mirrors the AWS SDK's own truthiness checks: an empty value is ignored by the
+        // SDK, a whitespace one is not. Do not turn this into a trim.
         if (env[name] !== undefined && env[name] !== '') {
           ctx.addIssue({
             code: 'custom',
             path: [name],
-            message: 'must not be set in pilot or production (use the instance role, C-31)',
+            message:
+              'must not be set in pilot or production (C-31: EC2 instance role only; container and web-identity credentials are refused until the hub allows ECS)',
           });
         }
       }
