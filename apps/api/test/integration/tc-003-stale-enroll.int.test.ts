@@ -3,7 +3,10 @@
 // /2fa/enroll/start and /2fa/enroll/confirm, and NOTHING changes: no secret stored, no audit row,
 // no session, no cookie. If TOTP was turned on meanwhile (password unchanged) start is a 409 and
 // the live secret stays. Gap: the narrow race (reset landing between the service's read and its
-// conditional write) cannot be forced from outside; the backend e2e spec covers it with hooks.
+// conditional write, and the 409 that the conditional write gives when TOTP turns on in that same
+// window) cannot be forced from outside; the backend e2e spec covers it with hooks. Note: these
+// black-box tests also pass on the old code (resolveChallenge already checked the password
+// version and the active flag), so they guard the behaviour, they do not prove the conditional write.
 import { authenticator } from 'otplib';
 import request from 'supertest';
 import { UserRole } from '../../src/generated/prisma/client';
