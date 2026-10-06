@@ -135,8 +135,16 @@ validation report; TC-011, DL-32), a draft or never-published question is a plai
 question is not available to you"), a published but archived question is still readable, and every
 write route is 403. Writers get an opaque `revision` (a content digest) and send it back as
 `expectedRevision` on save and publish (409 when stale); editing a published question forks the next
-draft (`createdNewVersion`). Routes the API does not serve yet (variants, prefill, validate job, AI
-references) are web-only placeholders, listed in `docs/followups/frontend.md` ("BE-04a sync").
+draft (`createdNewVersion`), copying test cases and variants with new ids. Variants follow the real
+BE-04b routes (`/versions/{n}/variants`, per-slot overrides, candidate-shaped preview): a variant has
+params, an active flag and a rendered statement but no name, so the editor calls them "Variant 1",
+"Variant 2" by list position. Validation and AI reference solutions follow the real BE-04c routes:
+`POST /validate` starts a run bound to the revision it validated, `GET /validation` reports NONE,
+RUNNING, PASSED, FAILED, STALE (the content changed, result dropped) or ERROR plus the report per
+variant and language; AI rows belong to ONE version (a new version starts with none), the server
+stamps their time, and publishing a coding question needs a passing run of the current revision and
+current rows from two distinct assistants per language. The only route the API does not serve is
+prefill, a web-only placeholder. See `docs/followups/frontend.md` ("BE-04a/b/c sync").
 
 | Route                    | What it is                                                                       |
 | ------------------------ | -------------------------------------------------------------------------------- |
@@ -219,16 +227,15 @@ overrides, "Prefill from reference solution" that only proposes values until you
 AI reference solutions (add, supersede, refresh-due badge, publish requirement), Limits. Multiple
 choice and short-answer questions have Statement and Answer.
 
-Mock questions to try: **Merge intervals** (published, 2 versions, variants, refresh due),
-**Rotate an array** (draft; its variant "Rotate by 3" fails validation, TC-012: fix the expected
-output of slot 2, Save, Validate, add two AI solutions for Python), **Running average** (validated
-draft, one AI assistant per language), **Cost of binary search** (MCQ, published), **Cost of a hash
+Mock questions to try: **Merge intervals** (published, 2 versions, 2 variants, refresh due),
+**Rotate an array** (draft; its "Variant 2" fails validation, TC-012: fix the expected
+output of slot 2, Save, Validate, add two AI solutions for Python, Publish), **Running average**
+(validated draft, one AI assistant per language: add a second one to publish), **Cost of binary search** (MCQ, published), **Cost of a hash
 lookup (draft)** (a complete MCQ draft: the real API publishes it, so Publish works), **Status code
-for a created resource** (short-answer draft), **Legacy tokenizer (archived)**. A CODING question
-cannot be published by the real API yet (no validate job until BE-04c), so the mock refuses it with
-422 "a passing validation run is required"; tests unlock it with
-`setMockQuestionScenario({ validationJob: true })` from `src/mocks/question-handlers.ts`. The mock
-"executor" is fake: a slot fails when its expected output is blank or starts with `TODO`. State is in
+for a created resource** (short-answer draft), **Legacy tokenizer (archived)**. The mock
+"executor" behind the validate job is fake: a slot fails when its expected output is blank or starts
+with `TODO`; tests make it end in an error or a timeout with
+`setMockQuestionScenario({ executor: 'TIMEOUT' })` from `src/mocks/question-handlers.ts`. State is in
 memory; reload to reset.
 
 Code map: `src/features/questions` (pages, editor, `tabs/`, `draft.ts` schemas and conversions,

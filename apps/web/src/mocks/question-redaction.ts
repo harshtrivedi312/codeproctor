@@ -1,6 +1,6 @@
 import type { Schemas } from '@/lib/api/client';
 import { mockRevision } from './question-revision';
-import type { MockQuestion, MockTestCase, MockVersion } from './question-seed';
+import type { MockQuestion, MockTestCase, MockVariant, MockVersion } from './question-seed';
 
 /*
  * The two views of a question the mock API serves, built FIELD BY FIELD like the real API's
@@ -74,8 +74,44 @@ const sortedCases = (cases: readonly MockTestCase[]): MockTestCase[] =>
   [...cases].sort((a, b) => a.position - b.position || (a.id < b.id ? -1 : 1));
 
 export function revisionOf(v: MockVersion): string {
-  return mockRevision(v);
+  return mockRevision({
+    ...v,
+    variants: v.variants.map((x) => ({
+      id: x.id,
+      params: x.params,
+      isActive: x.isActive,
+      overrides: x.overrides,
+    })),
+  });
 }
+
+/** A variant as the writer sees it; each override carries the slot's isHidden and position (staff-view toVariantDto). */
+export function toVariantDto(x: MockVariant, cases: readonly MockTestCase[]): Schemas['Variant'] {
+  const slot = new Map(cases.map((c) => [c.id, c]));
+  return {
+    id: x.id,
+    isActive: x.isActive,
+    params: { ...x.params },
+    renderedStatement: x.renderedStatement,
+    testCaseOverrides: x.overrides.flatMap((o) => {
+      const c = slot.get(o.testCaseId);
+      return c
+        ? [
+            {
+              testCaseId: o.testCaseId,
+              isHidden: c.isHidden,
+              position: c.position,
+              input: o.input,
+              expectedOutput: o.expectedOutput,
+            },
+          ]
+        : [];
+    }),
+  };
+}
+
+const byId = (a: { id: string }, b: { id: string }): number =>
+  a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 
 export function toFullVersion(v: MockVersion): Schemas['QuestionVersion'] {
   return {
@@ -89,6 +125,7 @@ export function toFullVersion(v: MockVersion): Schemas['QuestionVersion'] {
     validationReport: v.validationReport ? structuredClone(v.validationReport) : null,
     revision: revisionOf(v),
     testCases: sortedCases(v.testCases).map((t) => toTestCase(t, true)),
+    variants: [...v.variants].sort(byId).map((x) => toVariantDto(x, v.testCases)),
   };
 }
 

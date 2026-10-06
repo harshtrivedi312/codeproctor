@@ -187,6 +187,21 @@ export class UsersService {
       });
     } catch (e) {
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        // The create and USER_INVITED rolled back together, so the attempt would leave no record
+        // and a SUPER_ADMIN could probe other organizations' staff emails unseen (DL-36). Record it
+        // outside that transaction: actor, org and time only, no email and no user id. If this
+        // insert fails the request fails (500) rather than answering the probe unrecorded.
+        await this.prisma.client.auditLog.create({
+          data: {
+            orgId: actor.orgId,
+            actorId: actor.id,
+            action: 'USER_INVITE_CONFLICT',
+            entityType: 'user',
+            entityId: null,
+            ip: ctx.ip ?? null,
+            metadata: {},
+          },
+        });
         throw new ConflictException('A user with this email already exists.');
       }
       throw e;
