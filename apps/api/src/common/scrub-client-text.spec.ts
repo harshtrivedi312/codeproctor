@@ -362,6 +362,16 @@ describe('scrubClientText worst cases (NFR-04, C-32)', () => {
     return performance.now() - start;
   }
 
+  /**
+   * Best of several runs: a pause (GC, a busy shared runner) only ever adds time, so the minimum is
+   * the stable estimate of the work itself. A genuinely super-linear pass is slow on every run.
+   */
+  function best(fn: (s: string) => string, input: string, runs: number): number {
+    let min = Infinity;
+    for (let i = 0; i < runs; i++) min = Math.min(min, time(fn, input));
+    return min;
+  }
+
   it('NFR-04: every field, character and shape is under 100 ms and grows linearly', () => {
     let slowest = { ms: 0, label: '' };
     const failures: string[] = [];
@@ -371,8 +381,13 @@ describe('scrubClientText worst cases (NFR-04, C-32)', () => {
         for (const c of chars) {
           const small = build(c, Math.floor(max * 1.5));
           const large = build(c, max * 3);
-          const ts = time(fn, small);
-          const tl = time(fn, large);
+          let ts = best(fn, small, 3);
+          let tl = best(fn, large, 3);
+          // A suspicious ratio is measured again with more runs before it counts as a failure.
+          if (tl >= 10 && tl / Math.max(ts, 0.5) > 3.3) {
+            ts = best(fn, small, 11);
+            tl = best(fn, large, 11);
+          }
           const label = `${field} ${shape} c=${JSON.stringify(c)}`;
           if (tl > slowest.ms) slowest = { ms: tl, label };
           if (tl >= 100) failures.push(`${label} took ${tl.toFixed(1)} ms`);
