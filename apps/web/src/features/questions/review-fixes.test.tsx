@@ -263,11 +263,14 @@ describe('Concurrent edits (expectedRevision, 409)', () => {
     expect(screen.getByRole('button', { name: 'Publish' })).toBeDisabled();
 
     await u.click(screen.getByRole('button', { name: /Reload the latest version/ }));
-    await waitFor(() =>
-      expect(screen.getByLabelText('Title')).toHaveValue('Two sum (by someone else)'),
-    );
+    // The loader can show "Loading the question…" for a moment while the reloaded version settles
+    // (this made the test flaky in CI): wait for the editor itself, not just for the value.
+    await waitFor(() => {
+      expect(screen.queryByText('Loading the question…')).not.toBeInTheDocument();
+      expect(screen.getByLabelText('Title')).toHaveValue('Two sum (by someone else)');
+    });
     expect(screen.queryByText('This question changed since you opened it')).not.toBeInTheDocument();
-    await u.type(screen.getByLabelText('Title'), '!');
+    await u.type(await screen.findByLabelText('Title'), '!');
     await u.click(screen.getByRole('button', { name: 'Save' }));
     expect(await screen.findByText(/Saved/)).toBeInTheDocument();
   });
