@@ -14,7 +14,13 @@ const everyRoute = (): RegisteredRoute[] =>
     isPublic: isPublic(access) || isCandidate(access),
     roles: isStaff(access) ? access.roles : [],
     audited: !isPublic(access) && !isCandidate(access) && access.audited === true,
-    guards: isCandidate(access) ? [class G {}] : [],
+    guards: isCandidate(access)
+      ? [
+          class G {
+            canActivate = (): boolean => true;
+          },
+        ]
+      : [],
     candidatePermission: isCandidate(access) ? access.permission : null,
   }));
 
@@ -162,7 +168,13 @@ describe('route registry walk (FR-103, FR-105)', () => {
       isPublic: isPublic(access) || isCandidate(access),
       roles: isStaff(access) ? access.roles : [],
       audited: !isPublic(access) && !isCandidate(access) && access.audited === true,
-      guards: isCandidate(access) ? [class G {}] : [],
+      guards: isCandidate(access)
+        ? [
+            class G {
+              canActivate = (): boolean => true;
+            },
+          ]
+        : [],
       candidatePermission: isCandidate(access) ? access.permission : null,
     }));
     const flipped = routes.map((r) =>
@@ -190,7 +202,11 @@ describe('candidate route variant (FR-103, ADR 0010 section 6, ADR 0013)', () =>
     isPublic: true,
     roles: [],
     audited: false,
-    guards: [class FakeCandidateGuard {}],
+    guards: [
+      class FakeCandidateGuard {
+        canActivate = (): boolean => true;
+      },
+    ],
     candidatePermission: 'candidate_answer:run',
   };
   const withEntry = (entry: unknown, routes: RegisteredRoute[]): string[] => {
@@ -297,9 +313,15 @@ describe('candidate route variant (FR-103, ADR 0010 section 6, ADR 0013)', () =>
   });
 
   it('FR-103: ADR 0013: guards from the class and the handler are listed, class first', () => {
-    class ClassGuard {}
-    class G2 {}
-    class MethodGuard {}
+    class ClassGuard {
+      canActivate = (): boolean => true;
+    }
+    class G2 {
+      canActivate = (): boolean => true;
+    }
+    class MethodGuard {
+      canActivate = (): boolean => true;
+    }
     @Controller('candidate')
     @UseGuards(ClassGuard)
     class Guarded {
