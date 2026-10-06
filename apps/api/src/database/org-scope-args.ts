@@ -65,6 +65,16 @@ function isPlainObject(value: unknown): value is PlainObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * True when `value` names the org `orgId`, whatever the case of the uuid (FU-DB-201). Scope ids are
+ * lower-cased on entry (org-context.ts), but a value the caller writes (`data: { orgId }`, a cursor)
+ * is compared here, and Postgres treats `ABC...` and `abc...` as one uuid. Anything that is not a
+ * string is not an org id.
+ */
+function sameOrg(value: unknown, orgId: string): boolean {
+  return typeof value === 'string' && value.toLowerCase() === orgId.toLowerCase();
+}
+
 function asArgs(model: string, operation: string, args: unknown): PlainObject {
   if (args === undefined || args === null) return {};
   if (!isPlainObject(args)) {
@@ -122,10 +132,11 @@ function stampCreateData(
   if (!isPlainObject(data)) return data; // Prisma reports the malformed payload itself
   if (data.org !== undefined) throw orgRelation(model, operation); // refused earlier; fail closed
   if (data.orgId === undefined) return { ...data, orgId };
-  if (data.orgId !== orgId) {
+  if (!sameOrg(data.orgId, orgId)) {
     throw violation(model, operation, "orgId in the data is not the caller's org.");
   }
-  return data;
+  // The same org in another case is written in the scope's own spelling.
+  return data.orgId === orgId ? data : { ...data, orgId };
 }
 
 /** Update payload: a row cannot be moved to another org, and an organization keeps its id. */
@@ -144,7 +155,7 @@ function assertTenancyKept(
   if (data.org !== undefined) throw orgRelation(model, operation); // refused earlier; fail closed
   if (data.orgId === undefined) return;
   const value = isPlainObject(data.orgId) ? data.orgId.set : data.orgId;
-  if (value !== orgId) {
+  if (!sameOrg(value, orgId)) {
     throw violation(model, operation, 'orgId cannot be changed to another org.');
   }
 }
@@ -261,7 +272,7 @@ function scopeCursor(
       }
       return { ...cursor, orgId };
     case 'self':
-      if (cursor.id !== orgId) {
+      if (!sameOrg(cursor.id, orgId)) {
         throw violation(model, operation, "the cursor is not the caller's own organization.");
       }
       return cursor;
@@ -281,7 +292,7 @@ function scopeCursor(
 /** True when the cursor, or a compound key inside it, has an orgId that is not `orgId`. */
 function namesOtherOrg(cursor: PlainObject, orgId: string): boolean {
   return Object.entries(cursor).some(([key, value]) =>
-    key === 'orgId' ? value !== orgId : isPlainObject(value) && namesOtherOrg(value, orgId),
+    key === 'orgId' ? !sameOrg(value, orgId) : isPlainObject(value) && namesOtherOrg(value, orgId),
   );
 }
 
