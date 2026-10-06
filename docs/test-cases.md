@@ -96,7 +96,7 @@ Updated 2026-10-01 (ARC-01 Phase B, D-16..D-23). Changed: TC-007, TC-012, TC-030
 | --- | --- | --- | --- | --- | --- | --- |
 | TC-070 | FR-701 | Chunked upload | 30-min session | All streams present, no gaps over 10 s | F | P1 |
 | TC-071 | FR-703 | Signed playback URL | Copy playback URL, open after 20 min | Access denied | S | P1 |
-| TC-072 | FR-704 | Retention deletion | Set retention 7 days, advance clock | Objects deleted from object storage, keys nulled, audit logged | F | P1 |
+| TC-072 | FR-704 | Retention deletion | Set retention 7 days, advance clock; then set retention above 90 days and advance the clock 90 days past capture or submission | 7 days: objects deleted from object storage except `reports/`, keys nulled (`report_key` kept until the 1-year results clock), `RETENTION_MEDIA_DONE` audit marker written. Above 90 days: ID image, selfie and mismatch frames deleted at 90 days, recordings kept (C-27, C-35; updated 2026-10-06, ADR 0004 §9, D-54) | F | P1 |
 | TC-073 | FR-802 | Paste burst via typing tool | Auto-type 300 chars in 0.5 s (xdotool) | PASTE\_BURST event | I | P1 |
 | TC-074 | FR-803 | Identical submissions | Two candidates submit identical code | CODE\_SIMILARITY on both | I | P2 |
 | TC-075 | FR-804 | Risk banding | Session with 2 HIGH + 3 MEDIUM events | Score and band match configured weights | F | P1 |
@@ -115,4 +115,4 @@ Updated 2026-10-01 (ARC-01 Phase B, D-16..D-23). Changed: TC-007, TC-012, TC-030
 | TC-091 | NFR-01 | Code execution latency | 50 concurrent runs | p95 under 5 s | P | P2 |
 | TC-092 | NFR-06 | Accessibility | axe + screen reader on candidate flow | No WCAG 2.1 AA violations | A | P1 |
 | TC-093 | NFR-04 | OWASP scan | OWASP ZAP baseline against staging | No high findings | S | P1 |
-| TC-094 | NFR-05 | Deletion on request | Admin deletes a candidate: once with no open review or appeal, once while an appeal is open, then close the appeal | No open review or appeal: all personal data, media, consent PDF, code and answers removed within 30 days, only anonymized scores kept, audit logged. Open appeal: erasure waits and the candidate is told; it runs as soon as the appeal closes (D-19, provisional, Legal to confirm) | S | P2 |
+| TC-094 | NFR-05 | Deletion on request | Admin deletes a candidate: once with no open review or appeal, once while an appeal is open, then close the appeal | No open review or appeal: all personal data, media, report, code and answers removed within 30 days; every session ERASED; the signed consent record and PDF kept until their 3-year limit; scores kept, pseudonymized while the consent record exists; audit logged. Open appeal: that session waits and the candidate is told; it is erased within 30 days after the appeal closes (C-06, C-17; updated 2026-10-06, ADR 0004 §9.5, D-54) | S | P2 |

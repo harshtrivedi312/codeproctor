@@ -44,7 +44,7 @@ This tab turns each business requirement into testable functional requirements (
 - **FR-302** Proctoring profile per test: STANDARD (web), STRICT (web + second camera), LOCKDOWN (desktop client required). LOCKDOWN is not offered in this build; it returns with the lockdown client in a later phase (D-13, ADR 0007).
 - **FR-303** Invitations are sent by email with a unique token link, valid within a start window (for example 7 days) and usable once.
 - **FR-304** Bulk invitations by CSV upload; reminders 24 hours before window closes.
-- **FR-305** Per-candidate accommodations: extra time percentage, disabled detectors, allowed assistive tools.
+- **FR-305** Per-candidate accommodations: extra time percentage, disabled detectors ("face detectors off" among them), allowed assistive tools, and "no identity check". Every change to accommodations writes an audit row. With "no identity check", the recruiter must record a reason; the candidate uploads no ID image or selfie, no face match or identity re-check runs, and reviewers see "Identity check waived". The recruiter is advised to check the candidate's ID on a video call before any hiring decision, and records whether that was done (C-02, C-19, C-25). "Face detectors off" stops the in-browser and server face detectors during the test, including the periodic identity re-check (C-34); the initial identity check still runs (updated 2026-10-06, ADR 0015, D-54).
 
 ### M4 Candidate Portal
 
@@ -52,11 +52,12 @@ This tab turns each business requirement into testable functional requirements (
   - The document is 2-3 pages, versioned and stored. It covers what is recorded (screen, webcam, microphone, keystrokes), the ID image and selfie, face matching, automated detection and human review, how results are used in hiring, retention and deletion, who can access the data, appeals, accommodations and how to withdraw.
   - The candidate scrolls to the end and signs by typing their full legal name. The server records the date and time.
   - Stored per session: document version, signed name, signed timestamp, IP, user agent, and a generated PDF of the signed document in object storage. The candidate is emailed a copy.
+  - This signed consent record is kept 3 years after signing to prove consent, then deleted. It is kept through an erasure request, to defend legal claims; after erasure only a Super Admin can read it, and every read is audited (C-04, C-17, ADR 0004 §9.3 and §9.5; updated 2026-10-06, D-54).
   - Declining ends the session without any recording and shows a contact for alternatives or accommodations.
   - No device access or recording starts before the document is signed.
   - Until Legal supplies and approves the text, it is a clearly marked placeholder, and pilot and production refuse it.
 - **FR-402** System check: browser (Chromium required for STANDARD and STRICT), camera, microphone, screen-share support, network speed, single monitor.
-- **FR-403** Identity check: photo of government ID and a live selfie with liveness prompt (turn head, blink); face match score stored; ID image never used for other purposes. A failed or low-confidence match gets one retry and then goes to manual reviewer comparison; it never rejects the candidate or blocks the test (D-05, ADR 0004).
+- **FR-403** Identity check: photo of government ID and a live selfie with liveness prompt (turn head, blink); face match score stored; ID image never used for other purposes. A failed or low-confidence match gets one retry and then goes to manual reviewer comparison; it never rejects the candidate or blocks the test (D-05, ADR 0004). The identity check runs unless waived by accommodation (FR-305; ADR 0015).
 - **FR-404** Room scan: candidate rotates the camera 360 degrees and shows the desk surface; stored as a clip.
 - **FR-405** STRICT profile: candidate opens a QR-code link on a phone that streams a side view of the desk.
 - **FR-406** A practice question lets candidates try the editor before the timed test.
@@ -77,7 +78,7 @@ This tab turns each business requirement into testable functional requirements (
 - **FR-603** Paste, drop, right-click and common devtools shortcuts are blocked inside the test and each attempt is logged.
 - **FR-604** Screen share must be the entire screen (displaySurface = monitor); stopping it pauses the test until re-shared.
 - **FR-605** Multiple monitors detected (Window Management API where available) logs MULTI\_MONITOR and blocks start.
-- **FR-606** Webcam frames are analyzed in-browser every 1 second: NO\_FACE (over 5 s), MULTIPLE\_FACES, FACE\_MISMATCH (periodic re-check against selfie), GAZE\_AWAY (over 5 s), PHONE\_DETECTED, BOOK\_DETECTED.
+- **FR-606** Webcam frames are analyzed in-browser every 1 second: NO\_FACE (over 5 s), MULTIPLE\_FACES, GAZE\_AWAY (over 5 s), PHONE\_DETECTED, BOOK\_DETECTED. FACE\_MISMATCH comes from a server identity re-check that compares a webcam frame with the selfie every 2 minutes (ADR 0013). The re-check does not run when the identity check is waived or the FACE detector is off (FR-305, C-34; updated 2026-10-06, ADR 0013, ADR 0015, D-54).
 - **FR-607** Microphone audio levels and voice activity are analyzed; SPEECH\_DETECTED and MULTIPLE\_VOICES are logged.
 - **FR-608** Every keystroke and editor change is recorded with a timestamp (insert, delete, cursor move) for replay.
 - **FR-609** Heartbeat every 10 s; missing heartbeats over 60 s logs DISCONNECTED; the test resumes on reconnect with time continuing.
@@ -88,7 +89,12 @@ This tab turns each business requirement into testable functional requirements (
 - **FR-701** Screen, webcam and audio are recorded with MediaRecorder in 10-second chunks and uploaded directly to object storage (Cloudflare R2 on staging, AWS S3 on pilot and production) using short-lived presigned URLs.
 - **FR-702** Failed chunk uploads are retried with backoff and buffered in IndexedDB up to 200 MB.
 - **FR-703** Recordings are encrypted at rest; playback uses signed URLs valid for 15 minutes.
-- **FR-704** A scheduled job deletes recordings and ID images after the retention period (default 90 days, configurable). The period counts from the session's final outcome, and nothing is deleted while a review or appeal is open (ADR 0004).
+- **FR-704** A scheduled job deletes stored data on four clocks (ADR 0004 §5 and §9; updated 2026-10-06, D-54):
+  - **Recordings and session media** (all streams, the room scan included), evidence snapshots and keystroke data: after the retention period (default 90 days, configurable). The period counts from the session's final outcome, and nothing on this clock is deleted while a review or appeal is open.
+  - **Face images** (ID image, selfie, and identity re-check frames kept on a mismatch): at most 90 days after capture or submission, whatever any review hold or the organization's retention period says. A shorter retention period shortens it (C-27, C-35).
+  - **Results** (scores, verdicts, reviewer notes, submitted code and answers, reports): 1 year after the session's final outcome, then deleted, leaving only anonymized statistics (C-26).
+  - **Signed consent records:** 3 years after signing, then deleted (C-04, C-17; FR-401).
+  - A clock's data is deleted only after the deletion is verified; a failed deletion is retried daily and alerts after 3 days.
 
 ### M8 Integrity Engine
 
@@ -96,19 +102,19 @@ This tab turns each business requirement into testable functional requirements (
 - **FR-802** Keystroke analytics compute: paste-like bursts (over 80 characters in under 1 s), typing speed outliers, ratio of deletions, idle-then-complete patterns.
 - **FR-803** Code similarity against other submissions for the same question and against stored AI-generated reference solutions.
 - **FR-804** Risk score 0–100 = weighted sum of event severities and analytics, capped at 100. Bands: 0–29 LOW, 30–59 MEDIUM, 60–100 HIGH. Weights are configurable.
-- **FR-805** Sessions in MEDIUM or HIGH band go to the review queue automatically. So do sessions whose identity check awaits manual review and sessions with a short answer awaiting manual scoring (ADR 0002).
+- **FR-805** Every graded session goes to the review queue; no session is cleared automatically, and recruiters, exports and webhooks get results only after the reviewer's verdict (C-28). The risk band, an identity check awaiting manual review and a short answer awaiting manual scoring order the queue (ADR 0002; updated 2026-10-06, C-28, ADR 0015 §7).
 
 ### M9 Review & Live Proctoring
 
 - **FR-901** Review page: timeline of events, synchronized screen/webcam video, keystroke replay at 1x–16x speed, code diff per run, test results.
 - **FR-902** Reviewer marks each flag CONFIRMED or DISMISSED with a note, then sets session verdict CLEAN, SUSPICIOUS or VIOLATION.
 - **FR-903** Live view grid of active sessions with latest webcam thumbnail and live events; proctor can send a message or pause a session.
-- **FR-904** Candidates can submit an appeal within 7 days of a VIOLATION verdict; appeals go to a different reviewer.
+- **FR-904** Candidates can submit an appeal within 7 days of a VIOLATION verdict; appeals go to a different reviewer. An ERASED session cannot be appealed, and erasure with the hold off closes an open appeal without an outcome (ADR 0004 §9.5).
 
 ### M10 Reporting & Integrations
 
 - **FR-1001** Candidate report (score, per-question results, verdict, reviewer notes) as PDF.
-- **FR-1002** Dashboard: invitations sent, completion rate, pass rate, flag rate by type.
+- **FR-1002** Dashboard: invitations sent, completion rate, pass rate, flag rate by type. Score and pass-rate figures use only sessions still inside their 1-year results clock (FR-704), and ERASED sessions are counted under their own label, not as completions (ADR 0004 §9.4 and §9.9).
 - **FR-1003** Webhooks on session.completed and session.reviewed; CSV export.
 
 ### M11 Lockdown Client (Phase 3)
@@ -124,18 +130,19 @@ This tab turns each business requirement into testable functional requirements (
 | INVITED | Invitation created (the session row is created with it) | OPENED, EXPIRED |
 | OPENED | Candidate opens link inside the window and passes OTP | CONSENTED, DECLINED, EXPIRED |
 | CONSENTED | Consent document signed | VERIFIED, EXPIRED |
-| VERIFIED | System check, ID and selfie attempts and room scan done (identity passed or sent to manual review; never rejected) | IN\_PROGRESS, EXPIRED |
+| VERIFIED | System check, ID and selfie attempts and room scan done (identity passed, sent to manual review, or waived by accommodation (FR-305); never rejected) | IN\_PROGRESS, EXPIRED |
 | IN\_PROGRESS | Timer starts | PAUSED, SUBMITTED |
 | PAUSED | Fullscreen exit, share stopped, STRICT side camera lost, proctor pause (only a proctor pause stops the clock) | IN\_PROGRESS, SUBMITTED |
 | SUBMITTED | Candidate submits, last section ends, or time runs out | GRADED |
-| GRADED | Hidden tests and risk score done | UNDER\_REVIEW, COMPLETED |
-| UNDER\_REVIEW | Risk MEDIUM/HIGH, identity awaiting manual review, or a short answer awaiting manual scoring | COMPLETED |
-| COMPLETED | Verdict set or auto-clean | APPEALED |
+| GRADED | Hidden tests and risk score done | UNDER\_REVIEW |
+| UNDER\_REVIEW | Every graded session (C-28); risk band, identity awaiting manual review and a short answer awaiting manual scoring order the queue | COMPLETED |
+| COMPLETED | Verdict set | APPEALED |
 | APPEALED | Candidate appeals within 7 days of a VIOLATION verdict | COMPLETED |
 | EXPIRED | Start window closed before the test started | — |
 | DECLINED | Candidate declined the consent document; no recording | — |
+| ERASED | Candidate erasure fences the session: from every state except UNDER\_REVIEW and APPEALED, terminal ones included; from those two only when the erasure hold is off, and an open appeal then closes without an outcome | — (no exit; no appeal) |
 
-Rules and timing details: ADR 0002 (updated 2026-10-01, D-16, D-17).
+The Next states column does not repeat ERASED; every state can move to it as its row describes. Rules and timing details: ADR 0002 (updated 2026-10-01, D-16, D-17). GRADED always moves to UNDER\_REVIEW (C-28) and ERASED comes from ADR 0004 §9.5 (updated 2026-10-06, D-54); the matching ADR 0002 amendment is still owed.
 
 ## 4. Core API (REST, JSON, `/api/v1`)
 
@@ -150,6 +157,10 @@ Rules and timing details: ADR 0002 (updated 2026-10-01, D-16, D-17).
 | POST | /questions/:id/validate | Author | Run reference solution on all tests and variants |
 | GET/POST/PATCH | /tests, /tests/:id | Recruiter | Test templates |
 | POST | /tests/:id/invitations | Recruiter | Single or bulk invite |
+| GET | /invitations/:id/accommodations | Recruiter | Accommodations with the waiver reason and the identity check status; the only route that returns the reason; audited, fails closed (FR-305, FR-105; ADR 0015) |
+| PATCH | /invitations/:id/accommodations | Recruiter | Change accommodations; set or remove "no identity check"; requires `If-Match` (FR-305; ADR 0015) |
+| POST | /invitations/:id/accommodations/redact-note | Recruiter | Remove the waiver reason note (FR-305; ADR 0015) |
+| PUT | /sessions/:id/identity/video-check | Recruiter | Record whether the candidate's ID was checked on a video call (FR-305; ADR 0015) |
 | POST | /candidate/session/start | Candidate | Exchange invitation token + OTP for session token |
 | GET | /candidate/session/consent | Candidate | The consent document for this session (version and text) |
 | POST | /candidate/session/consent/sign | Candidate | Sign with the typed full legal name; server timestamps it, stores the PDF and emails a copy (FR-401) |
@@ -175,7 +186,7 @@ Rules and timing details: ADR 0002 (updated 2026-10-01, D-16, D-17).
 | NFR-02 | Capacity | 200 concurrent candidates on the pilot deployment |
 | NFR-03 | Availability | 99.5% during scheduled test windows |
 | NFR-04 | Security | OWASP ASVS Level 2; TLS 1.2+; secrets in environment vault; rate limits on all public endpoints |
-| NFR-05 | Privacy | Data minimization, encryption at rest, retention jobs, deletion on request within 30 days. Provisional (D-19, Legal to confirm): erasure waits while a review or appeal is open and runs as soon as it closes; the candidate is told. Proposed wording for Legal (D-27): erasure completes within 30 days of the request, or within 30 days after an open review or appeal closes, whichever is later; the candidate is told about any delay. The hold is configurable |
+| NFR-05 | Privacy | Data minimization, encryption at rest, retention jobs (FR-704), deletion on request. Erasure completes within 30 days of the request, or within 30 days after an open review or appeal closes, whichever is later; the candidate is told about any delay (C-06). Only the sessions with an open review or appeal wait; the hold is configurable. Code and answers are erased too. The signed consent record is kept until its 3-year limit to defend legal claims (C-17); scores remain, pseudonymized until that record is deleted, then anonymized (ADR 0004 §9.5; updated 2026-10-06, D-54) |
 | NFR-06 | Accessibility | WCAG 2.1 AA on candidate and staff screens |
 | NFR-07 | Browser support | Chrome and Edge (latest 2 versions) for STANDARD/STRICT; Firefox and Safari blocked with a clear message |
 | NFR-08 | Resilience | A network drop of up to 60 s loses no code and no recording chunks |
