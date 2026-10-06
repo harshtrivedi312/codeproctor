@@ -1981,4 +1981,290 @@ describe('ADR 0013 CS-4.4: column allowlists and grants against Postgres (NFR-04
       expect(error).not.toBeInstanceOf(OrgScopeViolationError);
     });
   });
+
+  // -------------------------------------------------------------------------------------------------
+  // Re-review of #185, S1: the operand of a Json filter is a value
+  // -------------------------------------------------------------------------------------------------
+  describe('S1 (re-review): a compare-and-set on a stored Json document with a nested own __proto__, or nested deep, is not refused (FR-704, NFR-05)', () => {
+    const plainMessage = /query arguments must be plain objects/;
+    const json = (text: string): never => JSON.parse(text) as never;
+    /**
+     * A document with own `__proto__` keys at depth 3 and in an array. Prisma strips them on a write, so it gets
+     * into the table by raw SQL only (a migration, a support session); Prisma returns them on a read.
+     */
+    const NESTED_PROTO =
+      '{"extraTimePct":25,"notes":{"a":{"b":{"__proto__":{"x":1},"c":[{"__proto__":{"y":2}}]}}}}';
+    const deepText = (levels: number): string =>
+      '{"next":'.repeat(levels) + '{"leaf":true}' + '}'.repeat(levels);
+    const staff = <R>(fn: () => Promise<R>): Promise<R> =>
+      orgContext.runAsUser({ orgId: T.orgId, userId: T.userId, role: T.userRole }, fn);
+    const ORIGINAL = { extraTimePct: 25, who: 'a' };
+
+    type Target = 'invitations' | 'organizations' | 'sessions';
+    const COLUMN = {
+      invitations: 'accommodations',
+      organizations: 'settings',
+      sessions: 'device_info',
+    } as const;
+    /** Stores `text` as the column's jsonb through raw SQL, exactly as given (own __proto__ keys intact). */
+    const storeRaw = (table: Target, id: string, text: string): Promise<number> =>
+      owner.$executeRawUnsafe(
+        `UPDATE "${table}" SET "${COLUMN[table]}" = $1::jsonb WHERE id = $2::uuid`,
+        text,
+        id,
+      );
+    const storedText = async (table: Target, id: string): Promise<string> => {
+      const rows = await owner.$queryRawUnsafe<Array<{ t: string }>>(
+        `SELECT "${COLUMN[table]}"::text AS t FROM "${table}" WHERE id = $1::uuid`,
+        id,
+      );
+      return rows[0]?.t ?? '';
+    };
+
+    afterEach(async () => {
+      await owner.invitation.update({
+        where: { id: A.invitationId },
+        data: { accommodations: ORIGINAL },
+      });
+      await owner.organization.update({
+        where: { id: T.orgId },
+        data: { settings: { org: T.label } },
+      });
+      await owner.session.update({
+        where: { id: A.sessionId },
+        data: { deviceInfo: { who: 'a', systemCheck: { ok: true } } },
+      });
+    });
+
+    it('TC-008 precondition: raw SQL stores the own __proto__ keys, Prisma returns them, and Prisma strips them from a write', async () => {
+      await storeRaw('invitations', A.invitationId, NESTED_PROTO);
+      expect(await storedText('invitations', A.invitationId)).toContain('"__proto__"');
+      const read = await owner.invitation.findUniqueOrThrow({ where: { id: A.invitationId } });
+      const b = (read.accommodations as { notes: { a: { b: object } } }).notes.a.b;
+      expect(Object.hasOwn(b, '__proto__')).toBe(true);
+      // A write through Prisma drops them: a stored document with one never comes from the app.
+      await owner.invitation.update({
+        where: { id: A.invitationId },
+        data: { accommodations: JSON.parse(NESTED_PROTO) as never },
+      });
+      expect(await storedText('invitations', A.invitationId)).not.toContain('"__proto__"');
+    });
+
+    it('TC-008 staff scope, the retention shape, a stored document with own __proto__ keys: the compare-and-set is NOT refused, reaches Postgres once, and answers as the unextended client does (Prisma drops the keys from the operand, so it matches nothing: count 0 on both)', async () => {
+      await storeRaw('invitations', A.invitationId, NESTED_PROTO);
+      const stored = (
+        await staff(() =>
+          client.invitation.findUniqueOrThrow({
+            where: { id: A.invitationId },
+            select: { accommodations: true },
+          }),
+        )
+      ).accommodations as never;
+      const cas = (run: typeof staff, where: Row) =>
+        run(() =>
+          client.invitation.updateMany({
+            where: where,
+            data: { accommodations: { rewritten: true } },
+          }),
+        );
+      await db.statements.reset();
+      const viaScope = await cas(staff, { id: A.invitationId, accommodations: { equals: stored } });
+      expect(await statementCount()).toBe(1);
+      const viaOwner = await owner.invitation.updateMany({
+        where: { id: A.invitationId, accommodations: { equals: stored } },
+        data: { accommodations: { rewritten: true } },
+      });
+      expect(viaScope).toEqual(viaOwner);
+      expect(viaScope).toEqual({ count: 0 });
+      // The row is as it was.
+      expect(await storedText('invitations', A.invitationId)).toContain('"__proto__"');
+    });
+
+    it.each([100, 500])(
+      'TC-008 staff scope, the retention shape, a stored document %s levels deep (past the structure limit of 64): the compare-and-set matches and rewrites the row (count 1, one statement)',
+      async (levels) => {
+        await owner.invitation.update({
+          where: { id: A.invitationId },
+          data: { accommodations: JSON.parse(deepText(levels)) as never },
+        });
+        const read = await staff(() =>
+          client.invitation.findUniqueOrThrow({
+            where: { id: A.invitationId },
+            select: { accommodations: true },
+          }),
+        );
+        await db.statements.reset();
+        const won = await staff(() =>
+          client.invitation.updateMany({
+            where: { id: A.invitationId, accommodations: { equals: read.accommodations as never } },
+            data: { accommodations: { rewritten: true } },
+          }),
+        );
+        expect(won).toEqual({ count: 1 });
+        expect(await statementCount()).toBe(1);
+        expect(
+          (await owner.invitation.findUniqueOrThrow({ where: { id: A.invitationId } }))
+            .accommodations,
+        ).toEqual({ rewritten: true });
+      },
+    );
+
+    it('TC-008 staff scope, the org settings shape: organizations.settings equals the stored document, 100 levels deep (count 1) and with own __proto__ keys (not refused)', async () => {
+      await owner.organization.update({
+        where: { id: T.orgId },
+        data: { settings: JSON.parse(deepText(100)) as never },
+      });
+      const deepDoc = (
+        await staff(() =>
+          client.organization.findUniqueOrThrow({
+            where: { id: T.orgId },
+            select: { settings: true },
+          }),
+        )
+      ).settings as never;
+      expect(
+        await staff(() =>
+          client.organization.updateMany({
+            where: { id: T.orgId, settings: { equals: deepDoc } },
+            data: { settings: { org: T.label } },
+          }),
+        ),
+      ).toEqual({ count: 1 });
+      await storeRaw('organizations', T.orgId, NESTED_PROTO);
+      const protoDoc = JSON.parse(NESTED_PROTO) as never;
+      const error = await staff(() =>
+        failure(
+          client.organization.updateMany({
+            where: { id: T.orgId, settings: { equals: protoDoc } },
+            data: { settings: { org: T.label } },
+          }),
+        ),
+      );
+      expect(error).not.toBeInstanceOf(OrgScopeViolationError);
+    });
+
+    it('TC-008 every value operator takes a stored document without a refusal: equals, not, in, notIn, array_contains, array_starts_with, array_ends_with, string_contains, string_starts_with and string_ends_with, deep and with own __proto__ keys', async () => {
+      const operands = [JSON.parse(NESTED_PROTO) as never, JSON.parse(deepText(100)) as never];
+      await staff(async () => {
+        for (const operand of operands) {
+          for (const operator of [
+            'equals',
+            'not',
+            'in',
+            'notIn',
+            'array_contains',
+            'array_starts_with',
+            'array_ends_with',
+            'string_contains',
+            'string_starts_with',
+            'string_ends_with',
+          ]) {
+            // Prisma may answer or reject the operator for this document (that is its business); the scope must not.
+            const error = await failure(
+              client.invitation.count({
+                where: { id: A.invitationId, accommodations: { [operator]: operand } as never },
+              }),
+            );
+            expect({ operator, refusedByScope: error instanceof OrgScopeViolationError }).toEqual({
+              operator,
+              refusedByScope: false,
+            });
+          }
+        }
+      });
+    });
+
+    it('TC-008 candidate scope, the DeviceInfoService fence: a stored deviceInfo 100 levels deep, or holding a field-reference look-alike (also under a path 33 levels down), is compared and rewritten (count 1, one statement)', async () => {
+      const device: GrantRequest = {
+        model: 'Session',
+        columns: ['deviceInfo'],
+        ids: [A.sessionId],
+      };
+      for (const text of [
+        deepText(100),
+        '{"capabilities":[{"modelName":"Session","name":"deviceInfo","typeName":"Json","isList":false}],"x":{"modelName":"S","name":"n","typeName":"Json","isList":true}}',
+      ]) {
+        await owner.session.update({
+          where: { id: A.sessionId },
+          data: { deviceInfo: JSON.parse(text) as never },
+        });
+        const read = (await asCandidate(A, () =>
+          grant(device, () =>
+            client.session.findUniqueOrThrow({
+              where: { id: A.sessionId },
+              select: { deviceInfo: true },
+            }),
+          ),
+        )) as { deviceInfo: never };
+        await db.statements.reset();
+        const written = await asCandidate(A, () =>
+          grant(device, () =>
+            client.session.updateMany({
+              where: { id: A.sessionId, deviceInfo: { equals: read.deviceInfo } },
+              data: { deviceInfo: { merged: true } },
+            }),
+          ),
+        );
+        expect(written).toEqual({ count: 1 });
+        expect(await statementCount()).toBe(1);
+      }
+      // With own __proto__ keys in the document: not refused (Prisma then matches nothing).
+      await storeRaw('sessions', A.sessionId, NESTED_PROTO);
+      const error = await asCandidate(A, () =>
+        grant(device, () =>
+          failure(
+            client.session.updateMany({
+              where: { id: A.sessionId, deviceInfo: { equals: JSON.parse(NESTED_PROTO) as never } },
+              data: { deviceInfo: { merged: true } },
+            }),
+          ),
+        ),
+      );
+      expect(error).not.toBeInstanceOf(OrgScopeViolationError);
+    });
+
+    it('TC-008 a polluted where is still refused with the same document in it, in the staff and job scopes, and nothing is sent: the wrapper, the filter object, an AND and the top-level args', async () => {
+      await storeRaw('invitations', A.invitationId, NESTED_PROTO);
+      const doc = NESTED_PROTO;
+      await db.statements.reset();
+      for (const make of [
+        // the where object itself carries an own __proto__
+        () =>
+          client.invitation.updateMany(
+            json(
+              `{"where":{"id":"${A.invitationId}","accommodations":{"equals":${doc}},"__proto__":{"a":1}},"data":{"accommodations":{"x":1}}}`,
+            ),
+          ),
+        // the Json filter object carries one (only its operand is a value)
+        () =>
+          client.invitation.updateMany(
+            json(
+              `{"where":{"id":"${A.invitationId}","accommodations":{"equals":${doc},"__proto__":{"a":1}}},"data":{"accommodations":{"x":1}}}`,
+            ),
+          ),
+        // an AND next to the Json filter
+        () =>
+          client.invitation.updateMany(
+            json(
+              `{"where":{"AND":[{"accommodations":{"equals":${doc}}},{"__proto__":{"a":1}}]},"data":{"accommodations":{"x":1}}}`,
+            ),
+          ),
+        // the top-level args
+        () =>
+          client.invitation.updateMany(
+            json(
+              `{"where":{"id":"${A.invitationId}","accommodations":{"equals":${doc}}},"data":{"accommodations":{"x":1}},"__proto__":{"select":{"id":true}}}`,
+            ),
+          ),
+      ]) {
+        for (const run of [staff, (fn: () => Promise<unknown>) => asService(A, fn)]) {
+          const error = await run(() => failure(make()));
+          expect(error).toBeInstanceOf(OrgScopeViolationError);
+          expect((error as Error).message).toMatch(plainMessage);
+        }
+      }
+      expect(await statementCount()).toBe(0);
+      expect(await storedText('invitations', A.invitationId)).toContain('"__proto__"');
+    });
+  });
 });

@@ -46,7 +46,7 @@ import { Prisma } from '../generated/prisma/client.js';
 import { deepFreeze } from './deep-freeze';
 import { OrgScopeViolationError } from './errors';
 import type { ModelName } from './org-scope-map';
-import { isFieldRef, ownValue } from './plain-args';
+import { isFieldRef, JSON_COLUMNS, JSON_VALUE_OPERATORS, ownValue } from './plain-args';
 import type { GrantView } from './session-scope-map';
 
 // Moved to plain-args.ts (the hook needs it too); the specs and the guard import it from here.
@@ -275,6 +275,13 @@ function refuse(model: string, operation: string, field: string, where: string) 
  * Refuses a field reference anywhere in a `where` or a `having`, through every operator and every
  * nesting (`equals`, `in`, `not: { lt }`, `AND`, `OR`, `NOT`, arrays). Pure, no query. A value that is
  * a Date or a byte array is a leaf. Arrays and objects count toward the depth.
+ *
+ * The operand of a Json filter on a Json column of `owner` (`equals`, `not`, `in`, `notIn`, `array_*`,
+ * `string_*`) is a stored document, a VALUE: it is not walked (a document deeper than the limit, or one that
+ * holds an object that looks like a field reference, would refuse the compare-and-set of the device-info
+ * fence for ever; review of #185, S1), but the operand ITSELF may not be a field reference. `owner` is the
+ * model the `where` filters, and is dropped (nothing exempt) below anything but AND, OR and NOT. A document
+ * shaped exactly like a field reference at its top level cannot be told from one, so it is refused.
  */
 function assertNoFieldRefs(
   model: ModelName,
@@ -282,6 +289,7 @@ function assertNoFieldRefs(
   value: unknown,
   place: string,
   depth: number,
+  owner?: ModelName,
 ): void {
   if (isFieldRef(value)) {
     throw new OrgScopeViolationError(
@@ -293,8 +301,39 @@ function assertNoFieldRefs(
   if (typeof value !== 'object' || value === null) return;
   if (value instanceof Date || ArrayBuffer.isView(value)) return;
   if (depth > MAX_DEPTH) throw tooDeep(model, operation, `a ${place}`);
-  const inner = Array.isArray(value) ? value : Object.values(value);
-  for (const item of inner) assertNoFieldRefs(model, operation, item, place, depth + 1);
+  if (Array.isArray(value)) {
+    for (const item of value) assertNoFieldRefs(model, operation, item, place, depth + 1, owner);
+    return;
+  }
+  for (const [key, inner] of Object.entries(value) as Array<[string, unknown]>) {
+    if (owner !== undefined && (key === 'AND' || key === 'OR' || key === 'NOT')) {
+      assertNoFieldRefs(model, operation, inner, place, depth + 1, owner);
+    } else if (
+      owner !== undefined &&
+      JSON_COLUMNS[owner]?.includes(key) === true &&
+      typeof inner === 'object' &&
+      inner !== null &&
+      !Array.isArray(inner) &&
+      !isFieldRef(inner)
+    ) {
+      for (const [operator, operand] of Object.entries(inner) as Array<[string, unknown]>) {
+        if (JSON_VALUE_OPERATORS.has(operator)) {
+          // The document is a value; only the operand itself may not be a field reference.
+          assertNoFieldRefs(
+            model,
+            operation,
+            isFieldRef(operand) ? operand : null,
+            place,
+            depth + 1,
+          );
+        } else {
+          assertNoFieldRefs(model, operation, operand, place, depth + 2);
+        }
+      }
+    } else {
+      assertNoFieldRefs(model, operation, inner, place, depth + 1);
+    }
+  }
 }
 
 // A where nests AND, OR and NOT, and arrays. Anything beyond this is refused, as in candidate-relations.ts.
@@ -459,8 +498,8 @@ export function assertCandidateColumns(
   }
 
   // 2. The read list in every place a column can be filtered or ordered on.
-  assertNoFieldRefs(model, operation, given('where'), 'where', 0);
-  assertNoFieldRefs(model, operation, given('having'), 'having', 0);
+  assertNoFieldRefs(model, operation, given('where'), 'where', 0, model);
+  assertNoFieldRefs(model, operation, given('having'), 'having', 0, model);
   const where = new Set<string>();
   whereFields(model, operation, given('where'), where, 0);
   check(where, 'where');

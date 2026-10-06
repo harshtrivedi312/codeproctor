@@ -25,15 +25,71 @@
 // args object or as a structure object. Dates, byte arrays, Decimals, the Json null sentinels and field
 // references are values, not structure, and are skipped.
 //
+// The operand of a Json filter is a VALUE, not structure (review of #185, S1): `where: { accommodations: {
+// equals: stored } }` is a compare-and-set (retention, the org settings, the device-info fence), and `stored`
+// is a document that the database returned, which may hold an own `__proto__` key at any depth or be nested
+// deeper than the structure limit (writes check two levels only). Prisma serialises that operand as JSON and
+// never reads it as structure, so the walk does not enter it: for a column of JSON_COLUMNS (the schema's Json
+// columns, checked against the generated client by a spec), the operand of `equals`, `not`, `in`, `notIn`,
+// `array_*` and `string_*` is skipped. Everything else keeps walking, including the filter object itself and
+// a `path`. The `where` and `having` of a call are walked model by model (AND, OR, NOT and a relation filter
+// follow the relation to its model); a `where` nested in a `select` or `include` has no model here and is
+// walked whole, so a polluted Json operand there is refused (fail closed).
+//
 // The checks that read `select`, `omit`, `where`, `data` and the rest also read through ownValue(), so a key
 // that is not the caller's own is never seen (defence in depth against a polluted Object.prototype).
 import { Prisma } from '../generated/prisma/client.js';
+import { deepFreeze } from './deep-freeze';
 import { OrgScopeViolationError } from './errors';
+import type { ModelName } from './org-scope-map';
+import { relationOf } from './org-scope-relations';
 
 type PlainObject = Record<string, unknown>;
 
 /** The deepest structure object (where, orderBy, ...) the walk follows; beyond it the call is refused. */
 export const MAX_STRUCTURE_DEPTH = 64;
+
+/**
+ * The Json columns of the schema, by Prisma model and field name (`type Json` in prisma/schema.prisma). The
+ * operand of a filter on one of them is a value, not structure (see the header). A spec compares this table
+ * with the generated client's own metadata, so a Json column that a migration adds fails the build until it
+ * is listed here; until then its operand is walked, which refuses and never lets anything through.
+ */
+export const JSON_COLUMNS: Readonly<Partial<Record<ModelName, readonly string[]>>> = deepFreeze({
+  Organization: ['settings'],
+  AuditLog: ['metadata'],
+  QuestionVersion: ['limits', 'starterCode', 'referenceSolution', 'answerSpec', 'validationReport'],
+  QuestionVariant: ['params'],
+  Test: ['settings'],
+  TestQuestion: ['randomRule'],
+  Invitation: ['accommodations'],
+  Session: ['deviceInfo'],
+  SessionQuestion: ['answer'],
+  Submission: ['results'],
+  ProctorEvent: ['payload'],
+  KeystrokeBatch: ['events'],
+});
+
+/**
+ * The operators of a Json filter whose operand is a value: the equality and list operators, and the array and
+ * string operators that Prisma documents for Json (`path` and `mode` are structure and are still walked).
+ */
+export const JSON_VALUE_OPERATORS: ReadonlySet<string> = new Set([
+  'equals',
+  'not',
+  'in',
+  'notIn',
+  'array_contains',
+  'array_starts_with',
+  'array_ends_with',
+  'string_contains',
+  'string_starts_with',
+  'string_ends_with',
+]);
+
+const LOGICAL_KEYS: ReadonlySet<string> = new Set(['AND', 'OR', 'NOT']);
+/** The keys of a relation filter; they wrap a where of the same (related) model. */
+const RELATION_FILTER_KEYS: ReadonlySet<string> = new Set(['some', 'every', 'none', 'is', 'isNot']);
 
 /**
  * The value of `key` when `object` OWNS it, else undefined: an inherited key is never read. Use it wherever a
@@ -169,6 +225,66 @@ function walkStructure(
     walkStructure(model, operation, inner, place, depth + 1);
 }
 
+/** The operators of a Json filter: the operand of a value operator is skipped, the rest is walked. */
+function walkJsonFilter(
+  model: string,
+  operation: string,
+  filter: unknown,
+  place: string,
+  depth: number,
+): void {
+  if (typeof filter !== 'object' || filter === null || isValueObject(filter)) return;
+  if (Array.isArray(filter)) {
+    walkStructure(model, operation, filter, place, depth);
+    return;
+  }
+  checkObject(model, operation, filter, place, true);
+  for (const [operator, operand] of Object.entries(filter)) {
+    if (JSON_VALUE_OPERATORS.has(operator)) continue; // a JSON document (or a field reference): a value
+    walkStructure(model, operation, operand, place, depth + 1);
+  }
+}
+
+/**
+ * A `where` or a `having`, model by model: AND, OR and NOT, a relation filter (to the related model) and a Json
+ * column filter are told apart; any other key (a scalar filter, an unknown key) is walked as structure.
+ * `owner` is the model the where filters, or `undefined` when it is not known (then nothing is exempt).
+ */
+function walkWhere(
+  model: string,
+  operation: string,
+  where: unknown,
+  place: string,
+  depth: number,
+  owner: ModelName | undefined,
+): void {
+  if (typeof where !== 'object' || where === null || isValueObject(where)) return;
+  if (depth > MAX_STRUCTURE_DEPTH) {
+    throw refusal(
+      model,
+      operation,
+      place,
+      `a structure nested more than ${MAX_STRUCTURE_DEPTH} levels`,
+    );
+  }
+  if (Array.isArray(where)) {
+    for (const item of where) walkWhere(model, operation, item, place, depth + 1, owner);
+    return;
+  }
+  checkObject(model, operation, where, place, true);
+  for (const [key, inner] of Object.entries(where)) {
+    if (LOGICAL_KEYS.has(key) || RELATION_FILTER_KEYS.has(key)) {
+      walkWhere(model, operation, inner, place, depth + 1, owner);
+    } else if (owner !== undefined && JSON_COLUMNS[owner]?.includes(key) === true) {
+      walkJsonFilter(model, operation, inner, place, depth + 1);
+    } else if (owner !== undefined && relationOf(owner, key) !== undefined) {
+      walkWhere(model, operation, inner, place, depth + 1, relationOf(owner, key)?.target);
+    } else {
+      walkStructure(model, operation, inner, place, depth + 1);
+    }
+  }
+}
+
 /** The row(s) of a write and one level below each column. JSON contents are not walked. */
 function walkData(model: string, operation: string, value: unknown, place: string): void {
   if (Array.isArray(value)) {
@@ -199,8 +315,10 @@ const WRITE_KEYS = ['data', 'create', 'update'] as const;
 export function assertPlainArgs(model: string, operation: string, args: unknown): void {
   if (typeof args !== 'object' || args === null || Array.isArray(args)) return;
   checkObject(model, operation, args, 'the arguments', true);
+  const owner = Object.hasOwn(Prisma.ModelName, model) ? (model as ModelName) : undefined;
   for (const [key, value] of Object.entries(args)) {
     if ((WRITE_KEYS as readonly string[]).includes(key)) walkData(model, operation, value, key);
+    else if (key === 'where' || key === 'having') walkWhere(model, operation, value, key, 0, owner);
     else walkStructure(model, operation, value, key, 0);
   }
 }

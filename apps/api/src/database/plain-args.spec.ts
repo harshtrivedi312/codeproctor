@@ -15,6 +15,8 @@ import { createOrgScopedClient } from './org-scope.extension';
 import {
   assertPlainArgs,
   isPlainPrototype,
+  JSON_COLUMNS,
+  JSON_VALUE_OPERATORS,
   MAX_STRUCTURE_DEPTH,
   ownArgs,
   ownValue,
@@ -23,6 +25,7 @@ import { applyOrgScope } from './org-scope-args';
 import { ORG_SCOPE } from './org-scope-map';
 import { applySessionScope } from './session-scope-args';
 import { Prisma } from '../generated/prisma/client.js';
+import { readModelMetas } from './testing/data-model';
 
 const ORG = '11111111-1111-4111-8111-111111111111';
 const SID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1';
@@ -93,7 +96,8 @@ describe('plain-args: the pure check (review of #185, B1; NFR-04, TC-008)', () =
         { NOT: { AND: [[bad]] } },
         { sessions: { some: bad } },
         { id: { not: { not: bad } } },
-        { deviceInfo: { path: ['a'], equals: bad } },
+        { deviceInfo: { path: [bad], equals: 1 } },
+        { status: { equals: bad } },
       ]) {
         expect(() => plain({ where })).toThrow(refused);
       }
@@ -356,6 +360,244 @@ describe('plain-args: the column check read straight (no own-key copy in front o
     expect(Object.hasOwn(Object.prototype, 'select')).toBe(false);
   });
 });
+
+describe('plain-args: the operand of a Json filter is a value, not structure (re-review of #185, S1; FR-704, NFR-05, NFR-04, TC-008)', () => {
+  /** A stored document (what the database returns, or JSON.parse makes) with an own __proto__ at several depths. */
+  const stored = (): unknown =>
+    json(
+      '{"extraTimePct":25,"notes":{"a":{"b":{"__proto__":{"x":1},"c":[{"__proto__":{"y":2}}]}}},"__proto__":{"top":true}}',
+    );
+  const deep = (levels: number): unknown => {
+    let value: unknown = { leaf: true };
+    for (let i = 0; i < levels; i++) value = { next: value };
+    return value;
+  };
+  const operands = (): Array<[string, unknown]> => [
+    ['own __proto__ at depth 0, 3 and in an array', stored()],
+    ['100 levels deep', deep(100)],
+    ['100000 levels deep', deep(100_000)],
+    ['an array of stored documents', [stored(), deep(100)]],
+    [
+      'a document that looks like a field reference',
+      {
+        modelName: 'Session',
+        name: 'deviceInfo',
+        typeName: 'Json',
+        isList: false,
+      },
+    ],
+    [
+      'a class instance with an inherited enumerable key',
+      Object.create({ inherited: 1 }) as object,
+    ],
+    ['null', null],
+  ];
+  const jsonColumns = Object.entries(JSON_COLUMNS).flatMap(([model, columns]) =>
+    (columns ?? []).map((column) => [model, column] as const),
+  );
+
+  it('TC-008 JSON_COLUMNS is exactly the Json columns of the schema, as the generated client reports them (a new Json column fails here until it is listed)', async () => {
+    const metas = await readModelMetas();
+    const fromSchema: Record<string, string[]> = {};
+    for (const [model, meta] of Object.entries(metas)) {
+      const columns = meta.fields
+        .filter((f) => f.kind === 'scalar' && f.type === 'Json')
+        .map((f) => f.name)
+        .sort();
+      if (columns.length > 0) fromSchema[model] = columns;
+    }
+    expect(
+      Object.fromEntries(
+        Object.entries(JSON_COLUMNS).map(([model, columns]) => [
+          model,
+          [...(columns ?? [])].sort(),
+        ]),
+      ),
+    ).toEqual(fromSchema);
+    expect(Object.keys(JSON_COLUMNS).length).toBe(12);
+    expect(Object.isFrozen(JSON_COLUMNS.Session)).toBe(true);
+  });
+
+  it('TC-008 the value operators are exactly the ten of the review', () => {
+    expect([...JSON_VALUE_OPERATORS].sort()).toEqual(
+      [
+        'array_contains',
+        'array_ends_with',
+        'array_starts_with',
+        'equals',
+        'in',
+        'not',
+        'notIn',
+        'string_contains',
+        'string_ends_with',
+        'string_starts_with',
+      ].sort(),
+    );
+  });
+
+  it.each(jsonColumns)(
+    'TC-008 %s.%s: every value operator takes a stored document with own __proto__ keys, one nested past the limit, and the other odd operands, in a where and a having',
+    (model, column) => {
+      for (const operator of JSON_VALUE_OPERATORS) {
+        for (const [label, operand] of operands()) {
+          for (const place of ['where', 'having']) {
+            expect({
+              model,
+              column,
+              operator,
+              label,
+              place,
+              ok: passes(() =>
+                assertPlainArgs(model, 'updateMany', {
+                  [place]: { id: 'x', [column]: { [operator]: operand } },
+                  data: {},
+                }),
+              ),
+            }).toEqual({ model, column, operator, label, place, ok: true });
+          }
+        }
+      }
+    },
+  );
+
+  it('TC-008 the compare-and-set of retention and the org settings, as written: { equals: stored } next to the id, with a deep or polluted document', () => {
+    for (const operand of [stored(), deep(200)]) {
+      expect(() =>
+        assertPlainArgs('Invitation', 'updateMany', {
+          where: { id: 'x', accommodations: { equals: operand } },
+          data: { accommodations: { a: 1 } },
+        }),
+      ).not.toThrow();
+      expect(() =>
+        assertPlainArgs('Organization', 'updateMany', {
+          where: { id: 'x', settings: { equals: operand } },
+          data: { settings: { a: 1 } },
+        }),
+      ).not.toThrow();
+    }
+    // Prisma.JsonNull and DbNull are values already.
+    expect(() =>
+      assertPlainArgs('Organization', 'updateMany', {
+        where: { id: 'x', settings: { equals: Prisma.JsonNull } },
+        data: {},
+      }),
+    ).not.toThrow();
+  });
+
+  it('TC-008 the exemption holds under AND, OR, NOT, arrays and through a relation filter to the related model', () => {
+    const operand = stored();
+    for (const where of [
+      { AND: [{ id: 'x' }, { deviceInfo: { equals: operand } }] },
+      { OR: [{ NOT: { deviceInfo: { not: operand } } }] },
+      { NOT: [{ deviceInfo: { in: [operand] } }] },
+    ]) {
+      expect(() => assertPlainArgs('Session', 'findMany', { where })).not.toThrow();
+    }
+    // Invitation -> sessions (to many) and Session -> invitation (to one): the related model's Json columns.
+    for (const where of [
+      { sessions: { some: { deviceInfo: { equals: operand } } } },
+      { sessions: { every: { AND: [{ deviceInfo: { string_contains: 'x' } }] } } },
+      { sessions: { none: { deviceInfo: { equals: operand } } } },
+    ]) {
+      expect(() => assertPlainArgs('Invitation', 'findMany', { where })).not.toThrow();
+    }
+    expect(() =>
+      assertPlainArgs('Session', 'findMany', {
+        where: { invitation: { is: { accommodations: { equals: operand } } } },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertPlainArgs('Session', 'findMany', {
+        where: { invitation: { accommodations: { equals: operand } } },
+      }),
+    ).not.toThrow();
+  });
+
+  it('TC-008 everything else is still walked: the filter object, a path, a mode, a non-Json column, a column of another model, an operator off the list, an unknown model', () => {
+    const polluted = json('{"a":{"__proto__":{"x":1}}}');
+    const refusedArgs: Array<[string, string, unknown]> = [
+      // the filter object itself
+      ['Session', 'findMany', { where: { deviceInfo: json('{"equals":1,"__proto__":{"x":1}}') } }],
+      ['Session', 'findMany', { where: { deviceInfo: Object.create({ equals: 1 }) as object } }],
+      // path and mode and any operator that is not a value operator
+      ['Session', 'findMany', { where: { deviceInfo: { path: [polluted], equals: 1 } } }],
+      ['Session', 'findMany', { where: { deviceInfo: { mode: polluted, equals: 1 } } }],
+      ['Session', 'findMany', { where: { deviceInfo: { gt: polluted } } }],
+      ['Session', 'findMany', { where: { deviceInfo: { unknownOperator: polluted } } }],
+      // a column of the model that is not Json
+      ['Session', 'findMany', { where: { status: { equals: polluted } } }],
+      ['Session', 'findMany', { where: { id: { not: polluted } } }],
+      // the Json column of ANOTHER model: invitations.accommodations is not a Session column
+      ['Session', 'findMany', { where: { accommodations: { equals: polluted } } }],
+      ['Test', 'findMany', { where: { deviceInfo: { equals: polluted } } }],
+      // a model the table does not know: nothing is exempt
+      ['NotAModel', 'findMany', { where: { deviceInfo: { equals: polluted } } }],
+      // a relation filter to a model that has no such Json column
+      [
+        'Invitation',
+        'findMany',
+        { where: { sessions: { some: { accommodations: { equals: polluted } } } } },
+      ],
+      // a where nested in a select or an include has no model here: walked whole (fail closed)
+      [
+        'Invitation',
+        'findMany',
+        { select: { sessions: { where: { deviceInfo: { equals: polluted } } } } },
+      ],
+      // a polluted wrapper
+      ['Session', 'findMany', { where: json('{"id":"x","__proto__":{"a":1}}') }],
+      ['Session', 'findMany', { where: { AND: [json('{"__proto__":{"a":1}}')] } }],
+      ['Session', 'findMany', { having: json('{"__proto__":{"a":1}}') }],
+      ['Session', 'findMany', json('{"where":{"id":"x"},"__proto__":{"select":{"id":true}}}')],
+    ];
+    for (const [model, operation, args] of refusedArgs) {
+      expect({
+        model,
+        args: JSON.stringify(args).slice(0, 60),
+        refused: !passes(() => assertPlainArgs(model, operation, args)),
+      }).toEqual({
+        model,
+        args: JSON.stringify(args).slice(0, 60),
+        refused: true,
+      });
+    }
+  });
+
+  it('TC-008 a field reference as the operand is a value for plain-args (the candidate scope refuses it on its own), and a document with a look-alike inside is not one', () => {
+    const client = createPrismaClient('postgresql://nobody:nothing@127.0.0.1:1/none');
+    try {
+      const ref = (client as unknown as { session: { fields: Record<string, unknown> } }).session
+        .fields.deviceInfo;
+      expect(ref).toBeDefined();
+      expect(() =>
+        assertPlainArgs('Session', 'findMany', { where: { deviceInfo: { equals: ref } } }),
+      ).not.toThrow();
+    } finally {
+      void client.$disconnect();
+    }
+  });
+
+  it('TC-008 the depth limit still applies to the structure around the operand, and a 100000-level operand costs nothing', () => {
+    let where: unknown = { deviceInfo: { equals: deep(100_000) } };
+    for (let i = 0; i < 100; i++) where = { NOT: where };
+    expect(() => assertPlainArgs('Session', 'findMany', { where })).toThrow(
+      /nested more than 64 levels/,
+    );
+    const started = process.hrtime.bigint();
+    assertPlainArgs('Session', 'findMany', { where: { deviceInfo: { equals: deep(100_000) } } });
+    expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(100);
+  });
+});
+
+/** True when `fn` does not throw (a refusal is false), for tables of cases. */
+function passes(fn: () => void): boolean {
+  try {
+    fn();
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 describe('plain-args: through the real client, in every scope (review of #185, B1; NFR-04, TC-008)', () => {
   const orgContext = new OrgContextService();

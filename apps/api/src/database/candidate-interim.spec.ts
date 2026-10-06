@@ -2430,6 +2430,137 @@ describe('B2 round 4: sealed identity keys, Crockford ULIDs, the MediaStream enu
   });
 });
 
+describe('the operand of a Json filter is a value in a candidate where too (re-review of #185, S1: the device-info fence; NFR-04, TC-008)', () => {
+  const base = createPrismaClient('postgresql://nobody:nothing@127.0.0.1:1/none');
+  afterAll(async () => {
+    await base.$disconnect();
+  });
+  const DEVICE = grantOf('DeviceInfoService', [SID]);
+  const deep = (levels: number): unknown => {
+    let value: unknown = { leaf: true };
+    for (let i = 0; i < levels; i++) value = { next: value };
+    return value;
+  };
+  const lookAlike = { modelName: 'Session', name: 'deviceInfo', typeName: 'Json', isList: false };
+  /** The DeviceInfoService fence: a conditional updateMany whose where holds the document that was read. */
+  const fence = (equals: unknown, operator = 'equals') =>
+    asCandidate(
+      'Session',
+      'updateMany',
+      {
+        where: { id: SID, deviceInfo: { [operator]: equals } },
+        data: { deviceInfo: { merged: true } },
+      },
+      DEVICE,
+    );
+  const deviceInfoRef = (): unknown =>
+    (base as unknown as { session: { fields: Record<string, unknown> } }).session.fields.deviceInfo;
+
+  it('TC-008 a stored document deeper than the limit of 32, or holding a field-reference look-alike, is a value: the fence passes', () => {
+    for (const operand of [
+      deep(100),
+      deep(100_000),
+      { capabilities: [lookAlike, { nested: lookAlike }], inner: lookAlike },
+      [deep(50)],
+      null,
+    ]) {
+      for (const operator of [
+        'equals',
+        'not',
+        'in',
+        'notIn',
+        'array_contains',
+        'array_starts_with',
+        'array_ends_with',
+        'string_contains',
+        'string_starts_with',
+        'string_ends_with',
+      ]) {
+        expect({ operator, ok: tryCall(() => fence(operand, operator)) }).toEqual({
+          operator,
+          ok: true,
+        });
+      }
+    }
+  });
+
+  it('TC-008 an operand that IS a field reference, or is shaped exactly like one at its top level, is refused (it cannot be told from one)', () => {
+    expect(() => fence(lookAlike)).toThrow(/a field reference \(client/);
+  });
+
+  it('TC-008 a field reference AS the operand is still refused, for every value operator, in a where and a having', () => {
+    for (const operator of ['equals', 'not', 'in', 'array_contains', 'string_contains']) {
+      expect(() => fence(deviceInfoRef(), operator)).toThrow(/a field reference \(client/);
+    }
+    expect(() =>
+      asCandidate(
+        'Session',
+        'groupBy',
+        {
+          by: ['status'],
+          having: { deviceInfo: { equals: deviceInfoRef() } },
+        },
+        DEVICE,
+      ),
+    ).toThrow(/a field reference \(client/);
+    // A bare filter value that IS a reference, and a reference in an AND, are refused too.
+    expect(() =>
+      asCandidate(
+        'Session',
+        'findMany',
+        { where: { deviceInfo: deviceInfoRef() }, select: { id: true } },
+        DEVICE,
+      ),
+    ).toThrow(/a field reference \(client/);
+    expect(() =>
+      asCandidate(
+        'Session',
+        'findMany',
+        { where: { AND: [{ deviceInfo: { equals: deviceInfoRef() } }] }, select: { id: true } },
+        DEVICE,
+      ),
+    ).toThrow(/a field reference \(client/);
+  });
+
+  it('TC-008 everything else is still walked: a path, a mode and another operator, a non-Json column, and a Json column that is not on the grant', () => {
+    expect(() =>
+      asCandidate(
+        'Session',
+        'findMany',
+        { where: { deviceInfo: { path: [deep(40)], equals: 1 } }, select: { id: true } },
+        DEVICE,
+      ),
+    ).toThrow(/nested more than 32 levels deep/);
+    expect(() =>
+      asCandidate(
+        'Session',
+        'findMany',
+        { where: { deviceInfo: { gt: lookAlike } }, select: { id: true } },
+        DEVICE,
+      ),
+    ).toThrow(/a field reference \(client/);
+    expect(() =>
+      asCandidate('Session', 'findMany', {
+        where: { status: { equals: deep(40) } },
+        select: { id: true },
+      }),
+    ).toThrow(/nested more than 32 levels deep/);
+    expect(() =>
+      asCandidate('Session', 'findMany', {
+        where: { authEpoch: { not: lookAlike } },
+        select: { id: true },
+      }),
+    ).toThrow(/a field reference \(client/);
+    // The read allowlist is untouched: the Json column needs its grant to be named at all.
+    expect(() =>
+      asCandidate('Session', 'findMany', {
+        where: { deviceInfo: { equals: deep(100) } },
+        select: { id: true },
+      }),
+    ).toThrow(/the column deviceInfo is not available/);
+  });
+});
+
 describe('CS-4.4 consents: ONE create under the ConsentService grant (item 9, ADR 0013 PR #178; FR-401, C-17; NFR-04, TC-008)', () => {
   const CTID = 'cccccccc-cccc-4ccc-8ccc-ccccccccccc1';
   const OTHER_SESSION = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2';
