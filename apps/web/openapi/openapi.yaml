@@ -734,9 +734,9 @@ paths:
               schema: { $ref: '#/components/schemas/ApiError' }
   # ---------------------------------------------------------------------------------------------
   # Question bank (FR-201..FR-205, FE-04). Routes marked REAL mirror BE-04a (PR #146,
-  # apps/api/src/questions). Routes marked WEB-ONLY have no counterpart in the API yet: they are web
-  # placeholders for BE-04b (variants, prefill) and BE-04c (validate job, AI reference solutions)
-  # and are listed in docs/followups/frontend.md. Readers: SUPER_ADMIN, RECRUITER, AUTHOR. Writers:
+  # apps/api/src/questions). Routes marked WEB-ONLY have no counterpart in the API yet and are
+  # listed in docs/followups/frontend.md. Variants are REAL since BE-04b; validate and AI references
+  # are still the web placeholders until the BE-04c sync. Readers: SUPER_ADMIN, RECRUITER, AUTHOR. Writers:
   # SUPER_ADMIN, AUTHOR. 404 is identical for missing, cross-org and (for readers without
   # question:update) unpublished questions. 409 and 422 carry detail and errors[] only, no code.
   # ---------------------------------------------------------------------------------------------
@@ -1051,61 +1051,246 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
-  # ---- WEB-ONLY placeholders: the API has no such route yet -------------------------------------
-  /v1/questions/{questionId}/variants:
+  # ---- Variants (REAL, BE-04b): question:update except the candidate-shaped preview -------------
+  /v1/questions/{questionId}/versions/{version}/variants:
     parameters:
       - name: questionId
         in: path
         required: true
         schema: { type: string }
       - name: version
-        in: query
+        in: path
+        required: true
         schema: { type: integer, minimum: 1 }
     get:
-      operationId: getVariants
-      summary: WEB-ONLY placeholder [BE-04b] (ADR 0007, explicit params per variant). Variants of a version, question:update only.
+      operationId: listVariants
+      summary: REAL. The variants of a version with params and per-slot overrides, plus the version revision (question:update). The writer detail carries the same variants in version.variants.
       responses:
         '200':
-          description: Variants
+          description: Variants and the revision to send back as expectedRevision
           content:
             application/json:
               schema: { $ref: '#/components/schemas/VariantList' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
-          description: Not found
+          description: No such question or version in your organization
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
-    put:
-      operationId: putVariants
-      summary: WEB-ONLY placeholder [BE-04b]. Replace the variants of the latest draft version.
+    post:
+      operationId: createVariant
+      summary: REAL. Add a variant to a draft version (question:update). Every {{placeholder}} of the statement, starter code and reference solution of an ACTIVE variant needs a param (400 otherwise). At most 50 per version.
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/VariantList' }
+            schema: { $ref: '#/components/schemas/CreateVariant' }
       responses:
-        '200':
-          description: Saved
+        '201':
+          description: Created
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/VariantList' }
+              schema: { $ref: '#/components/schemas/VariantMutation' }
         '400':
-          description: Invalid
+          description: Validation failed or a placeholder has no param
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
-          description: Not found
+          description: No such question or version in your organization
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: The version is published (immutable), or the question is archived
+          description: The version is published (immutable), the question is archived, or expectedRevision is stale
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: Not a coding question, or too many variants
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /v1/questions/{questionId}/versions/{version}/variants/{variantId}:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+      - name: version
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+      - name: variantId
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      operationId: updateVariant
+      summary: REAL. Change the params or the active flag of a variant of a draft (question:update). An empty body is 400.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateVariant' }
+      responses:
+        '200':
+          description: Changed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VariantMutation' }
+        '400':
+          description: Validation failed, a placeholder has no param, or no field sent
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such question, version or variant in your organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: The version is published (immutable), the question is archived, or expectedRevision is stale
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    delete:
+      operationId: removeVariant
+      summary: REAL. Remove a variant and its overrides from a draft (question:update). The revision check is a query parameter.
+      parameters:
+        - name: expectedRevision
+          in: query
+          schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+      responses:
+        '204':
+          description: Removed
+        '400':
+          description: Invalid expectedRevision
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such question, version or variant in your organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: The version is published (immutable), the question is archived, or expectedRevision is stale
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /v1/questions/{questionId}/versions/{version}/variants/{variantId}/preview:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+      - name: version
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+      - name: variantId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: previewVariant
+      summary: >-
+        REAL. The candidate-shaped view of one variant: rendered statement and starter code, its
+        own sample cases, no params, hidden data, reference solution or answer spec (question:read).
+        Without question:update only published versions and active variants are visible (404
+        otherwise). A variant that does not render is 422 with reasons for a writer and a plain 422
+        for others.
+      responses:
+        '200':
+          description: The candidate view
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CandidateQuestionPreview' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such question, version or variant in your organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: The variant does not render
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /v1/questions/{questionId}/versions/{version}/variants/{variantId}/test-cases/{testCaseId}:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+      - name: version
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+      - name: variantId
+        in: path
+        required: true
+        schema: { type: string }
+      - name: testCaseId
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      operationId: setVariantOverride
+      summary: REAL. Override the input and expected output of one test slot for a variant (question:update). The slot must belong to the same version; its hidden flag and weight stay the slot's. Returns the override only, not a revision.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OverrideInput' }
+      responses:
+        '200':
+          description: The override
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VariantOverride' }
+        '400':
+          description: Validation failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such question, version, variant or test slot in your organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: The version is published (immutable), the question is archived, or expectedRevision is stale
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    delete:
+      operationId: removeVariantOverride
+      summary: REAL. Remove an override; the slot's own input and output apply again (question:update).
+      parameters:
+        - name: expectedRevision
+          in: query
+          schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+      responses:
+        '204':
+          description: Removed
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such question, version, variant or override in your organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: The version is published (immutable), the question is archived, or expectedRevision is stale
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  # ---- WEB-ONLY placeholders: the API has no such route yet -------------------------------------
   /v1/questions/{questionId}/prefill:
     parameters:
       - name: questionId
@@ -1114,7 +1299,7 @@ paths:
         schema: { type: string }
     post:
       operationId: prefillVariantOutputs
-      summary: WEB-ONLY placeholder [BE-04b/c]. Run the reference solution on a variant's inputs and PROPOSE expected outputs (ADR 0007). Nothing is stored; the author must accept the proposals.
+      summary: WEB-ONLY placeholder (BE-04b did not add a prefill route; ADR 0007 helper). Run the reference solution on a variant's inputs and PROPOSE expected outputs (ADR 0007). Nothing is stored; the author must accept the proposals.
       requestBody:
         required: true
         content:
@@ -1495,6 +1680,7 @@ components:
               validationReport,
               revision,
               testCases,
+              variants,
             ]
           properties:
             statementMd: { type: string, maxLength: 50000 }
@@ -1514,9 +1700,14 @@ components:
               type: string
               pattern: '^[0-9a-f]{64}$'
               description: >-
-                Opaque SHA-256 of the version content and test cases (question:update only). Send it
-                back as expectedRevision; it changes with every content or test-case change.
+                Opaque SHA-256 of the version content, test cases and variants with their overrides
+                (question:update only). Send it back as expectedRevision; it changes with every
+                content, test-case, variant or override change.
             testCases: { type: array, items: { $ref: '#/components/schemas/TestCase' } }
+            variants:
+              type: array
+              description: Variants with params and overrides (writers only; a reader never gets this key).
+              items: { $ref: '#/components/schemas/Variant' }
     QuestionVersionRead:
       type: object
       additionalProperties: false
@@ -1660,31 +1851,114 @@ components:
         errors: { type: array, items: { type: string } }
     VariantOverride:
       type: object
-      required: [testCaseId, input, expectedOutput]
+      description: One test slot's input and expected output for a variant. isHidden and position come from the slot.
+      required: [testCaseId, isHidden, position, input, expectedOutput]
       properties:
         testCaseId: { type: string }
+        isHidden: { type: boolean }
+        position: { type: integer, minimum: 0 }
         input: { type: string }
         expectedOutput: { type: string }
     Variant:
       type: object
-      description: WEB-ONLY placeholder [BE-04b]. Explicit params per variant (ADR 0007), no parameter schema.
-      required: [id, label, params, active, overrides]
+      description: >-
+        An explicit variant (ADR 0007). It has NO label or name: the UI names it by its place in the
+        list and its params. renderedStatement is the statement rendered with params, kept for the
+        author. Variants are sorted by id, which is NOT a meaningful order, and a fork gives every
+        variant a new id.
+      required: [id, isActive, params, renderedStatement, testCaseOverrides]
       properties:
         id: { type: string }
-        label: { type: string }
+        isActive: { type: boolean }
         params:
           type: object
           additionalProperties:
             oneOf:
               - { type: string }
               - { type: number }
-        active: { type: boolean }
-        overrides: { type: array, items: { $ref: '#/components/schemas/VariantOverride' } }
+              - { type: boolean }
+        renderedStatement: { type: string }
+        testCaseOverrides: { type: array, items: { $ref: '#/components/schemas/VariantOverride' } }
     VariantList:
       type: object
-      required: [variants]
+      required: [items, revision]
       properties:
-        variants: { type: array, items: { $ref: '#/components/schemas/Variant' } }
+        items: { type: array, items: { $ref: '#/components/schemas/Variant' } }
+        revision: { type: string, pattern: '^[0-9a-f]{64}$' }
+    VariantMutation:
+      type: object
+      required: [variant, revision]
+      properties:
+        variant: { $ref: '#/components/schemas/Variant' }
+        revision:
+          { type: string, pattern: '^[0-9a-f]{64}$', description: The new revision of the version }
+    CreateVariant:
+      type: object
+      additionalProperties: false
+      required: [params]
+      properties:
+        params:
+          type: object
+          additionalProperties:
+            oneOf:
+              - { type: string, maxLength: 1000 }
+              - { type: number }
+              - { type: boolean }
+        isActive: { type: boolean, default: true }
+        expectedRevision: { type: string, pattern: '^[0-9a-f]{64}$' }
+    UpdateVariant:
+      type: object
+      additionalProperties: false
+      properties:
+        params:
+          type: object
+          additionalProperties:
+            oneOf:
+              - { type: string, maxLength: 1000 }
+              - { type: number }
+              - { type: boolean }
+        isActive: { type: boolean }
+        expectedRevision: { type: string, pattern: '^[0-9a-f]{64}$' }
+    OverrideInput:
+      type: object
+      additionalProperties: false
+      required: [input, expectedOutput]
+      properties:
+        input: { type: string, maxLength: 100000 }
+        expectedOutput: { type: string, maxLength: 100000 }
+        expectedRevision: { type: string, pattern: '^[0-9a-f]{64}$' }
+    CandidateQuestionPreview:
+      type: object
+      additionalProperties: false
+      required: [type, title, statementMd, languages, limits, starterCode, samples]
+      properties:
+        type: { $ref: '#/components/schemas/QuestionType' }
+        title: { type: string }
+        statementMd: { type: string }
+        languages: { type: array, items: { type: string } }
+        limits: { $ref: '#/components/schemas/Limits' }
+        starterCode: { type: object, additionalProperties: { type: string } }
+        samples:
+          type: array
+          items:
+            type: object
+            required: [input, expectedOutput]
+            properties:
+              input: { type: string }
+              expectedOutput: { type: string }
+        mcq:
+          type: object
+          required: [multiple, options]
+          properties:
+            multiple: { type: boolean }
+            options:
+              type: array
+              items:
+                type: object
+                required: [id, text]
+                properties:
+                  id: { type: string }
+                  text: { type: string }
     AiReferencePolicy:
       type: object
       required: [refreshDays, minAssistants]
