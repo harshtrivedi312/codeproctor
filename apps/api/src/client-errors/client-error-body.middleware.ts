@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
+import { markEarlyRejection } from '../common/early-rejection';
 
 /** Hard cap on the body of the public client-error route (C-32). */
 export const CLIENT_ERROR_MAX_BODY_BYTES = 16 * 1024;
@@ -8,23 +8,18 @@ export const CLIENT_ERROR_MAX_JSON_DEPTH = 20;
 
 const JSON_TYPE = /^application\/(?:[\w.+-]+\+)?json\b/i;
 
-function problem(req: Request, res: Response, status: number, title: string, detail: string): void {
-  const inbound = req.headers['x-request-id'];
-  const traceId =
-    typeof inbound === 'string' && /^[A-Za-z0-9._-]{8,64}$/.test(inbound) ? inbound : randomUUID();
-  res.setHeader('x-request-id', traceId);
-  res.setHeader('Connection', 'close');
-  res
-    .status(status)
-    .type('application/problem+json')
-    .json({
-      type: 'about:blank',
-      title,
-      status,
-      detail,
-      instance: req.originalUrl.split('?')[0],
-      traceId,
-    });
+/**
+ * Refuses the request without answering it here: records the status for the guard that runs
+ * after the throttler, so a rejected body still counts against the per-IP and global budgets
+ * (FU-BE-100). The body is never read further, and the framing headers are dropped so the global
+ * body parsers skip the request instead of reading it before the throttler runs.
+ */
+function reject(req: Request, next: NextFunction, status: number, detail: string): void {
+  markEarlyRejection(req, { status, detail });
+  delete req.headers['content-length'];
+  delete req.headers['transfer-encoding'];
+  delete req.headers['content-type'];
+  next();
 }
 
 /** True when `[` and `{` nest deeper than `max` outside strings. Linear, no recursion. */
@@ -56,29 +51,24 @@ export function exceedsJsonDepth(text: string, max: number): boolean {
  * refused at the cap (413), or after `timeoutMs` of reading (408, slowloris). A body that is not
  * JSON is 415 (so a cross-site form post cannot reach the global urlencoded parser) and a
  * compressed body is 415 (never inflated). A request with no body falls through and validation
- * answers 400.
+ * answers 400. Every refusal is recorded and answered later by ClientErrorRejectionGuard, after
+ * the throttler has counted the request (see `reject`).
  *
  * How the global parser is skipped: after this middleware has consumed the stream, body-parser 2
  * sees `onFinished.isFinished(req)` and calls next() without reading; `req.body` is what we set.
  */
 export function createClientErrorBody(timeoutMs: number): RequestHandler {
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return (req: Request, _res: Response, next: NextFunction): void => {
     if (req.method !== 'POST') return next();
     const encoding = req.headers['content-encoding'];
     if (encoding !== undefined && encoding.toLowerCase() !== 'identity') {
-      return problem(
-        req,
-        res,
-        415,
-        'Unsupported Media Type',
-        'Compressed bodies are not accepted.',
-      );
+      return reject(req, next, 415, 'Compressed bodies are not accepted.');
     }
     const declared = req.headers['content-length'];
     if (declared !== undefined) {
       const length = Number(declared);
       if (!Number.isFinite(length) || length < 0 || length > CLIENT_ERROR_MAX_BODY_BYTES) {
-        return problem(req, res, 413, 'Payload Too Large', 'The report is too large.');
+        return reject(req, next, 413, 'The report is too large.');
       }
     }
     const hasBody =
@@ -86,13 +76,7 @@ export function createClientErrorBody(timeoutMs: number): RequestHandler {
       (declared !== undefined && Number(declared) > 0);
     if (!hasBody) return next();
     if (!JSON_TYPE.test(req.headers['content-type'] ?? '')) {
-      return problem(
-        req,
-        res,
-        415,
-        'Unsupported Media Type',
-        'Send the report as application/json.',
-      );
+      return reject(req, next, 415, 'Send the report as application/json.');
     }
 
     const chunks: Buffer[] = [];
@@ -101,8 +85,8 @@ export function createClientErrorBody(timeoutMs: number): RequestHandler {
     const timer = setTimeout(() => {
       if (done) return;
       stop();
-      problem(req, res, 408, 'Request Timeout', 'The report body arrived too slowly.');
-      res.once('finish', () => req.destroy());
+      req.pause();
+      reject(req, next, 408, 'The report body arrived too slowly.');
     }, timeoutMs);
     timer.unref();
     const stop = (): void => {
@@ -115,8 +99,8 @@ export function createClientErrorBody(timeoutMs: number): RequestHandler {
       received += chunk.length;
       if (received > CLIENT_ERROR_MAX_BODY_BYTES) {
         stop();
-        problem(req, res, 413, 'Payload Too Large', 'The report is too large.');
-        res.once('finish', () => req.destroy());
+        req.pause();
+        reject(req, next, 413, 'The report is too large.');
         return;
       }
       chunks.push(chunk);
@@ -125,16 +109,16 @@ export function createClientErrorBody(timeoutMs: number): RequestHandler {
       stop();
       const text = Buffer.concat(chunks).toString('utf8');
       if (exceedsJsonDepth(text, CLIENT_ERROR_MAX_JSON_DEPTH)) {
-        return problem(req, res, 400, 'Bad Request', 'The body is nested too deeply.');
+        return reject(req, next, 400, 'The body is nested too deeply.');
       }
       let parsed: unknown;
       try {
         parsed = JSON.parse(text);
       } catch {
-        return problem(req, res, 400, 'Bad Request', 'The body is not valid JSON.');
+        return reject(req, next, 400, 'The body is not valid JSON.');
       }
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        return problem(req, res, 400, 'Bad Request', 'The body must be a JSON object.');
+        return reject(req, next, 400, 'The body must be a JSON object.');
       }
       req.body = parsed;
       next();
