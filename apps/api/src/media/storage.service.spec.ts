@@ -241,7 +241,7 @@ describe('StorageService HEAD, delete and prefix operations (FR-704 storage prim
       'orgs/x/y/',
       `orgs/${ORG}/../`,
       `orgs/${ORG}/sessions/${SID}`,
-      `orgs/${ORG}/sessions/${SID}/media/screen/`,
+      `orgs/${ORG}/sessions/${SID}/media/SCREEN/`,
       `orgs/${ORG}/sessions/${SID}/../`,
       `orgs/${ORG}/sessions/${SID}/unknown/`,
     ];

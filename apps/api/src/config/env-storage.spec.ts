@@ -11,6 +11,8 @@ const valid = {
 const deployed = {
   ...valid,
   APP_ENV: 'pilot',
+  WEB_ORIGIN: 'https://assess.example.com',
+  TRUST_PROXY_HOPS: '1',
   JUDGE0_URL: 'https://judge0.internal.example',
   JUDGE0_AUTH_TOKEN: 'j'.repeat(40),
   JUDGE0_AUTHZ_TOKEN: 'z'.repeat(40),

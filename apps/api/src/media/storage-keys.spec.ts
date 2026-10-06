@@ -23,10 +23,10 @@ const scope = { orgId: ORG, sessionId: SID };
 describe('Object key layout (FR-701, ADR 0013 section 5.7, TC-070)', () => {
   it('TC-070: media chunk keys pad segment to 6 and seq to 8 digits under the session prefix', () => {
     expect(mediaChunkKey(scope, 'SCREEN', 3, 42)).toBe(
-      `orgs/${ORG}/sessions/${SID}/media/screen/000003/00000042.webm`,
+      `orgs/${ORG}/sessions/${SID}/media/SCREEN/000003/00000042.webm`,
     );
     expect(mediaChunkKey(scope, 'ROOM_SCAN', 9_999, 99_999_999)).toBe(
-      `orgs/${ORG}/sessions/${SID}/media/room_scan/009999/99999999.webm`,
+      `orgs/${ORG}/sessions/${SID}/media/ROOM_SCAN/009999/99999999.webm`,
     );
   });
 
@@ -81,9 +81,9 @@ describe('Object key layout (FR-701, ADR 0013 section 5.7, TC-070)', () => {
       other,
       foreign,
       consent,
-      `${sessionPrefix(scope)}media/screen/000000/00000000.webm/../../../../x`,
+      `${sessionPrefix(scope)}media/SCREEN/000000/00000000.webm/../../../../x`,
       `${sessionPrefix(scope)}unknown/thing`,
-      `${sessionPrefix(scope)}media/screen/000000/00000000.exe`,
+      `${sessionPrefix(scope)}media/SCREEN/000000/00000000.exe`,
       '',
       ok.replace('orgs/', '/orgs/'),
     ]) {
@@ -112,6 +112,6 @@ describe('Object key layout (FR-701, ADR 0013 section 5.7, TC-070)', () => {
       sessionId: SID,
       sealed: false,
     });
-    expect(parseObjectKey('orgs/x/sessions/y/media/screen/000000/00000000.webm')).toBeNull();
+    expect(parseObjectKey('orgs/x/sessions/y/media/SCREEN/000000/00000000.webm')).toBeNull();
   });
 });

@@ -57,6 +57,9 @@ describe('NFR-04 environment validation', () => {
       OTP_PEPPER: 'p'.repeat(48),
       SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 3).toString('base64'),
       REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
+      // Object storage (BE-09) is required in pilot and production.
+      S3_REGION: 'eu-west-2',
+      S3_MEDIA_BUCKET: 'cp-pilot-media',
     };
     for (const APP_ENV of ['pilot', 'production']) {
       const base = { ...valid, ...live, APP_ENV };
@@ -204,6 +207,9 @@ describe('NFR-04 environment validation', () => {
       OTP_PEPPER: 'p'.repeat(48),
       REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
       SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 3).toString('base64'),
+      // Object storage (BE-09) is required in pilot and production.
+      S3_REGION: 'eu-west-2',
+      S3_MEDIA_BUCKET: 'cp-pilot-media',
     };
     for (const APP_ENV of ['pilot', 'production']) {
       expect(() => validateEnv({ ...live, APP_ENV, WEB_ORIGIN: 'http://app.example.com' })).toThrow(
