@@ -692,11 +692,11 @@ The files are pinned by **path**, in `testing/lock-call-sites.ts` (the constants
 | `ACCOMMODATIONS_FILE`    | `session/accommodations.ts`         |
 | `RETENTION_LOCK_FILE`    | `retention/retention.repository.ts` |
 
-| Lock                   | Callers outside `database/` (allowed files)                                                                                                                                                                                                                                                                                                                      | The wrapper                                |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| `guardLive`            | **exactly two**: `SessionJobProcessor.withLiveSession` (SERVICE; `session-job.processor.ts`) and **one** named STAFF method, `SessionStateService.proctorResume` (the proctor-resume transition, ADR 0002 P-3: it writes `session_sections.deadline_at`; `session-state.service.ts`)                                                                             | `SessionStateService.guardLive`            |
-| `lockAnySession`       | only `SessionJobProcessor.withAnySession` (`session-job.processor.ts`), through SessionStateService (`session-state.service.ts`)                                                                                                                                                                                                                                 | `SessionStateService.lockAnySession`       |
-| `lockForAccommodation` | **STAFF**, through SessionStateService: the accommodations PATCH, redact-note and the video-check PUT (`accommodations.ts`, `session-state.service.ts`). And **one** org-job site: `retention/retention.repository.ts`, `RetentionRepository.casAccommodations`, in a plain `runInOrg`, for erasure, R-4 and R-10 (R-4 runs there too: it has no SERVICE caller) | `SessionStateService.lockForAccommodation` |
+| Lock                   | Callers outside `database/` (allowed files)                                                                                                                                                                                                                                                                                                                                                                                      | The wrapper                                |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `guardLive`            | **exactly two**: `SessionJobProcessor.withLiveSession` (SERVICE; `session-job.processor.ts`) and **one** named STAFF method, `SessionStateService.proctorResume` (the proctor-resume transition, ADR 0002 P-3: it writes `session_sections.deadline_at`; `session-state.service.ts`)                                                                                                                                             | `SessionStateService.guardLive`            |
+| `lockAnySession`       | only `SessionJobProcessor.withAnySession` (`session-job.processor.ts`), through SessionStateService (`session-state.service.ts`)                                                                                                                                                                                                                                                                                                 | `SessionStateService.lockAnySession`       |
+| `lockForAccommodation` | **STAFF**, through SessionStateService: the accommodations PATCH, redact-note and the video-check PUT (the calls are in `accommodations.ts`; `session-state.service.ts` holds the wrapper only and makes no call of it). And **one** org-job site: `retention/retention.repository.ts`, `RetentionRepository.casAccommodations`, in a plain `runInOrg`, for erasure, R-4 and R-10 (R-4 runs there too: it has no SERVICE caller) | `SessionStateService.lockForAccommodation` |
 
 Five tests pin it, all with an **empty** list outside the defining file today:
 
@@ -716,35 +716,57 @@ Five tests pin it, all with an **empty** list outside the defining file today:
   writer and one of PATCH, redact-note, video-check (state and accommodations, `lockForAccommodation`), the erasure,
   R-4 and R-10 jobs (retention).
 - **The per-file rules**, for each listed file that exists (text rules over the source with comments stripped):
-  - **The state file** (`session-state.service.ts`): each core is **imported by name under an alias** (`import {
-guardLive as coreGuardLive }`), **never under its own name and never as a namespace** (`import * as locks` is
-    refused: it would hand the whole core to the file, and a file that imports the module is never skipped by the
-    export check); each core is **called exactly once, inside the wrapper method of the same name** (`async
-guardLive(...) { return coreGuardLive(...) }`), and the alias is used nowhere else (not passed, returned, stored,
-    or called in another method or an exported function). Every other mention of a lock name is the wrapper's
-    definition or a member call. **The wrappers are counted with ANY receiver** (`this.`, `self.`, `this?.`,
-    `(this as X).`, `super.`, another object; whitespace or a line break after the dot is fine): **exactly one
-    `.guardLive(` call, inside the brace-matched `proctorResume` body**, and **no `.lockAnySession(` and no
-    `.lockForAccommodation(` call at all** in this file (the accommodation routes call the second from
-    `session/accommodations.ts`, the jobs the first from the processor: a state method that called one of them,
-    say a `closeIngest` that locks any session, would be reachable from a SERVICE job and write into an ERASED
-    session). Optional-call, bracket and `.bind` forms are refused as property references. Write the wrappers as
-    **methods with a body** (the scan looks for `async name(...) {`), and keep inline object types out of their
-    return types.
+  - **The state file** (`session-state.service.ts`):
+    - **How the cores come in.** Each core is **imported by name under an alias**, by an
+      `import { guardLive as coreGuardLive } from` statement and **by no other form**: never under its own name, never
+      as a namespace (`import * as locks`), and never by `import locks = require(...)`, `const locks = require(...)`,
+      `await import(...)`, a side-effect `import '...'` or an `export ... from` of the module. Every specifier of
+      `database/session-locks` in the file must be one of the parsed `import { ... } from` statements, so a form the
+      scan does not know still fails. A file that reaches the module in any way is never skipped by the export check.
+    - **The wrapper.** Each core is **called exactly once, inside the wrapper method of the same name**, a method of
+      the `SessionStateService` class (a method of another class in the file does not count), and the alias is used
+      nowhere else (not passed, returned, stored, or called in another method or an exported function). The wrapper
+      is **thin**: its whole body is `return <alias>(<param1>, <param2>);` (an `await` and any whitespace are fine),
+      with exactly two plain parameters handed on in order. A body that stores a closure, adds a statement or changes
+      the arguments fails.
+    - **Every other mention.** A mention of a lock name is the wrapper's definition or a member call, nothing else:
+      `const { lockAnySession } = this`, `Reflect.apply(this.lockAnySession, ...)`, `const f = this.lockAnySession`,
+      `.guardLive.bind(this)` and an optional-call or bracket form all fail. **A string or a log message that names a
+      lock fails too** (`this.logger.log('guardLive done')`): the scan does not tell a string from code, so it fails
+      closed; a comment is stripped first and does not count.
+    - **Member calls, with ANY receiver** (`this.`, `self.`, `this?.`, `(this as X).`, `super.`, another object;
+      whitespace or a line break after the dot is fine): **exactly one `.guardLive(` call, inside the brace-matched
+      `proctorResume` body**, and **no `.lockAnySession(`, no `.lockForAccommodation(` and no `.proctorResume(` call
+      at all** in this file (the accommodation routes call the second from `session/accommodations.ts`, the jobs the
+      first from the processor, and the controller calls `proctorResume` from outside the file: a state method that
+      called one of them, say a `closeIngest` that locks any session, would be reachable from a SERVICE job and write
+      into an ERASED session; one that called `proctorResume` would be a second door to `guardLive`).
+    - **Write the wrappers as methods with a body** (the scan looks for `async name(...) {`), and keep inline object
+      types out of their return types.
   - **The processor file** (`session-job.processor.ts`): `.guardLive(` **exactly once, inside `withLiveSession`**;
     `.lockAnySession(` **exactly once, inside `withAnySession`**; every mention of a lock name is a member call
-    (`this.state.guardLive(...)`).
+    (`this.state.guardLive(...)`). A string or a log message that names a lock fails here as well (fail closed).
   - **The accommodations and retention files:** every mention of a lock name is a member call
     (`this.state.lockForAccommodation(...)`); nothing is held, bound or passed.
 - **The export check** (`findLockExports`, **no allowlist**, the state file included): no file outside `database/`
   exports a lock or an alias of one, other than through `export ... from` (the import guard catches that): not
   `export { guardLive as g }`, `export const g = guardLive`, `export default guardLive`, `export default { guardLive }`,
-  `module.exports = { guardLive }`, nor the same through a local variable. It also finds a **wrapper under a new
-  name**: an exported function, arrow or object whose text calls a lock or an alias
+  `module.exports = { guardLive }`, `export = { guardLive }`, nor the same through a local variable. The whole core
+  under one name is refused too (`import * as core`, `import core = require(...)`, `const core = require(...)`,
+  `const core = await import(...)`), and so is any file that reaches the module other than by a named import (a
+  `require(`, `import(`, side-effect import or `export * from`), even when it names no lock. It also finds a
+  **wrapper under a new name**: an exported function, arrow or object whose text calls a lock or an alias
   (`export function g(tx, s) { return guardLive(tx, s) }`, `export const g = (tx, s) => core(tx, s)`), and a
   **static property** that holds or calls one (`static g = guardLive`). A class that merely has a method with the
   name is fine. Backend B's SessionStateService file is checked by the same test: that is the mechanical review
   point.
+
+All of these are **text rules** over the comment-stripped source, not a parser, so they have limits a reviewer must not
+rely past: a quote or a `/*` inside a **regex literal** can unbalance a body or hide code (`stripComments` and the brace
+matching skip strings and templates, not regex literals), so the result there is wrong in either direction; a name written
+with a **unicode escape**, built at run time, reached through a computed property or an eval, or passed out through a
+closure built from a parameter is not seen; and the exported-function check assumes prettier's column-0 layout. FU-DB-189
+builds the AST gate that replaces the scan; FU-DB-244 records the comment-stripper case.
 
 **What to add, and when.**
 
