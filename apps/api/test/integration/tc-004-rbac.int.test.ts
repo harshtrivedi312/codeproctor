@@ -19,6 +19,7 @@ import {
   Harness,
   login,
   PASSWORD,
+  settleValidation,
   signIn,
   stableProblem,
 } from '../support/harness';
@@ -147,6 +148,7 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
           const res = await call(h, route.method, t.path, byRole[role].token, t.body);
           if (hasPermission(role, route.permission)) {
             expect(route.ok).toContain(res.status);
+            await settleValidation(h); // the validate job writes its FINISHED row asynchronously
             // A success must have an effect; a status code alone proves nothing.
             if (route.mutating) expect(await t.unchanged()).toBe(false);
           } else {
