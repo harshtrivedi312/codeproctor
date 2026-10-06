@@ -18,11 +18,25 @@ export const MAX_MIN_ASSISTANTS = 5;
 
 const minAssistantsSchema = z.int().min(0).max(MAX_MIN_ASSISTANTS);
 
-/** The effective settings (GET response, and the PATCH response): every allowed key present. */
+/**
+ * The effective settings values: every allowed key present, defaults applied. `OrgSettings` here is
+ * the current allowlist; database.md and ADR 0007 section 6 use the name for the full stored jsonb
+ * shape, which grows as keys are approved.
+ */
 export const orgSettingsSchema = z.strictObject({
   aiReferences: z.strictObject({ minAssistants: minAssistantsSchema }),
 });
 export type OrgSettings = z.infer<typeof orgSettingsSchema>;
+
+/**
+ * The GET and PATCH response (api-contract section 2): the effective values, plus `isDefault` per
+ * setting, true when no valid value is stored and the default applies. Parse responses with this
+ * schema, not with `orgSettingsSchema`.
+ */
+export const orgSettingsViewSchema = z.strictObject({
+  aiReferences: z.strictObject({ minAssistants: minAssistantsSchema, isDefault: z.boolean() }),
+});
+export type OrgSettingsView = z.infer<typeof orgSettingsViewSchema>;
 
 /** The settings part of a PATCH body: partial and strict; null and unknown keys are refused. */
 export const orgSettingsPatchSchema = z.strictObject({
@@ -30,9 +44,13 @@ export const orgSettingsPatchSchema = z.strictObject({
 });
 export type OrgSettingsPatch = z.infer<typeof orgSettingsPatchSchema>;
 
-/** True when the patch changes no key (`{}`, `{ aiReferences: {} }`): the route answers 400. */
-export function isEmptyOrgSettingsPatch(patch: OrgSettingsPatch): boolean {
-  return patch.aiReferences?.minAssistants === undefined;
+/**
+ * True when the patch sets no key (`{}`, `{ aiReferences: {} }`): the route answers 400. Generic:
+ * any leaf that is not undefined counts, so a key added to the allowlist needs no change here.
+ */
+export function isEmptyOrgSettingsPatch(patch: unknown): boolean {
+  if (typeof patch !== 'object' || patch === null) return patch === undefined;
+  return Object.values(patch).every((v) => isEmptyOrgSettingsPatch(v));
 }
 
 /**
@@ -41,11 +59,15 @@ export function isEmptyOrgSettingsPatch(patch: OrgSettingsPatch): boolean {
  */
 export const orgSettingsPatchBodySchema = z
   .strictObject({
+    ...orgSettingsPatchSchema.shape,
     currentPassword: z.string().min(1).max(MAX_PASSWORD_LENGTH),
-    aiReferences: orgSettingsPatchSchema.shape.aiReferences,
   })
-  .refine((body) => !isEmptyOrgSettingsPatch({ aiReferences: body.aiReferences }), {
-    message: 'Send at least one setting.',
-    path: ['aiReferences'],
-  });
+  .refine(
+    (body) => {
+      const settings: Record<string, unknown> = { ...body };
+      delete settings['currentPassword'];
+      return !isEmptyOrgSettingsPatch(settings);
+    },
+    { message: 'Send at least one setting.', path: ['aiReferences'] },
+  );
 export type OrgSettingsPatchBody = z.infer<typeof orgSettingsPatchBodySchema>;
