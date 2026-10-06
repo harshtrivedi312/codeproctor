@@ -1,7 +1,6 @@
 'use client';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import * as React from 'react';
-import { api } from '@/lib/api/client';
 import { computeClockOffset, remainingMs } from './timer';
 
 /** How often the offset is re-read from /v1/time (FR-505, TC-047). */
@@ -18,7 +17,7 @@ const QUERY_KEY = ['server-time'] as const;
  */
 const monotonicNow = (): number => performance.now();
 
-export function useServerClock(): {
+export function useServerClock(readServerNow: () => Promise<string>): {
   ready: boolean;
   remaining: (deadlineIso: string | null | undefined) => number | null;
   /** True when the server time could not be read at all: the screen must not run unchecked. */
@@ -43,10 +42,9 @@ export function useServerClock(): {
     refetchOnWindowFocus: true,
     queryFn: async () => {
       const start = monotonicNow();
-      const { data, error } = await api.GET('/v1/time');
+      const serverNow = await readServerNow();
       const end = monotonicNow();
-      if (error || !data) throw new Error('Could not read the server time');
-      return computeClockOffset(Date.parse(data.serverNow), start, end);
+      return computeClockOffset(Date.parse(serverNow), start, end);
     },
   });
   const [now, setNow] = React.useState(monotonicNow);

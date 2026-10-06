@@ -1,3 +1,4 @@
+import { demoSource } from './demo-source';
 /**
  * QA-01 test cases for the candidate test screen (merged in FE-01, mocked API).
  * Test names start with the TC ID from /docs/test-cases.md. These cover the browser side only;
@@ -179,7 +180,7 @@ describe('TC-047 clock moved after load (FR-505), UI side', () => {
         HttpResponse.json({ serverNow: new Date(realServerNow() + 90_000).toISOString() }),
       ),
     );
-    const { result } = renderHook(() => useServerClock(), { wrapper });
+    const { result } = renderHook(() => useServerClock(demoSource.serverNow), { wrapper });
     await waitFor(() => expect(result.current.ready).toBe(true));
     const deadline = new Date(Date.now() + 90_000 + 60 * 60_000).toISOString();
     const before = result.current.remaining(deadline) ?? 0;

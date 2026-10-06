@@ -8,7 +8,9 @@ import type { CodeLanguage } from '@codeproctor/shared';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
-import { api, type Schemas } from '@/lib/api/client';
+import type { Schemas } from '@/lib/api/client';
+import { demoSource } from './demo-source';
+import type { DraftBody, DraftResult, TestSource } from './source';
 import { cooldownRemainingMs, cooldownSeconds } from './cooldown';
 import { LANGUAGE_LABELS } from './keywords';
 import {
@@ -57,11 +59,6 @@ interface Drafts {
   mcq: Record<string, string>;
 }
 
-interface DraftResponse {
-  response: Response;
-  data?: { savedAt: string };
-}
-
 function omit<T>(record: Record<string, T>, key: string): Record<string, T> {
   return Object.fromEntries(Object.entries(record).filter(([k]) => k !== key));
 }
@@ -73,20 +70,26 @@ interface FinishedSection {
   sectionId: string;
   title: string;
   nextSectionId: string | null;
+  /** The server submitted the whole test with this finish (it was the last section). */
+  submitted: boolean;
   /** The session as re-read from the server, when the finish was confirmed that way. */
   next?: Schemas['CandidateSession'];
 }
 
-export function TestScreen(): React.JSX.Element {
+export function TestScreen({
+  source = demoSource,
+  onSubmitted,
+}: {
+  source?: TestSource;
+  /** Called once when the test is submitted (the last section was finished). */
+  onSubmitted?: () => void;
+} = {}): React.JSX.Element {
   const queryClient = useQueryClient();
   const session = useQuery({
     queryKey: ['candidate-session'],
     staleTime: Infinity,
-    queryFn: async () => {
-      const { data } = await api.GET('/v1/candidate/session');
-      if (!data) throw new Error('session');
-      return data;
-    },
+    gcTime: source.isDemo ? 5 * 60_000 : 0,
+    queryFn: () => source.loadSession(),
   });
   // The lock state (fullscreen, warnings) belongs to the whole test, not to one section.
   const [lock, dispatchLock] = React.useReducer(lockReducer, initialLockState);
@@ -112,6 +115,7 @@ export function TestScreen(): React.JSX.Element {
     );
   }
   const current = session.data;
+  if (finishedSection?.submitted) return <SubmittedPanel onShown={onSubmitted} />;
   const finishedHere = finishedSection?.sectionId === current.section.id ? finishedSection : null;
 
   const advance = async () => {
@@ -130,6 +134,7 @@ export function TestScreen(): React.JSX.Element {
     <>
       <TestScreenInner
         key={current.section.id}
+        source={source}
         session={current}
         lock={lock}
         dispatchLock={dispatchLock}
@@ -150,7 +155,7 @@ export function TestScreen(): React.JSX.Element {
               Continue to the next section
             </Button>
           ) : (
-            IS_DEMO && (
+            source.isDemo && (
               <p className="mt-1 text-sm text-muted-foreground">
                 Demo: the next section is not part of this preview.
               </p>
@@ -163,12 +168,14 @@ export function TestScreen(): React.JSX.Element {
 }
 
 function TestScreenInner({
+  source,
   session,
   lock,
   dispatchLock,
   finished,
   onFinished,
 }: {
+  source: TestSource;
   session: Schemas['CandidateSession'];
   lock: LockState;
   dispatchLock: React.Dispatch<LockEvent>;
@@ -193,7 +200,7 @@ function TestScreenInner({
   const [results, setResults] = React.useState<Record<string, Schemas['RunResult']>>({});
   const [runErrors, setRunErrors] = React.useState<Record<string, string>>({});
 
-  const clock = useServerClock();
+  const clock = useServerClock(source.serverNow);
   const testLeft = clock.remaining(session.testDeadlineAt);
   const sectionLeft = clock.remaining(section.deadlineAt);
   const expired =
@@ -209,32 +216,26 @@ function TestScreenInner({
   const [savedSnapshot, setSavedSnapshot] = React.useState<Drafts>({ code: {}, mcq: {} });
   const autosave = useAutosave(drafts, async (snapshot) => {
     const previous = lastSaved.current;
-    const jobs: Promise<DraftResponse>[] = [];
+    const jobs: Promise<DraftResult>[] = [];
     const requestStart = performance.now();
     for (const [key, code] of Object.entries(snapshot.code)) {
       if (previous.code[key] === code) continue;
       const [questionId, lang] = key.split(':') as [string, CodeLanguage];
-      jobs.push(
-        api.PUT('/v1/candidate/questions/{questionId}/draft', {
-          params: { path: { questionId } },
-          body: { kind: 'code', language: lang, code },
-        }),
-      );
+      jobs.push(source.saveDraft(questionId, { kind: 'code', language: lang, code }));
     }
     for (const [questionId, selectedOptionId] of Object.entries(snapshot.mcq)) {
       if (previous.mcq[questionId] === selectedOptionId) continue;
       jobs.push(
-        api.PUT('/v1/candidate/questions/{questionId}/draft', {
-          params: { path: { questionId } },
-          body: { kind: 'mcq', selectedOptionId },
-        }),
+        source.saveDraft(questionId, { kind: 'mcq', selectedOptionId } satisfies DraftBody),
       );
     }
     const responses = await Promise.all(jobs);
     const responseEnd = performance.now();
-    if (responses.some((r) => !r.response.ok || r.data === undefined)) throw new Error('save');
+    // A failed or paused save keeps the draft: nothing is marked saved, and the next tick retries
+    // (DL-17: a 409 SESSION_PAUSED never drops code).
+    if (responses.some((r) => !r.ok)) throw new Error('save');
     // The save response carries the server time: re-sync the countdown offset (FR-505, TC-047).
-    const serverTimes = responses.flatMap((r) => (r.data ? [r.data.savedAt] : []));
+    const serverTimes = responses.flatMap((r) => (r.ok ? [r.savedAt] : []));
     const latestServerTime = serverTimes[serverTimes.length - 1];
     if (latestServerTime) clock.syncFromServer(latestServerTime, requestStart, responseEnd);
     lastSaved.current = snapshot;
@@ -299,13 +300,12 @@ function TestScreenInner({
     const fail = (message: string) => setRunErrors((e) => ({ ...e, [questionId]: message }));
     try {
       await autosave.flush(); // FR-504: autosave on every run; a failed save does not block Run
-      const { data, response } = await api.POST('/v1/candidate/questions/{questionId}/run', {
-        params: { path: { questionId } },
-        body: { language, code: value },
-      });
-      if (response.ok && data) setResults((r) => ({ ...r, [questionId]: data }));
-      else if (response.status === 429)
+      const outcome = await source.run(questionId, language, value);
+      if (outcome.kind === 'result') setResults((r) => ({ ...r, [questionId]: outcome.result }));
+      else if (outcome.kind === 'rate-limited')
         fail('You can run once every 5 seconds. Wait a moment and press Run again.');
+      else if (outcome.kind === 'paused')
+        fail('The test is paused, so Run is off. Your code is kept. Run again when it resumes.');
       else fail('The run could not finish. Check your connection and press Run again.');
     } catch {
       fail('The run could not finish. Check your connection and press Run again.');
@@ -318,8 +318,12 @@ function TestScreenInner({
   const finishSection = async () => {
     setFinishing(true);
     setFinishError(null);
-    const markFinished = (nextSectionId: string | null, next?: Schemas['CandidateSession']) => {
-      onFinished({ sectionId: section.id, title: section.title, nextSectionId, next });
+    const markFinished = (
+      nextSectionId: string | null,
+      next?: Schemas['CandidateSession'],
+      submitted = false,
+    ) => {
+      onFinished({ sectionId: section.id, title: section.title, nextSectionId, next, submitted });
       setFinishOpen(false);
     };
     // After a failure, or a 409 (which can also mean a paused or inactive session), we cannot tell
@@ -328,7 +332,7 @@ function TestScreenInner({
     // (ADR 0002: finishing is final). The cache is only updated when the candidate continues.
     const confirmOrExplain = async (fallback: string) => {
       try {
-        const { data: fresh } = await api.GET('/v1/candidate/session');
+        const fresh = await source.readSession();
         if (!fresh) throw new Error('session');
         if (fresh.section.id !== section.id) {
           markFinished(fresh.section.id, fresh);
@@ -349,19 +353,23 @@ function TestScreenInner({
         );
         return;
       }
-      const { data, response } = await api.POST('/v1/candidate/sections/{sectionId}/finish', {
-        params: { path: { sectionId: section.id } },
-      });
-      // ADR 0002: finishing is final. Only an OK response with a body marks it finished. A 409 is
-      // not trusted by itself (the contract does not say which conflict it is); it goes through
-      // the verified re-read below.
-      if (response.ok && data) {
-        markFinished(data.nextSectionId ?? null);
+      const outcome = await source.finishSection(section.id);
+      // ADR 0002: finishing is final. Only a confirmed finish marks it finished. A 409 is not
+      // trusted by itself (the contract does not say which conflict it is); it goes through the
+      // verified re-read below.
+      if (outcome.kind === 'finished') {
+        markFinished(outcome.nextSectionId, undefined, outcome.submitted);
         return;
       }
-      if (response.status === 409) {
+      if (outcome.kind === 'conflict') {
         await confirmOrExplain(
           'The server could not finish the section right now (your session may be paused). Nothing changed and you can keep working. Try again in a moment, or tell the person running the test.',
+        );
+        return;
+      }
+      if (outcome.kind === 'unreachable') {
+        await confirmOrExplain(
+          'We could not reach the server, so the section is not finished. Check your connection and try again.',
         );
         return;
       }
@@ -436,8 +444,8 @@ function TestScreenInner({
 
       {expired && (
         <p role="alert" className="bg-destructive-soft px-4 py-2 text-sm text-destructive">
-          Time is up. {IS_DEMO ? 'In the real test your' : 'Your'} latest saved work is submitted
-          automatically.
+          Time is up. {source.isDemo ? 'In the real test your' : 'Your'} latest saved work is
+          submitted automatically.
         </p>
       )}
 
@@ -750,5 +758,44 @@ function SavedIndicator({
       )}
       {text}
     </p>
+  );
+}
+
+/**
+ * The last section was finished, so the server submitted the test (ADR 0013 section 5.11). The
+ * candidate sees that and nothing else: no score and no hidden results (Q17: no FR shows scores).
+ */
+function SubmittedPanel({ onShown }: { onShown?: (() => void) | undefined }): React.JSX.Element {
+  const headingRef = React.useRef<HTMLHeadingElement>(null);
+  React.useEffect(() => {
+    headingRef.current?.focus();
+    // Leave fullscreen: the test is over.
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
+    onShown?.();
+    // Once, when the panel appears.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return (
+    <main
+      id="main"
+      className="mx-auto my-24 max-w-md px-4 text-center"
+      data-testid="test-submitted"
+    >
+      <CheckCircle2 className="mx-auto h-10 w-10 text-success" aria-hidden />
+      <h1
+        ref={headingRef}
+        tabIndex={-1}
+        className="mt-3 text-2xl font-semibold outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        Your test is submitted
+      </h1>
+      <p className="mt-3">
+        Thank you. Your answers were received and the recording has stopped. You can close this
+        window now.
+      </p>
+      <p className="mt-2 text-sm text-muted-foreground">
+        A person reviews every assessment. The hiring team will contact you about next steps.
+      </p>
+    </main>
   );
 }
