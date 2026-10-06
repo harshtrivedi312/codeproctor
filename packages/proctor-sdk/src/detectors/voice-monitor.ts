@@ -71,13 +71,16 @@ export class VoiceMonitor implements Detector {
 
   async start(ctx: DetectorContext): Promise<void> {
     this.ctx = ctx;
+    this.stopped = false; // a monitor instance can be started again after stop()
+    const gen = ++this.gen;
     const stream = this.o.getStream();
     if (!stream) {
       ctx.setCapability({ id: 'voice', status: 'DENIED', detail: 'No microphone stream.' });
       ctx.emit('DETECTOR_UNAVAILABLE', { detector: 'VOICE', reason: 'PERMISSION_DENIED' });
       return;
     }
-    await this.begin(ctx, stream);
+    // Through the same queue as attachStream: two VADs must never run at once.
+    await this.serial(() => this.begin(ctx, stream, gen));
   }
 
   reportStartTimeout(ctx: DetectorContext): void {
@@ -89,27 +92,51 @@ export class VoiceMonitor implements Detector {
    * A new microphone stream (for example after `recordAudio()` restarted following a device
    * loss): restart the VAD on it instead of listening to a dead stream.
    */
-  async attachStream(stream: MediaStream): Promise<void> {
-    const ctx = this.ctx;
-    if (!ctx || this.stopped) return;
+  attachStream(stream: MediaStream): Promise<void> {
+    const gen = this.gen; // an attach queued before stop() must not act after a restart
+    return this.serial(async () => {
+      const ctx = this.ctx;
+      if (!ctx || this.stopped || gen !== this.gen) return;
+      await this.begin(ctx, stream, gen);
+    });
+  }
+
+  /** Runs `fn` after every earlier start or attach has finished. */
+  private serial(fn: () => Promise<void>): Promise<void> {
+    const run = this.attachChain.then(fn);
+    this.attachChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private attachChain: Promise<void> = Promise.resolve();
+  /** Bumped by start() and stop(): work queued under an older generation is dropped. */
+  private gen = 0;
+  /** Identifies the live VAD; callbacks of an older one are ignored. */
+  private token = 0;
+
+  private async destroyHandle(): Promise<void> {
     const old = this.handle;
     this.handle = null;
     await old?.destroy();
-    await this.begin(ctx, stream);
   }
 
-  private async begin(ctx: DetectorContext, stream: MediaStream): Promise<void> {
+  private async begin(ctx: DetectorContext, stream: MediaStream, gen: number): Promise<void> {
+    // Exactly one live VAD: release any existing one first and ignore its late callbacks.
+    const token = ++this.token;
+    await this.destroyHandle();
     const cfg = { ...DEFAULT_AI_CONFIG, ...this.o.config };
-    const rules = (this.rules = new SpeechRules(cfg));
+    // Reuse the rules on a stream swap so speech held back by the cooldown is not lost.
+    const rules = (this.rules ??= new SpeechRules(cfg));
     const now = this.o.now ?? Date.now;
     let startedAt: number | null = null;
     try {
       const creating = this.o.createVad(stream, {
         onSpeechStart: () => {
+          if (token !== this.token) return;
           startedAt = now();
         },
         onSpeechEnd: () => {
-          if (startedAt === null) return;
+          if (token !== this.token || startedAt === null) return;
           const s = startedAt;
           startedAt = null;
           ctx.measure('voice', () => {
@@ -136,7 +163,17 @@ export class VoiceMonitor implements Detector {
         );
       });
       try {
-        this.handle = await Promise.race([creating, timeout]);
+        const created = await Promise.race([creating, timeout]);
+        if (gen !== this.gen || this.stopped || token !== this.token) {
+          // Abandoned (stop, restart or a newer attach) while loading: release it, keep none.
+          try {
+            await created.destroy();
+          } catch {
+            // a throwing destroy must not fall into the load-failure handling below
+          }
+          return;
+        }
+        this.handle = created;
       } catch (err) {
         // If the VAD finishes loading after the timeout, release it.
         void creating.then((h) => h.destroy()).catch(() => undefined);
@@ -144,13 +181,13 @@ export class VoiceMonitor implements Detector {
       } finally {
         clearTimeout(timer);
       }
-      if (this.stopped) {
-        await this.handle.destroy();
-        return;
-      }
-      await this.handle.start();
+      await this.handle?.start();
+      if (gen !== this.gen || token !== this.token || this.stopped) return;
       ctx.setCapability({ id: 'voice', status: 'SUPPORTED' });
     } catch {
+      // An abandoned begin (stop, restart or a newer attach) must not report a failure: that would
+      // be false evidence and could overwrite the newer run's SUPPORTED flag.
+      if (gen !== this.gen || token !== this.token || this.stopped) return;
       ctx.setCapability({
         id: 'voice',
         status: 'UNSUPPORTED',
@@ -162,6 +199,8 @@ export class VoiceMonitor implements Detector {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.gen++;
+    this.token++;
     if (this.flushTimer) clearTimeout(this.flushTimer);
     this.flushTimer = null;
     if (this.ctx && this.rules) {
@@ -170,5 +209,6 @@ export class VoiceMonitor implements Detector {
     await this.handle?.destroy();
     this.handle = null;
     this.ctx = null;
+    this.rules = null;
   }
 }

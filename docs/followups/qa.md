@@ -138,6 +138,10 @@ Root cause was in the test, not the SDK: it assumed one batch per paste and wait
 Observation for proctor-sdk-engineer (low, not a data-loss defect; NFR-08 holds): `EventQueue.retryNow()` does nothing while a drain is already running. If the browser `online` event arrives during a send that is about to fail, the next attempt waits for the exponential backoff (up to 30 s) instead of starting at once. Suggested: remember that a retry was requested and run another drain pass when the current one ends in RETRY.
 
 
+### 7.6 TC-008 evidence is outside the P1 gate's inputs (FU-DB-59, FU-DB-81, 2026-10-05)
+
+- **should-fix (qa-engineer):** the TC-008 tests live in `apps/api/src/database/tc-008-org-isolation.spec.ts` (DB-05, PR #30), run by `apps/api/jest.config.js`. The P1 gate in `.github/workflows/qa.yml` reads only the report from `test/jest.integration.config.js`, so it does not see the TC-008 results. The test-matrix path is fixed (architecture hub, 2026-10-05); CI is not changed here. QA decides whether to add the API unit Jest report to the gate inputs or to move the TC-008 run into the integration config.
+
 ## Architecture hub: TC-050 follow-through (ADR 0013 section 5.9, PR #39)
 
 - [ ] Rewrite `TC-050 KNOWN DEFECT QA-D-01` (`it.fails` in `packages/proctor-sdk/src/qa/qa-tc.test.ts`) as plain tests: FULLSCREEN_EXIT has no `durationMs`, FULLSCREEN_RESTORED has one.
@@ -153,6 +157,10 @@ Observation for proctor-sdk-engineer (low, not a data-loss defect; NFR-08 holds)
 - [ ] Owner: qa-engineer. Per-section pause credit (ADR 0013 effectiveDeadline): (1) the deadline variant closes section k while PAUSED past the cap, and k+1 gets no credit for the earlier pause time; (2) a section-finish clicked during a PROCTOR pause does not give k+1 extra time.
 - [ ] Owner: qa-engineer. Erasure serialisation: a `close-section` run interleaved with erasure does not re-insert code (guardLive); a fence after a status read is still seen.
 - [ ] Owner: qa-engineer. A session past its deadline with a lost auto-submit job is submitted by the reconciler.
+- [ ] Owner: qa-engineer. A SERVICE writer that **starts after** the erasure fence writes nothing (face-recheck outcome, server-event, disconnected job, report generation, analyze-session); erasure-compatible jobs (ingest close, sweeps, evidence-expire, consent PDF) still run.
+- [ ] Owner: qa-engineer. A no-limit or clamped next section ends at the session's effective deadline: pause before the section opens (p = 10, open at 15, resume at 20) and cap exhausted at 40 both end with the session.
+- [ ] Owner: qa-engineer. The candidate SUBMIT insert leaves `created_at` to the database default; a no-match with saved code at T alerts and fails.
+- [ ] Owner: qa-engineer. Erasure re-run repeats the database steps and removes a late candidate-scope commit.
 - [ ] Owner: qa-engineer. DeviceInfoService fencing: concurrent writers lose no update; a skip sets resync and the next heartbeat asks for full capabilities; the first write fences on `{}`.
 - [ ] Owner: qa-engineer. `detachForSessionJob` refusals: in any scope, with a raw-SQL hatch open, with a grant present; a discovery processor cannot run a session handler inline.
 - [ ] Owner: qa-engineer. Section finished by the button: the latest saved code is graded (close-section is the only writer of `ended_at`, ADR 0013 5.11).
@@ -253,7 +261,7 @@ Product findings (owner backend-engineer):
 
 | ID | Sev | Finding |
 | --- | --- | --- |
-| QA-D-04 | low | Cold start: `ensureConnected()` (apps/api/src/infrastructure/redis-ready.ts) returns at once when the lazy client is `connecting`, the client has `enableOfflineQueue: false`, so parallel first requests that use Redis (2FA verify) answer 503. Reproduced on main: `tc-003-coldstart.int.test.ts` (`it.failing`, KNOWN DEFECT), 8 of 8 runs on a fresh boot, so it is near-deterministic and stays in the gated suite. The body throws only when every failure is the 503; any other failure, or no failure (fixed), turns it red on purpose. Backend fixes it in backend/redis-cold-start; QA flips it to a plain test afterwards |
+| QA-D-04 | low | FIXED 2026-10-05 in backend PR #60 (FU-BE-33). Was: cold start, `ensureConnected()` (apps/api/src/infrastructure/redis-ready.ts) returned at once while the lazy client was `connecting` and the client has `enableOfflineQueue: false`, so parallel first requests that use Redis (2FA verify) answered 503. `tc-003-coldstart.int.test.ts` is now a plain `it` (five parallel 2FA sign-ins on a fresh boot all 200; any failure fails it) and stays in the gated suite. Hardened after review: logins first (no Redis), a guard that the Redis client is still `wait`, then five verifies fired together. Proof it detects the defect: with the pre-fix `redis-ready.ts` (from ab106f0) temporarily restored, the test failed 8 of 8 runs (five failures); with the fix it passed 10 of 10 |
 | QA-O-01 | doc | backend.md says an audit write failure gives "500, no body". The answer is a bare problem+json (type, title, status, instance, traceId) with no route data. Fix the wording or the code; the test accepts the bare problem |
 | QA-O-02 | observation | Each password-protected admin call reserves a password attempt on the shared lockout, so more than 5 parallel calls from one admin get 403 REAUTH_FAILED with the right password, and 5 wrong passwords lock the admin (AUTH_ACCOUNT_LOCKED). A locked admin cannot unlock themself (their own password check fails); another SUPER_ADMIN must. Probably by design; tell the frontend (no bulk parallel admin actions) |
 | QA-O-03 | observation | A token issued in the same second as a role change or reactivation is refused (marker in epoch seconds): a sign-in right after reactivation can get a dead token. Documented by backend; tests wait 1.1 s |
@@ -347,3 +355,66 @@ The gate has no api-unit-specific code: the apps/api unit Jest JSON (`api-unit.j
 ```
 
 Until it lands the gate does not read `api-unit.json` and TC-008 stays Planned in the matrix.
+## TC-003 disable freshness depends on backend PR #51
+
+The tc-003 "turn 2FA off" test proves `totpEnabled` is fresh after a disable through a new login and a refresh of that new session, not through the pre-disable cookie, because #51 revokes every refresh family on disable. The later "already off" check (409) still reuses the pre-disable access token; if BE-03 or #51 invalidates access tokens on disable, switch it to the new session's token. Owner: qa-engineer.
+
+
+## QA B (ops) follow-ups (2026-10-05)
+
+Owner: qa-engineer (QA B session). Items for QA A and the hub; QA B does not edit the matrix, `packages/qa/src`, `apps/*/test` or CI.
+
+### B.1 Matrix rows for QA A (manual scripts added in docs/manual-tests.md)
+
+The manual script is a secondary level for TCs that already have an automated level; QA A decides the primary level and status. Status for all rows below is Planned until a person runs the script.
+
+| TC or ref | Script | Level to add | Pri | Note |
+| --- | --- | --- | --- | --- |
+| TC-095 | M-01 | manual (secondary) | P1 | 18+ confirmation (C-30), server timestamp, emailed copy, retention link (C-05), new signature per session |
+| TC-030 | M-01 steps 1 and 4 | manual (secondary) | P1 | no media request before signing or without the 18+ confirmation |
+| TC-096 | M-02 | manual (secondary) | P1 | decline screen shows the recruiter contact (C-02) |
+| TC-075, TC-076 | M-04 | manual (secondary) | P1 | C-28: every session reviewed; band LOW still goes to UNDER_REVIEW. The current text of TC-076 ("Session scores MEDIUM") and FR-805 predates C-28 (see B.3) |
+| TC-072, TC-094 | M-05 | manual (secondary) | P1/P2 | tiers C-26, C-27, C-35; consent proof kept (C-17); erasure waits for an open appeal (C-06) |
+| Compliance proposal (a) (section 9 above) | M-03 | manual (secondary) | P1 | waived identity check, two accommodation settings (C-25, C-34); TC ID pending from the hub |
+| C-30 (proposal (k), section 11.4) | M-01 | manual (secondary) | P1 | age confirmation; the hub assigns a TC ID |
+| Compliance proposal (b), (d) (section 9 above) | M-02, M-01 step 8 | manual (secondary) | P2 | decline contact, retention link; TC ID pending |
+| Compliance proposal (e) (section 9 above) | M-06 | manual (secondary) | P1 (privacy) | demographics, blocked until FAIR-01; TC ID pending |
+| TC-090 | packages/qa/k6 | load (k6) | P1 | script added by QA B (see B.2); status stays Planned until DEP-01 |
+| TC-091 | packages/qa/k6 | load (k6) | P2 | same |
+| TC-093 | packages/qa/zap | scan (ZAP) | P1 | config added by QA B; status stays Planned until DEP-01 |
+| TC-065, TC-053, TC-054, TC-056, TC-064, TC-036 | docs/qa/redteam-plan.md (in PR #80) | manual / red team | P1/P2 | QA-02 adversarial re-attempts; report goes to docs/red-team-report.md after DEP-01 |
+
+### B.2 Notes on the existing k6 scripts (packages/qa/k6, QA A)
+
+QA B has replaced the placeholder `packages/qa/k6/tc-090-load.js` and `tc-091-code-run.js` in place (PR #77). The old scripts used placeholder paths (`/v1/sessions/current/...`) that matched neither FSD section 4 nor ADR 0013, and sent no presign, confirm, keystrokes or signed batches. The new ones use the ADR 0013 routes and the real cadence (R-02). The hub should update the k6 job in `.github/workflows/qa.yml` (see B.4).
+
+### B.3 Doc disagreements found (for the hub)
+
+1. FSD FR-805 and TC-076 say only MEDIUM and HIGH sessions go to the review queue; C-28 says a person reviews every session and GRADED always goes to UNDER_REVIEW. FSD section 3 (COMPLETED "Verdict set or auto-clean") has the same old wording.
+2. FSD FR-401 has no age confirmation (C-30), and FR-305 has no "no identity check" or "face detectors off" accommodation (C-02, C-25).
+3. TC-094 still says "provisional, Legal to confirm"; C-06 made the erasure hold final.
+4. TC-063 (45 s) versus FR-609 (60 s) is still open (already listed above; ADR 0013 section 5.3 flags it as Q13).
+5. Proposal (m) in section 11.4 says that with "face detectors off" the identity re-check still runs and GAZE is off. C-34 refuses the re-check when either accommodation is on, ADR 0015 (proposed) is the same, and M-03 expects GAZE may still fire (OQ-15). Hub to reconcile; QA A owns that row.
+6. The face-tier clock reads "after the assessment is finished" in retention-schedule.md but "from capture or submission" in C-35. M-05 follows C-35; testers record the date the job used and do not file it as a new defect each run.
+
+### B.4 CI changes needed (hub, rule 12; none made by QA B)
+
+QA B made none of these changes. The exact diff is sent to the architecture hub, who apply it to `.github/workflows/qa.yml`. Summary:
+
+- k6 job: mount `packages/qa/k6` at `/k6` and run with `-w /k6`; set `API_BASE_URL=<target>/api/v1`; map the secret `K6_CANDIDATE_TOKENS` to `K6_SESSIONS_JSON` and pass it into the container as `docker -e SESSIONS_JSON`; add `--summary-export` and upload the summary as an artifact.
+- ZAP job: copy `packages/qa/zap/baseline.conf` and pass it with `-c`; replace the `jq` check with `node packages/qa/zap/evaluate.mjs`; optionally run a second scan against `api_url`.
+
+### B.5 Retention clock-shift hook (for DB-06 and backend)
+
+M-05 steps 5, 5a and 6 need a way to run the retention job with a shifted clock, which the docs do not yet specify. Requirement from QA: the hook exists on staging only, is admin-gated (SUPER_ADMIN, audited, with a fresh password check), and is absent from pilot and production builds. M-05 includes a check that it is absent there. Owners: database-engineer (DB-06, the job and its clock input) and backend-engineer (any route that exposes it). Until the hook is specified, the clock steps rely on the integration tests for TC-072.
+
+## QA B (ops) (D-51)
+
+| ID | Sev | Owner | Item |
+| --- | --- | --- | --- |
+| FU-QAB-01 | should-fix | architecture hub | `.github/workflows/qa.yml` job `zap-baseline` (PR #80 review): (1) it counts High alerts with `jq` and passes on an empty report (unreachable target); (2) it has no `actions/checkout`, so `packages/qa/zap/baseline.conf` and `evaluate.mjs` are not on the runner; (3) it has no `-c baseline.conf`. Fix: add `actions/checkout` and `actions/setup-node` (`.nvmrc`), mount the conf, run `node packages/qa/zap/cli.mjs zap/report.json --target-host <host>`, and make a ZAP exit code of 3 (scan failure) fail the job. Also run `node --test packages/qa/zap/*.test.mjs` in the QA workflow (suggestion: a `test:zap` script in packages/qa/package.json, a QA A file, which the hub or QA A adds and the workflow calls). The ZAP image digest in `packages/qa/zap/README.md` must be bumped together with qa.yml. The full diff was sent to the hub. |
+| FU-QAB-02 | owner decision | owner | Red-team plan rule 2: may a tester use their own face on staging? Default is no (synthetic faces only, CLAUDE.md, architecture.md:22). A yes needs the owner's written approval and a doc change or ADR via the architecture hub (architecture.md:22 and brd.md:87 say synthetic only); a chat approval is not enough. The volunteer consent form (D-18, C-11) does not cover it. |
+| FU-QAB-03 | nit | qa-engineer | RT-43, RT-44 and RT-67 rely on proposed ADR 0015; re-read them when the ADR is accepted or changed. |
+| FU-QAB-04 | nit | qa-engineer | Nits from the PR #71 review, in docs/manual-tests.md: (1) the M-05 hook line should say "(SUPER_ADMIN, audited, fresh password check)" to match B.5; (2) say that the local pilot/production-config run uses local or ephemeral DB, storage and secrets only, never real pilot or production credentials or an AWS bucket (ADR 0009); (3) add a receiver clean-up step: delete delivery logs, remove the secret from the environment, ask the admin to rotate it if exposed; (4) move M-01a after step 10; (5) confirm the PR numbers cited in B.1 and B.2. |
+| FU-QAB-05 | nit | qa-engineer | Nits from the PR #77 review (k6): (1) `lib/guard.js` uses the `i` flag, so case folding depends on the engine (goja vs Node); use explicit `[A-Za-z0-9.-]` or an ASCII pre-check and add a test for a Kelvin-sign host; (2) set `maxRedirects: 0` in the `options` of both scripts so a 3xx from an allow-listed host cannot send an API POST elsewhere; (3) drop `error` from `SYSTEM_TAGS` (`error_code` is enough) so no URL or object key can reach metric outputs; (4) after a long run, excused slots catch up in a burst (about 30 keystroke posts after a 60 s run); cap catch-up with `due = max(due + every, now)`; (5) README: `STORAGE_ALLOWED_HOSTS` accepts only `https://`, so it blocks every PUT against the http mock; (6) README: the request-rate floor counts setup and graceful-stop time, so smoke runs under 2 minutes can fail it falsely; loosen the margin or say so. |
+| FU-QAB-06 | nit | qa-engineer | Nits from the PR #80 review (red-team plan and ZAP): (1) plan rule 2: the physical webcam and microphone carry only generated footage or audio (virtual device, a capture card fed by generated video, or a camera pointed at an empty scene) and are never live on the tester (RT-27, RT-40, RT-46); (2) RT-30 "a pre-recorded video of a face" should say generated; (3) `evaluate.mjs` header still shows `--target-host` as optional (the CLI requires it); (4) `strip` in `evaluate.mjs` only removes `http(s)://` text; widen it to any `scheme://` and optionally `?key=value` pairs. |

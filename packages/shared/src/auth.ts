@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { userRoleSchema } from './permissions';
 
 /** RFC 5321 path limit for an email address. */
 export const MAX_EMAIL_LENGTH = 254;
@@ -28,3 +29,21 @@ export const otpCodeSchema = z
   .string()
   .trim()
   .regex(/^\d{6}$/, 'Enter the 6-digit code.');
+
+/** Upper bounds for display strings in the session user (a name or organisation name). */
+export const MAX_DISPLAY_NAME_LENGTH = 200;
+
+/**
+ * The signed-in staff user returned with every authenticated session (login, 2FA verify, enrolment
+ * confirm, refresh). `totpEnabled` is the caller's own current 2FA state, read-only, server-set
+ * (FR-102); it never appears on pre-2FA, challenge or other-user responses.
+ */
+export const sessionUserSchema = z.object({
+  id: z.uuid(),
+  email: z.string().max(MAX_EMAIL_LENGTH),
+  name: z.string().max(MAX_DISPLAY_NAME_LENGTH),
+  role: userRoleSchema,
+  orgName: z.string().max(MAX_DISPLAY_NAME_LENGTH),
+  totpEnabled: z.boolean(),
+});
+export type SessionUser = z.infer<typeof sessionUserSchema>;

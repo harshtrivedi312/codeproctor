@@ -12,7 +12,9 @@ analyzers and never scored by the risk calculator, whatever the events list cont
 
 from __future__ import annotations
 
-from typing import Annotated, Self
+import os
+from collections.abc import Mapping
+from typing import Annotated, Final, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
@@ -110,10 +112,55 @@ class VadConfig(_Base):
     f0_max_hz: _Pos = 400
 
 
+class FaceConfig(_Base):
+    """Face matching (FR-403, ADR 0004 section 2, D-05). Defaults in INTEGRITY-CONFIG.md section 7.
+
+    SYSTEM CONFIGURATION, NOT AN ORG SETTING (ADR 0004 section 2, ADR 0007): this class is not part
+    of `IntegrityConfig`, so `organizations.settings` cannot reach it. Load it with `from_env()`.
+
+    PLACEHOLDER THRESHOLD: `match_threshold` is NOT tuned. It waits for the demographically diverse
+    test set (INT-01, pilot entry criterion in ADR 0004 section 2). The default is deliberately high
+    so that doubt goes to a human (MANUAL_REVIEW); it never rejects anyone.
+    """
+
+    # Cosine similarity at or above which the pair is a MATCH; below goes to MANUAL_REVIEW.
+    match_threshold: Annotated[float, Field(ge=0.30, le=1.0)] = 0.75
+    # Detector confidence (when the detector reports one) below this is treated as no usable face.
+    min_detection_confidence: _Unit = 0.7
+    # ID photo only: faces smaller than this share of the largest face's size are ignored (ghost
+    # portrait, hologram). Selfies and re-check frames stay strictly single-face.
+    id_secondary_face_ratio: Annotated[float, Field(gt=0.0, le=1.0)] = 0.5
+    max_image_bytes: _Pos = 10 * 1024 * 1024
+    # At most Pillow's guard value (set at import), so its 2x bomb check cannot override this limit.
+    max_image_pixels: Annotated[int, Field(gt=0, le=25_000_000)] = 25_000_000
+    # Selfie embeddings kept in memory for FR-606 re-checks (ADR 0004 section 2); bounded LRU.
+    selfie_cache_max_sessions: _Pos = 256
+
+    @classmethod
+    def from_env(cls, environ: Mapping[str, str] | None = None) -> FaceConfig:
+        """Read system configuration from `FACE_*` environment variables; invalid values raise."""
+        env = os.environ if environ is None else environ
+        raw: dict[str, str] = {}
+        for field, var in _FACE_ENV.items():
+            if var in env:
+                raw[field] = env[var]
+        return cls.model_validate(raw)
+
+
+_FACE_ENV: Final = {
+    "match_threshold": "FACE_MATCH_THRESHOLD",
+    "min_detection_confidence": "FACE_MIN_DETECTION_CONFIDENCE",
+    "id_secondary_face_ratio": "FACE_ID_SECONDARY_FACE_RATIO",
+    "max_image_bytes": "FACE_MAX_IMAGE_BYTES",
+    "max_image_pixels": "FACE_MAX_IMAGE_PIXELS",
+    "selfie_cache_max_sessions": "FACE_SELFIE_CACHE_MAX_SESSIONS",
+}
+
+
 class RiskConfig(_Base):
     """FR-804 / ADR 0005 section 2."""
 
-    severity_points: dict[Severity, float] = Field(
+    severity_points: dict[Severity, Annotated[float, Field(allow_inf_nan=False)]] = Field(
         default_factory=lambda: dict(DEFAULT_SEVERITY_POINTS)
     )
     cap_per_type: _Pos = DEFAULT_EVENT_CAP_PER_TYPE
@@ -121,17 +168,13 @@ class RiskConfig(_Base):
     severity_by_type: dict[EventType, Severity] = Field(
         default_factory=lambda: dict(DEFAULT_EVENT_SEVERITY)
     )
-    weight_by_type: dict[EventType, Annotated[float, Field(ge=0.0)]] = Field(
+    weight_by_type: dict[EventType, Annotated[float, Field(ge=0.0, allow_inf_nan=False)]] = Field(
         default_factory=lambda: {
             t: (0.0 if t in ZERO_WEIGHT_EVENT_TYPES else 1.0) for t in DEFAULT_EVENT_SEVERITY
         }
     )
-    medium_min_score: float = DEFAULT_MEDIUM_MIN_SCORE
-    high_min_score: float = DEFAULT_HIGH_MIN_SCORE
-    # C-28: every session gets a human review. The band picks the review path: bands listed here
-    # get the fast path (summary and one-click verdict); the others get the full review. Only LOW
-    # is allowed until the hub decides otherwise (empty set = everything full).
-    fast_review_bands: frozenset[RiskBand] = frozenset({"LOW"})
+    medium_min_score: Annotated[float, Field(allow_inf_nan=False)] = DEFAULT_MEDIUM_MIN_SCORE
+    high_min_score: Annotated[float, Field(allow_inf_nan=False)] = DEFAULT_HIGH_MIN_SCORE
 
     @model_validator(mode="after")
     def _merge_defaults(self) -> Self:
@@ -151,13 +194,39 @@ class RiskConfig(_Base):
     def _bands(self) -> Self:
         if not 0 < self.medium_min_score < self.high_min_score <= 100:
             raise ValueError("Band edges must satisfy 0 < medium < high <= 100.")
-        if not self.fast_review_bands <= {"LOW"}:
-            raise ValueError(
-                "Only the LOW band may use the fast review path (pending hub decision)."
-            )
         if any(p < 0 for p in self.severity_points.values()):
             raise ValueError("severity_points must not be negative.")
         return self
+
+
+class ReviewPathConfig(_Base):
+    """Review-path routing (FR-805, owner decision C-28; DL-18). SYSTEM CONFIGURATION, NOT AN ORG
+    SETTING: this class is not part of `IntegrityConfig`, so `organizations.settings` and the /risk
+    request body cannot reach it. Load it with `from_env()`.
+
+    Every session gets a human review. Bands listed in `fast_review_bands` get the fast path
+    (summary and one-click verdict); the rest get the full review. Only LOW is allowed (DL-18);
+    an empty set sends everything to the full review.
+    """
+
+    fast_review_bands: frozenset[RiskBand] = frozenset({"LOW"})
+
+    @model_validator(mode="after")
+    def _only_low(self) -> Self:
+        if not self.fast_review_bands <= {"LOW"}:
+            raise ValueError("Only the LOW band may use the fast review path.")
+        return self
+
+    @classmethod
+    def from_env(cls, environ: Mapping[str, str] | None = None) -> ReviewPathConfig:
+        """Read `RISK_FAST_REVIEW_BANDS` (comma-separated, for example `LOW`; set but empty means
+        no fast path). Unset means the default (LOW). Anything invalid raises, loudly."""
+        env = os.environ if environ is None else environ
+        raw = env.get("RISK_FAST_REVIEW_BANDS")
+        if raw is None:
+            return cls()
+        bands = [b.strip() for b in raw.split(",") if b.strip()]
+        return cls.model_validate({"fast_review_bands": bands})
 
 
 class IntegrityConfig(_Base):

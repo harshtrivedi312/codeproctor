@@ -75,16 +75,21 @@ SCREEN_SHARE_RESUMED, IDENTITY_MANUAL_REVIEW, RESUME_OTP_FAILED). Bands: LOW 0-2
 HIGH 60-100 (`mediumMinScore`, `highMinScore`). Overrides: `severityPoints`, `capPerType`,
 `capOverrides`, `severityByType`, `weightByType`. TC-075: 2 HIGH + 3 MEDIUM = 64, HIGH.
 Routing (FR-805 as changed by owner decision C-28): a person reviews EVERY session, so `needs_review`
-is always true and nothing is auto-cleared. The band now orders the queue and picks the review path:
-`review_path` is `fast` (summary and one-click verdict; default for bands in `risk.fastReviewBands` =
-`["LOW"]`) or `full`. A pending identity review or pending manual short-answer score forces `full`
-(brief assumption, to confirm with the hub). `fastReviewBands` may hold only `LOW` (or be empty) until the hub decides. HIGH can never be fast (validated). Queue order
-(`order_review_queue`): HIGH, MEDIUM, LOW; higher score first; older submission first; session id as
-the final tie-break, so the order is total and deterministic. A LOW session with a hold ranks with plain LOW: the queue rank is band-based on
-purpose (the band orders the queue, C-28); the hold already shows in `reasons` and forces the `full`
-path, and ranking it higher would make the rank depend on two inputs the hub has not agreed on
-(see followups). `reasons` always starts with `RISK_<band>`. The `/risk` route accepts `identity_review_pending` and `short_answer_pending` and
-returns `needs_review`, `review_path`, `queue_rank`, `review_reasons`.
+is always true and nothing is auto-cleared. The band orders the queue and picks the review path:
+`review_path` is `fast` (summary and one-click verdict) or `full`. A pending identity review or
+pending manual short-answer score forces `full` (DL-18).
+
+`RISK_FAST_REVIEW_BANDS` (`ReviewPathConfig.from_env()`, DL-18) lists the bands that get `fast`. It is
+a system setting, not an org setting: it holds only `LOW` or nothing (set but empty = everything
+full), unset means `LOW`, and any other value fails loudly, at worker startup. It cannot be set
+through org settings or the `/risk` request config.
+
+Queue order helper (`order_review_queue`): HIGH, MEDIUM, LOW; higher score first; older submission
+first; session id as the final tie-break, so the order is total and deterministic. BE-13 owns the
+final review-queue order, including holds and oldest-first (DL-20); this helper has no holds tier and
+`queue_rank` stays band-based. `reasons` always starts with `RISK_<band>`. The `/risk` route accepts
+`identity_review_pending` and `short_answer_pending` and returns `needs_review`, `review_path`,
+`queue_rank`, `review_reasons`.
 Severity is always taken from the type; a severity sent by a client is ignored.
 
 Accommodations (FR-305): `disabledEventTypes` lists event types that are never produced by the
@@ -128,3 +133,40 @@ The worker has no face-based detectors, so poor lighting and glasses do not affe
 9. **Offsets beyond the BMP.** The SDK reports UTF-16 offsets; the worker replays with Python code
    points, so text with emoji or astral characters can desynchronize replay-based checks (not the
    counts). Logged in docs/followups/integrity.md.
+
+## 7. Face matching (FR-403, TC-033; ADR 0004, D-05) `face.*`
+
+**System configuration, not an org setting** (ADR 0004 section 2, ADR 0007): `FaceConfig` is not part of `IntegrityConfig`, so `organizations.settings` cannot override it. It loads from `FACE_*` environment variables via `FaceConfig.from_env()` (`FACE_MATCH_THRESHOLD`, `FACE_MIN_DETECTION_CONFIDENCE`, `FACE_ID_SECONDARY_FACE_RATIO`, `FACE_MAX_IMAGE_BYTES`, `FACE_MAX_IMAGE_PIXELS`, `FACE_SELFIE_CACHE_MAX_SESSIONS`); invalid values fail at startup.
+
+Code: `src/worker/face/`. Interface (ADR 0004 section 2): `detect_and_align(image)`, `embed(aligned)`,
+`compare(a, b)`, `model_id`. Detector (MediaPipe Face Landmarker, Apache 2.0) and embedder (AuraFace
+`glintr100.onnx` only, F-1) are swappable; tests use fakes. Output is MATCH or MANUAL_REVIEW with a
+reason from `identity_review_reason`. **There is no reject outcome**: no face, multiple faces, low
+detection confidence, bad/oversized/corrupt image, model error, hash mismatch, failed liveness and
+score below threshold are all MANUAL_REVIEW.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| matchThreshold | **0.75 (PLACEHOLDER, NOT TUNED)** | Cosine at or above is MATCH. Valid range 0.30-1.0. Waits for INT-01 tuning on the diverse test set (ADR 0004 section 2, D-18). Deliberately high so doubt goes to a human. |
+| minDetectionConfidence | 0.7 | Reported detector confidence below this is treated as no usable face (NO_FACE). The MediaPipe landmarker reports none, so it only applies to other detectors |
+| maxImageBytes / maxImagePixels | 10 MiB / 25,000,000 | Larger images are MANUAL_REVIEW (MATCH_ERROR, IMAGE_SIZE); decompression-bomb guard |
+| idSecondaryFaceRatio | 0.5 | ID photo only: faces smaller than this share of the largest face (by landmark extent) are ignored (ghost portrait); a comparable second face is MULTIPLE_FACES. Selfies and re-check frames must hold exactly one face |
+| selfieCacheMaxSessions | 256 | Bounded LRU of selfie embeddings for FR-606 re-checks; cleared at session end; ID embeddings are never kept |
+
+Model files (never committed, never downloaded by code; download needs owner approval P-07):
+`AURAFACE_MODEL_PATH` -> `glintr100.onnx`, SHA-256 `a7933ea5330113b01c9b60351d8f4c33003f145d8470ac5f0e52ee2effe25c60`
+(ADR 0001 section 12.2); any other file name or digest is refused. `FACE_LANDMARKER_MODEL_PATH` ->
+`face_landmarker.task` (full SHA-256 `64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff`, ADR 0001 section 12.2). Both files are read once, hashed, and the same bytes are given to the runtime (no check-then-use gap); a mismatch or wrong file name is MANUAL_REVIEW (MATCH_ERROR) via `review_for_model_error`. `model_id` = `auraface-v1:a7933ea5`.
+Images: JPEG, PNG and phone MPO (first frame) only; EXIF orientation is applied after the pixel-count check. Detail codes are prefixed `ID_`, `SELFIE_` or `FRAME_`.
+`match()` requires `liveness_confirmed` (no default; anything but `True` is MANUAL_REVIEW). `FACE_MIN_DETECTION_CONFIDENCE` is passed to the MediaPipe landmarker by `build_face_matcher`. `maxImagePixels` is at most 25,000,000. Model files over the ADR byte size are refused unread. `prime_selfie(session_id, selfie)` rebuilds only the selfie embedding after a cache miss.
+Optional extra: `pip install -e '.[face]'` (mediapipe, onnxruntime, pillow).
+
+Privacy: embeddings, aligned crops and the selfie cache have redacted repr/str, cannot be pickled or
+copied, are never logged, and nothing is written to disk (tests). Logs carry fixed codes only.
+
+False negatives (a genuine candidate sent to review): poor lighting, glasses glare, head pose,
+low-resolution or old ID photos, heavy ID security patterns over the face, webcam blur, and groups
+the model covers less well (AuraFace card, F-6). False positives (a wrong person matched): look-alikes
+and family members; a threshold that is too low. Manual review and the pilot-exit review of false
+match and false non-match rates (ADR 0004) are the safeguards; no automatic rejection exists.
+An ID card held up to a webcam is small for the BlazeFace short-range model (ADR 0001 12.2 notes).

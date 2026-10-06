@@ -11,9 +11,9 @@ import {
   CallHandler,
   ExecutionContext,
   Injectable,
+  InternalServerErrorException,
   Logger,
   NestInterceptor,
-  UnauthorizedException,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { Observable } from 'rxjs';
@@ -51,10 +51,11 @@ export class OrgContextInterceptor implements NestInterceptor {
 
     const parsed = requestUserSchema.safeParse(user);
     if (!parsed.success) {
-      // The auth layer produced a user without a usable org. Fail closed with 401 (FU-DB-65 changes
-      // this to 500 in a later PR); log no values.
+      // The guard accepted a token but produced a user without a usable org: a bug in the auth
+      // layer, not a bad credential from the client. Fail closed with 500 (FU-DB-65), and log no
+      // values.
       this.logger.error('request.user does not match AuthUser (id, orgId, role, kind "access")');
-      throw new UnauthorizedException();
+      throw new InternalServerErrorException();
     }
     const authenticated: AuthenticatedUser = {
       orgId: parsed.data.orgId,

@@ -20,7 +20,7 @@ from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from worker.config import IntegrityConfig
+from worker.config import IntegrityConfig, ReviewPathConfig
 from worker.events import EventType, RiskBand, Severity, risk_band_for_score
 
 
@@ -60,8 +60,8 @@ _BAND_RANK: Final[dict[RiskBand, int]] = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
 class ReviewRouting:
     """FR-805 as changed by C-28. The API applies the state change through SessionStateService.
 
-    `needs_review` is always True. `review_path` is "fast" only for bands in
-    `risk.fastReviewBands` (default LOW) and only when no identity review or manual short-answer
+    `needs_review` is always True. `review_path` is "fast" only for bands in the system setting
+    `RISK_FAST_REVIEW_BANDS` (default LOW) and only when no identity review or manual short-answer
     score is pending; those holds force the "full" path. `queue_rank` is the band's queue priority
     (0 = first).
     """
@@ -120,17 +120,21 @@ def route_for_review(
     band: RiskBand,
     identity_review_pending: bool = False,
     short_answer_pending: bool = False,
-    config: IntegrityConfig | None = None,
+    system: ReviewPathConfig | None = None,
 ) -> ReviewRouting:
-    """Every session is reviewed (C-28). Pick the review path and queue rank from the band."""
-    cfg = config or IntegrityConfig()
+    """Every session is reviewed (C-28). Pick the review path and queue rank from the band.
+
+    The fast-path bands come from SYSTEM configuration (`RISK_FAST_REVIEW_BANDS`), never from org
+    settings or the request.
+    """
+    system = system if system is not None else ReviewPathConfig.from_env()
     reasons = [f"RISK_{band}"]
     if identity_review_pending:
         reasons.append("IDENTITY_MANUAL_REVIEW")
     if short_answer_pending:
         reasons.append("SHORT_ANSWER_MANUAL_SCORING")
     held = identity_review_pending or short_answer_pending
-    fast = band in cfg.risk.fast_review_bands and not held
+    fast = band in system.fast_review_bands and not held
     return ReviewRouting(
         needs_review=True,
         reasons=reasons,
@@ -140,7 +144,10 @@ def route_for_review(
 
 
 def queue_sort_key(item: QueueItem) -> tuple[int, float, int, str]:
-    """HIGH, MEDIUM, LOW; higher score first; older submission first; then session id."""
+    """HIGH, MEDIUM, LOW; higher score first; older submission first; then session id.
+
+    A helper for the worker's own ordering and tests. BE-13 owns the final review-queue order
+    (including holds and oldest-first rules, DL-20); do not add tiers here."""
     return (_BAND_RANK[item.band], -item.score, item.submitted_at_ms, item.session_id)
 
 

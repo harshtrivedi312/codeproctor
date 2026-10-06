@@ -20,6 +20,9 @@ const PASSWORD = 'Correct-Horse-9';
 // [$queryRaw, $executeRaw] calls for a refused setup/start (reserve and failure register).
 const EXPECTED_SETUP_REFUSED_COUNTS = [2, 0];
 
+// login, password/reset, 2fa/disable, 2fa/verify probe requests.
+const EXPECTED_STATUSES = [401, 400, 401, 400];
+
 /** A re-auth refusal: 403 with the machine code, never a 401 (FU-BE-39). */
 function reauthRefused(res: request.Response): void {
   expect(res.status).toBe(403);
@@ -507,8 +510,8 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         data: { failedLogins: 5, lockedUntil: new Date(Date.now() + 600_000) },
       });
       const { PrismaService: PrismaSvc } = jest.requireActual<
-        typeof import('../database/prisma.module')
-      >('../database/prisma.module');
+        typeof import('../database/prisma.service')
+      >('../database/prisma.service');
       const client = app.get(PrismaSvc).client;
       const query = jest.spyOn(client, '$queryRaw');
       const exec = jest.spyOn(client, '$executeRaw');
@@ -652,8 +655,8 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         data: { failedLogins: 5, lockedUntil: new Date(Date.now() + 600_000) },
       });
       const { PrismaService: PrismaSvc } = jest.requireActual<
-        typeof import('../database/prisma.module')
-      >('../database/prisma.module');
+        typeof import('../database/prisma.service')
+      >('../database/prisma.service');
       const client = app.get(PrismaSvc).client;
       const query = jest.spyOn(client, '$queryRaw');
       const exec = jest.spyOn(client, '$executeRaw');
@@ -988,6 +991,212 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
     });
   });
 
+  describe('FR-102: totpEnabled on the session user', () => {
+    type UserBody = { user: { totpEnabled?: boolean } };
+    const SECRET = 'JBSWY3DPEHPK3PXP';
+
+    it('FR-102: login without 2FA reports totpEnabled false, and refresh keeps reporting the real state', async () => {
+      const u = await createUser();
+      const res = await login(u.email).expect(200);
+      expect((res.body as Body).session.user).toMatchObject({ totpEnabled: false });
+      const next = await refresh(refreshCookie(res)).expect(200);
+      expect((next.body as UserBody).user.totpEnabled).toBe(false);
+    });
+
+    it('FR-102: 2fa/verify reports true; after 2FA is disabled the refresh is refused and the next login reports false', async () => {
+      const u = await createUser({ totp: SECRET });
+      const first = (await login(u.email).expect(200)).body as Body;
+      // The previous step's code, so the current step stays unused for the disable call.
+      const previous = authenticator.clone({ epoch: Date.now() - 30_000 }).generate(SECRET);
+      const verified = await request(app.getHttpServer())
+        .post(`${API}/2fa/verify`)
+        .send({ challengeToken: first.challengeToken, code: previous })
+        .expect(200);
+      expect((verified.body as UserBody).user.totpEnabled).toBe(true);
+      const cookie = refreshCookie(verified);
+      const same = await refresh(cookie).expect(200);
+      expect((same.body as UserBody).user.totpEnabled).toBe(true);
+
+      await request(app.getHttpServer())
+        .post(`${API}/2fa/disable`)
+        .set('Authorization', `Bearer ${(same.body as Body).accessToken}`)
+        .send({ currentPassword: PASSWORD, totpCode: authenticator.generate(SECRET) })
+        .expect(204);
+      // Disable signs the user out everywhere.
+      await refresh(refreshCookie(same)).expect(401);
+      const again = (await login(u.email).expect(200)).body as Body;
+      expect(again.status).toBe('authenticated');
+      expect(again.session.user).toMatchObject({ totpEnabled: false });
+    });
+
+    it('FR-102: totpEnabled is not in the access token claims', async () => {
+      const u = await createUser();
+      const body = (await login(u.email).expect(200)).body as Body;
+      const claims = JSON.parse(
+        Buffer.from(body.session.accessToken.split('.')[1] ?? '', 'base64url').toString(),
+      ) as Record<string, unknown>;
+      expect(Object.keys(claims).join(',')).not.toMatch(/totp|twoFactor/i);
+    });
+
+    it("NFR-04: the running app's logger redacts secret fields (proves LOG_REDACT is wired into the live pinoHttp config)", () => {
+      const { Logger } = jest.requireActual<typeof import('nestjs-pino')>('nestjs-pino');
+      const live = app.get(Logger);
+      logged.length = 0;
+      live.log(
+        {
+          // The request serializer needs a url; it drops the body, so the body is also probed bare.
+          req: { id: 'probe-req', method: 'POST', url: '/probe' },
+          body: { password: 'ProbeX-11aa', nested: { totpCode: 'ProbeY-22bb' } },
+          wrapper: { a: { b: { secret: 'ProbeZ-33cc', otpauthUri: 'ProbeW-44dd' } } },
+        },
+        'live-logger-probe',
+      );
+      const output = logged.join('');
+      expect(output).toContain('live-logger-probe');
+      expect(output).toContain('[Redacted]');
+      for (const probe of ['ProbeX-11aa', 'ProbeY-22bb', 'ProbeZ-33cc', 'ProbeW-44dd']) {
+        expect(output).not.toContain(probe);
+      }
+    });
+
+    it('NFR-04: the request serializer keeps bodies and headers out of the request logs (probes sent to login, reset, disable and verify)', async () => {
+      const probes = {
+        password: 'ProbePassword-91ab',
+        currentPassword: 'ProbeCurrent-82cd',
+        newPassword: 'ProbeNewPass-73ef',
+        code: 'ProbeCode-64aa',
+        totpCode: 'ProbeTotp-55bb',
+        token: 'ProbeToken-46cc',
+        challengeToken: 'ProbeChallenge-37dd',
+      };
+      const u = await createUser({ totp: SECRET });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      logged.length = 0;
+      const auth = { Authorization: `Bearer ${challengeToken}` };
+      const statuses = [
+        (await login(u.email, probes.password)).status,
+        (
+          await request(app.getHttpServer()).post(`${API}/password/reset`).send({
+            token: probes.token,
+            newPassword: probes.newPassword,
+          })
+        ).status,
+        (
+          await request(app.getHttpServer())
+            .post(`${API}/2fa/disable`)
+            .set(auth)
+            .send({ currentPassword: probes.currentPassword, totpCode: probes.totpCode })
+        ).status,
+        (
+          await request(app.getHttpServer())
+            .post(`${API}/2fa/verify`)
+            .send({ challengeToken: probes.challengeToken, code: probes.code })
+        ).status,
+      ];
+      expect(statuses).toEqual(EXPECTED_STATUSES);
+      const output = logged.join('');
+      for (const path of ['/auth/login', '/password/reset', '/2fa/disable', '/2fa/verify']) {
+        expect(output).toContain(path);
+      }
+      for (const value of Object.values(probes)) expect(output).not.toContain(value);
+    });
+
+    it('NFR-04: real response secrets (refresh cookie, access token, manualKey, otpauthUri) never appear in the logs', async () => {
+      const u = await createUser();
+      logged.length = 0;
+      const res = await login(u.email).expect(200);
+      const cookieValue = refreshCookie(res).split('=')[1] ?? '';
+      const accessToken = (res.body as Body).session.accessToken;
+      const start = (
+        await request(app.getHttpServer())
+          .post(`${API}/2fa/setup/start`)
+          .set({ Authorization: `Bearer ${accessToken}` })
+          .send({ currentPassword: PASSWORD })
+          .expect(200)
+      ).body as Body;
+      const secrets = [cookieValue, accessToken, start.manualKey, start.otpauthUri];
+      for (const value of secrets) expect(value.length).toBeGreaterThan(10);
+      const output = logged.join('');
+      expect(output).toContain('/auth/login');
+      for (const value of secrets) expect(output).not.toContain(value);
+    });
+
+    it('FR-102: after setup/confirm the very next refresh reports totpEnabled true', async () => {
+      const u = await createUser();
+      const res = await login(u.email).expect(200);
+      const auth = { Authorization: `Bearer ${(res.body as Body).session.accessToken}` };
+      const start = (
+        await request(app.getHttpServer())
+          .post(`${API}/2fa/setup/start`)
+          .set(auth)
+          .send({ currentPassword: PASSWORD })
+          .expect(200)
+      ).body as Body;
+      await request(app.getHttpServer())
+        .post(`${API}/2fa/setup/confirm`)
+        .set(auth)
+        .send({ currentPassword: PASSWORD, code: authenticator.generate(start.manualKey) })
+        .expect(200);
+      const again = await refresh(refreshCookie(res)).expect(200);
+      expect((again.body as UserBody).user.totpEnabled).toBe(true);
+    });
+
+    it('FR-102: enroll/confirm reports totpEnabled true in the session it opens', async () => {
+      const u = await createUser({ role: UserRole.REVIEWER });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      const start = (
+        await request(app.getHttpServer())
+          .post(`${API}/2fa/enroll/start`)
+          .send({ challengeToken })
+          .expect(200)
+      ).body as Body;
+      const done = await request(app.getHttpServer())
+        .post(`${API}/2fa/enroll/confirm`)
+        .send({ challengeToken, code: authenticator.generate(start.manualKey) })
+        .expect(200);
+      expect((done.body as Body).session.user).toMatchObject({ totpEnabled: true });
+    });
+
+    it('FR-102: challenge and failed responses carry no session user and no totpEnabled', async () => {
+      const withTotp = await createUser({ totp: SECRET });
+      const required = await login(withTotp.email).expect(200);
+      const enforced = await createUser({ role: UserRole.REVIEWER });
+      const enrol = await login(enforced.email).expect(200);
+      const wrong = await login(withTotp.email, 'wrong-password-1').expect(401);
+      const badCode = await request(app.getHttpServer())
+        .post(`${API}/2fa/verify`)
+        .send({ challengeToken: (required.body as Body).challengeToken, code: 'ZZZZZZZZZZZZZZZZ' })
+        .expect(400);
+      for (const res of [required, enrol, wrong, badCode]) {
+        expect(JSON.stringify(res.body)).not.toContain('totpEnabled');
+      }
+      expect((required.body as Body).session).toBeUndefined();
+      expect((enrol.body as Body).session).toBeUndefined();
+    });
+
+    it('FR-102: totpEnabled is read-only; sending it in a request body is refused with 400', async () => {
+      const u = await createUser();
+      await request(app.getHttpServer())
+        .post(`${API}/login`)
+        .send({ email: u.email, password: PASSWORD, totpEnabled: true })
+        .expect(400);
+      const session = (await login(u.email).expect(200)).body as Body;
+      const t = await createUser({ totp: SECRET });
+      const { challengeToken } = (await login(t.email).expect(200)).body as Body;
+      const refused = await request(app.getHttpServer())
+        .post(`${API}/2fa/verify`)
+        .send({ challengeToken, code: '123456', totpEnabled: true })
+        .expect(400);
+      expect(JSON.stringify(refused.body)).toContain('totpEnabled');
+      const setupRefused = await request(app.getHttpServer())
+        .post(`${API}/2fa/setup/confirm`)
+        .set('Authorization', `Bearer ${session.session.accessToken}`)
+        .send({ currentPassword: PASSWORD, code: '123456', totpEnabled: true })
+        .expect(400);
+      expect(JSON.stringify(setupRefused.body)).toContain('totpEnabled');
+    });
+  });
+
   describe('TC-005 (FR-104): refresh token rotation and reuse', () => {
     it('TC-005: the second use of a refresh token is rejected and the whole family is revoked', async () => {
       const u = await createUser();
@@ -1179,8 +1388,8 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       const inactive = await createUser();
       await prisma.user.update({ where: { id: inactive.id }, data: { isActive: false } });
       const { PrismaService: PrismaSvc } = jest.requireActual<
-        typeof import('../database/prisma.module')
-      >('../database/prisma.module');
+        typeof import('../database/prisma.service')
+      >('../database/prisma.service');
       const { REDIS_CLIENT } = jest.requireActual<
         typeof import('../infrastructure/infrastructure.module')
       >('../infrastructure/infrastructure.module');
@@ -1730,8 +1939,8 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
 
     const countCalls = async (run: () => Promise<unknown>): Promise<number[]> => {
       const { PrismaService: PrismaSvc } = jest.requireActual<
-        typeof import('../database/prisma.module')
-      >('../database/prisma.module');
+        typeof import('../database/prisma.service')
+      >('../database/prisma.service');
       const client = app.get(PrismaSvc).client;
       const query = jest.spyOn(client, '$queryRaw');
       const exec = jest.spyOn(client, '$executeRaw');
@@ -1795,6 +2004,268 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         expect(audit).toHaveLength(1);
         expect(audit[0]?.metadata).toEqual({ sessionsRevoked: 2 });
         expect(((await login(u.email).expect(200)).body as Body).status).toBe('authenticated');
+      });
+
+      function failAccessMarker(): jest.SpyInstance {
+        const redis = app.get<import('ioredis').Redis>(
+          jest.requireActual<typeof import('../infrastructure/infrastructure.module')>(
+            '../infrastructure/infrastructure.module',
+          ).REDIS_CLIENT,
+        );
+        // Only the marker uses a Redis script, so failing eval fails exactly the marker write.
+        return jest.spyOn(redis, 'eval').mockRejectedValue(new Error('redis down'));
+      }
+
+      it('TC-003, FR-104: an access token issued before a successful disable is 401 afterwards, even in the same second', async () => {
+        const u = await createUser({ totp: SECRET });
+        const old = await accessFor(u.id);
+        const probe = (token: string): request.Test =>
+          post('2fa/setup/start', token, { currentPassword: PASSWORD });
+        expect((await probe(old)).status).not.toBe(401);
+        await post('2fa/disable', old, { currentPassword: PASSWORD, totpCode: goodCode() }).expect(
+          204,
+        );
+        expect((await probe(old)).status).toBe(401);
+      });
+
+      it('TC-003, FR-104: if the tokens-valid-after marker cannot be written the disable is a 503 and rolls back completely', async () => {
+        const u = await createUser({ totp: SECRET });
+        await signInWithTotp(u.email);
+        const before = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+        const liveBefore = await prisma.refreshToken.count({
+          where: { userId: u.id, revokedAt: null },
+        });
+        expect(liveBefore).toBe(1);
+        const fail = failAccessMarker();
+        try {
+          const res = await post('2fa/disable', await accessFor(u.id), {
+            currentPassword: PASSWORD,
+            totpCode: goodCode(),
+          });
+          expect(res.status).toBe(503);
+        } finally {
+          fail.mockRestore();
+        }
+        const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+        expect(row.totpEnabled).toBe(true);
+        expect(row.totpSecretEnc).toBe(before.totpSecretEnc);
+        expect(row.failedLogins).toBe(before.failedLogins);
+        expect(await prisma.refreshToken.count({ where: { userId: u.id, revokedAt: null } })).toBe(
+          liveBefore,
+        );
+        expect(
+          await prisma.auditLog.count({ where: { actorId: u.id, action: 'AUTH_2FA_DISABLED' } }),
+        ).toBe(0);
+      });
+
+      /** True once some backend waits on a lock (the statement under test is blocked). */
+      async function untilLockWaiter(): Promise<void> {
+        const deadline = Date.now() + 10_000;
+        for (;;) {
+          const rows = await prisma.$queryRaw<{ n: bigint }[]>`
+            SELECT count(*) AS n FROM pg_stat_activity
+            WHERE wait_event_type = 'Lock' AND datname = current_database()`;
+          if (Number(rows[0]?.n ?? 0) > 0) return;
+          if (Date.now() > deadline) throw new Error('no statement is waiting on a lock');
+          await new Promise((r) => setTimeout(r, 20));
+        }
+      }
+
+      /** Waits until the current second is later than the user's tokens-valid-after marker. */
+      async function pastMarker(userId: string): Promise<void> {
+        const redis = app.get<import('ioredis').Redis>(
+          jest.requireActual<typeof import('../infrastructure/infrastructure.module')>(
+            '../infrastructure/infrastructure.module',
+          ).REDIS_CLIENT,
+        );
+        const marker = Number(await redis.get(`auth:tokens-valid-after:${userId}`));
+        expect(Number.isFinite(marker)).toBe(true);
+        while (Math.floor(Date.now() / 1000) <= marker) await new Promise((r) => setTimeout(r, 50));
+      }
+
+      it('TC-003, FR-104: a recovery-code sign-in held inside its transaction makes the disable wait on the user row lock, and its token is refused afterwards', async () => {
+        const u = await createUser({ totp: SECRET });
+        const recovery = 'ABCDEFGHJKLMNPQR';
+        await withRecoveryCodes(u.id, [recovery]);
+        const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+        let release: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let reached: () => void = () => undefined;
+        const atGate = new Promise<void>((resolve) => {
+          reached = resolve;
+        });
+        const target = authService as unknown as {
+          clearFailures: (...args: unknown[]) => Promise<void>;
+        };
+        const real = target.clearFailures.bind(authService);
+        const hold = jest
+          .spyOn(target, 'clearFailures')
+          .mockImplementationOnce(async (...args: unknown[]) => {
+            reached();
+            await gate;
+            return real(...args);
+          });
+        let signIn: Promise<request.Response>;
+        let disable: Promise<request.Response>;
+        try {
+          signIn = Promise.resolve(post('2fa/verify', null, { challengeToken, code: recovery }));
+          await atGate;
+          // The family is inserted but uncommitted: the disable must wait for the row lock.
+          disable = Promise.resolve(
+            post('2fa/disable', await accessFor(u.id), {
+              currentPassword: PASSWORD,
+              totpCode: goodCode(),
+            }),
+          );
+          await untilLockWaiter();
+          release();
+        } finally {
+          hold.mockRestore();
+        }
+        expect((await signIn).status).toBe(200);
+        expect((await disable).status).toBe(204);
+        await pastMarker(u.id);
+        const issued = ((await signIn).body as { accessToken: string }).accessToken;
+        expect((await post('2fa/setup/start', issued, { currentPassword: PASSWORD })).status).toBe(
+          401,
+        );
+        expect(await prisma.refreshToken.count({ where: { userId: u.id, revokedAt: null } })).toBe(
+          0,
+        );
+      });
+
+      it('TC-004, FR-102: a password sign-in that read a RECRUITER cannot open a family after the user is promoted to a 2FA-required role (held after the password check)', async () => {
+        const admin = await createUser({ role: UserRole.SUPER_ADMIN, totp: SECRET });
+        const u = await createUser({ role: UserRole.RECRUITER });
+        let release: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let reached: () => void = () => undefined;
+        const atGate = new Promise<void>((resolve) => {
+          reached = resolve;
+        });
+        passwordVerify.mockImplementationOnce(async (hash: string, password: string) => {
+          const ok = await realPasswordVerify(hash, password);
+          if (ok) {
+            reached();
+            await gate;
+          }
+          return ok;
+        });
+        const signIn = Promise.resolve(login(u.email));
+        await atGate;
+        await request(app.getHttpServer())
+          .patch(`/api/v1/admin/users/${u.id}`)
+          .set('Authorization', `Bearer ${await accessFor(admin.id)}`)
+          .send({ currentPassword: PASSWORD, role: 'REVIEWER' })
+          .expect(200);
+        release();
+        const res = await signIn;
+        expect(res.status).toBe(401);
+        expect(res.headers['set-cookie']).toBeUndefined();
+        // The refused attempt was refunded: the right password must not count as a failure.
+        expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).failedLogins).toBe(0);
+        expect(await prisma.refreshToken.count({ where: { userId: u.id, revokedAt: null } })).toBe(
+          0,
+        );
+      });
+
+      it('TC-003, FR-102: forced enrollment start refuses with 409 and keeps the stored secret when 2FA was turned on between its read and its write', async () => {
+        const u = await createUser({ role: UserRole.REVIEWER });
+        const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+        const { TotpService: Totp } =
+          jest.requireActual<typeof import('./totp.service')>('./totp.service');
+        const totpService = app.get(Totp);
+        const real = totpService.createEnrollment.bind(totpService);
+        const flip = jest
+          .spyOn(totpService, 'createEnrollment')
+          .mockImplementationOnce(async (email: string) => {
+            // Another request finishes enrollment while this one is between read and write.
+            await prisma.user.update({
+              where: { id: u.id },
+              data: { totpEnabled: true, totpSecretEnc: 'live-secret-of-the-other-request' },
+            });
+            return real(email);
+          });
+        try {
+          await post('2fa/enroll/start', null, { challengeToken }).expect(409);
+        } finally {
+          flip.mockRestore();
+        }
+        const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+        expect(row.totpEnabled).toBe(true);
+        expect(row.totpSecretEnc).toBe('live-secret-of-the-other-request');
+      });
+
+      it('TC-004, FR-102: a refresh for a 2FA-required role without 2FA is refused and the family is revoked (defence in depth)', async () => {
+        const u = await createUser({ role: UserRole.REVIEWER });
+        const raw = `raw-refresh-${u.id}`;
+        const family = '22222222-2222-4222-8222-222222222222';
+        await prisma.refreshToken.create({
+          data: {
+            userId: u.id,
+            familyId: family,
+            tokenHash: sha256Hex(raw),
+            expiresAt: new Date(Date.now() + 600_000),
+          },
+        });
+        await expect(authService.refresh(raw, { ip: '203.0.113.9' })).rejects.toThrow(
+          'Authentication required.',
+        );
+        expect(await prisma.refreshToken.count({ where: { userId: u.id, revokedAt: null } })).toBe(
+          0,
+        );
+      });
+
+      it('TC-003, FR-104: a TOTP sign-in whose family commits before a disable but finishes after it gets an access token the guard refuses (held, same-second race)', async () => {
+        const u = await createUser({ totp: SECRET });
+        const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+        const code = authenticator.clone({ epoch: Date.now() - 30_000 }).generate(SECRET);
+        // Hold the sign-in right after its refresh family committed (clearFailures runs next).
+        let release: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let reached: () => void = () => undefined;
+        const atGate = new Promise<void>((resolve) => {
+          reached = resolve;
+        });
+        const target = authService as unknown as {
+          clearFailures: (...args: unknown[]) => Promise<void>;
+        };
+        const real = target.clearFailures.bind(authService);
+        const hold = jest
+          .spyOn(target, 'clearFailures')
+          .mockImplementationOnce(async (...args: unknown[]) => {
+            reached();
+            await gate;
+            return real(...args);
+          });
+        let signIn: Promise<request.Response>;
+        try {
+          signIn = Promise.resolve(post('2fa/verify', null, { challengeToken, code }));
+          await atGate;
+          // The disable commits while the sign-in is held.
+          await post('2fa/disable', await accessFor(u.id), {
+            currentPassword: PASSWORD,
+            totpCode: goodCode(),
+          }).expect(204);
+          // Let the clock pass the marker's second before the sign-in finishes: with the access
+          // token signed before the family commits the token is still refused, with the old order
+          // (signed after) it would carry a later iat and be accepted.
+          await pastMarker(u.id);
+          release();
+        } finally {
+          hold.mockRestore();
+        }
+        const done = await signIn;
+        expect(done.status).toBe(200);
+        const issued = (done.body as { accessToken: string }).accessToken;
+        const res = await post('2fa/setup/start', issued, { currentPassword: PASSWORD });
+        expect(res.status).toBe(401);
       });
 
       it('TC-003: a missing or malformed totpCode is a 400 and nothing is counted (a recovery code is not accepted)', async () => {

@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { Redis } from 'ioredis';
 import { Pool } from 'pg';
 import type { Env } from '../config/env';
+import { ensureConnected } from '../infrastructure/redis-ready';
 import { PG_POOL, REDIS_CLIENT } from '../infrastructure/infrastructure.module';
 
 export type DependencyState = 'up' | 'down';
@@ -29,7 +30,7 @@ export class HealthService {
         await this.pool.query('SELECT 1');
       }),
       this.probe(async () => {
-        if (this.redis.status === 'wait' || this.redis.status === 'end') await this.redis.connect();
+        await ensureConnected(this.redis);
         await this.redis.ping();
       }),
     ]);

@@ -60,4 +60,46 @@ describe('NFR-04 environment validation', () => {
       validateEnv({ ...valid, ENABLE_API_DOCS: 'true', NODE_ENV: 'production' }),
     ).toThrow(/ENABLE_API_DOCS/);
   });
+
+  it('FR-503: JUDGE0 settings are optional locally and required, strong and https in pilot and production', () => {
+    expect(validateEnv(valid).JUDGE0_URL).toBeUndefined();
+    const token = 't'.repeat(32);
+    const live = {
+      ...valid,
+      APP_ENV: 'pilot',
+      JUDGE0_URL: 'https://judge0.example.com',
+      JUDGE0_AUTH_TOKEN: token,
+      JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
+    };
+    expect(validateEnv(live).JUDGE0_URL).toBe('https://judge0.example.com');
+    expect(() => validateEnv({ ...live, JUDGE0_URL: undefined })).toThrow(/JUDGE0_URL/);
+    expect(() => validateEnv({ ...live, JUDGE0_AUTHZ_TOKEN: undefined })).toThrow(
+      /JUDGE0_AUTHZ_TOKEN/,
+    );
+    expect(() => validateEnv({ ...live, JUDGE0_AUTHZ_TOKEN: 'short-authz' })).toThrow(
+      /JUDGE0_AUTHZ_TOKEN/,
+    );
+    expect(() => validateEnv({ ...live, JUDGE0_AUTH_TOKEN: undefined })).toThrow(
+      /JUDGE0_AUTH_TOKEN/,
+    );
+    expect(() =>
+      validateEnv({ ...live, APP_ENV: 'production', JUDGE0_AUTH_TOKEN: 'change-me' }),
+    ).toThrow(/JUDGE0_AUTH_TOKEN/);
+    expect(() => validateEnv({ ...live, JUDGE0_URL: 'http://judge0.example.com:2358' })).toThrow(
+      /https/,
+    );
+    expect(validateEnv({ ...live, JUDGE0_URL: 'http://127.0.0.1:2358' }).JUDGE0_URL).toBe(
+      'http://127.0.0.1:2358',
+    );
+    try {
+      validateEnv({ ...live, JUDGE0_AUTH_TOKEN: 'short-secret-token' });
+      fail('expected throw');
+    } catch (e) {
+      expect(String(e)).not.toContain('short-secret-token');
+    }
+    expect(
+      validateEnv({ ...valid, APP_ENV: 'staging', JUDGE0_URL: 'http://judge0-server:2358' })
+        .APP_ENV,
+    ).toBe('staging');
+  });
 });

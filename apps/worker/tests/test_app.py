@@ -15,6 +15,11 @@ AUTH = {"X-Internal-Token": "test-token"}
 
 
 @pytest.fixture(autouse=True)
+def _no_review_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RISK_FAST_REVIEW_BANDS", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WORKER_INTERNAL_TOKEN", "test-token")
 
@@ -199,3 +204,32 @@ def test_fr805_c28_risk_route_returns_review_path_queue_rank_and_always_needs_re
     high = high_resp.json()
     assert high["band"] == "HIGH" and high["review_path"] == "full"
     assert high["queue_rank"] < low["queue_rank"]
+
+
+def test_fr805_c28_dl18_risk_request_config_cannot_set_fast_review_bands() -> None:
+    body = {"events": [], "config": {"risk": {"fastReviewBands": ["LOW"]}}}
+    assert client.post("/risk", json=body, headers=AUTH).status_code == 422
+    body = {"events": [], "config": {"fastReviewBands": ["LOW"]}}
+    assert client.post("/risk", json=body, headers=AUTH).status_code == 422
+
+
+def test_fr805_c28_dl18_risk_route_reads_the_system_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RISK_FAST_REVIEW_BANDS", "")
+    r = client.post("/risk", json={"events": []}, headers=AUTH)
+    assert r.status_code == 200 and r.json()["review_path"] == "full"
+    monkeypatch.setenv("RISK_FAST_REVIEW_BANDS", "LOW")
+    r = client.post("/risk", json={"events": []}, headers=AUTH)
+    assert r.json()["review_path"] == "fast"
+
+
+def test_fr805_c28_dl18_bad_fast_review_bands_stops_the_worker_at_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("RISK_FAST_REVIEW_BANDS", "MEDIUM")
+    with pytest.raises(ValidationError), TestClient(app):
+        pass  # entering the client runs the lifespan startup
+    monkeypatch.setenv("RISK_FAST_REVIEW_BANDS", "LOW")
+    with TestClient(app) as ok:
+        assert ok.get("/health").json() == {"status": "ok"}
