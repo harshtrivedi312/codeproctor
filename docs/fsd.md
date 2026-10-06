@@ -146,7 +146,10 @@ Rules and timing details: ADR 0002 (updated 2026-10-01, D-16, D-17).
 | POST | /auth/refresh | Staff | Rotate tokens |
 | POST | /auth/password/forgot | Public | Request a password reset link; same response whether or not the account exists (FR-107) |
 | POST | /auth/password/reset | Public | Set a new password with the single-use reset token (FR-107) |
-| GET/POST/PATCH | /questions, /questions/:id | Author | CRUD and versions |
+| GET/POST/PATCH | /questions, /questions/:id | Author, Super Admin (read: also Recruiter) | CRUD and versions. Roles without `question:update` get published versions only, with hidden test cases (including per-variant data for hidden slots), the reference solution (template and rendered), AI reference solutions, `answer_spec` and variant params omitted; drafts return 404 (FR-202, FR-301, DL-34). QA to add a TC for the Recruiter read (TC-011 covers only the candidate fetch) |
+| GET | /questions/:id/preview | Author | Candidate-view preview of a version |
+| POST | /questions/:id/publish, /archive, /unarchive | Author | Publish a version, archive or restore a question (FR-204) |
+| POST/PATCH/DELETE | /questions/:id/versions/:version/test-cases[/:testCaseId] | Author | Sample and hidden test cases with weights (FR-202). Draft versions only; 409 on a published version (FR-204) |
 | POST | /questions/:id/validate | Author | Run reference solution on all tests and variants |
 | GET/POST/PATCH | /tests, /tests/:id | Recruiter | Test templates |
 | POST | /tests/:id/invitations | Recruiter | Single or bulk invite |
