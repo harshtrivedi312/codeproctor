@@ -219,6 +219,20 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
 
   // ---------- helpers ----------
 
+  /** Waits until BullMQ has nothing waiting, running or delayed: a positive "the job finished". */
+  async function jobsIdle(ms = 15_000): Promise<void> {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      const [wait, active, delayed] = await Promise.all([
+        redis.llen('bull:identity-jobs:wait'),
+        redis.llen('bull:identity-jobs:active'),
+        redis.zcard('bull:identity-jobs:delayed'),
+      ]);
+      if (wait + active + delayed === 0 || Date.now() > deadline) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+
   interface Candidate {
     readonly sessionId: string;
     readonly orgId: string;
@@ -596,11 +610,7 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
       data: { idImageKey: null, selfieKey: null },
     });
     release();
-    await eventually(
-      () => Promise.resolve(verify.calls.length),
-      (n) => n > 0,
-      3_000,
-    );
+    await jobsIdle(); // the job really finished before we look
     const [row] = await rows(c.sessionId);
     expect(row?.status).toBe('PENDING');
     expect([row?.faceMatchScore, row?.modelId, row?.reviewReason]).toEqual([null, null, null]);
@@ -627,11 +637,7 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
       data: { erasureRequestedAt: new Date() },
     });
     release();
-    await eventually(
-      () => Promise.resolve(verify.calls.length),
-      (n) => n > 0,
-      3_000,
-    );
+    await jobsIdle(); // the job really finished before we look
     const [row] = await rows(c.sessionId);
     expect(row?.status).toBe('PENDING');
     expect(row?.faceMatchScore).toBeNull();

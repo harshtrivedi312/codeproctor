@@ -378,7 +378,12 @@ export class IdentityService {
 
   private async release(ctx: CandidateContext, claimed: readonly NameRef[]): Promise<void> {
     for (const r of claimed) {
-      await this.names.transition(ctx.sessionId, r.name, r.purpose, 'USED', 'ISSUED');
+      try {
+        await this.names.transition(ctx.sessionId, r.name, r.purpose, 'USED', 'ISSUED');
+      } catch {
+        // Redis down: the original error matters more, and the name record expires on its own.
+        this.logger.warn({ event: 'identity.release-failed', sessionId: ctx.sessionId });
+      }
     }
   }
 

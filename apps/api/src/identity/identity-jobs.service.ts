@@ -197,6 +197,9 @@ export class IdentityJobsService
           createdAt: { lt: cutoff },
           // A purged row (keys null) has nothing to match: leave it out so it cannot crowd the batch.
           idImageKey: { not: null },
+          // Fenced or erased candidates keep their keys and are skipped below: keep them out of the
+          // batch so they cannot crowd out rows that are really stuck.
+          session: { invitation: { candidate: { erasureRequestedAt: null, erasedAt: null } } },
         },
         orderBy: { createdAt: 'asc' },
         select: { attempt: true, sessionId: true, session: { select: { orgId: true } } },

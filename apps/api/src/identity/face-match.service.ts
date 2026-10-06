@@ -118,7 +118,9 @@ export class FaceMatchService {
     if (row === null) return 'SKIPPED';
     if ((await this.stopReason(data)) !== null) return 'SKIPPED';
     if (row.idImageKey === null || row.selfieKey === null) {
-      await this.finish(data, resolve(data.attempt, null));
+      // No keys and no waiver (for example a waiver withdrawn after its purge): there is nothing to
+      // match, so the candidate continues to review (D-05). The key condition does not apply here.
+      await this.finish(data, resolve(data.attempt, null), false);
       return 'RESOLVED';
     }
 
@@ -168,7 +170,11 @@ export class FaceMatchService {
     return null;
   }
 
-  private async finish(data: FaceMatchData, result: Resolution): Promise<FaceMatchOutcome> {
+  private async finish(
+    data: FaceMatchData,
+    result: Resolution,
+    requireKeys = true,
+  ): Promise<FaceMatchOutcome> {
     const wrote = await this.orgContext.runInOrg(data.orgId, async () => {
       // guardLive in spirit: look again at what could have changed during the worker call.
       const session = await this.facts.session(data.sessionId);
@@ -195,8 +201,7 @@ export class FaceMatchService {
             sessionId: data.sessionId,
             attempt: data.attempt,
             status: 'PENDING',
-            idImageKey: { not: null },
-            selfieKey: { not: null },
+            ...(requireKeys ? { idImageKey: { not: null }, selfieKey: { not: null } } : {}),
           },
           select: { id: true },
         });
@@ -205,8 +210,7 @@ export class FaceMatchService {
           where: {
             id: target.id,
             status: 'PENDING',
-            idImageKey: { not: null },
-            selfieKey: { not: null },
+            ...(requireKeys ? { idImageKey: { not: null }, selfieKey: { not: null } } : {}),
           },
           data: {
             status: result.status,
