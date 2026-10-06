@@ -18,13 +18,14 @@ CREATE INDEX "audit_logs_retention_marker_idx" ON "audit_logs"("action", "entity
 -- that repeats the audit_append_only pattern (GRANT ... ON ALL TABLES) would silently undo this REVOKE.
 REVOKE DELETE, TRUNCATE ON "sessions" FROM app_user;
 
--- ADR 0004 §9 edit: REVOKE only warns when it cannot revoke (another grantor, or an out-of-band grant),
--- so check the result instead of trusting it, as app_user_no_temp does for TEMPORARY.
+-- ADR 0004 §9 edit: REVOKE removes only the grants the running role made (or the owner made) and does
+-- not fail otherwise, so a grant from another grantor or a role membership (for example
+-- pg_write_all_data) survives it. Check the result instead of trusting it, as app_user_no_temp does.
 DO $$
 BEGIN
   IF has_table_privilege('app_user', 'sessions', 'DELETE')
      OR has_table_privilege('app_user', 'sessions', 'TRUNCATE') THEN
-    RAISE EXCEPTION 'app_user still has DELETE or TRUNCATE on sessions (ADR 0004 section 9.3). Revoke it as the table owner and every grantor, then deploy again.';
+    RAISE EXCEPTION 'app_user still has DELETE or TRUNCATE on sessions (ADR 0004 section 9.3), from another grantor or a role membership such as pg_write_all_data. Run prisma migrate resolve --rolled-back 20261006174300_retention_marker_index_and_no_session_delete, remove that grant or membership, then deploy again.';
   END IF;
 END
 $$;

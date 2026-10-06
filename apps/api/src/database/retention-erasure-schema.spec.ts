@@ -7,6 +7,8 @@
 // The grants checks follow the pattern of TC-006 (audit_logs is append-only for app_user): ask the
 // catalog, then try the statement and expect 42501. TC-008 (tc-008-org-isolation.spec.ts) and the CS-4
 // SERVICE matrix (cs4-session-isolation.spec.ts) run the per-model delete checks, each with a Session branch.
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { Client } from 'pg';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import { AppealStatus, SessionStatus } from '../generated/prisma/enums.js';
@@ -227,6 +229,39 @@ describe('ADR 0004 section 9 migrations: erasure statuses, retention marker inde
         ins: true,
         upd: true,
       });
+    });
+
+    it('NFR-05 TC-094 the migration fails, rather than passing open, when a DELETE from another grantor survives its REVOKE (ADR 0004 section 9.3)', async () => {
+      // The migration's own REVOKE and post-check, run again on top of a grant the owner did not make.
+      const sql = readFileSync(
+        resolve(
+          __dirname,
+          '../../../../prisma/migrations/20261006174300_retention_marker_index_and_no_session_delete/migration.sql',
+        ),
+        'utf8',
+      );
+      const revokeAndCheck = sql.slice(
+        sql.indexOf('REVOKE DELETE, TRUNCATE ON "sessions" FROM app_user;'),
+      );
+      expect(revokeAndCheck.startsWith('REVOKE')).toBe(true);
+      await owner.query('BEGIN');
+      try {
+        await owner.query('CREATE ROLE tmp_other_grantor NOLOGIN');
+        await owner.query('GRANT DELETE ON sessions TO tmp_other_grantor WITH GRANT OPTION');
+        await owner.query('SET ROLE tmp_other_grantor');
+        await owner.query('GRANT DELETE ON sessions TO app_user');
+        await owner.query('RESET ROLE');
+        await expect(owner.query(revokeAndCheck)).rejects.toThrow(
+          /app_user still has DELETE or TRUNCATE on sessions/,
+        );
+      } finally {
+        await owner.query('ROLLBACK');
+      }
+      // Rolled back: app_user is as the migrations left it.
+      const after = await appUser.query<{ del: boolean }>(
+        `SELECT has_table_privilege(current_user, 'sessions', 'DELETE') AS del`,
+      );
+      expect(after.rows[0]?.del).toBe(false);
     });
 
     it('NFR-05 TC-006 the privilege assertion catches a later GRANT ... ON ALL TABLES, which would silently undo the REVOKE (ADR 0004 section 9.3)', async () => {
