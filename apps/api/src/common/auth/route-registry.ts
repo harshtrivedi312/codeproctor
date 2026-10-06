@@ -2,6 +2,7 @@
 // declare, so the matrix can be checked against what is really registered.
 import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { hasPermission } from '@codeproctor/shared';
+import type { CanActivate, Type } from '@nestjs/common';
 import { RequestMethod } from '@nestjs/common';
 import { ModulesContainer } from '@nestjs/core';
 import type { UserRole } from '../../generated/prisma/client';
@@ -24,7 +25,7 @@ export interface RegisteredRoute {
   /** The handler or its class carries @Audited. */
   audited: boolean;
   /** Guards from @UseGuards on the handler and its class. */
-  guards: readonly unknown[];
+  guards: readonly (Type<CanActivate> | CanActivate)[];
   /** Permission set by @CandidateRoute, or null when the route does not carry the marker. */
   candidatePermission: string | null;
 }
@@ -79,8 +80,10 @@ export function listRoutes(modules: ModulesContainer): RegisteredRoute[] {
               roles: pick<UserRole[]>(ROLES) ?? [],
               audited: pick<unknown>(AUDITED) !== undefined,
               guards: [
-                ...((Reflect.getMetadata(GUARDS_METADATA, cls) as unknown[] | undefined) ?? []),
-                ...((Reflect.getMetadata(GUARDS_METADATA, handler) as unknown[] | undefined) ?? []),
+                ...((Reflect.getMetadata(GUARDS_METADATA, cls) as
+                  (Type<CanActivate> | CanActivate)[] | undefined) ?? []),
+                ...((Reflect.getMetadata(GUARDS_METADATA, handler) as
+                  (Type<CanActivate> | CanActivate)[] | undefined) ?? []),
               ],
               candidatePermission: pick<string>(CANDIDATE_ROUTE) ?? null,
             });
@@ -97,10 +100,10 @@ export function matrixProblems(routes: readonly RegisteredRoute[]): string[] {
   const problems: string[] = [];
   const seen = new Set<string>();
   for (const route of routes) {
-    if (seen.has(route.key)) {
+    if (seen.has(route.key.toLowerCase())) {
       problems.push(`${route.key} (${route.handler}) is served by more than one handler`);
     }
-    seen.add(route.key);
+    seen.add(route.key.toLowerCase());
     const entry = Object.hasOwn(ROUTE_PERMISSIONS, route.key)
       ? ROUTE_PERMISSIONS[route.key]
       : undefined;
@@ -147,7 +150,12 @@ export function matrixProblems(routes: readonly RegisteredRoute[]): string[] {
           : `${route.key} (${route.handler}) carries @CandidateRoute() but the matrix does not list it as CANDIDATE`,
       );
     } else if (isPublic(entry)) {
-      if (route.key.includes(' /candidate/') && !CANDIDATE_BOOTSTRAP_ROUTES.includes(route.key)) {
+      // Express routing is case-insensitive and '/candidate' has no trailing slash: match the segment.
+      const path = route.key.slice(route.key.indexOf(' ') + 1).toLowerCase();
+      if (
+        (path === '/candidate' || path.startsWith('/candidate/')) &&
+        !CANDIDATE_BOOTSTRAP_ROUTES.includes(route.key)
+      ) {
         problems.push(
           `${route.key} is a /candidate/ route listed public but is not a bootstrap route; list it as CANDIDATE`,
         );
@@ -173,7 +181,8 @@ export function matrixProblems(routes: readonly RegisteredRoute[]): string[] {
     }
   }
   for (const key of Object.keys(ROUTE_PERMISSIONS)) {
-    if (!seen.has(key)) problems.push(`${key} is in ROUTE_PERMISSIONS but no controller serves it`);
+    if (!seen.has(key.toLowerCase()))
+      problems.push(`${key} is in ROUTE_PERMISSIONS but no controller serves it`);
   }
   return problems;
 }

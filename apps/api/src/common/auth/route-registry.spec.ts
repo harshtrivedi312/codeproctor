@@ -77,7 +77,6 @@ describe('route permission matrix (FR-103, TC-004)', () => {
 
 describe('matrix edge cases (FR-103, FR-105)', () => {
   it('FR-105: a candidate-data route that is not audited is reported', () => {
-    const real = Object.entries(ROUTE_PERMISSIONS).filter(([, a]) => isStaff(a))[0];
     const key = 'GET /review/sessions/:id';
     const saved = ROUTE_PERMISSIONS[key];
     (ROUTE_PERMISSIONS as Record<string, unknown>)[key] = {
@@ -97,7 +96,6 @@ describe('matrix edge cases (FR-103, FR-105)', () => {
           candidatePermission: null,
         },
       ];
-      expect(real).toBeDefined();
       expect(matrixProblems(routes).join('\n')).toContain(
         'GET /review/sessions/:id touches candidate data but is not audited (FR-105)',
       );
@@ -298,10 +296,54 @@ describe('candidate route variant (FR-103, ADR 0010 section 6, ADR 0013)', () =>
     expect(withEntry(candidate, [base])).toEqual([]);
   });
 
-  it('FR-103: listRoutes reads @UseGuards from the handler and the class', () => {
-    class SomeGuard {}
+  it('FR-103: ADR 0013: guards from the class and the handler are listed, class first', () => {
+    class ClassGuard {}
+    class G2 {}
+    class MethodGuard {}
     @Controller('candidate')
-    @UseGuards(SomeGuard)
+    @UseGuards(ClassGuard)
+    class Guarded {
+      @Get('plain')
+      @Public()
+      plain(): void {}
+
+      @Get('method')
+      @Public()
+      @UseGuards(G2)
+      method(): void {}
+
+      @Get('both')
+      @Public()
+      @UseGuards(MethodGuard)
+      both(): void {}
+    }
+    const modules = {
+      values: () => [{ controllers: new Map([['c', { metatype: Guarded }]]) }],
+    } as unknown as ModulesContainer;
+    const guards = (key: string): unknown => listRoutes(modules).find((r) => r.key === key)?.guards;
+    expect(guards('GET /candidate/plain')).toEqual([ClassGuard]);
+    expect(guards('GET /candidate/method')).toEqual([ClassGuard, G2]);
+    expect(guards('GET /candidate/both')).toEqual([ClassGuard, MethodGuard]);
+  });
+
+  it('FR-103: ADR 0013: a real-decorated CANDIDATE controller with no @UseGuards fails closed', () => {
+    @Controller('candidate/answers')
+    class Unguarded {
+      @Post(':questionId/run')
+      @Public()
+      @CandidateRoute('candidate_answer:run')
+      run(): void {}
+    }
+    const modules = {
+      values: () => [{ controllers: new Map([['c', { metatype: Unguarded }]]) }],
+    } as unknown as ModulesContainer;
+    expect(withEntry(candidate, listRoutes(modules)).join('\n')).toContain(
+      `${KEY} is a CANDIDATE route with no route guard (@UseGuards(CandidateSessionGuard))`,
+    );
+  });
+
+  it('FR-103: listRoutes reads a class-level @CandidateRoute with a @Roles method', () => {
+    @Controller('candidate')
     @CandidateRoute('candidate_answer:run')
     class ClassLevel {
       @Get('mixed')
@@ -312,14 +354,10 @@ describe('candidate route variant (FR-103, ADR 0010 section 6, ADR 0013)', () =>
       values: () => [{ controllers: new Map([['c', { metatype: ClassLevel }]]) }],
     } as unknown as ModulesContainer;
     const route = listRoutes(modules).find((r) => r.key === 'GET /candidate/mixed');
-    expect(route?.guards).toEqual([SomeGuard]);
     expect(route?.candidatePermission).toBe('candidate_answer:run');
-    expect(
-      withEntry(
-        'public',
-        [route as RegisteredRoute].map((r) => ({ ...r, key: KEY })),
-      ).join('\n'),
-    ).toContain('is a staff route (@Roles()) but carries @CandidateRoute()');
+    expect(withEntry('public', [{ ...(route as RegisteredRoute), key: KEY }]).join('\n')).toContain(
+      'is a staff route (@Roles()) but carries @CandidateRoute()',
+    );
   });
 
   it('FR-103: a CANDIDATE entry whose permission CANDIDATE does not hold is reported', () => {
@@ -341,5 +379,33 @@ describe('candidate route variant (FR-103, ADR 0010 section 6, ADR 0013)', () =>
     } finally {
       delete matrix[key];
     }
+  });
+
+  it('FR-103: ADR 0013: /Candidate/x and a bare /candidate listed public are reported (case, no trailing slash)', () => {
+    const matrix = ROUTE_PERMISSIONS as Record<string, unknown>;
+    for (const key of ['GET /Candidate/x', 'GET /candidate']) {
+      matrix[key] = 'public';
+      try {
+        const route = { ...base, key, candidatePermission: null, guards: [] };
+        expect(
+          matrixProblems([route])
+            .filter((p) => p.includes(key))
+            .join('\n'),
+        ).toContain('is a /candidate/ route listed public but is not a bootstrap route');
+      } finally {
+        delete matrix[key];
+      }
+    }
+  });
+
+  it('FR-103: a route key that differs only in case counts as the same route', () => {
+    const [first] = everyRoute();
+    const dup = {
+      ...(first as RegisteredRoute),
+      key: (first as RegisteredRoute).key.toLowerCase(),
+    };
+    expect(matrixProblems([...everyRoute(), dup]).join('\n')).toContain(
+      'is served by more than one handler',
+    );
   });
 });
