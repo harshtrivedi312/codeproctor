@@ -79,6 +79,7 @@ const aiRefSupersede = {
   permission: 'ai_reference:supersede',
 } as const;
 const userManage = { roles: SUPER_ADMIN, permission: 'user:manage' } as const;
+const orgSettingsManage = { roles: SUPER_ADMIN, permission: 'org_settings:manage' } as const;
 const RECRUITER_ADMIN: readonly UserRole[] = ['SUPER_ADMIN', 'RECRUITER'];
 
 export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
@@ -112,6 +113,11 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'POST /admin/users/:userId/invite': userManage,
   'PATCH /admin/users/:userId': userManage,
   'POST /admin/users/:userId/unlock': userManage,
+
+  // Organization settings (FR-103, ADR 0010 org_settings:manage; SUPER_ADMIN only, own org only).
+  // The PATCH needs the admin's currentPassword (step-up) and writes its audit row (ORG_SETTINGS_UPDATED) in the same transaction as the update.
+  'GET /admin/org-settings': orgSettingsManage,
+  'PATCH /admin/org-settings': orgSettingsManage,
 
   // Test templates (FR-301, FR-302; ADR 0010 section 3): SUPER_ADMIN and RECRUITER. No copy or
   // archive route yet (no schema support). Writes audit in their own transaction (tests.service.ts).

@@ -99,7 +99,7 @@ export function loadBackendRegistry(): RegistryApi {
 }
 
 /**
- * Registry routes that QA covers in other files (tc-003: re-auth and 2FA routes). Every other
+ * Registry routes that QA covers in other files (tc-003: re-auth and 2FA routes; org settings: apps/api/src/org-settings/org-settings.e2e-spec.ts). Every other
  * non-public route in the registry must be in BE03_ROUTES, or the matrix test fails.
  */
 export const COVERED_ELSEWHERE: Readonly<Record<string, string>> = {
@@ -108,6 +108,9 @@ export const COVERED_ELSEWHERE: Readonly<Record<string, string>> = {
   'POST /auth/2fa/disable': 'apps/api/test/integration/tc-003.int.test.ts',
   'POST /auth/2fa/recovery-codes/regenerate': 'apps/api/test/integration/tc-003.int.test.ts',
   'POST /auth/2fa/reset/:userId': 'apps/api/test/integration/tc-003.int.test.ts',
+  // Org settings (FU-BE-133): role matrix, isolation, step-up (PATCH needs currentPassword) and audit in apps/api/src/org-settings/org-settings.e2e-spec.ts.
+  'GET /admin/org-settings': 'apps/api/src/org-settings/org-settings.e2e-spec.ts',
+  'PATCH /admin/org-settings': 'apps/api/src/org-settings/org-settings.e2e-spec.ts',
 };
 
 /** What a route needs before a call: a path with real ids and a body, built per call. */
