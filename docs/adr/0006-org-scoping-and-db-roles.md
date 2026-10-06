@@ -509,7 +509,7 @@ There is no org-provisioning reason (8.6, 8.9).
     - `exit`, `enterWith` and `disable` on the OrgContext store;
     - `detachForSessionJob`;
     - the `runInOrg` call site in `CandidateSessionGuard` for its candidate-facts pre-read (ADR 0013 section 5.10, DL-31), the only non-CANDIDATE read on routes behind the guard;
-    - the ten grant sites in the ADR 0013 CS-4.4 grant-site table (`CandidateSessionGuard` has no grant, DL-31):
+    - the eleven grant sites in the ADR 0013 CS-4.4 grant-site table (`CandidateSessionGuard` has no grant, DL-31):
       - `SessionStateService`
       - `KeyService`
       - `DeviceInfoService`
@@ -518,7 +518,7 @@ There is no org-provisioning reason (8.6, 8.9).
       - `TestSettingsService`
       - `AccommodationsService`
       - `SectionGateService` (two grants)
-      - `ConsentService`
+      - `ConsentService` (two grants: the `consent_texts` read and the `consents` create)
 
       ADR 0013 CS-4.4 defines each site's model, columns and ids. This ADR does not repeat them.
     - the private candidate-facts setter for `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. Only `CandidateSessionGuard` may call it, once per scope, before any other query in the scope; it throws if called twice or with any id missing, and the values are immutable afterwards.
@@ -528,11 +528,13 @@ There is no org-provisioning reason (8.6, 8.9).
   - **How grants work.** This is the normative grant spec; ADR 0013 uses the same wording.
     - `withGrant({ model, columns, ids }, fn)`. All three fields are mandatory, and an empty `ids` throws.
     - The extension checks the model and the columns, and adds `id IN ids` to the query itself.
+    - For a create grant there is no `where` to filter: `ids` then constrain the checked parent key (the extension checks that the create's `session_id` is in `ids`), and nothing else is filtered.
     - A grant is a nested AsyncLocalStorage run inside the current scope. It carries an `active` flag that is cleared in `finally` when `fn` settles, and the extension refuses any query under an inactive grant. So async work started inside `fn` and not awaited (a promise, `setTimeout`, an emitter or a stream callback) cannot use the grant after `fn` settles. A test checks that such a detached query throws.
     - Grants exist only inside a scope.
     - `ids` are never request input. They are values read inside the same scope, or ids resolved within the session through ADR 0013 CS-2 and CS-4.2. For example, `SectionGateService`'s step-1 id comes from the URL after that resolution.
     - Typical ids:
       - `[ctx.sessionId]` for session-row grants;
+      - `[ctx.sessionId]` for the `consents` create (ConsentService);
       - `[ctx.orgId]` for org settings;
       - `[ctx.testId]` for test settings.
   - Any use outside those files fails the test or the lint rule.
@@ -722,7 +724,7 @@ How the check runs:
     - `runSystem`, `runInOrg` and `runRawSql`, including the `runInOrg` pre-read in `CandidateSessionGuard` (DL-31);
     - the two session entries;
     - `exit`, `enterWith`, `disable` and `detachForSessionJob`;
-    - the ten CS-4.4 grant sites, with the candidate-facts setter;
+    - the eleven CS-4.4 grant sites, with the candidate-facts setter;
     - the advisory-lock raw call site;
     - `guardLive` and `lockForAccommodation`, each limited to its writers, with the lock order: advisory lock, then `sessions`, then `invitations`;
     - `withLiveSession` and `withAnySession`, only in `SessionJobProcessor`.

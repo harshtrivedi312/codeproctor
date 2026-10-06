@@ -321,6 +321,14 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
   async function restart(env: Record<string, string>): Promise<void> {
     await app.close();
     applyEnv(infra, { ...MAIN_ENV, ...env });
+    // Throttle counters live in Redis and outlive an app (FU-BE-1): start each case empty.
+    const { Redis } = await import('ioredis');
+    const redis = new Redis(infra.redis.getConnectionUrl());
+    try {
+      await redis.flushall();
+    } finally {
+      redis.disconnect();
+    }
     ({ app, lines } = await createApp());
   }
 

@@ -41,6 +41,10 @@ export const envSchema = z
     THROTTLE_TTL_MS: positiveInt.default(60_000),
     HEALTH_TIMEOUT_MS: positiveInt.default(2_000),
     // Number of reverse proxies in front of the API (0 locally, 1 behind Caddy). FU-BE-08.
+    // Pilot and production (APP_ENV pilot/production, or NODE_ENV production) must set it to at
+    // least 1: with 0 every client shares the proxy address and the per-IP throttles collapse into
+    // one bucket (FU-BE-97). Staging also runs behind Caddy but is not enforced, matching how the
+    // other pilot/production-only guards below treat it. Local, development and test stay at 0.
     TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
     // Staff invites per organization per hour (FR-103); a stolen admin session cannot mass-create.
     INVITE_RATE_LIMIT_PER_ORG_HOUR: positiveInt.default(20),
@@ -89,8 +93,8 @@ export const envSchema = z
       .transform((v) => v === 'true'),
   })
   .superRefine((env, ctx) => {
-    const live = env.APP_ENV === 'pilot' || env.APP_ENV === 'production';
-    if (live || env.NODE_ENV === 'production') {
+    const live = isLiveEnv(env);
+    if (live) {
       // The code runner holds candidate source and test data: it must be configured, authenticated
       // with a strong token, and not reached over plain HTTP unless it is on this host.
       if (!env.JUDGE0_URL) {
@@ -125,7 +129,14 @@ export const envSchema = z
         });
       }
     }
-    if ((live || env.NODE_ENV === 'production') && env.ENABLE_API_DOCS) {
+    if (live && env.TRUST_PROXY_HOPS < 1) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['TRUST_PROXY_HOPS'],
+        message: 'must be an integer of at least 1 in pilot and production (API runs behind Caddy)',
+      });
+    }
+    if (live && env.ENABLE_API_DOCS) {
       ctx.addIssue({
         code: 'custom',
         path: ['ENABLE_API_DOCS'],
@@ -161,6 +172,11 @@ export const envSchema = z
   });
 
 export type Env = z.infer<typeof envSchema>;
+
+/** Pilot or production, by the same test the guards above use. */
+export function isLiveEnv(env: Pick<Env, 'APP_ENV' | 'NODE_ENV'>): boolean {
+  return env.APP_ENV === 'pilot' || env.APP_ENV === 'production' || env.NODE_ENV === 'production';
+}
 
 export function validateEnv(raw: Record<string, unknown>): Env {
   const result = envSchema.safeParse(raw);
