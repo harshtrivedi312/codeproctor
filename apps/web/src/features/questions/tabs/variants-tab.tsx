@@ -20,7 +20,7 @@ import { errorAt, useDraftField, type ApiTabProps } from '../use-draft-field';
 type Proposal = Schemas['PrefillResponse']['proposals'][number];
 
 /**
- * FR-203, ADR 0007: declared parameters, variants with their own parameter values, a rendered
+ * FR-203, ADR 0007: variants with their own explicit parameter values, a rendered
  * preview, and per-variant input and expected-output overrides for each test slot. Prefilling
  * expected outputs from the reference solution only PROPOSES values; they change nothing until the
  * author accepts them.
@@ -287,7 +287,7 @@ function VariantCard({
         <Field
           id={`${headingId}-params`}
           label="Parameters (JSON)"
-          hint='An object with one value per declared parameter, for example {"count": 4}.'
+          hint='An object with one value per placeholder the question uses, for example {"count": 4}.'
           error={problems.length > 0 ? problems.join(' ') : formError}
         >
           {(aria) => (

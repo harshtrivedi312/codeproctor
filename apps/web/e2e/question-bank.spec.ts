@@ -159,10 +159,14 @@ test.describe('FR-201..FR-205 question bank', () => {
     await expectNoAxeViolations(page);
   });
 
-  test('FR-103 TC-004: a recruiter reads the list but cannot open the editor', async ({ page }) => {
+  test('FR-103 TC-004: a recruiter reads the list and opens the summary through the title link, never the editor', async ({
+    page,
+  }) => {
     await signInAt(page, RECRUITER, '/admin/questions');
     await expect(page.getByRole('row', { name: /Merge intervals/ })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Merge intervals', exact: true })).toHaveCount(0);
     await expect(page.getByRole('link', { name: 'New question' })).toHaveCount(0);
+    await page.getByRole('link', { name: 'Merge intervals', exact: true }).click();
+    await expect(page.getByText(/hidden for your role/)).toBeVisible();
+    await expect(page.getByRole('tablist')).toHaveCount(0);
   });
 });

@@ -8,7 +8,7 @@ export class ApiFailure extends Error {
   constructor(
     readonly status: number,
     message: string,
-    /** The API's machine code (for example `validation_required`), when it sent one. */
+    /** The API's machine code, when a route defines one (auth routes do; the question routes' 409 and 422 do not). */
     readonly code: string = '',
     /** RFC 7807 `errors[]` strings (409 and 422 bodies carry detail and errors only). */
     readonly errors: readonly string[] = [],

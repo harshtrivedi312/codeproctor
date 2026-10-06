@@ -97,7 +97,8 @@ function statusOf(q: MockQuestion): Schemas['QuestionStatus'] {
   return latest(q).isPublished ? 'PUBLISHED' : 'DRAFT';
 }
 
-function content(v: MockVersion): Content {
+/** The editable content only: a whitelist, so a client cannot set isPublished, version or the like. */
+function content(v: Content): Content {
   return {
     title: v.title,
     statementMd: v.statementMd,
@@ -316,7 +317,7 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
         aiRefs: [],
         versions: [
           {
-            ...rest,
+            ...content(rest),
             version: 1,
             updatedAt: stamp(),
             isPublished: false,
@@ -352,7 +353,7 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       if (err) return problem(400, err);
       const updatedAt = stamp();
       // Any save clears the validation: it was about the old content.
-      const fields = { ...body, updatedAt, validatedAt: null, validationReport: null };
+      const fields = { ...content(body), updatedAt, validatedAt: null, validationReport: null };
       if (current.isPublished) {
         // A published version never changes: the edit becomes the next draft (FR-204).
         r.q.versions.push({

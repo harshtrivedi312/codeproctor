@@ -500,6 +500,7 @@ describe('Publish that fails (DL-32): honest messages, never marked published', 
     await u.type(screen.getByLabelText('Title'), '!');
     await save(u);
     await screen.findByText(/Saved/);
+    expect(screen.queryByText(/Publishing was refused/)).not.toBeInTheDocument();
   });
 
   it('TC-012: a 409 on publish asks for a reload instead of claiming anything', async () => {

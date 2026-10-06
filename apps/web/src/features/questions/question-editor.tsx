@@ -56,7 +56,6 @@ const TAB_OF: Record<string, string> = {
   starterCode: 'languages',
   referenceSolution: 'reference',
   testCases: 'tests',
-  paramSchema: 'variants',
   variants: 'variants',
   limits: 'limits',
   mcq: 'answer',
@@ -277,6 +276,8 @@ export function QuestionEditor({
       setPolicy(latest.aiReferencePolicy);
       setConflict(false);
       setProblem(null);
+      setPublishProblem(null);
+      setPublishBlock(null);
       setReportFresh(false);
       setNotice('Loaded the latest saved version.');
     } catch (e) {

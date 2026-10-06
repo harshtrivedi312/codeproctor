@@ -97,11 +97,15 @@ describe('Question list (FR-201..FR-205)', () => {
     expect(screen.queryByRole('row', { name: /Rotate an array/ })).not.toBeInTheDocument();
   });
 
-  it('FR-103 TC-004: a recruiter can read the list but has no links into the editor and no New button', async () => {
+  it('FR-103 TC-004: a recruiter can open every question (the summary page), but has no New button and no history link', async () => {
     await openList(MOCK_USERS.recruiter);
     await screen.findByRole('row', { name: /Merge intervals/ });
-    expect(screen.queryByRole('link', { name: 'Merge intervals' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Merge intervals' })).toHaveAttribute(
+      'href',
+      '/admin/questions/q-merge',
+    );
     expect(screen.queryByRole('link', { name: 'New question' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Version history of/ })).not.toBeInTheDocument();
   });
 
   it('FR-103 TC-004: a reviewer gets an explanation, not the list', async () => {

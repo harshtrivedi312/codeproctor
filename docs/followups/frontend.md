@@ -334,3 +334,12 @@ Provisional (pending BE-04a/b/c SHA):
 - The validate job, the prefill endpoint and `aiReferencePolicy` are web-side inventions with no backend counterpart yet.
 
 Open questions for Backend A: the exact Recruiter allowlist (hidden-case count?), the `QuestionContent` shape without `paramSchema` and with variants, the 409 and 422 body shape (is `errors[]` always present?), and whether concurrency is an ETag, `If-Match`, `expectedUpdatedAt` or a revision, and how the validate job binds to the content it validated.
+
+### DL-32 review follow-ups (PR #141)
+
+Fixed on the branch: a role change now clears the query cache and the Monaco question models like a user change does (`AuthProvider` keys the session listener on `id|role`; the question loaders read the session so they refetch and decide editor or summary again); question titles link for every `question:read` reader (a Recruiter reaches the summary from the list); the redacted schema has `additionalProperties: false`; the mock PATCH and POST take only the editable content through one whitelist picker.
+
+Should-fix, open:
+- **S1 Backend A: the real PATCH DTO must whitelist the editable content.** The mock used to copy whatever the client sent (`isPublished`, `version`, `validatedAt`); now it does not, and a test pins it (TC-012). The API must refuse or ignore those fields too.
+- **S4 Backend A: `updatedAt` as the concurrency token needs a guaranteed-unique value.** Millisecond timestamps can collide for two saves in the same millisecond (a stale writer then passes). Use a revision counter or a monotonic value, and echo `validatedForUpdatedAt` in exactly the same format it was issued (no re-serialisation that changes precision or time zone), because the web compares the strings.
+- **Redaction mock nits** (`src/mocks/question-redaction.ts`): build `limits` and `starterCode` explicitly instead of copying through the allowlist loop; give `/versions/:n` its own per-version status (it reports the question's current status); `{ ...q, ...v }` lets a version field shadow a question field of the same name.

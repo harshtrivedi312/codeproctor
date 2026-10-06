@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { formatDate } from '@/features/admin/format';
 import { PageHeader } from '@/features/admin/page-header';
 import { ApiFailure } from '@/features/admin/queries';
+import { useAuth } from '@/features/auth/auth-provider';
 import { RequireRole } from '@/features/auth/require-role';
 import { rolesWith } from '@/features/staff/permissions';
 import type { Schemas } from '@/lib/api/client';
@@ -64,6 +65,10 @@ function EditorLoader({
   pollMs?: number;
   maxPolls?: number;
 }): React.JSX.Element {
+  // Reading the session re-renders this loader when the user or the role changes: the provider
+  // has cleared the cache by then, so the query below fetches again and the screen decides again
+  // (editor or summary) from what the API now answers (FR-103).
+  useAuth();
   const question = useQuestion(id);
   if (question.isPending) return <Loading />;
   if (question.isError) return <LoadError error={question.error} />;
@@ -254,6 +259,7 @@ export function QuestionVersionRoute({
 }
 
 function VersionLoader({ id, version }: { id: string; version: number }): React.JSX.Element {
+  useAuth(); // see EditorLoader: re-fetch and re-decide after a role change
   const data = useQuestionVersion(id, version);
   if (data.isPending) return <Loading />;
   if (data.isError) return <LoadError error={data.error} />;

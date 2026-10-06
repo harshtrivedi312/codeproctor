@@ -1362,6 +1362,7 @@ components:
         current: { $ref: '#/components/schemas/QuestionVersion' }
     QuestionDetailRedacted:
       type: object
+      additionalProperties: false
       description: >-
         What a caller without question:update (a Recruiter) gets from the detail routes: an allowlist,
         never a denylist. PROVISIONAL list pending BE-04a. No reference solution, answer key,
@@ -1402,6 +1403,7 @@ components:
           description: Visible (non-hidden) cases only
           items:
             type: object
+            additionalProperties: false
             required: [input, expectedOutput]
             properties:
               input: { type: string }

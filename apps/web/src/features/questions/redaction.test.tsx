@@ -1,21 +1,34 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { http, HttpResponse } from 'msw';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { axe } from 'vitest-axe';
+import { AuthProvider } from '@/features/auth/auth-provider';
 import { api } from '@/lib/api/client';
-import { MOCK_USERS } from '@/mocks/auth-handlers';
+import { refreshSession } from '@/lib/auth-session';
+import { MOCK_USERS, seedMockRefresh } from '@/mocks/auth-handlers';
 import { RECRUITER_QUESTION_FIELDS, redactQuestion } from '@/mocks/question-redaction';
 import { seedQuestions } from '@/mocks/question-seed';
 import { server } from '@/mocks/server';
 import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav } from '@/test/nav-mock';
+import { full } from '@/test/question-api';
 import { QuestionEditorRoute, QuestionVersionRoute } from './question-pages';
+import { disposeModels } from './monaco-registry';
 import { QuestionSummary } from './question-summary';
 
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
 vi.mock('./monaco-inner', async () => (await import('@/test/monaco-stub')).monacoModule());
+vi.mock('./monaco-registry', async (original) => {
+  const real = await original<typeof import('./monaco-registry')>();
+  return { ...real, disposeModels: vi.fn(real.disposeModels) };
+});
 
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
-afterEach(() => server.resetHandlers());
+afterEach(() => {
+  server.resetHandlers();
+  vi.mocked(disposeModels).mockClear();
+});
 afterAll(() => server.close());
 beforeEach(() => resetAuthTestState());
 
@@ -261,5 +274,149 @@ describe('Recruiter opening a question: a read-only summary (DL-32)', () => {
     );
     expect(screen.getByText('in')).toBeInTheDocument();
     expect(screen.getByText('out')).toBeInTheDocument();
+  });
+});
+
+describe('A role change clears what the old role could see (FR-103, TC-004)', () => {
+  function Harness({ id }: { id: string }) {
+    return (
+      <main>
+        <QuestionEditorRoute id={id} />
+      </main>
+    );
+  }
+  function renderWithClient(user: { email: string }, id: string) {
+    seedMockRefresh(user.email);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <AuthProvider>
+          <Harness id={id} />
+        </AuthProvider>
+      </QueryClientProvider>,
+    );
+    return client;
+  }
+  /** The refresh answers the same person with another role (an admin changed it meanwhile). */
+  function nextRefreshAs(role: 'RECRUITER' | 'AUTHOR', userId: string, email: string): void {
+    server.use(
+      http.post('*/v1/auth/refresh', () =>
+        HttpResponse.json({
+          accessToken: `mock-access-${role}-changed`,
+          user: {
+            id: userId,
+            email,
+            name: 'Same Person',
+            role,
+            orgName: 'Acme Hiring (demo)',
+            totpEnabled: false,
+          },
+        }),
+      ),
+    );
+  }
+  const cachedText = (client: QueryClient) =>
+    JSON.stringify(
+      client
+        .getQueryCache()
+        .getAll()
+        .map((q) => q.state.data ?? null),
+    );
+
+  it('FR-103 TC-004: an Author demoted to Recruiter by a refresh loses the cached editor, the code and the hidden tests', async () => {
+    const client = renderWithClient(MOCK_USERS.author, 'q-merge');
+    await screen.findByRole('tablist', { name: 'Question sections' });
+    expect(cachedText(client)).toContain('out.append'); // the reference solution is cached
+    expect(cachedText(client)).toContain('mi-t3'); // and a hidden test
+
+    nextRefreshAs('RECRUITER', 'user-author', MOCK_USERS.author.email);
+    await act(async () => {
+      await refreshSession();
+    });
+
+    // The loader refetched and got the redacted view: the summary replaces the editor.
+    await screen.findByTestId('summary-statement');
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+    const html = document.body.innerHTML;
+    for (const needle of ['out.append', 'mi-t3', '5 9', 'Three intervals']) {
+      expect(html).not.toContain(needle);
+    }
+    for (const el of document.querySelectorAll('textarea, input')) {
+      expect((el as HTMLInputElement).value).not.toContain('out.append');
+    }
+    const cached = cachedText(client);
+    for (const needle of [
+      'out.append',
+      'mi-t3',
+      'referenceSolution',
+      'isHidden',
+      'correctOptionIds',
+    ]) {
+      expect(cached).not.toContain(needle);
+    }
+    expect(disposeModels).toHaveBeenCalledWith('q/');
+  });
+
+  it('FR-103: a role change that still allows editing (Super Admin to Author) clears the cache too, as the safe default', async () => {
+    const client = renderWithClient(MOCK_USERS.admin, 'q-merge');
+    await screen.findByRole('tablist', { name: 'Question sections' });
+    const clear = vi.spyOn(client, 'clear');
+    nextRefreshAs('AUTHOR', 'user-super_admin', MOCK_USERS.admin.email);
+    await act(async () => {
+      await refreshSession();
+    });
+    expect(clear).toHaveBeenCalled();
+    // Still allowed to edit: the editor comes back from a fresh fetch.
+    await screen.findByRole('tablist', { name: 'Question sections' });
+  });
+
+  it('FR-103: a refresh with the same user and the same role keeps the cache (no needless refetch)', async () => {
+    const client = renderWithClient(MOCK_USERS.author, 'q-merge');
+    await screen.findByRole('tablist', { name: 'Question sections' });
+    const clear = vi.spyOn(client, 'clear');
+    await act(async () => {
+      await refreshSession();
+    });
+    expect(clear).not.toHaveBeenCalled();
+  });
+});
+
+describe('Question titles link for every reader (FR-103)', () => {
+  it('FR-103: the title is a link to the summary for a Recruiter and to the editor for an Author', async () => {
+    const { QuestionsPage } = await import('./questions-page');
+    nav.pathname = '/admin/questions';
+    renderAsStaff(
+      <main>
+        <QuestionsPage />
+      </main>,
+      MOCK_USERS.recruiter,
+    );
+    const link = await screen.findByRole('link', { name: 'Two sum' });
+    expect(link).toHaveAttribute('href', '/admin/questions/q-twosum');
+  });
+});
+
+describe('The mock PATCH keeps to the editable content (TC-012)', () => {
+  it('TC-012: a PATCH that sets isPublished or a version leaves a draft a draft', async () => {
+    renderAsStaff(<div />, MOCK_USERS.author);
+    await waitFor(async () => expect((await api.GET('/v1/questions')).response.status).toBe(200));
+    const got = await api.GET('/v1/questions/{questionId}', {
+      params: { path: { questionId: 'q-rotate' } },
+    });
+    const detail = full(got.data);
+    const saved = await api.PATCH('/v1/questions/{questionId}', {
+      params: { path: { questionId: 'q-rotate' } },
+      body: {
+        ...detail.current,
+        isPublished: true,
+        version: 99,
+        validatedAt: '2026-01-01T00:00:00.000Z',
+        expectedUpdatedAt: detail.current.updatedAt,
+      } as never,
+    });
+    const after = full(saved.data).current;
+    expect(after.isPublished).toBe(false);
+    expect(after.version).toBe(1);
+    expect(after.validatedAt).toBeNull();
   });
 });
