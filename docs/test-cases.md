@@ -38,9 +38,9 @@ Updated 2026-10-06 (ADR 0017, C-43..C-48, C-49). Added: TC-101..TC-111, each mar
 | ID | FR | Scenario | Steps | Expected result | Type | Priority |
 | --- | --- | --- | --- | --- | --- | --- |
 | TC-020 | FR-301 | Random pick rule | Test with 2 random MEDIUM questions tagged arrays; start 10 sessions | Each session gets 2 matching questions; distribution varies | F | P1 |
-| TC-021 | FR-303 | Single-use link | Complete a test, reopen link | "Already used" page; no new session | S | P1 |
-| TC-022 | FR-303 | Window enforcement | Open link after window\_end | "Expired" page; status EXPIRED | F | P1 |
-| TC-023 | FR-304 | Bulk CSV invite | Upload CSV of 100 rows with 3 invalid emails | 97 invitations sent; error report lists 3 rows | F | P2 |
+| TC-021 | FR-303 | Single-use link | Complete a test, reopen link with the API up (with the instances off, see TC-107) | "Already used" page; no new session | S | P1 |
+| TC-022 | FR-303 | Window enforcement | Open link after window\_end with the API up; separately let window\_end pass while the instances are off, then start them | "Expired" page; status EXPIRED (set on opening the link, or by the expiry job at the next start) | F | P1 |
+| TC-023 | FR-304 | Bulk CSV invite | Upload a CSV of 10 rows: 7 valid rows in two slots (4 candidates and 3 candidates, each within the capacity of 5) and 3 rows with invalid emails; then upload a row that would make one slot hold 6 | 7 invitations sent; the error report lists the 3 invalid rows, and the row that would make 6 with its reason (FR-306) | F | P2 |
 | TC-024 | FR-305 | Extra time accommodation | Invite with +50% time on 60-min test | Server deadline is 90 min after start | F | P1 |
 
 ## Candidate portal (M4)

@@ -103,6 +103,29 @@ export const envSchema = z
     JUDGE0_AUTHZ_TOKEN: z.string().min(1).optional(),
     JUDGE0_REQUEST_TIMEOUT_MS: positiveInt.default(10_000),
     JUDGE0_POLL_DEADLINE_MS: positiveInt.default(60_000),
+    // Candidate session (BE-07, ADR 0013 section 5.10, ADR 0003). The three secrets are optional so
+    // the staff-only suites and local tooling start without them; the candidate routes then answer
+    // 503 (CandidateConfig). Pilot and production must set them (superRefine below).
+    // Signs candidate JWTs; must differ from JWT_ACCESS_SECRET so a staff token never verifies.
+    JWT_CANDIDATE_SECRET: secret.optional(),
+    // Keys the HMAC that protects the 6-digit email OTP in Redis (ADR 0003 section 2).
+    OTP_PEPPER: secret.optional(),
+    // kid of the AES-256-GCM key (SESSION_KEY_ENC_KEY_<kid>, 32 bytes base64) that wraps the
+    // per-session HMAC master key (ADR 0013 section 2). Older kids stay configured until their rows
+    // are destroyed; the key itself is read from the environment by SessionKeyService.
+    SESSION_KEY_ENC_ACTIVE_KID: z
+      .string()
+      .regex(/^[A-Za-z0-9]{1,16}$/, 'must be 1 to 16 letters or digits')
+      .default('k1'),
+    // Candidate JWT lifetime. The heartbeat renews it when less than half is left.
+    CANDIDATE_TOKEN_TTL_SECONDS: z.coerce.number().int().min(60).max(3600).default(900),
+    // Seconds after submission during which proctor batches are still accepted (ADR 0013 section 2).
+    PROCTOR_INGEST_GRACE_SECONDS: z.coerce.number().int().min(0).max(3600).default(300),
+    // When true the API refuses to serve a consent text without Legal approval (ADR 0007 section 6).
+    REQUIRE_LEGAL_APPROVED_CONSENT: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((v) => v === 'true'),
     // Email (C-31): Amazon SES, or noop (drops mail) for local and test. Pilot and production
     // require ses. No secrets here: credentials come from the AWS SDK default chain (instance
     // role). SES_ENDPOINT is for tests only and is refused outside development and test.
@@ -252,6 +275,32 @@ export const envSchema = z
         message: 'must not be true in pilot or production',
       });
     }
+    if (live && !env.REQUIRE_LEGAL_APPROVED_CONSENT) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['REQUIRE_LEGAL_APPROVED_CONSENT'],
+        message: 'must be true in pilot and production (ADR 0007 section 6)',
+      });
+    }
+    // Staging is not listed: the candidate routes answer 503 there until the secrets are set.
+    const deployed = live || env.NODE_ENV === 'production';
+    if (deployed) {
+      for (const key of ['JWT_CANDIDATE_SECRET', 'OTP_PEPPER'] as const) {
+        if (env[key] === undefined) {
+          ctx.addIssue({ code: 'custom', path: [key], message: 'is required outside development' });
+        }
+      }
+    }
+    if (
+      env.JWT_CANDIDATE_SECRET !== undefined &&
+      env.JWT_CANDIDATE_SECRET === env.JWT_ACCESS_SECRET
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['JWT_CANDIDATE_SECRET'],
+        message: 'must differ from JWT_ACCESS_SECRET',
+      });
+    }
   });
 
 export type Env = z.infer<typeof envSchema>;
@@ -270,5 +319,16 @@ export function validateEnv(raw: Record<string, unknown>): Env {
       .join('; ');
     throw new Error(`Invalid environment: ${problems}`);
   }
-  return result.data;
+  // The wrapping key is named by the active kid (SESSION_KEY_ENC_KEY_<kid>), so the schema cannot
+  // list it. Pilot and production must not start without a valid one: without it every test start
+  // would fail at the candidate's first click (ADR 0013 section 2). Names only, never values.
+  const env = result.data;
+  if (env.APP_ENV === 'pilot' || env.APP_ENV === 'production' || env.NODE_ENV === 'production') {
+    const name = `SESSION_KEY_ENC_KEY_${env.SESSION_KEY_ENC_ACTIVE_KID}`;
+    const value = raw[name];
+    if (typeof value !== 'string' || !aesKey.safeParse(value).success) {
+      throw new Error(`Invalid environment: ${name}: must be 32 bytes, base64 encoded`);
+    }
+  }
+  return env;
 }
