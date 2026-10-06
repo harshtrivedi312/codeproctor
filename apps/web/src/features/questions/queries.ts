@@ -140,7 +140,7 @@ export interface SaveResult {
   idMap: Record<string, string>;
 }
 
-/** Where a save stopped: before the content PATCH (variants), the PATCH, test cases, variants, or the read-back. */
+/** Where a save stopped: before the content PATCH (variants), the PATCH, test cases, variants, or the final read. */
 export type SaveStep = 'variants' | 'content' | 'test cases' | 'reload';
 
 /** The delete of a variant was refused because it has AI rows: which variant, so the form can put it back. */
@@ -163,9 +163,9 @@ export class PartialSaveFailure extends ApiFailure {
     /** The content PATCH forked a new draft: ids in the form no longer match the server's. */
     readonly forked: boolean,
     /**
-     * The revision known to match the server after the last CONFIRMED write: null when a write that
-     * answers no revision went through but could not be confirmed (its read-back failed or showed
-     * something we did not write). Only fresh data with exactly this revision may be adopted.
+     * The revision the server answered for our last write (it is the state that write left). Only
+     * fresh data with exactly this revision may be adopted: anything else means someone else wrote,
+     * or the write that failed without an answer was applied after all.
      */
     readonly lastRevision: string | null,
     /** The session generation the save started in. */
@@ -178,7 +178,6 @@ export class PartialSaveFailure extends ApiFailure {
 
 type ServerCase = Schemas['TestCase'];
 type ServerVariant = Schemas['Variant'];
-type ServerVersion = Schemas['QuestionVersion'];
 type ParamsOf = Record<string, string | number | boolean>;
 
 const caseKey = (
@@ -225,125 +224,22 @@ const sameCase = (a: ServerCase, t: TestCase, position: number): boolean =>
   a.position === position;
 
 /**
- * The part of a version other editors can change under a save: its test cases and variants with
- * their overrides. Without `ids` the slots are named by position, so a fork copy (new ids) can be
- * compared with its source.
- */
-export function slotsSignature(v: ServerVersion, ids = true): string {
-  const pos = new Map(v.testCases.map((t) => [t.id, t.position]));
-  const cases = v.testCases
-    .map((t) => [
-      ids ? t.id : '',
-      t.position,
-      t.isHidden,
-      t.weight,
-      t.input ?? '',
-      t.expectedOutput ?? '',
-    ])
-    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
-  const variants = v.variants
-    .map((x) => [
-      ids ? x.id : '',
-      x.isActive,
-      Object.entries(x.params).sort(),
-      x.testCaseOverrides
-        .map((o) => [ids ? o.testCaseId : (pos.get(o.testCaseId) ?? -1), o.input, o.expectedOutput])
-        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
-    ])
-    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
-  return JSON.stringify([cases, variants]);
-}
-
-const CONTENT_FIELDS = [
-  'title',
-  'statementMd',
-  'difficulty',
-  'allowedLanguages',
-  'limits',
-  'starterCode',
-  'referenceSolution',
-  'answerSpec',
-] as const;
-
-/**
- * The content fields the revision covers besides the slots. `omit` leaves out the fields a PATCH
- * sent itself (the server stored ours, so only the ones we did NOT send can show someone else's edit).
- */
-export function contentSignature(v: ServerVersion, omit: readonly string[] = []): string {
-  return JSON.stringify(CONTENT_FIELDS.filter((k) => !omit.includes(k)).map((k) => v[k] ?? null));
-}
-
-/** The expected state after one of our own writes, built from the last confirmed one. */
-const upsertCase = (v: ServerVersion, c: ServerCase): ServerVersion => ({
-  ...v,
-  testCases: [...v.testCases.filter((t) => t.id !== c.id), c],
-});
-const dropCase = (v: ServerVersion, id: string): ServerVersion => ({
-  ...v,
-  testCases: v.testCases.filter((t) => t.id !== id),
-  variants: v.variants.map((x) => ({
-    ...x,
-    testCaseOverrides: x.testCaseOverrides.filter((o) => o.testCaseId !== id),
-  })),
-});
-const upsertVariant = (v: ServerVersion, x: ServerVariant): ServerVersion => ({
-  ...v,
-  variants: [...v.variants.filter((y) => y.id !== x.id), x],
-});
-const dropVariant = (v: ServerVersion, id: string): ServerVersion => ({
-  ...v,
-  variants: v.variants.filter((y) => y.id !== id),
-});
-const withOverride = (
-  v: ServerVersion,
-  variantId: string,
-  o: ServerVariant['testCaseOverrides'][number],
-): ServerVersion => ({
-  ...v,
-  variants: v.variants.map((x) =>
-    x.id === variantId
-      ? {
-          ...x,
-          testCaseOverrides: [
-            ...x.testCaseOverrides.filter((y) => y.testCaseId !== o.testCaseId),
-            o,
-          ],
-        }
-      : x,
-  ),
-});
-const withoutOverride = (
-  v: ServerVersion,
-  variantId: string,
-  testCaseId: string,
-): ServerVersion => ({
-  ...v,
-  variants: v.variants.map((x) =>
-    x.id === variantId
-      ? { ...x, testCaseOverrides: x.testCaseOverrides.filter((y) => y.testCaseId !== testCaseId) }
-      : x,
-  ),
-});
-
-/**
- * One save of the whole editor against the real routes (BE-04a/b). Every write after the first
- * carries `expectedRevision`, chained, and the chain only ever holds a revision that is CONFIRMED
- * to be the state our own write produced:
- *  - the content PATCH, variant create/patch answer a revision, but the PATCH's answer is read after
- *    its transaction, so its test cases and variants are compared with what we expect;
- *  - a write that answers NO revision (test cases, overrides, variant delete) is followed by a read
- *    of the whole version, which must equal the last confirmed state plus exactly that write. If it
- *    does not (another editor committed in between) the save stops as a 409 and nothing further is
- *    written: another editor's change is never adopted as our base.
- * Costs one full read per such write (the API answers no revision there: a question for Backend A).
+ * One save of the whole editor against the real routes (BE-04a/b, #192). Every write after the
+ * first carries `expectedRevision`, chained: each write answers the revision of the version as it
+ * stands AFTER that write, computed in the same transaction and under the same question lock, so
+ * the chain is exact without reading anything back. If another editor commits between two of our
+ * writes, the server revision has moved and our next write (carrying the previous answer) is a 409
+ * and nothing further is written: another editor's change is never adopted as our base and never
+ * overwritten. The answer to our own write cannot include a change made after it, and a change made
+ * before it would have failed its own expectedRevision check.
  * Order: (1) for a DRAFT with variants, a variant whose params gain a name first gets the union of
  * old and new params (so the statement PATCH still renders for every active variant), and variants
  * the form removed are deleted (so a variant lacking a newly added placeholder cannot make the PATCH
  * a 400); (2) PATCH the content, which forks the next draft when the latest version is published
  * (the server copies test cases and variants with new ids and re-points overrides); (3) test cases;
- * (4) variants and per-slot overrides; (5) read the question back. A step that fails after
- * something was written is a PartialSaveFailure naming the step. Each step checks the session is
- * still the one that started the save.
+ * (4) variants and per-slot overrides; (5) read the question back once, for the server's own ids.
+ * A step that fails after something was written is a PartialSaveFailure naming the step. Each step
+ * checks the session is still the one that started the save.
  */
 export async function saveQuestion(id: string, input: SaveInput): Promise<SaveResult> {
   const startedIn = getGeneration();
@@ -356,35 +252,15 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
   const loaded = input.loaded;
   const desired = input.variants;
   let rev = input.expectedRevision;
-  /** The last revision CONFIRMED to match the server (null while a write is unconfirmed). */
+  /**
+   * The last revision known to match the server: the answer of our last write. A write that failed
+   * without an answer may or may not have been applied; the resync tells by comparing the server's
+   * revision with this one, so nothing is adopted unless the server is exactly here.
+   */
   let confirmed: string | null = input.expectedRevision;
-  /** The last confirmed full state of the version being written. */
-  let known: ServerVersion = loaded;
-
-  /** After a write that answered a revision: the answer is exact, take it with the state we expect. */
-  const accept = (expected: ServerVersion, revision: string): void => {
-    known = expected;
+  const accept = (revision: string): void => {
     rev = revision;
     confirmed = revision;
-  };
-  /** After a write that answered none: read the version back and require exactly the expected state. */
-  const confirm = async (expected: ServerVersion): Promise<void> => {
-    confirmed = null;
-    const back = await fetchQuestion(id);
-    if (!isFullQuestion(back)) throw new ApiFailure(403, 'Your role cannot edit this question.');
-    if (
-      back.version.version !== expected.version ||
-      slotsSignature(back.version) !== slotsSignature(expected) ||
-      // The revision covers the content too: another author's edit of the statement or the title
-      // is not ours either, even when the slots are exactly what we expect.
-      contentSignature(back.version) !== contentSignature(expected)
-    ) {
-      throw new ApiFailure(
-        409,
-        'Someone else changed this question while your changes were being saved.',
-      );
-    }
-    accept(back.version, back.version.revision);
   };
 
   try {
@@ -415,7 +291,7 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
         );
         if (!r.data) fail(r.response, r.error);
         wrote = true;
-        accept(upsertVariant(known, r.data.variant), r.data.revision);
+        accept(r.data.revision);
       }
       // (1b) Removed variants go before the content PATCH.
       const keepIds = new Set(desired.map((d) => d.id));
@@ -432,7 +308,7 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
               },
             },
           );
-          if (!r.response.ok) {
+          if (!r.data) {
             try {
               fail(r.response, r.error);
             } catch (e) {
@@ -440,7 +316,7 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
             }
           }
           wrote = true;
-          await confirm(dropVariant(known, old.id));
+          accept(r.data.revision);
         }
       }
     }
@@ -456,21 +332,8 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
     wrote = true;
     const createdNewVersion = first.createdNewVersion;
     forked = createdNewVersion;
-    // The PATCH answers a revision, but its answer is read after its transaction: its test cases and
-    // variants must be what they were (a fork: copies of them), or another editor wrote in between.
-    confirmed = null;
-    const sent = Object.keys(input.update);
-    if (
-      slotsSignature(first.version, !createdNewVersion) !==
-        slotsSignature(known, !createdNewVersion) ||
-      contentSignature(first.version, sent) !== contentSignature(known, sent)
-    ) {
-      throw new ApiFailure(
-        409,
-        'Someone else changed this question while your changes were being saved.',
-      );
-    }
-    accept(first.version, first.version.revision);
+    // The answer carries the revision of the version this edit left, read in the same transaction.
+    accept(first.revision);
     const idMap: Record<string, string> = {};
     if (input.coding) {
       const version = first.version.version;
@@ -501,8 +364,8 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
             },
           },
         );
-        if (!r.response.ok) fail(r.response, r.error);
-        await confirm(dropCase(known, sc.id));
+        if (!r.data) fail(r.response, r.error);
+        accept(r.data.revision);
       }
       for (const [position, w] of wanted.entries()) {
         rowDone: {
@@ -526,7 +389,7 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
               },
             );
             if (!r.data) fail(r.response, r.error);
-            await confirm(upsertCase(known, r.data));
+            accept(r.data.revision);
           } else {
             const r = await api.POST('/v1/questions/{questionId}/versions/{version}/test-cases', {
               params: { path },
@@ -541,7 +404,7 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
             });
             if (!r.data) fail(r.response, r.error);
             idMap[w.t.id] = r.data.id;
-            await confirm(upsertCase(known, r.data));
+            accept(r.data.revision);
           }
         }
       }
@@ -593,14 +456,14 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
               },
             },
           );
-          if (!r.response.ok) {
+          if (!r.data) {
             try {
               fail(r.response, r.error);
             } catch (e) {
               throw isVariantHasAiRefs(e) ? new VariantBlockedFailure(e as ApiFailure, sv.id) : e;
             }
           }
-          await confirm(dropVariant(known, sv.id));
+          accept(r.data.revision);
         }
         for (const d of desired) {
           stillSame();
@@ -613,7 +476,7 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
             });
             if (!r.data) fail(r.response, r.error);
             sv = r.data.variant;
-            accept(upsertVariant(known, sv), r.data.revision);
+            accept(r.data.revision);
             existing = [];
           } else if (!sameParams(d.params, sv.params) || d.isActive !== sv.isActive) {
             const r = await api.PATCH(
@@ -625,7 +488,7 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
             );
             if (!r.data) fail(r.response, r.error);
             sv = r.data.variant;
-            accept(upsertVariant(known, sv), r.data.revision);
+            accept(r.data.revision);
           }
           const variantId = sv.id;
           // Overrides: the form's slot ids map to the server's; a slot that was removed took its overrides along.
@@ -646,8 +509,8 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
                 },
               },
             );
-            if (!r.response.ok) fail(r.response, r.error);
-            await confirm(withoutOverride(known, variantId, o.testCaseId));
+            if (!r.data) fail(r.response, r.error);
+            accept(r.data.revision);
           }
           for (const w of wantedOverrides) {
             const have = live.find((o) => o.testCaseId === w.slot);
@@ -662,7 +525,7 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
               },
             );
             if (!r.data) fail(r.response, r.error);
-            await confirm(withOverride(known, variantId, r.data));
+            accept(r.data.revision);
           }
         }
       }

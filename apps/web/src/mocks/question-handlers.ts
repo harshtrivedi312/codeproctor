@@ -999,7 +999,11 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
         }
       }
       const versions = visibleVersions(r.q, true);
-      return HttpResponse.json(toFullDetail(r.q, latest(r.q), versions, createdNewVersion));
+      // BE-04 #192: `revision` of the version this edit left (the new one after a fork).
+      return HttpResponse.json({
+        ...toFullDetail(r.q, latest(r.q), versions, createdNewVersion),
+        revision: revisionOf(latest(r.q)),
+      });
     }),
 
     http.post(`${base}/:id/publish`, async ({ request, params }) => {
@@ -1076,7 +1080,11 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       };
       v.testCases.push(t);
       clearValidation(v);
-      return HttpResponse.json(toTestCase(t, true), { status: 201 });
+      // BE-04 #192: the revision after the write, computed in the same transaction.
+      return HttpResponse.json(
+        { ...toTestCase(t, true), revision: revisionOf(v) },
+        { status: 201 },
+      );
     }),
 
     http.patch(`${base}/:id/versions/:version/test-cases/:caseId`, async ({ request, params }) => {
@@ -1107,7 +1115,7 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       if (typeof b.weight === 'number') t.weight = b.weight;
       if (typeof b.position === 'number') t.position = b.position;
       clearValidation(d.v);
-      return HttpResponse.json(toTestCase(t, true));
+      return HttpResponse.json({ ...toTestCase(t, true), revision: revisionOf(d.v) });
     }),
 
     http.delete(`${base}/:id/versions/:version/test-cases/:caseId`, async ({ request, params }) => {
@@ -1132,7 +1140,7 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
         overrides: x.overrides.filter((o) => o.testCaseId !== t.id),
       }));
       clearValidation(d.v);
-      return new HttpResponse(null, { status: 204 });
+      return HttpResponse.json({ revision: revisionOf(d.v) });
     }),
 
     // ---- variants (REAL, BE-04b) ---------------------------------------------------------------
@@ -1319,7 +1327,7 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
         }
         d.v.variants = d.v.variants.filter((y) => y.id !== String(params.variantId));
         clearValidation(d.v);
-        return new HttpResponse(null, { status: 204 });
+        return HttpResponse.json({ revision: revisionOf(d.v) });
       },
     ),
 
@@ -1365,13 +1373,13 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
           });
         }
         clearValidation(d.v);
-        // The override only, not a revision (the client reads the revision back).
         return HttpResponse.json({
           testCaseId: slot.id,
           isHidden: slot.isHidden,
           position: slot.position,
           input: String(b.input),
           expectedOutput: String(b.expectedOutput),
+          revision: revisionOf(d.v),
         });
       },
     ),
@@ -1394,7 +1402,7 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
           return problem(404, 'Override not found.');
         x.overrides = x.overrides.filter((o) => o.testCaseId !== String(params.testCaseId));
         clearValidation(d.v);
-        return new HttpResponse(null, { status: 204 });
+        return HttpResponse.json({ revision: revisionOf(d.v) });
       },
     ),
 
