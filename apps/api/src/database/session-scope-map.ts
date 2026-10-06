@@ -22,6 +22,7 @@
 // and the `submissions` RUN filter (CS-4.4). Until PR 2, candidate-interim.ts closes the read columns
 // on a list that is the complement of CS-4.4's read column. The fluent API (CS-4.5 vector 6) arrives as
 // a relation select and is refused by vector 2.
+import { deepFreeze } from './deep-freeze';
 import type { CandidateFacts } from './org-context';
 import { OrgScopeViolationError } from './errors';
 import type { ModelName } from './org-scope-map';
@@ -56,7 +57,7 @@ const bySessionId: SessionModelRule = {
 };
 
 /** CS-4.2: the models the session filter applies to, for both actors. Every other model is org-only. */
-export const SESSION_SCOPE: Readonly<Partial<Record<ModelName, SessionModelRule>>> = {
+export const SESSION_SCOPE: Readonly<Partial<Record<ModelName, SessionModelRule>>> = deepFreeze({
   // `invitationId` decides which invitation, candidate and test the CS-4.3 filters of `invitations`,
   // `candidates` and `tests` reach, and the composite foreign key allows any invitation of the org.
   Session: {
@@ -82,14 +83,14 @@ export const SESSION_SCOPE: Readonly<Partial<Record<ModelName, SessionModelRule>
     immutable: ['sessionQuestionId'],
     questionRef: { optional: false },
   },
-};
+});
 
 export function sessionRuleFor(model: string): SessionModelRule | undefined {
   return Object.hasOwn(SESSION_SCOPE, model) ? SESSION_SCOPE[model as ModelName] : undefined;
 }
 
 /** The operations that only read. Everything else in SCOPED_OPERATIONS writes. */
-export const READ_OPERATIONS: readonly string[] = [
+export const READ_OPERATIONS: readonly string[] = deepFreeze([
   'findUnique',
   'findUniqueOrThrow',
   'findFirst',
@@ -98,7 +99,7 @@ export const READ_OPERATIONS: readonly string[] = [
   'count',
   'aggregate',
   'groupBy',
-];
+]);
 
 export function isReadOperation(operation: string): boolean {
   return READ_OPERATIONS.includes(operation);
@@ -124,12 +125,59 @@ export type CandidateReadFilter =
  * `id` is also an existence oracle, because the primary-key collision answers P2002), the org, and the
  * timestamps the server keeps.
  */
-export const NEVER_WRITTEN_BY_CANDIDATE: readonly string[] = [
+export const NEVER_WRITTEN_BY_CANDIDATE: readonly string[] = deepFreeze([
   'id',
   'orgId',
   'createdAt',
   'updatedAt',
-];
+]);
+
+/**
+ * The object keys a candidate write may carry (ADR 0013 section 5.7, ADR 0004 section 9.2): the key must
+ * be `orgs/{orgId}/sessions/{sessionId}/` (the scope's own, lower-cased) followed by a path that matches
+ * the pattern here, the folder section 5.7 fixes for that column. A key of another session, another org,
+ * a traversal (`..`, `//`, a leading `/`) or a shape that is not the layout is refused, and the refusal
+ * never echoes the key. `null` is accepted on a create only (it points nowhere). Every column a
+ * candidate may write whose name ends in `Key` must be here: a spec checks.
+ */
+export const CANDIDATE_OBJECT_KEYS: Readonly<
+  Partial<Record<ModelName, Readonly<Record<string, RegExp>>>>
+> = deepFreeze({
+  // media/{stream}/{segment:06d}/{seq:08d}.webm
+  MediaChunk: { objectKey: /^media\/[A-Za-z_]+\/\d{6}\/\d{8}\.webm$/ },
+  // identity/{attempt}/{id|selfie}-{ULID}.jpg, or the sealed copy identity/{attempt}/sealed/... the
+  // identity_checks columns point to (section 5.7: the server derives them from the issued names)
+  IdentityCheck: {
+    idImageKey: /^identity\/\d{1,3}\/(?:sealed\/)?id-[A-Za-z0-9]+\.jpg$/,
+    selfieKey: /^identity\/\d{1,3}\/(?:sealed\/)?selfie-[A-Za-z0-9]+\.jpg$/,
+  },
+  // evidence/{ULID}.jpg: an EVENT frame. The sealed re-check frame (evidence/sealed/) belongs to the
+  // server-written FACE_MISMATCH row, never to a CLIENT event.
+  ProctorEvent: { evidenceKey: /^evidence\/[A-Za-z0-9]+\.jpg$/ },
+});
+
+/**
+ * Event types a candidate create may not carry (CS-4.4: SERVER events come only from SERVICE scope, and
+ * a CLIENT row must be one the browser can send). The list is every type in EVENT_TYPES that is not in
+ * CLIENT_EVENT_TYPES of packages/shared (the server-written ones, ADR 0010), plus FACE_MISMATCH, which
+ * ADR 0013 section 5.6 makes a server re-check (it leaves CLIENT_EVENT_TYPES when the SDK ships). A spec
+ * compares it with packages/shared, so a new event type fails until it is classified. #126 nit 4.
+ */
+export const SERVER_ONLY_EVENT_TYPES: readonly string[] = deepFreeze([
+  'FACE_MISMATCH',
+  'DISCONNECTED',
+  'RECONNECTED',
+  'PASTE_BURST',
+  'TYPING_ANOMALY',
+  'CODE_SIMILARITY',
+  'AI_LIKENESS',
+  'PROCTOR_PAUSE',
+  'PROCTOR_MESSAGE',
+  'PROCTOR_RESUME',
+  'IDLE_THEN_COMPLETE',
+  'IDENTITY_MANUAL_REVIEW',
+  'RESUME_OTP_FAILED',
+]);
 
 export type CandidateModelRule =
   /**
@@ -160,6 +208,17 @@ export type CandidateModelRule =
       readonly rowFilter?: PlainObject;
       /** Values a create must carry: stamped when missing, refused when different (CS-4.4). */
       readonly createFixed?: PlainObject;
+      /**
+       * Values a create may not carry, per column (proctor_events `type`: the server-written event types).
+       * A row that names one is refused; the message never echoes it.
+       */
+      readonly createRefused?: Readonly<Record<string, readonly string[]>>;
+      /**
+       * A filter ANDed into the `where` of every candidate UPDATE (and of an upsert's where), and of no
+       * read: the rows a candidate may still change. consents: only a row that is neither signed nor
+       * declined, so the record of a signature is written once (FR-401, C-17).
+       */
+      readonly updateFilter?: PlainObject;
     }
   /** Read-only: every write operation throws. */
   | { readonly kind: 'read'; readonly filter: CandidateReadFilter }
@@ -175,97 +234,108 @@ export type CandidateModelRule =
  * columns are CS-4.4's "Write" column, by Prisma field name (a name that differs from the ADR's
  * snake_case follows the schema; `sourceCode` is `source_code`).
  */
-export const CANDIDATE_MODELS: Readonly<Partial<Record<ModelName, CandidateModelRule>>> = {
-  // Session-path models (CS-4.2).
-  // CS-4.4: `last_heartbeat`; `device_info` (DeviceInfoService grant) and `status`, `pause_reasons`,
-  // `submitted_at` (SessionStateService grant) come with PR 2. No create, no delete.
-  Session: { kind: 'session', update: ['lastHeartbeat'] },
-  // CS-4.4: `final_code`, `final_language`, `answer`. No create.
-  SessionQuestion: {
-    kind: 'session',
-    update: ['finalCode', 'finalLanguage', 'answer'],
-    immutable: ['questionVersionId', 'testQuestionId', 'variantId'],
-  },
-  // CS-4.4: "none". Its writers are SERVICE jobs and the staff proctor-resume.
-  SessionSection: { kind: 'session' },
-  // CS-4.4: create only.
-  IdentityCheck: {
-    kind: 'session',
-    create: ['sessionId', 'attempt', 'idImageKey', 'selfieKey', 'livenessPassed'],
-  },
-  MediaChunk: {
-    kind: 'session',
-    create: [
-      'sessionId',
-      'stream',
-      'segment',
-      'seq',
-      'startedAt',
-      'durationMs',
-      'sizeBytes',
-      'uploadedAt',
-      'objectKey',
-    ],
-    update: [
-      'stream',
-      'segment',
-      'seq',
-      'startedAt',
-      'durationMs',
-      'sizeBytes',
-      'uploadedAt',
-      'objectKey',
-    ],
-  },
-  // CS-4.4: create only.
-  ProctorEventBatch: { kind: 'session', create: ['sessionId', 'seq', 'signature', 'eventCount'] },
-  // CS-4.4: reads and writes only `source = 'CLIENT'` rows (SERVER events stay hidden), creates carry
-  // `source = 'CLIENT'`, and an update writes `duration_ms` only. `severity` is assigned server-side by
-  // the batch route, which writes it.
-  ProctorEvent: {
-    kind: 'session',
-    create: [
-      'sessionId',
-      'type',
-      'occurredAt',
-      'durationMs',
-      'confidence',
-      'payload',
-      'evidenceKey',
-      'batchSeq',
-      'severity',
-      'source',
-    ],
-    update: ['durationMs'],
-    rowFilter: { source: 'CLIENT' },
-    createFixed: { source: 'CLIENT' },
-  },
-  // CS-4.4: create only.
-  KeystrokeBatch: {
-    kind: 'session',
-    create: ['sessionId', 'sessionQuestionId', 'seq', 'signature', 'startedAt', 'events'],
-  },
-  // CS-4.4: `signed_name`, `signed_at`, `declined_at`, `ip`, `user_agent`. `consent_text_id` is set
-  // server-side and `pdf_key` by the consent-PDF job, so neither is writable here, which also means a
-  // candidate cannot create the row (its `consentTextId` is required): update only.
-  Consent: { kind: 'session', update: ['signedName', 'signedAt', 'declinedAt', 'ip', 'userAgent'] },
-  // CS-4.4: create only: `session_question_id`, `kind` (RUN or SUBMIT), `language`, `source_code`.
-  // `results`, `passed` and `total` are CS-4.4's RUN-row columns: refused until the RUN filter of PR 2.
-  Submission: {
-    kind: 'session',
-    create: ['sessionQuestionId', 'kind', 'language', 'sourceCode'],
-  },
-  // Read-only.
-  Organization: { kind: 'read', filter: 'org' },
-  Candidate: { kind: 'read', filter: 'candidate' },
-  Invitation: { kind: 'read', filter: 'invitation' },
-  Test: { kind: 'read', filter: 'test' },
-  TestSection: { kind: 'read', filter: 'sections' },
-  Question: { kind: 'read', filter: 'questions' },
-  // Readable only under a grant (PR 2); refused until then.
-  ConsentText: { kind: 'grant-only', grantSite: 'ConsentService' },
-  TestQuestion: { kind: 'grant-only', grantSite: 'SectionGateService (step 2)' },
-};
+export const CANDIDATE_MODELS: Readonly<Partial<Record<ModelName, CandidateModelRule>>> =
+  deepFreeze({
+    // Session-path models (CS-4.2).
+    // CS-4.4: `last_heartbeat`; `device_info` (DeviceInfoService grant) and `status`, `pause_reasons`,
+    // `submitted_at` (SessionStateService grant) come with PR 2. No create, no delete.
+    Session: { kind: 'session', update: ['lastHeartbeat'] },
+    // CS-4.4: `final_code`, `final_language`, `answer`. No create.
+    SessionQuestion: {
+      kind: 'session',
+      update: ['finalCode', 'finalLanguage', 'answer'],
+      immutable: ['questionVersionId', 'testQuestionId', 'variantId'],
+    },
+    // CS-4.4: "none". Its writers are SERVICE jobs and the staff proctor-resume.
+    SessionSection: { kind: 'session' },
+    // CS-4.4: create only.
+    IdentityCheck: {
+      kind: 'session',
+      create: ['sessionId', 'attempt', 'idImageKey', 'selfieKey', 'livenessPassed'],
+    },
+    MediaChunk: {
+      kind: 'session',
+      create: [
+        'sessionId',
+        'stream',
+        'segment',
+        'seq',
+        'startedAt',
+        'durationMs',
+        'sizeBytes',
+        'uploadedAt',
+        'objectKey',
+      ],
+      update: [
+        'stream',
+        'segment',
+        'seq',
+        'startedAt',
+        'durationMs',
+        'sizeBytes',
+        'uploadedAt',
+        'objectKey',
+      ],
+    },
+    // CS-4.4: create only.
+    ProctorEventBatch: { kind: 'session', create: ['sessionId', 'seq', 'signature', 'eventCount'] },
+    // CS-4.4: reads and writes only `source = 'CLIENT'` rows (SERVER events stay hidden), creates carry
+    // `source = 'CLIENT'`, and an update writes `duration_ms` only. `severity` is assigned server-side by
+    // the batch route, which writes it.
+    ProctorEvent: {
+      kind: 'session',
+      create: [
+        'sessionId',
+        'type',
+        'occurredAt',
+        'durationMs',
+        'confidence',
+        'payload',
+        'evidenceKey',
+        'batchSeq',
+        'severity',
+        'source',
+      ],
+      update: ['durationMs'],
+      rowFilter: { source: 'CLIENT' },
+      createFixed: { source: 'CLIENT' },
+      createRefused: { type: SERVER_ONLY_EVENT_TYPES },
+    },
+    // CS-4.4: create only.
+    KeystrokeBatch: {
+      kind: 'session',
+      create: ['sessionId', 'sessionQuestionId', 'seq', 'signature', 'startedAt', 'events'],
+    },
+    // CS-4.4: `signed_name`, `signed_at`, `declined_at`, `ip`, `user_agent`. `consent_text_id` is set
+    // server-side and `pdf_key` by the consent-PDF job, so neither is writable here, which also means a
+    // candidate cannot create the row (its `consentTextId` is required): update only.
+    // The record of a signature is written once: an update reaches only a row that is neither signed
+    // nor declined (`updateFilter`), so once signed or declined, `signedName`, `ip` and `userAgent` cannot be
+    // rewritten (0 rows). The database CHECK (exactly one of signed_at and declined_at is set) means a row
+    // is never in that state, so a candidate update changes nothing today; the row is created, with its
+    // server-set consentTextId, by a SERVICE job or an org-scope create, or by PR 2's ConsentService grant.
+    Consent: {
+      kind: 'session',
+      update: ['signedName', 'signedAt', 'declinedAt', 'ip', 'userAgent'],
+      updateFilter: { signedAt: null, declinedAt: null },
+    },
+    // CS-4.4: create only: `session_question_id`, `kind` (RUN or SUBMIT), `language`, `source_code`.
+    // `results`, `passed` and `total` are CS-4.4's RUN-row columns: refused until the RUN filter of PR 2.
+    Submission: {
+      kind: 'session',
+      create: ['sessionQuestionId', 'kind', 'language', 'sourceCode'],
+    },
+    // Read-only.
+    Organization: { kind: 'read', filter: 'org' },
+    Candidate: { kind: 'read', filter: 'candidate' },
+    Invitation: { kind: 'read', filter: 'invitation' },
+    Test: { kind: 'read', filter: 'test' },
+    TestSection: { kind: 'read', filter: 'sections' },
+    Question: { kind: 'read', filter: 'questions' },
+    // Readable only under a grant (PR 2); refused until then.
+    ConsentText: { kind: 'grant-only', grantSite: 'ConsentService' },
+    TestQuestion: { kind: 'grant-only', grantSite: 'SectionGateService (step 2)' },
+  });
 
 export function candidateRuleFor(model: string): CandidateModelRule | undefined {
   return Object.hasOwn(CANDIDATE_MODELS, model) ? CANDIDATE_MODELS[model as ModelName] : undefined;

@@ -219,7 +219,7 @@ export async function createTenant(client: PrismaClient, label: string): Promise
       occurredAt: NOW,
     },
   });
-  const keystrokeBatch = await client.keystrokeBatch.create({
+  await client.keystrokeBatch.create({
     data: {
       sessionId: session.id,
       seq: 0,
@@ -295,7 +295,10 @@ export async function createTenant(client: PrismaClient, label: string): Promise
           filter: { sessionId: session.id, seq: 0 },
         },
         ProctorEvent: byId(proctorEvent.id),
-        KeystrokeBatch: byId(keystrokeBatch.id),
+        KeystrokeBatch: {
+          unique: { sessionId_seq: { sessionId: session.id, seq: 0 } },
+          filter: { sessionId: session.id, seq: 0 },
+        },
         Consent: byId(consent.id),
         Submission: byId(submission.id),
       },
@@ -335,7 +338,10 @@ export async function createTenant(client: PrismaClient, label: string): Promise
         filter: { sessionId: session.id, seq: 0 },
       },
       ProctorEvent: byId(proctorEvent.id),
-      KeystrokeBatch: byId(keystrokeBatch.id),
+      KeystrokeBatch: {
+        unique: { sessionId_seq: { sessionId: session.id, seq: 0 } },
+        filter: { sessionId: session.id, seq: 0 },
+      },
       SessionReview: byId(review.id),
       FlagDecision: byId(flagDecision.id),
       Appeal: byId(appeal.id),
@@ -462,7 +468,7 @@ export async function createCandidateChain(
       occurredAt: NOW,
     },
   });
-  const keystrokeBatch = await client.keystrokeBatch.create({
+  await client.keystrokeBatch.create({
     data: {
       sessionId: session.id,
       sessionQuestionId: sessionQuestion.id,
@@ -505,7 +511,10 @@ export async function createCandidateChain(
         filter: { sessionId: session.id, seq: 0 },
       },
       ProctorEvent: byId(proctorEvent.id),
-      KeystrokeBatch: byId(keystrokeBatch.id),
+      KeystrokeBatch: {
+        unique: { sessionId_seq: { sessionId: session.id, seq: 0 } },
+        filter: { sessionId: session.id, seq: 0 },
+      },
       Consent: byId(consent.id),
       Submission: byId(submission.id),
     },

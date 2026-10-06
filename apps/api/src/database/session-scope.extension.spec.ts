@@ -35,7 +35,11 @@ const FACTS = {
 type Delegate = Record<string, (args?: unknown) => Promise<unknown>>;
 
 /** One harmless column per model, so a candidate read names its select (candidate-interim.ts). */
-const KEY_COLUMN: Record<string, string> = { SessionSection: 'position', ProctorEventBatch: 'seq' };
+const KEY_COLUMN: Record<string, string> = {
+  SessionSection: 'position',
+  ProctorEventBatch: 'seq',
+  KeystrokeBatch: 'seq',
+};
 const selectOf = (model: string): { select: Record<string, true> } => ({
   select: { [KEY_COLUMN[model] ?? 'id']: true },
 });
@@ -457,11 +461,12 @@ describe('session scopes through the real client, without a database (ADR 0013 C
                 startedAt: new Date(),
                 events: [],
               } as never,
-              select: { id: true },
+              select: { seq: true },
             }),
           ),
         );
         expect(keystroke).toBeInstanceOf(OrgScopeViolationError);
+        expect((keystroke as Error).message).toContain('not a question of this session');
       }
     });
 
@@ -495,7 +500,7 @@ describe('session scopes through the real client, without a database (ADR 0013 C
         asCandidate(() =>
           scoped.keystrokeBatch.create({
             data: { ...batch, sessionId: OTHER_SID, sessionQuestionId: SQ },
-            select: { id: true },
+            select: { seq: true },
           }),
         ),
       );
@@ -508,7 +513,7 @@ describe('session scopes through the real client, without a database (ADR 0013 C
         asCandidate(() =>
           scoped.keystrokeBatch.create({
             data: { ...batch, sessionQuestionId: null } as never,
-            select: { id: true },
+            select: { seq: true },
           }),
         ),
       );

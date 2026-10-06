@@ -32,6 +32,7 @@ import type { ModelName, OrgScopeRule } from './org-scope-map';
 import { assertInterimColumns } from './candidate-interim';
 import { assertNoRelationVectors } from './candidate-relations';
 import {
+  CANDIDATE_OBJECT_KEYS,
   candidateReadFilter,
   candidateRuleFor,
   isReadOperation,
@@ -296,6 +297,81 @@ function assertWriteColumns(
   }
 }
 
+/** A `..` or `.` segment, an empty segment (`//`), a backslash or a control character in an object key. */
+function hasUnsafePathPiece(key: string): boolean {
+  for (let i = 0; i < key.length; i++) {
+    const code = key.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f || code === 0x5c) return true;
+  }
+  return key.split('/').some((segment, index, all) => {
+    const edge = index === all.length - 1 && segment === '';
+    return (segment === '' && !edge) || segment === '.' || segment === '..';
+  });
+}
+
+/**
+ * The object keys a candidate may write stay inside the session's own prefix (ADR 0013 section 5.7, ADR
+ * 0004 section 9.2): `orgs/{orgId}/sessions/{sessionId}/` with the scope's own, lower-cased ids, then the
+ * folder and shape fixed for the column (CANDIDATE_OBJECT_KEYS). Another session's prefix, another org's,
+ * a traversal (`..`, `//`, a leading `/`, a backslash, a control character) and any other shape are
+ * refused. `null` points nowhere and is accepted on a create only. The message names the model and the
+ * column, never the key.
+ */
+function assertObjectKeys(
+  model: ModelName,
+  operation: string,
+  kind: 'create' | 'update',
+  data: unknown,
+  orgId: string,
+  sessionId: string,
+): void {
+  const columns = CANDIDATE_OBJECT_KEYS[model];
+  if (columns === undefined || !isPlainObject(data)) return;
+  const prefix = `orgs/${orgId}/sessions/${sessionId}/`;
+  for (const [column, shape] of Object.entries(columns)) {
+    const given = data[column];
+    if (given === undefined) continue;
+    // `{ set: value }` is the update form (a create takes the bare value, so an object there is refused).
+    const value =
+      kind === 'update' && isPlainObject(given) && Object.hasOwn(given, 'set') ? given.set : given;
+    if (value === null && kind === 'create') continue;
+    const inside =
+      typeof value === 'string' &&
+      value.startsWith(prefix) &&
+      !hasUnsafePathPiece(value) &&
+      shape.test(value.slice(prefix.length));
+    if (!inside) {
+      throw violation(
+        model,
+        operation,
+        `${column} must be an object key under this session's own prefix and in the folder of ` +
+          'ADR 0013 section 5.7 (no other session, no other org, no traversal).',
+      );
+    }
+  }
+}
+
+/** A candidate create may not carry the values the server alone writes (proctor_events `type`). */
+function assertNoRefusedValues(
+  model: string,
+  operation: string,
+  refused: Readonly<Record<string, readonly string[]>>,
+  data: unknown,
+): void {
+  if (!isPlainObject(data)) return;
+  for (const [column, values] of Object.entries(refused)) {
+    const given = data[column];
+    if (typeof given === 'string' && values.includes(given)) {
+      throw violation(
+        model,
+        operation,
+        `${column} names a value that only the server writes: a candidate create cannot carry it ` +
+          '(ADR 0013 CS-4.4: SERVER events come from SERVICE scope).',
+      );
+    }
+  }
+}
+
 /** A CANDIDATE create carries the fixed values of CS-4.4: stamped when missing, refused when different. */
 function fixCreate(model: string, operation: string, fixed: PlainObject, data: unknown): unknown {
   if (!isPlainObject(data)) return data;
@@ -323,12 +399,17 @@ function stageArgs(
   rule: SessionModelRule,
   candidate: CandidateSessionRule | undefined,
   args: PlainObject,
+  orgId: string,
   sessionId: string,
 ): { args: PlainObject; sessionQuestionIds: string[] } {
   const ids: string[] = [];
   const stamp = (data: unknown): unknown => {
     if (candidate?.create !== undefined) {
       assertWriteColumns(model, operation, 'create', candidate.create, data);
+      assertObjectKeys(model, operation, 'create', data, orgId, sessionId);
+      if (candidate.createRefused !== undefined) {
+        assertNoRefusedValues(model, operation, candidate.createRefused, data);
+      }
     }
     const id = questionRefOf(model, operation, rule, data);
     if (id !== undefined) ids.push(id);
@@ -344,6 +425,7 @@ function stageArgs(
     assertSessionKeysKept(model, operation, keys, data);
     if (candidate?.update !== undefined) {
       assertWriteColumns(model, operation, 'update', candidate.update, data);
+      assertObjectKeys(model, operation, 'update', data, orgId, sessionId);
     }
   }
   if (!CREATE_OPERATIONS.includes(operation)) {
@@ -392,7 +474,7 @@ export function applySessionScope(input: SessionScopeInput): SessionScopeResult 
   const staged =
     sessionRule === undefined
       ? { args, sessionQuestionIds: [] as string[] }
-      : stageArgs(model, operation, sessionRule, gate?.sessionRule, args, session.sessionId);
+      : stageArgs(model, operation, sessionRule, gate?.sessionRule, args, orgId, session.sessionId);
 
   const scoped = applyOrgScope({ model, rule, operation, args: staged.args, orgId });
 
@@ -400,6 +482,11 @@ export function applySessionScope(input: SessionScopeInput): SessionScopeResult 
   if (sessionRule !== undefined) filters.push(sessionRule.filter(session.sessionId));
   if (gate?.sessionRule?.rowFilter !== undefined) filters.push(gate.sessionRule.rowFilter);
   if (gate?.readFilter !== undefined) filters.push(gate.readFilter);
+  // A candidate update reaches only the rows its model still lets it change (consents: not yet signed
+  // or declined); a read is not narrowed by it.
+  if (gate?.sessionRule?.updateFilter !== undefined && UPDATE_OPERATIONS.includes(operation)) {
+    filters.push(gate.sessionRule.updateFilter);
+  }
   if (filters.length === 0 || NO_WHERE.includes(operation)) {
     return { args: scoped, sessionQuestionIds: staged.sessionQuestionIds };
   }

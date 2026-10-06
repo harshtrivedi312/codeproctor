@@ -9,7 +9,10 @@
 //      findUnique, findUniqueOrThrow, findFirst, findFirstOrThrow, findMany, create,
 //      createManyAndReturn, update, updateManyAndReturn, upsert and delete. A new column therefore
 //      stays hidden until a route lists it. `include` is refused by CS-4.5 (candidate-relations.ts).
-//   2. CANDIDATE_INTERIM_DENY, per model, is refused in `select`, `where`, `having`, `orderBy`,
+//   2. No field reference (`client.model.fields.column`) anywhere in a `where` or a `having`: it
+//      compares one column with another without naming the other, so `{ points: { equals: fields.score } }`
+//      would test a hidden column. CS-4.4 grants none, so every one is refused, whichever column it names.
+//   3. CANDIDATE_INTERIM_DENY, per model, is refused in `select`, `where`, `having`, `orderBy`,
 //      `distinct`, `by` (groupBy), the aggregates (`_count`, `_sum`, `_avg`, `_min`, `_max`) and the
 //      `select` of `count`, so a hidden column cannot act as a boolean or ordering oracle either. A
 //      compound unique selector (`orgId_slug`) is read through to its columns.
@@ -27,6 +30,7 @@
 //
 // Names are Prisma's field names (`hmacKeyEnc`), not column names. A test checks each entry against the
 // generated client. Messages name the model, the column and the place, never a value.
+import { deepFreeze } from './deep-freeze';
 import { OrgScopeViolationError } from './errors';
 import type { ModelName } from './org-scope-map';
 
@@ -44,76 +48,80 @@ const deny = (...read: string[]): InterimDeny => ({ read });
  * exists only so that PR 1 does not ship a CANDIDATE scope with no read control. Each entry is the
  * complement of the CS-4.4 read column of that model (see the header).
  */
-export const CANDIDATE_INTERIM_DENY: Readonly<Partial<Record<ModelName, InterimDeny>>> = {
-  // Readable: id, status, startedAt, deadlineAt, pauseReasons, pausedMs, proctorPausedAt, submittedAt,
-  // authEpoch (CS-4.4; the last six feed `effectiveDeadline`).
-  Session: deny(
-    'invitationId',
-    'hmacKeyEnc',
-    'deviceInfo',
-    'clientKind',
-    'totalScore',
-    'riskScore',
-    'riskBand',
-    'lastHeartbeat',
-    'retentionAnchorAt',
-    'reportKey',
-    'reportGeneratedAt',
-    'createdAt',
-  ),
-  // Readable: id, sessionId, position, points, finalCode, finalLanguage, answer.
-  SessionQuestion: deny(
-    'testQuestionId',
-    'questionVersionId',
-    'variantId',
-    'score',
-    'scoring',
-    'scoredById',
-    'scoredAt',
-    'scoringNote',
-  ),
-  // Readable: every column.
-  SessionSection: deny(),
-  // Readable: id, sessionQuestionId, kind, language, createdAt. `results`, `passed` and `total` are
-  // CS-4.4's RUN-row columns (the RUN filter is PR 2); `sourceCode` is written, never read back.
-  Submission: deny('sourceCode', 'results', 'passed', 'total', 'score'),
-  // Readable: id, attempt, status, createdAt.
-  IdentityCheck: deny(
-    'idImageKey',
-    'selfieKey',
-    'faceMatchScore',
-    'modelId',
-    'threshold',
-    'livenessPassed',
-    'reviewReason',
-    'manualDecision',
-    'reviewedById',
-    'reviewedAt',
-    'reviewNote',
-  ),
-  // Readable: id, stream, segment, seq, sizeBytes, uploadedAt. `objectKey` is explicit-only.
-  MediaChunk: deny('objectKey', 'startedAt', 'durationMs', 'deletedAt'),
-  // Readable: seq, signature, eventCount.
-  ProctorEventBatch: deny('receivedAt'),
-  // Readable: seq, signature, startedAt.
-  KeystrokeBatch: deny('events'),
-  // Readable: id, type, occurredAt, durationMs, batchSeq, createdAt. The SERVER rows are filtered out.
-  ProctorEvent: deny('source', 'severity', 'confidence', 'payload', 'evidenceKey'),
-  // Readable: id, consentTextId, signedAt, declinedAt.
-  Consent: deny('signedName', 'ip', 'userAgent', 'pdfKey', 'pdfGeneratedAt', 'copyEmailedAt'),
-  // Readable: id, name, retentionDays, currentConsentTextId. `settings` is explicit-only.
-  Organization: deny('settings', 'createdAt'),
-  // Readable: id, fullName, email.
-  Candidate: deny('externalRef', 'erasureRequestedAt', 'erasedAt', 'createdAt'),
-  // Readable: id, testId, candidateId, windowStart, windowEnd, usedAt. `accommodations` is explicit-only.
-  Invitation: deny('tokenHash', 'accommodations', 'sentAt', 'createdById', 'createdAt'),
-  // Readable: id, name, description, durationMinutes, profile. `settings` is explicit-only.
-  Test: deny('passScore', 'settings', 'createdById', 'createdAt'),
-  // Readable: id, title, position, timeLimitMin.
-  TestSection: deny(),
-  // Readable: id, type.
-  Question: deny('slug', 'tags', 'currentVersionId', 'isArchived', 'createdById', 'createdAt'),
-};
+export const CANDIDATE_INTERIM_DENY: Readonly<Partial<Record<ModelName, InterimDeny>>> = deepFreeze(
+  {
+    // Readable: id, status, startedAt, deadlineAt, pauseReasons, pausedMs, proctorPausedAt, submittedAt,
+    // authEpoch (CS-4.4; the last six feed `effectiveDeadline`).
+    Session: deny(
+      'invitationId',
+      'hmacKeyEnc',
+      'deviceInfo',
+      'clientKind',
+      'totalScore',
+      'riskScore',
+      'riskBand',
+      'lastHeartbeat',
+      'retentionAnchorAt',
+      'reportKey',
+      'reportGeneratedAt',
+      'createdAt',
+    ),
+    // Readable: id, sessionId, position, points, finalCode, finalLanguage, answer.
+    SessionQuestion: deny(
+      'testQuestionId',
+      'questionVersionId',
+      'variantId',
+      'score',
+      'scoring',
+      'scoredById',
+      'scoredAt',
+      'scoringNote',
+    ),
+    // Readable: every column.
+    SessionSection: deny(),
+    // Readable: id, sessionQuestionId, kind, language, createdAt. `results`, `passed` and `total` are
+    // CS-4.4's RUN-row columns (the RUN filter is PR 2); `sourceCode` is written, never read back.
+    Submission: deny('sourceCode', 'results', 'passed', 'total', 'score'),
+    // Readable: id, attempt, status, createdAt.
+    IdentityCheck: deny(
+      'idImageKey',
+      'selfieKey',
+      'faceMatchScore',
+      'modelId',
+      'threshold',
+      'livenessPassed',
+      'reviewReason',
+      'manualDecision',
+      'reviewedById',
+      'reviewedAt',
+      'reviewNote',
+    ),
+    // Readable: id, stream, segment, seq, sizeBytes, uploadedAt. `objectKey` is explicit-only.
+    MediaChunk: deny('objectKey', 'startedAt', 'durationMs', 'deletedAt'),
+    // Readable: seq, signature, eventCount.
+    ProctorEventBatch: deny('receivedAt'),
+    // Readable: seq, signature, startedAt. `id` is a global identity counter: reading it tells a candidate
+    // how many keystroke batches every candidate of the platform has inserted (an insert-volume leak), and
+    // CS-4.4 does not list it.
+    KeystrokeBatch: deny('id', 'events'),
+    // Readable: id, type, occurredAt, durationMs, batchSeq, createdAt. The SERVER rows are filtered out.
+    ProctorEvent: deny('source', 'severity', 'confidence', 'payload', 'evidenceKey'),
+    // Readable: id, consentTextId, signedAt, declinedAt.
+    Consent: deny('signedName', 'ip', 'userAgent', 'pdfKey', 'pdfGeneratedAt', 'copyEmailedAt'),
+    // Readable: id, name, retentionDays, currentConsentTextId. `settings` is explicit-only.
+    Organization: deny('settings', 'createdAt'),
+    // Readable: id, fullName, email.
+    Candidate: deny('externalRef', 'erasureRequestedAt', 'erasedAt', 'createdAt'),
+    // Readable: id, testId, candidateId, windowStart, windowEnd, usedAt. `accommodations` is explicit-only.
+    Invitation: deny('tokenHash', 'accommodations', 'sentAt', 'createdById', 'createdAt'),
+    // Readable: id, name, description, durationMinutes, profile. `settings` is explicit-only.
+    Test: deny('passScore', 'settings', 'createdById', 'createdAt'),
+    // Readable: id, title, position, timeLimitMin.
+    TestSection: deny(),
+    // Readable: id, type.
+    Question: deny('slug', 'tags', 'currentVersionId', 'isArchived', 'createdById', 'createdAt'),
+  },
+);
 
 /**
  * The compound unique selectors of the models on the CANDIDATE allowlist (`@@unique` and `@@id` of
@@ -121,20 +129,22 @@ export const CANDIDATE_INTERIM_DENY: Readonly<Partial<Record<ModelName, InterimD
  * `orgId_slug: { orgId, slug }` is not a way round the deny list. candidate-interim.spec.ts checks the
  * table against schema.prisma.
  */
-export const COMPOUND_UNIQUES: Readonly<Partial<Record<ModelName, readonly string[]>>> = {
-  Candidate: ['orgId_email', 'id_orgId'],
-  Invitation: ['id_orgId'],
-  Test: ['id_orgId'],
-  Question: ['orgId_slug'],
-  SessionSection: ['sessionId_sectionId', 'sessionId_position'],
-  IdentityCheck: ['sessionId_attempt'],
-  MediaChunk: ['sessionId_stream_seq'],
-  ProctorEventBatch: ['sessionId_seq'],
-  KeystrokeBatch: ['sessionId_seq'],
-};
+export const COMPOUND_UNIQUES: Readonly<Partial<Record<ModelName, readonly string[]>>> = deepFreeze(
+  {
+    Candidate: ['orgId_email', 'id_orgId'],
+    Invitation: ['id_orgId'],
+    Test: ['id_orgId'],
+    Question: ['orgId_slug'],
+    SessionSection: ['sessionId_sectionId', 'sessionId_position'],
+    IdentityCheck: ['sessionId_attempt'],
+    MediaChunk: ['sessionId_stream_seq'],
+    ProctorEventBatch: ['sessionId_seq'],
+    KeystrokeBatch: ['sessionId_seq'],
+  },
+);
 
 /** The operations whose result carries rows: they must name their `select`. */
-export const ROW_RETURNING_OPERATIONS: readonly string[] = [
+export const ROW_RETURNING_OPERATIONS: readonly string[] = deepFreeze([
   'findUnique',
   'findUniqueOrThrow',
   'findFirst',
@@ -146,7 +156,7 @@ export const ROW_RETURNING_OPERATIONS: readonly string[] = [
   'updateManyAndReturn',
   'upsert',
   'delete',
-];
+]);
 
 function isPlainObject(value: unknown): value is PlainObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -157,6 +167,50 @@ function refuse(model: string, operation: string, field: string, where: string) 
     `${model}.${operation}: the column ${field} is not available to a candidate in ${where} ` +
       '(interim deny list CANDIDATE_INTERIM_DENY; ADR 0013 CS-4.4 read allowlists are PR 2).',
   );
+}
+
+/**
+ * A Prisma field reference (`client.model.fields.column`), as the runtime builds it: an object with the
+ * own properties `modelName`, `name`, `typeName`, `isList` and `isEnum`, and a `_toGraphQLInputType` method.
+ * Either mark is enough, so a look-alike that carries the four properties is refused too (fail closed).
+ * A column name is never a field reference: it is a key, and its value is a filter or a scalar.
+ */
+export function isFieldRef(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v._toGraphQLInputType === 'function' ||
+    (typeof v.modelName === 'string' &&
+      typeof v.name === 'string' &&
+      typeof v.typeName === 'string' &&
+      typeof v.isList === 'boolean')
+  );
+}
+
+/**
+ * Refuses a field reference anywhere in a `where` or a `having`, through every operator and every
+ * nesting (`equals`, `in`, `not: { lt }`, `AND`, `OR`, `NOT`, arrays). Pure, no query. A value that is
+ * a Date or a byte array is a leaf. Arrays and objects count toward the depth.
+ */
+function assertNoFieldRefs(
+  model: ModelName,
+  operation: string,
+  value: unknown,
+  place: string,
+  depth: number,
+): void {
+  if (isFieldRef(value)) {
+    throw new OrgScopeViolationError(
+      `${model}.${operation}: a field reference (client.<model>.fields.<column>) in ${place} is ` +
+        'refused in a CANDIDATE scope: it compares a column without naming it, and CS-4.4 grants ' +
+        'none (interim read control; ADR 0013 CS-4.4).',
+    );
+  }
+  if (typeof value !== 'object' || value === null) return;
+  if (value instanceof Date || ArrayBuffer.isView(value)) return;
+  if (depth > MAX_DEPTH) throw tooDeep(model, operation, `a ${place}`);
+  const inner = Array.isArray(value) ? value : Object.values(value);
+  for (const item of inner) assertNoFieldRefs(model, operation, item, place, depth + 1);
 }
 
 // A where nests AND, OR and NOT, and arrays. Anything beyond this is refused, as in candidate-relations.ts.
@@ -271,6 +325,8 @@ export function assertInterimColumns(model: ModelName, operation: string, args: 
   if (isPlainObject(args.select)) {
     assertNotDenied(model, operation, denyRead, Object.keys(args.select), 'select');
   }
+  assertNoFieldRefs(model, operation, args.where, 'where', 0);
+  assertNoFieldRefs(model, operation, args.having, 'having', 0);
   const where = new Set<string>();
   whereFields(model, operation, args.where, where, 0);
   assertNotDenied(model, operation, denyRead, where, 'where');

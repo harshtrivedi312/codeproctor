@@ -26,6 +26,7 @@ import { OrgScopeError, OrgScopeViolationError, RawQueryNotAllowedError } from '
 import { OrgContextService } from './org-context';
 import type { CandidateFacts } from './org-context';
 import { createOrgScopedClient } from './org-scope.extension';
+import { Prisma } from '../generated/prisma/client.js';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import { CANDIDATE_INTERIM_DENY } from './candidate-interim';
 import { startMigratedDatabase } from './testing/migrated-postgres';
@@ -150,6 +151,13 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
   const NO_CANDIDATE_UPDATE = SESSION_MODELS.filter((m) => !CANDIDATE_UPDATES.includes(m));
   const writersOf = (model: ChainModel) =>
     ACTORS.filter(([actor]) => actor === 'SERVICE' || CANDIDATE_UPDATES.includes(model));
+  // consents are written once (B3): a candidate update reaches no row, so "it changes its own row" is
+  // for the job there, and the write-once test below shows the candidate's 0 rows.
+  const ownWritersOf = (model: ChainModel) =>
+    ACTORS.filter(
+      ([actor]) =>
+        actor === 'SERVICE' || (CANDIDATE_UPDATES.includes(model) && model !== 'Consent'),
+    );
 
   const scoped = (model: string): Delegate =>
     (client as unknown as Record<string, Delegate>)[lowerFirst(model)] as Delegate;
@@ -318,7 +326,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       },
     );
 
-    it.each(writersOf(model))(
+    it.each(ownWritersOf(model))(
       '%s: it changes its own row, and only its own (TC-008)',
       async (_actor, run) => {
         const own = A.rows[model];
@@ -809,7 +817,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       });
       await owner.sessionQuestion.update({
         where: { id: A.sessionQuestionId },
-        data: { finalCode: null, finalLanguage: null, answer: undefined },
+        data: { finalCode: null, finalLanguage: null, answer: Prisma.DbNull },
       });
     });
 
@@ -960,11 +968,14 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
         await db.statements.reset();
         await asCandidate(A, async () => {
           const d = scoped(model);
+          // keystroke_batches.id is itself hidden, so that model is probed through seq.
+          const key = model === 'KeystrokeBatch' ? 'seq' : 'id';
+          const only = { select: { [key]: true } };
           for (const args of [
-            { select: { id: true, [column]: true } },
-            { ...ID, where: { [column]: { not: null } } },
-            { ...ID, orderBy: { [column]: 'asc' } },
-            { ...ID, distinct: [column] },
+            { select: { [key]: true, [column]: true } },
+            { ...only, where: { [column]: { not: null } } },
+            { ...only, orderBy: { [column]: 'asc' } },
+            { ...only, distinct: [column] },
           ]) {
             await expect(d.findMany?.(args)).rejects.toThrow(
               new RegExp(`the column ${column} is not available to a candidate`),
@@ -1172,8 +1183,8 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
           data: {
             sessionId: A.sessionId,
             attempt: 2,
-            idImageKey: 'id/not-real',
-            selfieKey: 'selfie/not-real',
+            idImageKey: `orgs/${A.orgId}/sessions/${A.sessionId}/identity/2/sealed/id-01HZZZ.jpg`,
+            selfieKey: `orgs/${A.orgId}/sessions/${A.sessionId}/identity/2/sealed/selfie-01HZZZ.jpg`,
             livenessPassed: true,
           },
           select: { id: true, attempt: true, status: true },
@@ -1181,38 +1192,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       );
       expect(check).toMatchObject({ attempt: 2, status: 'PENDING' });
       await owner.identityCheck.delete({ where: { id: check.id } });
-      // consents: the five columns update.
-      const own = A.rows.Consent.filter.id as string;
-      const before = await owner.consent.findUniqueOrThrow({ where: { id: own } });
-      const consent = await asCandidate(A, () =>
-        client.consent.update({
-          where: { id: own },
-          data: {
-            signedName: 'Synthetic Name',
-            signedAt: WHEN,
-            declinedAt: null,
-            ip: '203.0.113.7',
-            userAgent: 'cs4-agent',
-          },
-          select: { id: true, signedAt: true, declinedAt: true },
-        }),
-      );
-      expect(consent.signedAt).toEqual(WHEN);
-      expect(await owner.consent.findUniqueOrThrow({ where: { id: own } })).toMatchObject({
-        signedName: 'Synthetic Name',
-        ip: '203.0.113.7',
-        userAgent: 'cs4-agent',
-      });
-      await owner.consent.update({
-        where: { id: own },
-        data: {
-          signedName: before.signedName,
-          signedAt: before.signedAt,
-          declinedAt: before.declinedAt,
-          ip: before.ip,
-          userAgent: before.userAgent,
-        },
-      });
+      // consents: a candidate cannot change a signed or declined one (B3, tested below).
       // media_chunks: create and update.
       const chunk = await asCandidate(A, () =>
         client.mediaChunk.create({
@@ -1229,7 +1209,11 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       const updated = await asCandidate(A, () =>
         client.mediaChunk.update({
           where: { id: chunk.id },
-          data: { sizeBytes: 123n, uploadedAt: WHEN, objectKey: 'media/not-real' },
+          data: {
+            sizeBytes: 123n,
+            uploadedAt: WHEN,
+            objectKey: `orgs/${A.orgId}/sessions/${A.sessionId}/media/WEBCAM/000000/00000042.webm`,
+          },
           select: { id: true, sizeBytes: true, uploadedAt: true },
         }),
       );
@@ -1934,6 +1918,389 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
     });
   });
 
+  describe('B1: a field reference is refused, in where and in having, with no statement (#126 round 3)', () => {
+    const fieldsOf = (model: 'sessionQuestion' | 'identityCheck') =>
+      (client[model] as unknown as { fields: Record<string, unknown> }).fields;
+
+    it("TC-008 the oracle is real on the owner's client: points = fields.score counts the rows whose score equals their points", async () => {
+      await owner.sessionQuestion.update({
+        where: { id: A.sessionQuestionId },
+        data: { score: 100 },
+      });
+      try {
+        const plainFields = (owner.sessionQuestion as unknown as { fields: Record<string, never> })
+          .fields;
+        // points is 100 in the fixture: a hidden score of 100 is found without naming `score`.
+        expect(
+          await owner.sessionQuestion.count({
+            where: { id: A.sessionQuestionId, points: { equals: plainFields.score as never } },
+          }),
+        ).toBe(1);
+        await db.statements.reset();
+        await asCandidate(A, async () => {
+          await expect(
+            client.sessionQuestion.count({
+              where: { points: { equals: fieldsOf('sessionQuestion').score as never } },
+            }),
+          ).rejects.toThrow(/a field reference .* in where/);
+        });
+        expect(await statementCount()).toBe(0);
+      } finally {
+        await owner.sessionQuestion.update({
+          where: { id: A.sessionQuestionId },
+          data: { score: null },
+        });
+      }
+    });
+
+    it('TC-008 both queries of the review, and the same through having: refused, and 0 statements reach Postgres', async () => {
+      const points = { points: { equals: fieldsOf('sessionQuestion').score as never } };
+      const created = { createdAt: { lt: fieldsOf('identityCheck').reviewedAt as never } };
+      await db.statements.reset();
+      await asCandidate(A, async () => {
+        await expect(client.sessionQuestion.count({ where: points })).rejects.toThrow(
+          /a field reference .* in where/,
+        );
+        await expect(client.identityCheck.count({ where: created })).rejects.toThrow(
+          /a field reference .* in where/,
+        );
+        await expect(
+          client.sessionQuestion.groupBy({ by: ['position'], _count: true, having: points }),
+        ).rejects.toThrow(/a field reference .* in having/);
+        await expect(
+          client.identityCheck.groupBy({ by: ['attempt'], _count: true, having: created }),
+        ).rejects.toThrow(/a field reference .* in having/);
+        await expect(
+          client.sessionQuestion.findMany({ where: points, select: { id: true } }),
+        ).rejects.toThrow(/a field reference/);
+        await expect(
+          client.sessionQuestion.updateMany({ where: points, data: { finalCode: 'x' } }),
+        ).rejects.toThrow(/a field reference/);
+        // A reference to a column the candidate may read is refused too: CS-4.4 grants none.
+        await expect(
+          client.sessionQuestion.count({
+            where: { position: { equals: fieldsOf('sessionQuestion').position as never } },
+          }),
+        ).rejects.toThrow(/a field reference/);
+      });
+      expect(await statementCount()).toBe(0);
+    });
+
+    it('TC-008 the job is not limited: the same query runs for a SERVICE scope', async () => {
+      const count = await asService(A, () =>
+        client.sessionQuestion.count({
+          where: { points: { equals: fieldsOf('sessionQuestion').score as never } },
+        }),
+      );
+      expect(count).toBe(0);
+    });
+  });
+
+  describe('B2: object keys stay inside the session prefix (ADR 0013 section 5.7, ADR 0004 section 9.2)', () => {
+    const prefixOf = (chain: SessionChain): string =>
+      `orgs/${chain.orgId}/sessions/${chain.sessionId}/`;
+    const media = (chain: SessionChain, seq: number): string =>
+      `${prefixOf(chain)}media/SCREEN/000000/${String(seq).padStart(8, '0')}.webm`;
+
+    it("TC-008 a media chunk: the session's own prefix is stored; B's prefix, another org's and traversal are refused, and nothing is written", async () => {
+      const before = await snapshot();
+      await asCandidate(A, async () => {
+        for (const objectKey of [
+          media(B, 50), // another candidate, same org
+          media(O, 50), // another org
+          `${prefixOf(A)}media/../../${B.sessionId}/media/SCREEN/000000/00000050.webm`,
+          `${prefixOf(A)}media/SCREEN//000000/00000050.webm`,
+          `/${media(A, 50)}`,
+          `${prefixOf(A)}evidence/01HZZZ.jpg`,
+          `orgs/${A.orgId}/consents/${A.sessionId}/01HZZZ.pdf`,
+        ]) {
+          await expect(
+            client.mediaChunk.create({
+              data: {
+                sessionId: A.sessionId,
+                stream: 'SCREEN',
+                seq: 50,
+                startedAt: WHEN,
+                durationMs: 1,
+                objectKey,
+              },
+              ...ID,
+            }),
+          ).rejects.toThrow(/objectKey must be an object key under this session's own prefix/);
+          await expect(
+            client.mediaChunk.updateMany({
+              where: { id: A.rows.MediaChunk.filter.id as bigint },
+              data: { objectKey },
+            }),
+          ).rejects.toThrow(/objectKey must be an object key/);
+        }
+      });
+      expect(await snapshot()).toEqual(before);
+      const created = await asCandidate(A, () =>
+        client.mediaChunk.create({
+          data: {
+            sessionId: A.sessionId,
+            stream: 'SCREEN',
+            seq: 50,
+            startedAt: WHEN,
+            durationMs: 1,
+            objectKey: media(A, 50),
+          },
+          ...ID,
+        }),
+      );
+      const stored = await owner.mediaChunk.findUniqueOrThrow({ where: { id: created.id } });
+      expect(stored.objectKey).toBe(media(A, 50));
+      // An update to the other candidate's prefix is refused; the stored key is as it was.
+      await asCandidate(A, async () => {
+        await expect(
+          client.mediaChunk.update({
+            where: { id: created.id },
+            data: { objectKey: media(B, 50) },
+            ...ID,
+          }),
+        ).rejects.toThrow(/objectKey must be an object key/);
+        const moved = await client.mediaChunk.update({
+          where: { id: created.id },
+          data: { objectKey: media(A, 51) },
+          ...ID,
+        });
+        expect(moved.id).toBe(created.id);
+      });
+      expect(
+        (await owner.mediaChunk.findUniqueOrThrow({ where: { id: created.id } })).objectKey,
+      ).toBe(media(A, 51));
+      await owner.mediaChunk.delete({ where: { id: created.id } });
+    });
+
+    it('TC-008 the identity keys and the event evidence key: the same prefix rule, each in its own folder', async () => {
+      const before = await snapshot();
+      await asCandidate(A, async () => {
+        await expect(
+          client.identityCheck.create({
+            data: {
+              sessionId: A.sessionId,
+              attempt: 2,
+              idImageKey: `${prefixOf(B)}identity/2/sealed/id-01HZZZ.jpg`,
+            },
+            ...ID,
+          }),
+        ).rejects.toThrow(/idImageKey must be an object key/);
+        await expect(
+          client.identityCheck.create({
+            data: {
+              sessionId: A.sessionId,
+              attempt: 2,
+              selfieKey: `${prefixOf(O)}identity/2/sealed/selfie-01HZZZ.jpg`,
+            },
+            ...ID,
+          }),
+        ).rejects.toThrow(/selfieKey must be an object key/);
+        await expect(
+          client.proctorEvent.create({
+            data: {
+              type: 'TAB_SWITCH',
+              severity: 'LOW',
+              occurredAt: WHEN,
+              evidenceKey: `${prefixOf(B)}evidence/01HZZZ.jpg`,
+            } as never,
+            ...ID,
+          }),
+        ).rejects.toThrow(/evidenceKey must be an object key/);
+      });
+      expect(await snapshot()).toEqual(before);
+      const check = await asCandidate(A, () =>
+        client.identityCheck.create({
+          data: {
+            sessionId: A.sessionId,
+            attempt: 2,
+            idImageKey: `${prefixOf(A)}identity/2/sealed/id-01HZZZ.jpg`,
+            selfieKey: `${prefixOf(A)}identity/2/sealed/selfie-01HZZZ.jpg`,
+          },
+          ...ID,
+        }),
+      );
+      await owner.identityCheck.delete({ where: { id: check.id } });
+      const event = await asCandidate(A, () =>
+        client.proctorEvent.create({
+          data: {
+            type: 'TAB_SWITCH',
+            severity: 'LOW',
+            occurredAt: WHEN,
+            evidenceKey: `${prefixOf(A)}evidence/01HZZZ.jpg`,
+          } as never,
+          ...ID,
+        }),
+      );
+      await owner.proctorEvent.delete({ where: { id: event.id } });
+    });
+
+    it("TC-008 the job writes any key (the rule is the candidate's)", async () => {
+      const created = await asService(A, () =>
+        client.mediaChunk.create({
+          data: {
+            sessionId: A.sessionId,
+            stream: 'SCREEN',
+            seq: 60,
+            startedAt: WHEN,
+            durationMs: 1,
+            objectKey: 'anything/the/job/writes',
+          },
+          ...ID,
+        }),
+      );
+      await owner.mediaChunk.delete({ where: { id: created.id } });
+    });
+  });
+
+  describe('B3: consents are written once (FR-401, C-17)', () => {
+    it('TC-008 a candidate cannot rewrite its signed consent, nor a declined one: 0 rows, and the row is as it was; the job can', async () => {
+      // C declines (the database CHECK: exactly one of signed_at and declined_at is set).
+      const declined = await owner.consent.findUniqueOrThrow({
+        where: { id: C.rows.Consent.filter.id as string },
+      });
+      await owner.consent.update({
+        where: { id: declined.id },
+        data: { signedAt: null, signedName: null, declinedAt: WHEN },
+      });
+      const before = await snapshot();
+      try {
+        for (const [chain, row] of [
+          [A, A.rows.Consent],
+          [C, C.rows.Consent],
+        ] as const) {
+          await asCandidate(chain, async () => {
+            const data = { signedName: 'Forged Name', ip: '198.51.100.9', userAgent: 'forged' };
+            expect(await client.consent.updateMany({ where: row.filter, data })).toEqual({
+              count: 0,
+            });
+            expect(
+              await client.consent.updateManyAndReturn({ where: row.filter, data, ...ID }),
+            ).toEqual([]);
+            await expect(
+              client.consent.update({ where: row.unique as never, data, ...ID }),
+            ).rejects.toMatchObject({
+              code: 'P2025',
+            });
+            // A signed or declined consent cannot be turned into the other either.
+            expect(
+              await client.consent.updateMany({
+                where: row.filter,
+                data: { declinedAt: WHEN, signedAt: null },
+              }),
+            ).toEqual({ count: 0 });
+            // Reading it is not narrowed: the candidate still sees that it signed (or declined).
+            const seen = (await client.consent.findMany({
+              select: { id: true, signedAt: true, declinedAt: true },
+            })) as Row[];
+            expect(seen).toHaveLength(1);
+            expect(seen[0]?.id).toBe(row.filter.id);
+          });
+        }
+        expect(await snapshot()).toEqual(before);
+        // The job is not limited by it.
+        const changed = await asService(A, () =>
+          client.consent.updateMany({
+            where: A.rows.Consent.filter,
+            data: { userAgent: 'job-update' },
+          }),
+        );
+        expect(changed).toEqual({ count: 1 });
+      } finally {
+        await owner.consent.update({
+          where: { id: declined.id },
+          data: {
+            signedName: declined.signedName,
+            signedAt: declined.signedAt,
+            declinedAt: declined.declinedAt,
+          },
+        });
+        await owner.consent.update({
+          where: { id: A.rows.Consent.filter.id as string },
+          data: { userAgent: null },
+        });
+      }
+    });
+
+    it('TC-008 no row is ever in the state the update reaches: the database refuses a consent that is neither signed nor declined (so a candidate cannot sign by update, and cannot create the row)', async () => {
+      await expect(
+        owner.consent.update({
+          where: { id: A.rows.Consent.filter.id as string },
+          data: { signedAt: null, signedName: null },
+        }),
+      ).rejects.toThrow(/consents_check/);
+      await asCandidate(A, async () => {
+        await expect(
+          client.consent.create({
+            data: { sessionId: A.sessionId, consentTextId: T.consentTextId },
+            ...ID,
+          }),
+        ).rejects.toThrow(/cannot create this row: CS-4\.4 grants updates only/);
+      });
+    });
+  });
+
+  describe('nit 4 and nit 1 against the database', () => {
+    it('TC-008 a candidate create of a server-only event type is refused with no statement, and a browser type is stored as CLIENT', async () => {
+      await db.statements.reset();
+      await asCandidate(A, async () => {
+        for (const type of [
+          'FACE_MISMATCH',
+          'IDENTITY_MANUAL_REVIEW',
+          'RESUME_OTP_FAILED',
+          'DISCONNECTED',
+        ]) {
+          await expect(
+            client.proctorEvent.create({
+              data: { type, severity: 'HIGH', occurredAt: WHEN } as never,
+              ...ID,
+            }),
+          ).rejects.toThrow(/names a value that only the server writes/);
+        }
+      });
+      expect(await statementCount()).toBe(0);
+      const created = await asCandidate(A, () =>
+        client.proctorEvent.create({
+          data: { type: 'TAB_SWITCH', severity: 'LOW', occurredAt: WHEN } as never,
+          ...ID,
+        }),
+      );
+      const stored = await owner.proctorEvent.findUniqueOrThrow({ where: { id: created.id } });
+      expect({ type: stored.type, source: stored.source }).toEqual({
+        type: 'TAB_SWITCH',
+        source: 'CLIENT',
+      });
+      await owner.proctorEvent.delete({ where: { id: created.id } });
+    });
+
+    it('TC-008 keystroke_batches.id is not readable (an insert-volume leak): a candidate reads its batches by seq, the job sees the id', async () => {
+      await db.statements.reset();
+      await asCandidate(A, async () => {
+        await expect(client.keystrokeBatch.findMany({ select: { id: true } })).rejects.toThrow(
+          /the column id is not available/,
+        );
+        await expect(
+          client.keystrokeBatch.findUnique({ where: { id: 1n }, select: { seq: true } }),
+        ).rejects.toThrow(/the column id is not available/);
+        await expect(client.keystrokeBatch.aggregate({ _max: { id: true } })).rejects.toThrow(
+          /the column id is not available/,
+        );
+        await expect(
+          client.keystrokeBatch.findMany({ select: { seq: true }, orderBy: { id: 'desc' } }),
+        ).rejects.toThrow(/the column id is not available/);
+      });
+      expect(await statementCount()).toBe(0);
+      await asCandidate(A, async () => {
+        const rows = await client.keystrokeBatch.findMany({ select: { seq: true } });
+        expect(rows).toEqual([{ seq: 0 }]);
+      });
+      await asService(A, async () => {
+        const rows = await client.keystrokeBatch.findMany({ select: { id: true } });
+        expect(rows).toHaveLength(1);
+      });
+    });
+  });
+
   describe('S7: same-tick findUnique of two candidates in one org (Prisma batches findUnique calls)', () => {
     // Prisma's dataloader merges findUnique calls issued in the same tick with the same shape into
     // one query. The extension runs per call, before any batching, and adds a different filter for
@@ -2147,7 +2514,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
               await expect(
                 client.keystrokeBatch.create({
                   data: { ...batch(10), sessionQuestionId: id } as never,
-                  ...ID,
+                  select: { seq: true },
                 }),
               ).rejects.toThrow(/not a question of this session/);
               await expect(
@@ -2182,14 +2549,14 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
           const none = await run(A, () =>
             client.keystrokeBatch.create({
               data: { ...batch(20), sessionQuestionId: null } as never,
-              select: { id: true, sessionId: true },
+              select: { seq: true, sessionId: true },
             }),
           );
           expect(none.sessionId).toBe(A.sessionId);
           const own = await run(A, () =>
             client.keystrokeBatch.create({
               data: { ...batch(21), sessionQuestionId: A.sessionQuestionId } as never,
-              select: { id: true, sessionQuestionId: true },
+              select: { seq: true, sessionQuestionId: true },
             }),
           );
           expect(own.sessionQuestionId).toBe(A.sessionQuestionId);
@@ -2407,25 +2774,22 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       await owner.mediaChunk.update({ where: { id: chunk.id }, data: { sizeBytes: null } });
     });
 
-    it.each(ACTORS)(
-      'TC-008 %s: an update of its own row (consents) changes it',
-      async (_actor, run) => {
-        const own = A.rows.Consent.filter.id as string;
-        const original = await owner.consent.findUniqueOrThrow({ where: { id: own } });
-        const row = await run(A, () =>
-          client.consent.update({
-            where: { id: own },
-            data: { userAgent: 'cs4-update' },
-            select: { id: true, signedAt: true },
-          }),
-        );
-        expect(row.id).toBe(own);
-        expect((await owner.consent.findUniqueOrThrow({ where: { id: own } })).userAgent).toBe(
-          'cs4-update',
-        );
-        await owner.consent.update({ where: { id: own }, data: { userAgent: original.userAgent } });
-      },
-    );
+    it('TC-008 SERVICE: an update of its own row (consents) changes it', async () => {
+      const own = A.rows.Consent.filter.id as string;
+      const original = await owner.consent.findUniqueOrThrow({ where: { id: own } });
+      const row = await asService(A, () =>
+        client.consent.update({
+          where: { id: own },
+          data: { userAgent: 'cs4-update' },
+          select: { id: true, signedAt: true },
+        }),
+      );
+      expect(row.id).toBe(own);
+      expect((await owner.consent.findUniqueOrThrow({ where: { id: own } })).userAgent).toBe(
+        'cs4-update',
+      );
+      await owner.consent.update({ where: { id: own }, data: { userAgent: original.userAgent } });
+    });
 
     it('TC-008 SERVICE: an upsert of its own row updates it', async () => {
       const own = A.rows.Consent.filter.id as string;

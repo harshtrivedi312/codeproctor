@@ -30,6 +30,24 @@ const ACTORS: readonly SessionActor[] = ['CANDIDATE', 'SERVICE'];
 const WRITE_OPERATIONS = SCOPED_OPERATIONS.filter((op) => !READ_OPERATIONS.includes(op));
 const UPDATES = ['update', 'updateMany', 'updateManyAndReturn'] as const;
 
+/**
+ * keystroke_batches.id is a global identity counter that a candidate may not read (#126 nit 1), so a
+ * candidate call on that model names `seq` where the generic tests of the other models name `id`.
+ */
+function keyed(model: ModelName, args: unknown): unknown {
+  if (model !== 'KeystrokeBatch' || typeof args !== 'object' || args === null) return args;
+  const given = args as Record<string, unknown>;
+  const rename = (value: unknown): unknown =>
+    typeof value === 'object' && value !== null && !Array.isArray(value) && 'id' in value
+      ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k === 'id' ? 'seq' : k, v]))
+      : value;
+  return {
+    ...given,
+    ...(given.where === undefined ? {} : { where: rename(given.where) }),
+    ...(given.select === undefined ? {} : { select: rename(given.select) }),
+  };
+}
+
 function apply(
   actor: SessionActor,
   model: ModelName,
@@ -54,7 +72,7 @@ function apply(
     model,
     rule: ORG_SCOPE[model],
     operation,
-    args: withSelect,
+    args: actor === 'CANDIDATE' ? keyed(model, withSelect) : withSelect,
     orgId: ORG,
     session: { actor, sessionId: SID },
     facts: facts ?? undefined,
@@ -220,17 +238,19 @@ describe('CS-4.2 the session filter, both actors (NFR-04, TC-008)', () => {
     it.each(SESSION_MODELS)(
       'TC-008 %s: every read operation gets the session filter AND the org filter, and keeps the caller where',
       (model) => {
+        // keystroke_batches.id is not readable by a candidate, so it names seq (see keyed()).
+        const idKey = actor === 'CANDIDATE' && model === 'KeystrokeBatch' ? 'seq' : 'id';
         for (const operation of READ_OPERATIONS) {
           const { args } = apply(actor, model, operation, { where: { id: 'caller' } });
           const rule = ORG_SCOPE[model];
-          expect(args.where).toMatchObject({ id: 'caller' });
+          expect(args.where).toMatchObject({ [idKey]: 'caller' });
           expectFilter(args, orgFilter(rule, ORG));
           expectFilter(args, expectedFilter[model]);
           // A caller that tries to widen with OR/NOT/another session id only narrows.
           const wide = apply(actor, model, operation, {
             where: {
-              OR: [{ id: 'x' }],
-              NOT: { id: 'y' },
+              OR: [{ [idKey]: 'x' }],
+              NOT: { [idKey]: 'y' },
               ...(model === 'Session' ? {} : { sessionId: OTHER_SID }),
             },
           }).args;
