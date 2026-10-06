@@ -14,7 +14,7 @@ import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav } from '@/test/nav-mock';
 import { aiReferenceFormSchema } from './ai-schema';
 import { QuestionEditorRoute } from './question-pages';
-import { contentSignature, questionKeys, slotsSignature } from './queries';
+import { questionKeys } from './queries';
 import { ValidationPanel } from './validation-panel';
 
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
@@ -146,7 +146,7 @@ describe('Deleting a variant that has AI rows (ADR 0005 AI-1, VARIANT_HAS_AI_REF
     expect((await del()).body.code).toBe('VARIANT_HAS_AI_REFERENCES');
     // A variant without rows is still deleted, and an inactive variant is the way out.
     expect((await call('AUTHOR', 'DELETE', `${V}/q-rotate/versions/1/variants/ro-v2`)).status).toBe(
-      204,
+      200,
     );
     const off = await call('AUTHOR', 'PATCH', `${V}/q-rotate/versions/1/variants/ro-v1`, {
       isActive: false,
@@ -228,7 +228,83 @@ describe('Test-case routes take expectedRevision (FU-BE-106)', () => {
           `${V}/q-rotate/versions/1/test-cases/${created.body.id}?expectedRevision=${r1}`,
         )
       ).status,
-    ).toBe(204);
+    ).toBe(200);
+  });
+
+  it('BE-04 #192: every content write answers the revision after the write; the three DELETEs answer 200 {revision}', async () => {
+    const q = `${V}/q-rotate/versions/1`;
+    const rev = async () => (await detail('q-rotate')).version.revision;
+    let r = await rev();
+    const created = await call<{ id: string; revision: string }>(
+      'AUTHOR',
+      'POST',
+      `${q}/test-cases`,
+      {
+        input: '1',
+        expectedOutput: '1',
+        expectedRevision: r,
+      },
+    );
+    expect(created.status).toBe(201);
+    expect(created.body.revision).toBe(await rev());
+    r = created.body.revision;
+    const patched = await call<{ revision: string }>(
+      'AUTHOR',
+      'PATCH',
+      `${q}/test-cases/${created.body.id}`,
+      {
+        input: '2',
+        expectedRevision: r,
+      },
+    );
+    expect(patched.body.revision).toBe(await rev());
+    expect(patched.body.revision).not.toBe(r);
+    r = patched.body.revision;
+    const d = await detail('q-rotate');
+    const variant = d.version.variants[0]!.id;
+    const override = await call<{ revision: string }>(
+      'AUTHOR',
+      'PUT',
+      `${q}/variants/${variant}/test-cases/${created.body.id}`,
+      { input: 'a', expectedOutput: 'b', expectedRevision: r },
+    );
+    expect(override.status).toBe(200);
+    expect(override.body.revision).toBe(await rev());
+    r = override.body.revision;
+    const dropOverride = await call(
+      'AUTHOR',
+      'DELETE',
+      `${q}/variants/${variant}/test-cases/${created.body.id}?expectedRevision=${r}`,
+    );
+    expect(dropOverride.status).toBe(200);
+    expect(dropOverride.body).toEqual({ revision: await rev() });
+    r = (dropOverride.body as { revision: string }).revision;
+    const dropCase = await call(
+      'AUTHOR',
+      'DELETE',
+      `${q}/test-cases/${created.body.id}?expectedRevision=${r}`,
+    );
+    expect(dropCase.status).toBe(200);
+    expect(dropCase.body).toEqual({ revision: await rev() });
+    r = (dropCase.body as { revision: string }).revision;
+    const dropVariant = await call(
+      'AUTHOR',
+      'DELETE',
+      `${q}/variants/${variant}?expectedRevision=${r}`,
+    );
+    expect(dropVariant.status).toBe(200);
+    expect(dropVariant.body).toEqual({ revision: await rev() });
+    const edit = await call<{ revision: string; version: { revision: string } }>(
+      'AUTHOR',
+      'PATCH',
+      `${V}/q-rotate`,
+      {
+        title: 'Again',
+        expectedRevision: (dropVariant.body as { revision: string }).revision,
+      },
+    );
+    expect(edit.body.revision).toBe(edit.body.version.revision);
+    expect(edit.body.revision).toBe(await rev());
   });
 
   it('TC-012: a malformed revision is a 400 before any lookup (a missing question is not a 404 first)', async () => {
@@ -804,13 +880,18 @@ describe('A half-done save never adopts another editor as its base (B1, B2)', ()
     expect(screen.getByLabelText('Title')).toHaveValue('Rotate an array!');
   });
 
-  it('FR-204 B2: another editor committing between one of our writes and its read-back stops the save: their change is not adopted and our next write is never sent', async () => {
-    let gets = 0;
+  it('FR-204 B2: another editor committing between two of our writes makes our next write a 409 (it carries our previous revision): their change is intact and nothing more is sent', async () => {
+    const writes: string[] = [];
+    server.events.on('request:start', ({ request }) => {
+      if (['POST', 'PATCH', 'PUT', 'DELETE'].includes(request.method))
+        writes.push(`${request.method} ${new URL(request.url).pathname}`);
+    });
+    let theirs = false;
     server.use(
-      http.get(`${base}/q-rotate`, async () => {
-        gets += 1;
-        // 1st GET is the loader; the 2nd is the confirmation of our first test-case write.
-        if (gets === 2) {
+      // Their write lands before the server handles our second test-case write.
+      http.patch(`${base}/q-rotate/versions/1/test-cases/ro-t2`, async () => {
+        if (!theirs) {
+          theirs = true;
           await call('AUTHOR', 'PATCH', `${V}/q-rotate/versions/1/test-cases/ro-t2`, {
             input: 'theirs',
           });
@@ -832,9 +913,31 @@ describe('A half-done save never adopts another editor as its base (B1, B2)', ()
       `${V}/q-rotate`,
     );
     const byId = Object.fromEntries(after.body.version.testCases.map((t) => [t.id, t.input]));
-    expect(byId['ro-t1']).toBe('ours one'); // the write that was confirmed before they wrote
-    expect(byId['ro-t2']).toBe('theirs'); // never overwritten by our second write
+    expect(byId['ro-t1']).toBe('ours one'); // written before they wrote
+    expect(byId['ro-t2']).toBe('theirs'); // refused: our write carried the revision before theirs
     expect(screen.getByLabelText('Input of test 2')).toHaveValue('ours two');
+    // Our one request for test 2 (refused) and theirs; no retry of ours.
+    expect(writes.filter((w) => w.includes('/ro-t2'))).toHaveLength(2);
+  });
+
+  it('FR-204: a save needs no read per write: N writes, one final read', async () => {
+    const reads: string[] = [];
+    const writes: string[] = [];
+    server.events.on('request:start', ({ request }) => {
+      const path = new URL(request.url).pathname;
+      if (!path.startsWith('/v1/questions/q-rotate')) return;
+      if (request.method === 'GET') reads.push(path);
+      else writes.push(request.method);
+    });
+    const u = await openEditor('q-rotate');
+    await goTab(u, 'Test cases');
+    await setText(u, screen.getByLabelText('Input of test 1'), 'a');
+    await setText(u, screen.getByLabelText('Input of test 2'), 'b');
+    const loads = reads.length;
+    await u.click(saveButton());
+    expect(await screen.findByText(/^Saved/)).toBeInTheDocument();
+    expect(writes.length).toBeGreaterThanOrEqual(3); // the content PATCH and two test cases
+    expect(reads.length - loads).toBe(1); // the final read for the server's ids
   });
 
   it('FR-204: when nobody else writes, the confirmation passes and every write of a long chain goes through', async () => {
@@ -873,17 +976,6 @@ describe('A half-done save never adopts another editor as its base (B1, B2)', ()
     await waitFor(() => expect(saveButton()).toBeEnabled());
     await u.click(saveButton());
     expect(await screen.findByText(/^Saved/)).toBeInTheDocument();
-  });
-
-  it('pure: the slots signature ignores ids only when asked, and sees any test case, variant or override change', () => {
-    const v = (id: string, input: string) =>
-      ({
-        testCases: [{ id, position: 0, isHidden: false, weight: 1, input, expectedOutput: 'o' }],
-        variants: [],
-      }) as unknown as Parameters<typeof slotsSignature>[0];
-    expect(slotsSignature(v('a', 'i'))).not.toBe(slotsSignature(v('b', 'i')));
-    expect(slotsSignature(v('a', 'i'), false)).toBe(slotsSignature(v('b', 'i'), false));
-    expect(slotsSignature(v('a', 'i'), false)).not.toBe(slotsSignature(v('a', 'j'), false));
   });
 });
 
@@ -1022,10 +1114,9 @@ describe('The AI policy follows the session (FR-103)', () => {
   });
 });
 
-describe('The read-back also checks the content the revision covers (silent overwrite via content fields)', () => {
-  /** Another author edits the title as the read-back after our first unconfirmed write is answered. */
-  function theirTitleOnSecondRead(writes: string[]): void {
-    let gets = 0;
+describe('Another editor changing the content between our writes (silent overwrite via content fields)', () => {
+  /** Their title edit lands right before the server handles the request matched by `handler`. */
+  function theirTitleBefore(writes: string[], handler: (run: () => Promise<void>) => void): void {
     server.events.on('request:start', ({ request }) => {
       if (
         ['POST', 'PATCH', 'PUT', 'DELETE'].includes(request.method) &&
@@ -1034,19 +1125,24 @@ describe('The read-back also checks the content the revision covers (silent over
         writes.push(`${request.method} ${new URL(request.url).pathname}`);
       }
     });
-    server.use(
-      http.get(`${base}/q-rotate`, async () => {
-        gets += 1;
-        // 1st is the loader, the 2nd the read-back of our first write that answers no revision.
-        if (gets === 2) await call('AUTHOR', 'PATCH', `${V}/q-rotate`, { title: 'Theirs' });
-        return undefined;
-      }),
-    );
+    let done = false;
+    handler(async () => {
+      if (done) return;
+      done = true;
+      await call('AUTHOR', 'PATCH', `${V}/q-rotate`, { title: 'Theirs' });
+    });
   }
 
-  it('FR-204 (a): a removed draft variant, then their title edit before the read-back: the save stops, their title stays and our content PATCH is never sent', async () => {
+  it('FR-204 (a): a removed draft variant, then their title edit before our content PATCH: the PATCH is a 409, their title stays and nothing more is sent', async () => {
     const writes: string[] = [];
-    theirTitleOnSecondRead(writes);
+    theirTitleBefore(writes, (run) =>
+      server.use(
+        http.patch(`${base}/q-rotate`, async () => {
+          await run();
+          return undefined;
+        }),
+      ),
+    );
     const u = await openEditor('q-rotate');
     await u.type(screen.getByLabelText('Title'), ' (ours)');
     await goTab(u, 'Variants');
@@ -1056,15 +1152,23 @@ describe('The read-back also checks the content the revision covers (silent over
       await screen.findByText(/found that the question changed meanwhile/),
     ).toBeInTheDocument();
     expect((await detail('q-rotate')).version.title).toBe('Theirs');
-    // After the injected edit nothing more of ours was written (the statement PATCH would have been next).
-    expect(writes.filter((w) => w === 'PATCH /v1/questions/q-rotate')).toHaveLength(1); // theirs only
+    // Variant delete (ours), their PATCH, our refused PATCH: nothing after it.
+    expect(writes.filter((w) => w === 'PATCH /v1/questions/q-rotate')).toHaveLength(2);
+    expect(writes.at(-1)).toBe('PATCH /v1/questions/q-rotate');
     await goTab(u, 'Statement');
     expect(screen.getByLabelText('Title')).toHaveValue('Rotate an array (ours)');
   });
 
-  it('FR-204 (b): after the content PATCH, a test-case write whose read-back already holds their title edit stops the save and the retry is not adopted over it', async () => {
+  it('FR-204 (b): after our content PATCH, their title edit before our first test-case write: that write is a 409, the second is never sent and the retry is not adopted over theirs', async () => {
     const writes: string[] = [];
-    theirTitleOnSecondRead(writes);
+    theirTitleBefore(writes, (run) =>
+      server.use(
+        http.patch(`${base}/q-rotate/versions/1/test-cases/ro-t1`, async () => {
+          await run();
+          return undefined;
+        }),
+      ),
+    );
     const u = await openEditor('q-rotate');
     await u.type(screen.getByLabelText('Title'), ' (ours)');
     await goTab(u, 'Test cases');
@@ -1076,8 +1180,7 @@ describe('The read-back also checks the content the revision covers (silent over
     ).toBeInTheDocument();
     // Our content PATCH went first, then their title edit overwrote ours: theirs is the latest.
     expect((await detail('q-rotate')).version.title).toBe('Theirs');
-    const testCaseWrites = writes.filter((w) => w.includes('/test-cases/'));
-    expect(testCaseWrites).toHaveLength(1); // the second case was never written
+    expect(writes.filter((w) => w.includes('/ro-t2'))).toHaveLength(0); // never written
     // The editor did not adopt their revision: another Save is a plain 409, their title is intact.
     server.resetHandlers();
     await u.click(saveButton());
@@ -1085,32 +1188,6 @@ describe('The read-back also checks the content the revision covers (silent over
       expect(screen.getByText('This question changed since you opened it')).toBeInTheDocument(),
     );
     expect((await detail('q-rotate')).version.title).toBe('Theirs');
-  });
-
-  it('pure: the content signature sees every field the revision covers, and ignores the ones a PATCH sent', () => {
-    const base = {
-      title: 't',
-      statementMd: 's',
-      difficulty: 'EASY',
-      allowedLanguages: ['python'],
-      limits: { cpuMs: 1, wallMs: 2, memoryKb: 3 },
-      starterCode: {},
-      referenceSolution: {},
-      answerSpec: null,
-    } as unknown as Parameters<typeof contentSignature>[0];
-    for (const change of [
-      { title: 'u' },
-      { statementMd: 'x' },
-      { difficulty: 'HARD' },
-      { limits: { cpuMs: 9, wallMs: 2, memoryKb: 3 } },
-    ]) {
-      expect(contentSignature({ ...base, ...change } as typeof base)).not.toBe(
-        contentSignature(base),
-      );
-    }
-    expect(contentSignature({ ...base, title: 'u' }, ['title'])).toBe(
-      contentSignature(base, ['title']),
-    );
   });
 });
 

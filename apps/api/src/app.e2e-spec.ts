@@ -160,6 +160,8 @@ describe('API foundation in production (NFR-04)', () => {
 
   beforeAll(async () => {
     infra = await startInfra();
+    // Production refuses to start without the code runner settings (FR-503) and the candidate
+    // secrets and Legal-approved consent (BE-07, env.ts); synthetic values.
     applyEnv(infra, {
       NODE_ENV: 'production',
       APP_ENV: 'production',
@@ -171,6 +173,10 @@ describe('API foundation in production (NFR-04)', () => {
       JUDGE0_URL: 'https://judge0.test.invalid',
       JUDGE0_AUTH_TOKEN: 'a'.repeat(32),
       JUDGE0_AUTHZ_TOKEN: 'b'.repeat(32),
+      JWT_CANDIDATE_SECRET: 'x'.repeat(48),
+      OTP_PEPPER: 'y'.repeat(48),
+      SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 9).toString('base64'),
+      REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
       // Pilot and production require SES (C-31); nothing is sent in this suite.
       EMAIL_PROVIDER: 'ses',
       SES_FROM_ADDRESS: 'no-reply@test.invalid',
