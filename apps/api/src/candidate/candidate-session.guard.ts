@@ -15,7 +15,6 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { CodedHttpException } from '../common/coded.exception';
-import { PrismaService } from '../database/prisma.service';
 import { CandidateScope } from './candidate-scope';
 import { CandidateTokenError, CandidateTokenService } from './candidate-token.service';
 import type { CandidateRequest } from './candidate.types';
@@ -29,7 +28,6 @@ function unauthorized(code?: 'TOKEN_EXPIRED' | 'SESSION_TAKEN_OVER'): never {
 export class CandidateSessionGuard implements CanActivate {
   constructor(
     private readonly tokens: CandidateTokenService,
-    private readonly prisma: PrismaService,
     private readonly scope: CandidateScope,
   ) {}
 
@@ -47,28 +45,20 @@ export class CandidateSessionGuard implements CanActivate {
       throw e;
     }
 
-    // The org comes from the verified claims; the scoped client then adds `org_id = oid` itself.
-    const session = await this.scope.enter({ orgId: claims.oid, sessionId: claims.sid }, () =>
-      this.prisma.client.session.findUnique({
-        where: { id: claims.sid },
-        select: {
-          id: true,
-          orgId: true,
-          invitationId: true,
-          status: true,
-          authEpoch: true,
-          pauseReasons: true,
-        },
-      }),
-    );
+    // CandidateScope runs the two steps: column-only facts in an org scope, then the candidate scope
+    // with the facts set first. The org comes from the verified claims; another org's session is not
+    // found.
+    const session = await this.scope.authenticate(claims.oid, claims.sid);
     if (session === null) unauthorized();
     if (claims.epoch < session.authEpoch) unauthorized('SESSION_TAKEN_OVER');
     if (claims.epoch !== session.authEpoch) unauthorized();
 
     req.candidate = {
-      sessionId: session.id,
-      orgId: session.orgId,
+      sessionId: claims.sid,
+      orgId: claims.oid,
       invitationId: session.invitationId,
+      candidateId: session.candidateId,
+      testId: session.testId,
       epoch: session.authEpoch,
       status: session.status,
       pauseReasons: session.pauseReasons,

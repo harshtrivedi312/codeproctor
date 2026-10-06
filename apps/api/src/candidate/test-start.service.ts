@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { CodedHttpException } from '../common/coded.exception';
 import type { CandidateProblemCode } from '../common/coded.exception';
 import { PrismaService } from '../database/prisma.service';
+import { CandidateScope } from './candidate-scope';
 import { Difficulty, QuestionType } from '../generated/prisma/enums.js';
 import { readExtraTime, scaledMs } from '../session/accommodations';
 import { SessionKeyConfigError, SessionKeyService } from '../session/session-key.service';
@@ -87,9 +88,19 @@ export class TestStartService {
     private readonly prisma: PrismaService,
     private readonly states: SessionStateService,
     private readonly keys: SessionKeyService,
+    private readonly scope: CandidateScope,
   ) {}
 
-  async start(ctx: CandidateContext, now: Date = new Date()): Promise<TestStartView> {
+  /**
+   * Everything here reads question content, test sections, accommodations, the wrapped key and
+   * writes status, so it runs in the org scope, not the candidate scope (CS-4.4 opens none of it
+   * until PR 2's grants). The session id is the token's.
+   */
+  start(ctx: CandidateContext, now: Date = new Date()): Promise<TestStartView> {
+    return this.scope.asOrg(ctx, () => this.startInScope(ctx, now));
+  }
+
+  private async startInScope(ctx: CandidateContext, now: Date): Promise<TestStartView> {
     const session = await this.prisma.client.session.findUnique({
       where: { id: ctx.sessionId },
       select: { status: true, deviceInfo: true, invitationId: true },

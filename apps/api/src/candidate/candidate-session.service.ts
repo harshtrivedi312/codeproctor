@@ -7,6 +7,7 @@ import { ConfigService } from '@nestjs/config';
 import { CodedHttpException } from '../common/coded.exception';
 import type { Env } from '../config/env';
 import { PrismaService } from '../database/prisma.service';
+import { CandidateScope } from './candidate-scope';
 import type { MediaStream, PauseReason, SessionStatus } from '../generated/prisma/enums.js';
 import { REDIS_CLIENT } from '../infrastructure/infrastructure.module';
 import { ensureConnected } from '../infrastructure/redis-ready';
@@ -61,6 +62,7 @@ export class CandidateSessionService {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly scope: CandidateScope,
     private readonly keys: SessionKeyService,
     private readonly tokens: CandidateTokenService,
     private readonly jobs: SessionJobsService,
@@ -70,33 +72,39 @@ export class CandidateSessionService {
 
   /** Deadlines as the candidate may see them now: the stored value plus a running proctor pause. */
   private async state(ctx: CandidateContext, now: Date): Promise<SessionStateView> {
-    const session = await this.prisma.client.session.findUnique({
-      where: { id: ctx.sessionId },
-      select: {
-        status: true,
-        startedAt: true,
-        deadlineAt: true,
-        pausedMs: true,
-        proctorPausedAt: true,
-        pauseReasons: true,
-      },
+    // Candidate scope: the session's own readable columns and its sections (CS-4.4).
+    const { session, openSection } = await this.scope.asCandidate(ctx, async () => {
+      const row = await this.prisma.client.session.findUnique({
+        where: { id: ctx.sessionId },
+        select: {
+          status: true,
+          startedAt: true,
+          deadlineAt: true,
+          pausedMs: true,
+          proctorPausedAt: true,
+          pauseReasons: true,
+        },
+      });
+      if (row === null) throw sessionNotActive(ctx.status);
+      const section = LIVE_STATUSES.includes(row.status)
+        ? await this.prisma.client.sessionSection.findFirst({
+            where: { sessionId: ctx.sessionId, startedAt: { not: null }, endedAt: null },
+            orderBy: { position: 'asc' },
+            select: { startedAt: true, deadlineAt: true },
+          })
+        : null;
+      return { session: row, openSection: section };
     });
-    if (session === null) throw sessionNotActive(ctx.status);
-    const live = LIVE_STATUSES.includes(session.status);
-    const openSection = live
-      ? await this.prisma.client.sessionSection.findFirst({
-          where: { sessionId: ctx.sessionId, startedAt: { not: null }, endedAt: null },
-          orderBy: { position: 'asc' },
-          select: { startedAt: true, deadlineAt: true },
-        })
-      : null;
-    // The org allowance matters only while a proctor pause is running.
+    // The org allowance matters only while a proctor pause is running. `organizations.settings` is
+    // not readable in candidate scope, so this one read runs in the org scope (after the other).
     let capMs = 0;
     if (session.pauseReasons.includes('PROCTOR')) {
-      const org = await this.prisma.client.organization.findUnique({
-        where: { id: ctx.orgId },
-        select: { settings: true },
-      });
+      const org = await this.scope.asOrg(ctx, () =>
+        this.prisma.client.organization.findUnique({
+          where: { id: ctx.orgId },
+          select: { settings: true },
+        }),
+      );
       capMs = proctorPauseCapMs(org?.settings);
     }
     const deadlineSession: DeadlineSession = session;
@@ -128,11 +136,14 @@ export class CandidateSessionService {
     now: Date = new Date(),
   ): Promise<HeartbeatView> {
     if (!LIVE_STATUSES.includes(ctx.status)) throw sessionNotActive(ctx.status);
-    await this.prisma.client.session.update({
-      where: { id: ctx.sessionId },
-      data: { lastHeartbeat: now },
-      select: { id: true },
-    });
+    // The one write a candidate scope allows on `sessions` (CS-4.4: last_heartbeat only).
+    await this.scope.asCandidate(ctx, () =>
+      this.prisma.client.session.update({
+        where: { id: ctx.sessionId },
+        data: { lastHeartbeat: now },
+        select: { id: true },
+      }),
+    );
     await ensureConnected(this.redis);
     // The marker is set by the watchdog when it logs DISCONNECTED; the first beat removes it.
     // Queue RECONNECTED first and remove the marker after: if the queue is down the marker stays
@@ -182,10 +193,14 @@ export class CandidateSessionService {
    */
   async proctorKey(ctx: CandidateContext, now: Date = new Date()): Promise<ProctorKeyView> {
     if (!LIVE_STATUSES.includes(ctx.status)) throw sessionNotActive(ctx.status);
-    const session = await this.prisma.client.session.findUnique({
-      where: { id: ctx.sessionId },
-      select: { hmacKeyEnc: true, deadlineAt: true },
-    });
+    // The wrapped key is not readable in candidate scope (CS-4.4: KeyService under a grant, PR 2):
+    // this read stays in the org scope.
+    const session = await this.scope.asOrg(ctx, () =>
+      this.prisma.client.session.findUnique({
+        where: { id: ctx.sessionId },
+        select: { hmacKeyEnc: true, deadlineAt: true },
+      }),
+    );
     if (session === null) throw sessionNotActive(ctx.status);
     if (session.hmacKeyEnc === null || session.deadlineAt === null) {
       throw new CodedHttpException(
@@ -231,7 +246,7 @@ export class CandidateSessionService {
       throw e;
     }
     try {
-      const counters = await this.counters(ctx.sessionId);
+      const counters = await this.scope.asCandidate(ctx, () => this.counters(ctx.sessionId));
       return { alg: 'HMAC-SHA256', key: key.toString('base64'), keyEpoch: ctx.epoch, counters };
     } catch (e) {
       await this.redis.del(marker).catch(() => undefined);

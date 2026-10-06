@@ -4,14 +4,12 @@ import {
   ExecutionContext,
   UnauthorizedException,
   UseGuards,
-  UseInterceptors,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiUnauthorizedResponse } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 import { Public } from '../common/auth/decorators';
 import { CandidateRoute } from '../common/auth/candidate-route.decorator';
 import type { CandidatePermission } from '../common/auth/route-permissions';
-import { CandidateContextInterceptor } from './candidate-context.interceptor';
 import { CandidateSessionGuard } from './candidate-session.guard';
 import type { CandidateContext, CandidateRequest } from './candidate.types';
 
@@ -31,7 +29,6 @@ export function CandidateScoped(
     Public(),
     ...(permission === undefined ? [] : [CandidateRoute(permission)]),
     UseGuards(CandidateSessionGuard),
-    UseInterceptors(CandidateContextInterceptor),
     SkipThrottle({ candidate: true }),
     ApiBearerAuth(),
     ApiUnauthorizedResponse({

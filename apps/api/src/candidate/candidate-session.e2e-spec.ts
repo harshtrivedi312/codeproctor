@@ -1731,8 +1731,12 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     ]) {
       expect(schemas).toContain(name);
     }
-    const text = JSON.stringify(doc.paths);
-    expect(text).not.toContain('params');
+    const text = JSON.stringify(
+      Object.entries(doc.paths).filter(([path]) => path.startsWith(prefix)),
+    );
+    expect(text).not.toContain('variantId');
+    expect(text).not.toContain('\"params\"');
+    expect(text).not.toContain('hmacKeyEnc');
   });
 
   // ---------- review fixes ----------
@@ -1985,6 +1989,10 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       readonly op: string;
       readonly json: string;
       readonly scope: string;
+      /** ORG (plain org scope), CANDIDATE, SERVICE or SYSTEM. */
+      readonly actor: string;
+      /** Were the candidate facts already set when this query ran? */
+      readonly facts: boolean;
     }
 
     /** Wraps prisma.client so every model call made by a request (not a job) is recorded. */
@@ -2012,6 +2020,8 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
                     typeof v === 'bigint' ? v.toString() : v,
                   ),
                   scope: scope?.kind === 'system' ? `system:${scope.reason}` : 'org',
+                  actor: scope?.kind === 'system' ? 'SYSTEM' : (scope?.session?.actor ?? 'ORG'),
+                  facts: orgContext.candidateFacts() !== undefined,
                 });
               }
               return (fn as Fn).apply(t, a);
@@ -2243,6 +2253,59 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         else throw new Error(`unreviewed model in a candidate route: ${label}`);
         expect(all.length).toBeGreaterThan(0);
       }
+      // 4. CS-4 scope adoption (DL-31). Every candidate-scope query ran after the facts were set,
+      //    names only readable columns, and none of the org-scope-only data is touched there.
+      const inCandidate = rest.filter((c) => c.actor === 'CANDIDATE');
+      expect(inCandidate.length).toBeGreaterThan(8);
+      for (const c of inCandidate) {
+        expect([`${c.model}.${c.op}`, c.facts]).toEqual([`${c.model}.${c.op}`, true]);
+        expect([
+          'session',
+          'sessionSection',
+          'consent',
+          'organization',
+          'proctorEventBatch',
+          'keystrokeBatch',
+          'mediaChunk',
+        ]).toContain(c.model);
+        expect(c.json).not.toMatch(
+          /hmacKeyEnc|deviceInfo|accommodations|settings|objectKey|invitationId|testQuestionId/,
+        );
+        if (c.model === 'session' && ['update', 'updateMany'].includes(c.op)) {
+          // The only write a candidate scope makes on sessions: last_heartbeat.
+          expect(c.json).toContain('lastHeartbeat');
+          expect(c.json).not.toMatch(/status|authEpoch|submittedAt|pauseReasons/);
+        }
+        expect(['create', 'createMany', 'delete', 'deleteMany', 'upsert']).not.toContain(c.op);
+      }
+      // The data a candidate scope may not read or write is only touched in the org scope.
+      const orgOnly = rest.filter((c) => c.actor !== 'CANDIDATE' && c.actor !== 'SYSTEM');
+      for (const c of rest.filter(
+        (x) =>
+          [
+            'consentText',
+            'testQuestion',
+            'questionVersion',
+            'questionVariant',
+            'auditLog',
+            'testSection',
+          ].includes(x.model) ||
+          (x.model === 'consent' && x.op === 'create'),
+      )) {
+        expect([`${c.model}.${c.op}`, c.actor]).toEqual([`${c.model}.${c.op}`, 'ORG']);
+      }
+      expect(orgOnly.length).toBeGreaterThan(5);
+      // The guard's first step: column-only reads in a plain org scope (never accommodations).
+      const step1 = rest.filter(
+        (c) =>
+          c.actor === 'ORG' && c.model === 'invitation' && c.json.includes('"candidateId":true'),
+      );
+      expect(step1.length).toBeGreaterThanOrEqual(9);
+      for (const c of step1) expect(c.json).not.toContain('accommodations');
+      // A guarded request makes its guard queries (org scope, then candidate scope) before the
+      // handler's: the first query of a request is never in a candidate scope without facts.
+      expect(rest.filter((c) => c.actor === 'CANDIDATE' && !c.facts)).toEqual([]);
+
       // 3. Nothing of the other sessions was read or written.
       expect(await snapshot()).toEqual(before);
     });

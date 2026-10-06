@@ -15,6 +15,7 @@ import { CodedHttpException } from '../common/coded.exception';
 import type { CandidateProblemCode } from '../common/coded.exception';
 import type { Env } from '../config/env';
 import { PrismaService } from '../database/prisma.service';
+import { CandidateScope } from './candidate-scope';
 import { SessionStateService } from '../session/session-state.service';
 import { SessionStateConflictError } from '../session/session-state.errors';
 import { declineContactOf } from './candidate-auth.service';
@@ -64,6 +65,7 @@ export class ConsentService {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly scope: CandidateScope,
     private readonly states: SessionStateService,
     private readonly jobs: SessionJobsService,
     private readonly config: ConfigService<Env, true>,
@@ -86,11 +88,15 @@ export class ConsentService {
     if (!['OPENED', 'CONSENTED', 'VERIFIED', 'IN_PROGRESS', 'PAUSED'].includes(ctx.status)) {
       throw new SessionStateConflictError(ctx.status);
     }
-    const existing = await this.prisma.client.consent.findUnique({
-      where: { sessionId: ctx.sessionId },
-      select: { consentTextId: true, signedAt: true },
-    });
-    const textId = existing?.consentTextId ?? (await this.currentTextId(ctx.orgId));
+    // Candidate scope: the session's own consent row and the org's current text id (both readable).
+    const { existing, currentId } = await this.scope.asCandidate(ctx, async () => ({
+      existing: await this.prisma.client.consent.findUnique({
+        where: { sessionId: ctx.sessionId },
+        select: { consentTextId: true, signedAt: true },
+      }),
+      currentId: await this.currentTextId(ctx.orgId),
+    }));
+    const textId = existing?.consentTextId ?? currentId;
     if (textId === null) {
       throw coded(
         HttpStatus.CONFLICT,
@@ -98,10 +104,13 @@ export class ConsentService {
         'CONSENT_NOT_CONFIGURED',
       );
     }
-    const text = await this.prisma.client.consentText.findUnique({
-      where: { id: textId },
-      select: { id: true, version: true, bodyMd: true, legalApprovedAt: true },
-    });
+    // Consent texts are not readable in candidate scope (a grant in PR 2): org scope.
+    const text = await this.scope.asOrg(ctx, () =>
+      this.prisma.client.consentText.findUnique({
+        where: { id: textId },
+        select: { id: true, version: true, bodyMd: true, legalApprovedAt: true },
+      }),
+    );
     if (text === null) {
       throw coded(
         HttpStatus.CONFLICT,
@@ -146,7 +155,11 @@ export class ConsentService {
     if (signedName === null) {
       throw coded(HttpStatus.BAD_REQUEST, 'Type your full legal name.', 'SIGNED_NAME_INVALID');
     }
-    return this.performSign(ctx, input.consentTextId, signedName, info, now);
+    // The row create, the status change and the audit row stay in the org scope: a candidate scope
+    // may only update a consent row, never create it (CS-4.4; hub decision until PR 2 grants).
+    return this.scope.asOrg(ctx, () =>
+      this.performSign(ctx, input.consentTextId, signedName, info, now),
+    );
   }
 
   private async performSign(
@@ -256,6 +269,15 @@ export class ConsentService {
     ctx: CandidateContext,
     info: RequestInfo & { userAgent: string | undefined },
     now: Date = new Date(),
+  ): Promise<{ status: 'DECLINED'; declineContact: string | null }> {
+    // Org scope for the same reason as sign: the consent row is created here (CS-4.4).
+    return this.scope.asOrg(ctx, () => this.performDecline(ctx, info, now));
+  }
+
+  private async performDecline(
+    ctx: CandidateContext,
+    info: RequestInfo & { userAgent: string | undefined },
+    now: Date,
   ): Promise<{ status: 'DECLINED'; declineContact: string | null }> {
     const currentId = await this.currentTextId(ctx.orgId);
     try {

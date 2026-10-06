@@ -110,4 +110,22 @@ describe('ADR 0013 CS-4 interim: nothing a client sends picks a row', () => {
     ).toHaveLength(1);
     expect(prismaCalls('x.session.update(dto.sessionId)')).toHaveLength(0);
   });
+
+  it('CS-4 interim, DL-31: only candidate-scope.ts enters a candidate scope or sets the facts; the other entries are the pre-token and job paths', () => {
+    const entries = (re: RegExp): string[] =>
+      sources
+        .filter((f) => re.test(f.text))
+        .map((f) => f.path)
+        .sort();
+    expect(entries(/runAsCandidate\(|setCandidateFacts\(/)).toEqual([
+      'candidate/candidate-scope.ts',
+    ]);
+    // runInOrg: the guard's step 1 and asOrg (candidate-scope.ts), the pre-token routes, the jobs.
+    expect(entries(/\.runInOrg\(/)).toEqual([
+      'candidate/candidate-auth.service.ts',
+      'candidate/candidate-scope.ts',
+      'candidate/consent-pdf.service.ts',
+      'candidate/session-jobs.service.ts',
+    ]);
+  });
 });

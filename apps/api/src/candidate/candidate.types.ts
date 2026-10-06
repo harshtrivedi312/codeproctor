@@ -10,6 +10,8 @@ export interface CandidateContext {
   readonly sessionId: string;
   readonly orgId: string;
   readonly invitationId: string;
+  readonly candidateId: string;
+  readonly testId: string;
   /** The token's epoch, equal to sessions.auth_epoch when the guard let the request in. */
   readonly epoch: number;
   readonly status: SessionStatus;

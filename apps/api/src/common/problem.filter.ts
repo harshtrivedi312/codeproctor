@@ -11,7 +11,11 @@ import {
 import type { Request, Response } from 'express';
 import { OrgContextMissingError } from '../database/errors';
 import { scrubPrismaError } from '../database/error-scrub';
-import { CodedConflictException, CodedForbiddenException, CodedHttpException } from './coded.exception';
+import {
+  CodedConflictException,
+  CodedForbiddenException,
+  CodedHttpException,
+} from './coded.exception';
 import type { CandidateProblemCode, ProblemCode } from './coded.exception';
 
 export interface ProblemDetails {

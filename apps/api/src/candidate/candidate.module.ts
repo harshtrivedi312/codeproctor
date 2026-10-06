@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 import { SessionModule } from '../session/session.module';
 import { CandidateAuthController } from './candidate-auth.controller';
 import { CandidateAuthService } from './candidate-auth.service';
-import { CandidateContextInterceptor } from './candidate-context.interceptor';
 import { CandidateMailPort, UnboundCandidateMailPort } from './candidate-mail.port';
 import { CandidateScope } from './candidate-scope';
 import { CandidateSessionController } from './candidate-session.controller';
@@ -26,7 +25,6 @@ import { TestStartService } from './test-start.service';
     CandidateTokenService,
     CandidateScope,
     CandidateSessionGuard,
-    CandidateContextInterceptor,
     CandidateAuthService,
     CandidateSessionService,
     ConsentService,
