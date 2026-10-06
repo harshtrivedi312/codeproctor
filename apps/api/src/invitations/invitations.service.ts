@@ -103,7 +103,7 @@ export class InvitationsService {
   ): Promise<InvitationCreatedDto> {
     const now = new Date();
     const { start, end } = this.window(dto, now);
-    await this.takeSlot(actor.orgId);
+    const slot = await this.takeSlot(actor.orgId);
     const token = newOpaqueToken();
     const tokenHash = sha256Hex(token);
 
@@ -206,7 +206,13 @@ export class InvitationsService {
         { timeout: this.txTimeoutMs, maxWait: this.txMaxWaitMs },
       );
     } catch (e) {
-      throw this.mapTimeout(e);
+      const failure = this.mapTimeout(e);
+      // The rate slot is refunded only when the failure is the server's (5xx: lock contention,
+      // timeout, port 503, bug), so a retry does not burn the hourly budget. 400, 404, 409 and 422
+      // are legitimate attempts and keep their slot. Best effort; the original error is rethrown.
+      const status = failure instanceof HttpException ? failure.getStatus() : 500;
+      if (status >= 500) await this.refundSlot(slot);
+      throw failure;
     }
 
     // The mail is outside the transaction: an outcome other than queued does not undo anything.
@@ -234,7 +240,7 @@ export class InvitationsService {
   }
 
   /** Fixed window per org and hour. Redis down is a 503 (fail closed), over the limit a 429. */
-  private async takeSlot(orgId: string): Promise<void> {
+  private async takeSlot(orgId: string): Promise<string> {
     const key = `invitation:org:${orgId}:${Math.floor(Date.now() / (RATE_WINDOW_SECONDS * 1000))}`;
     let count: number;
     try {
@@ -249,6 +255,16 @@ export class InvitationsService {
         'Too many invitations. Try again later.',
         HttpStatus.TOO_MANY_REQUESTS,
       );
+    }
+    return key;
+  }
+
+  /** Gives one slot back. Never throws and never logs the key. */
+  private async refundSlot(key: string): Promise<void> {
+    try {
+      await this.redis.decr(key);
+    } catch {
+      this.log.warn('Invitation rate slot could not be refunded.');
     }
   }
 

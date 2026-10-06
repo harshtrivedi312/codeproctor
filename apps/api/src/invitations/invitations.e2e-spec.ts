@@ -709,6 +709,74 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
       if (left < 15_000) await new Promise((r) => setTimeout(r, left + 500));
     };
 
+    /** A fresh org with one test and a limit of 2 per hour; returns a restore function. */
+    async function limited(): Promise<{ who: Made; testId: string; restore: () => void }> {
+      await awayFromHourBoundary();
+      const org = (await owner.organization.create({ data: { name: 'Refund Org' } })).id;
+      const who = await make(UserRole.RECRUITER, org);
+      const test = await owner.test.create({
+        data: { orgId: org, name: 'T', durationMinutes: 30, createdById: who.id },
+      });
+      const service = svc();
+      const before = Reflect.get(service, 'rateLimit') as number;
+      Reflect.set(service, 'rateLimit', 2);
+      return {
+        who,
+        testId: test.id,
+        restore: () => Reflect.set(service, 'rateLimit', before),
+      };
+    }
+
+    it('FR-303: a port 503 after the slot gives the slot back; the next two invites still fit', async () => {
+      const { who, testId, restore } = await limited();
+      try {
+        portMode = 'fail';
+        await invite(who, testId, goodBody()).expect(503);
+        portMode = 'ok';
+        await invite(who, testId, goodBody()).expect(201);
+        await invite(who, testId, goodBody()).expect(201);
+        await invite(who, testId, goodBody()).expect(429);
+      } finally {
+        restore();
+      }
+    });
+
+    it('FR-303: a transaction timeout (P2028) gives the slot back', async () => {
+      const { who, testId, restore } = await limited();
+      const service = svc();
+      const before = Reflect.get(service, 'txTimeoutMs') as number;
+      Reflect.set(service, 'txTimeoutMs', 1500);
+      const holder = new Client({ connectionString: infra.postgres.getConnectionUri() });
+      await holder.connect();
+      try {
+        await holder.query('BEGIN');
+        await holder.query('SELECT id FROM tests WHERE id = $1 FOR UPDATE', [testId]);
+        const release = setTimeout(() => void holder.query('COMMIT'), 3000);
+        await invite(who, testId, goodBody()).expect(503);
+        clearTimeout(release);
+        Reflect.set(service, 'txTimeoutMs', before);
+        await invite(who, testId, goodBody()).expect(201);
+        await invite(who, testId, goodBody()).expect(201);
+        await invite(who, testId, goodBody()).expect(429);
+      } finally {
+        Reflect.set(service, 'txTimeoutMs', before);
+        await holder.end();
+        restore();
+      }
+    });
+
+    it('FR-303: a 409 keeps its slot (a legitimate attempt)', async () => {
+      const { who, testId, restore } = await limited();
+      try {
+        const addr = email();
+        await invite(who, testId, goodBody({ email: addr })).expect(201);
+        await invite(who, testId, goodBody({ email: addr })).expect(409);
+        await invite(who, testId, goodBody()).expect(429);
+      } finally {
+        restore();
+      }
+    });
+
     it('FR-303: a request that fails validation takes no rate-limit slot', async () => {
       await awayFromHourBoundary();
       const org = (await owner.organization.create({ data: { name: 'Slot Org' } })).id;
