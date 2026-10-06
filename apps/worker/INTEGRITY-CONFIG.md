@@ -78,7 +78,7 @@ Routing (FR-805 as changed by owner decision C-28): a person reviews EVERY sessi
 is always true and nothing is auto-cleared. The band now orders the queue and picks the review path:
 `review_path` is `fast` (summary and one-click verdict; default for bands in the SYSTEM setting
 `RISK_FAST_REVIEW_BANDS`, default `LOW`) or `full`. A pending identity review or pending manual short-answer score forces `full`
-(brief assumption, to confirm with the hub). `RISK_FAST_REVIEW_BANDS` (`ReviewPathConfig.from_env()`, DL-18) is a system setting, not an org setting: it holds only `LOW` or nothing (set but empty = everything full), unset means `LOW`, and any other value fails loudly. It cannot be set through org settings or the `/risk` request config. Holds force the `full` path (DL-18). Queue order
+(decided, DL-18). `RISK_FAST_REVIEW_BANDS` (`ReviewPathConfig.from_env()`, DL-18) is a system setting, not an org setting: it holds only `LOW` or nothing (set but empty = everything full), unset means `LOW`, and any other value fails loudly. It cannot be set through org settings or the `/risk` request config. Holds force the `full` path (DL-18). Queue order
 (`order_review_queue`): HIGH, MEDIUM, LOW; higher score first; older submission first; session id as
 the final tie-break, so the order is total and deterministic. BE-13 owns the final review-queue order, including holds and oldest-first (DL-20); this helper has
 no holds tier, and `queue_rank` stays band-based. `reasons` always starts with `RISK_<band>`. The `/risk` route accepts `identity_review_pending` and `short_answer_pending` and
