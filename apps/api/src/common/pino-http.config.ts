@@ -1,18 +1,18 @@
-import { randomUUID } from 'node:crypto';
 import type { Options } from 'pino-http';
 import { LOG_REDACT } from './log-redaction';
+import { resolveRequestId } from './request-id';
 
 /** The pinoHttp options the app logs with (NFR-09). Exported so a test can check the redact list. */
 export function buildPinoHttpOptions(level: string): Options {
   return {
     level,
-    // Per-request trace ID (NFR-09): honour a well-formed inbound id, else generate one.
+    // Per-request trace ID (NFR-09): honour a well-formed inbound id, else generate one
+    // (never on the public /client-errors route, FU-BE-95).
     genReqId: (req, res) => {
-      const inbound = req.headers['x-request-id'];
-      const id =
-        typeof inbound === 'string' && /^[A-Za-z0-9._-]{8,64}$/.test(inbound)
-          ? inbound
-          : randomUUID();
+      const id = resolveRequestId(
+        req.headers['x-request-id'],
+        (req as { originalUrl?: string }).originalUrl ?? req.url,
+      );
       res.setHeader('x-request-id', id);
       return id;
     },

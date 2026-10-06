@@ -1,8 +1,16 @@
-import { ArgumentsHost, ForbiddenException, HttpException } from '@nestjs/common';
+import {
+  ArgumentsHost,
+  ForbiddenException,
+  HttpException,
+  NotFoundException,
+} from '@nestjs/common';
 import { CodedConflictException, CodedForbiddenException, reauthFailed } from './coded.exception';
 import { ProblemFilter } from './problem.filter';
 
-function run(exception: unknown): { status: number; body: Record<string, unknown> } {
+function run(
+  exception: unknown,
+  reqOverrides: Record<string, unknown> = {},
+): { status: number; body: Record<string, unknown> } {
   let status = 0;
   let body: Record<string, unknown> = {};
   const res = {
@@ -19,7 +27,13 @@ function run(exception: unknown): { status: number; body: Record<string, unknown
   };
   const host = {
     switchToHttp: () => ({
-      getRequest: () => ({ headers: {}, id: 'trace-1', originalUrl: '/api/v1/x?y=1' }),
+      getRequest: () => ({
+        headers: {},
+        id: 'trace-1',
+        method: 'GET',
+        originalUrl: '/api/v1/x?y=1',
+        ...reqOverrides,
+      }),
       getResponse: () => res,
     }),
   } as unknown as ArgumentsHost;
@@ -165,5 +179,68 @@ describe('ProblemFilter scrubs Prisma errors before logging (TC-003, NFR-04, FU-
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe('ProblemFilter body-parser errors, 404 and trace id (FU-BE-103, FU-BE-13, FU-BE-12)', () => {
+  const tooLarge = Object.assign(new Error('request entity too large'), {
+    status: 413,
+    type: 'entity.too.large',
+    body: 'SECRET-BODY',
+  });
+  const badJson = Object.assign(new SyntaxError('Unexpected token S in JSON'), {
+    status: 400,
+    type: 'entity.parse.failed',
+    body: '{"password":"SECRET-BODY"',
+  });
+
+  it('FR-201: an oversize body is 413 problem+json with a fixed detail', () => {
+    const { status, body } = run(tooLarge);
+    expect(status).toBe(413);
+    expect(body).toMatchObject({ title: 'Payload Too Large', status: 413 });
+    expect(JSON.stringify(body)).not.toContain('SECRET-BODY');
+  });
+
+  it('FR-201: malformed JSON is 400 and never echoes the body or the parser message', () => {
+    const { status, body } = run(badJson);
+    expect(status).toBe(400);
+    expect(body.detail).toBe('The request body is not valid.');
+    expect(JSON.stringify(body)).not.toContain('SECRET-BODY');
+    expect(JSON.stringify(body)).not.toContain('Unexpected token');
+  });
+
+  it('FR-201: an unsupported charset or encoding is 415; an untyped error stays 500', () => {
+    expect(
+      run(Object.assign(new Error('x'), { status: 415, type: 'charset.unsupported' })).status,
+    ).toBe(415);
+    expect(run(Object.assign(new Error('x'), { status: 413 })).status).toBe(500);
+    expect(run(Object.assign(new Error('x'), { status: 500, type: 'entity.x' })).status).toBe(500);
+  });
+
+  it('FU-BE-13: the default 404 detail is fixed and does not echo the query string', () => {
+    const notFound = new NotFoundException('Cannot GET /api/v1/nope?token=secret');
+    const { body } = run(notFound, { originalUrl: '/api/v1/nope?token=secret' });
+    expect(body.detail).toBe('Route not found.');
+    expect(body.instance).toBe('/api/v1/nope');
+    expect(JSON.stringify(body)).not.toContain('secret');
+  });
+
+  it('FU-BE-13: a route handler 404 keeps its own message', () => {
+    expect(run(new HttpException('Question not found', 404)).body.detail).toBe(
+      'Question not found',
+    );
+  });
+
+  it('FU-BE-12: without req.id the traceId is a validated inbound id or a fresh one, never raw', () => {
+    const noId = { id: undefined };
+    expect(
+      run(tooLarge, { ...noId, headers: { 'x-request-id': 'good-id-12345' } }).body.traceId,
+    ).toBe('good-id-12345');
+    const bad = run(tooLarge, {
+      ...noId,
+      headers: { 'x-request-id': '<script>alert(1)</script>' },
+    });
+    expect(bad.body.traceId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(run(tooLarge, { ...noId, headers: {} }).body.traceId).toMatch(/^[0-9a-f-]{36}$/);
   });
 });

@@ -90,3 +90,14 @@ export class CodedHttpException extends HttpException {
     super({ message, code }, status);
   }
 }
+
+/**
+ * Every refusal on POST /auth/2fa/disable (wrong password, wrong or replayed code, locked
+ * account, password changed meanwhile) carries this one detail, so it never says which factor was
+ * wrong and never tells the user to retype a password that was right (FU-BE-58). Status and code
+ * stay 403 REAUTH_FAILED. A code that already signed the user in is a replay: wait for the next one.
+ */
+export const DISABLE_REFUSED_DETAIL = 'The password or code is incorrect.';
+export function disableRefused(): CodedForbiddenException {
+  return new CodedForbiddenException(DISABLE_REFUSED_DETAIL, 'REAUTH_FAILED');
+}

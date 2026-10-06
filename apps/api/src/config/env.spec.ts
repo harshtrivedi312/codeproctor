@@ -48,6 +48,7 @@ describe('NFR-04 environment validation', () => {
 
   it('FU-BE-97: pilot and production refuse TRUST_PROXY_HOPS of 0 or missing, and name only the variable', () => {
     const live = {
+      WEB_ORIGIN: 'https://app.example.com',
       JUDGE0_URL: 'https://judge0.example.com',
       JUDGE0_AUTH_TOKEN: 't'.repeat(32),
       JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
@@ -110,6 +111,7 @@ describe('NFR-04 environment validation', () => {
     const live = {
       ...valid,
       APP_ENV: 'pilot',
+      WEB_ORIGIN: 'https://app.example.com',
       TRUST_PROXY_HOPS: '1',
       JUDGE0_URL: 'https://judge0.example.com',
       JUDGE0_AUTH_TOKEN: token,
@@ -150,5 +152,59 @@ describe('NFR-04 environment validation', () => {
       validateEnv({ ...valid, APP_ENV: 'staging', JUDGE0_URL: 'http://judge0-server:2358' })
         .APP_ENV,
     ).toBe('staging');
+  });
+
+  it('FU-BE-11: WEB_ORIGIN is normalised to a bare origin; paths, queries and credentials are refused', () => {
+    expect(validateEnv({ ...valid, WEB_ORIGIN: 'https://app.example.com/' }).WEB_ORIGIN).toBe(
+      'https://app.example.com',
+    );
+    expect(validateEnv({ ...valid, WEB_ORIGIN: 'HTTPS://App.Example.com:8443' }).WEB_ORIGIN).toBe(
+      'https://app.example.com:8443',
+    );
+    for (const bad of [
+      'https://app.example.com/app',
+      'https://app.example.com/?x=1',
+      'https://app.example.com/#f',
+      'https://user:pw@app.example.com',
+      'ftp://app.example.com',
+    ]) {
+      expect(() => validateEnv({ ...valid, WEB_ORIGIN: bad })).toThrow(/WEB_ORIGIN/);
+    }
+  });
+
+  it('FU-BE-98: HTTP server timeouts have bounded defaults, and headers must be below request', () => {
+    const env = validateEnv(valid);
+    expect(env.HTTP_HEADERS_TIMEOUT_MS).toBe(10_000);
+    expect(env.HTTP_REQUEST_TIMEOUT_MS).toBe(30_000);
+    expect(env.HTTP_KEEPALIVE_TIMEOUT_MS).toBe(65_000);
+    expect(env.HTTP_HEADERS_TIMEOUT_MS).toBeLessThan(env.HTTP_REQUEST_TIMEOUT_MS);
+    expect(() =>
+      validateEnv({ ...valid, HTTP_HEADERS_TIMEOUT_MS: '30000', HTTP_REQUEST_TIMEOUT_MS: '30000' }),
+    ).toThrow(/HTTP_HEADERS_TIMEOUT_MS/);
+    expect(() => validateEnv({ ...valid, HTTP_KEEPALIVE_TIMEOUT_MS: '0' })).toThrow(
+      /HTTP_KEEPALIVE_TIMEOUT_MS/,
+    );
+    expect(() => validateEnv({ ...valid, HTTP_KEEPALIVE_TIMEOUT_MS: '9999999' })).toThrow(
+      /HTTP_KEEPALIVE_TIMEOUT_MS/,
+    );
+  });
+
+  it('FU-BE-11: pilot and production require an https WEB_ORIGIN; local http stays valid', () => {
+    const live = {
+      ...valid,
+      TRUST_PROXY_HOPS: '1',
+      JUDGE0_URL: 'https://judge0.example.com',
+      JUDGE0_AUTH_TOKEN: 't'.repeat(32),
+      JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
+    };
+    for (const APP_ENV of ['pilot', 'production']) {
+      expect(() => validateEnv({ ...live, APP_ENV, WEB_ORIGIN: 'http://app.example.com' })).toThrow(
+        /WEB_ORIGIN/,
+      );
+      expect(
+        validateEnv({ ...live, APP_ENV, WEB_ORIGIN: 'https://app.example.com' }).WEB_ORIGIN,
+      ).toBe('https://app.example.com');
+    }
+    expect(validateEnv(valid).WEB_ORIGIN).toBe('http://localhost:3000');
   });
 });
