@@ -5,6 +5,7 @@ import { Client } from 'pg';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { hash } from '@node-rs/argon2';
+import { MAX_FAILED_LOGINS } from '../auth/auth.service';
 import { passwordVersion } from '../auth/crypto.util';
 import { ARGON2_OPTIONS } from '../auth/password.service';
 import type { TokenService } from '../common/auth/token.service';
@@ -382,6 +383,39 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
       expect(await audits(orgA)).toHaveLength(0);
     });
 
+    describe.each([
+      ['the password hash changes', { passwordHash: 'x'.repeat(20) }],
+      ['the admin is demoted to RECRUITER', { role: UserRole.RECRUITER }],
+      ['the admin is deactivated', { isActive: false }],
+    ] as const)('FR-103, TC-004 after the password is verified, %s', (_name, change) => {
+      it('is 403 REAUTH_FAILED, settings unchanged, no audit row', async () => {
+        const admin = await make(UserRole.SUPER_ADMIN);
+        const { AuthService: Auth } =
+          jest.requireActual<typeof import('../auth/auth.service')>('../auth/auth.service');
+        const auth = app.get(Auth);
+        const real = auth.verifyCurrentPassword.bind(auth);
+        const spy = jest
+          .spyOn(auth, 'verifyCurrentPassword')
+          .mockImplementation(async (...args: Parameters<typeof real>) => {
+            const out = await real(...args);
+            await owner.user.update({ where: { id: admin.id }, data: change });
+            return out;
+          });
+        try {
+          const res = await http()
+            .patch(URL)
+            .set(admin.auth)
+            .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 1 } })
+            .expect(403);
+          expect((res.body as { code?: string }).code).toBe('REAUTH_FAILED');
+        } finally {
+          spy.mockRestore();
+        }
+        expect(await stored(orgA)).toEqual({});
+        expect(await audits(orgA)).toHaveLength(0);
+      });
+    });
+
     it('AI-5 compare-and-set: a change to another key between the read and the write is kept by the retry, one audit row, correct from', async () => {
       const admin = await make(UserRole.SUPER_ADMIN);
       await setStored(orgA, { retention: { days: 1 }, aiReferences: { minAssistants: 3 } });
@@ -585,7 +619,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
           .set(admin.auth)
           .send(body({ currentPassword: password }));
       const wrong = await patch('nope-nope-nope-1');
-      for (let i = 0; i < 6; i++) await patch('nope-nope-nope-1');
+      for (let i = 0; i < MAX_FAILED_LOGINS + 1; i++) await patch('nope-nope-nope-1');
       const lockedRight = await patch(PASSWORD);
       expect(lockedRight.status).toBe(403);
       const strip = (r: request.Response): unknown => {
