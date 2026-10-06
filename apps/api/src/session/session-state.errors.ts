@@ -1,3 +1,4 @@
+import { candidateVisibleStatus } from './candidate-visible-status';
 import { HttpStatus } from '@nestjs/common';
 import { CodedHttpException } from '../common/coded.exception';
 import type { SessionStatus } from '../generated/prisma/enums.js';
@@ -10,7 +11,7 @@ export class IllegalTransitionError extends CodedHttpException {
       `A session cannot move from ${from} to ${to}.`,
       'ILLEGAL_TRANSITION',
       {
-        sessionStatus: from,
+        sessionStatus: candidateVisibleStatus(from),
       },
     );
   }
@@ -23,7 +24,7 @@ export class SessionStateConflictError extends CodedHttpException {
       HttpStatus.CONFLICT,
       'The session is not in the expected state.',
       'SESSION_STATE_CONFLICT',
-      { sessionStatus: current },
+      { sessionStatus: current === null ? null : candidateVisibleStatus(current) },
     );
   }
 }

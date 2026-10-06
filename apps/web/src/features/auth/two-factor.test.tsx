@@ -8,6 +8,8 @@ import {
   MOCK_TOTP_CODE,
   MOCK_USERS,
 } from '@/mocks/auth-handlers';
+import { getAccessToken } from '@/lib/auth-token';
+import { apiBaseUrl } from '@/lib/env';
 import { server } from '@/mocks/server';
 import { renderWithAuth, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav, router } from '@/test/nav-mock';
@@ -160,6 +162,66 @@ describe('TwoFactorEnroll', () => {
     expect(click).toHaveBeenCalled();
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     click.mockRestore();
+  });
+
+  it('FR-102 TC-003 (#184): a 401 from enroll/start sends the user to sign-in with the expired notice, clears the challenge and publishes no session', async () => {
+    server.use(
+      http.post('*/v1/auth/2fa/enroll/start', () =>
+        HttpResponse.json(
+          {
+            type: 'about:blank',
+            title: 'Unauthorized',
+            status: 401,
+            detail: 'Your sign-in has expired. Sign in again.',
+            instance: '/x',
+            traceId: 't',
+          },
+          { status: 401 },
+        ),
+      ),
+    );
+    const calls: string[] = [];
+    server.events.on('request:start', ({ request }) => calls.push(new URL(request.url).pathname));
+    renderWithAuth(<Flow second="enroll" />);
+    // The provider's own silent refresh at mount is not what is being watched.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    calls.length = 0;
+    router.replace.mockClear();
+    await loginAs(MOCK_USERS.reviewer);
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith('/admin/login?reason=expired'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The pending-challenge effect must not replace the reason with plain /admin/login.
+    expect(router.replace).toHaveBeenLastCalledWith('/admin/login?reason=expired');
+    expect(screen.queryByText('We could not start set-up')).not.toBeInTheDocument();
+    expect(getAccessToken()).toBeNull();
+    expect(calls.some((c) => /\/auth\/(refresh|logout)$/.test(c))).toBe(false);
+    server.events.removeAllListeners();
+  });
+
+  it('FR-102: any other failure of enroll/start keeps the set-up error', async () => {
+    server.use(
+      http.post('*/v1/auth/2fa/enroll/start', () =>
+        HttpResponse.json({ detail: 'down' }, { status: 500 }),
+      ),
+    );
+    renderWithAuth(<Flow second="enroll" />);
+    router.replace.mockClear();
+    await loginAs(MOCK_USERS.reviewer);
+    expect(await screen.findByText('We could not start set-up')).toBeInTheDocument();
+    expect(router.replace).not.toHaveBeenCalledWith('/admin/login?reason=expired');
+  });
+
+  it('FR-102 TC-003: the mock answers enroll/start for an unknown challenge with the 401 problem body', async () => {
+    const res = await fetch(`${apiBaseUrl}/v1/auth/2fa/enroll/start`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ challengeToken: 'stale' }),
+    });
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({
+      status: 401,
+      detail: 'Your sign-in has expired. Sign in again.',
+    });
   });
 
   it('FR-102: a wrong first code asks for a fresh one', async () => {

@@ -16,11 +16,11 @@ export interface SessionScope {
 }
 
 export const MEDIA_STREAM_DIR: Readonly<Record<MediaStream, string>> = {
-  SCREEN: 'screen',
-  WEBCAM: 'webcam',
-  AUDIO: 'audio',
-  SIDE_CAMERA: 'side_camera',
-  ROOM_SCAN: 'room_scan',
+  SCREEN: 'SCREEN',
+  WEBCAM: 'WEBCAM',
+  AUDIO: 'AUDIO',
+  SIDE_CAMERA: 'SIDE_CAMERA',
+  ROOM_SCAN: 'ROOM_SCAN',
 };
 
 export type IdentityImageKind = 'id' | 'selfie';
@@ -116,7 +116,7 @@ export function liveThumbnailKey(scope: SessionScope, id: string): string {
 const SESSION_KEY_RE = new RegExp(
   `^orgs/(${UUID})/sessions/(${UUID})/(` +
     [
-      'media/(?:screen|webcam|audio|side_camera|room_scan)/\\d{6}/\\d{8}\\.webm',
+      'media/(?:SCREEN|WEBCAM|AUDIO|SIDE_CAMERA|ROOM_SCAN)/\\d{6}/\\d{8}\\.webm',
       'identity/\\d{1,2}/(?:sealed/)?(?:id|selfie)-' + ULID + '\\.jpg',
       'evidence/(?:sealed/)?' + ULID + '\\.jpg',
       'reports/' + ULID + '\\.pdf',

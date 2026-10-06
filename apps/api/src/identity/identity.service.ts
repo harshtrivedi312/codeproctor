@@ -15,6 +15,7 @@ import { CodedHttpException } from '../common/coded.exception';
 import { SessionRateLimiter } from '../candidate/session-rate-limiter';
 import { newUlid } from '../candidate/ulid';
 import type { CandidateContext } from '../candidate/candidate.types';
+import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
 import type { SessionScope } from '../media/storage-keys';
 import { sessionNotActive } from '../session/session-write-gate';
@@ -88,15 +89,26 @@ export class IdentityService {
     private readonly queue: FaceMatchQueue,
     private readonly limiter: SessionRateLimiter,
     private readonly purge: IdentityPurgeService,
+    private readonly orgContext: OrgContextService,
   ) {}
 
   // ---- presign: issue single-use names ----
 
   /** POST /candidate/session/identity/presign. */
-  async presign(
+  presign(
     ctx: CandidateContext,
     input: { purpose: IdentityPurpose; bytes: number },
     now: Date = new Date(),
+  ): Promise<IdentityPresignedDto> {
+    // The candidate routes carry no scope of their own (BE-07 CS-4 adoption): each service step picks one.
+    // INTERIM until the SessionJobProcessor / candidate reads for identity_checks land.
+    return this.orgContext.runInOrg(ctx.orgId, () => this.presignInScope(ctx, input, now));
+  }
+
+  private async presignInScope(
+    ctx: CandidateContext,
+    input: { purpose: IdentityPurpose; bytes: number },
+    now: Date,
   ): Promise<IdentityPresignedDto> {
     await this.limiter.hit('identity-presign', ctx.sessionId, 20, 60);
     if (input.bytes < 1 || input.bytes > IDENTITY_IMAGE_MAX_BYTES) throw nameInvalid();
@@ -128,7 +140,14 @@ export class IdentityService {
   // ---- submit ----
 
   /** POST /candidate/session/identity. 202 with the row's status (PENDING for a new attempt). */
-  async submit(
+  submit(
+    ctx: CandidateContext,
+    input: { idImageName: string; selfieName: string; livenessConfirmed: boolean },
+  ): Promise<IdentityStatusDto> {
+    return this.orgContext.runInOrg(ctx.orgId, () => this.submitInScope(ctx, input));
+  }
+
+  private async submitInScope(
     ctx: CandidateContext,
     input: { idImageName: string; selfieName: string; livenessConfirmed: boolean },
   ): Promise<IdentityStatusDto> {
@@ -257,7 +276,11 @@ export class IdentityService {
   // ---- status ----
 
   /** GET /candidate/session/identity: status only (NFR-05). */
-  async status(ctx: CandidateContext): Promise<IdentityStatusDto> {
+  status(ctx: CandidateContext): Promise<IdentityStatusDto> {
+    return this.orgContext.runInOrg(ctx.orgId, () => this.statusInScope(ctx));
+  }
+
+  private async statusInScope(ctx: CandidateContext): Promise<IdentityStatusDto> {
     if ((await this.facts.policy(ctx.sessionId)).waived) {
       return { attempt: 0, status: 'WAIVED', canRetry: false };
     }

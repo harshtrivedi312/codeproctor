@@ -1,3 +1,4 @@
+import { candidateVisibleStatus } from './candidate-visible-status';
 // assertWritable (DL-17, ADR 0002 P-2, ADR 0013 section 5.10 CS-4.6): the one check every question
 // and draft write route runs first. BE-11 (run, draft, answer, submit) calls it; BE-07 ships it.
 //
@@ -36,7 +37,7 @@ export function sessionNotActive(status: SessionStatus): CodedHttpException {
     HttpStatus.CONFLICT,
     'The session is not running.',
     'SESSION_NOT_ACTIVE',
-    { sessionStatus: status },
+    { sessionStatus: candidateVisibleStatus(status) },
   );
 }
 
@@ -49,7 +50,7 @@ export function assertWritable(session: WritableSession): void {
       HttpStatus.CONFLICT,
       'The test is paused. Your work is kept; continue when the pause ends.',
       'SESSION_PAUSED',
-      { sessionStatus: session.status },
+      { sessionStatus: candidateVisibleStatus(session.status) },
     );
   }
 }

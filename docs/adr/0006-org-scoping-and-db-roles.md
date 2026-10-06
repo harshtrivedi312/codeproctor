@@ -442,9 +442,10 @@ No rule in this ADR depends on a plain org scope narrowing into a session scope.
 
 **Routes behind `CandidateSessionGuard` use no system scope.**
 - Link resolve, OTP send and OTP verify are the candidate routes outside the guard (ADR 0013 section 5.10). They run under `AUTH_BOOTSTRAP`.
-- The guard verifies the candidate JWT, then enters `runAsCandidate(oid, sid)` from no scope, using the verified claims.
+- The guard verifies the candidate JWT. It then reads the candidate facts in a plain `runInOrg(oid)` entered from no scope (ADR 0013 section 5.10, DL-31; architect detail, DL-31 interim pick, owner accepts under P-15; the narrower variant, with `sessions.invitation_id` read in CANDIDATE scope under a grant, was considered and not chosen): the session's `invitation_id`, then the invitation's `candidate_id` and `test_id`, as column-only selects, never `accommodations`. That callback returns before the next step; it is never nested.
+- It then enters `runAsCandidate(oid, sid)` from no scope, using the verified claims, and calls the candidate-facts setter before any other query in that scope. **Fail closed:** in CANDIDATE scope the extension throws on any query on any model while the facts are unset; an injected filter whose context value is missing throws and is never passed to Prisma as `undefined` (Prisma would drop it from the `where`); the setter throws if called twice or with any id missing.
 - Inside that scope it loads the session with `id = sid` and checks `auth_epoch` against the token's `epoch`.
-- A session in another org is simply not found, which answers 401.
+- A missing session, a session in another org, or a missing invitation is simply not found. All three answer 401 with the same problem body and code.
 
 **Session jobs (grading, render-question, start-test) add no system reason.**
 - Hidden-test grading and start-test run as session jobs with actor SERVICE. ADR 0013 holds their contracts and timeouts; this ADR does not restate them.
@@ -476,7 +477,7 @@ There is no org-provisioning reason (8.6, 8.9).
     - It does not require a "live" status. Writers on GRADED or COMPLETED sessions, such as reports, use it too.
     - If the status read is ERASED, the writer returns without writing.
   - **0 rows.** The status changed in the meantime. The writer re-reads it and stops on ERASED; otherwise it retries a bounded number of times.
-  - **Jobs that work on ERASED sessions** use a separate entry, not `guardLive`: ingest-close and key destruction, the sweep passes, evidence-expire, and the consent-PDF job.
+  - **Jobs that work on ERASED sessions** use a separate entry, `withAnySession(sid, fn)`, not `guardLive`: ingest-close and key destruction, the sweep passes, evidence-expire, and the consent-PDF job.
   - **Where it lives.** `SessionJobProcessor` provides the write-transaction wrapper that calls `guardLive`. Writers do not call it by hand.
   - **Lock timeout.** If ADR 0004 keeps a `lock_timeout`, it is set without raw SQL: either a SERVICE pool whose pg options include `-c lock_timeout=...`, or the Prisma interactive-transaction `timeout`.
 - **Second model-API lock: `lockForAccommodation` (ADR 0015).**
@@ -507,30 +508,33 @@ There is no org-provisioning reason (8.6, 8.9).
   - The call-site allow-list and its test (FU-DB-67) also cover:
     - `exit`, `enterWith` and `disable` on the OrgContext store;
     - `detachForSessionJob`;
-    - the eleven grant sites in the ADR 0013 CS-4.4 grant-site table:
+    - the `runInOrg` call site in `CandidateSessionGuard` for its candidate-facts pre-read (ADR 0013 section 5.10, DL-31), the only non-CANDIDATE read on routes behind the guard;
+    - the eleven grant sites in the ADR 0013 CS-4.4 grant-site table (`CandidateSessionGuard` has no grant, DL-31):
       - `SessionStateService`
       - `KeyService`
-      - `CandidateSessionGuard`
       - `DeviceInfoService`
       - `StorageService`
       - `OrgSettingsService`
       - `TestSettingsService`
       - `AccommodationsService`
       - `SectionGateService` (two grants)
-      - `ConsentService`
-      - the private candidate-facts setter for `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. Only `CandidateSessionGuard` may call it, once per scope, and the values are immutable afterwards.
-      - the two model-API lock call sites, `guardLive` (only from the `SessionJobProcessor` write-transaction wrapper) and `lockForAccommodation` (only from the ADR 0015 accommodation writers).
+      - `ConsentService` (two grants: the `consent_texts` read and the `consents` create)
 
       ADR 0013 CS-4.4 defines each site's model, columns and ids. This ADR does not repeat them.
+    - the private candidate-facts setter for `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. Only `CandidateSessionGuard` may call it, once per scope, before any other query in the scope; it throws if called twice or with any id missing, and the values are immutable afterwards.
+    - the two model-API lock call sites, `guardLive` (only from the `SessionJobProcessor` write-transaction wrapper) and `lockForAccommodation` (only from the ADR 0015 accommodation writers).
+    - the two session-job write entries, `withLiveSession` and `withAnySession`, both only in the `SessionJobProcessor` base class (ADR 0013 5.7).
   - The grant-entry API and the candidate-facts setter stay private to `org-context.ts` or the extension, like the store.
   - **How grants work.** This is the normative grant spec; ADR 0013 uses the same wording.
     - `withGrant({ model, columns, ids }, fn)`. All three fields are mandatory, and an empty `ids` throws.
     - The extension checks the model and the columns, and adds `id IN ids` to the query itself.
+    - For a create grant there is no `where` to filter: `ids` then constrain the checked parent key (the extension checks that the create's `session_id` is in `ids`), and nothing else is filtered.
     - A grant is a nested AsyncLocalStorage run inside the current scope. It carries an `active` flag that is cleared in `finally` when `fn` settles, and the extension refuses any query under an inactive grant. So async work started inside `fn` and not awaited (a promise, `setTimeout`, an emitter or a stream callback) cannot use the grant after `fn` settles. A test checks that such a detached query throws.
     - Grants exist only inside a scope.
     - `ids` are never request input. They are values read inside the same scope, or ids resolved within the session through ADR 0013 CS-2 and CS-4.2. For example, `SectionGateService`'s step-1 id comes from the URL after that resolution.
     - Typical ids:
       - `[ctx.sessionId]` for session-row grants;
+      - `[ctx.sessionId]` for the `consents` create (ConsentService);
       - `[ctx.orgId]` for org settings;
       - `[ctx.testId]` for test settings.
   - Any use outside those files fails the test or the lint rule.
@@ -717,12 +721,13 @@ How the check runs:
     - 8.5: `guardLive` and `lockForAccommodation`.
     - 8.2: in SERVICE session scope, refuse an update that changes `session_id` or `session_question_id`.
   - **FU-DB-67, the call-site allow-list.** It covers:
-    - `runSystem`, `runInOrg` and `runRawSql`;
+    - `runSystem`, `runInOrg` and `runRawSql`, including the `runInOrg` pre-read in `CandidateSessionGuard` (DL-31);
     - the two session entries;
     - `exit`, `enterWith`, `disable` and `detachForSessionJob`;
     - the eleven CS-4.4 grant sites, with the candidate-facts setter;
     - the advisory-lock raw call site;
-    - `guardLive` and `lockForAccommodation`, each limited to its writers, with the lock order: advisory lock, then `sessions`, then `invitations`.
+    - `guardLive` and `lockForAccommodation`, each limited to its writers, with the lock order: advisory lock, then `sessions`, then `invitations`;
+    - `withLiveSession` and `withAnySession`, only in `SessionJobProcessor`.
 
     Update the FU-DB-67 row in docs/followups/database.md to match.
   - **Second client.** Build the candidate-write datasource:

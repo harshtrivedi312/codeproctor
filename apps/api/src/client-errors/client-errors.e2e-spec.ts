@@ -1,5 +1,6 @@
 import { request as httpRequest } from 'node:http';
 import type { Server } from 'node:http';
+import { connect } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { gzipSync } from 'node:zlib';
 import { INestApplication } from '@nestjs/common';
@@ -118,12 +119,14 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
       event: 'client_error',
       level: 'warn',
       reportedLevel: 'warn',
-      traceId: 'trace-client-err-1',
       userAgent: 'TestBrowser/1.0',
       route: '/candidate/session/[id]',
       release: 'web@1.0.0',
       url: 'https://app.example.test/candidate/s',
     });
+    // FU-BE-95: the inbound x-request-id is ignored on this public route.
+    expect(line['traceId']).toMatch(/^[0-9a-f-]{36}$/);
+    expect(res.headers['x-request-id']).toBe(line['traceId']);
     expect(String(line['message'])).toContain('Boom for');
     const dump = JSON.stringify(line);
     for (const secret of [
@@ -321,6 +324,14 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
   async function restart(env: Record<string, string>): Promise<void> {
     await app.close();
     applyEnv(infra, { ...MAIN_ENV, ...env });
+    // Throttle counters live in Redis and outlive an app (FU-BE-1): start each case empty.
+    const { Redis } = await import('ioredis');
+    const redis = new Redis(infra.redis.getConnectionUrl());
+    try {
+      await redis.flushall();
+    } finally {
+      redis.disconnect();
+    }
     ({ app, lines } = await createApp());
   }
 
@@ -383,5 +394,163 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
     });
     expect(status).toBe(408);
     delete process.env['CLIENT_ERROR_BODY_TIMEOUT_MS'];
+  });
+
+  it('C-32, FU-BE-100: rejected bodies (413, 415, 400) count against the per-IP budget, then 429', async () => {
+    await restart({ CLIENT_ERROR_THROTTLE_LIMIT: '4' });
+    const url = '/api/v1/client-errors';
+    await request(app.getHttpServer())
+      .post(url)
+      .send({ message: 'x'.repeat(20_000) })
+      .expect(413);
+    await request(app.getHttpServer())
+      .post(url)
+      .set('content-type', 'text/plain')
+      .send('hello')
+      .expect(415);
+    await request(app.getHttpServer())
+      .post(url)
+      .set('content-type', 'application/json')
+      .send('{"message": ')
+      .expect(400);
+    const chunked = await rawChunkedPost(app, url, [Buffer.alloc(20_000, 0x61)]);
+    expect(chunked.status).toBe(413);
+    const res = await request(app.getHttpServer()).post(url).send({ message: 'ok' }).expect(429);
+    expect(res.headers['content-type']).toMatch(/application\/problem\+json/);
+    expect(lines).toHaveLength(0);
+  });
+
+  it('C-32, FU-BE-100: rejected bodies count against the whole-instance budget', async () => {
+    await restart({ CLIENT_ERROR_THROTTLE_LIMIT: '100', CLIENT_ERROR_GLOBAL_LIMIT: '2' });
+    for (let i = 0; i < 2; i += 1) {
+      await request(app.getHttpServer())
+        .post('/api/v1/client-errors')
+        .send({ message: 'x'.repeat(20_000) })
+        .expect(413);
+    }
+    await request(app.getHttpServer())
+      .post('/api/v1/client-errors')
+      .send({ message: 'ok' })
+      .expect(429);
+  });
+
+  it('C-32, FU-BE-100: a body that arrives too slowly (408) is counted too', async () => {
+    await restart({ CLIENT_ERROR_BODY_TIMEOUT_MS: '300', CLIENT_ERROR_THROTTLE_LIMIT: '1' });
+    const server = app.getHttpServer() as unknown as Server;
+    if (server.address() === null) await new Promise<void>((resolve) => server.listen(0, resolve));
+    const { port } = server.address() as AddressInfo;
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/api/v1/client-errors',
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+        },
+        (res) => {
+          resolve(res.statusCode ?? 0);
+          res.resume();
+          req.destroy();
+        },
+      );
+      req.on('error', (e) => (e.message.includes('socket hang up') ? undefined : reject(e)));
+      req.write('{"message":"slow');
+    });
+    expect(status).toBe(408);
+    await request(app.getHttpServer())
+      .post('/api/v1/client-errors')
+      .send({ message: 'ok' })
+      .expect(429);
+    delete process.env['CLIENT_ERROR_BODY_TIMEOUT_MS'];
+  });
+
+  it('C-32, FU-BE-95: an inbound x-request-id is not the traceId of a rejected report either', async () => {
+    await restart({});
+    const res = await request(app.getHttpServer())
+      .post('/api/v1/client-errors')
+      .set('x-request-id', 'victim-trace-0001')
+      .send({ message: 'x'.repeat(20_000) })
+      .expect(413);
+    expect((res.body as ProblemDetails).traceId).not.toBe('victim-trace-0001');
+    expect(res.headers['x-request-id']).toBe((res.body as ProblemDetails).traceId);
+  });
+
+  it('C-32, FU-BE-100: a rejected report (declared 1 MB body, only the first chunk sent) is answered 413 with Connection: close before the body is read', async () => {
+    await restart({});
+    const server = app.getHttpServer() as unknown as Server;
+    if (server.address() === null) await new Promise<void>((resolve) => server.listen(0, resolve));
+    const { port } = server.address() as AddressInfo;
+    const total = 1024 * 1024;
+    const result = await new Promise<{ status: number; connection: string | undefined }>(
+      (resolve, reject) => {
+        // Only one chunk is written and the request is never ended: a server that closes with unread
+        // bytes still arriving would RST the connection and the client could lose the answer, which
+        // is a property of TCP, not of this route. The 413 must come from the declared length alone.
+        let answered = false;
+        const noAnswer = setTimeout(() => {
+          req.destroy();
+          reject(new Error('no response within 8 s'));
+        }, 8_000);
+        noAnswer.unref();
+        const req = httpRequest(
+          {
+            host: '127.0.0.1',
+            port,
+            path: '/api/v1/client-errors',
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'content-length': String(total) },
+          },
+          (res) => {
+            answered = true;
+            clearTimeout(noAnswer);
+            resolve({ status: res.statusCode ?? 0, connection: res.headers['connection'] });
+            res.on('error', () => undefined);
+            res.resume();
+            req.destroy();
+          },
+        );
+        req.on('error', (e) => {
+          if (!answered) {
+            clearTimeout(noAnswer);
+            reject(e);
+          }
+        });
+        // Under the 16 KB cap: only the declared length can explain the 413 (without that check the
+        // read deadline would answer 408 after 10 s).
+        req.write(Buffer.alloc(1024, 0x61));
+      },
+    );
+    expect(result.status).toBe(413);
+    expect(result.connection).toBe('close');
+  });
+
+  it('C-32, FU-BE-100: after a rejected report the server closes the connection (FIN after the 413, not a timeout)', async () => {
+    await restart({});
+    const server = app.getHttpServer() as unknown as Server;
+    if (server.address() === null) await new Promise<void>((resolve) => server.listen(0, resolve));
+    const { port } = server.address() as AddressInfo;
+    const started = Date.now();
+    const raw = await new Promise<string>((resolve, reject) => {
+      const socket = connect(port, '127.0.0.1');
+      let text = '';
+      socket.on('data', (d: Buffer) => {
+        text += d.toString('utf8');
+      });
+      // Headers only, no body bytes: the server has nothing unread, so it ends the connection with
+      // a clean FIN and the client can read the whole answer.
+      socket.on('end', () => resolve(text));
+      socket.on('close', () => resolve(text));
+      socket.on('error', reject);
+      socket.write(
+        'POST /api/v1/client-errors HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n' +
+          'Content-Length: 1048576\r\n\r\n',
+      );
+      setTimeout(() => socket.destroy(), 8_000).unref();
+    });
+    expect(raw.split('\r\n')[0]).toMatch(/^HTTP\/1\.1 413/);
+    expect(raw).toMatch(/connection: close/i);
+    // Well below the 10 s client-errors read deadline and the 30 s request timeout.
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 });

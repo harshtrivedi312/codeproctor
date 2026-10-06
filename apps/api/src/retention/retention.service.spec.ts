@@ -16,12 +16,7 @@ import type { TenantFixture } from '../database/testing/tenant-fixtures';
 import { LegalHoldPort, NoLegalHold } from './legal-hold.port';
 import { loadRetentionConfig } from './retention.config';
 import { RETENTION_MARKER_ACTIONS, sessionPrefix } from './retention.constants';
-import {
-  LIVE_STATUSES,
-  POST_CAPTURE_STATUSES,
-  RetentionRepository,
-  TERMINAL_TRANSITION_ACTIONS,
-} from './retention.repository';
+import { LIVE_STATUSES, POST_CAPTURE_STATUSES, RetentionRepository } from './retention.repository';
 import { ConsentRetentionRepository } from './consent-retention.repository';
 import { SessionStatus as SessionStatusEnum } from '../generated/prisma/enums.js';
 import { RetentionService } from './retention.service';
@@ -300,23 +295,48 @@ describe('RetentionService: face and media tiers (FR-704, NFR-05, TC-072)', () =
         expect((await build().service.runDaily(NOW)).face.completed).toBe(2);
       });
 
-      it('no capture at all: the first terminal transition decides, not the creation time', async () => {
-        await setup(A, { submittedDaysAgo: null, mismatchEvent: false, status: 'EXPIRED' });
+      it('no capture at all: the first terminal time (the anchor BE-07 stamps) decides, not the creation time', async () => {
+        await setup(A, {
+          submittedDaysAgo: null,
+          mismatchEvent: false,
+          status: 'EXPIRED',
+          anchorDaysAgo: 10,
+        });
         const sessionId = sessionIdOf(A);
         await owner.identityCheck.deleteMany({ where: { sessionId } });
-        const [action] = TERMINAL_TRANSITION_ACTIONS;
-        const row = await owner.auditLog.create({
-          data: {
-            orgId: A.orgId,
-            action: action ?? 'x',
-            entityType: 'session',
-            entityId: sessionId,
-            createdAt: daysAgo(10),
-          },
-        });
         expect((await build().service.runDaily(NOW)).face.due).toBe(0); // expired 10 days ago, created 1000
-        await owner.auditLog.update({ where: { id: row.id }, data: { createdAt: daysAgo(95) } });
+        await owner.session.update({
+          where: { id: sessionId },
+          data: { retentionAnchorAt: daysAgo(95) },
+        });
         expect((await build().service.runDaily(NOW)).face.completed).toBe(1);
+      });
+
+      it('FR-704, TC-072: a capture wins over the anchor when both exist (the order of the fallbacks is pinned)', async () => {
+        // Capture 95 days ago, anchor 10 days ago: due (the capture decides).
+        await setup(A, { submittedDaysAgo: null, status: 'EXPIRED', anchorDaysAgo: 10 });
+        const sessionId = sessionIdOf(A);
+        await owner.identityCheck.updateMany({
+          where: { sessionId },
+          data: { createdAt: daysAgo(95) },
+        });
+        await owner.proctorEvent.updateMany({
+          where: { sessionId, type: 'FACE_MISMATCH' },
+          data: { occurredAt: daysAgo(95) },
+        });
+        expect((await build().service.runDaily(NOW)).face.completed).toBe(1);
+        // Capture 10 days ago, anchor 95 days ago: not due (the capture still decides).
+        await setup(B, { submittedDaysAgo: null, status: 'EXPIRED', anchorDaysAgo: 95 });
+        const other = sessionIdOf(B);
+        await owner.identityCheck.updateMany({
+          where: { sessionId: other },
+          data: { createdAt: daysAgo(10) },
+        });
+        await owner.proctorEvent.updateMany({
+          where: { sessionId: other, type: 'FACE_MISMATCH' },
+          data: { occurredAt: daysAgo(10) },
+        });
+        expect((await build().service.runDaily(NOW)).face.due).toBe(0);
       });
 
       it('nothing else: the creation time is the last fallback', async () => {

@@ -17,6 +17,7 @@ import { ConfigService } from '@nestjs/config';
 import type { Redis } from 'ioredis';
 import { CodedHttpException } from '../common/coded.exception';
 import { sessionNotActive } from '../session/session-write-gate';
+import { CandidateScope } from '../candidate/candidate-scope';
 import type { CandidateContext } from '../candidate/candidate.types';
 import type { Env } from '../config/env';
 import { PrismaService } from '../database/prisma.service';
@@ -70,6 +71,7 @@ export class MediaService {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly scope: CandidateScope,
     private readonly storage: StorageService,
     private readonly config: ConfigService<Env, true>,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
@@ -90,11 +92,11 @@ export class MediaService {
       // The DTO already refuses these; this keeps the rule beside the signing call.
       throw new BadRequestException('The chunk size or type is not allowed for this stream.');
     }
-    const startedAt = clamp(req.startedAt, session.startedAt ?? session.createdAt, now);
+    const startedAt = clamp(req.startedAt, await this.clampFloor(ctx, session), now);
     const scope = { orgId: ctx.orgId, sessionId: ctx.sessionId };
     const key = mediaChunkKey(scope, req.stream, req.segment, req.seq);
 
-    const existing = await this.findRow(ctx.sessionId, req.stream, req.seq);
+    const existing = await this.findRow(ctx, req.stream, req.seq);
     if (existing !== null) {
       // The same (stream, seq) under another segment: the client's counters are wrong (OI-9).
       if (existing.segment !== req.segment) throw seqConflict();
@@ -108,24 +110,28 @@ export class MediaService {
 
     if (existing === null) {
       try {
-        await this.prisma.client.mediaChunk.create({
-          data: {
-            sessionId: ctx.sessionId,
-            stream: req.stream,
-            segment: req.segment,
-            seq: req.seq,
-            objectKey: key,
-            startedAt,
-            durationMs: req.durationMs,
-            // Pending: size_bytes holds the declared size until confirm sets the verified one.
-            sizeBytes: BigInt(req.bytes),
-          },
-          select: { id: true },
-        });
+        // Candidate scope: media_chunks create is on the CS-4.4 write allowlist, and the scope checks
+        // that object_key is this session's media key for this stream, segment and seq.
+        await this.scope.asCandidate(ctx, () =>
+          this.prisma.client.mediaChunk.create({
+            data: {
+              sessionId: ctx.sessionId,
+              stream: req.stream,
+              segment: req.segment,
+              seq: req.seq,
+              objectKey: key,
+              startedAt,
+              durationMs: req.durationMs,
+              // Pending: size_bytes holds the declared size until confirm sets the verified one.
+              sizeBytes: BigInt(req.bytes),
+            },
+            select: { id: true },
+          }),
+        );
       } catch (e) {
         if (!isUniqueViolation(e)) throw e;
         // Two presigns raced for the same chunk: the other one won; judge it as a retry.
-        const winner = await this.findRow(ctx.sessionId, req.stream, req.seq);
+        const winner = await this.findRow(ctx, req.stream, req.seq);
         this.log('presign', ctx, req, 'race');
         if (winner === null || winner.segment !== req.segment) throw seqConflict();
         if (winner.uploadedAt !== null) return { alreadyUploaded: true };
@@ -164,8 +170,8 @@ export class MediaService {
     const session = await this.loadSession(ctx);
     this.assertState(session, ref.stream, now);
 
-    const row = await this.findRow(ctx.sessionId, ref.stream, ref.seq);
-    if (row === null || row.segment !== ref.segment || row.objectKey === null) {
+    const row = await this.findRow(ctx, ref.stream, ref.seq);
+    if (row === null || row.segment !== ref.segment) {
       throw new CodedHttpException(
         HttpStatus.NOT_FOUND,
         'This chunk was not presigned. Presign it first.',
@@ -176,7 +182,15 @@ export class MediaService {
       return { uploaded: true, sizeBytes: Number(row.sizeBytes ?? 0n) };
     }
 
-    const head = await this.guardStorage(() => this.storage.head(row.objectKey as string));
+    // object_key is not readable in candidate scope (CS-4.4). The key is deterministic, so it is
+    // rebuilt from the context and the verified stream, segment and seq, never read or sent.
+    const objectKey = mediaChunkKey(
+      { orgId: ctx.orgId, sessionId: ctx.sessionId },
+      ref.stream,
+      ref.segment,
+      ref.seq,
+    );
+    const head = await this.guardStorage(() => this.storage.head(objectKey));
     if (head === null) {
       this.log('confirm', ctx, ref, 'not-found');
       throw new CodedHttpException(
@@ -195,7 +209,7 @@ export class MediaService {
     if (!typeOk || !sizeOk) {
       // A wrong object is removed so it can never be mistaken for the chunk; the row stays pending
       // and the client presigns again.
-      await this.guardStorage(() => this.storage.delete(row.objectKey as string));
+      await this.guardStorage(() => this.storage.delete(objectKey));
       this.log('confirm', ctx, ref, 'mismatch');
       throw new CodedHttpException(
         HttpStatus.UNPROCESSABLE_ENTITY,
@@ -205,10 +219,12 @@ export class MediaService {
     }
 
     // Compare-and-set on the pending state: two confirms cannot both claim it.
-    await this.prisma.client.mediaChunk.updateMany({
-      where: { id: row.id, sessionId: ctx.sessionId, uploadedAt: null },
-      data: { uploadedAt: now, sizeBytes: BigInt(head.sizeBytes) },
-    });
+    await this.scope.asCandidate(ctx, () =>
+      this.prisma.client.mediaChunk.updateMany({
+        where: { id: row.id, sessionId: ctx.sessionId, uploadedAt: null },
+        data: { uploadedAt: now, sizeBytes: BigInt(head.sizeBytes) },
+      }),
+    );
     if (head.etag !== null) await this.rememberEtag(ctx.sessionId, ref, head.etag);
     this.log('confirm', ctx, ref, 'uploaded');
     return { uploaded: true, sizeBytes: head.sizeBytes };
@@ -226,23 +242,43 @@ export class MediaService {
     }
   }
 
-  /** The session as it is now: the context status may be a few requests old. */
+  /**
+   * The session as it is now (the context status may be a few requests old). Candidate scope, CS-4.4
+   * readable columns only: createdAt is not one of them, see clampFloor.
+   */
   private async loadSession(ctx: CandidateContext): Promise<SessionFacts> {
-    const session = await this.prisma.client.session.findUnique({
-      where: { id: ctx.sessionId },
-      select: {
-        status: true,
-        submittedAt: true,
-        startedAt: true,
-        deadlineAt: true,
-        pausedMs: true,
-        proctorPausedAt: true,
-        pauseReasons: true,
-        createdAt: true,
-      },
-    });
+    const session = await this.scope.asCandidate(ctx, () =>
+      this.prisma.client.session.findUnique({
+        where: { id: ctx.sessionId },
+        select: {
+          status: true,
+          submittedAt: true,
+          startedAt: true,
+          deadlineAt: true,
+          pausedMs: true,
+          proctorPausedAt: true,
+          pauseReasons: true,
+        },
+      }),
+    );
     if (session === null) throw sessionNotActive(ctx.status);
     return session;
+  }
+
+  /**
+   * The earliest startedAt a chunk may claim: the session start, or before it starts (ROOM_SCAN) the
+   * session's creation time. sessions.created_at is not readable by a candidate, so that one column
+   * is read in a plain org scope, one step after the candidate scope has closed.
+   */
+  private async clampFloor(ctx: CandidateContext, session: SessionFacts): Promise<Date> {
+    if (session.startedAt !== null) return session.startedAt;
+    const row = await this.scope.asOrg(ctx, () =>
+      this.prisma.client.session.findUnique({
+        where: { id: ctx.sessionId },
+        select: { createdAt: true },
+      }),
+    );
+    return row?.createdAt ?? new Date(0);
   }
 
   private assertState(session: SessionFacts, stream: MediaStream, now: Date): void {
@@ -259,11 +295,14 @@ export class MediaService {
     throw sessionNotActive(session.status);
   }
 
-  private findRow(sessionId: string, stream: MediaStream, seq: number) {
-    return this.prisma.client.mediaChunk.findUnique({
-      where: { sessionId_stream_seq: { sessionId, stream, seq } },
-      select: { id: true, segment: true, objectKey: true, sizeBytes: true, uploadedAt: true },
-    });
+  /** Readable columns only: object_key is explicit-only in candidate scope (CS-4.4). */
+  private findRow(ctx: CandidateContext, stream: MediaStream, seq: number) {
+    return this.scope.asCandidate(ctx, () =>
+      this.prisma.client.mediaChunk.findUnique({
+        where: { sessionId_stream_seq: { sessionId: ctx.sessionId, stream, seq } },
+        select: { id: true, segment: true, sizeBytes: true, uploadedAt: true },
+      }),
+    );
   }
 
   /** A retry re-declares the chunk; only a pending row is touched (compare-and-set). */
@@ -273,22 +312,24 @@ export class MediaService {
     startedAt: Date,
     key: string,
   ): Promise<void> {
-    await this.prisma.client.mediaChunk.updateMany({
-      where: {
-        sessionId: ctx.sessionId,
-        stream: req.stream,
-        seq: req.seq,
-        segment: req.segment,
-        uploadedAt: null,
-      },
-      data: {
-        objectKey: key,
-        startedAt,
-        durationMs: req.durationMs,
-        sizeBytes: BigInt(req.bytes),
-        deletedAt: null,
-      },
-    });
+    await this.scope.asCandidate(ctx, () =>
+      this.prisma.client.mediaChunk.updateMany({
+        where: {
+          sessionId: ctx.sessionId,
+          stream: req.stream,
+          seq: req.seq,
+          segment: req.segment,
+          uploadedAt: null,
+        },
+        // deleted_at is not on the candidate write allowlist: only the sweep sets or clears it.
+        data: {
+          objectKey: key,
+          startedAt,
+          durationMs: req.durationMs,
+          sizeBytes: BigInt(req.bytes),
+        },
+      }),
+    );
   }
 
   /**
@@ -307,10 +348,13 @@ export class MediaService {
     if (session.startedAt !== null && session.deadlineAt !== null) {
       let capMs = 0;
       if (session.pauseReasons.includes('PROCTOR')) {
-        const org = await this.prisma.client.organization.findUnique({
-          where: { id: ctx.orgId },
-          select: { settings: true },
-        });
+        // organizations.settings is explicit-only in candidate scope: read it in a plain org scope.
+        const org = await this.scope.asOrg(ctx, () =>
+          this.prisma.client.organization.findUnique({
+            where: { id: ctx.orgId },
+            select: { settings: true },
+          }),
+        );
         capMs = proctorPauseCapMs(org?.settings);
       }
       const deadline = effectiveSessionDeadline(session, now, capMs) ?? session.deadlineAt;
@@ -389,7 +433,6 @@ interface SessionFacts {
   readonly pausedMs: bigint;
   readonly proctorPausedAt: Date | null;
   readonly pauseReasons: readonly PauseReason[];
-  readonly createdAt: Date;
 }
 
 function clamp(value: Date, min: Date, max: Date): Date {

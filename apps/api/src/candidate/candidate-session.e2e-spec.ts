@@ -940,10 +940,60 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const inv = await invite({ status: 'OPENED' }, bare);
       const token = tokens.sign({ sid: inv.sessionId, oid: bare.orgId, epoch: 0 }).token;
       await authed('get', '/consent', token)
-        .expect(409)
+        .expect(503)
         .expect((r) => expect(r.body).toMatchObject({ code: 'CONSENT_NOT_CONFIGURED' }));
       await authed('post', '/consent/decline', token).expect(200);
       expect((await sessionRow(inv.sessionId)).status).toBe('DECLINED');
+    });
+
+    it('FR-401, hub item 9: a missing current consent text is a 503 configuration fault (CONSENT_NOT_CONFIGURED), not the 409 of a stale page', async () => {
+      const bare = await createTenant(owner, 'bare2');
+      await owner.organization.update({
+        where: { id: bare.orgId },
+        data: { currentConsentTextId: null },
+      });
+      const inv = await invite({ status: 'OPENED' }, bare);
+      const token = tokens.sign({ sid: inv.sessionId, oid: bare.orgId, epoch: 0 }).token;
+      const res = await authed('post', '/consent/sign', token, {
+        consentTextId: bare.consentTextId,
+        signedName: 'Ada Lovelace',
+        confirmedAge18: true,
+      });
+      expect(res.status).toBe(503);
+      expect(res.body).toMatchObject({ code: 'CONSENT_NOT_CONFIGURED' });
+      expect(await owner.consent.count({ where: { sessionId: inv.sessionId } })).toBe(0);
+      expect((await sessionRow(inv.sessionId)).status).toBe('OPENED');
+      // The same body against a configured org is the mismatch: 409 CONSENT_TEXT_CHANGED.
+      const ok = await invite({ status: 'OPENED' });
+      const okToken = tokens.sign({ sid: ok.sessionId, oid: tenant.orgId, epoch: 0 }).token;
+      const stale = await authed('post', '/consent/sign', okToken, {
+        consentTextId: bare.consentTextId,
+        signedName: 'Ada Lovelace',
+        confirmedAge18: true,
+      });
+      expect(stale.status).toBe(409);
+      expect(stale.body).toMatchObject({ code: 'CONSENT_TEXT_CHANGED' });
+    });
+
+    it('FR-401, hub item 9: the create is write-once; a second row is 409 ALREADY_SIGNED without sessionStatus and rolls the status back', async () => {
+      const inv = await invite({ status: 'OPENED' });
+      await owner.consent.create({
+        data: {
+          sessionId: inv.sessionId,
+          consentTextId: tenant.consentTextId,
+          declinedAt: new Date(),
+        },
+      });
+      const token = tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch: 0 }).token;
+      const res = await authed('post', '/consent/sign', token, {
+        consentTextId: tenant.consentTextId,
+        signedName: 'Ada Lovelace',
+        confirmedAge18: true,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: 'ALREADY_SIGNED' });
+      expect(res.body).not.toHaveProperty('sessionStatus');
+      expect((await sessionRow(inv.sessionId)).status).toBe('OPENED');
     });
 
     it('D-17, ADR 0007 section 6: with REQUIRE_LEGAL_APPROVED_CONSENT an unapproved text is not served and cannot be signed', async () => {
@@ -1169,6 +1219,76 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         expect(new Set(versions).size).toBe(versions.length);
         expect(picked).toHaveLength(1);
       }
+    });
+
+    it('FR-203, FU-BE-154: nested random rules that the save-time check accepts always start (exact matching, not greedy)', async () => {
+      const t = await createTenant(owner, 'nest');
+      // Only two questions match {tags:[arrays]}; only one of them also has x. Greedy picking
+      // fails for the first slot half the time; the matching never does.
+      const [p1, p2, p3] = t.test.randomPoolVersionIds;
+      const tagOf = async (versionId: string | undefined, tags: string[]): Promise<void> => {
+        const v = await owner.questionVersion.findUniqueOrThrow({
+          where: { id: versionId as string },
+        });
+        await owner.question.update({ where: { id: v.questionId }, data: { tags } });
+      };
+      await tagOf(p1, ['arrays']);
+      await tagOf(p2, ['arrays', 'x']);
+      await tagOf(p3, ['other']);
+      // Slots: two random ones in section 1 and none fixed.
+      await owner.testQuestion.deleteMany({
+        where: { id: { in: [t.test.testQuestionIds[0], t.test.testQuestionIds[2]] } },
+      });
+      await owner.testQuestion.update({
+        where: { id: t.test.testQuestionIds[1] },
+        data: { randomRule: { tags: ['arrays'] } },
+      });
+      await owner.testQuestion.create({
+        data: {
+          sectionId: t.test.sectionIds[0],
+          randomRule: { tags: ['arrays', 'x'] },
+          points: 10,
+          position: 3,
+        },
+      });
+      for (let i = 0; i < 14; i++) {
+        const inv = await invite(verified(), t);
+        await authed('post', '/test/start', tokenFor(inv, t)).expect(200);
+        const rows = await owner.sessionQuestion.findMany({
+          where: { sessionId: inv.sessionId },
+          orderBy: { position: 'asc' },
+        });
+        expect(rows.map((r) => r.questionVersionId)).toEqual([p1, p2]);
+      }
+    });
+
+    it('FR-203: rules that nothing can serve together still fail the start with 409 RANDOM_RULE_UNSATISFIABLE', async () => {
+      const t = await createTenant(owner, 'nest2');
+      const v = await owner.questionVersion.findUniqueOrThrow({
+        where: { id: t.test.randomPoolVersionIds[0] as string },
+      });
+      for (const id of t.test.randomPoolVersionIds.slice(1)) {
+        const other = await owner.questionVersion.findUniqueOrThrow({ where: { id } });
+        await owner.question.update({ where: { id: other.questionId }, data: { tags: ['other'] } });
+      }
+      // One question matches {tags:[arrays]}, and two slots want it.
+      await owner.testQuestion.deleteMany({
+        where: { id: { in: [t.test.testQuestionIds[0], t.test.testQuestionIds[2]] } },
+      });
+      await owner.testQuestion.create({
+        data: {
+          sectionId: t.test.sectionIds[0],
+          randomRule: { tags: ['arrays'] },
+          points: 10,
+          position: 3,
+        },
+      });
+      expect(v.questionId).toBeTruthy();
+      const inv = await invite(verified(), t);
+      const res = await authed('post', '/test/start', tokenFor(inv, t));
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: 'RANDOM_RULE_UNSATISFIABLE' });
+      expect((await sessionRow(inv.sessionId)).status).toBe('VERIFIED');
     });
 
     it('FR-203: a random rule nothing matches fails the start cleanly and leaves the session VERIFIED', async () => {
@@ -1731,8 +1851,12 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     ]) {
       expect(schemas).toContain(name);
     }
-    const text = JSON.stringify(doc.paths);
-    expect(text).not.toContain('params');
+    const text = JSON.stringify(
+      Object.entries(doc.paths).filter(([path]) => path.startsWith(prefix)),
+    );
+    expect(text).not.toContain('variantId');
+    expect(text).not.toContain('"params"');
+    expect(text).not.toContain('hmacKeyEnc');
   });
 
   // ---------- review fixes ----------
@@ -1909,6 +2033,33 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       }
     });
 
+    it('Q17: review and outcome statuses read SUBMITTED on the state route, in problem bodies and in the start response; EXPIRED and DECLINED are shown as they are', async () => {
+      for (const status of ['GRADED', 'UNDER_REVIEW', 'COMPLETED', 'APPEALED'] as SessionStatus[]) {
+        const inv = await invite({ status, session: { authEpoch: 1 } });
+        const token = tokenFor(inv);
+        const state = await authed('get', '', token).expect(200);
+        expect(state.body).toMatchObject({ status: 'SUBMITTED' });
+        const beat = await authed('post', '/heartbeat', token);
+        expect(beat.status).toBe(409);
+        expect(beat.body).toMatchObject({ code: 'SESSION_NOT_ACTIVE', sessionStatus: 'SUBMITTED' });
+        const key = await authed('post', '/proctor-key', token);
+        expect(key.body).toMatchObject({ code: 'SESSION_NOT_ACTIVE', sessionStatus: 'SUBMITTED' });
+        const start = await authed('post', '/test/start', token);
+        expect(start.body).toMatchObject({
+          code: 'SESSION_STATE_CONFLICT',
+          sessionStatus: 'SUBMITTED',
+        });
+        expect(JSON.stringify([state.body, beat.body, key.body, start.body])).not.toMatch(
+          /GRADED|UNDER_REVIEW|COMPLETED|APPEALED/,
+        );
+      }
+      for (const status of ['EXPIRED', 'DECLINED'] as SessionStatus[]) {
+        const inv = await invite({ status, session: { authEpoch: 1 } });
+        const state = await authed('get', '', tokenFor(inv)).expect(200);
+        expect(state.body).toMatchObject({ status });
+      }
+    });
+
     it('FR-609: if RECONNECTED cannot be queued the marker stays and the next beat retries; it is queued once', async () => {
       const inv = await invite(liveSession({ lastHeartbeat: new Date(Date.now() - 95_000) }));
       await jobs.discoverDisconnected();
@@ -1985,7 +2136,16 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       readonly op: string;
       readonly json: string;
       readonly scope: string;
+      /** ORG (plain org scope), CANDIDATE, SERVICE or SYSTEM. */
+      readonly actor: string;
+      /** The caller of the request this query belongs to (null for the forged-token probes). */
+      readonly subject: InvitationFixture | null;
+      /** Were the candidate facts already set when this query ran? */
+      readonly facts: boolean;
     }
+
+    // Set before each request of the test below: whose token the queries that follow belong to.
+    let subjectOfRequest: InvitationFixture | null = null;
 
     /** Wraps prisma.client so every model call made by a request (not a job) is recorded. */
     async function record(run: () => Promise<void>): Promise<Call[]> {
@@ -2012,6 +2172,9 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
                     typeof v === 'bigint' ? v.toString() : v,
                   ),
                   scope: scope?.kind === 'system' ? `system:${scope.reason}` : 'org',
+                  actor: scope?.kind === 'system' ? 'SYSTEM' : (scope?.session?.actor ?? 'ORG'),
+                  facts: orgContext.candidateFacts() !== undefined,
+                  subject: subjectOfRequest,
                 });
               }
               return (fn as Fn).apply(t, a);
@@ -2102,10 +2265,10 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         data: { hmacKeyEnc: keys.generateWrapped(live.sessionId) },
       });
       const mine = [preToken, opened, declining, verified, live];
-      const hdr = (inv: InvitationFixture) => tokenFor(inv);
-      function tokenFor(inv: InvitationFixture): string {
+      const hdr = (inv: InvitationFixture): string => {
+        subjectOfRequest = inv;
         return tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch: 1 }).token;
-      }
+      };
       const snapshot = async () => ({
         sessions: await owner.session.findMany({
           where: { id: { in: [bSame.sessionId, bOther.sessionId, bOpened.sessionId] } },
@@ -2125,6 +2288,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
 
       const calls = await record(async () => {
         // Pre-token routes, with a wrong guess and the right code.
+        subjectOfRequest = preToken;
         await post('/link', { invitationToken: preToken.token }).expect(200);
         const code = await otpFor(preToken);
         await post('/start', { invitationToken: preToken.token, otp: wrongCode(code) }).expect(400);
@@ -2156,6 +2320,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         await authed('post', '/heartbeat', hdr(live)).expect(200);
         await authed('post', '/proctor-key', hdr(live), { sessionId: bSame.sessionId }).expect(200);
         // A token naming another session's id with this org (and the reverse) reads nothing of it.
+        subjectOfRequest = null;
         await authed(
           'get',
           '',
@@ -2169,7 +2334,6 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       });
 
       expect(calls.length).toBeGreaterThan(30);
-      const all = calls.map((c) => `${c.model}.${c.op} ${c.json}`);
       // 1. No query names any id or token of the other sessions or of the other org, anywhere.
       //    The two 401 probes above carry the foreign ids in the TOKEN and are expected to
       //    query the session by that id inside the token's own org only: they are the one allowed
@@ -2182,6 +2346,10 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
           [...probeSessionIds].some((id) => c.json.includes(id)),
       );
       expect(probeCalls).toHaveLength(2);
+      // The probes are token lookups in the plain org scope of the token's own org, for no subject.
+      for (const c of probeCalls) {
+        expect([c.subject, c.scope, c.actor]).toEqual([null, 'org', 'ORG']);
+      }
       const rest = calls.filter((c) => !probeCalls.includes(c));
       for (const c of rest) {
         for (const id of forbidden) expect(`${c.model}.${c.op} ${c.json}`).not.toContain(id);
@@ -2198,9 +2366,6 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         'mediaChunk',
         'identityCheck',
       ];
-      const mineSessions = mine.map((m) => m.sessionId);
-      const mineInvitations = mine.map((m) => m.invitationId);
-      const mineCandidates = mine.map((m) => m.candidateId);
       const mine1 = (c: Call, ids: string[]): boolean => ids.some((id) => c.json.includes(id));
       const sectionIds = [...tenant.test.sectionIds];
       const contentIds = [...tenant.test.fixedVersionIds, ...tenant.test.randomPoolVersionIds];
@@ -2212,15 +2377,21 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
           expect(c.json).toContain(sha256Hex(preToken.token));
           continue;
         }
+        // The ids of THIS request's token session, not of any session of the test.
+        const own = c.subject;
+        if (own === null) throw new Error(`a query outside a known request: ${label}`);
         if (sessionScoped.includes(c.model)) {
-          expect([c.model, mine1(c, [...mineSessions, ...mineInvitations])]).toEqual([
-            c.model,
-            true,
-          ]);
+          expect([label, mine1(c, [own.sessionId, own.invitationId])]).toEqual([label, true]);
+          for (const m of mine.filter((x) => x !== own)) {
+            expect([label, mine1(c, [m.sessionId, m.invitationId, m.candidateId])]).toEqual([
+              label,
+              false,
+            ]);
+          }
         } else if (c.model === 'invitation')
-          expect([label, mine1(c, mineInvitations)]).toEqual([label, true]);
+          expect([label, mine1(c, [own.invitationId])]).toEqual([label, true]);
         else if (c.model === 'candidate')
-          expect([label, mine1(c, mineCandidates)]).toEqual([label, true]);
+          expect([label, mine1(c, [own.candidateId])]).toEqual([label, true]);
         else if (c.model === 'test')
           expect([label, c.json.includes(tenant.test.id)]).toEqual([label, true]);
         else if (c.model === 'organization')
@@ -2241,10 +2412,227 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         else if (c.model === 'question')
           expect([label, c.json.includes('isArchived')]).toEqual([label, true]); // random-rule scan, org scope by the extension
         else throw new Error(`unreviewed model in a candidate route: ${label}`);
-        expect(all.length).toBeGreaterThan(0);
       }
+      // 4. CS-4 scope adoption (DL-31). Every candidate-scope query ran after the facts were set,
+      //    names only readable columns, and none of the org-scope-only data is touched there.
+      const inCandidate = rest.filter((c) => c.actor === 'CANDIDATE');
+      expect(inCandidate.length).toBeGreaterThan(8);
+      for (const c of inCandidate) {
+        expect([`${c.model}.${c.op}`, c.facts]).toEqual([`${c.model}.${c.op}`, true]);
+        expect([
+          'session',
+          'sessionSection',
+          'consent',
+          'organization',
+          'proctorEventBatch',
+          'keystrokeBatch',
+          'mediaChunk',
+        ]).toContain(c.model);
+        expect(c.json).not.toMatch(
+          /hmacKeyEnc|deviceInfo|accommodations|settings|objectKey|invitationId|testQuestionId/,
+        );
+        if (c.model === 'session' && ['update', 'updateMany'].includes(c.op)) {
+          // The only write a candidate scope makes on sessions: last_heartbeat.
+          expect(c.json).toContain('lastHeartbeat');
+          expect(c.json).not.toMatch(/status|authEpoch|submittedAt|pauseReasons/);
+        }
+        expect(['create', 'createMany', 'delete', 'deleteMany', 'upsert']).not.toContain(c.op);
+      }
+      // The data a candidate scope may not read or write is only touched in the org scope.
+      const orgOnly = rest.filter((c) => c.actor !== 'CANDIDATE' && c.actor !== 'SYSTEM');
+      for (const c of rest.filter(
+        (x) =>
+          [
+            'consentText',
+            'testQuestion',
+            'questionVersion',
+            'questionVariant',
+            'auditLog',
+            'testSection',
+          ].includes(x.model) ||
+          (x.model === 'consent' && x.op === 'create'),
+      )) {
+        expect([`${c.model}.${c.op}`, c.actor]).toEqual([`${c.model}.${c.op}`, 'ORG']);
+      }
+      expect(orgOnly.length).toBeGreaterThan(5);
+      // The guard's first step: column-only reads in a plain org scope (never accommodations).
+      const step1 = rest.filter(
+        (c) =>
+          c.actor === 'ORG' && c.model === 'invitation' && c.json.includes('"candidateId":true'),
+      );
+      expect(step1.length).toBeGreaterThanOrEqual(9);
+      for (const c of step1) expect(c.json).not.toContain('accommodations');
+      // A guarded request makes its guard queries (org scope, then candidate scope) before the
+      // handler's: the first query of a request is never in a candidate scope without facts.
+      expect(rest.filter((c) => c.actor === 'CANDIDATE' && !c.facts)).toEqual([]);
+
       // 3. Nothing of the other sessions was read or written.
       expect(await snapshot()).toEqual(before);
+    });
+  });
+
+  // ---------- cross-candidate isolation, same org (TC-008 style) ----------
+
+  describe('cross-candidate isolation inside one org (TC-008, ADR 0013 section 5.10, P-24)', () => {
+    it("TC-008, CS-1, CS-2: with candidate A's tokens on every candidate route, nothing of candidate B (same org) is read or changed, and no response carries a B value", async () => {
+      const B_SIGNED_NAME = 'Beatrice Zzyzx-Marker';
+      const B_ACCOMMODATION = 4242;
+      const B_DEVICE = 'B-DEVICE-INFO-MARKER';
+      const b = await invite({
+        ...liveSession({ deviceInfo: { marker: B_DEVICE, ...passedSystemCheck() } }),
+        accommodations: { extraTimePct: B_ACCOMMODATION, notes: 'B-PRIVATE-NOTE' },
+        email: 'beatrice-marker@example.test',
+      });
+      const bWrapped = keys.generateWrapped(b.sessionId);
+      await owner.session.update({ where: { id: b.sessionId }, data: { hmacKeyEnc: bWrapped } });
+      await owner.invitation.update({
+        where: { id: b.invitationId },
+        data: { usedAt: new Date() },
+      });
+      await owner.consent.create({
+        data: {
+          sessionId: b.sessionId,
+          consentTextId: tenant.consentTextId,
+          signedName: B_SIGNED_NAME,
+          signedAt: new Date(),
+          ip: '198.51.100.7',
+          userAgent: 'B-UA-MARKER',
+        },
+      });
+      await owner.sessionSection.create({
+        data: {
+          sessionId: b.sessionId,
+          sectionId: tenant.test.sectionIds[0],
+          position: 1,
+          startedAt: new Date(),
+          deadlineAt: new Date(Date.now() + 600_000),
+        },
+      });
+      await redis.set(`pkey:${b.sessionId}:1`, '1', 'EX', 3600);
+      await redis.set(`disc:${b.sessionId}`, '1', 'EX', 3600);
+
+      const snapshotB = async () => ({
+        session: await owner.session.findUniqueOrThrow({ where: { id: b.sessionId } }),
+        invitation: await owner.invitation.findUniqueOrThrow({ where: { id: b.invitationId } }),
+        consent: await owner.consent.findUniqueOrThrow({ where: { sessionId: b.sessionId } }),
+        sections: await owner.sessionSection.findMany({ where: { sessionId: b.sessionId } }),
+        questions: await owner.sessionQuestion.count({ where: { sessionId: b.sessionId } }),
+        events: await owner.proctorEvent.count({ where: { sessionId: b.sessionId } }),
+        markers: [
+          await redis.get(`pkey:${b.sessionId}:1`),
+          await redis.get(`disc:${b.sessionId}`),
+          await redis.exists(`otp:${b.invitationId}`),
+          await redis.exists(`otp-cooldown:${b.invitationId}`),
+        ],
+      });
+      const before = await snapshotB();
+
+      // A's sessions: one per phase, all in the same org as B.
+      const a0 = await invite();
+      const a1 = await invite({ status: 'OPENED', session: { authEpoch: 1 } });
+      const a2 = await invite({ status: 'OPENED', session: { authEpoch: 1 } });
+      const a3 = await invite({
+        status: 'VERIFIED',
+        session: { authEpoch: 1, deviceInfo: passedSystemCheck() },
+      });
+      const a4 = await invite(liveSession());
+      await owner.session.update({
+        where: { id: a4.sessionId },
+        data: { hmacKeyEnc: keys.generateWrapped(a4.sessionId) },
+      });
+      const t = (inv: InvitationFixture): string =>
+        tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch: 1 }).token;
+      const bodies: string[] = [];
+      const keep = (r: request.Response): request.Response => {
+        bodies.push(JSON.stringify(r.body) + JSON.stringify(r.headers));
+        return r;
+      };
+      const naming = {
+        sessionId: b.sessionId,
+        invitationId: b.invitationId,
+        candidateId: b.candidateId,
+      };
+
+      // Pre-token routes with A's own link.
+      keep(await post('/link', { invitationToken: a0.token }).expect(200));
+      const code = await otpFor(a0);
+      keep(await post('/start', { invitationToken: a0.token, otp: code }).expect(200));
+      // B's link and token inside A's requests are refused or ignored: unknown keys are 400.
+      keep(await post('/link', { invitationToken: a0.token, ...naming }).expect(400));
+      // Every guarded route with A's token, plus a body that names B's ids.
+      keep(await authed('get', '', t(a1)).expect(200));
+      keep(await authed('get', '/consent', t(a1)).expect(200));
+      expect(
+        keep(
+          await authed('post', '/consent/sign', t(a1), {
+            consentTextId: tenant.consentTextId,
+            signedName: 'Ada Lovelace',
+            confirmedAge18: true,
+            ...naming,
+          }),
+        ).status,
+      ).toBe(400);
+      keep(
+        await authed('post', '/consent/sign', t(a1), {
+          consentTextId: tenant.consentTextId,
+          signedName: 'Ada Lovelace',
+          confirmedAge18: true,
+        }).expect(200),
+      );
+      // Routes without a body DTO ignore the ids named in the body: the decline is A's own.
+      keep(await authed('post', '/consent/decline', t(a2), naming).expect(200));
+      keep(await authed('post', '/test/start', t(a3), naming).expect(200));
+      expect(keep(await authed('post', '/heartbeat', t(a4), naming)).status).toBe(400);
+      keep(await authed('post', '/heartbeat', t(a4)).expect(200));
+      keep(await authed('post', '/proctor-key', t(a4), naming).expect(200));
+      // A signs a document id that is B's org-mate's text: only the org's current text is accepted.
+      const a5 = await invite({ status: 'OPENED', session: { authEpoch: 1 } });
+      expect(
+        keep(
+          await authed('post', '/consent/sign', t(a5), {
+            consentTextId: other.consentTextId,
+            signedName: 'Ada Lovelace',
+            confirmedAge18: true,
+          }),
+        ).status,
+      ).toBe(409);
+      // Org mismatch: a token whose sid is B's session but whose oid is another org's is refused.
+      expect(
+        keep(
+          await authed(
+            'get',
+            '',
+            tokens.sign({ sid: b.sessionId, oid: other.orgId, epoch: 1 }).token,
+          ),
+        ).status,
+      ).toBe(401);
+
+      // Nothing of B changed.
+      const after = await snapshotB();
+      expect(after).toEqual(before);
+      // No response (body or header) carries a value of B.
+      const joined = bodies.join('\n');
+      for (const value of [
+        b.sessionId,
+        b.invitationId,
+        b.candidateId,
+        b.token,
+        b.candidateEmail,
+        B_SIGNED_NAME,
+        B_DEVICE,
+        'B-PRIVATE-NOTE',
+        'B-UA-MARKER',
+        bWrapped,
+        '198.51.100.7',
+        String(B_ACCOMMODATION),
+      ]) {
+        expect(joined).not.toContain(value);
+      }
+      // A's own requests did their work (so the checks above are not vacuous).
+      expect((await sessionRow(a1.sessionId)).status).toBe('CONSENTED');
+      expect((await sessionRow(a2.sessionId)).status).toBe('DECLINED');
+      expect((await sessionRow(a3.sessionId)).status).toBe('IN_PROGRESS');
+      expect((await sessionRow(a4.sessionId)).lastHeartbeat).not.toBeNull();
     });
   });
 

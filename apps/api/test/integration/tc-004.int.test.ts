@@ -1,6 +1,6 @@
 // TC-004 (FR-103): RBAC enforcement. Expected: a recruiter calling PATCH /questions/:id directly
 // gets 403 and nothing changes. The question routes arrive with BE-04, so the end-to-end case is
-// recorded as a todo; what exists today is tested: deny by default on every registered route,
+// recorded as a todo (the recruiter PATCH case now runs in tc-004-rbac.int.test.ts); what exists today is tested: deny by default on every registered route,
 // forged and expired tokens, a challenge token that is not a session, and a role claim that the
 // server (not the client) decides.
 import jwt from 'jsonwebtoken';
@@ -175,14 +175,12 @@ describe('TC-004 (FR-103): RBAC enforcement', () => {
       const res = await request(h.app.getHttpServer())[method.toLowerCase() as 'get'](
         `${API}${path}`,
       );
-      expect([401, 404]).toContain(res.status);
+      // Routes that exist answer exactly 401; only the unbuilt review routes (BE-13) may be 404.
+      if (path.startsWith('/review')) expect([401, 404]).toContain(res.status);
+      else expect([path, res.status]).toEqual([path, 401]);
     }
   });
 
-  it.todo(
-    'TC-004: recruiter PATCH /questions/:id returns 403 and the question row is unchanged (needs BE-04 question routes and BE-03 permission guard)',
-  );
-  it.todo(
-    'TC-004: reviewer cannot POST /tests, author cannot POST /review/sessions/:id/verdict (needs BE-04, BE-06, BE-13)',
-  );
+  // The reviewer POST /tests case runs in tc-004-rbac.int.test.ts since BE-06 (slice 6a).
+  it.todo('TC-004: author cannot POST /review/sessions/:id/verdict (needs BE-13)');
 });

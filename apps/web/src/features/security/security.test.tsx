@@ -499,6 +499,38 @@ describe('Disable 2FA needs a code and signs out everywhere (FR-102, backend PR 
     expect(router.replace).not.toHaveBeenCalled();
   });
 
+  it('FR-102 (#184): disable answers ONE fixed 403 detail for a wrong password, a wrong code and a locked account, and the dialog says exactly "Password or code incorrect" for each', async () => {
+    const u = await pageAs(MOCK_USERS.recruiter, { twoFactorOn: true });
+    const pw = MOCK_USERS.recruiter.password;
+    const detailOf = async (body: object) => {
+      const res = await disable(body);
+      expect(res.status).toBe(403);
+      const json = (await res.json()) as { code: string; detail: string };
+      expect(json.code).toBe('REAUTH_FAILED');
+      return json.detail;
+    };
+    const fixed = 'The password or code is incorrect.';
+    expect(await detailOf({ currentPassword: 'wrong-pass-1', totpCode: '123456' })).toBe(fixed);
+    expect(await detailOf({ currentPassword: pw, totpCode: '000000' })).toBe(fixed);
+    // The UI: same words for a wrong password and a wrong code.
+    await openAndSubmit(u, 'Disable 2FA', 'wrong-pass-2', '123456');
+    expect(await within(dialog()).findByText('Password or code incorrect')).toBeInTheDocument();
+    await u.type(passwordField(), pw);
+    await u.type(within(dialog()).getByLabelText('6-digit code'), '000000');
+    await u.click(within(dialog()).getByRole('button', { name: /Turn off|Disable|Continue/ }));
+    await waitFor(() =>
+      expect(within(dialog()).getByRole('alert')).toHaveTextContent(/^Password or code incorrect$/),
+    );
+    // Lock the account, then even the right pair gets the identical body.
+    for (let i = 0; i < 3; i++)
+      await disable({ currentPassword: 'wrong-pass-3', totpCode: '123456' });
+    expect(await detailOf({ currentPassword: pw, totpCode: '123456' })).toBe(fixed);
+    expect(within(dialog()).queryByText(/^Password incorrect$/)).not.toBeInTheDocument();
+    expect(
+      within(dialog()).queryByText(/code is wrong|wrong code|code did not/i),
+    ).not.toBeInTheDocument();
+  });
+
   it('FR-102: the code field is numeric with autocomplete one-time-code, and a bad code is stopped with a field message', async () => {
     const u = await pageAs(MOCK_USERS.recruiter, { twoFactorOn: true });
     await u.click(screen.getByRole('button', { name: 'Disable 2FA' }));
