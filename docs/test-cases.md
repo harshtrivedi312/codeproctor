@@ -4,7 +4,7 @@
 
 Updated 2026-10-01 (ARC-01 Phase B, D-16..D-23). Changed: TC-007, TC-012, TC-030, TC-048, TC-094. Added: TC-095..TC-099, each marked "added 2026-10-01" and placed in its module table.
 
-Updated 2026-10-06 (ADR 0017, C-43..C-48, C-43a). Added: TC-101..TC-110, each marked "added 2026-10-06", in the section "Pilot deployment (ADR 0017)" at the end. They are architect-drafted from ADR 0017 sections 4 to 9 and 15; the owner accepts them with the ADR.
+Updated 2026-10-06 (ADR 0017, C-43..C-48, C-43a). Added: TC-101..TC-111, each marked "added 2026-10-06", in the section "Pilot deployment (ADR 0017)" at the end. They are architect-drafted from ADR 0017 sections 4 to 9 and 15; the owner accepts them with the ADR.
 
 ## Identity & access (M1)
 
@@ -133,3 +133,4 @@ Updated 2026-10-06 (ADR 0017, C-43..C-48, C-43a). Added: TC-101..TC-110, each ma
 | TC-108 | NFR-03 | Hard ceiling cannot be cancelled by the host (added 2026-10-06, ADR 0017 4.3) | With the app role, try to delete or update a ceiling schedule and to start the instances outside a slot; leave a window running past its ceiling; leave an instance running past the 6-hour backstop | Delete and update are denied; the ceiling stop fires and both instances stop with an alert; the backstop stops an over-long run and emails the owner | S | P1 |
 | TC-109 | NFR-04 | Judge0 instance isolation (added 2026-10-06, C-45, ADR 0017 9) | From the Judge0 instance and from a sandboxed run, try to reach Postgres, Redis, the media and backup buckets, IMDS credentials and the main instance's other ports | Every attempt fails; the Judge0 instance has no role and no app secret; only 2358 over TLS from the main instance is reachable | S | P1 |
 | TC-110 | NFR-04 | Signed release at boot (added 2026-10-06, ADR 0017 6) | Start with an unsigned manifest, a manifest from another workflow or branch, an older signed manifest (lower sequence number), and a valid new one | The first three are refused: the host keeps the last good release and alerts the owner; the valid one is pulled by digest and started; the pre-migration dump exists when the manifest carries migrations | S | P1 |
+| TC-111 | FR-307 | Schedule view and review windows (added 2026-10-06, ADR 0017 4.1) | As a recruiter and a reviewer of organisation A, open the schedule while organisation B has slots; as a reviewer request a review window while the instances run and for a later slot | Organisation B's slots appear only as anonymous busy capacity (no tests, candidates or counts); the schedule shows the next window; the review window creates its start and ceiling schedules; a window that breaks the rules of TC-106 is refused with its reason | F | P2 |
