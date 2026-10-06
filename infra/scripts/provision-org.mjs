@@ -18,7 +18,7 @@
 // whether anything was created); 2 the org and admin exist but the job could not be queued: run
 // `reissue`. Output is ids only. The email, the token and the link are never printed, logged or kept.
 import { randomUUID } from 'node:crypto';
-import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
@@ -33,7 +33,8 @@ import {
 } from './provision-org-core.mjs';
 
 const MAX_FILE_BYTES = 64 * 1024;
-const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
+// realpath: require.resolve returns real paths, and a checkout may sit under a symlinked directory.
+const REPO_ROOT = realpathSync(fileURLToPath(new URL('../../', import.meta.url)));
 
 let prisma;
 let queue;
@@ -76,8 +77,12 @@ try {
   let fd;
   try {
     fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
-  } catch {
-    await fail('--file must be a regular file, not a link');
+  } catch (error) {
+    await fail(
+      error?.code === 'ELOOP'
+        ? '--file must be a regular file, not a link'
+        : '--file cannot be opened',
+    );
   }
   let text;
   try {
@@ -87,7 +92,11 @@ try {
     if (info.mode & 0o077) await fail('--file must not be readable by group or others (chmod 600)');
     if (info.uid !== process.getuid())
       await fail('--file must be owned by the user running this script');
-    text = readFileSync(fd, 'utf8');
+    // Read at most one byte past the limit, so a file that grew after the check is still refused.
+    const buffer = Buffer.alloc(MAX_FILE_BYTES + 1);
+    const bytes = readSync(fd, buffer, 0, buffer.length, 0);
+    if (bytes > MAX_FILE_BYTES) await fail('--file is larger than 64 KiB');
+    text = buffer.toString('utf8', 0, bytes);
   } finally {
     closeSync(fd);
   }
@@ -147,6 +156,7 @@ try {
     await fail('cannot reach Redis. Nothing was created.');
   }
   queue = new bullmq.Queue(QUEUE_NAME, { connection });
+  queue.on('error', () => {}); // BullMQ prints unhandled queue errors with a stack; never let it
 
   const runId = process.env.GITHUB_RUN_ID ?? randomUUID();
   const result =
