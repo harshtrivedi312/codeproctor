@@ -29,6 +29,13 @@ function reauthRefused(res: request.Response): void {
   expect((res.body as { code?: string }).code).toBe('REAUTH_FAILED');
 }
 
+/** The one fixed refusal of /auth/2fa/disable: same 403 REAUTH_FAILED, detail for both factors (FU-BE-58). */
+const DISABLE_REFUSED_DETAIL = 'The password or code is incorrect.';
+function disableRefused(res: request.Response): void {
+  reauthRefused(res);
+  expect((res.body as { detail?: string }).detail).toBe(DISABLE_REFUSED_DETAIL);
+}
+
 /** A response body without the per-request members, for wrong-vs-locked comparisons. */
 function sameShape(res: request.Response): object {
   return { ...(res.body as object), instance: undefined, traceId: undefined };
@@ -788,6 +795,108 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       );
     });
 
+    describe('forced-enrollment start is bound to the challenge state (FU-BE-86)', () => {
+      const PENDING = 'pending-secret-sentinel';
+
+      async function enrolUser(): Promise<{ id: string; pwv: string }> {
+        const u = await createUser({ role: UserRole.SUPER_ADMIN });
+        await prisma.user.update({ where: { id: u.id }, data: { totpSecretEnc: PENDING } });
+        const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+        return { id: u.id, pwv: passwordVersion(row.passwordHash ?? '') };
+      }
+
+      const secretOf = async (id: string): Promise<string | null> =>
+        (await prisma.user.findUniqueOrThrow({ where: { id } })).totpSecretEnc;
+
+      const changePassword = async (id: string): Promise<void> => {
+        await prisma.user.update({
+          where: { id },
+          data: { passwordHash: await hash('A-Brand-New-Passphrase-1', ARGON2_OPTIONS) },
+        });
+      };
+
+      const deactivate = async (id: string): Promise<void> => {
+        await prisma.user.update({ where: { id }, data: { isActive: false } });
+      };
+
+      /** Runs `change` after the row was read and before the conditional write. */
+      async function racing(
+        change: () => Promise<void>,
+        run: () => Promise<unknown>,
+      ): Promise<void> {
+        const { TotpService: Totp } =
+          jest.requireActual<typeof import('./totp.service')>('./totp.service');
+        const totp = app.get(Totp);
+        const real = totp.createEnrollment.bind(totp);
+        const hook = jest.spyOn(totp, 'createEnrollment').mockImplementationOnce(async (email) => {
+          await change();
+          return real(email);
+        });
+        try {
+          await run();
+        } finally {
+          hook.mockRestore();
+        }
+      }
+
+      it('TC-003: control, an unchanged account and challenge replace the pending secret', async () => {
+        const u = await enrolUser();
+        const out = await authService.startEnrollment(u.id, u.pwv);
+        expect(out.manualKey).toBeTruthy();
+        expect(await secretOf(u.id)).not.toBe(PENDING);
+      });
+
+      it('TC-003: a challenge issued before a password reset cannot overwrite the pending secret', async () => {
+        const u = await enrolUser();
+        await changePassword(u.id);
+        await expect(authService.startEnrollment(u.id, u.pwv)).rejects.toMatchObject({
+          status: 401,
+        });
+        expect(await secretOf(u.id)).toBe(PENDING);
+      });
+
+      it('TC-003: a challenge issued before a deactivation cannot overwrite the pending secret', async () => {
+        const u = await enrolUser();
+        await deactivate(u.id);
+        await expect(authService.startEnrollment(u.id, u.pwv)).rejects.toMatchObject({
+          status: 401,
+        });
+        expect(await secretOf(u.id)).toBe(PENDING);
+      });
+
+      it('TC-003: a password reset landing between the read and the write changes nothing (401)', async () => {
+        const u = await enrolUser();
+        await racing(
+          () => changePassword(u.id),
+          () =>
+            expect(authService.startEnrollment(u.id, u.pwv)).rejects.toMatchObject({ status: 401 }),
+        );
+        expect(await secretOf(u.id)).toBe(PENDING);
+      });
+
+      it('TC-003: a deactivation landing between the read and the write changes nothing (401)', async () => {
+        const u = await enrolUser();
+        await racing(
+          () => deactivate(u.id),
+          () =>
+            expect(authService.startEnrollment(u.id, u.pwv)).rejects.toMatchObject({ status: 401 }),
+        );
+        expect(await secretOf(u.id)).toBe(PENDING);
+      });
+
+      it('TC-003: TOTP turned on between the read and the write is still a 409 and the live secret stays', async () => {
+        const u = await enrolUser();
+        await racing(
+          async () => {
+            await prisma.user.update({ where: { id: u.id }, data: { totpEnabled: true } });
+          },
+          () =>
+            expect(authService.startEnrollment(u.id, u.pwv)).rejects.toMatchObject({ status: 409 }),
+        );
+        expect(await secretOf(u.id)).toBe(PENDING);
+      });
+    });
+
     it('TC-003: an access token is refused as a challenge', async () => {
       const u = await createUser();
       const { session } = (await login(u.email).expect(200)).body as Body;
@@ -1270,6 +1379,9 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       if (keys.length > 0) await redis.del(...keys);
     }
 
+    // Every test starts with an empty forgot budget, so none depends on earlier forgot calls (FU-BE-28).
+    beforeEach(resetForgotBudget);
+
     function tokenFrom(mail: SentMail | undefined): string {
       const match = /#token=([^&]+)$/.exec(mail?.url ?? '');
       if (!match?.[1]) throw new Error('no token in mail');
@@ -1398,7 +1510,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       const findSpy = jest.spyOn(appPrisma.user, 'findUnique');
       const writeSpy = jest.spyOn(appPrisma.user, 'update');
       const writeManySpy = jest.spyOn(appPrisma.user, 'updateMany');
-      const incrSpy = jest.spyOn(redis, 'incr');
+      const incrSpy = jest.spyOn(redis, 'eval');
       const sendSpy = jest.spyOn(fakeMail, 'sendPasswordReset');
       const ctx = { ip: '203.0.113.50' };
       const awaited: Record<string, number[]> = {};
@@ -1463,6 +1575,37 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       const statuses: number[] = [];
       for (let i = 0; i < 6; i++) statuses.push((await forgot(`ip-limit-${i}@example.com`)).status);
       expect(statuses).toContain(429);
+    });
+
+    it('TC-098 (FU-BE-64): a forgot counter that has no TTL is repaired by the next hit, and limits stay exact', async () => {
+      const { REDIS_CLIENT } = jest.requireActual<
+        typeof import('../infrastructure/infrastructure.module')
+      >('../infrastructure/infrastructure.module');
+      const redis = app.get<import('ioredis').Redis>(REDIS_CLIENT);
+      const ip = '198.51.100.9';
+      const email = 'ttl-repair@example.com';
+      const emailKey = `pwreset:email:${sha256Hex(email)}`;
+      // Counters left without an expiry, as a connection drop between INCR and EXPIRE did.
+      await redis.set(`pwreset:ip:${ip}`, '2');
+      await redis.set(emailKey, '2');
+      mails.length = 0;
+      await authService.forgotPassword(email, { ip });
+      await authService.settleDeferred();
+      for (const key of [`pwreset:ip:${ip}`, emailKey]) {
+        const ttl = await redis.ttl(key);
+        expect(ttl).toBeGreaterThan(0);
+        expect(ttl).toBeLessThanOrEqual(3600);
+      }
+      expect(await redis.get(`pwreset:ip:${ip}`)).toBe('3');
+      expect(await redis.get(emailKey)).toBe('3');
+      // Parallel hits are counted exactly.
+      await Promise.all(
+        Array.from({ length: 5 }, (_, i) =>
+          authService.forgotPassword(`parallel-${i}@example.com`, { ip }),
+        ),
+      );
+      await authService.settleDeferred();
+      expect(await redis.get(`pwreset:ip:${ip}`)).toBe('8');
     });
 
     it('TC-098: a short or malformed reset payload is a 400 validation error', async () => {
@@ -1878,7 +2021,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           '../infrastructure/infrastructure.module',
         ).REDIS_CLIENT,
       );
-      const incr = jest.spyOn(redis, 'incr').mockRejectedValue(new Error(`down ${u.email}`));
+      const incr = jest.spyOn(redis, 'eval').mockRejectedValue(new Error(`down ${u.email}`));
       logged.length = 0;
       try {
         await authService.forgotPassword(u.email, { ip: '203.0.113.77' });
@@ -2292,8 +2435,8 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           currentPassword: PASSWORD,
           totpCode: badCode(),
         });
-        reauthRefused(wrongPassword);
-        reauthRefused(wrongCode);
+        disableRefused(wrongPassword);
+        disableRefused(wrongCode);
         expect(sameShape(wrongCode)).toEqual(sameShape(wrongPassword));
         const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
         expect(row.totpEnabled).toBe(true);
@@ -2316,7 +2459,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           currentPassword: PASSWORD,
           totpCode: code,
         });
-        reauthRefused(replay);
+        disableRefused(replay);
         const wrongPassword = await post('2fa/disable', token, {
           currentPassword: 'wrong-password-1',
           totpCode: code,
@@ -2331,12 +2474,12 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         const u = await createUser({ totp: SECRET });
         const token = await accessFor(u.id);
         for (let i = 0; i < 3; i++) {
-          reauthRefused(
+          disableRefused(
             await post('2fa/disable', token, { currentPassword: PASSWORD, totpCode: badCode() }),
           );
         }
         for (let i = 0; i < 2; i++) {
-          reauthRefused(
+          disableRefused(
             await post('2fa/disable', token, {
               currentPassword: 'wrong-password-1',
               totpCode: goodCode(),
@@ -2354,7 +2497,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           currentPassword: PASSWORD,
           totpCode: goodCode(),
         });
-        reauthRefused(locked);
+        disableRefused(locked);
         expect(sameShape(locked)).toEqual(sameShape(wrong));
         expect(JSON.stringify(locked.body)).not.toMatch(/lock/i);
         expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).totpEnabled).toBe(
@@ -2365,7 +2508,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       it('TC-003: a failure at the code step that fills the last slot locks the account', async () => {
         const u = await createUser({ totp: SECRET });
         await prisma.user.update({ where: { id: u.id }, data: { failedLogins: 3 } });
-        reauthRefused(
+        disableRefused(
           await post('2fa/disable', await accessFor(u.id), {
             currentPassword: PASSWORD,
             totpCode: badCode(),
@@ -2375,7 +2518,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         expect(row.failedLogins).toBe(4);
         expect(row.lockedUntil).toBeNull();
         await prisma.user.update({ where: { id: u.id }, data: { failedLogins: 4 } });
-        reauthRefused(
+        disableRefused(
           await post('2fa/disable', await accessFor(u.id), {
             currentPassword: PASSWORD,
             totpCode: badCode(),
@@ -2403,7 +2546,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           const token = await accessFor(u.id);
           counts.push(
             await countCalls(async () =>
-              reauthRefused(await post('2fa/disable', token, { currentPassword, totpCode })),
+              disableRefused(await post('2fa/disable', token, { currentPassword, totpCode })),
             ),
           );
         }
@@ -2443,7 +2586,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         for (const role of [UserRole.SUPER_ADMIN, UserRole.REVIEWER]) {
           const u = await createUser({ role, totp: SECRET });
           const token = await accessFor(u.id);
-          reauthRefused(
+          disableRefused(
             await post('2fa/disable', token, { currentPassword: PASSWORD, totpCode: badCode() }),
           );
           const res = await post('2fa/disable', token, {
@@ -2464,7 +2607,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         const u = await createUser();
         const body = { currentPassword: PASSWORD, totpCode: goodCode() };
         await post('2fa/disable', await accessFor(u.id), body).expect(409);
-        reauthRefused(
+        disableRefused(
           await post('2fa/disable', await accessFor(u.id), {
             ...body,
             currentPassword: 'wrong-password-1',
@@ -2646,9 +2789,12 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           afterNextVerify(() =>
             prisma.user.update({ where: { id: u.id }, data: { passwordHash: changed } }),
           );
-          reauthRefused(
-            await post(route, token, { currentPassword: PASSWORD, ...extra }).expect(403),
-          );
+          const refused = await post(route, token, {
+            currentPassword: PASSWORD,
+            ...extra,
+          }).expect(403);
+          if (route === '2fa/disable') disableRefused(refused);
+          else reauthRefused(refused);
           const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
           expect(row.totpEnabled).toBe(true);
           expect(row.recoveryCodeHashes).toEqual([sha256Hex('ABCDEFGHJKLMNPQR')]);

@@ -986,21 +986,25 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       const id = '99999999-9999-4999-8999-999999999999';
       const key = `auth:tokens-valid-after:${id}`;
       await redis.del(key);
-      const now = Math.floor(Date.now() / 1000);
-      // Absent: set to now with the full TTL.
-      await validity.invalidateIssuedTokens(id);
-      expect(Math.abs(Number(await redis.get(key)) - now)).toBeLessThanOrEqual(2);
-      expect(await redis.ttl(key)).toBeGreaterThan(MARKER_TTL_SECONDS - 5);
-      // A marker ahead of now (a fast clock elsewhere) is never moved back; the TTL is refreshed.
-      await redis.set(key, String(now + 60), 'EX', 30);
-      await validity.invalidateIssuedTokens(id);
-      expect(await redis.get(key)).toBe(String(now + 60));
-      expect(await redis.ttl(key)).toBeGreaterThan(MARKER_TTL_SECONDS - 5);
-      // An older marker is raised.
-      await redis.set(key, String(now - 600), 'EX', 30);
-      await validity.invalidateIssuedTokens(id);
-      expect(Number(await redis.get(key))).toBeGreaterThanOrEqual(now);
-      await redis.del(key);
+      try {
+        const now = Math.floor(Date.now() / 1000);
+        // Absent: set to now with the full TTL.
+        await validity.invalidateIssuedTokens(id);
+        expect(Math.abs(Number(await redis.get(key)) - now)).toBeLessThanOrEqual(2);
+        expect(await redis.ttl(key)).toBeGreaterThan(MARKER_TTL_SECONDS - 5);
+        // A marker ahead of now (a fast clock elsewhere) is never moved back; the TTL is refreshed.
+        await redis.set(key, String(now + 60), 'EX', 30);
+        await validity.invalidateIssuedTokens(id);
+        expect(await redis.get(key)).toBe(String(now + 60));
+        expect(await redis.ttl(key)).toBeGreaterThan(MARKER_TTL_SECONDS - 5);
+        // An older marker is raised to now, with the full TTL.
+        await redis.set(key, String(now - 600), 'EX', 30);
+        await validity.invalidateIssuedTokens(id);
+        expect(Math.abs(Number(await redis.get(key)) - now)).toBeLessThanOrEqual(2);
+        expect(await redis.ttl(key)).toBeGreaterThan(MARKER_TTL_SECONDS - 5);
+      } finally {
+        await redis.del(key);
+      }
     });
 
     it('FR-104: if the marker cannot be written the role change rolls back (503), nothing half-done', async () => {
@@ -1011,11 +1015,11 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       >('../infrastructure/infrastructure.module');
       const redis = app.get<import('ioredis').Redis>(REDIS_CLIENT);
       await login(user.email).expect(200);
-      const set = jest.spyOn(redis, 'eval').mockRejectedValue(new Error('redis down'));
+      const evalSpy = jest.spyOn(redis, 'eval').mockRejectedValue(new Error('redis down'));
       try {
         expect((await patch(admin, user.id, { role: 'AUTHOR' })).status).toBe(503);
       } finally {
-        set.mockRestore();
+        evalSpy.mockRestore();
       }
       expect((await owner.user.findUniqueOrThrow({ where: { id: user.id } })).role).toBe(
         UserRole.RECRUITER,
