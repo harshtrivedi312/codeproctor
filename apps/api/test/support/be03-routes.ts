@@ -83,19 +83,43 @@ export interface MatrixEntry {
   audited?: true;
   candidateData?: true;
 }
-export interface RegistryApi {
-  ROUTE_PERMISSIONS: Readonly<Record<string, 'public' | MatrixEntry>>;
-  listRoutes: (modules: unknown) => { key: string; handler: string }[];
-  matrixProblems: (routes: { key: string; handler: string }[]) => string[];
+/** A candidate-session route (FU-BE-91): no roles, never audited; the permission is candidate_*. */
+export interface CandidateMatrixEntry {
+  principal: 'CANDIDATE';
+  permission: string;
 }
+export type AnyMatrixEntry = 'public' | MatrixEntry | CandidateMatrixEntry;
+/** The route facts the registry exposes (RegisteredRoute in route-registry.ts), as far as QA reads them. */
+export interface ListedRoute {
+  key: string;
+  handler: string;
+  isPublic?: boolean;
+  roles?: readonly string[];
+  audited?: boolean;
+  candidatePermission?: string | null;
+}
+export interface RegistryApi {
+  ROUTE_PERMISSIONS: Readonly<Record<string, AnyMatrixEntry>>;
+  CANDIDATE_BOOTSTRAP_ROUTES?: readonly string[];
+  listRoutes: (modules: unknown) => ListedRoute[];
+  matrixProblems: (routes: ListedRoute[]) => string[];
+}
+export const isCandidateEntry = (e: AnyMatrixEntry | undefined): e is CandidateMatrixEntry =>
+  typeof e === 'object' && 'principal' in e;
+export const isStaffEntry = (e: AnyMatrixEntry | undefined): e is MatrixEntry =>
+  typeof e === 'object' && 'roles' in e;
 export function loadBackendRegistry(): RegistryApi {
-  const perms = jest.requireActual<Pick<RegistryApi, 'ROUTE_PERMISSIONS'>>(
-    '../../src/common/auth/route-permissions',
-  );
+  const perms = jest.requireActual<
+    Pick<RegistryApi, 'ROUTE_PERMISSIONS' | 'CANDIDATE_BOOTSTRAP_ROUTES'>
+  >('../../src/common/auth/route-permissions');
   const reg = jest.requireActual<Pick<RegistryApi, 'listRoutes' | 'matrixProblems'>>(
     '../../src/common/auth/route-registry',
   );
-  return { ROUTE_PERMISSIONS: perms.ROUTE_PERMISSIONS, ...reg };
+  return {
+    ROUTE_PERMISSIONS: perms.ROUTE_PERMISSIONS,
+    CANDIDATE_BOOTSTRAP_ROUTES: perms.CANDIDATE_BOOTSTRAP_ROUTES,
+    ...reg,
+  };
 }
 
 /**
@@ -1546,6 +1570,33 @@ export function withReplacedId(path: string, id: string, replacement: string): s
   const segments = pathname.split('/').map((seg) => (seg === id ? replacement : seg));
   return query === undefined ? segments.join('/') : `${segments.join('/')}?${query}`;
 }
+
+/**
+ * Candidate-session routes (BE-07, FR-106, FR-401; ADR 0013 5.10), for REGISTRY AGREEMENT ONLY
+ * (tc-004 "route registry"): they use candidate tokens, so the staff 401/403/404/audit loops
+ * (BE03_ROUTES) never see them. Each is included only when the backend's ROUTE_PERMISSIONS has the
+ * key, so this is green before and after BE-07 (#98) merges. `permission: 'public'` = a pre-JWT
+ * bootstrap route; otherwise the candidate_* permission the matrix must carry.
+ */
+export interface CandidateRoute {
+  key: string;
+  permission: 'public' | Permission;
+}
+const CANDIDATE_ROUTE_CANDIDATES: readonly CandidateRoute[] = [
+  { key: 'POST /candidate/session/link', permission: 'public' },
+  { key: 'POST /candidate/session/otp', permission: 'public' },
+  { key: 'POST /candidate/session/start', permission: 'public' },
+  { key: 'GET /candidate/session/consent', permission: 'candidate_consent:read' },
+  { key: 'POST /candidate/session/consent/sign', permission: 'candidate_consent:sign' },
+  { key: 'POST /candidate/session/consent/decline', permission: 'candidate_consent:decline' },
+  { key: 'GET /candidate/session', permission: 'candidate_session:read' },
+  { key: 'POST /candidate/session/test/start', permission: 'candidate_session:start' },
+  { key: 'POST /candidate/session/heartbeat', permission: 'candidate_session:heartbeat' },
+  { key: 'POST /candidate/session/proctor-key', permission: 'candidate_session:key' },
+];
+export const CANDIDATE_ROUTES: readonly CandidateRoute[] = CANDIDATE_ROUTE_CANDIDATES.filter((r) =>
+  backendHasRoute(r.key),
+);
 
 export const routesFor = (step: Be03Route['step']): Be03Route[] =>
   BE03_ROUTES.filter((r) => r.step === step);
