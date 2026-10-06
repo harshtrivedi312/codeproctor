@@ -67,11 +67,11 @@ def main():
         chk(f"{n}: abort incomplete multipart enabled", rules_of(res, lg)["abort-incomplete-multipart"]["Status"] == "Enabled")
         chk(f"{n}: tagged Environment=pilot", {"Key": "Environment", "Value": "pilot"} in p["Tags"])
         sids = {st["Sid"] for st in res[lg.replace("Bucket", "BucketPolicy")]["Properties"]["PolicyDocument"]["Statement"]}
-        chk(f"{n}: bucket policy denies insecure transport, other KMS keys and listing", {"DenyInsecureTransport", "DenyOtherKmsKey", "DenyListingExceptInstanceRole"} <= sids)
+        chk(f"{n}: bucket policy denies insecure transport, other KMS keys and listing", {"DenyInsecureTransport", "DenyOtherKmsKey", "DenyKmsHeaderWithoutKeyId", "DenyListingExceptInstanceRole"} <= sids)
     chk("exactly two buckets (one media bucket, one backup bucket; DL-40)", sum(1 for v in res.values() if v["Type"] == "AWS::S3::Bucket") == 2)
     chk("no results, consent or SeparateBucketsInUse parameters", not {"ResultsExpiryDays", "ConsentExpiryDays", "MediaExpiryDays", "SeparateBucketsInUse"} & set(raw["Parameters"]))
     mr = rules_of(res, "MediaBucket")
-    chk("media: only age rule is the tag-filtered 90 day face image expiry", [i for i in mr if i != "abort-incomplete-multipart"] == ["expire-face-images-90-days"] and mr["expire-face-images-90-days"]["ExpirationInDays"] == 90 and mr["expire-face-images-90-days"]["TagFilters"] == [{"Key": "RetentionClass", "Value": "face"}] and "Prefix" not in mr["expire-face-images-90-days"])
+    chk("media: only age rule is the tag-filtered 88 day face image expiry (margin under the 90 day cap)", [i for i in mr if i != "abort-incomplete-multipart"] == ["expire-face-images-88-days"] and mr["expire-face-images-88-days"]["ExpirationInDays"] == 88 and mr["expire-face-images-88-days"]["TagFilters"] == [{"Key": "RetentionClass", "Value": "face"}] and "Prefix" not in mr["expire-face-images-88-days"])
     bk = rules_of(res, "BackupBucket")
     chk("backups: dumps 13 days under db/dumps/ (backup.sh layout)", bk["expire-dumps"]["ExpirationInDays"] == 13 and bk["expire-dumps"]["Prefix"] == "db/dumps/")
     chk("backups: WAL under db/wal/ with its own parameter, default equal to dumps", bk["expire-wal"]["Prefix"] == "db/wal/" and raw["Parameters"]["WalRetentionDays"]["Default"] == raw["Parameters"]["BackupRetentionDays"]["Default"] == 13)
@@ -79,7 +79,8 @@ def main():
     prefixes = [r.get("Prefix", "") for r in bk.values() if "ExpirationInDays" in r]
     chk("backups: db/erasure-list/ is not covered by any expiry rule", sorted(prefixes) == ["db/dumps/", "db/wal/"] and not any("db/erasure-list/".startswith(x) for x in prefixes))
     cors = res["MediaBucket"]["Properties"]["CorsConfiguration"]["CorsRules"][0]
-    chk("media CORS: PUT, GET, HEAD from AppOrigin, headers Content-Type and If-None-Match, exposes ETag", cors["AllowedMethods"] == ["PUT", "GET", "HEAD"] and cors["AllowedOrigins"] == ["https://app.example.test"] and cors["AllowedHeaders"] == ["Content-Type", "If-None-Match"] and cors["ExposedHeaders"] == ["ETag"])
+    chk("media CORS: PUT, GET, HEAD from AppOrigin, headers incl. x-amz-tagging, no POST, exposes ETag", cors["AllowedMethods"] == ["PUT", "GET", "HEAD"] and cors["AllowedOrigins"] == ["https://app.example.test"] and cors["AllowedHeaders"] == ["Content-Type", "If-None-Match", "x-amz-tagging", "x-amz-checksum-crc32", "x-amz-sdk-checksum-algorithm"] and "POST" not in cors["AllowedMethods"] and cors["ExposedHeaders"] == ["ETag"])
+    chk("backups: db/erasure-completed/ is not covered by any expiry rule", not any("db/erasure-completed/".startswith(x) for x in prefixes))
     chk("AppOrigin has no default", "Default" not in raw["Parameters"]["AppOrigin"])
     chk("backup bucket has no CORS", "CorsConfiguration" not in res["BackupBucket"]["Properties"])
     key = res["PilotDataKey"]["Properties"]
@@ -143,7 +144,7 @@ def main():
         add(f"another codeproctor role with admin identity cannot change {n} bucket policy", "ci-admin", "s3:PutBucketPolicy", b, {}, "DENY", n)
         add(f"scheduler role cannot read {n} objects", "scheduler", "s3:GetObject", o, T.SRC, "DENY", n)
         add(f"instance role reads {n} object with source instance", "app", "s3:GetObject", o, T.SRC, "ALLOW", n)
-        add(f"instance role writes {n} object (SSE-KMS header only)", "app", "s3:PutObject", o, {**T.SRC, "s3:x-amz-server-side-encryption": "aws:kms"}, "ALLOW", n)
+        add(f"instance role writes {n} object, aws:kms header without a key id (would use aws/s3)", "app", "s3:PutObject", o, {**T.SRC, "s3:x-amz-server-side-encryption": "aws:kms"}, "DENY", n)
         add(f"instance role writes {n} object with AES256", "app", "s3:PutObject", o, {**T.SRC, "s3:x-amz-server-side-encryption": "AES256"}, "DENY", n)
         add(f"instance role reads {n} object over plain HTTP", "app", "s3:GetObject", o, {**T.SRC, "aws:SecureTransport": "false"}, "DENY", n)
         add(f"instance role reads {n} object without source instance", "app", "s3:GetObject", o, {}, "DENY", n)

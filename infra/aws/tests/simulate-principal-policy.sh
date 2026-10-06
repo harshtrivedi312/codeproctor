@@ -15,12 +15,14 @@
 # and by the first real deploy.
 set -u
 
-ACCOUNT=""; PROFILE=""
+ACCOUNT=""; PROFILE=""; INSTANCE_ROLE="codeproctor-pilot-app"; ZONE_ID=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --account-id) ACCOUNT="$2"; shift 2 ;;
     --profile) PROFILE="$2"; shift 2 ;;
-    *) echo "usage: $0 --account-id <12 digits> --profile <profile>" >&2; exit 2 ;;
+    --instance-role-name) INSTANCE_ROLE="$2"; shift 2 ;;
+    --assess-zone-id) ZONE_ID="$2"; shift 2 ;;
+    *) echo "usage: $0 --account-id <12 digits> --profile <profile> [--instance-role-name <name>] [--assess-zone-id <id>]" >&2; exit 2 ;;
   esac
 done
 case "$ACCOUNT" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) echo "error: --account-id must be 12 digits" >&2; exit 2 ;; esac
@@ -62,9 +64,9 @@ ROLE_APP="arn:aws:iam::${ACCOUNT}:role/codeproctor-pilot-app"
 echo "Deploy role: ${DEPLOY}"
 check "$DEPLOY" denied  "S3 create bucket (owner template only)" s3:CreateBucket "arn:aws:s3:::codeproctor-pilot-x" "$REQ_TAG"
 for act in PutBucketPolicy DeleteBucketPolicy PutBucketAcl PutBucketPublicAccessBlock PutBucketOwnershipControls PutBucketVersioning PutLifecycleConfiguration; do
-  check "$DEPLOY" denied "S3 ${act} on pilot backups bucket" "s3:${act}" "arn:aws:s3:::codeproctor-pilot-backups"
+  check "$DEPLOY" denied "S3 ${act} on pilot backups bucket" "s3:${act}" "arn:aws:s3:::codeproctor-pilot-backup-${ACCOUNT}"
 done
-check "$DEPLOY" allowed "S3 read bucket policy of pilot backups" s3:GetBucketPolicy "arn:aws:s3:::codeproctor-pilot-backups" "aws:ResourceAccount=${ACCOUNT}"
+check "$DEPLOY" allowed "S3 read bucket policy of pilot backups" s3:GetBucketPolicy "arn:aws:s3:::codeproctor-pilot-backup-${ACCOUNT}" "aws:ResourceAccount=${ACCOUNT}"
 for b in media backup; do
   check "$DEPLOY" denied "S3 PutBucketPolicy on ${b} bucket (PR 1b)" s3:PutBucketPolicy "arn:aws:s3:::codeproctor-pilot-${b}-${ACCOUNT}"
   check "$DEPLOY" denied "S3 ListBucket on ${b} bucket (PR 1b)" s3:ListBucket "arn:aws:s3:::codeproctor-pilot-${b}-${ACCOUNT}"
@@ -82,7 +84,7 @@ check "$DEPLOY" denied  "KMS key deletion, 7 day window" kms:ScheduleKeyDeletion
 check "$DEPLOY" denied  "EC2 modify instance type to a huge type" ec2:ModifyInstanceAttribute "$INST" "$PILOT_TAG" "ec2:InstanceType=m5.24xlarge"
 check "$DEPLOY" denied  "IAM update trust of untagged owner-made role" iam:UpdateAssumeRolePolicy "$ROLE_APP"
 check "$DEPLOY" denied  "S3 create bucket other name" s3:CreateBucket "arn:aws:s3:::codeproctor-staging-x" "$REQ_TAG"
-check "$DEPLOY" denied  "S3 read object in pilot data bucket" s3:GetObject "arn:aws:s3:::codeproctor-pilot-recordings/a.webm"
+check "$DEPLOY" denied  "S3 read object in pilot data bucket" s3:GetObject "arn:aws:s3:::codeproctor-pilot-media-${ACCOUNT}/orgs/o/a.webm"
 check "$DEPLOY" denied  "S3 read object in other bucket" s3:GetObject "arn:aws:s3:::other-bucket/a"
 if aws s3api head-bucket --profile "$PROFILE" --bucket "codeproctor-pilot-tfstate-${ACCOUNT}" >/dev/null 2>&1; then
   check "$DEPLOY" allowed "State object read" s3:GetObject "${TF}/pilot/terraform.tfstate" "aws:ResourceAccount=${ACCOUNT}"
@@ -120,7 +122,7 @@ if aws iam get-role --profile "$PROFILE" --role-name codeproctor-pilot-plan --qu
   check "$PLAN" allowed "State read" s3:GetObject "${TF}/pilot/terraform.tfstate" "aws:ResourceAccount=${ACCOUNT}"
   check "$PLAN" allowed "Lock object write" s3:PutObject "${TF}/pilot/terraform.tfstate.tflock" "aws:ResourceAccount=${ACCOUNT}"
   check "$PLAN" denied  "State write" s3:PutObject "${TF}/pilot/terraform.tfstate" "aws:ResourceAccount=${ACCOUNT}"
-  check "$PLAN" denied  "Data object read" s3:GetObject "arn:aws:s3:::codeproctor-pilot-recordings/a.webm"
+  check "$PLAN" denied  "Data object read" s3:GetObject "arn:aws:s3:::codeproctor-pilot-media-${ACCOUNT}/orgs/o/a.webm"
   check "$PLAN" denied  "Secret value read" secretsmanager:GetSecretValue "arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:codeproctor-pilot-db-AbCdEf" "$PILOT_TAG"
   check "$PLAN" denied  "KMS decrypt with a data key" kms:Decrypt "arn:aws:kms:${REGION}:${ACCOUNT}:key/00000000-0000-0000-0000-000000000000" "$PILOT_TAG" "aws:ResourceTag/Purpose=data"
   check "$PLAN" denied  "Log events read" logs:GetLogEvents "arn:aws:logs:${REGION}:${ACCOUNT}:log-group:/codeproctor/pilot/api:log-stream:s"
@@ -129,6 +131,35 @@ if aws iam get-role --profile "$PROFILE" --role-name codeproctor-pilot-plan --qu
 else
   echo "Plan role not deployed (CreatePlanRole=false): plan checks skipped"
 fi
+
+# Encrypted EBS: EC2 creates grants for the caller (key policy of aws/ebs allows it; the deploy role must not be denied)
+check "$DEPLOY" denied  "KMS CreateGrant NOT through EC2" kms:CreateGrant "arn:aws:kms:${REGION}:${ACCOUNT}:key/00000000-0000-0000-0000-000000000000" "$PILOT_TAG" "kms:GrantIsForAWSResource=true"
+check "$DEPLOY" denied  "Route 53 change records in a hosted zone" route53:ChangeResourceRecordSets "arn:aws:route53:::hostedzone/Z0OTHERZONE0000"
+check "$DEPLOY" denied  "Route 53 create hosted zone" route53:CreateHostedZone "*"
+check "$DEPLOY" denied  "Route 53 delete hosted zone" route53:DeleteHostedZone "arn:aws:route53:::hostedzone/Z0OTHERZONE0000"
+check "$DEPLOY" denied  "SSM start session" ssm:StartSession "$INST" "$PILOT_TAG"
+check "$DEPLOY" denied  "SSM send command" ssm:SendCommand "$INST" "$PILOT_TAG"
+check "$DEPLOY" denied  "EC2 import key pair (Session Manager only, no SSH)" ec2:ImportKeyPair "arn:aws:ec2:${REGION}:${ACCOUNT}:key-pair/k" "$REQ_TAG"
+if [ -n "$ZONE_ID" ]; then
+  check "$DEPLOY" denied "Route 53 other zone (assess zone id is ${ZONE_ID})" route53:ChangeResourceRecordSets "arn:aws:route53:::hostedzone/Z0OTHERZONE0000"
+fi
+
+# Roles created later by CI (compute template): each must carry the boundary and the pilot tag.
+for r in "$INSTANCE_ROLE"; do
+  if aws iam get-role --profile "$PROFILE" --role-name "$r" >/dev/null 2>&1; then
+    pb="$(aws iam get-role --profile "$PROFILE" --role-name "$r" --query 'Role.PermissionsBoundary.PermissionsBoundaryArn' --output text 2>/dev/null)"
+    case "$pb" in
+      *policy/codeproctor-guardrails/codeproctor-pilot-boundary) pass=$((pass+1)); printf 'PASS  %-62s boundary set\n' "role $r permissions boundary" ;;
+      *) fail=$((fail+1)); printf 'FAIL  %-62s boundary is "%s" (must be codeproctor-pilot-boundary)\n' "role $r permissions boundary" "$pb" ;;
+    esac
+    env="$(aws iam list-role-tags --profile "$PROFILE" --role-name "$r" --query "Tags[?Key=='Environment']|[0].Value" --output text 2>/dev/null)"
+    if [ "$env" = "pilot" ]; then pass=$((pass+1)); printf 'PASS  %-62s tagged pilot\n' "role $r tag"; else fail=$((fail+1)); printf 'FAIL  %-62s Environment tag is "%s"\n' "role $r tag" "$env"; fi
+  else
+    echo "Role $r not created yet: boundary and tag checks skipped (re-run after the compute template)"
+  fi
+done
+echo "Every codeproctor-pilot-* role in the account (each must show the boundary and Environment=pilot, or Environment=owner):"
+aws iam list-roles --profile "$PROFILE" --query "Roles[?starts_with(RoleName, 'codeproctor-pilot-')].RoleName" --output text 2>/dev/null | tr '\t' '\n' | sed 's/^/  /'
 
 echo "passed: ${pass}, failed: ${fail}"
 [ "$fail" -eq 0 ]

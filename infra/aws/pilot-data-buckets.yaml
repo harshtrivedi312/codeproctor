@@ -1,7 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  CodeProctor pilot data stores, OWNER-APPLIED (never by CI): media, results, consent and backup
-  buckets plus one customer-managed KMS key. Single account, us-east-1. Apply after
+  CodeProctor pilot data stores, OWNER-APPLIED (never by CI): media and backup buckets plus one customer-managed KMS key. Single account, us-east-1. Apply after
   github-oidc-roles.yaml. No credentials, keys or account ids live in this file.
 
 # =============================================================================================
@@ -15,14 +14,17 @@ Description: >-
 #
 # Retention: RetentionService owns EVERY data-class clock (C-04, C-26, C-35, 3 year consent). The
 # only age-based rules here are backstops that cannot be wrong:
-#   media bucket   objects tagged RetentionClass=face expire 90 days after creation (C-27, C-35: face
-#                  images are capped at 90 days from capture whatever any hold says). Nothing else
+#   media bucket   objects tagged RetentionClass=face expire 88 days after creation (C-27, C-35: face
+#                  images are capped at 90 days from capture whatever any hold says; 88 leaves room
+#                  for S3 rounding up to the next midnight UTC and for the sealing CopyObject, which
+#                  creates a new object and restarts the clock). Nothing else
 #                  expires by age. The API must tag them (follow-up in docs/followups/qa.md).
 #   backup bucket  db/dumps/ 13 days (14 days is the schedule; S3 rounds expiry up to the next
 #                  midnight UTC and deletes asynchronously, so 13 keeps objects inside 14 days)
 #                  db/wal/ WalRetentionDays, default equal to the dumps (needs a physical base backup:
 #                  ARC-05, not provided here; this template only provides the storage)
-#                  db/erasure-list/ NEVER expires (the erasure list must outlive the dumps it re-applies to)
+#                  db/erasure-list/ and db/erasure-completed/ NEVER expire (the erasure list must
+#                  outlive the dumps it re-applies to)
 #
 # Versioning is NOT enabled on any bucket: ADR 0004 section 9.2 requires RetentionService to fail
 # closed when versioning has ever been on without a noncurrent-version expiry of 1 day.
@@ -75,7 +77,7 @@ Rules:
         AssertDescription: This stack must be created in us-east-1 (C-03)
 
 Resources:
-  # One customer-managed key for all four buckets. Tags Environment=pilot and Purpose=data and the alias match what the deploy role's denies expect: CI can neither use nor change it.
+  # One customer-managed key for both buckets. Tags Environment=pilot and Purpose=data and the alias match what the deploy role's denies expect: CI can neither use nor change it.
   PilotDataKey:
     Type: 'AWS::KMS::Key'
     DeletionPolicy: 'Retain'
@@ -163,7 +165,7 @@ Resources:
     Properties:
       AliasName: 'alias/codeproctor-pilot-data'
       TargetKeyId: !Ref PilotDataKey
-  # Media: recordings, room scans, ID images, selfies, evidence, report PDFs and consent PDFs under orgs/<org>/... (ADR 0013 5.7). RetentionService deletes on the real clocks. Only face images (tagged RetentionClass=face) have an age backstop: 90 days (C-27, C-35).
+  # Media: recordings, room scans, ID images, selfies, evidence, report PDFs and consent PDFs under orgs/<org>/... (ADR 0013 5.7). RetentionService deletes on the real clocks. Only face images (tagged RetentionClass=face) have an age backstop: 88 days, a margin under the 90 day cap (C-27, C-35).
   MediaBucket:
     Type: 'AWS::S3::Bucket'
     DeletionPolicy: 'Retain'
@@ -190,12 +192,12 @@ Resources:
             Status: 'Enabled'
             AbortIncompleteMultipartUpload:
               DaysAfterInitiation: 7
-          - Id: 'expire-face-images-90-days'
+          - Id: 'expire-face-images-88-days'
             Status: 'Enabled'
             TagFilters:
               - Key: 'RetentionClass'
                 Value: 'face'
-            ExpirationInDays: 90
+            ExpirationInDays: 88
       Tags:
         - Key: 'Environment'
           Value: 'pilot'
@@ -215,6 +217,9 @@ Resources:
             AllowedHeaders:
               - 'Content-Type'
               - 'If-None-Match'
+              - 'x-amz-tagging'
+              - 'x-amz-checksum-crc32'
+              - 'x-amz-sdk-checksum-algorithm'
             ExposedHeaders:
               - 'ETag'
             MaxAge: 3600
@@ -255,6 +260,16 @@ Resources:
                 s3:x-amz-server-side-encryption-aws-kms-key-id: 'false'
               StringNotEquals:
                 s3:x-amz-server-side-encryption-aws-kms-key-id: !GetAtt PilotDataKey.Arn
+          - Sid: 'DenyKmsHeaderWithoutKeyId'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-media-${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                s3:x-amz-server-side-encryption: 'aws:kms'
+              'Null':
+                s3:x-amz-server-side-encryption-aws-kms-key-id: 'true'
           - Sid: 'DenyObjectAccessExceptInstanceRole'
             Effect: 'Deny'
             Principal: '*'
@@ -306,7 +321,7 @@ Resources:
                 aws:PrincipalArn:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
-  # Backups: nightly dumps (infra/backup/backup.sh, db/dumps/), WAL (db/wal/, storage only) and the erasure list (db/erasure-list/, never expires). backup.sh keeps its newest-dump guard: do not rely on lifecycle to keep the last dump (see README).
+  # Backups: nightly dumps (infra/backup/backup.sh, db/dumps/), WAL (db/wal/, storage only) the erasure list (db/erasure-list/) and its completion markers (db/erasure-completed/), neither of which ever expires. backup.sh keeps its newest-dump guard: do not rely on lifecycle to keep the last dump (see README).
   BackupBucket:
     Type: 'AWS::S3::Bucket'
     DeletionPolicy: 'Retain'
@@ -385,6 +400,16 @@ Resources:
                 s3:x-amz-server-side-encryption-aws-kms-key-id: 'false'
               StringNotEquals:
                 s3:x-amz-server-side-encryption-aws-kms-key-id: !GetAtt PilotDataKey.Arn
+          - Sid: 'DenyKmsHeaderWithoutKeyId'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                s3:x-amz-server-side-encryption: 'aws:kms'
+              'Null':
+                s3:x-amz-server-side-encryption-aws-kms-key-id: 'true'
           - Sid: 'DenyObjectAccessExceptInstanceRole'
             Effect: 'Deny'
             Principal: '*'
