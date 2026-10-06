@@ -9,6 +9,7 @@ import { runInNewContext } from 'node:vm';
 import { setCandidateFacts } from './candidate-facts';
 import { createPrismaClient } from './create-prisma-client';
 import { OrgScopeError, OrgScopeViolationError } from './errors';
+import { assertCandidateColumns } from './candidate-interim';
 import { OrgContextService } from './org-context';
 import { createOrgScopedClient } from './org-scope.extension';
 import {
@@ -315,6 +316,42 @@ describe('plain-args: own-key reads (defence in depth against a polluted Object.
       expect(Object.keys(org).sort()).toEqual(['data', 'where']);
     } finally {
       for (const key of keys) delete (Object.prototype as Record<string, unknown>)[key];
+    }
+    expect(Object.hasOwn(Object.prototype, 'select')).toBe(false);
+  });
+});
+
+describe('plain-args: the column check read straight (no own-key copy in front of it)', () => {
+  it('TC-008 assertCandidateColumns reads select, omit, where, orderBy, distinct, by and the aggregates as the caller owns them', () => {
+    const polluted: Record<string, unknown> = {
+      select: { hmacKeyEnc: true },
+      omit: { id: true },
+      where: { hmacKeyEnc: 'k' },
+      having: { hmacKeyEnc: 'k' },
+      orderBy: { hmacKeyEnc: 'asc' },
+      distinct: ['hmacKeyEnc'],
+      by: ['hmacKeyEnc'],
+      _count: { hmacKeyEnc: true },
+      _max: { hmacKeyEnc: true },
+    };
+    for (const [key, value] of Object.entries(polluted)) {
+      Object.defineProperty(Object.prototype, key, {
+        value,
+        configurable: true,
+        enumerable: false,
+        writable: true,
+      });
+    }
+    try {
+      // The caller owns nothing but `take`: no select to check, no hidden column named anywhere, and the
+      // default omit is added.
+      const verdict = assertCandidateColumns('Session', 'findMany', { take: 1 }, false, undefined);
+      expect(verdict.omit).toMatchObject({ hmacKeyEnc: true, invitationId: true });
+      expect(verdict.omit).not.toHaveProperty('id');
+      expect(verdict.runFilter).toBe(false);
+    } finally {
+      for (const key of Object.keys(polluted))
+        delete (Object.prototype as Record<string, unknown>)[key];
     }
     expect(Object.hasOwn(Object.prototype, 'select')).toBe(false);
   });
