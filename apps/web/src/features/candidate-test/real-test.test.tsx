@@ -13,6 +13,7 @@ import {
 } from '@/features/candidate-flow/test-helpers';
 import { apiBaseUrl } from '@/lib/env';
 import { MOCK_OTP, MOCK_TOKENS } from '@/mocks/candidate/handlers';
+import { OVER_STATUSES } from './adr-wire';
 import { createAdrSource, openSection } from './adr-source';
 import { TestScreen } from './test-screen';
 
@@ -356,7 +357,7 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     );
   });
 
-  it('ADR 0002: a 409 SESSION_NOT_ACTIVE on the re-read also means the test is over', async () => {
+  it('ADR 0002 FR-505: a 409 SESSION_NOT_ACTIVE on the re-read also means the test is over', async () => {
     await startedSession();
     const source = createAdrSource({ onSessionEnded: vi.fn() });
     server.use(
@@ -367,7 +368,7 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     expect(await source.readSession()).toEqual({ submitted: true });
   });
 
-  it('ADR 0002: an unknown status (drift, lower case, empty) is "could not read", never "submitted"', async () => {
+  it('ADR 0002 FR-505: an unknown status (drift, lower case, empty) is "could not read", never "submitted"', async () => {
     await startedSession();
     const source = createAdrSource({ onSessionEnded: vi.fn() });
     for (const status of ['submitted', 'DONE', '', 'FINISHED']) {
@@ -385,14 +386,7 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
       );
       expect(await source.readSession()).toBeNull();
     }
-    for (const status of [
-      'SUBMITTED',
-      'GRADED',
-      'UNDER_REVIEW',
-      'COMPLETED',
-      'APPEALED',
-      'EXPIRED',
-    ]) {
+    for (const status of OVER_STATUSES) {
       server.use(
         http.get(`${cand}/session`, () =>
           HttpResponse.json({

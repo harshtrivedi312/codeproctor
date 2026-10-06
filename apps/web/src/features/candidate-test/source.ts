@@ -35,8 +35,11 @@ export interface TestSource {
   readonly isDemo: boolean;
   /** The running session with the open section and its questions. Rejects when it cannot be read. */
   loadSession(): Promise<Schemas['CandidateSession']>;
-  /** A plain re-read that never touches the cache (used to verify a finish). `{ submitted: true }` when
-   * the server says the test is over (SUBMITTED, or 409 SESSION_NOT_ACTIVE). Null when it fails. */
+  /**
+   * A plain re-read that never touches the cache (used to verify a finish). `{ submitted: true }`
+   * when the server says the test is over (a status in OVER_STATUSES, or 409 SESSION_NOT_ACTIVE).
+   * Null when it fails, and for an unknown status (never treated as over).
+   */
   readSession(): Promise<Schemas['CandidateSession'] | { submitted: true } | null>;
   /** The server's current time, ISO. Rejects when it cannot be read (FR-505). */
   serverNow(): Promise<string>;

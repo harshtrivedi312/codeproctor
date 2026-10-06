@@ -117,6 +117,8 @@ export function createProctorTransport(hooks: TransportHooks): EventTransport & 
     },
 
     async heartbeat(): Promise<boolean> {
+      // Purging: the session is over for this browser, so no more beats (and none reach the server).
+      if (hooks.isPurged?.()) return false;
       const startedAt = performance.now();
       const result = await requestAt(heartbeatSchema, '/session/heartbeat', {
         method: 'POST',

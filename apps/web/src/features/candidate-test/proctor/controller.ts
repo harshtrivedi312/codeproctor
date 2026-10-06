@@ -198,6 +198,8 @@ export interface ProctorControllerOptions {
   /** How long to wait for queued events and chunks when the test ends (SDK default 15 s). */
   finishDrainMs?: number;
   retrySleep?: (ms: number) => Promise<void>;
+  /** Per attempt on the one-shot key call (default 15 s). */
+  keyTimeoutMs?: number;
 }
 
 type Listener = (state: ProctorUiState) => void;
@@ -255,7 +257,12 @@ export class ProctorController {
     const store = this.o.store ?? new IdbStore(safeIdbFactory());
     this.store = store;
     const keyResult = await withRetry(
-      () => requestAt(proctorKeySchema, '/session/proctor-key', { method: 'POST', authed: true }),
+      () =>
+        requestAt(proctorKeySchema, '/session/proctor-key', {
+          method: 'POST',
+          authed: true,
+          signal: AbortSignal.timeout(this.o.keyTimeoutMs ?? 15_000),
+        }),
       this.o.retrySleep ? { sleep: this.o.retrySleep } : {},
     );
     if (this.stopped) return false;
@@ -274,6 +281,16 @@ export class ProctorController {
       return false;
     }
     await seedCounters(store, this.o.sessionId, keyResult.data.counters);
+    // The heartbeat reports where each stream continues from, before anything is uploaded.
+    for (const stream of MEDIA_STREAMS) {
+      const c = keyResult.data.counters?.media?.[stream];
+      if (c && c.nextSeq > 0) {
+        this.mediaProgress[stream] = {
+          segment: Math.max(0, c.nextSegment - 1),
+          lastSeq: c.nextSeq - 1,
+        };
+      }
+    }
     if (this.stopped) return false;
 
     const transport = createProctorTransport({
@@ -399,7 +416,7 @@ export class ProctorController {
     if (!outcome.ok) return { ok: false, reason: outcome.reason };
     this.set({ shared: true });
     await this.pipeline?.recordScreen(outcome.stream);
-    if (this.stopped) await this.pipeline?.stopStream('SCREEN');
+    if (this.stopped) await this.dropLate('SCREEN');
     return { ok: true };
   }
 
@@ -420,14 +437,32 @@ export class ProctorController {
     const webcam = await this.pipeline.recordWebcam();
     if (this.stopped) {
       webcam?.getTracks().forEach((t) => t.stop());
-      await this.pipeline.stopStream('WEBCAM');
+      await this.dropLate('WEBCAM');
       return;
     }
     const audio = await this.pipeline.recordAudio();
     if (this.stopped) {
       audio?.getTracks().forEach((t) => t.stop());
-      await this.pipeline.stopStream('AUDIO');
+      await this.dropLate('AUDIO');
     }
+  }
+
+  /**
+   * A device was granted after the test ended, and the SDK has already started a recorder (and
+   * its upload queue and segment counter) for it. Stopping the recorder flushes a last chunk into
+   * the SDK's storage. When the data is being purged or the test finished, that would leave a clip
+   * on disk after the purge, so finish the pipeline with no drain and purge the store again. When
+   * the page is only being left, the chunk is kept for the next load.
+   */
+  private async dropLate(stream: (typeof MEDIA_STREAMS)[number]): Promise<void> {
+    if (!this.pipeline) return;
+    if (this.purging || this.finishing) {
+      await this.pipeline.finish({ drainTimeoutMs: 0 }).catch(() => undefined);
+      if (this.store) await purgeStore(this.store, this.o.sessionId);
+      this.removeSeqBackup();
+      return;
+    }
+    await this.pipeline.stopStream(stream).catch(() => undefined);
   }
 
   /**
