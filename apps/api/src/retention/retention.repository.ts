@@ -53,6 +53,7 @@ export const POST_CAPTURE_STATUSES = [
   'EXPIRED',
   'APPEALED',
   'DECLINED',
+  'ERASED', // terminal, fenced by erasure (ADR 0004 §9.5)
 ];
 /** A review or appeal is open: the media tier never visits them (ADR 0004 R-2, re-checked here). */
 const HELD_STATUSES = ['UNDER_REVIEW', 'APPEALED'];

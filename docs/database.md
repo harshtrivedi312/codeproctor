@@ -199,14 +199,16 @@ CREATE TYPE user_role        AS ENUM ('SUPER_ADMIN','RECRUITER','AUTHOR','REVIEW
 CREATE TYPE difficulty       AS ENUM ('EASY','MEDIUM','HARD');
 CREATE TYPE question_type    AS ENUM ('CODING','MCQ','SHORT_ANSWER');
 CREATE TYPE proctor_profile  AS ENUM ('STANDARD','STRICT');  -- LOCKDOWN returns with the lockdown client (ADR 0007 §8)
-CREATE TYPE session_status   AS ENUM ('INVITED','OPENED','CONSENTED','VERIFIED','IN_PROGRESS','PAUSED','SUBMITTED','GRADED','UNDER_REVIEW','COMPLETED','EXPIRED','APPEALED','DECLINED');
+CREATE TYPE session_status   AS ENUM ('INVITED','OPENED','CONSENTED','VERIFIED','IN_PROGRESS','PAUSED','SUBMITTED','GRADED','UNDER_REVIEW','COMPLETED','EXPIRED','APPEALED','DECLINED',
+                                      'ERASED');  -- terminal, no exit (ADR 0004 §9.5; own migration, PR #91)
 CREATE TYPE submission_kind  AS ENUM ('RUN','SUBMIT');
 CREATE TYPE media_stream     AS ENUM ('SCREEN','WEBCAM','AUDIO','SIDE_CAMERA','ROOM_SCAN');
 CREATE TYPE severity         AS ENUM ('LOW','MEDIUM','HIGH');
 CREATE TYPE risk_band        AS ENUM ('LOW','MEDIUM','HIGH');
 CREATE TYPE verdict          AS ENUM ('CLEAN','SUSPICIOUS','VIOLATION');
 CREATE TYPE flag_decision    AS ENUM ('CONFIRMED','DISMISSED');
-CREATE TYPE appeal_status    AS ENUM ('OPEN','UPHELD','OVERTURNED');
+CREATE TYPE appeal_status    AS ENUM ('OPEN','UPHELD','OVERTURNED',
+                                      'CLOSED_ERASED');  -- closed by erasure, no outcome (ADR 0004 §9.5; own migration, PR #91)
 CREATE TYPE event_type AS ENUM (
   'FULLSCREEN_EXIT','TAB_SWITCH','FOCUS_LOST','PASTE_ATTEMPT','COPY_ATTEMPT','RIGHT_CLICK',
   'DEVTOOLS_OPEN','SCREEN_SHARE_STOPPED','MULTI_MONITOR','VIRTUAL_CAMERA',
@@ -281,6 +283,9 @@ CREATE TABLE audit_logs (
   created_at   timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ON audit_logs (org_id, created_at DESC);
+-- Retention completion markers (ADR 0004 §9.2; PR #91). Only the three RetentionService actions are indexed.
+CREATE INDEX audit_logs_retention_marker_idx ON audit_logs (action, entity_id)
+  WHERE action IN ('RETENTION_FACE_DONE','RETENTION_MEDIA_DONE','RETENTION_RESULTS_DONE');
 
 -- ---------- Content ----------
 
@@ -688,6 +693,9 @@ CREATE INDEX ON webhook_deliveries (endpoint_id, created_at DESC);
 -- ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO app_user;
 -- REVOKE UPDATE, DELETE, TRUNCATE ON audit_logs FROM app_user;
 -- REVOKE ALL ON _prisma_migrations FROM app_user;
+-- REVOKE DELETE, TRUNCATE ON sessions FROM app_user;   -- ADR 0004 §9.3, PR #91: sessions rows are never deleted
+-- A later migration that repeats GRANT ... ON ALL TABLES re-grants DELETE on sessions, so the DB test asserts
+-- has_table_privilege('app_user', 'sessions', 'DELETE') and 'TRUNCATE' are both false.
 ```
 
 ## Data rules
