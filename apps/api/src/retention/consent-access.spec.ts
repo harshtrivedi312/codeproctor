@@ -14,9 +14,10 @@ const ALLOWED: Record<string, string> = {
   'retention/consent-retention.repository.ts': 'the one repository, with a fixed select',
   'test/retention/retention-harness.ts': 'test helper: sets up fixtures with the owner role',
   'test/retention/consent-access-scan.ts': 'the scanner names what it looks for',
-  // BE-07 candidate consent flow (FR-106, C-07): the candidate signs or declines their own
-  // consent in their own session scope, and the signed PDF is rendered from what they typed.
-  // Nothing here lists or reads other candidates' consents. Added in the PR that builds it.
+  // BE-07 candidate consent flow (FR-106, C-07): sign and decline run in the org scope, keyed by
+  // the token's sessionId (the row create is not allowed in candidate scope, CS-4.4), and the
+  // signed PDF is rendered from what was typed. Nothing here lists or reads other candidates'
+  // consents. The exact hits of each file are pinned in the test below.
   'candidate/consent.service.ts': 'sign and decline of the session own consent (C-07)',
   'candidate/consent-pdf.service.ts': 'renders the signed PDF for the session own consent',
   'candidate/consent-pdf.renderer.ts': 'pure renderer of the typed legal name',
@@ -97,6 +98,24 @@ describe('consent access (FR-105, NFR-05, C-17)', () => {
       expect({ rel, hits: consentAccessHits(readFileSync(join(SRC, rel), 'utf8')) }).toEqual({
         rel,
         hits: ['signedName'],
+      });
+    }
+  });
+
+  it('the BE-07 candidate files are pinned to their exact consent hits (a new read or a new column fails)', () => {
+    const MODEL = 'client access to the consent model';
+    const pinned: Record<string, string[]> = {
+      'candidate/consent.service.ts': [MODEL, 'signedName'],
+      'candidate/consent-pdf.service.ts': [MODEL, 'signedName'],
+      'candidate/consent-pdf.renderer.ts': ['signedName'],
+      'candidate/dto/candidate.dto.ts': ['signedName'],
+      // The sweep only lists signed consents by id and date: model access, never the name.
+      'candidate/session-jobs.service.ts': [MODEL],
+    };
+    for (const [rel, hits] of Object.entries(pinned)) {
+      expect({ rel, hits: consentAccessHits(readFileSync(join(SRC, rel), 'utf8')) }).toEqual({
+        rel,
+        hits,
       });
     }
   });

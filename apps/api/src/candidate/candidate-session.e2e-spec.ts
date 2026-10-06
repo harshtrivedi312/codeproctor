@@ -940,10 +940,60 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const inv = await invite({ status: 'OPENED' }, bare);
       const token = tokens.sign({ sid: inv.sessionId, oid: bare.orgId, epoch: 0 }).token;
       await authed('get', '/consent', token)
-        .expect(409)
+        .expect(503)
         .expect((r) => expect(r.body).toMatchObject({ code: 'CONSENT_NOT_CONFIGURED' }));
       await authed('post', '/consent/decline', token).expect(200);
       expect((await sessionRow(inv.sessionId)).status).toBe('DECLINED');
+    });
+
+    it('FR-401, hub item 9: a missing current consent text is a 503 configuration fault (CONSENT_NOT_CONFIGURED), not the 409 of a stale page', async () => {
+      const bare = await createTenant(owner, 'bare2');
+      await owner.organization.update({
+        where: { id: bare.orgId },
+        data: { currentConsentTextId: null },
+      });
+      const inv = await invite({ status: 'OPENED' }, bare);
+      const token = tokens.sign({ sid: inv.sessionId, oid: bare.orgId, epoch: 0 }).token;
+      const res = await authed('post', '/consent/sign', token, {
+        consentTextId: bare.consentTextId,
+        signedName: 'Ada Lovelace',
+        confirmedAge18: true,
+      });
+      expect(res.status).toBe(503);
+      expect(res.body).toMatchObject({ code: 'CONSENT_NOT_CONFIGURED' });
+      expect(await owner.consent.count({ where: { sessionId: inv.sessionId } })).toBe(0);
+      expect((await sessionRow(inv.sessionId)).status).toBe('OPENED');
+      // The same body against a configured org is the mismatch: 409 CONSENT_TEXT_CHANGED.
+      const ok = await invite({ status: 'OPENED' });
+      const okToken = tokens.sign({ sid: ok.sessionId, oid: tenant.orgId, epoch: 0 }).token;
+      const stale = await authed('post', '/consent/sign', okToken, {
+        consentTextId: bare.consentTextId,
+        signedName: 'Ada Lovelace',
+        confirmedAge18: true,
+      });
+      expect(stale.status).toBe(409);
+      expect(stale.body).toMatchObject({ code: 'CONSENT_TEXT_CHANGED' });
+    });
+
+    it('FR-401, hub item 9: the create is write-once; a second row is 409 ALREADY_SIGNED without sessionStatus and rolls the status back', async () => {
+      const inv = await invite({ status: 'OPENED' });
+      await owner.consent.create({
+        data: {
+          sessionId: inv.sessionId,
+          consentTextId: tenant.consentTextId,
+          declinedAt: new Date(),
+        },
+      });
+      const token = tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch: 0 }).token;
+      const res = await authed('post', '/consent/sign', token, {
+        consentTextId: tenant.consentTextId,
+        signedName: 'Ada Lovelace',
+        confirmedAge18: true,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: 'ALREADY_SIGNED' });
+      expect(res.body).not.toHaveProperty('sessionStatus');
+      expect((await sessionRow(inv.sessionId)).status).toBe('OPENED');
     });
 
     it('D-17, ADR 0007 section 6: with REQUIRE_LEGAL_APPROVED_CONSENT an unapproved text is not served and cannot be signed', async () => {
@@ -1735,7 +1785,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       Object.entries(doc.paths).filter(([path]) => path.startsWith(prefix)),
     );
     expect(text).not.toContain('variantId');
-    expect(text).not.toContain('\"params\"');
+    expect(text).not.toContain('"params"');
     expect(text).not.toContain('hmacKeyEnc');
   });
 
@@ -1991,9 +2041,14 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       readonly scope: string;
       /** ORG (plain org scope), CANDIDATE, SERVICE or SYSTEM. */
       readonly actor: string;
+      /** The caller of the request this query belongs to (null for the forged-token probes). */
+      readonly subject: InvitationFixture | null;
       /** Were the candidate facts already set when this query ran? */
       readonly facts: boolean;
     }
+
+    // Set before each request of the test below: whose token the queries that follow belong to.
+    let subjectOfRequest: InvitationFixture | null = null;
 
     /** Wraps prisma.client so every model call made by a request (not a job) is recorded. */
     async function record(run: () => Promise<void>): Promise<Call[]> {
@@ -2022,6 +2077,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
                   scope: scope?.kind === 'system' ? `system:${scope.reason}` : 'org',
                   actor: scope?.kind === 'system' ? 'SYSTEM' : (scope?.session?.actor ?? 'ORG'),
                   facts: orgContext.candidateFacts() !== undefined,
+                  subject: subjectOfRequest,
                 });
               }
               return (fn as Fn).apply(t, a);
@@ -2112,10 +2168,10 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         data: { hmacKeyEnc: keys.generateWrapped(live.sessionId) },
       });
       const mine = [preToken, opened, declining, verified, live];
-      const hdr = (inv: InvitationFixture) => tokenFor(inv);
-      function tokenFor(inv: InvitationFixture): string {
+      const hdr = (inv: InvitationFixture): string => {
+        subjectOfRequest = inv;
         return tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch: 1 }).token;
-      }
+      };
       const snapshot = async () => ({
         sessions: await owner.session.findMany({
           where: { id: { in: [bSame.sessionId, bOther.sessionId, bOpened.sessionId] } },
@@ -2135,6 +2191,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
 
       const calls = await record(async () => {
         // Pre-token routes, with a wrong guess and the right code.
+        subjectOfRequest = preToken;
         await post('/link', { invitationToken: preToken.token }).expect(200);
         const code = await otpFor(preToken);
         await post('/start', { invitationToken: preToken.token, otp: wrongCode(code) }).expect(400);
@@ -2166,6 +2223,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         await authed('post', '/heartbeat', hdr(live)).expect(200);
         await authed('post', '/proctor-key', hdr(live), { sessionId: bSame.sessionId }).expect(200);
         // A token naming another session's id with this org (and the reverse) reads nothing of it.
+        subjectOfRequest = null;
         await authed(
           'get',
           '',
@@ -2208,9 +2266,6 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         'mediaChunk',
         'identityCheck',
       ];
-      const mineSessions = mine.map((m) => m.sessionId);
-      const mineInvitations = mine.map((m) => m.invitationId);
-      const mineCandidates = mine.map((m) => m.candidateId);
       const mine1 = (c: Call, ids: string[]): boolean => ids.some((id) => c.json.includes(id));
       const sectionIds = [...tenant.test.sectionIds];
       const contentIds = [...tenant.test.fixedVersionIds, ...tenant.test.randomPoolVersionIds];
@@ -2222,15 +2277,21 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
           expect(c.json).toContain(sha256Hex(preToken.token));
           continue;
         }
+        // The ids of THIS request's token session, not of any session of the test.
+        const own = c.subject;
+        if (own === null) throw new Error(`a query outside a known request: ${label}`);
         if (sessionScoped.includes(c.model)) {
-          expect([c.model, mine1(c, [...mineSessions, ...mineInvitations])]).toEqual([
-            c.model,
-            true,
-          ]);
+          expect([label, mine1(c, [own.sessionId, own.invitationId])]).toEqual([label, true]);
+          for (const m of mine.filter((x) => x !== own)) {
+            expect([label, mine1(c, [m.sessionId, m.invitationId, m.candidateId])]).toEqual([
+              label,
+              false,
+            ]);
+          }
         } else if (c.model === 'invitation')
-          expect([label, mine1(c, mineInvitations)]).toEqual([label, true]);
+          expect([label, mine1(c, [own.invitationId])]).toEqual([label, true]);
         else if (c.model === 'candidate')
-          expect([label, mine1(c, mineCandidates)]).toEqual([label, true]);
+          expect([label, mine1(c, [own.candidateId])]).toEqual([label, true]);
         else if (c.model === 'test')
           expect([label, c.json.includes(tenant.test.id)]).toEqual([label, true]);
         else if (c.model === 'organization')
@@ -2308,6 +2369,171 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
 
       // 3. Nothing of the other sessions was read or written.
       expect(await snapshot()).toEqual(before);
+    });
+  });
+
+  // ---------- cross-candidate isolation, same org (TC-008 style) ----------
+
+  describe('cross-candidate isolation inside one org (TC-008, ADR 0013 section 5.10, P-24)', () => {
+    it("TC-008, CS-1, CS-2: with candidate A's tokens on every candidate route, nothing of candidate B (same org) is read or changed, and no response carries a B value", async () => {
+      const B_SIGNED_NAME = 'Beatrice Zzyzx-Marker';
+      const B_ACCOMMODATION = 4242;
+      const B_DEVICE = 'B-DEVICE-INFO-MARKER';
+      const b = await invite({
+        ...liveSession({ deviceInfo: { marker: B_DEVICE, ...passedSystemCheck() } }),
+        accommodations: { extraTimePct: B_ACCOMMODATION, notes: 'B-PRIVATE-NOTE' },
+        email: 'beatrice-marker@example.test',
+      });
+      const bWrapped = keys.generateWrapped(b.sessionId);
+      await owner.session.update({ where: { id: b.sessionId }, data: { hmacKeyEnc: bWrapped } });
+      await owner.invitation.update({
+        where: { id: b.invitationId },
+        data: { usedAt: new Date() },
+      });
+      await owner.consent.create({
+        data: {
+          sessionId: b.sessionId,
+          consentTextId: tenant.consentTextId,
+          signedName: B_SIGNED_NAME,
+          signedAt: new Date(),
+          ip: '198.51.100.7',
+          userAgent: 'B-UA-MARKER',
+        },
+      });
+      await owner.sessionSection.create({
+        data: {
+          sessionId: b.sessionId,
+          sectionId: tenant.test.sectionIds[0],
+          position: 1,
+          startedAt: new Date(),
+          deadlineAt: new Date(Date.now() + 600_000),
+        },
+      });
+      await redis.set(`pkey:${b.sessionId}:1`, '1', 'EX', 3600);
+      await redis.set(`disc:${b.sessionId}`, '1', 'EX', 3600);
+
+      const snapshotB = async () => ({
+        session: await owner.session.findUniqueOrThrow({ where: { id: b.sessionId } }),
+        invitation: await owner.invitation.findUniqueOrThrow({ where: { id: b.invitationId } }),
+        consent: await owner.consent.findUniqueOrThrow({ where: { sessionId: b.sessionId } }),
+        sections: await owner.sessionSection.findMany({ where: { sessionId: b.sessionId } }),
+        questions: await owner.sessionQuestion.count({ where: { sessionId: b.sessionId } }),
+        events: await owner.proctorEvent.count({ where: { sessionId: b.sessionId } }),
+        markers: [
+          await redis.get(`pkey:${b.sessionId}:1`),
+          await redis.get(`disc:${b.sessionId}`),
+          await redis.exists(`otp:${b.invitationId}`),
+          await redis.exists(`otp-cooldown:${b.invitationId}`),
+        ],
+      });
+      const before = await snapshotB();
+
+      // A's sessions: one per phase, all in the same org as B.
+      const a0 = await invite();
+      const a1 = await invite({ status: 'OPENED', session: { authEpoch: 1 } });
+      const a2 = await invite({ status: 'OPENED', session: { authEpoch: 1 } });
+      const a3 = await invite({
+        status: 'VERIFIED',
+        session: { authEpoch: 1, deviceInfo: passedSystemCheck() },
+      });
+      const a4 = await invite(liveSession());
+      await owner.session.update({
+        where: { id: a4.sessionId },
+        data: { hmacKeyEnc: keys.generateWrapped(a4.sessionId) },
+      });
+      const t = (inv: InvitationFixture): string =>
+        tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch: 1 }).token;
+      const bodies: string[] = [];
+      const keep = (r: request.Response): request.Response => {
+        bodies.push(JSON.stringify(r.body) + JSON.stringify(r.headers));
+        return r;
+      };
+      const naming = {
+        sessionId: b.sessionId,
+        invitationId: b.invitationId,
+        candidateId: b.candidateId,
+      };
+
+      // Pre-token routes with A's own link.
+      keep(await post('/link', { invitationToken: a0.token }).expect(200));
+      const code = await otpFor(a0);
+      keep(await post('/start', { invitationToken: a0.token, otp: code }).expect(200));
+      // B's link and token inside A's requests are refused or ignored: unknown keys are 400.
+      keep(await post('/link', { invitationToken: a0.token, ...naming }).expect(400));
+      // Every guarded route with A's token, plus a body that names B's ids.
+      keep(await authed('get', '', t(a1)).expect(200));
+      keep(await authed('get', '/consent', t(a1)).expect(200));
+      expect(
+        keep(
+          await authed('post', '/consent/sign', t(a1), {
+            consentTextId: tenant.consentTextId,
+            signedName: 'Ada Lovelace',
+            confirmedAge18: true,
+            ...naming,
+          }),
+        ).status,
+      ).toBe(400);
+      keep(
+        await authed('post', '/consent/sign', t(a1), {
+          consentTextId: tenant.consentTextId,
+          signedName: 'Ada Lovelace',
+          confirmedAge18: true,
+        }).expect(200),
+      );
+      // Routes without a body DTO ignore the ids named in the body: the decline is A's own.
+      keep(await authed('post', '/consent/decline', t(a2), naming).expect(200));
+      keep(await authed('post', '/test/start', t(a3), naming).expect(200));
+      expect(keep(await authed('post', '/heartbeat', t(a4), naming)).status).toBe(400);
+      keep(await authed('post', '/heartbeat', t(a4)).expect(200));
+      keep(await authed('post', '/proctor-key', t(a4), naming).expect(200));
+      // A signs a document id that is B's org-mate's text: only the org's current text is accepted.
+      const a5 = await invite({ status: 'OPENED', session: { authEpoch: 1 } });
+      expect(
+        keep(
+          await authed('post', '/consent/sign', t(a5), {
+            consentTextId: other.consentTextId,
+            signedName: 'Ada Lovelace',
+            confirmedAge18: true,
+          }),
+        ).status,
+      ).toBe(409);
+      // A's token with B's session id in it is not A's token: refused.
+      expect(
+        keep(
+          await authed(
+            'get',
+            '',
+            tokens.sign({ sid: b.sessionId, oid: other.orgId, epoch: 1 }).token,
+          ),
+        ).status,
+      ).toBe(401);
+
+      // Nothing of B changed.
+      const after = await snapshotB();
+      expect(after).toEqual(before);
+      // No response (body or header) carries a value of B.
+      const joined = bodies.join('\n');
+      for (const value of [
+        b.sessionId,
+        b.invitationId,
+        b.candidateId,
+        b.token,
+        b.candidateEmail,
+        B_SIGNED_NAME,
+        B_DEVICE,
+        'B-PRIVATE-NOTE',
+        'B-UA-MARKER',
+        bWrapped,
+        '198.51.100.7',
+        String(B_ACCOMMODATION),
+      ]) {
+        expect(joined).not.toContain(value);
+      }
+      // A's own requests did their work (so the checks above are not vacuous).
+      expect((await sessionRow(a1.sessionId)).status).toBe('CONSENTED');
+      expect((await sessionRow(a2.sessionId)).status).toBe('DECLINED');
+      expect((await sessionRow(a3.sessionId)).status).toBe('IN_PROGRESS');
+      expect((await sessionRow(a4.sessionId)).lastHeartbeat).not.toBeNull();
     });
   });
 

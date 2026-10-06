@@ -20,7 +20,34 @@ function files(dir: string): Array<{ path: string; text: string }> {
   });
 }
 
+/** Every non-test source file under `dir`, whatever the folder (the generated client is skipped). */
+function allSources(dir: string): Array<{ path: string; text: string }> {
+  return readdirSync(dir).flatMap((name) => {
+    const full = join(dir, name);
+    const path = relative(SRC, full).split(sep).join('/');
+    if (statSync(full).isDirectory()) {
+      return name === 'generated' || name === 'testing' || path === 'test' ? [] : allSources(full);
+    }
+    return path.endsWith('.ts') && !/\.(spec|e2e-spec)\.ts$/.test(path)
+      ? [{ path, text: readFileSync(full, 'utf8') }]
+      : [];
+  });
+}
+
 const sources = DIRS.flatMap((d) => files(join(SRC, d)));
+
+/** [start, end) of the body of `async name(` in `text`; throws when the method is gone. */
+function methodRange(text: string, name: string): [number, number] {
+  const at = text.search(new RegExp(`async ${name}\\(`));
+  if (at < 0) throw new Error(`method ${name} not found`);
+  const open = text.indexOf('{', text.indexOf(')', text.indexOf('(', at)) + 1);
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === '{') depth += 1;
+    else if (text[i] === '}' && --depth === 0) return [at, i + 1];
+  }
+  return [at, text.length];
+}
 
 /** Text of the balanced parentheses that start at `open`. */
 function parens(text: string, open: number): string {
@@ -36,12 +63,13 @@ function parens(text: string, open: number): string {
   return text.slice(open);
 }
 
-export function prismaCalls(text: string): Array<{ call: string; args: string }> {
-  const out: Array<{ call: string; args: string }> = [];
+export function prismaCalls(text: string): Array<{ call: string; args: string; index: number }> {
+  const out: Array<{ call: string; args: string; index: number }> = [];
   for (const m of text.matchAll(/\b(?:client|tx|db)\s*\.\s*([a-z][A-Za-z]+)\s*\.\s*(\w+)\s*\(/g)) {
     out.push({
       call: `${m[1] ?? ''}.${m[2] ?? ''}`,
       args: parens(text, (m.index ?? 0) + m[0].length - 1),
+      index: m.index ?? 0,
     });
   }
   return out;
@@ -91,10 +119,13 @@ describe('ADR 0013 CS-4 interim: nothing a client sends picks a row', () => {
       /\b(sessionId|ctx\.|invitation|candidateId|testId|orgId|tokenHash|currentId|textId|consent\.|session\.|link\.|sections|versionId|sectionId|id:)/;
     const unfiltered: string[] = [];
     for (const f of sources) {
-      for (const { call, args } of prismaCalls(f.text)) {
-        // Discovery and sweep jobs read across orgs on purpose, under runSystem('BACKGROUND_JOB').
-        if (f.path === 'candidate/session-jobs.service.ts' && /discover|sweep/i.test(f.text))
-          continue;
+      // Only the two discovery methods read across orgs on purpose, under runSystem('BACKGROUND_JOB').
+      const exempt =
+        f.path === 'candidate/session-jobs.service.ts'
+          ? ['discoverDisconnected', 'sweepConsentPdfs'].map((m) => methodRange(f.text, m))
+          : [];
+      for (const { call, args, index } of prismaCalls(f.text)) {
+        if (exempt.some(([a, b]) => index >= a && index < b)) continue;
         if (!PREDICATE.test(args)) unfiltered.push(`${f.path}: ${call}`);
       }
     }
@@ -111,17 +142,25 @@ describe('ADR 0013 CS-4 interim: nothing a client sends picks a row', () => {
     expect(prismaCalls('x.session.update(dto.sessionId)')).toHaveLength(0);
   });
 
-  it('CS-4 interim, DL-31: only candidate-scope.ts enters a candidate scope or sets the facts; the other entries are the pre-token and job paths', () => {
-    const entries = (re: RegExp): string[] =>
-      sources
+  it('CS-4 interim, DL-31: in all of apps/api/src outside database/, only candidate-scope.ts calls runAsCandidate or setCandidateFacts or imports candidate-facts', () => {
+    const everything = allSources(SRC).filter((f) => !f.path.startsWith('database/'));
+    expect(everything.length).toBeGreaterThan(100);
+    const hits = (re: RegExp): string[] =>
+      everything
         .filter((f) => re.test(f.text))
         .map((f) => f.path)
         .sort();
-    expect(entries(/runAsCandidate\(|setCandidateFacts\(/)).toEqual([
+    expect(hits(/runAsCandidate\s*\(|setCandidateFacts\s*\(/)).toEqual([
       'candidate/candidate-scope.ts',
     ]);
-    // runInOrg: the guard's step 1 and asOrg (candidate-scope.ts), the pre-token routes, the jobs.
-    expect(entries(/\.runInOrg\(/)).toEqual([
+    expect(hits(/candidate-facts/)).toEqual(['candidate/candidate-scope.ts']);
+    // runInOrg inside the candidate module: the guard's step 1 and asOrg, the pre-token routes, the jobs.
+    expect(
+      sources
+        .filter((f) => /\.runInOrg\(/.test(f.text))
+        .map((f) => f.path)
+        .sort(),
+    ).toEqual([
       'candidate/candidate-auth.service.ts',
       'candidate/candidate-scope.ts',
       'candidate/consent-pdf.service.ts',

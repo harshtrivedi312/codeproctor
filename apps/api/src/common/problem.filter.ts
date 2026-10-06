@@ -28,7 +28,7 @@ export interface ProblemDetails {
   errors?: string[];
   /** Stable machine code, present only where a route defines one (e.g. REAUTH_FAILED). */
   code?: ProblemCode | CandidateProblemCode;
-  /** Extra members of a CodedHttpException, for example `status` or `retryAfterSeconds`. */
+  /** Extra members of a CodedHttpException, for example `sessionStatus` or `retryAfterSeconds`. */
   [extension: string]: unknown;
 }
 

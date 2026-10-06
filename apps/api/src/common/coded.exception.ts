@@ -77,7 +77,7 @@ export function reauthFailed(): CodedForbiddenException {
 
 /**
  * Any 4xx or 503 that carries a stable machine code (ADR 0013 section 5.1). `extensions` are extra
- * RFC 7807 members such as `status` (SESSION_NOT_ACTIVE) or `retryAfterSeconds`; they hold facts
+ * RFC 7807 members such as `sessionStatus` (SESSION_NOT_ACTIVE) or `retryAfterSeconds`; they hold facts
  * about the caller's own session only, never secrets.
  */
 export class CodedHttpException extends HttpException {

@@ -4,6 +4,7 @@
 import { Body, Controller, Get, Header, HttpCode, Post, Req } from '@nestjs/common';
 import {
   ApiConflictResponse,
+  ApiServiceUnavailableResponse,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
@@ -75,7 +76,10 @@ export class CandidateSessionController {
       'Refused with 409 CONSENT_NOT_APPROVED when REQUIRE_LEGAL_APPROVED_CONSENT is true and the text has no Legal approval.',
   })
   @ApiOkResponse({ type: ConsentDocumentDto })
-  @ApiConflictResponse({ description: 'CONSENT_NOT_CONFIGURED, CONSENT_NOT_APPROVED' })
+  @ApiConflictResponse({ description: 'CONSENT_NOT_APPROVED' })
+  @ApiServiceUnavailableResponse({
+    description: 'CONSENT_NOT_CONFIGURED: the org has no current consent text',
+  })
   async getConsent(@Candidate() ctx: CandidateContext): Promise<ConsentDocumentDto> {
     await this.limiter.hit('consent-get', ctx.sessionId, 30, 60);
     const view = await this.consent.get(ctx);

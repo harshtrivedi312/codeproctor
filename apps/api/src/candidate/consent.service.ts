@@ -2,6 +2,9 @@
 // signature; a resumed session keeps its signature. Nothing here starts a device, a recording or an
 // upload: before CONSENTED the other candidate routes refuse (SESSION_NOT_ACTIVE).
 //
+// A missing current text is a configuration fault (503 CONSENT_NOT_CONFIGURED), never a 409; a
+// body that names another text is the candidate's stale page (409 CONSENT_TEXT_CHANGED). The create
+// passes sessionId and consentTextId itself, for the CS-4.4 create-only grant to verify later.
 // The server decides which document is signed: `consentTextId` in the body must equal the org's
 // current text, otherwise 409 CONSENT_TEXT_CHANGED, so a stale page cannot sign an old version. The
 // time is the server's. The 18+ confirmation (C-30) is required to sign; the consents table has no
@@ -99,7 +102,7 @@ export class ConsentService {
     const textId = existing?.consentTextId ?? currentId;
     if (textId === null) {
       throw coded(
-        HttpStatus.CONFLICT,
+        HttpStatus.SERVICE_UNAVAILABLE,
         'No consent document is configured.',
         'CONSENT_NOT_CONFIGURED',
       );
@@ -113,7 +116,7 @@ export class ConsentService {
     );
     if (text === null) {
       throw coded(
-        HttpStatus.CONFLICT,
+        HttpStatus.SERVICE_UNAVAILABLE,
         'No consent document is configured.',
         'CONSENT_NOT_CONFIGURED',
       );
@@ -172,7 +175,7 @@ export class ConsentService {
     const currentId = await this.currentTextId(ctx.orgId);
     if (currentId === null) {
       throw coded(
-        HttpStatus.CONFLICT,
+        HttpStatus.SERVICE_UNAVAILABLE,
         'No consent document is configured.',
         'CONSENT_NOT_CONFIGURED',
       );
@@ -190,7 +193,7 @@ export class ConsentService {
     });
     if (text === null) {
       throw coded(
-        HttpStatus.CONFLICT,
+        HttpStatus.SERVICE_UNAVAILABLE,
         'No consent document is configured.',
         'CONSENT_NOT_CONFIGURED',
       );
@@ -242,10 +245,10 @@ export class ConsentService {
           HttpStatus.CONFLICT,
           'This session has already answered the consent document.',
           'ALREADY_SIGNED',
-          {
-            sessionStatus:
-              e instanceof SessionStateConflictError ? (e.extensions.sessionStatus ?? null) : null,
-          },
+          // The status is sent only when it is known (a lost compare-and-set), never as null.
+          e instanceof SessionStateConflictError && e.extensions.sessionStatus != null
+            ? { sessionStatus: e.extensions.sessionStatus }
+            : {},
         );
       }
       throw e;

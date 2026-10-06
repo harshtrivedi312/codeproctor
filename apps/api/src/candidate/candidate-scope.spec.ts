@@ -103,8 +103,22 @@ describe('CandidateScope (ADR 0013 CS-4, DL-31, FR-106)', () => {
     });
   });
 
-  it('CS-4 interim: outside a scope a handler can query nothing (fails closed)', () => {
+  it('CS-4 interim: outside a scope a real scoped-client query throws OrgContextMissingError (fails closed)', async () => {
+    const { createOrgScopedClient } = jest.requireActual<
+      typeof import('../database/org-scope.extension')
+    >('../database/org-scope.extension');
+    const { OrgContextMissingError } =
+      jest.requireActual<typeof import('../database/errors')>('../database/errors');
     const { orgContext } = setup();
-    expect(orgContext.current()?.scope).toBeUndefined();
+    // A real client that is never connected: the extension refuses before any statement is sent.
+    const { createPrismaClient } = jest.requireActual<
+      typeof import('../database/create-prisma-client')
+    >('../database/create-prisma-client');
+    const base = createPrismaClient('postgresql://nobody:nothing@127.0.0.1:1/none');
+    const queried = createOrgScopedClient(base, orgContext);
+    await expect(
+      queried.session.findUnique({ where: { id: SID }, select: { id: true } }),
+    ).rejects.toBeInstanceOf(OrgContextMissingError);
+    await base.$disconnect();
   });
 });
