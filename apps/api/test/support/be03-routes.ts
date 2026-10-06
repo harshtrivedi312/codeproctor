@@ -142,6 +142,8 @@ export const COVERED_ELSEWHERE: Readonly<Record<string, string>> = {
   // Org settings (FU-BE-133): role matrix, isolation, step-up (PATCH needs currentPassword) and audit in apps/api/src/org-settings/org-settings.e2e-spec.ts.
   'GET /admin/org-settings': 'apps/api/src/org-settings/org-settings.e2e-spec.ts',
   'PATCH /admin/org-settings': 'apps/api/src/org-settings/org-settings.e2e-spec.ts',
+  // Invitations (FR-303, BE-06 slice 6c): role matrix, isolation, audit and races in apps/api/src/invitations/invitations.e2e-spec.ts.
+  'POST /tests/:id/invitations': 'apps/api/src/invitations/invitations.e2e-spec.ts',
 };
 
 /** What a route needs before a call: a path with real ids and a body, built per call. */

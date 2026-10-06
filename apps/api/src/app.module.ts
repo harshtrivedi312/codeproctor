@@ -13,6 +13,7 @@ import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { OrgSettingsModule } from './org-settings/org-settings.module';
 import { UsersModule } from './users/users.module';
+import { InvitationsModule } from './invitations/invitations.module';
 import { TestsModule } from './tests/tests.module';
 import { QuestionsModule } from './questions/questions.module';
 import { JwtAuthGuard } from './common/auth/jwt-auth.guard';
@@ -124,6 +125,7 @@ function areaOf(context: ExecutionContext): Area {
     UsersModule,
     OrgSettingsModule,
     TestsModule,
+    InvitationsModule,
     QuestionsModule,
     HealthModule,
     ClientErrorsModule,

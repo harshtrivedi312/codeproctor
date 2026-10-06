@@ -125,6 +125,8 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'POST /tests': { roles: RECRUITER_ADMIN, permission: 'test:create' },
   'GET /tests/:id': { roles: RECRUITER_ADMIN, permission: 'test:read' },
   'PATCH /tests/:id': { roles: RECRUITER_ADMIN, permission: 'test:update' },
+  // Invitations (FR-303, BE-06 slice 6c): one route today; recruiters and super admins only.
+  'POST /tests/:id/invitations': { roles: RECRUITER_ADMIN, permission: 'invitation:create' },
   // Question bank (FR-201..FR-205). Reads: SUPER_ADMIN, RECRUITER, AUTHOR; writes: SUPER_ADMIN,
   // AUTHOR (ADR 0010 section 3). Publish, archive and test cases are changes: question:update.
   'GET /questions': questionRead,

@@ -49,6 +49,8 @@ export const envSchema = z
     LOG_LEVEL: z
       .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
       .default('info'),
+    // Longest candidate invitation window a recruiter may set, in days (FR-303).
+    INVITATION_MAX_WINDOW_DAYS: z.coerce.number().int().min(1).max(30).default(7),
     // Global default: requests per window per client IP.
     THROTTLE_DEFAULT_LIMIT: positiveInt.default(100),
     // Stricter limits for /auth and /candidate (NFR-04).

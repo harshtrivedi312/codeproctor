@@ -50,7 +50,8 @@ export interface Actor {
 /** The most rows a list can skip: deep offsets are refused (400), as in the staff user list. */
 export const MAX_LIST_OFFSET = 10_000;
 
-type Db = Pick<
+/** The client shape this service needs: the scoped client or a transaction of it. */
+export type TestsDb = Pick<
   OrgScopedPrismaClient,
   | 'test'
   | 'testSection'
@@ -62,6 +63,8 @@ type Db = Pick<
   | 'auditLog'
   | '$queryRaw'
 >;
+
+type Db = TestsDb;
 
 const NOT_FOUND = 'Test not found.';
 
@@ -366,12 +369,13 @@ export class TestsService {
    * this before it inserts an invitation, and refuse (409) when `satisfiable` is false. Test start
    * (BE-07) still answers 409 RANDOM_RULE_UNSATISFIABLE for a bank that changed after the invitation.
    * Org-scoped (another org's test is 404), no writes, no lock. Never read the test FOR UPDATE
-   * in the invitation step (FU-BE-114). Problems name slot positions only.
+   * in the invitation step (FU-BE-114). Problems name slot positions only. The invitation step
+   * passes its own transaction as `db` so it does not hold a second pool connection.
    */
   async checkTestSatisfiable(
     testId: string,
+    db: TestsDb = this.prisma.client,
   ): Promise<{ satisfiable: boolean; problems: string[] }> {
-    const db = this.prisma.client;
     const test = await db.test.findUnique({ where: { id: testId }, select: { id: true } });
     if (!test) throw new NotFoundException(NOT_FOUND);
     const sections = await db.testSection.findMany({
