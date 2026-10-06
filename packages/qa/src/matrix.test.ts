@@ -24,8 +24,8 @@ describe('test matrix (QA-01)', () => {
   const matrixText = read('docs/test-matrix.md');
   const matrixRows = matrixText.split('\n').filter((l) => /^\| TC-\d{3} \|/.test(l));
 
-  it('lists 72 test cases in test-cases.md', () => {
-    expect(cases).toHaveLength(72);
+  it('lists 73 test cases in test-cases.md', () => {
+    expect(cases).toHaveLength(73);
   });
 
   it('has exactly one row for every test case', () => {

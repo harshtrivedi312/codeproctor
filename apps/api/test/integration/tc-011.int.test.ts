@@ -20,6 +20,7 @@ import {
   HIDDEN_OUT_2,
   idOf,
   Json,
+  markValidated,
   mcqBody,
   MCQ_KEY_ID,
   publishQuestion,
@@ -46,8 +47,9 @@ const ANSWER_KEYS = [
   'canonical',
   'validationReport',
   'aiReference',
+  'revision',
 ];
-const ANSWER_KEY_RE = /reference|answer|canonical|variant|correct|validation|aiRef/i;
+const ANSWER_KEY_RE = /reference|answer|canonical|variant|correct|validation|aiRef|revision/i;
 const DETAIL_KEYS = [
   'id',
   'slug',
@@ -140,9 +142,9 @@ describe('TC-011 (FR-202): hidden tests, reference solutions and answer keys are
   };
 
   /**
-   * A recruiter read of one PUBLISHED question: only allowlisted keys, so a new field must be
-   * reviewed. The allowlist is ASSUMED from the current DTO (DL-32's allowlisted DTO is not on
-   * backend/step-4 @23b3caf); replace it with the DL-32 list when that lands.
+   * A recruiter read of one PUBLISHED question (DL-32 allowlisted DTO, exact key sets): a sample
+   * test case has id, position, isHidden, weight, input, expectedOutput; a hidden one has id,
+   * position, isHidden, weight ONLY (input and expectedOutput are ABSENT, not null).
    */
   const expectRecruiterDetail = (res: request.Response): void => {
     expectCleanView(res);
@@ -150,8 +152,12 @@ describe('TC-011 (FR-202): hidden tests, reference solutions and answer keys are
     expect(Object.keys(body).sort()).toEqual([...DETAIL_KEYS].sort());
     const v = body.version as Json;
     expect(Object.keys(v).sort()).toEqual([...VERSION_KEYS].sort());
-    for (const t of v.testCases as Json[])
-      expect(Object.keys(t).sort()).toEqual([...TEST_CASE_KEYS].sort());
+    for (const t of v.testCases as Json[]) {
+      const keys = Object.keys(t).sort();
+      expect(keys).toEqual(
+        t.isHidden === true ? ['id', 'isHidden', 'position', 'weight'] : [...TEST_CASE_KEYS].sort(),
+      );
+    }
   };
 
   it('TC-011: the candidate view of a coding question has exactly the contracted keys and the sample cases only', async () => {
@@ -175,18 +181,17 @@ describe('TC-011 (FR-202): hidden tests, reference solutions and answer keys are
     }
   });
 
-  it('TC-011: a recruiter sees samples in full but hidden tests with null input and output, and no reference solution, answer_spec or validation report', async () => {
+  it('TC-100 (FR-202, FR-301, DL-32, DL-34): a recruiter sees samples in full but hidden tests with the input and output keys absent, and no reference solution, answer_spec or validation report', async () => {
     const res = await call(h, 'GET', `/questions/${coding}`, s.recruiter.token);
     expectRecruiterDetail(res);
     const v = versionOf(res.body as Json);
-    const cases = v.testCases as {
-      isHidden: boolean;
-      input: string | null;
-      expectedOutput: string | null;
-    }[];
+    const cases = v.testCases as { isHidden: boolean; input?: string }[];
     expect(cases).toHaveLength(4);
-    for (const c of cases.filter((x) => x.isHidden))
-      expect([c.input, c.expectedOutput]).toEqual([null, null]);
+    expect(cases.filter((x) => x.isHidden)).toHaveLength(2);
+    for (const c of cases.filter((x) => x.isHidden)) {
+      expect('input' in c).toBe(false); // absent, not null
+      expect('expectedOutput' in c).toBe(false);
+    }
     for (const c of cases.filter((x) => !x.isHidden))
       expect(c.input).toEqual(expect.stringContaining(SAMPLE_IN));
     // The version selector is covered too (this question has one version; the draft version 2 case is below).
@@ -195,7 +200,7 @@ describe('TC-011 (FR-202): hidden tests, reference solutions and answer keys are
     );
   });
 
-  it('TC-011: positive control: author and admin do see hidden tests, reference solutions, canonical answers, variants, answer_spec and validationReport (so the scans can fail)', async () => {
+  it('TC-100 (FR-202, FR-301, DL-32, DL-34): positive control: author and admin do see hidden tests, reference solutions, canonical answers, variants, answer_spec and validationReport (so the scans can fail)', async () => {
     for (const who of [s.author, s.admin]) {
       const res = await call(h, 'GET', `/questions/${coding}`, who.token).expect(200);
       expect(res.text).toContain(HIDDEN_IN);
@@ -216,7 +221,7 @@ describe('TC-011 (FR-202): hidden tests, reference solutions and answer keys are
     }
   });
 
-  it('TC-011: the question list (every role that can read it) carries no test cases, solutions or answers', async () => {
+  it('TC-100 (FR-202, FR-301, DL-32, DL-34): the question list (every role that can read it) carries no test cases, solutions or answers', async () => {
     for (const who of [s.author, s.recruiter, s.admin]) {
       const res = await call(h, 'GET', '/questions?includeArchived=true&pageSize=100', who.token);
       expectCleanView(res);
@@ -283,7 +288,7 @@ describe('TC-011 (FR-202): hidden tests, reference solutions and answer keys are
     expectNoneOf(await previewText(), ['QA-DEFAULT-HIDDEN-IN', 'QA-DEFAULT-HIDDEN-OUT']);
   });
 
-  it('TC-011: write responses to a recruiter-level caller never carry data either (403 body) and a draft hidden test stays out of the preview of a published version', async () => {
+  it('TC-100 (FR-202, FR-301, DL-32, DL-34): write responses to a recruiter-level caller never carry data either (403 body) and a draft hidden test stays out of the preview of a published version', async () => {
     // 403 bodies: no question data.
     for (const [method, path, body] of [
       ['PATCH', `/questions/${coding}`, { title: 'x' }],
@@ -368,7 +373,7 @@ describe('TC-011 (FR-202): hidden tests, reference solutions and answer keys are
     }
   });
 
-  it('TC-011 TC-008: a never-published question is a 404 for a recruiter (default and any version), identical to a random id, and absent from their list; author and admin see it', async () => {
+  it('TC-100 (FR-202, FR-301, DL-32, DL-34): a never-published question is a 404 for a recruiter (default and any version), identical to a random id, and absent from their list; author and admin see it', async () => {
     const q = idOf(await createQuestion(h, s.author, codingBody({ title: 'QA draft only title' })));
     const random = await call(h, 'GET', `/questions/${crypto.randomUUID()}`, s.recruiter.token);
     expect(random.status).toBe(404);
@@ -381,7 +386,8 @@ describe('TC-011 (FR-202): hidden tests, reference solutions and answer keys are
       const res = await call(h, 'GET', path, s.recruiter.token);
       expect([path, res.status]).toEqual([path, 404]);
       expect(stableProblem(res)).toEqual(stableProblem(random));
-      expectNoneOf(res, [...HIDDEN_MARKERS, ...ANSWER_MARKERS, 'QA draft only title', q]);
+      expectNoneOf(res, [...HIDDEN_MARKERS, ...ANSWER_MARKERS, 'QA draft only title']);
+      expect(JSON.stringify(stableProblem(res))).not.toContain(q); // `instance` echoes the caller's own URL
     }
     const list = await call(
       h,
@@ -397,7 +403,7 @@ describe('TC-011 (FR-202): hidden tests, reference solutions and answer keys are
     }
   });
 
-  it('TC-011: the recruiter list shows the published version fields only: a question with published v1 and draft v2 shows v1', async () => {
+  it('TC-100 (FR-202, FR-301, DL-32, DL-34): the recruiter list shows the published version fields only: a question with published v1 and draft v2 shows v1', async () => {
     const q = idOf(await createQuestion(h, s.author, codingBody({ title: 'QA list v1 title' })));
     await publishQuestion(h, s.author, q);
     await call(h, 'PATCH', `/questions/${q}`, s.author.token, {
@@ -428,7 +434,7 @@ describe('TC-011 (FR-202): hidden tests, reference solutions and answer keys are
     });
   });
 
-  it('TC-011: unknown versions and other-org callers get a 404 with no question data (FR-202, NFR-04)', async () => {
+  it('TC-100 (FR-202, FR-301, DL-32, DL-34): unknown versions and other-org callers get a 404 with no question data (FR-202, NFR-04)', async () => {
     const outsider = await actor(h, UserRole.AUTHOR, orgB);
     for (const path of [`/questions/${coding}`, `/questions/${coding}/preview`]) {
       const res = await call(h, 'GET', path, outsider.token);
@@ -445,7 +451,7 @@ describe('TC-011 (FR-202): hidden tests, reference solutions and answer keys are
     }
   });
 
-  it('TC-011 FR-201 FR-301 DL-34: a recruiter list, with every filter the endpoint has, pagination, order and totals, never shows, counts or leaks a draft-only question; author and admin see it', async () => {
+  it('TC-100 (FR-202, FR-301, DL-32, DL-34): a recruiter list, with every filter the endpoint has, pagination, order and totals, never shows, counts or leaks a draft-only question; author and admin see it', async () => {
     const t = Date.now().toString(36);
     const common = `dl34-all-${t}`;
     const draftTag = `dl34-draft-${t}`;
@@ -494,7 +500,12 @@ describe('TC-011 (FR-202): hidden tests, reference solutions and answer keys are
       who: { token: string },
       qs: string,
     ): Promise<{ res: request.Response; body: ListBody }> => {
-      const res = await call(h, 'GET', `/questions?pageSize=100&${qs}`, who.token);
+      const res = await call(
+        h,
+        'GET',
+        `/questions?${qs.includes('pageSize') ? '' : 'pageSize=100&'}${qs}`,
+        who.token,
+      );
       expect([qs, res.status]).toEqual([qs, 200]);
       return { res, body: res.body as ListBody };
     };
@@ -533,10 +544,7 @@ describe('TC-011 (FR-202): hidden tests, reference solutions and answer keys are
     // Pagination: totals and pages never include the draft-only question.
     const seen: string[] = [];
     for (const page of [1, 2, 3]) {
-      const { res, body } = await list(
-        s.recruiter,
-        `tag=${common}&pageSize=1&page=${page}`.replace('pageSize=100&', ''),
-      );
+      const { res, body } = await list(s.recruiter, `tag=${common}&pageSize=1&page=${page}`);
       expect([page, body.total]).toEqual([page, 2]);
       expectNoneOf(res, secrets);
       seen.push(...ids(body));
@@ -574,5 +582,147 @@ describe('TC-011 (FR-202): hidden tests, reference solutions and answer keys are
       expect(ids(body)).not.toContain(draftOnly);
       expectNoneOf(res, secrets);
     }
+  });
+
+  it('TC-100 (FR-202, FR-301, DL-32, DL-34): includeArchived is ignored for a recruiter (archived questions never listed); author and admin do list them', async () => {
+    const t = Date.now().toString(36);
+    const tag = `arch-${t}`;
+    const id = idOf(
+      await createQuestion(h, s.author, codingBody({ title: `QA archived ${t}`, tags: [tag] })),
+    );
+    await publishQuestion(h, s.author, id);
+    await call(h, 'POST', `/questions/${id}/archive`, s.author.token).expect(200);
+    for (const qs of [`tag=${tag}`, `tag=${tag}&includeArchived=true`]) {
+      const rec = await call(h, 'GET', `/questions?${qs}`, s.recruiter.token).expect(200);
+      expect((rec.body as { items: unknown[]; total: number }).items).toEqual([]);
+      expect((rec.body as { total: number }).total).toBe(0);
+    }
+    for (const who of [s.author, s.admin]) {
+      const a = await call(
+        h,
+        'GET',
+        `/questions?tag=${tag}&includeArchived=true`,
+        who.token,
+      ).expect(200);
+      expect((a.body as { items: { id: string }[] }).items.map((i) => i.id)).toEqual([id]);
+      const hidden = await call(h, 'GET', `/questions?tag=${tag}`, who.token).expect(200);
+      expect((hidden.body as { total: number }).total).toBe(0);
+    }
+    // pending hub decision FU-BE-109: today a published ARCHIVED question is still readable by id
+    // (200, allowlisted keys only) by a recruiter. Flip these lines if the hub decides on a 404.
+    expectRecruiterDetail(await call(h, 'GET', `/questions/${id}`, s.recruiter.token));
+    const view = await call(h, 'GET', `/questions/${id}/preview`, s.recruiter.token);
+    expectCleanView(view);
+    expect(Object.keys(view.body as Json).sort()).toEqual([...CANDIDATE_KEYS].sort());
+  });
+
+  it("TC-100 (FR-202, DL-32, DL-34): a recruiter gets the identical 404 for a draft, a missing and another org's id, on detail and preview; list items carry exact keys and no revision", async () => {
+    const outsider = await actor(h, UserRole.AUTHOR, orgB);
+    const theirs = idOf(await createQuestion(h, outsider, codingBody({ title: 'QA org B only' })));
+    await publishQuestion(h, outsider, theirs);
+    const draft = idOf(await createQuestion(h, s.author, codingBody({ title: 'QA draft only 2' })));
+    const missing = crypto.randomUUID();
+    for (const suffix of ['', '/preview']) {
+      const bodies: string[] = [];
+      for (const id of [draft, missing, theirs]) {
+        const res = await call(h, 'GET', `/questions/${id}${suffix}`, s.recruiter.token);
+        expect([id, res.status]).toEqual([id, 404]);
+        bodies.push(JSON.stringify(stableProblem(res)));
+      }
+      expect(new Set(bodies).size).toBe(1);
+    }
+    const list = await call(h, 'GET', '/questions?pageSize=100', s.recruiter.token).expect(200);
+    expectNoneOf(list, ['QA org B only', 'QA draft only 2']);
+    for (const item of (list.body as { items: Json[] }).items) {
+      expect(Object.keys(item).sort()).toEqual([
+        'createdAt',
+        'id',
+        'isArchived',
+        'latest',
+        'published',
+        'slug',
+        'tags',
+        'type',
+      ]);
+      expect(Object.keys(item.latest as Json).sort()).toEqual([
+        'createdAt',
+        'difficulty',
+        'id',
+        'isPublished',
+        'title',
+        'validatedAt',
+        'version',
+      ]);
+    }
+  });
+
+  it('TC-100 (FR-202, DL-32): a writer gets a 64-hex revision that changes with every edit; a recruiter never gets it', async () => {
+    const q = idOf(await createQuestion(h, s.author, codingBody()));
+    await publishQuestion(h, s.author, q);
+    const rev = async (who: { token: string }, qs = ''): Promise<unknown> =>
+      versionOf((await call(h, 'GET', `/questions/${q}${qs}`, who.token).expect(200)).body as Json)
+        .revision;
+    const r1 = await rev(s.author, '?version=1');
+    expect(r1).toEqual(expect.stringMatching(/^[0-9a-f]{64}$/));
+    expect(await rev(s.admin, '?version=1')).toBe(r1);
+    expect(await rev(s.recruiter)).toBeUndefined();
+    const edited = await call(h, 'PATCH', `/questions/${q}`, s.author.token, {
+      statementMd: 'new text',
+    }).expect(200);
+    const r2 = versionOf(edited.body as Json).revision;
+    expect(r2).toEqual(expect.stringMatching(/^[0-9a-f]{64}$/));
+    expect(r2).not.toBe(r1);
+    const again = await call(h, 'PATCH', `/questions/${q}`, s.author.token, {
+      statementMd: 'newer text',
+    }).expect(200);
+    expect(versionOf(again.body as Json).revision).not.toBe(r2);
+  });
+
+  it('TC-100 (FR-204, DL-32): expectedRevision on PATCH and publish: current 200, stale 409 with no code, no row change and no audit row', async () => {
+    const q = idOf(await createQuestion(h, s.author, codingBody()));
+    const state = async (): Promise<string> =>
+      JSON.stringify(
+        {
+          v: await h.owner.questionVersion.findMany({ where: { questionId: q } }),
+          t: await h.owner.testCase.findMany({ where: { questionVersion: { questionId: q } } }),
+        },
+        (_k, x: unknown) => (typeof x === 'bigint' ? String(x) : x),
+      );
+    const loaded = versionOf((await call(h, 'GET', `/questions/${q}`, s.author.token)).body as Json)
+      .revision as string;
+    // Another editor saves first: the first loaded revision is now stale.
+    await call(h, 'PATCH', `/questions/${q}`, s.admin.token, { statementMd: 'admin edit' }).expect(
+      200,
+    );
+    await markValidated(h, q); // stand-in for the validate job, so only the revision check can refuse
+    const before = await state();
+    const audits = await h.owner.auditLog.count({ where: { entityId: q } });
+    const stale = await call(h, 'PATCH', `/questions/${q}`, s.author.token, {
+      title: 'stale edit',
+      expectedRevision: loaded,
+    });
+    expect(stale.status).toBe(409);
+    expect(stale.body).not.toHaveProperty('code');
+    const stalePublish = await call(h, 'POST', `/questions/${q}/publish`, s.author.token, {
+      expectedRevision: loaded,
+    });
+    expect(stalePublish.status).toBe(409);
+    expect(stalePublish.body).not.toHaveProperty('code');
+    expect(await state()).toBe(before); // no row changed (the draft stayed a draft)
+    expect(await h.owner.auditLog.count({ where: { entityId: q } })).toBe(audits);
+    // The current revision is accepted.
+    const current = versionOf(
+      (await call(h, 'GET', `/questions/${q}`, s.author.token)).body as Json,
+    ).revision as string;
+    await call(h, 'PATCH', `/questions/${q}`, s.author.token, {
+      title: 'fresh edit',
+      expectedRevision: current,
+    }).expect(200);
+    await markValidated(h, q);
+    const now = versionOf((await call(h, 'GET', `/questions/${q}`, s.author.token)).body as Json)
+      .revision as string;
+    await call(h, 'POST', `/questions/${q}/publish`, s.author.token, {
+      expectedRevision: now,
+    }).expect(200);
   });
 });
