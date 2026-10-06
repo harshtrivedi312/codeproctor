@@ -48,7 +48,7 @@ This tab turns each business requirement into testable functional requirements (
 
 ### M4 Candidate Portal
 
-- **FR-401** Landing page shows the rules, what is recorded and the retention period. After the candidate passes the email OTP, the candidate must sign a consent document before every test session; a signature is never reused across sessions or tests (updated 2026-10-01, D-17).
+- **FR-401** Landing page shows the rules, what is recorded and the retention period. After the candidate passes the email OTP, the candidate must confirm they are 18 or older and sign a consent document before every test session; a candidate who does not confirm cannot continue, and a signature is never reused across sessions or tests (updated 2026-10-01, D-17; age confirmation added 2026-10-06, C-30, D-55: stored with the consent record).
   - The document is 2-3 pages, versioned and stored. It covers what is recorded (screen, webcam, microphone, keystrokes), the ID image and selfie, face matching, automated detection and human review, how results are used in hiring, retention and deletion, who can access the data, appeals, accommodations and how to withdraw.
   - The candidate scrolls to the end and signs by typing their full legal name. The server records the date and time.
   - Stored per session: document version, signed name, signed timestamp, IP, user agent, and a generated PDF of the signed document in object storage. The candidate is emailed a copy.
@@ -102,7 +102,7 @@ This tab turns each business requirement into testable functional requirements (
 - **FR-802** Keystroke analytics compute: paste-like bursts (over 80 characters in under 1 s), typing speed outliers, ratio of deletions, idle-then-complete patterns.
 - **FR-803** Code similarity against other submissions for the same question and against stored AI-generated reference solutions.
 - **FR-804** Risk score 0–100 = weighted sum of event severities and analytics, capped at 100. Bands: 0–29 LOW, 30–59 MEDIUM, 60–100 HIGH. Weights are configurable.
-- **FR-805** Every graded session goes to the review queue; no session is cleared automatically, and recruiters, exports and webhooks get results only after the reviewer's verdict (C-28). The risk band, an identity check awaiting manual review and a short answer awaiting manual scoring order the queue (ADR 0002; updated 2026-10-06, C-28, ADR 0015 §7).
+- **FR-805** Every graded session goes to the review queue; no session is cleared automatically, and recruiters, exports and webhooks get results only after the reviewer's verdict (C-28). The risk band, an identity check awaiting manual review and a short answer awaiting manual scoring are shown in the queue (ordering is an architect detail of ADR 0014, still Proposed; updated 2026-10-06, C-28, ADR 0015 §7).
 
 ### M9 Review & Live Proctoring
 

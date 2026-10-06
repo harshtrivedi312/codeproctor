@@ -247,12 +247,12 @@ The target of section 1 stays the freeze of 2026-10-01. These forward-only delta
 | --- | --- | --- |
 | `session_status` | ADR 0004 section 9 (C-06, D-54) | + value `ERASED`, the terminal status of an erased session. `sessions` rows are never deleted. |
 | `appeal_status` | ADR 0004 section 9 (D-54) | + value `CLOSED_ERASED`. |
-| `audit_logs` | ADR 0004 section 9.4 (D-54) | + partial index `audit_logs_retention_marker_idx` for the "no marker yet" retention check. |
-| Grants | ADR 0004 section 9.5, ADR 0006 section 7.2 (D-54) | `REVOKE DELETE, TRUNCATE ON sessions FROM app_user`. |
+| `audit_logs` | ADR 0004 section 9.2 (D-54) | + partial index `audit_logs_retention_marker_idx` for the "no marker yet" retention check. |
+| Grants | ADR 0004 section 9.3, ADR 0006 section 7.2 (D-54) | `REVOKE DELETE, TRUNCATE ON sessions FROM app_user`. |
 | Grants | FU-DBB-18 (migration `app_user_no_temp`, on main) | `REVOKE TEMPORARY ON DATABASE <current database> FROM PUBLIC`, `REVOKE TEMPORARY, CREATE ... FROM app_user`, and `GRANT TEMPORARY ... TO` the database owner, so `app_user` has no TEMPORARY or CREATE on the database (ADR 0006 section 8.8, DL-26). |
 | `identity_check_status` | ADR 0015 (D-54) | + value `WAIVED`. |
 | `identity_checks` | ADR 0015 (D-54) | + columns `video_check_done`, `video_check_by` (foreign key to `users`, `ON DELETE NO ACTION`), `video_check_at`; + CHECKs `identity_checks_waived_check` and `identity_checks_video_check_check`. |
-| `consents` | C-30, D-55 | + column `age_confirmed_at timestamptz` (NULL on decline and on rows before C-30); + `consents_age_confirmed_check CHECK (signed_at IS NULL OR age_confirmed_at IS NOT NULL) NOT VALID` (an architect detail inside the owner-approved column: enforced for new and updated rows, existing rows untouched). |
+| `consents` | C-30, D-55 | + column `age_confirmed_at timestamptz` (NULL on decline and on rows before C-30); no CHECK is added: `ConsentService` requires the confirmation at sign (ADR 0013 CS-4.4), and a CHECK would also block updates of rows signed before C-30. |
 
-Totals against section 1: tables 31 (unchanged); enum types 20 (unchanged; `appeal_status` and `identity_check_status` join `session_status`, `proctor_profile` and `event_type` as changed); CHECK constraints 12 to 15; non-unique indexes 24 to 25 (partial indexes 2 to 3); `ON DELETE NO ACTION` foreign keys 0 to 1 (`identity_checks.video_check_by`); no new triggers. The JSON key `accommodations.identityCheckWaived` and the `retention_anchor_at` rules are not schema changes.
+Totals against section 1: tables 31 (unchanged); enum types 20 (unchanged; `appeal_status` and `identity_check_status` join `session_status`, `proctor_profile` and `event_type` as changed); CHECK constraints 12 to 14 (the two of ADR 0015); non-unique indexes 24 to 25 (partial indexes 2 to 3); foreign keys +1 (`identity_checks.video_check_by`, no ON DELETE clause, so NO ACTION; ON DELETE CASCADE 22, SET NULL 1 and composite 3 unchanged); no new triggers. The JSON key `accommodations.identityCheckWaived` and the `retention_anchor_at` rules are not schema changes.
 

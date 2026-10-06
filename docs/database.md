@@ -5,11 +5,11 @@ PostgreSQL 16 holds 31 tables in six groups: identity, content, delivery, procto
 Updated 2026-10-01 by ARC-01 Phase B. The changes come from ADRs 0002 to 0007 (accepted by D-16) and decisions D-17 to D-23. /docs/adr/0008-schema-freeze-list.md lists every delta against the original design (commit 7f5c6b9). Updated 2026-10-02: the roles and grants comment follows D-35 (ADR 0006 section 7); no table, column or enum changed.
 
 Updated 2026-10-06 for D-54, which accepted the ADR 0004 section 9 amendment, ADR 0013 and ADR 0015:
-- **Schema deltas:** the enum values `session_status` ERASED, `appeal_status` CLOSED_ERASED and `identity_check_status` WAIVED; three `identity_checks` video-check columns with one foreign key and two CHECK constraints; one partial index on `audit_logs`; and `REVOKE DELETE, TRUNCATE ON sessions`. There are no new tables or enum types.
+- **Schema deltas:** `consents.age_confirmed_at` (C-30, D-55; no CHECK: `ConsentService` requires the confirmation at sign, ADR 0013 CS-4.4, because a CHECK would also block updates of rows signed before C-30, such as the consent-PDF job's writes); the enum values `session_status` ERASED, `appeal_status` CLOSED_ERASED and `identity_check_status` WAIVED; three `identity_checks` video-check columns with one foreign key and two CHECK constraints; one partial index on `audit_logs`; and `REVOKE DELETE, TRUNCATE ON sessions`. There are no new tables or enum types.
 - **Data rules:** the retention tiers, R-9 and R-10, the amended erasure, and the identity-check waiver.
 - **Comments:** `batch_seq`, `hmac_key_enc` and `device_info` follow ADR 0013.
 - **Built status (2026-10-06).** None of these deltas is on main yet. The migrations are in open PRs #91 (ADR 0004 section 9: `session_status_erased`, `appeal_status_closed_erased`, `retention_marker_index_and_no_session_delete`) and #100 (ADR 0015: `identity_check_waived_enum`, `identity_check_waiver_columns`); the timestamps in their names change when they are rebased (FU-DB-168), so only the suffixes are cited here. Their SQL matches the DDL below.
-- **Delta list.** ADR 0008 §11 (post-freeze deltas) is still to be written by the hub. Until then, ADR 0004 section 9 and ADR 0015 section 4 are the delta source.
+- **Delta list.** ADR 0008 section 11 lists the post-freeze deltas and their totals.
 
 ## Entity-relationship diagram
 
@@ -547,8 +547,7 @@ CREATE TABLE consents (
   pdf_generated_at  timestamptz,
   copy_emailed_at   timestamptz,
   CHECK ((signed_at IS NULL) <> (declined_at IS NULL)),
-  CHECK (signed_at IS NULL OR signed_name IS NOT NULL),
-  CONSTRAINT consents_age_confirmed_check CHECK (signed_at IS NULL OR age_confirmed_at IS NOT NULL) NOT VALID  -- enforced for new and updated rows; rows signed before C-30 are not touched (ADR 0008 section 11)
+  CHECK (signed_at IS NULL OR signed_name IS NOT NULL)
 );
 
 CREATE TABLE identity_checks (
