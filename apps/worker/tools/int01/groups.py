@@ -41,6 +41,7 @@ class ScoredPair:
     kind: str  # "genuine" or "impostor"
     score: float
     unscored: bool = False  # no score could be computed (capture failure); see score_pairs
+    missing: bool = False  # an image file could not be read (a manifest error), left out entirely
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +63,7 @@ def parse_subject_demo(raw: Mapping[str, object]) -> SubjectDemo:
         if key not in ALLOWED_DIMENSIONS:
             raise ValueError("unknown demographic dimension")
         if not isinstance(val, str) or not (val == UNKNOWN or _VALUE.match(val)):
-            raise ValueError(f"invalid value for {key!r}")
+            raise ValueError("invalid demographic value")
         values[key] = val
     return SubjectDemo(flag, values)
 

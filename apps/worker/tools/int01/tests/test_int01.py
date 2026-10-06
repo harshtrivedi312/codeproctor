@@ -249,8 +249,9 @@ def test_c11_intake_leaves_no_temp_crop_when_encoding_fails(
         raise ValueError("encode")
 
     monkeypatch.setattr("PIL.Image.Image.save", boom)
-    with pytest.raises(ValueError):
+    with pytest.raises(intake.IntakeError) as ei:
         intake.intake_id_photo(src, out / "p.png", _OneFace([intake.Box(100, 50, 160, 130)]))
+    assert ei.value.code == "UNEXPECTED"  # a fixed code, never the exception text
     assert not src.exists() and list(out.iterdir()) == []
 
 

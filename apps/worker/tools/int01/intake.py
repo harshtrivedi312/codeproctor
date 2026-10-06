@@ -39,14 +39,17 @@ class FaceLocator(Protocol):
 
 class IntakeError(Exception):
     """Fixed code only: NO_FACE, MULTIPLE_FACES, UNREADABLE, WRITE_FAILED, DELETE_FAILED,
-    PATH_REFUSED."""
+    PATH_REFUSED, DETECTOR_FAILED, UNEXPECTED."""
 
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
 
 
-def crop_portrait(image: Image, box: Box, margin: float = 0.35) -> Image:
+DEFAULT_MARGIN = 0.35  # for a tight detector box; a full-face box needs far less (see locator)
+
+
+def crop_portrait(image: Image, box: Box, margin: float = DEFAULT_MARGIN) -> Image:
     """Crop the face box plus a margin (fraction of box size), clamped to the image."""
     h, w = image.shape[:2]
     mx = int((box.x1 - box.x0) * margin)
@@ -84,10 +87,15 @@ def _delete_original(path: Path) -> bool:
         path.unlink(missing_ok=True)
     except OSError:
         return False
-    return not path.exists()
+    try:
+        return not path.exists()  # Path.exists() re-raises some OSErrors (for example permissions)
+    except OSError:
+        return False  # cannot tell: report it as not deleted
 
 
-def intake_id_photo(src: Path, dest: Path, locator: FaceLocator) -> Path:
+def intake_id_photo(
+    src: Path, dest: Path, locator: FaceLocator, margin: float = DEFAULT_MARGIN
+) -> Path:
     """Write the portrait crop to `dest` (PNG, mode 0600) and delete `src`. Returns `dest`.
 
     `src` is deleted on success and on every failure after the paths are accepted. If it cannot
@@ -105,6 +113,7 @@ def intake_id_photo(src: Path, dest: Path, locator: FaceLocator) -> Path:
     ):
         raise IntakeError("PATH_REFUSED")
     error: IntakeError | None = None
+    wrote = False  # only this call's own crop may be removed if the original cannot be deleted
     try:
         image = _load(src)
         boxes = locator.locate(image)
@@ -112,7 +121,7 @@ def intake_id_photo(src: Path, dest: Path, locator: FaceLocator) -> Path:
             raise IntakeError("NO_FACE")
         if len(boxes) > 1:
             raise IntakeError("MULTIPLE_FACES")
-        crop = crop_portrait(image, boxes[0])
+        crop = crop_portrait(image, boxes[0], margin)
         dest.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(dir=dest.parent, suffix=".tmp")
         tmp = Path(tmp_name)
@@ -123,6 +132,7 @@ def intake_id_photo(src: Path, dest: Path, locator: FaceLocator) -> Path:
                 os.fsync(fh.fileno())
             os.chmod(tmp, 0o600)
             os.replace(tmp, dest)
+            wrote = True
         except BaseException:
             tmp.unlink(missing_ok=True)  # never leave a crop behind
             raise
@@ -130,10 +140,16 @@ def intake_id_photo(src: Path, dest: Path, locator: FaceLocator) -> Path:
         error = exc
     except OSError:
         error = IntakeError("WRITE_FAILED")
+    except Exception:  # noqa: BLE001 - never lose a failed delete behind an unexpected error
+        error = IntakeError("UNEXPECTED")
     finally:
         deleted = _delete_original(src)
     if not deleted:
-        dest.unlink(missing_ok=True)
+        if wrote:
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass  # the crop is ours to remove; DELETE_FAILED is what must reach the operator
         raise IntakeError("DELETE_FAILED") from None
     if error is not None:
         raise error from None

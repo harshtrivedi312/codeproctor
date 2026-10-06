@@ -29,14 +29,27 @@ interface Result {
   staged?: boolean;
   /** JUnit <error> (collection or setup error): fails the gate even when its name has no TC id. */
   error?: boolean;
+  /** JUnit untagged <failure> whose name looks like a test file (node:test: a file that failed to load). */
+  fileFailure?: boolean;
   /** Playwright: number of tests of this spec that failed unexpectedly (for stats.unexpected). */
   failedTests?: number;
   /** Report file the result came from, for messages. */
   source?: string;
 }
 
-/** Whole-file or whole-run failures (compile error, crash, hook failure, Playwright errors[]), over all reports. */
+/** Whole-file or whole-run failures (compile error, crash, hook failure, Playwright errors[]), over all reports. Each is a full message. */
 const suiteFailures: string[] = [];
+
+const TC_ID = /(?<![A-Za-z0-9])TC-\d{3}(?!\d)/g;
+/**
+ * The TC ids a result names: the leaf title first, the full name (describe blocks) only when the
+ * leaf names none. The one rule used for every verdict (state per case, file failures, Playwright).
+ */
+function idsOf(r: { title: string; full?: string }): string[] {
+  const find = (t: string): string[] => [...new Set(t.match(TC_ID) ?? [])];
+  const leaf = find(r.title);
+  return leaf.length > 0 ? leaf : find(r.full ?? '');
+}
 
 function priorities(): Map<string, string> {
   const map = new Map<string, string>();
@@ -84,13 +97,21 @@ interface PwSpec {
 }
 interface PwSuite {
   specs?: PwSpec[];
-  suites?: PwSuite[];
+  suites?: PwSuite2[];
   /** Playwright top-level errors (global setup, config, worker crash). */
   errors?: unknown[];
   stats?: { unexpected?: number };
 }
 
-function walkPlaywright(suite: PwSuite, out: Result[]): void {
+interface PwSuite2 extends PwSuite {
+  title?: string;
+}
+
+/** `trail` carries the describe and file titles so a TC id or KNOWN DEFECT only in test.describe is seen (as `full`). */
+const isStagedStatus = (s: string | undefined): boolean =>
+  s === 'pending' || s === 'skipped' || s === 'todo' || s === 'disabled';
+
+function walkPlaywright(suite: PwSuite2, out: Result[], trail: string[] = []): void {
   for (const spec of suite.specs ?? []) {
     // A spec with an empty tests array ran nothing: it is neither a pass nor staged, so it
     // produces no result (a Verified row resting on it then fails "no test ran").
@@ -99,12 +120,14 @@ function walkPlaywright(suite: PwSuite, out: Result[]): void {
     const skipped = tests.every((t) => t.status === 'skipped');
     out.push({
       title: spec.title,
+      full: [...trail, spec.title].join(' '),
       passed: skipped || spec.ok === true,
       staged: skipped,
       failedTests: tests.filter((t) => t.status === 'unexpected').length,
     });
   }
-  for (const child of suite.suites ?? []) walkPlaywright(child, out);
+  for (const child of suite.suites ?? [])
+    walkPlaywright(child, out, child.title ? [...trail, child.title] : trail);
 }
 
 const attr = (tag: string, name: string): string =>
@@ -119,12 +142,16 @@ function loadJunit(xml: string): Result[] {
     const norm = (t: string): string =>
       t.replace(/(^|[^A-Za-z0-9])tc[-_]?(\d{3})(?!\d)/gi, '$1TC-$2');
     const name = norm(attr(m[1] ?? '', 'name'));
+    const classname = attr(m[1] ?? '', 'classname');
+    const failed = /<(failure|error)\b/.test(body);
     out.push({
       title: name,
       full: `${norm(attr(m[1] ?? '', 'classname'))} ${name}`,
-      passed: !/<(failure|error)\b/.test(body),
+      passed: !failed,
       staged: /<skipped\b/.test(body),
       error: /<error\b/.test(body),
+      fileFailure:
+        failed && /\.(test\.(ts|tsx|mjs|js)|spec\.(ts|tsx)|py)\b/.test(`${name} ${classname}`),
     });
   }
   return out;
@@ -140,22 +167,33 @@ function load(file: string): { results: Result[]; failures: string[] } {
   if (json.testResults) {
     for (const f of json.testResults) {
       const asserts = f.assertionResults ?? [];
-      // A file that failed as a whole while every test it recorded passed or was skipped (compile
-      // error, crash, a failing afterAll hook, a Vitest suite error) fails the gate by name.
-      // Unless a failed assertion of the file names a P1 case (that already fails the gate), a failed
-      // file is recorded, so a P2 or untagged failure cannot hide a beforeAll crash that skipped P1 tests.
-      const p1Failed = asserts.some(
-        (a) =>
-          a.status === 'failed' &&
-          [
-            ...`${a.title ?? ''} ${a.fullName ?? ''}`.matchAll(/(?<![A-Za-z0-9])TC-\d{3}(?!\d)/g),
-          ].some((m) => prio.get(m[0]) === 'P1'),
-      );
-      if (f.status === 'failed' && !p1Failed) {
-        failures.push(f.name ?? f.testFilePath ?? '(unnamed test file)');
+      // In real Jest and Vitest JSON any failed assertion sets the file status "failed", so a lone
+      // failing P2 or untagged test must not be reported as a crashed file. A failed file is recorded
+      // when it has no failed assertion at all (compile error, crash, afterAll hook, suite error), or
+      // when one of its P1-tagged assertions did not run (skipped or pending): the beforeAll-crash shape.
+      // A failed P1 assertion is reported as a normal P1 failure.
+      const file = f.name ?? f.testFilePath ?? '(unnamed test file)';
+      const asArr = asserts.map((a) => ({
+        a,
+        ids: idsOf({ title: a.title ?? a.fullName ?? '', full: a.fullName ?? a.title ?? '' }),
+      }));
+      if (f.status === 'failed') {
+        if (!asserts.some((a) => a.status === 'failed')) {
+          failures.push(
+            `Test file failed with no failed test recorded (compile error, crash or hook failure): ${file}`,
+          );
+        } else if (
+          asArr.some(
+            ({ a, ids }) => isStagedStatus(a.status) && ids.some((i) => prio.get(i) === 'P1'),
+          )
+        ) {
+          failures.push(
+            `Test file failed and left P1 test(s) skipped, probably a beforeAll crash (failed with no failed test recorded for those): ${file}`,
+          );
+        }
       }
       for (const a of asserts) {
-        const staged = a.status === 'pending' || a.status === 'skipped' || a.status === 'todo';
+        const staged = isStagedStatus(a.status);
         out.push({
           title: a.title ?? a.fullName ?? '',
           full: a.fullName ?? a.title ?? '',
@@ -167,24 +205,30 @@ function load(file: string): { results: Result[]; failures: string[] } {
     const anyFailedTest = out.some((r) => !r.passed);
     // Runtime-error suites are recorded even when another test failed (a failed P2 test must not hide them).
     if ((json.numRuntimeErrorTestSuites ?? 0) > 0 && failures.length === 0) {
-      failures.push(`${file} (numRuntimeErrorTestSuites ${json.numRuntimeErrorTestSuites})`);
+      failures.push(
+        `Jest reported ${json.numRuntimeErrorTestSuites} test file(s) that failed to run (numRuntimeErrorTestSuites): ${file}`,
+      );
     }
     if (json.success === false && failures.length === 0 && !anyFailedTest) {
-      failures.push(`${file} (success: false with no failed test)`);
+      failures.push(`Report says success: false but no test failed (suite error): ${file}`);
     }
   } else {
     walkPlaywright(json, out);
     if ((json.errors ?? []).length > 0) {
-      failures.push(`${file} (Playwright errors[] has ${(json.errors ?? []).length} entry(ies))`);
+      failures.push(
+        `Playwright errors[] has ${(json.errors ?? []).length} entry(ies) (global setup, config or worker crash): ${file}`,
+      );
     }
     // Failing tests that name a TC id are judged per case; more unexpected failures than those
     // (an untagged failing spec) fail the gate.
-    const named = (r: Result): boolean => /(?<![A-Za-z0-9])TC-\d{3}(?!\d)/.test(r.title);
+    const named = (r: Result): boolean => idsOf(r).length > 0;
     const taggedFailed = out
       .filter((r) => !r.passed && named(r))
       .reduce((n, r) => n + Math.max(r.failedTests ?? 1, 1), 0);
     if ((json.stats?.unexpected ?? 0) > taggedFailed) {
-      failures.push(`${file} (Playwright stats.unexpected ${json.stats?.unexpected})`);
+      failures.push(
+        `Playwright stats.unexpected ${json.stats?.unexpected} is more than the failing specs that name a TC id (${taggedFailed}): ${file}`,
+      );
     }
   }
   return { results: out, failures };
@@ -210,9 +254,7 @@ const state = new Map<
   { passed: number; failed: number; known: number; fixed: number; staged: number }
 >();
 for (const res of results) {
-  const find = (t: string): string[] => t.match(/(?<![A-Za-z0-9])TC-\d{3}(?!\d)/g) ?? [];
-  const leaf = find(res.title);
-  for (const id of new Set(leaf.length > 0 ? leaf : find(res.full ?? ''))) {
+  for (const id of idsOf(res)) {
     const s = state.get(id) ?? { passed: 0, failed: 0, known: 0, fixed: 0, staged: 0 };
     if (res.staged) {
       s.staged++;
@@ -272,15 +314,18 @@ for (const [id, p] of [...prio].sort()) {
   console.log(`  ${id}  ${line}`);
 }
 for (const f of suiteFailures) {
-  console.error(
-    `Test file failed with no failed test recorded (compile error, crash or hook failure): ${f}`,
-  );
+  console.error(f);
   failures++;
 }
 for (const res of results) {
-  const named = [...res.title.matchAll(/TC-\d{3}/g), ...(res.full ?? '').matchAll(/TC-\d{3}/g)];
-  if (res.error && named.length === 0) {
+  const named = idsOf(res).length > 0 || /TC-\d{3}/.test(`${res.title} ${res.full ?? ''}`);
+  if (res.error && !named) {
     console.error(`Test error with no TC id (collection or setup): ${res.source} ${res.title}`);
+    failures++;
+  } else if (res.fileFailure && !res.error && !named) {
+    console.error(
+      `Test file failed to load or run (JUnit failure named after a file, no TC id): ${res.source} ${res.title}`,
+    );
     failures++;
   }
 }

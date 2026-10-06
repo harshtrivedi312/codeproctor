@@ -67,6 +67,10 @@ const userManage = { roles: SUPER_ADMIN, permission: 'user:manage' } as const;
 export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   // Operations
   'GET /health': 'public',
+  // Browser error reports (C-32). Public on purpose: candidates have no staff JWT and a crashed
+  // page may have no session. Safe because it returns 204 with no body, touches no database or
+  // Redis, logs only scrubbed fields, and has its own strict throttle and a 16 KB body limit.
+  'POST /client-errors': 'public',
 
   // Candidate session (BE-07, FR-106, FR-401; ADR 0013 section 5.10). The three pre-token routes
   // are plain public; the rest sit behind CandidateSessionGuard.
