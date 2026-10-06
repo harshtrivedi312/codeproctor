@@ -75,7 +75,11 @@ describe('guardLive with the REAL generated enum (ADR 0013 section 5.7): FR-704,
 
   it('TC-008 erasedStatusOf reads the enum object: present, absent, and not from the prototype', () => {
     expect(erasedStatusOf({ ...SessionStatus, ERASED: FAKE_ERASED })).toBe('ERASED');
-    expect(erasedStatusOf({ ...SessionStatus })).toBeUndefined();
+    // An enum without the member, built from the real one so the test means the same before and after #91.
+    const withoutErased = Object.fromEntries(
+      Object.entries(SessionStatus).filter(([name]) => name !== 'ERASED'),
+    ) as Record<string, (typeof SessionStatus)[keyof typeof SessionStatus]>;
+    expect(erasedStatusOf(withoutErased)).toBeUndefined();
     expect(erasedStatusOf(Object.create({ ERASED: FAKE_ERASED }) as Record<string, never>)).toBe(
       undefined,
     );
