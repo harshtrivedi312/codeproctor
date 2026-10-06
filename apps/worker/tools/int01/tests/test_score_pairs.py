@@ -53,7 +53,7 @@ def test_fr403_genuine_and_impostor_pairs_are_scored_through_the_production_matc
         ],
     )
     rows, summary = score_pairs.score_pairs(score_pairs.load_manifest(m), matcher())
-    by_kind = {k: s for _, k, s, _u in rows}
+    by_kind = {k: s for _, k, s, _st in rows}
     g, i = by_kind["genuine"], by_kind["impostor"]
     assert g is not None and i is not None and g > 0.99 and i < 0.75
     assert summary == score_pairs.ScoringSummary(2, 0, 0, 0)
@@ -75,13 +75,13 @@ def test_fr403_unscorable_genuine_counts_as_review_and_unscorable_impostor_is_dr
     )
     nobody = FakeDetector(lambda _img: [])  # no face is ever found
     rows, summary = score_pairs.score_pairs(score_pairs.load_manifest(m), matcher(nobody))
-    assert [(s, k, v, u) for s, k, v, u in rows] == [
-        ("v1", "genuine", -1.0, True),
-        ("v1", "impostor", None, True),
-        ("v2", "genuine", -1.0, True),
-        ("v2", "impostor", None, True),
+    assert rows == [
+        ("v1", "genuine", -1.0, "unscored"),  # no face was found
+        ("v1", "impostor", None, "unscored"),
+        ("v2", "genuine", None, "missing"),  # the file does not exist: a manifest error
+        ("v2", "impostor", None, "missing"),
     ]
-    assert summary == score_pairs.ScoringSummary(0, 2, 2, 2)  # two files were unreadable
+    assert summary == score_pairs.ScoringSummary(0, 1, 1, 2)
     # An unscored genuine pair is a false non-match at every threshold.
     pts = metrics.sweep([-1.0, 0.9], [0.1], [0.5])
     assert pts[0].fnmr == 0.5
@@ -123,15 +123,17 @@ def test_c11_manifest_and_output_refuse_the_repository_and_bad_shapes(tmp_path: 
 
 
 def test_c22_the_model_must_sit_in_the_cache_folder_and_scores_are_private(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(score_pairs, "MODELS_DIR", tmp_path / "models")
+    (tmp_path / "models").mkdir()
     ok = {"AURAFACE_MODEL_PATH": str(score_pairs.MODELS_DIR / "glintr100.onnx")}
     score_pairs.check_model_location(ok)
     for bad in ({}, {"AURAFACE_MODEL_PATH": str(tmp_path / "glintr100.onnx")}):
         with pytest.raises(score_pairs.ScoringError, match="AURAFACE_MODEL_PATH"):
             score_pairs.check_model_location(bad)
     out = tmp_path / "scores.csv"
-    score_pairs.write_scores(out, [("v", "genuine", 0.5, False)])
+    score_pairs.write_scores(out, [("v", "genuine", 0.5, "scored")])
     assert oct(out.stat().st_mode & 0o777) == "0o600"
     assert out.read_text().splitlines() == [
         "subject,kind,score,status",
@@ -163,7 +165,7 @@ def test_fr403_a_probe_with_several_faces_is_unscored(tmp_path: Path) -> None:
     rows, summary = score_pairs.score_pairs(
         score_pairs.load_manifest(m), matcher(FakeDetector(two))
     )
-    assert rows == [("v", "genuine", -1.0, True)] and summary.genuine_unscored == 1
+    assert rows == [("v", "genuine", -1.0, "unscored")] and summary.genuine_unscored == 1
 
 
 def test_c11_scores_file_is_0600_even_over_an_existing_wider_file_and_refuses_links(
@@ -174,7 +176,7 @@ def test_c11_scores_file_is_0600_even_over_an_existing_wider_file_and_refuses_li
     out = tmp_path / "scores.csv"
     out.write_text("old")
     out.chmod(0o644)
-    score_pairs.write_scores(out, [("v", "genuine", 0.5, False)])
+    score_pairs.write_scores(out, [("v", "genuine", 0.5, "scored")])
     assert oct(out.stat().st_mode & 0o777) == "0o600" and "old" not in out.read_text()
     link = tmp_path / "link.csv"
     link.symlink_to(out)
@@ -189,16 +191,17 @@ def test_c11_scores_file_is_0600_even_over_an_existing_wider_file_and_refuses_li
 def test_fr403_unscored_rows_roundtrip_into_the_evaluator_and_the_report(tmp_path: Path) -> None:
     out = tmp_path / "scores.csv"
     rows: list[score_pairs.Row] = (
-        [(f"v{n:02d}", "genuine", 0.9, False) for n in range(18)]
-        + [("v18", "genuine", -1.0, True), ("v19", "genuine", -1.0, True)]
-        + [(f"v{n:02d}", "impostor", 0.05, False) for n in range(20) for _ in range(3)]
-        + [("v00", "impostor", None, True)]
+        [(f"v{n:02d}", "genuine", 0.9, "scored") for n in range(18)]
+        + [("v18", "genuine", -1.0, "unscored"), ("v19", "genuine", -1.0, "unscored")]
+        + [(f"v{n:02d}", "impostor", 0.05, "scored") for n in range(20) for _ in range(3)]
+        + [("v00", "impostor", None, "unscored"), ("v01", "genuine", None, "missing")]
     )
     score_pairs.write_scores(out, rows)
     pairs = evaluate.load_scores(out)
     md = evaluate.run(pairs, {}, 0.5, False, "t")
     assert "2 of 20 genuine pairs could not be scored" in md
     assert "1 impostor pairs could not be scored" in md
+    assert "1 pairs named image files that could not be read" in md
     assert "liveness" in md and "presentation attacks" in md
 
 
@@ -207,7 +210,7 @@ def test_c11_manifest_codes_and_paths_are_checked(tmp_path: Path) -> None:
     sub.mkdir()
     write_pair(sub, "r.png", 0)
     write_pair(tmp_path, "outside.png", 0)
-    for code in ("=cmd", "+1", "a b", "a,b", ""):
+    for code in ("=cmd", "+1", "-A1", "a b", "a,b", ""):
         m = manifest(sub, [(code, "genuine", "r.png", "r.png")])
         with pytest.raises(score_pairs.ScoringError, match="subject code"):
             score_pairs.load_manifest(m)
@@ -220,6 +223,8 @@ def test_c11_manifest_codes_and_paths_are_checked(tmp_path: Path) -> None:
 def test_c22_landmarker_model_and_symlinked_models_folder_are_checked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(score_pairs, "MODELS_DIR", tmp_path / "models")
+    (tmp_path / "models").mkdir()
     good = {"AURAFACE_MODEL_PATH": str(score_pairs.MODELS_DIR / "glintr100.onnx")}
     score_pairs.check_model_location(
         good | {"FACE_LANDMARKER_MODEL_PATH": str(score_pairs.MODELS_DIR / "face_landmarker.task")}
@@ -256,4 +261,76 @@ def test_c11_main_never_prints_paths_or_subject_codes_and_stops_on_unreadable_im
     )
     out = capsys.readouterr()
     assert code == 0 and (tmp_path / "o.csv").exists() and "unreadable files: 1" in out.out
+    assert "missing" in (tmp_path / "o.csv").read_text()
     assert "SECRETCODE" not in out.out + out.err and "min detection confidence" in out.out
+
+
+def test_fr403_evaluator_never_trusts_an_unscored_cell_and_drops_missing_pairs(
+    tmp_path: Path,
+) -> None:
+    f = tmp_path / "s.csv"
+    f.write_text(
+        "subject,kind,score,status\n"
+        "a,genuine,0.99,unscored\n"  # a hand-edited cell: still a false non-match
+        "b,genuine,,unscored\n"  # an empty cell must not crash the metrics
+        "c,impostor,0.99,unscored\n"  # ignored: cannot be a false match
+        "d,impostor,0.1,scored\n"
+        "e,genuine,,missing\n"
+        "f,genuine,0.9,scored\n"
+    )
+    pairs = {p.subject: p for p in evaluate.load_scores(f)}
+    assert pairs["a"].score == -1.0 and pairs["b"].score == -1.0
+    assert pairs["e"].missing and not pairs["a"].missing
+    md = evaluate.run(list(pairs.values()), {}, 0.5, False, "t")
+    assert "2 of 3 genuine pairs could not be scored" in md  # e (missing) is not counted
+    f.write_text("subject,kind,score,status\nx,genuine,abc,scored\n")
+    with pytest.raises(ValueError, match="number"):
+        evaluate.load_scores(f)
+    f.write_text("subject,kind,score,status\nx,genuine,0.5,bogus\n")
+    with pytest.raises(ValueError, match="status"):
+        evaluate.load_scores(f)
+
+
+def test_c11_evaluator_cli_prints_fixed_text_never_a_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gone = tmp_path / "SECRET-dir" / "scores.csv"
+    assert evaluate.main(["--scores", str(gone), "--out", str(tmp_path / "r.md")]) == 2
+    err = capsys.readouterr().err
+    assert "SECRET" not in err and "could not be read" in err
+    f = tmp_path / "s.csv"
+    f.write_text("subject,kind,score\nv,genuine,0.9\n")  # no impostors: the metrics refuse it
+    assert evaluate.main(["--scores", str(f), "--out", str(tmp_path / "r.md")]) == 2
+    assert "impostor" in capsys.readouterr().err
+    out_dir = tmp_path / "no-such-dir-SECRET" / "r.md"
+    assert evaluate.main(["--synthetic", "--out", str(out_dir)]) == 2
+    assert "SECRET" not in capsys.readouterr().err
+
+
+def test_c11_images_are_read_safely_and_short_rows_and_hard_links_are_refused(
+    tmp_path: Path,
+) -> None:
+    import os
+
+    fifo = tmp_path / "pipe.png"
+    os.mkfifo(fifo)
+    with pytest.raises(OSError):
+        score_pairs._read_image(fifo)  # noqa: SLF001 - must not hang on a FIFO
+    link = tmp_path / "link.png"
+    link.symlink_to(write_pair(tmp_path, "real.png", 0))
+    with pytest.raises(OSError):
+        score_pairs._read_image(link)  # noqa: SLF001
+    big = tmp_path / "big.png"
+    big.write_bytes(b"x" * (score_pairs.MAX_IMAGE_FILE_BYTES + 1))
+    with pytest.raises(OSError):
+        score_pairs._read_image(big)  # noqa: SLF001
+    short = tmp_path / "short.csv"
+    short.write_text("subject,kind,reference,probe\nv,genuine,a.png\n")
+    with pytest.raises(score_pairs.ScoringError, match="four columns"):
+        score_pairs.load_manifest(short)
+    out = tmp_path / "scores.csv"
+    out.write_text("old")
+    os.link(out, tmp_path / "second-name.csv")
+    with pytest.raises(score_pairs.ScoringError, match="one name"):
+        score_pairs.write_scores(out, [])
+    assert out.read_text() == "old"  # nothing was truncated before the refusal

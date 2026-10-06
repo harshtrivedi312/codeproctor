@@ -36,6 +36,6 @@ export function storageSettingsFromEnv(env: ConfigService<Env, true>): StorageSe
     },
     StorageService,
   ],
-  exports: [StorageService],
+  exports: [StorageService, STORAGE_SETTINGS],
 })
 export class StorageModule {}

@@ -124,6 +124,20 @@ function isNotFound(e: unknown): boolean {
   return meta?.httpStatusCode === 404 || name === 'NotFound' || name === 'NoSuchKey';
 }
 
+/** One S3 client per settings, built the same way for StorageService and S3ObjectStore. */
+export function createS3Client(settings: StorageSettings): S3Client {
+  return new S3Client({
+    region: settings.region,
+    ...(settings.endpoint !== undefined ? { endpoint: settings.endpoint } : {}),
+    forcePathStyle: settings.forcePathStyle,
+    ...(settings.credentials !== undefined ? { credentials: settings.credentials } : {}),
+    // The default adds an x-amz-checksum-crc32 query parameter to presigned PUTs, which a browser
+    // upload (and R2) rejects: only compute a checksum when an operation requires it.
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED',
+  });
+}
+
 @Injectable()
 export class StorageService extends ObjectStoragePort {
   private cached: S3Client | undefined;
@@ -147,18 +161,7 @@ export class StorageService extends ObjectStoragePort {
 
   private get client(): S3Client {
     if (this.settings === null) throw new StorageUnconfiguredError();
-    this.cached ??= new S3Client({
-      region: this.settings.region,
-      ...(this.settings.endpoint !== undefined ? { endpoint: this.settings.endpoint } : {}),
-      forcePathStyle: this.settings.forcePathStyle,
-      ...(this.settings.credentials !== undefined
-        ? { credentials: this.settings.credentials }
-        : {}),
-      // The default adds an x-amz-checksum-crc32 query parameter to presigned PUTs, which a browser
-      // upload (and R2) rejects: only compute a checksum when an operation requires it.
-      requestChecksumCalculation: 'WHEN_REQUIRED',
-      responseChecksumValidation: 'WHEN_REQUIRED',
-    });
+    this.cached ??= createS3Client(this.settings);
     return this.cached;
   }
 
