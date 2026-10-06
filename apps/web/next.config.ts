@@ -37,6 +37,19 @@ const nextConfig: NextConfig = {
           },
         ],
       },
+      // DL-28: the candidate routes need the microphone (FR-402 mic check, FR-607 voice detector,
+      // FR-701 audio recording; the consent document covers it). Listed after the global rule so it
+      // overrides it for /t/<token> and below only. Camera, display-capture and fullscreen are
+      // unchanged; staff pages and every other route keep microphone=().
+      {
+        source: '/t/:path+',
+        headers: [
+          {
+            key: 'Permissions-Policy',
+            value: 'camera=(self), microphone=(self), display-capture=(self), fullscreen=(self)',
+          },
+        ],
+      },
       // Dev only, listed last so it overrides the global policy for this one path. The
       // /dev/proctor demo needs the microphone for the voice detector, which the global policy
       // blocks. Not emitted in production builds; every other route is unchanged.
