@@ -22,6 +22,7 @@ import { SessionStateConflictError } from '../session/session-state.errors';
 import { LIVE_STATUSES, PRE_START_STATUSES, USED_STATUSES } from '../session/session-transitions';
 import { CandidateMailPort } from './candidate-mail.port';
 import { isBusyLockError } from './busy-lock-error';
+import { sessionNotActive } from '../session/session-write-gate';
 import { CandidateTokenService } from './candidate-token.service';
 import {
   OTP_BLOCK_SECONDS,
@@ -66,6 +67,9 @@ interface ResolvedLink {
   readonly orgName: string;
   readonly orgSettings: unknown;
 }
+
+/** The statuses a sign-in may raise the epoch of: after the first transition, never a terminal one. */
+const SIGN_IN_STATUSES = ['OPENED', 'CONSENTED', 'VERIFIED', 'IN_PROGRESS', 'PAUSED'] as const;
 
 const MAX_CONTACT_LENGTH = 500;
 const INVALID_LINK = 'This invitation link is not valid.';
@@ -342,11 +346,26 @@ export class CandidateAuthService {
         }
         // The epoch last: it ends every older token at once, so a busy failure before it leaves
         // the other device signed in and only an idempotent OPENED behind.
-        updated = await this.prisma.client.session.update({
-          where: { id: sessionId },
+        // Atomic with the status: a session that became terminal since the read above (submitted,
+        // expired, declined) is not touched, so no epoch bump and no token for it.
+        const bumped = await this.prisma.client.session.updateManyAndReturn({
+          where: { id: sessionId, status: { in: [...SIGN_IN_STATUSES] } },
           data: { authEpoch: { increment: 1 } },
           select: { authEpoch: true, status: true },
         });
+        const row = bumped[0];
+        if (row === undefined) {
+          const now2 = await this.prisma.client.session.findUnique({
+            where: { id: sessionId },
+            select: { status: true },
+          });
+          if (now2 === null) return invalidLink();
+          this.refuseUnlessOpen(
+            await this.stateOf({ ...link, session: { id: sessionId, status: now2.status } }, now),
+          );
+          throw sessionNotActive(now2.status);
+        }
+        updated = row;
       } catch (e) {
         if (isBusyLockError(e)) {
           // Ids only in the log: never the hash.

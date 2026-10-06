@@ -2658,6 +2658,33 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       Number((await redis.get(`rl:${route}:${sid}`)) ?? 0);
     afterEach(() => jest.restoreAllMocks());
 
+    it('DL-37: the release script itself refuses a counter that is gone or zero (the rolled-window path in Lua, not only the Node check)', async () => {
+      const { SessionRateLimiter: Limiter } =
+        jest.requireActual<typeof import('./session-rate-limiter')>('./session-rate-limiter');
+      const limiter = new Limiter(redis);
+      const sid = randomUUID();
+      const future = Date.now() + 60_000;
+      // No counter at all: nothing is created, nothing goes negative.
+      await limiter.release('lua', sid, future);
+      expect(await redis.exists(`rl:lua:${sid}`)).toBe(0);
+      expect(await redis.exists(`rl-released:lua:${sid}`)).toBe(0);
+      // One hit then two releases: the second finds the counter at zero and changes nothing.
+      await limiter.hit('lua', sid, 10, 60);
+      await limiter.release('lua', sid, future);
+      await limiter.release('lua', sid, future);
+      expect(await slot('lua', sid)).toBe(0);
+      // The window rolled over in Redis while the Node-side time still looks open: the key is gone.
+      const sid2 = randomUUID();
+      await limiter.hit('lua', sid2, 10, 1);
+      await new Promise((r) => setTimeout(r, 1200));
+      await limiter.release('lua', sid2, Date.now() + 60_000);
+      expect(await redis.exists(`rl:lua:${sid2}`)).toBe(0);
+      // hit reports the window left in milliseconds.
+      const ms = await limiter.hit('lua', randomUUID(), 10, 60);
+      expect(ms).toBeGreaterThan(55_000);
+      expect(ms).toBeLessThanOrEqual(60_000);
+    });
+
     it('DL-37, FR-609: a busy heartbeat write keeps its slot (the next beat is the retry); the retry works', async () => {
       const inv = await invite(liveSession());
       const spy = (jest.spyOn(scope, 'asCandidate') as jest.SpyInstance).mockRejectedValueOnce(
@@ -2763,6 +2790,35 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect((await post('/start', { invitationToken: inv.token, otp: code })).status).toBe(400);
     });
 
+    it('FR-106, ADR 0002 L-3, L-4: a session that becomes terminal between the status read and the epoch write gets no token and no epoch bump', async () => {
+      for (const [terminal, code] of [
+        ['SUBMITTED', 'LINK_ALREADY_USED'],
+        ['EXPIRED', 'LINK_EXPIRED'],
+        ['DECLINED', 'LINK_DECLINED'],
+      ] as Array<[SessionStatus, string]>) {
+        const inv = await invite();
+        const otpCode = await otpFor(inv);
+        const real = states.transition.bind(states);
+        // The change lands after the service's read and before its write (the INVITED to OPENED step).
+        const spy = jest.spyOn(states, 'transition').mockImplementationOnce(async (change) => {
+          await owner.session.update({ where: { id: inv.sessionId }, data: { status: terminal } });
+          if (change.to !== 'OPENED') await real(change);
+        });
+        const res = await post('/start', { invitationToken: inv.token, otp: otpCode });
+        spy.mockRestore();
+        expect([terminal, res.status, (res.body as { code?: string }).code]).toEqual([
+          terminal,
+          409,
+          code,
+        ]);
+        expect(res.body).not.toHaveProperty('sessionToken');
+        expect([terminal, await sessionRow(inv.sessionId)]).toMatchObject([
+          terminal,
+          { status: terminal, authEpoch: 0 },
+        ]);
+      }
+    });
+
     it('DL-37: a non-busy error after a correct code never puts it back', async () => {
       const inv = await invite();
       const code = await otpFor(inv);
@@ -2824,7 +2880,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(await redis.exists(`otp:${inv2.invitationId}`)).toBe(0);
     });
 
-    it('DL-37, TC-097: restore never touches the cooldown: one set by another request meanwhile stays, and the code comes back', async () => {
+    it('DL-37: restore neither writes nor clears the cooldown: one set by another request meanwhile stays, and the code comes back (during a test a busy correct guess leaves no cooldown of its own, so the retry goes through at once)', async () => {
       const inv = await invite(liveSession());
       const code = await otpFor(inv);
       const ok = await otp.verify(inv.invitationId, code, 'LIVE');

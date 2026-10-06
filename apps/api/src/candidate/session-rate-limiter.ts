@@ -12,8 +12,8 @@ import { isBusyLockError } from './busy-lock-error';
 const SCRIPT = `
 local n = redis.call('INCR', KEYS[1])
 if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
-local ttl = redis.call('TTL', KEYS[1])
-if ttl < 0 then redis.call('EXPIRE', KEYS[1], ARGV[1]); ttl = tonumber(ARGV[1]) end
+local ttl = redis.call('PTTL', KEYS[1])
+if ttl < 0 then redis.call('EXPIRE', KEYS[1], ARGV[1]); ttl = tonumber(ARGV[1]) * 1000 end
 return {n, ttl}
 `;
 
@@ -36,8 +36,8 @@ export class SessionRateLimiter {
   constructor(@Inject(REDIS_CLIENT) private readonly redis: Redis) {}
 
   /**
-   * Counts one request; throws 429 when `limit` per `windowSeconds` is exceeded. Returns the seconds
-   * left in the counter's window, which `guarded` uses to refuse a late release.
+   * Counts one request; throws 429 when `limit` per `windowSeconds` is exceeded. Returns the
+   * milliseconds left in the counter's window, which `guarded` uses to refuse a late release.
    */
   async hit(
     route: string,
@@ -57,7 +57,7 @@ export class SessionRateLimiter {
         HttpStatus.TOO_MANY_REQUESTS,
         'Too many requests. Try again shortly.',
         'RATE_LIMITED',
-        { retryAfterSeconds: Math.max(1, ttl) },
+        { retryAfterSeconds: Math.max(1, Math.ceil(ttl / 1000)) },
       );
     }
     return ttl;
@@ -101,7 +101,7 @@ export class SessionRateLimiter {
     fn: () => Promise<T>,
   ): Promise<T> {
     const ttl = await this.hit(route, sessionId, limit, windowSeconds);
-    const windowEndsAt = Date.now() + ttl * 1000;
+    const windowEndsAt = Date.now() + ttl;
     try {
       return await fn();
     } catch (e) {
