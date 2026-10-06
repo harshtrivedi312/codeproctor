@@ -509,7 +509,7 @@ There is no org-provisioning reason (8.6, 8.9).
     - `exit`, `enterWith` and `disable` on the OrgContext store;
     - `detachForSessionJob`;
     - the `runInOrg` call site in `CandidateSessionGuard` for its candidate-facts pre-read (ADR 0013 section 5.10, DL-31), the only non-CANDIDATE read on routes behind the guard;
-    - the ten grant sites in the ADR 0013 CS-4.4 grant-site table (`CandidateSessionGuard` has no grant, DL-31):
+    - the eleven grant sites in the ADR 0013 CS-4.4 grant-site table (`CandidateSessionGuard` has no grant, DL-31):
       - `SessionStateService`
       - `KeyService`
       - `DeviceInfoService`
@@ -518,7 +518,7 @@ There is no org-provisioning reason (8.6, 8.9).
       - `TestSettingsService`
       - `AccommodationsService`
       - `SectionGateService` (two grants)
-      - `ConsentService`
+      - `ConsentService` (two grants: the `consent_texts` read and the `consents` create)
 
       ADR 0013 CS-4.4 defines each site's model, columns and ids. This ADR does not repeat them.
     - the private candidate-facts setter for `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. Only `CandidateSessionGuard` may call it, once per scope, before any other query in the scope; it throws if called twice or with any id missing, and the values are immutable afterwards.
@@ -722,7 +722,7 @@ How the check runs:
     - `runSystem`, `runInOrg` and `runRawSql`, including the `runInOrg` pre-read in `CandidateSessionGuard` (DL-31);
     - the two session entries;
     - `exit`, `enterWith`, `disable` and `detachForSessionJob`;
-    - the ten CS-4.4 grant sites, with the candidate-facts setter;
+    - the eleven CS-4.4 grant sites, with the candidate-facts setter;
     - the advisory-lock raw call site;
     - `guardLive` and `lockForAccommodation`, each limited to its writers, with the lock order: advisory lock, then `sessions`, then `invitations`;
     - `withLiveSession` and `withAnySession`, only in `SessionJobProcessor`.
