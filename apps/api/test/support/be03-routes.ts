@@ -16,16 +16,20 @@
 // cross-org or missing id is the same 404, and only AFTER a correct password. Failed requests
 // (400/401/403/404) write no audit row.
 //
-// Switches: the BE-03 tests are written but switched off until the routes exist. Turn them on with
-// `BE03_READY = true` below (the ONE-LINE switch), or `BE03_READY=1` in the environment for a trial
-// run. Same for the review routes (BE-13) with BE13_READY. The BE-13 entries are still ASSUMED.
+//   POST  /admin/users/:userId/invite {currentPassword}  re-issue of a pending invite. ASSUMED contract
+//         (not on main when written): 200/201/204, audit USER_INVITE_REISSUED, same step-up rules, new
+//         72 h token mailed. Listed ONLY when the backend's ROUTE_PERMISSIONS has the key (see below).
+//
+// Switches: the BE-03 tests run by default (BE03_DEFAULT = true). The review routes (BE-13) stay off
+// until BE13_DEFAULT is flipped, or `BE13_READY=1` in the environment for a trial run. The BE-13
+// entries are still ASSUMED.
 import { hasPermission, PRINCIPALS, USER_ROLES } from '../../../../packages/shared/src/permissions';
 import type { Permission, Principal } from '../../../../packages/shared/src/permissions';
 import { UserRole } from '../../src/generated/prisma/client';
 import { Harness, PASSWORD } from './harness';
 
-// TODO(QA-04b): when BE-03 is merged flip this to true; the staged tests then run on every PR.
-const BE03_DEFAULT = false; // flip to true when BE-03 is merged
+// BE-03 is merged (PR #84): the BE-03 tests run on every PR. BE-13 stays staged.
+const BE03_DEFAULT = true;
 const BE13_DEFAULT = false; // flip to true when BE-13 is merged
 export const BE03_READY: boolean = BE03_DEFAULT || process.env.BE03_READY === '1';
 export const BE13_READY: boolean = BE13_DEFAULT || process.env.BE13_READY === '1';
@@ -197,7 +201,72 @@ const withPassword = <T extends object>(body: T): T & { currentPassword: string 
   currentPassword: PASSWORD,
 });
 
+/** True when the backend's route matrix already has `key`; false when the file is absent or lacks it. */
+function backendHasRoute(key: string): boolean {
+  try {
+    const perms = jest.requireActual<Pick<RegistryApi, 'ROUTE_PERMISSIONS'>>(
+      '../../src/common/auth/route-permissions',
+    );
+    return Object.hasOwn(perms.ROUTE_PERMISSIONS, key);
+  } catch {
+    return false;
+  }
+}
+
+/** A pending invite: no password, a live set-password token. */
+async function pendingInvitee(
+  h: Harness,
+  orgId: string,
+): Promise<{ id: string; tokenHash: string }> {
+  const t = uniq();
+  const tokenHash = `qa-invite-token-hash-${t}`;
+  const u = await h.owner.user.create({
+    data: {
+      orgId,
+      email: `qa-pending-${t}@example.com`,
+      fullName: 'QA Pending',
+      role: UserRole.RECRUITER,
+      isActive: true,
+      setPasswordTokenHash: tokenHash,
+      setPasswordExpiresAt: new Date(Date.now() + 72 * 3_600_000),
+    },
+  });
+  return { id: u.id, tokenHash };
+}
+
+// Backend A's invite re-issue route. Included only when the backend serves it, so TC-004's
+// "the backend matrix agrees with the controllers" check is green before and after it lands.
+const reissueRoutes: Be03Route[] = backendHasRoute('POST /admin/users/:userId/invite')
+  ? [
+      {
+        id: 'users-invite-reissue',
+        step: 'BE-03',
+        method: 'POST',
+        template: `${ADMIN_USERS}/:userId/invite`,
+        permission: 'user:manage',
+        audit: { action: 'USER_INVITE_REISSUED', entityType: 'user' }, // ASSUMED action name
+        mutating: true,
+        sendsMail: true,
+        reauth: true,
+        ok: [200, 201, 204], // ASSUMED
+        prepare: async (h, orgId) => {
+          const u = await pendingInvitee(h, orgId);
+          return {
+            path: `${ADMIN_USERS}/${u.id}/invite`,
+            body: withPassword({}), // ASSUMED body: only currentPassword
+            entityId: u.id,
+            secrets: [PASSWORD],
+            unchanged: async () =>
+              (await h.owner.user.findUniqueOrThrow({ where: { id: u.id } }))
+                .setPasswordTokenHash === u.tokenHash,
+          };
+        },
+      },
+    ]
+  : [];
+
 export const BE03_ROUTES: Be03Route[] = [
+  ...reissueRoutes,
   {
     id: 'users-list',
     step: 'BE-03',
