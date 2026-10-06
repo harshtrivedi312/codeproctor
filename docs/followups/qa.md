@@ -596,3 +596,330 @@ Defence in depth beside the API's own boot refusal (static AWS keys, `AWS_PROFIL
 | FU-QA-18 | should-fix | database (DB-07, Database B #240) | `infra/backup/backup.sh` (timestamped keys, script-side pruning, `delete-object`) and `infra/backup/erasure-list.sh prune` (`delete-object`) do not match ADR 0017 5.3. The instance role has no `s3:DeleteObject` or `s3:DeleteObjectVersion` on the backup bucket and the bucket is versioned with Object Lock. The script must write every dump to the one key `db/dump/latest.dump` in a single `PutObject` carrying checksum and row counts, publish the metrics `BackupSuccess`, `DumpSizeChangeFactor`, `DumpVersionsPerDay` (namespace `codeproctor-pilot`) and never delete. The erasure-list prune moves to the owner-applied expiry function (its role `codeproctor-pilot-backup-expiry` exists in the data template). `BACKUP_SSE` must be empty on pilot (bucket default SSE-KMS; `AES256` and `aws:kms` without a key id are denied); `docs/runbook.md` and FU-DBB-06 still recommend `AES256`. |
 | FU-QA-19 | should-fix | database, hub | Physical repository (pgBackRest or WAL-G, full base backups only) under `db/wal/`: no lifecycle rule exists; the owner-applied expiry function keeps everything younger than 12 days plus the newest 3 full base backups and the WAL from the oldest of them. The tool's metadata files (`archive.info`, `backup.info`) are rewritten in place: with versioning on, the instance role keeps its put, and the function must not delete metadata a kept backup needs. The function, its daily schedule and the metrics `FullBaseBackupCountChange` and `OldestKeptBackupAgeDays` belong to a later owner template (code by the database track). |
 | FU-QA-20 | nit | hub | ADR 0017 sections 5.1 and 5.3: (a) with `NoncurrentDays` 1 and `NewerNoncurrentVersions` 2 a dump outside the newest 3 goes at the later of creation + 12 days (Object Lock) and replacement + 1 day, so the "within 14 days" and "13 days" wording should say 12; (b) the Object Lock floor does not protect dumps older than 12 days: if backups stall more than 12 days and 3 junk versions then land, the displaced real dumps expire at once (offline model case); only the alarms help; (c) section 14 item 2 says a 7 day freshness alarm, C-55 says 2 days (2 used); (d) the second alarm is 28 days for a kept backup (ADR) against a 30 day alarm on the newest dump (Delivery Lead): 28 used; (e) day 30 is the owner's decision, nothing deletes automatically. |
+
+## 23. QA-13 (2026-10-06): LOAD TEST PLAN, pilot capacity: 5 concurrent candidates on two instances (branch qa/step-11; plan only, nothing is built or run)
+
+> **GATE.** The 5-candidate load test on the REAL instances (step 2 below) is the gate before the first real candidate (C-43, C-44..C-48). A failed run, a skipped run, or a run whose evidence package is incomplete BLOCKS the first real candidate, unless the owner waives the failed criterion by ID in the sign-off line (23.9); QA never waives; a skipped run cannot be waived. Only the owner signs it off, from the evidence package (section 23.9); QA recommends, the owner decides. Step 1 (local) is an estimate and never satisfies the gate. **Decision record:** the topology (two instances), "identity LIVE", the slot-at-invite flow and the one KMS key come from decisions C-44..C-48 relayed by the Delivery Lead; they are recorded in ADR 0017 (draft PR #237 / FSD #236), final once merged (this branch's docs/compliance/decisions.md stops at C-43). The gate run is only valid once ADR 0017 is accepted: Q13.
+
+### 23.1 What is being proven
+
+| Item | Value |
+| --- | --- |
+| Source | C-43 (minimal-cost single-schedule AWS pilot) as amended by the owner decisions C-44..C-48 (relayed by the Delivery Lead 2026-10-06: two instances, identity face match stays live; recorded in ADR 0017 (draft PR #237 / FSD #236), final once merged, Q13) and DL-39 (QA A owns packages/qa/k6). C-43 says "the load test proving 5 concurrent candidates" is open until done. NFR-02 and TC-090 stay the 200-candidate case, unchanged (docs/fsd.md says 200; hub answer, Q1); this run is the NEW case TC-105 |
+| Topology (relayed by the Delivery Lead; recorded in ADR 0017 (draft PR #237 / FSD #236), final once merged, Q13) | **App host**: one x86 instance, 2 vCPU / 8 GB (m7i.large class): API, worker, Postgres 16, Redis, Caddy. **Judge0 host**: its OWN small isolated instance (Judge0 server, workers, its own Postgres and Redis; ADR 0016 section 3 rules). The app host reaches Judge0 over a private path only. **k6 runner**: a third machine, on neither host |
+| Pass (NFR-01, TC-105) | API p95 < 300 ms excluding code execution; run result p95 < 5 s measured end to end through the Judge0 instance including the network hop; zero errors; no OOM kill and no restart of any container on either host |
+| Not proven by this run | The 200-candidate figure (TC-090 as written), real browsers, real media bytes, AI/similarity analytics (23.12 Q4), disaster behaviour beyond the failure injection in 23.9 |
+
+### 23.2 Definitions (so the plan is usable without the conversation)
+
+- **Virtual candidate (VC)**: one k6 virtual user bound to one seeded session with its own bearer token and batch key. While identity is live the gate sessions are seeded to CONSENTED (not IN_PROGRESS); the VC does the identity step (I1, which needs the synthetic or licence-clear image set of Q8), waits for VERIFIED and calls start-test itself, so it is IN_PROGRESS only from stage 2 on. With the identity waiver, or against the mock, sessions are seeded IN_PROGRESS and I1 is skipped. Runs are limited to 1 per 5 s per candidate (FR-502), so VCs never share a session.
+- **Live view**: FR-903 and architecture.md: the staff app's live grid of active sessions, fed by the Socket.IO channel `WS /live` (fsd.md section 4, role Reviewer: live sessions, events, pause or message) plus the latest webcam thumbnail. In this plan a "live view subscriber" is one staff Socket.IO client connected to `/live` and subscribed to the org's active sessions. Model: 1 recruiter plus 1 reviewer (2 subscribers) for the whole run. The protocol and the thumbnail source are not decided (OI-2, Q-20 in ADR 0013 section 5.3; BE-13 is not built): the definition in 23.4 row L1 is a PROPOSAL to confirm (23.12 Q3).
+- **Seeder**: packages/qa/k6/seed (QA B draft PR #99, head 47d7ac9e; QA A re-lands it as a superseding PR on its own branch per DL-39). Prerequisite for this plan, see 23.7.
+
+### 23.3 Two-host resource budget (used by both steps)
+
+The app host and the Judge0 host are measured separately. Neither may OOM, restart or swap.
+
+App host (2 vCPU / 8 GB). Proposed split for the portable (per-service) cap; on a real instance the services share the pool:
+
+| Service | Memory limit | CPU quota (sum 2.0) | Notes |
+| --- | --- | --- | --- |
+| postgres (16) | 2048m | 0.5 | `shared_buffers=768MB`, `effective_cache_size=3GB`, `max_connections=60`, `work_mem=8MB`, `shared_preload_libraries=pg_stat_statements` (load-test DB only). Candidate-write pool plus main pool stay under 60 (ADR 0013) |
+| redis | 384m | 0.1 | `maxmemory 256mb` (NOT in infra/docker-compose.yml, which sets only `--appendonly yes --maxmemory-policy noeviction`; the override in 23.8 adds it), policy `noeviction` (BullMQ), AOF on |
+| api (Node) | 1536m | 0.8 | `--max-old-space-size=1024` |
+| worker (Python 3.12) | 2048m | 0.6 | Identity face match is LIVE (C-44..C-48): model memory plus bursts when 5 candidates reach the gate together. Anything else the worker runs during the test is open (23.12 Q4) |
+| Caddy, dockerd, OS | about 2.1 GiB (not capped; the four caps above sum to 5.875 GiB) | none | What is left of 8 GB: page cache, kernel, Caddy, CloudWatch agent |
+
+Judge0 host (own instance; size is an open question, 23.12 Q5). Assumed for the plan: 2 vCPU, 4 GB (c7i.large class, as ADR 0016 section 3 staging row) with the t3.medium class as the cheaper option to be tested only if CPU credits are measured (23.12 Q5):
+
+| Service | Memory limit | Notes |
+| --- | --- | --- |
+| judge0-server (Rails) | 640m | no candidate code runs here |
+| judge0-worker (`COUNT`=2) | 1536m | privileged, isolate; each sandbox up to `MAX_MEMORY_LIMIT` 512 MB; this is where run and submit CPU is spent |
+| judge0-db, judge0-redis | 384m, 128m | separate from the application's Postgres and Redis (infra/judge0/docker-compose.judge0.yml) |
+
+### 23.4 Per-virtual-candidate scenario and expected rates
+
+Cadences come from FSD, ADR 0013 section 5 and the SDK; "Built?" is the status on `main` @144020e0 or on an open PR branch (see 23.6).
+
+| # | Activity | Cadence (per VC) | Route | Req/s per VC | Built? |
+| --- | --- | --- | --- | --- | --- |
+| H1 | Heartbeat (FR-609) | 10 s | `POST /candidate/session/heartbeat` | 0.100 | BE-07 PR #98 (open) |
+| E1 | Event batch, 2 events (FR-601..; signed) | 5 s | `POST /candidate/session/events` | 0.200 | BE-10 not built; mock only |
+| K1 | Keystroke batch, 10 edits (FR-608; signed) | 2 s | `POST /candidate/session/keystrokes` | 0.500 | BE-10 not built; mock only |
+| A1 | Draft autosave (FR-504: every 10 s and on every run) | 10 s plus each run | `PUT /candidate/answers/:questionId/draft` (about 1 to 4 KiB code; body cap 16 KiB) | 0.117 | BE-11 PR #187 (open, B-3 gated) |
+| M1 | Media presign + confirm, 3 streams (SCREEN, WEBCAM, AUDIO) | 10 s per stream | `POST /candidate/session/media/presign` then `.../media/confirm` | 0.600 | BE-09 PR #119 (open) |
+| R1 | Code run: 3 sample tests (one Judge0 batch of 3 sandboxes) | once a minute | `POST /candidate/answers/:questionId/run` | 0.017 | BE-11 PR #187 (open); Judge0 wiring: BE-05 branch, not main |
+| S1 | Submit: hidden tests (assumed 5 tests, weights 1,1,2,2,4, TC-048) | 1 per 5 min, staggered | `POST /candidate/answers/:questionId/submit` | 0.003 | BE-11 PR #187 (open) |
+| I1 | Identity gate (live): ID presign, selfie presign, confirm, status | once at start of the run (burst, 5 VCs inside 30 s) | `POST /candidate/session/identity/presign`, `POST /candidate/session/identity`, `GET /candidate/session/identity` | burst only | BE-08b PR #129 (open); worker face match: integrity-id/be-08-worker-face branch, not main |
+| I2 | Identity re-check (every 120 s) | 120 s | `POST /candidate/session/identity/recheck` (plus presign) | 0.017 | BE-08c not built; optional |
+| F1 | Finish | once at the end | `POST /candidate/session/finish` | n/a | BE-11 PR #187 (open) |
+| L1 | Live view: 2 staff Socket.IO subscribers on `/live`; each VC raises 1 HIGH event a minute that fans out; thumbnail read every 10 s per session (source undecided) | continuous | `WS /live`, thumbnail route TBD | 2 sockets; 5 HIGH events a minute to 2 subscribers is about 0.17 pushes per second in total; thumbnails about 1.0 req/s in total if each subscriber reads them | BE-13 not built |
+
+Totals. Steady-state API requests per VC: 0.100 + 0.200 + 0.500 + 0.117 + 0.600 + 0.017 + 0.003 (+ 0.017 with I2, presign and re-check together) = **1.54 per second (1.55 with I2)**. For 5 VCs that is about **7.7 requests per second**, plus L1 thumbnails about 1.0 per second, so **about 9 per second** (storage PUTs: 3 streams x 6 a minute x 5 VCs = 90 a minute, 1.5 per second, from the runner, not on either host). The offered load is small; the risks are CPU contention (Judge0 submit bursts on the Judge0 host, face match on the app host), Postgres lock waits (503 `BUSY`, DL-37) and memory. The headroom stage in 23.5 therefore also runs 10 and 15 VCs; those figures are informational, never part of the gate.
+
+Why the storage PUTs stay in k6: `confirm` HEADs the object and answers 409 `UPLOAD_NOT_FOUND` if it is missing (ADR 0013 5.5), which would break "zero errors". The existing scripts PUT tiny objects (default 256 KiB video, 64 KiB audio; use 64 KiB for all in this run) from the runner to the bucket. That costs neither host anything (about 0.3 PUT/s per VC from the runner). The Delivery Lead brief said k6 does NOT upload; if the owner insists, `confirm` must be left out of the scenario and its coverage is lost: Q6.
+
+### 23.5 Stages (identical in both steps)
+
+| Stage | VCs | Duration | Purpose | Counted in the gate? |
+| --- | --- | --- | --- | --- |
+| 0 Pre-check | 0 | 15 min before; sessions are seeded right after it (precondition 7) | stack healthy, sampling started, `docker events` capture started, restart/OOM baseline recorded | no |
+| 1 Identity burst | 5 (sessions seeded CONSENTED) | 2 min | all 5 do I1 (identity) inside 30 s and reach VERIFIED (the gate comes before the test, as in a real slot). Worker CPU, queue depth, face match latency | yes |
+| 2 Ramp | 1 to 5 | 2 min (one more VC calls start-test every 30 s) | warm-up (JIT, pools, caches); a staggered start is lighter than a real simultaneous start, which stage 5 and the headroom stage cover | yes in the whole-run figures, but see PC-1 (stage 3 alone) |
+| 3 Steady | 5 | 15 min (step 1: 10 min is acceptable) | the gate measurement | yes |
+| 4 Soak | 5 | default: the longest pilot test length plus its grace (for example 90 + 10 = 100 min); reduced option: 10 min, only if the owner accepts it (Q10). Directly after steady, no restart | leaks: memory, connections, queue growth | yes |
+| 5 Run burst | 5 | 12 rounds, 1 per minute, all 5 at once | worst case for NFR-01 run p95: 5 simultaneous runs (15 sandboxes on 2 workers) and a simultaneous submit once | yes (TC-091 flavour) |
+| 6 Headroom | 10, then 15| 5 min each | where it breaks (informational) | no |
+| 7 Injection | 5 | five slots of 5 min each (about 2 min injected, then restore and observation until recovered), step 2 only | 23.9, failure injection | no (own criteria) |
+| 7b Rerun after injection | 5 | 5 min, after the LAST restore | proves the stack recovered fully: must meet PC-1 and PC-3 | yes (PC-10) |
+| 8 Ramp down | 5 to 0 | 1 min | finish route, queues drain, nothing left pending | yes (no pending jobs) |
+
+Duration of stages 1 to 5 and 8: 2 + 2 + 15 + 10 + 12 = 41 minutes for stages 1 to 5, plus the 1-minute stage 8 ramp down = 42 minutes with the reduced 10-minute soak; with the default soak it is 32 + soak minutes. The ramp at 1 to 4 VCs LOWERS a whole-run p95 (it is not conservative), so PC-1 is evaluated twice: over the whole gate run and over stage 3 (steady) alone, using a `phase` tag on every request (script work item 4). Both must pass. Stage 6 and 7 are separate k6 invocations with their own summary files so their numbers cannot contaminate the gate.
+
+### 23.6 What exists today and what is missing
+
+Candidate routes on `main` @144020e0: none. `apps/api/src` has no candidate controller on main; `execution` and `judge0` modules exist (BE-05 port and client). Open PR branches:
+
+| Piece | Where | State | Exercisable after |
+| --- | --- | --- | --- |
+| BE-07 session, OTP, consent, heartbeat, proctor-key, test/start | PR #98 (backend-cand/be-07-session) | open | merge of #98 (everything else is stacked on it) |
+| BE-09 media presign and confirm, StorageService | PR #119 (backend-cand/be-09-media) | open, stacked on #98 | merge of #119 |
+| BE-08b identity presign, upload, status | PR #129 (integrity-id/be-08b-identity) | open, stacked on #119 and #98 | merge of #129 |
+| Worker face match (identity) | branch integrity-id/be-08-worker-face | not on main, no PR seen | its merge; I1 latency needs it |
+| BE-11 run, submit, draft, finish, section finish | PR #187 (backend-cand/be-11-run-submit), B-3 gated | open, stacked on #98 | merge of #187 |
+| BE-10 events and keystrokes with HMAC | none found | not built | the k6 mock is the only target now |
+| BE-05 Judge0 wiring on the app side | branch backend-cand/be-05-execution | not on main | its merge |
+| BE-13 live gateway (`/live`) and thumbnails | none | not built | merge; L1 protocol to confirm |
+| BE-08c identity re-check | none | not built | optional I2 |
+| Deploy compose for API, worker, Caddy; Judge0 host provisioning | infra/docker-compose.yml has only postgres, redis, adminer; infra/judge0 has the Judge0 fragment; infra/caddy is empty | deploy track (DEP) not delivered | the proof cannot start before it |
+| Seeder (#99) | origin/qa-ops/k6-seed @47d7ac9e, packages/qa/k6/seed | draft, written against the docs, not against BE-07 | re-landed by QA A, then re-checked against BE-07 |
+
+Consequence: today only the TC-090 script against `mock/server.mjs` can run (routes H1, E1, K1, M1, R1; not A1, S1, I1, F1, L1). The gate cannot run before BE-07, BE-09, BE-10, BE-11, BE-08b plus the worker face match, BE-05 wiring, the deploy compose and both instances exist. L1 may be added later but if BE-13 is not part of the pilot slice it must be said so in the report.
+
+### 23.7 k6 script work needed (owned by QA A under DL-39; QA B is silent)
+
+New scenario `tc-pilot-capacity` in packages/qa/k6 (a new file, `packages/qa/k6/tc-pilot-capacity.js`, reusing `lib/`). Exact changes, none made here:
+
+1. `lib/candidate.js` SCHEDULE: add `draft` (every 10 s, `PUT /candidate/answers/:questionId/draft`, tag `endpoint:draft`, also fired after each run), `submit` (configurable `SUBMIT_EVERY_MS`, default 300000, staggered by VU id, tag `endpoint:submit`, excluded from `api_duration` like runs because grading has a 120 s deadline, but with its own threshold `http_req_duration{endpoint:submit}` p(95)<30000 as a stated assumption to confirm, Q7), `finish` (once, from a `teardown`-like last tick), `identity` (I1: presign, PUT an image from the Q8 synthetic or licence-clear set, confirm; the upload answers 202 and the result is read by polling `GET /candidate/session/identity` until a terminal status or 60 s; tag `endpoint:identity`; records `cp_identity_ms`). A zero-filled placeholder will not pass the face match (FR-403: a failed match gets one retry and then manual review), so I1 depends on the Q8 image set, not only on a seeder mode. A VC that reaches a terminal status other than VERIFIED, or times out at 60 s, never hangs: it is counted in its own counter `cp_identity_not_verified` (distinct from `cp_failures`), marked finished, and the other VCs go on; the gate threshold is `cp_identity_not_verified: count==0` (PC-8). Keep every new call out of the `url` tag and inside the host guard.
+2. Follow the heartbeat token renewal (`sessionToken`, ADR 0013 5.3), in memory only and never logged, so a run longer than the token lifetime does not die. Parameterise the rate constants (`HEARTBEAT_MS` 10000, `EVENTS_MS` 5000, `KEYSTROKES_MS` 2000, `CHUNK_MS` 10000) from the environment so a rehearsal can change them; the pass run uses the defaults above and the summary prints the effective values.
+3. `lib/config.js`: add `endpoint` sub-metrics for `draft`, `identity`, `submit`, `finish`; write full metrics (p50, p95, p99 per endpoint) with `handleSummary` to a path given by `SUMMARY_OUT` (the CI job already passes `--summary-export`; sub-metrics appear in it only if they have a threshold, hence the thresholds below).
+4. `tc-pilot-capacity.js`: scenarios `gate` (stages 1 to 5 and 8, `ramping-vus` plus a `per-vu-iterations` burst scenario for stage 5, `startTime` offsets), `headroom` (stage 6, 10 then 15 VCs) and `inject` selected by `STAGE=gate|headroom|inject`. `inject` runs 5 VCs at the steady cadence for `INJECT_MIN` minutes counted from the moment the last VC has finished I1 (default 30: five 5-minute injection slots, then the 5-minute stage 7b rerun); the owner applies each injection by hand at the slot starts, and the script tags requests `phase:inject` or, in the last 5 minutes, `phase:rerun`. Only `phase:rerun` carries the PC-1 and PC-3 thresholds, because errors are expected while a dependency is down. Every request carries a `phase` tag (`identity`, `ramp`, `steady`, `soak`, `runburst`, `down`) set from the elapsed time, so thresholds can also be written on `{phase:steady}`. Thresholds (whole `gate` run, and the same `api_duration` ones again on `{phase:steady}`):
+
+| Threshold | Meaning |
+| --- | --- |
+| `api_duration: p(95)<300` and `http_req_duration{kind:api}` the same, per `endpoint` (heartbeat, events, keystrokes, draft, presign, confirm, identity, finish) | NFR-01, excludes runs, submits and storage PUTs. `endpoint:api` in the brief maps to the existing `api_duration` and `kind:api` tags; no rename needed |
+| `api_duration{phase:steady}: p(95)<300` and the same per endpoint | stage 3 alone (PC-1) |
+| `http_req_failed{kind:storage}: rate<0.001`, `cp_storage_failures` as in the README | storage PUTs from the runner are judged separately, not as API errors |
+| `http_req_duration{endpoint:run}: p(95)<5000` | NFR-01 run result, end to end through the Judge0 instance |
+| `http_req_failed{kind:api}: rate==0`, `cp_failures: count==0`, `cp_setup_failures: count==0`, `checks: rate==1` | zero errors; a 429 or 503 counts |
+| `cp_late_slots: rate<0.01`, `http_reqs{kind:api}: rate>=0.9 x expected` | proof the offered load was really sent (expected is about 7.7 per second at 5 VCs; the script computes it from the schedule) |
+
+5. `mock/server.mjs`: add draft, submit, finish, identity and (when specified) a `/live` Socket.IO stub so the scenario can be checked offline with the mock; add `mock/judge0-stub.mjs`, a stand-in Judge0 (`POST /submissions/batch`, `GET /submissions/batch?tokens=`, configurable latency `STUB_MS` and 3-to-N sandboxes) for step 1.
+6. Seeder (prerequisite): the VCs need sessions with a token each (CONSENTED while identity is live, 23.2). Findings from packages/qa/k6/seed/README.md on origin/qa-ops/k6-seed @47d7ac9e, and what it means for this plan:
+   - It creates sessions through the PUBLIC API only (no database access): `POST /tests/:id/invitations`, link token read from a Mailpit-compatible mail sink, `POST /candidate/session/otp` then `start`, consent (`GET consent`, `POST consent/sign`), `system-check`, room scan (presign, PUT of one placeholder chunk, confirm), then start-test polled until VERIFIED to IN_PROGRESS. Output: a 0600 sessions file with `token`, `sessionQuestionId`, `questionId`, `seedRunId`, `tokenExpiresAt`, plus an ids-only manifest for cleanup by run id (`--cleanup --run-id`, needs the erase permission).
+   - Gaps against this plan: (a) it uses the identity WAIVER (no face, C-25, ADR 0015), but identity is LIVE now (C-44..C-48). Sessions seeded with the waiver skip I1. Either the seeder gets a `--identity` mode (ID and selfie placeholders; real faces are forbidden, so a synthetic or licence-clear test face image set and a worker configured to accept it are needed: Q8) or the seeder stops at CONSENTED (after consent and system-check) and I1 runs in k6, which is what the gate needs: the seeder gets a `--stop-at CONSENTED` mode. (b) It needs a mail sink; the pilot-class instance sends through SES and `EMAIL_PROVIDER=noop` is refused in pilot and production (Q9). (c) Its token is short lived and k6 does not follow renewal: seed within minutes of the run and check `tokenExpiresAt` against the run length (42 minutes with the reduced soak, longer with the default soak; if shorter, k6 must follow renewal, item 2). (d) It paces at 5 requests per second, 5 candidates take seconds. (e) It requires an org name containing "synthetic" and refuses hosts containing `prod`, `production` or `pilot`: the capacity host name must be neutral (Q2). (f) It was written against the docs, not BE-07; re-check `lib/routes.mjs` when #98 merges. (g) It issues no proctor key (k6 does).
+   - Seed PER k6 INVOCATION, just before it starts: 5 sessions for `gate`, 15 for `headroom` (stage 6 runs 10 and then 15 VCs, and the gate's 5 are finished in stage 8), 5 for `inject` (stages 7 and 7b). The proctor-key route answers 409 on a second call, so a session is never reused, and a session seeded for the gate cannot outlive the 42-minute run unless renewal is followed (item 2). All of them are seeded CONSENTED and do I1 first (identity time is excluded from the headroom and inject figures).
+
+### 23.8 Step 1: LOCAL ESTIMATE (app-host stack capped; Judge0 stubbed or on a separate Linux host)
+
+What it can and cannot prove, stated first:
+
+| Platform | Can show | Cannot show |
+| --- | --- | --- |
+| Mac (Apple Silicon), a SEPARATE 2 CPU / 8 GB Colima or Lima VM, Judge0 stubbed | Whether the API, Postgres and Redis keep p95 < 300 ms at about 9 requests per second (7.7 API requests at 5 VCs plus about 1.0 thumbnail request with L1) inside the capped VM; memory shape; lock waits; connection counts; the worker's face-match memory only if its image has an arm64 build | Anything about x86 speed (an Apple core is faster than an m7i vCPU, so latencies are optimistic); Judge0 (needs Linux x86, cgroup v1, privileged isolate; ADR 0016; the earlier notes that TC-042..044 need a Linux x86 runner); the network hop to a second host; S3 behaviour |
+| Linux x86 VM of the same shape (2 vCPU / 8 GB), Judge0 stubbed | The above on the real architecture; the cgroup cap method B (faithful) | the Judge0 host |
+| Plus a second Linux x86 VM (2 vCPU / 2 to 4 GB, cgroup v1) running infra/judge0 | A first honest figure for run p95 including a network hop on a LAN | AWS network, instance credits, S3 and SES |
+
+Meaning of the result: **PASS in step 1 = "no reason to expect failure", an estimate. FAIL in step 1 = a real finding (a defect or a capacity problem) to fix before step 2. Neither replaces step 2.** Report every step-1 figure with its platform row.
+
+**1.1 Cap the whole app-host stack** (Judge0 is NOT in this stack). Options, best first. **On a Mac every docker command in section 23 (compose, stats, inspect, events, exec) must run against the capped VM's context, never Docker Desktop (the shared dev stack): run `export DOCKER_CONTEXT=colima-cp-capped` once in each shell used for this plan, and check `docker context show` first.**
+
+- **A. A SEPARATE VM of the right size (preferred, caps everything including the kernel's share).** On a Mac create a dedicated VM, never resize Docker Desktop: `colima start --profile cp-capped --cpu 2 --memory 8 --disk 40 --vm-type vz` (or a Lima profile, or `multipass launch 22.04 --name cp-app --cpus 2 --memory 8G --disk 30G`). Colima gives the VM its own Docker daemon and context (`colima-cp-capped`; with multipass install Docker in the VM and create the context by hand); use `docker --context colima-cp-capped ...` for every command of this plan. Changing Docker Desktop's Resources restarts its VM, which stops every container including the SHARED dev stack and leaves it permanently capped, so QA never does it; only the human may, with the Database session's agreement and no other project running. Check: `docker --context colima-cp-capped info --format '{{.NCPU}} CPUs, {{.MemTotal}} bytes'` must print `2 CPUs` and about 8 GiB (8,3xx,xxx,xxx bytes minus VM overhead; record the value). On Linux x86: `multipass launch 22.04 --name cp-app --cpus 2 --memory 8G --disk 30G` (or a throwaway cloud VM of the real class for an hour), then install Docker inside. The k6 runner stays on the host, outside the VM, reaching the VM's published ports.
+- **B. Linux only: one systemd slice for the whole compose project.** `/etc/systemd/system/codeproctor-app.slice`:
+  ```ini
+  [Slice]
+  CPUQuota=200%
+  MemoryAccounting=true
+  CPUAccounting=true
+  MemoryMax=8G
+  MemorySwapMax=0
+  ```
+  Then `sudo systemctl daemon-reload`, and put `cgroup_parent: codeproctor-app.slice` on each service of the override file below. Verify with `systemd-cgls` and `cat /sys/fs/cgroup/codeproctor-app.slice/cpu.max` (`200000 100000`). On a cgroup v1 host use `MemoryLimit=8G` and check `memory.limit_in_bytes`. This slice must NOT contain Judge0 (isolate creates its own cgroups outside the container). 8 GB here is the app host's memory including the kernel cache the slice is charged for; it is a close, not exact, model of the instance.
+- **C. Portable fallback: per-service limits that sum to 2 CPU and 5.875 GiB** (the other 2.1 GiB or so model the OS). This runs as its OWN compose project with its own volumes and ports, preferably inside the separate VM of option A (on a shared Docker Desktop VM other containers pollute the measurement; record it if so). It must never run in the shared development stack (project `codeproctor`, volume `postgres_data`): CLAUDE.md rule 14 says "Only the Database session starts or stops the local Docker stack (`dev:infra`, `dev:infra:down`). Resets (`db:reset`, `dev:infra:reset`) stay human-only per the Rules above and ADR 0009. Other sessions may connect to the stack but never start, stop or reset it." A QA session therefore never starts, stops or resets the shared dev stack; the human (or the Database session) starts the separate project below, with a throwaway database and a throwaway password in its own env file, applies the schema with the project's migrate script (never `db push` or a reset), and creates `pg_stat_statements` only in that throwaway database. `infra/docker-compose.loadtest.yml` is an untracked override you create locally (not committed; `api` and `worker` are assumed service names until the deploy compose exists):
+  ```yaml
+  services:
+    postgres:
+      ports: !override ['127.0.0.1:55432:5432'] # Compose v2.24.4 or newer; cannot collide with the dev stack
+      command: ['postgres', '-c', 'shared_buffers=768MB', '-c', 'effective_cache_size=3GB', # a planner hint, harmless above the 2 GiB cap
+         '-c', 'max_connections=60', '-c', 'shared_preload_libraries=pg_stat_statements', '-c', 'track_io_timing=on']
+      deploy: { resources: { limits: { cpus: '0.5', memory: 2048M } } }
+      memswap_limit: 2048M
+    redis:
+      ports: !override ['127.0.0.1:56379:6379']
+      command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction', '--maxmemory', '256mb']
+      deploy: { resources: { limits: { cpus: '0.1', memory: 384M } } }
+      memswap_limit: 384M
+    api:
+      deploy: { resources: { limits: { cpus: '0.8', memory: 1536M } } }
+      memswap_limit: 1536M
+    worker:
+      deploy: { resources: { limits: { cpus: '0.6', memory: 2048M } } }
+      memswap_limit: 2048M
+  ```
+  Run (by the human, with `DOCKER_CONTEXT` exported as above): `docker compose -p codeproctor-loadtest --env-file .env.loadtest -f infra/docker-compose.yml -f infra/docker-compose.loadtest.yml up -d postgres redis api worker` (adminer is not started; `-p` gives it its own volumes and the override above remaps both published ports; `up ... api worker` cannot work until the deploy compose defines those services, so before that only `postgres redis` start; QA connects to it only; `docker update --cpus 0.8 --memory 1536m --memory-swap 1536m <container>` changes a running container without a restart). Weakness: quotas are per service, so an idle share cannot be borrowed as on the instance (pessimistic for a burst, but a leak in one service is not seen as it would be in a shared 8 GB). Prefer A or B; record which one was used.
+
+**1.2 Judge0 for step 1.** (a) API-only load: start `node packages/qa/k6/mock/judge0-stub.mjs` (script work item 5) outside the cap and set the API's Judge0 base URL and tokens to it (`STUB_MS=900` models 3 sandboxes plus polling; sweep 400, 900, 2500). It proves the API-side cost of the run route (the VU is blocked while Judge0 answers, so connection and event-loop pressure is real) and says nothing about sandbox time. (b) Run latency: only on a second Linux x86 machine with cgroup v1: `docker compose -f infra/judge0/docker-compose.judge0.yml --env-file .env up -d`, set `COUNT` to the value under test, check `docker compose exec judge0-worker curl -m 3 https://1.1.1.1` fails. That runs from the worker container, not inside an isolate box, so it is a smoke check only; the real sandbox network test is TC-042 (ADR 0016). Then point the API at it. The TC-042..044 sandbox checks are not part of this plan.
+
+**1.3 Run it (k6 outside the capped set; docker commands use the `DOCKER_CONTEXT` of 1.1 on a Mac).** k6 on the Mac host or a different machine; never inside the capped VM. Seed the sessions of each invocation (5, 15, 5) with the seeder (23.7) just before that invocation. Then:
+
+```sh
+export SESSIONS_FILE=/absolute/path/outside/repo/sessions.json   # never paste its content anywhere
+k6 run --summary-export=/absolute/path/outside/repo/results/gate-summary.json \
+  -e API_BASE_URL=http://localhost:4000/api/v1 -e ALLOWED_HOSTS=localhost \
+  -e STAGE=gate -e VUS=5 -e RAMP_UP=2m -e HOLD=15m -e SOAK=<longest test length + grace, or 10m reduced> \
+  -e CHUNK_BYTES_VIDEO=65536 -e CHUNK_BYTES_AUDIO=65536 \
+  packages/qa/k6/tc-pilot-capacity.js 2>&1 | sed -E 's#https?://[^" ]*#<url-redacted>#g' > /absolute/path/outside/repo/results/gate-k6.log
+```
+
+Warm-up: stage 2 is the warm-up and is counted in the whole-run figures; PC-1 is also read on stage 3 alone (23.5). In addition run `VUS=1` for 2 minutes once after every stack restart and discard it. Duration: 42 minutes for stages 1 to 5 and 8 with the reduced soak (32 + soak otherwise), plus 10 minutes for stage 6. Step 1 may shorten the steady stage to 10 minutes.
+
+**1.4 What to record** (every docker command here runs with the `DOCKER_CONTEXT` of 1.1; start before stage 0, stop after stage 8; all into `results/` outside the repo, one directory per run named by date and platform):
+
+| Data | Command (every 5 s unless stated) |
+| --- | --- |
+| Per-container CPU, memory, PIDs, I/O | `while true; do ts=$(date -u +%FT%TZ); docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}},{{.MemPerc}},{{.NetIO}},{{.BlockIO}},{{.PIDs}}' \| sed "s/^/$ts,/"; sleep 5; done >> docker-stats.csv` (cAdvisor is an acceptable alternative) |
+| Whole-host CPU, memory, swap, run queue | inside the VM or instance: `vmstat -t -w 5 > vmstat.txt`; also `mpstat -P ALL 5 > mpstat.txt` and `free -m -s 5 > free.txt` (CPU `st` steal must stay near 0) |
+| Restarts and OOM | before and after: `docker inspect -f '{{.Name}} oom={{.State.OOMKilled}} restarts={{.RestartCount}} started={{.State.StartedAt}}' $(docker ps -aq) > inspect-before.txt` (and `-after`); during: `docker events --filter event=oom --filter event=die --filter event=restart --format '{{json .}}' > events.jsonl`; on Linux also `sudo dmesg -T \| grep -i -E 'out of memory\|oom-kill\|killed process' > dmesg-oom.txt` (empty is the expectation; inside a Colima or Lima VM run it in the VM, for example `colima ssh -p cp-capped -- sudo dmesg -T`; `docker events` is the cross-platform evidence) |
+| Postgres hot queries | once, at the start of stage 3, `SELECT pg_stat_statements_reset();` and at the end of stage 5 (so the top 15 covers stages 3 to 5) `SELECT calls, round(total_exec_time) AS ms_total, round(mean_exec_time::numeric,2) AS ms_mean, rows, left(query,120) FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 15;`; sampled: `SELECT count(*) FILTER (WHERE wait_event_type='Lock') AS lock_waits, count(*) AS conns FROM pg_stat_activity;` and `SELECT deadlocks, conflicts FROM pg_stat_database WHERE datname=current_database();` (run as the owner of the stack, with the throwaway credentials in `.env.loadtest` (option C) or those of the stack's own env file; never from an agent session against staging or pilot, ADR 0009) |
+| Redis | `REDISCLI_AUTH=... redis-cli info memory`, `info stats` (watch `evicted_keys` = 0, `rejected_connections` = 0, `instantaneous_ops_per_sec`), `redis-cli --latency-history -i 5` for the run, `slowlog get 20` at the end |
+| Queues (worker and BullMQ) | queue depth and oldest-job age of the identity and session jobs: `redis-cli --scan --pattern 'bull:*:wait'` then `LLEN` each; names come from the API configuration. Worker CPU is its row in docker-stats.csv; face-match latency from the worker log (no media keys, no images in the log) |
+| Judge0 queue time and run phases | Judge0 host: docker stats as above; `redis-cli -h judge0-redis LLEN resque:queue:default` (verify the queue name on the running version); per-submission queue time from `created_at` and `finished_at` fields on `GET /submissions/:token` only if the API leaves them readable (it DELETEs after reading, so the capture must be in the stub or in an API debug log, which must not hold source code); the k6 `run` trend minus the stub or Judge0 `time` is the overhead |
+| API latency per route | the k6 summary (`p(50)`, `p(95)`, `p(99)` per `endpoint` tag; `summaryTrendStats` already has them) and, as the server-side cross-check, the Caddy JSON access log `duration` per route (no query strings, no bodies, no tokens) |
+| Errors | k6 `http_req_failed{kind:api}`, `cp_failures`, `cp_duplicate_batches`, `checks`; API logs grepped for `level>=50` and 5xx counts (no secrets in the output) |
+
+**1.5 Step 1 report** (QA writes it as a short section here or in docs/qa/pilot-capacity-report.md, labelled ESTIMATE): platform row, cap method A/B/C and the verified numbers, k6 summary, the CSV peaks (CPU and memory per container as a share of its limit), restart and OOM result, top 5 Postgres statements, and the first container to reach 80 % of its CPU or memory limit.
+
+### 23.9 Step 2: the real proof on the provisioned instances (THE GATE)
+
+**Preconditions (all must be true; QA checks, the owner confirms):**
+
+1. Both instances exist and are the pilot class: app host 2 vCPU / 8 GB x86 (m7i.large class; if a burstable t-class is used, CloudWatch `CPUCreditBalance` is recorded before and after, Q5), Judge0 host sized per Q5, Ubuntu 22.04 cgroup v1 with the boot check of ADR 0016 section 3.5 on the Judge0 host. Same AMI, Docker and compose files as the pilot will use. Region and AZ the same for both.
+2. Network: the app host reaches Judge0 over a private address and security-group rule only; Judge0 has no route to the app database or secrets; no egress from the sandbox (a `curl -m 3` from the worker is a smoke check; the real test is TC-109 / TC-042, hub and QA cases). The runner reaches only the app host's public Caddy endpoint.
+3. Stack deployed through the deploy track (not by hand), the exact commit recorded; instance role on S3 (no static keys, section "Deploy check: AWS credential sources" above); the load-test bucket and database are SYNTHETIC ONLY. If these are the pilot's own instance and database, they are rebuilt or reset by the human before any real candidate (nothing here is reused; D-10 principle of ADR 0016: a load-tested host is never promoted as it is). Agents never reset (CLAUDE.md, ADR 0009).
+4. The k6 runner: a small separate machine on neither host (for example a t3.small in the same region and a different AZ, so it adds a realistic network hop and cannot steal CPU), k6 from the image pinned by digest in .github/workflows/qa.yml. **The gate run must come from this runner** (or a self-hosted GitHub runner installed on that machine); a GitHub-hosted runner, a laptop, and the `k6` job of qa.yml on a GitHub-hosted runner are informational only and carry no gate status (different network path).
+5. Target host name is allow-listed and neutral. The k6 guard and the seeder refuse any host containing `prod`, `production` or `pilot`, and CI allows only hosts in `QA_STAGING_HOSTS`, with the secret from the `staging` GitHub environment (`K6_SESSIONS_JSON`). C-43 says there is no staging on AWS, so the hub and owner must give the capacity-test instance a host name such as `capacity.<domain>`, add it to `QA_STAGING_HOSTS`, and decide how the gate runs without editing the guard (Q2). CI configuration is hub-owned: this plan proposes no workflow edit; what the hub provides: the allow-list entry, a `k6-pilot-capacity` dispatch option that runs `tc-pilot-capacity.js` from the mounted folder (as README section "CI (hub changes, not made here)") and the artefact upload of the summary. The gate itself is run by the owner with the commands of 1.3 from the precondition-4 runner. Also set `STORAGE_ALLOWED_HOSTS` to the S3 bucket host (the S3 endpoint of the load-test bucket) so a presign pointing elsewhere is not followed.
+6. Secrets: sessions list (bearer tokens and batch keys) and staff credentials for the seeder live only in the human's secret store or the GitHub environment secret; nobody pastes them into a session, a PR, a log or this file. The seeder and k6 are run by the human, or by CI with secrets mapped to the environment. QA never receives them.
+7. Seed fresh sessions PER k6 invocation, after the stage-0 pre-check and at most 10 minutes before that invocation starts: 5 for the gate, 15 for stage 6, 5 for stages 7 and 7b (a session is never reused). Check that `tokenExpiresAt` is later than the end of the whole invocation (42 minutes for the gate with the reduced soak, longer otherwise) or that renewal is followed (item 2 of 23.7, required for the gate if the token lifetime is shorter); a mail sink (or a SES sandbox mailbox the human reads) for the invitation mail (Q9).
+8. Sampling installed on BOTH hosts (1.4 commands; `vmstat`, `docker stats` CSV, `docker events`, dmesg, Postgres on the app host, Judge0 queue on the Judge0 host), clocks in sync (chrony), CloudWatch agent not CPU-hungry (record its share).
+
+**Run order and who does what:**
+
+| # | Step | Who |
+| --- | --- | --- |
+| 1 | Provision both instances, deploy the stack, set the allow-list and secrets, confirm preconditions 1 to 8 | Owner (with Deploy: DEP track/Backend A for the compose files, host provisioning and the boot check) |
+| 2 | Provide the scripts, thresholds, command lines and an analysis template; dry-run on the mock and at step 1 (`--dry-run` of the seeder) | QA A |
+| 3 | Seed, start sampling, run stages 0 to 5 and 8 (`STAGE=gate`), then 6 (`STAGE=headroom`), then 7 and 7b (`STAGE=inject`) | Owner, from the precondition-4 runner (a CI dispatch is informational only) |
+| 4 | Collect the evidence package, analyse, write the report, list defects with owners | QA A, then hands defects to the project manager |
+| 5 | Sign off or reject | Owner |
+
+**Pass and fail criteria. One rule: ANY failed criterion blocks the first real candidate, unless the owner waives that criterion BY ID in the sign-off line. QA never waives. PC-5, PC-6, PC-7 and PC-8 carry QA-proposed numbers (Q10, Q11); the owner may change a number before the run, not after.**
+
+| ID | Criterion | Source | Evidence |
+| --- | --- | --- | --- |
+| PC-1 | `api_duration` p(95) < 300 ms for the whole gate run AND, separately, for stage 3 (steady) alone (`phase:steady`), and per endpoint (heartbeat, events, keystrokes, draft, presign, confirm, identity, finish), excluding runs, submits, storage PUTs; both readings must pass | NFR-01, TC-090 | k6 summary JSON; Caddy `duration` cross-check |
+| PC-2 | `http_req_duration{endpoint:run}` p(95) < 5000 ms end to end through the Judge0 instance (over the whole gate run: the steady, soak and the 12 stage-5 rounds; stage 5 may also be read alone with `phase:runburst`) | NFR-01, TC-091 | k6 summary JSON |
+| PC-3 | Zero errors: `http_req_failed{kind:api}` rate = 0, `cp_failures` = 0, `cp_setup_failures` = 0, `checks` rate = 1, no 429, no 503, no 5xx; storage PUT failures < 0.1 % (`http_req_failed{kind:storage}`) | TC-090 "no errors"| k6 summary; API log 5xx count = 0 |
+| PC-4 | No OOM kill and no restart of any container on EITHER host: every `RestartCount` unchanged, every `OOMKilled=false`, `dmesg` shows no oom-kill, no unexpected `die` event | brief | inspect-before/after, events.jsonl, dmesg-oom.txt |
+| PC-5 | Offered load proven: `http_reqs{kind:api}` rate >= 90 % of expected, `cp_late_slots` < 1 %, over stages 3 to 5 the run count equals 5 x elapsed minutes (+- 1 each) | QA proposal (Q10): the 90 %, 1 % and +-1 figures are not in the docs | k6 summary |
+| PC-6 | No resource cliff: no container above 90 % of its memory limit at any sample, host swap 0, CPU `steal` < 5 %, app host CPU and Judge0 host CPU 5-minute averages < 85 % in stage 3 | engineering margin (QA proposal; Q10) | docker-stats.csv, vmstat.txt |
+| PC-7 | No leak in the soak: each container's memory at the end of stage 4 is within +10 % of its value at minute 5 of stage 3; Postgres connections and Redis memory flat; BullMQ and Judge0 queues at 0 after stage 8 | QA proposal (Q10): the +10 % figure is not in the docs | CSV trends, queue counts |
+| PC-8 | Identity gate: all 5 reach VERIFIED within the proposed 60 s (FR-403; a number to confirm, Q11) and `cp_identity_not_verified` = 0; worker CPU recorded; no failed job | C-44..C-48 | `cp_identity_ms`, `cp_identity_not_verified`, worker log, queue samples |
+| PC-9 | No lost data: 5 final submissions graded, drafts equal the last autosave sent, every presigned chunk confirmed, no `duplicate:true` | FR-504, FR-701 | database counts by the owner, `cp_duplicate_batches` = 0 |
+| PC-10 | Failure injection (below) behaves as specified, only on the capacity instances, and the 5-VC rerun 7b after the last restore meets PC-1 and PC-3 | NFR-09 | injection log |
+| PC-11 | Evidence package complete (below) and every k6 and server log redacted | this plan | the package |
+
+Informational (never fails the gate): stage 6 (10 and 15 VCs) breakpoint, Postgres top queries, the first container to reach 80 %, Judge0 `COUNT` sensitivity.
+
+**Failure injection (stage 7, synthetic data, owner runs, 5 VCs; each injection has its own 5-minute slot: about 2 minutes injected, then restore and observation until recovered; the 70-second network cut fits in its slot the same way; then the 5-minute rerun 7b):**
+
+| Injection | Expected (to be confirmed against the code; a hang or a 500 is a defect) |
+| --- | --- |
+| `docker compose stop` Judge0 server and workers (Judge0 host)| Run answers a clear error (503 with `Retry-After`) within the 15 s Run deadline of ADR 0016, never hangs, never 500; heartbeat, events, keystrokes, draft, presign and confirm stay 200 with api p95 < 300 ms; after restore the next run succeeds within 60 s without an API restart |
+| Block the private path (security group) between app and Judge0 | same as above (a timeout, not a hang beyond the deadline) |
+| `docker compose stop redis` (app host) | Fail closed: candidate routes answer 503 problem+json with `Retry-After` promptly (rate limits and token freshness need Redis, section 18), no 200 with a lost write, no hang over 5 s; after restore the SDK-style resend drains and no event is duplicated or lost |
+| Stop Postgres (app host) | 503 `BUSY` or equivalent, no hang; recovery without restarting the API |
+| Pull the runner network for 70 s | the DISCONNECTED rule of FR-609 (more than 60 s) fires and RECONNECTED follows (TC-063 note on 45 s) |
+
+**Evidence package** (a folder the owner keeps outside git, the redacted summaries copied to docs/qa/pilot-capacity-report.md by QA): the k6 summary JSON for gate, headroom and inject runs; the redacted k6 logs; docker-stats.csv, vmstat, mpstat and free files for both hosts; inspect-before and inspect-after, events.jsonl, dmesg output; pg_stat_statements top 15, lock and connection samples; Redis info samples; Judge0 queue samples; Caddy access-log duration percentiles per route; the commit SHAs and image digests deployed, the instance types and the AMI ids, the effective environment values for `COUNT` and pool sizes (no secrets), the seeder run ids and the cleanup confirmation (`--cleanup` or the owner's erase); and the owner's sign-off line (name, date, "PASS" or "FAIL", the criteria IDs waived if any, with the reason). No candidate media keys, tokens, OTPs, URLs or secrets appear in any file.
+
+**Sign-off.** The owner signs. A waived criterion is the owner's explicit decision recorded in the sign-off line; QA does not waive. If any criterion fails or the package is incomplete, the first real candidate is blocked until a rerun passes or the owner waives that criterion by ID. After a failed run QA files defects (reproduction, expected vs actual, owner) for the project manager; the typical levers are Judge0 `COUNT` or the worker's concurrency, Postgres pool and `shared_buffers`, moving face match to a lower priority, or a bigger app host.
+
+### 23.10 Proposed test-case entry for the capacity gate (id TC-105 from the hub, draft PR #237, final once it merges; test-cases.md and test-matrix.md are NOT edited here). The other deploy-track cases are in section 24
+
+| Id | Source | Test | Level | Pri | How |
+| --- | --- | --- | --- | --- | --- |
+| TC-105 (id from draft PR #237, final once merged) | C-43..C-48, NFR-01 | Pilot capacity: 5 concurrent candidates on the two instances (this plan, section 23.9) | load, gate (owner-run) | P1 | Section 23.9 criteria PC-1..PC-11 and the owner's sign-off. Step 1 is the estimate and carries no TC status |
+
+QA's practice: the test carries its TC id in its name once the hub assigns it; the matrix row is added by QA after the id exists (rule: every TC id appears in the matrix with level and status).
+
+### 23.11 Work order for QA A (nothing started; each item is its own small PR after the hub assigns ids and QA A re-lands #97 and #99)
+
+1. Re-land the seeder (#99) as a superseding PR from QA A's own branch, add the `--stop-at CONSENTED` mode (what the gate needs, 23.7 item 6a), optionally an `--identity` mode (needs the Q8 image set), and the BE-07 re-check once #98 merges.
+2. Script work of 23.7 (items 1 to 5) with mock-based checks (`k6 inspect`, mock run), as in the existing README.
+3. Analysis template and the CSV sampling script under packages/qa (no secrets).
+4. After the owner's run: the report and the matrix row.
+
+### 23.12 Open questions
+
+| # | For | Question |
+| --- | --- | --- |
+| Q1 | Hub | Answered by the hub: the pilot-capacity case is NEW (TC-105); NFR-02 and TC-090 stay the 200-candidate case, unchanged (TC-091 too). Nothing to do except keep the matrix rows separate. |
+| Q2 | Owner, hub | Host naming and allow-list: the guard and seeder refuse `prod`, `production`, `pilot` in the host name and CI allows only `QA_STAGING_HOSTS`. What host name does the capacity run use, and is the run done on the pilot's own instances before go-live (then they are rebuilt per D-10) or on twins? Partly answered (relayed by the Delivery Lead, pending the ADR text): the API is `api.assess.thebigbraintech.com` and the web app is `app.assess.thebigbraintech.com`; whether those names pass the `prod`/`pilot` host guard, and whether the run uses them or twins, is still open. |
+| Q3 | Delivery Lead, hub | What exactly is "live view" load: subscribers (2 proposed), HIGH-event fan-out rate, thumbnail source and rate, Socket.IO or raw WebSocket (OI-2, Q-20)? Which HIGH event type does not pause the session or change the risk band (so a test can raise it without ending the run)? |
+| Q4 | Delivery Lead, owner | Does the worker run anything else on the app host during a test besides identity face match: AI-likeness, voice, keystroke analytics, similarity, audio checks? C-43 defers audio and similarity to after the sessions; confirm the deferral is enforced by configuration (a queue that is paused until the session window ends) and whether the test must include the deferred queue running at the end of the slot. |
+| Q5 | Owner | Judge0 instance size (t3.small, t3.medium or c7i.large class) and the app host class: burstable classes can run out of CPU credits during a 42-minute test (longer with the default soak); if one is chosen the plan adds the CPU credit check and a run long enough to exhaust the launch credits. Judge0 `COUNT` (2 assumed) and the CPU ceiling of the Judge0 workers while an API call is being served. |
+| Q6 | Delivery Lead | The brief says k6 does NOT upload media bytes. Confirm needs the object. Keep tiny PUTs from the runner (proposed), or drop `confirm` from the scenario and its coverage. |
+| Q7 | Backend, hub | Submit time bound: NFR-01 gives 5 s for a run only; grading polls up to 120 s per batch (ADR 0016). Is there a target for the submit of 5 simultaneous candidates (30 s is assumed), and does submit run hidden tests inline or as a queued job? |
+| Q8 | Owner, Integrity | Identity is live: what synthetic or licence-clear face and ID image set may the load test use (real people forbidden), and does the face model accept it? Also whether to exercise a deliberate no-match (retry and manual-review path): that would run OUTSIDE the gate invocation, in its own run, because it would trip `cp_identity_not_verified`. |
+| Q9 | Owner, Deploy | Mail for seeding: SES in sandbox with a mailbox the human reads, or a Mailpit-compatible sink reachable only by the runner? `EMAIL_PROVIDER=noop` is refused in pilot and production. Partly answered (relayed by the Delivery Lead, pending the ADR text): mail goes through SES on `assess.thebigbraintech.com` (C-52, relayed, not in decisions.md on this branch); which mailbox the seeder reads, and sandbox versus production SES, is still open. |
+| Q10 | Owner | The engineering margins in PC-6 (90 % memory, 85 % CPU, steal < 5 %) are QA proposals, not in the docs; accept or change. Also the S3 presign expiry (60 s in ADR 0013 5.5), expected autosave size (1 to 4 KiB assumed), and whether the reduced 10-minute soak is acceptable instead of the default (the longest pilot test length plus grace). The owner may change a number before the run, not after; the 60 s of PC-8 is Q11. The numbers in PC-5 (90 % offered load, 1 % late slots), PC-6 and PC-7 (+10 % memory) are QA proposals. |
+| Q11 | Integrity, Frontend | The time allowed for the identity check to reach a result (60 s assumed) and whether 5 candidates starting the gate in the same 30 s is the realistic worst case (a slot starts for all five at once). |
+| Q12 | Backend A (Deploy) | Postgres tuning for an 8 GB host shared with the API, worker and Redis: the proposed values in 23.3 (`shared_buffers` 768 MB, `max_connections` 60); and who provides the deploy compose with `api` and `worker` services and memory limits that match 23.3. |
+| Q13 | Hub, owner | C-43..C-48 and C-49 (renamed in #232) are recorded by the hub in ADR 0017 (PR #233), with test cases in draft PR #237 and FSD #236, none merged. Confirm ADR 0017 is ACCEPTED (and the PRs merged) before the gate run, so the gate is measured against recorded decisions; also that the TC ids below are final. Partly answered (relayed by the Delivery Lead, pending the ADR text): the owner will approve ADR 0017 (PR #233) once its re-review is clean (C-53, relayed); it is not accepted yet. |
+
+### 23.13 What could not be verified in this plan
+
+- No candidate route, deploy compose or Judge0 host exists on main, so no number here is measured; every rate is from the docs (FSD FR-504, FR-609, FR-701; ADR 0013 section 5; k6 README R-02) and the SDK, not from the running code.
+- SDK default cadences were taken from the docs and `AUTOSAVE_INTERVAL_MS = 10_000` in apps/web; the events, keystrokes and chunk timings follow ADR 0013 and the k6 README, not a fresh reading of packages/proctor-sdk.
+- The seeder README was read from origin/qa-ops/k6-seed @47d7ac9e only; its code and tests were not run.
+- Judge0 queue-time fields (`created_at`, `finished_at`, queue names) and the Colima flags are described from memory and are marked "verify on the running version".
+- The contents of #237, #236 and ADR 0017 (ids, titles, FR ids, the 14-day backup expiry) were relayed by the hub and NOT read by QA.
+- The 202 answer of the identity upload and the exact terminal statuses of `GET /candidate/session/identity` come from the review comments, not from a reading of the code.
+- Cgroup method B on a cgroup v1 host (Judge0's requirement) was not tried; it is only used for the app host, which has no isolate.
+
+## 24. QA-13 (2026-10-06): deploy-track test cases for the pilot (ids from the hub's draft PR #237, branch arc/test-cases-pilot-deploy @1a0d12e, section "Pilot deployment (ADR 0017)" of docs/test-cases.md; the ids are final once that PR merges; separate from the capacity gate of section 23; test-cases.md and test-matrix.md are NOT edited here)
+
+QA-owned cases (QA writes the tests and the manual scripts; the matrix rows are added by QA after the PR merges; each test carries its TC id in its name):
+
+| Id (draft #237) | Source | Test | Level | Pri | How |
+| --- | --- | --- | --- | --- | --- |
+| TC-101 (id from draft PR #237, final once merged) | C-43, DEP | OIDC role isolation: the deploy role (GitHub OIDC) can only do what the deploy needs, cannot read the data bucket or the database secrets, and a workflow from another repo, branch or environment cannot assume it | unit (offline policy test) + manual (owner-run simulation) | P1 | Offline: parse the IAM trust and permission policies in code (conditions `sub`, `aud`, ref and environment, no wildcard on resources or actions beyond the list); owner-run: `aws iam simulate-principal-policy` and a failing assume-role from a non-matching workflow |
+| TC-102 (id from draft PR #237, final once merged) | C-43 | Instance start and stop around a booked slot: scheduled start before the slot, self-stop ONLY when no session is active, no upload is pending, and all queues (BullMQ, Judge0, worker) are empty; a stop must never be issued while any of the three is non-empty | integration + manual | P1 | Integration: the stop decision function with table-driven state (active session, pending chunk, queue depth, Judge0 queue, one slot ending while a candidate is in its grace period); manual: owner-run on the real instance with a 5-minute slot, then a slot with a deliberately late upload |
+| TC-103 (id from draft PR #237, final once merged) | C-43 | Restore drill from S3: nightly or at-shutdown backup restores into a fresh instance; row counts and a checksum match; erasure re-apply list is applied (infra/backup/restore.sh, reapply-erasures.sql) | manual (+ integration for the script with a fake S3) | P1 | Owner-run on a throwaway instance with synthetic data; QA script checks counts, checksums, that erased candidates stay erased, and records the time to restore |
+| TC-104 (id from draft PR #237, final once merged) | C-43 | Daily maintenance wake: exactly one wake a day starts the instance, retention, erasure and reminder jobs run, and the instance stops by itself under the TC-102 rule; no wake when it is already running | integration + manual | P2 | Scheduler rule inspected; owner-run: observe one cycle, count wakes in 24 hours = 1, jobs completed, stop condition honoured |
+
+Added to TC-103 (restore drill): backups expire after 14 days (as relayed by the hub, not read by QA), so the drill also checks that the restore uses the newest backup inside that window and that an object older than 14 days is gone (lifecycle rule inspected, owner-run listing). Added to TC-105: the run uses the identity face match LIVE (stage 1, I1), worker CPU recorded.
+
+Hub cases listed for completeness (not QA load; titles and owners as relayed by the hub, not read by QA, to be confirmed in #237):
+
+| Id (draft #237) | Case | Owner |
+| --- | --- | --- |
+| TC-106 | Slot rules (FR-306); covers what this plan earlier called "slot chosen at invite", no separate QA case | hub, Backend |
+| TC-107 | Closed-instance page (FR-407), served while the instance is off | hub, Frontend and Deploy |
+| TC-108 | The hard ceiling cannot be cancelled | hub, Deploy |
+| TC-109 | Judge0 isolation | hub, Deploy and Integrity |
+| TC-110 | Signed release at boot | hub, Deploy |
+| TC-111 | Schedule view and review windows (FR-307) | hub, Frontend and Backend |
+
+"One KMS key" (an earlier QA placeholder) is covered by ADR 0017 and has no separate case; QA does not add one.
