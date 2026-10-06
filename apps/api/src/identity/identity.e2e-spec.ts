@@ -219,16 +219,16 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
 
   // ---------- helpers ----------
 
-  /** Waits until BullMQ has nothing waiting, running or delayed: a positive "the job finished". */
-  async function jobsIdle(ms = 15_000): Promise<void> {
+  /**
+   * Waits until one face-match job has finished (BullMQ sets `finishedOn` on its hash when it
+   * completes or fails): a positive "the job ran", not a guess. Throws at the deadline.
+   */
+  async function jobFinished(sessionId: string, attempt = 1, ms = 15_000): Promise<void> {
+    const key = `bull:identity-jobs:face-match_${sessionId}_${String(attempt)}`;
     const deadline = Date.now() + ms;
     for (;;) {
-      const [wait, active, delayed] = await Promise.all([
-        redis.llen('bull:identity-jobs:wait'),
-        redis.llen('bull:identity-jobs:active'),
-        redis.zcard('bull:identity-jobs:delayed'),
-      ]);
-      if (wait + active + delayed === 0 || Date.now() > deadline) return;
+      if ((await redis.hget(key, 'finishedOn')) !== null) return;
+      if (Date.now() > deadline) throw new Error('the face-match job did not finish');
       await new Promise((r) => setTimeout(r, 100));
     }
   }
@@ -610,7 +610,7 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
       data: { idImageKey: null, selfieKey: null },
     });
     release();
-    await jobsIdle(); // the job really finished before we look
+    await jobFinished(c.sessionId); // the job really finished before we look
     const [row] = await rows(c.sessionId);
     expect(row?.status).toBe('PENDING');
     expect([row?.faceMatchScore, row?.modelId, row?.reviewReason]).toEqual([null, null, null]);
@@ -637,7 +637,7 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
       data: { erasureRequestedAt: new Date() },
     });
     release();
-    await jobsIdle(); // the job really finished before we look
+    await jobFinished(c.sessionId); // the job really finished before we look
     const [row] = await rows(c.sessionId);
     expect(row?.status).toBe('PENDING');
     expect(row?.faceMatchScore).toBeNull();

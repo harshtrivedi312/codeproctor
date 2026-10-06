@@ -194,7 +194,8 @@ export class FaceMatchService {
         if (live === null || fence?.erasureRequestedAt != null || fence?.erasedAt != null) {
           return 'GONE' as const;
         }
-        // The keys still being there is part of the compare-and-set: a waiver's purge nulls them
+        // The keys still being there is part of the compare-and-set (except on the keyless path, where
+        // there are none to compare): a waiver's purge nulls them
         // under the row lock, so a result computed before the purge updates nothing (DL-30).
         const target = await tx.identityCheck.findFirst({
           where: {

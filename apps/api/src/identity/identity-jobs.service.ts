@@ -211,6 +211,7 @@ export class IdentityJobsService
       const orgId = row.session.orgId;
       const skip = await this.orgContext.runInOrg(orgId, async () => {
         const session = await this.facts.session(row.sessionId);
+        // The query already leaves fenced candidates out; this stays as defence in depth.
         if (session === null || session.imagesGone) return true; // erased or face tier run: leave it
         return (await this.facts.policy(row.sessionId)).waived ? 'WAIVED' : false;
       });
