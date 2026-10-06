@@ -28,6 +28,7 @@ import {
   ADMIN_USERS,
   BE03_READY,
   backendHasRoute,
+  isStaffEntry,
   loadBackendRegistry,
 } from '../support/be03-routes';
 
@@ -70,8 +71,8 @@ suite('TC-004 TC-006: invite re-issue route', () => {
 
   it('TC-004: the matrix entry is user:manage for SUPER_ADMIN only and carries no `audited` flag (the row is written in the service transaction)', () => {
     const entry = loadBackendRegistry().ROUTE_PERMISSIONS[KEY];
-    expect(entry).not.toBe('public');
-    if (entry === 'public' || entry === undefined) return;
+    expect(isStaffEntry(entry)).toBe(true);
+    if (!isStaffEntry(entry)) return;
     expect(entry.permission).toBe('user:manage');
     expect([...entry.roles]).toEqual(['SUPER_ADMIN']);
     expect(entry.audited).toBeUndefined();
