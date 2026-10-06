@@ -6,7 +6,11 @@
 //      `database/`, a lock may be named only in the files of LOCK_ALLOWED_FILES: guardLive and lockAnySession in the
 //      SessionStateService and SessionJobProcessor files, lockForAccommodation in the SessionStateService, accommodation
 //      writers and retention repository files. The paths are Backend B's real ones (#98, #206) and Database B's.
-//   2. WHAT EACH FILE MAY DO (checked when the file exists, text rules over the comment-stripped source):
+//   2. WHAT EACH FILE MAY DO (checked whenever the file exists, listed or not, text rules over the comment-stripped
+//      source). The state and processor files are each in ONE OF TWO STATES, and there is no third: before Backend B's
+//      switch-over (#206) they name no lock at all (and the state file does not import the core), which is how BE-07
+//      (#98) left them on main; once a file names a lock, or the state file reaches the core in any form, it gets the
+//      full shape below with nothing relaxed.
 //      - SESSION_STATE_FILE: each core is imported by NAME under an alias, by an `import { x as alias } from` statement and
 //        by no other way (never a namespace, never `import x = require`, `require(`, `import(`, a side-effect import or a
 //        re-export of the module), and called exactly once, inside the wrapper METHOD of the same name in the
@@ -81,11 +85,14 @@ export const LOCK_CALLER_RULES = {
     `${SESSION_STATE_FILE} holds the wrapper only, with no member call of it) and one org-job file, ` +
     `${RETENTION_LOCK_FILE} (RetentionRepository.casAccommodations in a plain runInOrg: the erasure, R-4 and R-10 jobs)`,
   stateFile:
-    `each core imported by name under an alias by an import { x as alias } from statement (no namespace import, no ` +
+    `no import of the core and no lock named at all (before the switch-over), or: each core imported by name under an alias by an import { x as alias } from statement (no namespace import, no ` +
     `import x = require, require(, import( or re-export of the module) and called exactly once, inside the wrapper ` +
     `method of the same name in the ${SESSION_STATE_CLASS} class, whose whole body is return <alias>(<param1>, ` +
     `<param2>); nowhere else; member calls counted with any receiver: one .guardLive( call, inside proctorResume, ` +
     `and no .lockAnySession(, .lockForAccommodation( or .proctorResume( call`,
+  processorFile:
+    'no lock named at all (before the switch-over), or: .guardLive( exactly once, inside withLiveSession, and ' +
+    '.lockAnySession( exactly once, inside withAnySession, every mention of a lock name a member call',
   otherFiles: 'every mention of a lock name is a member call (`this.state.guardLive(`)',
   exports: 'no export of a lock, an alias, or a function or static property that wraps one',
 } as const;
@@ -420,20 +427,35 @@ function isThinWrapper(code: string, wrapper: MethodSpan, aliases: readonly stri
 }
 
 /**
- * The SessionStateService file: wrappers over the cores. Each core is imported by name under an alias, by an
+ * The lock names that `code` mentions anywhere, in any form (a call, a definition, a reference, a string or a log
+ * message; the comments are already stripped): the test of the pre-switch-over state of a file.
+ */
+const namedLocks = (code: string): LockName[] =>
+  LOCK_NAMES.filter((name) => new RegExp(`(?<![\\w$])${escapeName(name)}(?![\\w$])`).test(code));
+
+/**
+ * The SessionStateService file, in one of TWO states and no third:
+ *   - it does NOT reach database/session-locks (no import statement of it, no require, no import()): the state of the
+ *     file before Backend B's switch-over. It must then name no lock at all: no wrapper, no member call, no string;
+ *   - it DOES reach it, by any form: it gets the full shape below, for all three locks, with nothing relaxed.
+ *
+ * The full shape: wrappers over the cores. Each core is imported by name under an alias, by an
  * `import { x as alias } from` statement and no other way (a namespace import would hand the whole core to the file, and
  * a `require(`, `import(` or `import x = require` is a way round the parsed imports), and called exactly once, inside its
  * own wrapper, a method of the SessionStateService class whose whole body is `return <alias>(<param1>, <param2>);`. The
  * wrappers are called from the file with ANY receiver: `.guardLive(` exactly once, inside `proctorResume`;
  * `.lockAnySession(`, `.lockForAccommodation(` and `.proctorResume(` never.
  */
-export function stateFileProblems(
-  path: string,
-  code: string,
-  names: readonly LockName[],
-): string[] {
+export function stateFileProblems(path: string, code: string): string[] {
   const out: string[] = [];
   const imports = parseLockImports(code);
+  if (imports.ranges.length === 0 && imports.others === 0) {
+    return namedLocks(code).map(
+      (name) =>
+        `${path}: ${name} is named in a state file that does not import database/session-locks: a file with no import names no lock at all (no wrapper, no member call, no string); one with the import needs the full wrapper shape`,
+    );
+  }
+  const names = LOCK_NAMES;
   if (imports.namespaces.length > 0) {
     out.push(
       `${path}: a namespace import of database/session-locks is refused: import the locks by name, each under an alias`,
@@ -544,19 +566,20 @@ export function stateFileProblems(
   return [...new Set(out)];
 }
 
-/** The SessionJobProcessor file: `.guardLive(` only in withLiveSession, `.lockAnySession(` only in withAnySession. */
-export function processorFileProblems(
-  path: string,
-  code: string,
-  names: readonly LockName[],
-): string[] {
+/**
+ * The SessionJobProcessor file, in one of TWO states and no third: it names no lock at all (the state before Backend B's
+ * switch-over), or it has the full shape: `.guardLive(` exactly once, inside `withLiveSession`; `.lockAnySession(`
+ * exactly once, inside `withAnySession`; every mention of a lock name a member call. One lock named is the full shape
+ * for both. The processor never imports the core: the import guard allows only the state file.
+ */
+export function processorFileProblems(path: string, code: string): string[] {
+  if (namedLocks(code).length === 0) return [];
   const out: string[] = [];
   const entries: Array<[LockName, string]> = [
     ['guardLive', 'withLiveSession'],
     ['lockAnySession', 'withAnySession'],
   ];
   for (const [name, method] of entries) {
-    if (!names.includes(name)) continue;
     const span = findMethod(code, method);
     const calls = indexesOf(code, new RegExp(`\\.\\s*${name}\\s*\\(`));
     if (span === undefined) out.push(`${path}: no ${method} method with a body found`);
@@ -596,8 +619,9 @@ export function lockImportProblems(allowed: readonly string[]): string[] {
  *   - the `why` of an entry names its callers: guardLive `withLiveSession` (processor) and `proctorResume` (state);
  *     lockAnySession `withAnySession`; lockForAccommodation the accommodation writer and one of PATCH, redact-note,
  *     video-check (state and accommodations) or the erasure, R-4 and R-10 jobs (retention);
- *   - with `files` (the sources by path), each listed file that exists obeys its per-file rules: stateFileProblems,
- *     processorFileProblems, and for the accommodation and retention files member calls only.
+ *   - with `files` (the sources by path), the state and processor files obey their per-file rules whenever they exist,
+ *     listed or not (stateFileProblems, processorFileProblems: each in its two states, no lock named or the full
+ *     shape), and each listed accommodation or retention file that exists has member calls only.
  * Database B adds the retention entry in its own PR, not before (the stale-entry check fails while the call does not exist).
  */
 export function lockCallSiteProblems(
@@ -654,12 +678,20 @@ export function lockCallSiteProblems(
         );
       }
     }
-    // The per-file rules, for the files that exist.
+    // The per-file rules of the other listed files, when they exist (the state and processor files are checked below).
     const code = textOf(path);
-    if (code === undefined) continue;
-    if (path === SESSION_STATE_FILE) out.push(...stateFileProblems(path, code, locks));
-    else if (path === SESSION_PROCESSOR_FILE) out.push(...processorFileProblems(path, code, locks));
-    else out.push(...memberCallOnlyProblems(path, code, LOCK_NAMES));
+    if (code === undefined || path === SESSION_STATE_FILE || path === SESSION_PROCESSOR_FILE)
+      continue;
+    out.push(...memberCallOnlyProblems(path, code, LOCK_NAMES));
+  }
+  // The state and processor files are checked whenever they exist, listed or not, in their two states (no lock named, or
+  // the full shape): a file that is missing from `files` gives nothing here (the stale-entry check fails a listed one), and
+  // the same entry with the file present obeys the rules, so a file that appears later is never passed vacuously.
+  const stateCode = textOf(SESSION_STATE_FILE);
+  if (stateCode !== undefined) out.push(...stateFileProblems(SESSION_STATE_FILE, stateCode));
+  const processorCode = textOf(SESSION_PROCESSOR_FILE);
+  if (processorCode !== undefined) {
+    out.push(...processorFileProblems(SESSION_PROCESSOR_FILE, processorCode));
   }
   return [...new Set(out)].sort();
 }

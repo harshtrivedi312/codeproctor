@@ -715,8 +715,16 @@ Five tests pin it, all with an **empty** list outside the defining file today:
   `guardLive`), `withLiveSession` (processor, `guardLive`), `withAnySession` (`lockAnySession`), the accommodation
   writer and one of PATCH, redact-note, video-check (state and accommodations, `lockForAccommodation`), the erasure,
   R-4 and R-10 jobs (retention).
-- **The per-file rules**, for each listed file that exists (text rules over the source with comments stripped):
-  - **The state file** (`session-state.service.ts`):
+- **The per-file rules**, for the state and processor files **whenever they exist, listed or not**, and for each listed
+  accommodations or retention file that exists (text rules over the source with comments stripped). The state and
+  processor files are each in **one of two states, and there is no third**: **before the switch-over** (Backend B's #206;
+  how BE-07 #98 left them on main) the file names **no lock at all**, and the state file does not import the core: a
+  wrapper, a member call or a string that names a lock then fails with "does not import database/session-locks"; once
+  the processor names a lock, or the state file reaches the core in **any** form (a type-only import counts), it gets the
+  **full shape** below, for all three locks in the state file and for both `withLiveSession` and `withAnySession` in the
+  processor, with nothing relaxed. A file that is missing passes no rule vacuously: a listed one fails the stale-entry
+  check, and the rules run on it as soon as it appears.
+  - **The state file** (`session-state.service.ts`), once it imports the core:
     - **How the cores come in.** Each core is **imported by name under an alias**, by an
       `import { guardLive as coreGuardLive } from` statement and **by no other form**: never under its own name, never
       as a namespace (`import * as locks`), and never by `import locks = require(...)`, `const locks = require(...)`,
@@ -743,7 +751,7 @@ Five tests pin it, all with an **empty** list outside the defining file today:
       into an ERASED session; one that called `proctorResume` would be a second door to `guardLive`).
     - **Write the wrappers as methods with a body** (the scan looks for `async name(...) {`), and keep inline object
       types out of their return types.
-  - **The processor file** (`session-job.processor.ts`): `.guardLive(` **exactly once, inside `withLiveSession`**;
+  - **The processor file** (`session-job.processor.ts`), once it names a lock: `.guardLive(` **exactly once, inside `withLiveSession`**;
     `.lockAnySession(` **exactly once, inside `withAnySession`**; every mention of a lock name is a member call
     (`this.state.guardLive(...)`). A string or a log message that names a lock fails here as well (fail closed).
   - **The accommodations and retention files:** every mention of a lock name is a member call

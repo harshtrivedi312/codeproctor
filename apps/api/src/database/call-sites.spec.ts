@@ -13,9 +13,11 @@
 // exact string, or the name inside braces (an import, a re-export, a destructuring); a mention in a comment or
 // in prose is not one (testing/call-site-guard.ts says how, and why it is fail-safe).
 //
-// TODAY the list holds the database folder's own definitions and nothing else: BE-07's guard,
-// SessionJobProcessor, SessionStateService (the wrappers of the three locks) and the grant-site services are
-// NOT allowed yet. A new call site must be added to
+// TODAY the list holds the database folder's own definitions and BE-07's guard path
+// (candidate/candidate-scope.ts, which sets the candidate facts): SessionJobProcessor, SessionStateService (the
+// wrappers of the three locks) and the grant-site services are NOT allowed yet. The real SessionStateService file
+// is on main (BE-07, #98) without a lock name: lockCallSiteProblems checks it in that state (no import of the
+// session locks, no lock named) and, from Backend B's switch-over on, in its full wrapper shape. A new call site must be added to
 // CALL_SITES in the same PR, which is the review point; for `withGrant` the entry names the CS-4.4 grant
 // site(s) the file holds, one `GRANT_SITES` name per site.
 //
@@ -36,7 +38,15 @@ import {
   usesOf,
 } from './testing/call-site-guard';
 import type { CallSiteList } from './testing/call-site-guard';
-import { findLockExports, lockCallSiteProblems } from './testing/lock-call-sites';
+import {
+  LOCK_NAMES,
+  SESSION_PROCESSOR_FILE,
+  SESSION_STATE_FILE,
+  findLockExports,
+  lockCallSiteProblems,
+  processorFileProblems,
+  stateFileProblems,
+} from './testing/lock-call-sites';
 import type { SourceFile } from './testing/import-guard';
 import { GRANT_SITES } from './session-scope-map';
 
@@ -46,9 +56,40 @@ const SRC = resolve(__dirname, '..');
  * Every file that may use a guarded name. Explicit paths, never folders. BE-07 adds ONE ENTRY PER FILE, with
  * `sites` naming the GRANT_SITES it holds, in the PR that builds it:
  *   'candidate/candidate-scope.ts':   { names: ['setCandidateFacts'], why: 'CandidateScope: the guard path and every asCandidate step (DL-31)' },
- *   'jobs/session-job.processor.ts':                 { names: ['detachForSessionJob'], why: 'SessionJobProcessor base class' },
- *   'candidate/session-state.service.ts':            { names: ['withGrant', 'guardLive', 'lockForAccommodation', 'lockAnySession'], sites: ['SessionStateService'], why: '…' },
- * (SessionStateService is the ONLY file that may use the three locks outside database/: its methods wrap them.)
+ *   'session/session-job.processor.ts':              { names: ['detachForSessionJob', 'guardLive', 'lockAnySession'],
+ *                                                       why: 'SessionJobProcessor base class: withLiveSession calls guardLive, withAnySession calls lockAnySession' },
+ *   'session/session-state.service.ts':              { names: ['withGrant', 'guardLive', 'lockForAccommodation', 'lockAnySession'], sites: ['SessionStateService'],
+ *                                                       why: 'the wrappers of the three locks; its single STAFF method proctorResume calls guardLive; …' },
+ *   'session/accommodations.ts':                     { names: ['lockForAccommodation'], why: 'the STAFF accommodation writers: PATCH, redact-note, video-check PUT' },
+ *   'retention/retention.repository.ts':             { names: ['lockForAccommodation'],      // Database B, in its own PR
+ *                                                       why: 'RetentionRepository.casAccommodations, plain runInOrg: the erasure, R-4 and R-10 jobs' },
+ *
+ * WHO MAY USE THE THREE LOCKS (the hub's rulings; lockCallSiteProblems in testing/lock-call-sites.ts enforces the
+ * shape below on every entry, and an extra entry fails; lock-call-sites.spec.ts pins each rule). The REAL paths are
+ * the constants of that file: session/session-state.service.ts, session/session-job.processor.ts,
+ * session/accommodations.ts (Backend B, #98 and #206) and retention/retention.repository.ts (Database B). A lock may
+ * be listed only for these files (a subset rule, outside database/):
+ *   guardLive             session-job.processor.ts and session-state.service.ts. The processor: exactly one
+ *                         `.guardLive(` call, inside `withLiveSession`. The state file: the single STAFF method
+ *                         `proctorResume`, exactly one `.guardLive(` call (any receiver) inside its brace-matched body;
+ *   lockAnySession        session-state.service.ts and session-job.processor.ts, each why naming `withAnySession`;
+ *                         the processor has exactly one `.lockAnySession(` call, inside `withAnySession`; the state
+ *                         file holds the wrapper only (no `.lockAnySession(` member call in it);
+ *   lockForAccommodation  accommodations.ts (the STAFF routes PATCH, redact-note and the video-check PUT: why names
+ *                         the accommodation writer and a route), session-state.service.ts (the wrapper only: no
+ *                         `.lockForAccommodation(` member call in that file) and at most ONE org-job file,
+ *                         retention.repository.ts (RetentionRepository.casAccommodations, in a plain runInOrg:
+ *                         erasure, R-4 and R-10; why names those jobs; R-4 has no SERVICE caller). Database B adds
+ *                         that entry in its own PR, not before.
+ * In the state file each core is imported by name under an alias, by an `import { x as alias } from` statement and no
+ * other form (a namespace import, `import x = require`, `require(`, `import(` and a re-export are refused), and called
+ * exactly once, inside the wrapper method of the same name in the SessionStateService class, whose whole body is
+ * `return <alias>(<param1>, <param2>);`; the alias is used nowhere else. The wrappers are counted with any receiver:
+ * `.lockAnySession(`, `.lockForAccommodation(` and `.proctorResume(` are allowed zero times in the state file. In every
+ * other listed file each mention of a lock name is a member call (`this.state.guardLive(`); in the state and processor
+ * files a lock name in a string or a log message fails too (the scan is fail-closed). The import guard is separate:
+ * ONLY the state file imports database/session-locks. No file outside database/ may export a lock, an alias, or a
+ * function or static property that wraps one (findLockExports): no allowlist.
  */
 export const CALL_SITES: CallSiteList = {
   'database/org-context.ts': {
@@ -58,6 +99,10 @@ export const CALL_SITES: CallSiteList = {
   'database/candidate-facts.ts': {
     names: ['claimCandidateFactsSetter', 'setCandidateFacts'],
     why: 'claims the setter once per process and exports setCandidateFacts for CandidateSessionGuard',
+  },
+  'database/session-locks.ts': {
+    names: ['guardLive', 'lockForAccommodation', 'lockAnySession'],
+    why: 'defines the three per-session write locks (the lock core); SessionStateService wraps them (Backend B adds its file)',
   },
   // BE-07 (reviewed: DL-31, ADR 0013 CS-4.1). The ONE place a candidate request enters the candidate
   // scope: CandidateScope calls setCandidateFacts as the first statement inside runAsCandidate, for
@@ -158,7 +203,7 @@ describe('call-site guard: the private entries of the database layer (FU-DB-67 s
     expect(findStaleEntries(files, CALL_SITES)).toEqual([]);
   });
 
-  it('TC-008 the list holds the two database files that define the private entries and the BE-07 guard path (candidate/candidate-scope.ts), and nothing else', () => {
+  it('TC-008 the list holds the three database files (the two private entries and the lock core) and the BE-07 guard path (candidate/candidate-scope.ts), and nothing else: the session wrappers are not listed yet', () => {
     expect(Object.keys(CALL_SITES).sort()).toEqual([
       'candidate/candidate-scope.ts',
       'database/candidate-facts.ts',
@@ -231,7 +276,47 @@ describe('call-site guard: the private entries of the database layer (FU-DB-67 s
     ]);
   });
 
-  it('TC-008 no file outside the database folder uses any of the four names except the listed BE-07 guard path (a service injecting OrgContextService does not call them)', () => {
+  it('TC-008 S2: the session-locks module has no importer yet, in any of the six source extensions (the import guard allows only SessionStateService, when Backend B adds it)', () => {
+    expect(importersOf(files, 'database/session-locks')).toEqual([]);
+    // The scan reads all six extensions: a .mts or .cjs importer would be in `files` and found.
+    expect(files.length).toBeGreaterThan(20);
+  });
+
+  it('TC-008 S3: no file outside the database folder exports a session lock or an alias of one (the SessionStateService file included, it has no allowlist)', () => {
+    const outside = files.filter((file) => !file.path.startsWith('database/'));
+    expect(outside.length).toBeGreaterThan(20);
+    expect(findLockExports(outside)).toEqual([]);
+  });
+
+  it('TC-008 the entries that name a lock obey the caller rules of the hub (guardLive: withLiveSession and the one STAFF method proctorResume; lockAnySession: withAnySession; lockForAccommodation: the accommodation writers and the retention repository)', () => {
+    expect(lockCallSiteProblems(CALL_SITES, files)).toEqual([]);
+  });
+
+  it('TC-008 DL-37 the real SessionStateService file exists on main and obeys the rules in its current state: no import of the session locks and no lock name, or the full wrapper shape', () => {
+    const state = files.find((file) => file.path === SESSION_STATE_FILE);
+    expect(state).toBeDefined(); // the check is not vacuous: BE-07 (#98) put the file on main
+    const code = stripComments(state?.text ?? '');
+    expect(stateFileProblems(SESSION_STATE_FILE, code)).toEqual([]);
+    expect(lockCallSiteProblems(CALL_SITES, files)).toEqual([]);
+    // Today (before Backend B's switch-over #206) the file does not import the core, so it names no lock; once it
+    // imports it, the full shape is what the line above checks.
+    const importsCore = importersOf(files, 'database/session-locks').includes(SESSION_STATE_FILE);
+    if (!importsCore) expect(usesOf(code, [...LOCK_NAMES])).toEqual([]);
+  });
+
+  it('TC-008 DL-37 the real SessionJobProcessor file, when it exists, obeys its rules in either state (Backend B adds it with the switch-over)', () => {
+    const processor = files.find((file) => file.path === SESSION_PROCESSOR_FILE);
+    if (processor === undefined) {
+      // A missing file passes no rule vacuously: it is checked as soon as it appears (lock-call-sites.spec.ts, DL-37).
+      expect(lockCallSiteProblems(CALL_SITES, files)).toEqual([]);
+      return;
+    }
+    expect(processorFileProblems(SESSION_PROCESSOR_FILE, stripComments(processor.text))).toEqual(
+      [],
+    );
+  });
+
+  it('TC-008 no file outside the database folder uses any of the names except the listed BE-07 guard path (a service injecting OrgContextService does not call them, and no session lock is named before the SessionStateService switch-over)', () => {
     const outside = files.filter((file) => !file.path.startsWith('database/'));
     expect(outside.length).toBeGreaterThan(20);
     const allowedOutside = Object.fromEntries(

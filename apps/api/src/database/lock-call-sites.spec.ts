@@ -51,6 +51,34 @@ export class SessionStateService {
   }
 }
 `;
+/** The SessionStateService file as BE-07 (#98) leaves it on main: no import of the core, no lock name. */
+const PRE_STATE_TEXT = `import { Injectable } from '@nestjs/common';
+import { PrismaService } from '../database/prisma.service';
+
+@Injectable()
+export class SessionStateService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async createInvited(ids: { orgId: string; invitationId: string }) {
+    return this.prisma.client.session.create({ data: { ...ids, status: 'INVITED' } });
+  }
+
+  async transition(change: { sessionId: string }) {
+    // the compare-and-set below needs no lock
+    const note = 'the compare-and-set below is the only write';
+    return note + change.sessionId;
+  }
+}
+`;
+const PRE_PROCESSOR_TEXT = `export abstract class SessionJobProcessor {
+  protected async run(sid: string, fn: () => Promise<void>) {
+    return this.prisma.client.$transaction(async () => {
+      // the session wrappers arrive with the switch-over
+      await fn();
+    });
+  }
+}
+`;
 const PROCESSOR_TEXT = `export abstract class SessionJobProcessor {
   protected async withLiveSession(sid: string, fn: () => Promise<void>) {
     return this.prisma.client.$transaction(async (tx) => {
@@ -147,6 +175,9 @@ describe('the real paths and the rules in words (S-B of the re-review of #208): 
     expect(LOCK_CALLER_RULES.stateFile).toContain('alias');
     expect(LOCK_CALLER_RULES.stateFile).toContain('return <alias>(<param1>, <param2>);');
     expect(LOCK_CALLER_RULES.stateFile).toContain('.proctorResume(');
+    expect(LOCK_CALLER_RULES.stateFile).toContain('no lock named at all');
+    expect(LOCK_CALLER_RULES.processorFile).toContain('no lock named at all');
+    expect(LOCK_CALLER_RULES.processorFile).toContain('withAnySession');
     expect(LOCK_CALLER_RULES.otherFiles).toContain('member call');
     expect(LOCK_CALLER_RULES.exports).toContain('wraps');
   });
@@ -274,8 +305,7 @@ describe('S-B: the entries of CALL_SITES for a lock are a subset of the real pat
 });
 
 describe('S-B, B1, S3, S4: the SessionStateService file: aliased cores, one call each, inside the same-named wrapper (FR-704, NFR-05, NFR-04, TC-008)', () => {
-  const state = (text: string, names = LOCK_NAMES): string[] =>
-    stateFileProblems(SESSION_STATE_FILE, text, names);
+  const state = (text: string): string[] => stateFileProblems(SESSION_STATE_FILE, text);
 
   it('TC-008 the file as Backend B writes it passes', () => {
     expect(state(STATE_TEXT)).toEqual([]);
@@ -765,6 +795,110 @@ export class S {
     );
   });
 
+  // ---- the two states of the file: no import and no lock name (before the switch-over), or the full shape -----------
+
+  it('TC-008 DL-37 the state file as BE-07 leaves it on main (no import of the core, no lock name) passes: the state before the switch-over', () => {
+    expect(state(PRE_STATE_TEXT)).toEqual([]);
+    expect(state('')).toEqual([]);
+    expect(state('export class SessionStateService {}')).toEqual([]);
+  });
+
+  it.each([
+    ['a wrapper method', 'async guardLive(tx: Tx, sid: string) {\n    return 1;\n  }'],
+    [
+      'a member call',
+      'async other(tx: Tx, sid: string) {\n    return this.guardLive(tx, sid);\n  }',
+    ],
+    ['a bare call', 'async other(tx: Tx, sid: string) {\n    return guardLive(tx, sid);\n  }'],
+    ['a reference', 'readonly held = this.guardLive;'],
+    ['a string', "readonly label = 'guardLive';"],
+    ['a log message', "async other() {\n    this.logger.log('guardLive done');\n  }"],
+    ['a property of an object', 'readonly locks = { guardLive: 1 };'],
+  ])(
+    'TC-008 DL-37 a state file that does NOT import the core but names a lock (%s) fails: no import means no lock name at all',
+    (_what, member) => {
+      const text = PRE_STATE_TEXT.replace(/\n}\n$/, `\n\n  ${member}\n}\n`);
+      expect(state(text)).toEqual([
+        `${SESSION_STATE_FILE}: guardLive is named in a state file that does not import database/session-locks: a file with no import names no lock at all (no wrapper, no member call, no string); one with the import needs the full wrapper shape`,
+      ]);
+    },
+  );
+
+  it('TC-008 DL-37 each of the three lock names fails in the no-import state, and several are each reported', () => {
+    for (const name of ['guardLive', 'lockAnySession', 'lockForAccommodation']) {
+      expect(state(PRE_STATE_TEXT.replace('transition(', `${name}(`))).toEqual([
+        `${SESSION_STATE_FILE}: ${name} is named in a state file that does not import database/session-locks: a file with no import names no lock at all (no wrapper, no member call, no string); one with the import needs the full wrapper shape`,
+      ]);
+    }
+    expect(
+      state(
+        PRE_STATE_TEXT.replace(
+          'transition(',
+          'guardLive(tx: Tx, sid: string) {}\n  lockAnySession(tx: Tx, sid: string) {}\n  lockForAccommodation(tx: Tx, sid: string) {}\n  transition(',
+        ),
+      ),
+    ).toHaveLength(3);
+  });
+
+  it('TC-008 DL-37 a lock name inside a COMMENT is not a mention in the no-import state, and a longer name is not the lock', () => {
+    expect(
+      problemsWith(
+        SESSION_STATE_FILE,
+        PRE_STATE_TEXT + '\n/* guardLive and lockAnySession are in the cores */\n',
+      ),
+    ).toEqual([]);
+    expect(
+      state(
+        PRE_STATE_TEXT.replace('transition(', 'guardLiveLater(').replace('note', 'lockAnySessions'),
+      ),
+    ).toEqual([]);
+  });
+
+  it.each([
+    ['a type-only import', "import type { SessionLockTx } from '../database/session-locks';"],
+    ['a named import of a type', "import { type SessionLockTx } from '../database/session-locks';"],
+    [
+      'an import with an extension',
+      "import type { SessionLockTx } from '../database/session-locks.js';",
+    ],
+    ['a side-effect import', "import '../database/session-locks';"],
+    ['a require', "const core = require('../database/session-locks');"],
+    ['an import()', "const core = await import('../database/session-locks');"],
+  ])(
+    'TC-008 DL-37 a state file that imports the core in ANY form (%s) gets the full shape, with no lock named yet: no wrapper is found',
+    (_what, extra) => {
+      const problems = state(extra + '\n' + PRE_STATE_TEXT);
+      for (const name of LOCK_NAMES) {
+        expect(problems).toContain(
+          `${SESSION_STATE_FILE}: no wrapper method ${name} with a body found`,
+        );
+      }
+      expect(problems).toContain(
+        `${SESSION_STATE_FILE}: 0 .guardLive( member calls (any receiver), exactly one is allowed, inside proctorResume`,
+      );
+      expect(problems).toContain(
+        `${SESSION_STATE_FILE}: no proctorResume method with a body found`,
+      );
+      expect(problems.some((line) => line.includes('does not import database/session-locks'))).toBe(
+        false,
+      );
+    },
+  );
+
+  it('TC-008 DL-37 the full shape for an importing file is not relaxed: every one of the three thin wrappers, and one resume call, are required', () => {
+    expect(state(STATE_TEXT)).toEqual([]);
+    for (const name of LOCK_NAMES) {
+      const wrapper = new RegExp(` {2}async ${name}\\([^\\n]*\\n[^\\n]*\\n {2}}\\n\\n?`);
+      const without = STATE_TEXT.replace(wrapper, '');
+      expect(without).not.toBe(STATE_TEXT);
+      expect(state(without)).toEqual(
+        expect.arrayContaining([
+          `${SESSION_STATE_FILE}: no wrapper method ${name} with a body found`,
+        ]),
+      );
+    }
+  });
+
   // ---- N6: ways to reach a wrapper that are not a plain member call ---------------------------------------------------
 
   it.each([
@@ -860,8 +994,7 @@ export class S {
 });
 
 describe('S-B: the SessionJobProcessor file: .guardLive( in withLiveSession, .lockAnySession( in withAnySession (FR-704, NFR-05, NFR-04, TC-008)', () => {
-  const processor = (text: string): string[] =>
-    processorFileProblems(SESSION_PROCESSOR_FILE, text, ['guardLive', 'lockAnySession']);
+  const processor = (text: string): string[] => processorFileProblems(SESSION_PROCESSOR_FILE, text);
 
   it('TC-008 the file as Backend B writes it passes', () => {
     expect(processor(PROCESSOR_TEXT)).toEqual([]);
@@ -945,6 +1078,136 @@ describe('S-B: the SessionJobProcessor file: .guardLive( in withLiveSession, .lo
     expect(processor(PROCESSOR_TEXT + '\nconst held = this.state.lockAnySession;')).toEqual([
       `${SESSION_PROCESSOR_FILE}: lockAnySession is used other than as a member call (this.state.lockAnySession(...))`,
     ]);
+  });
+});
+
+describe('DL-37: the SessionJobProcessor file in its two states: no lock named (before the switch-over) or the full shape (FR-704, NFR-05, NFR-04, TC-008)', () => {
+  const processor = (text: string): string[] => processorFileProblems(SESSION_PROCESSOR_FILE, text);
+
+  it('TC-008 DL-37 a processor that names no lock passes: the state before the switch-over', () => {
+    expect(processor(PRE_PROCESSOR_TEXT)).toEqual([]);
+    expect(processor('')).toEqual([]);
+  });
+
+  it.each([
+    ['guardLive', 'await this.state.guardLive(tx, sid);'],
+    ['lockAnySession', 'await this.state.lockAnySession(tx, sid);'],
+    ['lockForAccommodation', 'await this.state.lockForAccommodation(tx, sid);'],
+    ['a string', "this.logger.log('lockAnySession');"],
+  ])(
+    'TC-008 DL-37 a processor that names a lock (%s) gets the full shape: withLiveSession and withAnySession are both required',
+    (_what, line) => {
+      const problems = processor(
+        PRE_PROCESSOR_TEXT.replace('await fn();', `${line}\n      await fn();`),
+      );
+      expect(problems).toEqual(
+        expect.arrayContaining([
+          `${SESSION_PROCESSOR_FILE}: no withLiveSession method with a body found`,
+          `${SESSION_PROCESSOR_FILE}: no withAnySession method with a body found`,
+        ]),
+      );
+    },
+  );
+
+  it('TC-008 DL-37 one lock named is the full shape for both: a processor with only withLiveSession fails', () => {
+    const onlyLive = PROCESSOR_TEXT.replace(
+      /\n {2}protected async withAnySession[\s\S]*?\n {2}}\n/,
+      '',
+    );
+    expect(onlyLive).not.toBe(PROCESSOR_TEXT);
+    expect(processor(onlyLive)).toEqual([
+      `${SESSION_PROCESSOR_FILE}: no withAnySession method with a body found`,
+      `${SESSION_PROCESSOR_FILE}: 0 .lockAnySession( calls, exactly one is allowed, inside withAnySession`,
+    ]);
+  });
+});
+
+describe('DL-37: lockCallSiteProblems checks the state and processor files whenever they exist, listed or not, and never passes a missing file vacuously (FR-704, NFR-04, TC-008)', () => {
+  const NO_ENTRIES: CallSiteList = {};
+  const filesWith = (path: string, text: string): SourceFile[] => [file(path, text)];
+
+  it('TC-008 DL-37 the real pre-switch-over files, with NO entry in the list, pass', () => {
+    expect(
+      lockCallSiteProblems(NO_ENTRIES, [
+        file(SESSION_STATE_FILE, PRE_STATE_TEXT),
+        file(SESSION_PROCESSOR_FILE, PRE_PROCESSOR_TEXT),
+      ]),
+    ).toEqual([]);
+  });
+
+  it('TC-008 DL-37 a lock name in a comment of a pre-switch-over file is not a mention (the comments are stripped before the rules run)', () => {
+    expect(
+      lockCallSiteProblems(NO_ENTRIES, [
+        file(
+          SESSION_STATE_FILE,
+          PRE_STATE_TEXT + '\n// guardLive is a core\n/* lockAnySession too */\n',
+        ),
+        file(
+          SESSION_PROCESSOR_FILE,
+          PRE_PROCESSOR_TEXT + '\n// withLiveSession calls guardLive later\n',
+        ),
+      ]),
+    ).toEqual([]);
+  });
+
+  it('TC-008 DL-37 a state file that names a lock without the import fails even though NO entry lists it', () => {
+    expect(
+      lockCallSiteProblems(
+        NO_ENTRIES,
+        filesWith(SESSION_STATE_FILE, PRE_STATE_TEXT + "\nconst x = 'guardLive';\n"),
+      ),
+    ).toEqual([expect.stringContaining('guardLive is named in a state file that does not import')]);
+  });
+
+  it('TC-008 DL-37 a state file with the import and a broken shape fails with NO entry in the list', () => {
+    const broken = STATE_TEXT.replace('return coreGuardLive(tx, sessionId);', 'return 1;');
+    expect(lockCallSiteProblems(NO_ENTRIES, filesWith(SESSION_STATE_FILE, broken))).toEqual([
+      `${SESSION_STATE_FILE}: the core guardLive is called 0 times, exactly one call is allowed, inside the guardLive wrapper`,
+    ]);
+  });
+
+  it('TC-008 DL-37 a processor that names a lock with a broken shape fails with NO entry in the list', () => {
+    expect(
+      lockCallSiteProblems(
+        NO_ENTRIES,
+        filesWith(SESSION_PROCESSOR_FILE, PROCESSOR_TEXT.replace('withLiveSession', 'runLive')),
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        `${SESSION_PROCESSOR_FILE}: no withLiveSession method with a body found`,
+      ]),
+    );
+  });
+
+  it('TC-008 DL-37 a listed file that is MISSING gives nothing here (findStaleEntries fails it), and the same entries with the file present obey the rules', () => {
+    expect(lockCallSiteProblems(GOOD, [])).toEqual([]);
+    expect(
+      lockCallSiteProblems(
+        GOOD,
+        GOOD_FILES.filter((f) => f.path !== SESSION_PROCESSOR_FILE),
+      ),
+    ).toEqual([]);
+    expect(
+      problemsWith(SESSION_PROCESSOR_FILE, PROCESSOR_TEXT.replace('withLiveSession', 'runLive')),
+    ).toEqual(
+      expect.arrayContaining([
+        `${SESSION_PROCESSOR_FILE}: no withLiveSession method with a body found`,
+      ]),
+    );
+    expect(
+      problemsWith(SESSION_STATE_FILE, STATE_TEXT.replace('async proctorResume(', 'async resume(')),
+    ).toEqual(
+      expect.arrayContaining([`${SESSION_STATE_FILE}: no proctorResume method with a body found`]),
+    );
+  });
+
+  it('TC-008 DL-37 other files that name no lock are not checked at all: no entry, no finding', () => {
+    expect(
+      lockCallSiteProblems(NO_ENTRIES, filesWith('billing/invoice.ts', 'export const x = 1;')),
+    ).toEqual([]);
+    expect(
+      lockCallSiteProblems(NO_ENTRIES, filesWith(ACCOMMODATIONS_FILE, 'export class A {}')),
+    ).toEqual([]);
   });
 });
 
