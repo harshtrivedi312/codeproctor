@@ -111,7 +111,8 @@ describe('Variant routes (FR-203, BE-04b): list, create, change, remove', () => 
       'DELETE',
       `${V}/q-running/versions/1/variants/${created.body.variant.id}?expectedRevision=${created.body.revision}`,
     );
-    expect(removed.status).toBe(204);
+    expect(removed.status).toBe(200);
+    expect(removed.body).toEqual({ revision: before.revision });
     // Like the API: a version with no variants hashes as before they existed.
     expect((await detail('q-running')).version.revision).toBe(before.revision);
   });
@@ -163,7 +164,7 @@ describe('Variant routes (FR-203, BE-04b): list, create, change, remove', () => 
     expect(bad.body.errors.length).toBeGreaterThan(0);
   });
 
-  it('FR-203: overrides are set and removed per slot; the response is the override with the slot isHidden and position, and no revision', async () => {
+  it('FR-203: overrides are set and removed per slot; the response is the override with the slot isHidden and position, plus the new revision (#192)', async () => {
     const d = await detail('q-rotate');
     const slot = d.version.testCases.find((t) => t.position === 1)!;
     const put = await call<Record<string, unknown>>(
@@ -178,10 +179,12 @@ describe('Variant routes (FR-203, BE-04b): list, create, change, remove', () => 
       'input',
       'isHidden',
       'position',
+      'revision',
       'testCaseId',
     ]);
     expect(put.body.isHidden).toBe(true); // the slot's flag, not the variant's
     const after = await detail('q-rotate');
+    expect(put.body.revision).toBe(after.version.revision);
     expect(after.version.revision).not.toBe(d.version.revision);
     expect(
       after.version.variants.find((v) => v.id === 'ro-v1')?.testCaseOverrides.map((o) => o.input),
@@ -191,7 +194,8 @@ describe('Variant routes (FR-203, BE-04b): list, create, change, remove', () => 
       'DELETE',
       `${V}/q-rotate/versions/1/variants/ro-v1/test-cases/${slot.id}`,
     );
-    expect(del.status).toBe(204);
+    expect(del.status).toBe(200);
+    expect(del.body).toEqual({ revision: d.version.revision });
     expect((await detail('q-rotate')).version.revision).toBe(d.version.revision);
     // A slot that is not in this version is a 404, as is a second delete.
     expect(

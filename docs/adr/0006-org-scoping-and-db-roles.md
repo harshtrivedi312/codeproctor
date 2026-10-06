@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Accepted** 2026-10-01 (D-16): every recommendation as proposed. No amendment from D-17..D-23 beyond the tables they add, which carry or inherit `org_id` (section 1). Applied to database.md; deltas in ADR 0008. **Amended 2026-10-02 (D-35):** section 7 replaces "roles are created outside the migrations" in section 3; the rest of section 3 stands. **Proposed amendment 2026-10-05 (DB-05 review):** section 8, for the owner to accept (pending D-xx). |
+| Status | **Accepted** 2026-10-01 (D-16): every recommendation as proposed. No amendment from D-17..D-23 beyond the tables they add, which carry or inherit `org_id` (section 1). Applied to database.md; deltas in ADR 0008. **Amended 2026-10-02 (D-35):** section 7 replaces "roles are created outside the migrations" in section 3; the rest of section 3 stands. **Amendment (section 8, DB-05 review) Accepted 2026-10-06 (D-54):** the owner accepted it in the Delivery Lead's session, together with ADR 0013, ADR 0004 section 9 and ADR 0015; the Delivery Lead records the decision in docs/status.md and pins the accepted text to docs/adr at main 8f46852, so later edits need their own approval. |
 | Author | architect |
 | Decides | Q-10, Q-15, A-07, A-22 (index list for the freeze list), Q-17 (doc hygiene) |
 | Serves | FR-103, FR-105; NFR-01, NFR-04; TC-006, TC-008 |
@@ -225,7 +225,7 @@ Roles belong to the whole Postgres cluster, not to one database. So the `IF NOT 
 
 ## 8. DB-05 review decisions
 
-**Status: Proposed amendment 2026-10-05, for the owner to accept. Decision id: pending D-xx**, assigned in status.md when the owner accepts.
+**Status: Accepted 2026-10-06 (D-54); proposed 2026-10-05 (DB-05 review).** The accepted text is pinned to docs/adr at main 8f46852 (docs/status.md), so later edits need their own approval.
 - Source: the DB-05 architect gate (PR #30) and the Delivery Lead.
 - **Built and planned.** "Built" means present in main at 7c5d2e0, where PR #30 (DB-05) is merged. "Planned" means work that is not built yet, with its follow-up in docs/followups/database.md. Section 8.0 lists each item.
 - Until the owner accepts it, sections 1 to 7 stand as written.
