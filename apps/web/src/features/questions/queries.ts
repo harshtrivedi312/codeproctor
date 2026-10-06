@@ -2,6 +2,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiFailure } from '@/features/admin/queries';
 import { api, type Schemas } from '@/lib/api/client';
+import { useAuth } from '@/features/auth/auth-provider';
+import { can } from '@/features/staff/permissions';
 import { getGeneration } from '@/lib/auth-session';
 import type { DesiredVariant, TestCase } from './draft';
 
@@ -23,17 +25,25 @@ export const questionKeys = {
       ? (['questions', 'detail', id] as const)
       : (['questions', 'detail', id, version] as const),
   ai: (id: string, version: number) => ['questions', 'ai', id, version] as const,
+  aiPolicy: (userId: string) => ['questions', 'ai-policy', userId] as const,
 };
 
+/** The one machine code the question routes set: deleting a variant that has AI rows (409). */
+export const VARIANT_HAS_AI_REFERENCES = 'VARIANT_HAS_AI_REFERENCES';
+export const isVariantHasAiRefs = (e: unknown): boolean =>
+  e instanceof ApiFailure && e.status === 409 && e.code === VARIANT_HAS_AI_REFERENCES;
+
 /**
- * The question routes answer RFC 7807 problem bodies. 409 and 422 carry `detail` and `errors[]`
- * only (no machine code), so callers tell cases apart by endpoint and status, never by a code.
+ * The question routes answer RFC 7807 problem bodies. 409 and 422 carry `detail` and `errors[]`;
+ * callers tell cases apart by endpoint and status, and by `code` only for VARIANT_HAS_AI_REFERENCES.
+ * Any other `code` is ignored here (the question routes define no other).
  */
 function fail(response: Response, error: unknown): never {
   const body = error && typeof error === 'object' ? (error as Record<string, unknown>) : {};
   const text = (v: unknown) => (typeof v === 'string' ? v : '');
   const errors = Array.isArray(body.errors) ? body.errors.map((e) => text(e)).filter(Boolean) : [];
-  throw new ApiFailure(response.status, text(body.detail) || text(body.message), '', errors);
+  const code = body.code === VARIANT_HAS_AI_REFERENCES ? VARIANT_HAS_AI_REFERENCES : '';
+  throw new ApiFailure(response.status, text(body.detail) || text(body.message), code, errors);
 }
 
 export type QuestionSummary = Schemas['QuestionSummary'];
@@ -130,12 +140,15 @@ export interface SaveResult {
   idMap: Record<string, string>;
 }
 
+/** Where a save stopped: before the content PATCH (variants), the PATCH, test cases, variants, or the read-back. */
+export type SaveStep = 'variants' | 'content' | 'test cases' | 'reload';
 /** The save stopped after part of it was written (an earlier call went through, a later one did not). */
-export type SaveStep = 'variants' | 'test cases' | 'reload';
 export class PartialSaveFailure extends ApiFailure {
   constructor(
     inner: ApiFailure,
     readonly step: SaveStep,
+    /** The content PATCH forked a new draft: ids in the form no longer match the server's. */
+    readonly forked: boolean,
   ) {
     super(inner.status, inner.message, inner.code, inner.errors);
   }
@@ -188,16 +201,29 @@ const sameCase = (a: ServerCase, t: TestCase, position: number): boolean =>
   a.weight === t.weight &&
   a.position === position;
 
+/** The revision of a version right now: the variant list answers it (test-case writes return none). */
+async function currentRevision(id: string, version: number): Promise<string> {
+  const { data, error, response } = await api.GET(
+    '/v1/questions/{questionId}/versions/{version}/variants',
+    { params: { path: { questionId: id, version } } },
+  );
+  if (!data) fail(response, error);
+  return data.revision;
+}
+
 /**
- * One save of the whole editor against the real routes (BE-04a/b). Order: (1) for a DRAFT that
- * already has variants, a variant whose params gain a name is first given the union of old and new
- * params, so the statement PATCH below still renders for every active variant (the API refuses a
- * PATCH that leaves an active variant with an unknown placeholder); (2) PATCH the content, which
- * forks the next draft when the latest version is published (the server copies test cases and
- * variants with new ids and re-points overrides); (3) test cases through their own routes; (4)
- * variants and their per-slot overrides through the variant routes; (5) read the question back for
- * the new revision. A step that fails after something was written is a PartialSaveFailure naming the
- * step. Each step checks the session is still the one that started the save.
+ * One save of the whole editor against the real routes (BE-04a/b). Every write after the first
+ * carries `expectedRevision`, chained: the content PATCH answers a revision, a variant write
+ * answers its own, and a write that answers none (test cases, overrides, deletes) is followed by a
+ * read of the revision, so another editor's change between two of our calls is a 409 instead of a
+ * silent overwrite. Order: (1) for a DRAFT with variants, a variant whose params gain a name first
+ * gets the union of old and new params (so the statement PATCH still renders for every active
+ * variant), and variants the form removed are deleted (so a variant that lacks a newly added
+ * placeholder cannot make the PATCH a 400); (2) PATCH the content, which forks the next draft when
+ * the latest version is published (the server copies test cases and variants with new ids and
+ * re-points overrides); (3) test cases; (4) variants and per-slot overrides; (5) read the question
+ * back. A step that fails after something was written is a PartialSaveFailure naming the step.
+ * Each step checks the session is still the one that started the save.
  */
 export async function saveQuestion(id: string, input: SaveInput): Promise<SaveResult> {
   const startedIn = getGeneration();
@@ -206,13 +232,15 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
   };
   let step: SaveStep = 'variants';
   let wrote = false;
+  let forked = false;
   const loaded = input.loaded;
   const desired = input.variants;
-  // The revision the next write expects; each variant write returns the new one.
-  let expectedRevision = input.expectedRevision;
+  let rev = input.expectedRevision;
   try {
-    // (1) Additive param updates on a draft.
-    if (input.coding && desired !== null && !loaded.isPublished) {
+    const draftWithVariants = input.coding && desired !== null && !loaded.isPublished;
+    if (draftWithVariants) {
+      const lpath = { questionId: id, version: loaded.version };
+      // (1a) Additive param updates.
       for (const d of desired) {
         const old = loaded.variants.find((x) => x.id === d.id);
         if (!old) continue;
@@ -222,26 +250,46 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
         const r = await api.PATCH(
           '/v1/questions/{questionId}/versions/{version}/variants/{variantId}',
           {
-            params: { path: { questionId: id, version: loaded.version, variantId: old.id } },
-            body: { params: union, expectedRevision },
+            params: { path: { ...lpath, variantId: old.id } },
+            body: { params: union, expectedRevision: rev },
           },
         );
         if (!r.data) fail(r.response, r.error);
-        expectedRevision = r.data.revision;
+        rev = r.data.revision;
         wrote = true;
+      }
+      // (1b) Removed variants go before the content PATCH.
+      const keepIds = new Set(desired.map((d) => d.id));
+      for (const old of loaded.variants) {
+        if (keepIds.has(old.id)) continue;
+        stillSame();
+        const r = await api.DELETE(
+          '/v1/questions/{questionId}/versions/{version}/variants/{variantId}',
+          {
+            params: {
+              path: { ...lpath, variantId: old.id },
+              query: { expectedRevision: rev },
+            },
+          },
+        );
+        if (!r.response.ok) fail(r.response, r.error);
+        wrote = true;
+        rev = await currentRevision(id, loaded.version);
       }
     }
     // (2) The content.
-    step = 'variants';
+    step = 'content';
     stillSame();
     const patched = await api.PATCH('/v1/questions/{questionId}', {
       params: { path: { questionId: id } },
-      body: { ...input.update, expectedRevision },
+      body: { ...input.update, expectedRevision: rev },
     });
     if (!patched.data) fail(patched.response, patched.error);
     const first = patched.data;
     wrote = true;
     const createdNewVersion = first.createdNewVersion;
+    forked = createdNewVersion;
+    rev = first.version.revision;
     const idMap: Record<string, string> = {};
     if (input.coding) {
       const version = first.version.version;
@@ -265,43 +313,54 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
         stillSame();
         const r = await api.DELETE(
           '/v1/questions/{questionId}/versions/{version}/test-cases/{testCaseId}',
-          { params: { path: { ...path, testCaseId: s.id } } },
+          {
+            params: {
+              path: { ...path, testCaseId: s.id },
+              query: { expectedRevision: rev },
+            },
+          },
         );
         if (!r.response.ok) fail(r.response, r.error);
+        rev = await currentRevision(id, version);
       }
       for (const [position, w] of wanted.entries()) {
-        stillSame();
-        const current = server.find((s) => s.id === w.serverId);
-        if (current && w.serverId) {
-          idMap[w.t.id] = w.serverId;
-          if (sameCase(current, w.t, position)) continue;
-          const r = await api.PATCH(
-            '/v1/questions/{questionId}/versions/{version}/test-cases/{testCaseId}',
-            {
-              params: { path: { ...path, testCaseId: w.serverId } },
+        rowDone: {
+          stillSame();
+          const current = server.find((s) => s.id === w.serverId);
+          if (current && w.serverId) {
+            idMap[w.t.id] = w.serverId;
+            if (sameCase(current, w.t, position)) break rowDone;
+            const r = await api.PATCH(
+              '/v1/questions/{questionId}/versions/{version}/test-cases/{testCaseId}',
+              {
+                params: { path: { ...path, testCaseId: w.serverId } },
+                body: {
+                  input: w.t.input,
+                  expectedOutput: w.t.expectedOutput,
+                  isHidden: w.t.isHidden,
+                  weight: w.t.weight,
+                  position,
+                  expectedRevision: rev,
+                },
+              },
+            );
+            if (!r.data) fail(r.response, r.error);
+          } else {
+            const r = await api.POST('/v1/questions/{questionId}/versions/{version}/test-cases', {
+              params: { path },
               body: {
                 input: w.t.input,
                 expectedOutput: w.t.expectedOutput,
                 isHidden: w.t.isHidden,
                 weight: w.t.weight,
                 position,
+                expectedRevision: rev,
               },
-            },
-          );
-          if (!r.data) fail(r.response, r.error);
-        } else {
-          const r = await api.POST('/v1/questions/{questionId}/versions/{version}/test-cases', {
-            params: { path },
-            body: {
-              input: w.t.input,
-              expectedOutput: w.t.expectedOutput,
-              isHidden: w.t.isHidden,
-              weight: w.t.weight,
-              position,
-            },
-          });
-          if (!r.data) fail(r.response, r.error);
-          idMap[w.t.id] = r.data.id;
+            });
+            if (!r.data) fail(r.response, r.error);
+            idMap[w.t.id] = r.data.id;
+          }
+          rev = await currentRevision(id, version);
         }
       }
       // (4) Variants and overrides.
@@ -339,14 +398,21 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
           if (sv) matched.add(sv.id);
         }
         const vpath = { questionId: id, version };
+        // Only a fork still has removed variants to delete here (a draft's went in step 1).
         for (const sv of first.version.variants) {
           if (matched.has(sv.id)) continue;
           stillSame();
           const r = await api.DELETE(
             '/v1/questions/{questionId}/versions/{version}/variants/{variantId}',
-            { params: { path: { ...vpath, variantId: sv.id } } },
+            {
+              params: {
+                path: { ...vpath, variantId: sv.id },
+                query: { expectedRevision: rev },
+              },
+            },
           );
           if (!r.response.ok) fail(r.response, r.error);
+          rev = await currentRevision(id, version);
         }
         for (const d of desired) {
           stillSame();
@@ -355,20 +421,22 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
           if (!sv) {
             const r = await api.POST('/v1/questions/{questionId}/versions/{version}/variants', {
               params: { path: vpath },
-              body: { params: d.params, isActive: d.isActive },
+              body: { params: d.params, isActive: d.isActive, expectedRevision: rev },
             });
             if (!r.data) fail(r.response, r.error);
             sv = r.data.variant;
+            rev = r.data.revision;
             existing = [];
           } else if (!sameParams(d.params, sv.params) || d.isActive !== sv.isActive) {
             const r = await api.PATCH(
               '/v1/questions/{questionId}/versions/{version}/variants/{variantId}',
               {
                 params: { path: { ...vpath, variantId: sv.id } },
-                body: { params: d.params, isActive: d.isActive },
+                body: { params: d.params, isActive: d.isActive, expectedRevision: rev },
               },
             );
             if (!r.data) fail(r.response, r.error);
+            rev = r.data.revision;
           }
           const variantId = sv.id;
           // Overrides: the form's slot ids map to the server's; a slot that was removed took its overrides along.
@@ -382,9 +450,15 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
             stillSame();
             const r = await api.DELETE(
               '/v1/questions/{questionId}/versions/{version}/variants/{variantId}/test-cases/{testCaseId}',
-              { params: { path: { ...vpath, variantId, testCaseId: o.testCaseId } } },
+              {
+                params: {
+                  path: { ...vpath, variantId, testCaseId: o.testCaseId },
+                  query: { expectedRevision: rev },
+                },
+              },
             );
             if (!r.response.ok) fail(r.response, r.error);
+            rev = await currentRevision(id, version);
           }
           for (const w of wantedOverrides) {
             const have = live.find((o) => o.testCaseId === w.slot);
@@ -395,10 +469,12 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
               '/v1/questions/{questionId}/versions/{version}/variants/{variantId}/test-cases/{testCaseId}',
               {
                 params: { path: { ...vpath, variantId, testCaseId: w.slot } },
-                body: { input: w.input, expectedOutput: w.expectedOutput },
+                body: { input: w.input, expectedOutput: w.expectedOutput, expectedRevision: rev },
               },
             );
             if (!r.data) fail(r.response, r.error);
+            // The override answer carries no revision: read it before the next write.
+            rev = await currentRevision(id, version);
           }
         }
       }
@@ -410,8 +486,8 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
     if (!isFullQuestion(back)) throw new ApiFailure(403, 'Your role cannot edit this question.');
     return { detail: back, createdNewVersion, idMap };
   } catch (e) {
-    // Nothing was written before the first PATCH: that failure is the plain one (409 stays a 409).
-    if (e instanceof ApiFailure && wrote) throw new PartialSaveFailure(e, step);
+    // Nothing was written before the first failure: that failure is the plain one (409 stays a 409).
+    if (e instanceof ApiFailure && wrote) throw new PartialSaveFailure(e, step, forked);
     throw e;
   }
 }
@@ -557,5 +633,26 @@ export function useAddAiReference(id: string, version: number) {
       return r.data;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: questionKeys.ai(id, version) }),
+  });
+}
+
+export type AiPolicy = Schemas['AiPolicy'];
+
+/**
+ * The organisation's AI reference policy (`GET /questions/ai-policy`, permission ai_reference:read:
+ * Author and Super Admin). Nobody else gets it: a role without the permission never makes the
+ * call (the API would answer 403). The key carries the user id and the whole cache is cleared on
+ * a user or role change, so one person's answer is never shown to another.
+ */
+export function useAiPolicy(enabled = true) {
+  const { user, role } = useAuth();
+  return useQuery({
+    queryKey: questionKeys.aiPolicy(user?.id ?? ''),
+    enabled: enabled && user !== null && can(role, 'ai_reference:read'),
+    queryFn: async () => {
+      const { data, error, response } = await api.GET('/v1/questions/ai-policy');
+      if (!data) fail(response, error);
+      return data;
+    },
   });
 }

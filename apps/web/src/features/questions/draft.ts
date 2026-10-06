@@ -72,6 +72,10 @@ export interface DraftValues {
   short: { canonical: string; acceptedVariants: { key: string; value: string }[] };
 }
 
+/** Ids the form makes for variants that are not saved yet; the API's ids never start like this. */
+export const DRAFT_VARIANT_PREFIX = 'draft-var';
+export const isDraftVariantId = (id: string): boolean => id.startsWith(DRAFT_VARIANT_PREFIX);
+
 export const variantName = (index: number): string => `Variant ${index + 1}`;
 
 export const DEFAULT_LIMITS = { cpuMs: 2000, wallMs: 5000, memoryKb: 262_144 };

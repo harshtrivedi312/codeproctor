@@ -9,17 +9,21 @@ import { Field } from '@/components/ui/field';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import type { Schemas } from '@/lib/api/client';
-import { LANGUAGE_LABELS, newId, variantName, type VariantValues } from '../draft';
+import {
+  DRAFT_VARIANT_PREFIX,
+  isDraftVariantId,
+  LANGUAGE_LABELS,
+  newId,
+  variantName,
+  type VariantValues,
+} from '../draft';
 import { MarkdownPreview } from '../markdown-preview';
 import { checkParams, missingPlaceholders, parseParams } from '../params';
-import { usePrefill, usePreviewVariant } from '../queries';
+import { useAiReferences, usePrefill, usePreviewVariant } from '../queries';
 import { placeholdersOf, renderTemplate } from '../template';
 import { errorAt, useDraftField, type ApiTabProps } from '../use-draft-field';
 
 type Proposal = Schemas['PrefillResponse']['proposals'][number];
-
-/** Ids the form makes for variants that are not saved yet (the API's ids never start like this). */
-const DRAFT_VARIANT_PREFIX = 'draft-var';
 
 /**
  * FR-203, ADR 0007: variants with their own explicit parameter values, a rendered
@@ -180,7 +184,11 @@ function VariantCard({
   const requestId = React.useRef(0);
   const prefill = usePrefill(questionId ?? '');
   const candidate = usePreviewVariant(questionId ?? '', version);
-  const isSaved = !variant.id.startsWith(DRAFT_VARIANT_PREFIX);
+  const isSaved = !isDraftVariantId(variant.id);
+  // AI rows (current or retired) point at their variant and are never deleted, so the API refuses
+  // to delete such a variant: say so here instead of letting the save fail.
+  const aiRows = useAiReferences(isSaved ? (questionId ?? '') : '', version);
+  const aiCount = (aiRows.data?.items ?? []).filter((r) => r.variantId === variant.id).length;
 
   const overrideOf = (testCaseId: string) =>
     variant.overrides.find((o) => o.testCaseId === testCaseId);
@@ -286,12 +294,33 @@ function VariantCard({
             disabled={readOnly}
             onChange={(e) => onChange({ active: e.target.checked })}
           />
-          Active (candidates can get it; validation runs it)
+          <span>
+            Active (candidates can get it; validation runs it)
+            <span className="sr-only"> for {name}</span>
+          </span>
         </label>
-        {readOnly ? null : (
+        {readOnly ? null : aiCount > 0 ? (
+          <div className="space-y-1" data-testid={`variant-ai-note-${index}`}>
+            <p role="status" className="max-w-md text-sm text-muted-foreground">
+              {name} has {aiCount} AI reference solution{aiCount === 1 ? '' : 's'} (current or
+              retired). They are never deleted, so this variant cannot be removed. Set it inactive
+              instead: it will no longer be given to candidates or validated.
+            </p>
+            {variant.active ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => onChange({ active: false })}
+              >
+                Set {name} inactive
+              </Button>
+            ) : null}
+          </div>
+        ) : (
           <Button type="button" variant="ghost" size="sm" onClick={onRemove}>
             <Trash2 className="size-4" aria-hidden="true" />
-            Remove variant
+            Remove {name}
           </Button>
         )}
       </div>
