@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, Post, Req } from '@nestjs/common';
+import { Body, Controller, HttpCode, Post, Req, UseGuards } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
   ApiNoContentResponse,
@@ -9,6 +9,7 @@ import {
 } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { Public } from '../common/auth/decorators';
+import { ClientErrorRejectionGuard } from './client-error-rejection.guard';
 import { ClientErrorsService } from './client-errors.service';
 import { ClientErrorDto } from './dto/client-error.dto';
 
@@ -16,9 +17,11 @@ import { ClientErrorDto } from './dto/client-error.dto';
 // session at all. It is not an auth bypass: it reads nothing, returns nothing, writes one scrubbed
 // log line, has its own strict per-IP and whole-instance throttles ('client-errors' and
 // 'client-errors-global' in app.module.ts) and a streaming 16 KB body limit with a read
-// deadline (client-error-body.middleware.ts).
+// deadline (client-error-body.middleware.ts). A refused body is answered by
+// ClientErrorRejectionGuard after the throttlers, so it counts against them.
 @ApiTags('client-errors')
 @Public()
+@UseGuards(ClientErrorRejectionGuard)
 @Controller('client-errors')
 export class ClientErrorsController {
   constructor(private readonly service: ClientErrorsService) {}
