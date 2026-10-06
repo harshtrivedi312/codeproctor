@@ -5,6 +5,7 @@
 // database settings.
 import type { INestApplication } from '@nestjs/common';
 import { hash } from '@node-rs/argon2';
+import { Redis } from 'ioredis';
 import { randomBytes } from 'node:crypto';
 import { authenticator } from 'otplib';
 import { Client } from 'pg';
@@ -14,6 +15,7 @@ import { encryptSecret, sha256Hex } from '../../src/auth/crypto.util';
 import { createPrismaClient } from '../../src/database/create-prisma-client';
 import { PrismaClient, UserRole } from '../../src/generated/prisma/client';
 import { applyEnv, applyMigrations, startInfra, TestInfra } from '../../src/test/containers';
+import type { ReferenceValidationPort } from '../../src/questions/reference-validation.port';
 
 export const API = '/api/v1';
 export const PASSWORD = 'Correct-Horse-9';
@@ -42,13 +44,52 @@ export interface Harness {
   logged: string[];
   /** Waits for work the API defers until after the response (forgot-password mail, FU-BE-31). */
   settle(): Promise<void>;
+  /** Waits for the validation job (BE-04c) to finish; fails with a named error after 30 s. */
+  settleValidation(): Promise<void>;
+  /**
+   * Replaces what the validate job runs against (default: rejects, so every run ends ERROR on any
+   * machine, whatever JUDGE0_URL says). A test may pass a deferred promise to hold the job open.
+   */
+  setValidationPort(port: ReferenceValidationPort): void;
+  /**
+   * Outage tests only (needs no option, but only makes sense after boot({ memoryThrottle: true })):
+   * the JWT guard's own Redis freshness check (TokenValidityService.isFresh) answers the same
+   * "Verification is temporarily unavailable." as the handlers when Redis is down, so a protected
+   * route would never reach its handler. This makes that one check pass so the HANDLER's own
+   * fail-closed path is what the test observes. Returns the spy: assert it was called (so the
+   * bypass really took effect) and mockRestore() it in afterAll.
+   */
+  skipFreshnessCheck(): jest.SpyInstance;
+  /** Closes only this app (infra, owner client and fixtures stay), to simulate an API restart. */
+  stopApp(): Promise<void>;
+  /** Puts the default (never executes, outcome ERROR) back. */
+  resetValidationPort(): void;
   close(): Promise<void>;
 }
+
+const SETTLE_VALIDATION_MS = 30_000;
+
+/** The harness never executes code: a validate run fails closed with outcome ERROR. */
+export const NO_EXECUTION_PORT: ReferenceValidationPort = {
+  validate: () => Promise.reject(new Error('harness: no code execution')),
+};
 
 export interface BootOptions {
   env?: Record<string, string>;
   /** Capture stdout so a test can prove that no secret reaches the logs. */
   captureLogs?: boolean;
+  /**
+   * Replaces the Redis throttle store with the in-memory one, so that with Redis stopped a request
+   * still reaches the handler (otherwise the global throttle guard answers 503 first, since #175).
+   * Same pattern as auth-coldstart.e2e-spec.ts. Use it only in the stop-Redis tests.
+   */
+  memoryThrottle?: boolean;
+  /**
+   * Boots a SECOND API instance against the infra, database and organization of an existing
+   * harness (shared Redis counters across instances). Env is left as the first boot set it.
+   * close() on the joined harness closes only its own app; the owner harness stops the infra.
+   */
+  join?: Harness;
 }
 
 /** Docker Desktop sometimes misses the 10 s port-binding window; retry the start, never skip it. */
@@ -73,32 +114,57 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
       })
     : undefined;
 
-  const infra = await startInfraWithRetry();
+  const joined = opts.join;
+  const infra = joined?.infra ?? (await startInfraWithRetry());
   let app: INestApplication<App> | undefined;
   let owner: PrismaClient | undefined;
-  let appUserUrl: string;
-  let orgId: string;
+  let appUserUrl = joined?.appUserUrl ?? '';
+  let orgId = joined?.orgId ?? '';
   const mails: SentMail[] = [];
   let settle: () => Promise<void> = () => Promise.resolve();
+  let settleValidationJobs: () => Promise<void> = () => Promise.resolve();
+  let skipFreshness: () => jest.SpyInstance = () => {
+    throw new Error('harness: app not started');
+  };
+  let port: ReferenceValidationPort = NO_EXECUTION_PORT;
+  const switchingPort: ReferenceValidationPort = { validate: (r) => port.validate(r) };
   try {
-    await applyMigrations(infra);
+    if (joined) {
+      owner = joined.owner;
+    } else {
+      // Each boot starts its OWN Redis container, so it is empty here; the flush is defensive, so a
+      // test that counts to a throttle limit can never inherit counters (throttle:* keys now live
+      // in Redis and outlive an app instance). A separate client, so the app's own client stays cold.
+      const redis = new Redis(infra.redis.getConnectionUrl(), {
+        maxRetriesPerRequest: 1,
+        connectTimeout: 5000,
+      });
+      try {
+        await redis.flushall();
+      } finally {
+        redis.disconnect();
+      }
+      await applyMigrations(infra);
+    }
 
-    // app_user is created by the audit_append_only migration without a password (ADR 0006 7.4).
-    const appPassword = randomBytes(18).toString('hex');
-    const admin = new Client({ connectionString: infra.postgres.getConnectionUri() });
-    await admin.connect();
-    await admin.query(`ALTER ROLE app_user PASSWORD '${appPassword}'`);
-    await admin.end();
-    appUserUrl = `postgresql://app_user:${appPassword}@${infra.postgres.getHost()}:${infra.postgres.getMappedPort(5432)}/${infra.postgres.getDatabase()}`;
+    if (!joined) {
+      // app_user is created by the audit_append_only migration without a password (ADR 0006 7.4).
+      const appPassword = randomBytes(18).toString('hex');
+      const admin = new Client({ connectionString: infra.postgres.getConnectionUri() });
+      await admin.connect();
+      await admin.query(`ALTER ROLE app_user PASSWORD '${appPassword}'`);
+      await admin.end();
+      appUserUrl = `postgresql://app_user:${appPassword}@${infra.postgres.getHost()}:${infra.postgres.getMappedPort(5432)}/${infra.postgres.getDatabase()}`;
 
-    applyEnv(infra, {
-      DATABASE_URL: appUserUrl,
-      THROTTLE_AUTH_LIMIT: '100000',
-      LOG_LEVEL: opts.captureLogs ? 'info' : 'silent',
-      ...opts.env,
-    });
-    owner = createPrismaClient(infra.postgres.getConnectionUri());
-    orgId = (await owner.organization.create({ data: { name: 'QA Org A' } })).id;
+      applyEnv(infra, {
+        DATABASE_URL: appUserUrl,
+        THROTTLE_AUTH_LIMIT: '100000',
+        LOG_LEVEL: opts.captureLogs ? 'info' : 'silent',
+        ...opts.env,
+      });
+      owner = createPrismaClient(infra.postgres.getConnectionUri());
+      orgId = (await owner.organization.create({ data: { name: 'QA Org A' } })).id;
+    }
 
     // Every MailPort send method (send*): records the method name and ALL arguments, so one fake
     // serves password reset, staff invite and staff-account-locked. It does not assume a call shape
@@ -136,10 +202,26 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     const { MailPort: MailToken } = jest.requireActual<typeof import('../../src/mail/mail.port')>(
       '../../src/mail/mail.port',
     );
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+    const { REFERENCE_VALIDATION_PORT } = jest.requireActual<
+      typeof import('../../src/questions/reference-validation.port')
+    >('../../src/questions/reference-validation.port');
+    const { ValidationService } = jest.requireActual<
+      typeof import('../../src/questions/validation.service')
+    >('../../src/questions/validation.service');
+    const { TokenValidityService } = jest.requireActual<
+      typeof import('../../src/common/auth/token-validity.service')
+    >('../../src/common/auth/token-validity.service');
+    const { getStorageToken, ThrottlerStorageService } =
+      jest.requireActual<typeof import('@nestjs/throttler')>('@nestjs/throttler');
+    const builder = Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(MailToken)
       .useValue(fakeMail)
-      .compile();
+      .overrideProvider(REFERENCE_VALIDATION_PORT)
+      .useValue(switchingPort);
+    if (opts.memoryThrottle) {
+      builder.overrideProvider(getStorageToken()).useValue(new ThrottlerStorageService());
+    }
+    const moduleRef = await builder.compile();
     app = moduleRef.createNestApplication<INestApplication<App>>();
     configureApp(app);
     await app.init();
@@ -147,17 +229,59 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     await app.listen(0, '127.0.0.1');
     const authService = app.get(AuthService);
     settle = () => authService.settleDeferred();
+    const validity = app.get(TokenValidityService);
+    skipFreshness = () => jest.spyOn(validity, 'isFresh').mockResolvedValue(true);
+    const validation = app.get(ValidationService); // resolved once; settle and close use this instance
+    settleValidationJobs = async () => {
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(new Error('SettleValidationTimeout: validation job still running after 30 s')),
+          SETTLE_VALIDATION_MS,
+        );
+      });
+      try {
+        await Promise.race([validation.whenIdle(), timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
   } catch (error) {
     stdout?.mockRestore();
     await app?.close().catch(() => undefined);
-    await owner?.$disconnect().catch(() => undefined);
-    await infra.stop();
+    if (!joined) {
+      await owner?.$disconnect().catch(() => undefined);
+      await infra.stop();
+    }
     throw error;
   }
 
   const startedApp = app;
   const startedOwner = owner;
   if (!startedApp || !startedOwner) throw new Error('harness did not start');
+  let closing: Promise<void> | undefined;
+  let appClosing: Promise<void> | undefined;
+  const closeApp = (): Promise<void> =>
+    (appClosing ??= (async () => {
+      // A running validation job must not write to a closed Prisma.
+      await settleValidationJobs().catch(() => undefined);
+      await startedApp.close();
+    })());
+  const closeAll = async (): Promise<void> => {
+    stdout?.mockRestore();
+    try {
+      await closeApp();
+    } finally {
+      if (!joined) {
+        try {
+          await startedOwner.$disconnect();
+        } finally {
+          await infra.stop();
+        }
+      }
+    }
+  };
   return {
     infra,
     app: startedApp,
@@ -167,13 +291,25 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     mails,
     logged,
     settle: () => settle(),
-    close: async () => {
-      stdout?.mockRestore();
-      await startedApp.close();
-      await startedOwner.$disconnect();
-      await infra.stop();
+    settleValidation: () => settleValidationJobs(),
+    setValidationPort: (p) => {
+      port = p;
     },
+    resetValidationPort: () => {
+      port = NO_EXECUTION_PORT;
+    },
+    skipFreshnessCheck: () => skipFreshness(),
+    stopApp: closeApp,
+    close: () => (closing ??= closeAll()),
   };
+}
+
+/**
+ * Waits until the async question validation job (POST /questions/:id/validate, BE-04c) has finished
+ * and written its QUESTION_VALIDATION_FINISHED row. Call it after every successful validate call.
+ */
+export function settleValidation(h: Harness): Promise<void> {
+  return h.settleValidation();
 }
 
 let seq = 0;
@@ -332,6 +468,17 @@ export function expectReauthFailed(res: request.Response): void {
   const body = res.body as Body;
   expect(body.code).toBe('REAUTH_FAILED');
   expect(body.detail).toBe(REAUTH_DETAIL);
+}
+
+/** POST /auth/2fa/disable uses its own fixed detail on EVERY refusal (FU-BE-58); the code stays REAUTH_FAILED. */
+export const DISABLE_REAUTH_DETAIL = 'The password or code is incorrect.';
+
+export function expectDisableReauthFailed(res: request.Response): void {
+  expect(res.status).toBe(403);
+  expect(res.headers['content-type']).toContain('application/problem+json');
+  const body = res.body as Body;
+  expect(body.code).toBe('REAUTH_FAILED');
+  expect(body.detail).toBe(DISABLE_REAUTH_DETAIL);
 }
 
 /** A problem body without the per-request fields, for "identical body" comparisons. */

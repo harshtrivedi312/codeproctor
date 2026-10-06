@@ -3,6 +3,7 @@ import { apiBaseUrl } from '@/lib/env';
 import type { Schemas } from '@/lib/api/client';
 import { createAdminHandlers } from './admin-handlers';
 import { createAuthHandlers } from './auth-handlers';
+import { createCandidateHandlers } from './candidate/handlers';
 import { createQuestionHandlers } from './question-handlers';
 import { mockSession } from './data';
 
@@ -78,6 +79,8 @@ export function createHandlers(options: Partial<MockOptions> = {}) {
     ...createAuthHandlers(),
     ...createAdminHandlers({ latencyMs: opts.adminLatencyMs }),
     ...createQuestionHandlers({ latencyMs: opts.adminLatencyMs }),
+    // The candidate flow (FE-09, FE-09b): provisional mocks owned by Frontend B in ./candidate.
+    ...createCandidateHandlers(),
     http.get(`${base}/v1/health`, () => HttpResponse.json({ status: 'ok' as const })),
 
     http.get(`${base}/v1/time`, () =>

@@ -1,9 +1,11 @@
+import { candidateVisibleStatus } from '../session/candidate-visible-status';
 // Candidate routes behind a session token (ADR 0013 section 5.10). The session is the token's: no
 // route has a :sessionId, and ids in a body are never used to pick a session (CS-1). Each route is
 // limited per session in Redis, not per IP (ADR 0013 section 5.1).
 import { Body, Controller, Get, Header, HttpCode, Post, Req } from '@nestjs/common';
 import {
   ApiConflictResponse,
+  ApiServiceUnavailableResponse,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
@@ -36,7 +38,7 @@ const NO_STORE = 'no-store';
 function stateDto(view: SessionStateView): SessionStateDto {
   return {
     serverTime: view.serverTime.toISOString(),
-    status: view.status,
+    status: candidateVisibleStatus(view.status),
     startedAt: view.startedAt?.toISOString() ?? null,
     deadlineAt: view.deadlineAt?.toISOString() ?? null,
     sectionDeadlineAt: view.sectionDeadlineAt?.toISOString() ?? null,
@@ -56,7 +58,7 @@ export class CandidateSessionController {
     private readonly limiter: SessionRateLimiter,
   ) {}
 
-  // TODO(hub PR #113): @CandidateRoute('candidate_session:read') once the permission exists in shared.
+  @CandidateRoute('candidate_session:read')
   @Get()
   @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Session state with the server clock (a reload, FR-505)' })
@@ -75,7 +77,10 @@ export class CandidateSessionController {
       'Refused with 409 CONSENT_NOT_APPROVED when REQUIRE_LEGAL_APPROVED_CONSENT is true and the text has no Legal approval.',
   })
   @ApiOkResponse({ type: ConsentDocumentDto })
-  @ApiConflictResponse({ description: 'CONSENT_NOT_CONFIGURED, CONSENT_NOT_APPROVED' })
+  @ApiConflictResponse({ description: 'CONSENT_NOT_APPROVED' })
+  @ApiServiceUnavailableResponse({
+    description: 'CONSENT_NOT_CONFIGURED: the org has no current consent text',
+  })
   async getConsent(@Candidate() ctx: CandidateContext): Promise<ConsentDocumentDto> {
     await this.limiter.hit('consent-get', ctx.sessionId, 30, 60);
     const view = await this.consent.get(ctx);
@@ -125,7 +130,7 @@ export class CandidateSessionController {
     return this.consent.decline(ctx, { ip: req.ip, userAgent: req.headers['user-agent'] });
   }
 
-  // TODO(hub PR #113): @CandidateRoute('candidate_session:start').
+  @CandidateRoute('candidate_session:start')
   @Post('test/start')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)
@@ -156,7 +161,7 @@ export class CandidateSessionController {
     };
   }
 
-  // TODO(hub PR #113): @CandidateRoute('candidate_session:heartbeat').
+  @CandidateRoute('candidate_session:heartbeat')
   @Post('heartbeat')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)
@@ -185,7 +190,7 @@ export class CandidateSessionController {
     };
   }
 
-  // TODO(hub PR #113): @CandidateRoute('candidate_session:key').
+  @CandidateRoute('candidate_session:key')
   @Post('proctor-key')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)

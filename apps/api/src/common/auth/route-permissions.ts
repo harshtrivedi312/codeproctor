@@ -62,7 +62,28 @@ const ALL_STAFF: readonly UserRole[] = ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'R
 const SUPER_ADMIN: readonly UserRole[] = ['SUPER_ADMIN'];
 
 const own = { roles: ALL_STAFF, permission: 'account:self' } as const;
+const questionRead = {
+  roles: ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR'],
+  permission: 'question:read',
+} as const;
+const questionCreate = { roles: ['SUPER_ADMIN', 'AUTHOR'], permission: 'question:create' } as const;
+const questionUpdate = { roles: ['SUPER_ADMIN', 'AUTHOR'], permission: 'question:update' } as const;
+const questionValidate = {
+  roles: ['SUPER_ADMIN', 'AUTHOR'],
+  permission: 'question:validate',
+} as const;
+const aiRefRead = { roles: ['SUPER_ADMIN', 'AUTHOR'], permission: 'ai_reference:read' } as const;
+const aiRefCreate = {
+  roles: ['SUPER_ADMIN', 'AUTHOR'],
+  permission: 'ai_reference:create',
+} as const;
+const aiRefSupersede = {
+  roles: ['SUPER_ADMIN', 'AUTHOR'],
+  permission: 'ai_reference:supersede',
+} as const;
 const userManage = { roles: SUPER_ADMIN, permission: 'user:manage' } as const;
+const orgSettingsManage = { roles: SUPER_ADMIN, permission: 'org_settings:manage' } as const;
+const RECRUITER_ADMIN: readonly UserRole[] = ['SUPER_ADMIN', 'RECRUITER'];
 
 export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   // Operations
@@ -89,9 +110,19 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
     principal: 'CANDIDATE',
     permission: 'candidate_consent:decline',
   },
-  // TODO(BE-07, hub PR #113): GET /candidate/session, POST /candidate/session/test/start,
-  // /heartbeat and /proctor-key need candidate_session:read, :start, :heartbeat and :key in
-  // packages/shared. Add the four entries here and @CandidateRoute(...) on the handlers then.
+  'GET /candidate/session': { principal: 'CANDIDATE', permission: 'candidate_session:read' },
+  'POST /candidate/session/test/start': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:start',
+  },
+  'POST /candidate/session/heartbeat': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:heartbeat',
+  },
+  'POST /candidate/session/proctor-key': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:key',
+  },
 
   // Authentication (FR-101, FR-102, FR-104, FR-107). Public: the credential is in the body.
   'POST /auth/login': 'public',
@@ -126,4 +157,46 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
     principal: 'CANDIDATE',
     permission: 'candidate_media:presign',
   },
+  // Organization settings (FR-103, ADR 0010 org_settings:manage; SUPER_ADMIN only, own org only).
+  // The PATCH needs the admin's currentPassword (step-up) and writes its audit row (ORG_SETTINGS_UPDATED) in the same transaction as the update.
+  'GET /admin/org-settings': orgSettingsManage,
+  'PATCH /admin/org-settings': orgSettingsManage,
+
+  // Test templates (FR-301, FR-302; ADR 0010 section 3): SUPER_ADMIN and RECRUITER. No copy or
+  // archive route yet (no schema support). Writes audit in their own transaction (tests.service.ts).
+  'GET /tests': { roles: RECRUITER_ADMIN, permission: 'test:read' },
+  'POST /tests': { roles: RECRUITER_ADMIN, permission: 'test:create' },
+  'GET /tests/:id': { roles: RECRUITER_ADMIN, permission: 'test:read' },
+  'PATCH /tests/:id': { roles: RECRUITER_ADMIN, permission: 'test:update' },
+  // Question bank (FR-201..FR-205). Reads: SUPER_ADMIN, RECRUITER, AUTHOR; writes: SUPER_ADMIN,
+  // AUTHOR (ADR 0010 section 3). Publish, archive and test cases are changes: question:update.
+  'GET /questions': questionRead,
+  'POST /questions': questionCreate,
+  'GET /questions/ai-policy': aiRefRead,
+  'GET /questions/:id': questionRead,
+  'GET /questions/:id/preview': questionRead,
+  'PATCH /questions/:id': questionUpdate,
+  'POST /questions/:id/publish': questionUpdate,
+  'POST /questions/:id/archive': questionUpdate,
+  'POST /questions/:id/unarchive': questionUpdate,
+  'POST /questions/:id/versions/:version/test-cases': questionUpdate,
+  'PATCH /questions/:id/versions/:version/test-cases/:testCaseId': questionUpdate,
+  'DELETE /questions/:id/versions/:version/test-cases/:testCaseId': questionUpdate,
+  // Variants (FR-203, BE-04 slice 4b). Params and overrides are author data: question:update. The
+  // variant preview is the candidate-shaped view: question:read.
+  'GET /questions/:id/versions/:version/variants': questionUpdate,
+  'POST /questions/:id/versions/:version/variants': questionUpdate,
+  'GET /questions/:id/versions/:version/variants/:variantId/preview': questionRead,
+  'PATCH /questions/:id/versions/:version/variants/:variantId': questionUpdate,
+  'DELETE /questions/:id/versions/:version/variants/:variantId': questionUpdate,
+  'PUT /questions/:id/versions/:version/variants/:variantId/test-cases/:testCaseId': questionUpdate,
+  'DELETE /questions/:id/versions/:version/variants/:variantId/test-cases/:testCaseId':
+    questionUpdate,
+  // Reference validation (FR-203, BE-04 slice 4c): the report is author data, so the status read
+  // needs question:validate too. AI reference solutions (ADR 0005 AI-1) are never for recruiters.
+  'POST /questions/:id/validate': questionValidate,
+  'GET /questions/:id/validation': questionValidate,
+  'GET /questions/:id/versions/:version/ai-references': aiRefRead,
+  'POST /questions/:id/versions/:version/ai-references': aiRefCreate,
+  'POST /questions/:id/versions/:version/ai-references/:aiReferenceId/supersede': aiRefSupersede,
 };

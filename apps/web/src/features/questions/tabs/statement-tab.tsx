@@ -6,7 +6,7 @@ import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
-import { MAX_STATEMENT, MAX_TITLE } from '../draft';
+import { MAX_STATEMENT, MAX_TITLE, variantName } from '../draft';
 import { DIFFICULTY_LABEL } from '../labels';
 import { MarkdownPreview } from '../markdown-preview';
 import { parseParams } from '../params';
@@ -91,9 +91,9 @@ export function StatementTab({ form, readOnly }: TabProps): React.JSX.Element {
                 <span>Show as</span>
                 <Select value={variantId} onChange={(e) => setVariantId(e.target.value)}>
                   <option value="">Template (placeholders as written)</option>
-                  {variants.map((v) => (
+                  {variants.map((v, i) => (
                     <option key={v.id} value={v.id}>
-                      {v.label || 'Unnamed variant'}
+                      {variantName(i)}
                     </option>
                   ))}
                 </Select>

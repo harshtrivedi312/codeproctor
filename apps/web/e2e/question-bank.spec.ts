@@ -58,13 +58,13 @@ test.describe('FR-201..FR-205 question bank', () => {
     await expect(page.getByRole('tablist', { name: 'Question sections' })).toBeVisible();
     await page.getByRole('button', { name: 'Validate' }).click();
     await expect(page.getByText('Validation failed')).toBeVisible();
-    const failing = page.getByRole('table', { name: 'Results for Rotate by 3' });
+    const failing = page.getByRole('table', { name: 'Results for Variant 2' });
     await expect(failing.getByRole('row', { name: /Test 2/ })).toContainText('Wrong answer');
     await expect(page.getByRole('button', { name: 'Publish' })).toBeDisabled();
     await expectNoAxeViolations(page);
 
     await page.getByRole('tab', { name: 'Variants' }).click();
-    const card = page.getByRole('region', { name: 'Rotate by 3' });
+    const card = page.getByRole('region', { name: 'Variant 2' });
     await card.getByLabel('Expected output, slot 2').fill('4 5 6 1 2 3');
     await page.getByRole('button', { name: 'Save' }).click();
     await expect(page.getByText(/Saved\./)).toBeVisible();
@@ -85,8 +85,11 @@ test.describe('FR-201..FR-205 question bank', () => {
       await expect(dialog).toBeHidden();
     }
     await expect(page.getByRole('button', { name: 'Publish' })).toBeEnabled();
+    // The API publishes only after a passing run of this very content and the AI gate (BE-04c).
     await page.getByRole('button', { name: 'Publish' }).click();
     await expect(page.getByText(/Version 1 is published\. Editing it later/)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Publish' })).toBeDisabled();
+    await expectNoAxeViolations(page);
   });
 
   test('FR-204 TC-013: editing a published question creates a draft version; an older version is read-only', async ({
@@ -129,10 +132,41 @@ test.describe('FR-201..FR-205 question bank', () => {
     await expect(page).toHaveURL(/\/versions$/);
   });
 
-  test('FR-103 TC-004: a recruiter reads the list but cannot open the editor', async ({ page }) => {
+  test('TC-012 FR-203: a complete multiple-choice draft publishes in one click, and then cannot be published again', async ({
+    page,
+  }) => {
+    await signInAt(page, AUTHOR, '/admin/questions');
+    await page.getByLabel('Status', { exact: true }).selectOption('DRAFT');
+    await page.getByRole('link', { name: 'Cost of a hash lookup (draft)', exact: true }).click();
+    await expect(page.getByRole('tablist', { name: 'Question sections' })).toBeVisible();
+    await page.getByRole('button', { name: 'Publish' }).click();
+    await expect(page.getByText(/Version 1 is published\. Editing it later/)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Publish' })).toBeDisabled();
+    await expectNoAxeViolations(page);
+  });
+
+  test('DL-32 FR-103: a recruiter opening a question gets a read-only summary with the hidden parts left out', async ({
+    page,
+  }) => {
+    await signInAt(page, RECRUITER, '/admin/questions');
+    await page.goto('/admin/questions/q-merge');
+    await expect(page.getByRole('heading', { name: 'Merge intervals', level: 1 })).toBeVisible();
+    await expect(page.getByText(/hidden for your role/)).toBeVisible();
+    await expect(page.getByRole('table', { name: 'Visible sample test cases' })).toBeVisible();
+    await expect(page.getByRole('tablist')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Save|Validate|Publish/ })).toHaveCount(0);
+    expect(await page.content()).not.toContain('out.append');
+    await expectNoAxeViolations(page);
+  });
+
+  test('FR-103 TC-004: a recruiter reads the list and opens the summary through the title link, never the editor', async ({
+    page,
+  }) => {
     await signInAt(page, RECRUITER, '/admin/questions');
     await expect(page.getByRole('row', { name: /Merge intervals/ })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Merge intervals', exact: true })).toHaveCount(0);
     await expect(page.getByRole('link', { name: 'New question' })).toHaveCount(0);
+    await page.getByRole('link', { name: 'Merge intervals', exact: true }).click();
+    await expect(page.getByText(/hidden for your role/)).toBeVisible();
+    await expect(page.getByRole('tablist')).toHaveCount(0);
   });
 });

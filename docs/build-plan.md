@@ -49,7 +49,7 @@ Active agents are the files in `.claude/agents/`. The orchestrator prompt in age
 | 2 Core backend, staff web, SDK | Auth, RBAC, question bank, Judge0, tests and invitations, session state machine; staff screens on MSW mocks; proctor SDK | BE-01..BE-07 ∥ FE-01..FE-05 ∥ FE-06..FE-08 | M2: BE-07 merged, SDK merged |
 | 3 Candidate journey | Media, identity, events, run/grade, integrity worker, candidate flow and test screen | BE-09, BE-10, BE-11, BE-08, BE-12, FE-09, FE-10 | M3: candidate can complete a proctored test on seeded data; worker scores it |
 | 4 Review and reporting | Review API, live gateway, reports, webhooks; review workspace, live grid, dashboard; staging environment | BE-13, BE-14, FE-11, FE-12, FE-13, DEP-01 | M4: reviewer journey works on staging; mocks removed |
-| 5 Hardening and QA | Security review and fixes, load tuning, automated suite and CI gate, red team | BE-15A, BE-15B, QA-01B, QA-02 | M5: all 51 P1 TCs green or manual-signed; security review closed |
+| 5 Hardening and QA | Security review and fixes, load tuning, automated suite and CI gate, red team | BE-15A, BE-15B, QA-01B, QA-02 | M5: all 52 P1 TCs green or manual-signed; security review closed |
 | 6 Go-live readiness | Go-live checklist, pilot stack, threshold tuning and human decisions | DEP-02, DEP-03, INT-01, COMP-01, FAIR-01 (before the pilot exit review) | M6: checklist delivered; pilot stack built and verified with synthetic data; pilot entry blockers cleared (status.md B-05: owner-approved consent document and retention schedule, threshold tuning done, licence gate passing the two accepted models; for EU/UK candidates also the approved DPIA and processor transfer agreements). The owner is the approver (C-15). The pilot itself is human-run (BRD section 10) |
 | Later phase (not this build) | Electron lockdown client | FE-14 | Out of scope for this build (D-13, closes Q-41). Until it ships, the LOCKDOWN proctor profile must not be selectable (review A-30). |
 
@@ -326,7 +326,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 
 #### QA-01A: Test matrix and manual scripts
 - Owner: qa-engineer. Branch: `qa/test-matrix`. Depends on: none (docs only). Parallel with: everything in Phase 0 and 1.
-- Covers: all 72 TCs (TC-095..TC-099 added 2026-10-01).
+- Covers: all 73 TCs (TC-095..TC-099 added 2026-10-01; TC-100 added 2026-10-06).
 - Deliverables: /docs/test-matrix.md (TC ID, level, planned test file, owner task, status) using the owner tasks in /docs/requirements-trace.md; /docs/manual-tests.md with exact steps for hardware or people cases (TC-036, TC-056, TC-057, TC-058, TC-059, TC-060, TC-064, TC-063 offline check, TC-034).
 - Done when: every TC ID appears once in the matrix with a level and owner; no application code touched.
 
@@ -565,6 +565,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Owner: backend-engineer, architect review (D-26). Branch: `deploy/staging`. Depends on: ARC-05, BE-12, FE-10. Gate: architect at PR.
 - Covers: NFR-03, NFR-04, NFR-09, FR-703 (storage encryption settings), BO-5. TCs: none directly (supports TC-090, TC-093).
 - Deliverables: staging only, synthetic data only (D-10). Infra for the AWS EC2 x86 host (api, worker, redis, judge0 with its db and redis, caddy); Cloudflare R2 media bucket with CORS for browser PUT (D-11; ADR 0001 section 2.1); Postgres on Supabase or Neon free tier or as ARC-05 decides; web on Cloudflare Pages; `app_user` created by the `audit_append_only` migration, its password set at provisioning from the vault (ADR 0006 section 7.4); GitHub Actions build, push to GHCR, SSH deploy with zero-downtime restart, `prisma migrate deploy` with `MIGRATION_DATABASE_URL` held only by the deploy job (never `migrate reset` or `db push`, ADR 0009); staging database credentials live only in GitHub Actions secrets and on the server, never on developer machines or in agent sessions (D-38); Compose runs under its own project name `codeproctor-staging`, never the local `codeproctor` (ADR 0009 section 4.4, SF5); smoke tests; CloudWatch (C-32; Sentry removed); uptime checks on /health; /docs/runbook.md; seed guard verified (Q-28). The pilot stack is not part of DEP-01 (it is DEP-03).
+- Runtime settings from the backend (2026-10-06, #175, FU-BE-137/138): set `TRUST_PROXY_HOPS` to the real number of proxies in front of the API on each environment (1 when Caddy is the only one; 2 if Cloudflare or a load balancer also sits in front). The API refuses to boot in pilot or production with 0 (#175). Run Redis with `noeviction` and AOF (DL-24), sized with headroom for the throttler keys, because staff auth fails closed on Redis. The owner (never an agent, ADR 0009) adds the eight required staging secrets that the nightly backup names (#163), after first restricting the `staging` environment's deployment branches to main (workflow header, FU-DBB-04). HTTP server settings from #183 (FU-BE-140/141; defaults; the headers timeout must stay below the request timeout): HTTP_HEADERS_TIMEOUT_MS 10000, HTTP_REQUEST_TIMEOUT_MS 30000, HTTP_KEEPALIVE_TIMEOUT_MS 65000 (Caddy's upstream keepalive must be below it), HTTP_TIMEOUT_CHECK_INTERVAL_MS 2000; pilot and production refuse to boot unless WEB_ORIGIN is an https bare origin.
 - Done when: smoke tests green on staging; runbook steps exercised once.
 
 ### Phase 5: hardening, QA, go-live
@@ -585,7 +586,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Owner: qa-engineer. Branch: `qa/automation-ci`. Depends on: BE-14, FE-13, DEP-01.
 - Covers: all TCs; NFR-04, NFR-06. TCs: fills every automatable gap; TC-092 re-run; TC-093 (PM-assigned, ZAP baseline on staging).
 - Deliverables: test-matrix statuses from real runs; missing P1 then P2 then P3 automated tests, each named with its TC ID; CI job that fails on any P1 failure and prints coverage per module; ZAP baseline result.
-- Done when: matrix shows a level, file and status for all 72 TCs; all 51 P1 TCs pass or have a signed manual result.
+- Done when: matrix shows a level, file and status for all 73 TCs; all 52 P1 TCs pass or have a signed manual result.
 
 #### QA-02: Red team of anti-cheating controls
 - Owner: qa-engineer. Branch: `qa/red-team`. Depends on: DEP-01, BE-15A, FE-13.

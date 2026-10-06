@@ -14,27 +14,24 @@ import { z } from 'zod';
 import { CodedHttpException } from '../common/coded.exception';
 import type { CandidateProblemCode } from '../common/coded.exception';
 import { PrismaService } from '../database/prisma.service';
-import { Difficulty, QuestionType } from '../generated/prisma/enums.js';
+import { CandidateScope } from './candidate-scope';
 import { readExtraTime, scaledMs } from '../session/accommodations';
 import { SessionKeyConfigError, SessionKeyService } from '../session/session-key.service';
 import { SessionStateConflictError } from '../session/session-state.errors';
 import { SessionStateService } from '../session/session-state.service';
 import { LIVE_STATUSES, PRE_START_STATUSES } from '../session/session-transitions';
 import { sessionNotActive } from '../session/session-write-gate';
+import { parseRandomRule, ruleKey } from '../tests/random-rule';
+import type { RandomRule } from '../tests/random-rule';
+import { unservedSlots } from '../tests/feasibility';
 import type { CandidateContext } from './candidate.types';
+import { assignDistinct } from './random-assignment';
+
+/** Candidates read per random rule (ordered by id): wide enough for variety between candidates. */
+const RANDOM_POOL = 2000;
 
 /** The latest system check must be this fresh when the test starts (ADR 0013 section 3). */
 export const SYSTEM_CHECK_MAX_AGE_MS = 15 * 60_000;
-
-// What BE-06 stores in test_questions.random_rule. Unknown keys are refused, so a rule that this
-// code does not understand fails the start instead of silently picking from the whole bank.
-const randomRuleSchema = z
-  .object({
-    tags: z.array(z.string().min(1).max(64)).max(20).optional(),
-    difficulty: z.enum(Difficulty).optional(),
-    type: z.enum(QuestionType).optional(),
-  })
-  .strict();
 
 // What the system-check route (BE-10) stores in sessions.device_info.systemCheck.
 const systemCheckSchema = z.object({
@@ -87,9 +84,19 @@ export class TestStartService {
     private readonly prisma: PrismaService,
     private readonly states: SessionStateService,
     private readonly keys: SessionKeyService,
+    private readonly scope: CandidateScope,
   ) {}
 
-  async start(ctx: CandidateContext, now: Date = new Date()): Promise<TestStartView> {
+  /**
+   * Everything here reads question content, test sections, accommodations, the wrapped key and
+   * writes status, so it runs in the org scope, not the candidate scope (CS-4.4 opens none of it
+   * until PR 2's grants). The session id is the token's.
+   */
+  start(ctx: CandidateContext, now: Date = new Date()): Promise<TestStartView> {
+    return this.scope.asOrg(ctx, () => this.startInScope(ctx, now));
+  }
+
+  private async startInScope(ctx: CandidateContext, now: Date): Promise<TestStartView> {
     const session = await this.prisma.client.session.findUnique({
       where: { id: ctx.sessionId },
       select: { status: true, deviceInfo: true, invitationId: true },
@@ -150,7 +157,7 @@ export class TestStartService {
       );
     }
     const deadlineAt = new Date(now.getTime() + scaledMs(test.durationMinutes, extra));
-    const planned = await this.plan(sections, testQuestions);
+    const planned = await this.plan(ctx.sessionId, sections, testQuestions);
     let wrappedKey: string;
     try {
       wrappedKey = this.keys.generateWrapped(ctx.sessionId);
@@ -245,6 +252,7 @@ export class TestStartService {
   }
 
   private async plan(
+    sessionId: string,
     sections: readonly { id: string; position: number }[],
     testQuestions: readonly {
       id: string;
@@ -260,8 +268,7 @@ export class TestStartService {
         (order.get(a.sectionId) ?? 0) - (order.get(b.sectionId) ?? 0) ||
         testQuestions.indexOf(a) - testQuestions.indexOf(b),
     );
-    const usedQuestionIds = new Set<string>();
-    const usedVersionIds = new Set<string>();
+    const takenQuestionIds = new Set<string>();
     // Fixed slots first: every fixed question (whatever the slot order) is taken before any random
     // rule is resolved, so a random pick can never repeat a fixed question or another version of it.
     const fixed = new Map<string, string>();
@@ -279,16 +286,25 @@ export class TestStartService {
           'RANDOM_RULE_UNSATISFIABLE',
         );
       }
-      usedQuestionIds.add(found.questionId);
-      usedVersionIds.add(found.id);
+      takenQuestionIds.add(found.questionId);
       fixed.set(tq.id, found.id);
     }
+    const randomVersions = await this.assignRandom(
+      sessionId,
+      ordered.filter((tq) => tq.questionVersionId === null),
+      takenQuestionIds,
+      fixed.size,
+    );
     const out: PlannedQuestion[] = [];
     for (const tq of ordered) {
-      const versionId =
-        fixed.get(tq.id) ??
-        (await this.resolveRandom(tq.randomRule, usedQuestionIds, usedVersionIds));
-      usedVersionIds.add(versionId);
+      const versionId = fixed.get(tq.id) ?? randomVersions.get(tq.id);
+      if (versionId === undefined) {
+        throw coded(
+          HttpStatus.CONFLICT,
+          'No question matches a random rule of this test.',
+          'RANDOM_RULE_UNSATISFIABLE',
+        );
+      }
       const variants = await this.prisma.client.questionVariant.findMany({
         where: { questionVersionId: versionId, isActive: true },
         select: { id: true },
@@ -303,52 +319,88 @@ export class TestStartService {
     return out;
   }
 
-  private async resolveRandom(
-    rawRule: unknown,
-    usedQuestionIds: Set<string>,
-    usedVersionIds: Set<string>,
-  ): Promise<string> {
-    const rule = randomRuleSchema.safeParse(rawRule);
-    if (!rule.success) {
-      throw coded(
-        HttpStatus.CONFLICT,
-        'A random question rule of this test is not understood.',
-        'RANDOM_RULE_UNSATISFIABLE',
+  /**
+   * One question for every random slot, by the same exact matching the save-time check uses
+   * (tests/feasibility.ts), so a test that was accepted at save never fails here. Candidates per
+   * distinct rule: the org's questions that are not archived, whose current version is published
+   * with the rule's difficulty, with every tag and the type, ordered by id and bounded.
+   * Returns test_question id -> the question's current version id.
+   */
+  private async assignRandom(
+    sessionId: string,
+    slots: readonly { id: string; randomRule: unknown }[],
+    taken: ReadonlySet<string>,
+    fixedCount: number,
+  ): Promise<Map<string, string>> {
+    const result = new Map<string, string>();
+    if (slots.length === 0) return result;
+    const rules: RandomRule[] = [];
+    for (const slot of slots) {
+      const parsed = parseRandomRule(slot.randomRule);
+      if (!parsed.ok) {
+        throw coded(
+          HttpStatus.CONFLICT,
+          'A random question rule of this test is not understood.',
+          'RANDOM_RULE_UNSATISFIABLE',
+        );
+      }
+      rules.push(parsed.rule);
+    }
+    // Enough ids per rule that truncating cannot change feasibility (feasibility.ts candidateCap),
+    // and a wide pool so different candidates still get different questions.
+    const take = Math.max(RANDOM_POOL, slots.length + fixedCount);
+    const byKey = new Map<string, string[]>();
+    const versionOf = new Map<string, string>();
+    for (const rule of rules) {
+      const key = ruleKey(rule);
+      if (byKey.has(key)) continue;
+      const rows = await this.prisma.client.question.findMany({
+        where: {
+          isArchived: false,
+          currentVersionId: { not: null },
+          ...(rule.type !== undefined ? { type: rule.type } : {}),
+          ...(rule.tags !== undefined ? { tags: { hasEvery: rule.tags } } : {}),
+          currentVersion: {
+            is: {
+              isPublished: true,
+              ...(rule.difficulty !== undefined ? { difficulty: rule.difficulty } : {}),
+            },
+          },
+        },
+        select: { id: true, currentVersionId: true },
+        orderBy: { id: 'asc' },
+        take,
+      });
+      for (const r of rows)
+        if (r.currentVersionId !== null) versionOf.set(r.id, r.currentVersionId);
+      byKey.set(
+        key,
+        rows.map((r) => r.id),
       );
     }
-    const { tags, difficulty, type } = rule.data;
-    const questions = await this.prisma.client.question.findMany({
-      where: {
-        isArchived: false,
-        currentVersionId: { not: null },
-        ...(type !== undefined ? { type } : {}),
-        ...(tags !== undefined && tags.length > 0 ? { tags: { hasEvery: tags } } : {}),
-      },
-      select: { id: true, currentVersionId: true },
-      take: 2000,
-    });
-    const versionIds = questions
-      .filter((q) => !usedQuestionIds.has(q.id) && q.currentVersionId !== null)
-      .map((q) => q.currentVersionId as string)
-      .filter((id) => !usedVersionIds.has(id));
-    const versions = await this.prisma.client.questionVersion.findMany({
-      where: {
-        id: { in: versionIds },
-        isPublished: true,
-        ...(difficulty !== undefined ? { difficulty } : {}),
-      },
-      select: { id: true, questionId: true },
-    });
-    const chosen = pick(versions);
-    if (chosen === undefined) {
+    const options = rules.map((rule) => byKey.get(ruleKey(rule)) ?? []);
+    if (unservedSlots(options, taken).length > 0) {
       throw coded(
         HttpStatus.CONFLICT,
         'No question matches a random rule of this test.',
         'RANDOM_RULE_UNSATISFIABLE',
       );
     }
-    usedQuestionIds.add(chosen.questionId);
-    return chosen.id;
+    const chosen = assignDistinct(options, taken, sessionId);
+    slots.forEach((slot, i) => {
+      const questionId = chosen[i];
+      const versionId =
+        questionId === null || questionId === undefined ? undefined : versionOf.get(questionId);
+      if (versionId === undefined) {
+        throw coded(
+          HttpStatus.CONFLICT,
+          'No question matches a random rule of this test.',
+          'RANDOM_RULE_UNSATISFIABLE',
+        );
+      }
+      result.set(slot.id, versionId);
+    });
+    return result;
   }
 
   /** The running session's outline: ids, positions, points and times; no question content. */

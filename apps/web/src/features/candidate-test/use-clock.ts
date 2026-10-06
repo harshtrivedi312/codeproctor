@@ -1,14 +1,12 @@
 'use client';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import * as React from 'react';
-import { api } from '@/lib/api/client';
 import { computeClockOffset, remainingMs } from './timer';
 
 /** How often the offset is re-read from /v1/time (FR-505, TC-047). */
 export const CLOCK_RESYNC_MS = 60_000;
 /** Difference between Date.now and performance.now deltas that counts as an OS clock jump. */
 export const CLOCK_DRIFT_MS = 2_000;
-const QUERY_KEY = ['server-time'] as const;
 
 /**
  * Monotonic clock for ticking. The offset is measured against `performance.now()`, not
@@ -18,7 +16,11 @@ const QUERY_KEY = ['server-time'] as const;
  */
 const monotonicNow = (): number => performance.now();
 
-export function useServerClock(): {
+export function useServerClock(
+  readServerNow: () => Promise<string>,
+  /** Names the source, so a demo offset can never carry into a real run (same query client). */
+  scope: string,
+): {
   ready: boolean;
   remaining: (deadlineIso: string | null | undefined) => number | null;
   /** True when the server time could not be read at all: the screen must not run unchecked. */
@@ -31,6 +33,7 @@ export function useServerClock(): {
   syncFromServer: (serverNowIso: string, requestStart: number, responseEnd: number) => void;
 } {
   const queryClient = useQueryClient();
+  const QUERY_KEY = React.useMemo(() => ['server-time', scope] as const, [scope]);
   const {
     data: offset,
     isError,
@@ -43,10 +46,9 @@ export function useServerClock(): {
     refetchOnWindowFocus: true,
     queryFn: async () => {
       const start = monotonicNow();
-      const { data, error } = await api.GET('/v1/time');
+      const serverNow = await readServerNow();
       const end = monotonicNow();
-      if (error || !data) throw new Error('Could not read the server time');
-      return computeClockOffset(Date.parse(data.serverNow), start, end);
+      return computeClockOffset(Date.parse(serverNow), start, end);
     },
   });
   const [now, setNow] = React.useState(monotonicNow);
@@ -66,14 +68,14 @@ export function useServerClock(): {
       setNow(mono);
     }, 1000);
     return () => window.clearInterval(id);
-  }, [queryClient]);
+  }, [queryClient, QUERY_KEY]);
   const syncFromServer = React.useCallback(
     (serverNowIso: string, requestStart: number, responseEnd: number) => {
       const serverNow = Date.parse(serverNowIso);
       if (Number.isNaN(serverNow)) return;
       queryClient.setQueryData(QUERY_KEY, computeClockOffset(serverNow, requestStart, responseEnd));
     },
-    [queryClient],
+    [queryClient, QUERY_KEY],
   );
   return {
     ready: offset !== undefined,

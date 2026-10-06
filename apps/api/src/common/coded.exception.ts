@@ -1,7 +1,12 @@
-import { ForbiddenException, HttpException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, HttpException } from '@nestjs/common';
 
 /** Machine-readable codes the problem filter copies into the RFC 7807 body as `code`. */
-export const PROBLEM_CODES = ['REAUTH_FAILED', 'TWO_FACTOR_REQUIRED_FOR_ROLE'] as const;
+export const PROBLEM_CODES = [
+  'REAUTH_FAILED',
+  'TWO_FACTOR_REQUIRED_FOR_ROLE',
+  'SETTINGS_CONFLICT',
+  'VARIANT_HAS_AI_REFERENCES',
+] as const;
 
 /**
  * Codes of the candidate session routes (BE-07, ADR 0013 section 5.1 and 5.10). Clients branch on
@@ -58,6 +63,16 @@ export class CodedForbiddenException extends ForbiddenException {
   }
 }
 
+/** A 409 that carries a stable machine code (e.g. SETTINGS_CONFLICT after a lost compare-and-set). */
+export class CodedConflictException extends ConflictException {
+  constructor(
+    message: string,
+    readonly code: ProblemCode,
+  ) {
+    super({ message, code });
+  }
+}
+
 /**
  * Re-authentication failed on a route that needs the current password. A 403, not a 401, so the
  * web app does not treat it as an expired session. Wrong password, locked account and every
@@ -70,7 +85,7 @@ export function reauthFailed(): CodedForbiddenException {
 
 /**
  * Any 4xx or 503 that carries a stable machine code (ADR 0013 section 5.1). `extensions` are extra
- * RFC 7807 members such as `status` (SESSION_NOT_ACTIVE) or `retryAfterSeconds`; they hold facts
+ * RFC 7807 members such as `sessionStatus` (SESSION_NOT_ACTIVE) or `retryAfterSeconds`; they hold facts
  * about the caller's own session only, never secrets.
  */
 export class CodedHttpException extends HttpException {
@@ -82,4 +97,15 @@ export class CodedHttpException extends HttpException {
   ) {
     super({ message, code }, status);
   }
+}
+
+/**
+ * Every refusal on POST /auth/2fa/disable (wrong password, wrong or replayed code, locked
+ * account, password changed meanwhile) carries this one detail, so it never says which factor was
+ * wrong and never tells the user to retype a password that was right (FU-BE-58). Status and code
+ * stay 403 REAUTH_FAILED. A code that already signed the user in is a replay: wait for the next one.
+ */
+export const DISABLE_REFUSED_DETAIL = 'The password or code is incorrect.';
+export function disableRefused(): CodedForbiddenException {
+  return new CodedForbiddenException(DISABLE_REFUSED_DETAIL, 'REAUTH_FAILED');
 }
