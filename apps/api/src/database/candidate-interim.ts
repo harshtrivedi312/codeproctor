@@ -117,6 +117,9 @@ export const CANDIDATE_READ: Readonly<Partial<Record<ModelName, CandidateReadRul
   Submission: readRule(['id', 'sessionQuestionId', 'kind', 'language', 'createdAt'], {
     runOnly: ['results', 'passed', 'total'],
   }),
+  // CS-4.4: id, attempt, status, created_at. `status` includes WAIVED (ADR 0015: the candidate projection
+  // derives `identityCheckWaived` from the WAIVED row); the video_check_* columns of ADR 0015 are not listed,
+  // so the default omit hides them.
   IdentityCheck: readRule(['id', 'attempt', 'status', 'createdAt'], { keys: ['sessionId'] }),
   MediaChunk: readRule(['id', 'stream', 'segment', 'seq', 'sizeBytes', 'uploadedAt'], {
     keys: ['sessionId'],
