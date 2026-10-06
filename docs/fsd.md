@@ -91,10 +91,10 @@ This tab turns each business requirement into testable functional requirements (
 - **FR-703** Recordings are encrypted at rest; playback uses signed URLs valid for 15 minutes.
 - **FR-704** A scheduled job deletes stored data on four clocks (ADR 0004 §5 and §9; updated 2026-10-06, D-54):
   - **Recordings and session media** (all streams, the room scan included), evidence snapshots and keystroke data: after the retention period (default 90 days, configurable). The period counts from the session's final outcome, and nothing on this clock is deleted while a review or appeal is open.
-  - **Face images** (ID image, selfie, and identity re-check frames kept on a mismatch): at most 90 days after capture or submission, whatever any review hold or the organization's retention period says. A shorter retention period shortens it (C-27, C-35).
-  - **Results** (scores, verdicts, reviewer notes, submitted code and answers, reports): 1 year after the session's final outcome, then deleted, leaving only anonymized statistics (C-26).
+  - **Face images** (ID image, selfie, and identity re-check frames kept on a mismatch): at most 90 days after capture or submission, whatever any review hold or the organization's retention period says. A shorter retention period shortens it (C-27, C-35; whether evidence snapshots and webcam recordings join the 90-day cap is open, ADR 0004 §9.10 Q2).
+  - **Results** (scores, verdicts, reviewer notes, submitted code and answers, reports): 1 year after the session's final outcome (counted from the final outcome; counting from the test date instead is open, ADR 0004 §9.10 Q3), then deleted, leaving only anonymized statistics (C-26).
   - **Signed consent records:** 3 years after signing, then deleted (C-04, C-17; FR-401).
-  - A clock's data is deleted only after the deletion is verified; a failed deletion is retried daily and alerts after 3 days.
+  - A clock is marked done only after its deletion is verified (every page listed, no errors, an empty re-listing); otherwise it retries daily and alerts after 3 days.
 
 ### M8 Integrity Engine
 
@@ -135,7 +135,7 @@ This tab turns each business requirement into testable functional requirements (
 | PAUSED | Fullscreen exit, share stopped, STRICT side camera lost, proctor pause (only a proctor pause stops the clock) | IN\_PROGRESS, SUBMITTED |
 | SUBMITTED | Candidate submits, last section ends, or time runs out | GRADED |
 | GRADED | Hidden tests and risk score done | UNDER\_REVIEW |
-| UNDER\_REVIEW | Every graded session (C-28); risk band, identity awaiting manual review and a short answer awaiting manual scoring order the queue | COMPLETED |
+| UNDER\_REVIEW | Every graded session (C-28); risk band, identity awaiting manual review and a short answer awaiting manual scoring are shown in the queue (ordering is an architect detail of ADR 0014, still Proposed) | COMPLETED |
 | COMPLETED | Verdict set | APPEALED |
 | APPEALED | Candidate appeals within 7 days of a VIOLATION verdict | COMPLETED |
 | EXPIRED | Start window closed before the test started | — |
@@ -186,7 +186,7 @@ The Next states column does not repeat ERASED; every state can move to it as its
 | NFR-02 | Capacity | 200 concurrent candidates on the pilot deployment |
 | NFR-03 | Availability | 99.5% during scheduled test windows |
 | NFR-04 | Security | OWASP ASVS Level 2; TLS 1.2+; secrets in environment vault; rate limits on all public endpoints |
-| NFR-05 | Privacy | Data minimization, encryption at rest, retention jobs (FR-704), deletion on request. Erasure completes within 30 days of the request, or within 30 days after an open review or appeal closes, whichever is later; the candidate is told about any delay (C-06). Only the sessions with an open review or appeal wait; the hold is configurable. Code and answers are erased too. The signed consent record is kept until its 3-year limit to defend legal claims (C-17); scores remain, pseudonymized until that record is deleted, then anonymized (ADR 0004 §9.5; updated 2026-10-06, D-54) |
+| NFR-05 | Privacy | Data minimization, encryption at rest, retention jobs (FR-704), deletion on request. Erasure completes within 30 days of the request, or within 30 days after an open review or appeal closes, whichever is later; the candidate is told about any delay (C-06). Only the sessions with an open review or appeal wait; the hold is configurable. Code and answers are erased too. The signed consent record is kept until its 3-year limit to defend legal claims (C-17); scores remain until R-10 deletes them (anchor + 1 year), pseudonymized while that record exists, then anonymized when it is deleted at 3 years (ADR 0004 §9.5; updated 2026-10-06, D-54) |
 | NFR-06 | Accessibility | WCAG 2.1 AA on candidate and staff screens |
 | NFR-07 | Browser support | Chrome and Edge (latest 2 versions) for STANDARD/STRICT; Firefox and Safari blocked with a clear message |
 | NFR-08 | Resilience | A network drop of up to 60 s loses no code and no recording chunks |

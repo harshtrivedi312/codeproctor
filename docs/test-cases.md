@@ -2,7 +2,7 @@
 
 73 test cases cover every FSD module; the 52 marked P1 must pass before the pilot. Types: F = functional, S = security, I = integrity (anti-cheating), P = performance, A = accessibility, R = resilience.
 
-Updated 2026-10-01 (ARC-01 Phase B, D-16..D-23). Changed: TC-007, TC-012, TC-030, TC-048, TC-094. Added: TC-095..TC-099, each marked "added 2026-10-01" and placed in its module table.
+Updated 2026-10-01 (ARC-01 Phase B, D-16..D-23); 2026-10-06 (D-54: TC-072 and TC-094 wording only). Changed: TC-007, TC-012, TC-030, TC-048, TC-094. Added: TC-095..TC-099, each marked "added 2026-10-01" and placed in its module table.
 
 ## Identity & access (M1)
 
@@ -115,4 +115,4 @@ Updated 2026-10-01 (ARC-01 Phase B, D-16..D-23). Changed: TC-007, TC-012, TC-030
 | TC-091 | NFR-01 | Code execution latency | 50 concurrent runs | p95 under 5 s | P | P2 |
 | TC-092 | NFR-06 | Accessibility | axe + screen reader on candidate flow | No WCAG 2.1 AA violations | A | P1 |
 | TC-093 | NFR-04 | OWASP scan | OWASP ZAP baseline against staging | No high findings | S | P1 |
-| TC-094 | NFR-05 | Deletion on request | Admin deletes a candidate: once with no open review or appeal, once while an appeal is open, then close the appeal | No open review or appeal: all personal data, media, report, code and answers removed within 30 days; every session ERASED; the signed consent record and PDF kept until their 3-year limit; scores kept, pseudonymized while the consent record exists; audit logged. Open appeal: that session waits and the candidate is told; it is erased within 30 days after the appeal closes (C-06, C-17; updated 2026-10-06, ADR 0004 §9.5, D-54) | S | P2 |
+| TC-094 | NFR-05 | Deletion on request | Admin deletes a candidate: once with no open review or appeal, once while an appeal is open, then close the appeal | No open review or appeal: all other personal data, media, report, code and answers removed within 30 days; every session ERASED; the signed consent record and PDF kept until their 3-year limit; scores kept, pseudonymized while the consent record exists; audit logged. Open appeal: that session waits and the candidate is told; it is erased within 30 days after the appeal closes (C-06, C-17; updated 2026-10-06, ADR 0004 §9.5, D-54) | S | P2 |

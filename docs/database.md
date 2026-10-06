@@ -8,7 +8,7 @@ Updated 2026-10-06 for D-54, which accepted the ADR 0004 section 9 amendment, AD
 - **Schema deltas:** the enum values `session_status` ERASED, `appeal_status` CLOSED_ERASED and `identity_check_status` WAIVED; three `identity_checks` video-check columns with one foreign key and two CHECK constraints; one partial index on `audit_logs`; and `REVOKE DELETE, TRUNCATE ON sessions`. There are no new tables or enum types.
 - **Data rules:** the retention tiers, R-9 and R-10, the amended erasure, and the identity-check waiver.
 - **Comments:** `batch_seq`, `hmac_key_enc` and `device_info` follow ADR 0013.
-- **Built status (2026-10-06).** None of these deltas is on main yet. The migrations are in open PRs #91 (ADR 0004 section 9: `20261007010000_session_status_erased`, `20261007010100_appeal_status_closed_erased`, `20261007010200_retention_marker_index_and_no_session_delete`) and #100 (ADR 0015: `20261005235956_identity_check_waived_enum`, `20261005235957_identity_check_waiver_columns`). Their SQL matches the DDL below.
+- **Built status (2026-10-06).** None of these deltas is on main yet. The migrations are in open PRs #91 (ADR 0004 section 9: `session_status_erased`, `appeal_status_closed_erased`, `retention_marker_index_and_no_session_delete`) and #100 (ADR 0015: `identity_check_waived_enum`, `identity_check_waiver_columns`); the timestamps in their names change when they are rebased (FU-DB-168), so only the suffixes are cited here. Their SQL matches the DDL below.
 - **Delta list.** ADR 0008 §11 (post-freeze deltas) is still to be written by the hub. Until then, ADR 0004 section 9 and ADR 0015 section 4 are the delta source.
 
 ## Entity-relationship diagram
@@ -733,7 +733,7 @@ CREATE INDEX ON webhook_deliveries (endpoint_id, created_at DESC);
 **Session state.** Only SessionStateService writes `sessions.status`, following the transition map in fsd.md section 3 (ADR 0002).
 - ERASED is terminal and has no exit transition, so an ERASED session can never be appealed (ADR 0004 §9.5). The ADR 0002 amendment that adds it is still owed (ADR 0004 §9.9 row 20).
 - `sessions` rows are never deleted by any retention, results or erasure job. `consents.session_id` is `ON DELETE CASCADE`, so deleting a session would delete the consent proof that R-9 keeps. The database enforces it: `app_user` has no DELETE or TRUNCATE on `sessions` (ADR 0004 §9.3). Test teardown and seed cleanup delete sessions as the migration owner.
-- **Session-job writers (ADR 0004 §9.5 step 4).** SERVICE writers (grading and its reconciler, analysis, the `face-recheck` outcome, `server-event`, report generation, webhooks) take the `sessions` row lock first through `SessionJobProcessor.withLiveSession`, which calls `SessionStateService.guardLive`. On ERASED they write nothing, objects included.
+- **Session-job writers (ADR 0004 §9.5 step 4).** SERVICE writers (grading and its reconciler, analysis, the `face-recheck` outcome, `server-event`, report generation, webhooks) take the `sessions` row lock first through `SessionJobProcessor.withLiveSession`, which calls `SessionStateService.guardLive` (its only other direct caller is the STAFF `proctorResume` method, ADR 0013 5.7). On ERASED they write nothing, objects included.
   - Erasure-compatible jobs use `withAnySession`, which takes the same lock but does not stop on ERASED. They are ingest close, the sweeps, `evidence-expire`, the erasure re-run and the consent-PDF job.
   - After `guardLive`, transactions stay short and make no external call, apart from one bounded object write (NFR-01).
 
@@ -797,7 +797,7 @@ Row creation (invite inserts `invitations` before `sessions`) is exempt.
   - null `session_reviews.notes` and `session_questions.scoring_note`;
   - clear `sessions.device_info`;
   - reduce the waiver (ADR 0015);
-  - null `sessions.total_score`, `risk_score` and `risk_band`, `session_questions.score` and `session_reviews.verdict`, and delete the `appeals` row (option (a) of ADR 0004 §9.4).
+  - null `sessions.total_score`, `risk_score` and `risk_band`, `session_questions.score` and `session_reviews.verdict`, and delete the `appeals` row (option (a) of ADR 0004 §9.4, subject to ADR 0004 §9.10 Q4, the multi-session case, which is still open).
   - The `sessions` row (status, timestamps, invitation) and the audit rows remain. Statistics are counts. Score and pass-rate statistics use only sessions still inside their year.
   - Appeal creation refuses a review whose verdict is NULL or whose 7-day window, counted from `session_reviews.completed_at`, has passed.
   - Once no session of the candidate still has results, R-10 anonymises the `candidates` row as erasure does, and sends no email. It leaves a candidate with a pending erasure request to the erasure run.
@@ -808,7 +808,7 @@ Row creation (invite inserts `invitations` before `sessions`) is exempt.
   - Declined consents use 3 years from `declined_at`. This is provisional, pending open owner question OQ-11.
   - The period is a system constant, not an org setting.
   - There is no legal hold yet (open owner question OQ-10).
-- *Kept.* Audit rows (IDs only) and the `sessions` row are kept. Nothing else is kept without a clock.
+- *Kept with no clock (stated exactly, not as "nothing else").* The `sessions` row and the audit rows (IDs only); the structural rows `invitations`, `session_reviews` (reviewer and timestamps), `session_questions` and `webhook_deliveries`; the anonymised `candidates` row; and `invitations.accommodations`: its setting flags, and its free-text `notes` and the waiver reduction, which stay open under OQ-12 (ADR 0004 section 9.10).
 
 **Erasure on request (ADR 0004 R-6 and §9.5, C-06, C-17).** Erasure completes within 30 days of the request, or within 30 days after an open review or appeal closes, whichever is later. The candidate is told about any delay.
 - **Request.** A SUPER_ADMIN request sets `candidates.erasure_requested_at`. New invitations for that candidate are refused with 409 `CANDIDATE_ERASURE_PENDING`.
@@ -836,7 +836,7 @@ Row creation (invite inserts `invitations` before `sessions`) is exempt.
   - day 28 of the C-06 deadline.
 
   A day-25 alert asks a person to tell the candidate if neither exists.
-- **What remains.** Scores, risk scores and verdicts remain. They are pseudonymised while the consent proof exists, and anonymised once R-9 deletes it.
+- **What remains.** Scores, risk scores and verdicts remain until R-10 deletes them (anchor + 1 year, counted from the erasure fence for an erased session), pseudonymised while the consent proof exists, and anonymised once R-9 deletes it (3 years).
 - **Access after erasure.** From the first fence, everyone except the email worker and SUPER_ADMIN sees the candidate as "Erased", through one read projection, `CandidateProjection.forViewer()`. Only SUPER_ADMIN reads an erased candidate's consent record and PDF, and each read is audited.
   - `signed_name`, `ip`, `user_agent` and the PDF never reach review, recruiter, export, report or webhook paths.
   - System readers of `consents` go through `ConsentRetentionRepository` with a fixed `select`. The R-9 job and the R-7 re-application read ids and keys only. The consent-PDF renderer reads its own session's record.
