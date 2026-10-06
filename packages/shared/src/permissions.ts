@@ -50,6 +50,7 @@ export const PERMISSIONS = [
   'candidate_keystrokes:write', // POST /candidate/session/keystrokes
   'candidate_answer:run', // POST /candidate/answers/:questionId/run
   'candidate_answer:submit', // POST /candidate/answers/:questionId/submit
+  'candidate_answer:draft', // PUT /candidate/answers/:questionId/draft (code, MCQ and short-answer autosave; ADR 0013 5.11)
   'candidate_session:finish', // POST /candidate/session/finish
   'candidate_session:read', // GET /candidate/session (ADR 0013)
   'candidate_session:start', // POST /candidate/session/test/start (authenticated test start, not the public OTP exchange /candidate/session/start)
@@ -108,6 +109,7 @@ const CANDIDATE_PERMISSIONS = [
   'candidate_keystrokes:write',
   'candidate_answer:run',
   'candidate_answer:submit',
+  'candidate_answer:draft',
   'candidate_session:finish',
   'candidate_session:read',
   'candidate_session:start',
