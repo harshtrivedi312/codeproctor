@@ -694,6 +694,8 @@ All of it comes from one projection:
 
   In addition, a staff token on `/candidate/*` returns 401, and a candidate token on staff routes returns 401.
 
+- **Interim exception for BE-07 (P-24, pending the owner; not accepted).** BE-07 (#98) diverges from this section in four ways until CS-4 PRs 2 and 3 land, and in any case before the pilot: (1) its services make org-scope reads beyond the guard's DL-31 pre-read; (2) candidate scope is entered once per service step (`candidate-scope.ts`) instead of once in the guard; (3) VERIFIED to IN_PROGRESS runs in the request, in org scope, instead of in a start-session SERVICE job; (4) consent sign and decline run without the CS-4.4 `ConsentService` create grant (item 9; it arrives in CS-4 PR 2). Mitigations: the guard follows DL-31 (facts set first, fail closed, no unscoped route), and code-reviewer and the architect accepted the remaining org-scope surface as interim. **Gate B-3:** FU-BEB-15 and FU-BEB-66 must close before any BE-09, BE-10 or BE-11 route that takes client-supplied ids merges, and before the pilot. If the owner declines P-24, BE-07 does not merge until the four divergences are removed.
+
 ### 5.11 Submit and grading (keeps ADR 0007 §5)
 
 - **`POST /candidate/answers/:questionId/submit`** stores a `SUBMIT` row with the code and language and returns **200 `{ accepted: true, submissionId }`. Nothing else is returned**: no per-test result, weight or score. Hidden tests and answers therefore cannot be used as an oracle.
@@ -702,7 +704,7 @@ All of it comes from one projection:
   - Redis `INCR submits:{sid}:{sqid}` returns the new count. Above 20, the route `DECR`s and answers 409 `SUBMIT_LIMIT_REACHED`. If the insert fails after the `INCR`, the route also `DECR`s.
 - **What is graded (consistent with ADR 0002 S-5 and backend.md Step 11).** Candidate scope cannot read `submissions.source_code`, so closing a section is a SERVICE job, `close-section`. **It is the only writer of `session_sections.ended_at`.**
   - **Who enqueues it:**
-    - the section-finish route (finish variant);
+    - the section-finish route (finish variant): `POST /candidate/session/section/finish` with `{ position }`, the section's position within the token's own session, never an id. It is enqueue-only and idempotent: the open section enqueues the close, an already closing or closed section is a 202 no-op, a section that has not opened yet is 409 `SECTION_NOT_OPEN`, an unknown position is 404. A delayed retry therefore cannot finish the next section after the close opened it (P-25, ADR 0002 S-1 and S-4);
     - the section deadline (deadline variant);
     - `/finish` and the session-deadline auto-submit, through the SUBMITTED flow (final variant).
 
@@ -751,6 +753,15 @@ All of it comes from one projection:
 - **Grading.** `grade-session` (SERVICE) runs after the session is SUBMITTED, as ADR 0007 §5 and backend.md Step 11 already say ("On SUBMITTED, enqueue grade-session"). It covers hidden tests through Judge0 with the variant data, MCQ by key, and short answers by normalised match or MANUAL_PENDING (D-23).
 - **Run** (sample tests, FR-502, one per 5 s) still returns sample results.
 - **What the candidate sees after the test** (score, pass/fail or nothing) is an owner decision (Q17). No FR authorises showing scores or hidden results today, so the default is a "submitted" page only.
+
+#### Architect details for BE-11 (2026-10-06; owner decisions are marked)
+
+- **Accepted deviations from the text above, as architect detail,** on these conditions: (a) no BullMQ close-section flow, (b) one grading-sweep job and (d) no `render-question` jobs are acceptable if the open-section gate refuses every write after a section's deadline at request time (so FR-301's server-enforced deadline never depends on job timing), the graded snapshot equals the saved state at the deadline, the next section opens without a sweep interval costing or giving the candidate time, and questions are rendered lazily and deterministically from the session's fixed variant assignment, identical on every read. The section-finish route is **not** dropped (P-25, above).
+- **Grading timing.** `grade-session` runs flow-less with a 5 s start delay (so in-flight saves land first), and the grading-sweep reconciler runs every 15 s; both replace the "every 5 minutes" figure for discovery. The reconciler still skips a session whose `grade-session` job is active, waiting or delayed, skips ERASED sessions and `RETENTION_RESULTS_DONE`, and alerts on sessions stuck longer than 1 hour.
+- **Late write after the close claim (FU-BEB-86; owner decision P-27).** Grading uses the snapshot taken at the close and never throws because of a write that commits after it. Recommendation: a SERVER event `LATE_WRITE_AFTER_SECTION_CLOSE` (LOW, weight 0, payload `{ sessionQuestionId, sectionPosition }`, never code). Until it exists in `packages/shared`, `grade-session` writes a job audit row of the same name (actor null, `metadata { system: true, sessionId, sessionQuestionId }`, api-contract section 3) and a structured warning with ids only. It does **not** use `session_questions.scoring_note`, which the reviewer's note shares.
+- **Identifying the graded row (FU-BEB-89; owner decision P-28).** Prisma sets `created_at` at millisecond precision, so the "database `now()` microseconds" premise above does not hold for candidate rows. Recommendation: add `SNAPSHOT` to `submission_kind` (an ADR 0008 delta, Database A). Interim: the rule above stands (more than one match fails loudly and alerts, never a wrong grade); a candidate row can match only by hitting the same millisecond.
+- **Routing.** `grade-session` leaves the session GRADED; `route-session` (ADR 0014, BE-12) moves it to UNDER_REVIEW after analysis finishes or is abandoned (Q-22), so the review queue never opens before the findings exist. C-28 is unchanged.
+- **What the candidate sees (Q17; owner decision, recommendation).** Candidate routes return every status from SUBMITTED onward (GRADED, UNDER_REVIEW, APPEALED, COMPLETED) as `SUBMITTED`; EXPIRED and DECLINED are shown as they are.
 
 ## 6. ML model files (decision 4)
 
