@@ -6,8 +6,8 @@ import { getGeneration } from '@/lib/auth-session';
 import type { DesiredVariant, TestCase } from './draft';
 
 /*
- * TanStack Query hooks for the question bank, against the real BE-04a routes (plus the web-only
- * placeholders listed in docs/followups/frontend.md). Question data (statements, hidden tests,
+ * TanStack Query hooks for the question bank, against the real BE-04a/b/c routes (only prefill is
+ * a web-only placeholder, see docs/followups/frontend.md). Question data (statements, hidden tests,
  * reference solutions, answer keys) lives only in this cache and in component state: never in a
  * URL, in storage or in a log. The cache is cleared when the signed-in user or role changes
  * (AuthProvider), and every write into it is dropped when the session changed since the request
@@ -22,7 +22,7 @@ export const questionKeys = {
     version === undefined
       ? (['questions', 'detail', id] as const)
       : (['questions', 'detail', id, version] as const),
-  ai: (id: string) => ['questions', 'ai', id] as const,
+  ai: (id: string, version: number) => ['questions', 'ai', id, version] as const,
 };
 
 /**
@@ -431,11 +431,13 @@ export function useSaveQuestion(id: string) {
   });
 }
 
+/** Start a validation run of the saved draft; it is bound to the revision the editor loaded. */
 export function useStartValidation(id: string) {
   return useMutation({
-    mutationFn: async () => {
+    mutationFn: async (expectedRevision: string) => {
       const { data, error, response } = await api.POST('/v1/questions/{questionId}/validate', {
         params: { path: { questionId: id } },
+        body: { expectedRevision },
       });
       if (!data) fail(response, error);
       return data;
@@ -443,16 +445,27 @@ export function useStartValidation(id: string) {
   });
 }
 
-/** One poll of a validation job. The editor loops over this until the job is done or failed. */
-export async function fetchValidationJob(
-  id: string,
-  jobId: string,
-): Promise<Schemas['ValidationJob']> {
-  const { data, error, response } = await api.GET('/v1/questions/{questionId}/validation/{jobId}', {
-    params: { path: { questionId: id, jobId } },
+export type ValidationState = Schemas['ValidationStatus'];
+export type ValidationReport = Schemas['ValidationReport'];
+
+/** One read of the validation status of the question (there is one run per question, no job id). */
+export async function fetchValidation(id: string): Promise<ValidationState> {
+  const { data, error, response } = await api.GET('/v1/questions/{questionId}/validation', {
+    params: { path: { questionId: id } },
   });
   if (!data) fail(response, error);
   return data;
+}
+
+/** The status carries the report as an open object; only a well-formed one is used. */
+export function asReport(value: unknown): ValidationReport | null {
+  if (!value || typeof value !== 'object') return null;
+  const r = value as Record<string, unknown>;
+  return typeof r.passed === 'boolean' &&
+    typeof r.revision === 'string' &&
+    Array.isArray(r.perVariant)
+    ? (value as ValidationReport)
+    : null;
 }
 
 export function usePublishQuestion(id: string) {
@@ -503,37 +516,46 @@ export function usePrefill(id: string) {
   });
 }
 
-export function useAiReferences(id: string) {
+/** AI reference solutions of ONE version (they are per version; a new version starts with none). */
+export function useAiReferences(id: string, version: number) {
   return useQuery({
-    queryKey: questionKeys.ai(id),
+    queryKey: questionKeys.ai(id, version),
     // No question yet (create mode, or a type without AI solutions): no request.
-    enabled: id !== '',
+    enabled: id !== '' && version > 0,
     queryFn: async () => {
-      const { data, error, response } = await api.GET('/v1/questions/{questionId}/ai-references', {
-        params: { path: { questionId: id } },
-      });
+      const { data, error, response } = await api.GET(
+        '/v1/questions/{questionId}/versions/{version}/ai-references',
+        { params: { path: { questionId: id, version } } },
+      );
       if (!data) fail(response, error);
       return data;
     },
   });
 }
 
-export function useAddAiReference(id: string) {
+/** Add a row, or supersede one (retire it and insert the replacement in one call). */
+export function useAddAiReference(id: string, version: number) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (vars: { body: Schemas['AiReferenceInput']; supersedes?: string }) => {
-      const result = vars.supersedes
-        ? await api.POST('/v1/questions/{questionId}/ai-references/{referenceId}/supersede', {
-            params: { path: { questionId: id, referenceId: vars.supersedes } },
-            body: vars.body,
-          })
-        : await api.POST('/v1/questions/{questionId}/ai-references', {
-            params: { path: { questionId: id } },
-            body: vars.body,
-          });
-      if (!result.data) fail(result.response, result.error);
-      return result.data;
+    mutationFn: async (vars: { body: Schemas['CreateAiReference']; supersedes?: string }) => {
+      if (vars.supersedes) {
+        const r = await api.POST(
+          '/v1/questions/{questionId}/versions/{version}/ai-references/{aiReferenceId}/supersede',
+          {
+            params: { path: { questionId: id, version, aiReferenceId: vars.supersedes } },
+            body: { replacement: vars.body },
+          },
+        );
+        if (!r.data) fail(r.response, r.error);
+        return r.data;
+      }
+      const r = await api.POST('/v1/questions/{questionId}/versions/{version}/ai-references', {
+        params: { path: { questionId: id, version } },
+        body: vars.body,
+      });
+      if (!r.data) fail(r.response, r.error);
+      return r.data;
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: questionKeys.ai(id) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: questionKeys.ai(id, version) }),
   });
 }

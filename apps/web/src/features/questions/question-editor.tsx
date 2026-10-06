@@ -18,9 +18,10 @@ import {
   toDraft,
   toUpdate,
   toVariants,
+  variantName,
   type DraftValues,
 } from './draft';
-import { aiGate, canPublish, publishChecks } from './gate';
+import { aiGate, canPublish, DEFAULT_AI_POLICY, publishChecks } from './gate';
 import { disposeModels } from './monaco-registry';
 import { MonacoScope } from './monaco-field';
 import { STATUS_LABEL, TYPE_LABEL } from './labels';
@@ -36,7 +37,8 @@ import {
   usePublishQuestion,
   useSaveQuestion,
   useStartValidation,
-  fetchValidationJob,
+  fetchValidation,
+  asReport,
 } from './queries';
 import { AiTab } from './tabs/ai-tab';
 import { AnswerTab } from './tabs/answer-tab';
@@ -119,12 +121,9 @@ function metaOf(detail: FullQuestion | undefined): Meta {
     revision: detail?.version.revision ?? '',
     isPublished: detail?.version.isPublished ?? false,
     validatedAt: detail?.version.validatedAt ?? null,
-    report: detail?.version.validationReport ?? null,
+    report: asReport(detail?.version.validationReport),
   };
 }
-
-/** What the AI publish gate assumes until the web-only AI reference list (BE-04c) has loaded. */
-const DEFAULT_POLICY: Schemas['AiReferencePolicy'] = { refreshDays: 90, minAssistants: 2 };
 
 /**
  * Why a publish did not happen, from the status alone (409 and 422 carry no machine code):
@@ -205,11 +204,24 @@ export function QuestionEditor({
   const languages = useWatch({ control: form.control, name: 'allowedLanguages' });
   const title = useWatch({ control: form.control, name: 'title' });
   const isCoding = questionType === 'CODING';
-  const refs = useAiReferences(isCoding && mode !== 'create' ? (meta.questionId ?? '') : '');
-  const policy = refs.data?.policy ?? DEFAULT_POLICY;
+  // AI rows belong to the version being edited; a new version (a fork) starts with none.
+  const refs = useAiReferences(
+    isCoding && mode !== 'create' ? (meta.questionId ?? '') : '',
+    meta.version,
+  );
+  const policy = DEFAULT_AI_POLICY;
   const gates = aiGate(languages, refs.data?.items ?? [], policy);
 
-  const validationPassed = meta.report?.passed === true && meta.validatedAt !== null;
+  // A passing run counts only for the very content on screen: its revision is the current one.
+  const validationPassed =
+    meta.report?.passed === true &&
+    meta.validatedAt !== null &&
+    meta.report.revision === meta.revision;
+  const formVariants = useWatch({ control: form.control, name: 'variants' });
+  const variantNames = React.useMemo(
+    () => new Map(formVariants.map((v, i) => [v.id, variantName(i)])),
+    [formVariants],
+  );
   const input = {
     type: questionType,
     isPublished: meta.isPublished,
@@ -338,10 +350,29 @@ export function QuestionEditor({
     try {
       const questionId = meta.questionId ?? '';
       const generationAtStart = getGeneration();
-      // The result only counts for the exact saved content it was started on (TC-012).
-      const started = await startValidation.mutateAsync();
+      // The run only counts for the exact saved content it was started on (TC-012).
       const startedFor = revisionRef.current;
-      if (started.revision !== startedFor) {
+      let boundTo: string;
+      try {
+        boundTo = (await startValidation.mutateAsync(startedFor)).revision;
+      } catch (e) {
+        if (!(e instanceof ApiFailure) || (e.status !== 409 && e.status !== 422)) throw e;
+        if (e.status === 422) {
+          setProblem(
+            `The question cannot be validated yet: ${[e.message, ...e.errors].filter(Boolean).join(' ')}`,
+          );
+          return;
+        }
+        // 409 is either "changed since you loaded it" or "a run is already going": ask which.
+        const now = await fetchValidation(questionId);
+        if (now.status === 'RUNNING' && now.revision === startedFor) {
+          boundTo = startedFor;
+        } else {
+          setConflict(true);
+          return;
+        }
+      }
+      if (boundTo !== startedFor) {
         setProblem('The question changed on the server. Reload the latest version, then validate.');
         return;
       }
@@ -351,25 +382,43 @@ export function QuestionEditor({
           setTimeout(resolve, Math.min(pollMs * (1 + attempt * 0.25), pollMs * 5)),
         );
         if (!alive.current) return;
-        const state = await fetchValidationJob(questionId, started.jobId);
+        const state = await fetchValidation(questionId);
         if (!alive.current) return;
-        if (state.status === 'failed') {
-          setProblem(state.error ?? 'The validation job failed. Try again in a moment.');
+        if (state.status === 'RUNNING') continue;
+        if (generationAtStart !== getGeneration()) return;
+        if (state.status === 'NONE') {
+          setProblem(
+            'The validation run was lost (the server may have restarted). Press Validate to try again.',
+          );
           return;
         }
-        if (state.status !== 'done') continue;
-        const report = state.report;
-        if (!report) {
-          setProblem('The validation finished without a report. Press Validate to try again.');
-          return;
-        }
-        if (state.revision !== startedFor || revisionRef.current !== startedFor) {
+        // Whatever the run was bound to, it must be the content on screen and still the current one.
+        if (
+          state.revision !== startedFor ||
+          state.currentRevision !== startedFor ||
+          revisionRef.current !== startedFor ||
+          state.status === 'STALE'
+        ) {
           setProblem(
             'The question changed while it was being validated, so that result was dropped. Press Validate again.',
           );
           return;
         }
-        const validatedAt = report.passed ? (report.finishedAt ?? new Date().toISOString()) : null;
+        const report = asReport(state.report);
+        if (state.status === 'ERROR') {
+          // Nothing was recorded; show why when the report says so.
+          if (report) setMeta((m) => ({ ...m, report, validatedAt: null }));
+          setReportFresh(true);
+          setProblem(
+            'The validation could not complete. Nothing was recorded. Press Validate to try again.',
+          );
+          return;
+        }
+        if (!report) {
+          setProblem('The validation finished without a report. Press Validate to try again.');
+          return;
+        }
+        const validatedAt = state.validatedAt;
         setMeta((m) => ({ ...m, report, validatedAt }));
         setReportFresh(true);
         // Keep the cache in step with what the editor shows, and the history's "validated" column.
@@ -386,9 +435,7 @@ export function QuestionEditor({
       }
       setProblem('Validation is taking longer than expected. Press Validate to try again.');
     } catch (e) {
-      // A 409 on validate: the content changed on the server since it was loaded.
-      if (e instanceof ApiFailure && e.status === 409) setConflict(true);
-      else if (alive.current) setProblem(describe(e));
+      if (alive.current) setProblem(describe(e));
     } finally {
       busy.current = false;
       if (alive.current) setValidating(false);
@@ -579,6 +626,7 @@ export function QuestionEditor({
           isCoding={isCoding}
           stale={isDirty}
           fresh={reportFresh}
+          variantNames={variantNames}
         />
       ) : null}
 
@@ -599,7 +647,7 @@ export function QuestionEditor({
                   <VariantsTab {...tabProps} questionId={meta.questionId} version={meta.version} />
                 );
               case 'ai':
-                return <AiTab {...tabProps} questionId={meta.questionId} policy={policy} />;
+                return <AiTab {...tabProps} questionId={meta.questionId} version={meta.version} />;
               case 'limits':
                 return <LimitsTab {...tabProps} />;
               default:
