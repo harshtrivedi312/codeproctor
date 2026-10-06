@@ -22,7 +22,7 @@ export const WAIVER_REASON_LABEL: Record<WaiverReason, string> = {
   OTHER: 'Another reason',
 };
 
-/** Detectors a recruiter may switch off for one candidate. SIDE_CAMERA stays: a STRICT test needs it. */
+/** Detectors a recruiter may switch off for one candidate. SIDE_CAMERA is not offered: a STRICT test needs it. */
 export const ACCOMMODATION_DETECTORS = PROCTOR_DETECTORS.filter((d) => d !== 'SIDE_CAMERA');
 export type AccommodationDetector = (typeof ACCOMMODATION_DETECTORS)[number];
 

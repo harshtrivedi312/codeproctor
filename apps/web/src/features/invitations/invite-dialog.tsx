@@ -225,12 +225,10 @@ function InviteBody({
   function downloadProblems(): void {
     const rows = [
       ...problems,
-      ...(outcome?.errors ?? []).map((e) => ({
-        row: e.row,
-        message: e.message,
-        email: '',
-        name: '',
-      })),
+      ...(outcome?.errors ?? []).map((e) => {
+        const sent = csv?.parse.valid.find((r) => r.row === e.row);
+        return { row: e.row, message: e.message, email: sent?.email ?? '', name: sent?.name ?? '' };
+      }),
     ];
     const blob = new Blob([errorReportCsv(rows)], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -586,7 +584,7 @@ function InviteBody({
                 : 'success'
             }
             role="status"
-            title="Upload finished"
+            title={outcome.failed || outcome.notSent > 0 ? 'Upload stopped' : 'Upload finished'}
           >
             <span data-testid="bulk-result">{uploadSummary(outcome, problems.length)}</span>
           </Alert>
@@ -670,6 +668,9 @@ export function uploadSummary(o: BulkOutcome, fileProblems: number): string {
   const skipped = o.errors.length + fileProblems;
   const made = `${plural(o.created, 'invitation', 'invitations')} created`;
   const rest = skipped > 0 ? `, ${plural(skipped, 'row', 'rows')} not invited` : '';
+  if (o.stopped) {
+    return `The upload was stopped after ${plural(o.created, 'invitation', 'invitations')}${rest}, because the window was closed or you signed out. ${plural(o.notSent, 'row was', 'rows were')} not sent. Download the rows not sent and choose that file again.`;
+  }
   if (o.failed) {
     const may =
       o.uncertain > 0 ? `; ${plural(o.uncertain, 'row', 'rows')} of those may have been sent` : '';
@@ -677,7 +678,7 @@ export function uploadSummary(o: BulkOutcome, fileProblems: number): string {
   }
   if (o.notSent > 0) {
     const wait = o.retryAfterSeconds
-      ? `in about ${Math.ceil(o.retryAfterSeconds / 60)} minutes`
+      ? `in about ${plural(Math.ceil(o.retryAfterSeconds / 60), 'minute', 'minutes')}`
       : 'later';
     return `${made}${rest}. You reached the hourly limit: ${plural(o.notSent, 'row was', 'rows were')} not sent. Download the rows not sent, then choose that file again ${wait}. The invitations already sent stay valid.`;
   }

@@ -219,6 +219,7 @@ export function TestBuilder({
       const fresh = await fetchTest(detail.id);
       qc.setQueryData(testKeys.detail(detail.id), fresh);
       loaded.current = fresh;
+      setPassScoreHad(fresh.passScore !== null);
       form.reset(fromDetail(fresh));
       setConflict(false);
       setProblem(null);

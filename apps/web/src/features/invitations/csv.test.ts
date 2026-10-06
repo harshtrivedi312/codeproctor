@@ -7,6 +7,8 @@ import {
   looksLikeFormula,
   neutralise,
   parseInviteCsv,
+  restore,
+  unsentRowsCsv,
   readRecords,
 } from './csv';
 
@@ -135,5 +137,26 @@ describe('FR-304 TC-023: invitation CSV intake', () => {
       ['a', 'b'],
       ['c', 'd'],
     ]);
+  });
+
+  it('round trip: rows exported as "not sent" read back the same, including + and - starts', () => {
+    const first = parseInviteCsv(
+      'email,name,external_ref\r\n-john@example.test,+Jo "J" Smith,=REF\r\n+tag@example.test,@home,x\r\nplain@example.test,Plain,\r\n',
+    );
+    expect(first.valid).toHaveLength(3);
+    const exported = unsentRowsCsv(first.valid);
+    expect(exported).toContain("'-john@example.test");
+    const again = parseInviteCsv(exported);
+    expect(again.fatal).toBeNull();
+    expect(
+      again.valid.map(({ email, name, externalRef }) => ({ email, name, externalRef })),
+    ).toEqual(first.valid.map(({ email, name, externalRef }) => ({ email, name, externalRef })));
+  });
+
+  it('restore drops one leading apostrophe only before a formula character', () => {
+    expect(restore("'-a")).toBe('-a');
+    expect(restore("''-a")).toBe("''-a");
+    expect(restore("'Neil")).toBe("'Neil");
+    expect(restore('=x')).toBe('=x');
   });
 });

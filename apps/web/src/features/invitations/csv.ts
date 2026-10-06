@@ -44,6 +44,14 @@ export interface CsvParse {
 /** True when a spreadsheet could read the cell as a formula. */
 export const looksLikeFormula = (cell: string): boolean => /^[=+\-@\t\r]/.test(cell);
 
+/**
+ * Undoes `neutralise` when a file we exported is read again: ONE leading apostrophe followed by a
+ * formula character is dropped (so `'-john@x.test` is `-john@x.test`). Any other leading apostrophe
+ * is data and stays.
+ */
+export const restore = (cell: string): string =>
+  cell.startsWith("'") && looksLikeFormula(cell.slice(1, 2)) ? cell.slice(1) : cell;
+
 /** For a CSV that is downloaded: a cell that could run as a formula gets a leading apostrophe. */
 export const neutralise = (cell: string): string => (looksLikeFormula(cell) ? `'${cell}` : cell);
 
@@ -151,9 +159,11 @@ export function parseInviteCsv(text: string): CsvParse {
   const seen = new Map<string, number>();
   data.forEach((cells, idx) => {
     const row = idx + 1;
-    const email = (cells[col.email as number] ?? '').trim();
-    const name = (cells[col.name as number] ?? '').trim();
-    const externalRef = col.externalRef === undefined ? '' : (cells[col.externalRef] ?? '').trim();
+    const email = restore((cells[col.email as number] ?? '').trim());
+    const name = restore((cells[col.name as number] ?? '').trim());
+    const externalRef = restore(
+      col.externalRef === undefined ? '' : (cells[col.externalRef] ?? '').trim(),
+    );
     if (looksLikeFormula(email) || looksLikeFormula(name)) formulaLike.push(row);
     const problem = (message: string): void => void problems.push({ row, message, email, name });
     if (email === '') return problem('The email is empty.');

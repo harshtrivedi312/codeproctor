@@ -470,6 +470,47 @@ describe('Test builder: edits the API would otherwise ignore (FR-301)', () => {
     expect(await screen.findByText('Saved.')).toBeInTheDocument();
   });
 
+  it('FR-301: a pass score set by someone else and loaded with "Reload" cannot be cleared either', async () => {
+    const patches: unknown[] = [];
+    const u = openBuilder('/admin/tests/test-frontend', <TestRoute id="test-frontend" />);
+    const name = await screen.findByLabelText('Name');
+    await u.type(name, ' v2');
+    expect((await call('PATCH', '/v1/tests/test-frontend', { passScore: 50 })).status).toBe(200);
+    await u.click(screen.getByRole('button', { name: 'Save' }));
+    await u.click(await screen.findByRole('button', { name: /Reload the latest version/ }));
+    const pass = await screen.findByLabelText(/Pass score/);
+    await waitFor(() => expect(pass).toHaveValue(50));
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'PATCH') patches.push(1);
+    });
+    await u.clear(pass);
+    await u.type(screen.getByLabelText('Name'), '!');
+    await u.click(screen.getByRole('button', { name: 'Save' }));
+    expect(
+      await screen.findByText('A pass score cannot be removed. Enter a value.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Saved.')).not.toBeInTheDocument();
+    expect(patches).toEqual([]);
+  });
+
+  it('FR-301: a pass score saved earlier in the same session cannot be cleared afterwards', async () => {
+    const patches: unknown[] = [];
+    const u = openBuilder('/admin/tests/test-frontend', <TestRoute id="test-frontend" />);
+    const pass = await screen.findByLabelText(/Pass score/);
+    await u.type(pass, '50');
+    await u.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText('Saved.')).toBeInTheDocument();
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'PATCH') patches.push(1);
+    });
+    await u.clear(screen.getByLabelText(/Pass score/));
+    await u.click(screen.getByRole('button', { name: 'Save' }));
+    expect(
+      await screen.findByText('A pass score cannot be removed. Enter a value.'),
+    ).toBeInTheDocument();
+    expect(patches).toEqual([]);
+  });
+
   it('ADR 0002 S-6: the re-read before PATCH finds the test used, so nothing is saved and the page says why', async () => {
     const patches: unknown[] = [];
     server.events.on('request:start', ({ request }) => {

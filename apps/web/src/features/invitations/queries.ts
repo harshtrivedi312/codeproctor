@@ -86,6 +86,8 @@ export interface BulkOutcome {
   unsentRows: CsvRowInput[];
   /** Of `notSent`: rows in a request whose answer never arrived, so they may have been invited. */
   uncertain: number;
+  /** The upload was stopped here (dialog closed or session changed), not by the server. */
+  stopped: boolean;
   /** Seconds the server asked to wait, when it stopped us. */
   retryAfterSeconds: number | null;
   /** The upload stopped on a failure other than the limit. */
@@ -111,6 +113,7 @@ export async function inviteInChunks(
     notSent: 0,
     unsentRows: [],
     uncertain: 0,
+    stopped: false,
     retryAfterSeconds: null,
     failed: null,
   };
@@ -118,6 +121,7 @@ export async function inviteInChunks(
     if (signal?.aborted || startedIn !== getGeneration()) {
       out.notSent = rows.length - at;
       out.unsentRows = rows.slice(at);
+      out.stopped = true;
       return out;
     }
     const chunk = rows.slice(at, at + BULK_CHUNK);
