@@ -223,13 +223,16 @@ def test_TC_076_C28_queue_is_high_then_medium_then_low_whatever_the_scores_and_i
         QueueItem("low-old", "LOW", 70.0, 1),
         QueueItem("med", "MEDIUM", 65.0, 5),
         QueueItem("high", "HIGH", 60.0, 9),
+        # A second HIGH whose score is above every LOW: the band still decides, not the score.
+        QueueItem("high-2", "HIGH", 75.0, 4),
         QueueItem("low-new", "LOW", 69.0, 8),
     ]
     for seed in range(5):
         shuffled = items[:]
         random.Random(seed).shuffle(shuffled)
         ids = [i.session_id for i in order_review_queue(shuffled)]
-        assert ids[0] == "high" and ids[1] == "med" and set(ids[2:]) == {"low-old", "low-new"}
+        assert set(ids[:2]) == {"high", "high-2"} and ids[2] == "med"
+        assert set(ids[3:]) == {"low-old", "low-new"}
 
 
 def test_TC_076_C28_only_a_low_session_with_no_hold_gets_the_fast_path_and_nothing_is_auto_cleared() -> (
