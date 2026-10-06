@@ -160,7 +160,7 @@ _FACE_ENV: Final = {
 class RiskConfig(_Base):
     """FR-804 / ADR 0005 section 2."""
 
-    severity_points: dict[Severity, float] = Field(
+    severity_points: dict[Severity, Annotated[float, Field(allow_inf_nan=False)]] = Field(
         default_factory=lambda: dict(DEFAULT_SEVERITY_POINTS)
     )
     cap_per_type: _Pos = DEFAULT_EVENT_CAP_PER_TYPE
@@ -168,17 +168,13 @@ class RiskConfig(_Base):
     severity_by_type: dict[EventType, Severity] = Field(
         default_factory=lambda: dict(DEFAULT_EVENT_SEVERITY)
     )
-    weight_by_type: dict[EventType, Annotated[float, Field(ge=0.0)]] = Field(
+    weight_by_type: dict[EventType, Annotated[float, Field(ge=0.0, allow_inf_nan=False)]] = Field(
         default_factory=lambda: {
             t: (0.0 if t in ZERO_WEIGHT_EVENT_TYPES else 1.0) for t in DEFAULT_EVENT_SEVERITY
         }
     )
-    medium_min_score: float = DEFAULT_MEDIUM_MIN_SCORE
-    high_min_score: float = DEFAULT_HIGH_MIN_SCORE
-    # C-28: every session gets a human review. The band picks the review path: bands listed here
-    # get the fast path (summary and one-click verdict); the others get the full review. Only LOW
-    # is allowed until the hub decides otherwise (empty set = everything full).
-    fast_review_bands: frozenset[RiskBand] = frozenset({"LOW"})
+    medium_min_score: Annotated[float, Field(allow_inf_nan=False)] = DEFAULT_MEDIUM_MIN_SCORE
+    high_min_score: Annotated[float, Field(allow_inf_nan=False)] = DEFAULT_HIGH_MIN_SCORE
 
     @model_validator(mode="after")
     def _merge_defaults(self) -> Self:
@@ -198,13 +194,39 @@ class RiskConfig(_Base):
     def _bands(self) -> Self:
         if not 0 < self.medium_min_score < self.high_min_score <= 100:
             raise ValueError("Band edges must satisfy 0 < medium < high <= 100.")
-        if not self.fast_review_bands <= {"LOW"}:
-            raise ValueError(
-                "Only the LOW band may use the fast review path (pending hub decision)."
-            )
         if any(p < 0 for p in self.severity_points.values()):
             raise ValueError("severity_points must not be negative.")
         return self
+
+
+class ReviewPathConfig(_Base):
+    """Review-path routing (FR-805, owner decision C-28; DL-18). SYSTEM CONFIGURATION, NOT AN ORG
+    SETTING: this class is not part of `IntegrityConfig`, so `organizations.settings` and the /risk
+    request body cannot reach it. Load it with `from_env()`.
+
+    Every session gets a human review. Bands listed in `fast_review_bands` get the fast path
+    (summary and one-click verdict); the rest get the full review. Only LOW is allowed (DL-18);
+    an empty set sends everything to the full review.
+    """
+
+    fast_review_bands: frozenset[RiskBand] = frozenset({"LOW"})
+
+    @model_validator(mode="after")
+    def _only_low(self) -> Self:
+        if not self.fast_review_bands <= {"LOW"}:
+            raise ValueError("Only the LOW band may use the fast review path.")
+        return self
+
+    @classmethod
+    def from_env(cls, environ: Mapping[str, str] | None = None) -> ReviewPathConfig:
+        """Read `RISK_FAST_REVIEW_BANDS` (comma-separated, for example `LOW`; set but empty means
+        no fast path). Unset means the default (LOW). Anything invalid raises, loudly."""
+        env = os.environ if environ is None else environ
+        raw = env.get("RISK_FAST_REVIEW_BANDS")
+        if raw is None:
+            return cls()
+        bands = [b.strip() for b in raw.split(",") if b.strip()]
+        return cls.model_validate({"fast_review_bands": bands})
 
 
 class IntegrityConfig(_Base):
