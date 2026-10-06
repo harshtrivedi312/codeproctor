@@ -81,6 +81,31 @@ export const envSchema = z
       .enum(['true', 'false'])
       .default('false')
       .transform((v) => v === 'true'),
+    // Object storage (BE-09, ADR 0001 section 2.1, ADR 0013 section 5.7): one S3-compatible
+    // interface. Cloudflare R2 on staging (synthetic data only), AWS S3 on pilot and production;
+    // only these values differ. Unset locally and on a fresh staging: the media routes then answer
+    // 503 STORAGE_UNCONFIGURED. The two credentials are secrets (never log); both or neither (AWS
+    // may use the instance role).
+    // Empty for AWS S3; https://<account>.r2.cloudflarestorage.com for R2.
+    S3_ENDPOINT: z.url().optional(),
+    // The AWS region, or `auto` for R2.
+    S3_REGION: z.string().min(1).optional(),
+    S3_MEDIA_BUCKET: z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/, 'must be a valid bucket name')
+      .optional(),
+    S3_ACCESS_KEY_ID: z.string().min(1).optional(),
+    S3_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+    S3_FORCE_PATH_STYLE: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((v) => v === 'true'),
+    // Sign `If-None-Match: *` on chunk PUTs (ADR 0013 section 5.5 control 3). AWS S3 supports it;
+    // R2 is not verified (BE-09 spike), so it stays off until a staging check proves it.
+    S3_CONDITIONAL_WRITES: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((v) => v === 'true'),
   })
   .superRefine((env, ctx) => {
     const live = env.APP_ENV === 'pilot' || env.APP_ENV === 'production';
@@ -139,6 +164,30 @@ export const envSchema = z
       for (const key of ['JWT_CANDIDATE_SECRET', 'OTP_PEPPER'] as const) {
         if (env[key] === undefined) {
           ctx.addIssue({ code: 'custom', path: [key], message: 'is required outside development' });
+        }
+      }
+    }
+    if ((env.S3_ACCESS_KEY_ID === undefined) !== (env.S3_SECRET_ACCESS_KEY === undefined)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['S3_SECRET_ACCESS_KEY'],
+        message: 'S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set together',
+      });
+    }
+    if (deployed) {
+      for (const key of ['S3_REGION', 'S3_MEDIA_BUCKET'] as const) {
+        if (env[key] === undefined) {
+          ctx.addIssue({
+            code: 'custom',
+            path: [key],
+            message: 'is required in pilot and production',
+          });
+        }
+      }
+      if (env.S3_ENDPOINT !== undefined) {
+        const url = new URL(env.S3_ENDPOINT);
+        if (url.protocol !== 'https:') {
+          ctx.addIssue({ code: 'custom', path: ['S3_ENDPOINT'], message: 'must use https' });
         }
       }
     }

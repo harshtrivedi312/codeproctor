@@ -10,6 +10,9 @@ const valid = {
 };
 const judge0 = {
   JUDGE0_URL: 'https://judge0.example.com',
+  // Object storage (BE-09) is required in pilot and production too.
+  S3_REGION: 'eu-west-2',
+  S3_MEDIA_BUCKET: 'cp-pilot-media',
   JUDGE0_AUTH_TOKEN: 't'.repeat(32),
   JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
 };
