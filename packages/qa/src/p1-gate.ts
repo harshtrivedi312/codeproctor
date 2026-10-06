@@ -33,7 +33,7 @@ interface Result {
   source?: string;
 }
 
-/** Test files that failed as a whole with no assertion results (compile error, crash). */
+/** Whole-file or whole-run failures (compile error, crash, hook failure, Playwright errors[]), over all reports. */
 const suiteFailures: string[] = [];
 
 function priorities(): Map<string, string> {
@@ -83,11 +83,16 @@ interface PwSpec {
 interface PwSuite {
   specs?: PwSpec[];
   suites?: PwSuite[];
+  /** Playwright top-level errors (global setup, config, worker crash). */
+  errors?: unknown[];
+  stats?: { unexpected?: number };
 }
 
 function walkPlaywright(suite: PwSuite, out: Result[]): void {
   for (const spec of suite.specs ?? []) {
-    const skipped = (spec.tests ?? []).every((t) => t.status === 'skipped');
+    // A spec with an empty tests array ran nothing: it is not staged (every() is true on []).
+    const tests = spec.tests ?? [];
+    const skipped = tests.length > 0 && tests.every((t) => t.status === 'skipped');
     out.push({ title: spec.title, passed: skipped || spec.ok === true, staged: skipped });
   }
   for (const child of suite.suites ?? []) walkPlaywright(child, out);
@@ -116,8 +121,11 @@ function loadJunit(xml: string): Result[] {
   return out;
 }
 
-function load(file: string): Result[] {
-  if (file.endsWith('.xml')) return loadJunit(readFileSync(resolve(file), 'utf8'));
+/** Reads one report. Its whole-file failures are returned per report, not shared with other reports. */
+function load(file: string): { results: Result[]; failures: string[] } {
+  if (file.endsWith('.xml'))
+    return { results: loadJunit(readFileSync(resolve(file), 'utf8')), failures: [] };
+  const failures: string[] = [];
   const json = JSON.parse(readFileSync(resolve(file), 'utf8')) as VitestReport & PwSuite;
   const out: Result[] = [];
   if (json.testResults) {
@@ -127,7 +135,7 @@ function load(file: string): Result[] {
       // error, crash, a failing afterAll hook, a Vitest suite error) fails the gate by name.
       const anyFailed = asserts.some((a) => a.status === 'failed');
       if (f.status === 'failed' && !anyFailed) {
-        suiteFailures.push(f.name ?? f.testFilePath ?? '(unnamed test file)');
+        failures.push(f.name ?? f.testFilePath ?? '(unnamed test file)');
       }
       for (const a of asserts) {
         const staged = a.status === 'pending' || a.status === 'skipped' || a.status === 'todo';
@@ -140,16 +148,25 @@ function load(file: string): Result[] {
       }
     }
     const anyFailedTest = out.some((r) => !r.passed);
-    if ((json.numRuntimeErrorTestSuites ?? 0) > 0 && suiteFailures.length === 0 && !anyFailedTest) {
-      suiteFailures.push(`${file} (numRuntimeErrorTestSuites ${json.numRuntimeErrorTestSuites})`);
+    // Runtime-error suites are recorded even when another test failed (a failed P2 test must not hide them).
+    if ((json.numRuntimeErrorTestSuites ?? 0) > 0 && failures.length === 0) {
+      failures.push(`${file} (numRuntimeErrorTestSuites ${json.numRuntimeErrorTestSuites})`);
     }
-    if (json.success === false && suiteFailures.length === 0 && !anyFailedTest) {
-      suiteFailures.push(`${file} (success: false with no failed test)`);
+    if (json.success === false && failures.length === 0 && !anyFailedTest) {
+      failures.push(`${file} (success: false with no failed test)`);
     }
   } else {
     walkPlaywright(json, out);
+    if ((json.errors ?? []).length > 0) {
+      failures.push(`${file} (Playwright errors[] has ${(json.errors ?? []).length} entry(ies))`);
+    }
+    // Failing tests that name a TC id are judged per case; any other unexpected failure fails the gate.
+    const findIds = (r: Result): boolean => /(?<![A-Za-z0-9])TC-\d{3}(?!\d)/.test(r.title);
+    if ((json.stats?.unexpected ?? 0) > 0 && !out.some((r) => !r.passed && findIds(r))) {
+      failures.push(`${file} (Playwright stats.unexpected ${json.stats?.unexpected})`);
+    }
   }
-  return out;
+  return { results: out, failures };
 }
 
 const prio = priorities();
@@ -162,7 +179,9 @@ for (const r of reports) {
     console.error(`Report not found: ${r}`);
     process.exit(2);
   }
-  results.push(...load(r).map((x) => ({ ...x, source: r })));
+  const loaded = load(r);
+  suiteFailures.push(...loaded.failures);
+  results.push(...loaded.results.map((x) => ({ ...x, source: r })));
 }
 
 const state = new Map<
