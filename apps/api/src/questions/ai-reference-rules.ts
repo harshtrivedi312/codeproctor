@@ -3,10 +3,10 @@ import { AI_REFERENCE_LANGUAGES } from '@codeproctor/shared';
 
 /** Default of `aiReferences.minAssistants` (ADR 0005 D-20). */
 export const DEFAULT_MIN_ASSISTANTS = 2;
-const MAX_MIN_ASSISTANTS = 10;
+const MAX_MIN_ASSISTANTS = 5;
 
 /**
- * The stored organizations.settings.aiReferences.minAssistants when it is an integer from 0 to 10,
+ * The stored organizations.settings.aiReferences.minAssistants when it is an integer from 0 to 5,
  * else undefined (missing or malformed).
  */
 export function storedMinAssistants(settings: unknown): number | undefined {
@@ -25,7 +25,7 @@ export function storedMinAssistants(settings: unknown): number | undefined {
 
 /**
  * organizations.settings.aiReferences.minAssistants. A missing key is the default (2); a value that
- * is not an integer from 0 to 10 is also the default (fail closed); 0 turns the gate off.
+ * is not an integer from 0 to 5 is also the default (fail closed); 0 turns the gate off.
  */
 export function minAssistantsFromSettings(settings: unknown): number {
   return storedMinAssistants(settings) ?? DEFAULT_MIN_ASSISTANTS;

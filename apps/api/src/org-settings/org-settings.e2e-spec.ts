@@ -109,6 +109,25 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
         .expect(401);
     });
 
+    it('TC-004 a candidate-principal token is refused on GET and PATCH and nothing changes', async () => {
+      const n = ++seq;
+      // The staff guard accepts access tokens only; a candidate token (another kind, no role) is 401.
+      const candidate = tokens.sign({ sub: `cand-${n}`, org: orgA, kind: 'candidate' }, 900);
+      const auth = { Authorization: `Bearer ${candidate}` };
+      const statuses = [
+        (await http().get(URL).set(auth)).status,
+        (
+          await http()
+            .patch(URL)
+            .set(auth)
+            .send({ aiReferences: { minAssistants: 1 } })
+        ).status,
+      ];
+      for (const s of statuses) expect([401, 403]).toContain(s);
+      expect(await stored(orgA)).toEqual({});
+      expect(await audits(orgA)).toHaveLength(0);
+    });
+
     it.each([UserRole.RECRUITER, UserRole.AUTHOR, UserRole.REVIEWER])(
       'TC-004 %s gets 403 and nothing changes',
       async (role) => {
@@ -246,6 +265,8 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
       ['minAssistants is 2.5', '{"aiReferences":{"minAssistants":2.5}}', 2],
       ['minAssistants is a string', '{"aiReferences":{"minAssistants":"4"}}', 2],
       ['minAssistants is 99', '{"aiReferences":{"minAssistants":99}}', 2],
+      ['minAssistants is 6', '{"aiReferences":{"minAssistants":6}}', 2],
+      ['minAssistants is 10', '{"aiReferences":{"minAssistants":10}}', 2],
     ])(
       'AI-5 malformed stored settings (%s): GET is the default, PATCH repairs',
       async (_n, json, eff) => {
@@ -269,30 +290,74 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
       },
     );
 
-    it('AI-5 two parallel PATCHes both finish; the final value is one of them and each change is audited', async () => {
+    it('AI-5 parallel PATCHes (compare-and-set): each is 200 or 409 SETTINGS_CONFLICT, the final state is valid and audit rows equal the successful writes', async () => {
       const admin = await make(UserRole.SUPER_ADMIN);
-      const [a, b] = await Promise.all([
-        http()
-          .patch(URL)
-          .set(admin.auth)
-          .send({ aiReferences: { minAssistants: 1 } }),
-        http()
-          .patch(URL)
-          .set(admin.auth)
-          .send({ aiReferences: { minAssistants: 4 } }),
-      ]);
-      expect([a.status, b.status]).toEqual([200, 200]);
-      const final = (await stored(orgA)) as { aiReferences: { minAssistants: number } };
-      expect([1, 4]).toContain(final.aiReferences.minAssistants);
+      await setStored(orgA, { retention: { days: 5 } });
+      const values = [0, 1, 3, 4, 5, 1, 3];
+      const results = await Promise.all(
+        values.map((v) =>
+          http()
+            .patch(URL)
+            .set(admin.auth)
+            .send({ aiReferences: { minAssistants: v } }),
+        ),
+      );
+      const ok = results.filter((r) => r.status === 200);
+      const lost = results.filter((r) => r.status === 409);
+      expect(ok.length + lost.length).toBe(values.length);
+      expect(ok.length).toBeGreaterThanOrEqual(1);
+      for (const r of lost) expect((r.body as { code?: string }).code).toBe('SETTINGS_CONFLICT');
+      const final = (await stored(orgA)) as {
+        retention: unknown;
+        aiReferences: { minAssistants: number };
+      };
+      expect(values).toContain(final.aiReferences.minAssistants);
+      expect(final.retention).toEqual({ days: 5 });
+      // A repeat of the stored value is a 200 without a write, so rows <= 200s; every row is a
+      // real change and the chain of from/to values is unbroken.
       const rows = await audits(orgA);
-      expect(rows).toHaveLength(2);
-      // The lock serialises them: the second row starts where the first one ended.
+      expect(rows.length).toBeLessThanOrEqual(ok.length);
+      expect(rows.length).toBeGreaterThanOrEqual(1);
       const changes = rows.map(
         (r) => (r.metadata as { changes: { from: number; to: number }[] }).changes[0],
       );
       expect(changes[0]?.from).toBe(2);
-      expect(changes[1]?.from).toBe(changes[0]?.to);
-      expect(changes[1]?.to).toBe(final.aiReferences.minAssistants);
+      for (let i = 1; i < changes.length; i++) expect(changes[i]?.from).toBe(changes[i - 1]?.to);
+      expect(changes[changes.length - 1]?.to).toBe(final.aiReferences.minAssistants);
+    });
+
+    it('AI-5 a lost compare-and-set (3 attempts) is 409 SETTINGS_CONFLICT, writes nothing and no audit row', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const { OrgSettingsService } =
+        jest.requireActual<typeof import('./org-settings.service')>('./org-settings.service');
+      const svc = app.get(OrgSettingsService);
+      const spy = jest.spyOn(svc as unknown as { tryUpdate: () => Promise<null> }, 'tryUpdate');
+      spy.mockResolvedValue(null);
+      try {
+        const res = await http()
+          .patch(URL)
+          .set(admin.auth)
+          .send({ aiReferences: { minAssistants: 1 } })
+          .expect(409);
+        expect((res.body as { code?: string }).code).toBe('SETTINGS_CONFLICT');
+        expect(spy).toHaveBeenCalledTimes(3);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await stored(orgA)).toEqual({});
+      expect(await audits(orgA)).toHaveLength(0);
+    });
+
+    it('AI-5 extra stored keys never reset the stored minAssistants (GET and the publish-gate reader)', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      await setStored(orgA, {
+        retention: { days: 30 },
+        aiReferences: { minAssistants: 4, futureKey: { x: 1 } },
+        somethingNew: true,
+      });
+      const res = await http().get(URL).set(admin.auth).expect(200);
+      expect(res.body).toEqual({ aiReferences: { minAssistants: 4, isDefault: false } });
+      expect(minAssistantsFromSettings(await stored(orgA))).toBe(4);
     });
 
     it('AI-5 lowering minAssistants lowers the publish gate (the reader the gate uses)', async () => {
