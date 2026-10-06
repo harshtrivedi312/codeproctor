@@ -1963,6 +1963,33 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       }
     });
 
+    it('Q17: review and outcome statuses read SUBMITTED on the state route, in problem bodies and in the start response; EXPIRED and DECLINED are shown as they are', async () => {
+      for (const status of ['GRADED', 'UNDER_REVIEW', 'COMPLETED', 'APPEALED'] as SessionStatus[]) {
+        const inv = await invite({ status, session: { authEpoch: 1 } });
+        const token = tokenFor(inv);
+        const state = await authed('get', '', token).expect(200);
+        expect(state.body).toMatchObject({ status: 'SUBMITTED' });
+        const beat = await authed('post', '/heartbeat', token);
+        expect(beat.status).toBe(409);
+        expect(beat.body).toMatchObject({ code: 'SESSION_NOT_ACTIVE', sessionStatus: 'SUBMITTED' });
+        const key = await authed('post', '/proctor-key', token);
+        expect(key.body).toMatchObject({ code: 'SESSION_NOT_ACTIVE', sessionStatus: 'SUBMITTED' });
+        const start = await authed('post', '/test/start', token);
+        expect(start.body).toMatchObject({
+          code: 'SESSION_STATE_CONFLICT',
+          sessionStatus: 'SUBMITTED',
+        });
+        expect(JSON.stringify([state.body, beat.body, key.body, start.body])).not.toMatch(
+          /GRADED|UNDER_REVIEW|COMPLETED|APPEALED/,
+        );
+      }
+      for (const status of ['EXPIRED', 'DECLINED'] as SessionStatus[]) {
+        const inv = await invite({ status, session: { authEpoch: 1 } });
+        const state = await authed('get', '', tokenFor(inv)).expect(200);
+        expect(state.body).toMatchObject({ status });
+      }
+    });
+
     it('FR-609: if RECONNECTED cannot be queued the marker stays and the next beat retries; it is queued once', async () => {
       const inv = await invite(liveSession({ lastHeartbeat: new Date(Date.now() - 95_000) }));
       await jobs.discoverDisconnected();

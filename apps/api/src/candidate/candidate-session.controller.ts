@@ -1,3 +1,4 @@
+import { candidateVisibleStatus } from '../session/candidate-visible-status';
 // Candidate routes behind a session token (ADR 0013 section 5.10). The session is the token's: no
 // route has a :sessionId, and ids in a body are never used to pick a session (CS-1). Each route is
 // limited per session in Redis, not per IP (ADR 0013 section 5.1).
@@ -37,7 +38,7 @@ const NO_STORE = 'no-store';
 function stateDto(view: SessionStateView): SessionStateDto {
   return {
     serverTime: view.serverTime.toISOString(),
-    status: view.status,
+    status: candidateVisibleStatus(view.status),
     startedAt: view.startedAt?.toISOString() ?? null,
     deadlineAt: view.deadlineAt?.toISOString() ?? null,
     sectionDeadlineAt: view.sectionDeadlineAt?.toISOString() ?? null,

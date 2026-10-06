@@ -1,3 +1,4 @@
+import { candidateVisibleStatus } from '../session/candidate-visible-status';
 // The routes that run before a session token exists: link, otp, start (ADR 0013 section 5.10 names
 // them as the only pre-JWT candidate routes; they are the only ones outside CandidateSessionGuard).
 // Public to the staff guard, throttled per IP by the stricter /candidate limit (THROTTLE_CANDIDATE_LIMIT),
@@ -103,7 +104,7 @@ export class CandidateAuthController {
     return {
       sessionToken: result.token,
       sessionTokenExpiresAt: result.expiresAt.toISOString(),
-      status: result.status,
+      status: candidateVisibleStatus(result.status),
       serverTime: now.toISOString(),
     };
   }
