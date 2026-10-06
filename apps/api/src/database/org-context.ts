@@ -12,8 +12,12 @@
 // How the context is set:
 // - Staff HTTP routes: OrgContextInterceptor reads `request.user` (BE-02's JwtAuthGuard sets an
 //   AuthUser there) and calls runAsUser.
-// - Candidate routes, jobs, sockets: the code that resolves the org (the token's session, the job's
-//   session) calls runInOrg.
+// - Candidate routes: CandidateSessionGuard (BE-07) calls runAsCandidate(orgId, sessionId) from the
+//   verified token claims (ADR 0013 section 5.10, CS-4.1). Session jobs: SessionJobProcessor (BE-07)
+//   calls detachForSessionJob and then runAsSessionJob(orgId, sessionId) from the job payload. Both
+//   enter a scope bound to ONE session, and the entry sets the actor (CANDIDATE or SERVICE): it is
+//   never a parameter, so it cannot be forged.
+// - Jobs and sockets that span sessions: the code that resolves the org calls runInOrg.
 // - Work that has no org yet or spans orgs: runSystem, with one of the named reasons below.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Injectable } from '@nestjs/common';
@@ -51,8 +55,35 @@ export const SYSTEM_SCOPE_REASONS = {
 
 export type SystemScopeReason = keyof typeof SYSTEM_SCOPE_REASONS;
 
+/** Who works inside a session scope (ADR 0013 CS-4.1). The entry function sets it. */
+export type SessionActor = 'CANDIDATE' | 'SERVICE';
+
+/** The one session an org scope is bound to, and the actor working on it. Frozen. */
+export interface SessionBinding {
+  readonly actor: SessionActor;
+  readonly sessionId: string;
+}
+
+/**
+ * What a CANDIDATE scope knows about the session it was entered for, besides the ids in the token:
+ * the candidate, the invitation and the test (ADR 0013 CS-4.4, "Candidate facts"). They drive the
+ * injected row filters on `candidates`, `invitations` and `tests`. Set once, by
+ * CandidateSessionGuard only (candidate-facts.ts); immutable afterwards.
+ */
+export interface CandidateFacts {
+  readonly candidateId: string;
+  readonly invitationId: string;
+  readonly testId: string;
+}
+
 export type OrgScope =
-  | { readonly kind: 'org'; readonly orgId: string; readonly user?: AuthenticatedUser }
+  | {
+      readonly kind: 'org';
+      readonly orgId: string;
+      readonly user?: AuthenticatedUser;
+      /** Present only in a session scope (runAsCandidate, runAsSessionJob). */
+      readonly session?: SessionBinding;
+    }
   | { readonly kind: 'system'; readonly reason: SystemScopeReason };
 
 /** What AsyncLocalStorage holds for one unit of work. */
@@ -65,6 +96,8 @@ export interface ScopeStore {
 /** What the extension needs from the context. OrgContextService implements it. */
 export interface ScopeSource {
   current(): ScopeStore | undefined;
+  /** The candidate facts of the current CANDIDATE scope, or undefined while they are not set. */
+  candidateFacts(): CandidateFacts | undefined;
 }
 
 function isThenable(value: unknown): value is PromiseLike<unknown> {
@@ -92,6 +125,26 @@ const MIN_RAW_REASON_LENGTH = 10;
  */
 const storage = new AsyncLocalStorage<ScopeStore>();
 
+/**
+ * The candidate facts of each CANDIDATE scope, keyed by the scope's own (frozen) session binding.
+ * Module-private: the only writer is the setter below, so the facts cannot be changed from outside,
+ * and a nested runInOrg of the same org (which keeps the binding) sees the same facts.
+ */
+const factsOfBinding = new WeakMap<SessionBinding, CandidateFacts>();
+
+/**
+ * The key of the private candidate-facts setter on OrgContextService (ADR 0013 CS-4.4: "one private
+ * setter in org-context.ts, which only CandidateSessionGuard may call, once per scope"). A symbol,
+ * so the method is not part of the service's public surface, and a symbol that is not registered
+ * (`Symbol()`, not `Symbol.for()`), so it cannot be rebuilt from its name. Only candidate-facts.ts
+ * imports it. It is not exported from index.ts. FU-DB-67 pins the importers.
+ */
+export const SET_CANDIDATE_FACTS: unique symbol = Symbol('OrgContextService.setCandidateFacts');
+
+function isEmptyStore(store: ScopeStore | undefined): boolean {
+  return store === undefined || Object.values(store).every((value) => value === undefined);
+}
+
 @Injectable()
 export class OrgContextService implements ScopeSource {
   /** The scope of the current unit of work. A frozen object: it cannot be changed from outside. */
@@ -110,9 +163,55 @@ export class OrgContextService implements ScopeSource {
     return this.enter({ kind: 'org', orgId: user.orgId, user: frozen }, fn);
   }
 
-  /** Run `fn` for one org without a staff user: candidate routes (the token's session) and jobs. */
+  /**
+   * Run `fn` for one org without a staff user: cross-session jobs and narrowing from system scope.
+   * Inside a session scope (runAsCandidate, runAsSessionJob) of the same org it changes nothing:
+   * the session and the actor stay (ADR 0013 CS-4.1, nesting).
+   */
   runInOrg<T>(orgId: string, fn: () => T): Scoped<T> {
     return this.enter({ kind: 'org', orgId }, fn);
+  }
+
+  /**
+   * Run `fn` as a candidate, bound to ONE session (ADR 0013 CS-4.1; actor CANDIDATE). Called by
+   * CandidateSessionGuard only, from the verified token claims (`oid`, `sid`). Allowed from no scope
+   * only: inside any scope, system scope included, and inside a candidate scope of the same session,
+   * it throws. Every query inside is filtered by the org and by the session (CS-4.2), is limited to
+   * the CANDIDATE model allowlist (CS-4.3), and may not use relations (CS-4.5). Raw SQL is refused.
+   * Entering sends no SQL.
+   */
+  runAsCandidate<T>(orgId: string, sessionId: string, fn: () => T): Scoped<T> {
+    return this.enterSession('CANDIDATE', 'runAsCandidate', orgId, sessionId, fn);
+  }
+
+  /**
+   * Run `fn` as a session job, bound to ONE session (ADR 0013 CS-4.1; actor SERVICE). Called by
+   * SessionJobProcessor only, from the job payload, after detachForSessionJob. Allowed from no scope
+   * only: any scope, every system scope (BACKGROUND_JOB included), refuses it. Every query inside is
+   * filtered by the org and by the session on session-path models (CS-4.2); there is no allowlist
+   * and no column limit. Raw SQL is refused. Entering sends no SQL.
+   */
+  runAsSessionJob<T>(orgId: string, sessionId: string, fn: () => T): Scoped<T> {
+    return this.enterSession('SERVICE', 'runAsSessionJob', orgId, sessionId, fn);
+  }
+
+  /**
+   * SessionJobProcessor ONLY (ADR 0013 CS-4.1, ADR 0006 section 8.5). Asserts that the store is
+   * empty, then runs `fn` in a fresh empty store. It throws if anything is present: any scope
+   * (STAFF, plain org, SERVICE, CANDIDATE or system, BACKGROUND_JOB included), an open runRawSql
+   * hatch, or a grant. A BullMQ worker is built at module init, outside any scope, and each session
+   * job runs in its own worker callback; this is where the processor proves it did not inherit one,
+   * and the only function that could ever be used to leave a scope. A candidate scope therefore
+   * cannot leave itself. The call-site test (FU-DB-67) pins the one caller.
+   */
+  detachForSessionJob<T>(fn: () => T): Scoped<T> {
+    if (!isEmptyStore(storage.getStore())) {
+      throw new OrgScopeViolationError(
+        'detachForSessionJob needs an empty context: it was called inside a scope, an open ' +
+          'runRawSql, or a grant. Only SessionJobProcessor calls it, from a BullMQ worker callback.',
+      );
+    }
+    return this.runWith({}, fn);
   }
 
   /**
@@ -155,6 +254,51 @@ export class OrgContextService implements ScopeSource {
     return this.runWith({ ...current, rawSqlReason: reason }, fn);
   }
 
+  /**
+   * The candidate facts of the current CANDIDATE scope, or undefined while they are not set (and in
+   * every other scope). Read-only: the setter is private (candidate-facts.ts).
+   */
+  candidateFacts(): CandidateFacts | undefined {
+    const scope = storage.getStore()?.scope;
+    const session = scope?.kind === 'org' ? scope.session : undefined;
+    return session === undefined ? undefined : factsOfBinding.get(session);
+  }
+
+  /**
+   * The private candidate-facts setter (ADR 0013 CS-4.4). Do not call it: use setCandidateFacts in
+   * candidate-facts.ts, and only from CandidateSessionGuard. It refuses outside a CANDIDATE scope
+   * and a second call in the same scope, and the values are frozen.
+   * @internal
+   */
+  [SET_CANDIDATE_FACTS](facts: CandidateFacts): void {
+    const scope = storage.getStore()?.scope;
+    if (scope === undefined) throw new OrgContextMissingError('Setting the candidate facts');
+    const session = scope.kind === 'org' ? scope.session : undefined;
+    if (session?.actor !== 'CANDIDATE') {
+      throw new OrgScopeViolationError(
+        'The candidate facts can be set only inside a CANDIDATE scope (runAsCandidate).',
+      );
+    }
+    if (factsOfBinding.has(session)) {
+      throw new OrgScopeViolationError(
+        'The candidate facts are already set for this scope, and are immutable.',
+      );
+    }
+    for (const id of [facts.candidateId, facts.invitationId, facts.testId]) {
+      if (typeof id !== 'string' || !GUID.test(id)) {
+        throw new OrgScopeViolationError('The candidate facts need ids in uuid form.');
+      }
+    }
+    factsOfBinding.set(
+      session,
+      Object.freeze({
+        candidateId: facts.candidateId,
+        invitationId: facts.invitationId,
+        testId: facts.testId,
+      }),
+    );
+  }
+
   /** The org of the current unit of work. Throws outside an org scope, including in system scope. */
   requireOrgId(): string {
     const scope = storage.getStore()?.scope;
@@ -188,7 +332,47 @@ export class OrgContextService implements ScopeSource {
         'Already inside an org scope; system scope would widen it to every org.',
       );
     }
+    // A session scope only narrows (ADR 0013 CS-4.1, ADR 0006 section 8.4). The one thing that is
+    // allowed inside it is runInOrg of the same org (the org switch is refused above), and it keeps
+    // the session binding and the actor, so the scope object stays as it is. runAsUser would drop
+    // or change the actor; runSystem is refused above.
+    const bound = current?.scope?.kind === 'org' ? current.scope.session : undefined;
+    if (current !== undefined && bound !== undefined) {
+      if (scope.kind === 'org' && scope.user === undefined) return this.runWith(current, fn);
+      throw new OrgScopeViolationError(
+        `Inside a ${bound.actor} session scope; runAsUser would drop or change the session or ` +
+          'the actor. Only runInOrg of the same org is allowed.',
+      );
+    }
     return this.runWith({ ...current, scope: Object.freeze(scope) }, fn);
+  }
+
+  /**
+   * Enter a scope bound to one session. Allowed from no scope only, so no scope, hatch or grant of
+   * the caller can carry into it, and a plain org scope never narrows into a session scope.
+   */
+  private enterSession<T>(
+    actor: SessionActor,
+    entry: string,
+    orgId: string,
+    sessionId: string,
+    fn: () => T,
+  ): Scoped<T> {
+    if (typeof orgId !== 'string' || !GUID.test(orgId)) {
+      throw new OrgScopeViolationError(`${entry} needs an org id in uuid form.`);
+    }
+    if (typeof sessionId !== 'string' || !GUID.test(sessionId)) {
+      throw new OrgScopeViolationError(`${entry} needs a session id in uuid form.`);
+    }
+    if (!isEmptyStore(storage.getStore())) {
+      throw new OrgScopeViolationError(
+        `${entry} is allowed from no scope only: it was called inside a scope (a staff or org ` +
+          'scope, a system scope, a session scope, or an open runRawSql). A session job detaches ' +
+          'first (detachForSessionJob).',
+      );
+    }
+    const session: SessionBinding = Object.freeze({ actor, sessionId });
+    return this.runWith({ scope: Object.freeze({ kind: 'org', orgId, session }) }, fn);
   }
 
   /**
