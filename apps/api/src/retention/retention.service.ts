@@ -101,7 +101,7 @@ export class RetentionService {
       // A short page is the end. A session that failed is simply stepped past (the cursor moves on),
       // so it is retried tomorrow instead of blocking the head of the queue today.
       if (due.length < limit || last === undefined) break;
-      after = { createdAt: last.createdAt, sessionId: last.sessionId };
+      after = { createdAtCursor: last.createdAtCursor, sessionId: last.sessionId };
     }
     return tally;
   }
@@ -130,7 +130,14 @@ export class RetentionService {
 
         const root = sessionPrefix(orgId, sessionId);
         // A key stored outside the session prefix would be nulled but never deleted: not verified.
-        if (await this.repo.hasKeyOutside(root, sessionId, tier)) {
+        if (
+          await this.repo.hasKeyOutside(
+            root,
+            sessionId,
+            tier,
+            this.config.RETENTION_EVIDENCE_IN_FACE_TIER,
+          )
+        ) {
           this.log.warn(
             `retention ${tier} found a stored key outside the session prefix for session ${sessionId}`,
           );

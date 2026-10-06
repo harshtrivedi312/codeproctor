@@ -14,13 +14,16 @@ import type { RetentionTier } from './retention.constants';
 export interface DueSession {
   readonly sessionId: string;
   readonly orgId: string;
-  /** The keyset cursor: the next page starts after (createdAt, sessionId). */
-  readonly createdAt: Date;
+  /**
+   * `created_at` to the microsecond, as text. A JS Date cuts it to milliseconds, and rows made in
+   * one statement share the exact same value: a cut cursor would return the same rows again.
+   */
+  readonly createdAtCursor: string;
 }
 
 /** A page boundary: rows strictly after this (created_at, id). */
 export interface Cursor {
-  readonly createdAt: Date;
+  readonly createdAtCursor: string;
   readonly sessionId: string;
 }
 
@@ -37,18 +40,41 @@ export const TERMINAL_TRANSITION_ACTIONS: readonly string[] = [
 ];
 
 /** Sessions that can still capture a face image or start recording: the face tier never visits them (B1). */
-const LIVE_STATUSES = ['INVITED', 'OPENED', 'CONSENTED', 'VERIFIED', 'IN_PROGRESS', 'PAUSED'];
+export const LIVE_STATUSES = [
+  'INVITED',
+  'OPENED',
+  'CONSENTED',
+  'VERIFIED',
+  'IN_PROGRESS',
+  'PAUSED',
+];
+/** Every other status: the session can no longer capture (a spec pins both lists to the enum). */
+export const POST_CAPTURE_STATUSES = [
+  'SUBMITTED',
+  'GRADED',
+  'UNDER_REVIEW',
+  'COMPLETED',
+  'EXPIRED',
+  'APPEALED',
+  'DECLINED',
+];
 /** A review or appeal is open: the media tier never visits them (ADR 0004 R-2, re-checked here). */
 const HELD_STATUSES = ['UNDER_REVIEW', 'APPEALED'];
 
-/** The shortest `retention_days` (CHECK 7..730) bounds how young a due session can be (a scan limit). */
+/**
+ * The shortest `retention_days` bounds how young a due session can be (a scan limit). It depends on
+ * the `organizations_retention_days_check` CHECK (7..730) and on RETENTION_MEDIA_CAP_DAYS >= 7.
+ */
 const MIN_RETENTION_DAYS = 7;
 
 interface Row {
   sessionId: string;
   orgId: string;
-  createdAt: Date;
+  createdAtCursor: string;
 }
+
+/** The marker action goes into SQL as a literal; it is a code constant, and this keeps it that way. */
+const SAFE_ACTION = /^[A-Z_]+$/;
 
 /** Exactly `n * 24 hours`, so the SQL clock matches the UTC arithmetic of clocks.ts across a DST change. */
 const days = (n: Prisma.Sql): Prisma.Sql => Prisma.sql`(${n}) * interval '24 hours'`;
@@ -123,16 +149,19 @@ export class RetentionRepository {
   ): Promise<DueSession[]> {
     // The marker action is a code constant, written as a literal so the planner can match the
     // partial index (a bind parameter cannot be proved to satisfy its predicate on a generic plan).
-    const action = Prisma.raw(`'${RETENTION_MARKER_ACTIONS[tier]}'`);
+    const name = RETENTION_MARKER_ACTIONS[tier];
+    if (!SAFE_ACTION.test(name)) throw new Error('unsafe marker action');
+    const action = Prisma.raw(`'${name}'`);
     const cursor = after
-      ? Prisma.sql`AND (s.created_at, s.id) > (${after.createdAt}, ${after.sessionId}::uuid)`
+      ? Prisma.sql`AND (s.created_at, s.id) > (${after.createdAtCursor}::timestamptz, ${after.sessionId}::uuid)`
       : Prisma.empty;
     return this.orgContext.runSystem('RETENTION_ERASURE', () =>
       this.orgContext.runRawSql(
         'retention selection by date and marker (ADR 0004 9.2)',
         async () => {
           const rows = await this.prisma.client.$queryRaw<Row[]>(Prisma.sql`
-          SELECT s.id AS "sessionId", s.org_id AS "orgId", s.created_at AS "createdAt"
+          SELECT s.id AS "sessionId", s.org_id AS "orgId",
+                 to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAtCursor"
           FROM sessions s
           JOIN organizations o ON o.id = s.org_id
           WHERE s.created_at <= ${now}::timestamptz - ${days(Prisma.sql`${MIN_RETENTION_DAYS}`)}
@@ -148,7 +177,7 @@ export class RetentionRepository {
           return rows.map((r) => ({
             sessionId: r.sessionId,
             orgId: r.orgId,
-            createdAt: r.createdAt,
+            createdAtCursor: r.createdAtCursor,
           }));
         },
       ),
@@ -191,26 +220,37 @@ export class RetentionRepository {
   }
 
   /**
-   * True if a stored key lies outside the session prefix. Such a key would be nulled without its
-   * object ever being deleted (the tiers delete by prefix), so the tier treats the session as not
-   * verified and a person looks at it.
+   * True if a stored key lies outside the prefixes this tier deletes. Such a key would be nulled
+   * without its object ever being deleted, so the tier treats the session as not verified and a
+   * person looks at it. Face tier: identity keys must be under `identity/`, and the evidence keys it
+   * nulls (FACE_MISMATCH, or all with OQ-19) under `evidence/sealed/` (or `evidence/`). Media tier:
+   * every key must be under the session prefix.
    */
   async hasKeyOutside(
     root: string,
     sessionId: string,
     tier: Extract<RetentionTier, 'FACE' | 'MEDIA'>,
+    evidenceAll: boolean,
   ): Promise<boolean> {
+    const identityRoot = tier === 'FACE' ? `${root}identity/` : root;
+    const evidenceRoot =
+      tier === 'FACE' ? (evidenceAll ? `${root}evidence/` : `${root}evidence/sealed/`) : root;
     const outside = (field: 'idImageKey' | 'selfieKey') => ({
       sessionId,
-      AND: [{ [field]: { not: null } }, { NOT: { [field]: { startsWith: root } } }],
+      AND: [{ [field]: { not: null } }, { NOT: { [field]: { startsWith: identityRoot } } }],
     });
+    const evidenceScope = tier === 'FACE' && !evidenceAll ? { type: 'FACE_MISMATCH' as const } : {};
     const checks = await Promise.all([
       this.prisma.client.identityCheck.count({ where: outside('idImageKey') }),
       this.prisma.client.identityCheck.count({ where: outside('selfieKey') }),
       this.prisma.client.proctorEvent.count({
         where: {
           sessionId,
-          AND: [{ evidenceKey: { not: null } }, { NOT: { evidenceKey: { startsWith: root } } }],
+          ...evidenceScope,
+          AND: [
+            { evidenceKey: { not: null } },
+            { NOT: { evidenceKey: { startsWith: evidenceRoot } } },
+          ],
         },
       }),
       tier === 'MEDIA'
@@ -285,7 +325,9 @@ export class RetentionRepository {
   /**
    * Serialises two runs on one session and tier (a scheduler retry, two replicas): a transaction
    * advisory lock (ADR 0006 8.5), then the marker is looked for again inside the transaction.
-   * `audit_logs` is append-only, so a duplicate marker could never be removed.
+   * `audit_logs` is append-only, so a duplicate marker could never be removed. The R-2 hold check is
+   * not repeated here: by now the objects are deleted, so there is nothing left to protect. The
+   * `::text` cast is there because Prisma cannot decode the `void` result of the lock call.
    */
   private async lockAndCheck(tx: Tx, tier: RetentionTier, sessionId: string): Promise<boolean> {
     await this.orgContext.runRawSql(

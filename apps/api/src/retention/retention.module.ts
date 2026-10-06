@@ -22,6 +22,12 @@ export interface RetentionModuleOptions {
 @Module({})
 export class RetentionModule {
   static forRoot(options: RetentionModuleOptions): DynamicModule {
+    // A legal hold that is switched on but has no port bound would delete anyway: refuse to build.
+    if (loadRetentionConfig(process.env).RETENTION_LEGAL_HOLD && !options.legalHold) {
+      throw new Error(
+        'RETENTION_LEGAL_HOLD is on but RetentionModule.forRoot got no legalHold module',
+      );
+    }
     return {
       module: RetentionModule,
       imports: [

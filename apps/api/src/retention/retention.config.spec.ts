@@ -25,6 +25,7 @@ describe('loadRetentionConfig', () => {
       RETENTION_EVIDENCE_IN_FACE_TIER: 'false',
       RETENTION_RESULTS_CLOCK: 'submitted',
       RETENTION_VERSIONING_CHECK: 'skip',
+      APP_ENV: 'staging',
       RETENTION_BATCH_SIZE: '50',
     });
     expect(config).toMatchObject({
@@ -50,10 +51,28 @@ describe('loadRetentionConfig', () => {
       { NODE_ENV: 'production' },
     ]) {
       expect(() => loadRetentionConfig({ RETENTION_VERSIONING_CHECK: 'skip', ...env })).toThrow(
-        /not allowed in pilot or production/,
+        /allowed only with APP_ENV/,
       );
     }
     expect(loadRetentionConfig({ APP_ENV: 'pilot' }).RETENTION_VERSIONING_CHECK).toBe('enforce');
+    // Fail closed: an unset or misspelled environment is not "safe" (a denylist would let it through).
+    for (const env of [
+      {},
+      { APP_ENV: 'prod' },
+      { APP_ENV: 'pilot-1' },
+      { APP_ENV: '' },
+      { APP_ENV: 'staging', NODE_ENV: 'production' },
+    ]) {
+      expect(() => loadRetentionConfig({ RETENTION_VERSIONING_CHECK: 'skip', ...env })).toThrow(
+        /allowed only with APP_ENV/,
+      );
+    }
+    for (const appEnv of ['development', 'test', 'staging']) {
+      expect(
+        loadRetentionConfig({ RETENTION_VERSIONING_CHECK: 'skip', APP_ENV: appEnv })
+          .RETENTION_VERSIONING_CHECK,
+      ).toBe('skip');
+    }
   });
 
   it('NFR-05: an invalid value stops the process instead of silently using a default', () => {

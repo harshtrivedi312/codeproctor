@@ -42,12 +42,14 @@ export const retentionConfigSchema = z
     RETENTION_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).default(200),
   })
   .refine(
+    // A denylist would let an unset or misspelled APP_ENV through; ADR 0004 9.2 says pilot and
+    // production always fail closed, so `skip` is allowed only where the environment is named safe.
     (c) =>
       c.RETENTION_VERSIONING_CHECK !== 'skip' ||
-      !(['pilot', 'production'].includes(c.APP_ENV ?? '') || c.NODE_ENV === 'production'),
+      (['development', 'test', 'staging'].includes(c.APP_ENV ?? '') && c.NODE_ENV !== 'production'),
     {
       message:
-        'RETENTION_VERSIONING_CHECK=skip is not allowed in pilot or production (ADR 0004 9.2)',
+        'RETENTION_VERSIONING_CHECK=skip is allowed only with APP_ENV development, test or staging (ADR 0004 9.2)',
     },
   );
 

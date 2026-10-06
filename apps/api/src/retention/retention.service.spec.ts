@@ -16,13 +16,27 @@ import type { TenantFixture } from '../database/testing/tenant-fixtures';
 import { LegalHoldPort, NoLegalHold } from './legal-hold.port';
 import { loadRetentionConfig } from './retention.config';
 import { RETENTION_MARKER_ACTIONS, sessionPrefix } from './retention.constants';
-import { RetentionRepository, TERMINAL_TRANSITION_ACTIONS } from './retention.repository';
+import {
+  LIVE_STATUSES,
+  POST_CAPTURE_STATUSES,
+  RetentionRepository,
+  TERMINAL_TRANSITION_ACTIONS,
+} from './retention.repository';
+import { SessionStatus as SessionStatusEnum } from '../generated/prisma/enums.js';
 import { RetentionService } from './retention.service';
 import { InMemoryObjectStore } from './testing/in-memory-object-store';
 
 const DAY = 86_400_000;
 const NOW = new Date('2026-10-05T12:00:00.000Z');
 const daysAgo = (n: number): Date => new Date(NOW.getTime() - n * DAY);
+
+describe('session status lists (B1)', () => {
+  it('the live and post-capture lists together are exactly the SessionStatus enum', () => {
+    expect([...LIVE_STATUSES, ...POST_CAPTURE_STATUSES].sort()).toEqual(
+      Object.values(SessionStatusEnum).sort(),
+    );
+  });
+});
 
 describe('RetentionService: face and media tiers (FR-704, NFR-05, TC-072)', () => {
   let db: MigratedDatabase;
@@ -333,6 +347,38 @@ describe('RetentionService: face and media tiers (FR-704, NFR-05, TC-072)', () =
       expect((await build().service.runDaily(NOW)).face.completed).toBe(1);
     });
 
+    it('NFR-05: a face key inside the session but outside the face tier prefixes waits for a person (it would keep its object)', async () => {
+      await setup(A, { submittedDaysAgo: 100 });
+      const k = keys(A);
+      await owner.identityCheck.updateMany({
+        where: { sessionId: sessionIdOf(A) },
+        data: { selfieKey: `${k.root}media/selfie-misplaced.jpg` },
+      });
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      expect((await build().service.runDaily(NOW)).face).toMatchObject({
+        completed: 0,
+        retryLater: 1,
+      });
+      await owner.identityCheck.updateMany({
+        where: { sessionId: sessionIdOf(A) },
+        data: { selfieKey: k.selfie },
+      });
+      // An unsealed FACE_MISMATCH frame is outside evidence/sealed/ (OQ-19 off), but inside evidence/ (OQ-19 on).
+      await owner.proctorEvent.updateMany({
+        where: { sessionId: sessionIdOf(A), type: 'FACE_MISMATCH' },
+        data: { evidenceKey: k.evidence },
+      });
+      expect((await build().service.runDaily(NOW)).face).toMatchObject({
+        completed: 0,
+        retryLater: 1,
+      });
+      expect(
+        (await build({ RETENTION_EVIDENCE_IN_FACE_TIER: 'true' }).service.runDaily(NOW)).face
+          .completed,
+      ).toBe(1);
+      warn.mockRestore();
+    });
+
     it('NFR-05: a stored key outside the session prefix is not nulled away: the tier waits for a person', async () => {
       await setup(A, { submittedDaysAgo: 100 });
       await owner.identityCheck.updateMany({
@@ -513,6 +559,28 @@ describe('RetentionService: face and media tiers (FR-704, NFR-05, TC-072)', () =
       expect(summary.face).toMatchObject({ due: 2, completed: 1, retryLater: 1 });
       expect(await markers(B)).toHaveLength(1);
       expect(await markers(A)).toHaveLength(0);
+    });
+
+    it('NFR-05: sessions created in one statement (the same microsecond) are each visited exactly once, and none is starved (batch size 1)', async () => {
+      const extras = await Promise.all([
+        createTenant(owner, `ret-c-${counter}`),
+        createTenant(owner, `ret-d-${counter}`),
+      ]);
+      const all = [A, B, ...extras];
+      for (const t of all) await setup(t, { submittedDaysAgo: 100 });
+      // One statement, one value, microseconds that a JS Date cannot hold.
+      const ids = all.map(sessionIdOf);
+      await owner.$executeRaw`UPDATE sessions SET created_at = '2024-03-01 10:00:00.123456+00' WHERE id::text = ANY(${ids})`;
+      // The session that sorts first by id never verifies.
+      const failing = [...all].sort((a, b) =>
+        sessionIdOf(a).localeCompare(sessionIdOf(b)),
+      )[0] as TenantFixture;
+      store.failDeleteFor.add(keys(failing).idImage);
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const summary = await build({ RETENTION_BATCH_SIZE: '1' }).service.runDaily(NOW);
+      warn.mockRestore();
+      expect(summary.face).toMatchObject({ due: 4, completed: 3, retryLater: 1 });
+      expect(await markers(failing)).toHaveLength(0);
     });
 
     it('more due sessions than one page are all processed in the same run', async () => {
