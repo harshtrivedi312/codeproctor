@@ -36,9 +36,9 @@ Updated 2026-10-01 (ARC-01 Phase B, D-16..D-23). Changed: TC-007, TC-012, TC-030
 | ID | FR | Scenario | Steps | Expected result | Type | Priority |
 | --- | --- | --- | --- | --- | --- | --- |
 | TC-020 | FR-301 | Random pick rule | Test with 2 random MEDIUM questions tagged arrays; start 10 sessions | Each session gets 2 matching questions; distribution varies | F | P1 |
-| TC-021 | FR-303 | Single-use link | Complete a test, reopen link | "Already used" page; no new session | S | P1 |
-| TC-022 | FR-303 | Window enforcement | Open link after window\_end | "Expired" page; status EXPIRED | F | P1 |
-| TC-023 | FR-304 | Bulk CSV invite | Upload CSV of 100 rows with 3 invalid emails | 97 invitations sent; error report lists 3 rows | F | P2 |
+| TC-021 | FR-303 | Single-use link | Complete a test, reopen link with the API up (with the instances off, see TC-107) | "Already used" page; no new session | S | P1 |
+| TC-022 | FR-303 | Window enforcement | Open link after window\_end with the API up; separately let window\_end pass while the instances are off, then start them | "Expired" page; status EXPIRED (set on opening the link, or by the expiry job at the next start) | F | P1 |
+| TC-023 | FR-304 | Bulk CSV invite | Upload a CSV of 10 rows, each with a slot: 7 valid within capacity, 3 with invalid emails; then a row whose slot exceeds the capacity of FR-306 | 7 invitations sent; the error report lists the 3 invalid rows and the over-capacity row with its reason | F | P2 |
 | TC-024 | FR-305 | Extra time accommodation | Invite with +50% time on 60-min test | Server deadline is 90 min after start | F | P1 |
 
 ## Candidate portal (M4)
