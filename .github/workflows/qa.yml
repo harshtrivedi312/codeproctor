@@ -30,7 +30,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: qa-${{ github.workflow }}-${{ github.ref }}
+  group: qa-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}-${{ inputs.scan }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -150,7 +150,8 @@ jobs:
 
   zap-baseline:
     name: OWASP ZAP baseline (TC-093)
-    if: github.event_name == 'workflow_dispatch' && inputs.scan == 'zap-baseline'
+    # Dispatch from main only: a branch must not run unreviewed code with the staging secret.
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.scan == 'zap-baseline'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -163,7 +164,10 @@ jobs:
             https://*) ;;
             *) echo "Give an https staging URL." >&2; exit 1 ;;
           esac
-          host="${TARGET#https://}"; host="${host%%[/:?#]*}"
+          host="${TARGET#https://}"; host="${host%%[/:?#]*}"; host="${host,,}"
+          case "$host" in
+            *prod*|*pilot*) echo "Host $host looks like production or pilot; refused." >&2; exit 1 ;;
+          esac
           if [ -z "$STAGING_HOSTS" ]; then
             echo "Set the repository variable QA_STAGING_HOSTS (comma separated hostnames) first." >&2; exit 1
           fi
@@ -189,7 +193,10 @@ jobs:
             https://*) ;;
             *) echo "Give an https staging URL." >&2; exit 1 ;;
           esac
-          host="${TARGET#https://}"; host="${host%%[/:?#]*}"
+          host="${TARGET#https://}"; host="${host%%[/:?#]*}"; host="${host,,}"
+          case "$host" in
+            *prod*|*pilot*) echo "Host $host looks like production or pilot; refused." >&2; exit 1 ;;
+          esac
           case ",${STAGING_HOSTS//[[:space:]]/}," in
             *",$host,"*) echo "API host $host is allowed." ;;
             *) echo "Host $host is not in QA_STAGING_HOSTS." >&2; exit 1 ;;
@@ -199,17 +206,21 @@ jobs:
         env:
           TARGET: ${{ inputs.target_url }}
         run: |
+          set -o pipefail
           mkdir -p zap && chmod 777 zap
           cp packages/qa/zap/baseline.conf zap/
           docker run --rm -v "$PWD/zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy@sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef \
-            zap-baseline.py -t "$TARGET" -c baseline.conf -J report.json -r report.html -I
+            zap-baseline.py -t "$TARGET" -c baseline.conf -J report.json -r report.html -I 2>&1 \
+            | sed -E 's#https?://[^" ]*#<url-redacted>#g'
       - name: Run the baseline scan (API origin)
         if: ${{ inputs.api_url != '' }}
         env:
           TARGET: ${{ inputs.api_url }}
         run: |
+          set -o pipefail
           docker run --rm -v "$PWD/zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy@sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef \
-            zap-baseline.py -t "$TARGET" -c baseline.conf -J report-api.json -r report-api.html -I
+            zap-baseline.py -t "$TARGET" -c baseline.conf -J report-api.json -r report-api.html -I 2>&1 \
+            | sed -E 's#https?://[^" ]*#<url-redacted>#g'
       # TC-093: no high findings. cli.mjs exits 1 on a High alert and 2 on a missing, empty,
       # wrong-host or unreachable-target report (the old jq count passed on an empty report). It prints
       # alert names and counts, never URLs.
@@ -229,10 +240,12 @@ jobs:
         with:
           name: zap-report
           path: zap
+          retention-days: 7
 
   k6:
     name: k6 load (TC-090, TC-091)
-    if: github.event_name == 'workflow_dispatch' && (inputs.scan == 'k6-load' || inputs.scan == 'k6-code-run')
+    # Dispatch from main only: a branch must not run unreviewed code with the staging secret.
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && (inputs.scan == 'k6-load' || inputs.scan == 'k6-code-run')
     runs-on: ubuntu-24.04
     environment: staging
     timeout-minutes: 30
@@ -249,7 +262,10 @@ jobs:
             https://*) ;;
             *) echo "Give an https staging URL." >&2; exit 1 ;;
           esac
-          host="${TARGET#https://}"; host="${host%%[/:?#]*}"
+          host="${TARGET#https://}"; host="${host%%[/:?#]*}"; host="${host,,}"
+          case "$host" in
+            *prod*|*pilot*) echo "Host $host looks like production or pilot; refused." >&2; exit 1 ;;
+          esac
           if [ -z "$STAGING_HOSTS" ]; then
             echo "Set the repository variable QA_STAGING_HOSTS (comma separated hostnames) first." >&2; exit 1
           fi
@@ -269,15 +285,20 @@ jobs:
         run: |
           host="${TARGET#https://}"; host="${host%%[/:?#]*}"
           mkdir -p k6-out && chmod 777 k6-out
+          # k6 prints the full presigned URL (host, media object key, signature) on a transport error.
+          # URLs are redacted before they reach the job log; pipefail keeps k6's exit code.
+          set -o pipefail
           docker run --rm -v "$PWD/packages/qa/k6:/k6:ro" -v "$PWD/k6-out:/out:rw" -w /k6 \
             -e SESSIONS_JSON \
             -e ALLOWED_HOSTS="$host" \
             grafana/k6@sha256:e66db15b860113878fa74670e31f5e274830b7b6e42c8bff28b2f2d86a257603 \
             run -e API_BASE_URL="${TARGET%/}/api/v1" \
-            --summary-export=/out/summary.json "$SCRIPT"
+            --summary-export=/out/summary.json "$SCRIPT" 2>&1 \
+            | sed -E 's#https?://[^" ]*#<url-redacted>#g'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
         with:
           name: k6-summary
           path: k6-out/summary.json
+          retention-days: 7
           if-no-files-found: ignore
