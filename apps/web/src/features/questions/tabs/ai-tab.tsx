@@ -275,7 +275,12 @@ function AiDialog({
             : 'Paste a solution an AI assistant produced for this question.'}
         </DialogDescription>
         <form
-          onSubmit={(e) => void handleSubmit(onSubmit)(e)}
+          onSubmit={(e) => {
+            // The dialog renders in a portal, but React events still bubble to the editor's own
+            // <form>: without this, adding a solution would also submit (save) the question.
+            e.stopPropagation();
+            void handleSubmit(onSubmit)(e);
+          }}
           noValidate
           className="mt-4 space-y-3"
         >

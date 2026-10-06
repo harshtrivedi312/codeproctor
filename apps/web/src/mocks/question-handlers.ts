@@ -96,11 +96,7 @@ function detail(q: MockQuestion, v: MockVersion): Detail {
       isPublished: v.isPublished,
       createdAt: v.createdAt,
       validatedAt: v.validatedAt,
-      validationReport: v.validationReport ?? {
-        passed: false,
-        finishedAt: v.createdAt,
-        results: [],
-      },
+      validationReport: v.validationReport,
     },
   };
 }
