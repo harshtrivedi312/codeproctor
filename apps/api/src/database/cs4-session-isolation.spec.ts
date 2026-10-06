@@ -935,6 +935,73 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
     });
   });
 
+  describe("upsert against the other candidate's row", () => {
+    it.each(ACTORS)(
+      "TC-008 %s: the where cannot reach B's row, and the create branch (stamped with A's session) collides with it, leaving it unchanged",
+      async (_actor, run) => {
+        const before = await snapshot();
+        await run(A, async () => {
+          // The where is filtered, so B's row is not matched; the create then names B's primary key
+          // and the database refuses it. A session question, a submission and a consent (one per session).
+          await expect(
+            client.sessionQuestion.upsert({
+              where: { id: B.sessionQuestionId },
+              update: { position: 9 },
+              create: {
+                id: B.sessionQuestionId,
+                sessionId: A.sessionId,
+                testQuestionId: A.testQuestionId,
+                questionVersionId: A.questionVersionId,
+                position: 5,
+                points: 1,
+              },
+            }),
+          ).rejects.toMatchObject({ code: 'P2002' });
+          await expect(
+            client.submission.upsert({
+              where: { id: B.rows.Submission.filter.id as string },
+              update: { language: 'changed' },
+              create: {
+                id: B.rows.Submission.filter.id as string,
+                sessionQuestionId: A.sessionQuestionId,
+                kind: 'RUN',
+                language: 'python',
+                sourceCode: 'x',
+              },
+            }),
+          ).rejects.toMatchObject({ code: 'P2002' });
+          await expect(
+            client.consent.upsert({
+              where: { id: B.rows.Consent.filter.id as string },
+              update: { userAgent: 'changed' },
+              create: {
+                sessionId: A.sessionId,
+                consentTextId: T.consentTextId,
+                signedName: 'Candidate a',
+                signedAt: WHEN,
+              },
+            }),
+          ).rejects.toMatchObject({ code: 'P2002' });
+        });
+        expect(await snapshot()).toEqual(before);
+      },
+    );
+
+    it.each(ACTORS)('TC-008 %s: an upsert of its own row updates it', async (_actor, run) => {
+      const own = A.rows.Consent.filter.id as string;
+      const original = await owner.consent.findUniqueOrThrow({ where: { id: own } });
+      const row = await run(A, () =>
+        client.consent.upsert({
+          where: { id: own },
+          update: { userAgent: 'cs4-upsert' },
+          create: { sessionId: A.sessionId, consentTextId: T.consentTextId },
+        }),
+      );
+      expect(row.userAgent).toBe('cs4-upsert');
+      await owner.consent.update({ where: { id: own }, data: { userAgent: original.userAgent } });
+    });
+  });
+
   describe('CS-4.2 session keys are immutable, in both actors', () => {
     const keyWrites: Array<[string, string, (chain: SessionChain) => Row]> = [
       ['SessionQuestion', 'sessionId', (c) => ({ sessionId: c.sessionId })],
