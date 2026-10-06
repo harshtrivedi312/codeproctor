@@ -813,6 +813,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(consent.signedName).toBe('Ada Lovelace');
       expect(consent.signedAt?.getTime()).toBe(signedAtResponse);
       // D-55: the 18+ confirmation is stored as the server time of the signature, in the same create.
+      expect(consent.ageConfirmedAt?.getTime()).toBe(consent.signedAt?.getTime());
       expect(consent.ageConfirmedAt?.getTime()).toBe(signedAtResponse);
       expect(consent.declinedAt).toBeNull();
       expect(consent.userAgent).toBe('TestBrowser/1.0');
