@@ -73,11 +73,11 @@ export class TestsController {
       'Validation failed (LOCKDOWN profile, time limits above the duration, bad random rule, ...)',
   })
   @ApiNotFoundResponse({
-    description: 'A fixed question version does not exist in your organization',
+    description: 'A fixed question version does not exist or is not available in your organization',
   })
   @ApiUnprocessableEntityResponse({
     description:
-      'A fixed version is unpublished or its question archived, or a random rule matches too few published questions',
+      'A fixed version belongs to an archived question, or a random rule matches too few published questions',
   })
   create(@Body() dto: CreateTestDto, @Req() req: AuthedRequest): Promise<TestDetailDto> {
     return this.tests.create(actorOf(req), dto, ctxOf(req));
@@ -102,7 +102,8 @@ export class TestsController {
   @ApiNotFoundResponse({ description: 'No such test (or question version) in your organization' })
   @ApiConflictResponse({ description: 'The test already has an invitation or a session' })
   @ApiUnprocessableEntityResponse({
-    description: 'Unpublished or archived question, or an unsatisfiable random rule',
+    description:
+      'A fixed version belongs to an archived question, or a random rule is unsatisfiable',
   })
   update(
     @Param('id', new ParseUUIDPipe()) id: string,

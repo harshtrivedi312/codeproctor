@@ -314,8 +314,8 @@ export class TestsService {
 
   /**
    * Fixed questions must be PUBLISHED versions of non-archived questions of this org: a version of
-   * another org is the same 404 as a missing one, an unpublished version or an archived question
-   * is 422. A random rule must match, today, at least as many published questions of this org as
+   * another org, and a draft (unpublished) version, are the same 404 as a missing one (DL-34: no
+   * existence oracle for drafts); a published version of an archived question is 422. A random rule must match, today, at least as many published questions of this org as
    * there are slots with the same rule (a test never picks one question twice). Matching is the
    * same as at test start: the question's current published version, not archived.
    */
