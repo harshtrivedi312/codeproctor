@@ -377,6 +377,7 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
     expect(await completedRows(cid)).toHaveLength(1);
     // A completed and anonymised candidate is not listed again.
     await h.owner.candidate.update({ where: { id: cid }, data: { erasedAt: NOW } });
+    await svc.runDue(at(SETTLED + 5000)); // writes the list completion
     const listed = await repo.findRequested(1000);
     expect(listed.map((c) => c.candidateId)).not.toContain(cid);
     expect(requestIdOf(cid, daysAgo(1))).toContain(cid);
@@ -564,11 +565,11 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
     });
     expect(list.completed).toContain(cid);
   });
-  it('TC-094 #20: after completion a later run does not touch the store; a live session that appears afterwards is fenced and purged', async () => {
+  it('TC-094 #20: after completion a settled session costs no store traffic; a session fenced afterwards still gets its post-margin pass', async () => {
     await setup(h.A, { submittedDaysAgo: 3, anchorDaysAgo: 3 });
     const sid = sessionIdOf(h.A);
     const cid = await candidateOf(h.A);
-    const { svc } = service();
+    const { svc, alerts } = service();
     await svc.requestErasure({ orgId: h.A.orgId, candidateId: cid, actorId: ACTOR(), now: NOW });
     await svc.run(h.A.orgId, cid, at(SETTLED));
     const rows = () =>
@@ -576,13 +577,64 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
         where: { entityId: sid, action: { startsWith: 'ERASURE_SESSION' } },
       });
     const before = await rows();
-    h.store.failList = true;
+    const lists = h.store.listCalls;
     expect((await svc.run(h.A.orgId, cid, at(10 * 86_400_000))).status).toBe('completed');
+    expect(h.store.listCalls).toBe(lists);
     expect(await rows()).toBe(before);
-    h.store.failList = false;
-    await h.owner.session.update({ where: { id: sid }, data: { status: 'COMPLETED' } });
-    h.store.put(keys(h.A).media);
-    await svc.run(h.A.orgId, cid, at(11 * 86_400_000));
-    expect(h.store.keys.has(keys(h.A).media)).toBe(false);
+    expect(alerts.raised).toEqual([]);
+
+    // A second session of the same candidate appears after completion (a new invitation).
+    const inv = await h.owner.invitation.findFirstOrThrow({ where: { candidateId: cid } });
+    const second = await h.owner.invitation.create({
+      data: {
+        orgId: inv.orgId,
+        testId: inv.testId,
+        candidateId: cid,
+        tokenHash: `late-${cid}`,
+        windowStart: inv.windowStart,
+        windowEnd: inv.windowEnd,
+      },
+    });
+    const late = await h.owner.session.create({
+      data: { orgId: inv.orgId, invitationId: second.id, status: 'IN_PROGRESS' },
+    });
+    const t0 = at(11 * 86_400_000);
+    await svc.run(h.A.orgId, cid, t0);
+    expect((await h.owner.session.findUniqueOrThrow({ where: { id: late.id } })).status).toBe(
+      'ERASED',
+    );
+    const lateKey = `${sessionPrefix(h.A.orgId, late.id)}media/SCREEN/000001/late.webm`;
+    h.store.put(lateKey);
+    await svc.run(h.A.orgId, cid, new Date(t0.getTime() + 30_000));
+    h.store.put(lateKey);
+    await svc.run(h.A.orgId, cid, new Date(t0.getTime() + SETTLED));
+    expect(h.store.keys.has(lateKey)).toBe(false);
+    expect(
+      await h.owner.auditLog.count({
+        where: { entityId: late.id, action: 'ERASURE_SESSION_PURGED' },
+      }),
+    ).toBeGreaterThan(0);
+  });
+
+  it('TC-094 #21 FU-DBB-02: a failed list completion is retried by the sweep until it succeeds', async () => {
+    await setup(h.A, { submittedDaysAgo: 3, anchorDaysAgo: 3 });
+    const cid = await candidateOf(h.A);
+    const { svc, list } = service();
+    await svc.requestErasure({ orgId: h.A.orgId, candidateId: cid, actorId: ACTOR(), now: NOW });
+    await svc.run(h.A.orgId, cid, at(SETTLED));
+    expect(list.completed).toEqual([]);
+    const original = list.complete.bind(list);
+    list.complete = () => Promise.reject(new Error('list down'));
+    await expect(
+      svc.recordManualNotice({
+        orgId: h.A.orgId,
+        candidateId: cid,
+        actorId: ACTOR(),
+        now: at(SETTLED),
+      }),
+    ).rejects.toThrow();
+    list.complete = original;
+    await svc.runDue(at(SETTLED + 1000));
+    expect(list.completed).toContain(cid);
   });
 });

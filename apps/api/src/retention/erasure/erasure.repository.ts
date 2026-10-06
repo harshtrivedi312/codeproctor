@@ -67,6 +67,7 @@ export class ErasureRepository {
    */
   findRequested(limit: number, afterId?: string): Promise<RequestedErasure[]> {
     const completed = safeAction(ERASURE_RESERVED_ACTIONS.COMPLETED);
+    const listDone = safeAction(ERASURE_AUDIT_ACTIONS.LIST_COMPLETED);
     const after = afterId ? Prisma.sql`AND c.id > ${afterId}::uuid` : Prisma.empty;
     return this.orgContext.runSystem('RETENTION_ERASURE', () =>
       this.orgContext.runRawSql('erasure request selection (ADR 0004 9.5)', async () => {
@@ -74,10 +75,15 @@ export class ErasureRepository {
           SELECT c.id AS "candidateId", c.org_id AS "orgId"
           FROM candidates c
           WHERE c.erasure_requested_at IS NOT NULL
-            AND (c.erased_at IS NULL OR NOT EXISTS (
-              SELECT 1 FROM audit_logs a
-              WHERE a.action = ${completed} AND a.org_id = c.org_id
-                AND a.metadata->>'requestId' = c.id::text || '_' || floor(extract(epoch FROM c.erasure_requested_at))::bigint::text))
+            AND (c.erased_at IS NULL
+              OR NOT EXISTS (
+                SELECT 1 FROM audit_logs a
+                WHERE a.action = ${completed} AND a.org_id = c.org_id
+                  AND a.metadata->>'requestId' = c.id::text || '_' || floor(extract(epoch FROM c.erasure_requested_at))::bigint::text)
+              OR NOT EXISTS (
+                SELECT 1 FROM audit_logs a
+                WHERE a.action = ${listDone} AND a.org_id = c.org_id
+                  AND a.metadata->>'requestId' = c.id::text || '_' || floor(extract(epoch FROM c.erasure_requested_at))::bigint::text))
             ${after}
           ORDER BY c.id
           LIMIT ${limit}`);
@@ -309,8 +315,9 @@ export class ErasureRepository {
     sessionId: string;
     requestId: string;
     reduceAll: boolean;
+    at: Date;
   }): Promise<boolean> {
-    const { orgId, candidateId, sessionId, requestId, reduceAll } = args;
+    const { orgId, candidateId, sessionId, requestId, reduceAll, at } = args;
     return this.prisma.client.$transaction(async (tx) => {
       await this.retentionRepo.candidateLock(tx, candidateId);
       const session = await tx.session.findUnique({
@@ -354,10 +361,30 @@ export class ErasureRepository {
           action: ERASURE_AUDIT_ACTIONS.SESSION_PURGED,
           entityType: SESSION_ENTITY_TYPE,
           entityId: sessionId,
-          metadata: { requestId },
+          metadata: { requestId, at: at.toISOString() },
         },
       });
       return true;
+    });
+  }
+
+  /**
+   * Has a verified purge of this session run at or after `threshold` (its fence time + the settle
+   * window)? Only then is the session settled and may later sweeps leave it alone.
+   */
+  async purgedAfter(sessionId: string, requestId: string, threshold: Date): Promise<boolean> {
+    const rows = await this.prisma.client.auditLog.findMany({
+      where: {
+        action: ERASURE_AUDIT_ACTIONS.SESSION_PURGED,
+        entityType: SESSION_ENTITY_TYPE,
+        entityId: sessionId,
+        metadata: { path: ['requestId'], equals: requestId },
+      },
+      select: { metadata: true },
+    });
+    return rows.some((r) => {
+      const at = (r.metadata as { at?: unknown } | null)?.at;
+      return typeof at === 'string' && Date.parse(at) >= threshold.getTime();
     });
   }
 

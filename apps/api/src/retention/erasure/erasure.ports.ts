@@ -75,7 +75,8 @@ export abstract class ErasureAlertPort {
  * The erasure list that survives a restore (ADR 0004 9.7, FU-DBB-02; `infra/backup/erasure-list.sh`):
  * an object `<prefix>erasure-list/<stamp>-<candidateId>.json` kept outside the dumps, re-applied after
  * a restore. Both calls are idempotent (the adapter must not write a second entry for a candidate that
- * has one) and carry the candidate id only. A failure throws, so the run stops before it erases.
+ * has one) and carry the candidate id only. A failed `append` throws before anything is erased; a failed
+ * `complete` throws after, and the daily sweep retries it until it succeeds.
  */
 export abstract class ErasureListPort {
   /** Before the first fence of the request: without it a restore brings the candidate back. */

@@ -131,7 +131,6 @@ export class ErasureService {
     }
 
     let heldAny = false;
-    let fencedNow = false;
     for (const s of sessions) {
       if (s.status === 'ERASED') continue;
       const wouldHold =
@@ -146,7 +145,6 @@ export class ErasureService {
         continue;
       }
       if (result === 'fenced') {
-        fencedNow = true;
         // Record the fence time first: completion waits for it, even if the next call fails.
         const fencedAt = await inOrg(() =>
           this.repo.fenceTime({ orgId, candidateId, sessionId: s.id, requestId, now: current() }),
@@ -174,14 +172,16 @@ export class ErasureService {
     const wasCompleted = await inOrg(() => this.repo.isCompleted(requestId, candidateId));
     let allClean = fresh.every((s) => s.status === 'ERASED');
     let settled = true;
-    // Skip only when nothing was fenced now and every session is already ERASED (a session that shows
-    // up live after completion is still fenced AND purged).
-    const skipPurge = wasCompleted && !fencedNow && fresh.every((s) => s.status === 'ERASED');
-    for (const s of skipPurge ? [] : fresh) {
+    for (const s of fresh) {
       if (s.status !== 'ERASED') continue;
       const fencedAt = await inOrg(() =>
         this.repo.fenceTime({ orgId, candidateId, sessionId: s.id, requestId, now: current() }),
       );
+      const settleAt = new Date(fencedAt.getTime() + SETTLE_MS);
+      // After completion, a session that already had a verified pass after its settle time is left
+      // alone (no store traffic on the daily sweeps); a session fenced since gets its post-margin pass.
+      if (wasCompleted && (await inOrg(() => this.repo.purgedAfter(s.id, requestId, settleAt))))
+        continue;
       if (current().getTime() < fencedAt.getTime() + SETTLE_MS) {
         settled = false;
         // Idempotent by request and fence time: a lost or failed first scheduling is repaired here.
@@ -213,6 +213,7 @@ export class ErasureService {
           sessionId: s.id,
           requestId,
           reduceAll: this.config.RETENTION_REDUCE_ACCOMMODATIONS,
+          at: current(),
         }),
       );
       if (!purged || !(await inOrg(() => this.repo.isPurged(s.id)))) allClean = false;
@@ -258,7 +259,13 @@ export class ErasureService {
         );
       }
     }
-    if (completed && anonymised) await this.list.complete({ orgId, candidateId });
+    if (completed && anonymised) {
+      const key = { candidateId, requestId, action: ERASURE_AUDIT_ACTIONS.LIST_COMPLETED };
+      if (!(await inOrg(() => this.repo.onceDone(key)))) {
+        await this.list.complete({ orgId, candidateId });
+        await inOrg(() => this.repo.writeOnce({ orgId, ...key }));
+      }
+    }
     // After the day-28 check: an already anonymised candidate gets no mail (ADR 0004 9.5 step 8).
     if (completed && !sent && !noticed && !anonymised) {
       await this.notices.enqueueCompleted({ orgId, candidateId, requestId });
