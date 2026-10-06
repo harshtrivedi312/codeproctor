@@ -58,13 +58,13 @@ test.describe('FR-201..FR-205 question bank', () => {
     await expect(page.getByRole('tablist', { name: 'Question sections' })).toBeVisible();
     await page.getByRole('button', { name: 'Validate' }).click();
     await expect(page.getByText('Validation failed')).toBeVisible();
-    const failing = page.getByRole('table', { name: 'Results for Rotate by 3' });
+    const failing = page.getByRole('table', { name: 'Results for Variant 2' });
     await expect(failing.getByRole('row', { name: /Test 2/ })).toContainText('Wrong answer');
     await expect(page.getByRole('button', { name: 'Publish' })).toBeDisabled();
     await expectNoAxeViolations(page);
 
     await page.getByRole('tab', { name: 'Variants' }).click();
-    const card = page.getByRole('region', { name: 'Rotate by 3' });
+    const card = page.getByRole('region', { name: 'Variant 2' });
     await card.getByLabel('Expected output, slot 2').fill('4 5 6 1 2 3');
     await page.getByRole('button', { name: 'Save' }).click();
     await expect(page.getByText(/Saved\./)).toBeVisible();

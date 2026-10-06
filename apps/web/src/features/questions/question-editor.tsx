@@ -19,7 +19,6 @@ import {
   toUpdate,
   toVariants,
   type DraftValues,
-  type Variant,
 } from './draft';
 import { aiGate, canPublish, publishChecks } from './gate';
 import { disposeModels } from './monaco-registry';
@@ -27,7 +26,6 @@ import { MonacoScope } from './monaco-field';
 import { STATUS_LABEL, TYPE_LABEL } from './labels';
 import {
   fetchQuestion,
-  fetchVariants,
   isFullQuestion,
   PartialSaveFailure,
   questionKeys,
@@ -96,8 +94,6 @@ export interface QuestionEditorProps {
   mode: 'create' | 'edit' | 'view';
   /** Required for edit and view: the writer view of one version. */
   detail?: FullQuestion;
-  /** The variants of that version (web-only placeholder, BE-04b). */
-  variants?: Variant[];
   /** Required for create. */
   type?: Schemas['QuestionType'];
   /** Validation poll interval; tests pass a small value. */
@@ -146,7 +142,6 @@ type PublishBlock = 'unavailable' | 'refused' | null;
 export function QuestionEditor({
   mode,
   detail,
-  variants: loadedVariants = [],
   type,
   pollMs = 1000,
   maxPolls = 90,
@@ -156,10 +151,7 @@ export function QuestionEditor({
   const readOnly = mode === 'view';
   const questionType = detail?.type ?? type ?? 'CODING';
   const initial = React.useMemo(
-    () =>
-      detail
-        ? toDraft(detail.type, detail.tags, detail.version, loadedVariants)
-        : emptyDraft(questionType),
+    () => (detail ? toDraft(detail.type, detail.tags, detail.version) : emptyDraft(questionType)),
     // The editor mounts once per version of the question; later server data must not overwrite edits.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
@@ -174,10 +166,7 @@ export function QuestionEditor({
 
   const [meta, setMeta] = React.useState<Meta>(() => metaOf(detail));
   // What the server has, to work out what a save has to change (test cases, variants).
-  const loaded = React.useRef({
-    cases: (detail?.version.testCases ?? []).map((t) => ({ id: t.id, position: t.position })),
-    variants: loadedVariants,
-  });
+  const loaded = React.useRef<Schemas['QuestionVersion'] | null>(detail?.version ?? null);
   const [tab, setTab] = React.useState('statement');
   const [badTabs, setBadTabs] = React.useState<Set<string>>(new Set());
   const [notice, setNotice] = React.useState<string | null>(null);
@@ -257,21 +246,18 @@ export function QuestionEditor({
         router.replace(`/admin/questions/${created.id}`);
         return;
       }
+      if (!loaded.current) throw new ApiFailure(404, '');
       const result = await save.mutateAsync({
         update: toUpdate(values),
         expectedRevision: meta.revision,
         desiredCases: values.testCases,
-        loadedCases: loaded.current.cases,
         variants: isCoding ? toVariants(values) : null,
-        loadedVariants: loaded.current.variants,
+        loaded: loaded.current,
         coding: isCoding,
       });
       const saved = result.detail;
-      form.reset(toDraft(saved.type, saved.tags, saved.version, result.variants));
-      loaded.current = {
-        cases: saved.version.testCases.map((t) => ({ id: t.id, position: t.position })),
-        variants: result.variants,
-      };
+      form.reset(toDraft(saved.type, saved.tags, saved.version));
+      loaded.current = saved.version;
       setMeta(metaOf(saved));
       setPublishProblem(null);
       setPublishBlock((b) => (b === 'refused' ? null : b));
@@ -286,7 +272,15 @@ export function QuestionEditor({
       // A 409 on the save that sent expectedRevision means the content changed since it was loaded.
       if (e instanceof PartialSaveFailure) {
         setConflict(true);
-        if (e.status !== 409) {
+        if (e.step === 'reload') {
+          setProblem(
+            `Your changes were saved, but we could not load the saved version: ${describe(e)} Reload the latest version to continue.`,
+          );
+        } else if (e.status === 409) {
+          setProblem(
+            `Part of your changes were saved, then the ${e.step} step found that the question changed meanwhile. Reload the latest version to see where things stand; your edits on this page stay until you do.`,
+          );
+        } else {
           setProblem(
             `Some of your changes were saved, but the ${e.step} could not be: ${describe(e)} Reload the latest version to see where things stand.`,
           );
@@ -305,14 +299,9 @@ export function QuestionEditor({
       // The user or the role changed while this was in flight: what came back is not theirs to see.
       if (startedIn !== getGeneration()) return;
       if (!isFullQuestion(latest)) throw new ApiFailure(403, '');
-      const variants = isCoding ? await fetchVariants(latest.id, latest.version.version) : [];
-      if (startedIn !== getGeneration()) return;
       qc.setQueryData(questionKeys.detail(latest.id), latest);
-      form.reset(toDraft(latest.type, latest.tags, latest.version, variants));
-      loaded.current = {
-        cases: latest.version.testCases.map((t) => ({ id: t.id, position: t.position })),
-        variants,
-      };
+      form.reset(toDraft(latest.type, latest.tags, latest.version));
+      loaded.current = latest.version;
       setMeta(metaOf(latest));
       setConflict(false);
       setProblem(null);
@@ -430,7 +419,12 @@ export function QuestionEditor({
         setPublishProblem(
           `Publishing was refused: ${e.errors.length > 0 ? e.errors.join(' ') : e.message || 'the question does not meet the requirements yet.'}`,
         );
-      } else if (e.status === 404 || e.status === 405 || e.status === 501) {
+      } else if (e.status === 404) {
+        // The real API answers 404 only for a question that is gone (or not yours): say so.
+        setPublishProblem(
+          'This question no longer exists, so nothing was published. Go back to the list.',
+        );
+      } else if (e.status === 405 || e.status === 501) {
         setPublishBlock('unavailable');
         setPublishProblem(
           'Publishing is not available yet. Nothing was published; your question is saved as a draft.',
@@ -601,7 +595,9 @@ export function QuestionEditor({
               case 'tests':
                 return <TestsTab {...tabProps} />;
               case 'variants':
-                return <VariantsTab {...tabProps} questionId={meta.questionId} />;
+                return (
+                  <VariantsTab {...tabProps} questionId={meta.questionId} version={meta.version} />
+                );
               case 'ai':
                 return <AiTab {...tabProps} questionId={meta.questionId} policy={policy} />;
               case 'limits':

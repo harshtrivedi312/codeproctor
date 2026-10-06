@@ -14,7 +14,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { formatDate } from '@/features/admin/format';
 import type { Schemas } from '@/lib/api/client';
 import { aiReferenceFormSchema, type AiReferenceFormValues } from '../ai-schema';
-import { LANGUAGE_LABELS } from '../draft';
+import { LANGUAGE_LABELS, variantName } from '../draft';
 import { aiGate, aiRefreshDue } from '../gate';
 import { MonacoField } from '../monaco-field';
 import { useAddAiReference, useAiReferences } from '../queries';
@@ -31,6 +31,11 @@ interface Props extends ApiTabProps {
  * the new row and keeps the old one (marked superseded). They are used for similarity checks only,
  * never for grading, and candidates never see them.
  */
+function variantLabel(variants: readonly { id: string }[], id: string): string {
+  const at = variants.findIndex((v) => v.id === id);
+  return at >= 0 ? variantName(at) : 'A variant';
+}
+
 export function AiTab({
   form,
   readOnly,
@@ -169,9 +174,7 @@ export function AiTab({
                     <td className="px-3 py-2">{r.assistant}</td>
                     <td className="px-3 py-2">{r.modelLabel}</td>
                     <td className="px-3 py-2">
-                      {r.variantId
-                        ? (variants.find((v) => v.id === r.variantId)?.label ?? 'A variant')
-                        : 'Base statement'}
+                      {r.variantId ? variantLabel(variants, r.variantId) : 'Base statement'}
                     </td>
                     <td className="px-3 py-2">{formatDate(r.collectedAt)}</td>
                     <td className="px-3 py-2">{r.collectedByName}</td>
@@ -206,7 +209,7 @@ export function AiTab({
           questionId={questionId}
           supersede={dialog.supersede}
           languages={aiLanguages}
-          variants={variants.map((v) => ({ id: v.id, label: v.label }))}
+          variants={variants.map((v, i) => ({ id: v.id, label: variantName(i) }))}
           onClose={() => setDialog(null)}
         />
       ) : null}

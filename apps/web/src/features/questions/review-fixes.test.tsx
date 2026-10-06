@@ -288,7 +288,7 @@ describe('Prefill proposals (ADR 0007)', () => {
     );
     const { u } = await openEditor('q-merge');
     await goTab(u, 'Variants');
-    const card = screen.getByRole('region', { name: 'Three intervals' });
+    const card = screen.getByRole('region', { name: 'Variant 1' });
     await u.click(within(card).getByRole('button', { name: 'Prefill from reference solution' }));
     // The answer is still on its way; the author changes the parameters.
     await setText(u, within(card).getByLabelText('Parameters (JSON)'), '{"count": 5}');
@@ -308,7 +308,7 @@ describe('Prefill proposals (ADR 0007)', () => {
     );
     const { u } = await openEditor('q-merge');
     await goTab(u, 'Variants');
-    const card = screen.getByRole('region', { name: 'Three intervals' });
+    const card = screen.getByRole('region', { name: 'Variant 1' });
     await u.click(within(card).getByRole('button', { name: 'Prefill from reference solution' }));
     expect(
       await within(card).findByText('We could not run the reference solution'),

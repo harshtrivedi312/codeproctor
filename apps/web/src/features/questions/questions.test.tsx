@@ -171,7 +171,7 @@ describe('Question editor: tabs and statement (FR-201)', () => {
     expect(preview).toHaveTextContent('{{count}} intervals');
     await u.selectOptions(
       screen.getByLabelText('Show as'),
-      screen.getByRole('option', { name: 'Four intervals' }),
+      screen.getByRole('option', { name: 'Variant 2' }),
     );
     expect(preview).toHaveTextContent('Given 4 intervals');
     expect(preview).not.toHaveTextContent('{{count}}');

@@ -56,13 +56,22 @@ describe('variant parameters (FR-203, DL-32)', () => {
     expect(parseParams('[1]').ok).toBe(false);
     expect(parseParams('{').ok).toBe(false);
   });
-  it('FR-203: values must be strings or numbers; there is no declared schema to check against', () => {
-    expect(checkParams({ n: 1, s: 'x' })).toEqual([]);
-    expect(checkParams({ ok: true })[0]).toMatch(/"ok" must be a string or a number/);
-    expect(checkParams({ xs: [1] })[0]).toMatch(/"xs" must be a string or a number/);
-    expect(checkParams({ n: Number.NaN })[0]).toMatch(/"n" must be a string or a number/);
-    expect(checkParams({ n: null })[0]).toMatch(/"n" must be a string or a number/);
+  it('FR-203 BE-04b: values are strings, numbers or booleans with the API name and size rules', () => {
+    expect(checkParams({ n: 1, s: 'x', ok: true })).toEqual([]);
+    expect(checkParams({ xs: [1] })[0]).toMatch(/"xs" must be a string, a number or true or false/);
+    expect(checkParams({ n: Number.NaN })[0]).toMatch(/"n" must be a string, a number/);
+    expect(checkParams({ n: null })[0]).toMatch(/"n" must be a string, a number/);
     expect(checkParams({ 'bad name': 1 })[0]).toMatch(/not a valid name/);
+    expect(checkParams({ __proto__x: 1, constructor: 1 })).toHaveLength(2);
+    expect(checkParams({ s: 'x'.repeat(1001) })[0]).toMatch(/too long/);
+    expect(checkParams({ ['a'.repeat(41)]: 1 })[0]).toMatch(/not a valid name/);
+  });
+  it('FR-203 BE-04b: the template syntax is the API subset: an escaped brace is text, other tags are errors', () => {
+    expect(placeholdersOf('\\{{not}} but {{yes}}')).toEqual(['yes']);
+    expect(renderTemplate('\\{{a}} {{b}}', { b: true }).text).toBe('{{a}} true');
+    expect(hasUnsupportedSyntax('{{a.b}}')).toBe(true);
+    expect(hasUnsupportedSyntax('{{ a')).toBe(true);
+    expect(hasUnsupportedSyntax('\\{{ok')).toBe(false);
   });
   it('FR-203: finds the placeholders a variant gives no value, against its own keys', () => {
     expect(missingPlaceholders({ a: 1 }, ['a', 'b'])).toEqual(['b']);
@@ -151,7 +160,6 @@ describe('question draft (FR-201..FR-205)', () => {
       variants: [
         {
           id: 'v',
-          label: ' V ',
           paramsText: '{"n": 2}',
           active: true,
           overrides: [
@@ -166,7 +174,7 @@ describe('question draft (FR-201..FR-205)', () => {
     expect(update).not.toHaveProperty('testCases');
     expect(update).not.toHaveProperty('answerSpec');
     const [variant] = toVariants(d);
-    expect(variant).toMatchObject({ label: 'V', params: { n: 2 } });
+    expect(variant).toMatchObject({ params: { n: 2 }, isActive: true });
     expect(variant?.overrides).toHaveLength(1);
   });
 
