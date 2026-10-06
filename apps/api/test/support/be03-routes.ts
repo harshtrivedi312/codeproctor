@@ -23,7 +23,7 @@
 //         metadata ONLY {method, route '/api/v1/admin/users/:userId/invite'}, NOT @Audited (no `audited`
 //         flag in the matrix). Listed ONLY when the backend's ROUTE_PERMISSIONS has the key (see below).
 //
-// BE-04 (slice 4a, question bank): 11 routes under /questions, listed below in the same table so the
+// BE-04 (slice 4a, question bank): 11 routes under /questions (slice 4b adds 7 variant routes below), listed below in the same table so the
 // generic 401, 403, cross-org 404, effect and audit tests drive them. The audit rows are written by
 // the service in the mutation's own transaction (NOT @Audited, so no `audited` flag in the matrix):
 // entity `question`, entity id the question, metadata of ids and changed field NAMES only (never
@@ -116,7 +116,7 @@ export interface Target {
 export interface Be03Route {
   id: string;
   step: 'BE-03' | 'BE-04' | 'BE-13';
-  method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   /** Path template as the backend registry writes it (no query string), under /api/v1. */
   template: string;
   /** Distinguishes routes that share one method and template (PATCH role / deactivate / reactivate). */
@@ -318,6 +318,8 @@ const FIELD_NAMES = [
   'isHidden',
   'weight',
   'position',
+  'params',
+  'isActive',
 ];
 const isInt = (v: unknown): boolean => Number.isInteger(v) && (v as number) >= 1;
 const isUuid = (v: unknown): boolean => typeof v === 'string' && UUID_RE.test(v);
@@ -417,11 +419,15 @@ export async function markValidated(h: Harness, questionId: string): Promise<voi
     orderBy: { version: 'desc' },
   });
   const cases = await h.owner.testCase.findMany({ where: { questionVersionId: head.id } });
+  const variants = await h.owner.questionVariant.findMany({
+    where: { questionVersionId: head.id },
+    include: { testCaseOverrides: true },
+  });
   await h.owner.questionVersion.update({
     where: { id: head.id },
     data: {
       validatedAt: new Date(),
-      validationReport: { passed: true, revision: computeRevision(head, cases) },
+      validationReport: { passed: true, revision: computeRevision(head, cases, variants) },
     },
   });
 }
@@ -448,6 +454,38 @@ const createBody = (slug: string): Record<string, unknown> => ({
 });
 
 const QUESTIONS = '/questions';
+const VARIANT_SECRET = 'QA-VARIANT-PARAM';
+const OVERRIDE_IN = 'QA-OVERRIDE-IN';
+const OVERRIDE_OUT = 'QA-OVERRIDE-OUT';
+
+/** A coding question (see questionFixture) with one active variant, optionally with an override on the hidden slot. */
+async function variantFixture(
+  h: Harness,
+  orgId: string,
+  opts: { published?: boolean; override?: boolean } = {},
+): Promise<QuestionFix & { variantId: string }> {
+  const f = await questionFixture(h, orgId, { published: opts.published ?? false });
+  const variant = await h.owner.questionVariant.create({
+    data: {
+      questionVersionId: f.versionIds[1] as string,
+      params: { secret: VARIANT_SECRET },
+      renderedStatement: 'Add two numbers.',
+    },
+  });
+  if (opts.override) {
+    await h.owner.variantTestCase.create({
+      data: {
+        variantId: variant.id,
+        testCaseId: f.hiddenId,
+        input: OVERRIDE_IN,
+        expectedOutput: OVERRIDE_OUT,
+      },
+    });
+  }
+  return { ...f, variantId: variant.id };
+}
+const variantCount = (h: Harness, versionId: string): Promise<number> =>
+  h.owner.questionVariant.count({ where: { questionVersionId: versionId } });
 // Content that must never reach an audit row: the fixture and request body values too.
 const qSecrets = [
   REF_SECRET,
@@ -457,6 +495,9 @@ const qSecrets = [
   'QA edited title',
   'QA created question',
   'Add two numbers.',
+  VARIANT_SECRET,
+  OVERRIDE_IN,
+  OVERRIDE_OUT,
 ];
 
 /** A question-route entry with the shared BE-04 defaults; each route overrides what differs. */
@@ -717,6 +758,153 @@ const BE04_ROUTES: Be03Route[] = [
         entityId: f.id,
         secrets: qSecrets,
         unchanged: async () => (await h.owner.testCase.count({ where: { id: f.hiddenId } })) === 1,
+      };
+    },
+  }),
+  q04({
+    id: 'variants-list',
+    method: 'GET',
+    template: `${QUESTIONS}/:id/versions/:version/variants`,
+    permission: 'question:update',
+    audit: null,
+    mutating: false,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await variantFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/variants`,
+        entityId: f.id,
+        secrets: [],
+        unchanged: noop,
+      };
+    },
+  }),
+  q04({
+    id: 'variants-create',
+    method: 'POST',
+    template: `${QUESTIONS}/:id/versions/:version/variants`,
+    permission: 'question:update',
+    audit: { action: 'QUESTION_VARIANT_ADDED', entityType: 'question' },
+    metadataKeys: ['isActive', 'variantId', 'version'],
+    metadataShape: { isActive: isBool, variantId: isUuid, version: isInt },
+    mutating: true,
+    ok: [201],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      const versionId = f.versionIds[1] as string;
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/variants`,
+        body: { params: { secret: VARIANT_SECRET } },
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () => (await variantCount(h, versionId)) === 0,
+      };
+    },
+  }),
+  q04({
+    id: 'variants-preview',
+    method: 'GET',
+    template: `${QUESTIONS}/:id/versions/:version/variants/:variantId/preview`,
+    permission: 'question:read',
+    audit: null,
+    mutating: false,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await variantFixture(h, orgId, { published: true, override: true });
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/variants/${f.variantId}/preview`,
+        entityId: f.id,
+        secrets: [],
+        unchanged: noop,
+      };
+    },
+  }),
+  q04({
+    id: 'variants-update',
+    method: 'PATCH',
+    template: `${QUESTIONS}/:id/versions/:version/variants/:variantId`,
+    permission: 'question:update',
+    audit: { action: 'QUESTION_VARIANT_UPDATED', entityType: 'question' },
+    metadataKeys: ['fields', 'variantId', 'version'],
+    metadataShape: { fields: isFieldList, variantId: isUuid, version: isInt },
+    mutating: true,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await variantFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/variants/${f.variantId}`,
+        body: { params: { secret: 'QA-VARIANT-CHANGED' }, isActive: false },
+        entityId: f.id,
+        secrets: [...qSecrets, 'QA-VARIANT-CHANGED'],
+        unchanged: async () =>
+          (await h.owner.questionVariant.findUniqueOrThrow({ where: { id: f.variantId } }))
+            .isActive === true,
+      };
+    },
+  }),
+  q04({
+    id: 'variants-remove',
+    method: 'DELETE',
+    template: `${QUESTIONS}/:id/versions/:version/variants/:variantId`,
+    permission: 'question:update',
+    audit: { action: 'QUESTION_VARIANT_REMOVED', entityType: 'question' },
+    metadataKeys: ['variantId', 'version'],
+    metadataShape: { variantId: isUuid, version: isInt },
+    mutating: true,
+    takesBody: false,
+    ok: [204],
+    prepare: async (h, orgId) => {
+      const f = await variantFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/variants/${f.variantId}`,
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () =>
+          (await h.owner.questionVariant.count({ where: { id: f.variantId } })) === 1,
+      };
+    },
+  }),
+  q04({
+    id: 'variants-override-set',
+    method: 'PUT',
+    template: `${QUESTIONS}/:id/versions/:version/variants/:variantId/test-cases/:testCaseId`,
+    permission: 'question:update',
+    audit: { action: 'QUESTION_VARIANT_TEST_CASE_SET', entityType: 'question' },
+    metadataKeys: ['isHidden', 'testCaseId', 'variantId', 'version'],
+    metadataShape: { isHidden: isBool, testCaseId: isUuid, variantId: isUuid, version: isInt },
+    mutating: true,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await variantFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/variants/${f.variantId}/test-cases/${f.hiddenId}`,
+        body: { input: OVERRIDE_IN, expectedOutput: OVERRIDE_OUT },
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () =>
+          (await h.owner.variantTestCase.count({ where: { variantId: f.variantId } })) === 0,
+      };
+    },
+  }),
+  q04({
+    id: 'variants-override-remove',
+    method: 'DELETE',
+    template: `${QUESTIONS}/:id/versions/:version/variants/:variantId/test-cases/:testCaseId`,
+    permission: 'question:update',
+    audit: { action: 'QUESTION_VARIANT_TEST_CASE_REMOVED', entityType: 'question' },
+    metadataKeys: ['testCaseId', 'variantId', 'version'],
+    metadataShape: { testCaseId: isUuid, variantId: isUuid, version: isInt },
+    mutating: true,
+    takesBody: false,
+    ok: [204],
+    prepare: async (h, orgId) => {
+      const f = await variantFixture(h, orgId, { override: true });
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/variants/${f.variantId}/test-cases/${f.hiddenId}`,
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () =>
+          (await h.owner.variantTestCase.count({ where: { variantId: f.variantId } })) === 1,
       };
     },
   }),

@@ -112,4 +112,14 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'POST /questions/:id/versions/:version/test-cases': questionUpdate,
   'PATCH /questions/:id/versions/:version/test-cases/:testCaseId': questionUpdate,
   'DELETE /questions/:id/versions/:version/test-cases/:testCaseId': questionUpdate,
+  // Variants (FR-203, BE-04 slice 4b). Params and overrides are author data: question:update. The
+  // variant preview is the candidate-shaped view: question:read.
+  'GET /questions/:id/versions/:version/variants': questionUpdate,
+  'POST /questions/:id/versions/:version/variants': questionUpdate,
+  'GET /questions/:id/versions/:version/variants/:variantId/preview': questionRead,
+  'PATCH /questions/:id/versions/:version/variants/:variantId': questionUpdate,
+  'DELETE /questions/:id/versions/:version/variants/:variantId': questionUpdate,
+  'PUT /questions/:id/versions/:version/variants/:variantId/test-cases/:testCaseId': questionUpdate,
+  'DELETE /questions/:id/versions/:version/variants/:variantId/test-cases/:testCaseId':
+    questionUpdate,
 };

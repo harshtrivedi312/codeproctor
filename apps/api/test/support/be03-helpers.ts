@@ -27,7 +27,7 @@ export async function actor(h: Harness, role: UserRole, orgId = h.orgId): Promis
 
 export function call(
   h: Harness,
-  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   path: string,
   token?: string,
   body?: unknown,
