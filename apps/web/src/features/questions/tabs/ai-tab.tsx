@@ -31,7 +31,12 @@ interface Props extends ApiTabProps {
  * the new row and keeps the old one (marked superseded). They are used for similarity checks only,
  * never for grading, and candidates never see them.
  */
-export function AiTab({ form, readOnly, questionId, policy }: Props): React.JSX.Element {
+export function AiTab({
+  form,
+  readOnly,
+  questionId,
+  policy: fallbackPolicy,
+}: Props): React.JSX.Element {
   const [languages] = useDraftField(form, 'allowedLanguages');
   const [variants] = useDraftField(form, 'variants');
   const refs = useAiReferences(questionId ?? '');
@@ -44,7 +49,9 @@ export function AiTab({ form, readOnly, questionId, policy }: Props): React.JSX.
       </p>
     );
   }
-  const rows = refs.data ?? [];
+  const rows = refs.data?.items ?? [];
+  // The policy comes with the list (WEB-ONLY placeholder [BE-04c]); until it loads, the default.
+  const policy = refs.data?.policy ?? fallbackPolicy;
   const gates = aiGate(languages, rows, policy);
   const due = aiRefreshDue(rows, policy, new Date());
   const aiLanguages = languages.filter((l) => AI_REFERENCE_LANGUAGES.includes(l));

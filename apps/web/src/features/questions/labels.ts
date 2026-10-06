@@ -12,7 +12,7 @@ export const DIFFICULTY_LABEL: Record<Schemas['Difficulty'], string> = {
   HARD: 'Hard',
 };
 
-export const STATUS_LABEL: Record<Schemas['QuestionStatus'], string> = {
+export const STATUS_LABEL: Record<'DRAFT' | 'PUBLISHED' | 'ARCHIVED', string> = {
   DRAFT: 'Draft',
   PUBLISHED: 'Published',
   ARCHIVED: 'Archived',

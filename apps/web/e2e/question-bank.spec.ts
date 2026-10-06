@@ -85,8 +85,12 @@ test.describe('FR-201..FR-205 question bank', () => {
       await expect(dialog).toBeHidden();
     }
     await expect(page.getByRole('button', { name: 'Publish' })).toBeEnabled();
+    // The real API cannot publish a coding question until its validate job exists (BE-04c): the
+    // mock fails closed with 422 and the screen says so, publishing nothing.
     await page.getByRole('button', { name: 'Publish' }).click();
-    await expect(page.getByText(/Version 1 is published\. Editing it later/)).toBeVisible();
+    await expect(page.getByText(/Publishing was refused: .*passing validation run/)).toBeVisible();
+    await expect(page.getByText(/is published\./)).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Publish' })).toBeDisabled();
   });
 
   test('FR-204 TC-013: editing a published question creates a draft version; an older version is read-only', async ({
@@ -129,19 +133,16 @@ test.describe('FR-201..FR-205 question bank', () => {
     await expect(page).toHaveURL(/\/versions$/);
   });
 
-  test('DL-32: a publish that fails closed (501) is explained honestly and publishes nothing', async ({
+  test('TC-012 FR-203: a complete multiple-choice draft publishes in one click, and then cannot be published again', async ({
     page,
   }) => {
     await signInAt(page, AUTHOR, '/admin/questions');
     await page.getByLabel('Status', { exact: true }).selectOption('DRAFT');
-    await page
-      .getByRole('link', { name: 'Publishing unavailable (scenario)', exact: true })
-      .click();
+    await page.getByRole('link', { name: 'Cost of a hash lookup (draft)', exact: true }).click();
     await expect(page.getByRole('tablist', { name: 'Question sections' })).toBeVisible();
     await page.getByRole('button', { name: 'Publish' }).click();
-    await expect(page.getByText(/Publishing is not available yet/)).toBeVisible();
+    await expect(page.getByText(/Version 1 is published\. Editing it later/)).toBeVisible();
     await expect(page.getByRole('button', { name: 'Publish' })).toBeDisabled();
-    await expect(page.getByText(/is published\./)).toHaveCount(0);
     await expectNoAxeViolations(page);
   });
 

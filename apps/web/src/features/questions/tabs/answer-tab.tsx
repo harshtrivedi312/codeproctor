@@ -6,7 +6,7 @@ import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
-import { newId, normalizeShortAnswer } from '../draft';
+import { newId, newOptionId, normalizeShortAnswer } from '../draft';
 import { errorAt, useDraftField, type TabProps } from '../use-draft-field';
 
 /** FR-205: the answer key. MCQ: options and the correct ones. Short answer: canonical answer and accepted variants (D-23). */
@@ -134,7 +134,7 @@ function McqAnswer({ form, readOnly }: TabProps): React.JSX.Element {
             variant="outline"
             size="sm"
             onClick={() =>
-              setMcq({ ...mcq, options: [...mcq.options, { id: newId('opt'), text: '' }] })
+              setMcq({ ...mcq, options: [...mcq.options, { id: newOptionId(), text: '' }] })
             }
           >
             <Plus className="size-4" aria-hidden="true" />

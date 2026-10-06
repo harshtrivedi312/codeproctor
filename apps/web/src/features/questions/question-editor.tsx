@@ -14,10 +14,12 @@ import { getGeneration } from '@/lib/auth-session';
 import {
   draftSchema,
   emptyDraft,
-  toContent,
+  toCreate,
   toDraft,
+  toUpdate,
+  toVariants,
   type DraftValues,
-  type QuestionDetail,
+  type Variant,
 } from './draft';
 import { aiGate, canPublish, publishChecks } from './gate';
 import { disposeModels } from './monaco-registry';
@@ -25,8 +27,11 @@ import { MonacoScope } from './monaco-field';
 import { STATUS_LABEL, TYPE_LABEL } from './labels';
 import {
   fetchQuestion,
+  fetchVariants,
   isFullQuestion,
+  PartialSaveFailure,
   questionKeys,
+  type FullQuestion,
   type QuestionView,
   useAiReferences,
   useCreateQuestion,
@@ -89,8 +94,10 @@ function errorTabs(errors: FieldErrors<DraftValues>): Set<string> {
 
 export interface QuestionEditorProps {
   mode: 'create' | 'edit' | 'view';
-  /** Required for edit and view. */
-  detail?: QuestionDetail;
+  /** Required for edit and view: the writer view of one version. */
+  detail?: FullQuestion;
+  /** The variants of that version (web-only placeholder, BE-04b). */
+  variants?: Variant[];
   /** Required for create. */
   type?: Schemas['QuestionType'];
   /** Validation poll interval; tests pass a small value. */
@@ -101,26 +108,27 @@ export interface QuestionEditorProps {
 
 interface Meta {
   questionId: string | null;
-  status: Schemas['QuestionStatus'];
   version: number;
-  /** Opaque token of the saved content (`updatedAt`): concurrency check and ties a validation to it. */
-  updatedAt: string;
+  /** The opaque content revision (sha-256): concurrency check and ties a validation to the content. */
+  revision: string;
   isPublished: boolean;
   validatedAt: string | null;
   report: Report | null;
 }
 
-function metaOf(detail: QuestionDetail | undefined): Meta {
+function metaOf(detail: FullQuestion | undefined): Meta {
   return {
     questionId: detail?.id ?? null,
-    status: detail?.status ?? 'DRAFT',
-    version: detail?.current.version ?? 1,
-    updatedAt: detail?.current.updatedAt ?? '',
-    isPublished: detail?.current.isPublished ?? false,
-    validatedAt: detail?.current.validatedAt ?? null,
-    report: detail?.current.validationReport ?? null,
+    version: detail?.version.version ?? 1,
+    revision: detail?.version.revision ?? '',
+    isPublished: detail?.version.isPublished ?? false,
+    validatedAt: detail?.version.validatedAt ?? null,
+    report: detail?.version.validationReport ?? null,
   };
 }
+
+/** What the AI publish gate assumes until the web-only AI reference list (BE-04c) has loaded. */
+const DEFAULT_POLICY: Schemas['AiReferencePolicy'] = { refreshDays: 90, minAssistants: 2 };
 
 /**
  * Why a publish did not happen, from the status alone (409 and 422 carry no machine code):
@@ -138,6 +146,7 @@ type PublishBlock = 'unavailable' | 'refused' | null;
 export function QuestionEditor({
   mode,
   detail,
+  variants: loadedVariants = [],
   type,
   pollMs = 1000,
   maxPolls = 90,
@@ -148,7 +157,9 @@ export function QuestionEditor({
   const questionType = detail?.type ?? type ?? 'CODING';
   const initial = React.useMemo(
     () =>
-      detail ? toDraft(detail.type, detail.current.tags, detail.current) : emptyDraft(questionType),
+      detail
+        ? toDraft(detail.type, detail.tags, detail.version, loadedVariants)
+        : emptyDraft(questionType),
     // The editor mounts once per version of the question; later server data must not overwrite edits.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
@@ -162,20 +173,22 @@ export function QuestionEditor({
   const guard = useUnsavedGuard(isDirty && !readOnly);
 
   const [meta, setMeta] = React.useState<Meta>(() => metaOf(detail));
-  const [policy, setPolicy] = React.useState<Schemas['AiReferencePolicy']>(
-    detail?.aiReferencePolicy ?? { refreshDays: 90, minAssistants: 2 },
-  );
+  // What the server has, to work out what a save has to change (test cases, variants).
+  const loaded = React.useRef({
+    cases: (detail?.version.testCases ?? []).map((t) => ({ id: t.id, position: t.position })),
+    variants: loadedVariants,
+  });
   const [tab, setTab] = React.useState('statement');
   const [badTabs, setBadTabs] = React.useState<Set<string>>(new Set());
   const [notice, setNotice] = React.useState<string | null>(null);
   const [problem, setProblem] = React.useState<string | null>(null);
   const [publishProblem, setPublishProblem] = React.useState<string | null>(null);
   const [publishBlock, setPublishBlock] = React.useState<PublishBlock>(null);
-  /** The server has newer content than this editor started from (409 on a call that sent expectedUpdatedAt). */
+  /** The server has newer content than this editor started from (409 on a call that sent expectedRevision). */
   const [conflict, setConflict] = React.useState(false);
   /** True only for a report that just came back from a job (an alert), not one loaded with the page. */
   const [reportFresh, setReportFresh] = React.useState(false);
-  const updatedAtRef = React.useRef(meta.updatedAt);
+  const revisionRef = React.useRef(meta.revision);
   // Double clicks on Validate or Publish start one action, not two.
   const busy = React.useRef(false);
   // Every Monaco model of this editor lives under this prefix and is disposed with the editor.
@@ -191,8 +204,8 @@ export function QuestionEditor({
   const [validating, setValidating] = React.useState(false);
   const alive = React.useRef(true);
   React.useEffect(() => {
-    updatedAtRef.current = meta.updatedAt;
-  }, [meta.updatedAt]);
+    revisionRef.current = meta.revision;
+  }, [meta.revision]);
   React.useEffect(() => {
     alive.current = true;
     return () => {
@@ -204,7 +217,8 @@ export function QuestionEditor({
   const title = useWatch({ control: form.control, name: 'title' });
   const isCoding = questionType === 'CODING';
   const refs = useAiReferences(isCoding && mode !== 'create' ? (meta.questionId ?? '') : '');
-  const gates = aiGate(languages, refs.data ?? [], policy);
+  const policy = refs.data?.policy ?? DEFAULT_POLICY;
+  const gates = aiGate(languages, refs.data?.items ?? [], policy);
 
   const validationPassed = meta.report?.passed === true && meta.validatedAt !== null;
   const input = {
@@ -218,10 +232,10 @@ export function QuestionEditor({
 
   function describe(error: unknown): string {
     if (error instanceof ApiFailure) {
-      if (error.status === 400)
-        return (
-          error.message || 'The server did not accept this content. Check the highlighted fields.'
-        );
+      if (error.status === 400 || error.status === 422) {
+        const detail = [error.message, ...error.errors].filter(Boolean).join(' ');
+        return detail || 'The server did not accept this content. Check the highlighted fields.';
+      }
       if (error.status === 403)
         return 'Your role cannot do this. Ask a Super Admin if you think this is a mistake.';
       if (error.status === 404) return 'This question no longer exists. Go back to the list.';
@@ -235,32 +249,49 @@ export function QuestionEditor({
     setProblem(null);
     setNotice(null);
     setBadTabs(new Set());
-    const content = toContent(values);
     try {
       if (mode === 'create') {
-        const created = await create.mutateAsync({ ...content, type: questionType });
+        const created = await create.mutateAsync(toCreate(values));
         // Not dirty any more, so leaving the page for the saved question does not ask.
-        form.reset(toDraft(created.type, created.current.tags, created.current));
+        form.reset(toDraft(created.type, created.tags, created.version));
         router.replace(`/admin/questions/${created.id}`);
         return;
       }
-      const saved = await save.mutateAsync({ content, expectedUpdatedAt: meta.updatedAt });
-      form.reset(toDraft(saved.type, saved.current.tags, saved.current));
-      const newVersion = saved.current.version !== meta.version;
+      const result = await save.mutateAsync({
+        update: toUpdate(values),
+        expectedRevision: meta.revision,
+        desiredCases: values.testCases,
+        loadedCases: loaded.current.cases,
+        variants: isCoding ? toVariants(values) : null,
+        loadedVariants: loaded.current.variants,
+        coding: isCoding,
+      });
+      const saved = result.detail;
+      form.reset(toDraft(saved.type, saved.tags, saved.version, result.variants));
+      loaded.current = {
+        cases: saved.version.testCases.map((t) => ({ id: t.id, position: t.position })),
+        variants: result.variants,
+      };
       setMeta(metaOf(saved));
-      setPolicy(saved.aiReferencePolicy);
       setPublishProblem(null);
       setPublishBlock((b) => (b === 'refused' ? null : b));
       setConflict(false);
       setReportFresh(false);
       setNotice(
-        newVersion
-          ? `Saved as version ${saved.current.version} (draft). The published version ${meta.version} is unchanged.`
+        result.createdNewVersion
+          ? `Saved as version ${saved.version.version} (draft). The published version ${meta.version} is unchanged.`
           : 'Saved. Validate again before publishing.',
       );
     } catch (e) {
-      // A 409 on the save that sent expectedUpdatedAt means the content changed since it was loaded.
-      if (e instanceof ApiFailure && e.status === 409) {
+      // A 409 on the save that sent expectedRevision means the content changed since it was loaded.
+      if (e instanceof PartialSaveFailure) {
+        setConflict(true);
+        if (e.status !== 409) {
+          setProblem(
+            `Some of your changes were saved, but the ${e.step} could not be: ${describe(e)} Reload the latest version to see where things stand.`,
+          );
+        }
+      } else if (e instanceof ApiFailure && e.status === 409) {
         setConflict(true);
       } else setProblem(describe(e));
     }
@@ -274,10 +305,15 @@ export function QuestionEditor({
       // The user or the role changed while this was in flight: what came back is not theirs to see.
       if (startedIn !== getGeneration()) return;
       if (!isFullQuestion(latest)) throw new ApiFailure(403, '');
+      const variants = isCoding ? await fetchVariants(latest.id, latest.version.version) : [];
+      if (startedIn !== getGeneration()) return;
       qc.setQueryData(questionKeys.detail(latest.id), latest);
-      form.reset(toDraft(latest.type, latest.current.tags, latest.current));
+      form.reset(toDraft(latest.type, latest.tags, latest.version, variants));
+      loaded.current = {
+        cases: latest.version.testCases.map((t) => ({ id: t.id, position: t.position })),
+        variants,
+      };
       setMeta(metaOf(latest));
-      setPolicy(latest.aiReferencePolicy);
       setConflict(false);
       setProblem(null);
       setPublishProblem(null);
@@ -315,8 +351,8 @@ export function QuestionEditor({
       const generationAtStart = getGeneration();
       // The result only counts for the exact saved content it was started on (TC-012).
       const started = await startValidation.mutateAsync();
-      const startedFor = updatedAtRef.current;
-      if (started.validatedForUpdatedAt !== startedFor) {
+      const startedFor = revisionRef.current;
+      if (started.revision !== startedFor) {
         setProblem('The question changed on the server. Reload the latest version, then validate.');
         return;
       }
@@ -338,13 +374,13 @@ export function QuestionEditor({
           setProblem('The validation finished without a report. Press Validate to try again.');
           return;
         }
-        if (state.validatedForUpdatedAt !== startedFor || updatedAtRef.current !== startedFor) {
+        if (state.revision !== startedFor || revisionRef.current !== startedFor) {
           setProblem(
             'The question changed while it was being validated, so that result was dropped. Press Validate again.',
           );
           return;
         }
-        const validatedAt = report.passed ? report.finishedAt : null;
+        const validatedAt = report.passed ? (report.finishedAt ?? new Date().toISOString()) : null;
         setMeta((m) => ({ ...m, report, validatedAt }));
         setReportFresh(true);
         // Keep the cache in step with what the editor shows, and the history's "validated" column.
@@ -352,11 +388,11 @@ export function QuestionEditor({
           generationAtStart === getGeneration() &&
           old &&
           isFullQuestion(old) &&
-          old.current.updatedAt === startedFor
-            ? { ...old, current: { ...old.current, validatedAt, validationReport: report } }
+          old.version.revision === startedFor
+            ? { ...old, version: { ...old.version, validatedAt, validationReport: report } }
             : old,
         );
-        void qc.invalidateQueries({ queryKey: questionKeys.versions(questionId) });
+        void qc.invalidateQueries({ queryKey: ['questions', 'list'] });
         return;
       }
       setProblem('Validation is taking longer than expected. Press Validate to try again.');
@@ -376,11 +412,11 @@ export function QuestionEditor({
     setPublishProblem(null);
     setNotice(null);
     try {
-      const done = await publish.mutateAsync(meta.updatedAt);
+      const done = await publish.mutateAsync(meta.revision);
       // Only a 200 from the server marks the question published here, never anything earlier.
       setMeta(metaOf(done));
       setNotice(
-        `Version ${done.current.version} is published. Editing it later creates a new version.`,
+        `Version ${done.version.version} is published. Editing it later creates a new version.`,
       );
     } catch (e) {
       if (!(e instanceof ApiFailure)) {
@@ -433,7 +469,7 @@ export function QuestionEditor({
           <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
             <span>{TYPE_LABEL[questionType]}</span>
             <span>Version {meta.version}</span>
-            <Badge tone={meta.status === 'PUBLISHED' ? 'success' : 'warning'}>
+            <Badge tone={meta.isPublished ? 'success' : 'warning'}>
               {meta.isPublished ? STATUS_LABEL.PUBLISHED : STATUS_LABEL.DRAFT}
             </Badge>
             {isDirty && !readOnly ? <Badge tone="warning">Unsaved changes</Badge> : null}
