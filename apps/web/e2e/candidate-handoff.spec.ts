@@ -1,11 +1,14 @@
 import { expect, test, type Page } from '@playwright/test';
 
 /**
- * WRITTEN, NOT RUN (FU-FEB-23): the hand-off of the invitation token and the phone link token must
- * leave no token in the address bar, history state or router state. jsdom cannot show this, so
- * this is the real gate before a browser demo or the pilot. Run it against a real `next build` and
- * `next start` (this config runs `next dev`; point a copy of the config at the production server).
- * The API is stubbed per test so no mock registration is needed.
+ * Hand-off of the invitation token and the phone link token (FU-FEB-23): no token may remain in the
+ * address bar, history state or router state. jsdom cannot show this, so this is the real-browser
+ * gate. Run against a real `next build` and `next start` (packages/qa/playwright.config.ts, project
+ * web-staff).
+ *
+ * The API is stubbed per test with page.route. The build may have MSW mocks on, and the MSW service
+ * worker would answer requests inside the worker, where page.route cannot see them; so service
+ * workers are blocked for these tests (the app then marks mocking ready after the failed start).
  */
 const TOKEN = 'e2e-invitation-token-0123456789abcdef';
 const PHONE_TOKEN = 'e2e-phone-link-token-0123456789abcdef';
@@ -28,18 +31,22 @@ async function stubLink(page: Page): Promise<void> {
 async function expectNoToken(page: Page, token: string): Promise<void> {
   const state = await page.evaluate(() => JSON.stringify(history.state));
   expect(page.url()).not.toContain(token);
+  expect(await page.evaluate(() => location.hash)).toBe('');
   expect(state).not.toContain(token);
 }
 
 test.describe('candidate link hand-off (FU-FEB-23)', () => {
+  test.use({ serviceWorkers: 'block' });
+
   test('/t/<token> ends at /t/link with no token anywhere', async ({ page }) => {
     await stubLink(page);
     await page.goto(`/t/${TOKEN}`);
     await expect(page).toHaveURL(/\/t\/link$/);
     await expect(page.getByRole('heading', { level: 1, name: /welcome/i })).toBeVisible();
     await expectNoToken(page, TOKEN);
-    await page.evaluate(() => history.back());
-    await expect(page).not.toHaveURL(new RegExp(TOKEN));
+    // Back must not return to the token URL (it leaves the app: the token entry was replaced).
+    await page.goBack();
+    expect(page.url()).not.toContain(TOKEN);
   });
 
   test('/t/start#<token> ends at /t/link with no token anywhere', async ({ page }) => {
