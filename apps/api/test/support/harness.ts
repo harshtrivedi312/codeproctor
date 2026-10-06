@@ -406,6 +406,17 @@ export function expectReauthFailed(res: request.Response): void {
   expect(body.detail).toBe(REAUTH_DETAIL);
 }
 
+/** POST /auth/2fa/disable uses its own fixed detail on EVERY refusal (FU-BE-58); the code stays REAUTH_FAILED. */
+export const DISABLE_REAUTH_DETAIL = 'The password or code is incorrect.';
+
+export function expectDisableReauthFailed(res: request.Response): void {
+  expect(res.status).toBe(403);
+  expect(res.headers['content-type']).toContain('application/problem+json');
+  const body = res.body as Body;
+  expect(body.code).toBe('REAUTH_FAILED');
+  expect(body.detail).toBe(DISABLE_REAUTH_DETAIL);
+}
+
 /** A problem body without the per-request fields, for "identical body" comparisons. */
 export function stableProblem(res: request.Response): Record<string, unknown> {
   const { traceId: _t, instance: _i, ...rest } = res.body as Record<string, unknown>;

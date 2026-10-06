@@ -9,6 +9,7 @@ import {
   Body,
   boot,
   createUser,
+  expectDisableReauthFailed,
   expectNoTotpEnabled,
   expectReauthFailed,
   Harness,
@@ -432,9 +433,9 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       const u = await createUser(h, { role: UserRole.AUTHOR, totp: TOTP_SECRET });
       const { auth } = await signInPrevStep(u.email);
       const wrongPw = await disable(auth, { currentPassword: 'Nope-Nope-1', totpCode: goodCode() });
-      expectReauthFailed(wrongPw);
+      expectDisableReauthFailed(wrongPw);
       const wrongCode = await disable(auth, { currentPassword: PASSWORD, totpCode: badCode() });
-      expectReauthFailed(wrongCode);
+      expectDisableReauthFailed(wrongCode);
       expect(stableProblem(wrongCode)).toEqual(stableProblem(wrongPw));
       expect(wrongCode.headers['set-cookie']).toBeUndefined();
       expect(await twoFactorOn(u.id)).toBe(true);
@@ -447,7 +448,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
         currentPassword: 'Nope-Nope-1',
         totpCode: goodCode(),
       });
-      expectReauthFailed(wrongPwRes);
+      expectDisableReauthFailed(wrongPwRes);
       const wrongPw = stableProblem(wrongPwRes);
       await stepSafe();
       const { challengeToken } = (await login(h, u.email).expect(200)).body as Body;
@@ -455,7 +456,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       const done = await post('2fa/verify').send({ challengeToken, code }).expect(200);
       const auth = { Authorization: `Bearer ${(done.body as Body).accessToken}` };
       const replay = await disable(auth, { currentPassword: PASSWORD, totpCode: code });
-      expectReauthFailed(replay);
+      expectDisableReauthFailed(replay);
       expect(stableProblem(replay)).toEqual(wrongPw);
       expect(await twoFactorOn(u.id)).toBe(true);
     });
@@ -463,7 +464,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
     it('TC-003: with 2FA already off, disable is 409 after the password check (wrong password is REAUTH_FAILED), before the code is looked at', async () => {
       const u = await createUser(h, { role: UserRole.AUTHOR });
       const auth = await signIn(h, u.email);
-      expectReauthFailed(
+      expectDisableReauthFailed(
         await disable(auth, { currentPassword: 'Nope-Nope-1', totpCode: goodCode() }),
       );
       await disable(auth, { currentPassword: PASSWORD, totpCode: goodCode() }).expect(409);
@@ -480,12 +481,12 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
             ? { currentPassword: 'Nope-Nope-1', totpCode: goodCode() }
             : { currentPassword: PASSWORD, totpCode: badCode() };
         const r = await disable(auth, body);
-        expectReauthFailed(r);
+        expectDisableReauthFailed(r);
         wrongBody ??= stableProblem(r);
         expect(stableProblem(r)).toEqual(wrongBody);
       }
       const locked = await disable(auth, { currentPassword: PASSWORD, totpCode: goodCode() });
-      expectReauthFailed(locked);
+      expectDisableReauthFailed(locked);
       expect(stableProblem(locked)).toEqual(wrongBody);
       expect(await twoFactorOn(u.id)).toBe(true);
       await login(h, u.email).expect(401);
@@ -497,10 +498,12 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
         const u = await createUser(h, { role, totp: TOTP_SECRET });
         const { auth, cookie } = await signInPrevStep(u.email);
         const before = await h.owner.user.findUniqueOrThrow({ where: { id: u.id } });
-        expectReauthFailed(
+        expectDisableReauthFailed(
           await disable(auth, { currentPassword: 'Nope-Nope-1', totpCode: goodCode() }),
         );
-        expectReauthFailed(await disable(auth, { currentPassword: PASSWORD, totpCode: badCode() }));
+        expectDisableReauthFailed(
+          await disable(auth, { currentPassword: PASSWORD, totpCode: badCode() }),
+        );
         await disable(auth, {}).expect(400);
         await disable(auth, { currentPassword: PASSWORD }).expect(400);
         const failedBefore = await failedLogins(u.id); // the two refusals above counted
@@ -604,7 +607,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       );
     });
 
-    it('FR-102: a locked admin, or a wrong password, gets the identical REAUTH_FAILED body on reset, disable and regenerate', async () => {
+    it('FR-102: a locked admin, or a wrong password, gets the identical REAUTH_FAILED body within each of reset, disable (own fixed detail) and regenerate', async () => {
       const admin = await createUser(h, { role: UserRole.SUPER_ADMIN, totp: TOTP_SECRET });
       const target = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
       await stepSafe();
@@ -624,12 +627,16 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
       for (let i = 0; i < 5; i++) {
         const route = routes[i % 3];
         const r = await route!('Nope-Nope-1');
-        expectReauthFailed(r);
+        // Disable has its own fixed detail (FU-BE-58); reset and regenerate keep the old one.
+        if (i % 3 === 1) expectDisableReauthFailed(r);
+        else expectReauthFailed(r);
         wrong[i % 3] = stableProblem(r);
       }
       for (let i = 0; i < 3; i++) {
         const r = await routes[i]!(PASSWORD); // correct password, but the account is locked now
-        expectReauthFailed(r);
+        if (i === 1) expectDisableReauthFailed(r);
+        else expectReauthFailed(r);
+        expect((r.body as Body).code).toBe('REAUTH_FAILED');
         expect(stableProblem(r)).toEqual(wrong[i]);
       }
       expect((await h.owner.user.findUniqueOrThrow({ where: { id: target.id } })).totpEnabled).toBe(
