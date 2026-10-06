@@ -119,7 +119,8 @@ From the ADR 0013 / 0006 section 8 / 0014 / 0016 reviews and the CI PRs. Owner-g
 - F2: the SERVICE pool needs a whole-transaction bound (Prisma `$transaction` timeout about 5 s, `idle_in_transaction_session_timeout`); the bounded PUT under the lock gets its own timeout.
 - F3: main-pool candidate writes outside `$transaction` have no `statement_timeout`; add one or state that every candidate write runs in a `$transaction`.
 - F4: name the enforcement for "no other transaction API" (lint or the FU-DB-67 test rejecting `$transaction` in session-job code outside `SessionJobProcessor`).
-- Wording: the candidate session field is `sessionStatus`, not `status` (done in this PR, lines 132 and 193).
+- Wording: the 409 `SESSION_NOT_ACTIVE` problem extension member is `sessionStatus` (not `status`, which RFC 7807 reserves for the HTTP code); 200 bodies keep `status` (done in this PR, ADR 0013 lines 132 and 193). Add `sessionStatus` to docs/api-contract.md (which lists `code` as the only extension member) when BE-07 or BE-10 implements it.
+- fsd.md section 4: publish, archive and unarchive need their guard named (presumably `question:update`; validate uses `question:validate`); a question-publish permission would amend ADR 0010 section 6 (owner).
 - ADR 0004 section 9.5 step 4 predicate text: copy `where: { id, status: <read>, NOT: { status: 'ERASED' } }` and the `withLiveSession` / `withAnySession` names so the three ADRs read the same.
 
 ### ADR 0006 section 8 (merged)
