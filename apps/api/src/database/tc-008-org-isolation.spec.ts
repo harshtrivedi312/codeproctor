@@ -1374,7 +1374,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
           () =>
             prisma.client.identityCheck.update({
               where: { id: identityCheckId },
-              data: { videoCheckBy: { delete: true } as never },
+              data: { videoCheckBy: { delete: true } },
             }),
           () =>
             prisma.client.identityCheck.update({
