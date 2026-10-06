@@ -83,4 +83,13 @@ describe('consent access (FR-105, NFR-05, C-17)', () => {
       /signedName|userAgent|\bip\b\s*:/,
     );
   });
+
+  it('the two candidate-scope files name signedName and nothing else of the consent data (a later read there fails)', () => {
+    for (const rel of ['database/session-scope-map.ts', 'database/candidate-interim.ts']) {
+      expect({ rel, hits: consentAccessHits(readFileSync(join(SRC, rel), 'utf8')) }).toEqual({
+        rel,
+        hits: ['signedName'],
+      });
+    }
+  });
 });
