@@ -35,18 +35,6 @@ export interface Cursor {
   readonly sessionId: string;
 }
 
-/**
- * Audit actions that mean "the session reached a terminal status" (ADR 0002), written by
- * SessionStateService.transition() with `entity_type 'session'`. The face clock uses the earliest
- * one when a session was never submitted (ADR 0004 9.2). BE-07 owns the real names (they are to be
- * exported as one constant): this list is the one place to change them.
- */
-export const TERMINAL_TRANSITION_ACTIONS: readonly string[] = [
-  'SESSION_EXPIRED',
-  'SESSION_DECLINED',
-  'SESSION_ERASED',
-];
-
 /** Sessions that can still capture a face image or start recording: the face tier never visits them (B1). */
 export const LIVE_STATUSES = [
   'INVITED',
@@ -112,9 +100,10 @@ export class RetentionRepository {
             (SELECT max(pe.occurred_at) FROM proctor_events pe
               WHERE pe.session_id = s.id AND pe.type = 'FACE_MISMATCH')
           ),
-          (SELECT min(a.created_at) FROM audit_logs a
-            WHERE a.entity_type = ${MARKER_ENTITY_TYPE} AND a.entity_id = s.id::text
-              AND a.action IN (${Prisma.join(TERMINAL_TRANSITION_ACTIONS)})),
+          -- A session that was never submitted (EXPIRED, DECLINED, erased while live) has no review hold:
+          -- BE-07's transition stamps retention_anchor_at when it reaches that terminal status and the
+          -- erasure fence keeps or sets it, so the anchor IS its first terminal time (ADR 0004 9.2).
+          s.retention_anchor_at,
           s.created_at
         ) + ${days(Prisma.sql`LEAST(o.retention_days, ${FACE_CAP_DAYS})`)} <= ${now}`,
       'FACE',
