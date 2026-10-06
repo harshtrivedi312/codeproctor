@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from tools.int01.safety import inside_git_tree
+from tools.int01.safety import inside_git_tree, model_path_allowed
 from worker.face.matcher import FaceMatcher
 from worker.face.types import ReviewReason
 
@@ -175,13 +175,11 @@ def check_model_location(environ: Mapping[str, str] | None = None) -> None:
     env = os.environ if environ is None else environ
     if MODELS_DIR.is_symlink():
         raise ScoringError("the models folder must not be a symlink")
-    folder = MODELS_DIR.resolve()
     for var in ("AURAFACE_MODEL_PATH", "FACE_LANDMARKER_MODEL_PATH"):
         raw = env.get(var, "")
         if not raw and var == "FACE_LANDMARKER_MODEL_PATH":
             continue  # absent: the matcher build reports it
-        target = Path(raw).expanduser().resolve() if raw else None
-        if target is None or not target.is_relative_to(folder) or inside_git_tree(target):
+        if not model_path_allowed(raw, MODELS_DIR):
             raise ScoringError(f"{var} must point into ~/.cache/codeproctor/models")
 
 
