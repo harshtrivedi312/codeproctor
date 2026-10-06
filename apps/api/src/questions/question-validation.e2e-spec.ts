@@ -620,6 +620,7 @@ describe('Validate job and AI references (FR-202, FR-203, TC-011, TC-012)', () =
       const res = await delVariant(a, id, variantId);
       expect(res.status).toBe(409);
       expect(JSON.stringify(res.body)).toMatch(/AI reference/);
+      expect((res.body as { code?: string }).code).toBe('VARIANT_HAS_AI_REFERENCES');
       expect(await owner.questionVariant.count({ where: { id: variantId } })).toBe(1);
       expect(await aiCount(variantId)).toBe(1);
       expect(await removedAudits(id)).toBe(0);
@@ -635,7 +636,8 @@ describe('Validate job and AI references (FR-202, FR-203, TC-011, TC-012)', () =
         .set(a.auth)
         .send({})
         .expect(200);
-      await delVariant(a, id, variantId).expect(409);
+      const res = await delVariant(a, id, variantId).expect(409);
+      expect((res.body as { code?: string }).code).toBe('VARIANT_HAS_AI_REFERENCES');
       expect(await owner.questionVariant.count({ where: { id: variantId } })).toBe(1);
       expect(await aiCount(variantId)).toBe(1);
       expect(await removedAudits(id)).toBe(0);
@@ -672,7 +674,9 @@ describe('Validate job and AI references (FR-202, FR-203, TC-011, TC-012)', () =
         const del = delVariant(a, id, variantId).then((r) => r);
         expect(await settled(del)).toBe(false);
         await c.query('COMMIT');
-        expect((await del).status).toBe(409);
+        const done = await del;
+        expect(done.status).toBe(409);
+        expect((done.body as { code?: string }).code).toBe('VARIANT_HAS_AI_REFERENCES');
       } finally {
         await c.query('ROLLBACK').catch(() => undefined);
         await c.end();

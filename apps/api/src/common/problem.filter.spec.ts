@@ -1,5 +1,5 @@
 import { ArgumentsHost, ForbiddenException, HttpException } from '@nestjs/common';
-import { CodedForbiddenException, reauthFailed } from './coded.exception';
+import { CodedConflictException, CodedForbiddenException, reauthFailed } from './coded.exception';
 import { ProblemFilter } from './problem.filter';
 
 function run(exception: unknown): { status: number; body: Record<string, unknown> } {
@@ -33,6 +33,12 @@ describe('ProblemFilter code extension (ADR 0001 C-9)', () => {
     expect(status).toBe(403);
     expect(body.code).toBe('REAUTH_FAILED');
     expect(body.traceId).toBe('trace-1');
+  });
+
+  it('FR-203: a coded 409 carries VARIANT_HAS_AI_REFERENCES', () => {
+    const { status, body } = run(new CodedConflictException('x', 'VARIANT_HAS_AI_REFERENCES'));
+    expect(status).toBe(409);
+    expect(body.code).toBe('VARIANT_HAS_AI_REFERENCES');
   });
 
   it('TC-003: a plain exception that carries a code field does not reflect it', () => {

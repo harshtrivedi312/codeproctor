@@ -88,6 +88,7 @@ export class OrgSettingsService {
   ): Promise<OrgSettingsDto | null> {
     return this.prisma.client.$transaction(async (tx) => {
       // The admin must still be the one whose password was verified (same bind as the user routes).
+      // Accepted: this is a plain read, so a change committed right after it is not seen (same as invite/reissue).
       const still = await tx.user.count({
         where: {
           id: actor.id,
