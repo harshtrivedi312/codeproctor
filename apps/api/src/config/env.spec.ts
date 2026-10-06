@@ -280,6 +280,11 @@ describe('NFR-04 environment validation', () => {
         'AWS_PROFILE',
         'AWS_SHARED_CREDENTIALS_FILE',
         'AWS_CONFIG_FILE',
+        'AWS_CONTAINER_CREDENTIALS_FULL_URI',
+        'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
+        'AWS_CONTAINER_AUTHORIZATION_TOKEN',
+        'AWS_WEB_IDENTITY_TOKEN_FILE',
+        'AWS_ROLE_ARN',
       ]) {
         for (const APP_ENV of ['pilot', 'production']) {
           let text = '';

@@ -11,7 +11,6 @@ import {
   Logger,
   NotFoundException,
   BeforeApplicationShutdown,
-  OnApplicationShutdown,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -93,8 +92,11 @@ function isRetryable(e: unknown): boolean {
   return e instanceof BadRequestException || e instanceof ServiceUnavailableException;
 }
 
+/** How long shutdown waits for deferred reset and lock mail. */
+const SHUTDOWN_SETTLE_MS = 5_000;
+
 @Injectable()
-export class AuthService implements BeforeApplicationShutdown, OnApplicationShutdown {
+export class AuthService implements BeforeApplicationShutdown {
   private readonly webOrigin: string;
   private readonly logger = new Logger(AuthService.name);
   /** Deferred forgot-password work still running; awaited by tests and at shutdown. */
@@ -948,11 +950,27 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
    * email queue while it still accepts (the queue stops in its own onApplicationShutdown).
    */
   async beforeApplicationShutdown(): Promise<void> {
-    await this.settleDeferred();
+    // Bounded: a stuck query must not stall shutdown until SIGKILL. The deferred work is only
+    // mail, so abandoning it after the bound loses at most a reset or lock email. There is
+    // deliberately no onApplicationShutdown settle: this hook already ran before it.
+    await this.settleDeferredBounded(SHUTDOWN_SETTLE_MS);
   }
 
-  async onApplicationShutdown(): Promise<void> {
-    await this.settleDeferred();
+  /** Like settleDeferred, but gives up after timeoutMs and logs a fixed line (no payload). */
+  async settleDeferredBounded(timeoutMs: number): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = await Promise.race([
+      this.settleDeferred().then(() => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(true), timeoutMs);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (timedOut) {
+      this.logger.warn(
+        `Shutdown gave up waiting for ${this.deferred.size} deferred tasks after ${timeoutMs} ms`,
+      );
+    }
   }
 
   private defer(label: string, work: () => Promise<void>): void {

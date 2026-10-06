@@ -108,6 +108,9 @@ export class InProcessEmailQueue extends EmailQueuePort implements OnApplication
     this.stopped = true;
     const dropped = this.ready.length + this.retrying.size;
     if (dropped > 0) this.logger.warn(`mail queue stopped, dropped ${dropped} waiting jobs`);
+    // In-flight sends cannot be cancelled here; their outcome is lost with the process.
+    if (this.active > 0)
+      this.logger.warn(`mail queue stopped, abandoned ${this.active} in-flight sends`);
     for (const t of this.timers.values()) clearTimeout(t);
     this.timers.clear();
     this.retrying.clear();
