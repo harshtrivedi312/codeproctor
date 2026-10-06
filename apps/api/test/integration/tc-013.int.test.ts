@@ -201,11 +201,18 @@ describe('TC-013 (FR-204): editing a published question creates a new version; p
     const prev = await call(h, 'GET', `/questions/${id}/preview`, s.recruiter.token).expect(200);
     expect((prev.body as Json).title).toBe('QA two sum');
     // Tests built on this question keep resolving to the published version: the list says so.
-    const list = await call(h, 'GET', '/questions?pageSize=100', s.recruiter.token).expect(200);
+    const list = await call(h, 'GET', '/questions?pageSize=100', s.author.token).expect(200);
     const item = (list.body as { items: Json[] }).items.find((i) => i.id === id);
     expect(item).toMatchObject({
       published: { version: 1 },
       latest: { version: 2, isPublished: false },
+    });
+    // DL-34: a recruiter sees published versions only, so version 1 is also their "latest".
+    const recList = await call(h, 'GET', '/questions?pageSize=100', s.recruiter.token).expect(200);
+    const recItem = (recList.body as { items: Json[] }).items.find((i) => i.id === id);
+    expect(recItem).toMatchObject({
+      published: { version: 1 },
+      latest: { version: 1, isPublished: true },
     });
 
     // Publishing version 2 moves "current" forward; version 1 stays published and readable.

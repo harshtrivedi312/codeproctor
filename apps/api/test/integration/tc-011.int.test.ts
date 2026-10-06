@@ -305,18 +305,45 @@ describe('TC-011 (FR-202): hidden tests, reference solutions and answer keys are
       isHidden: true,
     }).expect(201);
     const v2Markers = ['QA-V2-HIDDEN-IN', 'QA-V2-HIDDEN-OUT', 'QA two sum v2'];
-    // Default preview: the published version 1. Draft preview by a recruiter: 404 or at least no data.
+    // Default preview: the latest published version (1), candidate-shaped with exact top-level keys.
     const def = await call(h, 'GET', `/questions/${coding}/preview`, s.recruiter.token);
     expectCleanView(def);
     expectNoneOf(def, v2Markers);
+    expect(Object.keys(def.body as Json).sort()).toEqual([...CANDIDATE_KEYS].sort());
+    expect(def.body).toMatchObject({ title: 'QA two sum' });
+    // Backend A: a recruiter's draft preview is the IDENTICAL 404 as a missing version or random id.
+    const randomPreview = await call(
+      h,
+      'GET',
+      `/questions/${crypto.randomUUID()}/preview`,
+      s.recruiter.token,
+    );
     const draftPreview = await call(
       h,
       'GET',
       `/questions/${coding}/preview?version=2`,
       s.recruiter.token,
     );
-    expect([200, 404]).toContain(draftPreview.status);
+    const missingPreview = await call(
+      h,
+      'GET',
+      `/questions/${coding}/preview?version=99`,
+      s.recruiter.token,
+    );
+    expect([draftPreview.status, missingPreview.status, randomPreview.status]).toEqual([
+      404, 404, 404,
+    ]);
+    expect(stableProblem(draftPreview)).toEqual(stableProblem(missingPreview));
+    expect(stableProblem(draftPreview)).toEqual(stableProblem(randomPreview));
     expectNoneOf(draftPreview, [...v2Markers, ...HIDDEN_MARKERS, ...ANSWER_MARKERS]);
+    // Positive control: author and admin DO get the draft preview (a candidate-shaped view, no hidden test).
+    for (const who of [s.author, s.admin]) {
+      const d = await call(h, 'GET', `/questions/${coding}/preview?version=2`, who.token);
+      expect(d.status).toBe(200);
+      expect(d.body).toMatchObject({ title: 'QA two sum v2' });
+      expect(Object.keys(d.body as Json).sort()).toEqual([...CANDIDATE_KEYS].sort());
+      expectNoneOf(d, ['QA-V2-HIDDEN-IN', 'QA-V2-HIDDEN-OUT', ...HIDDEN_MARKERS]);
+    }
     // DL-34: a role without question:update reads published versions only. A draft is a 404, the
     // same body as a version that does not exist (not 403: a draft must not be revealed).
     const draft = await call(h, 'GET', `/questions/${coding}?version=2`, s.recruiter.token);
