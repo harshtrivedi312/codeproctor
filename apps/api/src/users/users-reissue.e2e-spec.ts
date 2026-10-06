@@ -232,6 +232,7 @@ describe('Re-issue a pending invite (DL-23, FR-103, FR-105, TC-004, TC-008)', ()
     expect([cross?.status, missing?.status]).toEqual([404, 404]);
     if (!cross || !missing) throw new Error('unreachable');
     expect(stable(cross)).toEqual(stable(missing));
+    expect(crossCount).toBeGreaterThan(2);
     expect(crossCount).toBe(missingCount);
     expect(await tokenHashOf(foreign.id)).toBe(before);
     expect(await auditCount()).toBe(0);
@@ -336,17 +337,23 @@ describe('Re-issue a pending invite (DL-23, FR-103, FR-105, TC-004, TC-008)', ()
     const pending = await make(UserRole.AUTHOR, { pending: true });
     const held = new Client({ connectionString: infra.postgres.getConnectionUri() });
     await held.connect();
-    await held.query('BEGIN');
-    // The invitee's acceptance in flight: row locked, password set, not yet committed.
     const newHash = await hash(NEW_PASSWORD, ARGON2_OPTIONS);
-    await held.query(
-      `UPDATE users SET password_hash = $2, set_password_token_hash = NULL, set_password_expires_at = NULL WHERE id = $1`,
-      [pending.id, newHash],
-    );
-    const racing = reissue(admin, pending.id).then((r) => r);
-    await untilLockWaiter();
-    await held.query('COMMIT');
-    await held.end();
+    let racing: Promise<request.Response> | undefined;
+    try {
+      await held.query('BEGIN');
+      // The invitee's acceptance in flight: row locked, password set, not yet committed.
+      await held.query(
+        `UPDATE users SET password_hash = $2, set_password_token_hash = NULL, set_password_expires_at = NULL WHERE id = $1`,
+        [pending.id, newHash],
+      );
+      racing = reissue(admin, pending.id).then((r) => r);
+      await untilLockWaiter();
+      await held.query('COMMIT');
+    } finally {
+      await held.query('ROLLBACK').catch(() => undefined);
+      await held.end().catch(() => undefined);
+    }
+    if (racing === undefined) throw new Error('unreachable');
     expect((await racing).status).toBe(409);
     const row = await owner.user.findUniqueOrThrow({ where: { id: pending.id } });
     expect(row.passwordHash).toBe(newHash);
@@ -359,20 +366,68 @@ describe('Re-issue a pending invite (DL-23, FR-103, FR-105, TC-004, TC-008)', ()
     const admin = await make(UserRole.SUPER_ADMIN);
     const pending = await make(UserRole.AUTHOR, { pending: true });
     const oldHash = await tokenHashOf(pending.id);
-    await pg.query(
-      `CREATE OR REPLACE FUNCTION fail_reissue_audit() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'audit down'; END $$ LANGUAGE plpgsql`,
-    );
-    await pg.query(
-      `CREATE TRIGGER fail_reissue BEFORE INSERT ON audit_logs FOR EACH ROW WHEN (NEW.action = 'USER_INVITE_REISSUED') EXECUTE FUNCTION fail_reissue_audit()`,
-    );
     try {
+      await pg.query(
+        `CREATE OR REPLACE FUNCTION fail_reissue_audit() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'audit down'; END $$ LANGUAGE plpgsql`,
+      );
+      await pg.query(
+        `CREATE TRIGGER fail_reissue BEFORE INSERT ON audit_logs FOR EACH ROW WHEN (NEW.action = 'USER_INVITE_REISSUED') EXECUTE FUNCTION fail_reissue_audit()`,
+      );
       await reissue(admin, pending.id).expect(500);
     } finally {
-      await pg.query('DROP TRIGGER fail_reissue ON audit_logs');
+      await pg.query('DROP TRIGGER IF EXISTS fail_reissue ON audit_logs');
+      await pg.query('DROP FUNCTION IF EXISTS fail_reissue_audit()');
     }
     expect(await tokenHashOf(pending.id)).toBe(oldHash);
     expect(await auditCount(pending.id)).toBe(0);
     expect(invites).toHaveLength(0);
     await accept(pending.token).expect(204);
+  });
+
+  it('FR-103: Redis down on the invite slot is 503; hash unchanged, no audit row, no mail', async () => {
+    const admin = await make(UserRole.SUPER_ADMIN);
+    const pending = await make(UserRole.AUTHOR, { pending: true });
+    const before = await tokenHashOf(pending.id);
+    const { REDIS_CLIENT } = jest.requireActual<
+      typeof import('../infrastructure/infrastructure.module')
+    >('../infrastructure/infrastructure.module');
+    const redis = app.get<import('ioredis').Redis>(REDIS_CLIENT);
+    const set = jest.spyOn(redis, 'set').mockRejectedValue(new Error('redis down'));
+    try {
+      await reissue(admin, pending.id).expect(503);
+    } finally {
+      set.mockRestore();
+    }
+    expect(await tokenHashOf(pending.id)).toBe(before);
+    expect(await auditCount(pending.id)).toBe(0);
+    expect(invites).toHaveLength(0);
+  });
+
+  it('FR-103: the mirror race: acceptance arriving while a re-issue holds the row lock is refused after the commit (old link dead)', async () => {
+    const admin = await make(UserRole.SUPER_ADMIN);
+    const pending = await make(UserRole.AUTHOR, { pending: true });
+    const held = new Client({ connectionString: infra.postgres.getConnectionUri() });
+    await held.connect();
+    const newToken = `rotated-${randomBytes(8).toString('hex')}`;
+    let racing: Promise<request.Response> | undefined;
+    try {
+      await held.query('BEGIN');
+      await held.query(
+        `UPDATE users SET set_password_token_hash = $2, set_password_expires_at = now() + interval '72 hours' WHERE id = $1`,
+        [pending.id, sha256Hex(newToken)],
+      );
+      racing = accept(pending.token).then((r) => r);
+      await untilLockWaiter();
+      await held.query('COMMIT');
+    } finally {
+      await held.query('ROLLBACK').catch(() => undefined);
+      await held.end().catch(() => undefined);
+    }
+    if (racing === undefined) throw new Error('unreachable');
+    expect((await racing).status).toBe(400);
+    const row = await owner.user.findUniqueOrThrow({ where: { id: pending.id } });
+    expect(row.passwordHash).toBeNull();
+    expect(row.setPasswordTokenHash).toBe(sha256Hex(newToken));
+    void admin;
   });
 });
