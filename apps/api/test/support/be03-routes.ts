@@ -16,16 +16,23 @@
 // cross-org or missing id is the same 404, and only AFTER a correct password. Failed requests
 // (400/401/403/404) write no audit row.
 //
-// Switches: the BE-03 tests are written but switched off until the routes exist. Turn them on with
-// `BE03_READY = true` below (the ONE-LINE switch), or `BE03_READY=1` in the environment for a trial
-// run. Same for the review routes (BE-13) with BE13_READY. The BE-13 entries are still ASSUMED.
+//   POST  /admin/users/:userId/invite {currentPassword}  200 StaffUserDto (status 'invited', no token
+//         fields); re-issue of a pending invite (Backend A, branch backend/invite-reissue). Same step-up
+//         rules; 409 when the user has a password or is deactivated; shares the per-org invite limit
+//         (429); 503 Redis down; audit USER_INVITE_REISSUED written in the rotation's transaction with
+//         metadata ONLY {method, route '/api/v1/admin/users/:userId/invite'}, NOT @Audited (no `audited`
+//         flag in the matrix). Listed ONLY when the backend's ROUTE_PERMISSIONS has the key (see below).
+//
+// Switches: the BE-03 tests run by default (BE03_DEFAULT = true). The review routes (BE-13) stay off
+// until BE13_DEFAULT is flipped, or `BE13_READY=1` in the environment for a trial run. The BE-13
+// entries are still ASSUMED.
 import { hasPermission, PRINCIPALS, USER_ROLES } from '../../../../packages/shared/src/permissions';
 import type { Permission, Principal } from '../../../../packages/shared/src/permissions';
 import { UserRole } from '../../src/generated/prisma/client';
 import { Harness, PASSWORD } from './harness';
 
-// TODO(QA-04b): when BE-03 is merged flip this to true; the staged tests then run on every PR.
-const BE03_DEFAULT = false; // flip to true when BE-03 is merged
+// BE-03 is merged (PR #84): the BE-03 tests run on every PR. BE-13 stays staged.
+const BE03_DEFAULT = true;
 const BE13_DEFAULT = false; // flip to true when BE-13 is merged
 export const BE03_READY: boolean = BE03_DEFAULT || process.env.BE03_READY === '1';
 export const BE13_READY: boolean = BE13_DEFAULT || process.env.BE13_READY === '1';
@@ -40,9 +47,9 @@ export const ADMIN_USERS = '/admin/users';
 export const lockEventsPath = `${ADMIN_USERS}/lock-events`;
 
 /**
- * The backend route registry, loaded lazily so this file compiles and the always-run tests pass on
- * a branch where apps/api/src/common/auth/route-permissions.ts and route-registry.ts do not exist
- * yet (they arrive with BE-03). Only called from tests that run behind BE03_READY.
+ * The backend route registry (apps/api/src/common/auth/route-permissions.ts and route-registry.ts),
+ * loaded lazily with jest.requireActual after the test app has reset the module registry.
+ * Only called from tests that run behind BE03_READY.
  * `audited` means the route carries @Audited (the interceptor writes its row); routes that write
  * their audit row inside their own transaction (invite, role, unlock) do not carry it.
  * `candidateData` marks a route that reads or changes candidate data, which must be audited.
@@ -110,6 +117,11 @@ export interface Be03Route {
    * template} and there is no entity id (a list read has no single target).
    */
   interceptor?: boolean;
+  /**
+   * true: a service-written row (not @Audited) whose metadata is exactly {method, route} with the
+   * route being '/api/v1' + template, and which names the target entity.
+   */
+  routeMetadata?: boolean;
   mutating: boolean;
   /** true: a successful call sends a mail whose URL carries a token (checked for leaks). */
   sendsMail?: boolean;
@@ -197,7 +209,76 @@ const withPassword = <T extends object>(body: T): T & { currentPassword: string 
   currentPassword: PASSWORD,
 });
 
+/** True when the backend's route matrix already has `key`; false when the file is absent or lacks it. */
+export function backendHasRoute(key: string): boolean {
+  try {
+    const perms = jest.requireActual<Pick<RegistryApi, 'ROUTE_PERMISSIONS'>>(
+      '../../src/common/auth/route-permissions',
+    );
+    return Object.hasOwn(perms.ROUTE_PERMISSIONS, key);
+  } catch (e) {
+    // Only a missing registry file means "not there"; any other error (a syntax or import error in
+    // the backend file) must surface, not hide the route.
+    if ((e as { code?: string }).code === 'MODULE_NOT_FOUND') return false;
+    throw e;
+  }
+}
+
+/** A pending invite: no password, a live set-password token. */
+async function pendingInvitee(
+  h: Harness,
+  orgId: string,
+): Promise<{ id: string; tokenHash: string }> {
+  const t = uniq();
+  const tokenHash = `qa-invite-token-hash-${t}`;
+  const u = await h.owner.user.create({
+    data: {
+      orgId,
+      email: `qa-pending-${t}@example.com`,
+      fullName: 'QA Pending',
+      role: UserRole.RECRUITER,
+      isActive: true,
+      setPasswordTokenHash: tokenHash,
+      setPasswordExpiresAt: new Date(Date.now() + 72 * 3_600_000),
+    },
+  });
+  return { id: u.id, tokenHash };
+}
+
+// Backend A's invite re-issue route (contract confirmed). Included only when the backend serves it, so TC-004's
+// "the backend matrix agrees with the controllers" check is green before and after it lands.
+const reissueRoutes: Be03Route[] = backendHasRoute('POST /admin/users/:userId/invite')
+  ? [
+      {
+        id: 'users-invite-reissue',
+        step: 'BE-03',
+        method: 'POST',
+        template: `${ADMIN_USERS}/:userId/invite`,
+        permission: 'user:manage',
+        audit: { action: 'USER_INVITE_REISSUED', entityType: 'user' },
+        routeMetadata: true,
+        mutating: true,
+        sendsMail: true,
+        reauth: true,
+        ok: [200],
+        prepare: async (h, orgId) => {
+          const u = await pendingInvitee(h, orgId);
+          return {
+            path: `${ADMIN_USERS}/${u.id}/invite`,
+            body: withPassword({}),
+            entityId: u.id,
+            secrets: [PASSWORD],
+            unchanged: async () =>
+              (await h.owner.user.findUniqueOrThrow({ where: { id: u.id } }))
+                .setPasswordTokenHash === u.tokenHash,
+          };
+        },
+      },
+    ]
+  : [];
+
 export const BE03_ROUTES: Be03Route[] = [
+  ...reissueRoutes,
   {
     id: 'users-list',
     step: 'BE-03',
