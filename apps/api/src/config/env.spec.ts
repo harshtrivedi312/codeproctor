@@ -243,6 +243,77 @@ describe('NFR-04 environment validation', () => {
       ).toThrow(/EMAIL_PROVIDER/);
     });
 
+    it('C-31: empty optional SES settings count as unset when the provider is noop', () => {
+      const env = validateEnv({
+        ...valid,
+        SES_FROM_ADDRESS: '',
+        SES_CONFIGURATION_SET: '',
+        SES_ENDPOINT: '',
+      });
+      expect(env.SES_FROM_ADDRESS).toBeUndefined();
+      expect(env.SES_CONFIGURATION_SET).toBeUndefined();
+      expect(env.SES_ENDPOINT).toBeUndefined();
+    });
+
+    it('C-31: an empty SES_FROM_ADDRESS fails with ses and in live environments, naming only the variable', () => {
+      expect(() => validateEnv({ ...valid, EMAIL_PROVIDER: 'ses', SES_FROM_ADDRESS: '' })).toThrow(
+        /SES_FROM_ADDRESS/,
+      );
+      for (const APP_ENV of ['pilot', 'production']) {
+        expect(() => validateEnv({ ...live, APP_ENV, SES_FROM_ADDRESS: '' })).toThrow(
+          /SES_FROM_ADDRESS/,
+        );
+      }
+    });
+
+    it('C-31: an empty SES_ENDPOINT or SES_CONFIGURATION_SET is unset, a non-empty endpoint is still refused in live', () => {
+      const ok = validateEnv({ ...live, SES_ENDPOINT: '', SES_CONFIGURATION_SET: '' });
+      expect(ok.SES_ENDPOINT).toBeUndefined();
+      expect(ok.SES_CONFIGURATION_SET).toBeUndefined();
+      expect(() => validateEnv({ ...live, SES_ENDPOINT: 'http://127.0.0.1:4566' })).toThrow(
+        /SES_ENDPOINT/,
+      );
+    });
+
+    it('C-31: whitespace-only SES settings are invalid, never echoed; mixed-case http endpoint is refused in live', () => {
+      for (const env of [
+        { ...valid, EMAIL_PROVIDER: 'ses', SES_FROM_ADDRESS: ' ' },
+        { ...live, SES_FROM_ADDRESS: ' ' },
+      ]) {
+        let text = '';
+        try {
+          validateEnv(env);
+        } catch (e) {
+          text = String(e);
+        }
+        expect(text).toContain('SES_FROM_ADDRESS');
+        expect(text).not.toContain('SES_FROM_ADDRESS: " "');
+      }
+      expect(() => validateEnv({ ...valid, SES_ENDPOINT: ' ' })).toThrow(/SES_ENDPOINT/);
+      expect(() => validateEnv({ ...live, SES_ENDPOINT: 'HTTP://127.0.0.1:4566' })).toThrow(
+        /SES_ENDPOINT/,
+      );
+    });
+
+    it('C-31: each refused AWS variable set to a space is refused in live, set to empty is accepted', () => {
+      for (const name of [
+        'AWS_ACCESS_KEY_ID',
+        'AWS_SECRET_ACCESS_KEY',
+        'AWS_SESSION_TOKEN',
+        'AWS_PROFILE',
+        'AWS_SHARED_CREDENTIALS_FILE',
+        'AWS_CONFIG_FILE',
+        'AWS_CONTAINER_CREDENTIALS_FULL_URI',
+        'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
+        'AWS_CONTAINER_AUTHORIZATION_TOKEN',
+        'AWS_WEB_IDENTITY_TOKEN_FILE',
+        'AWS_ROLE_ARN',
+      ]) {
+        expect(() => validateEnv({ ...live, [name]: ' ' })).toThrow(new RegExp(name));
+        expect(() => validateEnv({ ...live, [name]: '' })).not.toThrow();
+      }
+    });
+
     it('C-31: ses needs a valid SES_FROM_ADDRESS', () => {
       expect(() => validateEnv({ ...live, SES_FROM_ADDRESS: undefined })).toThrow(
         /SES_FROM_ADDRESS/,
@@ -280,6 +351,11 @@ describe('NFR-04 environment validation', () => {
         'AWS_PROFILE',
         'AWS_SHARED_CREDENTIALS_FILE',
         'AWS_CONFIG_FILE',
+        'AWS_CONTAINER_CREDENTIALS_FULL_URI',
+        'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
+        'AWS_CONTAINER_AUTHORIZATION_TOKEN',
+        'AWS_WEB_IDENTITY_TOKEN_FILE',
+        'AWS_ROLE_ARN',
       ]) {
         for (const APP_ENV of ['pilot', 'production']) {
           let text = '';
