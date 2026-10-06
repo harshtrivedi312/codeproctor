@@ -53,6 +53,8 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
   let mailMode: 'queued' | 'failed' | 'disabled' | 'throw';
   let portMode: 'ok' | 'fail';
   let portCalls: number;
+  /** Runs after the fake mail answered 'queued'; a test uses it to break the sent_at stamp. */
+  let afterMail: ((to: string) => Promise<void>) | null;
   let HttpErrors: typeof import('@nestjs/common');
 
   beforeAll(async () => {
@@ -70,6 +72,15 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
 
     jest.resetModules();
     HttpErrors = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+    app = await build();
+    const { TokenService: Tokens } = jest.requireActual<
+      typeof import('../common/auth/token.service')
+    >('../common/auth/token.service');
+    tokens = app.get(Tokens);
+  });
+
+  /** Boots the app with the fakes; the log level comes from process.env.LOG_LEVEL at call time. */
+  async function build(): Promise<INestApplication<App>> {
     const { AppModule } = jest.requireActual<typeof import('../app.module')>('../app.module');
     const { Test } = jest.requireActual<typeof import('@nestjs/testing')>('@nestjs/testing');
     const { configureApp } = jest.requireActual<typeof import('../bootstrap')>('../bootstrap');
@@ -88,7 +99,7 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
           if (mailMode === 'throw') {
             return Promise.reject(new Error(`SES refused ${to} for ${m.inviteUrl}`));
           }
-          return Promise.resolve(mailMode);
+          return (afterMail ? afterMail(to) : Promise.resolve()).then(() => mailMode);
         },
       })
       .overrideProvider(INVITED_SESSION_PORT)
@@ -109,21 +120,19 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
         },
       })
       .compile();
-    app = moduleRef.createNestApplication<INestApplication<App>>();
-    configureApp(app);
-    await app.init();
-    await app.listen(0);
-    const { TokenService: Tokens } = jest.requireActual<
-      typeof import('../common/auth/token.service')
-    >('../common/auth/token.service');
-    tokens = app.get(Tokens);
-  });
+    const built = moduleRef.createNestApplication<INestApplication<App>>();
+    configureApp(built);
+    await built.init();
+    await built.listen(0);
+    return built;
+  }
 
   beforeEach(() => {
     sent = [];
     mailMode = 'queued';
     portMode = 'ok';
     portCalls = 0;
+    afterMail = null;
   });
 
   afterAll(async () => {
@@ -329,21 +338,40 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
       expect((await invite(who, testId, goodBody({ email: addr }))).status).toBe(201);
     });
 
-    it('FR-303: a candidate with an erasure request cannot be invited', async () => {
+    it.each([
+      ['erasureRequestedAt', { erasureRequestedAt: new Date() }],
+      ['erasedAt', { erasedAt: new Date() }],
+    ])(
+      'FR-303: a candidate with %s set cannot be invited (fixed 409, no address echo)',
+      async (_n, flag) => {
+        const who = await make(UserRole.RECRUITER);
+        const testId = await makeTest(who);
+        const addr = email();
+        await owner.candidate.create({
+          data: { orgId: orgA, email: addr.toLowerCase(), fullName: 'Gone', ...flag },
+        });
+        const res = await invite(who, testId, goodBody({ email: addr }));
+        expect(res.status).toBe(409);
+        expect((res.body as Json).detail).toBe('This candidate cannot be invited.');
+        expect(JSON.stringify(res.body).toLowerCase()).not.toContain(addr.toLowerCase());
+        expect(sent).toHaveLength(0);
+        expect(await owner.invitation.count({ where: { testId } })).toBe(0);
+      },
+    );
+
+    it('FR-303: a sent_at stamp that fails still answers 201 with mail queued', async () => {
       const who = await make(UserRole.RECRUITER);
       const testId = await makeTest(who);
       const addr = email();
-      await owner.candidate.create({
-        data: {
-          orgId: orgA,
-          email: addr.toLowerCase(),
-          fullName: 'Gone',
-          erasureRequestedAt: new Date(),
-        },
-      });
+      // After the mail, the invitation disappears, so the stamp finds no row.
+      afterMail = async (to) => {
+        const c = await owner.candidate.findFirstOrThrow({ where: { email: to, orgId: orgA } });
+        const invs = await owner.invitation.findMany({ where: { candidateId: c.id } });
+        await owner.session.deleteMany({ where: { invitationId: { in: invs.map((i) => i.id) } } });
+        await owner.invitation.deleteMany({ where: { candidateId: c.id } });
+      };
       const res = await invite(who, testId, goodBody({ email: addr }));
-      expect(res.status).toBe(409);
-      expect(sent).toHaveLength(0);
+      expect([res.status, (res.body as Json).mail]).toEqual([201, 'queued']);
     });
   });
 
@@ -392,7 +420,21 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
           windowEnd: iso(Date.now() + 401 * DAY),
         }),
       ],
+      [
+        'windowStart more than 5 minutes in the past',
+        () => ({ windowStart: iso(Date.now() - 10 * 60_000), windowEnd: iso(Date.now() + DAY) }),
+      ],
+      ['name with a newline', () => ({ fullName: 'Ada\nLovelace' })],
+      ['name with a C1 control', () => ({ fullName: 'Ada\u0085Lovelace' })],
+      ['name with a bidi override', () => ({ fullName: 'Ada\u202Eevol' })],
+      ['name with a bidi isolate', () => ({ fullName: 'Ada\u2066x' })],
+      ['externalRef with a bidi override', () => ({ externalRef: 'A\u202EB' })],
+      ['externalRef with a tab', () => ({ externalRef: 'A\tB' })],
       ['unknown field', () => ({ allowDuplicate: true })],
+      [
+        'mass assignment of orgId, tokenHash and createdById',
+        () => ({ orgId: GHOST, tokenHash: 'a'.repeat(64), createdById: GHOST }),
+      ],
       ['accommodations are not part of this route', () => ({ accommodations: {} })],
     ];
 
@@ -405,6 +447,17 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
       expect(await owner.candidate.count()).toBe(cands);
       expect(await owner.invitation.count({ where: { testId } })).toBe(0);
       expect(sent).toHaveLength(0);
+    });
+
+    it('FR-303: a windowStart a minute in the past (clock skew) is accepted', async () => {
+      const who = await make(UserRole.RECRUITER);
+      const testId = await makeTest(who);
+      const res = await invite(
+        who,
+        testId,
+        goodBody({ windowStart: iso(Date.now() - 60_000), windowEnd: iso(Date.now() + DAY) }),
+      );
+      expect(res.status).toBe(201);
     });
 
     it('FR-303: a window of exactly 7 days is accepted', async () => {
@@ -545,83 +598,6 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
     );
   });
 
-  // ---- secrets ------------------------------------------------------------------------------------
-
-  describe('FR-303, C-31: the token, address and name stay out of everything but the mail', () => {
-    it('C-31: planted token, address and name appear in no response, row, audit metadata, error or log line', async () => {
-      const who = await make(UserRole.RECRUITER);
-      const testId = await makeTest(who);
-      const lines: string[] = [];
-      const grab = (a: unknown[]): void => void lines.push(a.map((x) => String(x)).join(' '));
-      const spies = [
-        jest.spyOn(process.stdout, 'write').mockImplementation((c: unknown) => (grab([c]), true)),
-        jest.spyOn(process.stderr, 'write').mockImplementation((c: unknown) => (grab([c]), true)),
-        ...(['log', 'warn', 'error', 'debug', 'verbose', 'fatal'] as const).map((m) =>
-          jest
-            .spyOn(HttpErrors.Logger.prototype, m)
-            .mockImplementation((...a: unknown[]) => grab(a)),
-        ),
-      ];
-      const addr = 'planted.person@example.org';
-      const name = 'Plantedname Zxqv';
-      const responses: string[] = [];
-      try {
-        const ok = await invite(who, testId, {
-          email: addr,
-          fullName: name,
-          windowEnd: iso(Date.now() + DAY),
-        });
-        responses.push(JSON.stringify(ok.body), JSON.stringify(ok.headers));
-        expect(ok.status).toBe(201);
-        // A failing mail whose error carries the address and the link.
-        mailMode = 'throw';
-        const t2 = await makeTest(who);
-        const failed = await invite(who, t2, {
-          email: addr,
-          fullName: name,
-          windowEnd: iso(Date.now() + DAY),
-        });
-        responses.push(JSON.stringify(failed.body));
-        expect([failed.status, (failed.body as Json).mail]).toEqual([201, 'failed']);
-        // A conflict and a validation failure, which echo input in some APIs.
-        const dup = await invite(who, t2, {
-          email: addr,
-          fullName: name,
-          windowEnd: iso(Date.now() + DAY),
-        });
-        responses.push(JSON.stringify(dup.body));
-        const bad = await invite(who, testId, {
-          email: addr,
-          fullName: name,
-          windowEnd: 'planted',
-        });
-        responses.push(JSON.stringify(bad.body));
-      } finally {
-        spies.forEach((s) => s.mockRestore());
-      }
-      const tokensSeen = sent.map((s) => /#token=([A-Za-z0-9_-]+)$/.exec(s.inviteUrl)?.[1] ?? '');
-      expect(tokensSeen).toHaveLength(2);
-      for (const t of tokensSeen) expect(t).toHaveLength(43);
-      const planted = [...tokensSeen, addr, 'planted.person', name, 'Zxqv'];
-
-      const everywhere = [...lines, ...responses].join('\n');
-      for (const p of planted) expect(everywhere).not.toContain(p);
-
-      // Database: only the hash is stored; audit rows hold ids and dates only.
-      const hashes = (await owner.invitation.findMany({ where: { testId: { in: [testId] } } })).map(
-        (i) => i.tokenHash,
-      );
-      expect(hashes).toContain(sha256(tokensSeen[0] ?? ''));
-      const audits = await pg.query(
-        `SELECT metadata::text AS m, ip, entity_type FROM audit_logs WHERE action = 'INVITATION_CREATED'`,
-      );
-      const auditText = audits.rows.map((r: Json) => JSON.stringify(r)).join('\n');
-      const invText = JSON.stringify(await owner.invitation.findMany());
-      for (const p of planted) expect(auditText).not.toContain(p);
-      for (const p of tokensSeen) expect(invText).not.toContain(p);
-    });
-  });
-
   // ---- concurrency --------------------------------------------------------------------------------
 
   describe('FR-303, FR-301: races', () => {
@@ -642,6 +618,20 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
         expect(await owner.session.count({ where: { invitation: { is: { testId } } } })).toBe(1);
         expect(sent.filter((s) => s.to === addr.toLowerCase())).toHaveLength(1);
       }
+    });
+
+    it('FR-303: parallel invites of different candidates get different tokens and hashes', async () => {
+      const who = await make(UserRole.RECRUITER);
+      const testId = await makeTest(who);
+      const res = await Promise.all([
+        invite(who, testId, goodBody()),
+        invite(who, testId, goodBody()),
+      ]);
+      expect(res.map((r) => r.status)).toEqual([201, 201]);
+      const toks = sent.slice(-2).map((m) => /#token=(.+)$/.exec(m.inviteUrl)?.[1] ?? '');
+      expect(new Set(toks).size).toBe(2);
+      const rows = await owner.invitation.findMany({ where: { testId } });
+      expect(new Set(rows.map((r) => r.tokenHash)).size).toBe(2);
     });
 
     it('FR-301, FR-303: an invite racing PATCH /tests/:id: the edit waits or is refused, a used test is never edited', async () => {
@@ -697,6 +687,208 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
         await holder.end();
       }
       expect(await owner.invitation.count({ where: { testId } })).toBe(0);
+    });
+  });
+
+  // ---- rate limit and timeout -----------------------------------------------------------------------
+
+  describe('FR-303: per-organization limit and transaction timeout', () => {
+    const svc = (): object => {
+      const { InvitationsService } =
+        jest.requireActual<typeof import('./invitations.service')>('./invitations.service');
+      return app.get(InvitationsService);
+    };
+
+    it('FR-303: the invitation over the hourly limit is 429, nothing is written, and another org has its own counter', async () => {
+      const org = (await owner.organization.create({ data: { name: 'Limit Org' } })).id;
+      const who = await make(UserRole.RECRUITER, org);
+      const test = await owner.test.create({
+        data: { orgId: org, name: 'T', durationMinutes: 30, createdById: who.id },
+      });
+      const other = await make(UserRole.RECRUITER, orgB);
+      const otherTest = await owner.test.create({
+        data: { orgId: orgB, name: 'T', durationMinutes: 30, createdById: other.id },
+      });
+      const service = svc();
+      const before = Reflect.get(service, 'rateLimit') as number;
+      Reflect.set(service, 'rateLimit', 2);
+      try {
+        await invite(who, test.id, goodBody()).expect(201);
+        await invite(who, test.id, goodBody()).expect(201);
+        const refused = goodBody();
+        const res = await invite(who, test.id, refused);
+        expect(res.status).toBe(429);
+        expect(await owner.invitation.count({ where: { testId: test.id } })).toBe(2);
+        expect(await owner.candidate.count({ where: { email: refused.email as string } })).toBe(0);
+        expect(sent).toHaveLength(2);
+        // The counter is per organization.
+        await invite(other, otherTest.id, goodBody()).expect(201);
+        await invite(other, otherTest.id, goodBody()).expect(201);
+        await invite(other, otherTest.id, goodBody()).expect(429);
+        // A request that fails validation takes no slot.
+      } finally {
+        Reflect.set(service, 'rateLimit', before);
+      }
+    });
+
+    it('FR-303: Redis down is a fixed 503 (fail closed) and nothing is written', async () => {
+      const who = await make(UserRole.RECRUITER);
+      const testId = await makeTest(who);
+      const { REDIS_CLIENT } = jest.requireActual<
+        typeof import('../infrastructure/infrastructure.module')
+      >('../infrastructure/infrastructure.module');
+      const redis = app.get<import('ioredis').Redis>(REDIS_CLIENT);
+      const evalSpy = jest.spyOn(redis, 'eval').mockRejectedValue(new Error('redis down'));
+      try {
+        const res = await invite(who, testId, goodBody());
+        expect(res.status).toBe(503);
+      } finally {
+        evalSpy.mockRestore();
+      }
+      expect(await owner.invitation.count({ where: { testId } })).toBe(0);
+      expect(sent).toHaveLength(0);
+    });
+
+    it('FR-303: a transaction that waits past its timeout on the tests row is a fixed 503 and writes nothing', async () => {
+      const who = await make(UserRole.RECRUITER);
+      const testId = await makeTest(who);
+      const service = svc();
+      const before = Reflect.get(service, 'txTimeoutMs') as number;
+      Reflect.set(service, 'txTimeoutMs', 1500);
+      const holder = new Client({ connectionString: infra.postgres.getConnectionUri() });
+      await holder.connect();
+      const addr = email();
+      const audits = await owner.auditLog.count();
+      try {
+        await holder.query('BEGIN');
+        await holder.query('SELECT id FROM tests WHERE id = $1 FOR UPDATE', [testId]);
+        // Prisma cannot cancel a statement that is blocked on a lock, so the answer comes once the
+        // lock is released; the holder commits after the transaction timeout has passed.
+        const release = setTimeout(() => void holder.query('COMMIT'), 3000);
+        const res = await invite(who, testId, goodBody({ email: addr }));
+        clearTimeout(release);
+        expect(res.status).toBe(503);
+        expect((res.body as Json).detail).toBe(
+          'The invitation could not be saved in time. Try again.',
+        );
+      } finally {
+        Reflect.set(service, 'txTimeoutMs', before);
+        await holder.end();
+      }
+      await new Promise((r) => setTimeout(r, 500));
+      expect(await owner.invitation.count({ where: { testId } })).toBe(0);
+      expect(await owner.candidate.count({ where: { email: addr.toLowerCase() } })).toBe(0);
+      expect(await owner.auditLog.count()).toBe(audits);
+      expect(sent).toHaveLength(0);
+    });
+  });
+
+  // ---- secrets ------------------------------------------------------------------------------------
+
+  describe('FR-303, C-31: the token, address and name stay out of everything but the mail', () => {
+    it('C-31: planted token, address and name appear in no response, row, audit metadata, error or log line', async () => {
+      const who = await make(UserRole.RECRUITER);
+      const testId = await makeTest(who);
+      const lines: string[] = [];
+      const grab = (a: unknown[]): void => void lines.push(a.map((x) => String(x)).join(' '));
+      // A second app at log level trace: with the shared app (silent) this check would prove
+      // nothing. pino writes to fd 1 with fs.writeSync, so that is captured as well.
+      const fs = jest.requireActual<typeof import('node:fs')>('node:fs');
+      const realWriteSync = fs.writeSync.bind(fs);
+      // LOG_LEVEL is read when app.module is first loaded, so load a fresh module graph. This test
+      // is the last in the file because it resets the module registry.
+      process.env.LOG_LEVEL = 'trace';
+      jest.resetModules();
+      const Nest = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+      const traced = await build();
+      process.env.LOG_LEVEL = 'silent';
+      const inviteT = (t: string, b: Json): request.Test =>
+        request(traced.getHttpServer()).post(`${API}/tests/${t}/invitations`).set(who.auth).send(b);
+      const realWrite = fs.write.bind(fs);
+      const spies = [
+        jest
+          .spyOn(fs, 'write')
+          .mockImplementation((fd: number, data: unknown, ...rest: unknown[]) => {
+            if (fd !== 1 && fd !== 2)
+              return (realWrite as (...a: unknown[]) => void)(fd, data, ...rest);
+            grab([data]);
+            const cb = rest.find((r) => typeof r === 'function') as
+              ((e: null, n: number) => void) | undefined;
+            cb?.(null, Buffer.byteLength(String(data)));
+          }),
+        jest.spyOn(fs, 'writeSync').mockImplementation((fd: number, data: unknown) => {
+          if (fd === 1 || fd === 2) {
+            grab([data]);
+            return Buffer.byteLength(String(data));
+          }
+          return (realWriteSync as (...a: unknown[]) => number)(fd, data);
+        }),
+        jest.spyOn(process.stdout, 'write').mockImplementation((c: unknown) => (grab([c]), true)),
+        jest.spyOn(process.stderr, 'write').mockImplementation((c: unknown) => (grab([c]), true)),
+        ...(['log', 'warn', 'error', 'debug', 'verbose', 'fatal'] as const).map((m) =>
+          jest.spyOn(Nest.Logger.prototype, m).mockImplementation((...a: unknown[]) => grab(a)),
+        ),
+      ];
+      const addr = 'planted.person@example.org';
+      const name = 'Plantedname Zxqv';
+      const responses: string[] = [];
+      try {
+        const ok = await inviteT(testId, {
+          email: addr,
+          fullName: name,
+          windowEnd: iso(Date.now() + DAY),
+        });
+        responses.push(JSON.stringify(ok.body), JSON.stringify(ok.headers));
+        expect(ok.status).toBe(201);
+        // A failing mail whose error carries the address and the link.
+        mailMode = 'throw';
+        const t2 = await makeTest(who);
+        const failed = await inviteT(t2, {
+          email: addr,
+          fullName: name,
+          windowEnd: iso(Date.now() + DAY),
+        });
+        responses.push(JSON.stringify(failed.body));
+        expect([failed.status, (failed.body as Json).mail]).toEqual([201, 'failed']);
+        // A conflict and a validation failure, which echo input in some APIs.
+        const dup = await inviteT(t2, {
+          email: addr,
+          fullName: name,
+          windowEnd: iso(Date.now() + DAY),
+        });
+        responses.push(JSON.stringify(dup.body));
+        const bad = await inviteT(testId, {
+          email: addr,
+          fullName: name,
+          windowEnd: 'planted',
+        });
+        responses.push(JSON.stringify(bad.body));
+      } finally {
+        spies.forEach((s) => s.mockRestore());
+        await traced.close();
+      }
+      // Not vacuous: the request log lines were captured (the path carries the test id).
+      expect(lines.some((l) => l.includes(`/api/v1/tests/${testId}/invitations`))).toBe(true);
+      const tokensSeen = sent.map((s) => /#token=([A-Za-z0-9_-]+)$/.exec(s.inviteUrl)?.[1] ?? '');
+      expect(tokensSeen).toHaveLength(2);
+      for (const t of tokensSeen) expect(t).toHaveLength(43);
+      const planted = [...tokensSeen, addr, 'planted.person', name, 'Zxqv'];
+
+      const everywhere = [...lines, ...responses].join('\n');
+      for (const p of planted) expect(everywhere).not.toContain(p);
+
+      // Database: only the hash is stored; audit rows hold ids and dates only.
+      const hashes = (await owner.invitation.findMany({ where: { testId: { in: [testId] } } })).map(
+        (i) => i.tokenHash,
+      );
+      expect(hashes).toContain(sha256(tokensSeen[0] ?? ''));
+      const audits = await pg.query(
+        `SELECT metadata::text AS m, ip, entity_type FROM audit_logs WHERE action = 'INVITATION_CREATED'`,
+      );
+      const auditText = audits.rows.map((r: Json) => JSON.stringify(r)).join('\n');
+      const invText = JSON.stringify(await owner.invitation.findMany());
+      for (const p of planted) expect(auditText).not.toContain(p);
+      for (const p of tokensSeen) expect(invText).not.toContain(p);
     });
   });
 });

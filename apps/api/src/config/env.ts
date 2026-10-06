@@ -80,6 +80,8 @@ export const envSchema = z
     TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
     // Staff invites per organization per hour (FR-103); a stolen admin session cannot mass-create.
     INVITE_RATE_LIMIT_PER_ORG_HOUR: positiveInt.default(20),
+    // Candidate invitations (mail to arbitrary addresses) per organization per hour (FR-303).
+    INVITATION_RATE_LIMIT_PER_ORG_HOUR: z.coerce.number().int().min(1).max(10_000).default(200),
     // OpenAPI is opt-in and refused in pilot and production. FU-BE-10.
     ENABLE_API_DOCS: z
       .enum(['true', 'false'])

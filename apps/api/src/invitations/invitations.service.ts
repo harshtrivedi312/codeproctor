@@ -25,21 +25,29 @@
 // mail port. The database holds its SHA-256 (hex); responses, audit rows, errors and logs never
 // carry the token, the address or the name.
 import {
-  ConflictException,
   BadRequestException,
+  ConflictException,
+  HttpException,
+  HttpStatus,
   Inject,
   Injectable,
+  InternalServerErrorException,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { Redis } from 'ioredis';
 import { newOpaqueToken, sha256Hex } from '../auth/crypto.util';
 import type { RequestContext } from '../common/request-context';
+import { hitWindowCounter } from '../common/redis-counter';
 import type { Env } from '../config/env';
 import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
 import { Prisma } from '../generated/prisma/client';
+import { REDIS_CLIENT } from '../infrastructure/infrastructure.module';
+import { ensureConnected } from '../infrastructure/redis-ready';
 import { MailPort } from '../mail/mail.port';
 import type { MailOutcome } from '../mail/mail.port';
 import { TestsService } from '../tests/tests.service';
@@ -52,6 +60,9 @@ import type { InvitedSessionPort } from './invited-session.port';
 const DAY_MS = 86_400_000;
 /** A window may not start further ahead than this: no meaning, and keeps dates in range. */
 const MAX_START_AHEAD_DAYS = 366;
+/** A window may not start more than this far in the past (clock skew only). */
+const START_SKEW_MS = 5 * 60_000;
+const RATE_WINDOW_SECONDS = 60 * 60;
 const NOT_FOUND = 'Test not found.';
 
 /** The candidate page the web reads. /t/start moves the fragment token into memory (FE-09). */
@@ -62,6 +73,11 @@ export class InvitationsService {
   private readonly log = new Logger(InvitationsService.name);
   private readonly webOrigin: string;
   private readonly maxWindowDays: number;
+  /** Per org and hour (INVITATION_RATE_LIMIT_PER_ORG_HOUR); read per call so a test can lower it. */
+  private readonly rateLimit: number;
+  // The transaction may wait on a PATCH /tests holding the tests row FOR UPDATE (see the header).
+  private readonly txTimeoutMs = 10_000;
+  private readonly txMaxWaitMs = 5_000;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -69,10 +85,12 @@ export class InvitationsService {
     private readonly tests: TestsService,
     private readonly mail: MailPort,
     @Inject(INVITED_SESSION_PORT) private readonly sessions: InvitedSessionPort,
+    @Inject(REDIS_CLIENT) private readonly redis: Redis,
     config: ConfigService<Env, true>,
   ) {
     this.webOrigin = config.get('WEB_ORIGIN', { infer: true });
     this.maxWindowDays = config.get('INVITATION_MAX_WINDOW_DAYS', { infer: true });
+    this.rateLimit = config.get('INVITATION_RATE_LIMIT_PER_ORG_HOUR', { infer: true });
   }
 
   async create(
@@ -83,91 +101,104 @@ export class InvitationsService {
   ): Promise<InvitationCreatedDto> {
     const now = new Date();
     const { start, end } = this.window(dto, now);
+    await this.takeSlot(actor.orgId);
     const token = newOpaqueToken();
     const tokenHash = sha256Hex(token);
 
-    const created = await this.prisma.client.$transaction(async (tx) => {
-      const test = await tx.test.findUnique({ where: { id: testId }, select: { id: true } });
-      if (!test) throw new NotFoundException(NOT_FOUND);
+    let created;
+    try {
+      created = await this.prisma.client.$transaction(
+        async (tx) => {
+          const test = await tx.test.findUnique({ where: { id: testId }, select: { id: true } });
+          if (!test) throw new NotFoundException(NOT_FOUND);
 
-      // Candidate: insert if absent, then lock the row (see the header).
-      await this.orgContext.runRawSql(
-        'insert the candidate of this organization if absent: ON CONFLICT DO NOTHING keeps the transaction usable after a lost race, same org only',
-        () =>
-          tx.$executeRaw(Prisma.sql`
+          // Candidate: insert if absent, then lock the row (see the header).
+          await this.orgContext.runRawSql(
+            'insert the candidate of this organization if absent: ON CONFLICT DO NOTHING keeps the transaction usable after a lost race, same org only',
+            () =>
+              tx.$executeRaw(Prisma.sql`
             INSERT INTO candidates (org_id, email, full_name, external_ref)
             VALUES (${actor.orgId}::uuid, ${dto.email}::citext, ${dto.fullName}, ${dto.externalRef ?? null})
             ON CONFLICT (org_id, email) DO NOTHING`),
-      );
-      const rows = await this.orgContext.runRawSql(
-        'lock the candidate row so two invitations for the same candidate and test serialize; FOR NO KEY UPDATE does not conflict with the foreign key share lock, same org only',
-        () =>
-          tx.$queryRaw<
-            { id: string; erasure_requested_at: Date | null; erased_at: Date | null }[]
-          >(Prisma.sql`
+          );
+          const rows = await this.orgContext.runRawSql(
+            'lock the candidate row so two invitations for the same candidate and test serialize; FOR NO KEY UPDATE does not conflict with the foreign key share lock, same org only',
+            () =>
+              tx.$queryRaw<
+                { id: string; erasure_requested_at: Date | null; erased_at: Date | null }[]
+              >(Prisma.sql`
             SELECT id, erasure_requested_at, erased_at FROM candidates
             WHERE org_id = ${actor.orgId}::uuid AND email = ${dto.email}::citext
             FOR NO KEY UPDATE`),
+          );
+          const candidate = rows[0];
+          if (!candidate)
+            throw new InternalServerErrorException('The invitation could not be created.');
+          if (candidate.erasure_requested_at !== null || candidate.erased_at !== null) {
+            throw new ConflictException('This candidate cannot be invited.');
+          }
+
+          const active = await tx.invitation.findFirst({
+            where: {
+              testId,
+              candidateId: candidate.id,
+              usedAt: null,
+              windowEnd: { gt: new Date() },
+            },
+            select: { id: true },
+          });
+          if (active) {
+            throw new ConflictException(
+              'This candidate already has an active invitation for this test.',
+            );
+          }
+
+          const invitation = await tx.invitation.create({
+            data: {
+              orgId: actor.orgId,
+              testId,
+              candidateId: candidate.id,
+              tokenHash,
+              windowStart: start,
+              windowEnd: end,
+              createdById: actor.id,
+            },
+          });
+
+          // After the insert on purpose: an edit that held the tests row has committed by now.
+          const check = await this.tests.checkTestSatisfiable(testId, tx);
+          if (!check.satisfiable) {
+            throw new UnprocessableEntityException({ message: check.problems });
+          }
+
+          await this.sessions.createInvited(
+            { orgId: actor.orgId, invitationId: invitation.id },
+            tx,
+          );
+
+          await tx.auditLog.create({
+            data: {
+              orgId: actor.orgId,
+              actorId: actor.id,
+              action: 'INVITATION_CREATED',
+              entityType: 'invitation',
+              entityId: invitation.id,
+              ip: ctx.ip ?? null,
+              metadata: {
+                testId,
+                candidateId: candidate.id,
+                windowStart: start.toISOString(),
+                windowEnd: end.toISOString(),
+              },
+            },
+          });
+          return invitation;
+        },
+        { timeout: this.txTimeoutMs, maxWait: this.txMaxWaitMs },
       );
-      const candidate = rows[0];
-      if (!candidate) throw new Error('candidate row missing after insert');
-      if (candidate.erasure_requested_at !== null || candidate.erased_at !== null) {
-        throw new ConflictException('This candidate cannot be invited.');
-      }
-
-      const active = await tx.invitation.findFirst({
-        where: {
-          testId,
-          candidateId: candidate.id,
-          usedAt: null,
-          windowEnd: { gt: new Date() },
-        },
-        select: { id: true },
-      });
-      if (active) {
-        throw new ConflictException(
-          'This candidate already has an active invitation for this test.',
-        );
-      }
-
-      const invitation = await tx.invitation.create({
-        data: {
-          orgId: actor.orgId,
-          testId,
-          candidateId: candidate.id,
-          tokenHash,
-          windowStart: start,
-          windowEnd: end,
-          createdById: actor.id,
-        },
-      });
-
-      // After the insert on purpose: an edit that held the tests row has committed by now.
-      const check = await this.tests.checkTestSatisfiable(testId, tx);
-      if (!check.satisfiable) {
-        throw new UnprocessableEntityException({ message: check.problems });
-      }
-
-      await this.sessions.createInvited({ orgId: actor.orgId, invitationId: invitation.id }, tx);
-
-      await tx.auditLog.create({
-        data: {
-          orgId: actor.orgId,
-          actorId: actor.id,
-          action: 'INVITATION_CREATED',
-          entityType: 'invitation',
-          entityId: invitation.id,
-          ip: ctx.ip ?? null,
-          metadata: {
-            testId,
-            candidateId: candidate.id,
-            windowStart: start.toISOString(),
-            windowEnd: end.toISOString(),
-          },
-        },
-      });
-      return invitation;
-    });
+    } catch (e) {
+      throw this.mapTimeout(e);
+    }
 
     // The mail is outside the transaction: an outcome other than queued does not undo anything.
     const mail = await this.sendMail(dto.email, token, start, end);
@@ -193,6 +224,31 @@ export class InvitationsService {
     };
   }
 
+  /** Fixed window per org and hour. Redis down is a 503 (fail closed), over the limit a 429. */
+  private async takeSlot(orgId: string): Promise<void> {
+    const key = `invitation:org:${orgId}:${Math.floor(Date.now() / (RATE_WINDOW_SECONDS * 1000))}`;
+    let count: number;
+    try {
+      await ensureConnected(this.redis);
+      count = (await hitWindowCounter(this.redis, key, RATE_WINDOW_SECONDS)).count;
+    } catch {
+      throw new ServiceUnavailableException('Invitations are temporarily unavailable.');
+    }
+    if (count > this.rateLimit) {
+      throw new HttpException(
+        'Too many invitations. Try again later.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+  }
+
+  /** A transaction timeout (P2028) is a fixed 503; the transaction is rolled back. */
+  private mapTimeout(e: unknown): unknown {
+    return e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2028'
+      ? new ServiceUnavailableException('The invitation could not be saved in time. Try again.')
+      : e;
+  }
+
   /** Server time is the only clock: the rules compare against `now`, never a client value. */
   private window(dto: CreateInvitationDto, now: Date): { start: Date; end: Date } {
     const start = dto.windowStart === undefined ? now : parseInstant(dto.windowStart);
@@ -203,6 +259,9 @@ export class InvitationsService {
     if (end.getTime() <= now.getTime()) problems.push('windowEnd must be in the future');
     if (end.getTime() - start.getTime() > this.maxWindowDays * DAY_MS) {
       problems.push(`the window may be at most ${this.maxWindowDays} day(s) long`);
+    }
+    if (now.getTime() - start.getTime() > START_SKEW_MS) {
+      problems.push('windowStart may be at most 5 minutes in the past');
     }
     if (start.getTime() - now.getTime() > MAX_START_AHEAD_DAYS * DAY_MS) {
       problems.push(`windowStart may be at most ${MAX_START_AHEAD_DAYS} days ahead`);

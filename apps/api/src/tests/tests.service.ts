@@ -366,7 +366,8 @@ export class TestsService {
    * Read-only: can every random slot of this saved test still get its own question? Same check as
    * at save time, run against today's question bank (FU-BE-114). A test is checked once at save,
    * but a question can be archived or replaced afterwards. The invitation step (BE-06c) MUST call
-   * this before it inserts an invitation, and refuse (409) when `satisfiable` is false. Test start
+   * this and refuse (422, as at save time) when `satisfiable` is false; the invitation step calls
+   * it right after its insert, inside the same transaction. Test start
    * (BE-07) still answers 409 RANDOM_RULE_UNSATISFIABLE for a bank that changed after the invitation.
    * Org-scoped (another org's test is 404), no writes, no lock. Never read the test FOR UPDATE
    * in the invitation step (FU-BE-114). Problems name slot positions only. The invitation step

@@ -14,6 +14,21 @@ const SafeText = (): PropertyDecorator =>
     },
   });
 
+/**
+ * Display safety in the staff UI: single-line text without C0/C1 controls (newline and tab
+ * included), bidi overrides and isolates, or the Arabic letter mark.
+ */
+// eslint-disable-next-line no-control-regex -- control characters are exactly what this rejects
+const UNSAFE_DISPLAY = /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
+const DisplaySafe = (): PropertyDecorator =>
+  ValidateBy({
+    name: 'displaySafe',
+    validator: {
+      validate: (v: unknown) => typeof v !== 'string' || !UNSAFE_DISPLAY.test(v),
+      defaultMessage: () => '$property contains a control or bidirectional override character',
+    },
+  });
+
 /** Date-time with an explicit UTC offset (Z or +hh:mm): no local-time guessing on the server. */
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
 export const parseInstant = (v: unknown): Date | null => {
@@ -52,6 +67,7 @@ export class CreateInvitationDto {
   @IsString()
   @Length(1, MAX_FULL_NAME_LENGTH)
   @SafeText()
+  @DisplaySafe()
   fullName!: string;
 
   @ApiPropertyOptional({
@@ -63,6 +79,7 @@ export class CreateInvitationDto {
   @IsString()
   @Length(1, MAX_EXTERNAL_REF_LENGTH)
   @SafeText()
+  @DisplaySafe()
   externalRef?: string;
 
   @ApiPropertyOptional({
