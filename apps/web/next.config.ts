@@ -1,5 +1,25 @@
 import type { NextConfig } from 'next';
 
+/**
+ * Mock mode must never be baked into a production build: it would serve fake data and unlock demo
+ * routes. NEXT_PUBLIC_API_MOCKING is inlined at build time, so the build is the place to stop it.
+ * The one allowed exception is a throwaway build for QA or staging smoke tests that sets
+ * ALLOW_MOCKING_IN_PRODUCTION_BUILD=staging-only. Never set that for pilot or production images.
+ */
+export function assertNoMockingInProductionBuild(env: NodeJS.ProcessEnv): void {
+  if (
+    env.NODE_ENV === 'production' &&
+    env.NEXT_PUBLIC_API_MOCKING === 'enabled' &&
+    env.ALLOW_MOCKING_IN_PRODUCTION_BUILD !== 'staging-only'
+  ) {
+    throw new Error(
+      'Refusing to build: NEXT_PUBLIC_API_MOCKING=enabled in a production build. ' +
+        'Unset NEXT_PUBLIC_API_MOCKING. For a throwaway QA or staging-only build, set ' +
+        'ALLOW_MOCKING_IN_PRODUCTION_BUILD=staging-only.',
+    );
+  }
+}
+
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
@@ -57,5 +77,9 @@ const nextConfig: NextConfig = {
     ]);
   },
 };
+
+// Only for `next build` (Next does not set NEXT_PHASE while loading this file): `next start` of an
+// already built (allowed) mock build must still run, and tests import this file.
+if (process.argv.includes('build')) assertNoMockingInProductionBuild(process.env);
 
 export default nextConfig;
