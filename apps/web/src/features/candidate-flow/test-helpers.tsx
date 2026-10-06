@@ -104,3 +104,54 @@ export function startAtStepper(token: string): void {
   captureInvitationToken(token);
   window.history.replaceState(null, '', '/t/link');
 }
+
+/** Stand-in for the monaco editor, which needs a real browser. Use inside vi.mock('next/dynamic'). */
+export function editorStub() {
+  return function EditorStub(props: {
+    value: string;
+    readOnly: boolean;
+    ariaLabel: string;
+    onChange: (v: string) => void;
+    onBlocked: (kind: 'paste' | 'drop') => void;
+  }) {
+    return (
+      <>
+        <textarea
+          aria-label={props.ariaLabel}
+          value={props.value}
+          readOnly={props.readOnly}
+          onChange={(e) => props.onChange(e.target.value)}
+        />
+        <button type="button" onClick={() => props.onBlocked('paste')}>
+          simulate paste
+        </button>
+      </>
+    );
+  };
+}
+
+/** Room scan deps with a fake camera and recorder. `stopped` counts stopped camera tracks. */
+export function fakeRoomDeps(upload: 'ok' | 'exists' | 'failed' = 'ok') {
+  const stopped = vi.fn();
+  const started = vi.fn();
+  const stream = { getTracks: () => [{ stop: stopped }] } as unknown as MediaStream;
+  return {
+    stopped,
+    started,
+    deps: {
+      openCamera: () => Promise.resolve(stream),
+      startRecording: () => {
+        started();
+        return {
+          stop: () =>
+            Promise.resolve({
+              blob: new Blob(['webm-bytes'], { type: 'video/webm' }),
+              durationMs: 15_000,
+              startedAt: new Date('2026-10-05T10:00:00Z'),
+            }),
+        };
+      },
+      upload: () => Promise.resolve(upload),
+    },
+  };
+}
