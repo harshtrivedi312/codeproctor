@@ -36,6 +36,8 @@ export const envSchema = z
     HEALTH_TIMEOUT_MS: positiveInt.default(2_000),
     // Number of reverse proxies in front of the API (0 locally, 1 behind Caddy). FU-BE-08.
     TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
+    // Staff invites per organization per hour (FR-103); a stolen admin session cannot mass-create.
+    INVITE_RATE_LIMIT_PER_ORG_HOUR: positiveInt.default(20),
     // OpenAPI is opt-in and refused in pilot and production. FU-BE-10.
     ENABLE_API_DOCS: z
       .enum(['true', 'false'])
