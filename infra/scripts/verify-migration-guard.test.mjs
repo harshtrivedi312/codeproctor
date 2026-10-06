@@ -331,9 +331,50 @@ describe('DB-08 migration guard on a shallow checkout (FR-105)', () => {
       headBySha: false,
       refTries: 2,
       refDelayMs: 10,
+      sleep: () => {},
     });
     assert.equal(result.ok, false);
     assert.match(result.reason, /git fetch of refs\/pull\/92\/merge failed after 2 tries/);
+  });
+
+  it('FR-105, DB-08: a file added to a directory that main created after the merge ref was built is flagged (checked against origin/main too)', () => {
+    git(origin, 'checkout', '-q', '-B', 'latedir', 'main');
+    write(origin, 'prisma/migrations/20261005000077_late/extra.sql', 'SELECT 1;\n');
+    git(origin, 'add', '-A');
+    git(origin, 'commit', '-q', '-m', 'latedir');
+    git(origin, 'checkout', '-q', '--detach', 'main');
+    git(origin, 'merge', '-q', '--no-ff', '-m', 'merge latedir', 'latedir');
+    git(origin, 'update-ref', 'refs/pull/93/merge', 'HEAD');
+    git(origin, 'checkout', '-q', 'main');
+    const clone = join(root, 'latedir-clone');
+    mkdirSync(clone);
+    git(clone, 'init', '-q');
+    git(clone, 'remote', 'add', 'origin', `file://${origin}`);
+    git(
+      clone,
+      'fetch',
+      '-q',
+      '--no-tags',
+      '--depth=1',
+      'origin',
+      '+refs/pull/93/merge:refs/remotes/pull/93/merge',
+    );
+    git(clone, 'checkout', '-q', '--detach', 'refs/remotes/pull/93/merge');
+    // Main now has the same migration directory, after the merge ref's first parent.
+    write(
+      origin,
+      'prisma/migrations/20261005000077_late/migration.sql',
+      'CREATE TABLE late (id int);\n',
+    );
+    git(origin, 'add', '-A');
+    git(origin, 'commit', '-q', '-m', 'main adds the late directory');
+    const result = migrationChanges(clone, {
+      githubRef: 'refs/pull/93/merge',
+      headBySha: false,
+      sleep: () => {},
+    });
+    assert.equal(result.ok, true, result.reason);
+    assert.deepEqual(result.changed, ['A\tprisma/migrations/20261005000077_late/extra.sql']);
   });
 
   it('FR-105: if the pull request head moved while the job ran, it does not compare different content', () => {

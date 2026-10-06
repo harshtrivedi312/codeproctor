@@ -96,7 +96,8 @@ export function ensureBase(
     // While GitHub rebuilds the merge ref after main moved, the ref can be briefly missing or the
     // fetch can fail: try again a few times before giving up (the run is otherwise red for nothing).
     let fetched = { status: 1, stderr: '' };
-    for (let t = 0; t < Math.max(1, refTries); t++) {
+    const tries = Math.max(1, Math.floor(refTries));
+    for (let t = 0; t < tries; t++) {
       if (t > 0) sleep(refDelayMs);
       fetched = git(cwd, [
         'fetch',
@@ -110,7 +111,7 @@ export function ensureBase(
     if (fetched.status !== 0) {
       return {
         ok: false,
-        reason: `git fetch of ${githubRef} failed after ${refTries} tries: ${scrub(fetched.stderr)}`,
+        reason: `git fetch of ${githubRef} failed after ${tries} tries: ${scrub(fetched.stderr)}`,
       };
     }
     const got = git(cwd, [
