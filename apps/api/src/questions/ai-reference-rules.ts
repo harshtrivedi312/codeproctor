@@ -1,10 +1,9 @@
 // AI reference solution rules (ADR 0005 AI-5): the publish gate. Pure.
-import { AI_REFERENCE_LANGUAGES } from '@codeproctor/shared';
-
-/** Default of `aiReferences.minAssistants` (ADR 0005 D-20). */
-export const DEFAULT_MIN_ASSISTANTS = 2;
-/** Largest stored or accepted aiReferences.minAssistants (the PATCH bound and the reader bound). */
-export const MAX_MIN_ASSISTANTS = 5;
+import {
+  AI_REFERENCE_LANGUAGES,
+  DEFAULT_MIN_ASSISTANTS,
+  MAX_MIN_ASSISTANTS,
+} from '@codeproctor/shared';
 
 /**
  * The stored organizations.settings.aiReferences.minAssistants when it is an integer from 0 to 5,
