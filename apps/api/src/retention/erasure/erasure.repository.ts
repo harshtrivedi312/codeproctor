@@ -67,7 +67,7 @@ export class ErasureRepository {
    */
   findRequested(limit: number, afterId?: string): Promise<RequestedErasure[]> {
     const completed = safeAction(ERASURE_RESERVED_ACTIONS.COMPLETED);
-    const listDone = safeAction(ERASURE_AUDIT_ACTIONS.LIST_COMPLETED);
+    const listDone = safeAction(ERASURE_RESERVED_ACTIONS.LIST_COMPLETED);
     const after = afterId ? Prisma.sql`AND c.id > ${afterId}::uuid` : Prisma.empty;
     return this.orgContext.runSystem('RETENTION_ERASURE', () =>
       this.orgContext.runRawSql('erasure request selection (ADR 0004 9.5)', async () => {
@@ -212,6 +212,7 @@ export class ErasureRepository {
       where: {
         action,
         entityId: candidateId,
+        actorId: null,
         AND: [
           { metadata: { path: ['requestId'], equals: requestId } },
           ...(since === undefined ? [] : [{ metadata: { path: ['since'], equals: since } }]),
@@ -245,6 +246,22 @@ export class ErasureRepository {
           metadata: since === undefined ? { requestId } : { requestId, since },
         },
       });
+    });
+  }
+
+  async listCompleted(candidateId: string, requestId: string): Promise<boolean> {
+    return this.onceDone({
+      candidateId,
+      requestId,
+      action: ERASURE_RESERVED_ACTIONS.LIST_COMPLETED,
+    });
+  }
+  async markListCompleted(orgId: string, candidateId: string, requestId: string): Promise<void> {
+    await this.writeOnce({
+      orgId,
+      candidateId,
+      requestId,
+      action: ERASURE_RESERVED_ACTIONS.LIST_COMPLETED,
     });
   }
 
@@ -358,7 +375,7 @@ export class ErasureRepository {
         data: {
           orgId,
           actorId: null,
-          action: ERASURE_AUDIT_ACTIONS.SESSION_PURGED,
+          action: ERASURE_RESERVED_ACTIONS.SESSION_PURGED,
           entityType: SESSION_ENTITY_TYPE,
           entityId: sessionId,
           metadata: { requestId, at: at.toISOString() },
@@ -375,9 +392,10 @@ export class ErasureRepository {
   async purgedAfter(sessionId: string, requestId: string, threshold: Date): Promise<boolean> {
     const rows = await this.prisma.client.auditLog.findMany({
       where: {
-        action: ERASURE_AUDIT_ACTIONS.SESSION_PURGED,
+        action: ERASURE_RESERVED_ACTIONS.SESSION_PURGED,
         entityType: SESSION_ENTITY_TYPE,
         entityId: sessionId,
+        actorId: null,
         metadata: { path: ['requestId'], equals: requestId },
       },
       select: { metadata: true },

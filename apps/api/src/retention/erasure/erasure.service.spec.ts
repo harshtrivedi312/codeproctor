@@ -625,16 +625,38 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
     expect(list.completed).toEqual([]);
     const original = list.complete.bind(list);
     list.complete = () => Promise.reject(new Error('list down'));
-    await expect(
-      svc.recordManualNotice({
-        orgId: h.A.orgId,
-        candidateId: cid,
-        actorId: ACTOR(),
-        now: at(SETTLED),
-      }),
-    ).rejects.toThrow();
+    // The notice is saved and anonymisation committed: the caller is not failed, the sweep retries.
+    const r = await svc.recordManualNotice({
+      orgId: h.A.orgId,
+      candidateId: cid,
+      actorId: ACTOR(),
+      now: at(SETTLED),
+    });
+    expect(r.anonymised).toBe(true);
+    expect(list.completed).toEqual([]);
     list.complete = original;
     await svc.runDue(at(SETTLED + 1000));
     expect(list.completed).toContain(cid);
+    await svc.runDue(at(SETTLED + 2000));
+    expect(list.completed.filter((x) => x === cid)).toHaveLength(1);
+    expect(
+      await h.owner.auditLog.count({ where: { entityId: cid, action: 'ERASURE_LIST_COMPLETED' } }),
+    ).toBe(1);
+  });
+
+  it('TC-094 #22 C-06: a slow prefix pass does not count as a post-margin pass (the pass start is what is stamped)', async () => {
+    await setup(h.A, { submittedDaysAgo: 3, anchorDaysAgo: 3 });
+    const sid = sessionIdOf(h.A);
+    const cid = await candidateOf(h.A);
+    const { svc } = service();
+    await svc.requestErasure({ orgId: h.A.orgId, candidateId: cid, actorId: ACTOR(), now: NOW });
+    await svc.run(h.A.orgId, cid, at(SETTLED));
+    const row = await h.owner.auditLog.findFirstOrThrow({
+      where: { entityId: sid, action: 'ERASURE_SESSION_PURGED' },
+      orderBy: { createdAt: 'desc' },
+    });
+    const stamped = Date.parse((row.metadata as { at: string }).at);
+    // Stamped at the start of the pass, not after the (possibly slow) delete.
+    expect(stamped).toBeLessThanOrEqual(at(SETTLED).getTime() + 5_000);
   });
 });

@@ -126,6 +126,7 @@ export class ErasureService {
     const sessions = await inOrg(() => this.repo.sessionsOf(candidateId));
 
     // Before anything is fenced or deleted: a restore must not bring this candidate back (FU-DBB-02).
+    // (A session fenced after completion is covered by the same entry: it is per candidate.)
     if (!(await inOrg(() => this.repo.isCompleted(requestId, candidateId)))) {
       await this.list.append({ orgId, candidateId });
     }
@@ -193,6 +194,8 @@ export class ErasureService {
           runAt: new Date(fencedAt.getTime() + SETTLE_MS),
         });
       }
+      // Stamped BEFORE the list-delete-verify: only a pass that began after the settle window proves the late uploads were seen.
+      const passStart = current();
       const deleted = await deleteVerified(this.store, [sessionPrefix(orgId, s.id)]);
       if (!deleted.verified) {
         allClean = false;
@@ -213,7 +216,7 @@ export class ErasureService {
           sessionId: s.id,
           requestId,
           reduceAll: this.config.RETENTION_REDUCE_ACCOMMODATIONS,
-          at: current(),
+          at: passStart,
         }),
       );
       if (!purged || !(await inOrg(() => this.repo.isPurged(s.id)))) allClean = false;
@@ -259,15 +262,25 @@ export class ErasureService {
         );
       }
     }
-    if (completed && anonymised) {
-      const key = { candidateId, requestId, action: ERASURE_AUDIT_ACTIONS.LIST_COMPLETED };
-      if (!(await inOrg(() => this.repo.onceDone(key)))) {
+    // The list entry and the mail wait for every session's post-margin pass, so the sweep keeps the
+    // candidate until then (a session fenced after completion is not covered by a lost re-run job).
+    const finished = completed && settled && allClean;
+    if (
+      finished &&
+      anonymised &&
+      !(await inOrg(() => this.repo.listCompleted(candidateId, requestId)))
+    ) {
+      try {
         await this.list.complete({ orgId, candidateId });
-        await inOrg(() => this.repo.writeOnce({ orgId, ...key }));
+        await inOrg(() => this.repo.markListCompleted(orgId, candidateId, requestId));
+      } catch (error) {
+        // The notice and the anonymisation are done: the sweep retries this, the caller need not fail.
+        const name = error instanceof Error ? error.name : 'unknown';
+        this.log.warn(`erasure list completion failed for candidate ${candidateId} (${name})`);
       }
     }
     // After the day-28 check: an already anonymised candidate gets no mail (ADR 0004 9.5 step 8).
-    if (completed && !sent && !noticed && !anonymised) {
+    if (finished && !sent && !noticed && !anonymised) {
       await this.notices.enqueueCompleted({ orgId, candidateId, requestId });
     }
     if (completed) return { status: 'completed', requestId, anonymised };

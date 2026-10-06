@@ -23,14 +23,16 @@ export const ERASURE_RESERVED_ACTIONS = {
   NOTICE_RECORDED: 'ERASURE_NOTICE_RECORDED',
   /** The fence time of a session: completion waits for it plus the settle window. */
   FENCED: 'ERASURE_SESSION_FENCED',
+  /** A verified purge pass of a session (metadata `at` = when the pass began): gates the post-completion skip. */
+  SESSION_PURGED: 'ERASURE_SESSION_PURGED',
+  /** The erasure list entry was completed: gates the sweep's exit. */
+  LIST_COMPLETED: 'ERASURE_LIST_COMPLETED',
 } as const;
 
 /** Non-reserved audit actions of the erasure run (ids and the request id only). */
 export const ERASURE_AUDIT_ACTIONS = {
-  SESSION_PURGED: 'ERASURE_SESSION_PURGED',
   DELAY_NOTIFIED: 'ERASURE_DELAY_NOTIFIED',
   ALERT_RAISED: 'ERASURE_ALERT_RAISED',
-  LIST_COMPLETED: 'ERASURE_LIST_COMPLETED',
   REQUESTED: 'ERASURE_REQUESTED',
 } as const;
 

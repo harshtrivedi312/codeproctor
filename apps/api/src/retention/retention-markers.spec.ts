@@ -91,7 +91,7 @@ describe('reserved retention and erasure audit actions (FR-704, NFR-05)', () => 
     }
   });
 
-  it('the constants hold exactly the eight reserved action names', () => {
+  it('the constants hold exactly the ten reserved action names', () => {
     const text = readFileSync(join(REPO, 'apps/api/src/retention/retention.constants.ts'), 'utf8');
     for (const name of [
       'RETENTION_FACE_DONE',
@@ -102,6 +102,8 @@ describe('reserved retention and erasure audit actions (FR-704, NFR-05)', () => 
       'ERASURE_COMPLETED',
       'ERASURE_NOTICE_RECORDED',
       'ERASURE_SESSION_FENCED',
+      'ERASURE_SESSION_PURGED',
+      'ERASURE_LIST_COMPLETED',
     ]) {
       expect(text).toContain(`'${name}'`);
     }
