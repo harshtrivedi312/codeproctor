@@ -1,9 +1,8 @@
+import { MAX_PASSWORD_LENGTH } from '@codeproctor/shared';
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import { IsEmail, IsString, Length, Matches, MaxLength, MinLength } from 'class-validator';
 
-/** Bounds the Argon2id work an anonymous caller can trigger (matches shared MAX_PASSWORD_LENGTH). */
-export const MAX_PASSWORD_LENGTH = 1024;
 /** RFC 5321 path limit (matches shared MAX_EMAIL_LENGTH until the shared dependency lands). */
 export const MAX_EMAIL_LENGTH = 254;
 export const MIN_NEW_PASSWORD_LENGTH = 12;
