@@ -126,7 +126,7 @@ export class ErasureService {
     const sessions = await inOrg(() => this.repo.sessionsOf(candidateId));
 
     // Before anything is fenced or deleted: a restore must not bring this candidate back (FU-DBB-02).
-    // (A session fenced after completion is covered by the same entry: it is per candidate.)
+    // (The entry is per candidate; new invitations for a candidate with an erasure pending or done are refused by ADR 0004 9.5, so no later session is expected once the list is completed.)
     if (!(await inOrg(() => this.repo.isCompleted(requestId, candidateId)))) {
       await this.list.append({ orgId, candidateId });
     }

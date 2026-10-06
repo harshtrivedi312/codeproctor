@@ -75,6 +75,7 @@ constant, a string literal or inside raw SQL). Add a legitimate writer to the al
    boolean counts as true): a session that is UNDER_REVIEW or APPEALED, or has an open appeal, is skipped
    and the candidate is told once (`ERASURE_DELAY_NOTIFIED`). With the switch off the fence closes the
    open appeal (`CLOSED_ERASED`).
+   1b. Before anything is fenced or deleted, `ErasureListPort.append` records the candidate on the erasure list that survives restores (a failure stops the run); `complete` follows when every session is settled and the candidate is anonymised, and a failure is retried by the sweep.
 2. Fence each other session through `SessionFencePort` (BE-07 implements it; retention never writes
    `sessions.status`), then schedule a re-run after fence + 60 s + the storage sweep margin.
 3. For each ERASED session: delete the whole prefix with verification, then one transaction (candidate
@@ -86,5 +87,5 @@ constant, a string literal or inside raw SQL). Add a legitimate writer to the al
    (`recordManualNotice`, audited), or day 28 of the deadline (request or last review/appeal close,
    whichever is later; it does not run while a hold is open). Day 25 with no notice raises one alert. The consent record is never touched.
 
-`RetentionModule.forRoot({ ..., erasure })` takes a module exporting the four ports; without it every
+`RetentionModule.forRoot({ ..., erasure })` takes a module exporting the five ports (fence, scheduler, notices, alerts, erasure list); without it every
 erasure call is refused (fail closed).

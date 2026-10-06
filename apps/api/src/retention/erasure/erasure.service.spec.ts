@@ -209,6 +209,12 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
       now: NOW,
     });
     expect(r.anonymised).toBe(true);
+    await svc.recordManualNotice({
+      orgId: h.A.orgId,
+      candidateId: cid,
+      actorId: ACTOR(),
+      now: NOW,
+    });
     const c = await h.owner.candidate.findUniqueOrThrow({ where: { id: cid } });
     expect(c.email).toBe(`erased+${cid}@invalid`);
     expect(c.fullName).toBe('Erased');
@@ -644,19 +650,45 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
     ).toBe(1);
   });
 
-  it('TC-094 #22 C-06: a slow prefix pass does not count as a post-margin pass (the pass start is what is stamped)', async () => {
+  it('TC-094 #22 C-06: a slow pass is stamped with its start, so a session fenced after completion is not skipped past the settle window', async () => {
     await setup(h.A, { submittedDaysAgo: 3, anchorDaysAgo: 3 });
-    const sid = sessionIdOf(h.A);
     const cid = await candidateOf(h.A);
     const { svc } = service();
     await svc.requestErasure({ orgId: h.A.orgId, candidateId: cid, actorId: ACTOR(), now: NOW });
     await svc.run(h.A.orgId, cid, at(SETTLED));
-    const row = await h.owner.auditLog.findFirstOrThrow({
-      where: { entityId: sid, action: 'ERASURE_SESSION_PURGED' },
-      orderBy: { createdAt: 'desc' },
+    const inv = await h.owner.invitation.findFirstOrThrow({ where: { candidateId: cid } });
+    const second = await h.owner.invitation.create({
+      data: {
+        orgId: inv.orgId,
+        testId: inv.testId,
+        candidateId: cid,
+        tokenHash: `slow-${cid}`,
+        windowStart: inv.windowStart,
+        windowEnd: inv.windowEnd,
+      },
     });
-    const stamped = Date.parse((row.metadata as { at: string }).at);
-    // Stamped at the start of the pass, not after the (possibly slow) delete.
-    expect(stamped).toBeLessThanOrEqual(at(SETTLED).getTime() + 5_000);
+    const late = await h.owner.session.create({
+      data: { orgId: inv.orgId, invitationId: second.id, status: 'IN_PROGRESS' },
+    });
+    const key1 = `${sessionPrefix(h.A.orgId, late.id)}media/SCREEN/000001/one.webm`;
+    const key2 = `${sessionPrefix(h.A.orgId, late.id)}media/SCREEN/000002/two.webm`;
+    h.store.put(key1);
+    let offset = 0;
+    svc.clock = () => offset;
+    const realDelete = h.store.deleteKeys.bind(h.store);
+    h.store.deleteKeys = (keys) => {
+      offset += 120_000; // the delete takes longer than the settle window
+      return realDelete(keys);
+    };
+    const t0 = at(20 * 86_400_000);
+    await svc.run(h.A.orgId, cid, t0);
+    const purge = await h.owner.auditLog.findFirstOrThrow({
+      where: { entityId: late.id, action: 'ERASURE_SESSION_PURGED' },
+    });
+    expect(Date.parse((purge.metadata as { at: string }).at)).toBeLessThan(t0.getTime() + 5_000);
+    // An upload that landed after the listing is removed by the next pass past the window.
+    h.store.put(key2);
+    await svc.run(h.A.orgId, cid, new Date(t0.getTime() + SETTLED));
+    expect(h.store.keys.has(key2)).toBe(false);
   });
 });

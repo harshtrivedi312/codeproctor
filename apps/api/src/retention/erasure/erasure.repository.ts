@@ -82,7 +82,8 @@ export class ErasureRepository {
                   AND a.metadata->>'requestId' = c.id::text || '_' || floor(extract(epoch FROM c.erasure_requested_at))::bigint::text)
               OR NOT EXISTS (
                 SELECT 1 FROM audit_logs a
-                WHERE a.action = ${listDone} AND a.org_id = c.org_id
+                WHERE a.action = ${listDone} AND a.org_id = c.org_id AND a.actor_id IS NULL
+                  AND a.entity_id = c.id::text
                   AND a.metadata->>'requestId' = c.id::text || '_' || floor(extract(epoch FROM c.erasure_requested_at))::bigint::text))
             ${after}
           ORDER BY c.id
@@ -272,6 +273,8 @@ export class ErasureRepository {
     requestId: string;
     actorId: string;
   }): Promise<void> {
+    // Once per request, whoever asks: the row carries the actor, so the generic check (system rows only) does not apply.
+    if (await this.noticeRecorded(args.requestId, args.candidateId)) return;
     await this.writeOnce({ ...args, action: ERASURE_RESERVED_ACTIONS.NOTICE_RECORDED });
   }
 
