@@ -5,7 +5,6 @@ import {
   Get,
   HttpCode,
   Param,
-  ParseIntPipe,
   ParseUUIDPipe,
   Patch,
   Post,
@@ -34,14 +33,18 @@ import { UserRole } from '../generated/prisma/client';
 import {
   CandidateQuestionPreviewDto,
   CreateQuestionDto,
+  PublishQuestionDto,
   QuestionDetailDto,
+  QuestionIdParamDto,
   QuestionListDto,
   QuestionListQueryDto,
   QuestionSummaryDto,
   TestCaseDto,
   TestCaseFieldsDto,
+  TestCaseParamDto,
   UpdateQuestionDto,
   UpdateTestCaseDto,
+  VersionParamDto,
   VersionQueryDto,
 } from './dto/questions.dto';
 import { QuestionsService } from './questions.service';
@@ -53,7 +56,10 @@ function actorOf(req: AuthedRequest): Actor {
   return { id: req.user.id, orgId: req.user.orgId };
 }
 
-/** Callers without question:update (recruiters) never get answers or hidden test data. */
+/**
+ * The ONE place that decides between the full and the staff read view of a version: callers
+ * without question:update (recruiters) never get answers or hidden test data (staff-view.ts).
+ */
 function canSeeAnswers(req: AuthedRequest): boolean {
   return req.user !== undefined && hasPermission(req.user.role, 'question:update');
 }
@@ -75,8 +81,8 @@ export class QuestionsController {
   @Roles(...READERS)
   @ApiOperation({ summary: 'List questions with tag, difficulty and type filters (FR-201)' })
   @ApiOkResponse({ type: QuestionListDto })
-  list(@Query() query: QuestionListQueryDto): Promise<QuestionListDto> {
-    return this.questions.list(query);
+  list(@Query() query: QuestionListQueryDto, @Req() req: AuthedRequest): Promise<QuestionListDto> {
+    return this.questions.list(query, canSeeAnswers(req));
   }
 
   @Post()
@@ -87,14 +93,14 @@ export class QuestionsController {
   @ApiBadRequestResponse({ description: 'Validation failed' })
   @ApiConflictResponse({ description: 'The slug is taken in this organization' })
   create(@Body() dto: CreateQuestionDto, @Req() req: AuthedRequest): Promise<QuestionDetailDto> {
-    return this.questions.create(actorOf(req), dto, ctxOf(req));
+    return this.questions.create(actorOf(req), dto, ctxOf(req), canSeeAnswers(req));
   }
 
   @Get(':id')
   @Roles(...READERS)
   @ApiOperation({
     summary:
-      'One question with a version (latest by default). Without question:update the reference solution, answer_spec and hidden test data are left out.',
+      'One question with a version (latest by default). Without question:update only published versions are visible (a draft or never-published question is 404), and the reference solution, answer_spec, validation report and hidden test data are left out.',
   })
   @ApiOkResponse({ type: QuestionDetailDto })
   @ApiNotFoundResponse({ description: 'No such question in your organization' })
@@ -117,8 +123,9 @@ export class QuestionsController {
   preview(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Query() query: VersionQueryDto,
+    @Req() req: AuthedRequest,
   ): Promise<CandidateQuestionView> {
-    return this.questions.preview(id, query.version);
+    return this.questions.preview(id, query.version, canSeeAnswers(req));
   }
 
   @Patch(':id')
@@ -132,11 +139,11 @@ export class QuestionsController {
   @ApiNotFoundResponse({ description: 'No such question in your organization' })
   @ApiConflictResponse({ description: 'The question is archived, or a concurrent change won' })
   update(
-    @Param('id', new ParseUUIDPipe()) id: string,
+    @Param() params: QuestionIdParamDto,
     @Body() dto: UpdateQuestionDto,
     @Req() req: AuthedRequest,
   ): Promise<QuestionDetailDto> {
-    return this.questions.update(actorOf(req), id, dto, ctxOf(req));
+    return this.questions.update(actorOf(req), params.id, dto, ctxOf(req), canSeeAnswers(req));
   }
 
   @Post(':id/publish')
@@ -150,10 +157,17 @@ export class QuestionsController {
   @ApiConflictResponse({ description: 'No draft to publish, or the question is archived' })
   @ApiUnprocessableEntityResponse({ description: 'The draft is incomplete; errors lists what' })
   publish(
-    @Param('id', new ParseUUIDPipe()) id: string,
+    @Param() params: QuestionIdParamDto,
+    @Body() dto: PublishQuestionDto,
     @Req() req: AuthedRequest,
   ): Promise<QuestionDetailDto> {
-    return this.questions.publish(actorOf(req), id, ctxOf(req));
+    return this.questions.publish(
+      actorOf(req),
+      params.id,
+      ctxOf(req),
+      canSeeAnswers(req),
+      dto.expectedRevision,
+    );
   }
 
   @Post(':id/archive')
@@ -193,12 +207,18 @@ export class QuestionsController {
   })
   @ApiUnprocessableEntityResponse({ description: 'Not a coding question, or too many test cases' })
   addTestCase(
-    @Param('id', new ParseUUIDPipe()) id: string,
-    @Param('version', new ParseIntPipe()) version: number,
+    @Param() params: VersionParamDto,
     @Body() dto: TestCaseFieldsDto,
     @Req() req: AuthedRequest,
   ): Promise<TestCaseDto> {
-    return this.questions.addTestCase(actorOf(req), id, version, dto, ctxOf(req));
+    return this.questions.addTestCase(
+      actorOf(req),
+      params.id,
+      params.version,
+      dto,
+      ctxOf(req),
+      canSeeAnswers(req),
+    );
   }
 
   @Patch(':id/versions/:version/test-cases/:testCaseId')
@@ -212,13 +232,19 @@ export class QuestionsController {
     description: 'The version is published (immutable), or the question is archived',
   })
   updateTestCase(
-    @Param('id', new ParseUUIDPipe()) id: string,
-    @Param('version', new ParseIntPipe()) version: number,
-    @Param('testCaseId', new ParseUUIDPipe()) testCaseId: string,
+    @Param() params: TestCaseParamDto,
     @Body() dto: UpdateTestCaseDto,
     @Req() req: AuthedRequest,
   ): Promise<TestCaseDto> {
-    return this.questions.updateTestCase(actorOf(req), id, version, testCaseId, dto, ctxOf(req));
+    return this.questions.updateTestCase(
+      actorOf(req),
+      params.id,
+      params.version,
+      params.testCaseId,
+      dto,
+      ctxOf(req),
+      canSeeAnswers(req),
+    );
   }
 
   @Delete(':id/versions/:version/test-cases/:testCaseId')
@@ -233,11 +259,15 @@ export class QuestionsController {
     description: 'The version is published (immutable), or the question is archived',
   })
   async removeTestCase(
-    @Param('id', new ParseUUIDPipe()) id: string,
-    @Param('version', new ParseIntPipe()) version: number,
-    @Param('testCaseId', new ParseUUIDPipe()) testCaseId: string,
+    @Param() params: TestCaseParamDto,
     @Req() req: AuthedRequest,
   ): Promise<void> {
-    await this.questions.removeTestCase(actorOf(req), id, version, testCaseId, ctxOf(req));
+    await this.questions.removeTestCase(
+      actorOf(req),
+      params.id,
+      params.version,
+      params.testCaseId,
+      ctxOf(req),
+    );
   }
 }

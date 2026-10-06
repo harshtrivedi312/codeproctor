@@ -29,3 +29,30 @@ describe('FU-FEB-01 mocked server clock', () => {
     }
   });
 });
+
+describe('FU-FEB-08 candidate mocks are registered in mock mode', () => {
+  it('FU-FEB-08 the candidate flow routes answer through createHandlers, next to the older test-screen mocks', async () => {
+    const server = setupServer(...createHandlers({ saveLatencyMs: 0 }));
+    server.listen({ onUnhandledFrame: 'error' });
+    try {
+      const link = await fetch(`${apiBaseUrl}/v1/candidate/session/link`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invitationToken: 'a'.repeat(32) }),
+      });
+      expect(link.status).toBe(200);
+      expect(((await link.json()) as { state: string }).state).toBe('OTP_REQUIRED');
+      // A candidate route with an invalid token is the candidate mock's 404, not an unhandled request.
+      const bad = await fetch(`${apiBaseUrl}/v1/candidate/session/link`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invitationToken: 'short' }),
+      });
+      expect(bad.status).toBe(404);
+      // The older test-screen mocks still answer.
+      expect((await fetch(`${apiBaseUrl}/v1/candidate/session`)).status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+});

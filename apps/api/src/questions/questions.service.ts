@@ -4,10 +4,17 @@
 // latest. A published version is immutable (database.md immutability rule): it is never updated
 // and its test cases never change; editing a published question creates the next version as a
 // draft (FR-204), which becomes `current_version_id` when published. Past sessions point at the
-// version row they ran, so they never change (TC-013). Mutations write their audit row in the
-// same transaction. Audit metadata names ids and changed fields only, never content. Lock rule:
-// every change to a draft starts with an update of that version row (guarded by is_published =
-// false), which serializes it against a concurrent publish and against other edits.
+// version row they ran, so they never change (TC-013).
+//
+// Locking. Every mutation of a question starts with `lockWritable`, an UPDATE of the question row
+// that is a no-op by value and guarded by is_archived = false. It takes the row lock, so all
+// mutations of one question (edit, publish, archive, test cases, and later the validate job) run
+// one at a time, and everything is read AFTER the lock: no mutation works on a stale read. The
+// version updates keep their own `is_published = false` guard as a second line. Lock order is
+// always question row, then version row.
+//
+// Mutations write their audit row in the same transaction. Audit metadata names ids and changed
+// fields only, never content. `full` (see staff-view.ts) is decided once in the controller.
 import {
   BadRequestException,
   ConflictException,
@@ -19,17 +26,12 @@ import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../database/prisma.service';
 import type { OrgScopedPrismaClient } from '../database/org-scope.extension';
 import { Prisma } from '../generated/prisma/client';
-import type { Question, QuestionVersion, TestCase } from '../generated/prisma/client';
+import type { Question, QuestionVersion } from '../generated/prisma/client';
 import type { RequestContext } from '../common/request-context';
-import { toCandidateQuestion } from './candidate-view';
+import { InvalidAnswerSpecError, toCandidateQuestion } from './candidate-view';
 import type { CandidateQuestionView } from './candidate-view';
-import {
-  checkLimits,
-  limitsFromStored,
-  limitsToStored,
-  publishProblems,
-  shapeProblems,
-} from './question-content';
+import { computeRevision } from './revision';
+import { checkLimits, limitsToStored, publishProblems, shapeProblems } from './question-content';
 import type { Limits } from './question-content';
 import { MAX_TEST_CASES } from './dto/questions.dto';
 import type {
@@ -38,13 +40,19 @@ import type {
   QuestionListDto,
   QuestionListQueryDto,
   QuestionSummaryDto,
-  QuestionVersionDto,
-  QuestionVersionRefDto,
   TestCaseDto,
   TestCaseFieldsDto,
   UpdateQuestionDto,
   UpdateTestCaseDto,
 } from './dto/questions.dto';
+import {
+  toFullVersion,
+  toStaffReadVersion,
+  toTestCaseDto,
+  toVersionRef,
+  VERSION_REF_SELECT,
+} from './staff-view';
+import type { VersionRefRow } from './staff-view';
 
 export interface Actor {
   id: string;
@@ -62,7 +70,6 @@ const noHistory = { validatedAt: null, validationReport: Prisma.DbNull } as cons
 function slugFromTitle(title: string): string {
   const base = title
     .normalize('NFKD')
-    .replace(/[^a-zA-Z0-9]+/g, '-')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
@@ -71,32 +78,8 @@ function slugFromTitle(title: string): string {
   return `${base || 'question'}-${randomBytes(3).toString('hex')}`;
 }
 
-const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
-
-function ref(v: QuestionVersion): QuestionVersionRefDto {
-  return {
-    id: v.id,
-    version: v.version,
-    isPublished: v.isPublished,
-    title: v.title,
-    difficulty: v.difficulty,
-    validatedAt: iso(v.validatedAt),
-    createdAt: v.createdAt.toISOString(),
-  };
-}
-
-function asRecord(v: unknown): Record<string, unknown> | null {
-  return typeof v === 'object' && v !== null && !Array.isArray(v)
-    ? (v as Record<string, unknown>)
-    : null;
-}
-
-function stringMap(v: unknown): Record<string, string> {
-  const rec = asRecord(v) ?? {};
-  const out: Record<string, string> = {};
-  for (const [k, val] of Object.entries(rec)) if (typeof val === 'string') out[k] = val;
-  return out;
-}
+const isUniqueViolation = (e: unknown): boolean =>
+  e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002';
 
 @Injectable()
 export class QuestionsService {
@@ -104,12 +87,17 @@ export class QuestionsService {
 
   // ---- read -----------------------------------------------------------------------------------
 
-  async list(q: QuestionListQueryDto): Promise<QuestionListDto> {
+  /**
+   * `full` false (no question:update): published versions only. A question that was never
+   * published is not listed and no draft version ref appears (the same rule as `get`).
+   */
+  async list(q: QuestionListQueryDto, full: boolean): Promise<QuestionListDto> {
     if ((q.page - 1) * q.pageSize > MAX_LIST_OFFSET) {
       throw new BadRequestException('The page is too deep; narrow the filters instead.');
     }
     const where: Prisma.QuestionWhereInput = {
       ...(q.includeArchived ? {} : { isArchived: false }),
+      ...(full ? {} : { currentVersionId: { not: null } }),
       ...(q.type ? { type: q.type } : {}),
       ...(q.tag ? { tags: { has: q.tag } } : {}),
       ...(q.difficulty
@@ -131,9 +119,14 @@ export class QuestionsService {
       }),
       db.question.count({ where }),
     ]);
+    // Reference columns only: never the statement, code maps or answer_spec of every version.
     const versions = rows.length
       ? await db.questionVersion.findMany({
-          where: { questionId: { in: rows.map((r) => r.id) } },
+          where: {
+            questionId: { in: rows.map((r) => r.id) },
+            ...(full ? {} : { isPublished: true }),
+          },
+          select: { questionId: true, ...VERSION_REF_SELECT },
           orderBy: [{ questionId: 'asc' }, { version: 'desc' }],
         })
       : [];
@@ -149,24 +142,43 @@ export class QuestionsService {
     return this.detail(this.prisma.client, id, version, full, false);
   }
 
-  /** The candidate-facing rendering of a version, for authors to preview (FR-202, TC-011). */
-  async preview(id: string, version: number | undefined): Promise<CandidateQuestionView> {
+  /**
+   * The candidate-facing rendering of a version (FR-202, TC-011). Callers without question:update
+   * see published versions only (default: the current one); a draft, a never-published question
+   * and a missing or other-org id are the same 404.
+   */
+  async preview(
+    id: string,
+    version: number | undefined,
+    full: boolean,
+  ): Promise<CandidateQuestionView> {
     const db = this.prisma.client;
     const question = await this.requireQuestion(db, id);
     const row =
       version !== undefined
-        ? await db.questionVersion.findFirst({ where: { questionId: id, version } })
+        ? await db.questionVersion.findFirst({
+            where: { questionId: id, version, ...(full ? {} : { isPublished: true }) },
+          })
         : question.currentVersionId
           ? await db.questionVersion.findFirst({
               where: { id: question.currentVersionId, questionId: id },
             })
-          : await this.latestVersion(db, id);
+          : full
+            ? await this.latestVersion(db, id)
+            : null;
     if (!row) throw new NotFoundException(NOT_FOUND);
     const testCases = await db.testCase.findMany({
       where: { questionVersionId: row.id },
       orderBy: [{ position: 'asc' }, { id: 'asc' }],
     });
-    return toCandidateQuestion({ ...row, type: question.type }, testCases);
+    try {
+      return toCandidateQuestion({ ...row, type: question.type }, testCases);
+    } catch (e) {
+      if (e instanceof InvalidAnswerSpecError) {
+        throw new UnprocessableEntityException('The answer_spec of this version is incomplete.');
+      }
+      throw e;
+    }
   }
 
   // ---- create ---------------------------------------------------------------------------------
@@ -175,6 +187,7 @@ export class QuestionsService {
     actor: Actor,
     dto: CreateQuestionDto,
     ctx: RequestContext,
+    full: boolean,
   ): Promise<QuestionDetailDto> {
     const type = dto.type ?? 'CODING';
     const limits: Limits = dto.limits ?? { cpuMs: 2000, wallMs: 5000, memoryKb: 262_144 };
@@ -189,64 +202,66 @@ export class QuestionsService {
       problems.push(`testCases: not allowed on a ${type} question`);
     }
     if (problems.length) throw new BadRequestException(problems);
-    const slug = dto.slug ?? slugFromTitle(dto.title);
 
-    let id: string;
-    try {
-      id = await this.prisma.client.$transaction(async (tx) => {
-        const question = await tx.question.create({
-          data: {
-            orgId: actor.orgId,
-            slug,
-            type,
-            tags: dto.tags ?? [],
-            createdById: actor.id,
-          },
-        });
-        const version = await tx.questionVersion.create({
-          data: {
-            questionId: question.id,
-            version: 1,
-            title: dto.title,
-            statementMd: dto.statementMd,
-            difficulty: dto.difficulty,
-            allowedLanguages: content.allowedLanguages,
-            limits: limitsToStored(limits),
-            starterCode: content.starterCode,
-            referenceSolution: content.referenceSolution,
-            answerSpec:
-              content.answerSpec === null
-                ? Prisma.DbNull
-                : (content.answerSpec as Prisma.InputJsonObject),
-          },
-        });
-        const cases = dto.testCases ?? [];
-        if (cases.length) {
-          await tx.testCase.createMany({
-            data: cases.map((t, i) => ({
-              questionVersionId: version.id,
-              input: t.input,
-              expectedOutput: t.expectedOutput,
-              isHidden: t.isHidden ?? true,
-              weight: t.weight ?? 1,
-              position: t.position ?? i,
-            })),
+    // A generated slug that collides is retried once; an explicit one is a 409.
+    for (let attempt = 0; ; attempt++) {
+      const slug = dto.slug ?? slugFromTitle(dto.title);
+      try {
+        const id = await this.prisma.client.$transaction(async (tx) => {
+          const question = await tx.question.create({
+            data: {
+              orgId: actor.orgId,
+              slug,
+              type,
+              tags: dto.tags ?? [],
+              createdById: actor.id,
+            },
           });
-        }
-        await this.audit(tx, actor, 'QUESTION_CREATED', question.id, ctx, {
-          type,
-          version: 1,
-          testCases: cases.length,
+          const version = await tx.questionVersion.create({
+            data: {
+              questionId: question.id,
+              version: 1,
+              title: dto.title,
+              statementMd: dto.statementMd,
+              difficulty: dto.difficulty,
+              allowedLanguages: content.allowedLanguages,
+              limits: limitsToStored(limits),
+              starterCode: content.starterCode,
+              referenceSolution: content.referenceSolution,
+              answerSpec:
+                content.answerSpec === null
+                  ? Prisma.DbNull
+                  : (content.answerSpec as Prisma.InputJsonObject),
+            },
+          });
+          const cases = dto.testCases ?? [];
+          if (cases.length) {
+            await tx.testCase.createMany({
+              data: cases.map((t, i) => ({
+                questionVersionId: version.id,
+                input: t.input,
+                expectedOutput: t.expectedOutput,
+                isHidden: t.isHidden ?? true,
+                weight: t.weight ?? 1,
+                position: t.position ?? i,
+              })),
+            });
+          }
+          await this.audit(tx, actor, 'QUESTION_CREATED', question.id, ctx, {
+            type,
+            version: 1,
+            testCases: cases.length,
+          });
+          return question.id;
         });
-        return question.id;
-      });
-    } catch (e) {
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-        throw new ConflictException('A question with this slug already exists.');
+        return await this.detail(this.prisma.client, id, undefined, full, false);
+      } catch (e) {
+        if (!isUniqueViolation(e)) throw e;
+        if (dto.slug !== undefined || attempt >= 1) {
+          throw new ConflictException('A question with this slug already exists.');
+        }
       }
-      throw e;
     }
-    return this.detail(this.prisma.client, id, undefined, true, false);
   }
 
   // ---- update ---------------------------------------------------------------------------------
@@ -261,22 +276,23 @@ export class QuestionsService {
     id: string,
     dto: UpdateQuestionDto,
     ctx: RequestContext,
+    full: boolean,
   ): Promise<QuestionDetailDto> {
-    const { tags, ...rest } = dto;
+    const { tags, expectedRevision, ...rest } = dto;
     const contentFields = (Object.keys(rest) as (keyof typeof rest)[]).filter(
       (k) => rest[k] !== undefined,
     );
     if (tags === undefined && contentFields.length === 0) {
       throw new BadRequestException('Send at least one field to change.');
     }
-    const fork = await this.prisma.client
-      .$transaction(async (tx) => {
-        const question = await this.requireWritable(tx, id);
+    let forked: boolean;
+    try {
+      forked = await this.prisma.client.$transaction(async (tx) => {
+        const question = await this.lockWritable(tx, id);
         const head = await this.latestVersion(tx, id);
         if (!head) throw new NotFoundException(NOT_FOUND);
-        if (tags !== undefined) {
-          await tx.question.update({ where: { id }, data: { tags } });
-        }
+        await this.checkRevision(tx, head, expectedRevision);
+        if (tags !== undefined) await tx.question.update({ where: { id }, data: { tags } });
         if (contentFields.length === 0) {
           await this.audit(tx, actor, 'QUESTION_UPDATED', id, ctx, { fields: ['tags'] });
           return false;
@@ -315,8 +331,7 @@ export class QuestionsService {
             where: { id: head.id, isPublished: false },
             data: { ...data, ...noHistory },
           });
-          if (count !== 1)
-            throw new ConflictException('The version was published meanwhile; retry.');
+          if (count !== 1) throw new ConflictException('The version was published meanwhile.');
           await this.audit(tx, actor, 'QUESTION_UPDATED', id, ctx, {
             version: head.version,
             fields,
@@ -348,44 +363,58 @@ export class QuestionsService {
           fields,
         });
         return true;
-      })
-      .catch((e: unknown) => {
-        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-          throw new ConflictException('A newer version was created meanwhile; reload and retry.');
-        }
-        throw e;
       });
-    return this.detail(this.prisma.client, id, undefined, true, fork);
+    } catch (e) {
+      if (isUniqueViolation(e)) {
+        throw new ConflictException('A newer version was created meanwhile; reload and retry.');
+      }
+      throw e;
+    }
+    return this.detail(this.prisma.client, id, undefined, full, forked);
   }
 
   // ---- publish and archive --------------------------------------------------------------------
 
-  /** Publishes the latest draft after the completeness rules pass (FR-201, FR-202, FR-205). */
-  async publish(actor: Actor, id: string, ctx: RequestContext): Promise<QuestionDetailDto> {
+  /**
+   * Publishes the latest draft after the completeness rules pass (FR-201, FR-202, FR-205) and,
+   * for a coding question, a recorded passing validation run (FR-203, TC-012). The rules run on
+   * the row as it is after the question lock, so no edit can slip in between check and publish.
+   */
+  async publish(
+    actor: Actor,
+    id: string,
+    ctx: RequestContext,
+    full: boolean,
+    expectedRevision?: string,
+  ): Promise<QuestionDetailDto> {
     await this.prisma.client.$transaction(async (tx) => {
-      const question = await this.requireWritable(tx, id);
+      const question = await this.lockWritable(tx, id);
       const head = await this.latestVersion(tx, id);
       if (!head) throw new NotFoundException(NOT_FOUND);
+      await this.checkRevision(tx, head, expectedRevision);
       if (head.isPublished) {
         throw new ConflictException('There is no draft to publish; edit the question first.');
       }
-      // Take the row lock first, then read: an edit cannot slip in between check and publish.
       const { count } = await tx.questionVersion.updateMany({
         where: { id: head.id, isPublished: false },
         data: { isPublished: true },
       });
       if (count !== 1) throw new ConflictException('The version was published meanwhile.');
-      const cases = await tx.testCase.findMany({ where: { questionVersionId: head.id } });
+      // Re-read after the version lock: the rules see exactly what is being published.
+      const fresh = await tx.questionVersion.findUnique({ where: { id: head.id } });
+      if (!fresh) throw new NotFoundException(NOT_FOUND);
+      const cases = await tx.testCase.findMany({ where: { questionVersionId: fresh.id } });
       const problems = publishProblems(
         question.type,
-        head,
+        fresh,
+        computeRevision(fresh, cases),
         cases.map((t) => ({ isHidden: t.isHidden, weight: Number(t.weight) })),
       );
       if (problems.length) throw new UnprocessableEntityException({ message: problems });
-      await tx.question.update({ where: { id }, data: { currentVersionId: head.id } });
-      await this.audit(tx, actor, 'QUESTION_PUBLISHED', id, ctx, { version: head.version });
+      await tx.question.update({ where: { id }, data: { currentVersionId: fresh.id } });
+      await this.audit(tx, actor, 'QUESTION_PUBLISHED', id, ctx, { version: fresh.version });
     });
-    return this.detail(this.prisma.client, id, undefined, true, false);
+    return this.detail(this.prisma.client, id, undefined, full, false);
   }
 
   async setArchived(
@@ -395,24 +424,34 @@ export class QuestionsService {
     ctx: RequestContext,
   ): Promise<QuestionSummaryDto> {
     await this.prisma.client.$transaction(async (tx) => {
-      const question = await this.requireQuestion(tx, id);
-      if (question.isArchived === archived) return;
-      await tx.question.update({ where: { id }, data: { isArchived: archived } });
-      await this.audit(
-        tx,
-        actor,
-        archived ? 'QUESTION_ARCHIVED' : 'QUESTION_UNARCHIVED',
-        id,
-        ctx,
-        {},
-      );
+      // The same question row lock as every writer; count 0 is a missing id or the state already set.
+      const { count } = await tx.question.updateMany({
+        where: { id, isArchived: !archived },
+        data: { isArchived: archived },
+      });
+      if (count === 1) {
+        await this.audit(
+          tx,
+          actor,
+          archived ? 'QUESTION_ARCHIVED' : 'QUESTION_UNARCHIVED',
+          id,
+          ctx,
+          {},
+        );
+        return;
+      }
+      await this.requireQuestion(tx, id);
     });
-    const d = await this.detail(this.prisma.client, id, undefined, false, false);
-    const { versions: _v, version: _ver, createdNewVersion: _c, ...summary } = d;
-    void _v;
-    void _ver;
-    void _c;
-    return summary;
+    const db = this.prisma.client;
+    const question = await this.requireQuestion(db, id);
+    const versions = await db.questionVersion.findMany({
+      where: { questionId: id },
+      select: VERSION_REF_SELECT,
+      orderBy: { version: 'desc' },
+    });
+    const latest = versions[0];
+    if (!latest) throw new NotFoundException(NOT_FOUND);
+    return this.summary(question, versions, latest);
   }
 
   // ---- test cases (FR-202) --------------------------------------------------------------------
@@ -423,6 +462,7 @@ export class QuestionsService {
     version: number,
     dto: TestCaseFieldsDto,
     ctx: RequestContext,
+    full: boolean,
   ): Promise<TestCaseDto> {
     return this.prisma.client.$transaction(async (tx) => {
       const v = await this.lockDraft(tx, id, version);
@@ -455,7 +495,7 @@ export class QuestionsService {
         testCaseId: created.id,
         isHidden: created.isHidden,
       });
-      return this.testCaseDto(created, true);
+      return toTestCaseDto(created, full);
     });
   }
 
@@ -466,6 +506,7 @@ export class QuestionsService {
     testCaseId: string,
     dto: UpdateTestCaseDto,
     ctx: RequestContext,
+    full: boolean,
   ): Promise<TestCaseDto> {
     const fields = (Object.keys(dto) as (keyof UpdateTestCaseDto)[]).filter(
       (k) => dto[k] !== undefined,
@@ -493,7 +534,7 @@ export class QuestionsService {
         testCaseId,
         fields,
       });
-      return this.testCaseDto(row, true);
+      return toTestCaseDto(row, full);
     });
   }
 
@@ -522,10 +563,34 @@ export class QuestionsService {
     return q;
   }
 
-  private async requireWritable(db: Db, id: string): Promise<Question> {
+  /**
+   * Locks the question row for a mutation (see the header) and returns it. A missing or
+   * other-org id is 404 and an archived question is 409; both take the same statements whether
+   * the id is another org's or missing.
+   */
+  private async lockWritable(db: Db, id: string): Promise<Question> {
+    const { count } = await db.question.updateMany({
+      where: { id, isArchived: false },
+      data: { isArchived: false },
+    });
     const q = await this.requireQuestion(db, id);
-    if (q.isArchived) throw new ConflictException('The question is archived.');
+    if (count !== 1) throw new ConflictException('The question is archived.');
     return q;
+  }
+
+  /** Optimistic concurrency: a client that loaded an older revision must reload (409, no code). */
+  private async checkRevision(
+    db: Db,
+    head: QuestionVersion,
+    expected: string | undefined,
+  ): Promise<void> {
+    if (expected === undefined) return;
+    const cases = await db.testCase.findMany({ where: { questionVersionId: head.id } });
+    if (computeRevision(head, cases) !== expected) {
+      throw new ConflictException(
+        'The question changed since you loaded it; reload it and apply your edit again.',
+      );
+    }
   }
 
   private latestVersion(db: Db, questionId: string): Promise<QuestionVersion | null> {
@@ -536,9 +601,12 @@ export class QuestionsService {
    * The draft version a test case change targets, locked and with its validation result cleared
    * (a changed test set invalidates the last validation run). A published version is immutable: 409.
    */
-  private async lockDraft(db: Db, id: string, version: number): Promise<QuestionVersion> {
-    const question = await this.requireWritable(db, id);
-    const v = await db.questionVersion.findFirst({ where: { questionId: id, version } });
+  private async lockDraft(db: Db, id: string, version: number): Promise<{ id: string }> {
+    const question = await this.lockWritable(db, id);
+    const v = await db.questionVersion.findFirst({
+      where: { questionId: id, version },
+      select: { id: true },
+    });
     if (!v) throw new NotFoundException(NOT_FOUND);
     if (question.type !== 'CODING') {
       throw new UnprocessableEntityException('Only coding questions have test cases.');
@@ -555,22 +623,10 @@ export class QuestionsService {
     return v;
   }
 
-  private testCaseDto(t: TestCase, full: boolean): TestCaseDto {
-    const show = full || !t.isHidden;
-    return {
-      id: t.id,
-      position: t.position,
-      isHidden: t.isHidden,
-      weight: Number(t.weight),
-      input: show ? t.input : null,
-      expectedOutput: show ? t.expectedOutput : null,
-    };
-  }
-
   private summary(
     q: Question,
-    versions: QuestionVersion[],
-    latest: QuestionVersion,
+    versions: readonly VersionRefRow[],
+    latest: VersionRefRow,
   ): QuestionSummaryDto {
     const published = q.currentVersionId
       ? versions.find((v) => v.id === q.currentVersionId)
@@ -582,12 +638,15 @@ export class QuestionsService {
       tags: q.tags,
       isArchived: q.isArchived,
       createdAt: q.createdAt.toISOString(),
-      published: published ? ref(published) : null,
-      latest: ref(latest),
+      published: published ? toVersionRef(published) : null,
+      latest: toVersionRef(latest),
     };
   }
 
-  /** `full` is false for callers without question:update: no answers, no hidden test data. */
+  /**
+   * `full` false is the staff read view (no answers, no hidden test data); see staff-view.ts.
+   * Only the chosen version's content is loaded; the version list carries reference columns.
+   */
   private async detail(
     db: Db,
     id: string,
@@ -596,36 +655,26 @@ export class QuestionsService {
     createdNewVersion: boolean,
   ): Promise<QuestionDetailDto> {
     const question = await this.requireQuestion(db, id);
+    // Without question:update only published versions exist (latest = the latest published).
     const versions = await db.questionVersion.findMany({
-      where: { questionId: id },
+      where: { questionId: id, ...(full ? {} : { isPublished: true }) },
+      select: VERSION_REF_SELECT,
       orderBy: { version: 'desc' },
     });
     const latest = versions[0];
-    const chosen = versionNo === undefined ? latest : versions.find((v) => v.version === versionNo);
-    if (!latest || !chosen) throw new NotFoundException(NOT_FOUND);
+    const chosenRef =
+      versionNo === undefined ? latest : versions.find((v) => v.version === versionNo);
+    if (!latest || !chosenRef) throw new NotFoundException(NOT_FOUND);
+    const chosen = await db.questionVersion.findUnique({ where: { id: chosenRef.id } });
+    if (!chosen) throw new NotFoundException(NOT_FOUND);
     const cases = await db.testCase.findMany({
       where: { questionVersionId: chosen.id },
       orderBy: [{ position: 'asc' }, { id: 'asc' }],
     });
-    const version: QuestionVersionDto = {
-      ...ref(chosen),
-      statementMd: chosen.statementMd,
-      allowedLanguages: chosen.allowedLanguages,
-      limits: limitsFromStored(chosen.limits),
-      starterCode: stringMap(chosen.starterCode),
-      testCases: cases.map((t) => this.testCaseDto(t, full)),
-      ...(full
-        ? {
-            referenceSolution: stringMap(chosen.referenceSolution),
-            answerSpec: asRecord(chosen.answerSpec),
-            validationReport: asRecord(chosen.validationReport),
-          }
-        : {}),
-    };
     return {
       ...this.summary(question, versions, latest),
-      versions: [...versions].reverse().map(ref),
-      version,
+      versions: [...versions].reverse().map(toVersionRef),
+      version: full ? toFullVersion(chosen, cases) : toStaffReadVersion(chosen, cases),
       createdNewVersion,
     };
   }

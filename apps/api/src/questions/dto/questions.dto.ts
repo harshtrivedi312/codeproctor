@@ -11,7 +11,9 @@ import {
   IsInt,
   IsNumber,
   IsObject,
-  IsOptional,
+  IsUUID,
+  ValidateBy,
+  ValidateIf,
   IsString,
   Length,
   Matches,
@@ -21,6 +23,19 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Difficulty, QuestionType } from '../../generated/prisma/enums';
+import { isStorableText } from '../text-rules';
+
+/** Like @IsOptional(), but only `undefined` skips validation: an explicit null is a 400 (never a change). */
+const Opt = (): PropertyDecorator => ValidateIf((_o: unknown, v: unknown) => v !== undefined);
+/** Rejects NUL bytes and lone surrogates, which Postgres cannot store (would be a 500). */
+const SafeText = (): PropertyDecorator =>
+  ValidateBy({
+    name: 'safeText',
+    validator: {
+      validate: (v: unknown) => typeof v !== 'string' || isStorableText(v),
+      defaultMessage: () => '$property contains a NUL byte or a lone surrogate',
+    },
+  });
 
 const trim = ({ value }: { value: unknown }): unknown =>
   typeof value === 'string' ? value.trim() : value;
@@ -62,23 +77,25 @@ export class TestCaseFieldsDto {
   @ApiProperty({ maxLength: MAX_TEST_IO_LENGTH })
   @IsString()
   @MaxLength(MAX_TEST_IO_LENGTH)
+  @SafeText()
   input!: string;
 
   @ApiProperty({ maxLength: MAX_TEST_IO_LENGTH })
   @IsString()
   @MaxLength(MAX_TEST_IO_LENGTH)
+  @SafeText()
   expectedOutput!: string;
 
   @ApiPropertyOptional({
     default: true,
     description: 'Hidden tests are never shown to candidates.',
   })
-  @IsOptional()
+  @Opt()
   @IsBoolean()
   isHidden?: boolean;
 
   @ApiPropertyOptional({ default: 1, minimum: 0.01, maximum: 9999.99 })
-  @IsOptional()
+  @Opt()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
   @Max(9999.99)
@@ -89,7 +106,7 @@ export class TestCaseFieldsDto {
     maximum: 10_000,
     description: 'Default: after the last slot.',
   })
-  @IsOptional()
+  @Opt()
   @IsInt()
   @Min(0)
   @Max(10_000)
@@ -98,31 +115,33 @@ export class TestCaseFieldsDto {
 
 export class UpdateTestCaseDto {
   @ApiPropertyOptional({ maxLength: MAX_TEST_IO_LENGTH })
-  @IsOptional()
+  @Opt()
   @IsString()
   @MaxLength(MAX_TEST_IO_LENGTH)
+  @SafeText()
   input?: string;
 
   @ApiPropertyOptional({ maxLength: MAX_TEST_IO_LENGTH })
-  @IsOptional()
+  @Opt()
   @IsString()
   @MaxLength(MAX_TEST_IO_LENGTH)
+  @SafeText()
   expectedOutput?: string;
 
   @ApiPropertyOptional()
-  @IsOptional()
+  @Opt()
   @IsBoolean()
   isHidden?: boolean;
 
   @ApiPropertyOptional({ minimum: 0.01, maximum: 9999.99 })
-  @IsOptional()
+  @Opt()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
   @Max(9999.99)
   weight?: number;
 
   @ApiPropertyOptional({ minimum: 0, maximum: 10_000 })
-  @IsOptional()
+  @Opt()
   @IsInt()
   @Min(0)
   @Max(10_000)
@@ -132,7 +151,7 @@ export class UpdateTestCaseDto {
 /** Fields shared by create and update; update makes all of them optional. */
 class QuestionContentBase {
   @ApiPropertyOptional({ type: [String], maxItems: 20 })
-  @IsOptional()
+  @Opt()
   @Transform(tagNorm)
   @IsArray()
   @ArrayMaxSize(20)
@@ -141,14 +160,14 @@ class QuestionContentBase {
   tags?: string[];
 
   @ApiPropertyOptional({ enum: CODE_LANGUAGES, isArray: true })
-  @IsOptional()
+  @Opt()
   @IsArray()
   @ArrayMaxSize(CODE_LANGUAGES.length)
   @IsIn([...CODE_LANGUAGES], { each: true })
   allowedLanguages?: string[];
 
   @ApiPropertyOptional({ type: LimitsDto })
-  @IsOptional()
+  @Opt()
   @ValidateNested()
   @Type(() => LimitsDto)
   limits?: LimitsDto;
@@ -158,7 +177,7 @@ class QuestionContentBase {
     type: 'object',
     additionalProperties: { type: 'string' },
   })
-  @IsOptional()
+  @Opt()
   @IsObject()
   starterCode?: Record<string, string>;
 
@@ -167,14 +186,14 @@ class QuestionContentBase {
     type: 'object',
     additionalProperties: { type: 'string' },
   })
-  @IsOptional()
+  @Opt()
   @IsObject()
   referenceSolution?: Record<string, string>;
 }
 
 export class CreateQuestionDto extends QuestionContentBase {
   @ApiPropertyOptional({ enum: QuestionType, default: QuestionType.CODING })
-  @IsOptional()
+  @Opt()
   @IsEnum(QuestionType)
   type?: QuestionType;
 
@@ -182,7 +201,7 @@ export class CreateQuestionDto extends QuestionContentBase {
     description: 'Unique per organization; generated from the title when omitted.',
     maxLength: 80,
   })
-  @IsOptional()
+  @Opt()
   @Transform(trim)
   @IsString()
   @Length(1, 80)
@@ -193,11 +212,13 @@ export class CreateQuestionDto extends QuestionContentBase {
   @Transform(trim)
   @IsString()
   @Length(1, 200)
+  @SafeText()
   title!: string;
 
   @ApiProperty({ description: 'Markdown.', maxLength: MAX_STATEMENT_LENGTH })
   @IsString()
   @Length(1, MAX_STATEMENT_LENGTH)
+  @SafeText()
   statementMd!: string;
 
   @ApiProperty({ enum: Difficulty })
@@ -210,12 +231,12 @@ export class CreateQuestionDto extends QuestionContentBase {
     type: 'object',
     additionalProperties: true,
   })
-  @IsOptional()
+  @Opt()
   @IsObject()
   answerSpec?: Record<string, unknown>;
 
   @ApiPropertyOptional({ type: [TestCaseFieldsDto], maxItems: MAX_TEST_CASES })
-  @IsOptional()
+  @Opt()
   @IsArray()
   @ArrayMaxSize(MAX_TEST_CASES)
   @ValidateNested({ each: true })
@@ -223,34 +244,47 @@ export class CreateQuestionDto extends QuestionContentBase {
   testCases?: TestCaseFieldsDto[];
 }
 
+const REVISION_PATTERN = /^[0-9a-f]{64}$/;
+
 export class UpdateQuestionDto extends QuestionContentBase {
+  @ApiPropertyOptional({
+    description:
+      'The `revision` of the latest version as the client loaded it. When it no longer matches (another editor saved), the request is 409 and changes nothing.',
+  })
+  @Opt()
+  @IsString()
+  @Matches(REVISION_PATTERN)
+  expectedRevision?: string;
+
   @ApiPropertyOptional({ minLength: 1, maxLength: 200 })
-  @IsOptional()
+  @Opt()
   @Transform(trim)
   @IsString()
   @Length(1, 200)
+  @SafeText()
   title?: string;
 
   @ApiPropertyOptional({ maxLength: MAX_STATEMENT_LENGTH })
-  @IsOptional()
+  @Opt()
   @IsString()
   @Length(1, MAX_STATEMENT_LENGTH)
+  @SafeText()
   statementMd?: string;
 
   @ApiPropertyOptional({ enum: Difficulty })
-  @IsOptional()
+  @Opt()
   @IsEnum(Difficulty)
   difficulty?: Difficulty;
 
   @ApiPropertyOptional({ type: 'object', additionalProperties: true })
-  @IsOptional()
+  @Opt()
   @IsObject()
   answerSpec?: Record<string, unknown>;
 }
 
 export class QuestionListQueryDto {
   @ApiPropertyOptional({ default: 1, minimum: 1, maximum: 100_000 })
-  @IsOptional()
+  @Opt()
   @Type(() => Number)
   @IsInt()
   @Min(1)
@@ -258,7 +292,7 @@ export class QuestionListQueryDto {
   page: number = 1;
 
   @ApiPropertyOptional({ default: 20, minimum: 1, maximum: 100 })
-  @IsOptional()
+  @Opt()
   @Type(() => Number)
   @IsInt()
   @Min(1)
@@ -266,7 +300,7 @@ export class QuestionListQueryDto {
   pageSize: number = 20;
 
   @ApiPropertyOptional({ description: 'Questions carrying this tag (lower case).' })
-  @IsOptional()
+  @Opt()
   @Transform(({ value }: { value: unknown }) =>
     typeof value === 'string' ? value.trim().toLowerCase() : value,
   )
@@ -279,25 +313,35 @@ export class QuestionListQueryDto {
     description:
       'Difficulty of the published version, or of the latest draft when never published.',
   })
-  @IsOptional()
+  @Opt()
   @IsEnum(Difficulty)
   difficulty?: Difficulty;
 
   @ApiPropertyOptional({ enum: QuestionType })
-  @IsOptional()
+  @Opt()
   @IsEnum(QuestionType)
   type?: QuestionType;
 
   @ApiPropertyOptional({ default: false })
-  @IsOptional()
+  @Opt()
   @Transform(toBool)
   @IsBoolean()
   includeArchived?: boolean;
 }
 
+export class PublishQuestionDto {
+  @ApiPropertyOptional({
+    description: 'As on PATCH: 409 when the draft changed since it was loaded.',
+  })
+  @Opt()
+  @IsString()
+  @Matches(REVISION_PATTERN)
+  expectedRevision?: string;
+}
+
 export class VersionQueryDto {
   @ApiPropertyOptional({ minimum: 1, description: 'Version number; default the latest.' })
-  @IsOptional()
+  @Opt()
   @Type(() => Number)
   @IsInt()
   @Min(1)
@@ -347,14 +391,12 @@ export class TestCaseDto {
   @ApiProperty() position!: number;
   @ApiProperty() isHidden!: boolean;
   @ApiProperty() weight!: number;
-  @ApiProperty({
-    type: String,
-    nullable: true,
-    description: 'null for a hidden case to a caller without question:update.',
+  @ApiPropertyOptional({
+    description: 'Absent for a hidden case when the caller lacks question:update.',
   })
-  input!: string | null;
-  @ApiProperty({ type: String, nullable: true })
-  expectedOutput!: string | null;
+  input?: string;
+  @ApiPropertyOptional({ description: 'Absent for a hidden case, as input.' })
+  expectedOutput?: string;
 }
 
 export class QuestionVersionDto extends QuestionVersionRefDto {
@@ -369,6 +411,11 @@ export class QuestionVersionDto extends QuestionVersionRefDto {
   answerSpec?: Record<string, unknown> | null;
   @ApiPropertyOptional({ type: 'object', additionalProperties: true, nullable: true })
   validationReport?: Record<string, unknown> | null;
+  @ApiPropertyOptional({
+    description:
+      'SHA-256 of the version content and test cases (question:update only). Send it back as expectedRevision. The schema has no updated_at on versions.',
+  })
+  revision?: string;
   @ApiProperty({ type: [TestCaseDto] }) testCases!: TestCaseDto[];
 }
 
@@ -393,4 +440,25 @@ export class CandidateQuestionPreviewDto {
   samples!: { input: string; expectedOutput: string }[];
   @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   mcq?: { multiple: boolean; options: { id: string; text: string }[] };
+}
+
+export class QuestionIdParamDto {
+  @ApiProperty({ format: 'uuid' })
+  @IsUUID()
+  id!: string;
+}
+
+export class VersionParamDto extends QuestionIdParamDto {
+  @ApiProperty({ minimum: 1, maximum: 1_000_000 })
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(1_000_000)
+  version!: number;
+}
+
+export class TestCaseParamDto extends VersionParamDto {
+  @ApiProperty({ format: 'uuid' })
+  @IsUUID()
+  testCaseId!: string;
 }
