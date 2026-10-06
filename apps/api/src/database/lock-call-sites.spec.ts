@@ -140,7 +140,13 @@ describe('the real paths and the rules in words (S-B of the re-review of #208): 
     expect(LOCK_CALLER_RULES.lockAnySession).toContain('withAnySession');
     expect(LOCK_CALLER_RULES.lockForAccommodation).toContain(RETENTION_LOCK_FILE);
     expect(LOCK_CALLER_RULES.lockForAccommodation).toContain('PATCH, redact-note');
+    expect(LOCK_CALLER_RULES.lockForAccommodation).toContain(
+      `${SESSION_STATE_FILE} holds the wrapper only`,
+    );
+    expect(LOCK_CALLER_RULES.import).toContain('import { x as alias } from');
     expect(LOCK_CALLER_RULES.stateFile).toContain('alias');
+    expect(LOCK_CALLER_RULES.stateFile).toContain('return <alias>(<param1>, <param2>);');
+    expect(LOCK_CALLER_RULES.stateFile).toContain('.proctorResume(');
     expect(LOCK_CALLER_RULES.otherFiles).toContain('member call');
     expect(LOCK_CALLER_RULES.exports).toContain('wraps');
   });
