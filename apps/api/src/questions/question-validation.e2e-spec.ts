@@ -333,6 +333,18 @@ describe('Validate job and AI references (FR-202, FR-203, TC-011, TC-012)', () =
       expect(s.revision).toBe((started.body as Json).revision);
       expect(s.currentRevision).not.toBe(s.revision);
       expect((await question(id)).validatedAt).toBeNull();
+      // The STALE outcome is recorded (a job-written row) and nothing was stored in the report.
+      const finished = await owner.auditLog.findMany({
+        where: { entityId: id, action: 'QUESTION_VALIDATION_FINISHED' },
+      });
+      expect(finished).toHaveLength(1);
+      expect((finished[0]?.metadata as { outcome: string }).outcome).toBe('STALE');
+      expect(finished[0]?.actorId).toBeNull();
+      const stored = await owner.questionVersion.findFirstOrThrow({
+        where: { questionId: id },
+        orderBy: { version: 'desc' },
+      });
+      expect(stored.validationReport).toBeNull();
       await publish(a, id).expect(422);
       // A fresh run on the new content opens the gate.
       port.gate = undefined;
