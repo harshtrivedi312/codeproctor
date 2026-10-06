@@ -142,20 +142,43 @@ export interface SaveResult {
 
 /** Where a save stopped: before the content PATCH (variants), the PATCH, test cases, variants, or the read-back. */
 export type SaveStep = 'variants' | 'content' | 'test cases' | 'reload';
-/** The save stopped after part of it was written (an earlier call went through, a later one did not). */
-export class PartialSaveFailure extends ApiFailure {
+
+/** The delete of a variant was refused because it has AI rows: which variant, so the form can put it back. */
+export class VariantBlockedFailure extends ApiFailure {
   constructor(
     inner: ApiFailure,
-    readonly step: SaveStep,
-    /** The content PATCH forked a new draft: ids in the form no longer match the server's. */
-    readonly forked: boolean,
+    readonly variantId: string,
   ) {
     super(inner.status, inner.message, inner.code, inner.errors);
   }
 }
 
+/** The save stopped after part of it was written (an earlier call went through, a later one did not). */
+export class PartialSaveFailure extends ApiFailure {
+  /** The variant whose delete was refused (VARIANT_HAS_AI_REFERENCES), when that is what happened. */
+  readonly blockedVariantId: string | null;
+  constructor(
+    inner: ApiFailure,
+    readonly step: SaveStep,
+    /** The content PATCH forked a new draft: ids in the form no longer match the server's. */
+    readonly forked: boolean,
+    /**
+     * The revision known to match the server after the last CONFIRMED write: null when a write that
+     * answers no revision went through but could not be confirmed (its read-back failed or showed
+     * something we did not write). Only fresh data with exactly this revision may be adopted.
+     */
+    readonly lastRevision: string | null,
+    /** The session generation the save started in. */
+    readonly generation: number,
+  ) {
+    super(inner.status, inner.message, inner.code, inner.errors);
+    this.blockedVariantId = inner instanceof VariantBlockedFailure ? inner.variantId : null;
+  }
+}
+
 type ServerCase = Schemas['TestCase'];
 type ServerVariant = Schemas['Variant'];
+type ServerVersion = Schemas['QuestionVersion'];
 type ParamsOf = Record<string, string | number | boolean>;
 
 const caseKey = (
@@ -201,29 +224,107 @@ const sameCase = (a: ServerCase, t: TestCase, position: number): boolean =>
   a.weight === t.weight &&
   a.position === position;
 
-/** The revision of a version right now: the variant list answers it (test-case writes return none). */
-async function currentRevision(id: string, version: number): Promise<string> {
-  const { data, error, response } = await api.GET(
-    '/v1/questions/{questionId}/versions/{version}/variants',
-    { params: { path: { questionId: id, version } } },
-  );
-  if (!data) fail(response, error);
-  return data.revision;
+/**
+ * The part of a version other editors can change under a save: its test cases and variants with
+ * their overrides. Without `ids` the slots are named by position, so a fork copy (new ids) can be
+ * compared with its source.
+ */
+export function slotsSignature(v: ServerVersion, ids = true): string {
+  const pos = new Map(v.testCases.map((t) => [t.id, t.position]));
+  const cases = v.testCases
+    .map((t) => [
+      ids ? t.id : '',
+      t.position,
+      t.isHidden,
+      t.weight,
+      t.input ?? '',
+      t.expectedOutput ?? '',
+    ])
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const variants = v.variants
+    .map((x) => [
+      ids ? x.id : '',
+      x.isActive,
+      Object.entries(x.params).sort(),
+      x.testCaseOverrides
+        .map((o) => [ids ? o.testCaseId : (pos.get(o.testCaseId) ?? -1), o.input, o.expectedOutput])
+        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+    ])
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return JSON.stringify([cases, variants]);
 }
+
+/** The expected state after one of our own writes, built from the last confirmed one. */
+const upsertCase = (v: ServerVersion, c: ServerCase): ServerVersion => ({
+  ...v,
+  testCases: [...v.testCases.filter((t) => t.id !== c.id), c],
+});
+const dropCase = (v: ServerVersion, id: string): ServerVersion => ({
+  ...v,
+  testCases: v.testCases.filter((t) => t.id !== id),
+  variants: v.variants.map((x) => ({
+    ...x,
+    testCaseOverrides: x.testCaseOverrides.filter((o) => o.testCaseId !== id),
+  })),
+});
+const upsertVariant = (v: ServerVersion, x: ServerVariant): ServerVersion => ({
+  ...v,
+  variants: [...v.variants.filter((y) => y.id !== x.id), x],
+});
+const dropVariant = (v: ServerVersion, id: string): ServerVersion => ({
+  ...v,
+  variants: v.variants.filter((y) => y.id !== id),
+});
+const withOverride = (
+  v: ServerVersion,
+  variantId: string,
+  o: ServerVariant['testCaseOverrides'][number],
+): ServerVersion => ({
+  ...v,
+  variants: v.variants.map((x) =>
+    x.id === variantId
+      ? {
+          ...x,
+          testCaseOverrides: [
+            ...x.testCaseOverrides.filter((y) => y.testCaseId !== o.testCaseId),
+            o,
+          ],
+        }
+      : x,
+  ),
+});
+const withoutOverride = (
+  v: ServerVersion,
+  variantId: string,
+  testCaseId: string,
+): ServerVersion => ({
+  ...v,
+  variants: v.variants.map((x) =>
+    x.id === variantId
+      ? { ...x, testCaseOverrides: x.testCaseOverrides.filter((y) => y.testCaseId !== testCaseId) }
+      : x,
+  ),
+});
 
 /**
  * One save of the whole editor against the real routes (BE-04a/b). Every write after the first
- * carries `expectedRevision`, chained: the content PATCH answers a revision, a variant write
- * answers its own, and a write that answers none (test cases, overrides, deletes) is followed by a
- * read of the revision, so another editor's change between two of our calls is a 409 instead of a
- * silent overwrite. Order: (1) for a DRAFT with variants, a variant whose params gain a name first
- * gets the union of old and new params (so the statement PATCH still renders for every active
- * variant), and variants the form removed are deleted (so a variant that lacks a newly added
- * placeholder cannot make the PATCH a 400); (2) PATCH the content, which forks the next draft when
- * the latest version is published (the server copies test cases and variants with new ids and
- * re-points overrides); (3) test cases; (4) variants and per-slot overrides; (5) read the question
- * back. A step that fails after something was written is a PartialSaveFailure naming the step.
- * Each step checks the session is still the one that started the save.
+ * carries `expectedRevision`, chained, and the chain only ever holds a revision that is CONFIRMED
+ * to be the state our own write produced:
+ *  - the content PATCH, variant create/patch answer a revision, but the PATCH's answer is read after
+ *    its transaction, so its test cases and variants are compared with what we expect;
+ *  - a write that answers NO revision (test cases, overrides, variant delete) is followed by a read
+ *    of the whole version, which must equal the last confirmed state plus exactly that write. If it
+ *    does not (another editor committed in between) the save stops as a 409 and nothing further is
+ *    written: another editor's change is never adopted as our base.
+ * Costs one full read per such write (the API answers no revision there: a question for Backend A).
+ * Order: (1) for a DRAFT with variants, a variant whose params gain a name first gets the union of
+ * old and new params (so the statement PATCH still renders for every active variant), and variants
+ * the form removed are deleted (so a variant lacking a newly added placeholder cannot make the PATCH
+ * a 400); (2) PATCH the content, which forks the next draft when the latest version is published
+ * (the server copies test cases and variants with new ids and re-points overrides); (3) test cases;
+ * (4) variants and per-slot overrides; (5) read the question back. A step that fails after
+ * something was written is a PartialSaveFailure naming the step. Each step checks the session is
+ * still the one that started the save.
  */
 export async function saveQuestion(id: string, input: SaveInput): Promise<SaveResult> {
   const startedIn = getGeneration();
@@ -236,45 +337,90 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
   const loaded = input.loaded;
   const desired = input.variants;
   let rev = input.expectedRevision;
+  /** The last revision CONFIRMED to match the server (null while a write is unconfirmed). */
+  let confirmed: string | null = input.expectedRevision;
+  /** The last confirmed full state of the version being written. */
+  let known: ServerVersion = loaded;
+
+  /** After a write that answered a revision: the answer is exact, take it with the state we expect. */
+  const accept = (expected: ServerVersion, revision: string): void => {
+    known = expected;
+    rev = revision;
+    confirmed = revision;
+  };
+  /** After a write that answered none: read the version back and require exactly the expected state. */
+  const confirm = async (expected: ServerVersion): Promise<void> => {
+    confirmed = null;
+    const back = await fetchQuestion(id);
+    if (!isFullQuestion(back)) throw new ApiFailure(403, 'Your role cannot edit this question.');
+    if (
+      back.version.version !== expected.version ||
+      slotsSignature(back.version) !== slotsSignature(expected)
+    ) {
+      throw new ApiFailure(
+        409,
+        'Someone else changed this question while your changes were being saved.',
+      );
+    }
+    accept(back.version, back.version.revision);
+  };
+
   try {
     const draftWithVariants = input.coding && desired !== null && !loaded.isPublished;
     if (draftWithVariants) {
       const lpath = { questionId: id, version: loaded.version };
-      // (1a) Additive param updates.
+      // (1a) Additive param updates and switching variants off.
       for (const d of desired) {
         const old = loaded.variants.find((x) => x.id === d.id);
         if (!old) continue;
         const union: ParamsOf = { ...old.params, ...d.params };
-        if (sameParams(union, old.params)) continue;
+        // A variant that is being switched off goes inactive first too: an inactive variant is not
+        // rendered, so it cannot make the statement PATCH a 400.
+        const deactivate = old.isActive && !d.isActive;
+        const paramsChange = !sameParams(union, old.params);
+        if (!paramsChange && !deactivate) continue;
         stillSame();
         const r = await api.PATCH(
           '/v1/questions/{questionId}/versions/{version}/variants/{variantId}',
           {
             params: { path: { ...lpath, variantId: old.id } },
-            body: { params: union, expectedRevision: rev },
+            body: {
+              ...(paramsChange ? { params: union } : {}),
+              ...(deactivate ? { isActive: false } : {}),
+              expectedRevision: rev,
+            },
           },
         );
         if (!r.data) fail(r.response, r.error);
-        rev = r.data.revision;
         wrote = true;
+        accept(upsertVariant(known, r.data.variant), r.data.revision);
       }
       // (1b) Removed variants go before the content PATCH.
       const keepIds = new Set(desired.map((d) => d.id));
       for (const old of loaded.variants) {
         if (keepIds.has(old.id)) continue;
-        stillSame();
-        const r = await api.DELETE(
-          '/v1/questions/{questionId}/versions/{version}/variants/{variantId}',
-          {
-            params: {
-              path: { ...lpath, variantId: old.id },
-              query: { expectedRevision: rev },
+        blockDone: {
+          stillSame();
+          const r = await api.DELETE(
+            '/v1/questions/{questionId}/versions/{version}/variants/{variantId}',
+            {
+              params: {
+                path: { ...lpath, variantId: old.id },
+                query: { expectedRevision: rev },
+              },
             },
-          },
-        );
-        if (!r.response.ok) fail(r.response, r.error);
-        wrote = true;
-        rev = await currentRevision(id, loaded.version);
+          );
+          if (!r.response.ok) {
+            try {
+              fail(r.response, r.error);
+            } catch (e) {
+              throw isVariantHasAiRefs(e) ? new VariantBlockedFailure(e as ApiFailure, old.id) : e;
+            }
+          }
+          wrote = true;
+          await confirm(dropVariant(known, old.id));
+          break blockDone;
+        }
       }
     }
     // (2) The content.
@@ -289,7 +435,19 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
     wrote = true;
     const createdNewVersion = first.createdNewVersion;
     forked = createdNewVersion;
-    rev = first.version.revision;
+    // The PATCH answers a revision, but its answer is read after its transaction: its test cases and
+    // variants must be what they were (a fork: copies of them), or another editor wrote in between.
+    confirmed = null;
+    if (
+      slotsSignature(first.version, !createdNewVersion) !==
+      slotsSignature(known, !createdNewVersion)
+    ) {
+      throw new ApiFailure(
+        409,
+        'Someone else changed this question while your changes were being saved.',
+      );
+    }
+    accept(first.version, first.version.revision);
     const idMap: Record<string, string> = {};
     if (input.coding) {
       const version = first.version.version;
@@ -308,25 +466,25 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
       const wanted = input.desiredCases.map((t) => ({ t, serverId: serverIdOf(t.id) }));
       const keep = new Set(wanted.flatMap((w) => (w.serverId ? [w.serverId] : [])));
       const path = { questionId: id, version };
-      for (const s of server) {
-        if (keep.has(s.id)) continue;
+      for (const sc of server) {
+        if (keep.has(sc.id)) continue;
         stillSame();
         const r = await api.DELETE(
           '/v1/questions/{questionId}/versions/{version}/test-cases/{testCaseId}',
           {
             params: {
-              path: { ...path, testCaseId: s.id },
+              path: { ...path, testCaseId: sc.id },
               query: { expectedRevision: rev },
             },
           },
         );
         if (!r.response.ok) fail(r.response, r.error);
-        rev = await currentRevision(id, version);
+        await confirm(dropCase(known, sc.id));
       }
       for (const [position, w] of wanted.entries()) {
         rowDone: {
           stillSame();
-          const current = server.find((s) => s.id === w.serverId);
+          const current = server.find((sc) => sc.id === w.serverId);
           if (current && w.serverId) {
             idMap[w.t.id] = w.serverId;
             if (sameCase(current, w.t, position)) break rowDone;
@@ -345,6 +503,7 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
               },
             );
             if (!r.data) fail(r.response, r.error);
+            await confirm(upsertCase(known, r.data));
           } else {
             const r = await api.POST('/v1/questions/{questionId}/versions/{version}/test-cases', {
               params: { path },
@@ -359,8 +518,8 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
             });
             if (!r.data) fail(r.response, r.error);
             idMap[w.t.id] = r.data.id;
+            await confirm(upsertCase(known, r.data));
           }
-          rev = await currentRevision(id, version);
         }
       }
       // (4) Variants and overrides.
@@ -411,8 +570,14 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
               },
             },
           );
-          if (!r.response.ok) fail(r.response, r.error);
-          rev = await currentRevision(id, version);
+          if (!r.response.ok) {
+            try {
+              fail(r.response, r.error);
+            } catch (e) {
+              throw isVariantHasAiRefs(e) ? new VariantBlockedFailure(e as ApiFailure, sv.id) : e;
+            }
+          }
+          await confirm(dropVariant(known, sv.id));
         }
         for (const d of desired) {
           stillSame();
@@ -425,7 +590,7 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
             });
             if (!r.data) fail(r.response, r.error);
             sv = r.data.variant;
-            rev = r.data.revision;
+            accept(upsertVariant(known, sv), r.data.revision);
             existing = [];
           } else if (!sameParams(d.params, sv.params) || d.isActive !== sv.isActive) {
             const r = await api.PATCH(
@@ -436,7 +601,8 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
               },
             );
             if (!r.data) fail(r.response, r.error);
-            rev = r.data.revision;
+            sv = r.data.variant;
+            accept(upsertVariant(known, sv), r.data.revision);
           }
           const variantId = sv.id;
           // Overrides: the form's slot ids map to the server's; a slot that was removed took its overrides along.
@@ -458,7 +624,7 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
               },
             );
             if (!r.response.ok) fail(r.response, r.error);
-            rev = await currentRevision(id, version);
+            await confirm(withoutOverride(known, variantId, o.testCaseId));
           }
           for (const w of wantedOverrides) {
             const have = live.find((o) => o.testCaseId === w.slot);
@@ -473,8 +639,7 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
               },
             );
             if (!r.data) fail(r.response, r.error);
-            // The override answer carries no revision: read it before the next write.
-            rev = await currentRevision(id, version);
+            await confirm(withOverride(known, variantId, r.data));
           }
         }
       }
@@ -487,8 +652,10 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
     return { detail: back, createdNewVersion, idMap };
   } catch (e) {
     // Nothing was written before the first failure: that failure is the plain one (409 stays a 409).
-    if (e instanceof ApiFailure && wrote) throw new PartialSaveFailure(e, step, forked);
-    throw e;
+    if (!wrote) throw e;
+    // Part of it is on the server. A network error (not an ApiFailure) says so too, with status 0.
+    const inner = e instanceof ApiFailure ? e : new ApiFailure(0, '');
+    throw new PartialSaveFailure(inner, step, forked, confirmed, startedIn);
   }
 }
 

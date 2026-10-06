@@ -313,24 +313,25 @@ export function QuestionEditor({
     }
   }
 
-  const VARIANT_AI_MESSAGE =
-    'This variant has AI reference solutions, which are never deleted. Set it inactive instead of removing it; everything else you changed is still on this page.';
-
   /**
    * What a failed save says and does. Status and step decide; the one machine code is
    * VARIANT_HAS_AI_REFERENCES (a variant with AI rows cannot be deleted): not a conflict, no reload,
-   * the edits stay. A save that stopped half way on a draft refreshes the revision it will send
-   * next, so pressing Save again can finish the job without throwing the edits away; after a fork
-   * (ids changed) or a real concurrent change the author reloads.
+   * the edits stay, and the variant that could not be removed is put back, inactive. A save that
+   * stopped half way on a draft takes over the server's revision for the retry, but ONLY when the
+   * server is exactly where this save left it (`lastRevision`): if anyone else wrote meanwhile the
+   * author reloads, and the text stays on the page until then. After a fork (ids changed) or a real
+   * concurrent change the author reloads too.
    */
   async function explainSaveFailure(e: unknown): Promise<void> {
     if (isVariantHasAiRefs(e)) {
-      setProblem(
-        e instanceof PartialSaveFailure
-          ? `Some of your changes were saved, but ${VARIANT_AI_MESSAGE.charAt(0).toLowerCase()}${VARIANT_AI_MESSAGE.slice(1)}`
-          : VARIANT_AI_MESSAGE,
-      );
-      if (e instanceof PartialSaveFailure) await resync(e);
+      const partial = e instanceof PartialSaveFailure;
+      const blocked = e instanceof PartialSaveFailure ? e.blockedVariantId : null;
+      const name = blocked !== null && !(partial && e.forked) ? restoreVariant(blocked) : null;
+      const message = `This variant has AI reference solutions, which are never deleted, so it cannot be removed.${
+        name ? ` ${name} was put back, set inactive.` : ' Set it inactive instead.'
+      } Everything else you changed is still on this page.`;
+      setProblem(partial ? `Some of your changes were saved. ${message}` : message);
+      if (partial) await resync(e);
       return;
     }
     if (e instanceof PartialSaveFailure) {
@@ -360,17 +361,60 @@ export function QuestionEditor({
     } else setProblem(describe(e));
   }
 
-  /** After a half-done save on a draft: take the server's revision and snapshot so a retry diffs against it. */
+  /** Puts a saved variant that could not be removed back into the form, inactive, where it was. */
+  function restoreVariant(id: string): string | null {
+    const base = loaded.current?.variants.find((v) => v.id === id);
+    const at = loaded.current?.variants.findIndex((v) => v.id === id) ?? -1;
+    const current = form.getValues('variants');
+    if (!base || current.some((v) => v.id === id)) return null;
+    const index = Math.min(Math.max(at, 0), current.length);
+    const next = [...current];
+    next.splice(index, 0, {
+      id: base.id,
+      paramsText: JSON.stringify(base.params, null, 2),
+      active: false,
+      overrides: base.testCaseOverrides.map((o) => ({
+        testCaseId: o.testCaseId,
+        input: o.input,
+        expectedOutput: o.expectedOutput,
+      })),
+    });
+    form.setValue('variants', next, { shouldDirty: true });
+    return variantName(index);
+  }
+
+  /**
+   * After a half-done save on a draft: take the server's revision and snapshot so a retry diffs
+   * against it, but only if the server is EXACTLY where this save last confirmed it (e.lastRevision).
+   * Anything else (another author wrote, or a write could not be confirmed) is a conflict: adopting
+   * it would make the next Save overwrite their work with ours. Nothing happens for another session.
+   */
   async function resync(e: PartialSaveFailure): Promise<void> {
-    if (e.forked || e.step === 'reload' || e.status === 409) {
-      if (e.forked) setConflict(true);
+    if (e.forked) {
+      setConflict(true);
       return;
     }
-    const startedIn = getGeneration();
+    if (e.step === 'reload' || e.status === 401 || (e.status === 409 && !isVariantHasAiRefs(e))) {
+      return;
+    }
+    const meantime = () => {
+      setConflict(true);
+      setProblem(
+        'Part of your changes were saved, then the question changed or could not be confirmed. Reload the latest version to see where things stand; your edits on this page stay until you do.',
+      );
+    };
+    if (e.lastRevision === null) {
+      meantime();
+      return;
+    }
     try {
       const fresh = await fetchQuestion(meta.questionId ?? '');
-      if (startedIn !== getGeneration() || !isFullQuestion(fresh)) return;
-      if (fresh.version.version !== meta.version) return;
+      // The session of the save is the one that counts, and the editor must still be there.
+      if (e.generation !== getGeneration() || !alive.current || !isFullQuestion(fresh)) return;
+      if (fresh.version.version !== meta.version || fresh.version.revision !== e.lastRevision) {
+        meantime();
+        return;
+      }
       loaded.current = fresh.version;
       setMeta(metaOf(fresh));
     } catch {
@@ -733,7 +777,12 @@ export function QuestionEditor({
                 return <TestsTab {...tabProps} />;
               case 'variants':
                 return (
-                  <VariantsTab {...tabProps} questionId={meta.questionId} version={meta.version} />
+                  <VariantsTab
+                    {...tabProps}
+                    questionId={meta.questionId}
+                    version={meta.version}
+                    published={meta.isPublished}
+                  />
                 );
               case 'ai':
                 return <AiTab {...tabProps} questionId={meta.questionId} version={meta.version} />;

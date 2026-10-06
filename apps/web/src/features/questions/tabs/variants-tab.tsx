@@ -36,7 +36,8 @@ export function VariantsTab({
   readOnly,
   questionId,
   version,
-}: ApiTabProps & { version: number }): React.JSX.Element {
+  published,
+}: ApiTabProps & { version: number; published: boolean }): React.JSX.Element {
   if (questionId === null) {
     return (
       <p className="text-sm text-muted-foreground">
@@ -44,7 +45,15 @@ export function VariantsTab({
       </p>
     );
   }
-  return <VariantsBody form={form} readOnly={readOnly} questionId={questionId} version={version} />;
+  return (
+    <VariantsBody
+      form={form}
+      readOnly={readOnly}
+      questionId={questionId}
+      version={version}
+      published={published}
+    />
+  );
 }
 
 function VariantsBody({
@@ -52,7 +61,12 @@ function VariantsBody({
   readOnly,
   questionId,
   version,
-}: Omit<ApiTabProps, 'questionId'> & { questionId: string; version: number }): React.JSX.Element {
+  published,
+}: Omit<ApiTabProps, 'questionId'> & {
+  questionId: string;
+  version: number;
+  published: boolean;
+}): React.JSX.Element {
   const [variants, setVariants] = useDraftField(form, 'variants');
   const statement = useWatch({ control: form.control, name: 'statementMd' });
   const starter = useWatch({ control: form.control, name: 'starterCode' });
@@ -103,6 +117,7 @@ function VariantsBody({
             readOnly={readOnly}
             questionId={questionId}
             version={version}
+            published={published}
             used={used}
             statement={statement}
             reference={reference}
@@ -137,6 +152,8 @@ function VariantsBody({
 
 interface CardProps extends Pick<ApiTabProps, 'form' | 'readOnly' | 'questionId'> {
   version: number;
+  /** The version being edited is published: a save forks first, and the fork copy has no AI rows. */
+  published: boolean;
   index: number;
   variant: VariantValues;
   used: string[];
@@ -153,6 +170,7 @@ function VariantCard({
   readOnly,
   questionId,
   version,
+  published,
   used,
   statement,
   reference,
@@ -187,8 +205,14 @@ function VariantCard({
   const isSaved = !isDraftVariantId(variant.id);
   // AI rows (current or retired) point at their variant and are never deleted, so the API refuses
   // to delete such a variant: say so here instead of letting the save fail.
-  const aiRows = useAiReferences(isSaved ? (questionId ?? '') : '', version);
-  const aiCount = (aiRows.data?.items ?? []).filter((r) => r.variantId === variant.id).length;
+  // Only a DRAFT is deleted from in place: on a published latest the save forks first and the copy
+  // has no AI rows. Until the list is known the variant is treated as having some (fail closed).
+  const checkRows = isSaved && !published;
+  const aiRows = useAiReferences(checkRows ? (questionId ?? '') : '', version);
+  const aiCount = checkRows
+    ? (aiRows.data?.items ?? []).filter((r) => r.variantId === variant.id).length
+    : 0;
+  const aiUnknown = checkRows && !aiRows.isSuccess;
 
   const overrideOf = (testCaseId: string) =>
     variant.overrides.find((o) => o.testCaseId === testCaseId);
@@ -301,7 +325,7 @@ function VariantCard({
         </label>
         {readOnly ? null : aiCount > 0 ? (
           <div className="space-y-1" data-testid={`variant-ai-note-${index}`}>
-            <p role="status" className="max-w-md text-sm text-muted-foreground">
+            <p className="max-w-md text-sm text-muted-foreground">
               {name} has {aiCount} AI reference solution{aiCount === 1 ? '' : 's'} (current or
               retired). They are never deleted, so this variant cannot be removed. Set it inactive
               instead: it will no longer be given to candidates or validated.
@@ -318,10 +342,19 @@ function VariantCard({
             ) : null}
           </div>
         ) : (
-          <Button type="button" variant="ghost" size="sm" onClick={onRemove}>
-            <Trash2 className="size-4" aria-hidden="true" />
-            Remove {name}
-          </Button>
+          <div className="space-y-1">
+            <Button type="button" variant="ghost" size="sm" disabled={aiUnknown} onClick={onRemove}>
+              <Trash2 className="size-4" aria-hidden="true" />
+              Remove {name}
+            </Button>
+            {aiUnknown ? (
+              <p className="max-w-md text-sm text-muted-foreground">
+                {aiRows.isError
+                  ? 'We could not check whether this variant has AI solutions, so it cannot be removed now. Reload the page to try again.'
+                  : 'Checking whether this variant has AI solutions…'}
+              </p>
+            ) : null}
+          </div>
         )}
       </div>
 

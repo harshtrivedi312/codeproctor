@@ -1,17 +1,20 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { axe } from 'vitest-axe';
+import { AuthProvider } from '@/features/auth/auth-provider';
+import { refreshSession } from '@/lib/auth-session';
 import { apiBaseUrl } from '@/lib/env';
-import { MOCK_USERS } from '@/mocks/auth-handlers';
+import { MOCK_USERS, seedMockRefresh } from '@/mocks/auth-handlers';
 import { setMockQuestionScenario } from '@/mocks/question-handlers';
 import { server } from '@/mocks/server';
 import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav } from '@/test/nav-mock';
 import { aiReferenceFormSchema } from './ai-schema';
 import { QuestionEditorRoute } from './question-pages';
-import { questionKeys } from './queries';
+import { questionKeys, slotsSignature } from './queries';
 import { ValidationPanel } from './validation-panel';
 
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
@@ -492,6 +495,8 @@ describe('Variants with AI rows in the editor (S7)', () => {
     expect(saveButton()).toBeEnabled();
   });
 
+  // Defensive scenario: the real API cannot answer this after a fork (the copy has no AI rows); the
+  // web must still not lose the edits or treat it as a conflict if it ever does.
   it('AI-1: the same 409 after part of a fork was written says so and asks for a reload (ids changed)', async () => {
     server.use(
       http.delete(`${base}/q-merge/versions/3/variants/:id`, () =>
@@ -513,7 +518,7 @@ describe('Variants with AI rows in the editor (S7)', () => {
     await u.click(saveButton());
     expect(
       await screen.findByText(
-        /Some of your changes were saved, but this variant has AI reference solutions/,
+        /Some of your changes were saved\. This variant has AI reference solutions/,
       ),
     ).toBeInTheDocument();
     expect(
@@ -523,7 +528,7 @@ describe('Variants with AI rows in the editor (S7)', () => {
 });
 
 describe('Chained revisions (S3) and the save order (S4, S1)', () => {
-  it('FR-204: another editor writing between two of our calls makes the next call a 409, never a silent overwrite', async () => {
+  it('FR-204: another editor committing just before our first test-case write makes that write a 409 (its expectedRevision is stale); their change is intact', async () => {
     let first = true;
     server.use(
       http.patch(`${base}/q-rotate/versions/1/test-cases/:id`, async () => {
@@ -767,5 +772,252 @@ describe('Accessible names per variant card (a11y)', () => {
       ).toBeInTheDocument();
     }
     expect(await axe(document.body)).toHaveNoViolations();
+  });
+});
+
+describe('A half-done save never adopts another editor as its base (B1, B2)', () => {
+  const busy = () => HttpResponse.json({ detail: 'busy' }, { status: 500 });
+
+  it('FR-204 B1: if another author writes between our failed call and the resync, the editor does not adopt it: conflict, text kept, their change intact after a retry', async () => {
+    server.use(
+      http.post(`${base}/q-rotate/versions/1/test-cases`, async () => {
+        // Their save lands right as our call fails.
+        await call('AUTHOR', 'PATCH', `${V}/q-rotate`, { title: 'Theirs' });
+        return busy();
+      }),
+    );
+    const u = await openEditor('q-rotate');
+    await u.type(screen.getByLabelText('Title'), '!');
+    await goTab(u, 'Test cases');
+    await u.click(screen.getByRole('button', { name: 'Add test case' }));
+    await u.click(saveButton());
+    expect(await screen.findByText(/changed or could not be confirmed/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Reload the latest version/ })).toBeInTheDocument();
+    // The retry carries our old revision: a 409, never an overwrite of their title.
+    server.resetHandlers();
+    await u.click(saveButton());
+    await waitFor(() =>
+      expect(screen.getByText('This question changed since you opened it')).toBeInTheDocument(),
+    );
+    expect((await detail('q-rotate')).version.title).toBe('Theirs');
+    await goTab(u, 'Statement');
+    expect(screen.getByLabelText('Title')).toHaveValue('Rotate an array!');
+  });
+
+  it('FR-204 B2: another editor committing between one of our writes and its read-back stops the save: their change is not adopted and our next write is never sent', async () => {
+    let gets = 0;
+    server.use(
+      http.get(`${base}/q-rotate`, async () => {
+        gets += 1;
+        // 1st GET is the loader; the 2nd is the confirmation of our first test-case write.
+        if (gets === 2) {
+          await call('AUTHOR', 'PATCH', `${V}/q-rotate/versions/1/test-cases/ro-t2`, {
+            input: 'theirs',
+          });
+        }
+        return undefined;
+      }),
+    );
+    const u = await openEditor('q-rotate');
+    await goTab(u, 'Test cases');
+    await setText(u, screen.getByLabelText('Input of test 1'), 'ours one');
+    await setText(u, screen.getByLabelText('Input of test 2'), 'ours two');
+    await u.click(saveButton());
+    expect(
+      await screen.findByText(/found that the question changed meanwhile/),
+    ).toBeInTheDocument();
+    const after = await call<{ version: { testCases: { id: string; input?: string }[] } }>(
+      'AUTHOR',
+      'GET',
+      `${V}/q-rotate`,
+    );
+    const byId = Object.fromEntries(after.body.version.testCases.map((t) => [t.id, t.input]));
+    expect(byId['ro-t1']).toBe('ours one'); // the write that was confirmed before they wrote
+    expect(byId['ro-t2']).toBe('theirs'); // never overwritten by our second write
+    expect(screen.getByLabelText('Input of test 2')).toHaveValue('ours two');
+  });
+
+  it('FR-204: when nobody else writes, the confirmation passes and every write of a long chain goes through', async () => {
+    const u = await openEditor('q-rotate');
+    await goTab(u, 'Test cases');
+    await setText(u, screen.getByLabelText('Input of test 1'), 'a');
+    await setText(u, screen.getByLabelText('Input of test 2'), 'b');
+    await u.click(saveButton());
+    expect(await screen.findByText(/^Saved/)).toBeInTheDocument();
+    const d = await call<{ version: { testCases: { id: string; input?: string }[] } }>(
+      'AUTHOR',
+      'GET',
+      `${V}/q-rotate`,
+    );
+    expect(d.body.version.testCases.map((t) => t.input).sort()).toEqual(['a', 'b']);
+  });
+
+  it('FR-204 (4): a network error after some writes is a partial save: it says part was saved, and the retry finishes', async () => {
+    let fail = true;
+    server.use(
+      http.post(`${base}/q-rotate/versions/1/test-cases`, () =>
+        fail ? HttpResponse.error() : undefined,
+      ),
+    );
+    const u = await openEditor('q-rotate');
+    await u.type(screen.getByLabelText('Title'), '!');
+    await goTab(u, 'Test cases');
+    await u.click(screen.getByRole('button', { name: 'Add test case' }));
+    await u.click(saveButton());
+    expect(
+      await screen.findByText(
+        /Some of your changes were saved, but the test cases could not be: We could not reach the server/,
+      ),
+    ).toBeInTheDocument();
+    fail = false;
+    await waitFor(() => expect(saveButton()).toBeEnabled());
+    await u.click(saveButton());
+    expect(await screen.findByText(/^Saved/)).toBeInTheDocument();
+  });
+
+  it('pure: the slots signature ignores ids only when asked, and sees any test case, variant or override change', () => {
+    const v = (id: string, input: string) =>
+      ({
+        testCases: [{ id, position: 0, isHidden: false, weight: 1, input, expectedOutput: 'o' }],
+        variants: [],
+      }) as unknown as Parameters<typeof slotsSignature>[0];
+    expect(slotsSignature(v('a', 'i'))).not.toBe(slotsSignature(v('b', 'i')));
+    expect(slotsSignature(v('a', 'i'), false)).toBe(slotsSignature(v('b', 'i'), false));
+    expect(slotsSignature(v('a', 'i'), false)).not.toBe(slotsSignature(v('a', 'j'), false));
+  });
+});
+
+describe('Variants with AI rows, round two (should-fix 1 to 3)', () => {
+  const coded409 = () =>
+    HttpResponse.json(
+      {
+        type: 'about:blank',
+        title: 'Conflict',
+        status: 409,
+        detail: 'x',
+        code: 'VARIANT_HAS_AI_REFERENCES',
+      },
+      { status: 409 },
+    );
+
+  it('AI-1: after the coded 409 the removed variant is back in the form, inactive, and a coded 409 after union PATCHes still resyncs so Save finishes', async () => {
+    server.use(http.delete(`${base}/q-rotate/versions/1/variants/ro-v2`, coded409));
+    const u = await openEditor('q-rotate');
+    await setText(
+      u,
+      screen.getByLabelText('Statement (Markdown)'),
+      'Rotate **{{size}}** by **{{steps}}**, mode {{mode}}.',
+    );
+    await goTab(u, 'Variants');
+    await setText(
+      u,
+      within(screen.getByRole('region', { name: 'Variant 1' })).getByLabelText('Parameters (JSON)'),
+      '{"size": 5, "steps": 2, "mode": "a"}',
+    );
+    await u.click(screen.getByRole('button', { name: 'Remove Variant 2' }));
+    await u.click(saveButton());
+    expect(
+      await screen.findByText(
+        /Some of your changes were saved\. This variant has AI reference solutions.*Variant 2 was put back, set inactive/,
+      ),
+    ).toBeInTheDocument();
+    const card2 = screen.getByRole('region', { name: 'Variant 2' });
+    expect(
+      within(card2).getByRole('checkbox', { name: /Active.*for Variant 2/ }),
+    ).not.toBeChecked();
+    expect(screen.queryByText('This question changed since you opened it')).not.toBeInTheDocument();
+    // The retry works: the editor took over the revision the union PATCH confirmed.
+    server.resetHandlers();
+    await waitFor(() => expect(saveButton()).toBeEnabled());
+    await u.click(saveButton());
+    expect(await screen.findByText(/^Saved/)).toBeInTheDocument();
+    const d = await detail('q-rotate');
+    expect(d.version.variants.map((x) => [x.id, x.isActive])).toEqual([
+      ['ro-v1', true],
+      ['ro-v2', false],
+    ]);
+  });
+
+  it('AI-1: Remove stays off until the AI list is known (a failed list fails closed)', async () => {
+    server.use(
+      http.get(`${base}/q-rotate/versions/1/ai-references`, () =>
+        HttpResponse.json({ detail: 'down' }, { status: 500 }),
+      ),
+    );
+    const u = await openEditor('q-rotate');
+    await goTab(u, 'Variants');
+    expect(
+      await screen.findAllByText(/could not check whether this variant has AI solutions/),
+    ).toHaveLength(2);
+    expect(screen.getByRole('button', { name: 'Remove Variant 1' })).toBeDisabled();
+  });
+
+  it('AI-1: on a published latest version the note and the disabled Remove do not apply (the save forks, the copy has no AI rows)', async () => {
+    await call(
+      'AUTHOR',
+      'POST',
+      `${V}/q-merge/versions/2/ai-references`,
+      aiRow('ChatGPT', 'python', { variantId: 'mi-v1' }),
+    );
+    const u = await openEditor('q-merge');
+    await goTab(u, 'Variants');
+    expect(screen.getByRole('button', { name: 'Remove Variant 1' })).toBeEnabled();
+    expect(screen.queryByText(/has 1 AI reference solution/)).not.toBeInTheDocument();
+    // And the fork then lets it go: the new version has no AI rows.
+    await u.click(screen.getByRole('button', { name: 'Remove Variant 1' }));
+    await u.click(saveButton());
+    expect(await screen.findByText(/Saved as version 3/)).toBeInTheDocument();
+    expect((await detail('q-merge')).version.variants).toHaveLength(1);
+  });
+});
+
+describe('The AI policy follows the session (FR-103)', () => {
+  it('FR-103 TC-004: when the role changes, the cached policy (and everything else) is cleared with the session', async () => {
+    seedMockRefresh(MOCK_USERS.author.email);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    nav.pathname = '/admin/questions/q-merge';
+    render(
+      <QueryClientProvider client={client}>
+        <AuthProvider>
+          <main>
+            <QuestionEditorRoute id="q-merge" pollMs={5} />
+          </main>
+        </AuthProvider>
+      </QueryClientProvider>,
+    );
+    await screen.findByRole('tablist', { name: 'Question sections' });
+    await waitFor(() =>
+      expect(
+        client
+          .getQueryCache()
+          .getAll()
+          .some((q) => q.queryKey[1] === 'ai-policy'),
+      ).toBe(true),
+    );
+    server.use(
+      http.post('*/v1/auth/refresh', () =>
+        HttpResponse.json({
+          accessToken: 'mock-access-RECRUITER-changed',
+          user: {
+            id: 'user-author',
+            email: MOCK_USERS.author.email,
+            name: 'Same Person',
+            role: 'RECRUITER',
+            orgName: 'Acme Hiring (demo)',
+            totpEnabled: false,
+          },
+        }),
+      ),
+    );
+    await act(async () => {
+      await refreshSession();
+    });
+    await screen.findByTestId('summary-statement');
+    const keys = client
+      .getQueryCache()
+      .getAll()
+      .map((q) => q.queryKey.join('/'));
+    expect(keys.some((k) => k.includes('ai-policy'))).toBe(false);
+    expect(keys.some((k) => k.includes('/ai/'))).toBe(false);
   });
 });

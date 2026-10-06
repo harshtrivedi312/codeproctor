@@ -416,7 +416,8 @@ export const draftSchema = z
           return;
         }
         const errors = checkParams(parsed.value);
-        const missing = missingPlaceholders(parsed.value, used);
+        // An inactive variant is never rendered (the API checks it again when it is switched on).
+        const missing = v.active ? missingPlaceholders(parsed.value, used) : [];
         if (missing.length > 0) {
           errors.push(
             `Needs a value for ${names(missing)}: the question uses ${missing.length === 1 ? 'it' : 'them'} as a placeholder.`,
