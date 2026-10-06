@@ -9,7 +9,7 @@
 // never reads or returns a message, because those can carry SQL and argument values.
 import { HttpException } from '@nestjs/common';
 import { OrgScopeError } from '../database/errors';
-import { Prisma } from '../generated/prisma/client.js';
+import { Prisma } from '../generated/prisma/client';
 
 /** Seconds a client should wait before retrying a request refused for lock contention. */
 export const LOCK_CONTENTION_RETRY_AFTER_SECONDS = 2;

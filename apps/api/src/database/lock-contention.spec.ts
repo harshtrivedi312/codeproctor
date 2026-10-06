@@ -103,7 +103,7 @@ describe('lock contention through the app (DL-37, FU-BE-42)', () => {
           const res = await request(app.getHttpServer()).get('/probe/lock');
           expect(res.status).toBe(503);
           expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
-          expect(Number(res.headers['retry-after'])).toBeLessThanOrEqual(2);
+          expect(Number(res.headers['retry-after'])).toBeGreaterThanOrEqual(1);
           expect(Number(res.headers['retry-after'])).toBeLessThanOrEqual(2);
           expect(res.headers['content-type']).toContain('application/problem+json');
           const body = res.body as Record<string, unknown>;
@@ -129,6 +129,7 @@ describe('lock contention through the app (DL-37, FU-BE-42)', () => {
       const res = await request(app.getHttpServer()).get('/probe/slow');
       expect(res.status).toBe(503);
       expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+      expect(Number(res.headers['retry-after'])).toBeGreaterThanOrEqual(1);
       expect(Number(res.headers['retry-after'])).toBeLessThanOrEqual(2);
       expect(warn).not.toHaveBeenCalled();
       expect(error).toHaveBeenCalledTimes(1);

@@ -109,6 +109,8 @@ const SHUTDOWN_CATCH_ALL_MS = 1_000;
 export class AuthService implements BeforeApplicationShutdown, OnApplicationShutdown {
   private readonly webOrigin: string;
   private readonly logger = new Logger(AuthService.name);
+  /** Errors whose reservation was already given back, so a caller does not refund them twice. */
+  private readonly refundedErrors = new WeakSet<object>();
   /** Deferred forgot-password work still running; awaited by tests and at shutdown. */
   private readonly deferred = new Set<Promise<void>>();
 
@@ -213,7 +215,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       // DL-37: the password was already right and opening the session hit lock contention (503,
       // retry): give back the attempt of THIS request only. startSession runs on the root client
       // here, with no transaction: the refresh-family INSERT may already have committed when
-      // clearFailures fails, leaving a family whose token was never delivered (unusable; FU-BE-174). Failed-guess counts (wrong
+      // clearFailures fails, leaving a family whose token was never delivered (unusable; FU-BE-184). Failed-guess counts (wrong
       // password, wrong code) are never refunded, so contention cannot erase an attacker's count.
       if (lockContentionCode(e) !== undefined)
         await this.refundAttempt(user).catch(() => undefined);
@@ -290,7 +292,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
    * when `fn` ends in a wrong code, an outage or database lock contention (503 + Retry-After), so
    * a retry stays possible. Other errors leave it spent. Contention can follow a committed refresh
    * family INSERT (the TOTP path has no transaction around startSession), which then never
-   * reaches the client: unusable, and tracked by FU-BE-174. If releasing the mark also fails (Redis
+   * reaches the client: unusable, and tracked by FU-BE-184. If releasing the mark also fails (Redis
    * still down), the challenge stays spent until its TTL: the user signs in again.
    */
   private async withChallengeUse<T>(jti: string, fn: () => Promise<T>): Promise<T> {
@@ -548,6 +550,8 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       return await this.totp.verify(user.id, encryptedSecret, code);
     } catch (e) {
       await this.refundAttempt(user).catch(() => undefined);
+      // The caller must not refund this same failure a second time (DL-37).
+      if (typeof e === 'object' && e !== null) this.refundedErrors.add(e);
       throw e;
     }
   }
@@ -623,7 +627,11 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       }
       // DL-37: contention (503, retry) before a verdict on the code was recorded gave no guess
       // oracle, so this request's reservation goes back. A wrong code (failCode) is never refunded.
-      if (!wrongCode && lockContentionCode(e) !== undefined) {
+      if (
+        !wrongCode &&
+        lockContentionCode(e) !== undefined &&
+        !(typeof e === 'object' && e !== null && this.refundedErrors.has(e))
+      ) {
         await this.refundAttempt(user).catch(() => undefined);
       }
       throw e;
@@ -1275,7 +1283,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
   /**
    * An audit row written after the state change committed, on an auth route (login lockout,
    * re-auth failure lockout, refresh reuse, logout). A failure here is logged by class name (the
-   * alert hook, FU-BE-181) and NEVER changes the response: a 500 on these paths would tell an
+   * alert hook, FU-BE-191) and NEVER changes the response: a 500 on these paths would tell an
    * existing account from an unknown one (api-contract section 8, P-37).
    */
   private async auditAfterCommit(

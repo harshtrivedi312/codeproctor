@@ -1,6 +1,6 @@
 // DL-37, api-contract section 8 (auth routes): contention on a login must not tell an existing
 // account from an unknown one. No TC id covers this in docs/test-cases.md; names cite DL-37,
-// FR-101 and FU-BE-177.
+// FR-101 and FU-BE-187.
 import { INestApplication } from '@nestjs/common';
 import { hash } from '@node-rs/argon2';
 import { Client } from 'pg';
@@ -16,7 +16,7 @@ import { ARGON2_OPTIONS } from './password.service';
 const LOGIN = '/api/v1/auth/login';
 const PASSWORD = 'Correct-Horse-9';
 
-describe('Login under row-lock contention (DL-37, FR-101, FU-BE-177)', () => {
+describe('Login under row-lock contention (DL-37, FR-101, FU-BE-187)', () => {
   let infra: TestInfra;
   let app: INestApplication<App>;
   let prisma: PrismaClient;
@@ -70,13 +70,26 @@ describe('Login under row-lock contention (DL-37, FR-101, FU-BE-177)', () => {
       request(app.getHttpServer())
         .post(LOGIN)
         .send({ email: e, password: 'not-the-password-at-all-1' });
+    // Warm the app's connection pool first, so the logins below reach the row lock at once.
+    await login('warm@example.com').expect(401);
     await holder.query('BEGIN');
     await holder.query('SELECT id FROM users WHERE email = $1 FOR UPDATE', [email]);
+    let committed = false;
     try {
       const pending = Promise.all([login(email), login('nobody@example.com')]);
-      // Hold the lock while both requests are in flight, then release it.
-      await new Promise((r) => setTimeout(r, 500));
+      // Hold the lock until a request is really waiting on it, so the test is not vacuous.
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const waiting = await holder.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+           WHERE wait_event_type = 'Lock' AND datname = current_database()`,
+        );
+        if ((waiting.rows[0]?.n ?? 0) > 0) break;
+        if (Date.now() > deadline) throw new Error('no login ever waited on the row lock');
+        await new Promise((r) => setTimeout(r, 20));
+      }
       await holder.query('COMMIT');
+      committed = true;
       const [existing, unknown] = await pending;
       expect(existing.status).toBe(401);
       expect(unknown.status).toBe(401);
@@ -84,11 +97,11 @@ describe('Login under row-lock contention (DL-37, FR-101, FU-BE-177)', () => {
       expect(existing.headers['retry-after']).toBeUndefined();
       expect(unknown.headers['retry-after']).toBeUndefined();
     } finally {
-      await holder.query('ROLLBACK').catch(() => undefined);
+      if (!committed) await holder.query('ROLLBACK').catch(() => undefined);
     }
   });
 
-  it('FU-BE-177 guard: the client that serves login sets no lock_timeout or statement_timeout; a setting here must force the equalisation decision', async () => {
+  it('FU-BE-187 guard: the client that serves login sets no lock_timeout or statement_timeout; a setting here must force the equalisation decision', async () => {
     const { PrismaService: Prisma } = jest.requireActual<
       typeof import('../database/prisma.service')
     >('../database/prisma.service');

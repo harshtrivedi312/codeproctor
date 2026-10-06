@@ -193,17 +193,23 @@ export class UsersService {
         // and a SUPER_ADMIN could probe other organizations' staff emails unseen (DL-36). Record it
         // outside that transaction: actor, org and time only, no email and no user id. If this
         // insert fails the request fails (500) rather than answering the probe unrecorded.
-        await this.prisma.client.auditLog.create({
-          data: {
-            orgId: actor.orgId,
-            actorId: actor.id,
-            action: 'USER_INVITE_CONFLICT',
-            entityType: 'user',
-            entityId: null,
-            ip: ctx.ip ?? null,
-            metadata: {},
-          },
-        });
+        try {
+          await this.prisma.client.auditLog.create({
+            data: {
+              orgId: actor.orgId,
+              actorId: actor.id,
+              action: 'USER_INVITE_CONFLICT',
+              entityType: 'user',
+              entityId: null,
+              ip: ctx.ip ?? null,
+              metadata: {},
+            },
+          });
+        } catch (auditError) {
+          // Contention here is a 503 that invites a retry: the slot goes back (DL-37).
+          await this.refundSlotOnContention(slot, auditError);
+          throw auditError;
+        }
         throw new ConflictException('A user with this email already exists.');
       }
       // A busy database answers 503 and invites a retry: the slot of the attempt that never

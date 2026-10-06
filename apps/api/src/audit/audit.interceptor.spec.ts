@@ -157,6 +157,9 @@ describe('AuditInterceptor (FR-105, TC-006)', () => {
         .set('x-user', 'yes')
         .expect(500);
       expect(res.headers['retry-after']).toBeUndefined();
+      const body = res.body as Record<string, unknown>;
+      expect(body.code).toBeUndefined();
+      expect(body.detail).toBeUndefined();
       expect(JSON.stringify(res.body)).not.toContain('candidate data');
       expect(JSON.stringify(error.mock.calls)).not.toContain('lock wait');
     } finally {

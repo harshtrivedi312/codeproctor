@@ -1118,6 +1118,15 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       }
     });
 
+    it('FR-102: contention thrown by the TOTP check gives the attempt back exactly once (no double refund)', async () => {
+      const u = await createUser({ role: UserRole.REVIEWER, totp: 'JBSWY3DPEHPK3PXP' });
+      await prisma.user.update({ where: { id: u.id }, data: { failedLogins: 2 } });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      totpVerify.mockRejectedValueOnce(lockError());
+      await verify2fa(challengeToken, '123456').expect(503);
+      expect(await failedLogins(u.id)).toBe(2);
+    });
+
     it('FR-102: a wrong TOTP code is still counted when the failure write hits contention (no refund of a failed guess)', async () => {
       const u = await createUser({ role: UserRole.REVIEWER, totp: 'JBSWY3DPEHPK3PXP' });
       const { challengeToken } = (await login(u.email).expect(200)).body as Body;
