@@ -73,11 +73,13 @@ export class InvitationsService {
   private readonly log = new Logger(InvitationsService.name);
   private readonly webOrigin: string;
   private readonly maxWindowDays: number;
-  /** Per org and hour (INVITATION_RATE_LIMIT_PER_ORG_HOUR); read per call so a test can lower it. */
+  /** Per org and hour (INVITATION_RATE_LIMIT_PER_ORG_HOUR), read once in the constructor; the e2e lowers it with Reflect. */
   private readonly rateLimit: number;
   // The transaction may wait on a PATCH /tests holding the tests row FOR UPDATE (see the header).
   private readonly txTimeoutMs = 10_000;
   private readonly txMaxWaitMs = 5_000;
+  // A lock wait is cut at this point, so the transaction timeout above is really enforced.
+  private readonly lockTimeoutMs = 5_000;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -109,6 +111,13 @@ export class InvitationsService {
     try {
       created = await this.prisma.client.$transaction(
         async (tx) => {
+          await this.orgContext.runRawSql(
+            'cap lock waits of this transaction (SET LOCAL, no data access)',
+            () =>
+              tx.$executeRaw(
+                Prisma.sql`SELECT set_config('lock_timeout', ${`${this.lockTimeoutMs}ms`}, true)`,
+              ),
+          );
           const test = await tx.test.findUnique({ where: { id: testId }, select: { id: true } });
           if (!test) throw new NotFoundException(NOT_FOUND);
 
@@ -232,6 +241,7 @@ export class InvitationsService {
       await ensureConnected(this.redis);
       count = (await hitWindowCounter(this.redis, key, RATE_WINDOW_SECONDS)).count;
     } catch {
+      this.log.warn('Invitation rate limiter unavailable.');
       throw new ServiceUnavailableException('Invitations are temporarily unavailable.');
     }
     if (count > this.rateLimit) {
@@ -242,9 +252,16 @@ export class InvitationsService {
     }
   }
 
-  /** A transaction timeout (P2028) is a fixed 503; the transaction is rolled back. */
+  /**
+   * A transaction timeout (P2028) or a lock wait cut by lock_timeout (Postgres 55P03, which Prisma
+   * 7 reports as P2039 with the driver code in meta) is a fixed 503; the transaction is rolled
+   * back. Backend PR #216 maps these generally; this keeps the route safe until it lands.
+   */
   private mapTimeout(e: unknown): unknown {
-    return e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2028'
+    if (!(e instanceof Prisma.PrismaClientKnownRequestError)) return e;
+    const cause = (e.meta as { driverAdapterError?: { cause?: { code?: unknown } } } | undefined)
+      ?.driverAdapterError?.cause;
+    return e.code === 'P2028' || cause?.code === '55P03'
       ? new ServiceUnavailableException('The invitation could not be saved in time. Try again.')
       : e;
   }

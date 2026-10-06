@@ -8,6 +8,7 @@ import {
   ApiNotFoundResponse,
   ApiOperation,
   ApiServiceUnavailableResponse,
+  ApiTooManyRequestsResponse,
   ApiTags,
   ApiUnauthorizedResponse,
   ApiUnprocessableEntityResponse,
@@ -45,7 +46,11 @@ export class InvitationsController {
   @ApiUnprocessableEntityResponse({
     description: 'A random question slot of the test cannot be filled now (slot positions only)',
   })
-  @ApiServiceUnavailableResponse({ description: 'Sessions cannot be created yet' })
+  @ApiTooManyRequestsResponse({ description: 'The organization hit its hourly invitation limit' })
+  @ApiServiceUnavailableResponse({
+    description:
+      'Sessions cannot be created yet, the rate limiter (Redis) is down, or the transaction timed out',
+  })
   create(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: CreateInvitationDto,

@@ -45,6 +45,16 @@ const IsInstant = (): PropertyDecorator =>
     },
   });
 
+/** No quoted local part and no UTF-8 local part: plain ASCII atoms only. */
+const PlainLocalPart = (): PropertyDecorator =>
+  ValidateBy({
+    name: 'plainLocalPart',
+    validator: {
+      validate: (v: unknown) => typeof v !== 'string' || /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@/i.test(v),
+      defaultMessage: () => '$property must not use a quoted or non-ASCII local part',
+    },
+  });
+
 const trim = ({ value }: { value: unknown }): unknown =>
   typeof value === 'string' ? value.trim() : value;
 const trimLower = ({ value }: { value: unknown }): unknown =>
@@ -59,7 +69,9 @@ export class CreateInvitationDto {
   @Transform(trimLower)
   @IsString()
   @MaxLength(MAX_EMAIL_LENGTH)
-  @IsEmail()
+  @IsEmail({ allow_utf8_local_part: false })
+  @DisplaySafe()
+  @PlainLocalPart()
   email!: string;
 
   @ApiProperty({ minLength: 1, maxLength: MAX_FULL_NAME_LENGTH })

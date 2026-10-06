@@ -381,6 +381,10 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
     const bad: [string, (n: number) => Json][] = [
       ['no email', () => ({ email: undefined })],
       ['bad email', () => ({ email: 'not-an-email' })],
+      ['quoted local part with CRLF', () => ({ email: '"a\r\nb"@example.org' })],
+      ['quoted local part', () => ({ email: '"ab"@example.org' })],
+      ['local part with a bidi override', () => ({ email: 'ab\u202Ecd@example.org' })],
+      ['UTF-8 local part', () => ({ email: 'j\u00F6rg@example.org' })],
       ['null email', () => ({ email: null })],
       ['email over 254', () => ({ email: `${'a'.repeat(250)}@x.org` })],
       ['no name', () => ({ fullName: undefined })],
@@ -699,6 +703,36 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
       return app.get(InvitationsService);
     };
 
+    /** The counter is a fixed hourly window: do not straddle a window boundary mid-test. */
+    const awayFromHourBoundary = async (): Promise<void> => {
+      const left = DAY / 24 - (Date.now() % (DAY / 24));
+      if (left < 15_000) await new Promise((r) => setTimeout(r, left + 500));
+    };
+
+    it('FR-303: a request that fails validation takes no rate-limit slot', async () => {
+      await awayFromHourBoundary();
+      const org = (await owner.organization.create({ data: { name: 'Slot Org' } })).id;
+      const who = await make(UserRole.RECRUITER, org);
+      const test = await owner.test.create({
+        data: { orgId: org, name: 'T', durationMinutes: 30, createdById: who.id },
+      });
+      const service = svc();
+      const before = Reflect.get(service, 'rateLimit') as number;
+      Reflect.set(service, 'rateLimit', 2);
+      try {
+        await invite(who, test.id, goodBody()).expect(201);
+        // DTO-invalid and window()-invalid requests.
+        await invite(who, test.id, goodBody({ email: 'nope' })).expect(400);
+        await invite(who, test.id, goodBody({ windowStart: iso(Date.now() - 10 * 60_000) })).expect(
+          400,
+        );
+        await invite(who, test.id, goodBody()).expect(201);
+        await invite(who, test.id, goodBody()).expect(429);
+      } finally {
+        Reflect.set(service, 'rateLimit', before);
+      }
+    });
+
     it('FR-303: the invitation over the hourly limit is 429, nothing is written, and another org has its own counter', async () => {
       const org = (await owner.organization.create({ data: { name: 'Limit Org' } })).id;
       const who = await make(UserRole.RECRUITER, org);
@@ -709,6 +743,7 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
       const otherTest = await owner.test.create({
         data: { orgId: orgB, name: 'T', durationMinutes: 30, createdById: other.id },
       });
+      await awayFromHourBoundary();
       const service = svc();
       const before = Reflect.get(service, 'rateLimit') as number;
       Reflect.set(service, 'rateLimit', 2);
@@ -725,7 +760,6 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
         await invite(other, otherTest.id, goodBody()).expect(201);
         await invite(other, otherTest.id, goodBody()).expect(201);
         await invite(other, otherTest.id, goodBody()).expect(429);
-        // A request that fails validation takes no slot.
       } finally {
         Reflect.set(service, 'rateLimit', before);
       }
@@ -738,15 +772,46 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
         typeof import('../infrastructure/infrastructure.module')
       >('../infrastructure/infrastructure.module');
       const redis = app.get<import('ioredis').Redis>(REDIS_CLIENT);
+      const addr = email();
       const evalSpy = jest.spyOn(redis, 'eval').mockRejectedValue(new Error('redis down'));
       try {
-        const res = await invite(who, testId, goodBody());
+        const res = await invite(who, testId, goodBody({ email: addr }));
         expect(res.status).toBe(503);
+        expect((res.body as Json).detail).toBe('Invitations are temporarily unavailable.');
       } finally {
         evalSpy.mockRestore();
       }
       expect(await owner.invitation.count({ where: { testId } })).toBe(0);
+      expect(await owner.candidate.count({ where: { email: addr.toLowerCase() } })).toBe(0);
       expect(sent).toHaveLength(0);
+    });
+
+    it('FR-303: a lock wait is cut by lock_timeout; nothing is written', async () => {
+      const who = await make(UserRole.RECRUITER);
+      const testId = await makeTest(who);
+      const service = svc();
+      const before = Reflect.get(service, 'lockTimeoutMs') as number;
+      Reflect.set(service, 'lockTimeoutMs', 800);
+      const holder = new Client({ connectionString: infra.postgres.getConnectionUri() });
+      await holder.connect();
+      const addr = email();
+      try {
+        await holder.query('BEGIN');
+        await holder.query('SELECT id FROM tests WHERE id = $1 FOR UPDATE', [testId]);
+        const started = Date.now();
+        const res = await invite(who, testId, goodBody({ email: addr }));
+        expect(Date.now() - started).toBeLessThan(5000); // cut at ~0.8 s, not held to the commit
+        expect(res.status).toBe(503);
+        expect((res.body as Json).detail).toBe(
+          'The invitation could not be saved in time. Try again.',
+        );
+        await holder.query('COMMIT');
+      } finally {
+        Reflect.set(service, 'lockTimeoutMs', before);
+        await holder.end();
+      }
+      expect(await owner.invitation.count({ where: { testId } })).toBe(0);
+      expect(await owner.candidate.count({ where: { email: addr.toLowerCase() } })).toBe(0);
     });
 
     it('FR-303: a transaction that waits past its timeout on the tests row is a fixed 503 and writes nothing', async () => {
@@ -856,12 +921,14 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
           fullName: name,
           windowEnd: iso(Date.now() + DAY),
         });
+        expect(dup.status).toBe(409);
         responses.push(JSON.stringify(dup.body));
         const bad = await inviteT(testId, {
           email: addr,
           fullName: name,
           windowEnd: 'planted',
         });
+        expect(bad.status).toBe(400);
         responses.push(JSON.stringify(bad.body));
       } finally {
         spies.forEach((s) => s.mockRestore());
