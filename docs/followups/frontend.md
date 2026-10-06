@@ -17,7 +17,7 @@ Items 1, 3 and 8 below (mock start hang, Run/Finish error states, demo controls 
 5. **Tests do not name TC IDs; failure paths untested.** `test-screen.test.tsx`, `logic.test.ts`, `use-autosave.test.tsx`. Name tests with TC-040/041/045/050 and cover the 429 path (`mocks/handlers.ts:96` ties the 429 to latency, so the Node test server never hits it; give it its own `cooldownMs`), paste blocking (TC-052), run network error and finish failure.
 6. **Contract changes need architect sign-off.** Resolved in PR #4: the architect reviewed `packages/shared` and the placeholder OpenAPI, bounded the code and login inputs, and tracked the rest under ARC-02 below. Still open: the `Language` enum is duplicated in shared and the YAML (see the architect section).
 7. **No client-side code length check.** `test-screen.tsx` does not validate against `runRequestSchema` (100,000 chars) before Run or the draft PUT, so an oversized submission gets a server rejection with no clear message.
-8. **Permissions-Policy blocks the microphone.** `apps/web/next.config.ts:24`. `microphone=()` breaks FR-402, FR-607 and FR-701 later; use `microphone=(self)` or add a TODO tied to FE Steps 7 and 9.
+8. **FIXED by DL-28 (PR #122): Permissions-Policy blocks the microphone.** `apps/web/next.config.ts:24`. `microphone=()` breaks FR-402, FR-607 and FR-701 later; use `microphone=(self)` or add a TODO tied to FE Steps 7 and 9.
 9. **[MUST-FIX before Step 10] Demo-only controls ship in the real route bundle.** `apps/web/src/app/(candidate)/t/[token]/test/page.tsx:2`, `test-screen.tsx:144-152,422-431`. Alt+Shift+X "Simulate fullscreen exit", "Continue without fullscreen (demo only)" and the demo banner would bypass the lock in a real session. Load via `next/dynamic` only in mock mode or move into a demo wrapper before Step 10 builds on this screen.
 
 ### Nits
@@ -253,6 +253,16 @@ FE-09 candidate pre-test flow (branch fe-cand/fe-09-preflow). Scope built: welco
 - **FU-FEB-12 (later step) last-section path.** After the last section the banner has no action. A "test submitted" view is needed (later step, FE-10 and after).
 - **FU-FEB-13 (nit) `fsFailed` belongs in `TestScreen`.** It is per-section state in `TestScreenInner`, but the start gate and fullscreen request are test-wide now that the lock state is lifted.
 
+
+### frontend/permissions-policy-mic review (DL-28, PR #122; verdict: MERGE, no blockers)
+
+- **Closed:** FU-FEB-19 and step-1 item 8: `/t/:path+` now has `microphone=(self)`; every other route keeps `microphone=()`. Next resolves the two matching header rules last-wins, so a browser receives one `Permissions-Policy` header (checked in the installed Next's `resolve-routes.js` and in the test helper).
+- **Check on staging after deploy:** `curl -sI https://<staging>/t/x | grep -i permissions-policy` and the same for `/admin`: expect exactly one line each; a proxy (Cloudflare or other) must not add its own policy. Nothing in the repo sets one.
+- **Known limit (should-fix, record only):** a path-scoped policy is defence in depth, not isolation. A browser grants microphone permission per origin, so script running on any same-origin page (for example after XSS on a staff page) could `window.open('/t/x')` and call `getUserMedia` there. Same-origin XSS is already a full compromise; revisit if a separate candidate origin is ever considered (ADR note).
+- **Landing page link:** the preview link to `/t/demo/test` must stay a plain `<a>` (full document load); a soft navigation would keep the previous page's `microphone=()`. The same holds for the stepper's "Start test" (FE-09).
+- **Nits:** `/T/abc123` also gets `microphone=(self)` (matching ignores case; App Router is case-sensitive so it only 404s): add it to the tests as a documented harmless case, plus `/t/` and `/admin/t/abc`; comment that `/t/abc123/consent` is not a real route (it tests the wildcard); say in the header comment that the policy applies to the document as first loaded.
+- **Merge interaction with PR #94** (Frontend B's mock guards): both edit `next.config.ts`; whoever merges second keeps the `/t/:path+` rule after the global rule and before the dev override, and exports the plain config as the named `nextConfig` for the header tests (the default export becomes a phase function in #94, so `next-config.test.ts` and `unstable_getResponseFromNextConfig` must use the named export).
+- **Hub/SDK follow-up (not mine):** `docs/followups/proctor-sdk.md` ~210 has the related microphone note; mark it closed with DL-28.
 
 ## frontend/fe-04 (question bank UI, FR-201..FR-205)
 
