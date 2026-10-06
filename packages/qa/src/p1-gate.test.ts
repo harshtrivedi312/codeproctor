@@ -242,6 +242,20 @@ describe('P1 gate: a test file that fails as a whole', () => {
   });
 });
 
+describe('P1 gate: whole-file failures are kept per report', () => {
+  it('names a crashed file in each report, whatever other reports or tests did', T, () => {
+    const r = gate([
+      jest([ok('TC-902 ok'), ['TC-903 p2 broken', 'failed']], {
+        top: { numRuntimeErrorTestSuites: 1 },
+      }),
+      jest([], { fileStatus: 'failed' }),
+    ]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('numRuntimeErrorTestSuites');
+    expect(r.out).toContain('x.test.ts');
+  });
+});
+
 describe('P1 gate: JUnit reports (pytest, node:test)', () => {
   it('reads an id written TC_901, a failure as FAILED and a skipped case as staged', T, () => {
     const xml = junit(
@@ -307,5 +321,31 @@ describe('P1 gate: Playwright JSON', () => {
     expect(r.code).toBe(0);
     expect(r.out).toMatch(/TC-905\s+0 passing, 1 staged/);
     expect(gate([rep, jest([ok('TC-902 ok')])], ['--strict']).code).toBe(1);
+  });
+
+  it('fails on a Playwright top-level errors[] entry even when every spec passed', T, () => {
+    const rep = write(
+      'e2e-errors.json',
+      JSON.stringify({ suites: [], errors: [{ message: 'global setup failed' }] }),
+    );
+    const r = gate([rep, jest([ok('TC-902 ok')])]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('Playwright errors[]');
+  });
+
+  it('fails on stats.unexpected with no failed spec naming a TC id', T, () => {
+    const rep = write(
+      'e2e-unexpected.json',
+      JSON.stringify({ suites: [], stats: { unexpected: 2 } }),
+    );
+    const r = gate([rep, jest([ok('TC-902 ok')])]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('stats.unexpected 2');
+  });
+
+  it('does not count a spec with an empty tests array as staged', T, () => {
+    const rep = pw([{ title: 'TC-905 empty', ok: true, tests: [] }]);
+    const r = gate([rep, jest([ok('TC-902 ok')])]);
+    expect(r.out).not.toMatch(/TC-905\s+0 passing, 1 staged/);
   });
 });
