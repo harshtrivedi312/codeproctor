@@ -701,4 +701,23 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
     await svc.run(h.A.orgId, cid, new Date(t0.getTime() + SETTLED));
     expect(h.store.keys.has(key2)).toBe(false);
   });
+  it('FU-DB-222: a stored accommodations document with an own __proto__ key (raw SQL only) fails the compare-and-set closed, writes nothing, and never reaches retention through Prisma writes', async () => {
+    await setup(h.A, { submittedDaysAgo: 3, anchorDaysAgo: 3 });
+    const sid = sessionIdOf(h.A);
+    const session = await h.owner.session.findUniqueOrThrow({ where: { id: sid } });
+    await h.owner
+      .$executeRaw`UPDATE invitations SET accommodations = '{"__proto__":{"x":1},"identityCheckWaiver":{"reasonNote":"private"}}'::jsonb WHERE id = ${session.invitationId}::uuid`;
+    const b = build();
+    await expect(
+      b.orgContext.runInOrg(h.A.orgId, () =>
+        b.prisma.client.$transaction((tx) =>
+          b.repo.casAccommodations(tx, sid, () => ({ identityCheckWaived: true })),
+        ),
+      ),
+    ).rejects.toThrow(/accommodations changed/);
+    const stored = await h.owner.invitation.findUniqueOrThrow({
+      where: { id: session.invitationId },
+    });
+    expect(JSON.stringify(stored.accommodations)).toContain('private');
+  });
 });
