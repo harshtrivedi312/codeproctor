@@ -28,6 +28,14 @@ void describe('permission matrix skeleton (FR-103)', () => {
     for (const role of ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'REVIEWER'] as const) {
       for (const p of ROLE_PERMISSIONS[role]) assert.equal(candidate.has(p), false, `${role} ${p}`);
     }
+    // Staff lists are built by subtracting CANDIDATE_PERMISSIONS: a candidate_* permission missing
+    // from that list would leak to SUPER_ADMIN, so check the prefix as well.
+    for (const role of ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'REVIEWER'] as const) {
+      for (const p of ROLE_PERMISSIONS[role])
+        assert.equal(p.startsWith('candidate_'), false, `${role} ${p}`);
+    }
+    assert.equal(hasPermission('SUPER_ADMIN', 'candidate_session:key'), false);
+    assert.equal(hasPermission('CANDIDATE', 'candidate_session:heartbeat'), true);
     assert.equal(hasPermission('CANDIDATE', 'review_session:read'), false);
     assert.equal(hasPermission('CANDIDATE', 'candidate_events:write'), true);
   });
