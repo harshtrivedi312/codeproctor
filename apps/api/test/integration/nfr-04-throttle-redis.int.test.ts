@@ -10,6 +10,7 @@ import { API, boot, createUser, Harness, login, PASSWORD, signIn } from '../supp
 
 const DEFAULT_LIMIT = 5;
 const AUTH_LIMIT = 3;
+const TTL_MS = 600_000;
 
 const getTests = (h: Harness, token: string): request.Test =>
   request(h.app.getHttpServer()).get(`${API}/tests`).set('Authorization', `Bearer ${token}`);
@@ -26,6 +27,8 @@ async function statusesUntilLimited(
   throw new Error(`no 429 within ${max} calls (last status ${last?.status})`);
 }
 
+// The four tests below run in order and share state on purpose (one limit used up, then seen from
+// other instances, then after a restart); they are one scenario split for readable reports.
 describe('NFR-04 FU-BE-1: throttle counters are shared across instances and survive a restart', () => {
   let a: Harness;
   let b: Harness | undefined;
@@ -38,6 +41,8 @@ describe('NFR-04 FU-BE-1: throttle counters are shared across instances and surv
       env: {
         THROTTLE_DEFAULT_LIMIT: String(DEFAULT_LIMIT),
         THROTTLE_AUTH_LIMIT: String(AUTH_LIMIT),
+        // Long window: a slow runner must not let a counter expire between the tests below.
+        THROTTLE_TTL_MS: String(TTL_MS),
       },
     });
     const u = await createUser(a, { role: UserRole.RECRUITER });
@@ -81,14 +86,18 @@ describe('NFR-04 FU-BE-1: throttle counters are shared across instances and surv
       for (const k of keys) expect(k).toMatch(shape);
       expect(keys.some((k) => k.startsWith('throttle:default:'))).toBe(true);
       expect(keys.some((k) => k.startsWith('throttle:auth:'))).toBe(true);
+      // The 64-hex shape check above already excludes any address, email or token, so the next
+      // three lines are documentation; only the sha256(email) check adds information.
       const joined = keys.join('\n');
       expect(joined).not.toContain('127.0.0.1');
       expect(joined).not.toContain(email);
       expect(joined).not.toContain(token);
       expect(joined).not.toContain(createHash('sha256').update(email).digest('hex'));
-      // Every counter has a TTL (a key without one would limit for ever).
-      for (const k of keys.filter((x) => !x.endsWith(':block'))) {
-        expect(await redis.pttl(k)).toBeGreaterThan(0);
+      // Every key (counters and :block markers) has a TTL within the window (none limits for ever).
+      for (const k of keys) {
+        const ttl = await redis.pttl(k);
+        expect(ttl).toBeGreaterThan(0);
+        expect(ttl).toBeLessThanOrEqual(TTL_MS);
       }
     } finally {
       redis.disconnect();
@@ -133,6 +142,7 @@ describe('NFR-04 FU-BE-1: Redis down at the throttle guard', () => {
       .get(`${API}/health`)
       .timeout({ response: 30000, deadline: 40000 });
     expect(health.status).toBe(503);
+    expect(health.headers['content-type']).toContain('application/problem+json');
     expect((health.body as { detail: string }).detail).toContain('redis');
     expect(JSON.stringify(health.body)).not.toContain('Service is temporarily unavailable.');
   }, 120000);

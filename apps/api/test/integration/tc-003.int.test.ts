@@ -706,10 +706,12 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
 describe('TC-003 (FR-102): replay store outage reaches the handlers', () => {
   const HANDLER_503 = 'Verification is temporarily unavailable.';
   let h: Harness;
+  let spy: jest.SpyInstance | undefined;
   beforeAll(async () => {
     h = await boot({ memoryThrottle: true });
   });
   afterAll(async () => {
+    spy?.mockRestore();
     await h?.close();
   });
   const post = (path: string): request.Test =>
@@ -731,8 +733,23 @@ describe('TC-003 (FR-102): replay store outage reaches the handlers', () => {
   let verifyCase: { id: string; challengeToken: string };
   let disableCase: { id: string; accessToken: string };
   let confirmCase: { id: string; challengeToken: string; code: string };
+  let recoveryCase: { id: string; challengeToken: string; code: string };
+  let recruiterToken: string;
   let auditBefore: number;
   beforeAll(async () => {
+    const rec = await createUser(h, { role: UserRole.RECRUITER });
+    recruiterToken = (await signIn(h, rec.email)).Authorization.replace('Bearer ', '');
+    const r = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
+    const code = 'QRSTUVWXYZABCDEF';
+    await h.owner.user.update({
+      where: { id: r.id },
+      data: { recoveryCodeHashes: [sha256Hex(code)] },
+    });
+    recoveryCase = {
+      id: r.id,
+      code,
+      challengeToken: ((await login(h, r.email).expect(200)).body as Body).challengeToken,
+    };
     const u = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
     verifyCase = {
       id: u.id,
@@ -757,12 +774,27 @@ describe('TC-003 (FR-102): replay store outage reaches the handlers', () => {
       code: authenticator.generate(eStart.manualKey),
     };
     auditBefore = await h.owner.auditLog.count();
-    h.skipFreshnessCheck();
     await h.infra.redis.stop();
   }, 120000);
 
+  // No isFresh spy here: the JWT guard's own freshness check is the layer under test. A valid token
+  // on a route whose handler never touches Redis must NOT be served (a fail-open guard would 200).
+  it('TC-003: with Redis down and no bypass, a valid access token on GET /tests is refused by the guard with 503 and no data', async () => {
+    const res = await slow(
+      request(h.app.getHttpServer())
+        .get(`${API}/tests`)
+        .set('Authorization', `Bearer ${recruiterToken}`),
+    );
+    expect(res.status).toBe(503);
+    expect(res.headers['content-type']).toContain('application/problem+json');
+    expect((res.body as Body).detail).toBe(HANDLER_503);
+    expect(Array.isArray(res.body)).toBe(false);
+    expect((res.body as { items?: unknown }).items).toBeUndefined();
+  }, 90000);
+
   it('TC-003: with Redis down, /2fa/disable with correct factors answers the handler 503, keeps 2FA on, revokes nothing and counts no failure', async () => {
     const before = await row(disableCase.id);
+    spy = h.skipFreshnessCheck();
     expectHandler503(
       await slow(
         post('2fa/disable')
@@ -770,6 +802,7 @@ describe('TC-003 (FR-102): replay store outage reaches the handlers', () => {
           .send({ currentPassword: PASSWORD, totpCode: authenticator.generate(TOTP_SECRET) }),
       ),
     );
+    expect(spy).toHaveBeenCalled(); // the bypass took effect, so the handler is what answered
     const after = await row(disableCase.id);
     expect(after.totpEnabled).toBe(true);
     expect(after.totpSecretEnc).toBe(before.totpSecretEnc);
@@ -796,6 +829,23 @@ describe('TC-003 (FR-102): replay store outage reaches the handlers', () => {
     );
     expect(await h.owner.refreshToken.count({ where: { userId: verifyCase.id } })).toBe(0);
     expect((await row(verifyCase.id)).failedLogins).toBe(before.failedLogins);
+  }, 90000);
+
+  it('TC-003: with Redis down, /2fa/verify with a correct RECOVERY code answers the handler 503: no session, the code is not consumed, nothing counted', async () => {
+    const before = await row(recoveryCase.id);
+    expect(before.recoveryCodeHashes).toHaveLength(1);
+    expectHandler503(
+      await slow(
+        post('2fa/verify').send({
+          challengeToken: recoveryCase.challengeToken,
+          code: recoveryCase.code,
+        }),
+      ),
+    );
+    const after = await row(recoveryCase.id);
+    expect(after.recoveryCodeHashes).toEqual(before.recoveryCodeHashes);
+    expect(after.failedLogins).toBe(before.failedLogins);
+    expect(await h.owner.refreshToken.count({ where: { userId: recoveryCase.id } })).toBe(0);
   }, 90000);
 
   it('TC-003: with Redis down, /2fa/enroll/confirm with a correct code answers the handler 503: 2FA stays off, no recovery codes, no session', async () => {

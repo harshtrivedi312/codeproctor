@@ -257,10 +257,12 @@ suite('TC-004 TC-006: invite re-issue route', () => {
 // the re-issue handler (UsersService.takeInviteSlot) and ITS fail-closed branch is what answers.
 suite('TC-004: invite re-issue with Redis down', () => {
   let h: Harness;
+  let spy: jest.SpyInstance | undefined;
   beforeAll(async () => {
     h = await boot({ memoryThrottle: true });
   });
   afterAll(async () => {
+    spy?.mockRestore();
     await h?.close();
   });
 
@@ -271,11 +273,12 @@ suite('TC-004: invite re-issue with Redis down', () => {
       .setPasswordTokenHash;
     const before = (await h.owner.auditLog.findFirst({ orderBy: { id: 'desc' } }))?.id ?? 0n;
     const mailsBefore = h.mails.length;
-    h.skipFreshnessCheck();
+    spy = h.skipFreshnessCheck();
     await h.infra.redis.stop();
     const res = await call(h, 'POST', reissuePath(target.id), admin.token, {
       currentPassword: PASSWORD,
     }).timeout({ response: 30000, deadline: 40000 });
+    expect(spy).toHaveBeenCalled(); // the bypass took effect, so the handler is what answered
     expect(res.status).toBe(503);
     expect(res.headers['content-type']).toContain('application/problem+json');
     // The handler's own text; the throttler's 503 says "Service is temporarily unavailable."

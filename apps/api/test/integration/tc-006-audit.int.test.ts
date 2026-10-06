@@ -278,9 +278,7 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
               const started = rows.find(
                 (r) => r.action === 'QUESTION_VALIDATION_STARTED',
               ) as AuditLog;
-              const finished = rows.filter((r) => r.action === 'QUESTION_VALIDATION_FINISHED');
-              expect(finished).toHaveLength(1);
-              const row = finished[0] as AuditLog;
+              const row = rows.find((r) => r.action === 'QUESTION_VALIDATION_FINISHED') as AuditLog; // exactly one, by the pair check above
               expect([row.actorId, row.ip, row.entityId, row.orgId]).toEqual([
                 null,
                 null,

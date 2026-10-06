@@ -56,9 +56,10 @@ export interface Harness {
    * the JWT guard's own Redis freshness check (TokenValidityService.isFresh) answers the same
    * "Verification is temporarily unavailable." as the handlers when Redis is down, so a protected
    * route would never reach its handler. This makes that one check pass so the HANDLER's own
-   * fail-closed path is what the test observes.
+   * fail-closed path is what the test observes. Returns the spy: assert it was called (so the
+   * bypass really took effect) and mockRestore() it in afterAll.
    */
-  skipFreshnessCheck(): void;
+  skipFreshnessCheck(): jest.SpyInstance;
   /** Closes only this app (infra, owner client and fixtures stay), to simulate an API restart. */
   stopApp(): Promise<void>;
   /** Puts the default (never executes, outcome ERROR) back. */
@@ -122,7 +123,9 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
   const mails: SentMail[] = [];
   let settle: () => Promise<void> = () => Promise.resolve();
   let settleValidationJobs: () => Promise<void> = () => Promise.resolve();
-  let skipFreshness: () => void = () => undefined;
+  let skipFreshness: () => jest.SpyInstance = () => {
+    throw new Error('harness: app not started');
+  };
   let port: ReferenceValidationPort = NO_EXECUTION_PORT;
   const switchingPort: ReferenceValidationPort = { validate: (r) => port.validate(r) };
   try {
@@ -132,7 +135,10 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
       // Each boot starts its OWN Redis container, so it is empty here; the flush is defensive, so a
       // test that counts to a throttle limit can never inherit counters (throttle:* keys now live
       // in Redis and outlive an app instance). A separate client, so the app's own client stays cold.
-      const redis = new Redis(infra.redis.getConnectionUrl());
+      const redis = new Redis(infra.redis.getConnectionUrl(), {
+        maxRetriesPerRequest: 1,
+        connectTimeout: 5000,
+      });
       try {
         await redis.flushall();
       } finally {
@@ -224,9 +230,7 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     const authService = app.get(AuthService);
     settle = () => authService.settleDeferred();
     const validity = app.get(TokenValidityService);
-    skipFreshness = () => {
-      jest.spyOn(validity, 'isFresh').mockResolvedValue(true);
-    };
+    skipFreshness = () => jest.spyOn(validity, 'isFresh').mockResolvedValue(true);
     const validation = app.get(ValidationService); // resolved once; settle and close use this instance
     settleValidationJobs = async () => {
       let timer: NodeJS.Timeout | undefined;
