@@ -1,54 +1,169 @@
 import type { Schemas } from '@/lib/api/client';
-import type { MockQuestion, MockVersion } from './question-seed';
+import { mockRevision } from './question-revision';
+import type { MockQuestion, MockTestCase, MockVersion } from './question-seed';
 
 /*
- * What a caller without question:update (a Recruiter) may see of a question (DL-32). ALLOWLIST
- * semantics: a field that is not named below is dropped, so a new field added to the mock question
- * never reaches the Recruiter by default. PROVISIONAL, pending the exact allowlist of BE-04a:
- * changing the list is a one-line edit of RECRUITER_QUESTION_FIELDS (and the matching schema
- * `QuestionDetailRedacted` in openapi.yaml).
+ * The two views of a question the mock API serves, built FIELD BY FIELD like the real API's
+ * staff-view.ts (toFullVersion and toStaffReadVersion): never a spread of the stored row, so a
+ * field added to the mock question or version later is not exposed by accident. A caller without
+ * question:update (a Recruiter) gets the read view: no revision, reference solution, answer spec or
+ * validation report, and a hidden test case as id, position, isHidden and weight only (the input
+ * and expectedOutput keys are ABSENT, not null). The choice is made once, by the handler.
  */
-export const RECRUITER_QUESTION_FIELDS = [
+
+type VersionRef = Schemas['QuestionVersionRef'];
+type TestCase = Schemas['TestCase'];
+
+export const READ_VERSION_FIELDS = [
   'id',
-  'slug',
-  'title',
-  'type',
-  'status',
-  'difficulty',
-  'tags',
-  'statementMd',
   'version',
-  'updatedAt',
-  'starterCode',
-  'limits',
+  'isPublished',
+  'title',
+  'difficulty',
+  'validatedAt',
+  'createdAt',
+  'statementMd',
   'allowedLanguages',
-  'sampleTestCases',
+  'limits',
+  'starterCode',
+  'testCases',
 ] as const;
 
-export type RedactedQuestion = Schemas['QuestionDetailRedacted'];
+export const READ_DETAIL_FIELDS = [
+  'id',
+  'slug',
+  'type',
+  'tags',
+  'isArchived',
+  'createdAt',
+  'published',
+  'latest',
+  'versions',
+  'version',
+  'createdNewVersion',
+] as const;
 
-/**
- * Builds the Recruiter's view. The source is the question and the version flattened together with
- * everything they hold (so new fields are present in it on purpose), then only the allowlisted keys
- * are copied out. Visible sample cases carry input and expected output only: no id, no weight, no
- * hidden case, and nothing about hidden cases at all.
- */
-export function redactQuestion(
-  q: MockQuestion,
-  v: MockVersion,
-  status: Schemas['QuestionStatus'],
-): RedactedQuestion {
-  const source: Record<string, unknown> = {
-    ...q,
-    ...v,
-    status,
-    sampleTestCases: v.testCases
-      .filter((t) => !t.isHidden)
-      .map((t) => ({ input: t.input, expectedOutput: t.expectedOutput })),
+export function toVersionRef(v: MockVersion): VersionRef {
+  return {
+    id: v.id,
+    version: v.version,
+    isPublished: v.isPublished,
+    title: v.title,
+    difficulty: v.difficulty,
+    validatedAt: v.validatedAt,
+    createdAt: v.createdAt,
   };
-  const out: Record<string, unknown> = {};
-  for (const key of RECRUITER_QUESTION_FIELDS) {
-    if (key in source) out[key] = structuredClone(source[key]);
+}
+
+/** A test case. Without `full` a hidden case has no input and no expected output. */
+export function toTestCase(t: MockTestCase, full: boolean): TestCase {
+  const dto: TestCase = {
+    id: t.id,
+    position: t.position,
+    isHidden: t.isHidden,
+    weight: t.weight,
+  };
+  if (full || !t.isHidden) {
+    dto.input = t.input;
+    dto.expectedOutput = t.expectedOutput;
   }
-  return out as RedactedQuestion;
+  return dto;
+}
+
+const sortedCases = (cases: readonly MockTestCase[]): MockTestCase[] =>
+  [...cases].sort((a, b) => a.position - b.position || (a.id < b.id ? -1 : 1));
+
+export function revisionOf(v: MockVersion): string {
+  return mockRevision(v);
+}
+
+export function toFullVersion(v: MockVersion): Schemas['QuestionVersion'] {
+  return {
+    ...toVersionRef(v),
+    statementMd: v.statementMd,
+    allowedLanguages: [...v.allowedLanguages],
+    limits: { ...v.limits },
+    starterCode: { ...v.starterCode },
+    referenceSolution: { ...v.referenceSolution },
+    answerSpec: v.answerSpec ? structuredClone(v.answerSpec) : null,
+    validationReport: v.validationReport ? structuredClone(v.validationReport) : null,
+    revision: revisionOf(v),
+    testCases: sortedCases(v.testCases).map((t) => toTestCase(t, true)),
+  };
+}
+
+export function toReadVersion(v: MockVersion): Schemas['QuestionVersionRead'] {
+  return {
+    id: v.id,
+    version: v.version,
+    isPublished: v.isPublished,
+    title: v.title,
+    difficulty: v.difficulty,
+    validatedAt: v.validatedAt,
+    createdAt: v.createdAt,
+    statementMd: v.statementMd,
+    allowedLanguages: [...v.allowedLanguages],
+    limits: { ...v.limits },
+    starterCode: { ...v.starterCode },
+    testCases: sortedCases(v.testCases).map((t) => toTestCase(t, false)),
+  };
+}
+
+/** The visible versions of a question for this caller: writers see all, readers the published ones. */
+export function visibleVersions(q: MockQuestion, full: boolean): MockVersion[] {
+  return q.versions.filter((v) => full || v.isPublished);
+}
+
+export function toSummary(
+  q: MockQuestion,
+  versions: readonly MockVersion[],
+): Schemas['QuestionSummary'] {
+  const latest = versions[versions.length - 1]!;
+  const published = [...versions].reverse().find((v) => v.isPublished);
+  return {
+    id: q.id,
+    slug: q.slug,
+    type: q.type,
+    tags: [...q.tags],
+    isArchived: q.isArchived,
+    createdAt: q.createdAt,
+    published: published ? toVersionRef(published) : null,
+    latest: toVersionRef(latest),
+  };
+}
+
+export function toFullDetail(
+  q: MockQuestion,
+  chosen: MockVersion,
+  versions: readonly MockVersion[],
+  createdNewVersion: boolean,
+): Schemas['QuestionDetail'] {
+  return {
+    ...toSummary(q, versions),
+    versions: versions.map(toVersionRef),
+    version: toFullVersion(chosen),
+    createdNewVersion,
+  };
+}
+
+/** The Recruiter's detail: explicit keys only (QuestionDetailRedacted, additionalProperties false). */
+export function toReadDetail(
+  q: MockQuestion,
+  chosen: MockVersion,
+  versions: readonly MockVersion[],
+): Schemas['QuestionDetailRedacted'] {
+  const summary = toSummary(q, versions);
+  return {
+    id: summary.id,
+    slug: summary.slug,
+    type: summary.type,
+    tags: summary.tags,
+    isArchived: summary.isArchived,
+    createdAt: summary.createdAt,
+    published: summary.published,
+    latest: summary.latest,
+    versions: versions.map(toVersionRef),
+    version: toReadVersion(chosen),
+    createdNewVersion: false,
+  };
 }
