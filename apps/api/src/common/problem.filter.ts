@@ -9,6 +9,9 @@ import {
   Logger,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
+import { BODY_PARSER_DETAIL, bodyParserStatus } from './body-parsers';
+import { getEarlyRejection } from './early-rejection';
+import { resolveRequestId } from './request-id';
 import { OrgContextMissingError } from '../database/errors';
 import { scrubPrismaError } from '../database/error-scrub';
 import { CodedConflictException, CodedForbiddenException } from './coded.exception';
@@ -31,7 +34,10 @@ const TITLES: Record<number, string> = {
   401: 'Unauthorized',
   403: 'Forbidden',
   404: 'Not Found',
+  408: 'Request Timeout',
   409: 'Conflict',
+  413: 'Payload Too Large',
+  415: 'Unsupported Media Type',
   422: 'Unprocessable Entity',
   429: 'Too Many Requests',
   500: 'Internal Server Error',
@@ -47,18 +53,22 @@ export class ProblemFilter implements ExceptionFilter {
     const req = http.getRequest<Request>();
     const res = http.getResponse<Response>();
 
-    const inbound = req.headers['x-request-id'];
+    // Normally pino-http has set req.id. Errors raised before it (a body-parser failure) fall back
+    // to a validated inbound id or a fresh one, never a raw header value (FU-BE-12).
     const traceId =
-      typeof req.id === 'string' ? req.id : typeof inbound === 'string' ? inbound : '';
+      typeof req.id === 'string'
+        ? req.id
+        : resolveRequestId(req.headers['x-request-id'], req.originalUrl);
     // A query ran with no org context (a bug, or a public route that touches org data). It fails
     // closed with a fixed 403 that names nothing; the cause is logged by error name only, with
     // the trace id, so the bug is not masked (FR-103, TC-008).
     const noScope = exception instanceof OrgContextMissingError;
+    const parserStatus = bodyParserStatus(exception);
     const status = noScope
       ? HttpStatus.FORBIDDEN
       : exception instanceof HttpException
         ? exception.getStatus()
-        : HttpStatus.INTERNAL_SERVER_ERROR;
+        : (parserStatus ?? HttpStatus.INTERNAL_SERVER_ERROR);
 
     const problem: ProblemDetails = {
       type: 'about:blank',
@@ -71,6 +81,8 @@ export class ProblemFilter implements ExceptionFilter {
     if (noScope) {
       this.logger.error({ traceId, errorName: exception.name }, 'Query without an org context');
       problem.detail = 'Access denied.';
+    } else if (parserStatus !== undefined) {
+      problem.detail = BODY_PARSER_DETAIL[parserStatus];
     } else if (exception instanceof HttpException) {
       const body = exception.getResponse();
       if (typeof body === 'string') {
@@ -81,7 +93,12 @@ export class ProblemFilter implements ExceptionFilter {
           problem.detail = 'Request validation failed';
           problem.errors = message.map(String);
         } else if (typeof message === 'string') {
-          problem.detail = message;
+          // Nest's default 404 is `Cannot GET /path?query`: the query string may carry a token, so
+          // the route-not-found detail is fixed (FU-BE-13).
+          problem.detail =
+            status === 404 && message.startsWith(`Cannot ${req.method} `)
+              ? 'Route not found.'
+              : message;
         }
       }
       // Only our own coded exceptions may set `code`, and never on a 5xx.
@@ -107,6 +124,12 @@ export class ProblemFilter implements ExceptionFilter {
       );
     }
 
+    // A request refused before the throttler never had its body read: close the connection after
+    // the answer so the unread bytes are dropped (client-errors, FU-BE-100).
+    if (getEarlyRejection(req)) {
+      res.setHeader('Connection', 'close');
+      res.once('finish', () => req.destroy());
+    }
     res.status(status).type('application/problem+json').json(problem);
   }
 }

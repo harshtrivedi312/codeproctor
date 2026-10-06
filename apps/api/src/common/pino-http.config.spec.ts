@@ -12,6 +12,27 @@ describe('pinoHttp config (FR-101, FR-102, NFR-04)', () => {
     const req = options().serializers?.req as (r: object) => { url: string };
     expect(req({ id: 'a', method: 'GET', url: '/x?token=SECRET' }).url).toBe('/x');
   });
+
+  it('NFR-09, FU-BE-12: a malformed inbound id is replaced; a good one is kept', () => {
+    const gen = options().genReqId as (req: object, res: object) => string;
+    const res = { setHeader: jest.fn() };
+    expect(gen({ headers: { 'x-request-id': 'good-id-12345' }, url: '/api/v1/x' }, res)).toBe(
+      'good-id-12345',
+    );
+    expect(gen({ headers: { 'x-request-id': 'bad id\r\n<x>' }, url: '/api/v1/x' }, res)).toMatch(
+      /^[0-9a-f-]{36}$/,
+    );
+  });
+
+  it('FU-BE-95: the public client-errors route ignores the inbound id, in any case', () => {
+    const gen = options().genReqId as (req: object, res: object) => string;
+    const res = { setHeader: jest.fn() };
+    for (const url of ['/api/v1/client-errors', '/API/V1/Client-Errors?x=1']) {
+      expect(gen({ headers: { 'x-request-id': 'victim-trace-0001' }, url }, res)).toMatch(
+        /^[0-9a-f-]{36}$/,
+      );
+    }
+  });
 });
 
 function options(): ReturnType<typeof buildPinoHttpOptions> {

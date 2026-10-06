@@ -118,12 +118,14 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
       event: 'client_error',
       level: 'warn',
       reportedLevel: 'warn',
-      traceId: 'trace-client-err-1',
       userAgent: 'TestBrowser/1.0',
       route: '/candidate/session/[id]',
       release: 'web@1.0.0',
       url: 'https://app.example.test/candidate/s',
     });
+    // FU-BE-95: the inbound x-request-id is ignored on this public route.
+    expect(line['traceId']).toMatch(/^[0-9a-f-]{36}$/);
+    expect(res.headers['x-request-id']).toBe(line['traceId']);
     expect(String(line['message'])).toContain('Boom for');
     const dump = JSON.stringify(line);
     for (const secret of [
@@ -391,5 +393,85 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
     });
     expect(status).toBe(408);
     delete process.env['CLIENT_ERROR_BODY_TIMEOUT_MS'];
+  });
+
+  it('C-32, FU-BE-100: rejected bodies (413, 415, 400) count against the per-IP budget, then 429', async () => {
+    await restart({ CLIENT_ERROR_THROTTLE_LIMIT: '4' });
+    const url = '/api/v1/client-errors';
+    await request(app.getHttpServer())
+      .post(url)
+      .send({ message: 'x'.repeat(20_000) })
+      .expect(413);
+    await request(app.getHttpServer())
+      .post(url)
+      .set('content-type', 'text/plain')
+      .send('hello')
+      .expect(415);
+    await request(app.getHttpServer())
+      .post(url)
+      .set('content-type', 'application/json')
+      .send('{"message": ')
+      .expect(400);
+    const chunked = await rawChunkedPost(app, url, [Buffer.alloc(20_000, 0x61)]);
+    expect(chunked.status).toBe(413);
+    const res = await request(app.getHttpServer()).post(url).send({ message: 'ok' }).expect(429);
+    expect(res.headers['content-type']).toMatch(/application\/problem\+json/);
+    expect(lines).toHaveLength(0);
+  });
+
+  it('C-32, FU-BE-100: rejected bodies count against the whole-instance budget', async () => {
+    await restart({ CLIENT_ERROR_THROTTLE_LIMIT: '100', CLIENT_ERROR_GLOBAL_LIMIT: '2' });
+    for (let i = 0; i < 2; i += 1) {
+      await request(app.getHttpServer())
+        .post('/api/v1/client-errors')
+        .send({ message: 'x'.repeat(20_000) })
+        .expect(413);
+    }
+    await request(app.getHttpServer())
+      .post('/api/v1/client-errors')
+      .send({ message: 'ok' })
+      .expect(429);
+  });
+
+  it('C-32, FU-BE-100: a body that arrives too slowly (408) is counted too', async () => {
+    await restart({ CLIENT_ERROR_BODY_TIMEOUT_MS: '300', CLIENT_ERROR_THROTTLE_LIMIT: '1' });
+    const server = app.getHttpServer() as unknown as Server;
+    if (server.address() === null) await new Promise<void>((resolve) => server.listen(0, resolve));
+    const { port } = server.address() as AddressInfo;
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/api/v1/client-errors',
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+        },
+        (res) => {
+          resolve(res.statusCode ?? 0);
+          res.resume();
+          req.destroy();
+        },
+      );
+      req.on('error', (e) => (e.message.includes('socket hang up') ? undefined : reject(e)));
+      req.write('{"message":"slow');
+    });
+    expect(status).toBe(408);
+    await request(app.getHttpServer())
+      .post('/api/v1/client-errors')
+      .send({ message: 'ok' })
+      .expect(429);
+    delete process.env['CLIENT_ERROR_BODY_TIMEOUT_MS'];
+  });
+
+  it('C-32, FU-BE-95: an inbound x-request-id is not the traceId of a rejected report either', async () => {
+    await restart({});
+    const res = await request(app.getHttpServer())
+      .post('/api/v1/client-errors')
+      .set('x-request-id', 'victim-trace-0001')
+      .send({ message: 'x'.repeat(20_000) })
+      .expect(413);
+    expect((res.body as ProblemDetails).traceId).not.toBe('victim-trace-0001');
+    expect(res.headers['x-request-id']).toBe((res.body as ProblemDetails).traceId);
   });
 });

@@ -141,4 +141,39 @@ describe('NFR-04 environment validation', () => {
         .APP_ENV,
     ).toBe('staging');
   });
+
+  it('FU-BE-11: WEB_ORIGIN is normalised to a bare origin; paths, queries and credentials are refused', () => {
+    expect(validateEnv({ ...valid, WEB_ORIGIN: 'https://app.example.com/' }).WEB_ORIGIN).toBe(
+      'https://app.example.com',
+    );
+    expect(validateEnv({ ...valid, WEB_ORIGIN: 'HTTPS://App.Example.com:8443' }).WEB_ORIGIN).toBe(
+      'https://app.example.com:8443',
+    );
+    for (const bad of [
+      'https://app.example.com/app',
+      'https://app.example.com/?x=1',
+      'https://app.example.com/#f',
+      'https://user:pw@app.example.com',
+      'ftp://app.example.com',
+    ]) {
+      expect(() => validateEnv({ ...valid, WEB_ORIGIN: bad })).toThrow(/WEB_ORIGIN/);
+    }
+  });
+
+  it('FU-BE-98: HTTP server timeouts have bounded defaults, and headers must be below request', () => {
+    const env = validateEnv(valid);
+    expect(env.HTTP_HEADERS_TIMEOUT_MS).toBe(10_000);
+    expect(env.HTTP_REQUEST_TIMEOUT_MS).toBe(30_000);
+    expect(env.HTTP_KEEPALIVE_TIMEOUT_MS).toBe(65_000);
+    expect(env.HTTP_HEADERS_TIMEOUT_MS).toBeLessThan(env.HTTP_REQUEST_TIMEOUT_MS);
+    expect(() =>
+      validateEnv({ ...valid, HTTP_HEADERS_TIMEOUT_MS: '30000', HTTP_REQUEST_TIMEOUT_MS: '30000' }),
+    ).toThrow(/HTTP_HEADERS_TIMEOUT_MS/);
+    expect(() => validateEnv({ ...valid, HTTP_KEEPALIVE_TIMEOUT_MS: '0' })).toThrow(
+      /HTTP_KEEPALIVE_TIMEOUT_MS/,
+    );
+    expect(() => validateEnv({ ...valid, HTTP_KEEPALIVE_TIMEOUT_MS: '9999999' })).toThrow(
+      /HTTP_KEEPALIVE_TIMEOUT_MS/,
+    );
+  });
 });
