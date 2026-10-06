@@ -324,7 +324,7 @@ Results (scores, verdicts, reviewer notes, reports) are kept 1 year after the te
    - During a hold, the candidate's sessions that are not fenced proceed normally.
 5. **Late candidate-scope writes.** A draft or event request that passed the epoch check just before the fence can still commit after the blanking. The re-run (step 7) covers this.
 6. **Delete** as in the table above, and run the database erasure steps.
-7. **Re-run** the prefix delete **and the idempotent database erasure steps** (including the accommodations reduction under ADR 0015 §6(b)) at the fence time + 60 s + `STORAGE_SWEEP_MARGIN_SECONDS`, matching ADR 0013. It runs as a delayed job.
+7. **Re-run** the prefix delete **and the idempotent database erasure steps** (including the accommodations reduction under ADR 0015 §6(b), which runs in its own org-job-scope transaction at the pinned erasure call site and not inside the `withAnySession` transaction) at the fence time + 60 s + `STORAGE_SWEEP_MARGIN_SECONDS`, matching ADR 0013. It runs as a delayed job.
    - **Scope: only the candidate's ERASED sessions.** A session still on hold (UNDER_REVIEW, APPEALED) is not touched, so the C-06 hold stands, and it never fails verification or pages during the hold.
    - Each retry re-lists every **ERASED** session prefix of the candidate, so it never needs per-session markers.
    - It verifies that the prefixes are empty and that no erased rows remain (events, batches, submissions code, notes and so on).
