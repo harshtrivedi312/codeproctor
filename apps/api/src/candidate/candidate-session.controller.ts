@@ -58,7 +58,7 @@ export class CandidateSessionController {
     private readonly limiter: SessionRateLimiter,
   ) {}
 
-  // TODO(hub PR #113): @CandidateRoute('candidate_session:read') once the permission exists in shared.
+  @CandidateRoute('candidate_session:read')
   @Get()
   @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Session state with the server clock (a reload, FR-505)' })
@@ -130,7 +130,7 @@ export class CandidateSessionController {
     return this.consent.decline(ctx, { ip: req.ip, userAgent: req.headers['user-agent'] });
   }
 
-  // TODO(hub PR #113): @CandidateRoute('candidate_session:start').
+  @CandidateRoute('candidate_session:start')
   @Post('test/start')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)
@@ -161,7 +161,7 @@ export class CandidateSessionController {
     };
   }
 
-  // TODO(hub PR #113): @CandidateRoute('candidate_session:heartbeat').
+  @CandidateRoute('candidate_session:heartbeat')
   @Post('heartbeat')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)
@@ -190,7 +190,7 @@ export class CandidateSessionController {
     };
   }
 
-  // TODO(hub PR #113): @CandidateRoute('candidate_session:key').
+  @CandidateRoute('candidate_session:key')
   @Post('proctor-key')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)

@@ -110,9 +110,19 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
     principal: 'CANDIDATE',
     permission: 'candidate_consent:decline',
   },
-  // TODO(BE-07, hub PR #113): GET /candidate/session, POST /candidate/session/test/start,
-  // /heartbeat and /proctor-key need candidate_session:read, :start, :heartbeat and :key in
-  // packages/shared. Add the four entries here and @CandidateRoute(...) on the handlers then.
+  'GET /candidate/session': { principal: 'CANDIDATE', permission: 'candidate_session:read' },
+  'POST /candidate/session/test/start': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:start',
+  },
+  'POST /candidate/session/heartbeat': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:heartbeat',
+  },
+  'POST /candidate/session/proctor-key': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:key',
+  },
 
   // Authentication (FR-101, FR-102, FR-104, FR-107). Public: the credential is in the body.
   'POST /auth/login': 'public',
