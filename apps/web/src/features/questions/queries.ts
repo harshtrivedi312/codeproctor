@@ -254,6 +254,25 @@ export function slotsSignature(v: ServerVersion, ids = true): string {
   return JSON.stringify([cases, variants]);
 }
 
+const CONTENT_FIELDS = [
+  'title',
+  'statementMd',
+  'difficulty',
+  'allowedLanguages',
+  'limits',
+  'starterCode',
+  'referenceSolution',
+  'answerSpec',
+] as const;
+
+/**
+ * The content fields the revision covers besides the slots. `omit` leaves out the fields a PATCH
+ * sent itself (the server stored ours, so only the ones we did NOT send can show someone else's edit).
+ */
+export function contentSignature(v: ServerVersion, omit: readonly string[] = []): string {
+  return JSON.stringify(CONTENT_FIELDS.filter((k) => !omit.includes(k)).map((k) => v[k] ?? null));
+}
+
 /** The expected state after one of our own writes, built from the last confirmed one. */
 const upsertCase = (v: ServerVersion, c: ServerCase): ServerVersion => ({
   ...v,
@@ -355,7 +374,10 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
     if (!isFullQuestion(back)) throw new ApiFailure(403, 'Your role cannot edit this question.');
     if (
       back.version.version !== expected.version ||
-      slotsSignature(back.version) !== slotsSignature(expected)
+      slotsSignature(back.version) !== slotsSignature(expected) ||
+      // The revision covers the content too: another author's edit of the statement or the title
+      // is not ours either, even when the slots are exactly what we expect.
+      contentSignature(back.version) !== contentSignature(expected)
     ) {
       throw new ApiFailure(
         409,
@@ -399,7 +421,7 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
       const keepIds = new Set(desired.map((d) => d.id));
       for (const old of loaded.variants) {
         if (keepIds.has(old.id)) continue;
-        blockDone: {
+        {
           stillSame();
           const r = await api.DELETE(
             '/v1/questions/{questionId}/versions/{version}/variants/{variantId}',
@@ -419,7 +441,6 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
           }
           wrote = true;
           await confirm(dropVariant(known, old.id));
-          break blockDone;
         }
       }
     }
@@ -438,9 +459,11 @@ export async function saveQuestion(id: string, input: SaveInput): Promise<SaveRe
     // The PATCH answers a revision, but its answer is read after its transaction: its test cases and
     // variants must be what they were (a fork: copies of them), or another editor wrote in between.
     confirmed = null;
+    const sent = Object.keys(input.update);
     if (
       slotsSignature(first.version, !createdNewVersion) !==
-      slotsSignature(known, !createdNewVersion)
+        slotsSignature(known, !createdNewVersion) ||
+      contentSignature(first.version, sent) !== contentSignature(known, sent)
     ) {
       throw new ApiFailure(
         409,

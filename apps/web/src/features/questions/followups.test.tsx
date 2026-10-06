@@ -14,7 +14,7 @@ import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav } from '@/test/nav-mock';
 import { aiReferenceFormSchema } from './ai-schema';
 import { QuestionEditorRoute } from './question-pages';
-import { questionKeys, slotsSignature } from './queries';
+import { contentSignature, questionKeys, slotsSignature } from './queries';
 import { ValidationPanel } from './validation-panel';
 
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
@@ -1019,5 +1019,125 @@ describe('The AI policy follows the session (FR-103)', () => {
       .map((q) => q.queryKey.join('/'));
     expect(keys.some((k) => k.includes('ai-policy'))).toBe(false);
     expect(keys.some((k) => k.includes('/ai/'))).toBe(false);
+  });
+});
+
+describe('The read-back also checks the content the revision covers (silent overwrite via content fields)', () => {
+  /** Another author edits the title as the read-back after our first unconfirmed write is answered. */
+  function theirTitleOnSecondRead(writes: string[]): void {
+    let gets = 0;
+    server.events.on('request:start', ({ request }) => {
+      if (
+        ['POST', 'PATCH', 'PUT', 'DELETE'].includes(request.method) &&
+        request.url.includes('/q-rotate')
+      ) {
+        writes.push(`${request.method} ${new URL(request.url).pathname}`);
+      }
+    });
+    server.use(
+      http.get(`${base}/q-rotate`, async () => {
+        gets += 1;
+        // 1st is the loader, the 2nd the read-back of our first write that answers no revision.
+        if (gets === 2) await call('AUTHOR', 'PATCH', `${V}/q-rotate`, { title: 'Theirs' });
+        return undefined;
+      }),
+    );
+  }
+
+  it('FR-204 (a): a removed draft variant, then their title edit before the read-back: the save stops, their title stays and our content PATCH is never sent', async () => {
+    const writes: string[] = [];
+    theirTitleOnSecondRead(writes);
+    const u = await openEditor('q-rotate');
+    await u.type(screen.getByLabelText('Title'), ' (ours)');
+    await goTab(u, 'Variants');
+    await u.click(screen.getByRole('button', { name: 'Remove Variant 2' }));
+    await u.click(saveButton());
+    expect(
+      await screen.findByText(/found that the question changed meanwhile/),
+    ).toBeInTheDocument();
+    expect((await detail('q-rotate')).version.title).toBe('Theirs');
+    // After the injected edit nothing more of ours was written (the statement PATCH would have been next).
+    expect(writes.filter((w) => w === 'PATCH /v1/questions/q-rotate')).toHaveLength(1); // theirs only
+    await goTab(u, 'Statement');
+    expect(screen.getByLabelText('Title')).toHaveValue('Rotate an array (ours)');
+  });
+
+  it('FR-204 (b): after the content PATCH, a test-case write whose read-back already holds their title edit stops the save and the retry is not adopted over it', async () => {
+    const writes: string[] = [];
+    theirTitleOnSecondRead(writes);
+    const u = await openEditor('q-rotate');
+    await u.type(screen.getByLabelText('Title'), ' (ours)');
+    await goTab(u, 'Test cases');
+    await setText(u, screen.getByLabelText('Input of test 1'), 'ours one');
+    await setText(u, screen.getByLabelText('Input of test 2'), 'ours two');
+    await u.click(saveButton());
+    expect(
+      await screen.findByText(/found that the question changed meanwhile/),
+    ).toBeInTheDocument();
+    // Our content PATCH went first, then their title edit overwrote ours: theirs is the latest.
+    expect((await detail('q-rotate')).version.title).toBe('Theirs');
+    const testCaseWrites = writes.filter((w) => w.includes('/test-cases/'));
+    expect(testCaseWrites).toHaveLength(1); // the second case was never written
+    // The editor did not adopt their revision: another Save is a plain 409, their title is intact.
+    server.resetHandlers();
+    await u.click(saveButton());
+    await waitFor(() =>
+      expect(screen.getByText('This question changed since you opened it')).toBeInTheDocument(),
+    );
+    expect((await detail('q-rotate')).version.title).toBe('Theirs');
+  });
+
+  it('pure: the content signature sees every field the revision covers, and ignores the ones a PATCH sent', () => {
+    const base = {
+      title: 't',
+      statementMd: 's',
+      difficulty: 'EASY',
+      allowedLanguages: ['python'],
+      limits: { cpuMs: 1, wallMs: 2, memoryKb: 3 },
+      starterCode: {},
+      referenceSolution: {},
+      answerSpec: null,
+    } as unknown as Parameters<typeof contentSignature>[0];
+    for (const change of [
+      { title: 'u' },
+      { statementMd: 'x' },
+      { difficulty: 'HARD' },
+      { limits: { cpuMs: 9, wallMs: 2, memoryKb: 3 } },
+    ]) {
+      expect(contentSignature({ ...base, ...change } as typeof base)).not.toBe(
+        contentSignature(base),
+      );
+    }
+    expect(contentSignature({ ...base, title: 'u' }, ['title'])).toBe(
+      contentSignature(base, ['title']),
+    );
+  });
+});
+
+describe('The first write of a save is refused for AI rows (should-fix 2)', () => {
+  it('AI-1: a coded 409 on the very first call still puts the variant back, inactive, with nothing written', async () => {
+    server.use(
+      http.delete(`${base}/q-rotate/versions/1/variants/ro-v2`, () =>
+        HttpResponse.json(
+          {
+            type: 'about:blank',
+            title: 'Conflict',
+            status: 409,
+            detail: 'x',
+            code: 'VARIANT_HAS_AI_REFERENCES',
+          },
+          { status: 409 },
+        ),
+      ),
+    );
+    const u = await openEditor('q-rotate');
+    await goTab(u, 'Variants');
+    await u.click(screen.getByRole('button', { name: 'Remove Variant 2' }));
+    await u.click(saveButton());
+    expect(await screen.findByText(/Variant 2 was put back, set inactive/)).toBeInTheDocument();
+    expect(screen.queryByText(/Some of your changes were saved/)).not.toBeInTheDocument();
+    const card = screen.getByRole('region', { name: 'Variant 2' });
+    expect(within(card).getByRole('checkbox', { name: /Active.*for Variant 2/ })).not.toBeChecked();
+    expect((await detail('q-rotate')).version.variants).toHaveLength(2);
   });
 });

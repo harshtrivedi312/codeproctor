@@ -40,6 +40,7 @@ import {
   fetchValidation,
   asReport,
   isVariantHasAiRefs,
+  VariantBlockedFailure,
   useAiPolicy,
 } from './queries';
 import { AiTab } from './tabs/ai-tab';
@@ -325,7 +326,12 @@ export function QuestionEditor({
   async function explainSaveFailure(e: unknown): Promise<void> {
     if (isVariantHasAiRefs(e)) {
       const partial = e instanceof PartialSaveFailure;
-      const blocked = e instanceof PartialSaveFailure ? e.blockedVariantId : null;
+      const blocked =
+        e instanceof PartialSaveFailure
+          ? e.blockedVariantId
+          : e instanceof VariantBlockedFailure
+            ? e.variantId
+            : null;
       const name = blocked !== null && !(partial && e.forked) ? restoreVariant(blocked) : null;
       const message = `This variant has AI reference solutions, which are never deleted, so it cannot be removed.${
         name ? ` ${name} was put back, set inactive.` : ' Set it inactive instead.'
@@ -407,9 +413,10 @@ export function QuestionEditor({
       meantime();
       return;
     }
+    // The session of the save is the one that counts: another one never makes this request.
+    if (e.generation !== getGeneration() || !alive.current) return;
     try {
       const fresh = await fetchQuestion(meta.questionId ?? '');
-      // The session of the save is the one that counts, and the editor must still be there.
       if (e.generation !== getGeneration() || !alive.current || !isFullQuestion(fresh)) return;
       if (fresh.version.version !== meta.version || fresh.version.revision !== e.lastRevision) {
         meantime();
