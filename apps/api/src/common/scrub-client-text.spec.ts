@@ -215,6 +215,8 @@ describe('scrubClientText (NFR-04, C-32)', () => {
       ['login failed password=\\Tr0ub4dor', /Tr0ub4dor/],
       ['password=ab\\cd', /cd/],
       ['postgres://app:Xk3%2F9pQ@localhost:5432/db', /Xk3|9pQ|app:/],
+      ['postgres://admin@corp.com:S3cretPass@localhost:5432/db', /S3cretPass|admin@corp/],
+      ['postgres://admin@corp.com:S3cretPass@10.0.0.5:5432/db', /S3cretPass|admin@corp/],
       ['postgres://app:p%40ss@localhost:5432/db', /ss@|p%40|app:/],
       ['https://u:hun!ter@db.example.com', /hun|u:/],
       ['wss://u:pw@host:1', /u:pw/],

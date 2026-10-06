@@ -62,8 +62,9 @@ const OTP_ARRAY = new RegExp(
   'gi',
 );
 // `scheme://user:password@host`: the userinfo of a connection string or URL.
-// The password runs to the last `@` within 200 characters (it may hold `/`, `%40` or `@`).
-const USERINFO = /\b([a-z][a-z0-9+.-]{1,20}):\/\/[^\s/@:]{1,100}:[^\s]{1,200}@/gi;
+// The user ends at the first `:` and may itself hold `@` (user@server logins); the password runs
+// to the last `@` within 200 characters (it may hold `/`, `%40` or `@`).
+const USERINFO = /\b([a-z][a-z0-9+.-]{1,20}):\/\/[^\s/:]{1,100}:[^\s]{1,200}@/gi;
 // 6 to 8 digits, with one optional space or dash between digits (482-913).
 const DIGITS = String.raw`(?<!\d)\d(?:[ -]?\d){5,7}(?!\d)`;
 const OTP_AFTER_WORD = new RegExp(
