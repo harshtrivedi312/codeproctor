@@ -241,7 +241,7 @@ It fails with a clear message if `app_user` is missing. `DATABASE_URL` connects 
 
 ## 11. Deltas after the freeze (2026-10-06)
 
-The target of section 1 stays the freeze of 2026-10-01. These forward-only deltas were decided afterwards. Each has its own ADR or owner decision, and each is in `docs/database.md`. The migrations are Database A's (PRs #91 and #100 and the D-55 migration; `app_user_no_temp` is on main).
+The target of section 1 stays the freeze of 2026-10-01. These forward-only deltas were decided afterwards. Each has its own ADR or owner decision, and each is in `docs/database.md`. The migrations are Database A's (PRs #91 and #100; `app_user_no_temp` is on main). The D-55 column `consents.age_confirmed_at` is added here when its migration lands.
 
 | Delta | Source | Change |
 | --- | --- | --- |
@@ -252,7 +252,6 @@ The target of section 1 stays the freeze of 2026-10-01. These forward-only delta
 | Grants | FU-DBB-18 (migration `app_user_no_temp`, on main) | `REVOKE TEMPORARY ON DATABASE <current database> FROM PUBLIC`, `REVOKE TEMPORARY, CREATE ... FROM app_user`, and `GRANT TEMPORARY ... TO` the database owner, so `app_user` has no TEMPORARY or CREATE on the database (ADR 0006 section 8.8, DL-26). |
 | `identity_check_status` | ADR 0015 (D-54) | + value `WAIVED`. |
 | `identity_checks` | ADR 0015 (D-54) | + columns `video_check_done`, `video_check_by` (foreign key to `users`, `ON DELETE NO ACTION`), `video_check_at`; + CHECKs `identity_checks_waived_check` and `identity_checks_video_check_check`. |
-| `consents` | C-30, D-55 | + column `age_confirmed_at timestamptz` (NULL on decline and on rows before C-30); no CHECK is added: `ConsentService` requires the confirmation at sign (ADR 0013 CS-4.4), and a CHECK would also block updates of rows signed before C-30. |
 
 Totals against section 1: tables 31 (unchanged); enum types 20 (unchanged; `appeal_status` and `identity_check_status` join `session_status`, `proctor_profile` and `event_type` as changed); CHECK constraints 12 to 14 (the two of ADR 0015); non-unique indexes 24 to 25 (partial indexes 2 to 3); foreign keys +1 (`identity_checks.video_check_by`, no ON DELETE clause, so NO ACTION; ON DELETE CASCADE 22, SET NULL 1 and composite 3 unchanged); no new triggers. The JSON key `accommodations.identityCheckWaived` and the `retention_anchor_at` rules are not schema changes.
 

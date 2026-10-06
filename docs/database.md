@@ -5,7 +5,7 @@ PostgreSQL 16 holds 31 tables in six groups: identity, content, delivery, procto
 Updated 2026-10-01 by ARC-01 Phase B. The changes come from ADRs 0002 to 0007 (accepted by D-16) and decisions D-17 to D-23. /docs/adr/0008-schema-freeze-list.md lists every delta against the original design (commit 7f5c6b9). Updated 2026-10-02: the roles and grants comment follows D-35 (ADR 0006 section 7); no table, column or enum changed.
 
 Updated 2026-10-06 for D-54, which accepted the ADR 0004 section 9 amendment, ADR 0013 and ADR 0015:
-- **Schema deltas:** `consents.age_confirmed_at` (C-30, D-55; no CHECK: `ConsentService` requires the confirmation at sign, ADR 0013 CS-4.4, because a CHECK would also block updates of rows signed before C-30, such as the consent-PDF job's writes); the enum values `session_status` ERASED, `appeal_status` CLOSED_ERASED and `identity_check_status` WAIVED; three `identity_checks` video-check columns with one foreign key and two CHECK constraints; one partial index on `audit_logs`; and `REVOKE DELETE, TRUNCATE ON sessions`. There are no new tables or enum types.
+- **Schema deltas:** the enum values `session_status` ERASED, `appeal_status` CLOSED_ERASED and `identity_check_status` WAIVED; three `identity_checks` video-check columns with one foreign key and two CHECK constraints; one partial index on `audit_logs`; and `REVOKE DELETE, TRUNCATE ON sessions`. There are no new tables or enum types.
 - **Data rules:** the retention tiers, R-9 and R-10, the amended erasure, and the identity-check waiver.
 - **Comments:** `batch_seq`, `hmac_key_enc` and `device_info` follow ADR 0013.
 - **Built status (2026-10-06).** None of these deltas is on main yet. The migrations are in open PRs #91 (ADR 0004 section 9: `session_status_erased`, `appeal_status_closed_erased`, `retention_marker_index_and_no_session_delete`) and #100 (ADR 0015: `identity_check_waived_enum`, `identity_check_waiver_columns`); the timestamps in their names change when they are rebased (FU-DB-168), so only the suffixes are cited here. Their SQL matches the DDL below.
@@ -540,7 +540,6 @@ CREATE TABLE consents (
   signed_name       text,                     -- full legal name typed by the candidate
   signed_at         timestamptz,              -- server time of signing
   declined_at       timestamptz,              -- server time of declining
-  age_confirmed_at  timestamptz,              -- server time of the 18+ confirmation (C-30, D-55); set at sign, NULL on decline and on rows before C-30
   ip                inet,
   user_agent        text,
   pdf_key           text,                     -- signed PDF in object storage; kept through erasure, deleted with the row at R-9 (3 years)
