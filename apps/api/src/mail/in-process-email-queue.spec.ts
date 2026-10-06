@@ -186,4 +186,18 @@ describe('FU-BE-21 in-process email queue', () => {
     await q.idle();
     expect(cap.lines.some((l) => l.includes('dropped (stopped)'))).toBe(true);
   });
+
+  it('FU-BE-21: stop logs abandoned in-flight sends separately from waiting jobs (counts only)', async () => {
+    const cap = capture();
+    const q = new InProcessEmailQueue(() => new Promise<void>(() => undefined), {
+      concurrency: 1,
+      logger: cap.logger,
+    });
+    await q.enqueue(job(1));
+    await q.enqueue(job(2));
+    q.stop();
+    expect(cap.lines).toContain('mail queue stopped, dropped 1 waiting jobs');
+    expect(cap.lines).toContain('mail queue stopped, abandoned 1 in-flight sends');
+    expect(cap.lines.join('\n')).not.toContain('example.com');
+  });
 });
