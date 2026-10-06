@@ -1,7 +1,12 @@
-import { ForbiddenException, HttpException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, HttpException } from '@nestjs/common';
 
 /** Machine-readable codes the problem filter copies into the RFC 7807 body as `code`. */
-export const PROBLEM_CODES = ['REAUTH_FAILED', 'TWO_FACTOR_REQUIRED_FOR_ROLE'] as const;
+export const PROBLEM_CODES = [
+  'REAUTH_FAILED',
+  'TWO_FACTOR_REQUIRED_FOR_ROLE',
+  'SETTINGS_CONFLICT',
+  'VARIANT_HAS_AI_REFERENCES',
+] as const;
 
 /**
  * Codes of the candidate session routes (BE-07, ADR 0013 section 5.1 and 5.10). Clients branch on
@@ -42,6 +47,16 @@ export type ProblemCode = (typeof PROBLEM_CODES)[number];
 
 /** A 403 that carries a stable machine code, so clients never have to match on `detail`. */
 export class CodedForbiddenException extends ForbiddenException {
+  constructor(
+    message: string,
+    readonly code: ProblemCode,
+  ) {
+    super({ message, code });
+  }
+}
+
+/** A 409 that carries a stable machine code (e.g. SETTINGS_CONFLICT after a lost compare-and-set). */
+export class CodedConflictException extends ConflictException {
   constructor(
     message: string,
     readonly code: ProblemCode,

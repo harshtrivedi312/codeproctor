@@ -2,7 +2,18 @@ import { AI_REFERENCE_LANGUAGES, type CodeLanguage } from '@codeproctor/shared';
 import type { Schemas } from '@/lib/api/client';
 
 export type AiReference = Schemas['AiReference'];
-export type AiPolicy = Schemas['AiReferencePolicy'];
+
+/**
+ * What the AI gate assumes. The API does NOT expose the organisation's policy to Authors (org
+ * settings are SUPER_ADMIN only): `minAssistants` is the API's own default (2, D-20) and is only a
+ * hint, because the API's 422 on publish is the truth; `refreshDays` exists only in the web (the
+ * "refresh due" badge is advisory). Both are defaults, not settings.
+ */
+export interface AiPolicy {
+  refreshDays: number;
+  minAssistants: number;
+}
+export const DEFAULT_AI_POLICY: AiPolicy = { refreshDays: 90, minAssistants: 2 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -79,22 +90,26 @@ export function publishChecks(input: PublishInput): PublishCheck[] {
       id: 'saved',
       label: 'All changes saved',
       ok: !input.dirty,
-      hint: 'Save your changes first. Validation and publishing use the saved version.',
-    },
-    {
-      id: 'validated',
-      label: 'Validation passed on every variant and test',
-      ok: input.validationPassed,
-      hint: 'Press Validate. Any edit after a validation clears it.',
+      hint: 'Save your changes first. Publishing uses the saved version.',
     },
   ];
+  // Only coding questions are validated (TC-012); the API publishes a complete multiple-choice or
+  // short-answer question without a validation run.
   if (input.type === 'CODING') {
-    checks.push({
-      id: 'ai',
-      label: 'AI reference solutions collected',
-      ok: aiGatePassed(input.aiGates),
-      hint: 'Add solutions from enough different AI assistants for each language on the AI reference solutions tab.',
-    });
+    checks.push(
+      {
+        id: 'validated',
+        label: 'Validation passed on every variant and test',
+        ok: input.validationPassed,
+        hint: 'Press Validate. Any edit after a validation clears it.',
+      },
+      {
+        id: 'ai',
+        label: 'AI reference solutions collected',
+        ok: aiGatePassed(input.aiGates),
+        hint: 'Add solutions from enough different AI assistants for each language on the AI reference solutions tab.',
+      },
+    );
   }
   return checks;
 }

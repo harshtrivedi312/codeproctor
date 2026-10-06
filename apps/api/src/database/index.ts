@@ -2,7 +2,17 @@
 export { DatabaseModule } from './database.module';
 export { PrismaService } from './prisma.service';
 export { OrgContextService, SYSTEM_SCOPE_REASONS } from './org-context';
-export type { AuthenticatedUser, OrgScope, Scoped, SystemScopeReason } from './org-context';
+export type {
+  AuthenticatedUser,
+  CandidateFacts,
+  OrgScope,
+  Scoped,
+  SessionActor,
+  SessionBinding,
+  SystemScopeReason,
+} from './org-context';
+// Not exported here, on purpose: the candidate-facts setter (./candidate-facts, CandidateSessionGuard
+// only). `runAsCandidate`, `runAsSessionJob` and `detachForSessionJob` are methods of OrgContextService.
 export { OrgContextInterceptor } from './org-context.interceptor';
 export {
   OrgContextMissingError,

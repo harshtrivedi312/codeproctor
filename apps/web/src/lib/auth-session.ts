@@ -27,15 +27,25 @@ export function getSessionUserId(): string | null {
   return currentUserId;
 }
 
+// The role the session was published with. A role change (an Author demoted to Recruiter) is a new
+// access level: work started under the old role must not write its answer into the cache either.
+let currentRole: string | null = null;
+
 export function publishSession(session: AuthSession | null): void {
   const nextUserId = session ? session.user.id : null;
+  const nextRole = session ? session.user.role : null;
   if (nextUserId !== currentUserId) {
     // The identity changed (including to "nobody"): everything started under the old identity,
     // such as a request waiting for a 401 or a save in flight, must be dropped (FR-103, FR-104).
     generation += 1;
     inFlight = null;
+  } else if (nextRole !== currentRole) {
+    // Same person, other role: drop work started under the old role (FR-103). The refresh in
+    // flight (if this publish came from one) is left alone.
+    generation += 1;
   }
   currentUserId = nextUserId;
+  currentRole = nextRole;
   setAccessToken(session ? session.accessToken : null);
   for (const listener of listeners) listener(session);
 }

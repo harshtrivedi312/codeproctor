@@ -19,6 +19,7 @@ import {
   Harness,
   login,
   PASSWORD,
+  settleValidation,
   signIn,
   stableProblem,
 } from '../support/harness';
@@ -28,17 +29,21 @@ import {
   allowedRoles,
   BE03_READY,
   BE03_ROUTES,
+  BE04_READY,
+  BE06_READY,
   BE13_READY,
   Be03Route,
   COVERED_ELSEWHERE,
   hasPathId,
   loadBackendRegistry,
+  questionFixture,
   PRINCIPALS,
   randomIdOf,
   routeKey,
   routeLabel,
   routesFor,
   sessionFixture,
+  testFixture,
   USER_ROLES,
   withReplacedId,
 } from '../support/be03-routes';
@@ -143,6 +148,7 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
           const res = await call(h, route.method, t.path, byRole[role].token, t.body);
           if (hasPermission(role, route.permission)) {
             expect(route.ok).toContain(res.status);
+            await settleValidation(h); // the validate job writes its FINISHED row asynchronously
             // A success must have an effect; a status code alone proves nothing.
             if (route.mutating) expect(await t.unchanged()).toBe(false);
           } else {
@@ -171,6 +177,16 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
             // No id in the path: the call must act inside the caller's org only. Seed org A with
             // known rows and assert none of them appears in the answer (not only the org id).
             const leaks = Object.values(byRole).flatMap((a) => [a.id, a.email]);
+            if (route.template.startsWith('/questions')) {
+              // Org A questions (id and title) must not show in an org B list or create answer.
+              const f = await questionFixture(h, h.orgId, { published: true });
+              leaks.push(f.id, f.title);
+            }
+            if (route.template.startsWith('/tests')) {
+              // Org A tests (id and name) must not show in an org B list or create answer.
+              const f = await testFixture(h, h.orgId);
+              leaks.push(f.id, f.name);
+            }
             if (route.template.startsWith('/review')) {
               leaks.push((await sessionFixture(h, h.orgId)).sessionId);
             }
@@ -179,6 +195,19 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
             expect(route.ok).toContain(res.status);
             const text = JSON.stringify(res.body);
             for (const x of [...leaks, h.orgId]) expect(text).not.toContain(x);
+            if (route.template.startsWith('/questions') && route.method === 'POST') {
+              // A created question belongs to the caller's org, never to the org named elsewhere.
+              const id = await t.resolveEntityId?.();
+              expect(id).toBeDefined();
+              const row = await h.owner.question.findUniqueOrThrow({ where: { id: id as string } });
+              expect(row.orgId).toBe(orgB);
+            }
+            if (route.template.startsWith('/tests') && route.method === 'POST') {
+              const id = await t.resolveEntityId?.();
+              expect(id).toBeDefined();
+              const row = await h.owner.test.findUniqueOrThrow({ where: { id: id as string } });
+              expect([row.orgId, row.createdById]).toEqual([orgB, caller.id]);
+            }
           }
         },
       );
@@ -250,6 +279,16 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
 
 rbacSuite('TC-004: BE-03 routes by role (401, 403, 404, success)', BE03_READY, routesFor('BE-03'));
 rbacSuite(
+  'TC-004 (FR-103, FR-201, FR-202, FR-204): BE-04 question routes by role (401, 403, 404, success)',
+  BE04_READY,
+  routesFor('BE-04'),
+);
+rbacSuite(
+  'TC-004 (FR-103, FR-301, FR-302): BE-06 test builder routes by role (401, 403, 404, success)',
+  BE06_READY,
+  routesFor('BE-06'),
+);
+rbacSuite(
   'TC-004 [BE-13 pending]: review routes by role (401, 403, 404, success)',
   BE13_READY,
   routesFor('BE-13'),
@@ -276,7 +315,12 @@ rbacSuite(
       expect([key, key in ROUTE_PERMISSIONS]).toEqual([key, true]);
     // BE-13 routes count only once the BE-13 switch is on (they do not exist before).
     const listed = new Set(
-      [...routesFor('BE-03'), ...(BE13_READY ? routesFor('BE-13') : [])].map(routeKey),
+      [
+        ...routesFor('BE-03'),
+        ...routesFor('BE-04'),
+        ...routesFor('BE-06'),
+        ...(BE13_READY ? routesFor('BE-13') : []),
+      ].map(routeKey),
     );
     const missing = Object.entries(ROUTE_PERMISSIONS)
       .filter(([key, access]) => access !== 'public' && !(key in COVERED_ELSEWHERE))
@@ -286,8 +330,8 @@ rbacSuite(
     // action, body and fixtures (or to COVERED_ELSEWHERE, next to the file that tests it).
     expect(missing).toEqual([]);
 
-    // Every BE-03 route QA lists is served, with the permission QA expects.
-    for (const r of routesFor('BE-03')) {
+    // Every BE-03, BE-04 and BE-06 route QA lists is served, with the permission QA expects.
+    for (const r of [...routesFor('BE-03'), ...routesFor('BE-04'), ...routesFor('BE-06')]) {
       const entry = ROUTE_PERMISSIONS[routeKey(r)];
       expect(entry).toBeDefined();
       expect(entry === 'public' ? 'public' : entry?.permission).toBe(r.permission);
@@ -326,6 +370,84 @@ rbacSuite(
     }
   });
 });
+
+(BE04_READY ? describe : describe.skip)(
+  'TC-004 (FR-103, FR-204): the TC-004 scenario as written',
+  () => {
+    let h: Harness;
+    beforeAll(async () => {
+      h = await boot();
+    });
+    afterAll(async () => {
+      await h?.close();
+    });
+
+    it('TC-004: a recruiter calling PATCH /questions/:id directly gets 403, the question and its version rows are unchanged, and no audit row is written', async () => {
+      const recruiter = await actor(h, UserRole.RECRUITER);
+      for (const published of [false, true]) {
+        const f = await questionFixture(h, h.orgId, { published });
+        const dump = async (): Promise<string> =>
+          JSON.stringify(
+            {
+              q: await h.owner.question.findUniqueOrThrow({ where: { id: f.id } }),
+              v: await h.owner.questionVersion.findMany({ where: { questionId: f.id } }),
+              t: await h.owner.testCase.findMany({
+                where: { questionVersion: { questionId: f.id } },
+              }),
+            },
+            (_k, x: unknown) => (typeof x === 'bigint' ? String(x) : x),
+          );
+        const before = await dump();
+        const audits = await h.owner.auditLog.count({ where: { entityId: f.id } });
+        const res = await call(h, 'PATCH', `/questions/${f.id}`, recruiter.token, {
+          title: 'recruiter edit',
+          statementMd: 'recruiter statement',
+          tags: ['hacked'],
+        });
+        expect(res.status).toBe(403);
+        expect(await dump()).toBe(before);
+        expect(await h.owner.auditLog.count({ where: { entityId: f.id } })).toBe(audits);
+      }
+    });
+  },
+);
+
+(BE06_READY ? describe : describe.skip)(
+  'TC-004 (FR-103, FR-301): the TC-004 reviewer scenario on POST /tests',
+  () => {
+    let h: Harness;
+    beforeAll(async () => {
+      h = await boot();
+    });
+    afterAll(async () => {
+      await h?.close();
+    });
+
+    it('TC-004: a reviewer (and an author) calling POST /tests directly gets 403, no test row is created and no audit row is written', async () => {
+      const reviewer = await actor(h, UserRole.REVIEWER);
+      const author = await actor(h, UserRole.AUTHOR);
+      const f = await questionFixture(h, h.orgId, { published: true });
+      for (const who of [reviewer, author]) {
+        const name = `QA-REVIEWER-ATTEMPT-${who.role}`;
+        const tests = await h.owner.test.count({ where: { orgId: h.orgId } });
+        const sections = await h.owner.testSection.count();
+        const audits = await h.owner.auditLog.count({ where: { action: 'TEST_CREATED' } });
+        const res = await call(h, 'POST', '/tests', who.token, {
+          name,
+          durationMinutes: 60,
+          sections: [
+            { title: 'S', questions: [{ questionVersionId: f.versionIds[1], points: 100 }] },
+          ],
+        });
+        expect(res.status).toBe(403);
+        expect(await h.owner.test.count({ where: { orgId: h.orgId } })).toBe(tests);
+        expect(await h.owner.test.count({ where: { name } })).toBe(0);
+        expect(await h.owner.testSection.count()).toBe(sections);
+        expect(await h.owner.auditLog.count({ where: { action: 'TEST_CREATED' } })).toBe(audits);
+      }
+    });
+  },
+);
 
 (BE03_READY ? describe : describe.skip)('TC-004: guard coverage', () => {
   let h: Harness;

@@ -31,9 +31,11 @@ names the session id only.
 | Media (R-4) | anchor + `retention_days` (OQ-18 cap optional); a NULL anchor is a hold | the session prefix except `reports/`                          | media keys (+ `deleted_at`), evidence and identity keys; deletes `keystroke_batches` |
 
 The face clock is `COALESCE(submitted_at, GREATEST(latest identity check, latest FACE_MISMATCH),
-first terminal transition, created_at)`. The terminal-transition source is the earliest audit row
-whose action is in `TERMINAL_TRANSITION_ACTIONS` (`retention.repository.ts`); BE-07's
-`SessionStateService` owns the real names, so that list is the one place to change.
+retention_anchor_at, created_at)`. For a session that was never submitted (EXPIRED, DECLINED, erased
+while live) the anchor is its first terminal time: BE-07's `SessionStateService` stamps it on that
+transition and the erasure fence keeps or sets it. (ADR 0004 9.2 says "earliest terminal-transition
+audit row"; the state machine writes no such rows, so the anchor is used instead: FU-DBB-26 asks the hub
+to amend the text.)
 
 ## Switches (`retention.config.ts`)
 

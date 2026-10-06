@@ -29,7 +29,9 @@ export const addYears = (date: Date, years: number): Date => {
 /**
  * The face clock (ADR 0004 9.2): submission, else the latest capture, else the first terminal
  * transition, else creation. Never `updated_at`. `latestCapture` is the newest identity check or
- * FACE_MISMATCH event time. Face images stay at most this clock + 90 days whatever any review hold
+ * FACE_MISMATCH event time. The SQL in retention.repository.ts feeds `firstTerminalAt` from
+ * `sessions.retention_anchor_at` (stamped by BE-07 on EXPIRED, DECLINED, COMPLETED; kept or set by the
+ * erasure fence): for a session that was never submitted that is its first terminal time. Face images stay at most this clock + 90 days whatever any review hold
  * says (C-35), so the anchor is not an input.
  */
 export function faceClock(input: {

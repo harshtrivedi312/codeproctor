@@ -10,27 +10,35 @@ import { Button } from '@/components/ui/button';
 import { Tabs, type TabDef } from '@/components/ui/tabs';
 import { ApiFailure } from '@/features/admin/queries';
 import type { Schemas } from '@/lib/api/client';
+import { getGeneration } from '@/lib/auth-session';
 import {
   draftSchema,
   emptyDraft,
-  toContent,
+  toCreate,
   toDraft,
+  toUpdate,
+  toVariants,
+  variantName,
   type DraftValues,
-  type QuestionDetail,
 } from './draft';
-import { aiGate, canPublish, publishChecks } from './gate';
+import { aiGate, canPublish, DEFAULT_AI_POLICY, publishChecks } from './gate';
 import { disposeModels } from './monaco-registry';
 import { MonacoScope } from './monaco-field';
 import { STATUS_LABEL, TYPE_LABEL } from './labels';
 import {
   fetchQuestion,
+  isFullQuestion,
+  PartialSaveFailure,
   questionKeys,
+  type FullQuestion,
+  type QuestionView,
   useAiReferences,
   useCreateQuestion,
   usePublishQuestion,
   useSaveQuestion,
   useStartValidation,
-  fetchValidationJob,
+  fetchValidation,
+  asReport,
 } from './queries';
 import { AiTab } from './tabs/ai-tab';
 import { AnswerTab } from './tabs/answer-tab';
@@ -54,7 +62,6 @@ const TAB_OF: Record<string, string> = {
   starterCode: 'languages',
   referenceSolution: 'reference',
   testCases: 'tests',
-  paramSchema: 'variants',
   variants: 'variants',
   limits: 'limits',
   mcq: 'answer',
@@ -87,8 +94,8 @@ function errorTabs(errors: FieldErrors<DraftValues>): Set<string> {
 
 export interface QuestionEditorProps {
   mode: 'create' | 'edit' | 'view';
-  /** Required for edit and view. */
-  detail?: QuestionDetail;
+  /** Required for edit and view: the writer view of one version. */
+  detail?: FullQuestion;
   /** Required for create. */
   type?: Schemas['QuestionType'];
   /** Validation poll interval; tests pass a small value. */
@@ -99,35 +106,31 @@ export interface QuestionEditorProps {
 
 interface Meta {
   questionId: string | null;
-  status: Schemas['QuestionStatus'];
   version: number;
-  /** Content revision of the question: ties a validation to the exact saved content. */
-  revision: number;
+  /** The opaque content revision (sha-256): concurrency check and ties a validation to the content. */
+  revision: string;
   isPublished: boolean;
   validatedAt: string | null;
   report: Report | null;
 }
 
-function metaOf(detail: QuestionDetail | undefined): Meta {
+function metaOf(detail: FullQuestion | undefined): Meta {
   return {
     questionId: detail?.id ?? null,
-    status: detail?.status ?? 'DRAFT',
-    version: detail?.current.version ?? 1,
-    revision: detail?.current.revision ?? 1,
-    isPublished: detail?.current.isPublished ?? false,
-    validatedAt: detail?.current.validatedAt ?? null,
-    report: detail?.current.validationReport ?? null,
+    version: detail?.version.version ?? 1,
+    revision: detail?.version.revision ?? '',
+    isPublished: detail?.version.isPublished ?? false,
+    validatedAt: detail?.version.validatedAt ?? null,
+    report: asReport(detail?.version.validationReport),
   };
 }
 
-const PUBLISH_REFUSAL: Record<string, string> = {
-  validation_required:
-    'The saved version has no passing validation. Press Validate and fix every failing test.',
-  ai_references_missing: 'AI reference solutions are missing.',
-  already_published: 'This version is already published.',
-  stale_version:
-    'This question changed after it was validated. Reload the latest version, then validate again.',
-};
+/**
+ * Why a publish did not happen, from the status alone (409 and 422 carry no machine code):
+ * 409 the question changed since (reload), 422 the gate message(s) in errors[], 404/405/501 the
+ * server cannot publish yet (permanent until reload), anything else is treated as transient.
+ */
+type PublishBlock = 'unavailable' | 'refused' | null;
 
 /**
  * FR-201..FR-205 editor. One react-hook-form holds the whole draft; the tabs edit parts of it.
@@ -147,8 +150,7 @@ export function QuestionEditor({
   const readOnly = mode === 'view';
   const questionType = detail?.type ?? type ?? 'CODING';
   const initial = React.useMemo(
-    () =>
-      detail ? toDraft(detail.type, detail.current.tags, detail.current) : emptyDraft(questionType),
+    () => (detail ? toDraft(detail.type, detail.tags, detail.version) : emptyDraft(questionType)),
     // The editor mounts once per version of the question; later server data must not overwrite edits.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
@@ -162,15 +164,15 @@ export function QuestionEditor({
   const guard = useUnsavedGuard(isDirty && !readOnly);
 
   const [meta, setMeta] = React.useState<Meta>(() => metaOf(detail));
-  const [policy, setPolicy] = React.useState<Schemas['AiReferencePolicy']>(
-    detail?.aiReferencePolicy ?? { refreshDays: 90, minAssistants: 2 },
-  );
+  // What the server has, to work out what a save has to change (test cases, variants).
+  const loaded = React.useRef<Schemas['QuestionVersion'] | null>(detail?.version ?? null);
   const [tab, setTab] = React.useState('statement');
   const [badTabs, setBadTabs] = React.useState<Set<string>>(new Set());
   const [notice, setNotice] = React.useState<string | null>(null);
   const [problem, setProblem] = React.useState<string | null>(null);
   const [publishProblem, setPublishProblem] = React.useState<string | null>(null);
-  /** The server has a newer revision than this editor started from (409 stale_version). */
+  const [publishBlock, setPublishBlock] = React.useState<PublishBlock>(null);
+  /** The server has newer content than this editor started from (409 on a call that sent expectedRevision). */
   const [conflict, setConflict] = React.useState(false);
   /** True only for a report that just came back from a job (an alert), not one loaded with the page. */
   const [reportFresh, setReportFresh] = React.useState(false);
@@ -202,10 +204,24 @@ export function QuestionEditor({
   const languages = useWatch({ control: form.control, name: 'allowedLanguages' });
   const title = useWatch({ control: form.control, name: 'title' });
   const isCoding = questionType === 'CODING';
-  const refs = useAiReferences(isCoding && mode !== 'create' ? (meta.questionId ?? '') : '');
-  const gates = aiGate(languages, refs.data ?? [], policy);
+  // AI rows belong to the version being edited; a new version (a fork) starts with none.
+  const refs = useAiReferences(
+    isCoding && mode !== 'create' ? (meta.questionId ?? '') : '',
+    meta.version,
+  );
+  const policy = DEFAULT_AI_POLICY;
+  const gates = aiGate(languages, refs.data?.items ?? [], policy);
 
-  const validationPassed = meta.report?.passed === true && meta.validatedAt !== null;
+  // A passing run counts only for the very content on screen: its revision is the current one.
+  const validationPassed =
+    meta.report?.passed === true &&
+    meta.validatedAt !== null &&
+    meta.report.revision === meta.revision;
+  const formVariants = useWatch({ control: form.control, name: 'variants' });
+  const variantNames = React.useMemo(
+    () => new Map(formVariants.map((v, i) => [v.id, variantName(i)])),
+    [formVariants],
+  );
   const input = {
     type: questionType,
     isPublished: meta.isPublished,
@@ -217,10 +233,10 @@ export function QuestionEditor({
 
   function describe(error: unknown): string {
     if (error instanceof ApiFailure) {
-      if (error.status === 400)
-        return (
-          error.message || 'The server did not accept this content. Check the highlighted fields.'
-        );
+      if (error.status === 400 || error.status === 422) {
+        const detail = [error.message, ...error.errors].filter(Boolean).join(' ');
+        return detail || 'The server did not accept this content. Check the highlighted fields.';
+      }
       if (error.status === 403)
         return 'Your role cannot do this. Ask a Super Admin if you think this is a mistake.';
       if (error.status === 404) return 'This question no longer exists. Go back to the list.';
@@ -234,30 +250,54 @@ export function QuestionEditor({
     setProblem(null);
     setNotice(null);
     setBadTabs(new Set());
-    const content = toContent(values);
     try {
       if (mode === 'create') {
-        const created = await create.mutateAsync({ ...content, type: questionType });
+        const created = await create.mutateAsync(toCreate(values));
         // Not dirty any more, so leaving the page for the saved question does not ask.
-        form.reset(toDraft(created.type, created.current.tags, created.current));
+        form.reset(toDraft(created.type, created.tags, created.version));
         router.replace(`/admin/questions/${created.id}`);
         return;
       }
-      const saved = await save.mutateAsync({ content, expectedRevision: meta.revision });
-      form.reset(toDraft(saved.type, saved.current.tags, saved.current));
-      const newVersion = saved.current.version !== meta.version;
+      if (!loaded.current) throw new ApiFailure(404, '');
+      const result = await save.mutateAsync({
+        update: toUpdate(values),
+        expectedRevision: meta.revision,
+        desiredCases: values.testCases,
+        variants: isCoding ? toVariants(values) : null,
+        loaded: loaded.current,
+        coding: isCoding,
+      });
+      const saved = result.detail;
+      form.reset(toDraft(saved.type, saved.tags, saved.version));
+      loaded.current = saved.version;
       setMeta(metaOf(saved));
-      setPolicy(saved.aiReferencePolicy);
       setPublishProblem(null);
+      setPublishBlock((b) => (b === 'refused' ? null : b));
       setConflict(false);
       setReportFresh(false);
       setNotice(
-        newVersion
-          ? `Saved as version ${saved.current.version} (draft). The published version ${meta.version} is unchanged.`
+        result.createdNewVersion
+          ? `Saved as version ${saved.version.version} (draft). The published version ${meta.version} is unchanged.`
           : 'Saved. Validate again before publishing.',
       );
     } catch (e) {
-      if (e instanceof ApiFailure && e.status === 409 && e.code === 'stale_version') {
+      // A 409 on the save that sent expectedRevision means the content changed since it was loaded.
+      if (e instanceof PartialSaveFailure) {
+        setConflict(true);
+        if (e.step === 'reload') {
+          setProblem(
+            `Your changes were saved, but we could not load the saved version: ${describe(e)} Reload the latest version to continue.`,
+          );
+        } else if (e.status === 409) {
+          setProblem(
+            `Part of your changes were saved, then the ${e.step} step found that the question changed meanwhile. Reload the latest version to see where things stand; your edits on this page stay until you do.`,
+          );
+        } else {
+          setProblem(
+            `Some of your changes were saved, but the ${e.step} could not be: ${describe(e)} Reload the latest version to see where things stand.`,
+          );
+        }
+      } else if (e instanceof ApiFailure && e.status === 409) {
         setConflict(true);
       } else setProblem(describe(e));
     }
@@ -265,14 +305,20 @@ export function QuestionEditor({
 
   /** Throws the edits away and loads what is saved now. Only after the author chose to. */
   async function reloadLatest(): Promise<void> {
+    const startedIn = getGeneration();
     try {
       const latest = await fetchQuestion(meta.questionId ?? '');
+      // The user or the role changed while this was in flight: what came back is not theirs to see.
+      if (startedIn !== getGeneration()) return;
+      if (!isFullQuestion(latest)) throw new ApiFailure(403, '');
       qc.setQueryData(questionKeys.detail(latest.id), latest);
-      form.reset(toDraft(latest.type, latest.current.tags, latest.current));
+      form.reset(toDraft(latest.type, latest.tags, latest.version));
+      loaded.current = latest.version;
       setMeta(metaOf(latest));
-      setPolicy(latest.aiReferencePolicy);
       setConflict(false);
       setProblem(null);
+      setPublishProblem(null);
+      setPublishBlock(null);
       setReportFresh(false);
       setNotice('Loaded the latest saved version.');
     } catch (e) {
@@ -299,13 +345,34 @@ export function QuestionEditor({
     busy.current = true;
     setProblem(null);
     setPublishProblem(null);
+    setPublishBlock((b) => (b === 'refused' ? null : b));
     setValidating(true);
     try {
       const questionId = meta.questionId ?? '';
-      // The result only counts for the exact content revision it was started on (TC-012).
-      const started = await startValidation.mutateAsync();
-      const startedRevision = revisionRef.current;
-      if (started.revision !== startedRevision) {
+      const generationAtStart = getGeneration();
+      // The run only counts for the exact saved content it was started on (TC-012).
+      const startedFor = revisionRef.current;
+      let boundTo: string;
+      try {
+        boundTo = (await startValidation.mutateAsync(startedFor)).revision;
+      } catch (e) {
+        if (!(e instanceof ApiFailure) || (e.status !== 409 && e.status !== 422)) throw e;
+        if (e.status === 422) {
+          setProblem(
+            `The question cannot be validated yet: ${[e.message, ...e.errors].filter(Boolean).join(' ')}`,
+          );
+          return;
+        }
+        // 409 is either "changed since you loaded it" or "a run is already going": ask which.
+        const now = await fetchValidation(questionId);
+        if (now.status === 'RUNNING' && now.revision === startedFor) {
+          boundTo = startedFor;
+        } else {
+          setConflict(true);
+          return;
+        }
+      }
+      if (boundTo !== startedFor) {
         setProblem('The question changed on the server. Reload the latest version, then validate.');
         return;
       }
@@ -315,34 +382,55 @@ export function QuestionEditor({
           setTimeout(resolve, Math.min(pollMs * (1 + attempt * 0.25), pollMs * 5)),
         );
         if (!alive.current) return;
-        const state = await fetchValidationJob(questionId, started.jobId);
+        const state = await fetchValidation(questionId);
         if (!alive.current) return;
-        if (state.status === 'failed') {
-          setProblem(state.error ?? 'The validation job failed. Try again in a moment.');
+        if (state.status === 'RUNNING') continue;
+        if (generationAtStart !== getGeneration()) return;
+        if (state.status === 'NONE') {
+          setProblem(
+            'The validation run was lost (the server may have restarted). Press Validate to try again.',
+          );
           return;
         }
-        if (state.status !== 'done') continue;
-        const report = state.report;
-        if (!report) {
-          setProblem('The validation finished without a report. Press Validate to try again.');
-          return;
-        }
-        if (state.revision !== startedRevision || revisionRef.current !== startedRevision) {
+        // Whatever the run was bound to, it must be the content on screen and still the current one.
+        if (
+          state.revision !== startedFor ||
+          state.currentRevision !== startedFor ||
+          revisionRef.current !== startedFor ||
+          state.status === 'STALE'
+        ) {
           setProblem(
             'The question changed while it was being validated, so that result was dropped. Press Validate again.',
           );
           return;
         }
-        const validatedAt = report.passed ? report.finishedAt : null;
+        const report = asReport(state.report);
+        if (state.status === 'ERROR') {
+          // Nothing was recorded; show why when the report says so.
+          if (report) setMeta((m) => ({ ...m, report, validatedAt: null }));
+          setReportFresh(true);
+          setProblem(
+            'The validation could not complete. Nothing was recorded. Press Validate to try again.',
+          );
+          return;
+        }
+        if (!report) {
+          setProblem('The validation finished without a report. Press Validate to try again.');
+          return;
+        }
+        const validatedAt = state.validatedAt;
         setMeta((m) => ({ ...m, report, validatedAt }));
         setReportFresh(true);
         // Keep the cache in step with what the editor shows, and the history's "validated" column.
-        qc.setQueryData<QuestionDetail>(questionKeys.detail(questionId), (old) =>
-          old && old.current.revision === startedRevision
-            ? { ...old, current: { ...old.current, validatedAt, validationReport: report } }
+        qc.setQueryData<QuestionView>(questionKeys.detail(questionId), (old) =>
+          generationAtStart === getGeneration() &&
+          old &&
+          isFullQuestion(old) &&
+          old.version.revision === startedFor
+            ? { ...old, version: { ...old.version, validatedAt, validationReport: report } }
             : old,
         );
-        void qc.invalidateQueries({ queryKey: questionKeys.versions(questionId) });
+        void qc.invalidateQueries({ queryKey: ['questions', 'list'] });
         return;
       }
       setProblem('Validation is taking longer than expected. Press Validate to try again.');
@@ -361,16 +449,41 @@ export function QuestionEditor({
     setNotice(null);
     try {
       const done = await publish.mutateAsync(meta.revision);
+      // Only a 200 from the server marks the question published here, never anything earlier.
       setMeta(metaOf(done));
       setNotice(
-        `Version ${done.current.version} is published. Editing it later creates a new version.`,
+        `Version ${done.version.version} is published. Editing it later creates a new version.`,
       );
     } catch (e) {
-      if (e instanceof ApiFailure && e.status === 409) {
+      if (!(e instanceof ApiFailure)) {
         setPublishProblem(
-          `${PUBLISH_REFUSAL[e.code] ?? 'Publishing was refused.'}${e.code === 'ai_references_missing' && e.message ? ` ${e.message}` : ''}`,
+          'We could not reach the server, so nothing was published. Check your connection and try again.',
         );
-      } else setPublishProblem(describe(e));
+      } else if (e.status === 409) {
+        setConflict(true);
+      } else if (e.status === 422) {
+        setPublishBlock('refused');
+        setPublishProblem(
+          `Publishing was refused: ${e.errors.length > 0 ? e.errors.join(' ') : e.message || 'the question does not meet the requirements yet.'}`,
+        );
+      } else if (e.status === 404) {
+        // The real API answers 404 only for a question that is gone (or not yours): say so.
+        setPublishProblem(
+          'This question no longer exists, so nothing was published. Go back to the list.',
+        );
+      } else if (e.status === 405 || e.status === 501) {
+        setPublishBlock('unavailable');
+        setPublishProblem(
+          'Publishing is not available yet. Nothing was published; your question is saved as a draft.',
+        );
+      } else if (e.status === 401 || e.status === 403) {
+        setPublishProblem(describe(e));
+      } else {
+        // 5xx and the like: probably temporary, so Publish stays available for another try.
+        setPublishProblem(
+          'The server could not publish this right now. Nothing was published. Try again in a moment.',
+        );
+      }
     } finally {
       busy.current = false;
     }
@@ -397,7 +510,7 @@ export function QuestionEditor({
           <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
             <span>{TYPE_LABEL[questionType]}</span>
             <span>Version {meta.version}</span>
-            <Badge tone={meta.status === 'PUBLISHED' ? 'success' : 'warning'}>
+            <Badge tone={meta.isPublished ? 'success' : 'warning'}>
               {meta.isPublished ? STATUS_LABEL.PUBLISHED : STATUS_LABEL.DRAFT}
             </Badge>
             {isDirty && !readOnly ? <Badge tone="warning">Unsaved changes</Badge> : null}
@@ -421,7 +534,13 @@ export function QuestionEditor({
                 </Button>
                 <Button
                   type="button"
-                  disabled={!canPublish(input) || publish.isPending || validating || conflict}
+                  disabled={
+                    !canPublish(input) ||
+                    publish.isPending ||
+                    validating ||
+                    conflict ||
+                    publishBlock !== null
+                  }
                   aria-describedby="publish-checks"
                   onClick={() => void onPublish()}
                 >
@@ -507,6 +626,7 @@ export function QuestionEditor({
           isCoding={isCoding}
           stale={isDirty}
           fresh={reportFresh}
+          variantNames={variantNames}
         />
       ) : null}
 
@@ -523,9 +643,11 @@ export function QuestionEditor({
               case 'tests':
                 return <TestsTab {...tabProps} />;
               case 'variants':
-                return <VariantsTab {...tabProps} questionId={meta.questionId} />;
+                return (
+                  <VariantsTab {...tabProps} questionId={meta.questionId} version={meta.version} />
+                );
               case 'ai':
-                return <AiTab {...tabProps} questionId={meta.questionId} policy={policy} />;
+                return <AiTab {...tabProps} questionId={meta.questionId} version={meta.version} />;
               case 'limits':
                 return <LimitsTab {...tabProps} />;
               default:

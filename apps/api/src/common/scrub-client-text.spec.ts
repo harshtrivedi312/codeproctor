@@ -362,6 +362,16 @@ describe('scrubClientText worst cases (NFR-04, C-32)', () => {
     return performance.now() - start;
   }
 
+  /**
+   * Best of several runs: a pause (GC, a busy shared runner) only ever adds time, so the minimum is
+   * the stable estimate of the work itself. A genuinely super-linear pass is slow on every run.
+   */
+  function best(fn: (s: string) => string, input: string, runs: number): number {
+    let min = Infinity;
+    for (let i = 0; i < runs; i++) min = Math.min(min, time(fn, input));
+    return min;
+  }
+
   it('NFR-04: every field, character and shape is under 100 ms and grows linearly', () => {
     let slowest = { ms: 0, label: '' };
     const failures: string[] = [];
@@ -371,14 +381,22 @@ describe('scrubClientText worst cases (NFR-04, C-32)', () => {
         for (const c of chars) {
           const small = build(c, Math.floor(max * 1.5));
           const large = build(c, max * 3);
-          const ts = time(fn, small);
-          const tl = time(fn, large);
+          let ts = best(fn, small, 3);
+          let tl = best(fn, large, 3);
+          // A suspicious ratio is measured again with more runs before it counts as a failure.
+          // Not worth it once the case fails the absolute cap anyway, nor once several cases have
+          // failed (a real regression then ends quickly with a readable list).
+          const ratio = (): number => tl / Math.max(ts, 0.5);
+          if (tl >= 10 && tl < 100 && ratio() > 3.3 && failures.length < 5) {
+            ts = best(fn, small, 11);
+            tl = best(fn, large, 11);
+          }
           const label = `${field} ${shape} c=${JSON.stringify(c)}`;
           if (tl > slowest.ms) slowest = { ms: tl, label };
           if (tl >= 100) failures.push(`${label} took ${tl.toFixed(1)} ms`);
-          if (tl >= 10 && tl / Math.max(ts, 0.5) > 3.3) {
+          if (tl >= 10 && ratio() > 3.3) {
             failures.push(
-              `${label} grew ${(tl / ts).toFixed(1)}x for 2x input (${tl.toFixed(1)} ms)`,
+              `${label} grew ${ratio().toFixed(1)}x for 2x input (${tl.toFixed(1)} ms)`,
             );
           }
         }
