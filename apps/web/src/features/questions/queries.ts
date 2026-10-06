@@ -178,7 +178,6 @@ export class PartialSaveFailure extends ApiFailure {
 
 type ServerCase = Schemas['TestCase'];
 type ServerVariant = Schemas['Variant'];
-type ServerVersion = Schemas['QuestionVersion'];
 type ParamsOf = Record<string, string | number | boolean>;
 
 const caseKey = (
