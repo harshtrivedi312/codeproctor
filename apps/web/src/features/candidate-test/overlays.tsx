@@ -8,11 +8,14 @@ export function StartGate({
   onEnter,
   demoAction,
   fullscreenFailed,
+  timerRunning = false,
 }: {
   onEnter: () => void;
   /** Demo-only escape hatch; never passed in a real session. */
   demoAction?: React.ReactNode;
   fullscreenFailed: boolean;
+  /** The server clock already runs (the real test): the copy must not promise a later start. */
+  timerRunning?: boolean;
 }): React.JSX.Element {
   return (
     <Dialog open>
@@ -24,8 +27,9 @@ export function StartGate({
       >
         <DialogTitle>Enter fullscreen to begin</DialogTitle>
         <DialogDescription>
-          The test runs in fullscreen. Your timer starts when you press the button. Take a breath;
-          you can leave and come back, but time keeps running if you do.
+          {timerRunning
+            ? 'The test runs in fullscreen. Your time is already running: it started when you pressed Start. Enter fullscreen to continue.'
+            : 'The test runs in fullscreen. Your timer starts when you press the button. Take a breath; you can leave and come back, but time keeps running if you do.'}
         </DialogDescription>
         {fullscreenFailed && (
           <p role="alert" className="mt-3 rounded-md bg-warning-soft p-3 text-sm text-warning">
@@ -85,6 +89,7 @@ export function FinishSectionDialog({
   busy,
   error,
   sectionTitle,
+  last = false,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -92,6 +97,8 @@ export function FinishSectionDialog({
   busy: boolean;
   error?: string | null;
   sectionTitle: string;
+  /** The last section: finishing it submits the whole test (ADR 0002 S-5). */
+  last?: boolean;
 }): React.JSX.Element {
   return (
     <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
@@ -101,6 +108,12 @@ export function FinishSectionDialog({
           Once you finish this section it <strong>cannot be reopened</strong>, even if there is time
           left. Your latest saved answers are submitted. Make sure you are done with every question
           in it.
+          {last ? (
+            <>
+              {' '}
+              <strong>This is the last section: finishing it submits your test.</strong>
+            </>
+          ) : null}
         </DialogDescription>
         {error && (
           <p
