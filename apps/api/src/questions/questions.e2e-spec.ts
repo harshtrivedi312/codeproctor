@@ -1142,6 +1142,26 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       expect(JSON.stringify(pub.body)).toContain('REFERENCE-SECRET');
     });
 
+    it('TC-011, FR-201 staff view: an archived question is hidden from a recruiter even with includeArchived, and stays listed for authors', async () => {
+      const author = await make(UserRole.AUTHOR);
+      const recruiter = await make(UserRole.RECRUITER);
+      const tag = `arc${++seq}`;
+      const pub = await publishable(author, { tags: [tag] });
+      await http()
+        .post(`${API}/questions/${idOf(pub)}/archive`)
+        .set(author.auth)
+        .expect(200);
+      for (const qs of [`tag=${tag}`, `tag=${tag}&includeArchived=true`]) {
+        const res = await http().get(`${API}/questions?${qs}`).set(recruiter.auth).expect(200);
+        expect(res.body).toMatchObject({ total: 0, items: [] });
+      }
+      const mine = await http()
+        .get(`${API}/questions?tag=${tag}&includeArchived=true`)
+        .set(author.auth)
+        .expect(200);
+      expect((mine.body as { total: number }).total).toBe(1);
+    });
+
     it('TC-011, FR-201..FR-205 staff view: a recruiter cannot see a draft, cannot enumerate it via list, and gets the identical 404', async () => {
       const author = await make(UserRole.AUTHOR);
       const recruiter = await make(UserRole.RECRUITER);

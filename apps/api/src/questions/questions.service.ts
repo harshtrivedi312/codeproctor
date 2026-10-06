@@ -96,7 +96,7 @@ export class QuestionsService {
       throw new BadRequestException('The page is too deep; narrow the filters instead.');
     }
     const where: Prisma.QuestionWhereInput = {
-      ...(q.includeArchived ? {} : { isArchived: false }),
+      ...(q.includeArchived && full ? {} : { isArchived: false }),
       ...(full ? {} : { currentVersionId: { not: null } }),
       ...(q.type ? { type: q.type } : {}),
       ...(q.tag ? { tags: { has: q.tag } } : {}),
