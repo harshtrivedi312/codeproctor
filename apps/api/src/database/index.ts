@@ -5,6 +5,8 @@ export { OrgContextService, SYSTEM_SCOPE_REASONS } from './org-context';
 export type {
   AuthenticatedUser,
   CandidateFacts,
+  Grant,
+  GrantRequest,
   OrgScope,
   Scoped,
   SessionActor,
@@ -12,7 +14,8 @@ export type {
   SystemScopeReason,
 } from './org-context';
 // Not exported here, on purpose: the candidate-facts setter (./candidate-facts, CandidateSessionGuard
-// only). `runAsCandidate`, `runAsSessionJob` and `detachForSessionJob` are methods of OrgContextService.
+// only). `runAsCandidate`, `runAsSessionJob`, `detachForSessionJob` and `withGrant` are methods of
+// OrgContextService; FU-DB-67 pins who may call them (FU-DB-189).
 export { OrgContextInterceptor } from './org-context.interceptor';
 export {
   OrgContextMissingError,
