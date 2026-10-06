@@ -12,6 +12,7 @@ import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { TestsModule } from './tests/tests.module';
+import { QuestionsModule } from './questions/questions.module';
 import { JwtAuthGuard } from './common/auth/jwt-auth.guard';
 import { buildPinoHttpOptions } from './common/pino-http.config';
 import { TokenModule } from './common/auth/token.service';
@@ -103,6 +104,7 @@ function areaOf(context: ExecutionContext): Area {
     AuthModule,
     UsersModule,
     TestsModule,
+    QuestionsModule,
     HealthModule,
     ClientErrorsModule,
     ExecutionModule,

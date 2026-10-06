@@ -33,7 +33,7 @@ describe('route permission matrix (FR-103, TC-004)', () => {
     const routes = [
       ...everyRoute(),
       {
-        key: 'PATCH /questions/:id',
+        key: 'PATCH /widgets/:id',
         handler: 'Q.patch',
         isPublic: false,
         roles: ['AUTHOR' as const],
@@ -43,7 +43,7 @@ describe('route permission matrix (FR-103, TC-004)', () => {
       },
     ];
     expect(matrixProblems(routes)).toEqual([
-      'PATCH /questions/:id (Q.patch) is not in ROUTE_PERMISSIONS',
+      'PATCH /widgets/:id (Q.patch) is not in ROUTE_PERMISSIONS',
     ]);
   });
 
