@@ -54,7 +54,10 @@ export class AuditInterceptor implements NestInterceptor {
           await this.write(req, options);
         } catch (e) {
           // A missing actor is a wiring bug, not a failed write: rethrown unchanged.
-          if (e instanceof InternalServerErrorException) throw e;
+          if (e instanceof InternalServerErrorException) {
+            this.logger.error('Audited route without a verified user');
+            throw e;
+          }
           // The handler has already committed. A lock or deadlock error here must not reach the
           // client as 503 + Retry-After (DL-37): that invites a retry of a non-idempotent action
           // that already happened. A fixed error with no cause is never remapped (the filter

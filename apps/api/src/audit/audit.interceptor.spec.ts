@@ -142,9 +142,17 @@ describe('AuditInterceptor (FR-105, TC-006)', () => {
   });
 
   it('FR-105: an audited route without a verified user is refused rather than logged anonymously', async () => {
-    const res = await request(app.getHttpServer()).get('/probe/sessions/abc').expect(500);
-    expect(JSON.stringify(res.body)).not.toContain('candidate data');
-    expect(created).toHaveLength(0);
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    try {
+      const res = await request(app.getHttpServer()).get('/probe/sessions/abc').expect(500);
+      expect(JSON.stringify(res.body)).not.toContain('candidate data');
+      expect(created).toHaveLength(0);
+      const logged = JSON.stringify(error.mock.calls);
+      expect(logged).toContain('Audited route without a verified user');
+      expect(logged).not.toContain('Audit write failed after the handler committed');
+    } finally {
+      error.mockRestore();
+    }
   });
 
   // No TC id covers DL-37 in docs/test-cases.md; FR-105 and the decision id name these.

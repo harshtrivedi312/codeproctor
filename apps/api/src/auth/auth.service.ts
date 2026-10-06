@@ -37,7 +37,7 @@ import {
 } from './crypto.util';
 import type { RequestContext } from '../common/request-context';
 import { errorName } from '../common/request-context';
-import { lockContentionCode } from '../common/db-contention';
+import { isObject, lockContentionCode } from '../common/db-contention';
 import { ACCESS_TTL_SECONDS } from '../common/auth/access-ttl';
 import { TokenService } from '../common/auth/token.service';
 import { TokenValidityService } from '../common/auth/token-validity.service';
@@ -551,7 +551,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     } catch (e) {
       await this.refundAttempt(user).catch(() => undefined);
       // The caller must not refund this same failure a second time (DL-37).
-      if (typeof e === 'object' && e !== null) this.refundedErrors.add(e);
+      if (isObject(e)) this.refundedErrors.add(e);
       throw e;
     }
   }
@@ -630,7 +630,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       if (
         !wrongCode &&
         lockContentionCode(e) !== undefined &&
-        !(typeof e === 'object' && e !== null && this.refundedErrors.has(e))
+        !(isObject(e) && this.refundedErrors.has(e))
       ) {
         await this.refundAttempt(user).catch(() => undefined);
       }

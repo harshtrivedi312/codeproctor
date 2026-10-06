@@ -24,7 +24,7 @@ const SQLSTATES = new Set(['55P03', '40P01', '40001']);
 const PRISMA_CODES = new Set(['P2028', 'P2034']);
 const MAX_DEPTH = 8;
 
-function isObject(value: unknown): value is Record<string, unknown> {
+export function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 

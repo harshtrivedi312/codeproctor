@@ -75,8 +75,8 @@ describe('Login under row-lock contention (DL-37, FR-101, FU-BE-187)', () => {
     await holder.query('BEGIN');
     await holder.query('SELECT id FROM users WHERE email = $1 FOR UPDATE', [email]);
     let committed = false;
+    const pending = Promise.all([login(email), login('nobody@example.com')]);
     try {
-      const pending = Promise.all([login(email), login('nobody@example.com')]);
       // Hold the lock until a request is really waiting on it, so the test is not vacuous.
       const deadline = Date.now() + 10_000;
       for (;;) {
@@ -98,6 +98,7 @@ describe('Login under row-lock contention (DL-37, FR-101, FU-BE-187)', () => {
       expect(unknown.headers['retry-after']).toBeUndefined();
     } finally {
       if (!committed) await holder.query('ROLLBACK').catch(() => undefined);
+      await pending.catch(() => undefined);
     }
   });
 
