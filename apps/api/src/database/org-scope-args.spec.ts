@@ -609,3 +609,51 @@ describe('system scope: a scalar orgId cannot move a row (ADR 0006 section 8; NF
     expect(args).toEqual(copy);
   });
 });
+
+describe('system scope: an unknown operation is refused, deny by default (FU-DB-160; ADR 0006 section 8.2; NFR-04)', () => {
+  const system = (model: ModelName, operation: string, args: unknown): void =>
+    assertSystemScopeWrite(model, ORG_SCOPE[model], operation, args);
+  // findRaw and aggregateRaw are MongoDB-only today; the others stand for one a future Prisma adds.
+  const UNKNOWN = ['findRaw', 'aggregateRaw', 'somethingNew', 'deleteManyAndReturn', ''];
+  // One model of each rule kind: direct, path and the tenant root.
+  const MODELS: readonly ModelName[] = ['Session', 'ProctorEvent', 'Organization'];
+
+  it.each(MODELS)(
+    'TC-008 %s: every unknown operation is refused, with or without arguments',
+    (model) => {
+      for (const operation of UNKNOWN) {
+        for (const args of [{}, undefined, { where: {} }, { data: { orgId: ORG_B } }]) {
+          expect(() => system(model, operation, args)).toThrow(OrgScopeViolationError);
+        }
+      }
+    },
+  );
+
+  it('TC-008 the message names the model and the operation, and carries no value', () => {
+    let message = '';
+    try {
+      system('Session', 'somethingNew', { where: { id: 'SECRET-SESSION-ID' } });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toBe(
+      'Session.somethingNew: unknown operation in system scope. Add it to SCOPED_OPERATIONS and handle it.',
+    );
+  });
+
+  it.each(Object.keys(ORG_SCOPE) as ModelName[])(
+    'TC-008 %s: every operation in SCOPED_OPERATIONS still passes the check with plain arguments',
+    (model) => {
+      for (const operation of SCOPED_OPERATIONS) {
+        expect(() => system(model, operation, {})).not.toThrow();
+      }
+    },
+  );
+
+  it('TC-008 org scope and system scope refuse the same unknown operations', () => {
+    for (const operation of UNKNOWN) {
+      expect(() => scope('Session', operation, {})).toThrow(OrgScopeViolationError);
+      expect(() => system('Session', operation, {})).toThrow(OrgScopeViolationError);
+    }
+  });
+});
