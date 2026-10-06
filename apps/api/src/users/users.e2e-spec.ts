@@ -682,6 +682,7 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
           .set(adminAuth)
           .send({ active: false, ...body }),
       unlock: () => http().post(`${API}/admin/users/${targetId}/unlock`).set(adminAuth).send(body),
+      reissue: () => http().post(`${API}/admin/users/${targetId}/invite`).set(adminAuth).send(body),
     });
 
     it('TC-004: no password is 400; a wrong password is the same 403 REAUTH_FAILED on every route; nothing changes', async () => {
@@ -692,12 +693,12 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
         data: { failedLogins: 5, lockedUntil: new Date(Date.now() + 600_000) },
       });
       const missing = calls(admin.auth, victim.id, {});
-      for (const name of ['invite', 'role', 'deactivate', 'unlock'] as const) {
+      for (const name of ['invite', 'role', 'deactivate', 'unlock', 'reissue'] as const) {
         expect([name, (await missing[name]()).status]).toEqual([name, 400]);
       }
       const wrong = calls(admin.auth, victim.id, { currentPassword: 'not-the-password-1' });
       const bodies: unknown[] = [];
-      for (const name of ['invite', 'role', 'deactivate', 'unlock'] as const) {
+      for (const name of ['invite', 'role', 'deactivate', 'unlock', 'reissue'] as const) {
         const res = await wrong[name]();
         expect([name, res.status]).toEqual([name, 403]);
         expect((res.body as Body).code).toBe('REAUTH_FAILED');
@@ -739,13 +740,15 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       });
       const victim = await make(UserRole.RECRUITER);
       const ghost = '00000000-0000-4000-8000-000000000043';
-      const names = ['invite', 'role', 'deactivate', 'unlock'] as const;
+      const names = ['invite', 'role', 'deactivate', 'unlock', 'reissue'] as const;
       const measure = async (admin: Made, target: string): Promise<number[]> => {
         // Keep the wrong-password admin below the lock threshold: the 5th failure writes more.
         await owner.user.update({ where: { id: wrongAdmin.id }, data: { failedLogins: 0 } });
         const c = calls(admin.auth, target, { currentPassword: 'nope-nope-nope-1' });
         const counts: number[] = [];
         for (const name of names) {
+          // Five routes would reach the lock threshold (the 5th failure writes more): reset each time.
+          await owner.user.update({ where: { id: wrongAdmin.id }, data: { failedLogins: 0 } });
           let res: request.Response | undefined;
           counts.push(
             await statementsDuring(async () => {
