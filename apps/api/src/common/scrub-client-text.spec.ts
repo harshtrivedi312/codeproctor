@@ -210,6 +210,26 @@ describe('scrubClientText (NFR-04, C-32)', () => {
     expect(scrubClientText('{"password":"ab\\"cd ef","after":"kept"}')).toContain('"after":"kept"');
   });
 
+  it('NFR-04: redacts backslash values, encoded URL passwords and hyphenated key names', () => {
+    const cases: [string, RegExp][] = [
+      ['login failed password=\\Tr0ub4dor', /Tr0ub4dor/],
+      ['password=ab\\cd', /cd/],
+      ['postgres://app:Xk3%2F9pQ@localhost:5432/db', /Xk3|9pQ|app:/],
+      ['postgres://app:p%40ss@localhost:5432/db', /ss@|p%40|app:/],
+      ['https://u:hun!ter@db.example.com', /hun|u:/],
+      ['wss://u:pw@host:1', /u:pw/],
+      ['password-confirm=hunter2', /hunter2/],
+    ];
+    for (const [input, leak] of cases) {
+      expect(`${input} => ${scrubClientText(input)}`).not.toMatch(
+        new RegExp(`=> .*(?:${leak.source})`),
+      );
+    }
+    expect(scrubClientText('postgres://app:p%40ss@localhost:5432/db')).toContain(
+      'localhost:5432/db',
+    );
+  });
+
   it('NFR-04: keeps a standard UUID (session and trace ids) but not other long ids', () => {
     const uuid = '123e4567-e89b-12d3-a456-426614174000';
     expect(scrubClientText(`session ${uuid} failed`)).toBe(`session ${uuid} failed`);
