@@ -394,11 +394,14 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
           jest.requireActual<typeof import('../auth/auth.service')>('../auth/auth.service');
         const auth = app.get(Auth);
         const real = auth.verifyCurrentPassword.bind(auth);
+        let mutated = false;
+        let calls: number | undefined;
         const spy = jest
           .spyOn(auth, 'verifyCurrentPassword')
           .mockImplementation(async (...args: Parameters<typeof real>) => {
             const out = await real(...args);
             await owner.user.update({ where: { id: admin.id }, data: change });
+            mutated = true;
             return out;
           });
         try {
@@ -409,8 +412,12 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
             .expect(403);
           expect((res.body as { code?: string }).code).toBe('REAUTH_FAILED');
         } finally {
+          calls = spy.mock.calls.length;
           spy.mockRestore();
         }
+        // The 403 must come from the re-check after the step-up, not from the step-up itself.
+        expect(mutated).toBe(true);
+        expect(calls).toBe(1);
         expect(await stored(orgA)).toEqual({});
         expect(await audits(orgA)).toHaveLength(0);
       });
