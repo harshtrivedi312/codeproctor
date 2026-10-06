@@ -91,7 +91,7 @@ describe('DB-08 migration guard on a shallow checkout (FR-105)', () => {
     const clone = ciCheckout('adds', (r) =>
       write(r, 'prisma/migrations/20261003000001_more/migration.sql', 'CREATE TABLE b (id int);\n'),
     );
-    assert.deepEqual(ensureBase(clone), { ok: true });
+    assert.deepEqual(ensureBase(clone), { ok: true, headRef: 'HEAD' });
     assert.deepEqual(migrationChanges(clone), { ok: true, changed: [] });
   });
 
@@ -186,6 +186,63 @@ describe('DB-08 migration guard on a shallow checkout (FR-105)', () => {
     assert.deepEqual(migrationChanges(good), { ok: true, changed: [] });
     const bad = run('prbad', (r) => write(r, M1, 'CREATE TABLE a (id text);\n'));
     assert.deepEqual(migrationChanges(bad), { ok: true, changed: [`M\t${M1}`] });
+  });
+
+  it('FR-105: when main moves during the run and the checked-out merge commit can no longer be fetched, it compares the current merge ref', () => {
+    // GitHub builds refs/pull/N/merge from main and the PR, and rebuilds it when main moves.
+    const build = (name, change) => {
+      git(origin, 'checkout', '-q', '-B', name, 'main');
+      change(origin);
+      git(origin, 'add', '-A');
+      git(origin, 'commit', '-q', '-m', name);
+      git(origin, 'checkout', '-q', '--detach', 'main');
+      git(origin, 'merge', '-q', '--no-ff', '-m', `merge ${name} 1`, name);
+      git(origin, 'update-ref', `refs/pull/77/merge`, 'HEAD');
+      git(origin, 'checkout', '-q', 'main');
+      const clone = join(root, `moved-${name}`);
+      mkdirSync(clone);
+      git(clone, 'init', '-q');
+      git(clone, 'remote', 'add', 'origin', `file://${origin}`);
+      git(
+        clone,
+        'fetch',
+        '-q',
+        '--no-tags',
+        '--depth=1',
+        'origin',
+        '+refs/pull/77/merge:refs/remotes/pull/77/merge',
+      );
+      git(clone, 'checkout', '-q', '--detach', 'refs/remotes/pull/77/merge');
+      // Main moves on; GitHub rebuilds the merge ref, and the old merge commit is unreachable.
+      write(origin, `moved-after-${name}.txt`, 'main moved');
+      git(origin, 'add', '-A');
+      git(origin, 'commit', '-q', '-m', `main moved after ${name}`);
+      git(origin, 'checkout', '-q', '--detach', 'main');
+      git(origin, 'merge', '-q', '--no-ff', '-m', `merge ${name} 2`, name);
+      git(origin, 'update-ref', 'refs/pull/77/merge', 'HEAD');
+      git(origin, 'checkout', '-q', 'main');
+      return clone;
+    };
+    const options = { githubRef: 'refs/pull/77/merge', headBySha: false };
+    const good = build('movedgood', (r) =>
+      write(r, 'prisma/migrations/20261005000001_x/migration.sql', 'SELECT 1;\n'),
+    );
+    assert.deepEqual(migrationChanges(good, options), { ok: true, changed: [] });
+    const bad = build('movedbad', (r) => write(r, M1, 'CREATE TABLE a (id text);\n'));
+    assert.deepEqual(migrationChanges(bad, options), { ok: true, changed: [`M\t${M1}`] });
+  });
+
+  it('without a usable merge ref it reports, never passes, when the checked-out commit cannot be fetched', () => {
+    const clone = ciCheckout('noref', (r) => write(r, 'z.txt', 'z'));
+    const result = migrationChanges(clone, { githubRef: undefined, headBySha: false });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /share no history/);
+  });
+
+  it('a GITHUB_REF that is not a pull-request merge ref is never fetched', () => {
+    const clone = ciCheckout('oddref', (r) => write(r, 'q.txt', 'q'));
+    const result = migrationChanges(clone, { githubRef: 'refs/heads/main', headBySha: false });
+    assert.equal(result.ok, false);
   });
 
   it('a complete clone is never made shallow by the guard', () => {
