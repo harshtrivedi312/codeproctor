@@ -15,6 +15,11 @@ export interface MockOptions {
   adminLatencyMs: number;
 }
 
+/** The mocked server clock runs this far ahead of the browser, so the offset logic is visible. */
+export const MOCK_SERVER_CLOCK_AHEAD_MS = 90_000;
+/** One "server now" for every mocked response that carries a server time (/v1/time, savedAt...). */
+export const mockServerNow = (): Date => new Date(Date.now() + MOCK_SERVER_CLOCK_AHEAD_MS);
+
 const DEFAULTS: MockOptions = { runLatencyMs: 2500, saveLatencyMs: 300, adminLatencyMs: 300 };
 
 /** Fake grading, only to make the demo feel real. Not a judge: it looks for a few keywords. */
@@ -75,14 +80,13 @@ export function createHandlers(options: Partial<MockOptions> = {}) {
     ...createQuestionHandlers({ latencyMs: opts.adminLatencyMs }),
     http.get(`${base}/v1/health`, () => HttpResponse.json({ status: 'ok' as const })),
 
-    // The mocked clock runs 90 seconds ahead of the browser, so the offset logic is visible.
     http.get(`${base}/v1/time`, () =>
-      HttpResponse.json({ serverNow: new Date(Date.now() + 90_000).toISOString() }),
+      HttpResponse.json({ serverNow: mockServerNow().toISOString() }),
     ),
 
     http.get(`${base}/v1/candidate/session`, () => {
       const { testDurationMs, sectionDurationMs, ...rest } = mockSession;
-      const serverStart = startedAt + 90_000;
+      const serverStart = startedAt + MOCK_SERVER_CLOCK_AHEAD_MS;
       const body: Schemas['CandidateSession'] = {
         ...rest,
         testDeadlineAt: new Date(serverStart + testDurationMs).toISOString(),
@@ -96,7 +100,7 @@ export function createHandlers(options: Partial<MockOptions> = {}) {
 
     http.put(`${base}/v1/candidate/questions/:questionId/draft`, async () => {
       await delay(opts.saveLatencyMs);
-      return HttpResponse.json({ savedAt: new Date().toISOString() });
+      return HttpResponse.json({ savedAt: mockServerNow().toISOString() });
     }),
 
     http.post(`${base}/v1/candidate/questions/:questionId/run`, async ({ request, params }) => {
@@ -116,7 +120,7 @@ export function createHandlers(options: Partial<MockOptions> = {}) {
 
     http.post(`${base}/v1/candidate/sections/:sectionId/finish`, async () => {
       await delay(opts.saveLatencyMs);
-      return HttpResponse.json({ finishedAt: new Date().toISOString(), nextSectionId: null });
+      return HttpResponse.json({ finishedAt: mockServerNow().toISOString(), nextSectionId: null });
     }),
   ];
 }
