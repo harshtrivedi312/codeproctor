@@ -730,6 +730,19 @@ describe('Candidate media presign and confirm (FR-701, FR-702, FR-703, TC-070, T
     expect(app.get(port)).toBe(storage);
   });
 
+  it('FR-704: the app boots RetentionModule on the S3ObjectStore built from MediaModule', () => {
+    const port = jest.requireActual<typeof import('../retention/object-store.port')>(
+      '../retention/object-store.port',
+    ).ObjectStorePort;
+    const impl =
+      jest.requireActual<typeof import('./s3-object-store')>('./s3-object-store').S3ObjectStore;
+    const retention = jest.requireActual<typeof import('../retention/retention.service')>(
+      '../retention/retention.service',
+    ).RetentionService;
+    expect(app.get(port, { strict: false })).toBeInstanceOf(impl);
+    expect(app.get(retention, { strict: false })).toBeDefined();
+  });
+
   // ---------- logs (ADR 0013 section 5.1) ----------
 
   it('NFR-05, ADR 0013 5.1: no object key, URL, ETag or token reaches the logs', async () => {

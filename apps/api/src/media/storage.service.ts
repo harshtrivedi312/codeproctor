@@ -145,6 +145,14 @@ export class StorageService extends ObjectStoragePort {
     return this.settings.bucket;
   }
 
+  /**
+   * The configured client and bucket, for the retention adapter (S3ObjectStore) that shares this
+   * service's settings. Throws StorageUnconfiguredError without settings: nothing runs unconfigured.
+   */
+  rawClient(): { readonly client: S3Client; readonly bucket: string } {
+    return { client: this.client, bucket: this.bucket };
+  }
+
   private get client(): S3Client {
     if (this.settings === null) throw new StorageUnconfiguredError();
     this.cached ??= new S3Client({

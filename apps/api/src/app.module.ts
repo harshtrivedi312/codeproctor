@@ -19,6 +19,7 @@ import { DatabaseModule } from './database/database.module';
 import { ExecutionModule } from './execution/execution.module';
 import { MailModule } from './mail/mail.module';
 import { MediaModule } from './media/media.module';
+import { RetentionModule } from './retention/retention.module';
 import { HealthModule } from './health/health.module';
 import { InfrastructureModule } from './infrastructure/infrastructure.module';
 
@@ -83,6 +84,7 @@ function areaOf(context: ExecutionContext): Area {
     AuthModule,
     CandidateModule,
     MediaModule,
+    RetentionModule.forRoot({ objectStore: MediaModule }),
     UsersModule,
     HealthModule,
     ExecutionModule,
