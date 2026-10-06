@@ -14,14 +14,15 @@
 // check this file against the generated client.
 //
 // In this file from CS-4.4: the WRITE column as an allowlist (which columns a candidate create and a
-// candidate update may carry, per model; updates only on sessions, session_questions and consents,
-// create only on submissions, identity_checks and the two batch tables, none on session_sections),
-// and the `proctor_events` rules (source = 'CLIENT' row filter, creates carry it).
+// candidate update may carry, per model; updates only on sessions, session_questions and media_chunks,
+// create only on submissions, identity_checks, the two batch tables and, under the ConsentService
+// grant, consents; none on session_sections), the columns a GRANT unlocks for a write (`grantedUpdate`,
+// `grantedCreate`), the eleven grant sites (GRANT_SITES), and the `proctor_events` rules (source =
+// 'CLIENT' row filter, creates carry it).
 //
-// Out of this file, on purpose (ADR 0013 CS-4 PR 2): the READ column allowlists and `omit`, grants,
-// and the `submissions` RUN filter (CS-4.4). Until PR 2, candidate-interim.ts closes the read columns
-// on a list that is the complement of CS-4.4's read column. The fluent API (CS-4.5 vector 6) arrives as
-// a relation select and is refused by vector 2.
+// The READ column allowlists, the explicit-only columns, `omit` and the `submissions` RUN filter are in
+// candidate-interim.ts (the file keeps its PR 1 name: the consent-access scan of Database B pins the
+// path). The fluent API (CS-4.5 vector 6) arrives as a relation select and is refused by vector 2.
 import { MediaStream } from '../generated/prisma/enums.js';
 import { deepFreeze } from './deep-freeze';
 import type { CandidateFacts } from './org-context';
@@ -119,7 +120,14 @@ export type CandidateReadFilter =
   /** `test_sections`: `sessionSections: { some: { sessionId } }` (injected relation filter). */
   | 'sections'
   /** `questions`: `versions: { some: { sessionQuestions: { some: { sessionId } } } }`. */
-  | 'questions';
+  | 'questions'
+  /**
+   * `test_questions` (under its grant): `sessionQuestions: { some: { sessionId } }`, so the grant reaches
+   * only a test question that one of THIS session's questions points to. CS-4.3 names `id IN grant.ids`
+   * alone; the session filter is the stricter reading (FU-DB-212): without it a service that passed another
+   * candidate's `test_question_id` would read its `section_id`.
+   */
+  | 'testQuestions';
 
 /**
  * Columns that no candidate write names, ever (the review's rule): the primary key (a create that names
@@ -254,17 +262,142 @@ export const SERVER_ONLY_EVENT_TYPES: readonly string[] = deepFreeze([
   'RESUME_OTP_FAILED',
 ]);
 
+/** How a grant filters (ADR 0013 CS-4.4, ADR 0006 section 8.5). */
+export type GrantMode =
+  /** `id IN ids` is ANDed into every query on the grant's model (reads, updates, and the rest). */
+  | 'rows'
+  /** A create grant: there is no `where`, so `ids` constrain the create's own session key instead. */
+  | 'create';
+
+/**
+ * What a query sees of an active grant (org-context.ts builds the live object; the pure functions only
+ * read these four fields). `columns` are Prisma field names, `ids` are normalised (lower-case uuids, or
+ * bigint for media_chunks).
+ */
+export interface GrantView {
+  readonly model: string;
+  readonly columns: readonly string[];
+  readonly ids: readonly (string | bigint)[];
+  readonly mode: GrantMode;
+}
+
+/**
+ * One grant site of ADR 0013 CS-4.4's table (the FU-DB-67 call-site entries): the model, the columns it
+ * unlocks and how the ids filter. A grant must name a model and a non-empty subset of the columns of ONE
+ * site of that model, so one grant cannot join two services' columns (`status` with `hmacKeyEnc`). The
+ * site names are for messages and for the call-site test; the extension knows a grant only by its model
+ * and columns. `idKind`: `uuid`, or `bigint` for media_chunks, whose primary key is an identity counter.
+ */
+export interface GrantSite {
+  readonly name: string;
+  readonly model: ModelName;
+  readonly columns: readonly string[];
+  readonly mode: GrantMode;
+  readonly idKind: 'uuid' | 'bigint';
+}
+
+/**
+ * The eleven grant sites (ADR 0013 CS-4.4 table; ADR 0006 section 8.5 as amended by the hub, item 9).
+ * `CandidateSessionGuard` has no grant (DL-31). What each site unlocks:
+ *   - read of an explicit-only column (hmacKeyEnc, deviceInfo, objectKey, the two settings,
+ *     accommodations, testQuestionId): the column is also named in CANDIDATE_READ.explicit;
+ *   - the write of a column that is writable only under a grant (`grantedUpdate`: status, pauseReasons,
+ *     submittedAt, deviceInfo);
+ *   - the read of a model that is readable only under a grant (`grant-only`: consent_texts,
+ *     test_questions);
+ *   - the one candidate create of `consents` (`grantedCreate`), whose `ids` constrain `sessionId`.
+ */
+export const GRANT_SITES: readonly GrantSite[] = deepFreeze([
+  {
+    name: 'SessionStateService',
+    model: 'Session',
+    columns: ['status', 'pauseReasons', 'submittedAt'],
+    mode: 'rows',
+    idKind: 'uuid',
+  },
+  { name: 'KeyService', model: 'Session', columns: ['hmacKeyEnc'], mode: 'rows', idKind: 'uuid' },
+  {
+    name: 'DeviceInfoService',
+    model: 'Session',
+    columns: ['deviceInfo'],
+    mode: 'rows',
+    idKind: 'uuid',
+  },
+  {
+    name: 'StorageService',
+    model: 'MediaChunk',
+    columns: ['objectKey'],
+    mode: 'rows',
+    idKind: 'bigint',
+  },
+  {
+    name: 'OrgSettingsService',
+    model: 'Organization',
+    columns: ['settings'],
+    mode: 'rows',
+    idKind: 'uuid',
+  },
+  {
+    name: 'TestSettingsService',
+    model: 'Test',
+    columns: ['settings'],
+    mode: 'rows',
+    idKind: 'uuid',
+  },
+  {
+    name: 'AccommodationsService',
+    model: 'Invitation',
+    columns: ['accommodations'],
+    mode: 'rows',
+    idKind: 'uuid',
+  },
+  {
+    name: 'SectionGateService (step 1)',
+    model: 'SessionQuestion',
+    columns: ['testQuestionId'],
+    mode: 'rows',
+    idKind: 'uuid',
+  },
+  {
+    name: 'SectionGateService (step 2)',
+    model: 'TestQuestion',
+    columns: ['id', 'sectionId'],
+    mode: 'rows',
+    idKind: 'uuid',
+  },
+  {
+    name: 'ConsentService (consent text)',
+    model: 'ConsentText',
+    columns: ['id', 'version', 'bodyMd', 'legalApprovedAt'],
+    mode: 'rows',
+    idKind: 'uuid',
+  },
+  {
+    name: 'ConsentService (create)',
+    model: 'Consent',
+    columns: [
+      'sessionId',
+      'consentTextId',
+      'signedName',
+      'signedAt',
+      'declinedAt',
+      'ip',
+      'userAgent',
+    ],
+    mode: 'create',
+    idKind: 'uuid',
+  },
+]);
+
 export type CandidateModelRule =
   /**
    * A session-path model (CS-4.2). Its WRITE columns are the CS-4.4 "Write" column, as an allowlist:
    * `create` and `update` list the columns a candidate create and a candidate update may carry. A
    * missing list means the operation is refused (`update` missing: create only; `create` missing:
-   * update only; both missing: the model is read-only). Anything not listed throws. Its READ columns
-   * are limited by CANDIDATE_INTERIM_DENY (candidate-interim.ts) until PR 2.
-   *
-   * What is interim here is the grants: columns CS-4.4 opens only under a grant (`sessions.status`,
-   * `pauseReasons`, `submittedAt` and `deviceInfo`; `session_questions.testQuestionId`) are refused
-   * until PR 2 adds `withGrant`.
+   * update only; both missing: the model is read-only). Anything not listed throws. Columns that CS-4.4
+   * writable only under a grant are in `grantedUpdate` and `grantedCreate`: they are writable while a
+   * grant of this model names them, and a grant never adds an operation the lists above refuse. Its READ
+   * columns are limited by CANDIDATE_READ (candidate-interim.ts).
    */
   | {
       readonly kind: 'session';
@@ -272,6 +405,55 @@ export type CandidateModelRule =
       readonly create?: readonly string[];
       /** Columns a candidate update may write. The session keys are never among them. */
       readonly update?: readonly string[];
+      /**
+       * Columns an UPDATE may write only while a grant of this model names them (CS-4.4: `sessions.status`,
+       * `pauseReasons`, `submittedAt` under the SessionStateService grant, `deviceInfo` under
+       * DeviceInfoService). Needs `update` to be set: a grant does not make a model updatable. Only the
+       * column is unlocked; the transition rules (CS-4.4a) are the service's.
+       */
+      readonly grantedUpdate?: readonly string[];
+      /**
+       * A model with NO ungranted create whose create is allowed while a create grant of this model is
+       * active: the columns the grant may unlock (the consents create: the five written columns and the
+       * two checked keys). `create` is then unset.
+       */
+      readonly grantedCreate?: readonly string[];
+      /**
+       * The only create operations allowed (default: all four). The consents create is `create` alone:
+       * one row per session (`UNIQUE(session_id)`), so no batch and no upsert.
+       */
+      readonly createOperations?: readonly string[];
+      /**
+       * Columns a create must carry. The extension verifies them (the session key against the context
+       * and the grant's ids; `consentTextId` against the org's current text) instead of stamping them.
+       */
+      readonly createRequired?: readonly string[];
+      /**
+       * Columns a create may carry only on a row whose `column` equals `equals` (submissions: `results`,
+       * `passed` and `total` only on a RUN row, CS-4.4). A row that names one with another value, or none,
+       * is refused.
+       */
+      readonly createWhen?: {
+        readonly columns: readonly string[];
+        readonly column: string;
+        readonly equals: string;
+      };
+      /**
+       * Exactly one of these two columns is set in a create (the database CHECK, thrown first with no
+       * value in it): consents `signedAt` and `declinedAt`.
+       */
+      readonly createXor?: readonly [string, string];
+      /**
+       * A create that sets the key column must also carry the value column as a non-empty string
+       * (consents: `signedAt` needs the typed name, `consents_check1`).
+       */
+      readonly createNeeds?: Readonly<Record<string, string>>;
+      /**
+       * The create names a consent text that the extension checks against the organisation's current one
+       * (`organizations.current_consent_text_id`, one read on the factory client) before the insert. Only
+       * the consents create sets it.
+       */
+      readonly checksConsentText?: boolean;
       /**
        * Scalars a CANDIDATE may not write on update, on top of SessionModelRule.immutable: keys that
        * decide what the injected filters of OTHER models reach. `session_questions.questionVersionId`
@@ -288,21 +470,21 @@ export type CandidateModelRule =
        * A row that names one is refused; the message never echoes it.
        */
       readonly createRefused?: Readonly<Record<string, readonly string[]>>;
-      /**
-       * A filter ANDed into the `where` of every candidate UPDATE (and of an upsert's where), and of no
-       * read: the rows a candidate may still change. consents: only a row that is neither signed nor
-       * declined, so the record of a signature is written once (FR-401, C-17).
-       */
-      readonly updateFilter?: PlainObject;
     }
   /** Read-only: every write operation throws. */
   | { readonly kind: 'read'; readonly filter: CandidateReadFilter }
   /**
-   * Readable only under a grant (`consent_texts`, `test_questions`). TODO(ADR 0013 CS-4 PR 2): grants
-   * do not exist yet, so in this PR these two models throw in a CANDIDATE scope. PR 2 adds
-   * `withGrant`, the `id IN grant.ids` filter and the (`id`, `section_id`) column limit.
+   * Readable only under a grant (`consent_texts`, `test_questions`; CS-4.3): with no grant of this
+   * model every operation throws. Under one, the model is read-only, `id IN grant.ids` is ANDed into
+   * every query, and only the columns the grant names are readable (CS-4.4: `consent_texts`
+   * `id`, `version`, `body_md`, `legal_approved_at`; `test_questions` `id` and `section_id`).
    */
-  | { readonly kind: 'grant-only'; readonly grantSite: string };
+  | {
+      readonly kind: 'grant-only';
+      readonly grantSite: string;
+      /** A row filter ANDed on top of the grant's `id IN ids` (test_questions: the session's own). */
+      readonly filter?: CandidateReadFilter;
+    };
 
 /**
  * CS-4.3: the CANDIDATE allowlist. A model that is not here throws (deny by default). The write
@@ -312,9 +494,14 @@ export type CandidateModelRule =
 export const CANDIDATE_MODELS: Readonly<Partial<Record<ModelName, CandidateModelRule>>> =
   deepFreeze({
     // Session-path models (CS-4.2).
-    // CS-4.4: `last_heartbeat`; `device_info` (DeviceInfoService grant) and `status`, `pause_reasons`,
-    // `submitted_at` (SessionStateService grant) come with PR 2. No create, no delete.
-    Session: { kind: 'session', update: ['lastHeartbeat'] },
+    // CS-4.4: `last_heartbeat`; `device_info` only under the DeviceInfoService grant; `status`,
+    // `pause_reasons`, `submitted_at` only under the SessionStateService grant (the grant unlocks the
+    // column, the CS-4.4a transition rules are the service's). No create, no delete.
+    Session: {
+      kind: 'session',
+      update: ['lastHeartbeat'],
+      grantedUpdate: ['status', 'pauseReasons', 'submittedAt', 'deviceInfo'],
+    },
     // CS-4.4: `final_code`, `final_language`, `answer`. No create.
     SessionQuestion: {
       kind: 'session',
@@ -381,24 +568,39 @@ export const CANDIDATE_MODELS: Readonly<Partial<Record<ModelName, CandidateModel
       kind: 'session',
       create: ['sessionId', 'sessionQuestionId', 'seq', 'signature', 'startedAt', 'events'],
     },
-    // CS-4.4: `signed_name`, `signed_at`, `declined_at`, `ip`, `user_agent`. `consent_text_id` is set
-    // server-side and `pdf_key` by the consent-PDF job, so neither is writable here, which also means a
-    // candidate cannot create the row (its `consentTextId` is required): update only.
-    // The record of a signature is written once: an update reaches only a row that is neither signed
-    // nor declined (`updateFilter`), so once signed or declined, `signedName`, `ip` and `userAgent` cannot be
-    // rewritten (0 rows). The database CHECK (exactly one of signed_at and declined_at is set) means a row
-    // is never in that state, so a candidate update changes nothing today; the row is created, with its
-    // server-set consentTextId, by a SERVICE job or an org-scope create, or by PR 2's ConsentService grant.
+    // CS-4.4 (item 9, ADR 0013 PR #178): CREATE ONLY, and only under the ConsentService (create) grant
+    // (`ids` = [ctx.sessionId]). No update, delete or upsert, and no createMany: sign and decline are one
+    // `create` each, and write-once is `UNIQUE(session_id)` plus the CHECKs (a second create is P2002,
+    // which BE-07 maps to 409). The create carries `sessionId` and `consentTextId`, which the service sets
+    // (Prisma's unchecked create input requires them) and the extension VERIFIES: `sessionId` must be the
+    // scope's own and in the grant's ids, `consentTextId` must be the org's current text. The five written
+    // columns are `signedName`, `signedAt`, `declinedAt`, `ip`, `userAgent`; `pdfKey`, `pdfGeneratedAt` and
+    // `copyEmailedAt` stay with the consent-PDF job. The row a create returns omits `signedName`, `ip` and
+    // `userAgent` (read allowlist, candidate-interim.ts). This replaces PR 1's update-only, write-once
+    // update path (FU-DB-195 (h)).
     Consent: {
       kind: 'session',
-      update: ['signedName', 'signedAt', 'declinedAt', 'ip', 'userAgent'],
-      updateFilter: { signedAt: null, declinedAt: null },
+      grantedCreate: [
+        'sessionId',
+        'consentTextId',
+        'signedName',
+        'signedAt',
+        'declinedAt',
+        'ip',
+        'userAgent',
+      ],
+      createOperations: ['create'],
+      createRequired: ['sessionId', 'consentTextId'],
+      createXor: ['signedAt', 'declinedAt'],
+      createNeeds: { signedAt: 'signedName' },
+      checksConsentText: true,
     },
-    // CS-4.4: create only: `session_question_id`, `kind` (RUN or SUBMIT), `language`, `source_code`.
-    // `results`, `passed` and `total` are CS-4.4's RUN-row columns: refused until the RUN filter of PR 2.
+    // CS-4.4: create only: `session_question_id`, `kind` (RUN or SUBMIT), `language`, `source_code`, and
+    // `results`, `passed`, `total` on a RUN row only (the read side has the RUN filter, candidate-interim.ts).
     Submission: {
       kind: 'session',
-      create: ['sessionQuestionId', 'kind', 'language', 'sourceCode'],
+      create: ['sessionQuestionId', 'kind', 'language', 'sourceCode', 'results', 'passed', 'total'],
+      createWhen: { columns: ['results', 'passed', 'total'], column: 'kind', equals: 'RUN' },
     },
     // Read-only.
     Organization: { kind: 'read', filter: 'org' },
@@ -407,9 +609,13 @@ export const CANDIDATE_MODELS: Readonly<Partial<Record<ModelName, CandidateModel
     Test: { kind: 'read', filter: 'test' },
     TestSection: { kind: 'read', filter: 'sections' },
     Question: { kind: 'read', filter: 'questions' },
-    // Readable only under a grant (PR 2); refused until then.
-    ConsentText: { kind: 'grant-only', grantSite: 'ConsentService' },
-    TestQuestion: { kind: 'grant-only', grantSite: 'SectionGateService (step 2)' },
+    // Readable only under a grant of that model (CS-4.3): `id IN grant.ids`, and the grant's columns.
+    ConsentText: { kind: 'grant-only', grantSite: 'ConsentService (consent text)' },
+    TestQuestion: {
+      kind: 'grant-only',
+      grantSite: 'SectionGateService (step 2)',
+      filter: 'testQuestions',
+    },
   });
 
 export function candidateRuleFor(model: string): CandidateModelRule | undefined {
@@ -465,5 +671,7 @@ export function candidateReadFilter(
       return { sessionSections: { some: { sessionId } } };
     case 'questions':
       return { versions: { some: { sessionQuestions: { some: { sessionId } } } } };
+    case 'testQuestions':
+      return { sessionQuestions: { some: { sessionId } } };
   }
 }
