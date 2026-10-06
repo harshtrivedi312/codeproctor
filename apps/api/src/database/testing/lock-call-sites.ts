@@ -7,10 +7,12 @@
 //      SessionStateService and SessionJobProcessor files, lockForAccommodation in the SessionStateService, accommodation
 //      writers and retention repository files. The paths are Backend B's real ones (#98, #206) and Database B's.
 //   2. WHAT EACH FILE MAY DO (checked when the file exists, text rules over the comment-stripped source):
-//      - SESSION_STATE_FILE: each core is imported under an alias (or as a namespace) and called exactly once, inside
-//        the wrapper METHOD of the same name; the alias is used nowhere else; every other mention of a lock name is the
-//        wrapper's definition or a member call; exactly one `this.guardLive(` call, inside the brace-matched
-//        `proctorResume` body.
+//      - SESSION_STATE_FILE: each core is imported by NAME under an alias (never as a namespace) and called exactly
+//        once, inside the wrapper METHOD of the same name; the alias is used nowhere else; every other mention of a lock
+//        name is the wrapper's definition or a member call. Member calls of the wrappers inside the file are counted
+//        with ANY receiver (`this.`, `self.`, `this?.`, `(this as X).`, `super.`): exactly ONE `.guardLive(` call, inside
+//        the brace-matched `proctorResume` body, and ZERO `.lockAnySession(` and `.lockForAccommodation(` calls (the
+//        accommodation routes call the last from session/accommodations.ts, the jobs call the first from the processor).
 //      - SESSION_PROCESSOR_FILE: `.guardLive(` exactly once, inside `withLiveSession`; `.lockAnySession(` exactly once,
 //        inside `withAnySession`; every mention of a lock name is a member call.
 //      - the accommodation and retention files: every mention of a lock name is a member call.
@@ -19,8 +21,12 @@
 //
 // All of it is a TEXT scan after the comments are stripped (stripComments): a name built at run time, a string that spells
 // a call, or code that is not formatted as the repository's prettier formats it can be missed or can fail the other way.
-// A doubt costs an extra finding, never a missed one, wherever the scan can tell. The rules are documented for
-// Backend B and Database B in apps/api/src/database/README.md ("Who calls what").
+// A doubt costs an extra finding, never a missed one, wherever the scan can tell. LIMITS, so a reviewer does not rely on
+// more than this: `matchingBrace` and `findMethod` skip strings and templates but NOT regex literals (a quote inside a
+// regex literal can unbalance a body: the caller then reports "no wrapper found" or a count, never a pass); the
+// exported-function check works on lines (it assumes prettier's column-0 layout); a lock reached through a computed
+// property or an eval is not seen. The rules are documented for Backend B and Database B in
+// apps/api/src/database/README.md ("Who calls what").
 import { stripComments } from './call-site-guard';
 import type { CallSiteList } from './call-site-guard';
 import type { SourceFile } from './import-guard';
@@ -53,17 +59,18 @@ export const LOCK_CALLER_RULES = {
   import: `only ${SESSION_STATE_FILE} imports database/session-locks`,
   guardLive:
     `${SESSION_PROCESSOR_FILE} (withLiveSession, exactly one .guardLive( call) and ${SESSION_STATE_FILE} ` +
-    'with the single STAFF method proctorResume (exactly one this.guardLive( call, inside proctorResume)',
+    'with the single STAFF method proctorResume (exactly one .guardLive( call with any receiver, inside proctorResume)',
   lockAnySession:
     `${SESSION_PROCESSOR_FILE} (withAnySession, exactly one .lockAnySession( call) and ${SESSION_STATE_FILE} ` +
-    '(the wrapper); each why naming withAnySession',
+    '(the wrapper only: no member call of it in that file); each why naming withAnySession',
   lockForAccommodation:
     `the STAFF accommodation routes (${ACCOMMODATIONS_FILE} and ${SESSION_STATE_FILE}: PATCH, redact-note, ` +
     `video-check PUT) and one org-job file, ${RETENTION_LOCK_FILE} (RetentionRepository.casAccommodations in a ` +
     'plain runInOrg: the erasure, R-4 and R-10 jobs)',
   stateFile:
-    'each core imported under an alias (or a namespace) and called exactly once, inside the wrapper method of the ' +
-    'same name, nowhere else; one this.guardLive( call, inside proctorResume',
+    'each core imported by name under an alias (no namespace import) and called exactly once, inside the wrapper ' +
+    'method of the same name, nowhere else; member calls counted with any receiver: one .guardLive( call, inside ' +
+    'proctorResume, and no .lockAnySession( or .lockForAccommodation( call',
   otherFiles: 'every mention of a lock name is a member call (`this.state.guardLive(`)',
   exports: 'no export of a lock, an alias, or a function or static property that wraps one',
 } as const;
@@ -232,13 +239,19 @@ const inRanges = (index: number, ranges: ReadonlyArray<[number, number]>): boole
 
 // ---- the per-file rules -------------------------------------------------------------------------------------------------
 
-/** Mentions of `name` that are not preceded by a dot (a method definition, a bare call, a reference). */
-const bareMentions = (code: string, name: string): number[] =>
-  indexesOf(code, new RegExp(`(?<![.\\w$])${escapeName(name)}(?![\\w$])`));
+/** True when the text before `index` ends with a dot, whitespace and line breaks between the dot and the name allowed. */
+const afterDot = (code: string, index: number): boolean =>
+  /\.\s*$/.test(code.slice(Math.max(0, index - 64), index));
 
-/** A mention that is `.name(` : a member call. */
+/** Mentions of `name` that are not after a dot (a method definition, a bare call, a reference). */
+const bareMentions = (code: string, name: string): number[] =>
+  indexesOf(code, new RegExp(`(?<![\\w$])${escapeName(name)}(?![\\w$])`)).filter(
+    (index) => !afterDot(code, index),
+  );
+
+/** A mention that is `.name(` : a member call (whitespace after the dot is fine). */
 const isMemberCall = (code: string, index: number, name: string): boolean =>
-  code.charAt(index - 1) === '.' && /^\s*\(/.test(code.slice(index + name.length));
+  afterDot(code, index) && /^\s*\(/.test(code.slice(index + name.length));
 
 /** A mention that begins a method definition: only modifiers before it on its line, and `(` after it. */
 function isDefinitionLike(code: string, index: number, name: string): boolean {
@@ -264,7 +277,26 @@ function memberCallOnlyProblems(path: string, code: string, names: readonly Lock
   return out;
 }
 
-/** The SessionStateService file: wrappers over the cores, one `proctorResume` call of guardLive. */
+/** The `\.\s*name` occurrences in `code` with the index where the name ends: any receiver, `?.` included. */
+function memberMentions(code: string, name: string): Array<{ index: number; end: number }> {
+  return [...code.matchAll(new RegExp(`\\.\\s*${escapeName(name)}(?![\\w$])`, 'g'))].map((m) => ({
+    index: m.index,
+    end: m.index + m[0].length,
+  }));
+}
+
+/** The member CALLS of `name` in `code`, with any receiver: `.name(`, `?.name(`, `self.name(`, `(x as T).name(`, `super.name(`. */
+const memberCalls = (code: string, name: string): number[] =>
+  memberMentions(code, name)
+    .filter(({ end }) => /^\s*\(/.test(code.slice(end)))
+    .map(({ index }) => index);
+
+/**
+ * The SessionStateService file: wrappers over the cores. Each core is imported by name under an alias (a namespace
+ * import is refused: it would hand the whole core to the file) and called exactly once, inside its own wrapper. The
+ * wrappers are called from the file with ANY receiver: `.guardLive(` exactly once, inside `proctorResume`;
+ * `.lockAnySession(` and `.lockForAccommodation(` never.
+ */
 export function stateFileProblems(
   path: string,
   code: string,
@@ -272,6 +304,11 @@ export function stateFileProblems(
 ): string[] {
   const out: string[] = [];
   const imports = parseLockImports(code);
+  if (imports.namespaces.length > 0) {
+    out.push(
+      `${path}: a namespace import of database/session-locks is refused: import the locks by name, each under an alias`,
+    );
+  }
   for (const name of names) {
     const wrapper = findMethod(code, name);
     if (wrapper === undefined) {
@@ -284,9 +321,9 @@ export function stateFileProblems(
       );
     }
     const aliases = locals.filter((local) => local !== name);
-    if (aliases.length === 0 && imports.namespaces.length === 0) {
+    if (aliases.length === 0) {
       out.push(
-        `${path}: the core ${name} is not imported from database/session-locks under an alias or a namespace`,
+        `${path}: the core ${name} is not imported from database/session-locks under an alias`,
       );
       continue;
     }
@@ -294,11 +331,6 @@ export function stateFileProblems(
     const calls: number[] = [];
     for (const alias of aliases) {
       calls.push(...indexesOf(code, new RegExp(`(?<![.\\w$])${escapeName(alias)}\\s*\\(`)));
-    }
-    for (const ns of imports.namespaces) {
-      calls.push(
-        ...indexesOf(code, new RegExp(`(?<![.\\w$])${escapeName(ns)}\\s*\\.\\s*${name}\\s*\\(`)),
-      );
     }
     if (calls.length !== 1) {
       out.push(
@@ -319,17 +351,6 @@ export function stateFileProblems(
         }
       }
     }
-    for (const ns of imports.namespaces) {
-      for (const index of bareMentions(code, ns)) {
-        const isCall = new RegExp(`^\\s*\\.\\s*(?:${LOCK_NAMES.join('|')})\\s*\\(`).test(
-          code.slice(index + ns.length),
-        );
-        if (!isCall && !inRanges(index, imports.ranges)) {
-          out.push(`${path}: the namespace ${ns} is used other than as ${ns}.<lock>( calls`);
-          break;
-        }
-      }
-    }
     // Every other mention of the lock name is the wrapper's definition or a member call.
     for (const index of bareMentions(code, name)) {
       if (!inRanges(index, imports.ranges) && !isDefinitionLike(code, index, name)) {
@@ -339,23 +360,33 @@ export function stateFileProblems(
         break;
       }
     }
-    for (const index of indexesOf(code, new RegExp(`\\.\\s*${name}\\b`))) {
-      if (!/^\s*\(/.test(code.slice(index + 1 + name.length))) {
+    // A property reference that is not a call (`.guardLive.bind(this)`, `.guardLive?.(tx)`): whitespace after the dot is fine.
+    for (const { end } of memberMentions(code, name)) {
+      if (!/^\s*\(/.test(code.slice(end))) {
         out.push(`${path}: ${name} is referenced as a property, not called`);
         break;
+      }
+    }
+    // Member calls of the wrappers inside the file, with ANY receiver.
+    if (name !== 'guardLive') {
+      const inFile = memberCalls(code, name);
+      if (inFile.length > 0) {
+        out.push(
+          `${path}: ${inFile.length} .${name}( member calls in the state file (any receiver), none are allowed`,
+        );
       }
     }
   }
   if (names.includes('guardLive')) {
     const resume = findMethod(code, 'proctorResume');
-    const calls = indexesOf(code, /\bthis\.guardLive\s*\(/);
+    const calls = memberCalls(code, 'guardLive');
     if (resume === undefined) out.push(`${path}: no proctorResume method with a body found`);
     if (calls.length !== 1) {
       out.push(
-        `${path}: ${calls.length} this.guardLive( calls, exactly one is allowed, inside proctorResume`,
+        `${path}: ${calls.length} .guardLive( member calls (any receiver), exactly one is allowed, inside proctorResume`,
       );
     } else if (resume !== undefined && !inside(calls[0] as number, resume)) {
-      out.push(`${path}: the this.guardLive( call is not inside proctorResume`);
+      out.push(`${path}: the .guardLive( call is not inside proctorResume`);
     }
   }
   return [...new Set(out)];
@@ -585,9 +616,18 @@ export function findLockExports(
   const out: string[] = [];
   for (const file of files) {
     const code = stripComments(file.text);
-    if (!names.some((name) => new RegExp(`\\b${escapeName(name)}\\b`).test(code))) continue;
-    const aliases = aliasesOf(code, names);
+    const imports = parseLockImports(code);
+    const importsTheCore = imports.ranges.length > 0;
+    if (
+      !importsTheCore &&
+      !names.some((name) => new RegExp(`\\b${escapeName(name)}\\b`).test(code))
+    ) {
+      continue;
+    }
+    // A namespace import is the whole core under one name: refused, and its name is an alias like the others.
+    const aliases = aliasesOf(code, [...names, ...imports.namespaces]);
     const found = new Set<string>();
+    if (imports.namespaces.length > 0) found.add('imports database/session-locks as a namespace');
     for (const alias of aliases) {
       if (exportForms(alias).some((form) => form.test(code))) found.add(`exports ${alias}`);
     }

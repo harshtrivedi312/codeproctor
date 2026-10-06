@@ -113,7 +113,7 @@ const problemsWith = (path: string, text: string): string[] =>
     GOOD_FILES.map((f) => (f.path === path ? file(path, text) : f)),
   );
 
-describe('the real paths and the rules in words (S-B of the re-review of #208): FU-DB-67, TC-008', () => {
+describe('the real paths and the rules in words (S-B of the re-review of #208): FU-DB-67, NFR-04, TC-008', () => {
   it("TC-008 the pinned paths are Backend B's (#98, #206) and Database B's", () => {
     expect(SESSION_STATE_FILE).toBe('session/session-state.service.ts');
     expect(SESSION_PROCESSOR_FILE).toBe('session/session-job.processor.ts');
@@ -144,7 +144,7 @@ describe('the real paths and the rules in words (S-B of the re-review of #208): 
   });
 });
 
-describe('the import guard allowlist is a subset of the SessionStateService file (S-B): FU-DB-67, TC-008', () => {
+describe('the import guard allowlist is a subset of the SessionStateService file (S-B): FU-DB-67, NFR-04, TC-008', () => {
   it('TC-008 empty and the SessionStateService file pass; any other file fails, by name', () => {
     expect(lockImportProblems([])).toEqual([]);
     expect(lockImportProblems([SESSION_STATE_FILE])).toEqual([]);
@@ -156,7 +156,7 @@ describe('the import guard allowlist is a subset of the SessionStateService file
   });
 });
 
-describe('S-B: the entries of CALL_SITES for a lock are a subset of the real paths', () => {
+describe('S-B: the entries of CALL_SITES for a lock are a subset of the real paths (FU-DB-67, NFR-04, TC-008)', () => {
   it('TC-008 the complete list passes, with the files checked', () => {
     expect(lockCallSiteProblems(GOOD, GOOD_FILES)).toEqual([]);
     expect(lockCallSiteProblems(GOOD)).toEqual([]); // without files, only the entries are checked
@@ -265,7 +265,7 @@ describe('S-B: the entries of CALL_SITES for a lock are a subset of the real pat
   });
 });
 
-describe('S-B: the SessionStateService file: aliased cores, one call each, inside the same-named wrapper', () => {
+describe('S-B, B1, S3, S4: the SessionStateService file: aliased cores, one call each, inside the same-named wrapper (FR-704, NFR-05, NFR-04, TC-008)', () => {
   const state = (text: string, names = LOCK_NAMES): string[] =>
     stateFileProblems(SESSION_STATE_FILE, text, names);
 
@@ -273,7 +273,7 @@ describe('S-B: the SessionStateService file: aliased cores, one call each, insid
     expect(state(STATE_TEXT)).toEqual([]);
   });
 
-  it('TC-008 a namespace import works too: ns.guardLive( once, inside the wrapper', () => {
+  it('TC-008 S4 a namespace import of the core is refused: the state file imports the locks by name, each under an alias', () => {
     const text = `import * as locks from '../database/session-locks';
 export class S {
   async guardLive(tx: Tx, sid: string) { return locks.guardLive(tx, sid); }
@@ -282,14 +282,25 @@ export class S {
   async proctorResume(sid: string) { return this.guardLive(tx, sid); }
 }
 `;
-    expect(state(text)).toEqual([]);
+    const problems = state(text);
+    expect(problems).toContain(
+      `${SESSION_STATE_FILE}: a namespace import of database/session-locks is refused: import the locks by name, each under an alias`,
+    );
+    for (const name of LOCK_NAMES) {
+      expect(problems).toContain(
+        `${SESSION_STATE_FILE}: the core ${name} is not imported from database/session-locks under an alias`,
+      );
+    }
+    // Next to the named imports it is refused all the same.
     expect(
       state(
-        text.replace('return locks.guardLive(tx, sid);', 'return locks.lockAnySession(tx, sid);'),
+        STATE_TEXT.replace(
+          'import type',
+          "import * as whole from '../database/session-locks';\nimport type",
+        ),
       ),
-    ).not.toEqual([]);
-    expect(state(text + '\nconst leaked = locks;')).toEqual([
-      `${SESSION_STATE_FILE}: the namespace locks is used other than as locks.<lock>( calls`,
+    ).toEqual([
+      `${SESSION_STATE_FILE}: a namespace import of database/session-locks is refused: import the locks by name, each under an alias`,
     ]);
   });
 
@@ -309,7 +320,7 @@ export class S {
     );
     expect(state(text)).toEqual(
       expect.arrayContaining([
-        `${SESSION_STATE_FILE}: the core guardLive is not imported from database/session-locks under an alias or a namespace`,
+        `${SESSION_STATE_FILE}: the core guardLive is not imported from database/session-locks under an alias`,
       ]),
     );
   });
@@ -380,20 +391,20 @@ export class S {
     expect(state(property)).not.toEqual([]);
   });
 
-  it('TC-008 exactly ONE this.guardLive( call, inside the brace-matched proctorResume body', () => {
+  it('TC-008 exactly ONE .guardLive( member call (any receiver), inside the brace-matched proctorResume body', () => {
     const two = STATE_TEXT.replace(
       'const result = await this.guardLive(tx, sessionId);',
       'await this.guardLive(tx, sessionId);\n      const result = await this.guardLive(tx, sessionId);',
     );
     expect(state(two)).toEqual([
-      `${SESSION_STATE_FILE}: 2 this.guardLive( calls, exactly one is allowed, inside proctorResume`,
+      `${SESSION_STATE_FILE}: 2 .guardLive( member calls (any receiver), exactly one is allowed, inside proctorResume`,
     ]);
     const none = STATE_TEXT.replace(
       'const result = await this.guardLive(tx, sessionId);',
       "const result = 'ERASED';",
     );
     expect(state(none)).toEqual([
-      `${SESSION_STATE_FILE}: 0 this.guardLive( calls, exactly one is allowed, inside proctorResume`,
+      `${SESSION_STATE_FILE}: 0 .guardLive( member calls (any receiver), exactly one is allowed, inside proctorResume`,
     ]);
     const outside = STATE_TEXT.replace(
       'const result = await this.guardLive(tx, sessionId);',
@@ -403,7 +414,7 @@ export class S {
       '  async another(tx: Tx, sessionId: string) {\n    return this.guardLive(tx, sessionId);\n  }\n\n  async proctorResume(',
     );
     expect(state(outside)).toEqual([
-      `${SESSION_STATE_FILE}: the this.guardLive( call is not inside proctorResume`,
+      `${SESSION_STATE_FILE}: the .guardLive( call is not inside proctorResume`,
     ]);
     const noResume = STATE_TEXT.replace('async proctorResume(', 'async resumeSession(');
     expect(state(noResume)).toEqual(
@@ -411,12 +422,105 @@ export class S {
     );
   });
 
-  it('TC-008 a guardLive reference that is not a call fails (.bind, a property read)', () => {
-    expect(state(STATE_TEXT + '\nconst f = this.guardLive.bind(this);')).toEqual(
-      expect.arrayContaining([
-        `${SESSION_STATE_FILE}: guardLive is referenced as a property, not called`,
-      ]),
+  /** A second STAFF method that calls a wrapper, added after proctorResume. */
+  const withMethod = (body: string): string =>
+    STATE_TEXT.replace(
+      /\n}\n$/,
+      `\n\n  async closeIngest(tx: Tx, sid: string) {\n    ${body}\n  }\n}\n`,
     );
+
+  it.each([
+    ['this', 'await this.guardLive(tx, sid);'],
+    ['self', 'await self.guardLive(tx, sid);'],
+    ['optional chaining on the receiver', 'await this?.guardLive(tx, sid);'],
+    ['a cast receiver', 'await (this as unknown as S).guardLive(tx, sid);'],
+    ['super', 'await super.guardLive(tx, sid);'],
+    ['another object', 'await this.helper.guardLive(tx, sid);'],
+    ['whitespace after the dot', 'await this. guardLive(tx, sid);'],
+    ['a line break after the dot', 'await this.\n      guardLive(tx, sid);'],
+  ])('TC-008 B1 a second .guardLive( call with %s outside proctorResume fails', (_what, body) => {
+    expect(state(withMethod(body))).toEqual([
+      `${SESSION_STATE_FILE}: 2 .guardLive( member calls (any receiver), exactly one is allowed, inside proctorResume`,
+    ]);
+  });
+
+  it('TC-008 B1 a guardLive call that is the ONLY one but sits outside proctorResume fails with any receiver', () => {
+    for (const receiver of ['self', 'this?', '(this as S)', 'super']) {
+      const text = STATE_TEXT.replace(
+        'const result = await this.guardLive(tx, sessionId);',
+        "const result = 'ERASED';",
+      ).replace(
+        /\n}\n$/,
+        `\n\n  async other(tx: Tx, sid: string) {\n    return ${receiver}.guardLive(tx, sid);\n  }\n}\n`,
+      );
+      expect({ receiver, problems: state(text) }).toEqual({
+        receiver,
+        problems: [`${SESSION_STATE_FILE}: the .guardLive( call is not inside proctorResume`],
+      });
+    }
+  });
+
+  it.each([
+    ['this.lockAnySession', 'await this.lockAnySession(tx, sid);', 'lockAnySession'],
+    ['self.lockAnySession', 'await self.lockAnySession(tx, sid);', 'lockAnySession'],
+    ['this?.lockAnySession', 'await this?.lockAnySession(tx, sid);', 'lockAnySession'],
+    ['a cast', 'await (this as unknown as S).lockAnySession(tx, sid);', 'lockAnySession'],
+    [
+      'this.lockForAccommodation',
+      'await this.lockForAccommodation(tx, sid);',
+      'lockForAccommodation',
+    ],
+    [
+      'super.lockForAccommodation',
+      'await super.lockForAccommodation(tx, sid);',
+      'lockForAccommodation',
+    ],
+    ['another object', 'await this.other.lockForAccommodation(tx, sid);', 'lockForAccommodation'],
+  ])(
+    'TC-008 S3 %s in a state method fails: no member call of lockAnySession or lockForAccommodation is allowed in the state file (closeIngest would write into an ERASED session)',
+    (_what, body, name) => {
+      expect(state(withMethod(body))).toEqual([
+        `${SESSION_STATE_FILE}: 1 .${name}( member calls in the state file (any receiver), none are allowed`,
+      ]);
+    },
+  );
+
+  it('TC-008 S3 a wrapper that calls ANOTHER wrapper fails too, inside proctorResume as well', () => {
+    const text = STATE_TEXT.replace(
+      "return result === 'ERASED' ? 'gone' : 'resumed';",
+      "await this.lockAnySession(tx, sessionId);\n      return result === 'ERASED' ? 'gone' : 'resumed';",
+    );
+    expect(state(text)).toEqual([
+      `${SESSION_STATE_FILE}: 1 .lockAnySession( member calls in the state file (any receiver), none are allowed`,
+    ]);
+  });
+
+  it("TC-008 B1 optional-call and bracket forms are not calls the rules miss: `.guardLive?.(`, `this['guardLive'](` and `.guardLive.call(` fail", () => {
+    for (const body of [
+      'await this.guardLive?.(tx, sid);',
+      "await this['guardLive'](tx, sid);",
+      'await this.guardLive.call(this, tx, sid);',
+      'const f = this.lockAnySession.bind(this);',
+    ]) {
+      expect({ body, problems: state(withMethod(body)).length > 0 }).toEqual({
+        body,
+        problems: true,
+      });
+    }
+  });
+
+  it('TC-008 N4 a guardLive reference that is not a call fails (.bind, a property read), with or without whitespace after the dot', () => {
+    for (const reference of [
+      'this.guardLive.bind(this)',
+      'this. guardLive.bind(this)',
+      'this.\n  guardLive.bind(this)',
+    ]) {
+      expect(state(STATE_TEXT + `\nconst f = ${reference};`)).toEqual(
+        expect.arrayContaining([
+          `${SESSION_STATE_FILE}: guardLive is referenced as a property, not called`,
+        ]),
+      );
+    }
   });
 
   it('TC-008 comments and strings with braces do not confuse the body matching', () => {
@@ -428,7 +532,7 @@ export class S {
   });
 });
 
-describe('S-B: the SessionJobProcessor file: .guardLive( in withLiveSession, .lockAnySession( in withAnySession', () => {
+describe('S-B: the SessionJobProcessor file: .guardLive( in withLiveSession, .lockAnySession( in withAnySession (FR-704, NFR-05, NFR-04, TC-008)', () => {
   const processor = (text: string): string[] =>
     processorFileProblems(SESSION_PROCESSOR_FILE, text, ['guardLive', 'lockAnySession']);
 
@@ -462,6 +566,16 @@ describe('S-B: the SessionJobProcessor file: .guardLive( in withLiveSession, .lo
     );
     expect(processor(none)).toEqual([
       `${SESSION_PROCESSOR_FILE}: 0 .guardLive( calls, exactly one is allowed, inside withLiveSession`,
+    ]);
+  });
+
+  it('TC-008 N4 whitespace or a line break after the dot, and a ?. receiver, are still counted as calls', () => {
+    const spaced = PROCESSOR_TEXT.replace(
+      "if ((await this.state.guardLive(tx, sid)) === 'LIVE') await fn();",
+      "await this.state. guardLive(tx, sid);\n      if ((await this.state?.\n        guardLive(tx, sid)) === 'LIVE') await fn();",
+    );
+    expect(processor(spaced)).toEqual([
+      `${SESSION_PROCESSOR_FILE}: 2 .guardLive( calls, exactly one is allowed, inside withLiveSession`,
     ]);
   });
 
@@ -507,7 +621,7 @@ describe('S-B: the SessionJobProcessor file: .guardLive( in withLiveSession, .lo
   });
 });
 
-describe('S-B: the accommodation and retention files call the wrapper as a member, nothing else', () => {
+describe('S-B: the accommodation and retention files call the wrapper as a member, nothing else (FR-704, NFR-04, TC-008)', () => {
   it.each([ACCOMMODATIONS_FILE, RETENTION_LOCK_FILE])(
     'TC-008 %s: a bare name, a reference or a held function fails',
     (path) => {
@@ -529,7 +643,7 @@ describe('S-B: the accommodation and retention files call the wrapper as a membe
   });
 });
 
-describe('S-B and S3: no export of a lock, an alias, or a wrapper of one', () => {
+describe('S-B, S3, S4: no export of a lock, an alias, or a wrapper of one (FR-704, NFR-04, TC-008)', () => {
   const exported = (text: string, path = SESSION_STATE_FILE): string[] =>
     findLockExports([file(path, text)]);
 
@@ -625,6 +739,40 @@ describe('S-B and S3: no export of a lock, an alias, or a wrapper of one', () =>
     }
   });
 
+  it('TC-008 S4 a namespace import of the core is refused and is an alias: exporting it exports the whole core', () => {
+    const ns = "import * as core from '../database/session-locks';";
+    for (const text of [
+      `${ns}\nexport { core };`,
+      `${ns}\nexport default core;`,
+      `${ns}\nexport const c = core;`,
+      `${ns}\nexport const locks = { core };`,
+      `${ns}\nconst held = core;\nexport { held };`,
+      `${ns}\nmodule.exports = core;`,
+    ]) {
+      const found = exported(text);
+      expect({
+        text,
+        refused: found.includes(
+          `${SESSION_STATE_FILE}: imports database/session-locks as a namespace`,
+        ),
+      }).toEqual({
+        text,
+        refused: true,
+      });
+      expect({ text, exports: found.some((line) => line.includes('exports ')) }).toEqual({
+        text,
+        exports: true,
+      });
+    }
+    // The file names no lock, only the module: it is not skipped, and the import alone is refused.
+    expect(exported(ns)).toEqual([
+      `${SESSION_STATE_FILE}: imports database/session-locks as a namespace`,
+    ]);
+    // A named import with no use of a lock name is fine, and a namespace of another module is not this module.
+    expect(exported("import { SessionLockTx } from '../database/session-locks';")).toEqual([]);
+    expect(exported("import * as other from '../database/other';\nexport { other };")).toEqual([]);
+  });
+
   it('TC-008 S3 FAIL-SAFE: a string that spells an export is flagged like code (strings are not stripped), a comment is not', () => {
     expect(exported("export const m = 'export { guardLive }';")).toEqual([
       `${SESSION_STATE_FILE}: exports guardLive`,
@@ -643,7 +791,7 @@ describe('S-B and S3: no export of a lock, an alias, or a wrapper of one', () =>
   });
 });
 
-describe('the text tools: brace matching and method spans', () => {
+describe('the text tools: brace matching and method spans (NFR-04, TC-008)', () => {
   it('TC-008 matchingBrace skips strings, templates with ${} and nested braces, and gives up on unbalanced text', () => {
     const code = "a { b: '}', c: `x ${ { d: 1 }.d } y`, e: { f: 2 } } tail";
     const open = code.indexOf('{');
