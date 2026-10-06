@@ -14,10 +14,13 @@ import { Prisma } from '../generated/prisma/client.js';
 /** Seconds a client should wait before retrying a request refused for lock contention. */
 export const LOCK_CONTENTION_RETRY_AFTER_SECONDS = 2;
 
+/** The fixed problem `code` of the 503 body (api-contract section 8). */
+export const LOCK_CONTENTION_CODE = 'BUSY' as const;
+
 /** The fixed detail of the 503 body. */
 export const LOCK_CONTENTION_DETAIL = 'The service is busy; retry shortly.';
 
-const SQLSTATES = new Set(['55P03', '40P01']);
+const SQLSTATES = new Set(['55P03', '40P01', '40001']);
 const PRISMA_CODES = new Set(['P2028', 'P2034']);
 const MAX_DEPTH = 8;
 
@@ -27,7 +30,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 /**
  * The fixed code token (a Postgres SQLSTATE or a Prisma code) when the error is lock contention,
- * otherwise undefined. The result is one of four constants, so it is safe to log.
+ * otherwise undefined. The result is one of five constants, so it is safe to log.
  */
 export function lockContentionCode(error: unknown): string | undefined {
   const seen = new Set<unknown>();

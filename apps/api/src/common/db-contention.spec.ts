@@ -68,7 +68,7 @@ const pgError = (sqlstate: string): Error =>
   Object.assign(new Error(LEAK), { name: 'DatabaseError', code: sqlstate });
 
 const CASES: { name: string; code: string; make: () => Error }[] = [];
-for (const sqlstate of ['55P03', '40P01']) {
+for (const sqlstate of ['55P03', '40P01', '40001']) {
   CASES.push(
     {
       name: `${sqlstate} as a Prisma known error with the adapter error in meta`,
@@ -112,15 +112,16 @@ describe('ProblemFilter database lock contention (DL-37, FU-BE-42, NFR-04)', () 
     expect(status).toBe(503);
     expect(headers['Retry-After']).toMatch(/^[1-9]\d*$/);
     expect(Number(headers['Retry-After'])).toBeLessThanOrEqual(2);
+    expect(Number(headers['Retry-After'])).toBeGreaterThanOrEqual(1);
     expect(body).toEqual({
       type: 'about:blank',
       title: 'Service Unavailable',
       status: 503,
       detail: 'The service is busy; retry shortly.',
+      code: 'BUSY',
       instance: '/api/v1/x',
       traceId: 'trace-1',
     });
-    expect(body).not.toHaveProperty('code');
     const logged = JSON.stringify([...warn.mock.calls, ...error.mock.calls]);
     expect(logged).toContain(code);
     expect(logged).toContain('trace-1');
@@ -182,9 +183,10 @@ describe('ProblemFilter database lock contention (DL-37, FU-BE-42, NFR-04)', () 
     }
   });
 
-  it('FU-BE-42: an unknown error is 500, and a serialization failure (40001) is not remapped', () => {
+  it('FU-BE-42: an unknown error is 500, and an unrelated SQLSTATE is not remapped', () => {
     expect(run(new Error('boom')).status).toBe(500);
-    expect(run(adapterError('40001')).status).toBe(500);
+    expect(run(adapterError('23505')).status).toBe(500);
+    expect(run(adapterError('22P02')).status).toBe(500);
     expect(run('a string').status).toBe(500);
   });
 

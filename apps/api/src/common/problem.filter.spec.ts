@@ -157,7 +157,7 @@ describe('ProblemFilter scrubs Prisma errors before logging (TC-003, NFR-04, FU-
       name: 'DriverAdapterError',
       cause: {
         kind: 'TransactionWriteConflict',
-        originalCode: '40001',
+        originalCode: '22P02',
         originalMessage: `row (${secret}) conflicted`,
         detail: `Key (token_hash)=(${secret})`,
       },
@@ -175,7 +175,7 @@ describe('ProblemFilter scrubs Prisma errors before logging (TC-003, NFR-04, FU-
       );
       expect(logged).not.toContain(secret);
       expect(logged).toContain('TransactionWriteConflict');
-      expect(logged).toContain('40001');
+      expect(logged).toContain('22P02');
     } finally {
       spy.mockRestore();
     }

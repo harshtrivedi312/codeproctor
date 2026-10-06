@@ -11,6 +11,7 @@ import {
 import type { Request, Response } from 'express';
 import { BODY_PARSER_DETAIL, bodyParserStatus } from './body-parsers';
 import {
+  LOCK_CONTENTION_CODE,
   LOCK_CONTENTION_DETAIL,
   LOCK_CONTENTION_RETRY_AFTER_SECONDS,
   lockContentionCode,
@@ -106,6 +107,8 @@ export class ProblemFilter implements ExceptionFilter {
       if (lockCode === 'P2028') this.logger.error(fields, 'Database transaction error');
       else this.logger.warn(fields, 'Database lock contention');
       problem.detail = LOCK_CONTENTION_DETAIL;
+      // Set here, never copied from the error.
+      problem.code = LOCK_CONTENTION_CODE;
       if (!res.headersSent) {
         res.setHeader('Retry-After', String(LOCK_CONTENTION_RETRY_AFTER_SECONDS));
       }

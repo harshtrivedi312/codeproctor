@@ -6,6 +6,8 @@ export const PROBLEM_CODES = [
   'TWO_FACTOR_REQUIRED_FOR_ROLE',
   'SETTINGS_CONFLICT',
   'VARIANT_HAS_AI_REFERENCES',
+  // The 503 for database lock contention (DL-37); only ProblemFilter's lock path sets it.
+  'BUSY',
 ] as const;
 export type ProblemCode = (typeof PROBLEM_CODES)[number];
 
