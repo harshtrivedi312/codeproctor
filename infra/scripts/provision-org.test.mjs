@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -23,9 +23,16 @@ after(() => rmSync(dir, { recursive: true, force: true }));
 const file = (name, content) => {
   const path = join(dir, name);
   writeFileSync(path, typeof content === 'string' ? content : JSON.stringify(content));
+  chmodSync(path, 0o600); // the CLI refuses a file others can read
   return path;
 };
-const GOOD = { orgName: ORG, retentionDays: 30, adminEmail: EMAIL, adminName: 'Pat Admin' };
+const GOOD = {
+  orgName: ORG,
+  retentionDays: 30,
+  adminEmail: EMAIL,
+  adminName: 'Pat Admin',
+  expectedDatabase: 'pilot',
+};
 const run = (args, env = {}) =>
   spawnSync('node', [...NODE_TSX, CLI, ...args], {
     cwd: REPO_ROOT,
@@ -35,12 +42,21 @@ const run = (args, env = {}) =>
 
 describe('provision-org input (ADR 0006 8.9)', () => {
   it('accepts a good file, defaults retention to 90, and trims', () => {
-    assert.deepEqual(validateInput({ orgName: ' A ', adminEmail: 'a@b.test', adminName: ' N ' }), {
-      orgName: 'A',
-      adminEmail: 'a@b.test',
-      adminName: 'N',
-      retentionDays: 90,
-    });
+    assert.deepEqual(
+      validateInput({
+        orgName: ' A ',
+        adminEmail: 'a@b.test',
+        adminName: ' N ',
+        expectedDatabase: 'pilot',
+      }),
+      {
+        orgName: 'A',
+        adminEmail: 'a@b.test',
+        adminName: 'N',
+        retentionDays: 90,
+        expectedDatabase: 'pilot',
+      },
+    );
   });
 
   it('refuses unknown fields, bad retention, bad email and empty names, without echoing a value', () => {
@@ -52,6 +68,10 @@ describe('provision-org input (ADR 0006 8.9)', () => {
       { ...GOOD, adminEmail: 'not-an-email SENTINEL' },
       { ...GOOD, orgName: '  ' },
       { ...GOOD, adminName: 'x'.repeat(201) },
+      { ...GOOD, adminName: 'Pat\u0000Admin' },
+      { ...GOOD, expectedDatabase: 'pilot; DROP' },
+      { orgName: 'A', adminEmail: 'a@b.test', adminName: 'N' },
+      { ...GOOD, 'a.admin@pilot-corp.example': '' },
       [],
       null,
     ];
@@ -63,12 +83,11 @@ describe('provision-org input (ADR 0006 8.9)', () => {
       );
     }
     assert.throws(
-      () =>
-        validateInput(
-          { orgName: 'A', adminEmail: 'a@b.test', adminName: 'N' },
-          { forReissue: true },
-        ),
-      /unknown field "adminName"/,
+      () => validateInput({ ...GOOD }, { forReissue: true }),
+      (e) =>
+        e.name === 'InputError' &&
+        /unknown field/.test(e.message) &&
+        !e.message.includes('adminName'),
     );
   });
 
@@ -129,6 +148,46 @@ describe('provision-org command line (ADR 0006 8.9, ADR 0009)', () => {
     assert.ok(!(r2.stdout + r2.stderr).includes(EMAIL));
   });
 
+  it('the input file must be a private regular file of reasonable size, and a link is refused', () => {
+    const open = file('open.json', GOOD);
+    chmodSync(open, 0o644);
+    assert.match(
+      run(['create', '--file', open], env).stderr,
+      /must not be readable by group or others/,
+    );
+    const real = file('real.json', GOOD);
+    const link = join(dir, 'link.json');
+    symlinkSync(real, link);
+    assert.match(run(['create', '--file', link], env).stderr, /regular file, not a link/);
+    const big = file('big.json', ' '.repeat(70 * 1024));
+    assert.match(run(['create', '--file', big], env).stderr, /larger than 64 KiB/);
+    assert.match(run(['create', '--file', dir], env).stderr, /regular file/);
+  });
+
+  it('an email-shaped key in the file is never printed (a hand-edited file)', () => {
+    const r = run(['create', '--file', file('keyed.json', { ...GOOD, [EMAIL]: '' })], env);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /unknown field/);
+    assert.ok(
+      !(r.stdout + r.stderr).includes('pilot-corp') && !(r.stdout + r.stderr).includes(EMAIL),
+    );
+  });
+
+  it('the test driver refuses to run without the test flag, or against a remote host', () => {
+    for (const env2 of [
+      { DATABASE_URL: 'postgresql://app_user:x@127.0.0.1:1/p' },
+      { DATABASE_URL: 'postgresql://app_user:x@db.example.com/p', PROVISION_ORG_DRIVER: 'test' },
+    ]) {
+      const r = spawnSync('node', [...NODE_TSX, DRIVER], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', ...env2 },
+      });
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /test only/);
+    }
+  });
+
   it('an invalid field is named, never its value', () => {
     const r = run(['create', '--file', file('range.json', { ...GOOD, retentionDays: 5000 })], env);
     assert.equal(r.status, 1);
@@ -139,7 +198,15 @@ describe('provision-org command line (ADR 0006 8.9, ADR 0009)', () => {
 
 const skip = drillUnavailable(['psql']) ?? false;
 if (skip) console.log(`# provision-org database tests skipped: ${skip}`);
+it(
+  'provision-org: the database tests can run when they are required',
+  { skip: !(skip && process.env.REQUIRE_DB_DRILL === '1') },
+  () => {
+    assert.fail(`REQUIRE_DB_DRILL=1 but the database tests cannot run: ${skip}`);
+  },
+);
 
+// The tests in this block depend on each other's rows (exact counts), so they run in this order.
 describe('provision-org against a real database (ADR 0006 8.9, FR-105)', { skip }, () => {
   let pg;
   const appPassword = randomBytes(12).toString('hex');
@@ -153,6 +220,7 @@ describe('provision-org against a real database (ADR 0006 8.9, FR-105)', { skip 
         PATH: process.env.PATH ?? '',
         HOME: process.env.HOME ?? '',
         DATABASE_URL: appUrl(),
+        PROVISION_ORG_DRIVER: 'test',
         DRIVER_COMMAND: command,
         DRIVER_FILE: file(`${command}-${randomBytes(3).toString('hex')}.json`, content),
         ...extraEnv,
@@ -251,7 +319,7 @@ describe('provision-org against a real database (ADR 0006 8.9, FR-105)', { skip 
     const mail = 'queue.down@pilot-corp.example';
     const out = driver(
       'create',
-      { orgName: 'Queue Down Org', adminName: 'Q', adminEmail: mail },
+      { orgName: 'Queue Down Org', adminName: 'Q', adminEmail: mail, expectedDatabase: 'pilot' },
       { DRIVER_QUEUE: 'fail' },
     );
     assert.equal(out.ok, false);
@@ -261,7 +329,11 @@ describe('provision-org against a real database (ADR 0006 8.9, FR-105)', { skip 
       !JSON.stringify(out).includes('pilot-corp') && !JSON.stringify(out).includes('Queue Down'),
     );
     assert.equal(q(`SELECT count(*) FROM users WHERE id = '${out.ids.userId}'`), '1');
-    const again = driver('reissue', { orgName: 'Queue Down Org', adminEmail: mail });
+    const again = driver('reissue', {
+      orgName: 'Queue Down Org',
+      adminEmail: mail,
+      expectedDatabase: 'pilot',
+    });
     assert.equal(again.ok, true, JSON.stringify(again));
     assert.deepEqual(again.result, out.ids);
     assert.equal(again.jobs[0].opts.jobId, `set-password_${out.ids.userId}`);
@@ -275,23 +347,83 @@ describe('provision-org against a real database (ADR 0006 8.9, FR-105)', { skip 
 
   it('reissue refuses a user who has a password, an inactive one, another org, and an unknown email', () => {
     const mail = 'has.password@pilot-corp.example';
-    const out = driver('create', { orgName: 'Has Password Org', adminName: 'H', adminEmail: mail });
+    const out = driver('create', {
+      orgName: 'Has Password Org',
+      adminName: 'H',
+      adminEmail: mail,
+      expectedDatabase: 'pilot',
+    });
     assert.equal(out.ok, true);
-    const attempt = (orgName, adminEmail) => driver('reissue', { orgName, adminEmail });
+    const attempt = (orgName, adminEmail) => {
+      const out = driver('reissue', { orgName, adminEmail, expectedDatabase: 'pilot' });
+      return out;
+    };
+    const refused = (out) =>
+      out.ok === false && out.error.name === 'InputError' && out.jobs.length === 0;
     q(
       `UPDATE users SET password_hash = 'argon2-hash', set_password_token_hash = NULL WHERE id = '${out.result.userId}'`,
     );
-    assert.equal(attempt('Has Password Org', mail).ok, false);
+    assert.ok(refused(attempt('Has Password Org', mail)));
     q(
       `UPDATE users SET password_hash = NULL, set_password_token_hash = repeat('a', 64), is_active = false WHERE id = '${out.result.userId}'`,
     );
-    assert.equal(attempt('Has Password Org', mail).ok, false);
+    assert.ok(refused(attempt('Has Password Org', mail)));
     q(`UPDATE users SET is_active = true WHERE id = '${out.result.userId}'`);
-    assert.equal(attempt('Pilot Corp SENTINEL-ORG', mail).ok, false, 'the named org must match');
-    assert.equal(attempt('Has Password Org', 'nobody@pilot-corp.example').ok, false);
+    assert.ok(refused(attempt('Pilot Corp SENTINEL-ORG', mail)));
+    assert.ok(refused(attempt('Has Password Org', 'nobody@pilot-corp.example')));
     const refusal = attempt('Has Password Org', 'nobody@pilot-corp.example');
+    assert.equal(
+      q(
+        "SELECT count(*) FROM audit_logs WHERE action = 'SET_PASSWORD_REISSUED' AND entity_id = (SELECT id::text FROM users WHERE email = '" +
+          mail +
+          "')",
+      ),
+      '0',
+      'refused attempts leave no audit row',
+    );
     assert.ok(!JSON.stringify(refusal).includes('nobody'));
     assert.equal(attempt('Has Password Org', mail).ok, true, 'and works once the user qualifies');
+  });
+
+  it('the CLI refuses a database other than the one the file names, before creating anything', () => {
+    const path = file('wrongdb.json', {
+      ...GOOD,
+      orgName: 'Wrong Db Org',
+      adminEmail: 'wrong.db@pilot-corp.example',
+      expectedDatabase: 'staging',
+    });
+    const orgs = q('SELECT count(*) FROM organizations');
+    const r = run(['create', '--file', path], {
+      DATABASE_URL: appUrl(),
+      REDIS_URL: 'redis://127.0.0.1:1',
+    });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /different database than expectedDatabase/);
+    assert.equal(q('SELECT count(*) FROM organizations'), orgs);
+    assert.ok(!(r.stdout + r.stderr).includes('pilot-corp'));
+  });
+
+  it('a reissue whose job cannot be queued is recorded as failed, not as sent', () => {
+    const mail = 'reissue.fails@pilot-corp.example';
+    const created = driver('create', {
+      orgName: 'Reissue Fails Org',
+      adminName: 'R',
+      adminEmail: mail,
+      expectedDatabase: 'pilot',
+    });
+    assert.equal(created.ok, true);
+    const out = driver(
+      'reissue',
+      { orgName: 'Reissue Fails Org', adminEmail: mail, expectedDatabase: 'pilot' },
+      { DRIVER_QUEUE: 'fail' },
+    );
+    assert.equal(out.error.name, 'EnqueueError');
+    assert.equal(
+      q(
+        `SELECT string_agg(action, ',' ORDER BY id) FROM audit_logs WHERE entity_id = '${created.result.userId}' AND entity_type = 'user'`,
+      ),
+      'SET_PASSWORD_REISSUED,SET_PASSWORD_REISSUE_FAILED',
+    );
   });
 
   it('the CLI refuses owner credentials, and without BullMQ it creates nothing', () => {
@@ -299,6 +431,7 @@ describe('provision-org against a real database (ADR 0006 8.9, FR-105)', { skip 
       orgName: 'Cli Org',
       adminName: 'C',
       adminEmail: 'cli.admin@pilot-corp.example',
+      expectedDatabase: 'pilot',
     });
     const orgs = q('SELECT count(*) FROM organizations');
     const asOwner = run(['create', '--file', path], {

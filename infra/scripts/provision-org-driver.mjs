@@ -2,7 +2,7 @@
 // factory, with a fake queue that records jobs. Run as `node --import tsx` by provision-org.test.mjs.
 // Not shipped to the pilot host and never given real credentials.
 import { readFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   EnqueueError,
   provisionOrg,
@@ -10,8 +10,15 @@ import {
   validateInput,
 } from './provision-org-core.mjs';
 
+// Test only: it skips the app_user and database checks of the real CLI and uses a fake queue, so it
+// refuses to run unless a test flag is set and the database is on this machine.
+const host = new URL(process.env.DATABASE_URL ?? 'postgresql://invalid').hostname;
+if (process.env.PROVISION_ORG_DRIVER !== 'test' || !['127.0.0.1', 'localhost'].includes(host)) {
+  console.error('provision-org-driver: test only');
+  process.exit(1);
+}
 const factory = pathToFileURL(
-  new URL('../../apps/api/src/database/create-prisma-client.ts', import.meta.url).pathname,
+  fileURLToPath(new URL('../../apps/api/src/database/create-prisma-client.ts', import.meta.url)),
 );
 const prisma = (await import(factory.href)).createPrismaClient(process.env.DATABASE_URL);
 const jobs = [];
@@ -33,7 +40,13 @@ try {
   console.log(
     JSON.stringify({
       ok: false,
-      error: { name: error.constructor.name, message: error.message, code: error.code ?? null },
+      // Only known messages: a Prisma or pg error can quote values.
+      error: {
+        name: error.constructor.name,
+        message:
+          error.name === 'InputError' || error.name === 'EnqueueError' ? error.message : 'other',
+        code: error.code ?? null,
+      },
       ids: error instanceof EnqueueError ? { orgId: error.orgId, userId: error.userId } : null,
       jobs,
     }),

@@ -20,6 +20,7 @@ export const JOB_OPTIONS = {
 
 export const ACTION_PROVISIONED = 'ORG_PROVISIONED';
 export const ACTION_REISSUED = 'SET_PASSWORD_REISSUED';
+export const ACTION_REISSUE_FAILED = 'SET_PASSWORD_REISSUE_FAILED';
 
 /** A problem with what the operator supplied. The message never holds a value. */
 export class InputError extends Error {
@@ -36,40 +37,64 @@ export class EnqueueError extends Error {
 }
 
 const EMAIL = /^[^\s@]{1,64}@[^\s@]{1,255}$/;
+// Control characters (NUL breaks the insert; others reach the email template) are never accepted.
+const hasControl = (text) => [...text].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127);
+const DATABASE_NAME = /^[A-Za-z0-9_.-]{1,63}$/;
 
 /**
  * @param {unknown} raw parsed JSON from the host file
- * @returns {{ orgName: string, retentionDays: number, adminEmail: string, adminName: string }}
+ * @returns {{ orgName: string, retentionDays: number, adminEmail: string, adminName: string, expectedDatabase: string }}
  */
 export function validateInput(raw, { forReissue = false } = {}) {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
     throw new InputError('the file must hold a JSON object');
   const allowed = forReissue
-    ? ['orgName', 'adminEmail']
-    : ['orgName', 'retentionDays', 'adminEmail', 'adminName'];
-  for (const key of Object.keys(raw))
-    if (!allowed.includes(key)) throw new InputError(`unknown field "${key.slice(0, 40)}"`);
+    ? ['orgName', 'adminEmail', 'expectedDatabase']
+    : ['orgName', 'retentionDays', 'adminEmail', 'adminName', 'expectedDatabase'];
+  // A key is never echoed: a hand-edited file can have an email address in the place of a key.
+  if (Object.keys(raw).some((key) => !allowed.includes(key))) {
+    throw new InputError(`the file has an unknown field (allowed: ${allowed.join(', ')})`);
+  }
   const text = (field, max) => {
     const v = raw[field];
-    if (typeof v !== 'string' || v.trim() === '' || v.length > max)
-      throw new InputError(`${field} must be a non-empty string of at most ${max} characters`);
+    if (typeof v !== 'string' || v.trim() === '' || v.length > max || hasControl(v)) {
+      throw new InputError(
+        `${field} must be a non-empty string of at most ${max} characters, with no control characters`,
+      );
+    }
     return v.trim();
   };
   const orgName = text('orgName', 200);
   const adminEmail = text('adminEmail', 254);
   if (!EMAIL.test(adminEmail)) throw new InputError('adminEmail must look like an email address');
-  if (forReissue) return { orgName, adminEmail, adminName: '', retentionDays: 0 };
+  const expectedDatabase = text('expectedDatabase', 63);
+  if (!DATABASE_NAME.test(expectedDatabase))
+    throw new InputError('expectedDatabase must be a plain database name');
+  if (forReissue) return { orgName, adminEmail, adminName: '', retentionDays: 0, expectedDatabase };
   const adminName = text('adminName', 200);
   const retentionDays = raw.retentionDays === undefined ? 90 : raw.retentionDays;
   if (!Number.isInteger(retentionDays) || retentionDays < 7 || retentionDays > 730) {
     throw new InputError('retentionDays must be a whole number from 7 to 730');
   }
-  return { orgName, adminEmail, adminName, retentionDays };
+  return { orgName, adminEmail, adminName, retentionDays, expectedDatabase };
 }
+
+/** Rejects with `Error('timeout')` when the promise does not settle in time (Redis can hang a producer). */
+export function withTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('timeout')), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+export const ENQUEUE_TIMEOUT_MS = 15_000;
 
 async function enqueue(queue, orgId, userId) {
   try {
-    await queue.add(JOB_NAME, { orgId, userId }, { jobId: jobIdFor(userId), ...JOB_OPTIONS });
+    await withTimeout(
+      queue.add(JOB_NAME, { orgId, userId }, { jobId: jobIdFor(userId), ...JOB_OPTIONS }),
+      ENQUEUE_TIMEOUT_MS,
+    );
   } catch {
     throw new EnqueueError(orgId, userId);
   }
@@ -153,6 +178,21 @@ export async function reissueSetPassword({ prisma, queue, input, runId }) {
       metadata: { runId, orgId: user.orgId, userId: user.id },
     },
   });
-  await enqueue(queue, user.orgId, user.id);
+  try {
+    await enqueue(queue, user.orgId, user.id);
+  } catch (error) {
+    // The first row says a reissue was requested; this one says it did not reach the queue.
+    await prisma.auditLog.create({
+      data: {
+        orgId: user.orgId,
+        actorId: null,
+        action: ACTION_REISSUE_FAILED,
+        entityType: 'user',
+        entityId: user.id,
+        metadata: { runId, orgId: user.orgId, userId: user.id },
+      },
+    });
+    throw error;
+  }
   return { orgId: user.orgId, userId: user.id };
 }
