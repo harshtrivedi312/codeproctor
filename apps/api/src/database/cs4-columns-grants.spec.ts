@@ -1437,6 +1437,62 @@ describe('ADR 0013 CS-4.4: column allowlists and grants against Postgres (NFR-04
       });
     });
 
+    it('TC-008 the bare rows of upsert and createManyAndReturn carry the default columns only too', async () => {
+      const key = `orgs/${A.orgId}/sessions/${A.sessionId}/media/SCREEN/000000/00000000.webm`;
+      const id = await chunkId(A);
+      await asCandidate(A, async () => {
+        const upserted = (await client.mediaChunk.upsert({
+          where: { sessionId_stream_seq: { sessionId: A.sessionId, stream: 'SCREEN', seq: 0 } },
+          update: { objectKey: key, sizeBytes: 7n },
+          create: {
+            sessionId: A.sessionId,
+            stream: 'SCREEN',
+            seq: 99,
+            startedAt: WHEN,
+            durationMs: 1,
+          },
+        })) as Row;
+        expect(upserted.id).toBe(id);
+        expect(Object.keys(upserted).sort()).toEqual(
+          ['id', 'segment', 'seq', 'sessionId', 'sizeBytes', 'stream', 'uploadedAt'].sort(),
+        );
+        const made = (await client.proctorEvent.createManyAndReturn({
+          data: [
+            { sessionId: A.sessionId, type: 'TAB_SWITCH', severity: 'LOW', occurredAt: WHEN },
+          ] as never,
+        })) as Row[];
+        expect(made).toHaveLength(1);
+        expect(Object.keys(made[0] as Row).sort()).toEqual(
+          ['batchSeq', 'createdAt', 'durationMs', 'id', 'occurredAt', 'sessionId', 'type'].sort(),
+        );
+        await owner.proctorEvent.delete({ where: { id: made[0]?.id as bigint } });
+      });
+      await owner.mediaChunk.update({ where: { id }, data: { sizeBytes: null } });
+    });
+
+    it('TC-008 a grant filters its own model only: under a Session grant the other models answer as they do without one', async () => {
+      const reads = (): Promise<unknown[]> =>
+        Promise.all([
+          client.sessionQuestion.count(),
+          client.submission.count(),
+          client.mediaChunk.count(),
+          client.proctorEvent.count(),
+          client.organization.count(),
+          client.test.count(),
+          client.invitation.count(),
+          client.candidate.count(),
+          client.question.count(),
+          client.testSection.count(),
+          client.session.count(),
+        ]);
+      const plain = await asCandidate(A, reads);
+      expect(plain.every((n) => typeof n === 'number' && n >= 1)).toBe(true);
+      const granted = await asCandidate(A, () =>
+        grant({ model: 'Session', columns: ['hmacKeyEnc'], ids: [A.sessionId] }, reads),
+      );
+      expect(granted).toEqual(plain);
+    });
+
     it('TC-008 every readable column of every model is real: a select of each reaches Postgres and answers', async () => {
       const readable: Array<[string, string[]]> = [
         [

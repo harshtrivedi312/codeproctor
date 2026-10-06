@@ -512,6 +512,102 @@ describe('a grant unlocks the WRITE of the session state columns (CS-4.4: Sessio
   });
 });
 
+describe('a grant is bound to its model and its mode (synthetic grants, for a site that does not exist yet) (NFR-04, TC-008)', () => {
+  it('TC-008 a grant filters its own model only: no other model gets id IN ids, whatever the other model is', () => {
+    const others: ModelName[] = [
+      'Session',
+      'SessionQuestion',
+      'SessionSection',
+      'Submission',
+      'IdentityCheck',
+      'MediaChunk',
+      'ProctorEvent',
+      'Organization',
+      'Candidate',
+      'Invitation',
+      'Test',
+      'TestSection',
+      'Question',
+    ];
+    for (const s of GRANT_SITES.filter((x) => x.mode === 'rows')) {
+      const grant = grantFor(s, idsOf(s));
+      for (const model of others.filter((m) => m !== s.model)) {
+        const out = call(model, 'findMany', {}, grant).args;
+        expect({
+          site: s.name,
+          model,
+          filtered: andOf(out).some((f) => isDeepStrictEqual(f, idFilter(grant))),
+        }).toEqual({ site: s.name, model, filtered: false });
+      }
+    }
+  });
+
+  it('TC-008 a grant of another model never unlocks a write, even when it names a column of this model', () => {
+    for (const model of ['Test', 'Organization', 'Invitation', 'MediaChunk'] as const) {
+      const foreign: GrantView = {
+        model,
+        columns: ['status', 'pauseReasons', 'submittedAt', 'deviceInfo', 'hmacKeyEnc'],
+        ids: [SID],
+        mode: 'rows',
+      };
+      for (const column of ['status', 'pauseReasons', 'submittedAt', 'deviceInfo']) {
+        expect(() =>
+          call('Session', 'update', { where: { id: SID }, data: { [column]: null } }, foreign),
+        ).toThrow(new RegExp(`${column} cannot be written by a candidate update here`));
+      }
+      expect(() => call('Session', 'findFirst', { select: { hmacKeyEnc: true } }, foreign)).toThrow(
+        /the column hmacKeyEnc is not available/,
+      );
+    }
+  });
+
+  it('TC-008 a create-mode grant unlocks no read and no update, whatever columns it names, and filters nothing', () => {
+    const create: GrantView = {
+      model: 'Session',
+      columns: ['hmacKeyEnc', 'deviceInfo', 'status', 'pauseReasons', 'submittedAt'],
+      ids: [SID],
+      mode: 'create',
+    };
+    for (const column of ['hmacKeyEnc', 'deviceInfo']) {
+      expect(() => call('Session', 'findFirst', { select: { [column]: true } }, create)).toThrow(
+        new RegExp(`the column ${column} is not available`),
+      );
+    }
+    for (const column of ['status', 'pauseReasons', 'submittedAt', 'deviceInfo']) {
+      expect(() =>
+        call('Session', 'update', { where: { id: SID }, data: { [column]: null } }, create),
+      ).toThrow(new RegExp(`${column} cannot be written by a candidate update here`));
+    }
+    expect(
+      andOf(call('Session', 'findFirst', { select: { id: true } }, create).args),
+    ).not.toContainEqual(idFilter(create));
+  });
+
+  it('TC-008 a rows grant on the consents model unlocks no create: only the create grant does', () => {
+    const rows: GrantView = {
+      model: 'Consent',
+      columns: [...site('ConsentService (create)').columns],
+      ids: [SID],
+      mode: 'rows',
+    };
+    expect(() =>
+      call(
+        'Consent',
+        'create',
+        {
+          data: {
+            sessionId: SID,
+            consentTextId: OTHER,
+            signedName: 'x',
+            signedAt: new Date(),
+          },
+        },
+        rows,
+      ),
+    ).toThrow(/creates this row only under its create grant/);
+  });
+});
+
 describe('the two models that are readable only under a grant (CS-4.3: consent_texts, test_questions)', () => {
   const text = site('ConsentService (consent text)');
   const gate = site('SectionGateService (step 2)');

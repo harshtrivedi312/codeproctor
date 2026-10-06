@@ -132,15 +132,19 @@ function writePlan(
   grant: GrantView | undefined,
 ): WritePlan {
   const mine = grant !== undefined && grant.model === model ? grant : undefined;
-  const unlocked = (columns: readonly string[] | undefined): string[] =>
-    (columns ?? []).filter((column) => mine?.columns.includes(column) === true);
+  // A rows grant unlocks the update of its columns, a create grant the create of its columns: neither
+  // unlocks the other's operation (no site mixes them today, so this holds the property for a new one).
+  const unlocked = (columns: readonly string[] | undefined, mode: 'rows' | 'create'): string[] =>
+    (columns ?? []).filter((column) => mine?.mode === mode && mine.columns.includes(column));
   const update =
-    rule.update === undefined ? undefined : [...rule.update, ...unlocked(rule.grantedUpdate)];
+    rule.update === undefined
+      ? undefined
+      : [...rule.update, ...unlocked(rule.grantedUpdate, 'rows')];
   const create =
     rule.create !== undefined
       ? [...rule.create]
       : rule.grantedCreate !== undefined && mine?.mode === 'create'
-        ? unlocked(rule.grantedCreate)
+        ? unlocked(rule.grantedCreate, 'create')
         : undefined;
   return { create, update };
 }

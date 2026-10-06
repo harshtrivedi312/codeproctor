@@ -104,6 +104,16 @@ describe('OrgContextService.withGrant (ADR 0013 CS-4.4; NFR-04, TC-008)', () => 
       });
     });
 
+    it('TC-008 a model with no grant site is named as such, before its columns are looked at', async () => {
+      await asCandidate(() => {
+        for (const model of ['User', 'sessions', 'Submission', 'Candidate', 'SessionSection']) {
+          expect(() =>
+            orgContext.withGrant({ model, columns: ['id'], ids: [SID] }, () => 1),
+          ).toThrow(/has no grant site in ADR 0013 CS-4\.4/);
+        }
+      });
+    });
+
     it('TC-008 the model must be one with a grant site, and the columns one non-empty list of distinct names of ONE site', async () => {
       await asCandidate(() => {
         for (const request of [
