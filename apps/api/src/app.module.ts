@@ -11,6 +11,7 @@ import { isLiveEnv, validateEnv } from './config/env';
 import type { Env } from './config/env';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
+import { CandidateModule } from './candidate/candidate.module';
 import { OrgSettingsModule } from './org-settings/org-settings.module';
 import { UsersModule } from './users/users.module';
 import { TestsModule } from './tests/tests.module';
@@ -121,6 +122,7 @@ function areaOf(context: ExecutionContext): Area {
     TokenModule,
     AuditModule,
     AuthModule,
+    CandidateModule,
     UsersModule,
     OrgSettingsModule,
     TestsModule,

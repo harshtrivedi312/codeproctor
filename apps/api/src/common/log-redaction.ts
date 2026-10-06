@@ -22,10 +22,13 @@ export const SECRET_FIELDS = [
   'otp',
   'otpCode',
   'candidateToken',
+  'sessionToken',
   'invitationToken',
   'inviteToken',
   'accessCode',
   'hmacKey',
+  'hmacKeyEnc',
+  'pdfKey',
   // Media and object-store references and signed URLs (candidate media keys are never logged).
   'mediaKey',
   'objectKey',
