@@ -49,6 +49,7 @@ const SENSITIVE_KEYS = [
   'aiReferences',
 ];
 /** A hidden test case reaches a Recruiter as exactly these keys (QuestionDetailRedacted). */
+const STALE = '0'.repeat(64);
 const HIDDEN_ROW_KEYS = ['id', 'isHidden', 'position', 'weight'];
 
 interface ReadBody {
@@ -93,7 +94,7 @@ describe('Recruiter detail routes: 200 with an allowlisted view (DL-32, BE-04a)'
       'out.append',
       'referenceSolution',
       '"params"',
-      'Three intervals',
+      'renderedStatement',
       'revision',
       '5 9\\n1 3',
       '1 4\\n5 9',
@@ -186,10 +187,21 @@ describe('Recruiter detail routes: 200 with an allowlisted view (DL-32, BE-04a)'
     renderAsStaff(<div />, MOCK_USERS.recruiter);
     await waitFor(async () => expect((await api.GET('/v1/questions')).response.status).toBe(200));
     const id = { params: { path: { questionId: 'q-merge' } } };
-    expect((await api.GET('/v1/questions/{questionId}/ai-references', id)).response.status).toBe(
-      403,
-    );
+    const v2 = { params: { path: { questionId: 'q-merge', version: 2 } } };
+    expect(
+      (await api.GET('/v1/questions/{questionId}/versions/{version}/ai-references', v2)).response
+        .status,
+    ).toBe(403);
+    expect(
+      (
+        await api.POST('/v1/questions/{questionId}/versions/{version}/ai-references', {
+          ...v2,
+          body: { assistant: 'A', modelLabel: 'm', language: 'python', solutionCode: 'x' },
+        })
+      ).response.status,
+    ).toBe(403);
     expect((await api.POST('/v1/questions/{questionId}/validate', id)).response.status).toBe(403);
+    expect((await api.GET('/v1/questions/{questionId}/validation', id)).response.status).toBe(403);
     expect(
       (
         await api.POST('/v1/questions/{questionId}/publish', {
@@ -257,13 +269,13 @@ describe('Recruiter detail routes: 200 with an allowlisted view (DL-32, BE-04a)'
     const path = { params: { path: { questionId: 'q-mcq-draft' } } };
     const patch = await api.PATCH('/v1/questions/{questionId}', {
       ...path,
-      body: { title: 'Changed', expectedRevision: 'stale' },
+      body: { title: 'Changed', expectedRevision: STALE },
     });
     expect(patch.response.status).toBe(409);
     expect(patch.error).not.toHaveProperty('code');
     const publish = await api.POST('/v1/questions/{questionId}/publish', {
       ...path,
-      body: { expectedRevision: 'stale' },
+      body: { expectedRevision: STALE },
     });
     expect(publish.response.status).toBe(409);
     expect(publish.error).not.toHaveProperty('code');
@@ -374,9 +386,9 @@ describe('Recruiter opening a question: a read-only summary (DL-32)', () => {
     for (const needle of [
       'out.append',
       '5 9',
-      'Three intervals',
-      'Four intervals',
-      'Rotate by',
+      'renderedStatement',
+      'testCaseOverrides',
+      'isActive',
       'Validation',
     ]) {
       expect(html).not.toContain(needle);
@@ -544,7 +556,7 @@ describe('A role change clears what the old role could see (FR-103, TC-004)', ()
     await screen.findByTestId('summary-statement');
     expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
     const html = document.body.innerHTML;
-    for (const needle of ['out.append', '5 9', 'Three intervals', 'revision']) {
+    for (const needle of ['out.append', '5 9', 'renderedStatement', 'revision']) {
       expect(html).not.toContain(needle);
     }
     for (const el of document.querySelectorAll('textarea, input')) {
@@ -758,12 +770,13 @@ describe('Question titles link for every reader (FR-103)', () => {
   });
 });
 
-describe('The mock PATCH and POST keep to the documented fields (TC-012, BE-04a)', () => {
-  it('TC-012: a PATCH that sets isPublished, version, validatedAt or revision leaves a draft a draft', async () => {
+describe('The mock PATCH and POST refuse fields no DTO declares (TC-012, BE-04a forbidNonWhitelisted)', () => {
+  it('TC-012: a PATCH that sets isPublished, version, validatedAt or revision is a 400 naming each field, and changes nothing', async () => {
     renderAsStaff(<div />, MOCK_USERS.author);
     await waitFor(async () => expect((await api.GET('/v1/questions')).response.status).toBe(200));
     const path = { params: { path: { questionId: 'q-rotate' } } };
-    const saved = await api.PATCH('/v1/questions/{questionId}', {
+    const before = full((await api.GET('/v1/questions/{questionId}', path)).data).version;
+    const refused = await api.PATCH('/v1/questions/{questionId}', {
       ...path,
       body: {
         title: 'Rotate, retitled',
@@ -774,19 +787,22 @@ describe('The mock PATCH and POST keep to the documented fields (TC-012, BE-04a)
         validationReport: { passed: true },
       } as never,
     });
-    expect(saved.response.status).toBe(200);
-    const after = full(saved.data).version;
+    expect(refused.response.status).toBe(400);
+    const errors = (refused.error as { errors: string[] }).errors;
+    for (const field of ['isPublished', 'version', 'validatedAt', 'revision', 'validationReport']) {
+      expect(errors).toContain(`property ${field} should not exist`);
+    }
+    const after = full((await api.GET('/v1/questions/{questionId}', path)).data).version;
+    expect(after.title).toBe(before.title);
+    expect(after.revision).toBe(before.revision);
+    expect(after.version).toBe(before.version);
     expect(after.isPublished).toBe(false);
-    expect(after.version).toBe(1);
-    expect(after.validatedAt).toBeNull();
-    expect(after.validationReport).toBeNull();
-    expect(after.revision).not.toBe('forged');
-    expect(after.title).toBe('Rotate, retitled');
   });
 
-  it('TC-012: a POST that sets isPublished or a version creates version 1 as a draft', async () => {
+  it('TC-012: a POST that sets isPublished or a version is a 400, and creates nothing', async () => {
     renderAsStaff(<div />, MOCK_USERS.author);
     await waitFor(async () => expect((await api.GET('/v1/questions')).response.status).toBe(200));
+    const before = (await api.GET('/v1/questions')).data?.total;
     const created = await api.POST('/v1/questions', {
       body: {
         type: 'CODING',
@@ -798,11 +814,36 @@ describe('The mock PATCH and POST keep to the documented fields (TC-012, BE-04a)
         revision: 'forged',
       } as never,
     });
-    expect(created.response.status).toBe(201);
-    const after = full(created.data);
-    expect(after.version.isPublished).toBe(false);
-    expect(after.version.version).toBe(1);
-    expect(after.published).toBeNull();
-    expect(after.version.revision).not.toBe('forged');
+    expect(created.response.status).toBe(400);
+    expect((created.error as { errors: string[] }).errors).toContain(
+      'property isPublished should not exist',
+    );
+    expect((await api.GET('/v1/questions')).data?.total).toBe(before);
+  });
+
+  it('TC-012: publish, test-case and variant bodies refuse unknown fields too, and a malformed revision is a 400 before any 409', async () => {
+    renderAsStaff(<div />, MOCK_USERS.author);
+    await waitFor(async () => expect((await api.GET('/v1/questions')).response.status).toBe(200));
+    const q = { params: { path: { questionId: 'q-mcq-draft' } } };
+    const publish = await api.POST('/v1/questions/{questionId}/publish', {
+      ...q,
+      body: { isPublished: true } as never,
+    });
+    expect(publish.response.status).toBe(400);
+    const patch = await api.PATCH('/v1/questions/{questionId}', {
+      ...q,
+      body: { title: 'x', expectedRevision: 'stale' },
+    });
+    expect(patch.response.status).toBe(400);
+    const tc = await api.POST('/v1/questions/{questionId}/versions/{version}/test-cases', {
+      params: { path: { questionId: 'q-rotate', version: 1 } },
+      body: { input: '1', expectedOutput: '1', isHidden: true, weight: 1, extra: 1 } as never,
+    });
+    expect(tc.response.status).toBe(400);
+    const variant = await api.POST('/v1/questions/{questionId}/versions/{version}/variants', {
+      params: { path: { questionId: 'q-rotate', version: 1 } },
+      body: { params: { size: 3, steps: 1 }, label: 'nope' } as never,
+    });
+    expect(variant.response.status).toBe(400);
   });
 });

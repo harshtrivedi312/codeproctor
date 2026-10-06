@@ -1,7 +1,7 @@
 import { CODE_LANGUAGES, type CodeLanguage } from '@codeproctor/shared';
 import { z } from 'zod';
 import type { Schemas } from '@/lib/api/client';
-import { checkParams, missingPlaceholders, parseParams } from './params';
+import { checkParams, missingPlaceholders, parseParams, type ParamValue } from './params';
 import { hasUnsupportedSyntax, placeholdersOf } from './template';
 
 /*
@@ -37,14 +37,19 @@ export const MAX_TEST_TEXT = 100_000;
 export const MAX_WEIGHT = 9999.99;
 export const MAX_TEST_CASES = 100;
 export const MAX_TAGS = 20;
+export const MAX_VARIANTS = 50;
 /** The API's tag rule (BE-04a): lower case, starts with a letter or digit, at most 40 characters. */
 export const TAG_PATTERN = /^[a-z0-9][a-z0-9 _.+#-]{0,39}$/;
 /** The API's option id rule: 1 to 32 letters, digits, underscores or dashes. */
 export const OPTION_ID_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 
+/**
+ * A variant in the form. The API has no name for a variant, so the UI calls it "Variant N" by its
+ * place in the list (`variantName`); the order is the server's (by id, not meaningful) and a new
+ * version gives every variant a new id.
+ */
 export interface VariantValues {
   id: string;
-  label: string;
   /** The JSON text the author edits; parsed and checked on save. */
   paramsText: string;
   active: boolean;
@@ -66,6 +71,8 @@ export interface DraftValues {
   mcq: { options: { id: string; text: string }[]; correctOptionIds: string[]; multiple: boolean };
   short: { canonical: string; acceptedVariants: { key: string; value: string }[] };
 }
+
+export const variantName = (index: number): string => `Variant ${index + 1}`;
 
 export const DEFAULT_LIMITS = { cpuMs: 2000, wallMs: 5000, memoryKb: 262_144 };
 
@@ -129,12 +136,11 @@ function shortOf(spec: Schemas['AnswerSpec'] | null): Schemas['ShortAnswerSpec']
   return spec && 'canonical' in spec ? spec : null;
 }
 
-/** Server version (writer view), its question tags and its variants to form values. */
+/** Server version (writer view, variants included) and the question tags to form values. */
 export function toDraft(
   type: QuestionType,
   tags: readonly string[],
   v: QuestionVersion,
-  variants: readonly Variant[] = [],
 ): DraftValues {
   const mcq = type === 'MCQ' ? mcqOf(v.answerSpec) : null;
   const short = type === 'SHORT_ANSWER' ? shortOf(v.answerSpec) : null;
@@ -158,12 +164,15 @@ export function toDraft(
         isHidden: t.isHidden,
         weight: t.weight,
       })),
-    variants: variants.map((x) => ({
+    variants: v.variants.map((x) => ({
       id: x.id,
-      label: x.label,
       paramsText: JSON.stringify(x.params, null, 2),
-      active: x.active,
-      overrides: x.overrides.map((o) => ({ ...o })),
+      active: x.isActive,
+      overrides: x.testCaseOverrides.map((o) => ({
+        testCaseId: o.testCaseId,
+        input: o.input,
+        expectedOutput: o.expectedOutput,
+      })),
     })),
     mcq: mcq
       ? {
@@ -181,11 +190,11 @@ export function toDraft(
   };
 }
 
-/** Keeps the string and number values (the check on save has already rejected anything else). */
-function scalarsOf(value: Record<string, unknown>): Record<string, string | number> {
-  const out: Record<string, string | number> = {};
+/** Keeps the scalar values (the check on save has already rejected anything else). */
+function scalarsOf(value: Record<string, unknown>): Record<string, ParamValue> {
+  const out: Record<string, ParamValue> = {};
   for (const [k, v] of Object.entries(value)) {
-    if (typeof v === 'string' || typeof v === 'number') out[k] = v;
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') out[k] = v;
   }
   return out;
 }
@@ -250,17 +259,24 @@ export function toCreate(d: DraftValues): Schemas['CreateQuestion'] {
   };
 }
 
-/** The variants of a coding question for the (web-only) variants route. */
-export function toVariants(d: DraftValues): Variant[] {
+/** A variant as the save sends it: the form's id, its params and flag, and its slot overrides. */
+export interface DesiredVariant {
+  id: string;
+  params: Record<string, ParamValue>;
+  isActive: boolean;
+  overrides: { testCaseId: string; input: string; expectedOutput: string }[];
+}
+
+/** The variants of a coding question as the form has them (overrides of removed slots dropped). */
+export function toVariants(d: DraftValues): DesiredVariant[] {
   if (d.type !== 'CODING') return [];
   const slotIds = new Set(d.testCases.map((t) => t.id));
   return d.variants.map((v) => {
     const parsed = parseParams(v.paramsText);
     return {
       id: v.id,
-      label: v.label.trim(),
       params: parsed.ok ? scalarsOf(parsed.value) : {},
-      active: v.active,
+      isActive: v.active,
       overrides: v.overrides.filter((o) => slotIds.has(o.testCaseId)),
     };
   });
@@ -321,7 +337,6 @@ export const draftSchema = z
     variants: z.array(
       z.object({
         id: z.string().min(1),
-        label: z.string().trim().min(1, 'Name this variant.'),
         paramsText: z.string(),
         active: z.boolean(),
         overrides: z.array(
@@ -379,6 +394,9 @@ export const draftSchema = z
       d.testCases.forEach((t, i) => {
         if (ids.indexOf(t.id) !== i) issue(['testCases', i, 'id'], 'Duplicate test case.');
       });
+      if (d.variants.length > MAX_VARIANTS) {
+        issue(['variants'], `Use at most ${MAX_VARIANTS} variants.`);
+      }
       const used = placeholdersOf(text.join('\n'));
       const names = (list: string[]) => list.map((m) => `"${m}"`).join(', ');
       if (used.length > 0 && d.variants.length === 0) {

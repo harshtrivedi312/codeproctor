@@ -2,7 +2,18 @@ import { AI_REFERENCE_LANGUAGES, type CodeLanguage } from '@codeproctor/shared';
 import type { Schemas } from '@/lib/api/client';
 
 export type AiReference = Schemas['AiReference'];
-export type AiPolicy = Schemas['AiReferencePolicy'];
+
+/**
+ * What the AI gate assumes. The API does NOT expose the organisation's policy to Authors (org
+ * settings are SUPER_ADMIN only): `minAssistants` is the API's own default (2, D-20) and is only a
+ * hint, because the API's 422 on publish is the truth; `refreshDays` exists only in the web (the
+ * "refresh due" badge is advisory). Both are defaults, not settings.
+ */
+export interface AiPolicy {
+  refreshDays: number;
+  minAssistants: number;
+}
+export const DEFAULT_AI_POLICY: AiPolicy = { refreshDays: 90, minAssistants: 2 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 

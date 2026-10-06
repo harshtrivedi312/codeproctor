@@ -15,7 +15,7 @@ import type { Schemas } from '@/lib/api/client';
 import { TYPE_LABEL } from './labels';
 import { QuestionEditor } from './question-editor';
 import { QuestionSummary } from './question-summary';
-import { isFullQuestion, useQuestion, useVariants } from './queries';
+import { isFullQuestion, useQuestion } from './queries';
 
 function LoadError({ error, canWrite }: { error: unknown; canWrite: boolean }): React.JSX.Element {
   const notFound = error instanceof ApiFailure && error.status === 404;
@@ -79,17 +79,11 @@ function EditorLoader({
   const canWrite = can(role, 'question:update');
   const question = useQuestion(id);
   const full = question.data && isFullQuestion(question.data) ? question.data : null;
-  // WEB-ONLY placeholder [BE-04b]: the variants of this version, for writers of a coding question.
-  const variants = useVariants(id, full?.version.version ?? 0, full?.type === 'CODING');
   if (question.isPending) return <Loading />;
   if (question.isError) return <LoadError error={question.error} canWrite={canWrite} />;
   // The API decides: a caller without question:update gets the allowlisted view, and that is
   // all this screen can show (no editor).
   if (!full) return <SummaryPage data={question.data} />;
-  if (full.type === 'CODING') {
-    if (variants.isPending) return <Loading />;
-    if (variants.isError) return <LoadError error={variants.error} canWrite={canWrite} />;
-  }
   return (
     <>
       <p className="mb-3 text-sm">
@@ -104,7 +98,6 @@ function EditorLoader({
         key={id}
         mode="edit"
         detail={full}
-        variants={variants.data ?? []}
         {...(pollMs ? { pollMs } : {})}
         {...(maxPolls ? { maxPolls } : {})}
       />
@@ -285,14 +278,9 @@ function VersionLoader({ id, version }: { id: string; version: number }): React.
   const canWrite = can(role, 'question:update');
   const data = useQuestion(id, version);
   const full = data.data && isFullQuestion(data.data) ? data.data : null;
-  const variants = useVariants(id, version, full?.type === 'CODING');
   if (data.isPending) return <Loading />;
   if (data.isError) return <LoadError error={data.error} canWrite={canWrite} />;
   if (!full) return <SummaryPage data={data.data} />;
-  if (full.type === 'CODING') {
-    if (variants.isPending) return <Loading />;
-    if (variants.isError) return <LoadError error={variants.error} canWrite={canWrite} />;
-  }
   return (
     <>
       <p className="mb-3 text-sm">
@@ -303,12 +291,7 @@ function VersionLoader({ id, version }: { id: string; version: number }): React.
           Back to the version history
         </Link>
       </p>
-      <QuestionEditor
-        key={`${id}-${version}`}
-        mode="view"
-        detail={full}
-        variants={variants.data ?? []}
-      />
+      <QuestionEditor key={`${id}-${version}`} mode="view" detail={full} />
     </>
   );
 }

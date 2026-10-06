@@ -6,18 +6,20 @@ import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Field } from '@/components/ui/field';
-import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import type { Schemas } from '@/lib/api/client';
-import { LANGUAGE_LABELS, newId, type VariantValues } from '../draft';
+import { LANGUAGE_LABELS, newId, variantName, type VariantValues } from '../draft';
 import { MarkdownPreview } from '../markdown-preview';
 import { checkParams, missingPlaceholders, parseParams } from '../params';
-import { usePrefill } from '../queries';
+import { usePrefill, usePreviewVariant } from '../queries';
 import { placeholdersOf, renderTemplate } from '../template';
 import { errorAt, useDraftField, type ApiTabProps } from '../use-draft-field';
 
 type Proposal = Schemas['PrefillResponse']['proposals'][number];
+
+/** Ids the form makes for variants that are not saved yet (the API's ids never start like this). */
+const DRAFT_VARIANT_PREFIX = 'draft-var';
 
 /**
  * FR-203, ADR 0007: variants with their own explicit parameter values, a rendered
@@ -25,7 +27,12 @@ type Proposal = Schemas['PrefillResponse']['proposals'][number];
  * expected outputs from the reference solution only PROPOSES values; they change nothing until the
  * author accepts them.
  */
-export function VariantsTab({ form, readOnly, questionId }: ApiTabProps): React.JSX.Element {
+export function VariantsTab({
+  form,
+  readOnly,
+  questionId,
+  version,
+}: ApiTabProps & { version: number }): React.JSX.Element {
   if (questionId === null) {
     return (
       <p className="text-sm text-muted-foreground">
@@ -33,14 +40,15 @@ export function VariantsTab({ form, readOnly, questionId }: ApiTabProps): React.
       </p>
     );
   }
-  return <VariantsBody form={form} readOnly={readOnly} questionId={questionId} />;
+  return <VariantsBody form={form} readOnly={readOnly} questionId={questionId} version={version} />;
 }
 
 function VariantsBody({
   form,
   readOnly,
   questionId,
-}: Omit<ApiTabProps, 'questionId'> & { questionId: string }): React.JSX.Element {
+  version,
+}: Omit<ApiTabProps, 'questionId'> & { questionId: string; version: number }): React.JSX.Element {
   const [variants, setVariants] = useDraftField(form, 'variants');
   const statement = useWatch({ control: form.control, name: 'statementMd' });
   const starter = useWatch({ control: form.control, name: 'starterCode' });
@@ -90,6 +98,7 @@ function VariantsBody({
             form={form}
             readOnly={readOnly}
             questionId={questionId}
+            version={version}
             used={used}
             statement={statement}
             reference={reference}
@@ -105,8 +114,7 @@ function VariantsBody({
               setVariants([
                 ...variants,
                 {
-                  id: newId('var'),
-                  label: `Variant ${variants.length + 1}`,
+                  id: newId(DRAFT_VARIANT_PREFIX),
                   paramsText: JSON.stringify(Object.fromEntries(used.map((n) => [n, ''])), null, 2),
                   active: true,
                   overrides: [],
@@ -124,6 +132,7 @@ function VariantsBody({
 }
 
 interface CardProps extends Pick<ApiTabProps, 'form' | 'readOnly' | 'questionId'> {
+  version: number;
   index: number;
   variant: VariantValues;
   used: string[];
@@ -139,6 +148,7 @@ function VariantCard({
   form,
   readOnly,
   questionId,
+  version,
   used,
   statement,
   reference,
@@ -160,6 +170,7 @@ function VariantCard({
   const formError = errorAt(form, `variants.${index}.paramsText`);
   const rendered = parsed.ok ? renderTemplate(statement, parsed.value) : null;
   const headingId = `variant-${variant.id}`;
+  const name = variantName(index);
 
   const [language, setLanguage] = React.useState('');
   const withReference = languages.filter((l) => (reference[l] ?? '').trim() !== '');
@@ -168,6 +179,8 @@ function VariantCard({
   const [proposed, setProposed] = React.useState<{ key: string; items: Proposal[] } | null>(null);
   const requestId = React.useRef(0);
   const prefill = usePrefill(questionId ?? '');
+  const candidate = usePreviewVariant(questionId ?? '', version);
+  const isSaved = !variant.id.startsWith(DRAFT_VARIANT_PREFIX);
 
   const overrideOf = (testCaseId: string) =>
     variant.overrides.find((o) => o.testCaseId === testCaseId);
@@ -262,22 +275,10 @@ function VariantCard({
   return (
     <section aria-labelledby={headingId} className="space-y-4 rounded-md border bg-card p-4">
       <div className="flex flex-wrap items-start gap-3">
-        <Field
-          id={`${headingId}-label`}
-          label="Variant name"
-          error={errorAt(form, `variants.${index}.label`)}
-        >
-          {(aria) => (
-            <Input
-              {...aria}
-              className="w-64"
-              value={variant.label}
-              disabled={readOnly}
-              onChange={(e) => onChange({ label: e.target.value })}
-            />
-          )}
-        </Field>
-        <label className="mt-7 flex items-center gap-2 text-sm">
+        <h4 id={headingId} className="mt-1 text-base font-medium">
+          {name}
+        </h4>
+        <label className="mt-1 flex items-center gap-2 text-sm">
           <input
             type="checkbox"
             className="size-4"
@@ -288,15 +289,12 @@ function VariantCard({
           Active (candidates can get it; validation runs it)
         </label>
         {readOnly ? null : (
-          <Button type="button" variant="ghost" size="sm" className="mt-7" onClick={onRemove}>
+          <Button type="button" variant="ghost" size="sm" onClick={onRemove}>
             <Trash2 className="size-4" aria-hidden="true" />
             Remove variant
           </Button>
         )}
       </div>
-      <h4 id={headingId} className="sr-only">
-        {variant.label || `Variant ${index + 1}`}
-      </h4>
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Field
@@ -336,6 +334,39 @@ function VariantCard({
         </div>
       </div>
 
+      {isSaved && questionId ? (
+        <div className="space-y-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={candidate.isPending}
+            onClick={() => candidate.mutate(variant.id)}
+          >
+            {candidate.isPending ? 'Loading…' : 'Show what a candidate sees'}
+          </Button>
+          {candidate.isError ? (
+            <Alert tone="error" role="alert" title="We could not show this variant">
+              Check that the parameters cover every placeholder, then save and try again.
+            </Alert>
+          ) : null}
+          {candidate.data ? (
+            <div
+              role="region"
+              aria-label={`Candidate view of ${name}`}
+              className="space-y-2 rounded-md border p-3"
+            >
+              <MarkdownPreview>{candidate.data.statementMd}</MarkdownPreview>
+              <p className="text-sm text-muted-foreground">
+                {candidate.data.samples.length} sample case
+                {candidate.data.samples.length === 1 ? '' : 's'} are shown to the candidate. This is
+                the saved variant; save your edits to see them here.
+              </p>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="space-y-2">
         <h5 className="text-sm font-medium">Test data of this variant</h5>
         {tests.length === 0 ? (
@@ -363,7 +394,7 @@ function VariantCard({
                         onChange={(e) => setOverride(t.id, e.target.checked ? {} : null)}
                       />
                       <span>
-                        Override slot {ti + 1} for {variant.label || `variant ${index + 1}`}
+                        Override slot {ti + 1} for {name}
                       </span>
                     </label>
                   </div>
@@ -465,11 +496,7 @@ function VariantCard({
             </Alert>
           ) : null}
           {proposals ? (
-            <div
-              role="region"
-              aria-label={`Proposed outputs for ${variant.label}`}
-              className="space-y-2"
-            >
+            <div role="region" aria-label={`Proposed outputs for ${name}`} className="space-y-2">
               {proposals.length === 0 ? <p className="text-sm">All proposals handled.</p> : null}
               <ul className="space-y-2">
                 {proposals.map((p) => {
