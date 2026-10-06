@@ -1410,7 +1410,7 @@ export interface components {
       total: number;
     };
     /**
-     * @description The session state machine of ADR 0002 with ERASED (D-54, ADR 0004 section 9): the candidate's data was erased. Recruiters see only that fact and its time.
+     * @description The session state machine of ADR 0002 with ERASED (D-54, ADR 0004 section 9): the candidate's data was erased after an erasure request. Terminal; set only by the erasure fence.
      * @enum {string}
      */
     SessionStatus:

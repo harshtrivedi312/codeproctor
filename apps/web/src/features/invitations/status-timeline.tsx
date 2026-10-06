@@ -198,12 +198,12 @@ export function timelineSteps(status: Status, history: readonly Step[]): Timelin
     });
   }
   if (status === 'ERASED') {
-    // D-54 (ADR 0004 section 9): only the fact and the time are shown, nothing else about the person.
+    // D-54 (ADR 0004 section 9): the reached stages and their times stay (the ADR keeps a session's status and
+    // timestamps); the person's details are masked server-side. Policy wording belongs to the owner (FU-FEB-14).
     items.push({
       key: 'ERASED',
       label: 'Data erased',
-      description:
-        "The candidate's data was erased under the retention or erasure policy. Only the fact and the time of the erasure are kept.",
+      description: "The candidate's data was erased after an erasure request.",
       state: 'ended',
       at: timeOf(['ERASED']),
     });
