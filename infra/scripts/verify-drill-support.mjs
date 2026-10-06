@@ -138,11 +138,12 @@ export function clientShims(pg, dir) {
   const installed = spawnSync('pg_dump', ['--version'], { encoding: 'utf8' }).stdout;
   mkdirSync(dir, { recursive: true });
   // A psql wrapper that fails when the arguments contain FAKE_PSQL_FAIL_ON, so a test can break
-  // one step (for example the erasure re-application) and nothing else.
+  // one step (for example the erasure re-application) and nothing else, or that prints
+  // FAKE_PSQL_OUTPUT instead of running when the arguments contain FAKE_PSQL_OUTPUT_ON.
   const realPsql = spawnSync('sh', ['-c', 'command -v psql'], { encoding: 'utf8' }).stdout.trim();
   writeFileSync(
     join(dir, 'psql'),
-    `#!/bin/sh\ncase "$*" in *"\${FAKE_PSQL_FAIL_ON:-@@never@@}"*) echo "psql: simulated failure" >&2; exit "\${FAKE_PSQL_FAIL_STATUS:-3}" ;; esac\nexec ${realPsql} "$@"\n`,
+    `#!/bin/sh\ncase "$*" in *"\${FAKE_PSQL_FAIL_ON:-@@never@@}"*) echo "psql: simulated failure" >&2; exit "\${FAKE_PSQL_FAIL_STATUS:-3}" ;; esac\ncase "$*" in *"\${FAKE_PSQL_OUTPUT_ON:-@@never@@}"*) printf '%s\\n' "\${FAKE_PSQL_OUTPUT:-}"; exit 0 ;; esac\nexec ${realPsql} "$@"\n`,
     { mode: 0o755 },
   );
   if (installed.match(/\) (\d+)/)?.[1] === String(major)) {

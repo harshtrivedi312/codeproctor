@@ -82,6 +82,8 @@ jobs:
         run: pnpm build
         env:
           NEXT_PUBLIC_API_MOCKING: enabled
+          # Allows only this test build past the production-build mock guard (Frontend #94); the value is a label, not a secret.
+          ALLOW_MOCKING_IN_PRODUCTION_BUILD: staging-only
 
       # Every test step runs even when an earlier one failed (`!cancelled()`), so the gate below
       # sees all reports and prints one verdict per P1 case. The job still fails if any step failed.
