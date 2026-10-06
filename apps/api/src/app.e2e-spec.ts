@@ -163,6 +163,8 @@ describe('API foundation in production (NFR-04)', () => {
     applyEnv(infra, {
       NODE_ENV: 'production',
       APP_ENV: 'production',
+      // Production requires an https web origin (FU-BE-11).
+      WEB_ORIGIN: 'https://app.test.invalid',
       // Behind Caddy in production (FU-BE-97).
       TRUST_PROXY_HOPS: '1',
       // Pilot and production require the code runner settings (FR-503); synthetic values.

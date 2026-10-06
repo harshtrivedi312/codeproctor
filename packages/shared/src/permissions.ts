@@ -50,7 +50,13 @@ export const PERMISSIONS = [
   'candidate_keystrokes:write', // POST /candidate/session/keystrokes
   'candidate_answer:run', // POST /candidate/answers/:questionId/run
   'candidate_answer:submit', // POST /candidate/answers/:questionId/submit
+  'candidate_section:finish', // POST /candidate/session/section/finish with the section `position` in the body, which must be the open one (enqueue-only close; ADR 0013 5.11, ADR 0002 S-4, P-25)
+  'candidate_answer:draft', // PUT /candidate/answers/:questionId/draft (code, MCQ and short-answer autosave; ADR 0013 5.11)
   'candidate_session:finish', // POST /candidate/session/finish
+  'candidate_session:read', // GET /candidate/session (ADR 0013)
+  'candidate_session:start', // POST /candidate/session/test/start (authenticated test start, not the public OTP exchange /candidate/session/start)
+  'candidate_session:heartbeat', // POST /candidate/session/heartbeat (FR-609)
+  'candidate_session:key', // POST /candidate/session/proctor-key (ADR 0013)
   // M9 Review and live (fsd.md §4 /review, /live)
   'review_queue:read', // GET /review/queue
   'review_session:read', // GET /review/sessions/:id (audited, FR-105)
@@ -104,7 +110,13 @@ const CANDIDATE_PERMISSIONS = [
   'candidate_keystrokes:write',
   'candidate_answer:run',
   'candidate_answer:submit',
+  'candidate_answer:draft',
+  'candidate_section:finish',
   'candidate_session:finish',
+  'candidate_session:read',
+  'candidate_session:start',
+  'candidate_session:heartbeat',
+  'candidate_session:key',
 ] as const satisfies readonly Permission[];
 
 const STAFF_PERMISSIONS: readonly Permission[] = PERMISSIONS.filter(
