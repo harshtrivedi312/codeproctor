@@ -27,7 +27,10 @@ function actorOf(req: AuthedRequest): Actor {
 @Roles(UserRole.SUPER_ADMIN)
 @Controller('admin/org-settings')
 @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
-@ApiForbiddenResponse({ description: 'Caller is not a super admin' })
+@ApiForbiddenResponse({
+  description:
+    "Caller is not a super admin, or (PATCH) the admin's own currentPassword is wrong or locked: code 'REAUTH_FAILED'",
+})
 export class OrgSettingsController {
   constructor(private readonly settings: OrgSettingsService) {}
 
@@ -41,7 +44,7 @@ export class OrgSettingsController {
   @Patch()
   @ApiOperation({
     summary:
-      'Change settings (merged into the stored settings; audited ORG_SETTINGS_UPDATED). A change to the stored value only is audited; a repeat of the stored value is a 200 with no audit row.',
+      'Change settings (merged into the stored settings; audited ORG_SETTINGS_UPDATED). Needs the own currentPassword of the admin (step-up; wrong or locked is 403 REAUTH_FAILED, missing is 400); the password is never stored or audited. A change to the stored value only is audited; a repeat of the stored value is a 200 with no audit row.',
   })
   @ApiOkResponse({ type: OrgSettingsDto })
   @ApiBadRequestResponse({ description: 'Unknown key, null, out of range, or nothing to change' })

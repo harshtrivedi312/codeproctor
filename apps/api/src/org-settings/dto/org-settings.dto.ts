@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsInt, IsObject, Max, Min, ValidateIf, ValidateNested } from 'class-validator';
+import { CurrentPasswordDto } from '../../auth/dto/auth.dto';
 import { MAX_MIN_ASSISTANTS } from '../../questions/ai-reference-rules';
 
 // The global ValidationPipe (whitelist + forbidNonWhitelisted) rejects unknown keys at every level.
@@ -16,7 +17,7 @@ export class AiReferenceSettingsPatchDto {
   minAssistants?: number;
 }
 
-export class UpdateOrgSettingsDto {
+export class UpdateOrgSettingsDto extends CurrentPasswordDto {
   @ApiPropertyOptional({ type: AiReferenceSettingsPatchDto })
   @ValidateIf((_o, v) => v !== undefined)
   @IsObject()

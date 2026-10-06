@@ -4,15 +4,16 @@
 // written (ADR 0006, TC-008). A PATCH MERGES into the settings jsonb (other keys such as retention
 // or consent survive), by compare-and-set (updateMany where the settings still equal the value read, 3 attempts, then
 // 409 SETTINGS_CONFLICT), and writes its audit row in the same transaction as the winning update.
-// No raw SQL (ADR 0006). A PATCH that changes nothing (the stored value already equals the sent one) returns
-// 200 with no write and no audit row. Malformed stored settings read as the default and a PATCH
+// No raw SQL (ADR 0006). A PATCH needs the admin's currentPassword (step-up, FR-102). A PATCH that changes nothing (the
+// stored value already equals the sent one) still needs it, then returns 200 with no write and no audit row. Malformed stored settings read as the default and a PATCH
 // repairs them by writing a valid structure. Known limit (FU-BE-134): an integer above 2^53 anywhere
 // in the stored settings does not round-trip through the JSON equality filter, so the compare-and-set
 // would never match and every PATCH would be 409 until the value is fixed by hand.
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { AuthService } from '../auth/auth.service';
 import { PrismaService } from '../database/prisma.service';
-import { Prisma } from '../generated/prisma/client';
-import { CodedConflictException } from '../common/coded.exception';
+import { Prisma, UserRole } from '../generated/prisma/client';
+import { CodedConflictException, reauthFailed } from '../common/coded.exception';
 import type { RequestContext } from '../common/request-context';
 import { DEFAULT_MIN_ASSISTANTS, storedMinAssistants } from '../questions/ai-reference-rules';
 import type { OrgSettingsDto, UpdateOrgSettingsDto } from './dto/org-settings.dto';
@@ -39,7 +40,10 @@ function view(settings: unknown): OrgSettingsDto {
 
 @Injectable()
 export class OrgSettingsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auth: AuthService,
+  ) {}
 
   async get(actor: Actor): Promise<OrgSettingsDto> {
     const org = await this.prisma.client.organization.findUnique({
@@ -57,8 +61,12 @@ export class OrgSettingsService {
   ): Promise<OrgSettingsDto> {
     const next = dto.aiReferences?.minAssistants;
     if (next === undefined) throw new BadRequestException('Send at least one setting.');
+    // Step-up, same order as the other admin writes: body checks (400) first, then the admin's
+    // current password on the login path (reserve, equal work, shared lockout; wrong or locked is
+    // the same 403 REAUTH_FAILED). The password is used here only and never stored or audited.
+    const verified = await this.auth.verifyCurrentPassword(actor.id, dto.currentPassword, ctx);
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      const done = await this.tryUpdate(actor, next, ctx);
+      const done = await this.tryUpdate(actor, next, verified.passwordHash, ctx);
       if (done) return done;
     }
     throw new CodedConflictException(
@@ -75,9 +83,21 @@ export class OrgSettingsService {
   private tryUpdate(
     actor: Actor,
     next: number,
+    verifiedHash: string,
     ctx: RequestContext,
   ): Promise<OrgSettingsDto | null> {
     return this.prisma.client.$transaction(async (tx) => {
+      // The admin must still be the one whose password was verified (same bind as the user routes).
+      const still = await tx.user.count({
+        where: {
+          id: actor.id,
+          orgId: actor.orgId,
+          passwordHash: verifiedHash,
+          role: UserRole.SUPER_ADMIN,
+          isActive: true,
+        },
+      });
+      if (still !== 1) throw reauthFailed();
       const org = await tx.organization.findUnique({
         where: { id: actor.orgId },
         select: { settings: true },

@@ -115,7 +115,7 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'POST /admin/users/:userId/unlock': userManage,
 
   // Organization settings (FR-103, ADR 0010 org_settings:manage; SUPER_ADMIN only, own org only).
-  // The PATCH writes its audit row (ORG_SETTINGS_UPDATED) in the same transaction as the update.
+  // The PATCH needs the admin's currentPassword (step-up) and writes its audit row (ORG_SETTINGS_UPDATED) in the same transaction as the update.
   'GET /admin/org-settings': orgSettingsManage,
   'PATCH /admin/org-settings': orgSettingsManage,
 

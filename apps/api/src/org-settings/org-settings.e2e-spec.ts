@@ -4,7 +4,9 @@ import { randomBytes } from 'node:crypto';
 import { Client } from 'pg';
 import request from 'supertest';
 import type { App } from 'supertest/types';
+import { hash } from '@node-rs/argon2';
 import { passwordVersion } from '../auth/crypto.util';
+import { ARGON2_OPTIONS } from '../auth/password.service';
 import type { TokenService } from '../common/auth/token.service';
 import { createPrismaClient } from '../database/create-prisma-client';
 import { PrismaClient, UserRole } from '../generated/prisma/client';
@@ -14,6 +16,7 @@ import { applyEnv, applyMigrations, startInfra, TestInfra } from '../test/contai
 
 const API = '/api/v1';
 const URL = `${API}/admin/org-settings`;
+const PASSWORD = 'Correct-Horse-9';
 
 describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0010)', () => {
   let infra: TestInfra;
@@ -24,6 +27,9 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
   let orgB: string;
   let tokens: TokenService;
   let seq = 0;
+  let cachedHash: string | undefined;
+  const passwordHashOf = async (): Promise<string> =>
+    (cachedHash ??= await hash(PASSWORD, ARGON2_OPTIONS));
 
   beforeAll(async () => {
     infra = await startInfra();
@@ -76,10 +82,22 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
   ): Promise<{ id: string; auth: { Authorization: string } }> {
     const n = ++seq;
     const user = await owner.user.create({
-      data: { orgId, email: `os${n}@example.com`, fullName: `User ${n}`, role, passwordHash: 'x' },
+      data: {
+        orgId,
+        email: `os${n}@example.com`,
+        fullName: `User ${n}`,
+        role,
+        passwordHash: await passwordHashOf(),
+      },
     });
     const token = tokens.sign(
-      { sub: user.id, org: orgId, role, kind: 'access', pwv: passwordVersion('x') },
+      {
+        sub: user.id,
+        org: orgId,
+        role,
+        kind: 'access',
+        pwv: passwordVersion(await passwordHashOf()),
+      },
       900,
     );
     return { id: user.id, auth: { Authorization: `Bearer ${token}` } };
@@ -105,7 +123,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
       await http().get(URL).expect(401);
       await http()
         .patch(URL)
-        .send({ aiReferences: { minAssistants: 1 } })
+        .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 1 } })
         .expect(401);
     });
 
@@ -119,7 +137,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
           org: orgA,
           role: 'SUPER_ADMIN',
           kind: 'candidate',
-          pwv: passwordVersion('x'),
+          pwv: passwordVersion(await passwordHashOf()),
         },
       ];
       for (const claims of forged) {
@@ -128,7 +146,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
         await http()
           .patch(URL)
           .set(auth)
-          .send({ aiReferences: { minAssistants: 1 } })
+          .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 1 } })
           .expect(401);
       }
       expect(await stored(orgA)).toEqual({});
@@ -143,7 +161,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
         await http()
           .patch(URL)
           .set(caller.auth)
-          .send({ aiReferences: { minAssistants: 1 } })
+          .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 1 } })
           .expect(403);
         expect(await stored(orgA)).toEqual({});
         expect(await audits(orgA)).toHaveLength(0);
@@ -163,7 +181,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
       const res = await http()
         .patch(URL)
         .set(admin.auth)
-        .send({ aiReferences: { minAssistants: 4 } })
+        .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 4 } })
         .expect(200);
       expect(res.body).toEqual({ aiReferences: { minAssistants: 4, isDefault: false } });
       const got = await http().get(URL).set(admin.auth).expect(200);
@@ -184,12 +202,12 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
       await http()
         .patch(URL)
         .set(admin.auth)
-        .send({ aiReferences: { minAssistants: 0 } })
+        .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 0 } })
         .expect(200);
       await http()
         .patch(URL)
         .set(admin.auth)
-        .send({ aiReferences: { minAssistants: 5 } })
+        .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 5 } })
         .expect(200);
       expect((await audits(orgA)).map((r) => r.metadata)).toEqual([
         { changes: [{ key: 'aiReferences.minAssistants', from: 2, to: 0 }] },
@@ -203,7 +221,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
       const res = await http()
         .patch(URL)
         .set(admin.auth)
-        .send({ aiReferences: { minAssistants: 3 } })
+        .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 3 } })
         .expect(200);
       expect(res.body).toEqual({ aiReferences: { minAssistants: 3, isDefault: false } });
       expect(await audits(orgA)).toHaveLength(0);
@@ -223,7 +241,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
       await http()
         .patch(URL)
         .set(admin.auth)
-        .send({ aiReferences: { minAssistants: value } })
+        .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: value } })
         .expect(400);
       expect(await stored(orgA)).toEqual({});
       expect(await audits(orgA)).toHaveLength(0);
@@ -241,7 +259,11 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
       ['only an unknown key', { other: 1 }],
     ])('AI-5 %s is 400', async (_n, body) => {
       const admin = await make(UserRole.SUPER_ADMIN);
-      await http().patch(URL).set(admin.auth).send(body).expect(400);
+      await http()
+        .patch(URL)
+        .set(admin.auth)
+        .send(Array.isArray(body) ? body : { currentPassword: PASSWORD, ...body })
+        .expect(400);
       expect(await stored(orgA)).toEqual({});
       expect(await audits(orgA)).toHaveLength(0);
     });
@@ -256,7 +278,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
       await http()
         .patch(URL)
         .set(admin.auth)
-        .send({ aiReferences: { minAssistants: 3 } })
+        .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 3 } })
         .expect(200);
       expect(await stored(orgA)).toEqual({
         retention: { days: 30 },
@@ -286,7 +308,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
         await http()
           .patch(URL)
           .set(admin.auth)
-          .send({ aiReferences: { minAssistants: 2 } })
+          .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 2 } })
           .expect(200);
         const after = (await stored(orgA)) as { aiReferences: { minAssistants: number } };
         expect(after.aiReferences.minAssistants).toBe(2);
@@ -307,12 +329,16 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
           http()
             .patch(URL)
             .set(admin.auth)
-            .send({ aiReferences: { minAssistants: v } }),
+            .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: v } }),
         ),
       );
       const ok = results.filter((r) => r.status === 200);
       const lost = results.filter((r) => r.status === 409);
-      expect(ok.length + lost.length).toBe(values.length);
+      // The shared step-up reservation can refuse a concurrent attempt of the same admin: 403
+      // REAUTH_FAILED, exactly as on the sibling admin routes. It changes nothing.
+      const refused = results.filter((r) => r.status === 403);
+      for (const r of refused) expect((r.body as { code?: string }).code).toBe('REAUTH_FAILED');
+      expect(ok.length + lost.length + refused.length).toBe(values.length);
       expect(ok.length).toBeGreaterThanOrEqual(1);
       for (const r of lost) expect((r.body as { code?: string }).code).toBe('SETTINGS_CONFLICT');
       const final = (await stored(orgA)) as {
@@ -345,7 +371,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
         const res = await http()
           .patch(URL)
           .set(admin.auth)
-          .send({ aiReferences: { minAssistants: 1 } })
+          .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 1 } })
           .expect(409);
         expect((res.body as { code?: string }).code).toBe('SETTINGS_CONFLICT');
         expect(spy).toHaveBeenCalledTimes(3);
@@ -400,7 +426,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
         await http()
           .patch(URL)
           .set(admin.auth)
-          .send({ aiReferences: { minAssistants: 5 } })
+          .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 5 } })
           .expect(200);
       } finally {
         spy.mockRestore();
@@ -438,15 +464,147 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
       await http()
         .patch(URL)
         .set(admin.auth)
-        .send({ aiReferences: { minAssistants: 1 } })
+        .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 1 } })
         .expect(200);
       expect(await problems()).toHaveLength(0);
       await http()
         .patch(URL)
         .set(admin.auth)
-        .send({ aiReferences: { minAssistants: 3 } })
+        .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 3 } })
         .expect(200);
       expect(await problems()).toHaveLength(1);
+    });
+  });
+
+  describe('FR-102, TC-003: step-up with the admin current password on PATCH', () => {
+    const body = (extra: object = {}): object => ({ aiReferences: { minAssistants: 4 }, ...extra });
+
+    it('FR-102 a wrong password is 403 REAUTH_FAILED, nothing changes and no audit row', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const res = await http()
+        .patch(URL)
+        .set(admin.auth)
+        .send(body({ currentPassword: 'Wrong-Horse-99' }))
+        .expect(403);
+      expect((res.body as { code?: string }).code).toBe('REAUTH_FAILED');
+      expect(JSON.stringify(res.body)).not.toContain('Wrong-Horse-99');
+      expect(await stored(orgA)).toEqual({});
+      expect(await audits(orgA)).toHaveLength(0);
+    });
+
+    it('FR-102 a correct password works', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      await http()
+        .patch(URL)
+        .set(admin.auth)
+        .send(body({ currentPassword: PASSWORD }))
+        .expect(200);
+      expect(await audits(orgA)).toHaveLength(1);
+    });
+
+    it('FR-102 a no-op PATCH (same value) still needs the correct password', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      await setStored(orgA, { aiReferences: { minAssistants: 4 } });
+      await http()
+        .patch(URL)
+        .set(admin.auth)
+        .send(body({ currentPassword: 'Wrong-Horse-99' }))
+        .expect(403);
+      await http()
+        .patch(URL)
+        .set(admin.auth)
+        .send(body({ currentPassword: PASSWORD }))
+        .expect(200);
+    });
+
+    it.each([
+      ['missing', undefined],
+      ['empty', ''],
+      ['null', null],
+      ['a number', 12345],
+    ])('FR-102 a %s password is 400 and nothing changes', async (_n, value) => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const payload: Record<string, unknown> = { aiReferences: { minAssistants: 4 } };
+      if (value !== undefined) payload['currentPassword'] = value;
+      await http().patch(URL).set(admin.auth).send(payload).expect(400);
+      expect(await stored(orgA)).toEqual({});
+      expect(await audits(orgA)).toHaveLength(0);
+    });
+
+    it('FR-102 GET needs no password', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      await http().get(URL).set(admin.auth).expect(200);
+    });
+
+    it('FR-102 the password never appears in the audit row or the logs', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const planted = 'Zq7-Planted-Pw-Unusual!';
+      const hashed = await hash(planted, ARGON2_OPTIONS);
+      await owner.user.update({ where: { id: admin.id }, data: { passwordHash: hashed } });
+      const token = tokens.sign(
+        {
+          sub: admin.id,
+          org: orgA,
+          role: 'SUPER_ADMIN',
+          kind: 'access',
+          pwv: passwordVersion(hashed),
+        },
+        900,
+      );
+      const writes: string[] = [];
+      const spy = jest.spyOn(process.stdout, 'write').mockImplementation((c: unknown) => {
+        writes.push(String(c));
+        return true;
+      });
+      try {
+        await http()
+          .patch(URL)
+          .set({ Authorization: `Bearer ${token}` })
+          .send(body({ currentPassword: planted }))
+          .expect(200);
+        await http()
+          .patch(URL)
+          .set({ Authorization: `Bearer ${token}` })
+          .send({ aiReferences: { minAssistants: 1 }, currentPassword: `${planted}-wrong` })
+          .expect(403);
+      } finally {
+        spy.mockRestore();
+      }
+      const row = await pg.query(
+        `SELECT to_jsonb(a)::text AS t FROM audit_logs a WHERE action = 'ORG_SETTINGS_UPDATED'`,
+      );
+      expect(JSON.stringify(row.rows)).not.toContain('Planted-Pw');
+      expect(writes.join('')).not.toContain('Planted-Pw');
+    });
+
+    it('FR-101, TC-003 repeated wrong passwords lock the admin like the sibling admin routes: even the right password is then the same 403', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const patch = (password: string): request.Test =>
+        http()
+          .patch(URL)
+          .set(admin.auth)
+          .send(body({ currentPassword: password }));
+      const wrong = await patch('nope-nope-nope-1');
+      for (let i = 0; i < 6; i++) await patch('nope-nope-nope-1');
+      const lockedRight = await patch(PASSWORD);
+      expect(lockedRight.status).toBe(403);
+      const strip = (r: request.Response): unknown => {
+        const { traceId: _t, instance: _i, ...rest } = r.body as Record<string, unknown>;
+        void _t;
+        void _i;
+        return rest;
+      };
+      expect(strip(lockedRight)).toEqual(strip(wrong));
+      // The shared counter: the sibling unlock route is locked too.
+      const victim = await make(UserRole.RECRUITER);
+      const sibling = await http()
+        .post(`${API}/admin/users/${victim.id}/unlock`)
+        .set(admin.auth)
+        .send({ currentPassword: PASSWORD });
+      expect(sibling.status).toBe(403);
+      expect((sibling.body as { code?: string }).code).toBe('REAUTH_FAILED');
+      expect(await stored(orgA)).toEqual({});
+      expect(await audits(orgA)).toHaveLength(0);
     });
   });
 
@@ -458,7 +616,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
       await http()
         .patch(URL)
         .set(adminB.auth)
-        .send({ aiReferences: { minAssistants: 0 } })
+        .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 0 } })
         .expect(200);
       expect(await stored(orgA)).toEqual({
         aiReferences: { minAssistants: 3 },
@@ -483,7 +641,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
       await http()
         .patch(`${URL}?orgId=${orgA}`)
         .set(adminB.auth)
-        .send({ orgId: orgA, aiReferences: { minAssistants: 0 } })
+        .send({ currentPassword: PASSWORD, orgId: orgA, aiReferences: { minAssistants: 0 } })
         .expect(400);
       expect(await stored(orgA)).toEqual({});
     });
