@@ -1,9 +1,17 @@
-import { Controller, Get, INestApplication, NotFoundException, Param } from '@nestjs/common';
-import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import {
+  Controller,
+  Get,
+  INestApplication,
+  Logger,
+  NotFoundException,
+  Param,
+} from '@nestjs/common';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import type { CanActivate, ExecutionContext } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import type { App } from 'supertest/types';
+import { ProblemFilter } from '../common/problem.filter';
 import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
 import { Audited } from './audited.decorator';
@@ -19,6 +27,8 @@ class ProbeController {
   @Audited('SESSION_REVIEW_READ', 'session', { idParam: 'id' })
   read(@Param('id') id: string): { id: string; secretRecording: string } {
     if (id === 'missing') throw new NotFoundException();
+    // A lock timeout raised by the handler itself, before anything committed.
+    if (id === 'locked') throw Object.assign(new Error('lock wait'), { code: '55P03' });
     return { id, secretRecording: 'candidate data' };
   }
 
@@ -43,7 +53,7 @@ class FakeGuard implements CanActivate {
 describe('AuditInterceptor (FR-105, TC-006)', () => {
   let app: INestApplication<App>;
   const created: { data: Record<string, unknown> }[] = [];
-  let failWrite = false;
+  let failWrite: Error | false = false;
   let orgSeenByWrite: string | undefined;
 
   beforeAll(async () => {
@@ -53,7 +63,7 @@ describe('AuditInterceptor (FR-105, TC-006)', () => {
         auditLog: {
           create: (args: { data: Record<string, unknown> }) => {
             orgSeenByWrite = orgContext.requireOrgId();
-            if (failWrite) return Promise.reject(new Error('disk full'));
+            if (failWrite) return Promise.reject(failWrite);
             created.push(args);
             return Promise.resolve({});
           },
@@ -67,6 +77,7 @@ describe('AuditInterceptor (FR-105, TC-006)', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: APP_GUARD, useClass: FakeGuard },
         { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
+        { provide: APP_FILTER, useClass: ProblemFilter },
       ],
     }).compile();
     app = moduleRef.createNestApplication<INestApplication<App>>({ logger: false });
@@ -122,7 +133,7 @@ describe('AuditInterceptor (FR-105, TC-006)', () => {
   });
 
   it('FR-105: when the audit write fails the read fails and the candidate data is not returned', async () => {
-    failWrite = true;
+    failWrite = new Error('disk full');
     const res = await request(app.getHttpServer())
       .get('/probe/sessions/abc')
       .set('x-user', 'yes')
@@ -134,5 +145,36 @@ describe('AuditInterceptor (FR-105, TC-006)', () => {
     const res = await request(app.getHttpServer()).get('/probe/sessions/abc').expect(500);
     expect(JSON.stringify(res.body)).not.toContain('candidate data');
     expect(created).toHaveLength(0);
+  });
+
+  // No TC id covers DL-37 in docs/test-cases.md; FR-105 and the decision id name these.
+  it('DL-37, FR-105: a lock error from the post-handler audit write is a fixed 500 with no Retry-After and no data', async () => {
+    failWrite = Object.assign(new Error('lock wait'), { code: '55P03' });
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    try {
+      const res = await request(app.getHttpServer())
+        .get('/probe/sessions/abc')
+        .set('x-user', 'yes')
+        .expect(500);
+      expect(res.headers['retry-after']).toBeUndefined();
+      expect(JSON.stringify(res.body)).not.toContain('candidate data');
+      expect(JSON.stringify(error.mock.calls)).not.toContain('lock wait');
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('DL-37: the same lock error from the handler itself is 503 with Retry-After', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const res = await request(app.getHttpServer())
+        .get('/probe/sessions/locked')
+        .set('x-user', 'yes')
+        .expect(503);
+      expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+      expect(created).toHaveLength(0);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

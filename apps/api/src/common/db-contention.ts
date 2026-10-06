@@ -7,6 +7,8 @@
 // pg driver-adapter shape, where the SQLSTATE sits in `originalCode` or `code` of the error or of
 // something in its `cause` chain. The walk is bounded and cycle-safe, and reads codes only: it
 // never reads or returns a message, because those can carry SQL and argument values.
+import { HttpException } from '@nestjs/common';
+import { OrgScopeError } from '../database/errors';
 import { Prisma } from '../generated/prisma/client.js';
 
 /** Seconds a client should wait before retrying a request refused for lock contention. */
@@ -32,6 +34,8 @@ export function lockContentionCode(error: unknown): string | undefined {
   const visit = (node: unknown, depth: number): string | undefined => {
     if (!isObject(node) || depth > MAX_DEPTH || seen.has(node)) return undefined;
     seen.add(node);
+    // Our own errors are never database contention, and their causes are not followed.
+    if (node instanceof HttpException || node instanceof OrgScopeError) return undefined;
     if (node instanceof Prisma.PrismaClientKnownRequestError && PRISMA_CODES.has(node.code)) {
       return node.code === 'P2028' ? 'P2028' : 'P2034';
     }

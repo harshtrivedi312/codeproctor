@@ -17,7 +17,7 @@ import {
 } from './db-contention';
 import { getEarlyRejection } from './early-rejection';
 import { resolveRequestId } from './request-id';
-import { OrgContextMissingError } from '../database/errors';
+import { OrgContextMissingError, OrgScopeError } from '../database/errors';
 import { scrubPrismaError } from '../database/error-scrub';
 import { CodedConflictException, CodedForbiddenException } from './coded.exception';
 import type { ProblemCode } from './coded.exception';
@@ -72,7 +72,9 @@ export class ProblemFilter implements ExceptionFilter {
     // Database lock contention (DL-37, FU-BE-42): 503 + Retry-After on every route. An
     // HttpException is never reclassified.
     const lockCode =
-      exception instanceof HttpException || noScope ? undefined : lockContentionCode(exception);
+      exception instanceof HttpException || exception instanceof OrgScopeError
+        ? undefined
+        : lockContentionCode(exception);
     const status = noScope
       ? HttpStatus.FORBIDDEN
       : exception instanceof HttpException
@@ -94,10 +96,15 @@ export class ProblemFilter implements ExceptionFilter {
       problem.detail = 'Access denied.';
     } else if (lockCode !== undefined) {
       // Class name and the fixed code token only: the message can hold SQL and parameters.
-      this.logger.warn(
-        { traceId, errorName: exception instanceof Error ? exception.name : 'NonError', lockCode },
-        'Database lock contention',
-      );
+      // P2028 also means a closed or unknown transaction (a code bug), so it is logged at error
+      // level to be noticed when it recurs; the genuine lock cases stay at warn.
+      const fields = {
+        traceId,
+        errorName: exception instanceof Error ? exception.name : 'NonError',
+        lockCode,
+      };
+      if (lockCode === 'P2028') this.logger.error(fields, 'Database transaction error');
+      else this.logger.warn(fields, 'Database lock contention');
       problem.detail = LOCK_CONTENTION_DETAIL;
       if (!res.headersSent) {
         res.setHeader('Retry-After', String(LOCK_CONTENTION_RETRY_AFTER_SECONDS));
@@ -145,9 +152,13 @@ export class ProblemFilter implements ExceptionFilter {
       );
     }
 
-    // Headers already sent (a lock error while the response was streaming): nothing more can be
-    // written, and writing would throw.
-    if (res.headersSent) return;
+    // Headers already sent (an error while the response was streaming): nothing more can be
+    // written, and ending the response would make a truncated 200 look complete. Destroy the
+    // socket so the client sees an aborted response. Applies to every error class.
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
     // A request refused before the throttler never had its body read: close the connection after
     // the answer (no immediate destroy: that can RST and hide the answer; the leftover is capped by
     // the server requestTimeout) (client-errors, FU-BE-100).

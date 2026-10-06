@@ -27,7 +27,8 @@ import { AuthService } from '../auth/auth.service';
 import { newOpaqueToken, sha256Hex } from '../auth/crypto.util';
 import { TokenValidityService } from '../common/auth/token-validity.service';
 import { reauthFailed } from '../common/coded.exception';
-import { hitWindowCounter } from '../common/redis-counter';
+import { lockContentionCode } from '../common/db-contention';
+import { hitWindowCounter, refundWindowCounter } from '../common/redis-counter';
 import { errorName } from '../common/request-context';
 import type { RequestContext } from '../common/request-context';
 import { ensureConnected } from '../infrastructure/redis-ready';
@@ -156,7 +157,7 @@ export class UsersService {
    */
   async invite(actor: Actor, dto: InviteStaffUserDto, ctx: RequestContext): Promise<StaffUserDto> {
     const verified = await this.auth.verifyCurrentPassword(actor.id, dto.currentPassword, ctx);
-    await this.takeInviteSlot(actor.orgId);
+    const slot = await this.takeInviteSlot(actor.orgId);
     const token = newOpaqueToken();
     let created: User;
     try {
@@ -205,6 +206,9 @@ export class UsersService {
         });
         throw new ConflictException('A user with this email already exists.');
       }
+      // A busy database answers 503 and invites a retry: the slot of the attempt that never
+      // happened goes back (DL-37), or contention would burn the org's invite budget.
+      await this.refundSlotOnContention(slot, e);
       throw e;
     }
     try {
@@ -237,45 +241,50 @@ export class UsersService {
     ctx: RequestContext,
   ): Promise<StaffUserDto> {
     const verified = await this.auth.verifyCurrentPassword(actor.id, currentPassword, ctx);
-    await this.takeInviteSlot(actor.orgId);
+    const slot = await this.takeInviteSlot(actor.orgId);
     const targetId = rawTargetId.toLowerCase();
     const token = newOpaqueToken();
-    const updated = await this.prisma.client.$transaction(async (tx) => {
-      await this.requireSameAdmin(tx, actor, verified.passwordHash);
-      const found = await this.raw('lock the target user row, same org only', () =>
-        tx.$queryRaw<{ id: string; is_active: boolean; has_password: boolean }[]>(Prisma.sql`
+    const updated = await this.prisma.client
+      .$transaction(async (tx) => {
+        await this.requireSameAdmin(tx, actor, verified.passwordHash);
+        const found = await this.raw('lock the target user row, same org only', () =>
+          tx.$queryRaw<{ id: string; is_active: boolean; has_password: boolean }[]>(Prisma.sql`
           SELECT id, is_active, (password_hash IS NOT NULL) AS has_password FROM users
           WHERE id = ${targetId}::uuid AND org_id = ${actor.orgId}::uuid
           FOR NO KEY UPDATE`),
-      );
-      const target = found[0];
-      if (!target) throw new NotFoundException('User not found.');
-      if (target.has_password || !target.is_active) {
-        throw new ConflictException('Only a pending invitation can be re-issued.');
-      }
-      const done = await tx.user.updateMany({
-        where: { id: targetId, passwordHash: null, isActive: true },
-        data: {
-          setPasswordTokenHash: sha256Hex(token),
-          setPasswordExpiresAt: new Date(Date.now() + INVITE_TTL_MS),
-          updatedAt: new Date(),
-        },
+        );
+        const target = found[0];
+        if (!target) throw new NotFoundException('User not found.');
+        if (target.has_password || !target.is_active) {
+          throw new ConflictException('Only a pending invitation can be re-issued.');
+        }
+        const done = await tx.user.updateMany({
+          where: { id: targetId, passwordHash: null, isActive: true },
+          data: {
+            setPasswordTokenHash: sha256Hex(token),
+            setPasswordExpiresAt: new Date(Date.now() + INVITE_TTL_MS),
+            updatedAt: new Date(),
+          },
+        });
+        if (done.count !== 1)
+          throw new ConflictException('Only a pending invitation can be re-issued.');
+        await tx.auditLog.create({
+          data: {
+            orgId: actor.orgId,
+            actorId: actor.id,
+            action: 'USER_INVITE_REISSUED',
+            entityType: 'user',
+            entityId: targetId,
+            ip: ctx.ip ?? null,
+            metadata: { method: 'POST', route: '/api/v1/admin/users/:userId/invite' },
+          },
+        });
+        return tx.user.findUniqueOrThrow({ where: { id: targetId } });
+      })
+      .catch(async (e: unknown) => {
+        await this.refundSlotOnContention(slot, e);
+        throw e;
       });
-      if (done.count !== 1)
-        throw new ConflictException('Only a pending invitation can be re-issued.');
-      await tx.auditLog.create({
-        data: {
-          orgId: actor.orgId,
-          actorId: actor.id,
-          action: 'USER_INVITE_REISSUED',
-          entityType: 'user',
-          entityId: targetId,
-          ip: ctx.ip ?? null,
-          metadata: { method: 'POST', route: '/api/v1/admin/users/:userId/invite' },
-        },
-      });
-      return tx.user.findUniqueOrThrow({ where: { id: targetId } });
-    });
     try {
       await this.mail.sendStaffInvite(
         updated.email,
@@ -288,7 +297,7 @@ export class UsersService {
   }
 
   /** Fixed window per org and hour. Redis down is a 503 (fail closed), over the limit a 429. */
-  private async takeInviteSlot(orgId: string): Promise<void> {
+  private async takeInviteSlot(orgId: string): Promise<string> {
     const key = `invite:org:${orgId}:${Math.floor(Date.now() / (INVITE_WINDOW_SECONDS * 1000))}`;
     let count: number;
     try {
@@ -305,6 +314,19 @@ export class UsersService {
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }
+    return key;
+  }
+
+  /**
+   * DL-37: lock contention answers 503 and invites a retry, so the invite slot of the attempt
+   * that never happened is given back; otherwise contention alone could exhaust the org's budget.
+   * Only for contention: a refused invite (409, 404) keeps its slot as before. This counter does
+   * not record a failed authentication (the admin's password was already verified), so refunding
+   * it cannot erase an attacker's count. Best effort, never masks the original error.
+   */
+  private async refundSlotOnContention(slotKey: string, error: unknown): Promise<void> {
+    if (lockContentionCode(error) === undefined) return;
+    await refundWindowCounter(this.redis, slotKey);
   }
 
   /**

@@ -1042,6 +1042,85 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
     });
   });
 
+  // DL-37: lock contention is 503 + Retry-After and invites a retry. No TC id covers it in
+  // docs/test-cases.md; names cite FR-101/102 and the decision id.
+  describe('DL-37 (FR-101, FR-102): contention gives back only the attempt that failed for contention', () => {
+    const lockError = (): Error => Object.assign(new Error('lock wait'), { code: '55P03' });
+    const startSessionSpy = (): jest.SpyInstance =>
+      jest.spyOn(
+        authService as unknown as { startSession: () => Promise<unknown> },
+        'startSession',
+      );
+
+    it('FR-101: a right password whose session transaction hits contention is 503, keeps no failed attempt, and the retry signs in', async () => {
+      const u = await createUser();
+      const spy = startSessionSpy().mockRejectedValueOnce(lockError());
+      try {
+        const res = await login(u.email).expect(503);
+        expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+        expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).failedLogins).toBe(0);
+        await login(u.email).expect(200);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('FR-101: a wrong password still counts as a failed attempt (never refunded)', async () => {
+      const u = await createUser();
+      await login(u.email, 'not-the-password-at-all-1').expect(401);
+      expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).failedLogins).toBe(1);
+    });
+
+    it('FR-102: a right TOTP code whose session transaction hits contention is 503, gives the attempt back and releases the challenge', async () => {
+      const secret = 'JBSWY3DPEHPK3PXP';
+      const u = await createUser({ role: UserRole.REVIEWER, totp: secret });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      const spy = startSessionSpy().mockRejectedValueOnce(lockError());
+      try {
+        const res = await request(app.getHttpServer())
+          .post(`${API}/2fa/verify`)
+          .send({ challengeToken, code: authenticator.generate(secret) })
+          .expect(503);
+        expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+        expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).failedLogins).toBe(0);
+        const jti = (
+          JSON.parse(Buffer.from(challengeToken.split('.')[1] ?? '', 'base64url').toString()) as {
+            jti: string;
+          }
+        ).jti;
+        const redis = app.get<import('ioredis').Redis>(
+          jest.requireActual<typeof import('../infrastructure/infrastructure.module')>(
+            '../infrastructure/infrastructure.module',
+          ).REDIS_CLIENT,
+        );
+        expect(await redis.exists(`auth:challenge:used:${jti}`)).toBe(0);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('FR-102: a wrong TOTP code is still counted when the failure write hits contention (no refund of a failed guess)', async () => {
+      const u = await createUser({ role: UserRole.REVIEWER, totp: 'JBSWY3DPEHPK3PXP' });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      totpVerify.mockResolvedValueOnce(false);
+      const fail = jest
+        .spyOn(
+          authService as unknown as { registerFailure: () => Promise<void> },
+          'registerFailure',
+        )
+        .mockRejectedValueOnce(lockError());
+      try {
+        await request(app.getHttpServer())
+          .post(`${API}/2fa/verify`)
+          .send({ challengeToken, code: '000000' })
+          .expect(503);
+        expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).failedLogins).toBe(1);
+      } finally {
+        fail.mockRestore();
+      }
+    });
+  });
+
   describe('FR-104 access token re-check (FU-BE-19)', () => {
     const setupStart = (accessToken: string): request.Test =>
       request(app.getHttpServer())

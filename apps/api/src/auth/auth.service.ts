@@ -37,6 +37,7 @@ import {
 } from './crypto.util';
 import type { RequestContext } from '../common/request-context';
 import { errorName } from '../common/request-context';
+import { lockContentionCode } from '../common/db-contention';
 import { ACCESS_TTL_SECONDS } from '../common/auth/access-ttl';
 import { TokenService } from '../common/auth/token.service';
 import { TokenValidityService } from '../common/auth/token-validity.service';
@@ -90,7 +91,13 @@ type Reservation = 'granted' | 'denied';
 
 /** Failures that mean "try again with the same challenge": a wrong code or an outage. */
 function isRetryable(e: unknown): boolean {
-  return e instanceof BadRequestException || e instanceof ServiceUnavailableException;
+  // Database lock contention is answered 503 + Retry-After (DL-37): the transaction rolled back,
+  // so the same challenge must stay usable for the retry it invites.
+  return (
+    e instanceof BadRequestException ||
+    e instanceof ServiceUnavailableException ||
+    lockContentionCode(e) !== undefined
+  );
 }
 
 @Injectable()
@@ -198,6 +205,11 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         await this.refundAttempt(user).catch(() => undefined);
         throw this.invalid();
       }
+      // DL-37: the password was already right and the session transaction hit lock contention
+      // (503, retry): give back the attempt of THIS request only. Failed-guess counts (wrong
+      // password, wrong code) are never refunded, so contention cannot erase an attacker's count.
+      if (lockContentionCode(e) !== undefined)
+        await this.refundAttempt(user).catch(() => undefined);
       throw e;
     }
   }
@@ -566,9 +578,11 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     if (!user.totpEnabled || !secret) throw this.challengeExpired();
     // Same status and message as a wrong code, so a locked account is indistinguishable.
     if ((await this.reserveAttempt(user, ctx)) !== 'granted') throw this.invalidCode();
+    let wrongCode = false;
     try {
       if (/^\d{6}$/.test(code)) {
         if (!(await this.verifyTotp(user, secret, code))) {
+          wrongCode = true;
           return await this.failCode(user, ctx);
         }
         return await this.startSession(user, this.prisma.client, secret);
@@ -595,6 +609,11 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       if (e instanceof PasswordChangedSignal) {
         await this.refundAttempt(user).catch(() => undefined);
         throw this.challengeExpired();
+      }
+      // DL-37: contention (503, retry) before a verdict on the code was recorded gave no guess
+      // oracle, so this request's reservation goes back. A wrong code (failCode) is never refunded.
+      if (!wrongCode && lockContentionCode(e) !== undefined) {
+        await this.refundAttempt(user).catch(() => undefined);
       }
       throw e;
     }

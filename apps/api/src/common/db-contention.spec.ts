@@ -12,10 +12,15 @@ interface Out {
   headers: Record<string, string>;
 }
 
-function run(exception: unknown, headersSent = false): Out {
-  const out: Out = { status: 0, body: {}, headers: {} };
+function run(exception: unknown, headersSent = false): Out & { destroyed: boolean } {
+  const out = { status: 0, body: {}, headers: {}, destroyed: false } as Out & {
+    destroyed: boolean;
+  };
   const res = {
     headersSent,
+    destroy() {
+      out.destroyed = true;
+    },
     setHeader(k: string, v: string) {
       out.headers[k] = v;
     },
@@ -134,10 +139,38 @@ describe('ProblemFilter database lock contention (DL-37, FU-BE-42, NFR-04)', () 
     });
   });
 
-  it('FU-BE-42: headers already sent: no crash, nothing written', () => {
-    const out = run(known('P2028'), true);
-    expect(out.status).toBe(0);
-    expect(out.headers['Retry-After']).toBeUndefined();
+  it('FU-BE-42: headers already sent: nothing is written, the socket is destroyed, for every error class', () => {
+    for (const e of [known('P2028'), new Error('boom'), new HttpException('x', 500)]) {
+      const out = run(e, true);
+      expect(out.status).toBe(0);
+      expect(out.headers['Retry-After']).toBeUndefined();
+      expect(out.destroyed).toBe(true);
+    }
+  });
+
+  it('FU-BE-42: P2028 is logged at error level (a closed transaction is a code bug), the rest at warn', () => {
+    run(known('P2028'));
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
+    expect(JSON.stringify(error.mock.calls)).not.toMatch(/leak-marker|UPDATE/);
+    error.mockClear();
+    run(known('P2034'));
+    run(adapterError('55P03'));
+    expect(error).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  it('DL-37: an OrgScopeError subclass or an HttpException is never remapped, nor are their causes followed', () => {
+    const { OrgScopeViolationError } =
+      jest.requireActual<typeof import('../database/errors')>('../database/errors');
+    const scope = Object.assign(new OrgScopeViolationError('x'), { code: '55P03' });
+    expect(run(scope).status).toBe(500);
+    const wrapped = new OrgScopeViolationError('x');
+    Object.assign(wrapped, { cause: pgError('55P03') });
+    expect(lockContentionCode(wrapped)).toBeUndefined();
+    expect(
+      lockContentionCode(new ConflictException('x', { cause: pgError('40P01') })),
+    ).toBeUndefined();
   });
 
   it('FU-BE-42: other Prisma codes keep their behaviour (P2002, P2025 stay 500)', () => {

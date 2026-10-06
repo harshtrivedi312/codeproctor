@@ -1,3 +1,5 @@
+// A real 40P01 is not provoked end to end: which transaction a deadlock aborts is not deterministic.
+// No TC id in docs/test-cases.md covers DL-37; test names cite FU-BE-42 and the decision id.
 // DL-37, FU-BE-42: a REAL lock wait that times out, through a real Nest app on the real scoped
 // client against Postgres 16 (Testcontainers), answers 503 + Retry-After with a fixed body.
 // No existing route can be driven into a lock wait, so a probe controller (test only) runs a
@@ -28,6 +30,19 @@ class ProbeController {
     private readonly prisma: PrismaService,
     private readonly orgContext: OrgContextService,
   ) {}
+
+  // A transaction that outlives its own timeout: Prisma P2028.
+  @Get('slow')
+  slow(): Promise<unknown> {
+    return this.orgContext.runSystem('AUTH_BOOTSTRAP', () =>
+      this.orgContext.runRawSql('test: provoke a transaction timeout', () =>
+        (this.prisma.client as unknown as PrismaClient).$transaction(
+          (tx) => tx.$queryRaw`SELECT pg_sleep(1.5)::text AS s`,
+          { timeout: 200 },
+        ),
+      ),
+    );
+  }
 
   @Get('lock')
   lock(): Promise<unknown> {
@@ -98,7 +113,23 @@ describe('lock contention through the app (DL-37, FU-BE-42)', () => {
       );
       const logged = JSON.stringify([...warn.mock.calls, ...error.mock.calls]);
       expect(warn).toHaveBeenCalledTimes(1);
+      expect(error).not.toHaveBeenCalled();
       expect(logged).not.toMatch(/FOR UPDATE|SELECT|users/);
+    } finally {
+      jest.restoreAllMocks();
+    }
+  });
+
+  it('FU-BE-42: a real interactive-transaction timeout (P2028) is 503 + Retry-After, logged at error level without SQL', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    try {
+      const res = await request(app.getHttpServer()).get('/probe/slow');
+      expect(res.status).toBe(503);
+      expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+      expect(warn).not.toHaveBeenCalled();
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(error.mock.calls)).not.toMatch(/pg_sleep|SELECT/);
     } finally {
       jest.restoreAllMocks();
     }

@@ -8,6 +8,7 @@ import {
   ExecutionContext,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NestInterceptor,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
@@ -26,10 +27,20 @@ function normaliseId(id: string): string {
     : id;
 }
 
+/** Fixed, message-free and cause-free: nothing from the database error travels with it. */
+class AuditWriteFailedError extends Error {
+  constructor() {
+    super('Audit write failed');
+    this.name = 'AuditWriteFailedError';
+  }
+}
+
 type AuditedRequest = Request & { user?: AuthUser };
 
 @Injectable()
 export class AuditInterceptor implements NestInterceptor {
+  private readonly logger = new Logger(AuditInterceptor.name);
+
   constructor(
     private readonly reflector: Reflector,
     private readonly prisma: PrismaService,
@@ -46,7 +57,21 @@ export class AuditInterceptor implements NestInterceptor {
     const req = context.switchToHttp().getRequest<AuditedRequest>();
     return next.handle().pipe(
       mergeMap(async (data: unknown) => {
-        await this.write(req, options);
+        try {
+          await this.write(req, options);
+        } catch (e) {
+          // The handler has already committed. A lock or deadlock error here must not reach the
+          // client as 503 + Retry-After (DL-37): that invites a retry of a non-idempotent action
+          // that already happened. A fixed error with no cause is never remapped (the filter
+          // answers a bare 500, as before; an HttpException would add a detail the QA contract
+          // for this route does not expect), so no Retry-After is sent. The response data stays
+          // dropped (fail closed). Class name only is logged.
+          this.logger.error(
+            { errorName: e instanceof Error ? e.name : 'NonError' },
+            'Audit write failed after the handler committed',
+          );
+          throw e instanceof InternalServerErrorException ? e : new AuditWriteFailedError();
+        }
         return data;
       }),
     );
