@@ -345,7 +345,7 @@ Each environment has its own bucket (D-10, D-11), so keys carry no environment. 
     - `SessionStateService.closeIngest` moves the session to the new terminal status **`ERASED`**, which has **no transition out**, and keeps an existing `retention_anchor_at`, else sets it to the fence time (ADR 0004 step 3).
 
     The fence never starts grading, `analyze-session`, webhooks or review routing.
-  - **`SessionStateService.guardLive(tx, sessionId)`: the per-session write lock.** It is a thin wrapper (Backend B) over the lock core in `apps/api/src/database/session-locks.ts` (Database A, built in #208) and is called only by `SessionJobProcessor.withLiveSession` (FU-DB-67); the database primitives may be imported only by `SessionStateService` and its tests. `withAnySession` does not call `guardLive`: it takes the same `sessions` row lock through a separate ERASED-ignoring core, `lockAnySession` (same shape as `lockForAccommodation`, its own allow-list entry: `SessionJobProcessor.withAnySession` only) and does not stop on ERASED (the same text goes into ADR 0006 section 8.5).
+  - **`SessionStateService.guardLive(tx, sessionId)`: the per-session write lock.** It is a thin wrapper (Backend B) over the lock core in `apps/api/src/database/session-locks.ts` (Database A, built in #208) and is called only by `SessionJobProcessor.withLiveSession` (FU-DB-67); the database primitives may be imported only by `SessionStateService` and its tests. `withAnySession` does not call `guardLive`: it takes the same `sessions` row lock through a separate ERASED-ignoring lock, `SessionStateService.lockAnySession` (a thin Backend B wrapper over the `lockAnySession` core in session-locks.ts, same shape as `lockForAccommodation`, called only from `SessionJobProcessor.withAnySession`) and does not stop on ERASED (the same text goes into ADR 0006 section 8.5).
     - **The check is part of `guardLive` itself, so a caller cannot forget it.** It reads the status, then runs the model-API `sessions.updateMany({ where: { id, status: <status read>, NOT: { status: 'ERASED' } }, data: { status: <same status> } })` under the SessionStateService grant. Writing the status to its current value takes the row lock.
     - **Result.** `guardLive` returns `LIVE` when 1 row is updated. When the read status is ERASED, or 0 rows are updated and a re-read finds ERASED, it returns `ERASED` and writes nothing; the caller writes nothing either. A SERVICE writer that **starts after the fence** therefore writes nothing. If 0 rows are updated for any other change, it re-reads and retries: 3 tries, then one ERASED-only re-read, then it fails for the job's own retry. A lock timeout (SQLSTATE 55P03) or a deadlock (40P01) is not swallowed: `SessionJobProcessor` maps both to a BullMQ retry, never to a response to a candidate.
     - **Structural, not a list.** `SessionJobProcessor` provides the only write-transaction wrapper for session jobs, `withLiveSession(sid, fn)`: guardLive first, then `fn` only when `LIVE`. Session jobs get no other transaction API. The writer list below is documentation, not the control: every `close-section` variant, the session auto-submit, `start-session`, `grade-session`, `analyze-session`, the `face-recheck` outcome handler, `server-event`, the `disconnected` watchdog job, report generation and webhooks.
@@ -646,22 +646,22 @@ All of it comes from one projection:
 
 | Job | Actor | jobId |
 | --- | --- | --- |
-| `start-session` (assign questions, sections, key, projections, VERIFIED → IN_PROGRESS); the route waits up to 10 s, else 503 with `Retry-After`; idempotent | SERVICE | `start-session:{sid}` |
-| `render-question` | SERVICE | `render-question:{sid}:{sessionQuestionId}` |
-| `verify-session` (CONSENTED → VERIFIED when all checks are done; compare-and-set) | SERVICE | `verify-session:{sid}:{n}`, where `n` comes from Redis `INCR vs:{sid}` (TTL 24 h). Debounced (see below), so a burst of room-scan confirms (up to 60 per minute) produces one run |
-| `close-section`, deadline variant (enqueued for the section deadline + 5 s; re-checks and re-delays, 5.11); `removeOnComplete` and `removeOnFail: true` | SERVICE | `close-section:{sid}:{sectionId}:deadline:{deadlineEpochMs}` |
-| `auto-submit` (session deadline + 5 s; same re-check and re-delay, 5.11); `removeOnComplete` and `removeOnFail: true` | SERVICE | `auto-submit:{sid}:{deadlineEpochMs}` |
-| `close-section`, finish variant (section-finish button) | SERVICE | `close-section:{sid}:{sectionId}:finish` |
-| `close-section`, final variant (flow child on SUBMITTED, delayed 5 s) | SERVICE | `close-section:{sid}:{sectionId}:final` |
+| `start-session` (assign questions, sections, key, projections, VERIFIED → IN_PROGRESS); the route waits up to 10 s, else 503 with `Retry-After`; idempotent | SERVICE | `start-session_{sid}` |
+| `render-question` | SERVICE | `render-question_{sid}_{sessionQuestionId}` |
+| `verify-session` (CONSENTED → VERIFIED when all checks are done; compare-and-set) | SERVICE | `verify-session_{sid}_{n}`, where `n` comes from Redis `INCR vs:{sid}` (TTL 24 h). Debounced (see below), so a burst of room-scan confirms (up to 60 per minute) produces one run |
+| `close-section`, deadline variant (enqueued for the section deadline + 5 s; re-checks and re-delays, 5.11); `removeOnComplete` and `removeOnFail: true` | SERVICE | `close-section_{sid}_{sectionId}_deadline_{deadlineEpochMs}` |
+| `auto-submit` (session deadline + 5 s; same re-check and re-delay, 5.11); `removeOnComplete` and `removeOnFail: true` | SERVICE | `auto-submit_{sid}_{deadlineEpochMs}` |
+| `close-section`, finish variant (section-finish button) | SERVICE | `close-section_{sid}_{sectionId}_finish` |
+| `close-section`, final variant (flow child on SUBMITTED, delayed 5 s) | SERVICE | `close-section_{sid}_{sectionId}_final` |
 | `grading-reconciler` (repeatable discovery every 5 min under `BACKGROUND_JOB`) | system discovery that only enqueues | none (repeatable) |
-| `grade-session` (hidden tests through Judge0, MCQ and short-answer scoring per ADR 0007 §5, D-23) | SERVICE | `grade-session:{sid}` |
-| `analyze-session` | org scope (cross-session similarity); per-session writes through SessionStateService with `guardLive`. ERASED sessions are never comparison sources, and a CODE_SIMILARITY payload about another candidate's session carries `matchedSessionId` only, never the matched code | `analyze-session:{sid}` |
-| ingest close (key destruction, sweep pass 1) and sweep pass 2 | SERVICE | `ingest-close:{sid}`, `sweep-2:{sid}` |
-| consent PDF | SERVICE | `consent-pdf:{sid}` |
-| `face-recheck` (worker) and its outcome handler | SERVICE | `face-recheck:{name}` |
-| `evidence-expire` | SERVICE | `evidence-expire:{name}:{attempt}` |
-| `server-event` (RECONNECTED and similar) | SERVICE | `server-event:{sid}:{type}:{heartbeatAt}` |
-| disconnect watchdog: discovery under `BACKGROUND_JOB` enqueues one SERVICE job per silent session; that job (no scope → `runAsSessionJob`) writes DISCONNECTED | discovery: system; per session: SERVICE | `disconnected:{sid}:{lastHeartbeat}` |
+| `grade-session` (hidden tests through Judge0, MCQ and short-answer scoring per ADR 0007 §5, D-23) | SERVICE | `grade-session_{sid}` |
+| `analyze-session` | org scope (cross-session similarity); per-session writes through SessionStateService with `guardLive`. ERASED sessions are never comparison sources, and a CODE_SIMILARITY payload about another candidate's session carries `matchedSessionId` only, never the matched code | `analyze-session_{sid}` |
+| ingest close (key destruction, sweep pass 1) and sweep pass 2 | SERVICE | `ingest-close_{sid}`, `sweep-2_{sid}` |
+| consent PDF | SERVICE | `consent-pdf_{sid}` |
+| `face-recheck` (worker) and its outcome handler | SERVICE | `face-recheck_{name}` |
+| `evidence-expire` | SERVICE | `evidence-expire_{name}_{attempt}` |
+| `server-event` (RECONNECTED and similar) | SERVICE | `server-event_{sid}_{type}_{heartbeatAt}` |
+| disconnect watchdog: discovery under `BACKGROUND_JOB` enqueues one SERVICE job per silent session; that job (no scope → `runAsSessionJob`) writes DISCONNECTED | discovery: system; per session: SERVICE | `disconnected_{sid}_{lastHeartbeat}` |
 
 - BullMQ `returnvalue` and `failedReason` never carry case data, stdout, keys, URLs or answer keys.
 - `render-question`'s return value is the candidate-safe projection by construction.
@@ -673,7 +673,7 @@ All of it comes from one projection:
 - `grade-session` and the final `close-section` children use `removeOnComplete: true` and `removeOnFail: true`, so a reconciler re-add is never ignored.
 - `removeOnComplete` and `removeOnFail` are set explicitly on `close-section`, `verify-session`, `analyze-session`, `start-session`, `render-question`, `grade-session`, `face-recheck` and `server-event`.
 - **Spike (BE-07), delayed jobs:** re-delaying from inside a job needs `job.moveToDelayed(timestamp, token)` with the job's token, followed by `throw new DelayedError()`, because a normal return completes or fails the job. Confirm this on the BullMQ version in use.
-- **Spike (BE-07), jobIds:** whether BullMQ accepts `:` in custom jobIds is **not verified** (the same pattern appears in ADR 0006 section 8.9). If it does not, the separator becomes `_`.
+- **Spike (BE-07), jobIds:** BullMQ does not accept `:` in custom jobIds (found in #206), so every `name:{id}` jobId in this ADR uses `_` as the separator; the same pattern in ADR 0006 section 8.9 follows it.
 
 #### CS-4.8 Tests (DB-05, BE-07; TC IDs assigned by QA, tracked in docs/followups/qa.md)
 

@@ -253,7 +253,7 @@ DB-05 (PR #30) is merged into main at 7c5d2e0. The code, the README (`apps/api/s
 | Actor in the scope, `runAsCandidate`, `runAsSessionJob`, `detachForSessionJob`, the candidate-facts setter and the full 8.4 transition table | Planned (ADR 0013 CS-4; BE-07, BE-08) |
 | `runRawSql` requires a scope (8.5) | Built |
 | An open `runRawSql` hatch carries into nested scopes (8.5) | **As built**, and documented in the README as limit (e). Planned: the hatch does not carry into nested scopes, and never into a session scope. |
-| Raw SQL refused in a `sessionId` scope; the advisory-lock call site; `withGrant`; `guardLive`; `lockForAccommodation` (8.5) | Planned (no session scopes exist yet) |
+| Raw SQL refused in a `sessionId` scope; the advisory-lock call site; `withGrant`; `guardLive`; `lockForAccommodation`; `lockAnySession` (8.5) | Planned (no session scopes exist yet) |
 | FU-DB-67 call-site allow-list (`runSystem`, `runInOrg`, `runRawSql`, the session entries, the store methods, the grant sites) | Planned |
 | Importer guard (`import-guard.spec.ts`) | **Built**, for `create-prisma-client` (only `prisma.service.ts` and the interim `prisma.module.ts`), `prisma.module` and `PG_POOL`. It scans `apps/api/src` only, so the seed and a CLI outside it are not covered. Planned: add the provisioning CLI and the candidate-write client (8.6). |
 | `Organization`: create refused in an org scope | Built |
@@ -522,7 +522,7 @@ There is no org-provisioning reason (8.6, 8.9).
 
       ADR 0013 CS-4.4 defines each site's model, columns and ids. This ADR does not repeat them.
     - the private candidate-facts setter for `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. Only `CandidateSessionGuard` may call it, once per scope, before any other query in the scope; it throws if called twice or with any id missing, and the values are immutable afterwards.
-    - the two model-API lock call sites, `SessionStateService.guardLive` (only from the `SessionJobProcessor.withLiveSession` write-transaction wrapper), `SessionStateService.lockForAccommodation` (only from the ADR 0015 accommodation writers and the erasure, R-4 and R-10 jobs, which take it themselves and never `guardLive`) and `lockAnySession` (only from `SessionJobProcessor.withAnySession`).
+    - the three model-API lock call sites, `SessionStateService.guardLive` (only from the `SessionJobProcessor.withLiveSession` write-transaction wrapper), `SessionStateService.lockForAccommodation` (only from the ADR 0015 accommodation writers and the erasure, R-4 and R-10 jobs, which take it themselves and never `guardLive`) and `SessionStateService.lockAnySession` (only from `SessionJobProcessor.withAnySession`), each a thin wrapper over the same-named core in session-locks.ts.
     - the two session-job write entries, `withLiveSession` and `withAnySession`, both only in the `SessionJobProcessor` base class (ADR 0013 5.7).
   - The grant-entry API and the candidate-facts setter stay private to `org-context.ts` or the extension, like the store.
   - **How grants work.** This is the normative grant spec; ADR 0013 uses the same wording.
@@ -718,7 +718,7 @@ How the check runs:
     - 8.5: `SessionJobProcessor` asserts that there is no scope.
     - 8.5: refuse raw SQL in a `sessionId` scope.
     - 8.5: `withGrant({ model, columns, ids }, fn)`, with mandatory ids and the `active` flag.
-    - 8.5: `guardLive` and `lockForAccommodation`.
+    - 8.5: `guardLive`, `lockForAccommodation` and `lockAnySession`.
     - 8.2: in SERVICE session scope, refuse an update that changes `session_id` or `session_question_id`.
   - **FU-DB-67, the call-site allow-list.** It covers:
     - `runSystem`, `runInOrg` and `runRawSql`, including the `runInOrg` pre-read in `CandidateSessionGuard` (DL-31);
@@ -726,7 +726,7 @@ How the check runs:
     - `exit`, `enterWith`, `disable` and `detachForSessionJob`;
     - the eleven CS-4.4 grant sites, with the candidate-facts setter;
     - the advisory-lock raw call site;
-    - `guardLive` and `lockForAccommodation`, each limited to its writers, with the lock order: advisory lock, then `sessions`, then `invitations`;
+    - `guardLive`, `lockForAccommodation` and `lockAnySession`, each limited to its callers, with the lock order: advisory lock, then `sessions`, then `invitations`;
     - `withLiveSession` and `withAnySession`, only in `SessionJobProcessor`.
 
     Update the FU-DB-67 row in docs/followups/database.md to match.
