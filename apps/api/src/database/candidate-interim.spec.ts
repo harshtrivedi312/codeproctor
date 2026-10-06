@@ -2086,11 +2086,9 @@ describe('nit 3: the scope tables are frozen at runtime (#126)', () => {
       walk(table, name);
     }
     expect(found).toEqual([]);
-    // Why: a frozen RegExp is rewritten by compile() before it throws on the frozen lastIndex.
-    const frozen = Object.freeze(/a/);
-    expect(() => frozen.compile('b')).toThrow(TypeError);
-    expect(frozen.source).toBe('b');
-    // So deepFreeze refuses one, and a table cannot be given one by mistake.
+    // Why: freezing a RegExp does not stop compile() from rewriting it (what the engine does to the
+    // pattern before the throw is an engine detail, so it is not asserted: FU-DB-200). deepFreeze
+    // refuses one, and a table cannot be given one by mistake.
     expect(() => deepFreeze({ pattern: /x/ })).toThrow(/RegExp/);
     expect(() => deepFreeze([[/x/]])).toThrow(/RegExp/);
   });
