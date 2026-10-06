@@ -1639,4 +1639,346 @@ describe('ADR 0013 CS-4.4: column allowlists and grants against Postgres (NFR-04
       );
     });
   });
+
+  // -------------------------------------------------------------------------------------------------
+  // Review of #185: B1 (plain arguments) and S2 (a select that names nothing)
+  // -------------------------------------------------------------------------------------------------
+  describe('B1: arguments must be plain: an own __proto__ never drops the omit (review of #185; CLAUDE.md rule 3)', () => {
+    const plainMessage = /query arguments must be plain objects/;
+    /** A JSON body as a request carries it: `__proto__` is an OWN property of the parsed object. */
+    const json = (text: string): never => JSON.parse(text) as never;
+    const inProto = (selectBody = '{"id":true}'): string => `"__proto__":{"select":${selectBody}}`;
+    const findA = (): never => json(`{"where":{"id":"${A.sessionId}"},${inProto()}}`);
+
+    const staff = <R>(fn: () => Promise<R>): Promise<R> =>
+      orgContext.runAsUser({ orgId: T.orgId, userId: T.userId, role: T.userRole }, fn);
+    const plainOrg = <R>(fn: () => Promise<R>): Promise<R> => orgContext.runInOrg(T.orgId, fn);
+    const system = <R>(fn: () => Promise<R>): Promise<R> =>
+      orgContext.runSystem('AUTH_BOOTSTRAP', fn);
+    const scopes: Array<[string, <R>(fn: () => Promise<R>) => Promise<R>]> = [
+      ['CANDIDATE', (fn) => asCandidate(A, fn)],
+      ['SERVICE', (fn) => asService(A, fn)],
+      ['STAFF', staff],
+      ['plain org', plainOrg],
+      ['system', system],
+    ];
+
+    it('TC-008 premise: the unextended client answers that input with EVERY column, the sealed key included (the exploit is real; this test names it when Prisma changes)', async () => {
+      const row = (await owner.session.findFirst(findA())) as Row;
+      expect(Object.keys(row)).toEqual(
+        expect.arrayContaining(['id', 'hmacKeyEnc', 'invitationId', 'deviceInfo']),
+      );
+      expect(row.hmacKeyEnc).toBe(sealed(A));
+    });
+
+    it.each(scopes)(
+      'TC-008 %s: a findFirst with an own __proto__ select is refused, and no statement is sent',
+      async (_name, run) => {
+        await db.statements.reset();
+        const error = await run(() => failure(client.session.findFirst(findA())));
+        expect(error).toBeInstanceOf(OrgScopeViolationError);
+        expect((error as Error).message).toMatch(plainMessage);
+        expect(await statementCount()).toBe(0);
+      },
+    );
+
+    it('TC-008 CANDIDATE: findMany, findFirst, findFirstOrThrow and findUnique with the polluted select, on every model that holds a hidden column, are refused with no statement', async () => {
+      const where = (model: string): string =>
+        model === 'session' ? `"where":{"id":"${A.sessionId}"},` : '';
+      await db.statements.reset();
+      await asCandidate(A, async () => {
+        for (const model of [
+          'session',
+          'sessionQuestion',
+          'submission',
+          'mediaChunk',
+          'invitation',
+          'test',
+          'organization',
+          'consent',
+          'identityCheck',
+          'proctorEvent',
+        ] as const) {
+          const delegate = (
+            client as unknown as Record<string, Record<string, (a: unknown) => Promise<unknown>>>
+          )[model];
+          for (const operation of ['findMany', 'findFirst', 'findFirstOrThrow']) {
+            const error = await failure(
+              delegate?.[operation]?.(json(`{${where(model)}${inProto()}}`)) as Promise<unknown>,
+            );
+            expect({ model, operation, refused: error instanceof OrgScopeViolationError }).toEqual({
+              model,
+              operation,
+              refused: true,
+            });
+          }
+        }
+        const error = await failure(
+          client.session.findUnique(json(`{"where":{"id":"${A.sessionId}"},${inProto()}}`)),
+        );
+        expect((error as Error).message).toMatch(plainMessage);
+      });
+      expect(await statementCount()).toBe(0);
+    });
+
+    it('TC-008 CANDIDATE: an update with the polluted select is refused, sends nothing, and the row is as it was', async () => {
+      await db.statements.reset();
+      const error = await asCandidate(A, () =>
+        failure(
+          client.session.update(
+            json(
+              `{"where":{"id":"${A.sessionId}"},"data":{"lastHeartbeat":"2026-10-06T00:00:00.000Z"},${inProto()}}`,
+            ),
+          ),
+        ),
+      );
+      expect(error).toBeInstanceOf(OrgScopeViolationError);
+      expect((error as Error).message).toMatch(plainMessage);
+      expect(await statementCount()).toBe(0);
+      expect(
+        (await owner.session.findUniqueOrThrow({ where: { id: A.sessionId } })).lastHeartbeat,
+      ).toBeNull();
+    });
+
+    it('TC-008 CANDIDATE: create, createManyAndReturn, updateManyAndReturn and upsert with the polluted select are refused, and no row appears', async () => {
+      await db.statements.reset();
+      const row = `{"sessionQuestionId":"${A.sessionQuestionId}","kind":"RUN","language":"cs4-proto","sourceCode":"x"}`;
+      await asCandidate(A, async () => {
+        for (const make of [
+          () => client.submission.create(json(`{"data":${row},${inProto()}}`)),
+          () => client.submission.createManyAndReturn(json(`{"data":[${row}],${inProto()}}`)),
+          () =>
+            client.session.updateManyAndReturn(
+              json(
+                `{"where":{"id":"${A.sessionId}"},"data":{"lastHeartbeat":"2026-10-06T00:00:00.000Z"},${inProto()}}`,
+              ),
+            ),
+          () =>
+            client.mediaChunk.upsert(
+              json(
+                `{"where":{"id":1},"create":{"stream":"SCREEN","seq":77,"startedAt":"2026-10-06T00:00:00.000Z","durationMs":1},"update":{"durationMs":2},${inProto()}}`,
+              ),
+            ),
+        ]) {
+          const error = await failure(make());
+          expect(error).toBeInstanceOf(OrgScopeViolationError);
+          expect((error as Error).message).toMatch(plainMessage);
+        }
+      });
+      expect(await statementCount()).toBe(0);
+      expect(await owner.submission.count({ where: { language: 'cs4-proto' } })).toBe(0);
+      expect(
+        (await owner.session.findUniqueOrThrow({ where: { id: A.sessionId } })).lastHeartbeat,
+      ).toBeNull();
+    });
+
+    it('TC-008 CANDIDATE: the grant reads and the consents create with the polluted select are refused too (the key, the accommodations, the ip and the signed name)', async () => {
+      await db.statements.reset();
+      await asCandidate(A, async () => {
+        const key = await failure(
+          grant({ model: 'Session', columns: ['hmacKeyEnc'], ids: [A.sessionId] }, () =>
+            client.session.findFirst(findA()),
+          ),
+        );
+        expect(key).toBeInstanceOf(OrgScopeViolationError);
+        const consent = await failure(
+          grant(
+            {
+              model: 'Consent',
+              columns: ['sessionId', 'consentTextId', 'signedName', 'signedAt', 'ip', 'userAgent'],
+              ids: [A.sessionId],
+            },
+            () =>
+              client.consent.create(
+                json(
+                  `{"data":{"sessionId":"${A.sessionId}","consentTextId":"${T.consentTextId}","signedName":"x","signedAt":"2026-10-06T00:00:00.000Z"},${inProto()}}`,
+                ),
+              ),
+          ),
+        );
+        expect(consent).toBeInstanceOf(OrgScopeViolationError);
+        const accommodations = await failure(
+          grant({ model: 'Invitation', columns: ['accommodations'], ids: [A.invitationId] }, () =>
+            client.invitation.findFirst(json(`{"where":{"id":"${A.invitationId}"},${inProto()}}`)),
+          ),
+        );
+        expect(accommodations).toBeInstanceOf(OrgScopeViolationError);
+      });
+      expect(await statementCount()).toBe(0);
+    });
+
+    it('TC-008 an own __proto__ nested in a where, a select, an orderBy, a data row, a column value or a createMany row is refused in a candidate scope, with no statement and no change', async () => {
+      const own = `"__proto__":{"hmacKeyEnc":"k"}`;
+      await db.statements.reset();
+      await asCandidate(A, async () => {
+        for (const make of [
+          () => client.session.findFirst(json(`{"where":{"id":"${A.sessionId}",${own}}}`)),
+          () => client.session.count(json(`{"where":{"AND":[{${own}}]}}`)),
+          () => client.session.findFirst(json(`{"select":{"id":true,${own}}}`)),
+          () =>
+            client.session.findMany(json(`{"select":{"id":true},"orderBy":[{"id":"asc",${own}}]}`)),
+          () =>
+            client.session.update(
+              json(
+                `{"where":{"id":"${A.sessionId}"},"data":{"lastHeartbeat":"2026-10-06T00:00:00.000Z","__proto__":{"status":"PAUSED"}}}`,
+              ),
+            ),
+          () =>
+            client.sessionQuestion.update(
+              json(
+                `{"where":{"id":"${A.sessionQuestionId}"},"data":{"answer":{"a":1,"__proto__":{"b":2}}}}`,
+              ),
+            ),
+          () =>
+            client.proctorEventBatch.createMany(
+              json(
+                `{"data":[{"sessionId":"${A.sessionId}","seq":91,"signature":"c2ln","eventCount":1,"__proto__":{"eventCount":99}}]}`,
+              ),
+            ),
+        ]) {
+          const error = await failure(make());
+          expect(error).toBeInstanceOf(OrgScopeViolationError);
+          expect((error as Error).message).toMatch(plainMessage);
+        }
+      });
+      expect(await statementCount()).toBe(0);
+      expect((await owner.session.findUniqueOrThrow({ where: { id: A.sessionId } })).status).toBe(
+        'INVITED',
+      );
+      expect(
+        await owner.proctorEventBatch.count({ where: { sessionId: A.sessionId, seq: 91 } }),
+      ).toBe(0);
+    });
+
+    it('TC-008 an inherited key (Object.create) is copied to an own key by Prisma before the hook, so the scope checks refuse it: status is not written, a hidden column is not a filter', async () => {
+      await db.statements.reset();
+      await asCandidate(A, async () => {
+        await expect(
+          client.session.update({
+            where: { id: A.sessionId },
+            data: Object.assign(Object.create({ status: 'PAUSED' }) as object, {
+              lastHeartbeat: WHEN,
+            }),
+            select: { id: true },
+          }),
+        ).rejects.toThrow(/status cannot be written by a candidate update here/);
+        await expect(
+          client.session.count({ where: Object.create({ hmacKeyEnc: sealed(A) }) as never }),
+        ).rejects.toThrow(/the column hmacKeyEnc is not available/);
+        await expect(
+          client.session.findFirst(Object.create({ select: { hmacKeyEnc: true } }) as never),
+        ).rejects.toThrow(/the column hmacKeyEnc is not available/);
+      });
+      expect(await statementCount()).toBe(0);
+      expect((await owner.session.findUniqueOrThrow({ where: { id: A.sessionId } })).status).toBe(
+        'INVITED',
+      );
+    });
+
+    it('TC-008 controls: null-prototype arguments and a normal select still work (one statement), and a bare read still carries the omit', async () => {
+      await db.statements.reset();
+      const viaNullProto = await asCandidate(A, () =>
+        client.session.findFirst(
+          Object.assign(Object.create(null) as object, {
+            where: Object.assign(Object.create(null) as object, { id: A.sessionId }),
+            select: Object.assign(Object.create(null) as object, { id: true }),
+          }) as never,
+        ),
+      );
+      expect(viaNullProto).toEqual({ id: A.sessionId });
+      expect(await statementCount()).toBe(1);
+      const bare = (await asCandidate(A, () =>
+        client.session.findFirst({ where: { id: A.sessionId } }),
+      )) as Row;
+      expect(Object.keys(bare)).not.toContain('hmacKeyEnc');
+    });
+  });
+
+  describe('S2: a select that names nothing is refused in a candidate scope (review of #185)', () => {
+    const empty = /a select must name at least one column with true/;
+    const shapes: Array<[string, Record<string, unknown>]> = [
+      ['select: {}', {}],
+      ['select: { id: false }', { id: false }],
+      ['select: { id: undefined }', { id: undefined }],
+      ['select: { id: false, status: false }', { id: false, status: false }],
+      ['select: { id: undefined, status: undefined }', { id: undefined, status: undefined }],
+    ];
+
+    it.each(shapes)(
+      'TC-008 %s: refused by findFirst, findMany, findUnique, update, updateManyAndReturn, create and count, with no statement, so no hidden column can come back',
+      async (_label, select) => {
+        await db.statements.reset();
+        await asCandidate(A, async () => {
+          const calls: Array<() => Promise<unknown>> = [
+            () => client.session.findFirst({ where: { id: A.sessionId }, select }),
+            () => client.session.findMany({ select }),
+            () => client.session.findUnique({ where: { id: A.sessionId }, select }),
+            () =>
+              client.session.update({
+                where: { id: A.sessionId },
+                data: { lastHeartbeat: WHEN },
+                select,
+              }),
+            () =>
+              client.session.updateManyAndReturn({
+                where: { id: A.sessionId },
+                data: { lastHeartbeat: WHEN },
+                select,
+              }),
+            () =>
+              client.submission.create({
+                data: {
+                  sessionQuestionId: A.sessionQuestionId,
+                  kind: 'RUN',
+                  language: 'cs4-empty',
+                  sourceCode: 'x',
+                },
+                select,
+              } as never),
+            () => client.session.count({ select } as never),
+          ];
+          for (const call of calls) {
+            const error = await failure(call());
+            expect(error).toBeInstanceOf(OrgScopeViolationError);
+            expect((error as Error).message).toMatch(empty);
+          }
+        });
+        expect(await statementCount()).toBe(0);
+        expect(await owner.submission.count({ where: { language: 'cs4-empty' } })).toBe(0);
+        expect(
+          (await owner.session.findUniqueOrThrow({ where: { id: A.sessionId } })).lastHeartbeat,
+        ).toBeNull();
+      },
+    );
+
+    it('TC-008 a select value that is not a boolean is refused, and one true next to false and undefined is a select', async () => {
+      await asCandidate(A, async () => {
+        for (const value of [1, 'id', null, {}, [], 0]) {
+          await expect(
+            client.session.findFirst({ select: { id: true, status: value } as never }),
+          ).rejects.toThrow(/takes true or false for a scalar column/);
+        }
+        const row = await client.session.findFirst({
+          where: { id: A.sessionId },
+          select: { id: true, status: false, authEpoch: undefined },
+        });
+        expect(row).toEqual({ id: A.sessionId });
+      });
+    });
+
+    it('TC-008 a hidden column named false in a select is still refused by name (PR 1 rule)', async () => {
+      await asCandidate(A, async () => {
+        await expect(
+          client.session.findFirst({ select: { id: true, hmacKeyEnc: false } }),
+        ).rejects.toThrow(/the column hmacKeyEnc is not available/);
+      });
+    });
+
+    it('TC-008 the rule is a CANDIDATE rule: a plain org scope is not refused by it (Prisma answers)', async () => {
+      const error = await orgContext.runInOrg(T.orgId, () =>
+        failure(client.session.findFirst({ select: { id: false } })),
+      );
+      expect(error).not.toBeInstanceOf(OrgScopeViolationError);
+    });
+  });
 });

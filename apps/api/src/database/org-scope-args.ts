@@ -7,6 +7,7 @@ import { assertNoNestedCursor, assertNoNestedWritesIn } from './org-scope-nested
 import { orgFilter } from './org-scope-map';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
 import { scopeHopColumn } from './org-scope-relations';
+import { ownArgs } from './plain-args';
 
 type PlainObject = Record<string, unknown>;
 
@@ -82,7 +83,7 @@ function asArgs(model: string, operation: string, args: unknown): PlainObject {
       `${model}.${operation} was called with arguments that are not an object.`,
     );
   }
-  return args;
+  return ownArgs(args);
 }
 
 /** where AND filter. An existing AND (single or list) is kept, so the caller's filter still applies. */
@@ -228,14 +229,15 @@ export function assertSystemScopeWrite(
   }
   assertNoNestedWritesIn(model, operation, args);
   if (!isPlainObject(args)) return;
+  const own = ownArgs(args);
   switch (operation) {
     case 'update':
     case 'updateMany':
     case 'updateManyAndReturn':
-      assertNoRowMove(model, operation, rule, args.data);
+      assertNoRowMove(model, operation, rule, own.data);
       break;
     case 'upsert':
-      assertNoRowMove(model, operation, rule, args.update);
+      assertNoRowMove(model, operation, rule, own.update);
       break;
     default:
       break; // creates may set orgId in system scope; reads and deletes carry no data

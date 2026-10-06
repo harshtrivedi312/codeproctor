@@ -35,6 +35,7 @@ import type { ModelName, OrgScopeRule } from './org-scope-map';
 import { assertCandidateColumns, COMPOUND_UNIQUES, whereFieldNames } from './candidate-interim';
 import type { ColumnVerdict } from './candidate-interim';
 import { assertNoRelationVectors } from './candidate-relations';
+import { ownArgs } from './plain-args';
 import {
   CANDIDATE_OBJECT_KEYS,
   candidateReadFilter,
@@ -766,7 +767,8 @@ export function applySessionScope(input: SessionScopeInput): SessionScopeResult 
   if (input.args !== undefined && input.args !== null && !isPlainObject(input.args)) {
     throw violation(model, operation, 'was called with arguments that are not an object.');
   }
-  const args: PlainObject = isPlainObject(input.args) ? input.args : {};
+  // Own keys only: a key of a prototype is never read (plain-args.ts; the hook refuses such arguments first).
+  const args: PlainObject = isPlainObject(input.args) ? ownArgs(input.args) : {};
 
   const sessionRule = sessionRuleFor(model);
   const isCandidate = session.actor === 'CANDIDATE';

@@ -46,7 +46,11 @@ import { Prisma } from '../generated/prisma/client.js';
 import { deepFreeze } from './deep-freeze';
 import { OrgScopeViolationError } from './errors';
 import type { ModelName } from './org-scope-map';
+import { isFieldRef, ownValue } from './plain-args';
 import type { GrantView } from './session-scope-map';
+
+// Moved to plain-args.ts (the hook needs it too); the specs and the guard import it from here.
+export { isFieldRef };
 
 type PlainObject = Record<string, unknown>;
 
@@ -56,7 +60,7 @@ export interface CandidateReadRule {
   readonly read: readonly string[];
   /**
    * Scope keys: the ids of the candidate's own org, session and test, which the scope fixes anyway
-   * (`orgId`, `sessionId`, `sessionQuestionId`, `testId`, `sectionId`). Readable, filterable and in the
+   * (`orgId`, `sessionId`, `sessionQuestionId`, `testId`). Readable, filterable and in the
    * default select, although CS-4.4 does not list them (PR 1's choice, FU-DB-195 (k)): a compound unique
    * selector such as `sessionId_stream_seq` names them.
    */
@@ -268,24 +272,6 @@ function refuse(model: string, operation: string, field: string, where: string) 
 }
 
 /**
- * A Prisma field reference (`client.model.fields.column`), as the runtime builds it: an object with the
- * own properties `modelName`, `name`, `typeName`, `isList` and `isEnum`, and a `_toGraphQLInputType` method.
- * Either mark is enough, so a look-alike that carries the four properties is refused too (fail closed).
- * A column name is never a field reference: it is a key, and its value is a filter or a scalar.
- */
-export function isFieldRef(value: unknown): boolean {
-  if (typeof value !== 'object' || value === null) return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v._toGraphQLInputType === 'function' ||
-    (typeof v.modelName === 'string' &&
-      typeof v.name === 'string' &&
-      typeof v.typeName === 'string' &&
-      typeof v.isList === 'boolean')
-  );
-}
-
-/**
  * Refuses a field reference anywhere in a `where` or a `having`, through every operator and every
  * nesting (`equals`, `in`, `not: { lt }`, `AND`, `OR`, `NOT`, arrays). Pure, no query. A value that is
  * a Date or a byte array is a leaf. Arrays and objects count toward the depth.
@@ -432,49 +418,71 @@ export function assertCandidateColumns(
     }
   };
 
+  // Every key of the caller's arguments is read through ownValue: an inherited key is never seen (plain-args.ts).
+  const given = (key: string): unknown => ownValue(args, key);
+
   // 1. The selection: a `select` of readable columns, or the default `omit` (below).
-  const named = args.select;
+  const named = given('select');
+  const omitted = given('omit');
   if (named !== undefined && !isPlainObject(named)) {
     throw new OrgScopeViolationError(
       `${model}.${operation}: select must be an object (ADR 0013 CS-4.4).`,
     );
   }
-  if (named !== undefined && args.omit !== undefined) {
+  if (named !== undefined && omitted !== undefined) {
     throw new OrgScopeViolationError(
       `${model}.${operation}: select and omit cannot be used together in a CANDIDATE scope.`,
     );
   }
-  if (args.omit !== undefined && !isPlainObject(args.omit)) {
+  if (omitted !== undefined && !isPlainObject(omitted)) {
     throw new OrgScopeViolationError(
       `${model}.${operation}: omit must be an object (ADR 0013 CS-4.4).`,
     );
   }
-  if (named !== undefined) check(Object.keys(named), 'select', operation === 'count');
+  if (named !== undefined) {
+    // A select that names nothing is refused (review of #185, S2): Prisma 7.10 answers `{}`, `{ id: false }`
+    // and `{ id: undefined }` with a validation error today, which is a Prisma detail and not a promise.
+    // Every value is a boolean (or an absent key), and at least one is `true`.
+    const values = Object.values(named);
+    if (!values.some((value) => value === true)) {
+      throw new OrgScopeViolationError(
+        `${model}.${operation}: a select must name at least one column with true (an empty select, or one ` +
+          'with only false or undefined, is refused in a CANDIDATE scope; ADR 0013 CS-4.4).',
+      );
+    }
+    if (values.some((value) => value !== true && value !== false && value !== undefined)) {
+      throw new OrgScopeViolationError(
+        `${model}.${operation}: a select takes true or false for a scalar column (ADR 0013 CS-4.4).`,
+      );
+    }
+    check(Object.keys(named), 'select', operation === 'count');
+  }
 
   // 2. The read list in every place a column can be filtered or ordered on.
-  assertNoFieldRefs(model, operation, args.where, 'where', 0);
-  assertNoFieldRefs(model, operation, args.having, 'having', 0);
+  assertNoFieldRefs(model, operation, given('where'), 'where', 0);
+  assertNoFieldRefs(model, operation, given('having'), 'having', 0);
   const where = new Set<string>();
-  whereFields(model, operation, args.where, where, 0);
+  whereFields(model, operation, given('where'), where, 0);
   check(where, 'where');
   const having = new Set<string>();
-  whereFields(model, operation, args.having, having, 0);
+  whereFields(model, operation, given('having'), having, 0);
   check(having, 'having');
   const ordered = new Set<string>();
-  orderByFields(model, operation, args.orderBy, ordered, 0);
+  orderByFields(model, operation, given('orderBy'), ordered, 0);
   check(ordered, 'orderBy');
   for (const key of ['distinct', 'by'] as const) {
     const listed = new Set<string>();
-    listFields(model, operation, args[key], listed, 0);
+    listFields(model, operation, given(key), listed, 0);
     check(listed, key === 'by' ? 'groupBy' : key);
   }
   for (const key of ['_count', '_sum', '_avg', '_min', '_max'] as const) {
-    if (isPlainObject(args[key])) check(Object.keys(args[key]), key, key === '_count');
+    const aggregate = given(key);
+    if (isPlainObject(aggregate)) check(Object.keys(aggregate), key, key === '_count');
   }
 
   const omit =
     named === undefined && ROW_RETURNING_OPERATIONS.includes(operation)
-      ? { ...(isPlainObject(args.omit) ? (args.omit as Record<string, true>) : {}), ...access.omit }
+      ? { ...(isPlainObject(omitted) ? (omitted as Record<string, true>) : {}), ...access.omit }
       : undefined;
   return { omit, runFilter };
 }

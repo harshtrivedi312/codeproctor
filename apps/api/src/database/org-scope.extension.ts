@@ -67,6 +67,7 @@ import type { ScopeSource } from './org-context';
 import { applyOrgScope, assertSystemScopeWrite, isScopedOperation } from './org-scope-args';
 import { scrubPrismaError } from './error-scrub';
 import { ORG_SCOPE } from './org-scope-map';
+import { assertPlainArgs } from './plain-args';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
 import {
   applySessionScope,
@@ -196,6 +197,11 @@ export function orgScopeExtension(
               'query that outlives withGrant is refused (ADR 0013 CS-4.4).',
           );
         }
+
+        // Arguments must be plain (B1 of the #185 review): Prisma reads inherited keys that the checks
+        // below do not see, so a foreign prototype or an inherited key is refused before anything else
+        // reads the arguments, in EVERY scope, system and staff included (plain-args.ts).
+        if (model !== undefined) assertPlainArgs(model, operation, args);
 
         // Raw queries and any other operation that is not tied to a model.
         if (model === undefined) {
