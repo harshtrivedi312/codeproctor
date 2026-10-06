@@ -12,6 +12,8 @@ const LABELS: Record<string, string> = {
   reports: 'Reports',
   settings: 'Settings',
   security: 'Security',
+  new: 'New question',
+  versions: 'Version history',
   users: 'Users',
   data: 'Data and privacy',
   risk: 'Risk scoring',
