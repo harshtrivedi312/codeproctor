@@ -18,10 +18,10 @@ export const aiReferenceFormSchema = z.object({
     .max(100, 'Keep it under 100 characters.'),
   language: z.enum(AI_REFERENCE_LANGUAGES as [string, ...string[]], { error: 'Pick a language.' }),
   variantId: z.string(),
+  // Not trimmed: the code is stored exactly as pasted (the API only refuses a blank one).
   solutionCode: z
     .string()
-    .trim()
-    .min(1, "Paste the assistant's solution.")
+    .refine((v) => v.trim() !== '', "Paste the assistant's solution.")
     .max(100_000, 'This solution is too long.'),
   promptText: z.string().max(20_000, 'The prompt is too long.'),
 });
