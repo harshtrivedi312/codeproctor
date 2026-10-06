@@ -224,10 +224,10 @@ Coding editor tabs: Statement (Markdown, live preview, no raw HTML), Languages a
 (Monaco, self-hosted), Reference solution, Test cases (hidden toggle, weight), Variants (explicit
 parameters per variant as JSON of strings and numbers, rendered preview, per-slot input and output
 overrides, "Prefill from reference solution" that only proposes values until you accept them),
-AI reference solutions (add, supersede, refresh-due badge, publish requirement), Limits. Multiple
+AI reference solutions (add, supersede, the organisation's real requirement from `GET /questions/ai-policy`, a refresh-due badge only if the API sends a refresh interval), Limits. Multiple
 choice and short-answer questions have Statement and Answer.
 
-Mock questions to try: **Merge intervals** (published, 2 versions, 2 variants, refresh due),
+Mock questions to try: **Merge intervals** (published, 2 versions, 2 variants, AI rows for every language),
 **Rotate an array** (draft; its "Variant 2" fails validation, TC-012: fix the expected
 output of slot 2, Save, Validate, add two AI solutions for Python, Publish), **Running average**
 (validated draft, one AI assistant per language: add a second one to publish), **Cost of binary search** (MCQ, published), **Cost of a hash
@@ -235,7 +235,8 @@ lookup (draft)** (a complete MCQ draft: the real API publishes it, so Publish wo
 for a created resource** (short-answer draft), **Legacy tokenizer (archived)**. The mock
 "executor" behind the validate job is fake: a slot fails when its expected output is blank or starts
 with `TODO`; tests make it end in an error or a timeout with
-`setMockQuestionScenario({ executor: 'TIMEOUT' })` from `src/mocks/question-handlers.ts`. State is in
+`setMockQuestionScenario({ executor: 'TIMEOUT' })`, and set the organisation's policy with
+`setMockQuestionScenario({ aiMinAssistants: 3, aiRefreshDays: 30 })` from `src/mocks/question-handlers.ts`. State is in
 memory; reload to reset.
 
 Code map: `src/features/questions` (pages, editor, `tabs/`, `draft.ts` schemas and conversions,
