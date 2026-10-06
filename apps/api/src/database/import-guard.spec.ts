@@ -7,6 +7,10 @@
 //   - the `@prisma/adapter-pg` package: building a driver adapter, hence a client, of your own.
 // New business modules inject PrismaService from database/prisma.service.ts instead.
 //
+// A sixth rule is not about the org scope but about WHO may take the per-session write lock:
+//   - database/session-locks: guardLive and lockForAccommodation (ADR 0013 section 5.7, FU-DB-67). The
+//     allowlist is empty until Backend B and Database B add their files with their first use.
+//
 // It reads every non-test file under apps/api/src and matches `from '…'`, `require('…')` and
 // `import('…')`, with or without the `.js` extension, against an explicit per-file allowlist. A
 // re-export (`export … from`) of a guarded module, package or identifier is refused even in an
@@ -48,6 +52,19 @@ export const RULES: readonly GuardRule[] = [
     package: '@prisma/adapter-pg',
     why: 'A driver adapter of your own builds a client of your own. Only the client factory may.',
     allowed: ['database/create-prisma-client.ts'],
+  },
+  {
+    name: 'database/session-locks',
+    module: 'database/session-locks',
+    why:
+      'guardLive and lockForAccommodation take the per-session write lock (ADR 0013 section 5.7, ADR 0006 ' +
+      'section 8.5, ADR 0015 section 6; FU-DB-67). Only named files may import them. Backend B adds, in the ' +
+      'same pull request that first uses them, the SessionJobProcessor wrapper file (withLiveSession and ' +
+      'withAnySession) and SessionStateService (the staff proctor-resume; lockForAccommodation for ' +
+      'AccommodationsService), and Database B adds the retention and erasure jobs that call ' +
+      'lockForAccommodation. That entry in `allowed` is the review point. Candidate paths use ' +
+      'SessionStateService.transition(), never these.',
+    allowed: [], // nobody outside database/ yet: Backend B and Database B add their files with their first use
   },
   {
     name: 'PG_POOL',
@@ -416,5 +433,123 @@ describe('import guard: bare packages and re-exports (NFR-04, FU-DB-91)', () => 
         pg,
       ),
     ).toEqual([]);
+  });
+});
+
+describe('import guard: the session write locks have no importer yet (FU-DB-67, FR-704, NFR-04)', () => {
+  const stray = (path: string, text: string): SourceFile => ({ path, text });
+  const locks = ruleNamed('database/session-locks');
+
+  it('TC-008 the rule exists, names the module, and its allowlist is empty until Backend B adds its files', () => {
+    expect(locks.module).toBe('database/session-locks');
+    expect(locks.allowed).toEqual([]);
+    // The reason is the review point: it says who adds what, in which pull request.
+    expect(locks.why).toContain('SessionJobProcessor');
+    expect(locks.why).toContain('withLiveSession');
+    expect(locks.why).toContain('withAnySession');
+    expect(locks.why).toContain('SessionStateService');
+    expect(locks.why).toContain('lockForAccommodation');
+    expect(locks.why).toContain('review point');
+  });
+
+  it('TC-008 an importer of database/session-locks outside database/ fails, in every import form', () => {
+    for (const [path, text] of [
+      ['jobs/session-job.processor.ts', "import { guardLive } from '../database/session-locks';"],
+      [
+        'jobs/session-job.processor.ts',
+        'import { guardLive } from "../database/session-locks.js";',
+      ],
+      [
+        'accommodations/accommodations.service.ts',
+        "import { lockForAccommodation } from '../database/session-locks';",
+      ],
+      ['billing/a.ts', "import type { SessionLockTx } from '../database/session-locks';"],
+      ['billing/b.ts', "const { guardLive } = require('../database/session-locks');"],
+      ['billing/c.ts', "const m = await import('../database/session-locks.js');"],
+      ['billing/d.ts', "import '../database/session-locks';"],
+      ['a/b/c.ts', "import { guardLive } from '../../database/session-locks';"],
+    ] as const) {
+      expect({ text, found: findViolations([stray(path, text)], locks) }).toEqual({
+        text,
+        found: [path],
+      });
+    }
+  });
+
+  it('TC-008 a sibling inside database/ is not exempt either: the allowlist is per file, and empty', () => {
+    expect(
+      findViolations(
+        [stray('database/prisma.service.ts', "import { guardLive } from './session-locks';")],
+        locks,
+      ),
+    ).toEqual(['database/prisma.service.ts']);
+  });
+
+  it('TC-008 a re-export from index.ts fails, in every export-from form', () => {
+    for (const text of [
+      "export { guardLive } from './session-locks';",
+      "export { guardLive, lockForAccommodation } from './session-locks.js';",
+      "export * from './session-locks';",
+      "export * as locks from './session-locks';",
+      "export type { SessionLockTx } from './session-locks';",
+      "export {\n  guardLive,\n} from './session-locks';",
+    ]) {
+      expect({ text, found: findViolations([stray('database/index.ts', text)], locks) }).toEqual({
+        text,
+        found: ['database/index.ts'],
+      });
+    }
+  });
+
+  it('TC-008 a re-export is refused even in a file that is on the allowlist', () => {
+    const allowed: GuardRule = { ...locks, allowed: ['jobs/session-job.processor.ts'] };
+    expect(
+      findViolations(
+        [
+          stray(
+            'jobs/session-job.processor.ts',
+            "import { guardLive } from '../database/session-locks';",
+          ),
+        ],
+        allowed,
+      ),
+    ).toEqual([]);
+    expect(
+      findViolations(
+        [
+          stray(
+            'jobs/session-job.processor.ts',
+            "export { guardLive } from '../database/session-locks';",
+          ),
+        ],
+        allowed,
+      ),
+    ).toEqual(['jobs/session-job.processor.ts']);
+  });
+
+  it('TC-008 unrelated imports do not match: errors.ts, the barrel and a similarly named module', () => {
+    for (const text of [
+      "import { SessionNotFoundError } from '../database/errors';",
+      "import { SessionNotFoundError } from '../database';",
+      "import { x } from '../database/session-locks-helper';",
+      "import { x } from './session-locks';", // a ./session-locks outside database/ is another module
+    ]) {
+      expect({ text, found: findViolations([stray('billing/x.ts', text)], locks) }).toEqual({
+        text,
+        found: [],
+      });
+    }
+  });
+
+  it('TC-008 the real database/index.ts does not export the locks, and no real file imports them', () => {
+    const files = readSource(SRC);
+    const index = files.find((f) => f.path === 'database/index.ts');
+    expect(index).toBeDefined();
+    expect(findViolations([index as SourceFile], locks)).toEqual([]);
+    expect(reexportsOf(index?.text ?? '').map((r) => r.specifier)).not.toContain('./session-locks');
+    // The whole real tree, with the empty allowlist: nothing outside the spec files imports it.
+    expect(findViolations(files, locks)).toEqual([]);
+    // The module is really there, so the rule guards something.
+    expect(files.some((f) => f.path === 'database/session-locks.ts')).toBe(true);
   });
 });
