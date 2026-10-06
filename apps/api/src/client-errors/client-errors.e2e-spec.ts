@@ -483,6 +483,7 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
     const total = 1024 * 1024;
     const result = await new Promise<{ status: number; connection: string | undefined }>(
       (resolve, reject) => {
+        let gotResponse = false;
         const req = httpRequest(
           {
             host: '127.0.0.1',
@@ -492,17 +493,21 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
             headers: { 'content-type': 'application/json', 'content-length': String(total) },
           },
           (res) => {
+            // The status line and headers are what matter: the server may close the socket right
+            // after answering, so the rest of the exchange can end in an RST that is not a failure.
+            gotResponse = true;
+            clearInterval(timer);
+            resolve({ status: res.statusCode ?? 0, connection: res.headers['connection'] });
             res.resume();
-            res.on('end', () =>
-              resolve({ status: res.statusCode ?? 0, connection: res.headers['connection'] }),
-            );
-            res.on('error', reject);
+            res.on('error', () => undefined);
           },
         );
-        req.on('error', reject);
+        req.on('error', (e) => {
+          if (!gotResponse) reject(e);
+        });
         let sent = 0;
         const timer = setInterval(() => {
-          if (sent >= total || req.destroyed) return clearInterval(timer);
+          if (sent >= total || req.destroyed || gotResponse) return clearInterval(timer);
           sent += 64 * 1024;
           req.write(Buffer.alloc(64 * 1024, 0x61));
         }, 20);
