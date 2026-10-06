@@ -27,6 +27,7 @@ from worker.events import (
 )
 from worker.keystrokes import analyze_keystrokes
 from worker.risk import ReviewPath, RiskResult, ScoredEvent, calculate_risk, route_for_review
+from worker.routes_face import install_face_routes
 from worker.similarity import (
     AiReference,
     Submission,
@@ -164,3 +165,6 @@ def risk_route(req: RiskRequest) -> RiskResultOut:
         queue_rank=routing.queue_rank,
         review_reasons=routing.reasons,
     )
+
+
+install_face_routes(app)  # signed /v1 face routes (BE-08a, ADR 0014); the one line Integrity B owns
