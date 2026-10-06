@@ -538,6 +538,7 @@ CREATE TABLE consents (
   pdf_key           text,                     -- generated PDF of the signed document, in object storage
   pdf_generated_at  timestamptz,
   copy_emailed_at   timestamptz,
+  age_confirmed_at  timestamptz,              -- C-30: set at sign by ConsentService (server time), NULL on decline and on rows before C-30 (D-55)
   CHECK ((signed_at IS NULL) <> (declined_at IS NULL)),
   CHECK (signed_at IS NULL OR signed_name IS NOT NULL)
 );
