@@ -725,6 +725,7 @@ describe('Test templates (FR-301, FR-302, TC-020 part 1, TC-008)', () => {
       await expect(inOrg(orgB, () => service.checkTestSatisfiable(id))).rejects.toThrow(
         /Test not found/,
       );
+      expect(await owner.auditLog.count()).toBe(audits);
     });
   });
 

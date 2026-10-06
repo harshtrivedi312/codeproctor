@@ -10,8 +10,8 @@
 //
 // Bounds: a test has at most MAX_QUESTIONS_PER_TEST slots, and the caller reads at most
 // candidateCap() ids per distinct rule. Keeping only that many per rule never changes the answer:
-// a slot whose list still has `random slots + fixed questions` ids after the fixed ones are removed
-// can always be served, whatever the other slots take.
+// a list with `random slots + fixed questions` ids still has at least `random slots` ids after the
+// fixed ones are removed, so its slot can always be served, whatever the other slots take.
 import { MAX_QUESTIONS_PER_TEST } from './test-structure';
 
 /** Ids to read per distinct rule: enough that truncating a rule's matches cannot change the result. */

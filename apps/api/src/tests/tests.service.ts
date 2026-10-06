@@ -433,7 +433,7 @@ export class TestsService {
     fixedSlots: number,
   ): Promise<string[]> {
     if (rules.length === 0) return [];
-    const take = candidateCap(rules.length, Math.max(fixedSlots, fixedQuestionIds.size));
+    const take = candidateCap(rules.length, fixedSlots);
     const byKey = new Map<string, string[]>();
     for (const { rule } of rules) {
       const key = ruleKey(rule);
@@ -460,10 +460,16 @@ export class TestsService {
         rows.map((r) => r.id),
       );
     }
-    const unserved = unservedSlots(
-      rules.map(({ rule }) => byKey.get(ruleKey(rule)) ?? []),
-      fixedQuestionIds,
-    );
+    let unserved: number[];
+    try {
+      unserved = unservedSlots(
+        rules.map(({ rule }) => byKey.get(ruleKey(rule)) ?? []),
+        fixedQuestionIds,
+      );
+    } catch (e) {
+      if (!(e instanceof RangeError)) throw e;
+      return ['the test has more random slots than the limit allows'];
+    }
     return unserved.map((i) => {
       const matches = byKey.get(ruleKey(rules[i]?.rule ?? {}))?.length ?? 0;
       return `${rules[i]?.at ?? ''}.randomRule matches ${matches} published question(s) in your organization; the test needs a different one for every random slot`;
