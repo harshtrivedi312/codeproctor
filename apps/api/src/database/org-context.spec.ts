@@ -231,6 +231,21 @@ describe('OrgContextService (NFR-04, FR-103)', () => {
     expect(text).toContain('orgId and sessionId');
     expect(text).toContain('runInOrg(payload.orgId');
     expect(text).toContain('poison job');
+    // FU-DB-188: session jobs now run through detachForSessionJob and runAsSessionJob, and the
+    // discovery only enqueues.
+    expect(text).toContain('detachForSessionJob');
+    expect(text).toContain('runAsSessionJob(orgId, sessionId)');
+    expect(text).toContain('only enqueues');
+  });
+
+  it('TC-008 AUTH_BOOTSTRAP does not resolve a candidate token to its session under a system scope (S8)', () => {
+    const text = SYSTEM_SCOPE_REASONS.AUTH_BOOTSTRAP;
+    // The three candidate routes before a session JWT exists, and nothing else on the candidate side.
+    expect(text).toContain('invitation-link resolve, OTP send, OTP verify');
+    expect(text).toContain('runAsCandidate(oid, sid)');
+    expect(text).toContain('outside every system scope');
+    expect(text).toContain('cannot enter a session scope');
+    expect(text).not.toMatch(/resolving a candidate token to its session/);
   });
 
   it('TC-008 runSystem accepts only the named reasons', () => {

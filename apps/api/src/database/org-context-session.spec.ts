@@ -4,7 +4,7 @@
 import { setCandidateFacts } from './candidate-facts';
 import { OrgContextMissingError, OrgScopeViolationError } from './errors';
 import * as barrel from './index';
-import { OrgContextService, SYSTEM_SCOPE_REASONS } from './org-context';
+import { claimCandidateFactsSetter, OrgContextService, SYSTEM_SCOPE_REASONS } from './org-context';
 import type { AuthenticatedUser, CandidateFacts, Scoped, SystemScopeReason } from './org-context';
 
 const ORG_A = '11111111-1111-4111-8111-111111111111';
@@ -507,16 +507,129 @@ describe('the candidate facts (ADR 0013 CS-4.4 "Candidate facts"; NFR-04, TC-008
     });
   });
 
-  it('TC-008 the setter is not part of the database barrel or the service surface (CandidateSessionGuard only)', () => {
+  it('TC-008 the setter is not part of the database barrel (CandidateSessionGuard only)', () => {
     expect(Object.keys(barrel)).not.toContain('setCandidateFacts');
+    expect(Object.keys(barrel)).not.toContain('claimCandidateFactsSetter');
     expect(Object.keys(barrel)).not.toContain('SET_CANDIDATE_FACTS');
-    const names = Object.getOwnPropertyNames(OrgContextService.prototype);
-    expect(names).not.toContain('setCandidateFacts');
-    // The one way in is the symbol-keyed method; its symbol is not registered, so it cannot be rebuilt.
-    const symbols = Object.getOwnPropertySymbols(OrgContextService.prototype);
-    expect(symbols).toHaveLength(1);
-    expect(Symbol.keyFor(symbols[0] as symbol)).toBeUndefined();
     // The barrel does carry the entries BE-07 needs, through OrgContextService.
     expect(barrel.OrgContextService).toBe(OrgContextService);
+  });
+
+  it('TC-008 S4: no setter is reachable by reflection on the service: no method, no symbol, no own property', () => {
+    expect(Object.getOwnPropertySymbols(OrgContextService.prototype)).toEqual([]);
+    expect(Reflect.ownKeys(new OrgContextService())).toEqual([]);
+    // The prototype is exactly the public surface: the setter is not on it under any name.
+    expect(Object.getOwnPropertyNames(OrgContextService.prototype).sort()).toEqual(
+      [
+        'candidateFacts',
+        'constructor',
+        'current',
+        'detachForSessionJob',
+        'requireOrgId',
+        'requireUser',
+        'runAsCandidate',
+        'runAsSessionJob',
+        'runAsUser',
+        'runInOrg',
+        'runRawSql',
+        'runSystem',
+      ].sort(),
+    );
+    expect(Object.getPrototypeOf(OrgContextService.prototype)).toBe(Object.prototype);
+  });
+
+  it('TC-008 S4: the scope builders are ES private, not TypeScript private: `enter`, `enterSession` and `runWith` do not exist at runtime', () => {
+    const forged = svc as unknown as Record<string, unknown>;
+    for (const name of [
+      'enter',
+      'enterSession',
+      'runWith',
+      '#enter',
+      '#enterSession',
+      '#runWith',
+    ]) {
+      expect(forged[name]).toBeUndefined();
+      expect(name in forged).toBe(false);
+    }
+    // Calling a public method on a lookalike receiver cannot reach the private builders either.
+    const run = (receiver: unknown): unknown =>
+      Reflect.apply(
+        Reflect.get(OrgContextService.prototype, 'runInOrg') as () => unknown,
+        receiver,
+        [ORG_A, () => 1],
+      );
+    expect(() => run({})).toThrow(TypeError);
+    // A subclass cannot call them: there is no member to call.
+    class Forger extends OrgContextService {
+      forge(): unknown {
+        return (this as unknown as Record<string, (...a: unknown[]) => unknown>).enter?.({
+          kind: 'org',
+          orgId: ORG_A,
+          session: { actor: 'CANDIDATE', sessionId: SESSION_1 },
+        });
+      }
+    }
+    expect(new Forger().forge()).toBeUndefined();
+    expect(svc.current()).toBeUndefined();
+  });
+
+  it('TC-008 S4: the setter closure is handed out once; a second claim throws (candidate-facts.ts holds it)', () => {
+    // candidate-facts.ts claimed it when it was imported above.
+    expect(() => claimCandidateFactsSetter()).toThrow(OrgScopeViolationError);
+    expect(() => claimCandidateFactsSetter()).toThrow(/already claimed/);
+  });
+
+  it('TC-008 S4: setCandidateFacts needs the OrgContextService', () => {
+    svc.runAsCandidate(ORG_A, SESSION_1, () => {
+      expect(() => setCandidateFacts({} as OrgContextService, FACTS)).toThrow(
+        OrgScopeViolationError,
+      );
+      expect(svc.candidateFacts()).toBeUndefined();
+    });
+  });
+});
+
+describe('ids are lower-cased on entry (nit 4)', () => {
+  const svc = new OrgContextService();
+  const UP = (id: string): string => id.toUpperCase();
+
+  it.each(ENTRIES)(
+    'TC-008 %s stores both ids in lower case, and the nested runInOrg agrees',
+    (entry) => {
+      svc[entry](UP(ORG_A), UP(SESSION_1), () => {
+        const scope = svc.current()?.scope;
+        expect(scope).toMatchObject({ orgId: ORG_A, session: { sessionId: SESSION_1 } });
+        expect(svc.requireOrgId()).toBe(ORG_A);
+        // The same org in another case is the same org: nothing is refused, nothing is dropped.
+        svc.runInOrg(UP(ORG_A), () => {
+          expect(svc.current()?.scope).toBe(scope);
+        });
+        expect(() => svc.runInOrg(ORG_B, () => 1)).toThrow(OrgScopeViolationError);
+      });
+    },
+  );
+
+  it('TC-008 runInOrg and runAsUser lower-case the org id, the user copy included', () => {
+    svc.runInOrg(UP(ORG_A), () => {
+      expect(svc.requireOrgId()).toBe(ORG_A);
+      // Another case of the same org is not an org switch.
+      svc.runInOrg(ORG_A, () => undefined);
+    });
+    svc.runAsUser({ ...USER_A, orgId: UP(ORG_A) }, () => {
+      expect(svc.requireOrgId()).toBe(ORG_A);
+      expect(svc.requireUser().orgId).toBe(ORG_A);
+      svc.runInOrg(ORG_A, () => undefined);
+    });
+  });
+
+  it('TC-008 the candidate facts are lower-cased too', () => {
+    svc.runAsCandidate(ORG_A, SESSION_1, () => {
+      setCandidateFacts(svc, {
+        candidateId: UP(FACTS.candidateId),
+        invitationId: UP(FACTS.invitationId),
+        testId: UP(FACTS.testId),
+      });
+      expect(svc.candidateFacts()).toEqual(FACTS);
+    });
   });
 });
