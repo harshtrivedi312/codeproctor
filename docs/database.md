@@ -125,6 +125,7 @@ erDiagram
     numeric face_match_score
     identity_check_status status
     identity_manual_decision manual_decision
+    boolean video_check_done
   }
   proctor_events {
     bigint id PK
@@ -212,7 +213,8 @@ CREATE TYPE event_type AS ENUM (
 CREATE TYPE pause_reason             AS ENUM ('FULLSCREEN_EXIT','SCREEN_SHARE_STOPPED','SIDE_CAMERA_LOST','PROCTOR');
 CREATE TYPE client_kind              AS ENUM ('WEB');
 CREATE TYPE event_source             AS ENUM ('CLIENT','SERVER');
-CREATE TYPE identity_check_status    AS ENUM ('PENDING','PASSED','LOW_CONFIDENCE','MANUAL_REVIEW','REVIEWED');
+CREATE TYPE identity_check_status    AS ENUM ('PENDING','PASSED','LOW_CONFIDENCE','MANUAL_REVIEW','REVIEWED',
+                                              'WAIVED');  -- not a rejection (ADR 0015 §4; own migration, PR #100)
 CREATE TYPE identity_review_reason   AS ENUM ('BELOW_THRESHOLD','NO_FACE','MULTIPLE_FACES','LIVENESS_NOT_CONFIRMED','MATCH_ERROR');
 CREATE TYPE identity_manual_decision AS ENUM ('MATCH','NO_MATCH','INCONCLUSIVE');
 CREATE TYPE question_scoring         AS ENUM ('AUTO','MANUAL_PENDING','MANUAL');
@@ -551,9 +553,22 @@ CREATE TABLE identity_checks (
   reviewed_by      uuid REFERENCES users(id),
   reviewed_at      timestamptz,
   review_note      text,
+  video_check_done boolean,                   -- recruiter's video ID check on a WAIVED row; NULL = not recorded (ADR 0015, PR #100)
+  video_check_by   uuid REFERENCES users(id), -- NO ACTION; not org-composite, the service checks the org (as reviewed_by)
+  video_check_at   timestamptz,
   created_at       timestamptz NOT NULL DEFAULT now(),
   UNIQUE (session_id, attempt),
-  CHECK ((status = 'REVIEWED') = (manual_decision IS NOT NULL AND reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL))
+  CHECK ((status = 'REVIEWED') = (manual_decision IS NOT NULL AND reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL)),
+  -- A WAIVED row is attempt 1 and carries no identity data (ADR 0015 §4).
+  CONSTRAINT identity_checks_waived_check CHECK (status <> 'WAIVED' OR (
+    attempt = 1 AND id_image_key IS NULL AND selfie_key IS NULL AND face_match_score IS NULL
+    AND model_id IS NULL AND threshold IS NULL AND liveness_passed IS NULL AND review_reason IS NULL
+    AND manual_decision IS NULL AND reviewed_by IS NULL AND reviewed_at IS NULL AND review_note IS NULL)),
+  -- The video check is all or nothing, and only a WAIVED row carries one.
+  CONSTRAINT identity_checks_video_check_check CHECK (
+    (video_check_done IS NULL) = (video_check_by IS NULL)
+    AND (video_check_done IS NULL) = (video_check_at IS NULL)
+    AND (video_check_done IS NULL OR status = 'WAIVED'))
 );
 
 CREATE TABLE media_chunks (
