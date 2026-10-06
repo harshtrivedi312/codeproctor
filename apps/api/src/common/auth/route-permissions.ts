@@ -48,6 +48,7 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'GET /admin/users': { ...userManage, audited: true },
   'GET /admin/users/lock-events': { ...userManage, audited: true },
   'POST /admin/users': userManage,
+  'POST /admin/users/:userId/invite': userManage,
   'PATCH /admin/users/:userId': userManage,
   'POST /admin/users/:userId/unlock': userManage,
 };

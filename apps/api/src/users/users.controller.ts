@@ -33,6 +33,7 @@ import {
   InviteStaffUserDto,
   ListQueryDto,
   LockEventListDto,
+  ReissueStaffInviteDto,
   StaffUserDto,
   StaffUserListDto,
   UnlockStaffUserDto,
@@ -89,6 +90,25 @@ export class UsersController {
   @ApiTooManyRequestsResponse({ description: 'Per-organization invite limit reached' })
   invite(@Body() dto: InviteStaffUserDto, @Req() req: AuthedRequest): Promise<StaffUserDto> {
     return this.users.invite(actorOf(req), dto, ctxOf(req));
+  }
+
+  @Post(':userId/invite')
+  @HttpCode(200)
+  @ApiOperation({
+    summary:
+      'Re-issue the invite of a user who has not set a password yet: a new 72 hour single-use link, the old link stops working (DL-23, FR-103)',
+  })
+  @ApiOkResponse({ type: StaffUserDto })
+  @ApiBadRequestResponse({ description: 'Not a UUID, or no currentPassword' })
+  @ApiNotFoundResponse({ description: 'No such user in your organization' })
+  @ApiConflictResponse({ description: 'The user already has a password, or is deactivated' })
+  @ApiTooManyRequestsResponse({ description: 'Per-organization invite limit reached' })
+  reissueInvite(
+    @Param('userId', new ParseUUIDPipe()) userId: string,
+    @Body() dto: ReissueStaffInviteDto,
+    @Req() req: AuthedRequest,
+  ): Promise<StaffUserDto> {
+    return this.users.reissueInvite(actorOf(req), userId, dto.currentPassword, ctxOf(req));
   }
 
   @Patch(':userId')
