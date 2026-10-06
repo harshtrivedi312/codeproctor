@@ -14,6 +14,7 @@ import {
   Harness,
   login,
   PASSWORD,
+  settleValidation,
 } from '../support/harness';
 import { actor, Actor, call, flushDeferred, tokenFromUrl } from '../support/be03-helpers';
 import {
@@ -132,9 +133,14 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
           const res = await call(h, route.method, t.path, who.token, t.body);
           expect(route.ok).toContain(res.status);
           const t1 = Date.now();
+          await settleValidation(h); // the validate job writes its own row later (own test below)
 
-          const rows = await since(before);
-          expect(rows).toHaveLength(1); // exactly one: not zero, not a duplicate
+          // Exactly one row of the action under test: not zero, not a duplicate. The validate job's
+          // QUESTION_VALIDATION_FINISHED row is a second action, asserted in its own test.
+          const rows = (await since(before)).filter(
+            (r) => route.id !== 'questions-validate' || r.action === audit.action,
+          );
+          expect(rows).toHaveLength(1);
           const row = rows[0] as AuditLog;
           expect(row.action).toBe(audit.action);
           expect(row.entityType).toBe(audit.entityType);
@@ -178,6 +184,171 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
           if (route.sendsMail) expect(mailTokens.filter((x) => x !== '').length).toBeGreaterThan(0);
           expectNoSecrets(row, [...t.secrets, ...mailTokens, who.token]);
         });
+
+        if (route.id === 'questions-validate') {
+          it(`TC-006 FR-203: ${label} writes exactly one QUESTION_VALIDATION_FINISHED row when the job ends (ADR 0001 C-3: a job row has actor NULL and IP NULL, metadata names the starter and the STARTED row)`, async () => {
+            const who = await as(roleFor(route));
+            const t = await route.prepare(h, h.orgId);
+            const before = await lastId();
+            const res = await call(h, route.method, t.path, who.token, t.body);
+            expect(route.ok).toContain(res.status);
+            await settleValidation(h);
+            const started202 = res.body as { version: number; revision: string };
+
+            const rows = await since(before);
+            expect(rows.map((r) => r.action).sort()).toEqual([
+              'QUESTION_VALIDATION_FINISHED',
+              'QUESTION_VALIDATION_STARTED',
+            ]);
+            const started = rows.find(
+              (r) => r.action === 'QUESTION_VALIDATION_STARTED',
+            ) as AuditLog;
+            const row = rows.find((r) => r.action === 'QUESTION_VALIDATION_FINISHED') as AuditLog;
+            expect(row.entityType).toBe('question');
+            expect(row.entityId).toBe(t.entityId);
+            expect(row.orgId).toBe(h.orgId);
+            expect(row.actorId).toBeNull(); // a job, not a request (ADR 0001 C-3)
+            expect(row.ip).toBeNull();
+            const meta = row.metadata as Record<string, unknown>;
+            expect(Object.keys(meta).sort()).toEqual([
+              'initiatedBy',
+              'outcome',
+              'revision',
+              'startedAuditId',
+              'system',
+              'version',
+            ]);
+            expect(meta.system).toBe(true);
+            expect(meta.initiatedBy).toBe(who.id);
+            // startedAuditId resolves to exactly the STARTED row of this question and version.
+            const target = await h.owner.auditLog.findMany({
+              where: { id: BigInt(meta.startedAuditId as string) },
+            });
+            expect(typeof meta.startedAuditId).toBe('string');
+            expect(meta.startedAuditId).toBe(String(started.id));
+            expect(target).toHaveLength(1);
+            expect(target[0]?.id).toBe(started.id);
+            expect([
+              target[0]?.action,
+              target[0]?.entityId,
+              target[0]?.actorId,
+              target[0]?.orgId,
+            ]).toEqual(['QUESTION_VALIDATION_STARTED', t.entityId, who.id, h.orgId]);
+            expect(['PASSED', 'FAILED', 'ERROR', 'STALE']).toContain(meta.outcome);
+            expect(meta.outcome).toBe('ERROR'); // the harness port never executes code
+            expect(meta.revision).toMatch(/^[0-9a-f]{12}$/);
+            expect(meta.revision).toBe(started202.revision.slice(0, 12));
+            expect(meta.version).toBe(started202.version);
+            expect(row.createdAt.getTime()).toBeGreaterThanOrEqual(started.createdAt.getTime());
+            expectNoSecrets(row, [...t.secrets, who.token]);
+          });
+
+          it(`TC-006 FR-203: ${label} with a fully passing run writes FINISHED outcome PASSED (same job-row shape) and sets validatedAt on the version`, async () => {
+            const who = await as(roleFor(route));
+            const t = await route.prepare(h, h.orgId);
+            // One passing cell per variant and language, every slot passed, no failure.
+            h.setValidationPort({
+              validate: (r) =>
+                Promise.resolve({
+                  passed: true,
+                  failures: [],
+                  cells: r.variants.flatMap((v) =>
+                    r.languages.map((language) => ({
+                      variantId: v.variantId,
+                      language,
+                      passed: true,
+                      testsPassed: v.tests.length,
+                      testsTotal: v.tests.length,
+                    })),
+                  ),
+                }),
+            });
+            try {
+              const before = await lastId();
+              const res = await call(h, route.method, t.path, who.token, t.body);
+              expect(route.ok).toContain(res.status);
+              await settleValidation(h);
+              const body = res.body as { version: number; revision: string };
+              const rows = await since(before);
+              const started = rows.find(
+                (r) => r.action === 'QUESTION_VALIDATION_STARTED',
+              ) as AuditLog;
+              const finished = rows.filter((r) => r.action === 'QUESTION_VALIDATION_FINISHED');
+              expect(finished).toHaveLength(1);
+              const row = finished[0] as AuditLog;
+              expect([row.actorId, row.ip, row.entityId, row.orgId]).toEqual([
+                null,
+                null,
+                t.entityId,
+                h.orgId,
+              ]);
+              expect(row.metadata).toEqual({
+                system: true,
+                initiatedBy: who.id,
+                startedAuditId: String(started.id),
+                version: body.version,
+                outcome: 'PASSED',
+                revision: body.revision.slice(0, 12),
+              });
+              const version = await h.owner.questionVersion.findFirstOrThrow({
+                where: { questionId: t.entityId as string, version: body.version },
+              });
+              expect(version.validatedAt).not.toBeNull();
+            } finally {
+              h.resetValidationPort();
+            }
+          });
+
+          it(`TC-006 FR-203: ${label} writes no FINISHED row when the question is archived while the job runs (STARTED stays)`, async () => {
+            const who = await as(roleFor(route));
+            const t = await route.prepare(h, h.orgId);
+            let release: () => void = () => undefined;
+            const held = new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            h.setValidationPort({
+              validate: async () => {
+                await held;
+                throw new Error('held job released');
+              },
+            });
+            try {
+              const before = await lastId();
+              const res = await call(h, route.method, t.path, who.token, t.body);
+              expect(route.ok).toContain(res.status);
+              await h.owner.question.update({
+                where: { id: t.entityId as string },
+                data: { isArchived: true },
+              });
+              release();
+              await settleValidation(h);
+              expect((await since(before)).map((r) => r.action)).toEqual([
+                'QUESTION_VALIDATION_STARTED',
+              ]);
+            } finally {
+              release();
+              await settleValidation(h).catch(() => undefined);
+              h.resetValidationPort();
+            }
+          });
+
+          it(`TC-006: ${label} refused (401, 403) or on another org's question (404) writes neither STARTED nor FINISHED, even after the job queue is idle`, async () => {
+            const denied = (['SUPER_ADMIN', 'REVIEWER', 'RECRUITER', 'AUTHOR'] as const).filter(
+              (x) => !hasPermission(x, route.permission),
+            );
+            const lowly: Actor[] = [];
+            for (const d of denied) lowly.push(await as(UserRole[d]));
+            const outsider = (orgBStaff[roleFor(route)] ??= await actor(h, roleFor(route), orgB));
+            const t = await route.prepare(h, h.orgId);
+            const before = await lastId();
+            await call(h, route.method, t.path, undefined, t.body).expect(401);
+            for (const who of lowly)
+              await call(h, route.method, t.path, who.token, t.body).expect(403);
+            await call(h, route.method, t.path, outsider.token, t.body).expect(404);
+            await settleValidation(h);
+            expect(await since(before)).toEqual([]);
+          });
+        }
 
         it(`TC-006: ${label} writes no audit row when refused (401, 403) or when the target is in another org (404)`, async () => {
           const holder = roleFor(route);

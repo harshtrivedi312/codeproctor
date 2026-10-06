@@ -153,15 +153,18 @@ export function buildReport(
           ...(f.diagnostic !== undefined ? { diagnostic: f.diagnostic } : {}),
         };
       });
-    const covered = request.languages.every((l) =>
-      cells.some(
-        (c) =>
-          c.language === l &&
-          c.passed &&
-          c.testsTotal === v.tests.length &&
-          c.testsTotal > 0 &&
-          c.testsPassed === c.testsTotal,
-      ),
+    const covered = request.languages.every(
+      (l) =>
+        // Exactly one cell per (variant, language): a duplicate next to a failing cell is not coverage.
+        cells.filter((c) => c.language === l).length === 1 &&
+        cells.some(
+          (c) =>
+            c.language === l &&
+            c.passed &&
+            c.testsTotal === v.tests.length &&
+            c.testsTotal > 0 &&
+            c.testsPassed === c.testsTotal,
+        ),
     );
     return { variantId: v.variantId, passed: covered && failures.length === 0, cells, failures };
   });

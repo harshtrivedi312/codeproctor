@@ -14,6 +14,7 @@ import { encryptSecret, sha256Hex } from '../../src/auth/crypto.util';
 import { createPrismaClient } from '../../src/database/create-prisma-client';
 import { PrismaClient, UserRole } from '../../src/generated/prisma/client';
 import { applyEnv, applyMigrations, startInfra, TestInfra } from '../../src/test/containers';
+import type { ReferenceValidationPort } from '../../src/questions/reference-validation.port';
 
 export const API = '/api/v1';
 export const PASSWORD = 'Correct-Horse-9';
@@ -42,8 +43,24 @@ export interface Harness {
   logged: string[];
   /** Waits for work the API defers until after the response (forgot-password mail, FU-BE-31). */
   settle(): Promise<void>;
+  /** Waits for the validation job (BE-04c) to finish; fails with a named error after 30 s. */
+  settleValidation(): Promise<void>;
+  /**
+   * Replaces what the validate job runs against (default: rejects, so every run ends ERROR on any
+   * machine, whatever JUDGE0_URL says). A test may pass a deferred promise to hold the job open.
+   */
+  setValidationPort(port: ReferenceValidationPort): void;
+  /** Puts the default (never executes, outcome ERROR) back. */
+  resetValidationPort(): void;
   close(): Promise<void>;
 }
+
+const SETTLE_VALIDATION_MS = 30_000;
+
+/** The harness never executes code: a validate run fails closed with outcome ERROR. */
+export const NO_EXECUTION_PORT: ReferenceValidationPort = {
+  validate: () => Promise.reject(new Error('harness: no code execution')),
+};
 
 export interface BootOptions {
   env?: Record<string, string>;
@@ -80,6 +97,9 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
   let orgId: string;
   const mails: SentMail[] = [];
   let settle: () => Promise<void> = () => Promise.resolve();
+  let settleValidationJobs: () => Promise<void> = () => Promise.resolve();
+  let port: ReferenceValidationPort = NO_EXECUTION_PORT;
+  const switchingPort: ReferenceValidationPort = { validate: (r) => port.validate(r) };
   try {
     await applyMigrations(infra);
 
@@ -136,9 +156,17 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     const { MailPort: MailToken } = jest.requireActual<typeof import('../../src/mail/mail.port')>(
       '../../src/mail/mail.port',
     );
+    const { REFERENCE_VALIDATION_PORT } = jest.requireActual<
+      typeof import('../../src/questions/reference-validation.port')
+    >('../../src/questions/reference-validation.port');
+    const { ValidationService } = jest.requireActual<
+      typeof import('../../src/questions/validation.service')
+    >('../../src/questions/validation.service');
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(MailToken)
       .useValue(fakeMail)
+      .overrideProvider(REFERENCE_VALIDATION_PORT)
+      .useValue(switchingPort)
       .compile();
     app = moduleRef.createNestApplication<INestApplication<App>>();
     configureApp(app);
@@ -147,6 +175,22 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     await app.listen(0, '127.0.0.1');
     const authService = app.get(AuthService);
     settle = () => authService.settleDeferred();
+    const validation = app.get(ValidationService); // resolved once; settle and close use this instance
+    settleValidationJobs = async () => {
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(new Error('SettleValidationTimeout: validation job still running after 30 s')),
+          SETTLE_VALIDATION_MS,
+        );
+      });
+      try {
+        await Promise.race([validation.whenIdle(), timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
   } catch (error) {
     stdout?.mockRestore();
     await app?.close().catch(() => undefined);
@@ -158,6 +202,24 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
   const startedApp = app;
   const startedOwner = owner;
   if (!startedApp || !startedOwner) throw new Error('harness did not start');
+  let closing: Promise<void> | undefined;
+  const closeAll = async (): Promise<void> => {
+    stdout?.mockRestore();
+    try {
+      // A running validation job must not write to a closed Prisma.
+      await settleValidationJobs().catch(() => undefined);
+    } finally {
+      try {
+        await startedApp.close();
+      } finally {
+        try {
+          await startedOwner.$disconnect();
+        } finally {
+          await infra.stop();
+        }
+      }
+    }
+  };
   return {
     infra,
     app: startedApp,
@@ -167,13 +229,23 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     mails,
     logged,
     settle: () => settle(),
-    close: async () => {
-      stdout?.mockRestore();
-      await startedApp.close();
-      await startedOwner.$disconnect();
-      await infra.stop();
+    settleValidation: () => settleValidationJobs(),
+    setValidationPort: (p) => {
+      port = p;
     },
+    resetValidationPort: () => {
+      port = NO_EXECUTION_PORT;
+    },
+    close: () => (closing ??= closeAll()),
   };
+}
+
+/**
+ * Waits until the async question validation job (POST /questions/:id/validate, BE-04c) has finished
+ * and written its QUESTION_VALIDATION_FINISHED row. Call it after every successful validate call.
+ */
+export function settleValidation(h: Harness): Promise<void> {
+  return h.settleValidation();
 }
 
 let seq = 0;
