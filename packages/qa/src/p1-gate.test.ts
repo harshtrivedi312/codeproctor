@@ -433,7 +433,7 @@ describe('P1 gate: a failed file next to a failing non-P1 test', () => {
   });
 
   it(
-    'fails when a P2 test failed and a beforeAll crash skipped P1 tests of the file (leaf TC-903 inside describe TC-901)',
+    'fails when a P2 test failed and a beforeAll crash skipped P1 tests of the file (a P2 leaf inside a P1 describe block)',
     T,
     () => {
       const r = gate([
