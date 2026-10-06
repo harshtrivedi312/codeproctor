@@ -53,3 +53,39 @@ The paths are the routes on main (backend #26); ARC-02 part 2 pins them in fsd.m
 ### Tests (QA assigns new TC IDs for re-auth; TC-002 and TC-003 are cited only for the lockout and forced-enrolment regressions)
 
 FR-102, FR-101, TC-002, TC-003: wrong password is 403 `REAUTH_FAILED` on each endpoint; correct password succeeds; repeated wrong passwords lock; a locked account with the correct password still gets 403 `REAUTH_FAILED`; forced enrolment at login needs no `currentPassword`; a role denial carries no `code`; disable by SUPER_ADMIN or REVIEWER is 403 `TWO_FACTOR_REQUIRED_FOR_ROLE` after the password; a self-reset is 400 before the password; reset revokes the target's refresh sessions; disable without a current TOTP code is refused once the backend follow-up lands; the password never appears in logs or audit records.
+
+## 2. Organisation settings (BE-04c follow-up; FU-BE-126)
+
+Proposed by Backend A through the Delivery Lead (2026-10-06). The route shape is the hub's call (architect detail); the new FSD §4 row is the owner's. Settings live in `organizations.settings` (jsonb, database.md; shape `OrgSettings`).
+
+| Method | Path | Role (permission) | Purpose |
+| --- | --- | --- | --- |
+| GET | `/admin/org-settings` | SUPER_ADMIN (`org_settings:manage`) | Read the effective settings of the caller's organisation, defaults applied. |
+| PATCH | `/admin/org-settings` | SUPER_ADMIN (`org_settings:manage`) | Change one or more allowed keys. |
+
+Rules:
+
+- **Org scope:** the organisation comes from the access token. There is no org id in the path or body, and a body `orgId` is rejected as an unknown key. Every query runs in `runInOrg(orgId)`.
+- **Strict allowlist:** a body key outside the allowlist is 400 (problem details, `errors` names the key). A key is added to the allowlist only by its owner's decision. Today:
+  - `aiReferences.minAssistants`: integer 0..5, default 2 (ADR 0005 AI-5; 0 turns the publish gate off). A malformed stored value reads as 2.
+  - Not yet allowed (later, from their owners): retention days (the `retention_days` column, not the jsonb), `aiReferences.refreshDays` (AI-4), risk weights, consent version.
+- **GET response (200):** `{ "aiReferences": { "minAssistants": 2 } }`, always with every allowed key present (defaults applied). Send `Cache-Control: no-store`.
+- **PATCH body:** a partial object of the same shape, for example `{ "aiReferences": { "minAssistants": 0 } }`. Unspecified keys are unchanged. An empty body is 400. The response is the full effective settings, as GET. The change is one `UPDATE` of the jsonb merge in a single statement (no read-modify-write in application code), so two concurrent PATCHes of different keys do not lose each other's change.
+- **Effect:** the new value is read at publish time. It never changes versions that are already published, and a change does not revalidate drafts.
+- **Audit:** `ORG_SETTINGS_UPDATED`, request-driven, with actor, IP and metadata `{ changed: [{ key, from, to }] }`. The allowed values hold no secret and no personal data. A rejected PATCH (400 or 403) writes no row.
+- **Errors:** 401; 403 for any role other than SUPER_ADMIN (RECRUITER, AUTHOR, REVIEWER, CANDIDATE); 400 as above. No 404: the organisation always exists for a valid token.
+- **packages/shared:** the strict `orgSettingsSchema` and its patch variant belong in `packages/shared` (database.md names it `OrgSettings`). The hub adds them in a small PR (rule 12); until it lands, Backend A may keep a local zod schema with the same shape and moves to the shared one afterwards.
+- **Tests:** SUPER_ADMIN reads and changes `minAssistants`; each other role gets 403; an unknown key, a value outside 0..5 and a non-integer get 400; one organisation's change is not visible to another (TC-008 style); the audit row has `changed` and no other fields; the publish gate honours the new value (BE-04c).
+
+## 3. Audit rows written by jobs
+
+ADR 0001 C-3 already says jobs write audit rows with a null actor. Convention for every audit row that is not written inside the request of the person it concerns (validation finish, retention and erasure jobs, reconcilers, webhook deliveries):
+
+- `actor_id` is NULL and `ip` is NULL.
+- `metadata` carries `system: true`. When the job finishes work that a named user started, it also carries `initiatedBy` (the user id) and `startedAuditId` (the id of the request-driven row that started it), so the two rows can be linked. The actor is not set to the initiator: an append-only log should attribute to a person only what they did in a request.
+- TC-006's "actor, entity, IP" applies to request-driven rows (FR-105: staff reads and changes of candidate data). `audit_logs.ip` is nullable (database.md). Tests assert `ip === null`, `actor_id === null` and `metadata.system === true` for job rows.
+- Example: `QUESTION_VALIDATION_FINISHED` has metadata `{ system: true, initiatedBy, startedAuditId, version, outcome, revision }`.
+
+## 4. Problem extension members
+
+Besides `code` (section intro), `409 SESSION_NOT_ACTIVE` carries the extension member `sessionStatus` (the session's status, for example `PAUSED`). It is not named `status` because RFC 7807 reserves that member for the HTTP code. 200 bodies that return the session keep the field name `status` (ADR 0013 lines 132, 192 and 193). BE-07 and BE-10 implement it.
