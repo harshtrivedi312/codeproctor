@@ -2,7 +2,7 @@
 # and prints coverage per module. Uses the same pinned official actions as ci.yml. The p1-gate job
 # uses no secrets, so it is safe on pull requests from forks. The ZAP and k6 jobs run only on a manual
 # dispatch (never on pull requests), only against hosts in the repository variable QA_STAGING_HOSTS,
-# and the k6 job reads the secret K6_CANDIDATE_TOKENS from the `staging` environment.
+# and the k6 job reads the secret K6_SESSIONS_JSON from the `staging` environment.
 name: QA
 
 on:
@@ -13,6 +13,10 @@ on:
     inputs:
       target_url:
         description: 'Base URL of the environment for the ZAP baseline scan or the k6 run (staging only)'
+        required: false
+        type: string
+      api_url:
+        description: 'API origin for a second ZAP baseline scan, for example https://api.staging.example/api/v1/health (staging only, optional)'
         required: false
         type: string
       scan:
@@ -167,19 +171,59 @@ jobs:
             *",$host,"*) echo "Target host $host is allowed." ;;
             *) echo "Host $host is not in QA_STAGING_HOSTS." >&2; exit 1 ;;
           esac
-      - name: Run the baseline scan
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      # The API origin gets the same host allow-list check as the web origin.
+      - name: Allow only staging hosts for the API origin
+        if: ${{ inputs.api_url != '' }}
+        env:
+          TARGET: ${{ inputs.api_url }}
+          STAGING_HOSTS: ${{ vars.QA_STAGING_HOSTS }}
+        run: |
+          case "$TARGET" in
+            https://*) ;;
+            *) echo "Give an https staging URL." >&2; exit 1 ;;
+          esac
+          host="${TARGET#https://}"; host="${host%%[/:?#]*}"
+          case ",${STAGING_HOSTS//[[:space:]]/}," in
+            *",$host,"*) echo "API host $host is allowed." ;;
+            *) echo "Host $host is not in QA_STAGING_HOSTS." >&2; exit 1 ;;
+          esac
+      # -I keeps warnings from failing the scan; the verdict comes from evaluate.mjs below.
+      - name: Run the baseline scan (web origin)
         env:
           TARGET: ${{ inputs.target_url }}
         run: |
           mkdir -p zap && chmod 777 zap
+          cp packages/qa/zap/baseline.conf zap/
           docker run --rm -v "$PWD/zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy@sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef \
-            zap-baseline.py -t "$TARGET" -J report.json -r report.html -I
-      # TC-093: no high findings. ZAP risk code 3 is High.
-      - name: Fail on high findings
+            zap-baseline.py -t "$TARGET" -c baseline.conf -J report.json -r report.html -I
+      - name: Run the baseline scan (API origin)
+        if: ${{ inputs.api_url != '' }}
+        env:
+          TARGET: ${{ inputs.api_url }}
         run: |
-          high=$(jq '[.site[].alerts[] | select(.riskcode == "3")] | length' zap/report.json)
-          echo "High findings: $high"
-          test "$high" -eq 0
+          docker run --rm -v "$PWD/zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy@sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef \
+            zap-baseline.py -t "$TARGET" -c baseline.conf -J report-api.json -r report-api.html -I
+      # TC-093: no high findings. cli.mjs exits 1 on a High alert and 2 on a missing, empty,
+      # wrong-host or unreachable-target report (the old jq count passed on an empty report). It prints
+      # alert names and counts, never URLs.
+      - name: Fail on high findings
+        env:
+          WEB_TARGET: ${{ inputs.target_url }}
+          API_TARGET: ${{ inputs.api_url }}
+        run: |
+          web_host="${WEB_TARGET#https://}"; web_host="${web_host%%[/:?#]*}"
+          node packages/qa/zap/cli.mjs --target-host "$web_host" zap/report.json
+          if [ -f zap/report-api.json ]; then
+            api_host="${API_TARGET#https://}"; api_host="${api_host%%[/:?#]*}"
+            node packages/qa/zap/cli.mjs --target-host "$api_host" zap/report-api.json
+          fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
         with:
@@ -213,14 +257,27 @@ jobs:
             *",$host,"*) echo "Target host $host is allowed." ;;
             *) echo "Host $host is not in QA_STAGING_HOSTS." >&2; exit 1 ;;
           esac
-      # Candidate tokens for the seeded load sessions come from a repository secret that holds
-      # staging-only values. Add K6_CANDIDATE_TOKENS before the first run (docs/followups/qa.md).
+      # The seeded load sessions come from an environment secret that holds staging-only values:
+      # K6_SESSIONS_JSON, the JSON list described in packages/qa/k6/README.md. Add it before the
+      # first run. It is passed to the container by name (docker -e SESSIONS_JSON, k6 reads it from its environment), so it never appears in an argument list.
       # Images are pinned by digest (the tags were latest/stable on 2026-10-02). Bump deliberately.
       - name: Run k6
         env:
           TARGET: ${{ inputs.target_url }}
           SCRIPT: ${{ inputs.scan == 'k6-load' && 'tc-090-load.js' || 'tc-091-code-run.js' }}
-          K6_CANDIDATE_TOKENS: ${{ secrets.K6_CANDIDATE_TOKENS }}
+          SESSIONS_JSON: ${{ secrets.K6_SESSIONS_JSON }}
         run: |
-          docker run --rm -i -e API_URL="$TARGET" -e CANDIDATE_TOKENS="$K6_CANDIDATE_TOKENS" \
-            grafana/k6@sha256:e66db15b860113878fa74670e31f5e274830b7b6e42c8bff28b2f2d86a257603 run - < "packages/qa/k6/$SCRIPT"
+          host="${TARGET#https://}"; host="${host%%[/:?#]*}"
+          mkdir -p k6-out && chmod 777 k6-out
+          docker run --rm -v "$PWD/packages/qa/k6:/k6:ro" -v "$PWD/k6-out:/out:rw" -w /k6 \
+            -e SESSIONS_JSON \
+            -e ALLOWED_HOSTS="$host" \
+            grafana/k6@sha256:e66db15b860113878fa74670e31f5e274830b7b6e42c8bff28b2f2d86a257603 \
+            run -e API_BASE_URL="${TARGET%/}/api/v1" \
+            --summary-export=/out/summary.json "$SCRIPT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: k6-summary
+          path: k6-out/summary.json
+          if-no-files-found: ignore
