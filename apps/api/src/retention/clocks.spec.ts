@@ -84,7 +84,10 @@ describe('retention clocks', () => {
     });
     it('NFR-05: no anchor (a hold) means never due on the anchor clock', () => {
       expect(resultsDue(null, submitted, { RETENTION_RESULTS_CLOCK: 'anchor' })).toBeNull();
-      expect(resultsDue(anchor, null, { RETENTION_RESULTS_CLOCK: 'submitted' })).toBeNull();
+      expect(resultsDue(anchor, null, { RETENTION_RESULTS_CLOCK: 'submitted' })).toEqual(
+        d('2027-03-01T00:00:00Z'),
+      ); // falls back to the anchor
+      expect(resultsDue(null, null, { RETENTION_RESULTS_CLOCK: 'submitted' })).toBeNull();
     });
   });
 

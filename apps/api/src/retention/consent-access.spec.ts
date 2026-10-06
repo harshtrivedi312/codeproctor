@@ -56,6 +56,10 @@ describe('consent access (FR-105, NFR-05, C-17)', () => {
       'SELECT * FROM consents WHERE id = $1',
       'DELETE FROM public.consents',
       'UPDATE "consents" SET ip = NULL',
+      "await client['consent'].findMany()",
+      'await tx.consent?.findMany()',
+      'const { consent } = tx; consent.findMany()',
+      'include: { consent: withConsent }',
     ];
     for (const sample of offenders) expect(consentAccessHits(sample)).not.toEqual([]);
     expect(consentAccessHits("const consentText = 'x'; consentTexts.findMany()")).toEqual([]);

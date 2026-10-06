@@ -6,7 +6,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client.js';
 import { OrgContextService, PrismaService } from '../database';
-import { CONSENT_YEARS, MARKER_ENTITY_TYPE } from './retention.constants';
+import { CONSENT_YEARS, SESSION_ENTITY_TYPE } from './retention.constants';
 
 export interface DueConsent {
   readonly consentId: string;
@@ -140,7 +140,7 @@ export class ConsentRetentionRepository {
           orgId,
           actorId: null,
           action: CONSENT_DELETED_ACTION,
-          entityType: MARKER_ENTITY_TYPE,
+          entityType: SESSION_ENTITY_TYPE,
           entityId: sessionId,
           metadata: { consentId, runId },
         },

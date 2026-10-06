@@ -76,6 +76,7 @@ export function useRetentionDatabase() {
     const consentRepo = new ConsentRetentionRepository(prisma, orgContext);
     const config = loadRetentionConfig(overrides);
     return {
+      prisma,
       repo,
       consentRepo,
       service: new RetentionService(repo, consentRepo, h.store, legalHold, config),

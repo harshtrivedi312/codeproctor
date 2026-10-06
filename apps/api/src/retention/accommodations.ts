@@ -40,15 +40,30 @@ export function reduceAccommodations(accommodations: unknown): Obj | null {
     const value = accommodations[key];
     if (value !== undefined) reduced[key] = value;
   }
-  if (
-    accommodations['identityCheckWaiver'] !== undefined ||
-    accommodations['identityCheckWaived'] === true
-  ) {
-    reduced['identityCheckWaived'] = true;
-  }
+  if (hasWaiver(accommodations)) reduced['identityCheckWaived'] = true;
   return JSON.stringify(sorted(reduced)) === JSON.stringify(sorted(accommodations))
     ? null
     : reduced;
+}
+
+/**
+ * R-10 with the OQ-12 switch off: the free-text `notes` and other keys stay, but the waiver is always
+ * reduced to the fact of it (ADR 0015 section 7: R-10 replaces `identityCheckWaiver` with
+ * `identityCheckWaived: true` whatever OQ-12 decides). Its reason code and note are health-adjacent.
+ */
+export function reduceWaiverOnly(accommodations: unknown): Obj | null {
+  if (!isObject(accommodations) || !isObject(accommodations['identityCheckWaiver'])) return null;
+  const { identityCheckWaiver: _waiver, ...rest } = accommodations;
+  void _waiver;
+  return { ...rest, identityCheckWaived: true };
+}
+
+/** A stored waiver is an object (or the server-only flag): `null` or a string is not a valid shape. */
+function hasWaiver(accommodations: Obj): boolean {
+  return (
+    isObject(accommodations['identityCheckWaiver']) ||
+    accommodations['identityCheckWaived'] === true
+  );
 }
 
 function sorted(value: Obj): Obj {

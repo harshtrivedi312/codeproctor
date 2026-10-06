@@ -17,7 +17,7 @@ erasure (the fence through BE-07's SessionStateService via a port, the hold, the
 2. **Per session**, in a plain `runInOrg(orgId)` through the org-scoped client: legal-hold check
    (OQ-10, off by default), "marker already there?" (a concurrent run), then list, delete and
    **verify**: every page listed, no DeleteObjects `Errors`, a fresh listing empty.
-3. **Only after verification**, one transaction nulls the columns and writes the marker
+3. **Only after verification**, one transaction (which re-reads the R-2 holds under the per-session lock) nulls the columns and writes the marker
    (`RETENTION_FACE_DONE` or `RETENTION_MEDIA_DONE`, `entity_type 'session'`, `entity_id` the session
    id as text, metadata `{ tier, runId }`). Otherwise nothing changes and the next run tries again.
 4. One `RETENTION_RUN` audit row per org per run: the run id and counts, nothing else.

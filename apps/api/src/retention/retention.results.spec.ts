@@ -3,10 +3,27 @@
 // app_user, an in-memory object store. Docker is required. Synthetic data only.
 import { Logger } from '@nestjs/common';
 import type { TenantFixture } from '../database/testing/tenant-fixtures';
-import { DAY, NOW, daysAgo, useRetentionDatabase } from '../test/retention/retention-harness';
+import { NOW, daysAgo, useRetentionDatabase } from '../test/retention/retention-harness';
+import { reduceAccommodations } from './accommodations';
 
 describe('RetentionService: results tier R-10 (FR-704, NFR-05, TC-072)', () => {
   const { h, build, setup, keys, sessionIdOf, markers } = useRetentionDatabase();
+
+  /** Everything R-10 needs, for calling the repository directly. */
+  const complete = (t: TenantFixture, over: Record<string, unknown> = {}) => {
+    const { repo } = build();
+    return repo.inOrg(t.orgId, () =>
+      repo.completeResults({
+        orgId: t.orgId,
+        sessionId: sessionIdOf(t),
+        reduceAccommodationsOnRun: true,
+        clock: 'anchor',
+        now: NOW,
+        runId: 'run-test',
+        ...over,
+      }),
+    );
+  };
 
   /** A session whose results are due: anchor 366 days ago. */
   const due = (t: TenantFixture, extra: Parameters<typeof setup>[1] = {}) =>
@@ -50,11 +67,13 @@ describe('RetentionService: results tier R-10 (FR-704, NFR-05, TC-072)', () => {
 
   it('C-17: the consent record is not touched by R-10 (it has its own 3-year clock)', async () => {
     await due(h.A);
+    h.store.put(keys(h.A).consentPdf);
     await build().service.runDaily(NOW);
     expect(await h.owner.consent.count({ where: { sessionId: sessionIdOf(h.A) } })).toBe(1);
+    expect(h.store.keys.has(keys(h.A).consentPdf)).toBe(true); // the PDF is outside the session prefix
   });
 
-  it('ADR 0004 9.3: the sessions row is never deleted, and app_user could not delete it anyway', async () => {
+  it('ADR 0004 9.3: R-10 never deletes the sessions row', async () => {
     await due(h.A);
     await build().service.runDaily(NOW);
     expect(await h.owner.session.count({ where: { id: sessionIdOf(h.A) } })).toBe(1);
@@ -294,15 +313,164 @@ describe('RetentionService: results tier R-10 (FR-704, NFR-05, TC-072)', () => {
       });
     });
 
-    it('with the OQ-12 switch off, R-10 keeps the notes', async () => {
+    it('B2: with the OQ-12 switch off, R-10 keeps the notes but still removes the waiver reason', async () => {
       await due(h.A);
       await h.owner.invitation.updateMany({
         where: { orgId: h.A.orgId },
-        data: { accommodations: { notes: 'keep me', extraTimePct: 10 } },
+        data: { accommodations: waiver },
       });
       await build({ RETENTION_REDUCE_ACCOMMODATIONS: 'false' }).service.runDaily(NOW);
-      expect(await accommodationsOf(h.A)).toEqual({ notes: 'keep me', extraTimePct: 10 });
+      expect(await accommodationsOf(h.A)).toEqual({
+        extraTimePct: 25,
+        disabledDetectors: ['GAZE'],
+        notes: 'free text',
+        identityCheckWaived: true,
+      });
     });
+
+    it('S3: the compare-and-set really rejects a changed value: a PATCH between the read and the write survives and is then reduced', async () => {
+      await due(h.A);
+      await h.owner.invitation.updateMany({
+        where: { orgId: h.A.orgId },
+        data: { accommodations: waiver },
+      });
+      const { repo, prisma } = build();
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      let raced = false;
+      await repo.inOrg(h.A.orgId, () =>
+        prisma.client.$transaction(async (tx) => {
+          await repo.casAccommodations(tx, sessionIdOf(h.A), async (value) => {
+            if (!raced) {
+              raced = true;
+              // A PATCH commits after the job read the value.
+              await h.owner.invitation.updateMany({
+                where: { orgId: h.A.orgId },
+                data: { accommodations: { extraTimePct: 99, notes: 'patched' } },
+              });
+            }
+            return reduceAccommodations(value);
+          });
+        }),
+      );
+      const logged = warn.mock.calls.map((c) => String(c[0])).join();
+      warn.mockRestore();
+      expect(logged).toContain('compare-and-set'); // the lost race is reported (ids only)
+      expect(await accommodationsOf(h.A)).toEqual({ extraTimePct: 99 }); // the PATCH value, then reduced; never the stale one
+    });
+
+    it('S3 (ADR 0015): stored keys in another order plus a legacy key still match and are reduced', async () => {
+      await due(h.A);
+      await h.owner.$executeRawUnsafe(
+        `UPDATE invitations SET accommodations = '{"legacy": 1, "notes": "x", "extraTimePct": 10}'::jsonb WHERE org_id = '${h.A.orgId}'`,
+      );
+      await build().service.runDaily(NOW);
+      expect(await accommodationsOf(h.A)).toEqual({ extraTimePct: 10 });
+    });
+  });
+
+  it('B1: results and the candidate row change in ONE transaction: a failing anonymisation rolls everything back, and the next run completes both', async () => {
+    await due(h.A);
+    await h.owner.$executeRawUnsafe(
+      `CREATE OR REPLACE FUNCTION fail_anonymise() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'simulated failure'; END $$`,
+    );
+    await h.owner.$executeRawUnsafe(
+      `CREATE TRIGGER fail_anonymise_trigger BEFORE UPDATE OF full_name ON candidates FOR EACH ROW WHEN (NEW.full_name = 'Erased') EXECUTE FUNCTION fail_anonymise()`,
+    );
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      expect((await build().service.runDaily(NOW)).results).toMatchObject({
+        completed: 0,
+        retryLater: 1,
+      });
+    } finally {
+      warn.mockRestore();
+      await h.owner.$executeRawUnsafe('DROP TRIGGER fail_anonymise_trigger ON candidates');
+    }
+    // Nothing happened: the results are still there and there is no marker, so tomorrow's run still selects it.
+    expect(
+      await h.owner.submission.count({
+        where: { sessionQuestion: { sessionId: sessionIdOf(h.A) } },
+      }),
+    ).toBeGreaterThan(0);
+    expect((await markers(h.A)).map((m) => m.action)).not.toContain('RETENTION_RESULTS_DONE');
+    const summary = await build().service.runDaily(NOW);
+    expect(summary.results.completed).toBe(1);
+    expect(summary.candidatesAnonymised).toBe(1);
+  });
+
+  it('B1: the daily backstop anonymises a candidate whose sessions all have the marker but who was never anonymised', async () => {
+    await due(h.A);
+    const owner = await h.owner.session.findUniqueOrThrow({
+      where: { id: sessionIdOf(h.A) },
+      select: { invitation: { select: { candidateId: true } } },
+    });
+    const id = owner.invitation.candidateId;
+    // The state an older run (or a late-added session) could leave: a marker, an un-anonymised candidate.
+    await h.owner.auditLog.create({
+      data: {
+        orgId: h.A.orgId,
+        action: 'RETENTION_RESULTS_DONE',
+        entityType: 'session',
+        entityId: sessionIdOf(h.A),
+      },
+    });
+    const summary = await build().service.runDaily(NOW);
+    expect(summary.candidatesAnonymised).toBe(1);
+    expect((await h.owner.candidate.findUniqueOrThrow({ where: { id } })).fullName).toBe('Erased');
+    const row = await h.owner.auditLog.findFirstOrThrow({
+      where: { action: 'CANDIDATE_ANONYMISED', entityId: id },
+    });
+    expect(Object.keys(row.metadata as object)).toEqual(['runId']); // ids only
+  });
+
+  it('S1: the holds are read again inside the transaction: an appeal opened after selection stops R-10 with nothing changed', async () => {
+    await due(h.A);
+    const reviewOf = { sessionReview: { sessionId: sessionIdOf(h.A) } };
+    await h.owner.appeal.updateMany({ where: reviewOf, data: { status: 'OPEN' } });
+    expect(await complete(h.A)).toEqual({ kind: 'notEligible' });
+    await h.owner.appeal.updateMany({ where: reviewOf, data: { status: 'UPHELD' } });
+    await h.owner.session.update({ where: { id: sessionIdOf(h.A) }, data: { status: 'APPEALED' } });
+    expect(await complete(h.A)).toEqual({ kind: 'notEligible' });
+    // An anchor cleared and set again after selection must not make results go early.
+    await h.owner.session.update({
+      where: { id: sessionIdOf(h.A) },
+      data: { status: 'COMPLETED', retentionAnchorAt: daysAgo(10) },
+    });
+    expect(await complete(h.A)).toEqual({ kind: 'notEligible' });
+    expect(
+      await h.owner.submission.count({
+        where: { sessionQuestion: { sessionId: sessionIdOf(h.A) } },
+      }),
+    ).toBeGreaterThan(0);
+    expect(await markers(h.A)).toHaveLength(0);
+    await h.owner.session.update({
+      where: { id: sessionIdOf(h.A) },
+      data: { retentionAnchorAt: daysAgo(400) },
+    });
+    expect(await complete(h.A)).toMatchObject({ kind: 'done' });
+  });
+
+  it('S4, OQ-20: with the submitted clock, a session that was never submitted falls back to its anchor and is still purged', async () => {
+    await due(h.A, { submittedDaysAgo: null, anchorDaysAgo: 400, status: 'EXPIRED' });
+    expect(
+      (await build({ RETENTION_RESULTS_CLOCK: 'submitted' }).service.runDaily(NOW)).results
+        .completed,
+    ).toBe(1);
+  });
+
+  it('S7: the year is a calendar year: across a leap day, 365 days later is not yet due', async () => {
+    await due(h.A, { submittedDaysAgo: 800, anchorDaysAgo: 800 });
+    const anchor = new Date('2024-02-28T12:00:00.000Z');
+    await h.owner.session.update({
+      where: { id: sessionIdOf(h.A) },
+      data: { retentionAnchorAt: anchor, submittedAt: anchor },
+    });
+    expect((await build().service.runDaily(new Date('2025-02-27T12:00:00.000Z'))).results.due).toBe(
+      0,
+    ); // 365 days
+    expect(
+      (await build().service.runDaily(new Date('2025-02-28T12:00:00.000Z'))).results.completed,
+    ).toBe(1);
   });
 
   it('writes the results counts in the run summary row, ids and counts only', async () => {
@@ -315,12 +483,19 @@ describe('RetentionService: results tier R-10 (FR-704, NFR-05, TC-072)', () => {
     expect(JSON.stringify(row.metadata)).not.toContain('orgs/');
   });
 
-  it("FR-103: another org's results are untouched (both due, each prefix stays in its own org)", async () => {
+  it("FR-103: with both orgs due, each org's rows, objects and marker are handled once, in its own org", async () => {
     await due(h.A);
-    await due(h.B, { submittedDaysAgo: 30, anchorDaysAgo: 30 });
-    await build().service.runDaily(NOW);
-    expect(h.store.keys.has(keys(h.B).media)).toBe(true);
-    expect((await markers(h.B)).map((m) => m.action)).not.toContain('RETENTION_RESULTS_DONE');
-    expect(DAY).toBeGreaterThan(0);
+    await due(h.B);
+    const summary = await build().service.runDaily(NOW);
+    expect(summary.results).toMatchObject({ due: 2, completed: 2 });
+    for (const t of [h.A, h.B]) {
+      expect([...h.store.keys].filter((key) => key.startsWith(keys(t).root))).toEqual([]);
+      const found = (await markers(t)).filter((m) => m.action === 'RETENTION_RESULTS_DONE');
+      expect(found).toHaveLength(1);
+      expect(found[0]?.orgId).toBe(t.orgId);
+      expect(
+        (await h.owner.session.findUniqueOrThrow({ where: { id: sessionIdOf(t) } })).totalScore,
+      ).toBeNull();
+    }
   });
 });

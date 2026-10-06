@@ -1,5 +1,5 @@
-// RetentionService: the daily retention tiers (FR-704, NFR-05; ADR 0004 9.2). Face tier and media
-// tier here; results (R-10), consent (R-9) and erasure follow in their own slices.
+// RetentionService: the daily retention tiers (FR-704, NFR-05; ADR 0004 9.2 to 9.4): face, media and
+// results tiers, consent records (R-9) and candidate anonymisation. Erasure is its own slice.
 //
 // For each tier: page through the sessions that are due and have no marker (a keyset cursor, so a
 // session that never verifies cannot starve the others), then per session in its own org scope:
@@ -49,6 +49,8 @@ export interface RunSummary {
   readonly results: TierSummary;
   /** R-9: signed and declined consent records past 3 years. */
   readonly consent: TierSummary;
+  /** Candidates anonymised this run (R-10's atomic path and the daily backstop). */
+  readonly candidatesAnonymised: number;
 }
 
 type Outcome = 'completed' | 'alreadyDone' | 'retryLater';
@@ -56,6 +58,8 @@ type Outcome = 'completed' | 'alreadyDone' | 'retryLater';
 @Injectable()
 export class RetentionService {
   private readonly log = new Logger(RetentionService.name);
+  /** Candidates anonymised in the current run (a run is not re-entrant per instance; the count is a summary only). */
+  private anonymised = 0;
 
   constructor(
     private readonly repo: RetentionRepository,
@@ -76,15 +80,17 @@ export class RetentionService {
       perOrg.set(orgId, row);
     };
 
+    this.anonymised = 0;
     const face = await this.runTier('FACE', now, runId, count);
     const media = await this.runTier('MEDIA', now, runId, count);
     const results = await this.runTier('RESULTS', now, runId, count);
     const consent = await this.runConsent(now, runId, count);
+    await this.sweepCandidates(now, runId, count);
 
     for (const [orgId, counts] of perOrg) {
       await this.repo.inOrg(orgId, () => this.repo.writeRunSummary(orgId, runId, counts));
     }
-    return { runId, face, media, results, consent };
+    return { runId, face, media, results, consent, candidatesAnonymised: this.anonymised };
   }
 
   private async runTier(
@@ -188,11 +194,14 @@ export class RetentionService {
             orgId,
             sessionId,
             reduceAccommodationsOnRun: this.config.RETENTION_REDUCE_ACCOMMODATIONS,
+            clock: this.config.RETENTION_RESULTS_CLOCK,
+            now,
             runId,
           });
-          if (done === null) return 'alreadyDone';
-          // The candidate row goes once none of their sessions still has results (ADR 0004 9.4).
-          await this.repo.anonymiseCandidateIfDone({ candidateId: done.candidateId, now });
+          // R-2 held it again inside the transaction (a review or appeal opened meanwhile).
+          if (done.kind === 'notEligible') return 'retryLater';
+          if (done.kind === 'alreadyDone') return 'alreadyDone';
+          if (done.anonymised) this.anonymised++;
           return 'completed';
         }
         const wrote =
@@ -284,6 +293,35 @@ export class RetentionService {
         `retention CONSENT failed for session ${sessionId} (${name}${typeof code === 'string' ? ` ${code}` : ''})`,
       );
       return 'retryLater';
+    }
+  }
+
+  /**
+   * The daily backstop for candidate anonymisation (ADR 0004 9.4): a candidate whose sessions all have
+   * their results marker but who was not anonymised (an older marker, or a session added later) is
+   * anonymised here, one per transaction, in their own org.
+   */
+  private async sweepCandidates(
+    now: Date,
+    runId: string,
+    count: (orgId: string, key: string) => void,
+  ): Promise<void> {
+    const found = await this.repo.findCandidatesToAnonymise(this.config.RETENTION_BATCH_SIZE);
+    for (const { candidateId, orgId } of found) {
+      try {
+        const did = await this.repo.inOrg(orgId, () =>
+          this.repo.anonymiseCandidateIfDone({ orgId, candidateId, now, runId }),
+        );
+        if (did) {
+          this.anonymised++;
+          count(orgId, 'candidatesAnonymised');
+        }
+      } catch (error) {
+        const code = (error as { code?: unknown } | null)?.code;
+        this.log.warn(
+          `retention candidate anonymisation failed (${typeof code === 'string' ? code : 'error'})`,
+        );
+      }
     }
   }
 

@@ -1,5 +1,5 @@
 // Accommodation reductions (FR-704, NFR-05; ADR 0015 section 7, OQ-12, C-19).
-import { reduceAccommodations, redactReasonNote } from './accommodations';
+import { reduceAccommodations, reduceWaiverOnly, redactReasonNote } from './accommodations';
 
 describe('redactReasonNote (R-4, ADR 0015 section 7)', () => {
   it('NFR-05: drops the note and sets reasonNoteRemoved, keeping the reason code and the settings', () => {
@@ -69,5 +69,34 @@ describe('reduceAccommodations (erasure and R-10, OQ-12)', () => {
     expect(reduceAccommodations({})).toBeNull();
     expect(reduceAccommodations({ extraTimePct: 10 })).toBeNull();
     expect(reduceAccommodations('nope')).toBeNull();
+  });
+});
+
+describe('reduceWaiverOnly (R-10 with the OQ-12 switch off)', () => {
+  it('NFR-05: the waiver reason and note always go, whatever the switch says; every other key stays', () => {
+    expect(
+      reduceWaiverOnly({
+        extraTimePct: 25,
+        notes: 'free text stays when the switch is off',
+        identityCheckWaiver: { reasonCode: 'OTHER', reasonNote: 'health details' },
+      }),
+    ).toEqual({
+      extraTimePct: 25,
+      notes: 'free text stays when the switch is off',
+      identityCheckWaived: true,
+    });
+  });
+  it('returns null (no write) when there is no waiver object to reduce', () => {
+    expect(reduceWaiverOnly({ notes: 'x' })).toBeNull();
+    expect(reduceWaiverOnly({ identityCheckWaived: true })).toBeNull();
+    expect(reduceWaiverOnly(null)).toBeNull();
+  });
+});
+
+describe('a malformed waiver value (nit)', () => {
+  it('identityCheckWaiver: null is not a waiver, so it does not set identityCheckWaived', () => {
+    expect(reduceAccommodations({ identityCheckWaiver: null, extraTimePct: 5 })).toEqual({
+      extraTimePct: 5,
+    });
   });
 });

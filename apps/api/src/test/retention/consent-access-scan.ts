@@ -9,6 +9,12 @@ export function consentAccessHits(text: string): string[] {
     hits.push('client access to the consent model');
   }
   if (/\.consent\s*\(/.test(text)) hits.push('fluent .consent()');
+  if (/\[\s*['"`]consent['"`]\s*\]/.test(text)) hits.push('bracket access to consent');
+  if (/\.consent\s*\?\./.test(text)) hits.push('optional-chained consent access');
+  if (/\b(include|select)\s*:\s*\{[^}]*\bconsent\s*:/.test(text))
+    hits.push('consent in an include or select (any value)');
+  if (/\{[^}]*\bconsent\b[^}]*\}\s*=\s*\w*(tx|client|prisma)\b/i.test(text))
+    hits.push('consent destructured from a client');
   if (/\bconsent\s*:\s*(true|\{)/.test(text)) hits.push('consent in an include or select');
   if (/\bsignedName\b/.test(text)) hits.push('signedName');
   if (
