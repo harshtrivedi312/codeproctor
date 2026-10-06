@@ -420,7 +420,7 @@ export async function questionFixture(
 }
 
 /**
- * Stands in for the validate job (BE-04 slice 4c, not built): records a passing validation of the
+ * Stands in for a PASSED validate run (BE-04 slice 4c): records a passing validation of the
  * CURRENT content of the latest version of a question, directly in the database, bound to the
  * revision the backend computes. Publish of a coding question needs it (FR-203, fails closed).
  */
@@ -428,9 +428,12 @@ export async function markValidated(h: Harness, questionId: string): Promise<voi
   // These tests are about other rules than the AI reference gate (ADR 0005 AI-5, BE-04c): switch
   // it off for the question's org so a publish needs only the validation result.
   const { orgId } = await h.owner.question.findUniqueOrThrow({ where: { id: questionId } });
+  const org = await h.owner.organization.findUniqueOrThrow({ where: { id: orgId } });
+  const settings = (org.settings ?? {}) as Record<string, unknown>;
+  const aiReferences = (settings.aiReferences ?? {}) as Record<string, unknown>;
   await h.owner.organization.update({
     where: { id: orgId },
-    data: { settings: { aiReferences: { minAssistants: 0 } } },
+    data: { settings: { ...settings, aiReferences: { ...aiReferences, minAssistants: 0 } } },
   });
   const head = await h.owner.questionVersion.findFirstOrThrow({
     where: { questionId },
@@ -474,6 +477,7 @@ const createBody = (slug: string): Record<string, unknown> => ({
 const QUESTIONS = '/questions';
 const VARIANT_SECRET = 'QA-VARIANT-PARAM';
 const AI_SECRET = 'QA-AI-SOLUTION-SECRET';
+const AI_PROMPT = 'QA-AI-PROMPT-SECRET';
 const OVERRIDE_IN = 'QA-OVERRIDE-IN';
 const OVERRIDE_OUT = 'QA-OVERRIDE-OUT';
 
@@ -1015,9 +1019,10 @@ const BE04_ROUTES: Be03Route[] = [
           modelLabel: 'qa-model',
           language: 'python',
           solutionCode: AI_SECRET,
+          promptText: AI_PROMPT,
         },
         entityId: f.id,
-        secrets: [...qSecrets, AI_SECRET, 'QA-ASSISTANT'],
+        secrets: [...qSecrets, AI_SECRET, AI_PROMPT, 'QA-ASSISTANT'],
         unchanged: async () =>
           (await h.owner.aiReferenceSolution.count({
             where: { questionVersionId: f.versionIds[1] as string },
@@ -1037,7 +1042,10 @@ const BE04_ROUTES: Be03Route[] = [
     ok: [200],
     prepare: async (h, orgId) => {
       const f = await questionFixture(h, orgId);
-      const collector = await h.owner.user.findFirstOrThrow({ where: { orgId } });
+      const collector = await h.owner.user.findFirstOrThrow({
+        where: { orgId },
+        orderBy: { createdAt: 'asc' },
+      });
       const row = await h.owner.aiReferenceSolution.create({
         data: {
           questionVersionId: f.versionIds[1] as string,
@@ -1045,6 +1053,7 @@ const BE04_ROUTES: Be03Route[] = [
           modelLabel: 'qa-model',
           language: 'python',
           solutionCode: AI_SECRET,
+          promptText: AI_PROMPT,
           collectedAt: new Date(),
           collectedById: collector.id,
         },
@@ -1053,7 +1062,7 @@ const BE04_ROUTES: Be03Route[] = [
         path: `${QUESTIONS}/${f.id}/versions/1/ai-references/${row.id}/supersede`,
         body: {},
         entityId: f.id,
-        secrets: [...qSecrets, AI_SECRET, 'QA-ASSISTANT'],
+        secrets: [...qSecrets, AI_SECRET, AI_PROMPT, 'QA-ASSISTANT'],
         unchanged: async () =>
           (await h.owner.aiReferenceSolution.findUniqueOrThrow({ where: { id: row.id } }))
             .supersededAt === null,
