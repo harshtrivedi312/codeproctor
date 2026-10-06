@@ -1,4 +1,4 @@
-"""ADR 0014 4.2 / 4.3: request and response signing for /v1 routes (FR-403 transport; TC-033 path).
+"""ADR 0014 4.2 / 4.3: request and response signing for every route but the exempt list (FR-403 transport; TC-033 path).
 
 QA assigns the TC ids for the 401/400/503 cases (ADR 0014 section 11); these tests name the rule.
 """
@@ -188,7 +188,7 @@ def test_fr403_oversized_body_is_refused_before_signature_checks() -> None:
     assert bodies == []
 
 
-def test_fr403_health_and_non_v1_paths_are_not_signed() -> None:
+def test_fr403_health_is_not_signed() -> None:
     app, _, _ = build()
     r = call(app, "/health", {}, b"", method="GET")
     assert r.status_code == 200 and "x-cp-signature" not in r.headers
@@ -408,3 +408,24 @@ def test_fr403_websocket_scopes_fail_closed() -> None:
 
     asyncio.run(app({"type": "websocket", "path": "/v1/echo", "headers": []}, receive, send))
     assert sent == [{"type": "websocket.close", "code": 1008}]
+
+
+def test_fr403_websocket_on_an_exempt_path_is_still_closed_and_all_docs_paths_follow_the_flag() -> (
+    None
+):
+    app, _, _ = build()
+    sent: list[dict[str, Any]] = []
+
+    async def send(m: dict[str, Any]) -> None:
+        sent.append(m)
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "websocket.connect"}
+
+    asyncio.run(app({"type": "websocket", "path": "/health", "headers": []}, receive, send))
+    assert sent == [{"type": "websocket.close", "code": 1008}]
+    inner = FastAPI()
+    for path in ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"):
+        assert call(app, path, {}, b"", method="GET").status_code == 401
+        mw = signing.SigningMiddleware(inner, {"k1": KEY_A}, docs_exempt=True)
+        assert call(mw, path, {}, b"", method="GET").status_code != 401

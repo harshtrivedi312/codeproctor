@@ -70,7 +70,7 @@ def test_fr403_path_style_and_virtual_hosted_urls_naming_the_bucket_are_allowed(
         url(path=f"/{BUCKET}/a%2fb"),
         url(path=f"/{BUCKET}//k"),
         url(path=f"/{BUCKET}/./k"),
-        url(q=amz().replace("20", "99", 1)),
+        url(q=amz().replace("X-Amz-Date=20", "X-Amz-Date=99", 1)),  # signed far in the future
         url(q="X-Amz-Date=20261301T000000Z&X-Amz-Expires=60"),  # month 13
         url(q=amz() + "&x-amz-expires=60"),  # case-variant duplicate
         url(q=amz() + "&X-Amz-Expires=604800"),  # exact duplicate
@@ -85,6 +85,27 @@ def test_fr403_urls_outside_the_allow_list_or_expired_are_refused(bad: str) -> N
         ok(bad)
     assert ei.value.code == "URL_REFUSED"
     assert "evil" not in str(ei.value)
+
+
+def test_fr403_legitimate_encoded_keys_pass_and_encoded_query_keys_cannot_hide_duplicates() -> None:
+    for key in ("a%2Bb.jpg", "a%20b.jpg", "100%25.jpg"):
+        assert ok(url(path=f"/{BUCKET}/orgs/o/{key}"))[0] == "s3.example.test"
+    for extra in (
+        "&X-Amz%2DExpires=604800",
+        "&X-Amz%2DDate=20200101T000000Z",
+        "&x-amz%2dexpires=60",
+    ):
+        with pytest.raises(FetchError):
+            ok(url(q=amz() + extra))
+    for path in (f"/{BUCKET}/a%2Fb", f"/{BUCKET}/a%5Cb", f"/{BUCKET}/a%5cb"):
+        with pytest.raises(FetchError):
+            ok(url(path=path))
+
+
+def test_fr403_a_bucket_root_without_a_key_is_refused() -> None:
+    for u in (url(path=f"/{BUCKET}/"), url(host=f"{BUCKET}.s3.example.test", path="/")):
+        with pytest.raises(FetchError):
+            ok(u)
 
 
 def test_fr403_host_case_is_normalised_for_matching() -> None:
@@ -123,8 +144,11 @@ class FakeResponse:
     def getheader(self, name: str) -> str | None:
         return self._headers.get(name)
 
-    def read(self, n: int) -> bytes:
+    def read1(self, n: int) -> bytes:
         return self._body.read(n)
+
+    def close(self) -> None:
+        return None
 
 
 class FakeConn:
@@ -133,6 +157,10 @@ class FakeConn:
     def __init__(self, response: FakeResponse | Exception) -> None:
         self.response = response
         self.closed = False
+        self.timeouts: list[float] = []
+
+    def set_timeout(self, seconds: float) -> None:
+        self.timeouts.append(seconds)
 
     def request(self, method: str, target: str, headers: dict[str, str]) -> None:
         FakeConn.requests.append((method, target))
@@ -286,12 +314,13 @@ def test_fr403_real_http_fetch_against_a_local_store_does_not_follow_a_redirect(
 
 def test_fr403_a_slow_sender_is_cut_off_by_the_total_deadline() -> None:
     class Slow(FakeResponse):
-        def read(self, n: int) -> bytes:
+        def read1(self, n: int) -> bytes:
             ticks.append(1)
             return b"x"
 
     ticks: list[int] = []
-    clock = iter([0.0, 1.0, 2.0, 9.0, 10.0])  # deadline at 8 s from the first reading
+    # the deadline is 5.5 s after the first reading; the third read finds it long past
+    clock = iter([0.0, 0.1, 0.2, 0.3, 1.0, 9.0])
     conn = FakeConn(Slow(200, b""))
     with pytest.raises(FetchError) as ei:
         fetchguard.fetch(
@@ -314,3 +343,69 @@ def test_fr606_a_decompression_bomb_is_a_dimension_refusal(monkeypatch: pytest.M
     with pytest.raises(ImagePolicyError) as ei:
         check_image("SELFIE", b"\xff\xd8\xff" + b"0" * 20)
     assert ei.value.code == "SELFIE_DIMENSIONS"
+
+
+def test_fr403_the_deadline_cuts_a_real_slow_sender_and_limits_each_socket_wait() -> None:
+    import http.server
+    import socketserver
+    import threading
+
+    port_box: list[int] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Length", "100000")
+            self.end_headers()
+            try:
+                for _ in range(400):  # one byte every 0.25 s would take 100 s
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    time.sleep(0.25)
+            except OSError:
+                return
+
+        def log_message(self, *args: object) -> None:
+            return
+
+    class Server(http.server.HTTPServer):
+        def server_bind(self) -> None:
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+
+    server = Server(("127.0.0.1", 0), Handler)
+    port_box.append(server.server_port)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        cfg = FetchConfig((Origin("http", "127.0.0.1", port_box[0]),), BUCKET, allow_http=True)
+        u = f"http://127.0.0.1:{port_box[0]}/{BUCKET}/slow.jpg?{amz(time.time())}"
+        started = time.monotonic()
+        with pytest.raises(FetchError) as ei:
+            fetchguard.fetch(
+                u, cfg, max_bytes=200_000, max_lifetime=60, timeout=10.0, total_timeout=0.8
+            )
+        assert ei.value.code == "MEDIA_UNAVAILABLE"
+        assert time.monotonic() - started < 3.0  # not the 10 s socket timeout, nor 100 s
+    finally:
+        server.shutdown()
+
+
+def test_fr403_each_socket_wait_is_capped_by_what_is_left_of_the_deadline() -> None:
+    conn = FakeConn(FakeResponse(200, b"abc"))
+    ticks = iter([0.0, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5])
+    fetchguard.fetch(
+        url(),
+        CFG,
+        max_bytes=100,
+        max_lifetime=60,
+        timeout=10.0,
+        total_timeout=5.5,
+        now=lambda: NOW,
+        monotonic=lambda: next(ticks),
+        connection=lambda scheme, host, port, timeout: conn,
+    )
+    assert (
+        conn.timeouts
+        and max(conn.timeouts) <= 5.5
+        and conn.timeouts == sorted(conn.timeouts, reverse=True)
+    )

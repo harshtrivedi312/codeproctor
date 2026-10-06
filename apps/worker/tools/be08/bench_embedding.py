@@ -98,6 +98,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--runs", type=int, default=60)
     ap.add_argument("--threads", type=int, nargs="+", default=[1, 2, 4])
     args = ap.parse_args(argv)
+    if args.runs < 2:
+        ap.error("--runs must be at least 2")
     check_model_location()
     try:
         embedder = AuraFaceEmbedder.from_env()
