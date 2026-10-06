@@ -1023,6 +1023,76 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       }
     });
 
+    it('TC-008 FR-305 ADR 0015 4: a candidate reads status WAIVED of its own row and none of the video check, and can neither write the video check nor change the row', async () => {
+      const where = { id: A.rows.IdentityCheck.filter.id as string };
+      const when = new Date('2026-10-06T10:00:00.000Z');
+      // A WAIVED row as the accommodations path writes it, with a recorded video check: attempt 1 and no
+      // identity data (the PENDING fixture row already satisfies identity_checks_waived_check).
+      await owner.identityCheck.update({
+        where,
+        data: {
+          status: 'WAIVED',
+          videoCheckDone: true,
+          videoCheckById: T.userId,
+          videoCheckAt: when,
+        },
+      });
+      try {
+        const before = await snapshot();
+        await db.statements.reset();
+        const row = await asCandidate(A, () => client.identityCheck.findUniqueOrThrow({ where }));
+        // CS-4.4 reads id, attempt, status and created_at (plus the session key): WAIVED is a status.
+        expect(row).toMatchObject({ status: 'WAIVED', attempt: 1 });
+        expect(Object.keys(row).sort()).toEqual(defaultColumns('IdentityCheck'));
+        expect(text(row)).not.toContain(T.userId);
+        expect(text(row)).not.toContain(when.toISOString());
+        expect(row).not.toHaveProperty('videoCheckDone');
+        await asCandidate(A, async () => {
+          for (const column of ['videoCheckDone', 'videoCheckById', 'videoCheckAt']) {
+            await expect(
+              client.identityCheck.findMany({ select: { [column]: true } }),
+            ).rejects.toThrow(new RegExp(`the column ${column} is not available to a candidate`));
+          }
+          // No boolean oracle on "was the video check done?".
+          await expect(
+            client.identityCheck.count({ where: { videoCheckDone: true } }),
+          ).rejects.toThrow(/videoCheckDone is not available/);
+          // The writes: the video check, and the status of the row, on an update and as a new row.
+          await expect(
+            client.identityCheck.update({ where, data: { videoCheckDone: false }, ...ID }),
+          ).rejects.toThrow(/cannot update this row/);
+          await expect(
+            client.identityCheck.updateMany({ where, data: { status: 'PENDING' } }),
+          ).rejects.toThrow(/cannot update this row/);
+          await expect(
+            client.identityCheck.create({ data: { attempt: 2, status: 'WAIVED' } as never, ...ID }),
+          ).rejects.toThrow(/status cannot be written by a candidate create here/);
+          await expect(
+            client.identityCheck.createMany({
+              data: [{ attempt: 2, videoCheckDone: true }] as never,
+            }),
+          ).rejects.toThrow(/videoCheckDone cannot be written by a candidate create here/);
+        });
+        // Only the refusals ran: nothing was written, and the owner still sees the waived row.
+        expect(await snapshot()).toEqual(before);
+        expect(await owner.identityCheck.findUniqueOrThrow({ where })).toMatchObject({
+          status: 'WAIVED',
+          videoCheckDone: true,
+          videoCheckById: T.userId,
+        });
+      } finally {
+        await owner.identityCheck.update({
+          where,
+          data: {
+            status: 'PENDING',
+            videoCheckDone: null,
+            videoCheckById: null,
+            videoCheckAt: null,
+          },
+        });
+      }
+    });
+
     it.each([
       // Session: lastHeartbeat only without a grant; the state columns need the SessionStateService grant.
       ['Session', 'status', { status: 'SUBMITTED' }],
@@ -1064,6 +1134,10 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       ['IdentityCheck', 'reviewedById', { reviewedById: randomUUID() }],
       ['IdentityCheck', 'reviewNote', { reviewNote: 'x' }],
       ['IdentityCheck', 'faceMatchScore', { faceMatchScore: 1 }],
+      // ADR 0015 section 4: the video ID check of a WAIVED row is the recruiter's, never the candidate's.
+      ['IdentityCheck', 'videoCheckDone', { videoCheckDone: true }],
+      ['IdentityCheck', 'videoCheckById', { videoCheckById: randomUUID() }],
+      ['IdentityCheck', 'videoCheckAt', { videoCheckAt: WHEN }],
       ['ProctorEventBatch', 'eventCount', { eventCount: 99 }],
       ['ProctorEventBatch', 'signature', { signature: Buffer.from('forged') }],
       ['KeystrokeBatch', 'events', { events: [] }],
@@ -1104,6 +1178,13 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       await asCandidate(A, async () => {
         for (const data of [
           { attempt: 5, status: 'PASSED' },
+          // ADR 0015: a candidate never creates a WAIVED row (the accommodations path does, in a staff
+          // scope), and never writes the video check columns.
+          { attempt: 5, status: 'WAIVED' },
+          { attempt: 1, status: 'WAIVED' },
+          { attempt: 5, videoCheckDone: true },
+          { attempt: 5, videoCheckById: randomUUID() },
+          { attempt: 5, videoCheckAt: WHEN },
           { attempt: 5, faceMatchScore: 1 },
           { attempt: 5, reviewNote: 'x' },
           { attempt: 5, createdAt: WHEN },

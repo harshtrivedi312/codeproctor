@@ -2,6 +2,7 @@
 // or SERVICE session scope (session-scope-args.ts, session-scope-map.ts, candidate-relations.ts).
 // No database: every model and operation is checked on the rewritten arguments. The same rules against
 // a real Postgres are in cs4-session-isolation.spec.ts. NFR-04, TC-008.
+import { assertNoRelationVectors } from './candidate-relations';
 import { OrgScopeViolationError } from './errors';
 import type { CandidateFacts, SessionActor } from './org-context';
 import { applyOrgScope, SCOPED_OPERATIONS } from './org-scope-args';
@@ -1075,7 +1076,8 @@ describe('CS-4.5 a CANDIDATE scope refuses relation vectors 1 to 5 (NFR-04, TC-0
 
   it('TC-008 the refusal covers every relation field of every model a candidate can query', () => {
     // Every relation side in the relation table, on every allowlisted model, in include, select,
-    // where and orderBy. 116 relation fields exist in all; those of the allowed models are walked.
+    // where and orderBy. 118 relation fields exist in all (59 foreign keys, both sides); those of the
+    // allowed models are walked.
     let checked = 0;
     for (const model of Object.keys(CANDIDATE_MODELS) as ModelName[]) {
       if (CANDIDATE_MODELS[model]?.kind === 'grant-only') continue;
@@ -1092,6 +1094,64 @@ describe('CS-4.5 a CANDIDATE scope refuses relation vectors 1 to 5 (NFR-04, TC-0
       }
     }
     expect(checked).toBeGreaterThan(40);
+  });
+
+  it('TC-008 FR-305 ADR 0015 4: the relations of identity_checks.video_check_by (IdentityCheck.videoCheckBy and User.videoCheckedIdentityChecks) are refused in vectors 1 to 5, as reviewedBy is', () => {
+    // IdentityCheck is on the CANDIDATE allowlist: the relation is refused through the real entry point,
+    // for every operation a candidate may attempt on it.
+    for (const field of ['videoCheckBy', 'reviewedBy'] as const) {
+      for (const operation of candidateOperations('IdentityCheck')) {
+        const base = { where: { id: 'x' }, data: {}, create: {}, update: {} };
+        expect(() =>
+          run('IdentityCheck', operation, { ...base, include: { [field]: true } }),
+        ).toThrow(new RegExp(`IdentityCheck\\.${field} in include \\(vector 1\\)`));
+        expect(() =>
+          run('IdentityCheck', operation, {
+            ...base,
+            select: { [field]: { select: { id: true } } },
+          }),
+        ).toThrow(new RegExp(`IdentityCheck\\.${field} in select \\(vector 2\\)`));
+      }
+      expect(() =>
+        run('IdentityCheck', 'findMany', { where: { [field]: { is: { orgId: 'x' } } } }),
+      ).toThrow(new RegExp(`IdentityCheck\\.${field} in where \\(vector 3\\)`));
+      expect(() =>
+        run('IdentityCheck', 'findMany', { where: { NOT: [{ [field]: { isNot: null } }] } }),
+      ).toThrow(/vector 3/);
+      expect(() =>
+        run('IdentityCheck', 'findMany', { orderBy: { [field]: { email: 'asc' } } }),
+      ).toThrow(new RegExp(`IdentityCheck\\.${field} in orderBy \\(vector 4\\)`));
+    }
+    // The user side is not on the allowlist (a candidate cannot query users at all), so the pure check
+    // is called directly: the back-relations are in the relation table, so no path reaches them.
+    for (const field of ['videoCheckedIdentityChecks', 'reviewedIdentityChecks'] as const) {
+      expect(() =>
+        assertNoRelationVectors('User', 'findMany', { include: { [field]: true } }),
+      ).toThrow(/vector 1/);
+      expect(() =>
+        assertNoRelationVectors('User', 'findMany', { select: { [field]: true } }),
+      ).toThrow(/vector 2/);
+      expect(() =>
+        assertNoRelationVectors('User', 'findMany', { where: { [field]: { some: {} } } }),
+      ).toThrow(/vector 3/);
+      expect(() =>
+        assertNoRelationVectors('User', 'findMany', { orderBy: { [field]: { _count: 'desc' } } }),
+      ).toThrow(/vector 4/);
+    }
+    // Both new fields really are in the relation table, one each side of the key (a typo above would
+    // otherwise pass as "not a relation": the column named the same way is not refused).
+    expect(
+      FK_CLASSES.some(
+        (fk) =>
+          fk.model === 'IdentityCheck' &&
+          fk.field === 'videoCheckBy' &&
+          fk.target === 'User' &&
+          fk.back === 'videoCheckedIdentityChecks',
+      ),
+    ).toBe(true);
+    expect(() =>
+      assertNoRelationVectors('IdentityCheck', 'findMany', { select: { videoCheckDone: true } }),
+    ).not.toThrow();
   });
 
   it('TC-008 vector 6, the fluent API, reaches the extension as a relation select, which vector 2 refuses', () => {
