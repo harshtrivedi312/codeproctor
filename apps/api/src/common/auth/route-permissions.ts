@@ -65,6 +65,19 @@ const questionRead = {
 } as const;
 const questionCreate = { roles: ['SUPER_ADMIN', 'AUTHOR'], permission: 'question:create' } as const;
 const questionUpdate = { roles: ['SUPER_ADMIN', 'AUTHOR'], permission: 'question:update' } as const;
+const questionValidate = {
+  roles: ['SUPER_ADMIN', 'AUTHOR'],
+  permission: 'question:validate',
+} as const;
+const aiRefRead = { roles: ['SUPER_ADMIN', 'AUTHOR'], permission: 'ai_reference:read' } as const;
+const aiRefCreate = {
+  roles: ['SUPER_ADMIN', 'AUTHOR'],
+  permission: 'ai_reference:create',
+} as const;
+const aiRefSupersede = {
+  roles: ['SUPER_ADMIN', 'AUTHOR'],
+  permission: 'ai_reference:supersede',
+} as const;
 const userManage = { roles: SUPER_ADMIN, permission: 'user:manage' } as const;
 const RECRUITER_ADMIN: readonly UserRole[] = ['SUPER_ADMIN', 'RECRUITER'];
 
@@ -129,4 +142,11 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'PUT /questions/:id/versions/:version/variants/:variantId/test-cases/:testCaseId': questionUpdate,
   'DELETE /questions/:id/versions/:version/variants/:variantId/test-cases/:testCaseId':
     questionUpdate,
+  // Reference validation (FR-203, BE-04 slice 4c): the report is author data, so the status read
+  // needs question:validate too. AI reference solutions (ADR 0005 AI-1) are never for recruiters.
+  'POST /questions/:id/validate': questionValidate,
+  'GET /questions/:id/validation': questionValidate,
+  'GET /questions/:id/versions/:version/ai-references': aiRefRead,
+  'POST /questions/:id/versions/:version/ai-references': aiRefCreate,
+  'POST /questions/:id/versions/:version/ai-references/:aiReferenceId/supersede': aiRefSupersede,
 };

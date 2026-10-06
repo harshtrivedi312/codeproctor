@@ -23,7 +23,7 @@
 //         metadata ONLY {method, route '/api/v1/admin/users/:userId/invite'}, NOT @Audited (no `audited`
 //         flag in the matrix). Listed ONLY when the backend's ROUTE_PERMISSIONS has the key (see below).
 //
-// BE-04 (question bank): 18 routes (4a: 11 under /questions, 4b: 7 variant routes), listed below in the same table so the
+// BE-04 (question bank): 23 routes (4a: 11 under /questions, 4b: 7 variant routes, 4c: validate, validation status and 3 AI reference routes), listed below in the same table so the
 // generic 401, 403, cross-org 404, effect and audit tests drive them. The audit rows are written by
 // the service in the mutation's own transaction (NOT @Audited, so no `audited` flag in the matrix):
 // entity `question`, entity id the question, metadata of ids and changed field NAMES only (never
@@ -420,11 +420,21 @@ export async function questionFixture(
 }
 
 /**
- * Stands in for the validate job (BE-04 slice 4c, not built): records a passing validation of the
+ * Stands in for a PASSED validate run (BE-04 slice 4c): records a passing validation of the
  * CURRENT content of the latest version of a question, directly in the database, bound to the
  * revision the backend computes. Publish of a coding question needs it (FR-203, fails closed).
  */
 export async function markValidated(h: Harness, questionId: string): Promise<void> {
+  // These tests are about other rules than the AI reference gate (ADR 0005 AI-5, BE-04c): switch
+  // it off for the question's org so a publish needs only the validation result.
+  const { orgId } = await h.owner.question.findUniqueOrThrow({ where: { id: questionId } });
+  const org = await h.owner.organization.findUniqueOrThrow({ where: { id: orgId } });
+  const settings = (org.settings ?? {}) as Record<string, unknown>;
+  const aiReferences = (settings.aiReferences ?? {}) as Record<string, unknown>;
+  await h.owner.organization.update({
+    where: { id: orgId },
+    data: { settings: { ...settings, aiReferences: { ...aiReferences, minAssistants: 0 } } },
+  });
   const head = await h.owner.questionVersion.findFirstOrThrow({
     where: { questionId },
     orderBy: { version: 'desc' },
@@ -466,6 +476,8 @@ const createBody = (slug: string): Record<string, unknown> => ({
 
 const QUESTIONS = '/questions';
 const VARIANT_SECRET = 'QA-VARIANT-PARAM';
+const AI_SECRET = 'QA-AI-SOLUTION-SECRET';
+const AI_PROMPT = 'QA-AI-PROMPT-SECRET';
 const OVERRIDE_IN = 'QA-OVERRIDE-IN';
 const OVERRIDE_OUT = 'QA-OVERRIDE-OUT';
 
@@ -920,6 +932,140 @@ const BE04_ROUTES: Be03Route[] = [
         secrets: qSecrets,
         unchanged: async () =>
           (await h.owner.variantTestCase.count({ where: { variantId: f.variantId } })) === 1,
+      };
+    },
+  }),
+  q04({
+    id: 'questions-validate',
+    method: 'POST',
+    template: `${QUESTIONS}/:id/validate`,
+    permission: 'question:validate',
+    audit: { action: 'QUESTION_VALIDATION_STARTED', entityType: 'question' },
+    metadataKeys: ['variants', 'version'],
+    metadataShape: { variants: isInt, version: isInt },
+    mutating: true,
+    ok: [202],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/validate`,
+        body: {},
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () =>
+          (await h.owner.auditLog.count({
+            where: { entityId: f.id, action: 'QUESTION_VALIDATION_STARTED' },
+          })) === 0,
+      };
+    },
+  }),
+  q04({
+    id: 'questions-validation-status',
+    method: 'GET',
+    template: `${QUESTIONS}/:id/validation`,
+    permission: 'question:validate',
+    audit: null,
+    mutating: false,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/validation`,
+        entityId: f.id,
+        secrets: [],
+        unchanged: noop,
+      };
+    },
+  }),
+  q04({
+    id: 'ai-references-list',
+    method: 'GET',
+    template: `${QUESTIONS}/:id/versions/:version/ai-references`,
+    permission: 'ai_reference:read',
+    audit: null,
+    mutating: false,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/ai-references`,
+        entityId: f.id,
+        secrets: [],
+        unchanged: noop,
+      };
+    },
+  }),
+  q04({
+    id: 'ai-references-create',
+    method: 'POST',
+    template: `${QUESTIONS}/:id/versions/:version/ai-references`,
+    permission: 'ai_reference:create',
+    audit: { action: 'AI_REFERENCE_CREATED', entityType: 'question' },
+    metadataKeys: ['aiReferenceId', 'language', 'variantId', 'version'],
+    metadataShape: {
+      aiReferenceId: isUuid,
+      language: (v) => v === 'python',
+      variantId: (v) => v === null,
+      version: isInt,
+    },
+    mutating: true,
+    ok: [201],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/ai-references`,
+        body: {
+          assistant: 'QA-ASSISTANT',
+          modelLabel: 'qa-model',
+          language: 'python',
+          solutionCode: AI_SECRET,
+          promptText: AI_PROMPT,
+        },
+        entityId: f.id,
+        secrets: [...qSecrets, AI_SECRET, AI_PROMPT, 'QA-ASSISTANT'],
+        unchanged: async () =>
+          (await h.owner.aiReferenceSolution.count({
+            where: { questionVersionId: f.versionIds[1] as string },
+          })) === 0,
+      };
+    },
+  }),
+  q04({
+    id: 'ai-references-supersede',
+    method: 'POST',
+    template: `${QUESTIONS}/:id/versions/:version/ai-references/:aiReferenceId/supersede`,
+    permission: 'ai_reference:supersede',
+    audit: { action: 'AI_REFERENCE_SUPERSEDED', entityType: 'question' },
+    metadataKeys: ['aiReferenceId', 'replacementId', 'version'],
+    metadataShape: { aiReferenceId: isUuid, replacementId: (v) => v === null, version: isInt },
+    mutating: true,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      const collector = await h.owner.user.findFirstOrThrow({
+        where: { orgId },
+        orderBy: { createdAt: 'asc' },
+      });
+      const row = await h.owner.aiReferenceSolution.create({
+        data: {
+          questionVersionId: f.versionIds[1] as string,
+          assistant: 'QA-ASSISTANT',
+          modelLabel: 'qa-model',
+          language: 'python',
+          solutionCode: AI_SECRET,
+          promptText: AI_PROMPT,
+          collectedAt: new Date(),
+          collectedById: collector.id,
+        },
+      });
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/ai-references/${row.id}/supersede`,
+        body: {},
+        entityId: f.id,
+        secrets: [...qSecrets, AI_SECRET, AI_PROMPT, 'QA-ASSISTANT'],
+        unchanged: async () =>
+          (await h.owner.aiReferenceSolution.findUniqueOrThrow({ where: { id: row.id } }))
+            .supersededAt === null,
       };
     },
   }),

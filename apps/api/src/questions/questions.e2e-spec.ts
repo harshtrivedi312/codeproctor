@@ -140,6 +140,13 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
    * of the latest version, directly in the database.
    */
   async function markValidated(questionId: string, revision?: string): Promise<void> {
+    // These tests are about content rules, not the AI reference gate (ADR 0005 AI-5): switch it off
+    // for the question's org. The gate has its own tests (question-validation.e2e-spec.ts).
+    const { orgId } = await owner.question.findUniqueOrThrow({ where: { id: questionId } });
+    await owner.organization.update({
+      where: { id: orgId },
+      data: { settings: { aiReferences: { minAssistants: 0 } } },
+    });
     const head = await owner.questionVersion.findFirstOrThrow({
       where: { questionId },
       orderBy: { version: 'desc' },
@@ -2485,7 +2492,7 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       typeof import('../common/auth/route-registry')
     >('../common/auth/route-registry');
     const routes = listRoutes(app.get(ModulesContainer));
-    expect(routes.filter((r) => r.key.includes('/questions')).length).toBe(18);
+    expect(routes.filter((r) => r.key.includes('/questions')).length).toBe(23);
     expect(matrixProblems(routes)).toEqual([]);
   });
 });
