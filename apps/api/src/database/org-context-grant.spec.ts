@@ -209,6 +209,38 @@ describe('OrgContextService.withGrant (ADR 0013 CS-4.4; NFR-04, TC-008)', () => 
       });
     });
 
+    it("TC-008 N1: the columns are copied once and frozen before they are checked: the caller's array, or a Proxy that answers differently on every read, cannot change them after the check", async () => {
+      await asCandidate(() => {
+        // The caller's own array is not the grant's: changing it afterwards changes nothing.
+        const mine = ['hmacKeyEnc'];
+        const seen = orgContext.withGrant({ model: 'Session', columns: mine, ids: [SID] }, () => {
+          mine.push('deviceInfo');
+          mine[0] = 'riskScore';
+          return orgContext.current()?.grant;
+        });
+        expect(seen?.columns).toEqual(['hmacKeyEnc']);
+        expect(Object.isFrozen(seen?.columns)).toBe(true);
+        expect(mine).toEqual(['riskScore', 'deviceInfo']);
+        // A Proxy over the list that is valid on its first read of each index and not on the later ones.
+        let reads = 0;
+        const flipping = new Proxy(['hmacKeyEnc'], {
+          get(target, key, receiver) {
+            if (key === '0') {
+              reads += 1;
+              return reads === 1 ? 'hmacKeyEnc' : 'riskScore';
+            }
+            return Reflect.get(target, key, receiver) as unknown;
+          },
+        });
+        const granted = orgContext.withGrant(
+          { model: 'Session', columns: flipping, ids: [SID] },
+          () => orgContext.current()?.grant,
+        );
+        expect(granted?.columns).toEqual(['hmacKeyEnc']);
+        expect(reads).toBe(1);
+      });
+    });
+
     it('TC-008 the messages carry no id', async () => {
       await asCandidate(() => {
         let message = '';

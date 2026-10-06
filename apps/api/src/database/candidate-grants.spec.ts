@@ -170,6 +170,36 @@ describe('the eleven CS-4.4 grant sites (ADR 0013 CS-4.4; ADR 0006 section 8.5; 
   });
 });
 
+describe('the grant-only models name a real grant site (review of #185, N2; NFR-04, TC-008)', () => {
+  it('TC-008 every grantSite in CANDIDATE_MODELS is the name of a GRANT_SITES entry for that very model', () => {
+    const grantOnly = Object.entries(CANDIDATE_MODELS).filter(
+      ([, rule]) => rule?.kind === 'grant-only',
+    );
+    expect(grantOnly.map(([model]) => model).sort()).toEqual(['ConsentText', 'TestQuestion']);
+    for (const [model, rule] of grantOnly) {
+      if (rule?.kind !== 'grant-only') throw new Error('unreachable');
+      const site = GRANT_SITES.find((candidate) => candidate.name === rule.grantSite);
+      expect({ model, grantSite: rule.grantSite, found: site !== undefined }).toEqual({
+        model,
+        grantSite: rule.grantSite,
+        found: true,
+      });
+      expect(site?.model).toBe(model);
+      expect(site?.mode).toBe('rows');
+    }
+  });
+
+  it('TC-008 and every grant-only model has exactly one rows site, whose columns are the whole CS-4.4 read column of the model', () => {
+    for (const model of ['ConsentText', 'TestQuestion'] as const) {
+      const sites = GRANT_SITES.filter((candidate) => candidate.model === model);
+      expect(sites).toHaveLength(1);
+      expect([...(sites[0]?.columns ?? [])].sort()).toEqual(
+        [...(CANDIDATE_READ[model]?.read ?? [])].sort(),
+      );
+    }
+  });
+});
+
 describe('a grant unlocks the READ of an explicit-only column, on its model only (NFR-04, TC-008)', () => {
   const explicitSites = GRANT_SITES.filter((s) =>
     s.columns.some((c) => CANDIDATE_READ[s.model]?.explicit.includes(c)),

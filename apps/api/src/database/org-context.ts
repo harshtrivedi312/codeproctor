@@ -259,19 +259,25 @@ function grantIds(site: GrantSite, ids: unknown): (string | bigint)[] {
 }
 
 /** The one grant site of the model that names every requested column, or a throw. */
-function grantSiteOf(request: unknown): { site: GrantSite; columns: string[] } {
+function grantSiteOf(request: unknown): { site: GrantSite; columns: readonly string[] } {
   if (typeof request !== 'object' || request === null) {
     throw new OrgScopeViolationError('withGrant needs { model, columns, ids }.');
   }
-  const { model, columns } = request as Partial<GrantRequest>;
+  const { model, columns: given } = request as Partial<GrantRequest>;
   if (typeof model !== 'string' || !GRANT_SITES.some((site) => site.model === model)) {
     throw new OrgScopeViolationError(
       'withGrant: this model has no grant site in ADR 0013 CS-4.4 (the explicit-only and grant-only ' +
         'models only).',
     );
   }
+  // Copied first, once, and frozen: what is validated below is the very list the grant carries, so the
+  // caller's array (or a Proxy that answers differently on each read) cannot change between the check and
+  // the grant (review of #185, N1).
+  const columns: readonly unknown[] | undefined = Array.isArray(given)
+    ? Object.freeze(Array.from(given as readonly unknown[]))
+    : undefined;
   if (
-    !Array.isArray(columns) ||
+    columns === undefined ||
     columns.length === 0 ||
     !columns.every((column): column is string => typeof column === 'string') ||
     new Set(columns).size !== columns.length
@@ -280,10 +286,11 @@ function grantSiteOf(request: unknown): { site: GrantSite; columns: string[] } {
       `withGrant (${model}) needs columns: a non-empty list of distinct column names.`,
     );
   }
+  const names = columns;
   // A grant names the columns of ONE site, so it cannot join the columns of two services.
   const site = GRANT_SITES.find(
     (candidate) =>
-      candidate.model === model && columns.every((column) => candidate.columns.includes(column)),
+      candidate.model === model && names.every((column) => candidate.columns.includes(column)),
   );
   if (site === undefined) {
     throw new OrgScopeViolationError(
@@ -291,7 +298,7 @@ function grantSiteOf(request: unknown): { site: GrantSite; columns: string[] } {
         'unlocks a subset of ONE site columns, never a column outside the sites or columns of two sites.',
     );
   }
-  return { site, columns: [...columns] };
+  return { site, columns: names };
 }
 
 function isEmptyStore(store: ScopeStore | undefined): boolean {
@@ -414,7 +421,7 @@ export class OrgContextService implements ScopeSource {
       model: site.model,
       site: site.name,
       mode: site.mode,
-      columns: Object.freeze(columns),
+      columns,
       ids: Object.freeze(ids),
       get active(): boolean {
         return liveGrants.has(grant);

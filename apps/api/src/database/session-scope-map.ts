@@ -610,7 +610,7 @@ export const CANDIDATE_MODELS: Readonly<Partial<Record<ModelName, CandidateModel
     TestSection: { kind: 'read', filter: 'sections' },
     Question: { kind: 'read', filter: 'questions' },
     // Readable only under a grant of that model (CS-4.3): `id IN grant.ids`, and the grant's columns.
-    ConsentText: { kind: 'grant-only', grantSite: 'ConsentService' },
+    ConsentText: { kind: 'grant-only', grantSite: 'ConsentService (consent text)' },
     TestQuestion: {
       kind: 'grant-only',
       grantSite: 'SectionGateService (step 2)',
