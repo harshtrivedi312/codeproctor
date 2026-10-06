@@ -6,6 +6,7 @@ import { AuthProvider } from '@/features/auth/auth-provider';
 import { beginSession, publishSession } from '@/lib/auth-session';
 import { resetMockAdminState } from '@/mocks/admin-handlers';
 import { resetMockQuestionState } from '@/mocks/question-handlers';
+import { resetMockInvitationState } from '@/mocks/invitation-handlers';
 import { resetMockTestState } from '@/mocks/test-handlers';
 import { resetMockAuthState, seedMockRefresh } from '@/mocks/auth-handlers';
 
@@ -20,6 +21,7 @@ export function resetAuthTestState(): void {
   resetMockAdminState();
   resetMockQuestionState();
   resetMockTestState();
+  resetMockInvitationState();
 }
 
 export function renderWithAuth(ui: React.ReactElement) {

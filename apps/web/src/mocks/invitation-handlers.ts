@@ -1,0 +1,451 @@
+import { hasPermission } from '@codeproctor/shared';
+import { delay, http, HttpResponse } from 'msw';
+import type { Schemas } from '@/lib/api/client';
+import { apiBaseUrl } from '@/lib/env';
+import {
+  ensureMockCandidate,
+  mockCandidateExists,
+  mockCandidateIdByEmail,
+  mockCandidateIds,
+  setCandidateEnricher,
+} from './admin-handlers';
+import { mockRoleFromToken } from './auth-handlers';
+import { markTestInvited, mockTestExists, mockTestName } from './test-handlers';
+
+/*
+ * WEB-ONLY mock of the invitations and candidate status routes (FR-303..FR-305) [BE-06b]. The API
+ * has no invitations module yet: the paths, bodies, limits and error words below are the web's
+ * proposal (docs/followups/frontend.md), built from fsd.md, ADR 0002 and ADR 0015. In memory; fake
+ * people only. Never logs a row. Status and times only: no scores, flags or verdicts (C-28).
+ */
+
+type Status = Schemas['SessionStatus'];
+type Step = Schemas['StatusStep'];
+
+export interface InvitationScenario {
+  /** ADR 0015: the global flag for the REFUSED_BIOMETRIC_PROCESSING reason; off answers 422 REASON_NOT_ENABLED. */
+  biometricRefusalEnabled: boolean;
+  /** Invitations one organisation may create per hour (the API will have a limit; its size is unknown). */
+  limitPerHour: number;
+}
+
+interface MockInvitation {
+  id: string;
+  testId: string;
+  candidateId: string;
+  status: Status;
+  windowStart: string;
+  windowEnd: string;
+  history: Step[];
+  accommodations: Schemas['InvitationAccommodations'] | null;
+  createdAt: string;
+}
+interface State {
+  invitations: MockInvitation[];
+  seq: number;
+  usedThisHour: number;
+  scenario: InvitationScenario;
+}
+
+const TERMINAL: readonly Status[] = ['EXPIRED', 'DECLINED', 'COMPLETED'];
+const MAX_BULK = 200;
+const MOCK_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/i;
+const DETECTORS = [
+  'FACE',
+  'GAZE',
+  'OBJECT',
+  'VOICE',
+  'MULTI_MONITOR',
+  'DEVTOOLS',
+  'VIRTUAL_CAMERA',
+  'EXTENSION',
+  'SIDE_CAMERA',
+];
+const REASONS = ['REFUSED_BIOMETRIC_PROCESSING', 'CANNOT_COMPLETE_ID_CHECK', 'OTHER'];
+
+/** The statuses a session passes on the way to `status` (ADR 0002), with times counted back from `hoursAgo`. */
+function pathTo(status: Status, hoursAgo: number): Step[] {
+  const normal: Status[] = [
+    'INVITED',
+    'OPENED',
+    'CONSENTED',
+    'VERIFIED',
+    'IN_PROGRESS',
+    'SUBMITTED',
+    'GRADED',
+    'UNDER_REVIEW',
+    'COMPLETED',
+    'APPEALED',
+  ];
+  let chain: Status[];
+  if (status === 'EXPIRED') chain = ['INVITED', 'EXPIRED'];
+  else if (status === 'DECLINED') chain = ['INVITED', 'OPENED', 'DECLINED'];
+  else if (status === 'PAUSED')
+    chain = ['INVITED', 'OPENED', 'CONSENTED', 'VERIFIED', 'IN_PROGRESS', 'PAUSED'];
+  else chain = normal.slice(0, normal.indexOf(status) + 1);
+  return chain.map((st, i) => ({
+    status: st,
+    at: new Date(Date.now() - (hoursAgo - (i * hoursAgo) / chain.length) * 3_600_000).toISOString(),
+  }));
+}
+
+function seed(): State {
+  const statuses: Status[] = [
+    'COMPLETED',
+    'APPEALED',
+    'UNDER_REVIEW',
+    'COMPLETED',
+    'SUBMITTED',
+    'IN_PROGRESS',
+    'PAUSED',
+    'VERIFIED',
+    'CONSENTED',
+    'OPENED',
+    'INVITED',
+    'EXPIRED',
+    'DECLINED',
+    'GRADED',
+  ];
+  const ids = mockCandidateIds();
+  const now = Date.now();
+  return {
+    seq: 1,
+    usedThisHour: 0,
+    scenario: { biometricRefusalEnabled: true, limitPerHour: 1000 },
+    invitations: ids.slice(0, statuses.length).map((candidateId, i) => ({
+      id: `inv-${i + 1}`,
+      testId: 'test-backend',
+      candidateId,
+      status: statuses[i] as Status,
+      windowStart: new Date(now - (10 + i) * 86_400_000).toISOString(),
+      windowEnd: new Date(now + (7 - i) * 86_400_000).toISOString(),
+      history: pathTo(statuses[i] as Status, 24 * (i + 2)),
+      accommodations: null,
+      createdAt: new Date(now - (11 + i) * 86_400_000).toISOString(),
+    })),
+  };
+}
+
+let state: State = seed();
+export function resetMockInvitationState(): void {
+  state = seed();
+}
+/** Tests and demos: choose how the API's global switches and limits behave. */
+export function setInvitationScenario(scenario: Partial<InvitationScenario>): void {
+  state.scenario = { ...state.scenario, ...scenario };
+}
+export const mockInvitationCount = (): number => state.invitations.length;
+
+const TITLES: Record<number, string> = {
+  400: 'Bad Request',
+  401: 'Unauthorized',
+  403: 'Forbidden',
+  404: 'Not Found',
+  409: 'Conflict',
+  422: 'Unprocessable Entity',
+  429: 'Too Many Requests',
+};
+const problem = (
+  status: number,
+  detail: string,
+  errors?: string[],
+  code?: string,
+  headers?: Record<string, string>,
+) =>
+  HttpResponse.json(
+    {
+      type: 'about:blank',
+      title: TITLES[status] ?? 'Error',
+      status,
+      detail: errors ? 'Request validation failed' : detail,
+      instance: '/mock',
+      traceId: 'mock-trace',
+      ...(errors ? { errors } : {}),
+      ...(code ? { code } : {}),
+    },
+    { status, ...(headers ? { headers } : {}) },
+  );
+
+function allowed(request: Request): Response | null {
+  const role = mockRoleFromToken(request.headers.get('authorization'));
+  if (!role) return problem(401, 'Sign in again.');
+  return hasPermission(role, 'invitation:create')
+    ? null
+    : problem(403, 'Your role does not allow this.');
+}
+
+const isInt = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n);
+const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+const EMAIL = /^[^\s@"(),:;<>[\\\]]+@[^\s@"(),:;<>[\\\]]+\.[^\s@"(),:;<>[\\\]]{2,}$/;
+const validEmail = (v: unknown): v is string =>
+  typeof v === 'string' && v.length <= 254 && EMAIL.test(v) && !v.includes('..');
+const unknownKeys = (b: Record<string, unknown>, keys: readonly string[], at = ''): string[] =>
+  Object.keys(b)
+    .filter((k) => !keys.includes(k))
+    .map((k) => `property ${at}${k} should not exist`);
+
+function candidateProblems(raw: unknown, at: string): string[] {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
+    return [`${at} must be an object`];
+  const c = raw as Record<string, unknown>;
+  const out = unknownKeys(c, ['email', 'name', 'externalRef'], `${at}.`);
+  if (!validEmail(typeof c.email === 'string' ? c.email.trim() : c.email))
+    out.push(`${at}.email must be an email`);
+  if (typeof c.name !== 'string' || c.name.trim().length < 1 || c.name.trim().length > 200)
+    out.push(`${at}.name must be 1 to 200 characters`);
+  if (
+    c.externalRef !== undefined &&
+    (typeof c.externalRef !== 'string' || c.externalRef.length > 200)
+  )
+    out.push(`${at}.externalRef must be at most 200 characters`);
+  return out;
+}
+
+function accommodationProblems(raw: unknown): string[] {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
+    return ['accommodations must be an object'];
+  const a = raw as Record<string, unknown>;
+  const out = unknownKeys(
+    a,
+    ['extraTimePct', 'disabledDetectors', 'allowedAssistiveTools', 'notes', 'identityCheckWaiver'],
+    'accommodations.',
+  );
+  if (
+    a.extraTimePct !== undefined &&
+    (!isInt(a.extraTimePct) || a.extraTimePct < 0 || a.extraTimePct > 200)
+  )
+    out.push('accommodations.extraTimePct must be an integer from 0 to 200');
+  if (a.disabledDetectors !== undefined) {
+    const d = a.disabledDetectors;
+    if (
+      !Array.isArray(d) ||
+      d.some((x) => !DETECTORS.includes(String(x))) ||
+      new Set(d).size !== d.length
+    )
+      out.push('accommodations.disabledDetectors must be unique detector names');
+  }
+  if (a.allowedAssistiveTools !== undefined) {
+    const t = a.allowedAssistiveTools;
+    if (
+      !Array.isArray(t) ||
+      t.length > 10 ||
+      t.some((x) => typeof x !== 'string' || x.length < 1 || x.length > 80)
+    )
+      out.push(
+        'accommodations.allowedAssistiveTools must be at most 10 names of 1 to 80 characters',
+      );
+  }
+  if (a.notes !== undefined && (typeof a.notes !== 'string' || a.notes.length > 1000))
+    out.push('accommodations.notes must be at most 1000 characters');
+  if (a.identityCheckWaiver !== undefined) {
+    const w = a.identityCheckWaiver;
+    if (typeof w !== 'object' || w === null)
+      out.push('accommodations.identityCheckWaiver must be an object');
+    else {
+      const r = w as Record<string, unknown>;
+      out.push(
+        ...unknownKeys(r, ['reasonCode', 'reasonNote'], 'accommodations.identityCheckWaiver.'),
+      );
+      if (!REASONS.includes(str(r.reasonCode)))
+        out.push(
+          'accommodations.identityCheckWaiver.reasonCode must be one of the following values: ' +
+            REASONS.join(', '),
+        );
+      if (r.reasonCode === 'OTHER') {
+        if (
+          typeof r.reasonNote !== 'string' ||
+          r.reasonNote.trim().length < 1 ||
+          r.reasonNote.length > 500
+        )
+          out.push(
+            'accommodations.identityCheckWaiver.reasonNote is required for OTHER: 1 to 500 characters',
+          );
+      } else if (r.reasonNote !== undefined)
+        out.push('accommodations.identityCheckWaiver.reasonNote is allowed only with OTHER');
+    }
+  }
+  return out;
+}
+
+function windowProblems(b: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const k of ['windowStart', 'windowEnd'] as const) {
+    if (typeof b[k] !== 'string' || Number.isNaN(Date.parse(b[k])))
+      out.push(`${k} must be an ISO 8601 date string`);
+  }
+  if (out.length === 0 && Date.parse(b.windowEnd as string) <= Date.parse(b.windowStart as string))
+    out.push('windowEnd must be after windowStart');
+  return out;
+}
+
+const openFor = (testId: string, candidateId: string): boolean =>
+  state.invitations.some(
+    (i) => i.testId === testId && i.candidateId === candidateId && !TERMINAL.includes(i.status),
+  );
+
+function create(
+  testId: string,
+  c: { email: string; name: string },
+  windowStart: string,
+  windowEnd: string,
+  accommodations: Schemas['InvitationAccommodations'] | null,
+): MockInvitation {
+  const { id: candidateId } = ensureMockCandidate(c.email.trim(), c.name.trim());
+  state.seq += 1;
+  const now = new Date().toISOString();
+  const inv: MockInvitation = {
+    id: `inv-new-${state.seq}`,
+    testId,
+    candidateId,
+    status: 'INVITED',
+    windowStart,
+    windowEnd,
+    history: [{ status: 'INVITED', at: now }],
+    accommodations,
+    createdAt: now,
+  };
+  state.invitations.push(inv);
+  markTestInvited(testId);
+  return inv;
+}
+
+export function createInvitationHandlers(options: { latencyMs: number }) {
+  const wait = () => (options.latencyMs > 0 ? delay(options.latencyMs) : undefined);
+  setCandidateEnricher((id) => {
+    const mine = state.invitations
+      .filter((i) => i.candidateId === id)
+      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    return { invitationCount: mine.length, latestStatus: mine[0]?.status ?? null };
+  });
+  const tests = `${apiBaseUrl}/v1/tests`;
+  return [
+    http.post(`${tests}/:testId/invitations`, async ({ request, params }) => {
+      const denied = allowed(request);
+      if (denied) return denied;
+      const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+      const dto = [
+        ...unknownKeys(b, ['candidate', 'windowStart', 'windowEnd', 'accommodations']),
+        ...candidateProblems(b.candidate, 'candidate'),
+        ...windowProblems(b),
+        ...(b.accommodations === undefined ? [] : accommodationProblems(b.accommodations)),
+        ...(MOCK_ID.test(String(params.testId)) ? [] : ['testId must be a UUID']),
+      ];
+      if (dto.length) return problem(400, 'x', dto);
+      await wait();
+      const testId = String(params.testId);
+      if (!mockTestExists(testId)) return problem(404, 'Test not found.');
+      if (Date.parse(b.windowEnd as string) <= Date.now())
+        return problem(422, 'The window has already closed.');
+      const acc = (b.accommodations as Schemas['InvitationAccommodations'] | undefined) ?? null;
+      if (
+        acc?.identityCheckWaiver?.reasonCode === 'REFUSED_BIOMETRIC_PROCESSING' &&
+        !state.scenario.biometricRefusalEnabled
+      ) {
+        return problem(
+          422,
+          'This waiver reason is not enabled yet.',
+          undefined,
+          'REASON_NOT_ENABLED',
+        );
+      }
+      const cand = b.candidate as { email: string; name: string };
+      const existing = mockCandidateIdByEmail(cand.email.trim());
+      if (existing && openFor(testId, existing))
+        return problem(409, 'This candidate already has an open invitation to this test.');
+      if (state.usedThisHour + 1 > state.scenario.limitPerHour) {
+        return problem(
+          429,
+          'Too many invitations this hour. Try again later.',
+          undefined,
+          undefined,
+          { 'Retry-After': '1800' },
+        );
+      }
+      state.usedThisHour += 1;
+      const inv = create(testId, cand, b.windowStart as string, b.windowEnd as string, acc);
+      return HttpResponse.json(
+        {
+          id: inv.id,
+          testId,
+          candidateId: inv.candidateId,
+          status: inv.status,
+          windowStart: inv.windowStart,
+          windowEnd: inv.windowEnd,
+        },
+        { status: 201 },
+      );
+    }),
+
+    http.post(`${tests}/:testId/invitations/bulk`, async ({ request, params }) => {
+      const denied = allowed(request);
+      if (denied) return denied;
+      const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+      const dto = [...unknownKeys(b, ['rows', 'windowStart', 'windowEnd']), ...windowProblems(b)];
+      if (!Array.isArray(b.rows) || b.rows.length < 1 || b.rows.length > MAX_BULK)
+        dto.push(`rows must contain 1 to ${MAX_BULK} items`);
+      else (b.rows as unknown[]).forEach((r, i) => dto.push(...candidateProblems(r, `rows.${i}`)));
+      if (dto.length) return problem(400, 'x', dto);
+      await wait();
+      const testId = String(params.testId);
+      if (!mockTestExists(testId)) return problem(404, 'Test not found.');
+      if (Date.parse(b.windowEnd as string) <= Date.now())
+        return problem(422, 'The window has already closed.');
+      const rows = b.rows as { email: string; name: string }[];
+      if (state.usedThisHour + rows.length > state.scenario.limitPerHour) {
+        return problem(
+          429,
+          'Too many invitations this hour. Nothing was invited. Try again later.',
+          undefined,
+          undefined,
+          { 'Retry-After': '1800' },
+        );
+      }
+      const errors: { row: number; message: string }[] = [];
+      const seen = new Set<string>();
+      let created = 0;
+      rows.forEach((r, i) => {
+        const key = r.email.trim().toLowerCase();
+        const existing = mockCandidateIdByEmail(r.email.trim());
+        if (seen.has(key))
+          return void errors.push({
+            row: i + 1,
+            message: 'The same email appears twice in this upload.',
+          });
+        seen.add(key);
+        if (existing && openFor(testId, existing))
+          return void errors.push({
+            row: i + 1,
+            message: 'This candidate already has an open invitation to this test.',
+          });
+        create(testId, r, b.windowStart as string, b.windowEnd as string, null);
+        created += 1;
+      });
+      state.usedThisHour += created;
+      return HttpResponse.json({ created, errors });
+    }),
+
+    http.get(
+      `${apiBaseUrl}/v1/admin/candidates/:candidateId/invitations`,
+      async ({ request, params }) => {
+        const denied = allowed(request);
+        if (denied) return denied;
+        await wait();
+        const id = String(params.candidateId);
+        if (!mockCandidateExists(id)) return problem(404, 'Candidate not found.');
+        const items = state.invitations
+          .filter((i) => i.candidateId === id)
+          .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+          .map((i) => ({
+            id: i.id,
+            testId: i.testId,
+            testName: mockTestName(i.testId) ?? 'A test',
+            status: i.status,
+            windowStart: i.windowStart,
+            windowEnd: i.windowEnd,
+            history: i.history,
+          }));
+        return HttpResponse.json({ items });
+      },
+    ),
+  ];
+}
