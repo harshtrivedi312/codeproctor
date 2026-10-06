@@ -92,8 +92,14 @@ async function prepare(language, source) {
   if (compiled.status !== 0) {
     return { dir, failure: `javac failed: ${compiled.stderr.trim().slice(0, 400)}` };
   }
-  return { dir, command: 'java', args: ['-Xss64m', '-cp', 'out', 'Main'] };
+  return { dir, command: 'java', args: [...JAVA_RUN_FLAGS, '-cp', 'out', 'Main'] };
 }
+
+// The JVM's own diagnostics must never be read as the program's answer. HotSpot unified logging
+// (-Xlog) writes warnings to stdout by default, so a hsperfdata warning ("Cannot use file
+// /tmp/hsperfdata_...") once landed in the compared output. -XX:-UsePerfData stops the hsperfdata
+// file altogether, and -Xlog:all=warning:stderr sends any remaining JVM warning to stderr.
+const JAVA_RUN_FLAGS = Object.freeze(['-XX:-UsePerfData', '-Xlog:all=warning:stderr', '-Xss64m']);
 
 /** @returns {Promise<string[]>} one message per wrong answer; empty when every slot passes */
 async function check(label, language, source, slots) {
@@ -189,5 +195,30 @@ test('ADR-0007 V-2: every placeholder in a template has a value in every variant
         assert.doesNotMatch(rendered, /\{\{/, `${spec.slug} variant ${variantIndex}`);
       }
     });
+  }
+});
+
+test('FR-203 / ADR-0007 V-3: the Java runner keeps JVM diagnostics out of the compared stdout', async (t) => {
+  // A hsperfdata warning once reached stdout and failed a correct solution (main CI, 9495f05).
+  assert.ok(JAVA_RUN_FLAGS.includes('-XX:-UsePerfData'));
+  assert.ok(JAVA_RUN_FLAGS.includes('-Xlog:all=warning:stderr'));
+  if (!AVAILABLE.java) return t.skip(MISSING_TOOL.java);
+  // With the flags, a program's stdout is exactly what it prints, with no JVM output mixed in.
+  const dir = mkdtempSync(join(tmpdir(), 'codeproctor-seed-jvm-'));
+  try {
+    writeFileSync(
+      join(dir, 'Main.java'),
+      'public class Main { public static void main(String[] a) { System.out.print("42"); } }',
+    );
+    mkdirSync(join(dir, 'out'));
+    assert.equal((await runProcess('javac', ['-d', 'out', 'Main.java'], { cwd: dir })).status, 0);
+    const run = await runProcess('java', [...JAVA_RUN_FLAGS, '-cp', 'out', 'Main'], {
+      cwd: dir,
+      input: '',
+    });
+    assert.equal(run.status, 0);
+    assert.equal(run.stdout, '42');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
