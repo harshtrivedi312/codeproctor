@@ -17,6 +17,7 @@ import { TokenModule } from './common/auth/token.service';
 import { DatabaseModule } from './database/database.module';
 import { ExecutionModule } from './execution/execution.module';
 import { MailModule } from './mail/mail.module';
+import { ipBucket } from './client-errors/ip-bucket';
 import { ClientErrorsModule } from './client-errors/client-errors.module';
 import { HealthModule } from './health/health.module';
 import { InfrastructureModule } from './infrastructure/infrastructure.module';
@@ -51,7 +52,7 @@ function areaOf(context: ExecutionContext): Area {
       useFactory: (config: ConfigService<Env, true>) => {
         const ttl = config.get('THROTTLE_TTL_MS', { infer: true });
         return {
-          // Four named throttlers; each applies to exactly one area of the API.
+          // Five named throttlers; each applies to exactly one area of the API.
           throttlers: [
             {
               name: 'default',
@@ -76,6 +77,17 @@ function areaOf(context: ExecutionContext): Area {
               name: 'client-errors',
               ttl,
               limit: config.get('CLIENT_ERROR_THROTTLE_LIMIT', { infer: true }),
+              // Per IP, IPv6 bucketed by /64.
+              getTracker: (req) => ipBucket(typeof req['ip'] === 'string' ? req['ip'] : undefined),
+              skipIf: (ctx) => areaOf(ctx) !== 'client-errors',
+            },
+            {
+              // One budget for the whole instance, whoever sends: caps log volume from a botnet
+              // or a rotating IPv6 range.
+              name: 'client-errors-global',
+              ttl,
+              limit: config.get('CLIENT_ERROR_GLOBAL_LIMIT', { infer: true }),
+              getTracker: () => 'client-errors-global',
               skipIf: (ctx) => areaOf(ctx) !== 'client-errors',
             },
           ],

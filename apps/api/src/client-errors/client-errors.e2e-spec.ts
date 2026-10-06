@@ -1,3 +1,7 @@
+import { request as httpRequest } from 'node:http';
+import type { Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { gzipSync } from 'node:zlib';
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import type { App } from 'supertest/types';
@@ -7,9 +11,9 @@ import { applyEnv, applyMigrations, startInfra, TestInfra } from '../test/contai
 const JWT =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c';
 const EMAIL = 'candidate.person@private-mail.example';
-const OBJECT_KEY = 'org/42/media/sess-9/chunk-0001.webm';
+const OBJECT_KEY = 'orgs/42/sessions/sess-9/chunk-0001.webm';
 const SIGNED =
-  'https://bkt.s3.amazonaws.com/org/42/media/chunk.webm?X-Amz-Signature=SIGSECRET123&X-Amz-Credential=AKIACRED';
+  'https://bkt.s3.amazonaws.com/orgs/42/sessions/chunk.webm?X-Amz-Signature=SIGSECRET123&X-Amz-Credential=AKIACRED';
 const OTP = '482913';
 
 interface Loaded {
@@ -38,6 +42,40 @@ async function createApp(): Promise<Loaded> {
   return { app, lines };
 }
 
+const MAIN_ENV = {
+  THROTTLE_DEFAULT_LIMIT: '1000',
+  THROTTLE_AUTH_LIMIT: '1000',
+  CLIENT_ERROR_THROTTLE_LIMIT: '1000',
+  CLIENT_ERROR_GLOBAL_LIMIT: '1000',
+};
+
+interface RawResponse {
+  status: number;
+  body: string;
+}
+
+/** A POST with no Content-Length (chunked framing), written chunk by chunk. */
+async function rawChunkedPost(
+  app: INestApplication<App>,
+  path: string,
+  chunks: Buffer[],
+  headers: Record<string, string> = { 'content-type': 'application/json' },
+): Promise<RawResponse> {
+  const server = app.getHttpServer() as unknown as Server;
+  if (server.address() === null) await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  return new Promise<RawResponse>((resolve, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port, path, method: 'POST', headers }, (res) => {
+      let body = '';
+      res.on('data', (d: Buffer) => (body += d.toString('utf8')));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+    });
+    req.on('error', reject);
+    for (const c of chunks) req.write(c);
+    req.end();
+  });
+}
+
 describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
   let infra: TestInfra;
   let app: INestApplication<App>;
@@ -46,7 +84,7 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
   beforeAll(async () => {
     infra = await startInfra();
     await applyMigrations(infra);
-    applyEnv(infra, { THROTTLE_DEFAULT_LIMIT: '1000', CLIENT_ERROR_THROTTLE_LIMIT: '10' });
+    applyEnv(infra, MAIN_ENV);
     ({ app, lines } = await createApp());
   });
 
@@ -160,13 +198,79 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
     }
   });
 
-  it('C-32: the 11th request in a window from one IP is 429 (own throttler)', async () => {
-    // Earlier tests used some of this IP's budget; restart the app for a clean window.
+  it('C-32: a 16 KB User-Agent is bounded and scrubbed quickly (no ReDoS)', async () => {
+    const ua = `x@${'.'.repeat(8000)}a ${'a@'.repeat(3000)}`;
+    const start = performance.now();
+    await request(app.getHttpServer())
+      .post('/api/v1/client-errors')
+      .set('user-agent', ua)
+      .send({ message: 'ua' })
+      .expect(204);
+    expect(performance.now() - start).toBeLessThan(500);
+    expect(String(lines[0]?.['userAgent']).length).toBeLessThanOrEqual(200);
+  });
+
+  it('C-32: Content-Length is no longer required; a small chunked body is accepted (no 411)', async () => {
+    const res = await rawChunkedPost(app, '/api/v1/client-errors', [
+      Buffer.from('{"message":"chunk'),
+      Buffer.from('ed"}'),
+    ]);
+    expect(res.status).toBe(204);
+    expect(lines[0]).toMatchObject({ message: 'chunked' });
+  });
+
+  it('C-32: a chunked body that streams past 16 KB is 413 problem+json and logs nothing', async () => {
+    const chunk = Buffer.from('a'.repeat(6000));
+    const res = await rawChunkedPost(app, '/api/v1/client-errors', [
+      Buffer.from('{"message":"'),
+      chunk,
+      chunk,
+      chunk,
+      Buffer.from('"}'),
+    ]);
+    expect(res.status).toBe(413);
+    expect(JSON.parse(res.body)).toMatchObject({ status: 413 });
+    expect(lines).toHaveLength(0);
+  });
+
+  it('C-32: a compressed body is refused (415), never inflated', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/api/v1/client-errors')
+      .set('content-encoding', 'gzip')
+      .set('content-type', 'application/json')
+      .send(gzipSync(Buffer.from(JSON.stringify({ message: 'z'.repeat(100) }))))
+      .expect(415);
+    expect(res.headers['content-type']).toMatch(/application\/problem\+json/);
+    expect(lines).toHaveLength(0);
+  });
+
+  it('C-32: malformed JSON is 400 problem+json', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/api/v1/client-errors')
+      .set('content-type', 'application/json')
+      .send('{"message": PLANTED-ECHO')
+      .expect(400);
+    expect(JSON.stringify(res.body)).not.toContain('PLANTED-ECHO');
+  });
+
+  it('C-32: the mixed-case path hits the same body limit', async () => {
+    await request(app.getHttpServer())
+      .post('/API/V1/Client-Errors')
+      .send({ message: 'x'.repeat(20_000) })
+      .expect(413);
+  });
+
+  async function restart(env: Record<string, string>): Promise<void> {
     await app.close();
+    applyEnv(infra, { ...MAIN_ENV, ...env });
     ({ app, lines } = await createApp());
+  }
+
+  it('C-32: the 11th request in a window from one IP is 429, also on a mixed-case path', async () => {
+    await restart({ CLIENT_ERROR_THROTTLE_LIMIT: '10' });
     for (let i = 0; i < 10; i += 1) {
       await request(app.getHttpServer())
-        .post('/api/v1/client-errors')
+        .post('/API/V1/Client-Errors')
         .send({ message: `n${i}` })
         .expect(204);
     }
@@ -175,7 +279,24 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
       .send({ message: 'n11' })
       .expect(429);
     expect(res.headers['content-type']).toMatch(/application\/problem\+json/);
-    // Other areas keep their own budget.
-    await request(app.getHttpServer()).get('/api/v1/health').expect(200);
+    // Other areas keep their own budget: a default-area and an auth-area route are not 429.
+    const def = await request(app.getHttpServer()).get('/api/v1/admin/users');
+    expect(def.status).toBe(401);
+    const auth = await request(app.getHttpServer()).post('/api/v1/auth/login').send({});
+    expect(auth.status).not.toBe(429);
+  });
+
+  it('C-32: the whole-instance budget caps reports even when the per-IP budget is not used up', async () => {
+    await restart({ CLIENT_ERROR_THROTTLE_LIMIT: '100', CLIENT_ERROR_GLOBAL_LIMIT: '5' });
+    for (let i = 0; i < 5; i += 1) {
+      await request(app.getHttpServer())
+        .post('/api/v1/client-errors')
+        .send({ message: `g${i}` })
+        .expect(204);
+    }
+    await request(app.getHttpServer())
+      .post('/api/v1/client-errors')
+      .send({ message: 'g6' })
+      .expect(429);
   });
 });
