@@ -8,7 +8,7 @@ Updated 2026-10-06 for D-54, which accepted the ADR 0004 section 9 amendment, AD
 - **Schema deltas:** the enum values `session_status` ERASED, `appeal_status` CLOSED_ERASED and `identity_check_status` WAIVED; three `identity_checks` video-check columns with one foreign key and two CHECK constraints; one partial index on `audit_logs`; and `REVOKE DELETE, TRUNCATE ON sessions`. There are no new tables or enum types.
 - **Data rules:** the retention tiers, R-9 and R-10, the amended erasure, and the identity-check waiver.
 - **Comments:** `batch_seq`, `hmac_key_enc` and `device_info` follow ADR 0013.
-- **Built status (2026-10-06).** None of these deltas is on main yet. The migrations are in open PRs #91 (ADR 0004 section 9: `session_status_erased`, `appeal_status_closed_erased`, `retention_marker_index_and_no_session_delete`) and #100 (ADR 0015: `identity_check_waived_enum`, `identity_check_waiver_columns`); the timestamps in their names change when they are rebased (FU-DB-168), so only the suffixes are cited here. Their SQL matches the DDL below.
+- **Built status (2026-10-06).** None of these deltas is on main yet. The migrations are in open PRs #91 (ADR 0004 section 9: `session_status_erased`, `appeal_status_closed_erased`, `retention_marker_index_and_no_session_delete`) and #100 (ADR 0015: `identity_check_waived_enum`, `identity_check_waiver_columns`); the timestamps in their names change when they are rebased (FU-DB-168), so only the suffixes are cited here. The DDL below does not show these deltas yet: each migration PR adds its own DDL lines to this file (enum values, the audit index, the REVOKE note, the `identity_checks` columns and CHECKs), so the schema check stays green in each PR.
 - **Delta list.** ADR 0008 section 11 lists the post-freeze deltas and their totals.
 
 ## Entity-relationship diagram
@@ -132,7 +132,6 @@ erDiagram
     numeric face_match_score
     identity_check_status status
     identity_manual_decision manual_decision
-    boolean video_check_done
   }
   proctor_events {
     bigint id PK
@@ -200,16 +199,14 @@ CREATE TYPE user_role        AS ENUM ('SUPER_ADMIN','RECRUITER','AUTHOR','REVIEW
 CREATE TYPE difficulty       AS ENUM ('EASY','MEDIUM','HARD');
 CREATE TYPE question_type    AS ENUM ('CODING','MCQ','SHORT_ANSWER');
 CREATE TYPE proctor_profile  AS ENUM ('STANDARD','STRICT');  -- LOCKDOWN returns with the lockdown client (ADR 0007 §8)
-CREATE TYPE session_status   AS ENUM ('INVITED','OPENED','CONSENTED','VERIFIED','IN_PROGRESS','PAUSED','SUBMITTED','GRADED','UNDER_REVIEW','COMPLETED','EXPIRED','APPEALED','DECLINED',
-                                      'ERASED');  -- terminal, no exit (ADR 0004 §9.5; own migration, PR #91)
+CREATE TYPE session_status   AS ENUM ('INVITED','OPENED','CONSENTED','VERIFIED','IN_PROGRESS','PAUSED','SUBMITTED','GRADED','UNDER_REVIEW','COMPLETED','EXPIRED','APPEALED','DECLINED');
 CREATE TYPE submission_kind  AS ENUM ('RUN','SUBMIT');
 CREATE TYPE media_stream     AS ENUM ('SCREEN','WEBCAM','AUDIO','SIDE_CAMERA','ROOM_SCAN');
 CREATE TYPE severity         AS ENUM ('LOW','MEDIUM','HIGH');
 CREATE TYPE risk_band        AS ENUM ('LOW','MEDIUM','HIGH');
 CREATE TYPE verdict          AS ENUM ('CLEAN','SUSPICIOUS','VIOLATION');
 CREATE TYPE flag_decision    AS ENUM ('CONFIRMED','DISMISSED');
-CREATE TYPE appeal_status    AS ENUM ('OPEN','UPHELD','OVERTURNED',
-                                      'CLOSED_ERASED');  -- closed by erasure, no outcome (ADR 0004 §9.5; own migration, PR #91)
+CREATE TYPE appeal_status    AS ENUM ('OPEN','UPHELD','OVERTURNED');
 CREATE TYPE event_type AS ENUM (
   'FULLSCREEN_EXIT','TAB_SWITCH','FOCUS_LOST','PASTE_ATTEMPT','COPY_ATTEMPT','RIGHT_CLICK',
   'DEVTOOLS_OPEN','SCREEN_SHARE_STOPPED','MULTI_MONITOR','VIRTUAL_CAMERA',
@@ -222,8 +219,7 @@ CREATE TYPE event_type AS ENUM (
 CREATE TYPE pause_reason             AS ENUM ('FULLSCREEN_EXIT','SCREEN_SHARE_STOPPED','SIDE_CAMERA_LOST','PROCTOR');
 CREATE TYPE client_kind              AS ENUM ('WEB');
 CREATE TYPE event_source             AS ENUM ('CLIENT','SERVER');
-CREATE TYPE identity_check_status    AS ENUM ('PENDING','PASSED','LOW_CONFIDENCE','MANUAL_REVIEW','REVIEWED',
-                                              'WAIVED');  -- not a rejection (ADR 0015 §4; own migration, PR #100)
+CREATE TYPE identity_check_status    AS ENUM ('PENDING','PASSED','LOW_CONFIDENCE','MANUAL_REVIEW','REVIEWED');
 CREATE TYPE identity_review_reason   AS ENUM ('BELOW_THRESHOLD','NO_FACE','MULTIPLE_FACES','LIVENESS_NOT_CONFIRMED','MATCH_ERROR');
 CREATE TYPE identity_manual_decision AS ENUM ('MATCH','NO_MATCH','INCONCLUSIVE');
 CREATE TYPE question_scoring         AS ENUM ('AUTO','MANUAL_PENDING','MANUAL');
@@ -285,9 +281,6 @@ CREATE TABLE audit_logs (
   created_at   timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ON audit_logs (org_id, created_at DESC);
--- Retention completion markers (ADR 0004 §9.2; PR #91). Only the three RetentionService actions are indexed.
-CREATE INDEX audit_logs_retention_marker_idx ON audit_logs (action, entity_id)
-  WHERE action IN ('RETENTION_FACE_DONE','RETENTION_MEDIA_DONE','RETENTION_RESULTS_DONE');
 
 -- ---------- Content ----------
 
@@ -565,22 +558,9 @@ CREATE TABLE identity_checks (
   reviewed_by      uuid REFERENCES users(id),
   reviewed_at      timestamptz,
   review_note      text,
-  video_check_done boolean,                   -- recruiter's video ID check on a WAIVED row; NULL = not recorded (ADR 0015, PR #100)
-  video_check_by   uuid REFERENCES users(id), -- NO ACTION; not org-composite, the service checks the org (as reviewed_by)
-  video_check_at   timestamptz,
   created_at       timestamptz NOT NULL DEFAULT now(),
   UNIQUE (session_id, attempt),
-  CHECK ((status = 'REVIEWED') = (manual_decision IS NOT NULL AND reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL)),
-  -- A WAIVED row is attempt 1 and carries no identity data (ADR 0015 §4).
-  CONSTRAINT identity_checks_waived_check CHECK (status <> 'WAIVED' OR (
-    attempt = 1 AND id_image_key IS NULL AND selfie_key IS NULL AND face_match_score IS NULL
-    AND model_id IS NULL AND threshold IS NULL AND liveness_passed IS NULL AND review_reason IS NULL
-    AND manual_decision IS NULL AND reviewed_by IS NULL AND reviewed_at IS NULL AND review_note IS NULL)),
-  -- The video check is all or nothing, and only a WAIVED row carries one.
-  CONSTRAINT identity_checks_video_check_check CHECK (
-    (video_check_done IS NULL) = (video_check_by IS NULL)
-    AND (video_check_done IS NULL) = (video_check_at IS NULL)
-    AND (video_check_done IS NULL OR status = 'WAIVED'))
+  CHECK ((status = 'REVIEWED') = (manual_decision IS NOT NULL AND reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL))
 );
 
 CREATE TABLE media_chunks (
@@ -708,9 +688,6 @@ CREATE INDEX ON webhook_deliveries (endpoint_id, created_at DESC);
 -- ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO app_user;
 -- REVOKE UPDATE, DELETE, TRUNCATE ON audit_logs FROM app_user;
 -- REVOKE ALL ON _prisma_migrations FROM app_user;
--- REVOKE DELETE, TRUNCATE ON sessions FROM app_user;   -- ADR 0004 §9.3, PR #91: sessions rows are never deleted
--- A later migration that repeats GRANT ... ON ALL TABLES re-grants DELETE on sessions, so the DB test asserts
--- has_table_privilege('app_user', 'sessions', 'DELETE') and 'TRUNCATE' are both false.
 ```
 
 ## Data rules
