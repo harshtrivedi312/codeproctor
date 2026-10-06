@@ -27,7 +27,8 @@
 //  1. Extensions. Prisma emits none. Put these first in the init migration, before any CITEXT column:
 //       CREATE EXTENSION IF NOT EXISTS pgcrypto;
 //       CREATE EXTENSION IF NOT EXISTS citext;
-//  2. 14 CHECK constraints: 12 from ADR 0008 section 5 and 2 from ADR 0015 (the last two below).
+//  2. 14 CHECK constraints: 12 from ADR 0008 section 5 and 2 from ADR 0015 (the two
+//     identity_checks_waived_check and identity_checks_video_check_check below).
 //     Postgres names an unnamed inline CHECK as shown:
 //       organizations_retention_days_check  retention_days BETWEEN 7 AND 730
 //       users_check                         password_hash IS NOT NULL OR set_password_token_hash IS NOT NULL
@@ -41,7 +42,6 @@
 //       identity_checks_attempt_check       attempt BETWEEN 1 AND 2
 //       identity_checks_check               (status = 'REVIEWED') = (manual_decision IS NOT NULL AND
 //                                             reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL)
-//       appeals_check                       (status = 'OVERTURNED') = (new_verdict IS NOT NULL)
 //       identity_checks_waived_check        status <> 'WAIVED' OR (attempt = 1 AND id_image_key IS NULL AND
 //                                             selfie_key IS NULL AND face_match_score IS NULL AND model_id IS
 //                                             NULL AND threshold IS NULL AND liveness_passed IS NULL AND
@@ -51,6 +51,7 @@
 //       identity_checks_video_check_check   (video_check_done IS NULL) = (video_check_by IS NULL) AND
 //                                             (video_check_done IS NULL) = (video_check_at IS NULL) AND
 //                                             (video_check_done IS NULL OR status = 'WAIVED')    (ADR 0015)
+//       appeals_check                       (status = 'OVERTURNED') = (new_verdict IS NOT NULL)
 //  3. 3 partial indexes (the other 22 indexes are declared below):
 //       sessions_risk_band_idx            ON sessions (risk_band) WHERE status IN ('GRADED','UNDER_REVIEW')
 //       sessions_retention_anchor_at_idx  ON sessions (retention_anchor_at) WHERE retention_anchor_at IS NOT NULL
