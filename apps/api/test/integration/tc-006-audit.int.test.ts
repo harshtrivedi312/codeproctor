@@ -2,8 +2,8 @@
 // candidate data, writes exactly ONE audit_logs row with org, actor, server time and caller IP, and
 // no secret in any column or in metadata. A refused call (401, 403, 404, 400) writes no row.
 //
-// Tests marked "[BE-03 pending]" (staff user routes) and "[BE-13 pending]" (review routes) are real
-// but switched off until the routes exist: set BE03_READY / BE13_READY in support/be03-routes.ts.
+// The staff user route tests (BE-03) run by default. Tests marked "[BE-13 pending]" (review routes)
+// are real but switched off until the routes exist (BE13_READY in support/be03-routes.ts).
 // The append-only and row-shape tests of the existing audit table are in tc-006.int.test.ts.
 import { AuditLog, UserRole } from '../../src/generated/prisma/client';
 import {
@@ -233,7 +233,7 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
   });
 }
 
-auditSuite('TC-006 [BE-03 pending]: staff user routes are audited', BE03_READY, routesFor('BE-03'));
+auditSuite('TC-006: staff user routes are audited', BE03_READY, routesFor('BE-03'));
 auditSuite(
   'TC-006 [BE-13 pending]: review routes are audited (a reviewer opening a review)',
   BE13_READY,
@@ -241,7 +241,7 @@ auditSuite(
 );
 
 (BE03_READY ? describe : describe.skip)(
-  'TC-006 [BE-03 pending]: audit rows hold up under repeat and concurrent calls',
+  'TC-006: audit rows hold up under repeat and concurrent calls',
   () => {
     let h: Harness;
     beforeAll(async () => {
@@ -251,11 +251,11 @@ auditSuite(
       await h?.close();
     });
 
-    it('TC-006 [BE-03 pending]: ten parallel role changes (two per admin, five admins) write exactly ten rows (no lost or doubled rows)', async () => {
+    it('TC-006: ten parallel role changes (two per admin, five admins) write exactly ten rows (no lost or doubled rows)', async () => {
       // One admin sends at most two at once: every call reserves a password attempt (shared lockout
       // with login), so more than five parallel calls of ONE admin are refused 403 REAUTH_FAILED.
       const admins: Actor[] = [];
-      // One at a time: parallel first sign-ins hit the cold-start Redis race (QA-D-04).
+      // One at a time: parallel first sign-ins make the first Redis use of a cold client together (QA-D-04, fixed).
       for (let i = 0; i < 5; i++) admins.push(await actor(h, UserRole.SUPER_ADMIN));
       const route = BE03_ROUTES.find((r) => r.id === 'users-role') as Be03Route;
       const targets = await Promise.all(
@@ -275,103 +275,98 @@ auditSuite(
   },
 );
 
-(BE03_READY ? describe : describe.skip)(
-  'TC-006 [BE-03 pending]: invite acceptance and audit write failure',
-  () => {
-    let h: Harness;
-    beforeAll(async () => {
-      h = await boot();
-    });
-    afterAll(async () => {
-      await h?.close();
-    });
+(BE03_READY ? describe : describe.skip)('TC-006: invite acceptance and audit write failure', () => {
+  let h: Harness;
+  beforeAll(async () => {
+    h = await boot();
+  });
+  afterAll(async () => {
+    await h?.close();
+  });
 
-    it('TC-006 [BE-03 pending]: an invite mailed as staff-invite with a /admin/set-password#token link is accepted through POST /auth/password/reset and writes one AUTH_INVITE_ACCEPTED row (FR-105, FR-107)', async () => {
-      const admin = await actor(h, UserRole.SUPER_ADMIN);
-      const email = `qa-accept-${Date.now()}@example.com`;
-      const mailsBefore = h.mails.length;
-      const invited = (
-        await call(h, 'POST', ADMIN_USERS, admin.token, {
-          email,
-          name: 'Accept Test',
-          role: 'RECRUITER',
-          currentPassword: PASSWORD,
-        }).expect(201)
-      ).body as Body;
-      const id = invited.id as string;
-      expect(invited.status).toBe('invited');
-      await flushDeferred(h);
-      const mail = h.mails.slice(mailsBefore).find((m) => m.method === 'sendStaffInvite');
-      expect(mail?.to).toBe(email);
-      expect(mail?.url).toMatch(/\/admin\/set-password#token=[^&]+$/);
-      const token = tokenFromUrl(mail?.url ?? '');
-      expect(token.length).toBeGreaterThanOrEqual(20);
-      // Only the SHA-256 of the token is stored (ADR 0003), 72 h single use.
-      const stored = await h.owner.user.findUniqueOrThrow({ where: { id } });
-      expect(JSON.stringify(stored)).not.toContain(token);
-      await login(h, email).expect(401); // not usable until the password is set
+  it('TC-006: an invite mailed as staff-invite with a /admin/set-password#token link is accepted through POST /auth/password/reset and writes one AUTH_INVITE_ACCEPTED row (FR-105, FR-107)', async () => {
+    const admin = await actor(h, UserRole.SUPER_ADMIN);
+    const email = `qa-accept-${Date.now()}@example.com`;
+    const mailsBefore = h.mails.length;
+    const invited = (
+      await call(h, 'POST', ADMIN_USERS, admin.token, {
+        email,
+        name: 'Accept Test',
+        role: 'RECRUITER',
+        currentPassword: PASSWORD,
+      }).expect(201)
+    ).body as Body;
+    const id = invited.id as string;
+    expect(invited.status).toBe('invited');
+    await flushDeferred(h);
+    const mail = h.mails.slice(mailsBefore).find((m) => m.method === 'sendStaffInvite');
+    expect(mail?.to).toBe(email);
+    expect(mail?.url).toMatch(/\/admin\/set-password#token=[^&]+$/);
+    const token = tokenFromUrl(mail?.url ?? '');
+    expect(token.length).toBeGreaterThanOrEqual(20);
+    // Only the SHA-256 of the token is stored (ADR 0003), 72 h single use.
+    const stored = await h.owner.user.findUniqueOrThrow({ where: { id } });
+    expect(JSON.stringify(stored)).not.toContain(token);
+    await login(h, email).expect(401); // not usable until the password is set
 
-      const before = (await h.owner.auditLog.findFirst({ orderBy: { id: 'desc' } }))?.id ?? 0n;
-      await request(h.app.getHttpServer())
-        .post('/api/v1/auth/password/reset')
-        .send({ token, newPassword: 'Brand-New-Passphrase-77' })
-        .expect(204);
-      const rows = await h.owner.auditLog.findMany({
-        where: { id: { gt: before }, action: 'AUTH_INVITE_ACCEPTED' },
+    const before = (await h.owner.auditLog.findFirst({ orderBy: { id: 'desc' } }))?.id ?? 0n;
+    await request(h.app.getHttpServer())
+      .post('/api/v1/auth/password/reset')
+      .send({ token, newPassword: 'Brand-New-Passphrase-77' })
+      .expect(204);
+    const rows = await h.owner.auditLog.findMany({
+      where: { id: { gt: before }, action: 'AUTH_INVITE_ACCEPTED' },
+    });
+    expect(rows).toHaveLength(1);
+    const row = rows[0] as AuditLog;
+    expect([row.entityType, row.entityId, row.orgId]).toEqual(['user', id, h.orgId]);
+    expect([id, null]).toContain(row.actorId); // the invitee (or none): never the inviting admin
+    expect(row.ip).toMatch(/^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/);
+    const text = JSON.stringify(row, (_k, v: unknown) => (typeof v === 'bigint' ? String(v) : v));
+    expect(text).not.toContain(token);
+    expect(text).not.toContain('Brand-New-Passphrase-77');
+    expect(keysOf(row.metadata).filter((k) => FORBIDDEN_KEY.test(k))).toEqual([]);
+
+    await login(h, email, 'Brand-New-Passphrase-77').expect(200);
+    const list = (await call(h, 'GET', ADMIN_USERS, admin.token).expect(200)).body as {
+      items: { id: string; status: string }[];
+    };
+    expect(list.items.find((u) => u.id === id)?.status).toBe('active');
+    // Single use: the same link does not work twice.
+    await request(h.app.getHttpServer())
+      .post('/api/v1/auth/password/reset')
+      .send({ token, newPassword: 'Another-Passphrase-88' })
+      .expect(400);
+  });
+
+  it('TC-006: when the audit write fails the request fails with 500 and no route data (fail closed), on an interceptor route and on an invite', async () => {
+    const admin = await actor(h, UserRole.SUPER_ADMIN);
+    // Sign-ins above wrote their rows; now remove the app role's right to insert audit rows.
+    const mailsBefore = h.mails.length;
+    await h.owner.$executeRawUnsafe('REVOKE INSERT ON audit_logs FROM app_user');
+    try {
+      const email = `qa-auditfail-${Date.now()}@example.com`;
+      const list = await call(h, 'GET', ADMIN_USERS, admin.token);
+      expectNoDataProblem(list); // the data the route read is not returned
+      const invite = await call(h, 'POST', ADMIN_USERS, admin.token, {
+        email,
+        name: 'Audit Fail',
+        role: 'RECRUITER',
+        currentPassword: PASSWORD,
       });
-      expect(rows).toHaveLength(1);
-      const row = rows[0] as AuditLog;
-      expect([row.entityType, row.entityId, row.orgId]).toEqual(['user', id, h.orgId]);
-      expect([id, null]).toContain(row.actorId); // the invitee (or none): never the inviting admin
-      expect(row.ip).toMatch(/^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/);
-      const text = JSON.stringify(row, (_k, v: unknown) => (typeof v === 'bigint' ? String(v) : v));
-      expect(text).not.toContain(token);
-      expect(text).not.toContain('Brand-New-Passphrase-77');
-      expect(keysOf(row.metadata).filter((k) => FORBIDDEN_KEY.test(k))).toEqual([]);
-
-      await login(h, email, 'Brand-New-Passphrase-77').expect(200);
-      const list = (await call(h, 'GET', ADMIN_USERS, admin.token).expect(200)).body as {
-        items: { id: string; status: string }[];
-      };
-      expect(list.items.find((u) => u.id === id)?.status).toBe('active');
-      // Single use: the same link does not work twice.
-      await request(h.app.getHttpServer())
-        .post('/api/v1/auth/password/reset')
-        .send({ token, newPassword: 'Another-Passphrase-88' })
-        .expect(400);
-    });
-
-    it('TC-006 [BE-03 pending]: when the audit write fails the request fails with 500 and no route data (fail closed), on an interceptor route and on an invite', async () => {
-      const admin = await actor(h, UserRole.SUPER_ADMIN);
-      // Sign-ins above wrote their rows; now remove the app role's right to insert audit rows.
-      const mailsBefore = h.mails.length;
-      await h.owner.$executeRawUnsafe('REVOKE INSERT ON audit_logs FROM app_user');
-      try {
-        const email = `qa-auditfail-${Date.now()}@example.com`;
-        const list = await call(h, 'GET', ADMIN_USERS, admin.token);
-        expectNoDataProblem(list); // the data the route read is not returned
-        const invite = await call(h, 'POST', ADMIN_USERS, admin.token, {
-          email,
-          name: 'Audit Fail',
-          role: 'RECRUITER',
-          currentPassword: PASSWORD,
-        });
-        expectNoDataProblem(invite);
-        // No audit row, so no change either: no user row left behind, and no invite mail sent.
-        expect(await h.owner.user.count({ where: { email } })).toBe(0);
-        await flushDeferred(h);
-        expect(h.mails.slice(mailsBefore).filter((m) => m.method === 'sendStaffInvite')).toEqual(
-          [],
-        );
-      } finally {
-        await h.owner.$executeRawUnsafe('GRANT INSERT ON audit_logs TO app_user');
-      }
-    });
-  },
-);
+      expectNoDataProblem(invite);
+      // No audit row, so no change either: no user row left behind, and no invite mail sent.
+      expect(await h.owner.user.count({ where: { email } })).toBe(0);
+      await flushDeferred(h);
+      expect(h.mails.slice(mailsBefore).filter((m) => m.method === 'sendStaffInvite')).toEqual([]);
+    } finally {
+      await h.owner.$executeRawUnsafe('GRANT INSERT ON audit_logs TO app_user');
+    }
+  });
+});
 
 (BE03_READY ? describe : describe.skip)(
-  'TC-006 [BE-03 pending]: no secret in the logs of the admin user routes',
+  'TC-006: no secret in the logs of the admin user routes',
   () => {
     let h: Harness;
     beforeAll(async () => {
@@ -381,7 +376,7 @@ auditSuite(
       await h?.close();
     });
 
-    it('TC-006 [BE-03 pending]: invite, PATCH and unlock with the right and a wrong currentPassword log neither password, the invite token from the mail, nor the access token', async () => {
+    it('TC-006: invite, PATCH and unlock with the right and a wrong currentPassword log neither password, the invite token from the mail, nor the access token', async () => {
       const admin = await actor(h, UserRole.SUPER_ADMIN);
       const target = await createUser(h);
       const wrong = 'Wrong-Password-Logcheck-1';
