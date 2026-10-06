@@ -140,7 +140,7 @@ From the ADR 0013 / 0006 section 8 / 0014 / 0016 reviews and the CI PRs. Owner-g
 - `backup-nightly.yml`: `PGSSLROOTCERT=system` needs a publicly signed certificate matching `STAGING_BACKUP_PGHOST`; document in the runbook. Pin `postgres:16` by digest in both workflow files, kept in sync with `POSTGRES_IMAGE` in `verify-drill-support.mjs`. The `verify` job may need a longer `timeout-minutes` now that it runs the restore drill.
 
 ### Owner-gated (not done here)
-- ADR 0011 amendment: `currentPassword` step-up also covers `POST /admin/users`, `PATCH /admin/users/:userId` and `POST .../unlock` and `PATCH /admin/org-settings` (step-up, api-contract section 2). ADR 0010 section 6: `account:self`, heartbeat, appeals, reports and webhooks permissions and a CANDIDATE route variant (PR #113 adds `candidate_session:read|start|heartbeat|key`).
+- ADR 0011 amendment: `currentPassword` step-up also covers `POST /admin/users`, `PATCH /admin/users/:userId` and `POST .../unlock`, and `PATCH /admin/org-settings` (step-up, api-contract section 2). ADR 0010 section 6: `account:self`, heartbeat, appeals, reports and webhooks permissions and a CANDIDATE route variant (PR #113 adds `candidate_session:read|start|heartbeat|key`).
 - CLAUDE.md rule 9/11 amendment (merge by the Delivery Lead, no re-run for disjoint changes); ADR 0004 section 9 and ADR 0015 acceptance with the database.md update for migrations #91 and #100; C-30 age-confirmation storage; BE-07 B-1 exception.
 
 ## Delivery Lead relay queue (2026-10-06)
