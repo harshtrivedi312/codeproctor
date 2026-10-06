@@ -442,9 +442,10 @@ No rule in this ADR depends on a plain org scope narrowing into a session scope.
 
 **Routes behind `CandidateSessionGuard` use no system scope.**
 - Link resolve, OTP send and OTP verify are the candidate routes outside the guard (ADR 0013 section 5.10). They run under `AUTH_BOOTSTRAP`.
-- The guard verifies the candidate JWT, then enters `runAsCandidate(oid, sid)` from no scope, using the verified claims.
+- The guard verifies the candidate JWT. It then reads the candidate facts in a plain `runInOrg(oid)` entered from no scope (ADR 0013 section 5.10, DL-31): the session's `invitation_id`, then the invitation's `candidate_id` and `test_id`, as column-only selects, never `accommodations`. That callback returns before the next step; it is never nested.
+- It then enters `runAsCandidate(oid, sid)` from no scope, using the verified claims, and calls the candidate-facts setter before any other query in that scope.
 - Inside that scope it loads the session with `id = sid` and checks `auth_epoch` against the token's `epoch`.
-- A session in another org is simply not found, which answers 401.
+- A missing session, or one in another org, is simply not found, which answers 401.
 
 **Session jobs (grading, render-question, start-test) add no system reason.**
 - Hidden-test grading and start-test run as session jobs with actor SERVICE. ADR 0013 holds their contracts and timeouts; this ADR does not restate them.
@@ -507,10 +508,10 @@ There is no org-provisioning reason (8.6, 8.9).
   - The call-site allow-list and its test (FU-DB-67) also cover:
     - `exit`, `enterWith` and `disable` on the OrgContext store;
     - `detachForSessionJob`;
-    - the eleven grant sites in the ADR 0013 CS-4.4 grant-site table:
+    - the `runInOrg` call site in `CandidateSessionGuard` for its candidate-facts pre-read (ADR 0013 section 5.10, DL-31), the only non-CANDIDATE read on routes behind the guard;
+    - the ten grant sites in the ADR 0013 CS-4.4 grant-site table (`CandidateSessionGuard` has no grant, DL-31):
       - `SessionStateService`
       - `KeyService`
-      - `CandidateSessionGuard`
       - `DeviceInfoService`
       - `StorageService`
       - `OrgSettingsService`
@@ -518,7 +519,7 @@ There is no org-provisioning reason (8.6, 8.9).
       - `AccommodationsService`
       - `SectionGateService` (two grants)
       - `ConsentService`
-      - the private candidate-facts setter for `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. Only `CandidateSessionGuard` may call it, once per scope, and the values are immutable afterwards.
+      - the private candidate-facts setter for `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. Only `CandidateSessionGuard` may call it, once per scope, before any other query in the scope, and the values are immutable afterwards.
       - the two model-API lock call sites, `guardLive` (only from the `SessionJobProcessor` write-transaction wrapper) and `lockForAccommodation` (only from the ADR 0015 accommodation writers).
 
       ADR 0013 CS-4.4 defines each site's model, columns and ids. This ADR does not repeat them.
@@ -717,10 +718,10 @@ How the check runs:
     - 8.5: `guardLive` and `lockForAccommodation`.
     - 8.2: in SERVICE session scope, refuse an update that changes `session_id` or `session_question_id`.
   - **FU-DB-67, the call-site allow-list.** It covers:
-    - `runSystem`, `runInOrg` and `runRawSql`;
+    - `runSystem`, `runInOrg` and `runRawSql`, including the `runInOrg` pre-read in `CandidateSessionGuard` (DL-31);
     - the two session entries;
     - `exit`, `enterWith`, `disable` and `detachForSessionJob`;
-    - the eleven CS-4.4 grant sites, with the candidate-facts setter;
+    - the ten CS-4.4 grant sites, with the candidate-facts setter;
     - the advisory-lock raw call site;
     - `guardLive` and `lockForAccommodation`, each limited to its writers, with the lock order: advisory lock, then `sessions`, then `invitations`.
 
