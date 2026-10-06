@@ -66,14 +66,19 @@ type Permission =
   | 'ai_reference:create'
   | 'ai_reference:supersede';
 
-/** organizations.settings.aiReferences.minAssistants: the API's default (ai-reference-rules.ts). */
-const MIN_ASSISTANTS = 2;
+/** The API's default of aiReferences.minAssistants (ai-reference-rules.ts DEFAULT_MIN_ASSISTANTS). */
+const DEFAULT_MIN_ASSISTANTS = 2;
+const minAssistants = (): number => state.scenario.aiMinAssistants ?? DEFAULT_MIN_ASSISTANTS;
 const NOT_FOUND = 'Not found.';
 const MAX_TEST_CASES = 100;
 
 export interface QuestionScenario {
   /** The executor behind the validate job: it runs fine, or the run ends as an execution error or a timeout. */
   executor: 'ok' | 'EXECUTION_ERROR' | 'TIMEOUT';
+  /** The organisation's aiReferences.minAssistants; null means no valid setting (the default applies). */
+  aiMinAssistants: number | null;
+  /** AI-4 refresh interval in days; null like the real API, which does not implement it yet. */
+  aiRefreshDays: number | null;
 }
 
 type JobStatus = 'RUNNING' | 'PASSED' | 'FAILED' | 'STALE' | 'ERROR';
@@ -106,7 +111,7 @@ function fresh(): State {
     questions: seedQuestions(),
     jobs: new Map(),
     seq: 1,
-    scenario: { executor: 'ok' },
+    scenario: { executor: 'ok', aiMinAssistants: null, aiRefreshDays: null },
   };
 }
 export function resetMockQuestionState(): void {
@@ -127,7 +132,12 @@ const TITLES: Record<number, string> = {
 };
 
 /** RFC 7807 problem body. 409 and 422 carry detail and errors[] only: no machine code. */
-const problem = (status: number, detail: string, errors?: string[]) =>
+const problem = (
+  status: number,
+  detail: string,
+  errors?: string[],
+  code?: Schemas['ProblemCode'],
+) =>
   HttpResponse.json(
     {
       type: 'about:blank',
@@ -137,6 +147,7 @@ const problem = (status: number, detail: string, errors?: string[]) =>
       detail: errors ? 'Request validation failed' : detail,
       instance: '/mock',
       traceId: 'mock-trace',
+      ...(code ? { code } : {}),
       ...(errors ? { errors } : {}),
     },
     { status },
@@ -188,6 +199,19 @@ const revisionProblems = (v: unknown): string[] =>
   v === undefined || (typeof v === 'string' && REVISION.test(v))
     ? []
     : ['expectedRevision must match /^[0-9a-f]{64}$/ regular expression'];
+
+/**
+ * Path ids the real DTOs check with @IsUUID (variantId, testCaseId, aiReferenceId) and the body
+ * variantId: a non-UUID is a 400 before anything is looked up. The mock's own ids are not UUIDs,
+ * so it accepts its own id style and refuses what the form invents for unsaved rows.
+ */
+const MOCK_ID = /^(?!draft-)[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function idProblems(ids: Record<string, string | readonly string[] | undefined>): string[] {
+  return Object.entries(ids).flatMap(([name, v]) =>
+    typeof v === 'string' && !UUID.test(v) && !MOCK_ID.test(v) ? [`${name} must be a UUID`] : [],
+  );
+}
 
 /** Every ACTIVE variant must render against the content (renderVariant), or the problems say why. */
 function renderProblems(
@@ -390,6 +414,7 @@ function aiInputProblems(b: Record<string, unknown>, prefix: string): string[] {
     out.push(`${prefix}promptText must be at most 20000 characters`);
   if (b.variantId !== undefined && typeof b.variantId !== 'string')
     out.push(`${prefix}variantId must be a string`);
+  else out.push(...idProblems({ [`${prefix}variantId`]: b.variantId }));
   return out;
 }
 
@@ -417,7 +442,7 @@ function runExecutor(
     const cells: Schemas['ValidationCell'][] = [];
     const failures: Schemas['ValidationFailure'][] = [];
     for (const language of v.allowedLanguages) {
-      if ((v.referenceSolution[language] ?? '').trim() === '') {
+      if ((v.referenceSolution[language] ?? '').trim() === '' || slots.length === 0) {
         cells.push({ language, passed: false, testsPassed: 0, testsTotal: slots.length });
         failures.push({ language, testCaseId: null, position: null, verdict: 'MISSING_REFERENCE' });
         continue;
@@ -490,9 +515,9 @@ function aiGateProblems(v: MockVersion): string[] {
         .filter((r) => r.language === language && r.supersededAt === null)
         .map((r) => r.assistant.trim().toLowerCase()),
     );
-    if (have.size < MIN_ASSISTANTS) {
+    if (minAssistants() > 0 && have.size < minAssistants()) {
       out.push(
-        `aiReferences.${language}: needs current rows from at least ${MIN_ASSISTANTS} distinct assistants (has ${have.size})`,
+        `aiReferences.${language}: needs current rows from at least ${minAssistants()} distinct assistants (has ${have.size})`,
       );
     }
   }
@@ -511,6 +536,7 @@ interface TestCaseBody {
   isHidden?: unknown;
   weight?: unknown;
   position?: unknown;
+  expectedRevision?: unknown;
 }
 function testCaseProblems(b: TestCaseBody, requireIo: boolean): string[] {
   const out: string[] = unknownFields(b as Record<string, unknown>, [
@@ -519,7 +545,9 @@ function testCaseProblems(b: TestCaseBody, requireIo: boolean): string[] {
     'isHidden',
     'weight',
     'position',
+    'expectedRevision',
   ]);
+  out.push(...revisionProblems(b.expectedRevision));
   for (const k of ['input', 'expectedOutput'] as const) {
     const v = b[k];
     if (v === undefined) {
@@ -588,6 +616,7 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
     id: string,
     version: number,
     expectedRevision: unknown,
+    what = 'variants',
   ): Promise<{ r: { role: Role; q: MockQuestion }; v: MockVersion } | Response> {
     const r = await writer(request, id);
     if (r instanceof Response) return r;
@@ -595,7 +624,7 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
     if (closed) return closed;
     const v = r.q.versions.find((x) => x.version === version);
     if (!v) return problem(404, NOT_FOUND);
-    if (r.q.type !== 'CODING') return problem(422, 'Only coding questions have variants.');
+    if (r.q.type !== 'CODING') return problem(422, `Only coding questions have ${what}.`);
     if (v.isPublished) {
       return problem(
         409,
@@ -656,6 +685,18 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
   }
 
   return [
+    // The org's AI policy (ai_reference:read: Author, Super Admin). Before `:id` so it is never one.
+    http.get(`${base}/ai-policy`, async ({ request }) => {
+      const gate = allowed(request, 'ai_reference:read');
+      if (gate instanceof Response) return gate;
+      await wait();
+      return HttpResponse.json({
+        minAssistants: minAssistants(),
+        isDefault: state.scenario.aiMinAssistants === null,
+        refreshIntervalDays: state.scenario.aiRefreshDays,
+      });
+    }),
+
     http.get(base, async ({ request }) => {
       await wait();
       const role = allowed(request, 'question:read');
@@ -801,8 +842,8 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
     }),
 
     http.patch(`${base}/:id`, async ({ request, params }) => {
-      const r = await writer(request, String(params.id));
-      if (r instanceof Response) return r;
+      const gate = allowed(request, 'question:update');
+      if (gate instanceof Response) return gate;
       const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
       const fields = [
         'title',
@@ -824,6 +865,9 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       if (b.tags === undefined && touched.length === 0) {
         return problem(400, 'Send at least one field to change.');
       }
+      // The pipe and the empty-body check come first; only then is the question looked up (404).
+      const r = await writer(request, String(params.id));
+      if (r instanceof Response) return r;
       const closed = archivedCheck(r.q);
       if (closed) return closed;
       const head = latest(r.q);
@@ -919,14 +963,16 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
     }),
 
     http.post(`${base}/:id/publish`, async ({ request, params }) => {
-      const r = await writer(request, String(params.id));
-      if (r instanceof Response) return r;
+      const gate = allowed(request, 'question:update');
+      if (gate instanceof Response) return gate;
       const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
       const dtoProblems = [
         ...unknownFields(b, ['expectedRevision']),
         ...revisionProblems(b.expectedRevision),
       ];
       if (dtoProblems.length > 0) return problem(400, 'Validation failed', dtoProblems);
+      const r = await writer(request, String(params.id));
+      if (r instanceof Response) return r;
       const closed = archivedCheck(r.q);
       if (closed) return closed;
       const head = latest(r.q);
@@ -961,19 +1007,22 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
 
     // ---- test cases (REAL, BE-04a) -------------------------------------------------------------
     http.post(`${base}/:id/versions/:version/test-cases`, async ({ request, params }) => {
-      const r = await writer(request, String(params.id));
-      if (r instanceof Response) return r;
-      const v = r.q.versions.find((x) => x.version === Number(params.version));
-      if (!v) return problem(404, NOT_FOUND);
-      if (v.isPublished) return problem(409, 'The version is published and cannot change.');
-      const closed = archivedCheck(r.q);
-      if (closed) return closed;
-      if (r.q.type !== 'CODING') return problem(422, 'Only coding questions have test cases.');
-      if (v.testCases.length >= MAX_TEST_CASES)
-        return problem(422, `At most ${MAX_TEST_CASES} test cases.`);
+      const gate = allowed(request, 'question:update');
+      if (gate instanceof Response) return gate;
       const b = (await request.json().catch(() => ({}))) as TestCaseBody;
       const problems = testCaseProblems(b, true);
       if (problems.length > 0) return problem(400, 'Validation failed', problems);
+      const d = await draftOf(
+        request,
+        String(params.id),
+        Number(params.version),
+        b.expectedRevision,
+        'test cases',
+      );
+      if (d instanceof Response) return d;
+      const v = d.v;
+      if (v.testCases.length >= MAX_TEST_CASES)
+        return problem(422, `A version has at most ${MAX_TEST_CASES} test cases.`);
       const t: MockTestCase = {
         id: newId('tc'),
         position:
@@ -991,44 +1040,58 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
     }),
 
     http.patch(`${base}/:id/versions/:version/test-cases/:caseId`, async ({ request, params }) => {
-      const r = await writer(request, String(params.id));
-      if (r instanceof Response) return r;
-      const v = r.q.versions.find((x) => x.version === Number(params.version));
-      const t = v?.testCases.find((x) => x.id === String(params.caseId));
-      if (!v || !t) return problem(404, 'Test case not found.');
-      if (v.isPublished) return problem(409, 'The version is published and cannot change.');
-      const closed = archivedCheck(r.q);
-      if (closed) return closed;
+      const gate = allowed(request, 'question:update');
+      if (gate instanceof Response) return gate;
       const b = (await request.json().catch(() => ({}))) as TestCaseBody;
+      const problems = [
+        ...testCaseProblems(b, false),
+        ...idProblems({ testCaseId: params.caseId }),
+      ];
+      if (problems.length > 0) return problem(400, 'Validation failed', problems);
       const keys = ['input', 'expectedOutput', 'isHidden', 'weight', 'position'] as const;
       if (keys.every((k) => b[k] === undefined))
         return problem(400, 'Send at least one field to change.');
-      const problems = testCaseProblems(b, false);
-      if (problems.length > 0) return problem(400, 'Validation failed', problems);
+      const d = await draftOf(
+        request,
+        String(params.id),
+        Number(params.version),
+        b.expectedRevision,
+        'test cases',
+      );
+      if (d instanceof Response) return d;
+      const t = d.v.testCases.find((x) => x.id === String(params.caseId));
+      if (!t) return problem(404, 'Test case not found.');
       if (typeof b.input === 'string') t.input = b.input;
       if (typeof b.expectedOutput === 'string') t.expectedOutput = b.expectedOutput;
       if (typeof b.isHidden === 'boolean') t.isHidden = b.isHidden;
       if (typeof b.weight === 'number') t.weight = b.weight;
       if (typeof b.position === 'number') t.position = b.position;
-      clearValidation(v);
+      clearValidation(d.v);
       return HttpResponse.json(toTestCase(t, true));
     }),
 
     http.delete(`${base}/:id/versions/:version/test-cases/:caseId`, async ({ request, params }) => {
-      const r = await writer(request, String(params.id));
-      if (r instanceof Response) return r;
-      const v = r.q.versions.find((x) => x.version === Number(params.version));
-      const t = v?.testCases.find((x) => x.id === String(params.caseId));
-      if (!v || !t) return problem(404, 'Test case not found.');
-      if (v.isPublished) return problem(409, 'The version is published and cannot change.');
-      const closed = archivedCheck(r.q);
-      if (closed) return closed;
-      v.testCases = v.testCases.filter((x) => x.id !== t.id);
-      v.variants = v.variants.map((x) => ({
+      const gate = allowed(request, 'question:update');
+      if (gate instanceof Response) return gate;
+      const expected = new URL(request.url).searchParams.get('expectedRevision') ?? undefined;
+      const dto = [...revisionProblems(expected), ...idProblems({ testCaseId: params.caseId })];
+      if (dto.length > 0) return problem(400, 'Validation failed', dto);
+      const d = await draftOf(
+        request,
+        String(params.id),
+        Number(params.version),
+        expected,
+        'test cases',
+      );
+      if (d instanceof Response) return d;
+      const t = d.v.testCases.find((x) => x.id === String(params.caseId));
+      if (!t) return problem(404, 'Test case not found.');
+      d.v.testCases = d.v.testCases.filter((x) => x.id !== t.id);
+      d.v.variants = d.v.variants.map((x) => ({
         ...x,
         overrides: x.overrides.filter((o) => o.testCaseId !== t.id),
       }));
-      clearValidation(v);
+      clearValidation(d.v);
       return new HttpResponse(null, { status: 204 });
     }),
 
@@ -1093,6 +1156,9 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
     http.get(
       `${base}/:id/versions/:version/variants/:variantId/preview`,
       async ({ request, params }) => {
+        const badIds = idProblems({ variantId: params.variantId });
+        if (badIds.length > 0 && !(allowed(request, 'question:read') instanceof Response))
+          return problem(400, 'Validation failed', badIds);
         const r = await reader(request, String(params.id));
         if (r instanceof Response) return r;
         const v = r.q.versions.find(
@@ -1146,6 +1212,8 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
     http.patch(`${base}/:id/versions/:version/variants/:variantId`, async ({ request, params }) => {
       const gate = allowed(request, 'question:update');
       if (gate instanceof Response) return gate;
+      const badIds = idProblems({ variantId: params.variantId });
+      if (badIds.length > 0) return problem(400, 'Validation failed', badIds);
       const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
       const dto = [
         ...unknownFields(b, ['params', 'isActive', 'expectedRevision']),
@@ -1190,6 +1258,8 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       async ({ request, params }) => {
         const gate = allowed(request, 'question:update');
         if (gate instanceof Response) return gate;
+        const badIds = idProblems({ variantId: params.variantId });
+        if (badIds.length > 0) return problem(400, 'Validation failed', badIds);
         const expected = new URL(request.url).searchParams.get('expectedRevision') ?? undefined;
         const dto = revisionProblems(expected);
         if (dto.length > 0) return problem(400, 'Validation failed', dto);
@@ -1197,6 +1267,16 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
         if (d instanceof Response) return d;
         if (!d.v.variants.some((y) => y.id === String(params.variantId)))
           return problem(404, 'Variant not found.');
+        // AI rows are append-only and point at their variant (current or superseded): such a
+        // variant is never deleted; the author sets it inactive instead (ADR 0005 AI-1).
+        if (d.v.aiRefs.some((a) => a.variantId === String(params.variantId))) {
+          return problem(
+            409,
+            'The variant has AI reference rows, which are never deleted; set it inactive instead.',
+            undefined,
+            'VARIANT_HAS_AI_REFERENCES',
+          );
+        }
         d.v.variants = d.v.variants.filter((y) => y.id !== String(params.variantId));
         clearValidation(d.v);
         return new HttpResponse(null, { status: 204 });
@@ -1208,6 +1288,8 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       async ({ request, params }) => {
         const gate = allowed(request, 'question:update');
         if (gate instanceof Response) return gate;
+        const badIds = idProblems({ variantId: params.variantId, testCaseId: params.testCaseId });
+        if (badIds.length > 0) return problem(400, 'Validation failed', badIds);
         const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
         const dto = [
           ...unknownFields(b, ['input', 'expectedOutput', 'expectedRevision']),
@@ -1259,6 +1341,8 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       async ({ request, params }) => {
         const gate = allowed(request, 'question:update');
         if (gate instanceof Response) return gate;
+        const badIds = idProblems({ variantId: params.variantId, testCaseId: params.testCaseId });
+        if (badIds.length > 0) return problem(400, 'Validation failed', badIds);
         const expected = new URL(request.url).searchParams.get('expectedRevision') ?? undefined;
         const dto = revisionProblems(expected);
         if (dto.length > 0) return problem(400, 'Validation failed', dto);
@@ -1415,6 +1499,8 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       async ({ request, params }) => {
         const gate = allowed(request, 'ai_reference:supersede');
         if (gate instanceof Response) return gate;
+        const badIds = idProblems({ aiReferenceId: params.aiReferenceId });
+        if (badIds.length > 0) return problem(400, 'Validation failed', badIds);
         const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
         const dto = [
           ...unknownFields(b, ['replacement']),
