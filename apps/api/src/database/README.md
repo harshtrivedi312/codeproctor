@@ -415,7 +415,7 @@ of the 18 models on the CANDIDATE allowlist is exactly one of:
 | **key**      | the ids of the candidate's own org, session and test (`orgId`, `sessionId`, `sessionQuestionId`, `testId`): readable and filterable although CS-4.4 does not list them (PR 1's choice, FU-DB-195 (k); compound keys name them)                                               |
 | **explicit** | `sessions.hmacKeyEnc` and `deviceInfo`, `media_chunks.objectKey`, `organizations.settings`, `tests.settings`, `invitations.accommodations`, `session_questions.testQuestionId`: never in the default select, nameable only under a grant of that model that names the column |
 | **RUN-only** | `submissions.results`, `passed`, `total`: never in the default select; naming one ANDs `kind = 'RUN'` (below)                                                                                                                                                                |
-| **hidden**   | everything else: never nameable, always omitted. This is every column that CS-4.4 does not list, and `score` and `sourceCode` of submissions, `signedName`, `ip` and `userAgent` of consents (a grant changes none of it)                                                    |
+| **hidden**   | everything else: never nameable, always omitted. This is every column that CS-4.4 does not list, and `score` and `sourceCode` of submissions, `signedName`, `ip`, `userAgent` and `ageConfirmedAt` (C-30, D-55) of consents (a grant changes none of it)                     |
 
 `candidate-interim.spec.ts` holds its own copy of the ADR's column and fails when `CANDIDATE_READ` differs,
 and when a column of the schema is none of the five (a new column breaks the build until it is classified).
@@ -508,10 +508,16 @@ so a widened list fails.
   facts check and before the insert. A create is therefore **two statements** (the read, then the insert), also
   inside a `$transaction` (the read then uses a second connection). A text published between the read and the
   insert is not caught by the extension; the read narrows that window, ConsentService's own version check
-  (`CONSENT_TEXT_CHANGED`) is the other half. Exactly one of `signedAt` and `declinedAt` is set, and `signedName`
-  comes with `signedAt` (thrown before the database). Writable: `signedName`, `signedAt`, `declinedAt`, `ip`,
-  `userAgent`; `pdfKey`, `pdfGeneratedAt` and `copyEmailedAt` are the consent-PDF job's (SERVICE). The row the
-  create returns omits `signedName`, `ip` and `userAgent`, and a `select` of them throws, grant or not.
+  (`CONSENT_TEXT_CHANGED`) is the other half. Exactly one of `signedAt` and `declinedAt` is set, `signedName` comes
+  with `signedAt`, a sign carries `ageConfirmedAt` as a valid `Date` (`createNeedsDate`: an ISO string, a number,
+  `null` or an invalid Date is refused) and a decline never carries it (`createForbids`), all thrown before the
+  database with the column names only. These rules bind the CANDIDATE create only: a SERVICE or STAFF write and
+  every update, the consent-PDF job's update of a pre-C-30 row included, are untouched. Writable: `signedName`, `signedAt`, `declinedAt`,
+  `ageConfirmedAt` (C-30, D-55: server time, set at sign; ConsentService requires the body's `ageConfirmed: true`;
+  the database has no CHECK on it, which would block the PDF job's update of a row signed before C-30, so the
+  create is the net under the service, FU-DB-260), `ip`, `userAgent`; `pdfKey`, `pdfGeneratedAt` and `copyEmailedAt` are the consent-PDF job's (SERVICE). The row
+  the create returns omits `signedName`, `ip`, `userAgent` and `ageConfirmedAt`, and a `select` of them throws,
+  grant or not.
   The create and `SessionStateService.transition()` run **one after the other in one transaction, each under
   its own grant** (grants do not nest; tested, with the rollback).
 - **`proctor_events` (CS-4.4, permanent):** reads and writes see `source = 'CLIENT'` rows only, a create
@@ -607,19 +613,19 @@ const key = await this.orgContext.withGrant(
 - **Await inside `fn`.** Like the scope functions, `withGrant` starts a returned thenable inside the grant. A
   lazy Prisma query that is returned inside an object is not started there: await queries inside `fn`.
 
-| Grant site (BE-07)                        | `model`           | `columns`                                                                                        | `ids`                                                      | `mode`   |
-| ----------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------- | -------- |
-| `SessionStateService.transition()`        | `Session`         | `status`, `pauseReasons`, `submittedAt` (write)                                                  | `[ctx.sessionId]`                                          | `rows`   |
-| `KeyService`                              | `Session`         | `hmacKeyEnc` (read)                                                                              | `[ctx.sessionId]`                                          | `rows`   |
-| `DeviceInfoService`                       | `Session`         | `deviceInfo` (read and write)                                                                    | `[ctx.sessionId]`                                          | `rows`   |
-| `StorageService`                          | `MediaChunk`      | `objectKey` (read)                                                                               | ids of the chunk rows, as `bigint`, resolved by CS-2       | `rows`   |
-| `OrgSettingsService`                      | `Organization`    | `settings` (read)                                                                                | `[ctx.orgId]`                                              | `rows`   |
-| `TestSettingsService`                     | `Test`            | `settings` (read)                                                                                | `[ctx.testId]`                                             | `rows`   |
-| `AccommodationsService` (projection only) | `Invitation`      | `accommodations` (read)                                                                          | `[ctx.invitationId]`                                       | `rows`   |
-| `SectionGateService`, step 1              | `SessionQuestion` | `testQuestionId` (read)                                                                          | `[sessionQuestionId resolved through CS-2]`                | `rows`   |
-| `SectionGateService`, step 2              | `TestQuestion`    | `id`, `sectionId` (read)                                                                         | `[test_question_id from step 1]`                           | `rows`   |
-| `ConsentService` (consent text)           | `ConsentText`     | `id`, `version`, `bodyMd`, `legalApprovedAt` (read)                                              | `[current_consent_text_id, the session's consent_text_id]` | `rows`   |
-| `ConsentService` (create)                 | `Consent`         | `sessionId`, `consentTextId`, `signedName`, `signedAt`, `declinedAt`, `ip`, `userAgent` (create) | `[ctx.sessionId]`                                          | `create` |
+| Grant site (BE-07)                        | `model`           | `columns`                                                                                                          | `ids`                                                      | `mode`   |
+| ----------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------- | -------- |
+| `SessionStateService.transition()`        | `Session`         | `status`, `pauseReasons`, `submittedAt` (write)                                                                    | `[ctx.sessionId]`                                          | `rows`   |
+| `KeyService`                              | `Session`         | `hmacKeyEnc` (read)                                                                                                | `[ctx.sessionId]`                                          | `rows`   |
+| `DeviceInfoService`                       | `Session`         | `deviceInfo` (read and write)                                                                                      | `[ctx.sessionId]`                                          | `rows`   |
+| `StorageService`                          | `MediaChunk`      | `objectKey` (read)                                                                                                 | ids of the chunk rows, as `bigint`, resolved by CS-2       | `rows`   |
+| `OrgSettingsService`                      | `Organization`    | `settings` (read)                                                                                                  | `[ctx.orgId]`                                              | `rows`   |
+| `TestSettingsService`                     | `Test`            | `settings` (read)                                                                                                  | `[ctx.testId]`                                             | `rows`   |
+| `AccommodationsService` (projection only) | `Invitation`      | `accommodations` (read)                                                                                            | `[ctx.invitationId]`                                       | `rows`   |
+| `SectionGateService`, step 1              | `SessionQuestion` | `testQuestionId` (read)                                                                                            | `[sessionQuestionId resolved through CS-2]`                | `rows`   |
+| `SectionGateService`, step 2              | `TestQuestion`    | `id`, `sectionId` (read)                                                                                           | `[test_question_id from step 1]`                           | `rows`   |
+| `ConsentService` (consent text)           | `ConsentText`     | `id`, `version`, `bodyMd`, `legalApprovedAt` (read)                                                                | `[current_consent_text_id, the session's consent_text_id]` | `rows`   |
+| `ConsentService` (create)                 | `Consent`         | `sessionId`, `consentTextId`, `signedName`, `signedAt`, `declinedAt`, `ageConfirmedAt`, `ip`, `userAgent` (create) | `[ctx.sessionId]`                                          | `create` |
 
 `CandidateSessionGuard` has **no grant** (DL-31): it reads `sessions.invitation_id` in its org-scope pre-read,
 so `invitationId` is not readable in CANDIDATE scope at all. A grant may name a subset of one site's columns

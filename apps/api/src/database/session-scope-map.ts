@@ -381,6 +381,7 @@ export const GRANT_SITES: readonly GrantSite[] = deepFreeze([
       'signedName',
       'signedAt',
       'declinedAt',
+      'ageConfirmedAt',
       'ip',
       'userAgent',
     ],
@@ -414,7 +415,7 @@ export type CandidateModelRule =
       readonly grantedUpdate?: readonly string[];
       /**
        * A model with NO ungranted create whose create is allowed while a create grant of this model is
-       * active: the columns the grant may unlock (the consents create: the five written columns and the
+       * active: the columns the grant may unlock (the consents create: the six written columns and the
        * two checked keys). `create` is then unset.
        */
       readonly grantedCreate?: readonly string[];
@@ -448,6 +449,21 @@ export type CandidateModelRule =
        * (consents: `signedAt` needs the typed name, `consents_check1`).
        */
       readonly createNeeds?: Readonly<Record<string, string>>;
+      /**
+       * A create that sets the key column must also carry the value column as a valid `Date` (`instanceof
+       * Date` and not NaN): `undefined`, `null`, an invalid Date, an ISO string and a number are refused.
+       * Consents (C-30, D-55, FU-DB-260): `signedAt` needs `ageConfirmedAt`. The service sets server time
+       * as a Date, so a string means a bug. There is no database CHECK for it (it would block the PDF job's
+       * update of a row signed before C-30), so this is the net under ConsentService. It binds the
+       * CANDIDATE create only: SERVICE and STAFF writes, and every update, are untouched.
+       */
+      readonly createNeedsDate?: Readonly<Record<string, string>>;
+      /**
+       * A create that sets the key column may not carry any of the listed columns (`null` and `undefined`
+       * count as not carried, as for `createXor`). Consents (C-30, D-55, FU-DB-260): a decline
+       * (`declinedAt`) never carries `ageConfirmedAt`.
+       */
+      readonly createForbids?: Readonly<Record<string, readonly string[]>>;
       /**
        * The create names a consent text that the extension checks against the organisation's current one
        * (`organizations.current_consent_text_id`, one read on the factory client) before the insert. Only
@@ -575,11 +591,15 @@ export const CANDIDATE_MODELS: Readonly<Partial<Record<ModelName, CandidateModel
     // `create` each, and write-once is `UNIQUE(session_id)` plus the CHECKs (a second create is P2002,
     // which BE-07 maps to 409). The create carries `sessionId` and `consentTextId`, which the service sets
     // (Prisma's unchecked create input requires them) and the extension VERIFIES: `sessionId` must be the
-    // scope's own and in the grant's ids, `consentTextId` must be the org's current text. The five written
-    // columns are `signedName`, `signedAt`, `declinedAt`, `ip`, `userAgent`; `pdfKey`, `pdfGeneratedAt` and
-    // `copyEmailedAt` stay with the consent-PDF job. The row a create returns omits `signedName`, `ip` and
-    // `userAgent` (read allowlist, candidate-interim.ts). This replaces PR 1's update-only, write-once
-    // update path (FU-DB-195 (h)).
+    // scope's own and in the grant's ids, `consentTextId` must be the org's current text. The six written
+    // columns are `signedName`, `signedAt`, `declinedAt`, `ageConfirmedAt` (C-30, D-55: server time, set at
+    // sign; BE-07 requires the body's `ageConfirmed: true`), `ip`, `userAgent`; `pdfKey`, `pdfGeneratedAt` and
+    // `copyEmailedAt` stay with the consent-PDF job. The row a create returns omits `signedName`, `ip`,
+    // `userAgent` and `ageConfirmedAt` (read allowlist, candidate-interim.ts). The database has no CHECK
+    // on `ageConfirmedAt` (it would block the PDF job's update of a pre-C-30 signed row), so ConsentService
+    // requires it, and this create is the net under it (FU-DB-260, hub option (a)): a sign carries
+    // `ageConfirmedAt` as a valid Date (`createNeedsDate`) and a decline never carries it (`createForbids`),
+    // thrown before any statement. This replaces PR 1's update-only, write-once update path (FU-DB-195 (h)).
     Consent: {
       kind: 'session',
       grantedCreate: [
@@ -588,6 +608,7 @@ export const CANDIDATE_MODELS: Readonly<Partial<Record<ModelName, CandidateModel
         'signedName',
         'signedAt',
         'declinedAt',
+        'ageConfirmedAt',
         'ip',
         'userAgent',
       ],
@@ -595,6 +616,8 @@ export const CANDIDATE_MODELS: Readonly<Partial<Record<ModelName, CandidateModel
       createRequired: ['sessionId', 'consentTextId'],
       createXor: ['signedAt', 'declinedAt'],
       createNeeds: { signedAt: 'signedName' },
+      createNeedsDate: { signedAt: 'ageConfirmedAt' },
+      createForbids: { declinedAt: ['ageConfirmedAt'] },
       checksConsentText: true,
     },
     // CS-4.4: create only: `session_question_id`, `kind` (RUN or SUBMIT), `language`, `source_code`, and
