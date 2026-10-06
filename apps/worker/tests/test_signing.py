@@ -271,12 +271,13 @@ def test_fr403_streamed_body_over_the_limit_is_413_even_without_a_content_length
     async def send(m: dict[str, Any]) -> None:
         sent.append(m)
 
+    hdrs, _, _ = signed(body=b"x" * 12)
     scope = {
         "type": "http",
         "method": "POST",
         "path": "/v1/echo",
         "query_string": b"",
-        "headers": [],
+        "headers": [(k.lower().encode(), v.encode()) for k, v in hdrs.items()],
     }
     asyncio.run(app(scope, receive, send))
     assert sent[0]["status"] == 413 and bodies == []
@@ -355,3 +356,33 @@ def test_fr403_full_cache_and_handler_error_leave_a_fixed_code_log_only(
     text = caplog.text
     assert "NONCE_CACHE_FULL" in text and "HANDLER_ERROR" in text
     assert h["X-CP-Signature"] not in text and "secret-detail" not in text
+
+
+def test_fr403_bad_headers_are_refused_before_any_body_is_buffered() -> None:
+    app, _, _ = build()
+    reads: list[int] = []
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        reads.append(1)
+        return {"type": "http.request", "body": b"x", "more_body": False}
+
+    async def send(m: dict[str, Any]) -> None:
+        sent.append(m)
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/v1/echo",
+        "query_string": b"",
+        "headers": [(b"x-cp-key-id", b"nope")],
+    }
+    asyncio.run(app(scope, receive, send))
+    assert sent[0]["status"] == 401 and reads == []
+
+
+def test_fr403_request_content_encoding_is_refused() -> None:
+    app, _, bodies = build()
+    h, body, _ = signed()
+    assert call(app, "/v1/echo", {**h, "Content-Encoding": "gzip"}, body).status_code == 400
+    assert bodies == []

@@ -184,19 +184,24 @@ class SigningMiddleware:
             if int(declared) > limit:
                 await self._plain(send, 413, "PAYLOAD_TOO_LARGE", "Payload too large")
                 return
+        if "content-encoding" in headers:  # bodies are signed as sent; no decompression here
+            await self._plain(send, 400, "VALIDATION_FAILED", "Content encoding not accepted")
+            return
+        kid = headers.get("x-cp-key-id", "")
+        nonce = headers.get("x-cp-nonce", "")
+        ts = headers.get("x-cp-timestamp", "")
+        key = self._keys.get(kid)
+        # Cheap checks before buffering any body, so an unauthenticated caller cannot make the
+        # worker read up to the route limit (steps 2 to 4 of ADR 0014 4.2).
+        if key is None or not self._fresh(ts) or not self._nonce_ok(nonce):
+            await self._reject(send)
+            return
         try:
             body = await self._read_body(receive, limit)
         except _TooLarge:
             await self._plain(send, 413, "PAYLOAD_TOO_LARGE", "Payload too large")
             return
         except _Disconnected:
-            return
-        kid = headers.get("x-cp-key-id", "")
-        nonce = headers.get("x-cp-nonce", "")
-        ts = headers.get("x-cp-timestamp", "")
-        key = self._keys.get(kid)
-        if key is None or not self._fresh(ts) or not self._nonce_ok(nonce):
-            await self._reject(send)
             return
         expected = sign(key, request_string(kid, scope["method"], scope["path"], ts, nonce, body))
         # Bytes, not str: compare_digest raises TypeError on non-ASCII str, which must be a 401.
