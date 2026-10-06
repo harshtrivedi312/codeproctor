@@ -35,10 +35,10 @@
 //      and then only through the grant's columns.
 //
 // Hidden by this table (not listed, so never readable and always omitted), for the record. consents:
-// `signedName`, `ip`, `userAgent` (the grant that creates the row does not change that), `pdfKey`,
-// `pdfGeneratedAt`, `copyEmailedAt`. sessions: `invitationId` (the guard reads it outside the candidate
-// scope), `clientKind`, the scores and risk, `lastHeartbeat`, `retentionAnchorAt`, the report columns,
-// `createdAt`. keystroke_batches: `id` (a global identity counter) and `events`.
+// `signedName`, `ip`, `userAgent`, `ageConfirmedAt` (C-30, D-55; the grant that creates the row does not
+// change that), `pdfKey`, `pdfGeneratedAt`, `copyEmailedAt`. sessions: `invitationId` (the guard reads it
+// outside the candidate scope), `clientKind`, the scores and risk, `lastHeartbeat`, `retentionAnchorAt`,
+// the report columns, `createdAt`. keystroke_batches: `id` (a global identity counter) and `events`.
 //
 // Names are Prisma's field names (`hmacKeyEnc`), not column names. A test checks each entry against the
 // generated client. Messages name the model, the column and the place, never a value.
@@ -132,6 +132,8 @@ export const CANDIDATE_READ: Readonly<Partial<Record<ModelName, CandidateReadRul
   KeystrokeBatch: readRule(['seq', 'signature', 'startedAt'], {
     keys: ['sessionId', 'sessionQuestionId'],
   }),
+  // CS-4.4: id, consent_text_id, signed_at, declined_at. `ageConfirmedAt` (D-55) is not listed, so the default
+  // omit hides it, like `signedName`, `ip` and `userAgent`: a candidate writes it at sign and never reads it back.
   Consent: readRule(['id', 'consentTextId', 'signedAt', 'declinedAt'], { keys: ['sessionId'] }),
   Organization: readRule(['id', 'name', 'retentionDays', 'currentConsentTextId'], {
     explicit: ['settings'],
