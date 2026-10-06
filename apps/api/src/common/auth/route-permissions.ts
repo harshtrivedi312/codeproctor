@@ -27,6 +27,10 @@ const userManage = { roles: SUPER_ADMIN, permission: 'user:manage' } as const;
 export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   // Operations
   'GET /health': 'public',
+  // Browser error reports (C-32). Public on purpose: candidates have no staff JWT and a crashed
+  // page may have no session. Safe because it returns 204 with no body, touches no database or
+  // Redis, logs only scrubbed fields, and has its own strict throttle and a 16 KB body limit.
+  'POST /client-errors': 'public',
 
   // Authentication (FR-101, FR-102, FR-104, FR-107). Public: the credential is in the body.
   'POST /auth/login': 'public',

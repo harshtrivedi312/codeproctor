@@ -6,11 +6,40 @@ import cookieParser from 'cookie-parser';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
+import { randomUUID } from 'node:crypto';
+import type { NextFunction, Request, Response } from 'express';
 import type { Env } from './config/env';
 import { ProblemFilter } from './common/problem.filter';
 
 export const API_PREFIX = 'api/v1';
 export const DOCS_PATH = 'api/docs';
+
+export const CLIENT_ERROR_MAX_BODY_BYTES = 16 * 1024;
+
+function problem(req: Request, res: Response, status: number, title: string, detail: string): void {
+  const inbound = req.headers['x-request-id'];
+  const traceId =
+    typeof inbound === 'string' && /^[A-Za-z0-9._-]{8,64}$/.test(inbound) ? inbound : randomUUID();
+  res.setHeader('x-request-id', traceId);
+  res
+    .status(status)
+    .type('application/problem+json')
+    .json({ type: 'about:blank', title, status, detail, instance: req.path, traceId });
+}
+
+export function clientErrorBodyLimit(req: Request, res: Response, next: NextFunction): void {
+  if (req.method !== 'POST') return next();
+  const raw = req.headers['content-length'];
+  if (raw === undefined) {
+    // Chunked bodies have no declared size to check up front.
+    return problem(req, res, 411, 'Length Required', 'A Content-Length header is required.');
+  }
+  const length = Number(raw);
+  if (!Number.isFinite(length) || length < 0 || length > CLIENT_ERROR_MAX_BODY_BYTES) {
+    return problem(req, res, 413, 'Payload Too Large', 'The report is too large.');
+  }
+  next();
+}
 
 export function configureApp(app: INestApplication): void {
   const express = app as NestExpressApplication;
@@ -35,6 +64,9 @@ export function configureApp(app: INestApplication): void {
     },
     credentials: true,
   });
+  // Hard body limit for the public client-error route, enforced from Content-Length before any
+  // parsing (C-32). Node frames the body by Content-Length, so a client cannot exceed it.
+  app.use(`/${API_PREFIX}/client-errors`, clientErrorBodyLimit);
   app.useGlobalFilters(new ProblemFilter());
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),

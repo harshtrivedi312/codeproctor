@@ -32,6 +32,8 @@ export const envSchema = z
     // Stricter limits for /auth and /candidate (NFR-04).
     THROTTLE_AUTH_LIMIT: positiveInt.default(10),
     THROTTLE_CANDIDATE_LIMIT: positiveInt.default(30),
+    // Browser error reports per window per IP on the public POST /client-errors (C-32).
+    CLIENT_ERROR_THROTTLE_LIMIT: positiveInt.default(10),
     THROTTLE_TTL_MS: positiveInt.default(60_000),
     HEALTH_TIMEOUT_MS: positiveInt.default(2_000),
     // Number of reverse proxies in front of the API (0 locally, 1 behind Caddy). FU-BE-08.
