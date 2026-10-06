@@ -40,6 +40,8 @@ export interface ProctorSessionConfig {
   backoffBaseMs?: number;
   /** A detector whose start() takes longer than this is abandoned (default 45 s). */
   detectorStartTimeoutMs?: number;
+  /** After a start timeout, stop() of the abandoned detector is given this long (default 5 s). */
+  detectorStopTimeoutMs?: number;
 }
 
 export interface SessionEvents {
@@ -111,6 +113,24 @@ export class ProctorSession {
       store: config.store ?? new IdbStore(),
       ...(config.flushIntervalMs === undefined ? {} : { flushIntervalMs: config.flushIntervalMs }),
       ...(config.backoffBaseMs === undefined ? {} : { backoffBaseMs: config.backoffBaseMs }),
+      onSeqUntrusted: () =>
+        this.fire('capability', {
+          id: 'event-seq',
+          status: 'UNVERIFIABLE',
+          detail:
+            'The batch counter could not be read; sequence numbers jump ahead (holes, no collisions).',
+        }),
+      onStorageRecovered: () =>
+        this.fire('capability', { id: 'event-storage', status: 'SUPPORTED' }),
+      onStorageDegraded: (reason) =>
+        this.fire('capability', {
+          id: 'event-storage',
+          status: 'UNVERIFIABLE',
+          detail:
+            reason === 'OPEN_FAILED'
+              ? 'IndexedDB unavailable: event batches are kept in memory only (a reload loses unsent batches).'
+              : 'IndexedDB writes are failing: event batches are kept in memory only.',
+        }),
     }));
     await queue.start();
 
@@ -177,9 +197,9 @@ export class ProctorSession {
             // ignore
           }
           try {
-            await d.stop();
+            await withTimeout(d.stop(), config.detectorStopTimeoutMs ?? 5000);
           } catch {
-            // best effort
+            // best effort (a stop() that hangs must not block the session start)
           }
           this.started = this.started.filter((x) => x !== d);
         }
@@ -250,7 +270,25 @@ export class ProctorSession {
     this.started = [];
     let lostBatches = 0;
     if (purgeDrainMs === null) await this.queue?.stop();
-    else lostBatches = (await this.queue?.finish(purgeDrainMs))?.lostBatches ?? 0;
+    else {
+      const unsent = this.queue?.stats().unsentBatches ?? 0;
+      if (unsent > 0) {
+        // Tell the UI before data is discarded so the candidate can stay online.
+        this.fire('capability', {
+          id: 'finish-pending',
+          status: 'UNVERIFIABLE',
+          detail: `${unsent} event batches are still being sent: stay online.`,
+        });
+      }
+      lostBatches = (await this.queue?.finish(purgeDrainMs))?.lostBatches ?? 0;
+      if (lostBatches > 0) {
+        this.fire('capability', {
+          id: 'finish-lost',
+          status: 'UNVERIFIABLE',
+          detail: `${lostBatches} event batches could not be sent.`,
+        });
+      }
+    }
     this.metrics?.stop();
     this.queue = null;
     this.config = null;

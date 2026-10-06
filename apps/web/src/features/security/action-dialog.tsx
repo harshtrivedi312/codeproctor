@@ -134,7 +134,7 @@ export function ActionDialog({
       return 'ok';
     }
     if (action === 'disable') {
-      const out = await disableTwoFactor(values.currentPassword, (values.totpCode ?? '').trim());
+      const out = await disableTwoFactor(values.currentPassword, values.totpCode ?? '');
       if (!out.ok) return fail(out.failure);
       // Another tab signed in as someone else (or this tab already signed out) while the call
       // was in flight: that session is not ours to end. Just close.
