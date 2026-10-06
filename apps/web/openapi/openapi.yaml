@@ -739,7 +739,7 @@ paths:
   # validation status and the AI reference solutions are REAL since BE-04c. Only prefill is still
   # web-only. Readers: SUPER_ADMIN, RECRUITER, AUTHOR. Writers:
   # SUPER_ADMIN, AUTHOR. 404 is identical for missing, cross-org and (for readers without
-  # question:update) unpublished questions. 409 and 422 carry detail and errors[] only, no code.
+  # question:update) unpublished questions. 409 and 422 carry detail and errors[]; the ONLY machine code on these routes is VARIANT_HAS_AI_REFERENCES on deleting a variant that has AI rows.
   # ---------------------------------------------------------------------------------------------
   /v1/questions:
     get:
@@ -797,6 +797,17 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+  /v1/questions/ai-policy:
+    get:
+      operationId: getAiPolicy
+      summary: REAL. The AI reference policy of your organization (permission ai_reference:read, held by Author and Super Admin; recruiters and reviewers get 403). Read-only.
+      responses:
+        '200':
+          description: The policy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AiPolicy' }
+        '403': { $ref: '#/components/responses/Forbidden' }
   /v1/questions/{questionId}:
     parameters:
       - name: questionId
@@ -860,7 +871,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: The question is archived, or it changed since it was loaded (expectedRevision); detail only, no code
+          description: The question is archived, or it changed since it was loaded (expectedRevision)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -874,8 +885,8 @@ paths:
       operationId: publishQuestion
       summary: >-
         REAL. Publish the latest draft (question:update). 422 with errors[] while the draft is
-        incomplete; for a CODING question also until a passing validation of the current revision
-        exists (slice BE-04c), so coding questions cannot be published yet. 409 when there is no
+        incomplete; for a CODING question also until a passing validation run of the current
+        revision exists and every allowed language has enough AI reference solutions. 409 when there is no
         draft, the question is archived, or expectedRevision no longer matches.
       requestBody:
         required: false
@@ -982,7 +993,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: The version is published (immutable), or the question is archived
+          description: The version is published (immutable), the question is archived, or expectedRevision is stale
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -1031,13 +1042,17 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: The version is published (immutable), or the question is archived
+          description: The version is published (immutable), the question is archived, or expectedRevision is stale
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
     delete:
       operationId: removeTestCase
-      summary: REAL. Remove a test case from a draft version (question:update).
+      summary: REAL. Remove a test case from a draft version (question:update). The revision check is a query parameter.
+      parameters:
+        - name: expectedRevision
+          in: query
+          schema: { type: string, pattern: '^[0-9a-f]{64}$' }
       responses:
         '204':
           description: Removed
@@ -1048,7 +1063,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: The version is published (immutable), or the question is archived
+          description: The version is published (immutable), the question is archived, or expectedRevision is stale
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -1179,7 +1194,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: The version is published (immutable), the question is archived, or expectedRevision is stale
+          description: 'The version is published (immutable), the question is archived, expectedRevision is stale, or the variant has AI reference rows (code VARIANT_HAS_AI_REFERENCES: they are never deleted, set the variant inactive instead)'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -1502,11 +1517,11 @@ paths:
 components:
   responses:
     Forbidden:
-      description: The role is not allowed to call this route (FR-103)
+      description: The role is not allowed to call this route (FR-103). A guard 403 has no code.
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/ApiError'
+            $ref: '#/components/schemas/ProblemDetails'
   parameters:
     QuestionId:
       name: questionId
@@ -1594,9 +1609,11 @@ components:
           }
         position:
           { type: integer, minimum: 0, maximum: 10000, description: Default after the last slot }
+        expectedRevision: { type: string, pattern: '^[0-9a-f]{64}$' }
     TestCasePatch:
       type: object
       properties:
+        expectedRevision: { type: string, pattern: '^[0-9a-f]{64}$' }
         input: { type: string, maxLength: 100000 }
         expectedOutput: { type: string, maxLength: 100000 }
         isHidden: { type: boolean }
@@ -1703,7 +1720,7 @@ components:
         position: { type: integer, nullable: true, minimum: 0 }
         verdict: { $ref: '#/components/schemas/ValidationVerdict' }
         actualOutput:
-          { type: string, description: Only for a visible (sample) slot, never a hidden one }
+          { type: string, description: 'Only for a visible (sample) slot, never a hidden one' }
         diagnostic: { type: string }
     ValidationVariantResult:
       type: object
@@ -1965,11 +1982,17 @@ components:
       type: object
       properties:
         expectedRevision: { type: string, pattern: '^[0-9a-f]{64}$' }
+    ProblemCode:
+      type: string
+      description: The machine codes the API's problem filter can set (problem.filter.ts PROBLEM_CODES). Guard 403s carry none.
+      enum:
+        [REAUTH_FAILED, TWO_FACTOR_REQUIRED_FOR_ROLE, SETTINGS_CONFLICT, VARIANT_HAS_AI_REFERENCES]
     Problem:
       type: object
       description: >-
-        RFC 7807 problem body of the question routes. 409 and 422 carry detail and errors[] only: no
-        machine code, the caller tells cases apart by endpoint and status.
+        RFC 7807 problem body of the question routes. 409 and 422 carry detail and errors[]. `code`
+        is present only where a route defines one: VARIANT_HAS_AI_REFERENCES (409, deleting a
+        variant that has AI reference rows). The UI branches on status and endpoint, and on that code.
       required: [type, title, status]
       properties:
         type: { type: string }
@@ -1979,6 +2002,7 @@ components:
         instance: { type: string }
         traceId: { type: string }
         errors: { type: array, items: { type: string } }
+        code: { $ref: '#/components/schemas/ProblemCode' }
     VariantOverride:
       type: object
       description: One test slot's input and expected output for a variant. isHidden and position come from the slot.
@@ -2089,6 +2113,22 @@ components:
                 properties:
                   id: { type: string }
                   text: { type: string }
+    AiPolicy:
+      type: object
+      required: [minAssistants, isDefault, refreshIntervalDays]
+      properties:
+        minAssistants:
+          type: integer
+          minimum: 0
+          maximum: 10
+          description: Assistants required per language to publish; 0 is off.
+        isDefault:
+          type: boolean
+          description: True when the org has no valid setting and the default applies
+        refreshIntervalDays:
+          type: integer
+          nullable: true
+          description: AI-4 refresh interval in days; null until the API implements the setting.
     CreateAiReference:
       type: object
       additionalProperties: false
@@ -2099,8 +2139,7 @@ components:
             type: string,
             minLength: 1,
             maxLength: 100,
-            description: Assistant product name,
-            for example ChatGPT,
+            description: 'Assistant product name, for example ChatGPT',
           }
         modelLabel: { type: string, minLength: 1, maxLength: 100 }
         language: { $ref: '#/components/schemas/Language' }
@@ -2174,8 +2213,7 @@ components:
               input:
                 {
                   type: string,
-                  description: The input that applies to this variant,
-                  override or default,
+                  description: 'The input that applies to this variant (override or default)',
                 }
     PrefillResponse:
       type: object
@@ -2192,8 +2230,7 @@ components:
               error:
                 {
                   type: string,
-                  description: Why no output could be produced (runtime error,
-                  limit),
+                  description: 'Why no output could be produced (runtime error, limit)',
                 }
     ApiError:
       type: object
@@ -2213,7 +2250,7 @@ components:
         instance: { type: string }
         traceId: { type: string }
         errors: { type: array, items: { type: string } }
-        code: { type: string, enum: [REAUTH_FAILED, TWO_FACTOR_REQUIRED_FOR_ROLE] }
+        code: { $ref: '#/components/schemas/ProblemCode' }
     RecoveryCodes:
       type: object
       required: [recoveryCodes]
