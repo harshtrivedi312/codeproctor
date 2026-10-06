@@ -6,16 +6,16 @@
 //
 // Why it matters. The org scope filters the top-level model. A foreign key that points into
 // another org is invisible to it, so every id that is written into such a column must be loaded
-// through the scoped client first, and a miss answered 404 (ADR 0006 section 2, rule (i)). The 25
+// through the scoped client first, and a miss answered 404 (ADR 0006 section 2, rule (i)). The 26
 // foreign keys of class RULE_I below are exactly the ones rule (i) applies to
 // (RULE_I_REFERENCES). Module tests and code review use that list.
 //
-// All 58 foreign keys of the schema, one class each:
+// All 59 foreign keys of the schema, one class each:
 //   ORG_ID      9   the org_id column of a model with its own org (to organizations)
 //   SCOPE_HOP  21   the first hop of a path model's scope path (its own parent)
 //   COMPOSITE   3   (id, org_id) keys on invitations and sessions (ADR 0006 section 2 ii)
-//   RULE_I     25   rule (i) references: 12 staff (to users) and 13 cross-chain
-// (SCOPE_HOP + COMPOSITE + RULE_I is 49; the 9 ORG_ID keys make 58.)
+//   RULE_I     26   rule (i) references: 13 staff (to users) and 13 cross-chain
+// (SCOPE_HOP + COMPOSITE + RULE_I is 50; the 9 ORG_ID keys make 59.)
 import type { ModelName } from './org-scope-map';
 
 export type FkClass =
@@ -111,7 +111,7 @@ export const FK_CLASSES: readonly ForeignKey[] = [
   fk('Invitation', 'candidate', 'Candidate', 'invitations', 'COMPOSITE'),
   fk('Session', 'invitation', 'Invitation', 'sessions', 'COMPOSITE'),
 
-  // RULE_I, staff (12): a reference to a user. A user of any org can be named. Load the user
+  // RULE_I, staff (13): a reference to a user. A user of any org can be named. Load the user
   // through the scoped client first.
   fk('AuditLog', 'actor', 'User', 'auditLogs', 'RULE_I', 'staff'),
   fk('Question', 'createdBy', 'User', 'createdQuestions', 'RULE_I', 'staff'),
@@ -128,6 +128,9 @@ export const FK_CLASSES: readonly ForeignKey[] = [
   fk('SessionQuestion', 'scoredBy', 'User', 'scoredSessionQuestions', 'RULE_I', 'staff'),
   fk('ConsentText', 'createdBy', 'User', 'createdConsentTexts', 'RULE_I', 'staff'),
   fk('IdentityCheck', 'reviewedBy', 'User', 'reviewedIdentityChecks', 'RULE_I', 'staff'),
+  // ADR 0015 section 4: the recruiter who recorded the video ID check on a WAIVED row. Not
+  // org-composite, so the service loads the user through the scoped client first, as for reviewedBy.
+  fk('IdentityCheck', 'videoCheckBy', 'User', 'videoCheckedIdentityChecks', 'RULE_I', 'staff'),
   fk('SessionReview', 'reviewer', 'User', 'sessionReviews', 'RULE_I', 'staff'),
   fk('FlagDecision', 'reviewer', 'User', 'flagDecisions', 'RULE_I', 'staff'),
   fk('Appeal', 'assignedTo', 'User', 'assignedAppeals', 'RULE_I', 'staff'),
