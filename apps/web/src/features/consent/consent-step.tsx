@@ -37,7 +37,8 @@ export function ConsentStep({
     queryKey: ['candidate', 'consent'],
     queryFn: () => candidateApi.getConsent(),
     gcTime: 0,
-    staleTime: 0,
+    // Never silently swap the text under a candidate who is reading it; "Check again" refetches.
+    staleTime: Number.POSITIVE_INFINITY,
     retry: false,
   });
   const result = query.data;
@@ -85,6 +86,7 @@ export function ConsentStep({
   }
   return (
     <ConsentForm
+      key={result.data.consentTextId}
       document={result.data}
       onSigned={onSigned}
       onDeclined={onDeclined}
@@ -261,7 +263,8 @@ function ConsentForm({
         className="space-y-4"
         onSubmit={(e) =>
           void handleSubmit(
-            (values) => sign.mutate(values),
+            // Defence in depth: the controls are disabled until the end, but never sign without it.
+            (values) => (reachedEnd ? sign.mutate(values) : undefined),
             () => setSummaryFocus((n) => n + 1),
           )(e)
         }

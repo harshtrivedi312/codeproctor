@@ -93,7 +93,6 @@ describe('system check step (FR-402)', () => {
 
   it('TC-031: an unsupported browser is blocked with a clear message and the other checks stay off', async () => {
     await signIn();
-    const user = userEvent.setup();
     const checker = fakeChecker({
       browser: () => ({
         brand: 'Firefox',
@@ -113,7 +112,6 @@ describe('system check step (FR-402)', () => {
     expect(screen.getByText(/firefox is not supported/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /check camera/i })).toBeDisabled();
     expect(screen.getByRole('button', { name: /continue to identity check/i })).toBeDisabled();
-    await user.click(screen.getByRole('button', { name: /continue to identity check/i }));
   });
 
   it('TC-032: a denied camera shows what happened and what to do, and can be retried', async () => {

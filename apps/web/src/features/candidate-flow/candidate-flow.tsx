@@ -44,7 +44,8 @@ export function CandidateFlow({
   token,
   overrides,
 }: {
-  token: string;
+  /** Test seam only: pages never pass a token as a prop (it would sit in the RSC payload). */
+  token?: string;
   /** Test seam: real browsers never pass this. */
   overrides?: FlowOverrides;
 }): React.JSX.Element {
@@ -53,11 +54,10 @@ export function CandidateFlow({
   const [sent, setSent] = React.useState<CodeSentInfo | null>(null);
   const [resuming, setResuming] = React.useState(false);
 
-  // A token in the fragment wins over one in the path: the fragment never reaches the server. The
-  // value is read once, here, so a development double-mount cannot lose it after the scrub.
-  const [urlToken] = React.useState(() =>
-    typeof window === 'undefined' ? token : (readTokenFromHash() ?? token),
-  );
+  // Where the token comes from, in order: the URL fragment (never reaches the server), memory
+  // (handed over by /t/[token]), then a test seam. Held in a ref so it can be dropped once the code
+  // is verified, and so a development double-mount cannot lose it after the scrub.
+  const seedRef = React.useRef<string | null>(null);
 
   // False while rendering on the server, true in the browser. The token is only ever touched in
   // the browser: module state on the server would be shared between visitors.
@@ -69,13 +69,15 @@ export function CandidateFlow({
 
   // Read the token, then take it out of the address bar and history straight away.
   React.useEffect(() => {
-    captureInvitationToken(urlToken);
-    scrubTokenFromUrl();
+    seedRef.current ??= readTokenFromHash() ?? getInvitationToken() ?? token ?? null;
+    const t = seedRef.current;
+    if (t !== null) captureInvitationToken(t);
+    scrubTokenFromUrl(t);
     return () => {
       // Leaving the flow forgets everything held in memory.
       clearCandidateCredentials();
     };
-  }, [urlToken]);
+  }, [token]);
 
   const link = useQuery({
     queryKey: ['candidate', 'link'],
@@ -84,7 +86,7 @@ export function CandidateFlow({
     staleTime: Number.POSITIVE_INFINITY,
     retry: false,
     queryFn: async () => {
-      captureInvitationToken(urlToken);
+      if (seedRef.current !== null) captureInvitationToken(seedRef.current);
       const invitation = getInvitationToken();
       if (invitation === null)
         return {
@@ -111,6 +113,7 @@ export function CandidateFlow({
   const onVerified = React.useCallback((session: SessionTokenResponse) => {
     setSessionToken(session.sessionToken);
     clearInvitationToken();
+    seedRef.current = null;
     setResuming(session.status === 'IN_PROGRESS' || session.status === 'PAUSED');
     setStep(stepForStatus(session.status));
   }, []);

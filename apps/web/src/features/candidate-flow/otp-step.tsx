@@ -41,6 +41,9 @@ export function OtpStep({
 }): React.JSX.Element {
   const [maskedEmail, setMaskedEmail] = React.useState(sent.maskedEmail);
   const [notice, setNotice] = React.useState<string | null>(null);
+  const [verifyError, setVerifyError] = React.useState<keyof typeof OTP_MESSAGES | null>(null);
+  // The wait is announced once, with its full length; only the visible countdown ticks (aria-hidden).
+  const [waitTotal, setWaitTotal] = React.useState(0);
   const resend = useCountdown();
   const wait = useCountdown();
   const startResend = resend.start;
@@ -71,12 +74,27 @@ export function OtpStep({
       }
       reset({ otp: '' });
       setNotice(null);
+      setVerifyError(
+        result.kind !== 'problem'
+          ? 'network'
+          : result.code === 'OTP_NOT_REQUESTED'
+            ? 'expired'
+            : result.status === 400
+              ? 'invalid'
+              : result.status >= 500
+                ? 'server'
+                : null,
+      );
       if (result.kind === 'problem') {
         if (result.status === 429 && result.code === 'LINK_BLOCKED') {
           onTerminal({ reason: 'BLOCKED', retryAfterSeconds: result.retryAfterSeconds });
           return;
         }
-        if (result.status === 429) wait.start(result.retryAfterSeconds ?? OTP_RESEND_SECONDS);
+        if (result.status === 429) {
+          const seconds = result.retryAfterSeconds ?? OTP_RESEND_SECONDS;
+          setWaitTotal(seconds);
+          wait.start(seconds);
+        }
         if (result.status === 409) onTerminal(terminalForConflict(result.code, windowStart));
         if (result.status === 404) onTerminal({ reason: 'INVALID' });
       }
@@ -114,19 +132,7 @@ export function OtpStep({
     },
   });
 
-  const result = verify.data;
-  let errorMessage: string | null = null;
-  if (verify.isError) errorMessage = OTP_MESSAGES.network;
-  else if (result && !result.ok) {
-    if (result.kind === 'problem') {
-      if (result.status === 429 && wait.secondsLeft > 0) errorMessage = null;
-      else if (result.code === 'OTP_NOT_REQUESTED') errorMessage = OTP_MESSAGES.expired;
-      else if (result.status === 400) errorMessage = OTP_MESSAGES.invalid;
-      else if (result.status >= 500) errorMessage = OTP_MESSAGES.server;
-    } else {
-      errorMessage = OTP_MESSAGES.network;
-    }
-  }
+  const errorMessage = verifyError ? OTP_MESSAGES[verifyError] : null;
   const waiting = wait.secondsLeft > 0;
 
   return (
@@ -140,16 +146,28 @@ export function OtpStep({
     >
       <form
         noValidate
-        onSubmit={(e) => void handleSubmit((values) => verify.mutate(values))(e)}
+        onSubmit={(e) => {
+          setVerifyError(null);
+          // The mutation keeps its variables (the code) until reset, so reset as soon as it settles.
+          void handleSubmit((values) => verify.mutate(values, { onSettled: () => verify.reset() }))(
+            e,
+          );
+        }}
         className="space-y-4"
       >
         <div aria-live="polite" role="status" className="space-y-3 empty:hidden">
           {notice ? <Alert tone="success">{notice}</Alert> : null}
           {errorMessage ? <Alert tone="error">{errorMessage}</Alert> : null}
-          {waiting ? (
+          {waitTotal > 0 ? (
             <Alert tone="warning">
-              Please wait {wait.secondsLeft} seconds before trying again. You can still use the same
-              code if it has not expired.
+              {waiting
+                ? `Please wait ${waitTotal} seconds before trying again. You can still use the same code if it has not expired.`
+                : 'You can try again now.'}
+              {waiting ? (
+                <span aria-hidden="true" className="ml-2 font-medium">
+                  ({wait.secondsLeft} s left)
+                </span>
+              ) : null}
             </Alert>
           ) : null}
         </div>

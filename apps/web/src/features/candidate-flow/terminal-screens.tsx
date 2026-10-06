@@ -24,8 +24,14 @@ export interface Terminal {
 
 export function RetentionLink(): React.JSX.Element {
   return (
-    <a className="underline underline-offset-4" href={RETENTION_SCHEDULE_HREF}>
+    <a
+      className="underline underline-offset-4"
+      href={RETENTION_SCHEDULE_HREF}
+      target="_blank"
+      rel="noopener noreferrer"
+    >
       How long we keep your data (retention schedule)
+      <span className="sr-only"> (opens in a new tab)</span>
     </a>
   );
 }

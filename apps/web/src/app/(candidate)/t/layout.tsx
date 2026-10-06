@@ -1,8 +1,9 @@
 import type { Metadata } from 'next';
 
-// Candidate routes: calm layout, no staff chrome. The invitation token is in this page's URL, so
+// Candidate routes: calm layout, no staff chrome. The invitation token can be in this page's URL, so
 // the page sends no Referer to anything it links or loads, and is kept out of search indexes.
 export const metadata: Metadata = {
+  title: 'Your test',
   referrer: 'no-referrer',
   robots: { index: false, follow: false },
 };

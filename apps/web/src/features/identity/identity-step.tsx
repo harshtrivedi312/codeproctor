@@ -82,6 +82,7 @@ export function IdentityStep({
   const [problem, setProblem] = React.useState<string | null>(null);
   const [retryHint, setRetryHint] = React.useState(false);
   const streamRef = React.useRef<MediaStream | null>(null);
+  const sendingRef = React.useRef(false);
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const shotsRef = React.useRef<{ id: Shot | null; selfie: Shot | null }>({
     id: null,
@@ -175,6 +176,16 @@ export function IdentityStep({
   }
 
   async function send(): Promise<void> {
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    try {
+      await sendOnce();
+    } finally {
+      sendingRef.current = false;
+    }
+  }
+
+  async function sendOnce(): Promise<void> {
     const idBlob = idShot?.blob;
     const selfieBlob = selfieShot?.blob;
     if (!idBlob || !selfieBlob) return;
@@ -262,9 +273,7 @@ export function IdentityStep({
       <StepFrame title="No identity check needed">
         <div data-testid="identity-waived" className="space-y-3">
           <p>{IDENTITY_COPY.waived}</p>
-          {projection?.faceDetectorsOff === false || forcedWaived ? (
-            <p>{IDENTITY_COPY.waivedFaceOn}</p>
-          ) : null}
+          {projection?.faceDetectorsOff === false ? <p>{IDENTITY_COPY.waivedFaceOn}</p> : null}
         </div>
         <Button size="lg" className="min-h-11" onClick={onDone}>
           Continue
@@ -451,7 +460,14 @@ export function IdentityStep({
             ) : null}
             {phase === 'selfie' && selfieShot ? (
               <>
-                <Button size="lg" className="min-h-11" onClick={() => setPhase('review')}>
+                <Button
+                  size="lg"
+                  className="min-h-11"
+                  onClick={() => {
+                    stopCamera();
+                    setPhase('review');
+                  }}
+                >
                   Use this selfie
                 </Button>
                 <Button

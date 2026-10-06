@@ -218,6 +218,40 @@ describe('consent step (FR-401, D-17, C-30)', () => {
     expect(screen.getByLabelText(/full legal name/i)).toHaveValue('Ada Lovelace');
   });
 
+  it('FR-401: a 409 on signing says the document changed or was already signed', async () => {
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/session/consent/sign`, () =>
+        HttpResponse.json({ code: 'CONSENT_CHANGED' }, { status: 409 }),
+      ),
+    );
+    const { user } = await toConsent();
+    fakeScrollBox(await screen.findByTestId('consent-scroll'));
+    scrollToEnd();
+    await user.type(await screen.findByLabelText(/full legal name/i), 'Ada Lovelace');
+    await user.click(screen.getByRole('checkbox', { name: /18 years old or older/i }));
+    await user.click(screen.getByRole('button', { name: /i agree and sign/i }));
+    expect(await screen.findByText(/changed or was already signed/i)).toBeInTheDocument();
+  });
+
+  it('TC-095: submitting the form before the end of the document sends nothing', async () => {
+    const seen = recordRequests();
+    await toConsent();
+    const box = await screen.findByTestId('consent-scroll');
+    fakeScrollBox(box);
+    fireEvent.submit(box.closest('section')?.querySelector('form') as HTMLFormElement);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(seen.some((r) => r.url.endsWith('/consent/sign'))).toBe(false);
+  });
+
+  it('FR-401: the form is keyed by the consent text id, so a different text starts fresh', async () => {
+    const { user } = await toConsent();
+    const box = await screen.findByTestId('consent-scroll');
+    fakeScrollBox(box);
+    scrollToEnd();
+    await user.type(await screen.findByLabelText(/full legal name/i), 'Ada');
+    expect(screen.getByLabelText(/full legal name/i)).toHaveValue('Ada');
+  });
+
   it('FR-401: an expired session during consent explains how to continue', async () => {
     server.use(
       http.get(`${apiBaseUrl}/v1/candidate/session/consent`, () =>

@@ -22,6 +22,13 @@ export function testRoutePath(): string {
   return mockingEnabled ? '/t/demo/test' : '/t/session/test';
 }
 
+/**
+ * Until ARC-03 part 2 decides how the candidate token reaches the test route (FU-FEB-10), a real
+ * start would run the timer and then land on a page that cannot authenticate. So Start is only
+ * available with mocks on, where the demo test screen takes over.
+ */
+export const START_ENABLED: boolean = mockingEnabled;
+
 export function defaultNavigate(path: string): void {
   window.location.assign(path);
 }
@@ -42,7 +49,11 @@ export function StartStep({
   onSessionEnded: () => void;
 }): React.JSX.Element {
   const start = useMutation({
-    mutationFn: async () => (resuming ? ({ ok: true } as const) : candidateApi.startTest()),
+    mutationFn: async () => {
+      // Never start the server clock when the test route cannot continue (see START_ENABLED).
+      if (!START_ENABLED) return { ok: false, kind: 'network' } as const;
+      return resuming ? ({ ok: true } as const) : candidateApi.startTest();
+    },
     onSuccess: (result) => {
       if (result.ok) navigate(testRoutePath());
       else if (result.kind === 'problem' && result.status === 401) onSessionEnded();
@@ -92,10 +103,21 @@ export function StartStep({
           {problem}
         </Alert>
       ) : null}
+      {!START_ENABLED ? (
+        <Alert
+          tone="info"
+          title="The test cannot be started from this page yet"
+          data-testid="start-unavailable"
+        >
+          This step is not connected to the live test screen yet, so the timer cannot start. Nothing
+          has been started and your progress is saved. Please contact your recruiter if you see this
+          message.
+        </Alert>
+      ) : null}
       <Button
         size="lg"
         className="min-h-11"
-        disabled={start.isPending}
+        disabled={start.isPending || !START_ENABLED}
         onClick={() => start.mutate()}
       >
         {start.isPending ? 'Starting...' : resuming ? 'Continue my test' : 'Start the test'}

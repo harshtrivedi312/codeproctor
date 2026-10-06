@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { axe } from 'vitest-axe';
 import { describe, expect, it, vi } from 'vitest';
 import { MOCK_OTP, MOCK_RECRUITER_CONTACT, MOCK_TOKENS } from '@/mocks/candidate/handlers';
+import { candidateApi } from './api';
 import { CandidateFlow } from './candidate-flow';
 import { getInvitationToken, getSessionToken, SCRUBBED_PATH } from './session-store';
 import {
@@ -225,6 +226,34 @@ describe('email OTP step (FR-106, TC-007, TC-097)', () => {
     expect(screen.getByRole('button', { name: /check code/i })).toBeDisabled();
     expect(screen.queryByRole('heading', { name: /paused/i })).not.toBeInTheDocument();
     expect(screen.getByLabelText(/6-digit code/i)).toBeInTheDocument();
+  });
+
+  it('TC-097: the wait is announced once with its full length, and the ticking countdown is hidden from screen readers', async () => {
+    const user = userEvent.setup();
+    open(MOCK_TOKENS.resume);
+    await user.click(await screen.findByRole('button', { name: /email me a one-time code/i }));
+    for (const code of ['111111', '222222']) {
+      await user.type(await screen.findByLabelText(/6-digit code/i), code);
+      await user.click(screen.getByRole('button', { name: /check code/i }));
+      await screen.findByLabelText(/6-digit code/i);
+    }
+    const live = (await screen.findByText(/please wait 30 seconds before trying again/i)).closest(
+      '[aria-live]',
+    );
+    expect(live).not.toBeNull();
+    const ticking = screen.getByText(/\(\d+ s left\)/);
+    expect(ticking).toHaveAttribute('aria-hidden', 'true');
+    // The live text itself is the fixed sentence, not the changing number.
+    expect(live?.textContent?.replace(ticking.textContent ?? '', '')).toMatch(/30 seconds/);
+  });
+
+  it('FR-106: a code sent a moment ago (OTP_COOLDOWN on the first press) goes on to the code entry with the wait', async () => {
+    const user = userEvent.setup();
+    await candidateApi.sendOtp(MOCK_TOKENS.cooldown);
+    open(MOCK_TOKENS.cooldown);
+    await user.click(await screen.findByRole('button', { name: /email me a one-time code/i }));
+    expect(await screen.findByLabelText(/6-digit code/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /send a new code \(wait \d+ s\)/i })).toBeDisabled();
   });
 
   it('TC-097: the right code resumes a running test at the start step', async () => {

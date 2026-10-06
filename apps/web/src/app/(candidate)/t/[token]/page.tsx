@@ -1,12 +1,9 @@
-import { CandidateFlow } from '@/features/candidate-flow/candidate-flow';
-
-export const metadata = { title: 'Your test' };
+import { TokenHandoff } from '@/features/candidate-flow/token-handoff';
 
 /**
- * FR-401 to FR-403 pre-test stepper. The token in the path is read once on the client and then
- * removed from the address bar (see CandidateFlow); it is never logged here.
+ * Thin entry for links shaped /t/<token>. It renders no props from the server: the client reads the
+ * segment, moves the token into memory and replaces the URL with /t/link (see TokenHandoff).
  */
-export default async function CandidatePage({ params }: { params: Promise<{ token: string }> }) {
-  const { token } = await params;
-  return <CandidateFlow token={token} />;
+export default function CandidateTokenEntry() {
+  return <TokenHandoff />;
 }

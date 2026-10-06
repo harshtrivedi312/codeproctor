@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { mockingEnabled } from '@/lib/env';
 
 /**
  * PROVISIONAL wire contract for the candidate pre-test routes (contract not final).
@@ -117,7 +118,13 @@ export interface SystemCheckBody {
  * its path here is PROVISIONAL.
  */
 export const presignSchema = z.object({
-  url: z.string().url(),
+  // Real uploads are https only. Plain http is accepted with mocks on (localhost mock upload).
+  url: z
+    .string()
+    .url()
+    .refine((u) => u.startsWith('https://') || (mockingEnabled && u.startsWith('http://')), {
+      message: 'Upload URL must be https',
+    }),
   method: z.literal('PUT'),
   headers: z.record(z.string(), z.string()),
   evidenceKey: z.string().min(1),

@@ -17,6 +17,16 @@ import {
 } from './test-helpers';
 import { fireEvent } from '@testing-library/react';
 
+// Mock mode on: uploads to the local mock URL and Start are only allowed then. There is no browser
+// worker in jsdom, so the ready promise is replaced.
+vi.hoisted(() => {
+  process.env.NEXT_PUBLIC_API_MOCKING = 'enabled';
+});
+vi.mock('@/lib/mock-ready', () => ({
+  mockingReady: Promise.resolve(),
+  markMockingReady: () => undefined,
+}));
+
 setupCandidateServer();
 
 const ok = (message: string): CheckOutcome => ({ status: 'passed', message });

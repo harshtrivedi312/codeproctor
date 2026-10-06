@@ -1,17 +1,30 @@
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { http, HttpResponse } from 'msw';
 import { axe } from 'vitest-axe';
+import { apiBaseUrl } from '@/lib/env';
 import { describe, expect, it, vi } from 'vitest';
 import { candidateApi } from '@/features/candidate-flow/api';
 import { setSessionToken } from '@/features/candidate-flow/session-store';
 import {
   recordRequests,
   renderWithQuery,
+  server,
   setupCandidateServer,
 } from '@/features/candidate-flow/test-helpers';
 import { MOCK_OTP, MOCK_TOKENS } from '@/mocks/candidate/handlers';
 import type { IdentityDeps } from './capture';
 import { IDENTITY_COPY, IdentityStep } from './identity-step';
+
+// Mock mode on: uploads to the local mock URL and Start are only allowed then. There is no browser
+// worker in jsdom, so the ready promise is replaced.
+vi.hoisted(() => {
+  process.env.NEXT_PUBLIC_API_MOCKING = 'enabled';
+});
+vi.mock('@/lib/mock-ready', () => ({
+  mockingReady: Promise.resolve(),
+  markMockingReady: () => undefined,
+}));
 
 setupCandidateServer();
 
@@ -201,9 +214,6 @@ describe('identity step (FR-403, ADR 0004)', () => {
     await signIn();
     const { deps } = fakeDeps();
     const user = userEvent.setup();
-    const { server } = await import('@/features/candidate-flow/test-helpers');
-    const { http, HttpResponse } = await import('msw');
-    const { apiBaseUrl } = await import('@/lib/env');
     server.use(
       http.post(`${apiBaseUrl}/v1/candidate/session/evidence/presign`, () =>
         HttpResponse.json({ code: 'IDENTITY_CHECK_WAIVED' }, { status: 409 }),
@@ -211,8 +221,47 @@ describe('identity step (FR-403, ADR 0004)', () => {
     );
     renderWithQuery(<IdentityStep deps={deps} onDone={vi.fn()} onSessionEnded={vi.fn()} />);
     await capturePhotos(user);
+    // The waiver arrives after the page loaded: the next read of the projection shows it.
+    server.use(
+      http.get(`${apiBaseUrl}/v1/candidate/session/accommodations`, () =>
+        HttpResponse.json({ identityCheckWaived: true, faceDetectorsOff: false }),
+      ),
+    );
     await user.click(await screen.findByRole('button', { name: /send my photos/i }));
-    expect(await screen.findByTestId('identity-waived')).toBeInTheDocument();
+    const waived = await screen.findByTestId('identity-waived');
+    await waitFor(() => expect(waived).toHaveTextContent(IDENTITY_COPY.waivedFaceOn));
+  });
+
+  it('FR-403: a double click on send uploads once', async () => {
+    await signIn();
+    const seen = recordRequests();
+    const { deps } = fakeDeps();
+    const user = userEvent.setup();
+    renderWithQuery(<IdentityStep deps={deps} onDone={vi.fn()} onSessionEnded={vi.fn()} />);
+    await capturePhotos(user);
+    const send = await screen.findByRole('button', { name: /send my photos/i });
+    await user.dblClick(send);
+    await screen.findByTestId('identity-received');
+    expect(seen.filter((r) => r.url.endsWith('/identity'))).toHaveLength(1);
+  });
+
+  it('FR-403: the camera is stopped once the selfie is accepted', async () => {
+    await signIn();
+    const { deps, stopped } = fakeDeps();
+    const user = userEvent.setup();
+    renderWithQuery(<IdentityStep deps={deps} onDone={vi.fn()} onSessionEnded={vi.fn()} />);
+    await capturePhotos(user);
+    expect(stopped).toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /send my photos/i })).toBeInTheDocument();
+  });
+
+  it('FR-403: an upload URL that is not https is refused (only the mock URL is allowed with mocks on)', async () => {
+    await signIn();
+    const { presignSchema } = await import('@/features/candidate-flow/wire');
+    const base = { method: 'PUT', headers: {}, evidenceKey: 'k', expiresAt: 'x' };
+    expect(presignSchema.safeParse({ ...base, url: 'https://s3.test/x' }).success).toBe(true);
+    expect(presignSchema.safeParse({ ...base, url: 'ftp://s3.test/x' }).success).toBe(false);
+    expect(presignSchema.safeParse({ ...base, url: 'javascript:alert(1)' }).success).toBe(false);
   });
 
   it('FR-403: nothing is kept in browser storage', async () => {
