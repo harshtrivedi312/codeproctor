@@ -4,17 +4,14 @@ Everything in this folder serves one rule: **a query can only see or change rows
 org** (ADR 0006, NFR-04, FR-103, TC-008). Services never build a Prisma client of their own. They
 inject `PrismaService` and use `prisma.client`, which runs every model query through the org scope.
 
-**Which `PrismaService`.** There are two classes with that name, in different files:
-
-- `database/prisma.service.ts` (exported from `database/index.ts`, provided by `DatabaseModule`) is
-  the org-scoped one. **New business modules must use it.**
-- `database/prisma.module.ts` is BE-02's interim client: an unscoped `PrismaClient` for auth
-  bootstrap only. It stays until `auth.service.ts` moves onto `database/prisma.service.ts` inside
-  `runSystem('AUTH_BOOTSTRAP', ...)` (see the recipe below), and then it is deleted (FU-DB-58).
+**Which `PrismaService`.** There is one: `database/prisma.service.ts` (exported from
+`database/index.ts`, provided by `DatabaseModule`), the org-scoped one. BE-02's interim
+unscoped client (`database/prisma.module.ts`) is gone: `AuthService` and `JwtAuthGuard` use the
+scoped one inside `runSystem('AUTH_BOOTSTRAP', ...)` or `runInOrg` (FU-DB-58, FU-DB-102).
 
 An import guard (`import-guard.spec.ts`) keeps five things out of new code, because each reaches
-Postgres around the org scope: `database/prisma.module`, `database/create-prisma-client`, BE-01's
-`PG_POOL` token, the `pg` package (allowed only in `infrastructure/infrastructure.module.ts` and
+Postgres around the org scope: the removed `database/prisma.module` (no file may bring it back),
+`database/create-prisma-client`, BE-01's `PG_POOL` token, the `pg` package (allowed only in `infrastructure/infrastructure.module.ts` and
 `health/health.service.ts`) and the `@prisma/adapter-pg` package (only in
 `database/create-prisma-client.ts`). It reads every non-test file under `src` for `from '...'`,
 `require('...')` and `import('...')`, with or without `.js`, and compares against an explicit
@@ -22,9 +19,6 @@ per-file allowlist in the spec (not folders). **A re-export (`export ... from`) 
 package or identifier is refused even in an allowlisted file**, because it hands the thing to every
 importer of that file. A new legitimate user is added to the allowlist in the same pull request,
 which is the review point.
-
-Nest injects by class reference, not by name, so the two never collide at runtime. Always import
-from the file named above, and check the import line when an editor offers an auto-import.
 
 Developer notes:
 
@@ -478,8 +472,8 @@ reading the 7.10 runtime (not reproduced): an adapter kind the runtime does not 
 
 `error-hygiene.spec.ts` proves it against Postgres: a unique violation on a known token hash, an
 id that is not a uuid, a check and a foreign key violation, a record not found, validation errors, a
-failing raw query, an interactive and a batch transaction, and a Serializable transaction that fails at commit. The plain factory client (the seed, and
-BE-02's interim `PrismaModule` until FU-DB-58) does **not** scrub: do not log its errors as they are.
+failing raw query, an interactive and a batch transaction, and a Serializable transaction that fails at commit. The plain factory client (the seed only) does
+**not** scrub: do not log its errors as they are.
 
 ## `upsert` in an org scope is not a native upsert
 
@@ -519,7 +513,6 @@ which stays one statement, and be ready to retry on `P2002` elsewhere.
 | `org-scope-relations.ts`                       | Every foreign key classified (`FK_CLASSES`, `RULE_I_REFERENCES`), the first-hop column of each path model (`scopeHopColumn`) and the side of every relation that holds the key |
 | `org-scope.extension.ts`                       | The `$extends` query extension and `OrgScopedPrismaClient`                                                                                                                     |
 | `org-context.ts`, `org-context.interceptor.ts` | The AsyncLocalStorage context, its API, and the HTTP population point                                                                                                          |
-| `prisma.module.ts`                             | BE-02's interim unscoped client for auth bootstrap only (not part of DB-05)                                                                                                    |
 | `errors.ts`                                    | `OrgContextMissingError`, `OrgScopeViolationError`, `RawQueryNotAllowedError`                                                                                                  |
 | `error-scrub.ts`                               | Keeps argument values out of the Prisma errors that are logged (FU-DB-70)                                                                                                      |
 | `testing/`                                     | Test helpers (excluded from the build): throwaway migrated Postgres, fixtures, scope checks                                                                                    |
