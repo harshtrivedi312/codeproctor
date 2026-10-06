@@ -847,14 +847,15 @@ plain org scope (it becomes STAFF). Two tests show it. The call-site rules above
 
 ### ERASED detection
 
-`session_status` gains `ERASED` only with ADR 0004 section 9 (PR #91). Until that migration is on main the
-generated enum has no such member, and no row can be ERASED. `session-locks.ts` reads it from the generated enum
-once, at load: `Object.hasOwn(SessionStatus, 'ERASED')`, for one thing, the typed `NOT: { status: 'ERASED' }`
+`session_status` gained `ERASED` with ADR 0004 section 9 (PR #91, now on main, so the generated enum has the
+member and the **present** mode is live). Before that migration the enum had no such member and no row could be
+ERASED. `session-locks.ts` reads it from the generated enum once, at load: `Object.hasOwn(SessionStatus, 'ERASED')`, for one thing, the typed `NOT: { status: 'ERASED' }`
 condition of `guardLive`'s write:
 
 - **present:** `guardLive` adds the `NOT` condition to the update;
-- **absent:** the condition is left out. That is equivalent (`status: <read>` already excludes ERASED), so nothing
-  needs to change when #91 lands: regenerating the client switches the first branch on.
+- **absent:** the condition is left out. That is equivalent (`status: <read>` already excludes ERASED); this is the
+  mode of a client generated before #91, and it is still tested (with the generated enums module replaced).
+  Regenerating the client switched the first branch on, with no code change.
 
 **The status that was read is always compared with the literal string `'ERASED'`**, in both modes (N1 of the
 review of #208), so a client generated before #91 still fails closed on a row that reads ERASED: `guardLive`
@@ -871,8 +872,10 @@ actor included), `session-locks-enum-erased.spec.ts` and `session-locks-enum-abs
 with the generated enum replaced by one with and without ERASED, sharing `testing/guard-live-cases.ts`, plus a
 stale client whose row reads ERASED), and `session-locks-postgres.spec.ts` (Postgres 16 as `app_user`: scopes,
 grants, cross-org, refused scopes send nothing, statement counts, two connections for the lock semantics, a
-forced and a real race, the retention lock order, and the ERASED cases that are skipped, with the reason in their
-name, until #91 lands). The import-guard and call-site cases are in `import-guard.spec.ts` and `call-sites.spec.ts`.
+forced and a real race, the retention lock order, and the ERASED cases against the real enum: an owner-set ERASED
+row, `guardLive` returns `'ERASED'` and writes nothing, `lockForAccommodation` and `lockAnySession` lock it, the fence
+wins a real race, and the `NOT (status = 'ERASED')` clause is in `guardLive`'s UPDATE text and in no other lock's; they
+run whenever the generated enum has ERASED, and skip with their reason in the name when it does not). The import-guard and call-site cases are in `import-guard.spec.ts` and `call-sites.spec.ts`.
 
 ## Auth bootstrap recipe
 

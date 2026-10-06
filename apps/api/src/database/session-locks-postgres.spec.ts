@@ -22,7 +22,9 @@
 //     seen by the re-read, and is never reverted;
 //   - the retry: a status change between the read and the update (forced through a proxied tx) is
 //     re-read, and three changes in a row end in the retry error with the last status untouched;
-//   - ERASED against the real enum: skipped, with the reason, until PR #91 adds it to session_status.
+//   - ERASED against the real enum (PR #91 is on main): a row set to ERASED by the owner, guardLive writes nothing,
+//     the other two lock it, the fence wins a real race, and the NOT-ERASED clause is in guardLive's UPDATE text only;
+//     they skip, with the reason in their name, only against a client generated before #91.
 // The logic with a fake transaction (every branch, the exact arguments) is in session-locks.spec.ts.
 // Every probe has a short lock_timeout or a polling deadline, so a broken lock fails the test and never
 // hangs it. FR-704, NFR-05 (erasure), NFR-04, TC-008, TC-094.
@@ -1018,6 +1020,33 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
       probe.query("UPDATE sessions SET status = 'ERASED'::session_status WHERE id = $1::uuid", [
         id,
       ]);
+
+    itWithErased(
+      `NFR-05 TC-094 the NOT-ERASED clause is in guardLive's UPDATE text, and in no other lock's${ENUM_HAS_ERASED ? '' : SKIP_NOTE}`,
+      async () => {
+        const g = await freshChain('erasedtext1');
+        await db.statements.reset();
+        await asService(g, () => lockIn(guardLive, g.sessionId));
+        const guard = (await counts()).updateTexts;
+        expect(guard).toHaveLength(1);
+        // id = $2 AND status = <read> ($3) AND (NOT status = 'ERASED' ($4)) AND the scope's filters: the exclusion is
+        // part of the compare-and-set, and a parameter of its own.
+        expect(guard[0]).toMatch(
+          /"sessions"\."status" = CAST\(\$3::text AS "public"\."session_status"\) AND \(NOT "public"\."sessions"\."status" = CAST\(\$4::text AS "public"\."session_status"\)\)/,
+        );
+        for (const [name, lock] of ANY_STATUS_LOCKS) {
+          const chain = await freshChain(`erasedtext-${name}`);
+          await db.statements.reset();
+          await asHome(lock, chain, () => lockIn(lock, chain.sessionId));
+          const texts = (await counts()).updateTexts;
+          expect({ name, texts: texts.length }).toEqual({ name, texts: 1 });
+          expect({ name, notErased: /\bNOT\b/.test(texts[0] as string) }).toEqual({
+            name,
+            notErased: false,
+          });
+        }
+      },
+    );
 
     itWithErased(
       `NFR-05 TC-094 guardLive returns ERASED for an erased session and writes nothing (xmin the same)${ENUM_HAS_ERASED ? '' : SKIP_NOTE}`,

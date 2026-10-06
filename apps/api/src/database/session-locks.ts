@@ -58,8 +58,8 @@
 // level turns the compare-and-set into serialization errors), and keep the transaction short: the lock
 // is held until it commits.
 //
-// ERASED. `session_status` gains `ERASED` only with ADR 0004 section 9 (PR #91). Until that migration
-// is on main the generated enum has no such member, and no row can be ERASED. The member is therefore
+// ERASED. `session_status` gained `ERASED` with ADR 0004 section 9 (PR #91, on main). A client generated
+// before that migration has no such member, and no row of its database can be ERASED. The member is therefore
 // taken from the generated enum at load time (`Object.hasOwn(SessionStatus, 'ERASED')`) for ONE thing,
 // the typed `NOT: { status: 'ERASED' }` condition of guardLive's write:
 //   present  guardLive adds the `NOT` condition to the write;
