@@ -56,7 +56,7 @@ describe('2FA verify right after a cold start (FR-102, TC-003, NFR-03, NFR-04, Q
     return emails;
   }
 
-  async function bootFreshApp(): Promise<void> {
+  async function bootFreshApp(options: { memoryThrottle?: boolean } = {}): Promise<void> {
     await app?.close();
     jest.resetModules();
     const { AppModule } = jest.requireActual<typeof import('../app.module')>('../app.module');
@@ -64,16 +64,23 @@ describe('2FA verify right after a cold start (FR-102, TC-003, NFR-03, NFR-04, Q
     const { configureApp } = jest.requireActual<typeof import('../bootstrap')>('../bootstrap');
     const { MailPort } =
       jest.requireActual<typeof import('../mail/mail.port')>('../mail/mail.port');
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+    const { getStorageToken, ThrottlerStorageService } =
+      jest.requireActual<typeof import('@nestjs/throttler')>('@nestjs/throttler');
+    const builder = Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(MailPort)
-      .useValue({ sendPasswordReset: () => Promise.resolve() })
-      .compile();
+      .useValue({ sendPasswordReset: () => Promise.resolve() });
+    // With the Redis throttle store, a dead Redis answers 503 before the handler runs. An
+    // in-memory store lets the request reach the handler's own fail-closed path.
+    if (options.memoryThrottle) {
+      builder.overrideProvider(getStorageToken()).useValue(new ThrottlerStorageService());
+    }
+    const moduleRef = await builder.compile();
     app = moduleRef.createNestApplication<INestApplication<App>>();
     configureApp(app);
     await app.init();
   }
 
-  // Password sign-in does not touch Redis, so the first Redis use is the verify that follows.
+  // Password sign-in is throttled in Redis (FU-BE-1); the replay store is used by the verify.
   async function challengeFor(email: string): Promise<string> {
     const res = await request(app.getHttpServer())
       .post(`${API}/login`)
@@ -97,20 +104,35 @@ describe('2FA verify right after a cold start (FR-102, TC-003, NFR-03, NFR-04, Q
       expect((r.body as { accessToken?: string }).accessToken).toEqual(expect.any(String));
   });
 
-  it('NFR-04: with Redis unreachable a 2FA verify fails closed with 503 within the health timeout, no session, no failed-login count', async () => {
+  it('NFR-04: with Redis unreachable the 2FA verify handler fails closed with its own 503 within the health timeout, no session, no failed-login count', async () => {
     const [email] = await createTotpUsers('down', 1);
-    applyEnv(infra, { THROTTLE_AUTH_LIMIT: '10000', REDIS_URL: 'redis://127.0.0.1:1' });
+    // The challenge is signed with the test secrets, so get it from an app that still has Redis,
+    // then point a fresh app (in-memory throttle store, so the handler is reached) at a dead Redis.
     await bootFreshApp();
     const challengeToken = await challengeFor(email ?? '');
+    process.env.REDIS_URL = 'redis://127.0.0.1:1';
+    await bootFreshApp({ memoryThrottle: true });
     const started = Date.now();
     const res = await request(app.getHttpServer())
       .post(`${API}/2fa/verify`)
       .send({ challengeToken, code: authenticator.generate(SECRET) });
     expect(res.status).toBe(503);
+    expect(JSON.stringify(res.body)).toContain('Verification is temporarily unavailable.');
     expect(Date.now() - started).toBeLessThan(1500 + 1500);
     expect(res.headers['set-cookie']).toBeUndefined();
     expect((res.body as { accessToken?: string }).accessToken).toBeUndefined();
     const row = await prisma.user.findUniqueOrThrow({ where: { email: email ?? '' } });
     expect(row.failedLogins).toBe(0);
+  });
+
+  it('FU-BE-1: with Redis unreachable the throttle guard answers 503 before the handler runs', async () => {
+    process.env.REDIS_URL = 'redis://127.0.0.1:1';
+    await bootFreshApp();
+    const res = await request(app.getHttpServer())
+      .post(`${API}/2fa/verify`)
+      .send({ challengeToken: 'x', code: '000000' });
+    expect(res.status).toBe(503);
+    expect(JSON.stringify(res.body)).toContain('Service is temporarily unavailable.');
+    expect(JSON.stringify(res.body)).not.toContain('Verification is');
   });
 });
