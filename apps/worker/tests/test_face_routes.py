@@ -419,3 +419,80 @@ def test_fr606_recheck_refused_url_is_400(monkeypatch: pytest.MonkeyPatch) -> No
     req = recheck_req(w, ID_A, ID_A)
     w.objects[req["selfieUrl"]] = fetchguard.FetchError("MEDIA_UNAVAILABLE")
     assert w.post("/v1/face/recheck", req, monkeypatch).json()["outcome"] == "ERROR"
+
+
+def test_fr403_liveness_false_never_downloads_a_biometric_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    w = World()
+    fetched: list[str] = []
+
+    def spy(url: str, cfg: Any, **kw: Any) -> bytes:
+        fetched.append(url)
+        return ID_A
+
+    monkeypatch.setattr(fetchguard, "fetch", spy)
+    body = json.dumps(match_req(w, ID_A, ID_A, livenessConfirmed=False)).encode()
+    h, b, _ = signed(body=body, path="/v1/face/match", ts=time.time())
+    r = call(w.app, "/v1/face/match", h, b)
+    assert r.json()["reason"] == "LIVENESS_NOT_CONFIRMED" and fetched == []
+
+
+def test_fr606_cache_expiry_must_be_aware_future_and_is_clamped_to_four_hours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    on = World(cache=True)
+    for bad in ("2030-01-01T00:00:00", "2020-01-01T00:00:00Z", "not a date"):
+        req = recheck_req(on, ID_A, ID_A, cacheSelfie=True, cacheExpiresAt=bad)
+        assert on.post("/v1/face/recheck", req, monkeypatch).status_code == 400
+    far = recheck_req(on, ID_A, ID_A, cacheSelfie=True, cacheExpiresAt="2099-01-01T00:00:00Z")
+    assert on.post("/v1/face/recheck", far, monkeypatch).json()["cache"] == "MISS"
+    entry = on.matcher.selfie_cache._items[SESSION]  # noqa: SLF001 - proving the clamp
+    assert entry[1] is not None and entry[1] <= time.time() + 4 * 3600 + 5
+    m = World(cache=True)
+    req = match_req(m, ID_A, ID_A, cacheSelfie=True, cacheExpiresAt="2099-01-01T00:00:00Z")
+    assert m.post("/v1/face/match", req, monkeypatch).status_code == 200
+    stored = m.matcher.selfie_cache._items[SESSION][1]  # noqa: SLF001
+    assert stored is not None and stored <= time.time() + 4 * 3600 + 5
+
+
+def test_fr606_evict_never_loads_a_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    built: list[int] = []
+
+    def factory() -> FaceMatcher:
+        built.append(1)
+        raise AssertionError("evict must not build the matcher")
+
+    w = World(factory=factory)
+    assert w.post("/v1/face/evict", {"sessionId": SESSION}, monkeypatch).status_code == 204
+    assert built == []
+
+
+def test_fr403_cache_flag_is_refused_in_pilot_and_production_and_unknown_env_is_refused(
+    tmp_path: Path,
+) -> None:
+    models = tmp_path / "m"
+    models.mkdir()
+    base = env(
+        WORKER_MODELS_DIR=str(models),
+        WORKER_OBJECT_STORE_ORIGINS="https://s3.example.test",
+        WORKER_OBJECT_STORE_BUCKET=BUCKET,
+    )
+    for mode in ("pilot", "production"):
+        with pytest.raises(ValueError, match="selfie cache"):
+            build_runtime(base | {"WORKER_ENV": mode, "WORKER_FACE_CACHE_ENABLED": "true"})
+    rt, _, _ = build_runtime(base | {"WORKER_ENV": "staging", "WORKER_FACE_CACHE_ENABLED": "true"})
+    assert rt.cache_enabled  # staging has synthetic data only
+    for typo in ("prod", "Production", "PRODUCTION", "stage"):
+        with pytest.raises(ValueError, match="WORKER_ENV"):
+            build_runtime(base | {"WORKER_ENV": typo})
+
+
+def test_fr403_docs_routes_are_removed_outside_local_and_kept_in_local() -> None:
+    for local in (False, True):
+        app = FastAPI()
+        w = World()
+        install_face_routes(app, w.runtime, keys={"k1": KEY_A}, docs_local=local)
+        h, b, _ = signed(body=b"", path="/openapi.json", method="GET", ts=time.time())
+        status = call(app, "/openapi.json", h, b, method="GET").status_code
+        assert (status == 200) if local else (status == 404)

@@ -16,12 +16,14 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final, Protocol
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 FACE_MAX_URL_LIFETIME: Final = 60
 ANALYSIS_MAX_URL_LIFETIME: Final = 300
 CLOCK_SKEW_SECONDS: Final = 60
 MAX_URL_LENGTH: Final = 2048
+# One object must arrive within this, however slowly the store sends (the API gives up at 15-20 s).
+FACE_FETCH_DEADLINE: Final = 8.0
 _AMZ_DATE: Final = re.compile(r"[0-9]{8}T[0-9]{6}Z")
 _EXPIRES: Final = re.compile(r"[0-9]{1,7}")
 _HOST: Final = re.compile(r"[A-Za-z0-9.-]{1,253}")
@@ -72,6 +74,14 @@ def build_config(origins_env: str, bucket: str, *, allow_http: bool) -> FetchCon
     return FetchConfig(origins, bucket, allow_http)
 
 
+def _odd_path(path: str) -> bool:
+    """Dot segments in any encoding, encoded slashes or backslashes, and empty segments."""
+    lowered = path.lower()
+    if "%2f" in lowered or "%5c" in lowered or "//" in path:
+        return True
+    return any(seg in (".", "..") for seg in unquote(path).split("/"))
+
+
 def _amz_epoch(value: str) -> int:
     return calendar.timegm(time.strptime(value, "%Y%m%dT%H%M%SZ"))
 
@@ -80,7 +90,11 @@ def validate_url(
     url: str, cfg: FetchConfig, max_lifetime: int, now: Callable[[], float] = time.time
 ) -> tuple[str, int, str]:
     """Return (host, port, path-with-query) if the URL is allowed; raise FetchError otherwise."""
-    if len(url) > MAX_URL_LENGTH or not url.isascii() or any(c in url for c in "\r\n\t\\ "):
+    if (
+        len(url) > MAX_URL_LENGTH
+        or not url.isascii()
+        or any(ord(c) < 0x21 or ord(c) == 0x7F or c == "\\" for c in url)
+    ):
         raise FetchError("URL_REFUSED")
     try:
         parts = urlsplit(url)
@@ -101,14 +115,23 @@ def validate_url(
             names_bucket = True  # path style
         elif host == f"{cfg.bucket}.{o.host}":
             names_bucket = True  # virtual-hosted style
-    if not names_bucket or ".." in parts.path.split("/"):
+    if not names_bucket or _odd_path(parts.path):
         raise FetchError("URL_REFUSED")
-    query = {k.lower(): v for k, v in parse_qs(parts.query, keep_blank_values=True).items()}
-    date, expires = query.get("x-amz-date", [""])[0], query.get("x-amz-expires", [""])[0]
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    folded = [k.lower() for k, _ in pairs]
+    if len(set(folded)) != len(
+        folded
+    ):  # duplicates or case variants: the guard and S3 could differ
+        raise FetchError("URL_REFUSED")
+    query = dict(pairs)
+    date, expires = query.get("X-Amz-Date", ""), query.get("X-Amz-Expires", "")
     if not _AMZ_DATE.fullmatch(date) or not _EXPIRES.fullmatch(expires):
         raise FetchError("URL_REFUSED")
     lifetime = int(expires)
-    signed_at = _amz_epoch(date)
+    try:
+        signed_at = _amz_epoch(date)
+    except (ValueError, OverflowError):
+        raise FetchError("URL_REFUSED") from None
     t = now()
     if lifetime < 1 or lifetime > max_lifetime:
         raise FetchError("URL_REFUSED")
@@ -162,12 +185,15 @@ def fetch(
     max_bytes: int,
     max_lifetime: int,
     timeout: float = 10.0,
+    total_timeout: float = FACE_FETCH_DEADLINE,
     now: Callable[[], float] = time.time,
+    monotonic: Callable[[], float] = time.monotonic,
     connection: ConnectionFactory = _default_connection,
 ) -> bytes:
     """GET the object. No redirects, no proxy, streamed and cut at `max_bytes`."""
     host, port, target = validate_url(url, cfg, max_lifetime, now)
     scheme = urlsplit(url).scheme
+    deadline = monotonic() + total_timeout
     conn = connection(scheme, host, port, timeout)
     try:
         conn.request("GET", target, headers={"Accept-Encoding": "identity"})
@@ -181,6 +207,8 @@ def fetch(
         chunks: list[bytes] = []
         size = 0
         while True:
+            if monotonic() > deadline:  # a slow sender must not hold a worker slot
+                raise FetchError("MEDIA_UNAVAILABLE")
             chunk = resp.read(64 * 1024)
             if not chunk:
                 break

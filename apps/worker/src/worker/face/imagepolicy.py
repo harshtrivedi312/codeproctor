@@ -49,6 +49,8 @@ def check_image(role: Role, data: bytes) -> None:
     try:
         with PILImage.open(io.BytesIO(data), formats=["JPEG"]) as im:  # header only: lazy
             width, height = im.size
+    except PILImage.DecompressionBombError:
+        raise ImagePolicyError(f"{role}_DIMENSIONS") from None
     except Exception:
         raise ImagePolicyError(f"{role}_IMAGE_CORRUPT") from None
     if width < 1 or height < 1 or width * height > policy.max_pixels:

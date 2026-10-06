@@ -15,13 +15,13 @@ import os
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from importlib import metadata
 from pathlib import Path
 from typing import Annotated, Final, Literal
 
 from fastapi import APIRouter, FastAPI, Request, Response
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from worker import fetchguard
 from worker.config import FaceConfig
@@ -38,6 +38,9 @@ log = logging.getLogger(__name__)
 FACE_CONCURRENCY: Final = 4
 RETRY_AFTER_SECONDS: Final = "5"
 STRICT_ENVS: Final = frozenset({"staging", "pilot", "production"})
+KNOWN_ENVS: Final = STRICT_ENVS | {"", "local"}
+CACHE_FORBIDDEN_ENVS: Final = frozenset({"pilot", "production"})  # ADR 0004 question 1 is open
+MAX_CACHE_TTL: Final = timedelta(hours=4)  # ADR 0014 6.3 backstop
 DEFAULT_LOCK_PATH: Final = Path(__file__).resolve().parents[2] / "models.lock.json"
 _SESSION_ID = r"^[A-Za-z0-9_-]{1,64}$"
 
@@ -53,12 +56,14 @@ class MatchRequest(_Req):
     selfieUrl: Annotated[str, Field(min_length=1, max_length=fetchguard.MAX_URL_LENGTH)]  # noqa: N815
     livenessConfirmed: StrictBool  # noqa: N815
     cacheSelfie: StrictBool = False  # noqa: N815
-    cacheExpiresAt: datetime | None = None  # noqa: N815
+    cacheExpiresAt: AwareDatetime | None = None  # noqa: N815
 
     @model_validator(mode="after")
     def _expiry(self) -> MatchRequest:
         if self.cacheSelfie != (self.cacheExpiresAt is not None):
             raise ValueError("cacheExpiresAt is required exactly when cacheSelfie is true")
+        if self.cacheExpiresAt is not None and self.cacheExpiresAt <= datetime.now(UTC):
+            raise ValueError("cacheExpiresAt is in the past")
         return self
 
 
@@ -67,12 +72,14 @@ class RecheckRequest(_Req):
     frameUrl: Annotated[str, Field(min_length=1, max_length=fetchguard.MAX_URL_LENGTH)]  # noqa: N815
     selfieUrl: Annotated[str, Field(min_length=1, max_length=fetchguard.MAX_URL_LENGTH)]  # noqa: N815
     cacheSelfie: StrictBool = False  # noqa: N815
-    cacheExpiresAt: datetime | None = None  # noqa: N815
+    cacheExpiresAt: AwareDatetime | None = None  # noqa: N815
 
     @model_validator(mode="after")
     def _expiry(self) -> RecheckRequest:
         if self.cacheSelfie != (self.cacheExpiresAt is not None):
             raise ValueError("cacheExpiresAt is required exactly when cacheSelfie is true")
+        if self.cacheExpiresAt is not None and self.cacheExpiresAt <= datetime.now(UTC):
+            raise ValueError("cacheExpiresAt is in the past")
         return self
 
 
@@ -118,13 +125,17 @@ class FaceRuntime:
     semaphore: threading.BoundedSemaphore = field(
         default_factory=lambda: threading.BoundedSemaphore(FACE_CONCURRENCY)
     )
-    _matcher: FaceMatcher | None = None
-    _error: ModelLoadError | None = None
-    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _matcher: FaceMatcher | None = field(default=None, init=False, repr=False)
+    _error: ModelLoadError | None = field(default=None, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     @property
     def lock_digest(self) -> str:
         return self.loaded_lock.digest12 if self.loaded_lock else "000000000000"
+
+    def built_matcher(self) -> FaceMatcher | None:
+        with self._lock:
+            return self._matcher
 
     def matcher(self) -> tuple[FaceMatcher | None, ModelLoadError | None]:
         """Build once. A model that fails its pin stays failed until the worker restarts."""
@@ -146,6 +157,13 @@ class FaceRuntime:
 
 
 router = APIRouter(prefix="/v1")
+
+
+def _expiry(value: datetime | None) -> float | None:
+    """Epoch seconds, never later than now + 4 h (the ADR 0014 6.3 backstop)."""
+    if value is None:
+        return None
+    return min(value, datetime.now(UTC) + MAX_CACHE_TTL).timestamp()
 
 
 def _runtime(request: Request) -> FaceRuntime:
@@ -188,7 +206,8 @@ def _not_configured() -> Response:
 def _get(rt: FaceRuntime, url: str, role: Role) -> bytes:
     """Download and apply the role's caps. FetchError(URL_REFUSED) is the caller's bug (400); the
     rest become MANUAL_REVIEW codes through ImagePolicyError / FetchError handling in the routes."""
-    assert rt.fetch is not None  # noqa: S101 - callers check configuration first
+    if rt.fetch is None:  # callers check first; never rely on `assert`
+        raise fetchguard.FetchError("MEDIA_UNAVAILABLE")
     from worker.face.imagepolicy import POLICIES
 
     data = fetchguard.fetch(
@@ -233,8 +252,10 @@ def _json(data: object) -> bytes:
 def match(body: MatchRequest, request: Request) -> MatchResponse | Response:
     rt = _runtime(request)
     if rt.fetch is None:
+        log.warning("face route=match outcome=WORKER_NOT_CONFIGURED")
         return _not_configured()
     if not rt.semaphore.acquire(blocking=False):
+        log.warning("face route=match outcome=WORKER_BUSY")
         return _busy()
     try:
         matcher, error = rt.matcher()
@@ -243,6 +264,17 @@ def match(body: MatchRequest, request: Request) -> MatchResponse | Response:
                 error or ModelLoadError("MODEL_UNAVAILABLE"), rt.face_config
             )
             log.info("face route=match outcome=%s", result.detail)
+            return _match_body(rt, result)
+        if not body.livenessConfirmed:  # fail closed before downloading any biometric image
+            result = MatchResult(
+                FaceDecision.MANUAL_REVIEW,
+                ReviewReason.LIVENESS_NOT_CONFIRMED,
+                "LIVENESS",
+                None,
+                matcher.model_id,
+                rt.face_config.match_threshold,
+            )
+            log.info("face route=match outcome=%s", result.decision.value)
             return _match_body(rt, result)
         try:
             id_image = _get(rt, body.idImageUrl, "ID")
@@ -257,20 +289,16 @@ def match(body: MatchRequest, request: Request) -> MatchResponse | Response:
         else:
             cache_key = body.sessionId if body.cacheSelfie and rt.cache_enabled else None
             result = matcher.match(
-                id_image, selfie, liveness_confirmed=body.livenessConfirmed, session_id=cache_key
+                id_image,
+                selfie,
+                liveness_confirmed=body.livenessConfirmed,
+                session_id=cache_key,
+                expires_at=_expiry(body.cacheExpiresAt),
             )
-            if cache_key is not None and body.cacheExpiresAt is not None:
-                _set_expiry(matcher, cache_key, body.cacheExpiresAt)
         log.info("face route=match outcome=%s", result.decision.value)
         return _match_body(rt, result)
     finally:
         rt.semaphore.release()
-
-
-def _set_expiry(matcher: FaceMatcher, session_id: str, expires: datetime) -> None:
-    emb = matcher.selfie_cache.get(session_id)
-    if emb is not None:
-        matcher.selfie_cache.put(session_id, emb, expires.timestamp())
 
 
 def _outcome(r: MatchResult) -> RecheckOutcome:
@@ -306,8 +334,10 @@ def _recheck_body(
 def recheck(body: RecheckRequest, request: Request) -> RecheckResponse | Response:
     rt = _runtime(request)
     if rt.fetch is None:
+        log.warning("face route=recheck outcome=WORKER_NOT_CONFIGURED")
         return _not_configured()
     if not rt.semaphore.acquire(blocking=False):
+        log.warning("face route=recheck outcome=WORKER_BUSY")
         return _busy()
     try:
         matcher, error = rt.matcher()
@@ -325,8 +355,9 @@ def recheck(body: RecheckRequest, request: Request) -> RecheckResponse | Respons
                 else:
                     cache_mode = "MISS"
                     selfie = _get(rt, body.selfieUrl, "SELFIE")
-                    expires = body.cacheExpiresAt.timestamp() if body.cacheExpiresAt else None
-                    primed = matcher.prime_selfie(body.sessionId, selfie, expires)
+                    primed = matcher.prime_selfie(
+                        body.sessionId, selfie, _expiry(body.cacheExpiresAt)
+                    )
                     if primed is not None:
                         return _recheck_body(rt, primed, cache_mode)
                 result = matcher.recheck(body.sessionId, frame)
@@ -350,7 +381,7 @@ def recheck(body: RecheckRequest, request: Request) -> RecheckResponse | Respons
 @router.post("/face/evict", status_code=204)
 def evict(body: EvictRequest, request: Request) -> Response:
     rt = _runtime(request)
-    matcher, _ = rt.matcher() if rt.cache_enabled else (None, None)
+    matcher = rt.built_matcher()  # never loads a model just to evict
     if matcher is not None:
         matcher.end_session(body.sessionId)
     return Response(status_code=204)
@@ -364,7 +395,12 @@ def build_runtime(
     (tests, tooling) those checks are skipped and the routes report not ready instead."""
     env = os.environ if environ is None else environ
     mode = env.get("WORKER_ENV", "")
+    if mode not in KNOWN_ENVS:  # a typo must not silently run lenient
+        raise ValueError("unknown WORKER_ENV")
     strict = mode in STRICT_ENVS
+    cache_flag = env.get("WORKER_FACE_CACHE_ENABLED", "false") == "true"
+    if cache_flag and mode in CACHE_FORBIDDEN_ENVS:
+        raise ValueError("selfie cache is not allowed here until ADR 0004 question 1 is answered")
     keys = parse_keys(env.get("WORKER_HMAC_KEYS", ""))
     if strict and not keys:
         raise KeyConfigError("NO_KEYS")
@@ -393,7 +429,7 @@ def build_runtime(
         loaded_lock=loaded,
         check=check,
         fetch=fetch,
-        cache_enabled=env.get("WORKER_FACE_CACHE_ENABLED", "false") == "true",  # off by default
+        cache_enabled=cache_flag,  # off by default
         worker_version=version,
     )
     return rt, keys, mode == "local"
@@ -410,6 +446,12 @@ def install_face_routes(
     if runtime is None:
         runtime, keys, docs_local = build_runtime()
     app.state.face_runtime = runtime
+    if not docs_local:  # ADR 0014 4.2: no interactive docs outside local development
+        from worker.signing import DOCS_PATHS
+
+        app.router.routes = [
+            r for r in app.router.routes if getattr(r, "path", "") not in DOCS_PATHS
+        ]
     install_problem_handlers(app)
     app.include_router(router)
     app.add_middleware(SigningMiddleware, keys=keys or {}, docs_exempt=docs_local)

@@ -61,6 +61,23 @@ def test_fr403_path_style_and_virtual_hosted_urls_naming_the_bucket_are_allowed(
         "https://s3.example.test/cp-media/x.jpg?" + amz() + "\r\nHost: evil",
         "https://s3.example.test/cp-media/é.jpg?" + amz(),
         "x" * 3000,
+        url(host=f"{BUCKET}.s3.example.test.evil.test", path="/x.jpg"),  # suffix trick
+        url(host="s3.example.test."),  # trailing dot
+        url(host="[::1]"),
+        url(host="127.0.0.1"),
+        url(path=f"/{BUCKET}/%2e%2e/other-bucket/k"),
+        url(path=f"/{BUCKET}/%2E%2E/other-bucket/k"),
+        url(path=f"/{BUCKET}/a%2fb"),
+        url(path=f"/{BUCKET}//k"),
+        url(path=f"/{BUCKET}/./k"),
+        url(q=amz().replace("20", "99", 1)),
+        url(q="X-Amz-Date=20261301T000000Z&X-Amz-Expires=60"),  # month 13
+        url(q=amz() + "&x-amz-expires=60"),  # case-variant duplicate
+        url(q=amz() + "&X-Amz-Expires=604800"),  # exact duplicate
+        url(q=amz().replace("X-Amz-Expires", "x-amz-expires")),  # wrong case
+        "https://s3.example.test:443@evil.test/cp-media/x.jpg?" + amz(),
+        "https://s3.example.test/cp-media/x\x00.jpg?" + amz(),
+        "https://s3.example.test/cp-media/x\x7f.jpg?" + amz(),
     ],
 )
 def test_fr403_urls_outside_the_allow_list_or_expired_are_refused(bad: str) -> None:
@@ -68,6 +85,10 @@ def test_fr403_urls_outside_the_allow_list_or_expired_are_refused(bad: str) -> N
         ok(bad)
     assert ei.value.code == "URL_REFUSED"
     assert "evil" not in str(ei.value)
+
+
+def test_fr403_host_case_is_normalised_for_matching() -> None:
+    assert ok(url(host="S3.Example.TEST"))[0] == "s3.example.test"
 
 
 def test_fr403_http_is_allowed_only_when_the_config_allows_it() -> None:
@@ -261,3 +282,35 @@ def test_fr403_real_http_fetch_against_a_local_store_does_not_follow_a_redirect(
         assert "/cp-media/leak" not in hits  # the Location was never requested
     finally:
         server.shutdown()
+
+
+def test_fr403_a_slow_sender_is_cut_off_by_the_total_deadline() -> None:
+    class Slow(FakeResponse):
+        def read(self, n: int) -> bytes:
+            ticks.append(1)
+            return b"x"
+
+    ticks: list[int] = []
+    clock = iter([0.0, 1.0, 2.0, 9.0, 10.0])  # deadline at 8 s from the first reading
+    conn = FakeConn(Slow(200, b""))
+    with pytest.raises(FetchError) as ei:
+        fetchguard.fetch(
+            url(),
+            CFG,
+            max_bytes=10_000,
+            max_lifetime=60,
+            now=lambda: NOW,
+            monotonic=lambda: next(clock),
+            connection=lambda scheme, host, port, timeout: conn,
+        )
+    assert ei.value.code == "MEDIA_UNAVAILABLE" and len(ticks) == 2 and conn.closed
+
+
+def test_fr606_a_decompression_bomb_is_a_dimension_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    def bomb(*a: object, **k: object) -> None:
+        raise PILImage.DecompressionBombError("too big")
+
+    monkeypatch.setattr(PILImage, "open", bomb)
+    with pytest.raises(ImagePolicyError) as ei:
+        check_image("SELFIE", b"\xff\xd8\xff" + b"0" * 20)
+    assert ei.value.code == "SELFIE_DIMENSIONS"

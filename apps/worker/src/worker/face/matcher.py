@@ -180,6 +180,7 @@ class FaceMatcher:
         *,
         liveness_confirmed: bool,
         session_id: str | None = None,
+        expires_at: float | None = None,
     ) -> MatchResult:
         """ID photo vs selfie. The ID embedding is dropped as soon as the score is computed.
 
@@ -197,7 +198,7 @@ class FaceMatcher:
             selfie_emb = self._embed_single(selfie_image, "SELFIE")
             score = self.compare(id_emb, selfie_emb)
             if session_id is not None:
-                self.selfie_cache.put(session_id, selfie_emb)
+                self.selfie_cache.put(session_id, selfie_emb, expires_at)
             return self._decide(score)
         except Exception as e:
             return self._failure(e, "match")
