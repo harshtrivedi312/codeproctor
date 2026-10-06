@@ -26,6 +26,13 @@ import {
   specifiersOf,
 } from './testing/import-guard';
 import type { GuardRule, SourceFile } from './testing/import-guard';
+import {
+  ACCOMMODATIONS_FILE,
+  RETENTION_LOCK_FILE,
+  SESSION_PROCESSOR_FILE,
+  SESSION_STATE_FILE,
+  lockImportProblems,
+} from './testing/lock-call-sites';
 
 const SRC = resolve(__dirname, '..');
 
@@ -473,17 +480,27 @@ describe('import guard: the session write locks have no importer yet (FU-DB-67, 
     expect(locks.why).toContain('review point');
   });
 
+  it('TC-008 S-B the allowlist is a subset of the one real SessionStateService path (session/session-state.service.ts)', () => {
+    expect(lockImportProblems(locks.allowed)).toEqual([]);
+    expect(SESSION_STATE_FILE).toBe('session/session-state.service.ts');
+    // A rule that lists any other file fails, by name.
+    expect(lockImportProblems([...locks.allowed, SESSION_PROCESSOR_FILE])).toEqual([
+      `${SESSION_PROCESSOR_FILE}: only ${SESSION_STATE_FILE} may import database/session-locks`,
+    ]);
+    expect(lockImportProblems([ACCOMMODATIONS_FILE])).toHaveLength(1);
+    expect(lockImportProblems([RETENTION_LOCK_FILE])).toHaveLength(1);
+  });
+
   it('TC-008 only the SessionStateService file may be added: SessionJobProcessor and the retention jobs still fail beside it', () => {
-    const allowed: GuardRule = { ...locks, allowed: ['candidate/session-state.service.ts'] };
+    const allowed: GuardRule = { ...locks, allowed: [SESSION_STATE_FILE] };
     const importLocks = "import { guardLive } from '../database/session-locks';";
-    expect(
-      findViolations([stray('candidate/session-state.service.ts', importLocks)], allowed),
-    ).toEqual([]);
+    expect(findViolations([stray(SESSION_STATE_FILE, importLocks)], allowed)).toEqual([]);
     for (const path of [
-      'jobs/session-job.processor.ts',
+      SESSION_PROCESSOR_FILE,
+      ACCOMMODATIONS_FILE,
+      RETENTION_LOCK_FILE,
       'retention/retention.service.ts',
-      'accommodations/accommodations.service.ts',
-      'candidate/other.service.ts',
+      'session/other.service.ts',
     ]) {
       expect(findViolations([stray(path, importLocks)], allowed)).toEqual([path]);
     }
@@ -542,29 +559,19 @@ describe('import guard: the session write locks have no importer yet (FU-DB-67, 
   });
 
   it('TC-008 a re-export is refused even in a file that is on the allowlist', () => {
-    const allowed: GuardRule = { ...locks, allowed: ['candidate/session-state.service.ts'] };
+    const allowed: GuardRule = { ...locks, allowed: [SESSION_STATE_FILE] };
     expect(
       findViolations(
-        [
-          stray(
-            'candidate/session-state.service.ts',
-            "import { guardLive } from '../database/session-locks';",
-          ),
-        ],
+        [stray(SESSION_STATE_FILE, "import { guardLive } from '../database/session-locks';")],
         allowed,
       ),
     ).toEqual([]);
     expect(
       findViolations(
-        [
-          stray(
-            'candidate/session-state.service.ts',
-            "export { guardLive } from '../database/session-locks';",
-          ),
-        ],
+        [stray(SESSION_STATE_FILE, "export { guardLive } from '../database/session-locks';")],
         allowed,
       ),
-    ).toEqual(['candidate/session-state.service.ts']);
+    ).toEqual([SESSION_STATE_FILE]);
   });
 
   it('TC-008 S2: a template-literal specifier (backticks, no ${}) is an import too, in every form', () => {
