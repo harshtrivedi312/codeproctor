@@ -772,41 +772,65 @@ describe('FR-301 FR-302: test builder', () => {
       expect(await ids('search=engineer&used=true')).toEqual([]);
     });
 
-    // KNOWN DEFECT (backend-engineer, should-fix; no TC id): `search` goes to Prisma `contains`, which
-    // does not escape the LIKE wildcards, so `%` and `_` match every name instead of the literal
-    // character. it.failing passes while the defect exists and FAILS once it is fixed: then change it
-    // to a plain `it` and drop "KNOWN DEFECT" from the title. Fixtures are made in beforeAll so a
-    // setup error fails the suite instead of reading as "defect still open".
-    describe('search wildcards', () => {
+    // Fixed in PR #147 (f52b232, 2026-10-06): `search` escapes %, _ and backslash, so they match
+    // literally. Before the fix both wildcards matched every name (it.failing, KNOWN DEFECT).
+    describe('search wildcards are literal', () => {
       let owner: Org;
-      let pct: string;
+      const named: Record<string, string> = {};
       beforeAll(async () => {
         owner = await newOrg(h);
         const iq = await poolQuestion(h, owner.id);
-        const mk = async (name: string): Promise<string> =>
-          (
+        for (const name of [
+          '100% Coverage',
+          'snake_case names',
+          'back\\slash path',
+          'Plain test',
+        ]) {
+          named[name] = (
             await createTest(
               h,
               owner.recruiter,
               testBody06([section([fixedQ(iq.versionId)])], { name }),
             )
           ).id as string;
-        pct = await mk('100% Coverage');
-        await mk('Plain test');
+        }
       });
-      const ids = async (qs: string): Promise<string[]> =>
+      const ids = async (search: string): Promise<string[]> =>
         (
-          ((await call(h, 'GET', `/tests?${qs}`, owner.recruiter.token)).body as Json)
-            .items as Json[]
-        ).map((i) => i.id as string);
+          (
+            (
+              await call(
+                h,
+                'GET',
+                `/tests?search=${encodeURIComponent(search)}`,
+                owner.recruiter.token,
+              )
+            ).body as Json
+          ).items as Json[]
+        )
+          .map((i) => i.id as string)
+          .sort();
+      const only = (...names: string[]): string[] => names.map((n) => named[n] as string).sort();
 
-      it.failing(
-        'FR-301: KNOWN DEFECT search treats % and _ as plain characters (they act as LIKE wildcards)',
-        async () => {
-          expect(await ids('search=%25')).toEqual([pct]); // a literal %, not "match everything"
-          expect(await ids('search=_')).toEqual([]); // no name has a literal underscore
-        },
-      );
+      it('FR-301: search "%" matches only names containing a literal %', async () => {
+        expect(await ids('%')).toEqual(only('100% Coverage'));
+        expect(await ids('0% C')).toEqual(only('100% Coverage'));
+      });
+      it('FR-301: search "_" matches only names containing a literal underscore', async () => {
+        expect(await ids('_')).toEqual(only('snake_case names'));
+        expect(await ids('e_c')).toEqual(only('snake_case names'));
+      });
+      it('FR-301: search "\\" matches only names containing a literal backslash', async () => {
+        expect(await ids('\\')).toEqual(only('back\\slash path'));
+        expect(await ids('k\\s')).toEqual(only('back\\slash path'));
+      });
+      it('FR-301: names without wildcards are found as before, and a pattern that is not in any name finds nothing', async () => {
+        expect(await ids('plain')).toEqual(only('Plain test'));
+        expect(await ids('coverage')).toEqual(only('100% Coverage'));
+        expect(await ids('%%')).toEqual([]);
+        expect(await ids('x_x')).toEqual([]);
+        expect(await ids('\\%')).toEqual([]);
+      });
     });
   });
 
