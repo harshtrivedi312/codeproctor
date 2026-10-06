@@ -1,14 +1,20 @@
 // Candidate email OTP (FR-106, ADR 0003 sections 2 and 6, TC-007, TC-097). All state is in Redis.
 //
 //   otp:{invitationId}           HMAC-SHA256(OTP_PEPPER, invitationId:code), TTL 10 minutes
-//   otp-attempts:{invitationId}  wrong-or-pending guesses before the test, TTL 30 minutes
+//   otp-attempts:{invitationId}  CONFIRMED wrong guesses before the test, TTL 30 minutes
+//   otp-pending:{invitationId}   comparisons in flight before the test (a slot per reserved guess),
+//                                short TTL so a crashed request cannot hold slots
 //   otp-block:{invitationId}     set on the 5th wrong guess before the test, TTL 30 minutes
 //   otp-cooldown:{invitationId}  during IN_PROGRESS or PAUSED: one guess per 30 seconds
 //   otp-send:{invitationId}      one email per 30 seconds
 //
 // Every guess is RESERVED by a Lua script before the code is compared, so concurrent requests
 // cannot all pass a check and then all spend an attempt (the FU-BE-26 check-then-act race): at most
-// 5 comparisons can ever happen before the block, and at most one per 30 s during a test. The
+// 5 comparisons can ever happen before the block (confirmed wrong guesses plus comparisons in
+// flight), and at most one per 30 s during a test. A reservation takes a PENDING slot, not an
+// attempt: a request over the limit is told to retry (429), it never sets the block. Only CONFIRMED
+// wrong guesses reaching 5 set the block (and so the recruiter notice); a correct guess, or a lost
+// race for the code, releases its slot, so a burst of correct submissions can never block the link. The
 // comparison itself runs in Node with timingSafeEqual. A correct code is spent by a compare-and-
 // delete, so two concurrent correct submissions cannot both succeed. The code and its hash are
 // never logged. Keys are per invitation, not per IP (ADR 0003 A-27).
@@ -26,6 +32,8 @@ export const OTP_MAX_ATTEMPTS = 5;
 export const OTP_BLOCK_SECONDS = 1800;
 export const OTP_COOLDOWN_SECONDS = 30;
 export const OTP_SEND_COOLDOWN_SECONDS = 30;
+/** A reserved comparison that never finished frees its slot after this long. */
+export const OTP_PENDING_TTL_MS = 10_000;
 /** How long a spent code stays restorable. */
 const SPENT_MARKER_MS = 60_000;
 
@@ -53,6 +61,8 @@ export type OtpVerification =
   | { readonly kind: 'wrong'; readonly blockedNow: boolean }
   | { readonly kind: 'blocked'; readonly retryAfterSeconds: number; readonly blockedNow: boolean }
   | { readonly kind: 'cooldown'; readonly retryAfterSeconds: number }
+  /** Too many comparisons in flight or already confirmed wrong: retry shortly (not a block). */
+  | { readonly kind: 'busy'; readonly retryAfterSeconds: number }
   | { readonly kind: 'none' };
 
 // KEYS: 1 otp, 2 send cooldown, 3 block, 4 spent marker. ARGV: 1 hash, 2 otp ttl, 3 send cooldown s, 4 phase.
@@ -70,14 +80,14 @@ redis.call('DEL', KEYS[4])
 return {'issued', 0}
 `;
 
-// KEYS: 1 otp, 2 attempts, 3 block, 4 cooldown.
-// ARGV: 1 phase, 2 max attempts, 3 block s, 4 attempts ttl s, 5 cooldown ms.
+// KEYS: 1 otp, 2 attempts (confirmed wrong), 3 block, 4 cooldown, 5 pending.
+// ARGV: 1 phase, 2 max attempts, 3 cooldown ms, 4 pending ttl ms.
 const RESERVE = `
 if ARGV[1] == 'PRE_START' then
   local blocked = redis.call('PTTL', KEYS[3])
   if blocked > 0 then return {'blocked', blocked, 0} end
 else
-  local took = redis.call('SET', KEYS[4], '1', 'PX', ARGV[5], 'NX')
+  local took = redis.call('SET', KEYS[4], '1', 'PX', ARGV[3], 'NX')
   if not took then return {'cooldown', redis.call('PTTL', KEYS[4]), 0} end
 end
 local hash = redis.call('GET', KEYS[1])
@@ -86,29 +96,51 @@ if not hash then
   return {'none', 0, 0}
 end
 if ARGV[1] == 'PRE_START' then
-  local n = redis.call('INCR', KEYS[2])
-  if n == 1 then redis.call('EXPIRE', KEYS[2], ARGV[4]) end
-  if n > tonumber(ARGV[2]) then
-    local fresh = redis.call('SET', KEYS[3], '1', 'EX', ARGV[3], 'NX')
-    redis.call('DEL', KEYS[1])
-    return {'blocked', redis.call('PTTL', KEYS[3]), fresh and 1 or 0}
+  local wrong = tonumber(redis.call('GET', KEYS[2])) or 0
+  local pending = tonumber(redis.call('GET', KEYS[5])) or 0
+  if wrong + pending >= tonumber(ARGV[2]) then
+    return {'busy', math.max(redis.call('PTTL', KEYS[5]), 1000), 0}
   end
-  return {'ok', hash, n}
+  redis.call('INCR', KEYS[5])
+  redis.call('PEXPIRE', KEYS[5], ARGV[4])
+  return {'ok', hash, wrong}
 end
 return {'ok', hash, 0}
 `;
 
-// KEYS: 1 otp, 2 attempts, 3 cooldown, 4 spent marker. ARGV: 1 the hash that was compared,
-// 2 marker life in ms. Returns {1, remaining code life ms, wrong-guess count, its remaining ms}: the
-// state the caller needs to put everything back if a later write is busy (DL-37), or {0, 0, 0, 0}.
+// A guess that did not match, before the test. KEYS: 1 pending, 2 attempts, 3 block, 4 otp.
+// ARGV: 1 max attempts, 2 block s, 3 attempts ttl s. Releases the slot, confirms the wrong guess
+// and sets the block (once) when confirmed wrong guesses reach the maximum. Returns 1 when THIS
+// call set the block.
+const WRONG = `
+local p = tonumber(redis.call('GET', KEYS[1])) or 0
+if p > 0 then redis.call('DECR', KEYS[1]) end
+local n = redis.call('INCR', KEYS[2])
+if n == 1 then redis.call('EXPIRE', KEYS[2], ARGV[3]) end
+if n >= tonumber(ARGV[1]) then
+  local fresh = redis.call('SET', KEYS[3], '1', 'EX', ARGV[2], 'NX')
+  redis.call('DEL', KEYS[4], KEYS[2], KEYS[1])
+  if fresh then return 1 end
+end
+return 0
+`;
+
+// KEYS: 1 otp, 2 attempts, 3 cooldown, 4 spent marker, 5 pending. ARGV: 1 the hash that was
+// compared, 2 marker life in ms. Always releases the pending slot. Returns {1, remaining code life
+// ms, the wrong-guess count to restore (confirmed wrong + this guess, at most 4 so a restore can
+// never leave the link unusable), its remaining ms}: what the caller needs to put everything back if
+// a later write is busy (DL-37), or {0, 0, 0, 0} when another request spent the code first.
 const CONSUME = `
+local p = tonumber(redis.call('GET', KEYS[5])) or 0
+if p > 0 then redis.call('DECR', KEYS[5]) end
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   local otpLeft = redis.call('PTTL', KEYS[1])
-  local attempts = tonumber(redis.call('GET', KEYS[2])) or 0
+  local wrong = tonumber(redis.call('GET', KEYS[2])) or 0
   local attemptsLeft = redis.call('PTTL', KEYS[2])
+  if attemptsLeft <= 0 then attemptsLeft = 1800000 end
   redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])
   redis.call('SET', KEYS[4], ARGV[1], 'PX', ARGV[2])
-  return {1, otpLeft, attempts, attemptsLeft}
+  return {1, otpLeft, math.min(wrong + 1, 4), attemptsLeft}
 end
 return {0, 0, 0, 0}
 `;
@@ -134,14 +166,6 @@ if ARGV[5] == 'PRE_START' and tonumber(ARGV[3]) > 0 then
   end
 end
 return 1
-`;
-
-// KEYS: 1 otp, 2 attempts, 3 block. ARGV: 1 block s.
-const BLOCK = `
-local fresh = redis.call('SET', KEYS[3], '1', 'EX', ARGV[1], 'NX')
-redis.call('DEL', KEYS[1], KEYS[2])
-if fresh then return 1 end
-return 0
 `;
 
 function ceilSeconds(ms: number): number {
@@ -248,23 +272,25 @@ export class OtpService {
       OtpService.key('otp-attempts', invitationId),
       OtpService.key('otp-block', invitationId),
       OtpService.key('otp-cooldown', invitationId),
-    ];
-    const [kind, value, extra] = (await this.redis.eval(
+      OtpService.key('otp-pending', invitationId),
+    ] as [string, string, string, string, string];
+    const [kind, value] = (await this.redis.eval(
       RESERVE,
-      4,
+      5,
       ...keys,
       phase,
       String(OTP_MAX_ATTEMPTS),
-      String(OTP_BLOCK_SECONDS),
-      String(OTP_BLOCK_SECONDS),
       String(OTP_COOLDOWN_SECONDS * 1000),
+      String(OTP_PENDING_TTL_MS),
     )) as [string, string | number, number];
 
     if (kind === 'none') return { kind: 'none' };
     if (kind === 'blocked') {
-      return { kind, retryAfterSeconds: ceilSeconds(Number(value)), blockedNow: extra === 1 };
+      return { kind, retryAfterSeconds: ceilSeconds(Number(value)), blockedNow: false };
     }
     if (kind === 'cooldown') return { kind, retryAfterSeconds: ceilSeconds(Number(value)) };
+    // Too many comparisons in flight or confirmed wrong: retry shortly. This is not a block.
+    if (kind === 'busy') return { kind, retryAfterSeconds: ceilSeconds(Number(value)) };
 
     const stored = Buffer.from(String(value), 'utf8');
     const candidate = Buffer.from(expected, 'utf8');
@@ -272,11 +298,12 @@ export class OtpService {
     if (matches) {
       const [spent, codeLeftMs, attempts, attemptsLeftMs] = (await this.redis.eval(
         CONSUME,
-        4,
-        keys[0] as string,
-        keys[1] as string,
-        keys[3] as string,
+        5,
+        keys[0],
+        keys[1],
+        keys[3],
         OtpService.key('otp-spent', invitationId),
+        keys[4],
         String(value),
         String(SPENT_MARKER_MS),
       )) as [number, number, number, number];
@@ -287,18 +314,19 @@ export class OtpService {
         : { kind: 'none' };
     }
 
-    const attempt = Number(extra);
-    if (phase === 'PRE_START' && attempt >= OTP_MAX_ATTEMPTS) {
-      const fresh = (await this.redis.eval(
-        BLOCK,
-        3,
-        keys[0] as string,
-        keys[1] as string,
-        keys[2] as string,
-        String(OTP_BLOCK_SECONDS),
-      )) as number;
-      return { kind: 'wrong', blockedNow: fresh === 1 };
-    }
-    return { kind: 'wrong', blockedNow: false };
+    // During a test a wrong guess only keeps its 30 s cooldown (no counter, no block).
+    if (phase === 'LIVE') return { kind: 'wrong', blockedNow: false };
+    const fresh = (await this.redis.eval(
+      WRONG,
+      4,
+      keys[4],
+      keys[1],
+      keys[2],
+      keys[0],
+      String(OTP_MAX_ATTEMPTS),
+      String(OTP_BLOCK_SECONDS),
+      String(OTP_BLOCK_SECONDS),
+    )) as number;
+    return { kind: 'wrong', blockedNow: fresh === 1 };
   }
 }

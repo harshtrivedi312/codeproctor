@@ -302,6 +302,7 @@ export class CandidateAuthService {
             'LINK_BLOCKED',
             { retryAfterSeconds: result.retryAfterSeconds },
           );
+        case 'busy':
         case 'cooldown':
           throw coded(
             HttpStatus.TOO_MANY_REQUESTS,

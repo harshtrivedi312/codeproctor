@@ -81,6 +81,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
   let keys: SessionKeyService;
   let jobs: SessionJobsService;
   let otp: OtpService;
+  let appRedis: Redis;
   let states: SessionStateService;
   let scope: CandidateScope;
   let prisma: PrismaService;
@@ -166,6 +167,12 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     jobs = app.get(J);
     const { OtpService: O } = jest.requireActual<typeof import('./otp.service')>('./otp.service');
     otp = app.get(O);
+    // The app's own Redis client (resolved here: the module registry changes when another app is built).
+    appRedis = app.get<Redis>(
+      jest.requireActual<typeof import('../infrastructure/infrastructure.module')>(
+        '../infrastructure/infrastructure.module',
+      ).REDIS_CLIENT,
+    );
     states = app.get(
       jest.requireActual<typeof import('../session/session-state.service')>(
         '../session/session-state.service',
@@ -2070,7 +2077,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       }
     });
 
-    it('NFR-05, ADR 0004 section 9.5, ADR 0013 5.7, TC-008: a token with a MATCHING epoch for an ERASED session gets a plain 401 on every guarded route, with no session data, no status and no side effect', async () => {
+    it('NFR-05, ADR 0004 section 9.5, ADR 0013 5.7, TC-008: a token with a MATCHING epoch for an ERASED session gets the same 401 as a stale epoch on every guarded route, with no session data, no status and no side effect', async () => {
       const heartbeatAt = new Date(Date.now() - 120_000);
       const inv = await invite({
         status: 'ERASED',
@@ -2090,21 +2097,22 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         ['post', '/heartbeat'],
         ['post', '/proctor-key'],
       ];
-      // The answer after the fence's epoch bump (the token is behind the new epoch), for comparison.
-      const bumped = await authed(
-        'get',
-        '',
-        tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch: 0 }).token,
-      );
+      const strip = (b: object): object => ({ ...b, instance: undefined, traceId: undefined });
+      // The answer after the fence's epoch bump (the token is behind the new epoch), per route.
+      const stale = tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch: 0 }).token;
       for (const [method, path, body] of routes) {
         const res = await authed(method, path, token, body);
         expect([method, path, res.status]).toEqual([method, path, 401]);
         expect(res.body).not.toHaveProperty('sessionStatus');
         expect(res.body).not.toHaveProperty('status', 'SUBMITTED');
         expect(JSON.stringify(res.body)).not.toMatch(/startedAt|deadlineAt|pauseReasons|ERASED/);
-        // Identical to the stale-epoch answer apart from per-request members.
-        const strip = (b: object): object => ({ ...b, instance: undefined, traceId: undefined });
-        if (path === '') expect(strip(res.body as object)).toEqual(strip(bumped.body as object));
+        // Identical to the stale-epoch answer apart from per-request members, on every route.
+        const bumped = await authed(method, path, stale, body);
+        expect([method, path, strip(res.body as object)]).toEqual([
+          method,
+          path,
+          strip(bumped.body as object),
+        ]);
       }
       const row = await sessionRow(inv.sessionId);
       expect(row.lastHeartbeat?.getTime()).toBe(heartbeatAt.getTime());
@@ -2998,6 +3006,176 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       await redis.set(`otp-block:${blocked.invitationId}`, '1', 'EX', 1800);
       expect(await otp.restore(blocked.invitationId, okb, 'PRE_START')).toBe(false);
       expect(await redis.exists(`otp:${blocked.invitationId}`)).toBe(0);
+    });
+  });
+
+  // ---------- OTP reservations: a burst of correct codes must never block the link ----------
+
+  describe('OTP reservations: pending slots, confirmed wrong guesses, no false lockout (FU-BE-26, TC-007, TC-097)', () => {
+    afterEach(() => jest.restoreAllMocks());
+    const wrongOf = (code: string): string => (code === '000000' ? '000001' : '000000');
+
+    /** Holds every CONSUME script of the app's Redis client until `release()` (the reserves land first). */
+    function holdConsume(): { held: () => number; release: () => void } {
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let held = 0;
+      const real = appRedis.eval.bind(appRedis) as (...a: unknown[]) => Promise<unknown>;
+      jest.spyOn(appRedis, 'eval').mockImplementation((...args: unknown[]) => {
+        if (String(args[0]).includes('math.min(wrong + 1, 4)')) {
+          held += 1;
+          return gate.then(() => real(...args));
+        }
+        return real(...args);
+      });
+      return { held: () => held, release };
+    }
+    const until = async (check: () => boolean, ms = 10_000): Promise<void> => {
+      const end = Date.now() + ms;
+      while (!check() && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+    };
+
+    it('FU-BE-26, TC-007: with the first CONSUMEs held, 8 correct submissions reserve at most 5 slots, the rest retry (429), exactly one wins, and the link is never blocked (no lockout email, no audit row, epoch 1)', async () => {
+      const inv = await invite();
+      const code = await otpFor(inv);
+      const lockouts = mail.lockouts.length;
+      const hold = holdConsume();
+      const calls = Array.from({ length: 8 }, () =>
+        post('/start', { invitationToken: inv.token, otp: code }).then((r) => r),
+      );
+      await until(() => hold.held() >= 5);
+      expect(hold.held()).toBe(5);
+      // While 5 are in flight the 6th to 8th have already been told to retry.
+      expect(await redis.exists(`otp-block:${inv.invitationId}`)).toBe(0);
+      hold.release();
+      const results = await Promise.all(calls);
+      expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+      // Everyone else is told to retry (429 OTP_COOLDOWN: no slot free) or, if they arrived after the
+      // code was spent, that no code is waiting (400 OTP_NOT_REQUESTED). Never a block, never a wrong code.
+      for (const r of results.filter((x) => x.status !== 200)) {
+        const code = (r.body as { code?: string }).code;
+        expect([r.status, code]).toEqual(
+          r.status === 429 ? [429, 'OTP_COOLDOWN'] : [400, 'OTP_NOT_REQUESTED'],
+        );
+      }
+      // No more than 5 comparisons were ever in flight (the held CONSUMEs are the comparisons).
+      expect(hold.held()).toBeLessThanOrEqual(5);
+      expect(await redis.exists(`otp-block:${inv.invitationId}`)).toBe(0);
+      expect(mail.lockouts.length).toBe(lockouts);
+      expect(
+        await owner.auditLog.count({
+          where: { action: 'CANDIDATE_OTP_LOCKED', entityId: inv.sessionId },
+        }),
+      ).toBe(0);
+      expect((await sessionRow(inv.sessionId)).authEpoch).toBe(1);
+      // No slot is left behind.
+      expect(Number((await redis.get(`otp-pending:${inv.invitationId}`)) ?? 0)).toBe(0);
+    });
+
+    it('TC-007: five confirmed wrong guesses still block, the sixth comparison attempt is refused as blocked, and the pending slots are released by each wrong guess', async () => {
+      const inv = await invite();
+      const code = await otpFor(inv);
+      for (let i = 0; i < 4; i++) {
+        expect((await otp.verify(inv.invitationId, wrongOf(code), 'PRE_START')).kind).toBe('wrong');
+        expect(Number((await redis.get(`otp-pending:${inv.invitationId}`)) ?? 0)).toBe(0);
+      }
+      const fifth = await otp.verify(inv.invitationId, wrongOf(code), 'PRE_START');
+      expect(fifth).toMatchObject({ kind: 'wrong', blockedNow: true });
+      expect(await redis.exists(`otp-block:${inv.invitationId}`)).toBe(1);
+      expect((await otp.verify(inv.invitationId, code, 'PRE_START')).kind).toBe('blocked');
+    });
+
+    it('FU-BE-26: a concurrent mix of wrong and correct guesses never lets more than 5 comparisons through, and at most one correct guess wins', async () => {
+      for (let round = 0; round < 3; round++) {
+        const inv = await invite();
+        const code = await otpFor(inv);
+        let compared = 0;
+        const real = appRedis.eval.bind(appRedis) as (...a: unknown[]) => Promise<unknown>;
+        const spy = jest.spyOn(appRedis, 'eval').mockImplementation(async (...args: unknown[]) => {
+          const out = await real(...args);
+          if (
+            String(args[0]).includes("return {'ok', hash, wrong}") &&
+            Array.isArray(out) &&
+            out[0] === 'ok'
+          )
+            compared += 1;
+          return out;
+        });
+        const guesses = Array.from({ length: 30 }, (_, i) => (i % 2 === 0 ? code : wrongOf(code)));
+        const results = await Promise.all(
+          guesses.map((g) => otp.verify(inv.invitationId, g, 'PRE_START')),
+        );
+        spy.mockRestore();
+        expect(compared).toBeLessThanOrEqual(5);
+        expect(results.filter((r) => r.kind === 'ok').length).toBeLessThanOrEqual(1);
+        expect(Number((await redis.get(`otp-pending:${inv.invitationId}`)) ?? 0)).toBe(0);
+      }
+    });
+
+    it('FU-BE-26: a reservation that never finishes frees its slot after the pending TTL, and a crashed burst cannot lock the candidate out', async () => {
+      const inv = await invite();
+      const code = await otpFor(inv);
+      // Five slots taken by requests that crashed: nothing completes them.
+      await redis.set(`otp-pending:${inv.invitationId}`, '5', 'PX', 400);
+      const busy = await otp.verify(inv.invitationId, code, 'PRE_START');
+      expect(busy.kind).toBe('busy');
+      expect(await redis.exists(`otp-block:${inv.invitationId}`)).toBe(0);
+      await new Promise((r) => setTimeout(r, 500));
+      expect((await otp.verify(inv.invitationId, code, 'PRE_START')).kind).toBe('ok');
+    });
+
+    it('TC-097, FR-106: during a test a burst of correct submissions makes one comparison (the 30 s cooldown), never sets a block, and the rest are told to wait', async () => {
+      const inv = await invite(liveSession());
+      const code = await otpFor(inv);
+      const results = await Promise.all(
+        Array.from({ length: 8 }, () => otp.verify(inv.invitationId, code, 'LIVE')),
+      );
+      expect(results.filter((r) => r.kind === 'ok')).toHaveLength(1);
+      expect(results.filter((r) => r.kind === 'cooldown')).toHaveLength(7);
+      expect(await redis.exists(`otp-block:${inv.invitationId}`)).toBe(0);
+      expect(await redis.exists(`otp-pending:${inv.invitationId}`)).toBe(0);
+    });
+  });
+
+  describe('the lockout notice reads the candidate only when it is sent (NFR-05, TC-007)', () => {
+    afterEach(() => jest.restoreAllMocks());
+    it('TC-007: the fifth wrong code reads the candidate exactly once with an active recruiter, and not at all with an inactive or missing one', async () => {
+      const read = jest.spyOn(prisma.client.candidate, 'findUnique');
+      // The code email itself reads the candidate once; the count starts after it is sent.
+      const lockOut = async (inv: InvitationFixture): Promise<void> => {
+        const code = await otpFor(inv);
+        read.mockClear();
+        for (let i = 0; i < 5; i++) {
+          await post('/start', {
+            invitationToken: inv.token,
+            otp: code === '000000' ? '000001' : '000000',
+          });
+        }
+      };
+      const active = await invite();
+      const lockouts = mail.lockouts.length;
+      await lockOut(active);
+      expect(mail.lockouts.length).toBe(lockouts + 1);
+      expect(read.mock.calls.length).toBe(1);
+
+      const gone = await invite({ createdById: null });
+      await lockOut(gone);
+      expect(read.mock.calls.length).toBe(0);
+
+      const staff = await owner.user.create({
+        data: {
+          orgId: tenant.orgId,
+          email: `inactive-${randomUUID()}@example.test`,
+          fullName: 'Inactive',
+          passwordHash: 'x',
+          role: 'RECRUITER',
+          isActive: false,
+        },
+      });
+      const inactive = await invite({ createdById: staff.id });
+      await lockOut(inactive);
+      expect(read.mock.calls.length).toBe(0);
+      expect(mail.lockouts.length).toBe(lockouts + 1);
     });
   });
 
