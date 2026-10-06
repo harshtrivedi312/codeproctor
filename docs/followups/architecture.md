@@ -109,3 +109,27 @@ The six owner questions were answered by C-21 (2026-10-05, D-49) and are recorde
 - BE-02: a successful re-auth does not reset the failed-login counter on main (it only refunds its own reservation); confirm or change.
 - Backend follow-up: add `req.body.currentPassword`, `req.body.password`, `req.body.newPassword` (and `err` equivalents) to the pino redact list in `apps/api/src/app.module.ts` (no body paths on main today).
 - Backend follow-up: audit every re-auth failure and a successful `setup/start` (today only completed actions and the lock-triggering failure are audited).
+
+## Delivery Lead relay queue (2026-10-06)
+
+The architecture hub session hasn't been running since 2026-10-06 02:25 UTC, so the Delivery Lead queues hub items here. The hub works through them when it restarts and strikes each one through with its PR number. Decisions that also need the owner are marked **owner**.
+
+### ADR text corrections, before the owner accepts under P-15
+1. **ADR 0013 §5.10 (DL-31, FU-DB-185).** The guard reads the session's `invitation_id`, then the invitation's `candidate_id` and `test_id`, in a plain `runInOrg(oid)`. These are column-only selects, never `accommodations`. The callback returns before `runAsCandidate(oid, sid)`, and `setCandidateFacts` runs first. Update §5.10, the CS-4.4 `CandidateSessionGuard` grant row and its copy in ADR 0006 §8.4 (not needed under option (a)), and the FU-DB-67 call-site list. Alternatively, choose the narrower variant (only `invitations` read in org scope, with the grant row kept).
+2. **ADR 0015 (DL-30).** When a waiver lands after a face match already ran, every earlier attempt's sealed ID image and selfie is deleted at once. Widen §6's waiver window to match.
+3. **ADR 0004 §9.2, the face-clock bullet (Database B, #134).** Replace "earliest terminal-transition audit row written by SessionStateService.transition()" with: "Terminal transition time: for a session that was never submitted, `sessions.retention_anchor_at`, which the state machine stamps at its first terminal status (expiry, decline) and the erasure fence keeps or sets. Never updated_at." ADR 0013 §5.7 already says "terminal transition time".
+
+### Contracts and packages/shared
+4. **BE-08b (Integrity B, #129; FU-INB-29..37).** `GET /candidate/session/identity` with `canRetry`; the `IDENTITY_ATTEMPTS_EXHAUSTED` error code; BE-09's name state and `capturedAt`; and who builds `withLiveSession`, `guardLive` and verify-session.
+5. **FU-FEB-10, the token hand-off (ARC-03 part 2, Frontend B).**
+6. **BE-04 (Backend A, DL-32).**
+   - FU-BE-101: a declarative variant parameter schema is new scope and a schema change (**owner**). BE-04b follows ADR 0007 as written meanwhile.
+   - FU-BE-102: move the short-answer normalisation and the answer_spec zod schema (D-23) into packages/shared. It must match the web editor's copy.
+   - Decide whether publish and archive get a separate `question:publish` permission (ADR 0010).
+7. **BE-06 (Backend A, DL-33).**
+   - Copy-or-archive for tests (ADR 0002) has no `archived_at` or `source_test_id` column. Decide the schema (an ADR 0008 delta, **owner**) or another design.
+   - api-contract and fsd.md §4 rows are missing for test copy and archive, invitation list, read, resend and revoke, bulk CSV, and the accommodations PATCH.
+   - New permissions `invitation:read` and a revoke permission (ADR 0010 §6).
+   - Publish `accommodationsSchema` in packages/shared.
+   - docs/prompts/backend.md Step 6 still names Resend or Brevo. C-31 says Amazon SES.
+8. **FU-FEB-34 (Frontend B).** There is no room-scan waiver in FR-305. Decide whether the accommodations waiver covers FR-404's room scan (**owner** if it changes the FSD).
