@@ -53,6 +53,9 @@ export class UpdateStaffUserDto extends CurrentPasswordDto {
 /** Unlock needs the admin's own current password, like the 2FA reset (FR-102 re-auth). */
 export class UnlockStaffUserDto extends CurrentPasswordDto {}
 
+/** Re-issuing a pending invite needs the admin's own current password (step-up). */
+export class ReissueStaffInviteDto extends CurrentPasswordDto {}
+
 export class ListQueryDto {
   @ApiPropertyOptional({ default: 1, minimum: 1 })
   @IsOptional()
