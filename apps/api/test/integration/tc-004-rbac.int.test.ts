@@ -35,6 +35,7 @@ import {
   Be03Route,
   CANDIDATE_ROUTES,
   candidateRegistryProblems,
+  isCandidatePath,
   COVERED_ELSEWHERE,
   hasPathId,
   AnyMatrixEntry,
@@ -123,7 +124,7 @@ describe('TC-004 (FR-103, FU-BE-91): candidate and staff permissions never mix, 
       }).join(),
     ).toMatch(/extra keys roles/);
     expect(
-      run({ ...clean(), 'GET /candidate/session': { ...cand, audited: true } as never }).join(),
+      run({ ...clean(), 'GET /candidate/session': { ...cand, audited: true } }).join(),
     ).toMatch(/extra keys audited/);
   });
 
@@ -131,7 +132,7 @@ describe('TC-004 (FR-103, FU-BE-91): candidate and staff permissions never mix, 
     expect(
       run({
         ...clean(),
-        'GET /candidate/session': { principal: 'CANDIDATE', permission: 'test:read' } as never,
+        'GET /candidate/session': { principal: 'CANDIDATE', permission: 'test:read' },
       }).join(),
     ).toMatch(/not a candidate_\* permission/);
   });
@@ -147,6 +148,68 @@ describe('TC-004 (FR-103, FU-BE-91): candidate and staff permissions never mix, 
     expect(run(clean(), { route: served({ candidatePermission: null }) }).join()).toMatch(
       /differs from the matrix/,
     );
+  });
+
+  it('TC-004: a CANDIDATE entry whose principal is not CANDIDATE is reported', () => {
+    const bad = {
+      principal: 'STAFF',
+      permission: 'candidate_session:read',
+    } as unknown as AnyMatrixEntry;
+    expect(run({ ...clean(), 'GET /candidate/session': bad }).join()).toMatch(
+      /principal is not CANDIDATE/,
+    );
+  });
+
+  it('TC-004: an unknown candidate_ permission, absent from shared PERMISSIONS, is reported', () => {
+    expect(
+      run({
+        ...clean(),
+        'GET /candidate/session': { principal: 'CANDIDATE', permission: 'candidate_bogus:x' },
+      }).join(),
+    ).toMatch(/candidate_bogus:x is not a candidate_\* permission/);
+  });
+
+  it('TC-004: a candidate matrix key the backend does not serve is reported', () => {
+    expect(run({ ...clean(), 'GET /candidate/gone': { ...cand } }).join()).toMatch(
+      /GET \/candidate\/gone: not served by the backend/,
+    );
+  });
+
+  it('TC-004: a staff route carrying @CandidateRoute is reported', () => {
+    const m = clean();
+    expect(
+      candidateRegistryProblems({
+        matrix: m,
+        routes: new Map([
+          ['GET /candidate/session', served()],
+          [
+            'GET /tests',
+            {
+              key: 'GET /tests',
+              handler: 's',
+              roles: ['RECRUITER'],
+              candidatePermission: 'candidate_session:read',
+            },
+          ],
+        ]),
+        bootstrap: ['POST /candidate/session/link'],
+        listed: [
+          { key: 'GET /candidate/session', permission: 'candidate_session:read' },
+          { key: 'POST /candidate/session/link', permission: 'public' },
+        ],
+      }).join(),
+    ).toMatch(/GET \/tests: staff route carries @CandidateRoute/);
+  });
+
+  it('TC-004: a bootstrap key outside /candidate/ is reported even when listed public', () => {
+    expect(
+      run(
+        { ...clean(), 'POST /auth/login': 'public' },
+        {
+          bootstrap: ['POST /candidate/session/link', 'POST /auth/login'],
+        },
+      ).join(),
+    ).toMatch(/POST \/auth\/login: bootstrap route must be a \/candidate\//);
   });
 
   it('TC-004: a /Candidate/ route listed public outside the bootstrap list is reported', () => {
@@ -497,7 +560,7 @@ rbacSuite(
     ).toEqual([]);
     // Not vacuous: whatever candidate keys the matrix has, QA lists the same number.
     const inMatrix = Object.entries(ROUTE_PERMISSIONS).filter(
-      ([k, a]) => isCandidateEntry(a) || (/^\S+ \/candidate(\/|$)/i.test(k) && a === 'public'),
+      ([k, a]) => isCandidateEntry(a) || (isCandidatePath(k) && a === 'public'),
     );
     expect(CANDIDATE_ROUTES.length).toBe(inMatrix.length);
   });
