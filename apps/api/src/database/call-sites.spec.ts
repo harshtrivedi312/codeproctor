@@ -54,6 +54,13 @@ export const CALL_SITES: CallSiteList = {
     names: ['claimCandidateFactsSetter', 'setCandidateFacts'],
     why: 'claims the setter once per process and exports setCandidateFacts for CandidateSessionGuard',
   },
+  // BE-07 (reviewed: DL-31, ADR 0013 CS-4.1). The ONE place a candidate request enters the candidate
+  // scope: CandidateScope calls setCandidateFacts as the first statement inside runAsCandidate, for
+  // the guard (authenticate) and for every service step (asCandidate).
+  'candidate/candidate-scope.ts': {
+    names: ['setCandidateFacts'],
+    why: 'CandidateScope: the guard path and every asCandidate step set the facts first (DL-31)',
+  },
 };
 
 /** The source extensions that are scanned. */
@@ -143,8 +150,9 @@ describe('call-site guard: the private entries of the database layer (FU-DB-67 s
     expect(findStaleEntries(files, CALL_SITES)).toEqual([]);
   });
 
-  it('TC-008 today the list holds the two database files that define the private entries, and nothing else: BE-07 sites are not allowed yet', () => {
+  it('TC-008 the list holds the two database files that define the private entries and the BE-07 guard path (candidate/candidate-scope.ts), and nothing else', () => {
     expect(Object.keys(CALL_SITES).sort()).toEqual([
+      'candidate/candidate-scope.ts',
       'database/candidate-facts.ts',
       'database/org-context.ts',
     ]);
@@ -186,13 +194,19 @@ describe('call-site guard: the private entries of the database layer (FU-DB-67 s
   });
 
   it('TC-008 the candidate-facts module is imported only by the database module (side effect) and, with BE-07, the guard', () => {
-    expect(importersOf(files, 'database/candidate-facts')).toEqual(['database/database.module.ts']);
+    expect(importersOf(files, 'database/candidate-facts')).toEqual([
+      'candidate/candidate-scope.ts',
+      'database/database.module.ts',
+    ]);
   });
 
-  it('TC-008 no file outside the database folder uses any of the four names (a service injecting OrgContextService does not call them)', () => {
+  it('TC-008 no file outside the database folder uses any of the four names except the listed BE-07 guard path (a service injecting OrgContextService does not call them)', () => {
     const outside = files.filter((file) => !file.path.startsWith('database/'));
     expect(outside.length).toBeGreaterThan(20);
-    expect(findCallSiteViolations(outside, {})).toEqual([]);
+    const allowedOutside = Object.fromEntries(
+      Object.entries(CALL_SITES).filter(([path]) => !path.startsWith('database/')),
+    );
+    expect(findCallSiteViolations(outside, allowedOutside)).toEqual([]);
   });
 });
 

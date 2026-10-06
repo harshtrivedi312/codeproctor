@@ -24,6 +24,8 @@ import type { ConsentCopyMail, OtpLockoutMail, OtpMail } from './candidate-mail.
 import type { OrgContextService } from '../database/org-context';
 import type { PrismaService } from '../database/prisma.service';
 import type { OtpService } from './otp.service';
+import type { CandidateScope } from './candidate-scope';
+import type { SessionStateService } from '../session/session-state.service';
 import type { SessionJobsService } from './session-jobs.service';
 import { createInvitation, createTenant, passedSystemCheck } from './testing/fixtures';
 import type { InvitationFixture, InvitationOptions, Tenant } from './testing/fixtures';
@@ -79,6 +81,8 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
   let keys: SessionKeyService;
   let jobs: SessionJobsService;
   let otp: OtpService;
+  let states: SessionStateService;
+  let scope: CandidateScope;
   let prisma: PrismaService;
   let orgContext: OrgContextService;
   let tenant: Tenant;
@@ -162,6 +166,14 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     jobs = app.get(J);
     const { OtpService: O } = jest.requireActual<typeof import('./otp.service')>('./otp.service');
     otp = app.get(O);
+    states = app.get(
+      jest.requireActual<typeof import('../session/session-state.service')>(
+        '../session/session-state.service',
+      ).SessionStateService,
+    );
+    scope = app.get(
+      jest.requireActual<typeof import('./candidate-scope')>('./candidate-scope').CandidateScope,
+    );
     prisma = app.get(
       jest.requireActual<typeof import('../database/prisma.service')>('../database/prisma.service')
         .PrismaService,
@@ -2020,7 +2032,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         const epoch = (await sessionRow(inv.sessionId)).authEpoch;
         const spy = jest.spyOn(otp, 'verify').mockImplementationOnce(async () => {
           await owner.session.update({ where: { id: inv.sessionId }, data: { status: endStatus } });
-          return { kind: 'ok' };
+          return { kind: 'ok', hash: 'x' };
         });
         const res = await post('/start', { invitationToken: inv.token, otp: '123456' });
         spy.mockRestore();
@@ -2633,6 +2645,113 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect((await sessionRow(a2.sessionId)).status).toBe('DECLINED');
       expect((await sessionRow(a3.sessionId)).status).toBe('IN_PROGRESS');
       expect((await sessionRow(a4.sessionId)).lastHeartbeat).not.toBeNull();
+    });
+  });
+
+  // ---------- DL-37: a busy session row must not consume anything the client retries with ----------
+
+  describe('a lock timeout is retried by the client: nothing taken before the failing write stays taken (DL-37)', () => {
+    const busy = (): Error => Object.assign(new Error('lock timeout'), { code: '55P03' });
+    const tokenOf = (inv: InvitationFixture, epoch = 1): string =>
+      tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch }).token;
+    const slot = async (route: string, sid: string): Promise<number> =>
+      Number((await redis.get(`rl:${route}:${sid}`)) ?? 0);
+    afterEach(() => jest.restoreAllMocks());
+
+    it('DL-37, FR-609: a busy heartbeat write gives the rate slot back; the retry works; another error keeps the slot', async () => {
+      const inv = await invite(liveSession());
+      const spy = (jest.spyOn(scope, 'asCandidate') as jest.SpyInstance).mockRejectedValueOnce(
+        busy(),
+      );
+      const first = await authed('post', '/heartbeat', tokenOf(inv));
+      expect(first.status).toBeGreaterThanOrEqual(500);
+      expect(await slot('heartbeat', inv.sessionId)).toBe(0);
+      spy.mockRestore();
+      await authed('post', '/heartbeat', tokenOf(inv)).expect(200);
+      expect(await slot('heartbeat', inv.sessionId)).toBe(1);
+      // A different failure is not a retry case: its slot stays used.
+      (jest.spyOn(scope, 'asCandidate') as jest.SpyInstance).mockRejectedValueOnce(
+        new Error('other'),
+      );
+      expect((await authed('post', '/heartbeat', tokenOf(inv))).status).toBeGreaterThanOrEqual(500);
+      expect(await slot('heartbeat', inv.sessionId)).toBe(2);
+    });
+
+    it('DL-37, FR-401: a busy consent sign or decline gives the slot back, leaves the session OPENED with no consent row, and the retry succeeds', async () => {
+      for (const [route, path, body] of [
+        [
+          'consent-sign',
+          '/consent/sign',
+          { consentTextId: tenant.consentTextId, signedName: 'Ada Lovelace', confirmedAge18: true },
+        ],
+        ['consent-decline', '/consent/decline', {}],
+      ] as const) {
+        const inv = await invite({ status: 'OPENED', session: { authEpoch: 1 } });
+        const spy = jest.spyOn(states, 'transition').mockRejectedValueOnce(busy());
+        const first = await authed('post', path, tokenOf(inv), body);
+        expect([route, first.status >= 500]).toEqual([route, true]);
+        expect([route, await slot(route, inv.sessionId)]).toEqual([route, 0]);
+        expect((await sessionRow(inv.sessionId)).status).toBe('OPENED');
+        expect(await owner.consent.count({ where: { sessionId: inv.sessionId } })).toBe(0);
+        spy.mockRestore();
+        await authed('post', path, tokenOf(inv), body).expect(200);
+        expect([route, await slot(route, inv.sessionId)]).toEqual([route, 1]);
+      }
+    });
+
+    it('DL-37, FR-505: a busy test start gives the slot back, leaves VERIFIED with no key, sections or used_at, and the retry starts', async () => {
+      const inv = await invite({
+        status: 'VERIFIED',
+        session: { authEpoch: 1, deviceInfo: passedSystemCheck() },
+      });
+      const spy = jest.spyOn(states, 'transition').mockRejectedValueOnce(busy());
+      const first = await authed('post', '/test/start', tokenOf(inv));
+      expect(first.status).toBeGreaterThanOrEqual(500);
+      expect(await slot('test-start', inv.sessionId)).toBe(0);
+      const row = await sessionRow(inv.sessionId);
+      expect(row.status).toBe('VERIFIED');
+      expect(row.hmacKeyEnc).toBeNull();
+      expect(await owner.sessionSection.count({ where: { sessionId: inv.sessionId } })).toBe(0);
+      expect(
+        (await owner.invitation.findUniqueOrThrow({ where: { id: inv.invitationId } })).usedAt,
+      ).toBeNull();
+      spy.mockRestore();
+      await authed('post', '/test/start', tokenOf(inv)).expect(200);
+    });
+
+    it('DL-37, FR-106, TC-007: a busy write after a correct code puts the code and its guess back; the same code works on the retry and the epoch moved once', async () => {
+      const inv = await invite();
+      const code = await otpFor(inv);
+      const spy = jest.spyOn(states, 'transition').mockRejectedValueOnce(busy());
+      const first = await post('/start', { invitationToken: inv.token, otp: code });
+      expect(first.status).toBeGreaterThanOrEqual(500);
+      // The code is back (hashed, with a TTL), no wrong-guess is counted, and nothing was issued.
+      expect(await redis.exists(`otp:${inv.invitationId}`)).toBe(1);
+      expect(Number((await redis.get(`otp-attempts:${inv.invitationId}`)) ?? 0)).toBe(0);
+      const row = await sessionRow(inv.sessionId);
+      expect(row).toMatchObject({ status: 'INVITED', authEpoch: 0 });
+      spy.mockRestore();
+      const retry = await post('/start', { invitationToken: inv.token, otp: code });
+      expect(retry.status).toBe(200);
+      expect((await sessionRow(inv.sessionId)).authEpoch).toBe(1);
+      // And the code is single use again after the success.
+      expect((await post('/start', { invitationToken: inv.token, otp: code })).status).toBe(400);
+    });
+
+    it('DL-37, TC-097: OtpService.restore during a test clears the cooldown the spent guess set, and never replaces a newer code', async () => {
+      const inv = await invite(liveSession());
+      const code = await otpFor(inv);
+      const verified = await otp.verify(inv.invitationId, code, 'LIVE');
+      expect(verified.kind).toBe('ok');
+      expect(await redis.exists(`otp-cooldown:${inv.invitationId}`)).toBe(0);
+      expect(await redis.exists(`otp:${inv.invitationId}`)).toBe(0);
+      const hash = (verified as { hash: string }).hash;
+      await otp.restore(inv.invitationId, hash, 'LIVE');
+      expect(await redis.get(`otp:${inv.invitationId}`)).toBe(hash);
+      // A newer code is not overwritten by a late restore.
+      await redis.set(`otp:${inv.invitationId}`, 'newer', 'EX', 600);
+      await otp.restore(inv.invitationId, hash, 'LIVE');
+      expect(await redis.get(`otp:${inv.invitationId}`)).toBe('newer');
     });
   });
 

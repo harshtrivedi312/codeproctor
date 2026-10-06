@@ -7,6 +7,7 @@ import type { Redis } from 'ioredis';
 import { CodedHttpException } from '../common/coded.exception';
 import { REDIS_CLIENT } from '../infrastructure/infrastructure.module';
 import { ensureConnected } from '../infrastructure/redis-ready';
+import { isBusyLockError } from './busy-lock-error';
 
 const SCRIPT = `
 local n = redis.call('INCR', KEYS[1])
@@ -36,6 +37,41 @@ export class SessionRateLimiter {
         'RATE_LIMITED',
         { retryAfterSeconds: Math.max(1, ttl) },
       );
+    }
+  }
+
+  /** Gives back one slot taken by `hit` (never below zero). */
+  async release(route: string, sessionId: string): Promise<void> {
+    try {
+      await ensureConnected(this.redis);
+      await this.redis.eval(
+        "local n = tonumber(redis.call('GET', KEYS[1])) if n and n > 0 then redis.call('DECR', KEYS[1]) end",
+        1,
+        `rl:${route}:${sessionId}`,
+      );
+    } catch {
+      // Best effort: the window expires by itself.
+    }
+  }
+
+  /**
+   * `hit`, then `fn`. When `fn` fails because the session row is busy (lock timeout, deadlock),
+   * the slot is given back and the error is rethrown unchanged, so a 503 the client retries does
+   * not use up its rate limit (DL-37). Any other error keeps the slot.
+   */
+  async guarded<T>(
+    route: string,
+    sessionId: string,
+    limit: number,
+    windowSeconds: number,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    await this.hit(route, sessionId, limit, windowSeconds);
+    try {
+      return await fn();
+    } catch (e) {
+      if (isBusyLockError(e)) await this.release(route, sessionId);
+      throw e;
     }
   }
 }

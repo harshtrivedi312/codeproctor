@@ -21,6 +21,7 @@ import { SessionStateService } from '../session/session-state.service';
 import { SessionStateConflictError } from '../session/session-state.errors';
 import { LIVE_STATUSES, PRE_START_STATUSES, USED_STATUSES } from '../session/session-transitions';
 import { CandidateMailPort } from './candidate-mail.port';
+import { isBusyLockError } from './busy-lock-error';
 import { CandidateTokenService } from './candidate-token.service';
 import {
   OTP_BLOCK_SECONDS,
@@ -317,29 +318,40 @@ export class CandidateAuthService {
           break;
       }
 
-      // The code is spent. Read the status again: it may have moved since the first read (the test
-      // was submitted, expired or declined on another device), and no token is issued for that.
+      // The code is spent. If a write below is busy (lock timeout, deadlock), the client retries
+      // with the same code (503), so the code and the guess it used are put back first (DL-37).
       const sessionId = link.session.id;
-      const fresh = await this.prisma.client.session.findUnique({
-        where: { id: sessionId },
-        select: { status: true },
-      });
-      if (fresh === null) return invalidLink();
-      this.refuseUnlessOpen(
-        await this.stateOf({ ...link, session: { id: sessionId, status: fresh.status } }, now),
-      );
-      // Raise the epoch first: it ends every older token at once.
-      const updated = await this.prisma.client.session.update({
-        where: { id: sessionId },
-        data: { authEpoch: { increment: 1 } },
-        select: { authEpoch: true },
-      });
-      if (link.session.status === 'INVITED') {
-        try {
-          await this.states.transition({ sessionId, from: 'INVITED', to: 'OPENED', now });
-        } catch (e) {
-          if (!(e instanceof SessionStateConflictError)) throw e;
+      let updated: { authEpoch: number };
+      try {
+        // Read the status again: it may have moved since the first read (the test was submitted,
+        // expired or declined on another device), and no token is issued for that.
+        const fresh = await this.prisma.client.session.findUnique({
+          where: { id: sessionId },
+          select: { status: true },
+        });
+        if (fresh === null) return invalidLink();
+        this.refuseUnlessOpen(
+          await this.stateOf({ ...link, session: { id: sessionId, status: fresh.status } }, now),
+        );
+        if (link.session.status === 'INVITED') {
+          try {
+            await this.states.transition({ sessionId, from: 'INVITED', to: 'OPENED', now });
+          } catch (e) {
+            if (!(e instanceof SessionStateConflictError)) throw e;
+          }
         }
+        // The epoch last: it ends every older token at once, so a busy failure before it leaves
+        // the other device signed in and only an idempotent OPENED behind.
+        updated = await this.prisma.client.session.update({
+          where: { id: sessionId },
+          data: { authEpoch: { increment: 1 } },
+          select: { authEpoch: true },
+        });
+      } catch (e) {
+        if (isBusyLockError(e)) {
+          await this.otp.restore(link.invitation.id, result.hash, phase).catch(() => undefined);
+        }
+        throw e;
       }
       const current = await this.prisma.client.session.findUnique({
         where: { id: sessionId },

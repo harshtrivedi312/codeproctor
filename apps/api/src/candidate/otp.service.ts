@@ -35,7 +35,8 @@ export type OtpIssue =
   | { readonly kind: 'wait'; readonly retryAfterSeconds: number };
 
 export type OtpVerification =
-  | { readonly kind: 'ok' }
+  /** `hash` lets the caller put the code back (restore) when a later write is busy (DL-37). */
+  | { readonly kind: 'ok'; readonly hash: string }
   /** `blockedNow`: this guess was the one that blocked the link (notify the recruiter once). */
   | { readonly kind: 'wrong'; readonly blockedNow: boolean }
   | { readonly kind: 'blocked'; readonly retryAfterSeconds: number; readonly blockedNow: boolean }
@@ -90,6 +91,18 @@ if redis.call('GET', KEYS[1]) == ARGV[1] then
   return 1
 end
 return 0
+`;
+
+// KEYS: 1 otp, 2 attempts, 3 cooldown. ARGV: 1 hash, 2 otp ttl, 3 phase.
+const RESTORE = `
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2], 'NX')
+if ARGV[3] == 'PRE_START' then
+  local n = tonumber(redis.call('GET', KEYS[2]))
+  if n and n > 0 then redis.call('DECR', KEYS[2]) end
+else
+  redis.call('DEL', KEYS[3])
+end
+return 1
 `;
 
 // KEYS: 1 otp, 2 attempts, 3 block. ARGV: 1 block s.
@@ -161,6 +174,26 @@ export class OtpService {
     );
   }
 
+  /**
+   * Puts a code that verify() spent back, and gives back the guess it reserved: for a request whose
+   * later database write was busy (503, the client retries with the same code, DL-37). Only if no
+   * newer code replaced it (NX); before the test it takes one off the wrong-guess counter, during a
+   * test it clears the 30 s cooldown.
+   */
+  async restore(invitationId: string, hash: string, phase: OtpPhase): Promise<void> {
+    await ensureConnected(this.redis);
+    await this.redis.eval(
+      RESTORE,
+      3,
+      OtpService.key('otp', invitationId),
+      OtpService.key('otp-attempts', invitationId),
+      OtpService.key('otp-cooldown', invitationId),
+      hash,
+      String(OTP_TTL_SECONDS),
+      phase,
+    );
+  }
+
   /** Seconds the link stays blocked before the test starts, or 0. */
   async blockedSeconds(invitationId: string): Promise<number> {
     await ensureConnected(this.redis);
@@ -208,7 +241,7 @@ export class OtpService {
       )) as number;
       // 0: a concurrent request spent this code first (or a block removed it). Only one wins, and
       // the loser is not a wrong guess: it is told there is no code waiting, and nothing is logged.
-      return spent === 1 ? { kind: 'ok' } : { kind: 'none' };
+      return spent === 1 ? { kind: 'ok', hash: String(value) } : { kind: 'none' };
     }
 
     const attempt = Number(extra);

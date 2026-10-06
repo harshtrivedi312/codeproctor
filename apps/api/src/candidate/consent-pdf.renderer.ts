@@ -56,7 +56,7 @@ export function toBlocks(md: string): Block[] {
 function clean(text: string): string {
   return text
     .replace(/\*\*(.+?)\*\*/g, '$1')
-    .replace(/[*_`]/g, '')
+    .replace(/[*_\u0060]/g, '')
     .replace(/\[(.+?)\]\(.+?\)/g, '$1');
 }
 
