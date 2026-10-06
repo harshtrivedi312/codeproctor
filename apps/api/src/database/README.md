@@ -982,3 +982,12 @@ upsert, create, cursors, nested writes and the HTTP path on chosen models), and 
 and runs the compiled client and `DatabaseModule` on Node. `auth-bootstrap.spec.ts` covers what
 BE-02's auth needs: raw SQL and transactions inside system scope, and the statement counts
 (NFR-04, FR-104).
+
+Session rows are never deleted by the API (ADR 0004 section 9.3, proposed until the owner accepts
+it). `app_user` has no DELETE and no TRUNCATE on `sessions`, so `session.delete` and
+`session.deleteMany` fail with "permission denied" in every scope, system scope included. Deleting a
+session would cascade to its consent row, which R-9 keeps for 3 years. Retention and erasure change a
+session's status (ERASED) and clear its data; they do not delete the row. Test teardown and seed
+cleanup delete sessions as the migration owner (and delete the appeal first, if the session's review
+has one). `retention-erasure-schema.spec.ts` covers this, the ERASED and CLOSED_ERASED enum values
+and the retention marker index (FR-704, NFR-05); the TC-008 matrix has a Session branch for it.
