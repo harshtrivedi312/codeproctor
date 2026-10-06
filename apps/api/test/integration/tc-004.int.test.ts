@@ -175,11 +175,12 @@ describe('TC-004 (FR-103): RBAC enforcement', () => {
       const res = await request(h.app.getHttpServer())[method.toLowerCase() as 'get'](
         `${API}${path}`,
       );
-      expect([401, 404]).toContain(res.status);
+      // Routes that exist answer exactly 401; only the unbuilt review routes (BE-13) may be 404.
+      if (path.startsWith('/review')) expect([401, 404]).toContain(res.status);
+      else expect([path, res.status]).toEqual([path, 401]);
     }
   });
 
-  it.todo(
-    'TC-004: reviewer cannot POST /tests, author cannot POST /review/sessions/:id/verdict (needs BE-04, BE-06, BE-13)',
-  );
+  // The reviewer POST /tests case runs in tc-004-rbac.int.test.ts since BE-06 (slice 6a).
+  it.todo('TC-004: author cannot POST /review/sessions/:id/verdict (needs BE-13)');
 });
