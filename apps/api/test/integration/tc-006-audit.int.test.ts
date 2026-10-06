@@ -147,6 +147,14 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
             expect(meta?.route?.endsWith(route.template)).toBe(true); // template, never the concrete URL
             expect(meta?.route).not.toContain('page=');
           } else {
+            if (route.routeMetadata) {
+              // Service-written row in the same transaction as the change: metadata is exactly
+              // {method, route template} (no ids, no token, no password).
+              const meta = row.metadata as { method?: string; route?: string } | null;
+              expect(Object.keys(meta ?? {}).sort()).toEqual(['method', 'route']);
+              expect(meta?.method).toBe(route.method);
+              expect(meta?.route).toBe(`/api/v1${route.template}`);
+            }
             const entityId = t.entityId ?? (await t.resolveEntityId?.());
             expect(entityId).toBeDefined(); // every audited route names its entity
             expect(row.entityId).toBe(entityId);

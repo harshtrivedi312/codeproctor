@@ -16,9 +16,12 @@
 // cross-org or missing id is the same 404, and only AFTER a correct password. Failed requests
 // (400/401/403/404) write no audit row.
 //
-//   POST  /admin/users/:userId/invite {currentPassword}  re-issue of a pending invite. ASSUMED contract
-//         (not on main when written): 200/201/204, audit USER_INVITE_REISSUED, same step-up rules, new
-//         72 h token mailed. Listed ONLY when the backend's ROUTE_PERMISSIONS has the key (see below).
+//   POST  /admin/users/:userId/invite {currentPassword}  200 StaffUserDto (status 'invited', no token
+//         fields); re-issue of a pending invite (Backend A, branch backend/invite-reissue). Same step-up
+//         rules; 409 when the user has a password or is deactivated; shares the per-org invite limit
+//         (429); 503 Redis down; audit USER_INVITE_REISSUED written in the rotation's transaction with
+//         metadata ONLY {method, route '/api/v1/admin/users/:userId/invite'}, NOT @Audited (no `audited`
+//         flag in the matrix). Listed ONLY when the backend's ROUTE_PERMISSIONS has the key (see below).
 //
 // Switches: the BE-03 tests run by default (BE03_DEFAULT = true). The review routes (BE-13) stay off
 // until BE13_DEFAULT is flipped, or `BE13_READY=1` in the environment for a trial run. The BE-13
@@ -114,6 +117,11 @@ export interface Be03Route {
    * template} and there is no entity id (a list read has no single target).
    */
   interceptor?: boolean;
+  /**
+   * true: a service-written row (not @Audited) whose metadata is exactly {method, route} with the
+   * route being '/api/v1' + template, and which names the target entity.
+   */
+  routeMetadata?: boolean;
   mutating: boolean;
   /** true: a successful call sends a mail whose URL carries a token (checked for leaks). */
   sendsMail?: boolean;
@@ -202,7 +210,7 @@ const withPassword = <T extends object>(body: T): T & { currentPassword: string 
 });
 
 /** True when the backend's route matrix already has `key`; false when the file is absent or lacks it. */
-function backendHasRoute(key: string): boolean {
+export function backendHasRoute(key: string): boolean {
   try {
     const perms = jest.requireActual<Pick<RegistryApi, 'ROUTE_PERMISSIONS'>>(
       '../../src/common/auth/route-permissions',
@@ -234,7 +242,7 @@ async function pendingInvitee(
   return { id: u.id, tokenHash };
 }
 
-// Backend A's invite re-issue route. Included only when the backend serves it, so TC-004's
+// Backend A's invite re-issue route (contract confirmed). Included only when the backend serves it, so TC-004's
 // "the backend matrix agrees with the controllers" check is green before and after it lands.
 const reissueRoutes: Be03Route[] = backendHasRoute('POST /admin/users/:userId/invite')
   ? [
@@ -244,16 +252,17 @@ const reissueRoutes: Be03Route[] = backendHasRoute('POST /admin/users/:userId/in
         method: 'POST',
         template: `${ADMIN_USERS}/:userId/invite`,
         permission: 'user:manage',
-        audit: { action: 'USER_INVITE_REISSUED', entityType: 'user' }, // ASSUMED action name
+        audit: { action: 'USER_INVITE_REISSUED', entityType: 'user' },
+        routeMetadata: true,
         mutating: true,
         sendsMail: true,
         reauth: true,
-        ok: [200, 201, 204], // ASSUMED
+        ok: [200],
         prepare: async (h, orgId) => {
           const u = await pendingInvitee(h, orgId);
           return {
             path: `${ADMIN_USERS}/${u.id}/invite`,
-            body: withPassword({}), // ASSUMED body: only currentPassword
+            body: withPassword({}),
             entityId: u.id,
             secrets: [PASSWORD],
             unchanged: async () =>
