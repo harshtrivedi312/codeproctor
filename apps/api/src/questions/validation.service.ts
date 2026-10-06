@@ -34,7 +34,6 @@ import type { QuestionVersion } from '../generated/prisma/client';
 import type { RequestContext } from '../common/request-context';
 import { computeRevision } from './revision';
 import {
-  audit,
   checkRevision,
   latestVersion,
   loadVariants,
@@ -64,6 +63,8 @@ interface Job {
   readonly orgId: string;
   /** The author who started the run: the actor of the finish audit row (a system write). */
   readonly starterId: string;
+  /** The STARTED audit row of this run (a string: audit ids are bigints). */
+  readonly startedAuditId: string;
   readonly questionId: string;
   readonly versionId: string;
   readonly version: number;
@@ -132,14 +133,23 @@ export class ValidationService {
           where: { id: head.id, isPublished: false },
           data: noHistory,
         });
-        await audit(tx, actor, 'QUESTION_VALIDATION_STARTED', id, ctx, {
-          version: head.version,
-          variants: built.request.variants.length,
+        const startedRow = await tx.auditLog.create({
+          data: {
+            orgId: actor.orgId,
+            actorId: actor.id,
+            action: 'QUESTION_VALIDATION_STARTED',
+            entityType: 'question',
+            entityId: id,
+            ip: ctx.ip ?? null,
+            metadata: { version: head.version, variants: built.request.variants.length },
+          },
+          select: { id: true },
         });
         const job: Job = {
           jobId: randomUUID(),
           orgId: actor.orgId,
           starterId: actor.id,
+          startedAuditId: startedRow.id.toString(),
           questionId: id,
           versionId: head.id,
           version: head.version,
@@ -259,20 +269,27 @@ export class ValidationService {
             ? 'PASSED'
             : 'FAILED';
       if (current !== null) {
-        // The outcome outlives the report (the next run clears it): ids, the outcome and a revision
-        // prefix only. A system write on behalf of the author who started the run (FU-BE-130).
-        await audit(
-          tx,
-          { id: job.starterId, orgId: job.orgId },
-          'QUESTION_VALIDATION_FINISHED',
-          job.questionId,
-          {},
-          {
-            version: job.version,
-            outcome: status,
-            revision: job.revision.slice(0, 12),
+        // The outcome outlives the report (the next run clears it). A job-written row (ADR 0001
+        // C-3): actor and ip are null, the initiating user and the STARTED row are in the metadata,
+        // which holds ids, the outcome and a revision prefix only (FU-BE-130).
+        await tx.auditLog.create({
+          data: {
+            orgId: job.orgId,
+            actorId: null,
+            action: 'QUESTION_VALIDATION_FINISHED',
+            entityType: 'question',
+            entityId: job.questionId,
+            ip: null,
+            metadata: {
+              system: true,
+              initiatedBy: job.starterId,
+              startedAuditId: job.startedAuditId,
+              version: job.version,
+              outcome: status,
+              revision: job.revision.slice(0, 12),
+            },
           },
-        );
+        });
       }
       if (!stale) {
         await tx.questionVersion.updateMany({
