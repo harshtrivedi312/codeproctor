@@ -4,6 +4,8 @@
 // A request for another org's row is a different case: the scoped query simply finds nothing, and
 // the service answers 404 (ADR 0006 section 2, TC-008).
 
+import { deepFreeze } from './deep-freeze';
+
 /** Base class, so callers and tests can catch every scoping failure at once. */
 export class OrgScopeError extends Error {
   constructor(message: string) {
@@ -60,12 +62,15 @@ export class RawQueryNotAllowedError extends OrgScopeError {
 //   AccommodationLockedError  `ACCOMMODATION_LOCKED` 409, a state conflict (ADR 0015 section 6); the retention site
 //                                                    retries through BullMQ.
 
-/** The `code` of each lock error. A caller switches on the code or on `instanceof`. */
-export const SESSION_LOCK_ERROR_CODES = {
+/**
+ * The `code` of each lock error. A caller switches on the code or on `instanceof`. FROZEN (`as const` is compile-time
+ * only): a write anywhere would otherwise change the code every error of that class carries, for the whole process.
+ */
+export const SESSION_LOCK_ERROR_CODES = deepFreeze({
   notFound: 'SESSION_NOT_FOUND',
   retry: 'SESSION_LOCK_RETRY',
   accommodationLocked: 'ACCOMMODATION_LOCKED',
-} as const;
+} as const);
 
 export type SessionLockErrorCode =
   (typeof SESSION_LOCK_ERROR_CODES)[keyof typeof SESSION_LOCK_ERROR_CODES];
@@ -116,3 +121,10 @@ export class AccommodationLockedError extends Error {
     return SESSION_LOCK_ERROR_CODES.accommodationLocked;
   }
 }
+
+// The `code` getters live on the prototypes, so the prototypes are frozen: a write, a defineProperty or a delete on one of
+// them throws, and no code can change what every error of a class reports. (An instance can still get an own property of
+// its own through Object.defineProperty, which changes that one object only.)
+Object.freeze(SessionNotFoundError.prototype);
+Object.freeze(SessionLockRetryError.prototype);
+Object.freeze(AccommodationLockedError.prototype);

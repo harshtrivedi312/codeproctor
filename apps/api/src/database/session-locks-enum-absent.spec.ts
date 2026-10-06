@@ -1,6 +1,6 @@
-// guardLive when the generated `SessionStatus` enum has NO `ERASED` (main today, before PR #91, ADR 0004
-// section 9). The generated enums module is replaced by one with ERASED removed, so the spec means the same
-// after #91 lands, and the real `guardLive` export is run: the load-time detection leaves the typed `NOT`
+// guardLive when the generated `SessionStatus` enum has NO `ERASED`: a client generated before PR #91 (ADR 0004
+// section 9, now on main). The generated enums module is replaced by one with ERASED removed, so the spec means the
+// same whatever the real client has, and the real `guardLive` export is run: the load-time detection leaves the typed `NOT`
 // condition out. The cases are shared with its twin session-locks-enum-erased.spec.ts
 // (testing/guard-live-cases.ts).
 //

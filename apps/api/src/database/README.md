@@ -716,13 +716,21 @@ Five tests pin it, all with an **empty** list outside the defining file today:
   writer and one of PATCH, redact-note, video-check (state and accommodations, `lockForAccommodation`), the erasure,
   R-4 and R-10 jobs (retention).
 - **The per-file rules**, for each listed file that exists (text rules over the source with comments stripped):
-  - **The state file** (`session-state.service.ts`): each core is **imported under an alias** (`import { guardLive as
-coreGuardLive }`) or as a namespace (`import * as locks`), **never under its own name**; each core is **called
-    exactly once, inside the wrapper method of the same name** (`async guardLive(...) { return coreGuardLive(...) }`),
-    and the alias is used nowhere else (not passed, returned, stored, or called in another method or an exported
-    function). Every other mention of a lock name is the wrapper's definition or a member call. There is **exactly one
-    `this.guardLive(` call, inside the brace-matched `proctorResume` body**. Write the wrappers as **methods with a
-    body** (the scan looks for `async name(...) {`), and keep inline object types out of their return types.
+  - **The state file** (`session-state.service.ts`): each core is **imported by name under an alias** (`import {
+guardLive as coreGuardLive }`), **never under its own name and never as a namespace** (`import * as locks` is
+    refused: it would hand the whole core to the file, and a file that imports the module is never skipped by the
+    export check); each core is **called exactly once, inside the wrapper method of the same name** (`async
+guardLive(...) { return coreGuardLive(...) }`), and the alias is used nowhere else (not passed, returned, stored,
+    or called in another method or an exported function). Every other mention of a lock name is the wrapper's
+    definition or a member call. **The wrappers are counted with ANY receiver** (`this.`, `self.`, `this?.`,
+    `(this as X).`, `super.`, another object; whitespace or a line break after the dot is fine): **exactly one
+    `.guardLive(` call, inside the brace-matched `proctorResume` body**, and **no `.lockAnySession(` and no
+    `.lockForAccommodation(` call at all** in this file (the accommodation routes call the second from
+    `session/accommodations.ts`, the jobs the first from the processor: a state method that called one of them,
+    say a `closeIngest` that locks any session, would be reachable from a SERVICE job and write into an ERASED
+    session). Optional-call, bracket and `.bind` forms are refused as property references. Write the wrappers as
+    **methods with a body** (the scan looks for `async name(...) {`), and keep inline object types out of their
+    return types.
   - **The processor file** (`session-job.processor.ts`): `.guardLive(` **exactly once, inside `withLiveSession`**;
     `.lockAnySession(` **exactly once, inside `withAnySession`**; every mention of a lock name is a member call
     (`this.state.guardLive(...)`).
@@ -886,7 +894,8 @@ grants, cross-org, refused scopes send nothing, statement counts, two connection
 forced and a real race, the retention lock order, and the ERASED cases against the real enum: an owner-set ERASED
 row, `guardLive` returns `'ERASED'` and writes nothing, `lockForAccommodation` and `lockAnySession` lock it, the fence
 wins a real race, and the `NOT (status = 'ERASED')` clause is in `guardLive`'s UPDATE text and in no other lock's; they
-run whenever the generated enum has ERASED, and skip with their reason in the name when it does not). The import-guard and call-site cases are in `import-guard.spec.ts` and `call-sites.spec.ts`.
+are plain tests, **never skipped**: #91 is on main, a client generated before it fails them, and the "no ERASED"
+mode is covered by the mocked-enum spec). The import-guard and call-site cases are in `import-guard.spec.ts` and `call-sites.spec.ts`.
 
 ## Auth bootstrap recipe
 

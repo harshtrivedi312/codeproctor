@@ -24,7 +24,7 @@
 //     re-read, and three changes in a row end in the retry error with the last status untouched;
 //   - ERASED against the real enum (PR #91 is on main): a row set to ERASED by the owner, guardLive writes nothing,
 //     the other two lock it, the fence wins a real race, and the NOT-ERASED clause is in guardLive's UPDATE text only;
-//     they skip, with the reason in their name, only against a client generated before #91.
+//     plain tests, never skipped: a client generated before #91 fails them.
 // The logic with a fake transaction (every branch, the exact arguments) is in session-locks.spec.ts.
 // Every probe has a short lock_timeout or a polling deadline, so a broken lock fails the test and never
 // hangs it. FR-704, NFR-05 (erasure), NFR-04, TC-008, TC-094.
@@ -50,11 +50,12 @@ import type { MigratedDatabase } from './testing/migrated-postgres';
 import { createCandidateChain, createTenant } from './testing/tenant-fixtures';
 import type { SessionChain, TenantFixture } from './testing/tenant-fixtures';
 
-/** True once PR #91 (ADR 0004 section 9) has added ERASED to session_status and the client is regenerated. */
+/**
+ * PR #91 (ADR 0004 section 9) is on main: the generated enum has ERASED, and the tests below run against it. They are
+ * plain `it`, not skipped on a stale client: a client generated before #91 must FAIL them (the first test asserts it),
+ * and the "enum has no ERASED" mode is covered by session-locks-enum-absent.spec.ts with the enums module replaced.
+ */
 const ENUM_HAS_ERASED = Object.hasOwn(SessionStatus, 'ERASED');
-const itWithErased = ENUM_HAS_ERASED ? it : it.skip;
-const SKIP_NOTE =
-  ' [SKIPPED: session_status has no ERASED until PR #91 (ADR 0004 section 9) merges]';
 
 /** The statuses to cycle through. ERASED is excluded on purpose: it has its own tests. */
 const ORDINARY = Object.values(SessionStatus).filter(
@@ -1021,49 +1022,51 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
         id,
       ]);
 
-    itWithErased(
-      `NFR-05 TC-094 the NOT-ERASED clause is in guardLive's UPDATE text, and in no other lock's${ENUM_HAS_ERASED ? '' : SKIP_NOTE}`,
-      async () => {
-        const g = await freshChain('erasedtext1');
-        await db.statements.reset();
-        await asService(g, () => lockIn(guardLive, g.sessionId));
-        const guard = (await counts()).updateTexts;
-        expect(guard).toHaveLength(1);
-        // id = $2 AND status = <read> ($3) AND (NOT status = 'ERASED' ($4)) AND the scope's filters: the exclusion is
-        // part of the compare-and-set, and a parameter of its own.
-        expect(guard[0]).toMatch(
-          /"sessions"\."status" = CAST\(\$3::text AS "public"\."session_status"\) AND \(NOT "public"\."sessions"\."status" = CAST\(\$4::text AS "public"\."session_status"\)\)/,
-        );
-        for (const [name, lock] of ANY_STATUS_LOCKS) {
-          const chain = await freshChain(`erasedtext-${name}`);
-          await db.statements.reset();
-          await asHome(lock, chain, () => lockIn(lock, chain.sessionId));
-          const texts = (await counts()).updateTexts;
-          expect({ name, texts: texts.length }).toEqual({ name, texts: 1 });
-          expect({ name, notErased: /\bNOT\b/.test(texts[0] as string) }).toEqual({
-            name,
-            notErased: false,
-          });
-        }
-      },
-    );
+    it('NFR-05 TC-094 the generated client has ERASED (a client generated before #91 fails this suite, it does not skip it), and the database accepts it', async () => {
+      expect(ENUM_HAS_ERASED).toBe(true);
+      expect(Object.values(SessionStatus)).toContain('ERASED');
+      const chain = await freshChain('erased0');
+      await setErased(chain.sessionId);
+      expect(await statusOf(chain.sessionId)).toBe('ERASED');
+    });
 
-    itWithErased(
-      `NFR-05 TC-094 guardLive returns ERASED for an erased session and writes nothing (xmin the same)${ENUM_HAS_ERASED ? '' : SKIP_NOTE}`,
-      async () => {
-        const chain = await freshChain('erased1');
-        await setErased(chain.sessionId);
-        const xmin = await xminOf(chain.sessionId);
+    it(`NFR-05 TC-094 the NOT-ERASED clause is in guardLive's UPDATE text, and in no other lock's`, async () => {
+      const g = await freshChain('erasedtext1');
+      await db.statements.reset();
+      await asService(g, () => lockIn(guardLive, g.sessionId));
+      const guard = (await counts()).updateTexts;
+      expect(guard).toHaveLength(1);
+      // id = $2 AND status = <read> ($3) AND (NOT status = 'ERASED' ($4)) AND the scope's filters: the exclusion is
+      // part of the compare-and-set, and a parameter of its own.
+      expect(guard[0]).toMatch(
+        /"sessions"\."status" = CAST\(\$3::text AS "public"\."session_status"\) AND \(NOT "public"\."sessions"\."status" = CAST\(\$4::text AS "public"\."session_status"\)\)/,
+      );
+      for (const [name, lock] of ANY_STATUS_LOCKS) {
+        const chain = await freshChain(`erasedtext-${name}`);
         await db.statements.reset();
-        expect(await asService(chain, () => lockIn(guardLive, chain.sessionId))).toBe('ERASED');
-        expect(await xminOf(chain.sessionId)).toBe(xmin);
-        expect((await counts()).update).toBe(0);
-        expect(await statusOf(chain.sessionId)).toBe('ERASED');
-      },
-    );
+        await asHome(lock, chain, () => lockIn(lock, chain.sessionId));
+        const texts = (await counts()).updateTexts;
+        expect({ name, texts: texts.length }).toEqual({ name, texts: 1 });
+        expect({ name, notErased: /\bNOT\b/.test(texts[0] as string) }).toEqual({
+          name,
+          notErased: false,
+        });
+      }
+    });
 
-    itWithErased.each(ANY_STATUS_LOCKS)(
-      `NFR-05 TC-094 %s locks an ERASED session and returns ERASED (the reduction and the erasure-compatible jobs must run on it)${ENUM_HAS_ERASED ? '' : SKIP_NOTE}`,
+    it(`NFR-05 TC-094 guardLive returns ERASED for an erased session and writes nothing (xmin the same)`, async () => {
+      const chain = await freshChain('erased1');
+      await setErased(chain.sessionId);
+      const xmin = await xminOf(chain.sessionId);
+      await db.statements.reset();
+      expect(await asService(chain, () => lockIn(guardLive, chain.sessionId))).toBe('ERASED');
+      expect(await xminOf(chain.sessionId)).toBe(xmin);
+      expect((await counts()).update).toBe(0);
+      expect(await statusOf(chain.sessionId)).toBe('ERASED');
+    });
+
+    it.each(ANY_STATUS_LOCKS)(
+      `NFR-05 TC-094 %s locks an ERASED session and returns ERASED (the reduction and the erasure-compatible jobs must run on it)`,
       async (_name, lock) => {
         const chain = await freshChain('erased2');
         await setErased(chain.sessionId);
@@ -1076,53 +1079,46 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
       },
     );
 
-    itWithErased(
-      `NFR-05 TC-094 the fence wins the race: ERASED committed while the guard's UPDATE waits, so guardLive returns ERASED and writes nothing${ENUM_HAS_ERASED ? '' : SKIP_NOTE}`,
-      async () => {
-        const chain = await freshChain('erased3');
-        const racer = new Client({ connectionString: db.ownerUrl });
-        await racer.connect();
-        let pending: Promise<unknown> | undefined;
-        try {
-          await racer.query('BEGIN');
-          await racer.query(
-            "UPDATE sessions SET status = 'ERASED'::session_status WHERE id = $1::uuid",
-            [chain.sessionId],
-          );
-          pending = asService(chain, () => lockIn(guardLive, chain.sessionId));
-          await waitUntilBlocked('UPDATE "public"."sessions"');
-          await racer.query('COMMIT');
-          expect(await pending).toBe('ERASED');
-        } finally {
-          await racer.query('ROLLBACK').catch(() => undefined);
-          await racer.end();
-          await pending?.catch(() => undefined);
-        }
-        expect(await statusOf(chain.sessionId)).toBe('ERASED');
-      },
-      60_000,
-    );
-
-    itWithErased(
-      `NFR-05 TC-094 an ERASED write is excluded in the database too: the update's own where refuses a row that became ERASED${ENUM_HAS_ERASED ? '' : SKIP_NOTE}`,
-      async () => {
-        // The status moves to ERASED right after the read: the compare-and-set loses, the re-read says ERASED.
-        const chain = await freshChain('erased4');
-        const result = await asService(chain, () =>
-          client.$transaction(
-            (tx) =>
-              guardLive(
-                afterReads(tx, async (n) => {
-                  if (n === 0) await setErased(chain.sessionId);
-                }),
-                chain.sessionId,
-              ),
-            TX_OPTIONS,
-          ),
+    it(`NFR-05 TC-094 the fence wins the race: ERASED committed while the guard's UPDATE waits, so guardLive returns ERASED and writes nothing`, async () => {
+      const chain = await freshChain('erased3');
+      const racer = new Client({ connectionString: db.ownerUrl });
+      await racer.connect();
+      let pending: Promise<unknown> | undefined;
+      try {
+        await racer.query('BEGIN');
+        await racer.query(
+          "UPDATE sessions SET status = 'ERASED'::session_status WHERE id = $1::uuid",
+          [chain.sessionId],
         );
-        expect(result).toBe('ERASED');
-        expect(await statusOf(chain.sessionId)).toBe('ERASED');
-      },
-    );
+        pending = asService(chain, () => lockIn(guardLive, chain.sessionId));
+        await waitUntilBlocked('UPDATE "public"."sessions"');
+        await racer.query('COMMIT');
+        expect(await pending).toBe('ERASED');
+      } finally {
+        await racer.query('ROLLBACK').catch(() => undefined);
+        await racer.end();
+        await pending?.catch(() => undefined);
+      }
+      expect(await statusOf(chain.sessionId)).toBe('ERASED');
+    }, 60_000);
+
+    it(`NFR-05 TC-094 an ERASED write is excluded in the database too: the update's own where refuses a row that became ERASED`, async () => {
+      // The status moves to ERASED right after the read: the compare-and-set loses, the re-read says ERASED.
+      const chain = await freshChain('erased4');
+      const result = await asService(chain, () =>
+        client.$transaction(
+          (tx) =>
+            guardLive(
+              afterReads(tx, async (n) => {
+                if (n === 0) await setErased(chain.sessionId);
+              }),
+              chain.sessionId,
+            ),
+          TX_OPTIONS,
+        ),
+      );
+      expect(result).toBe('ERASED');
+      expect(await statusOf(chain.sessionId)).toBe('ERASED');
+    });
   });
 });

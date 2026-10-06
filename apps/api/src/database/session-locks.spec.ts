@@ -553,6 +553,46 @@ describe('the three errors (ADR 0013 section 5.7, ADR 0015 section 6)', () => {
     expect(new Set(Object.values(SESSION_LOCK_ERROR_CODES)).size).toBe(3);
   });
 
+  it('TC-008 S1 the code table and the three prototypes are frozen: a write or a defineProperty anywhere cannot change what every error reports', () => {
+    expect(Object.isFrozen(SESSION_LOCK_ERROR_CODES)).toBe(true);
+    for (const type of [SessionNotFoundError, SessionLockRetryError, AccommodationLockedError]) {
+      expect({ type: type.name, frozen: Object.isFrozen(type.prototype) }).toEqual({
+        type: type.name,
+        frozen: true,
+      });
+      // The code getter cannot be replaced, redefined, shadowed on the prototype or deleted.
+      expect(() => {
+        Object.defineProperty(type.prototype, 'code', { get: () => 'BUSY' });
+      }).toThrow(TypeError);
+      expect(() => {
+        (type.prototype as unknown as { code: string }).code = 'BUSY';
+      }).toThrow(TypeError);
+      expect(() => {
+        delete (type.prototype as unknown as Record<string, unknown>)['code'];
+      }).toThrow(TypeError);
+      expect(() => {
+        (type.prototype as unknown as Record<string, unknown>)['extra'] = 1;
+      }).toThrow(TypeError);
+    }
+    expect(() => {
+      (SESSION_LOCK_ERROR_CODES as { retry: string }).retry = 'BUSY';
+    }).toThrow(TypeError);
+    expect(() => {
+      Object.defineProperty(SESSION_LOCK_ERROR_CODES, 'retry', { value: 'BUSY' });
+    }).toThrow(TypeError);
+    expect(() => {
+      delete (SESSION_LOCK_ERROR_CODES as Record<string, unknown>)['notFound'];
+    }).toThrow(TypeError);
+    // Nothing changed.
+    expect(new SessionLockRetryError().code).toBe('SESSION_LOCK_RETRY');
+    expect(new SessionNotFoundError().code).toBe('SESSION_NOT_FOUND');
+    expect(new AccommodationLockedError().code).toBe('ACCOMMODATION_LOCKED');
+    expect(SESSION_LOCK_ERROR_CODES.retry).toBe('SESSION_LOCK_RETRY');
+    // The base class and the scoping errors are not frozen by this: only the three prototypes are.
+    expect(Object.isFrozen(Error.prototype)).toBe(false);
+    expect(Object.isFrozen(OrgScopeError.prototype)).toBe(false);
+  });
+
   it('TC-008 the code is read-only and not an own property: it cannot be reassigned and never shows in a serialised error', () => {
     for (const error of [
       new SessionNotFoundError(),
