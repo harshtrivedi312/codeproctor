@@ -200,6 +200,12 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
               const row = await h.owner.question.findUniqueOrThrow({ where: { id: id as string } });
               expect(row.orgId).toBe(orgB);
             }
+            if (route.template.startsWith('/tests') && route.method === 'POST') {
+              const id = await t.resolveEntityId?.();
+              expect(id).toBeDefined();
+              const row = await h.owner.test.findUniqueOrThrow({ where: { id: id as string } });
+              expect([row.orgId, row.createdById]).toEqual([orgB, caller.id]);
+            }
           }
         },
       );

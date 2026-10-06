@@ -759,7 +759,6 @@ const isTestFieldList = (v: unknown): boolean =>
   Array.isArray(v) &&
   v.length > 0 &&
   v.every((x) => typeof x === 'string' && TEST_FIELD_NAMES.includes(x));
-const isPositiveCount = (v: unknown): boolean => Number.isInteger(v) && (v as number) >= 1;
 
 export interface TestFix {
   id: string;
@@ -866,7 +865,7 @@ const BE06_ROUTES: Be03Route[] = [
     permission: 'test:create',
     audit: { action: 'TEST_CREATED', entityType: 'test' },
     metadataKeys: ['questions', 'sections'],
-    metadataShape: { questions: isPositiveCount, sections: isPositiveCount },
+    metadataShape: { questions: (v) => v === 1, sections: (v) => v === 1 }, // the fixture has 1 and 1
     mutating: true,
     ok: [201],
     prepare: async (h, orgId) => {
@@ -903,7 +902,9 @@ const BE06_ROUTES: Be03Route[] = [
     permission: 'test:update',
     audit: { action: 'TEST_UPDATED', entityType: 'test' },
     metadataKeys: ['fields'],
-    metadataShape: { fields: isTestFieldList },
+    metadataShape: {
+      fields: (v) => isTestFieldList(v) && JSON.stringify(v) === '["name"]', // the body sends name only
+    },
     mutating: true,
     ok: [200],
     prepare: async (h, orgId) => {

@@ -77,7 +77,11 @@ describe('FR-301 FR-302: test builder', () => {
   async function expectRefused(body: unknown, status = 400): Promise<void> {
     const before = await builderCounts(h, org.id);
     const res = await postTest(h, rec, body);
-    expect([status, res.status]).toEqual([status, status]);
+    expect([status, JSON.stringify(res.body).slice(0, 300), res.status]).toEqual([
+      status,
+      expect.anything(),
+      status,
+    ]);
     expect(await builderCounts(h, org.id)).toEqual(before);
   }
 
@@ -436,15 +440,8 @@ describe('FR-301 FR-302: test builder', () => {
         createdById: other.admin.id,
         id: '00000000-0000-4000-8000-000000000001',
       });
-      expect([201, 400]).toContain(res.status); // refused or ignored, never honoured
-      const row = await h.owner.test.findFirst({ where: { name: 'QA mass assignment' } });
-      if (res.status === 201) {
-        expect(row?.orgId).toBe(org.id);
-        expect(row?.createdById).toBe(rec.id);
-        expect(row?.id).not.toBe('00000000-0000-4000-8000-000000000001');
-      } else {
-        expect(row).toBeNull();
-      }
+      expect(res.status).toBe(400); // unknown properties are refused (whitelist)
+      expect(await h.owner.test.count({ where: { name: 'QA mass assignment' } })).toBe(0);
     });
 
     it('FR-301: a section limit may be left out; limits and duration are checked together', async () => {
@@ -572,7 +569,8 @@ describe('FR-301 FR-302: test builder', () => {
     ])('FR-301: PATCH with %s is 400 and changes nothing (no audit row)', async (_label, body) => {
       const { id, created, inner } = await fresh();
       const before = await builderCounts(h, inner.id);
-      // The "below the pass score" case needs a valid-looking rule, so a pool question exists.
+      // The "below the pass score" case is a 400 from the plan check, which runs before the pool is
+      // consulted (assertPlan before checkReferences), so its unsatisfiable rule never matters.
       const res = await patchTest(h, inner.recruiter, id, body);
       expect(res.status).toBe(400);
       expect(await builderCounts(h, inner.id)).toEqual(before);
@@ -745,7 +743,7 @@ describe('FR-301 FR-302: test builder', () => {
       }
     });
 
-    it('FR-301: search is a case-insensitive substring of the name and treats % and _ as plain characters; filters combine', async () => {
+    it('FR-301: search is a case-insensitive substring of the name; filters combine', async () => {
       const inner = await newOrg(h);
       const iq = await poolQuestion(h, inner.id);
       const mk = async (name: string, profile: string): Promise<string> =>
@@ -758,7 +756,6 @@ describe('FR-301 FR-302: test builder', () => {
         ).id as string;
       const backend = await mk('Backend Engineer Screen', 'STANDARD');
       const frontend = await mk('Frontend Engineer Screen', 'STRICT');
-      const pct = await mk('100% Coverage', 'STANDARD');
       await mk('Plain test', 'STANDARD');
       const ids = async (qs: string): Promise<string[]> =>
         (
@@ -773,37 +770,44 @@ describe('FR-301 FR-302: test builder', () => {
       expect(await ids('search=engineer&profile=STRICT')).toEqual([frontend]);
       expect(await ids('search=nomatch')).toEqual([]);
       expect(await ids('search=engineer&used=true')).toEqual([]);
-      expect(pct).toBeDefined();
     });
 
-    // DEFECT (backend-engineer, should-fix): `search` is passed to Prisma `contains`, which does not
-    // escape the LIKE wildcards, so `%` and `_` match every name instead of the literal character.
-    // it.failing: the test passes while the defect exists and FAILS once it is fixed, which is the
-    // signal to change it to a plain `it`.
-    it.failing(
-      'FR-301: search treats % and _ as plain characters (DEFECT: they act as LIKE wildcards)',
-      async () => {
-        const inner = await newOrg(h);
-        const iq = await poolQuestion(h, inner.id);
+    // KNOWN DEFECT (backend-engineer, should-fix; no TC id): `search` goes to Prisma `contains`, which
+    // does not escape the LIKE wildcards, so `%` and `_` match every name instead of the literal
+    // character. it.failing passes while the defect exists and FAILS once it is fixed: then change it
+    // to a plain `it` and drop "KNOWN DEFECT" from the title. Fixtures are made in beforeAll so a
+    // setup error fails the suite instead of reading as "defect still open".
+    describe('search wildcards', () => {
+      let owner: Org;
+      let pct: string;
+      beforeAll(async () => {
+        owner = await newOrg(h);
+        const iq = await poolQuestion(h, owner.id);
         const mk = async (name: string): Promise<string> =>
           (
             await createTest(
               h,
-              inner.recruiter,
+              owner.recruiter,
               testBody06([section([fixedQ(iq.versionId)])], { name }),
             )
           ).id as string;
-        const pct = await mk('100% Coverage');
+        pct = await mk('100% Coverage');
         await mk('Plain test');
-        const ids = async (qs: string): Promise<string[]> =>
-          (
-            ((await call(h, 'GET', `/tests?${qs}`, inner.recruiter.token)).body as Json)
-              .items as Json[]
-          ).map((i) => i.id as string);
-        expect(await ids('search=%25')).toEqual([pct]); // a literal %, not "match everything"
-        expect(await ids('search=_')).toEqual([]); // no name has a literal underscore
-      },
-    );
+      });
+      const ids = async (qs: string): Promise<string[]> =>
+        (
+          ((await call(h, 'GET', `/tests?${qs}`, owner.recruiter.token)).body as Json)
+            .items as Json[]
+        ).map((i) => i.id as string);
+
+      it.failing(
+        'FR-301: KNOWN DEFECT search treats % and _ as plain characters (they act as LIKE wildcards)',
+        async () => {
+          expect(await ids('search=%25')).toEqual([pct]); // a literal %, not "match everything"
+          expect(await ids('search=_')).toEqual([]); // no name has a literal underscore
+        },
+      );
+    });
   });
 
   describe('no copy, archive or delete routes (TODO FU-BE-110)', () => {

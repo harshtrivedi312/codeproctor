@@ -146,8 +146,6 @@ export const normalized = (res: request.Response, ids: string[]): string => {
 
 export const keysOf = (o: unknown): string[] => Object.keys(o as object).sort();
 
-export const sortedKeys = (o: unknown): string[] => keysOf(o);
-
 /** Counts of the rows a refused call must not change. */
 export async function builderCounts(
   h: Harness,

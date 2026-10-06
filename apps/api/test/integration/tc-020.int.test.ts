@@ -132,7 +132,8 @@ describe('TC-020 (FR-301) part 1: random pick rule configuration', () => {
     await poolQuestion(h, org.id, { tags: ['graphs'] });
     await poolQuestion(h, org.id, { tags: ['arrays', 'graphs'], difficulty: 'MEDIUM' });
     await poolQuestion(h, org.id, { type: 'MCQ', tags: ['arrays'], difficulty: 'MEDIUM' });
-    // A draft version 2 (HARD) on the EASY question changes nothing: the published version counts.
+    // A draft version 2 (MEDIUM) on the EASY, arrays-tagged question changes nothing: the published
+    // version (EASY) counts. If the draft counted, the rule below would match 3 questions, not 2.
     await h.owner.questionVersion.create({
       data: {
         questionId: easy.id,
@@ -150,9 +151,16 @@ describe('TC-020 (FR-301) part 1: random pick rule configuration', () => {
       postTest(h, org.recruiter, testBody06([section([randomQ(rule), randomQ(rule)])])).then(
         (r) => r.status,
       );
+    const three = (rule: Json): Promise<number> =>
+      postTest(
+        h,
+        org.recruiter,
+        testBody06([section([randomQ(rule), randomQ(rule), randomQ(rule)])]),
+      ).then((r) => r.status);
     expect(await two({ difficulty: 'EASY' })).toBe(422); // only 1 EASY (v2 draft is MEDIUM, ignored)
     expect(await one({ difficulty: 'EASY' })).toBe(201);
     expect(await two({ tags: ['arrays'], difficulty: 'MEDIUM' })).toBe(201); // arrays+graphs and MCQ
+    expect(await three({ tags: ['arrays'], difficulty: 'MEDIUM' })).toBe(422); // 201 if draft v2 counted
     expect(await two({ tags: ['arrays', 'graphs'] })).toBe(422); // all tags must match: 1 question
     expect(await one({ tags: ['arrays', 'graphs'] })).toBe(201);
     expect(await two({ tags: ['arrays'], type: 'MCQ' })).toBe(422);

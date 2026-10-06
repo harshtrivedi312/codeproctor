@@ -164,52 +164,64 @@ describe('FR-301: test builder scoping, pinning and attachable questions', () =>
   });
 
   describe('which questions a recruiter can attach (published, not archived, own org)', () => {
-    it('FR-301 TC-100: a draft version is 422 (not 404) for a fixed slot, an archived question is 422, a published one is 201; nothing is saved on refusal', async () => {
+    const GHOST = '00000000-0000-4000-8000-0000000000ee';
+
+    it('FR-301 TC-100 (DL-34): a draft version is the same 404 as a missing version (no existence oracle), a published but ARCHIVED question is 422, a published one is 201; nothing is saved on refusal', async () => {
       const org = await newOrg(h);
       const draft = await poolQuestion(h, org.id, { published: false });
       const archived = await poolQuestion(h, org.id, { archived: true });
       const ok = await poolQuestion(h, org.id);
       const before = await builderCounts(h, org.id);
-      for (const bad of [draft, archived]) {
-        const res = await postTest(
-          h,
-          org.recruiter,
-          testBody06([section([fixedQ(bad.versionId)])]),
-        );
-        expect([res.status, bad.id]).toEqual([422, bad.id]);
-        expect(JSON.stringify(res.body)).not.toContain(bad.title);
-      }
-      // A good question next to a bad one still refuses the whole test.
+      const missing = await postTest(h, org.recruiter, testBody06([section([fixedQ(GHOST)])]));
+      expect(missing.status).toBe(404);
+      const asDraft = await postTest(
+        h,
+        org.recruiter,
+        testBody06([section([fixedQ(draft.versionId)])]),
+      );
+      expect(asDraft.status).toBe(404);
+      expect(normalized(asDraft, [draft.versionId])).toBe(normalized(missing, [GHOST]));
+      expect(JSON.stringify(asDraft.body)).not.toContain(draft.title);
+      const asArchived = await postTest(
+        h,
+        org.recruiter,
+        testBody06([section([fixedQ(archived.versionId)])]),
+      );
+      expect(asArchived.status).toBe(422);
+      expect(JSON.stringify(asArchived.body)).not.toContain(archived.title);
+      // A good question next to a draft still refuses the whole test, with the missing-id 404.
       const mixed = await postTest(
         h,
         org.recruiter,
         testBody06([section([fixedQ(ok.versionId), fixedQ(draft.versionId)])]),
       );
-      expect(mixed.status).toBe(422);
+      expect(mixed.status).toBe(404);
+      expect(normalized(mixed, [draft.versionId])).toBe(normalized(missing, [GHOST]));
       expect(await builderCounts(h, org.id)).toEqual(before);
       expect(
         (await postTest(h, org.recruiter, testBody06([section([fixedQ(ok.versionId)])]))).status,
       ).toBe(201);
     });
 
-    it('FR-301: PATCH with a draft or archived question is 422 and keeps the old sections', async () => {
+    it('FR-301 TC-100 (DL-34): PATCH with a draft version is the missing-id 404, with an archived question 422; the old sections are kept', async () => {
       const org = await newOrg(h);
       const ok = await poolQuestion(h, org.id);
       const draft = await poolQuestion(h, org.id, { published: false });
       const archived = await poolQuestion(h, org.id, { archived: true });
       const t = await createTest(h, org.recruiter, testBody06([section([fixedQ(ok.versionId)])]));
       const before = await builderCounts(h, org.id);
-      for (const bad of [draft, archived]) {
-        const res = await patchTest(h, org.recruiter, t.id as string, {
-          sections: [section([fixedQ(bad.versionId)])],
-        });
-        expect(res.status).toBe(422);
-      }
+      const patch = (versionId: string) =>
+        patchTest(h, org.recruiter, t.id as string, { sections: [section([fixedQ(versionId)])] });
+      const missing = await patch(GHOST);
+      const asDraft = await patch(draft.versionId);
+      expect([missing.status, asDraft.status]).toEqual([404, 404]);
+      expect(normalized(asDraft, [draft.versionId])).toBe(normalized(missing, [GHOST]));
+      expect((await patch(archived.versionId)).status).toBe(422);
       expect(await builderCounts(h, org.id)).toEqual(before);
       expect((await getTest(h, org.recruiter, t.id as string)).body).toEqual(t);
     });
 
-    it('FR-301 TC-100: the recruiter finds attachable versions through the API itself: the published version id from GET /questions/:id builds a test; a draft-only question is invisible to the recruiter (404) yet its version id is refused (422)', async () => {
+    it('FR-301 TC-100 (DL-34): the recruiter finds attachable versions through the API itself: the published version id from GET /questions/:id builds a test; a draft-only question is invisible (404) and its version id is the same 404 as a missing id', async () => {
       const org = await newOrg(h);
       const author = await actor(h, UserRole.AUTHOR, org.id);
       const published = idOf(
@@ -234,9 +246,14 @@ describe('FR-301: test builder scoping, pinning and attachable questions', () =>
       ]);
 
       const draftVersion = (draftOnly.version as Json).id as string;
-      expect(
-        (await postTest(h, org.recruiter, testBody06([section([fixedQ(draftVersion)])]))).status,
-      ).toBe(422);
+      const asDraft = await postTest(
+        h,
+        org.recruiter,
+        testBody06([section([fixedQ(draftVersion)])]),
+      );
+      const missing = await postTest(h, org.recruiter, testBody06([section([fixedQ(GHOST)])]));
+      expect([asDraft.status, missing.status]).toEqual([404, 404]);
+      expect(normalized(asDraft, [draftVersion])).toBe(normalized(missing, [GHOST]));
     });
 
     it('FR-301 TC-100: a test answer never contains answer keys, hidden test data or reference solutions of the attached questions', async () => {
