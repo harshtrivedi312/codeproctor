@@ -94,3 +94,39 @@ describe('ProblemFilter logging of failures (S8)', () => {
     }
   });
 });
+
+describe('ProblemFilter scrubs Prisma errors before logging (NFR-04, FU-BE-83)', () => {
+  it('NFR-04: a validation error whose message holds an argument value is logged without that value', () => {
+    const { Prisma } = jest.requireActual<typeof import('../generated/prisma/client')>(
+      '../generated/prisma/client',
+    );
+    const { Logger } = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+    const secret = '$argon2id$v=19$m=19456,t=2,p=1$c2VjcmV0$leaked-hash-value';
+    const error = new Prisma.PrismaClientValidationError(
+      `Invalid \`prisma.user.update()\` invocation:\n{ data: { passwordHash: "${secret}" } }`,
+      { clientVersion: '7.10.0' },
+    );
+    const spy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    try {
+      const { status, body } = run(error);
+      expect(status).toBe(500);
+      expect(JSON.stringify(body)).not.toContain(secret);
+      const logged = JSON.stringify(
+        spy.mock.calls.map(([first]) => {
+          const e = (first as { err: Error }).err;
+          return {
+            message: e.message,
+            stack: e.stack,
+            name: e.name,
+            traceId: (first as { traceId: string }).traceId,
+          };
+        }),
+      );
+      expect(logged).not.toContain(secret);
+      expect(logged).toContain('PrismaClientValidationError');
+      expect(logged).toContain('trace-1');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

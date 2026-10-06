@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { OrgContextMissingError } from '../database/errors';
+import { scrubPrismaError } from '../database/error-scrub';
 import { CodedForbiddenException } from './coded.exception';
 import type { ProblemCode } from './coded.exception';
 
@@ -93,8 +94,11 @@ export class ProblemFilter implements ExceptionFilter {
       }
       if (status >= 500 && status !== 503) problem.detail = 'The service is unavailable or failed';
     } else {
+      // A Prisma or driver error can carry argument values (a passwordHash, a token hash) in its
+      // message and meta: scrub it before it reaches the log (FU-DB-70, FU-DB-112).
+      const err = exception instanceof Error ? scrubPrismaError(exception) : undefined;
       this.logger.error(
-        { err: exception instanceof Error ? exception : new Error('Non-Error thrown'), traceId },
+        { err: err instanceof Error ? err : new Error('Non-Error thrown'), traceId },
         'Unhandled exception',
       );
     }

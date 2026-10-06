@@ -19,9 +19,10 @@
 //     writes through a RULE_I relation, all refused; child-side connect and nested writes through
 //     SCOPE_HOP and COMPOSITE relations still work), deleting own rows, transactions, system scope,
 //     raw SQL, the app_user role and the HTTP path through the real guard.
-//   - Not covered, by design (README "Limits"): re-parenting, ids written through a child-side
-//     connect or a scalar foreign key (rule (i), the service's job), and nested reads. One test pins
-//     that an include follows a cross-org foreign key.
+//   - Not covered, by design (README "Limits"): re-parenting in an org scope, ids written through
+//     a child-side connect or a scalar foreign key (rule (i), the service's job), and nested reads.
+//     One test pins that an org scope can re-parent a row, one that an include follows a cross-org
+//     foreign key. System scope refuses a first-hop key and `orgId` in an update (FU-DB-107).
 import { Controller, Get, INestApplication, NotFoundException, Param, Query } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
@@ -42,6 +43,7 @@ import { OrgContextMissingError, OrgScopeViolationError, RawQueryNotAllowedError
 import { OrgContextService } from './org-context';
 import { ORG_SCOPE } from './org-scope-map';
 import type { ModelName } from './org-scope-map';
+import { FK_CLASSES, scopeHopColumn } from './org-scope-relations';
 import { PrismaService } from './prisma.service';
 import { startMigratedDatabase } from './testing/migrated-postgres';
 import type { MigratedDatabase } from './testing/migrated-postgres';
@@ -299,6 +301,17 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         });
         expect(await d.updateMany?.({ where: b.filter, data: TOUCH[model] })).toEqual({ count: 0 });
         expect(await d.updateManyAndReturn?.({ where: b.filter, data: TOUCH[model] })).toEqual([]);
+        if (model === 'Organization') {
+          // An org scope cannot delete an organization at all, its own or another (FU-DB-68):
+          // refused before any query, so the answer is not P2025 or a count of 0.
+          await expect(d.delete?.({ where: b.unique })).rejects.toBeInstanceOf(
+            OrgScopeViolationError,
+          );
+          await expect(d.deleteMany?.({ where: b.filter })).rejects.toBeInstanceOf(
+            OrgScopeViolationError,
+          );
+          return;
+        }
         await expect(d.delete?.({ where: b.unique })).rejects.toMatchObject({ code: 'P2025' });
         expect(await d.deleteMany?.({ where: b.filter })).toEqual({ count: 0 });
       });
@@ -1796,14 +1809,22 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
     });
   });
 
-  describe('system scope cannot move a row to another org (scalar orgId in an update)', () => {
-    // Deny-by-default refuses nested relation writes, so a scalar orgId is the only way left to
-    // move a row. Postgres catches it only on the composite-key tables, so the extension refuses it
-    // in system scope too (org scope already did).
+  describe('system scope cannot move a row to another org (scalar orgId or first-hop key in an update)', () => {
+    // Deny-by-default refuses nested relation writes, so a scalar foreign key is the only way left
+    // to move a row: `orgId` on a model with its own org_id, and the first-hop scope key of a path
+    // model (`testId` of TestSection, `sessionId` of ProctorEvent), which re-parents the row and so
+    // moves it to the org of the new parent. Postgres catches `orgId` only on the composite-key
+    // tables and the first-hop key never, so the extension refuses both in system scope. Org scope
+    // refuses `orgId` (another org's) but leaves the first-hop key to rule (i), README "Limits" (b).
     let M: TenantFixture;
     let N: TenantFixture;
     const system = <T>(fn: () => Promise<T>): Promise<T> =>
       orgContext.runSystem('AUTH_BOOTSTRAP', fn);
+    /** One operation of one model's delegate, run in system scope. */
+    const call = (model: ModelName, operation: string, args: unknown): Promise<unknown> =>
+      system(
+        () => scoped(model)[operation]?.(args) ?? Promise.reject(new Error(`no ${operation}`)),
+      );
 
     beforeAll(async () => {
       M = await createTenant(owner, 'm');
@@ -1816,7 +1837,7 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         system(() =>
           prisma.client.user.update({ where: { id: M.userId }, data: { orgId: N.orgId } }),
         ),
-      ).rejects.toThrow(/orgId cannot be written by an update/);
+      ).rejects.toThrow(/orgId cannot be written by an update in system scope/);
       // The { set } form, and naming the row's own org: the key itself is refused, whatever the value.
       await expect(
         system(() =>
@@ -1872,6 +1893,36 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expect(await snapshot()).toEqual(before);
     });
 
+    it('TC-008 an org scope cannot delete its own organization or another one, and system scope can (FU-DB-68)', async () => {
+      const D1 = await createTenant(owner, 'od');
+      const D2 = await createTenant(owner, 'oe');
+      const before = await snapshot();
+      const attempts: Array<() => Promise<unknown>> = [
+        () => prisma.client.organization.delete({ where: { id: D1.orgId } }),
+        () => prisma.client.organization.deleteMany({ where: { id: D1.orgId } }),
+        () => prisma.client.organization.deleteMany(),
+        () => prisma.client.organization.delete({ where: { id: D2.orgId } }),
+      ];
+      for (const attempt of attempts) {
+        await expect(orgContext.runInOrg(D1.orgId, attempt)).rejects.toThrow(
+          /organizations are deleted only in system scope/,
+        );
+      }
+      expect(await snapshot()).toEqual(before);
+      // System scope can: with the org's own rows out of the way (the foreign keys are NO ACTION),
+      // so what this shows is that the extension does not refuse it there.
+      await expect(
+        orgContext.runSystem('BACKGROUND_JOB', () =>
+          prisma.client.organization.delete({ where: { id: D2.orgId } }),
+        ),
+      ).rejects.toMatchObject({ code: 'P2003' }); // the database, not the extension, objects
+      const empty = await owner.organization.create({ data: { name: 'Empty org' } });
+      await orgContext.runSystem('BACKGROUND_JOB', () =>
+        prisma.client.organization.delete({ where: { id: empty.id } }),
+      );
+      expect(await owner.organization.count({ where: { id: empty.id } })).toBe(0);
+    });
+
     it('TC-008 an Organization keeps its id in system scope too', async () => {
       await expect(
         system(() =>
@@ -1879,6 +1930,96 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         ),
       ).rejects.toBeInstanceOf(OrgScopeViolationError);
       expect(await owner.organization.count({ where: { id: M.orgId } })).toBe(1);
+    });
+
+    it('TC-008 system scope cannot re-parent a row: the first-hop scope key of every path model is refused on all four update operations, and nothing changes (FU-DB-107)', async () => {
+      const before = await snapshot();
+      const hops = FK_CLASSES.filter((key) => key.fkClass === 'SCOPE_HOP');
+      expect(hops).toHaveLength(21);
+      for (const key of hops) {
+        const column = scopeHopColumn(key.model) as string;
+        const row = M.rows[key.model];
+        // The parent in the other org: the id the key would be re-pointed to.
+        const otherParent = N.rows[key.target].filter.id;
+        const refused = new RegExp(`${key.model}\\.\\w+: ${column} cannot be written`);
+        for (const value of [otherParent, { set: otherParent }]) {
+          const data = { [column]: value };
+          await expect(call(key.model, 'update', { where: row.unique, data })).rejects.toThrow(
+            refused,
+          );
+          await expect(call(key.model, 'updateMany', { where: row.filter, data })).rejects.toThrow(
+            refused,
+          );
+          await expect(
+            call(key.model, 'updateManyAndReturn', { where: row.filter, data }),
+          ).rejects.toThrow(refused);
+          await expect(
+            call(key.model, 'upsert', { where: row.unique, create: {}, update: data }),
+          ).rejects.toThrow(refused);
+        }
+        // Naming the row's own parent is refused too: the key itself is what is refused.
+        await expect(
+          call(key.model, 'updateMany', {
+            where: row.filter,
+            data: { [column]: M.rows[key.target].filter.id },
+          }),
+        ).rejects.toBeInstanceOf(OrgScopeViolationError);
+      }
+      expect(await snapshot()).toEqual(before);
+      // Spot check against the owner: the section is still under M's test.
+      expect(
+        (
+          await owner.testSection.findUniqueOrThrow({
+            where: { id: M.rows.TestSection.filter.id as string },
+          })
+        ).testId,
+      ).toBe(M.rows.Test.filter.id);
+    });
+
+    it('TC-008 the first-hop refusal is only for updates: system scope updates other columns and other foreign keys of a path model, and creates under any parent', async () => {
+      // Every path model: a harmless change still works (the first-hop key is not touched).
+      for (const model of MODELS) {
+        if (ORG_SCOPE[model].kind !== 'path') continue;
+        const row = M.rows[model];
+        expect(await call(model, 'updateMany', { where: row.filter, data: TOUCH[model] })).toEqual({
+          count: 1,
+        });
+      }
+      // A rule (i) key of a path model (SessionQuestion.scoredById, a staff reference) is not a
+      // first-hop key, so the extension leaves it to the service.
+      const sessionQuestion = M.rows.SessionQuestion.unique;
+      const scored = await system(() =>
+        prisma.client.sessionQuestion.update({
+          where: sessionQuestion as { id: string },
+          data: { scoredById: M.userId },
+        }),
+      );
+      expect(scored.scoredById).toBe(M.userId);
+      // A create may name any parent in system scope (creates there are review-only).
+      const created = await system(() =>
+        prisma.client.testSection.create({
+          data: { testId: M.rows.Test.filter.id as string, title: 'Added by system', position: 9 },
+        }),
+      );
+      expect(created.testId).toBe(M.rows.Test.filter.id);
+    });
+
+    it('TC-008 an org scope does not refuse a first-hop key: re-parenting there is rule (i), the limit README (b) documents (FU-DB-107)', async () => {
+      // This pins current behaviour; it is not a fix. A section of org P is pointed at org Q's test
+      // by org P's own scope, because the scope filters the row it updates, not the new parent.
+      const P = await createTenant(owner, 'rp');
+      const Q = await createTenant(owner, 'rq');
+      const section = P.rows.TestSection.filter.id as string;
+      const qTest = Q.rows.Test.filter.id as string;
+      const moved = await orgContext.runInOrg(P.orgId, () =>
+        prisma.client.testSection.update({ where: { id: section }, data: { testId: qTest } }),
+      );
+      expect(moved.testId).toBe(qTest);
+      // Restore through the owner, so the row is back under P's own test.
+      await owner.testSection.update({
+        where: { id: section },
+        data: { testId: P.rows.Test.filter.id as string },
+      });
     });
 
     it('TC-008 positive controls: a system-scope update without orgId works, and a system-scope create may set orgId', async () => {

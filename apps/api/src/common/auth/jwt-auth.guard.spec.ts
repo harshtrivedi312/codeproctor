@@ -146,6 +146,26 @@ describe('JwtAuthGuard user re-check (FR-103, FR-104, FU-BE-19)', () => {
     ).rejects.toThrow(new UnauthorizedException('Authentication required.'));
   });
 
+  it('FR-103: an accepted request carries exactly the AuthUser the org-context interceptor accepts (FU-DB-65)', async () => {
+    const req: { headers: Record<string, string>; user?: unknown } = {
+      headers: { authorization: 'Bearer t' },
+    };
+    const ctx = {
+      getHandler: () => (Protected.prototype as unknown as Record<string, () => void>).handle,
+      getClass: () => Protected,
+      switchToHttp: () => ({ getRequest: () => req }),
+    } as unknown as ExecutionContext;
+    await expect(guardWith(jest.fn().mockResolvedValue(current)).canActivate(ctx)).resolves.toBe(
+      true,
+    );
+    expect(req.user).toEqual({
+      id: USER_1,
+      orgId: ORG_1,
+      role: UserRole.RECRUITER,
+      kind: 'access',
+    });
+  });
+
   it('FR-104: an access token with no iat claim is refused', async () => {
     const noIat = { ...claims } as Record<string, unknown>;
     delete noIat.iat;
