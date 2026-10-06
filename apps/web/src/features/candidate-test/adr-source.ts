@@ -110,6 +110,24 @@ export function createAdrSource(hooks: { onSessionEnded: () => void }): TestSour
     isDemo: false,
     loadSession: load,
     async readSession() {
+      // A lost answer to the last section's finish: the server may have submitted the test. Ask for
+      // the state first, so "over" is told apart from "could not read".
+      const state = await requestAt(sessionStateSchema, '/session', {
+        method: 'GET',
+        authed: true,
+      });
+      ended(state);
+      if (state.ok && !['IN_PROGRESS', 'PAUSED'].includes(state.data.status)) {
+        return { submitted: true };
+      }
+      if (
+        !state.ok &&
+        state.kind === 'problem' &&
+        state.status === 409 &&
+        state.code === 'SESSION_NOT_ACTIVE'
+      ) {
+        return { submitted: true };
+      }
       try {
         return await load();
       } catch {

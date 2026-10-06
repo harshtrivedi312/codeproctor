@@ -229,7 +229,7 @@ function TestScreenInner({
   const [results, setResults] = React.useState<Record<string, Schemas['RunResult']>>({});
   const [runErrors, setRunErrors] = React.useState<Record<string, string>>({});
 
-  const clock = useServerClock(() => source.serverNow());
+  const clock = useServerClock(() => source.serverNow(), source.isDemo ? 'demo' : 'candidate');
   const syncClock = clock.syncFromServer;
   React.useEffect(() => registerClockSync?.(syncClock), [registerClockSync, syncClock]);
 
@@ -436,6 +436,11 @@ function TestScreenInner({
       try {
         const fresh = await source.readSession();
         if (!fresh) throw new Error('session');
+        if ('submitted' in fresh) {
+          // The server submitted the test (the last section, or time ran out): say so.
+          markFinished(null, undefined, true);
+          return;
+        }
         if (fresh.section.id !== section.id) {
           markFinished(fresh.section.id, fresh);
           return;

@@ -131,9 +131,16 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
     return { session, s };
   };
   const isResponse = (v: unknown): v is Response => v instanceof Response;
+  /**
+   * The older demo mocks (/t/demo/test, the QA specs) serve the same paths without any credential.
+   * A request with no Authorization header is therefore not a candidate request: it falls through
+   * to them, so registering these handlers never changes what the demo gets.
+   */
+  const notCandidate = (request: Request): boolean => !request.headers.has('Authorization');
 
   return [
     http.get(`${cand}/session`, ({ request }) => {
+      if (notCandidate(request)) return undefined;
       const session = bearer(request);
       if (!session) return problem(401, 'UNAUTHENTICATED');
       const s = testState(session);
@@ -254,6 +261,7 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
     }),
 
     http.put(`${cand}/questions/:id/draft`, async ({ request, params }) => {
+      if (notCandidate(request)) return undefined;
       const r = live(request);
       if (isResponse(r)) return r;
       const id = String(params.id);
@@ -300,6 +308,7 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
     }),
 
     http.post(`${cand}/sections/:position/finish`, ({ request, params }) => {
+      if (notCandidate(request)) return undefined;
       const r = live(request);
       if (isResponse(r)) return r;
       const position = Number(params.position);

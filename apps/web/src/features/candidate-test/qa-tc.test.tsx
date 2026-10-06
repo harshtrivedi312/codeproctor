@@ -180,7 +180,9 @@ describe('TC-047 clock moved after load (FR-505), UI side', () => {
         HttpResponse.json({ serverNow: new Date(realServerNow() + 90_000).toISOString() }),
       ),
     );
-    const { result } = renderHook(() => useServerClock(() => demoSource.serverNow()), { wrapper });
+    const { result } = renderHook(() => useServerClock(() => demoSource.serverNow(), 'demo'), {
+      wrapper,
+    });
     await waitFor(() => expect(result.current.ready).toBe(true));
     const deadline = new Date(Date.now() + 90_000 + 60 * 60_000).toISOString();
     const before = result.current.remaining(deadline) ?? 0;

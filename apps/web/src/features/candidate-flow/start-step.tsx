@@ -12,7 +12,7 @@ import { StepFrame } from './step-frame';
  * Start hands over to the test screen in the SAME document (FU-FEB-10, option (c)): the candidate
  * session token stays in memory and nothing is written to storage or a URL. The cost is the CSP:
  * the document keeps the stepper's policy, which has no WebAssembly allowance (D-45 limits that to
- * /t/[token]/test), so the in-browser ML detectors cannot run and report DETECTOR_UNAVAILABLE.
+ * /t/[token]/test), so the in-browser ML detectors cannot run. They are not started, and today nothing is reported for them (FU-FEB-44 plans a DETECTOR_UNAVAILABLE or capability flag, so a reviewer can tell "off" from "no findings").
  * Owner decision still open: extend the CSP allowance to /t/link, or pick option (a) or (b).
  *
  * Until the real backend serves the test routes, Start is only available with mocks on, where the

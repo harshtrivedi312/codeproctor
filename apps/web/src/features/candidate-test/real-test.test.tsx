@@ -4,7 +4,7 @@ import { http, HttpResponse } from 'msw';
 import { axe } from 'vitest-axe';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { candidateApi } from '@/features/candidate-flow/api';
-import { setSessionToken } from '@/features/candidate-flow/session-store';
+import { getSessionToken, setSessionToken } from '@/features/candidate-flow/session-store';
 import {
   recordRequests,
   renderWithQuery,
@@ -319,5 +319,53 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     await user.click(screen.getByRole('button', { name: /enter fullscreen and start/i }));
     await screen.findByRole('button', { name: /run sample tests/i });
     expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('ADR 0002 FR-505: a lost answer to the last section finish is re-read, and a submitted test shows the submitted page', async () => {
+    await startedSession();
+    const user = userEvent.setup();
+    await enterTest(user);
+    await user.click(screen.getByRole('button', { name: 'Finish section' }));
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Finish section' }),
+    );
+    await user.click(await screen.findByRole('button', { name: /continue to the next section/i }));
+    await screen.findByText(/section 2 of 2/i);
+    // The server submits the test, but the answer never arrives.
+    server.use(
+      http.post(`${cand}/sections/:position/finish`, () => {
+        const token = getSessionToken();
+        void token;
+        return HttpResponse.error();
+      }),
+      http.get(`${cand}/session`, () =>
+        HttpResponse.json({
+          serverTime: new Date().toISOString(),
+          status: 'SUBMITTED',
+          startedAt: new Date().toISOString(),
+          deadlineAt: new Date().toISOString(),
+          sectionDeadlineAt: null,
+          pauseReasons: [],
+        }),
+      ),
+    );
+    await user.click(screen.getByRole('button', { name: 'Finish section' }));
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Finish section' }),
+    );
+    expect(await screen.findByTestId('test-submitted')).toHaveTextContent(
+      /your test is submitted/i,
+    );
+  });
+
+  it('ADR 0002: a 409 SESSION_NOT_ACTIVE on the re-read also means the test is over', async () => {
+    await startedSession();
+    const source = createAdrSource({ onSessionEnded: vi.fn() });
+    server.use(
+      http.get(`${cand}/session`, () =>
+        HttpResponse.json({ code: 'SESSION_NOT_ACTIVE' }, { status: 409 }),
+      ),
+    );
+    expect(await source.readSession()).toEqual({ submitted: true });
   });
 });

@@ -7,7 +7,6 @@ import { computeClockOffset, remainingMs } from './timer';
 export const CLOCK_RESYNC_MS = 60_000;
 /** Difference between Date.now and performance.now deltas that counts as an OS clock jump. */
 export const CLOCK_DRIFT_MS = 2_000;
-const QUERY_KEY = ['server-time'] as const;
 
 /**
  * Monotonic clock for ticking. The offset is measured against `performance.now()`, not
@@ -17,7 +16,11 @@ const QUERY_KEY = ['server-time'] as const;
  */
 const monotonicNow = (): number => performance.now();
 
-export function useServerClock(readServerNow: () => Promise<string>): {
+export function useServerClock(
+  readServerNow: () => Promise<string>,
+  /** Names the source, so a demo offset can never carry into a real run (same query client). */
+  scope: string,
+): {
   ready: boolean;
   remaining: (deadlineIso: string | null | undefined) => number | null;
   /** True when the server time could not be read at all: the screen must not run unchecked. */
@@ -30,6 +33,7 @@ export function useServerClock(readServerNow: () => Promise<string>): {
   syncFromServer: (serverNowIso: string, requestStart: number, responseEnd: number) => void;
 } {
   const queryClient = useQueryClient();
+  const QUERY_KEY = React.useMemo(() => ['server-time', scope] as const, [scope]);
   const {
     data: offset,
     isError,
@@ -64,14 +68,14 @@ export function useServerClock(readServerNow: () => Promise<string>): {
       setNow(mono);
     }, 1000);
     return () => window.clearInterval(id);
-  }, [queryClient]);
+  }, [queryClient, QUERY_KEY]);
   const syncFromServer = React.useCallback(
     (serverNowIso: string, requestStart: number, responseEnd: number) => {
       const serverNow = Date.parse(serverNowIso);
       if (Number.isNaN(serverNow)) return;
       queryClient.setQueryData(QUERY_KEY, computeClockOffset(serverNow, requestStart, responseEnd));
     },
-    [queryClient],
+    [queryClient, QUERY_KEY],
   );
   return {
     ready: offset !== undefined,
