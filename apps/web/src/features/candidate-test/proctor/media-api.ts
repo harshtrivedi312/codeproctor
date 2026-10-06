@@ -22,7 +22,12 @@ const wireSeq = (c: ChunkRef): number => c.segment * 100_000 + c.seq;
 /** The wire allows seq 0..99,999,999 (ADR 0013 section 5.5). */
 const MAX_WIRE_SEQ = 99_999_999;
 
-export function createAdrMediaApi(): MediaApi {
+export interface MediaProgress {
+  /** Per stream: the segment of the last confirmed chunk and its wire seq (ADR 0013 section 5.3). */
+  [stream: string]: { segment: number; lastSeq: number } | undefined;
+}
+
+export function createAdrMediaApi(progress: MediaProgress = {}): MediaApi {
   // Chunks this page has been given an upload URL for. `alreadyUploaded` is believed only for those
   // (the upload may have landed, the answer got lost); for any other chunk the seq belongs to
   // something this page did not send, so it is a conflict, never a silent "stored" (FU-FEB-36).
@@ -68,7 +73,13 @@ export function createAdrMediaApi(): MediaApi {
         authed: true,
         body: { stream: c.stream, segment: c.segment, seq: wireSeq(c) },
       });
-      if (r.ok) return;
+      if (r.ok) {
+        const known = progress[c.stream];
+        if (!known || wireSeq(c) >= known.lastSeq) {
+          progress[c.stream] = { segment: c.segment, lastSeq: wireSeq(c) };
+        }
+        return;
+      }
       // 404 CHUNK_NOT_PRESIGNED, 409 UPLOAD_NOT_FOUND, 422 UPLOAD_MISMATCH: presign and upload again.
       if (r.kind === 'problem' && r.code === 'SESSION_NOT_ACTIVE')
         throw new MediaApiError('FATAL', 'SESSION_NOT_ACTIVE');

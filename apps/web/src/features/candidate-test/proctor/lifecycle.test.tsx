@@ -1,4 +1,4 @@
-import { STORES } from '@codeproctor/proctor-sdk';
+import { STORES, padSeq, type Detector } from '@codeproctor/proctor-sdk';
 import { screen, waitFor, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import * as React from 'react';
@@ -62,6 +62,28 @@ function controllerFor(store: MemoryStore, extra: Record<string, unknown> = {}) 
   return c;
 }
 
+/** What an earlier page load left behind: a signed batch, a recording chunk and its counters. */
+async function prefill(store: MemoryStore): Promise<void> {
+  await store.put(STORES.eventBatches, `${SID}:${padSeq(7)}`, {
+    seq: 7,
+    body: '{"seq":7,"events":[]}',
+    signature: 'a'.repeat(64),
+  });
+  await store.put(STORES.chunks, `${SID}:SCREEN:0:0`, { data: new ArrayBuffer(8) });
+  await store.put(STORES.meta, `${SID}:segment:SCREEN`, 0);
+  localStorage.setItem(
+    `codeproctor:eventseq:${SID}`,
+    JSON.stringify({ seq: 8, seenAt: Date.now() }),
+  );
+}
+
+function expectPurged(store: MemoryStore): void {
+  expect(store.count(STORES.eventBatches)).toBe(0);
+  expect(store.count(STORES.chunks)).toBe(0);
+  expect([...store.data.keys()].some((k) => k.includes(`${SID}:segment:`))).toBe(false);
+  expect(localStorage.getItem(`codeproctor:eventseq:${SID}`)).toBeNull();
+}
+
 const paste = (): void => {
   document.body.dispatchEvent(new Event('paste', { bubbles: true, cancelable: true }));
 };
@@ -70,42 +92,162 @@ const flush = (): void => {
 };
 
 describe('purge and keep on the way out (ADR 0013 section 2, Purge; TC-063)', () => {
-  it('ADR 0013 5.3: 409 SESSION_NOT_ACTIVE purges signed batches and releases the devices', async () => {
+  it('ADR 0013 5.3: 409 SESSION_NOT_ACTIVE purges batches, chunks, counters and the backup, and releases the devices', async () => {
     const devices = setupDevices();
     const session = await startedSession();
     // The server cannot take events (503), so batches wait in the store.
     server.use(http.post(`${cand}/session/events`, () => HttpResponse.json({}, { status: 503 })));
     const store = new MemoryStore();
+    await prefill(store);
     const c = controllerFor(store);
     await c.init();
     await c.shareScreen();
     await c.startRecorders();
     paste();
-    await waitFor(() => expect(store.count(STORES.eventBatches)).toBeGreaterThan(0));
+    await waitFor(() => expect(store.count(STORES.eventBatches)).toBeGreaterThan(1));
     testState(session).submitted = true;
     testState(session).submittedAt = Date.now() - MOCK_INGEST_GRACE_MS - 1000;
     await waitFor(() => expect(c.getState().endedBecause).toBe('not-active'), { timeout: 4000 });
-    await waitFor(() => expect(store.count(STORES.eventBatches)).toBe(0));
-    expect(store.count(STORES.chunks)).toBe(0);
+    await waitFor(() => expectPurged(store));
     expect(devices.display.stops).toHaveBeenCalled();
     expect(devices.userStreams.every((s) => s.stops.mock.calls.length > 0)).toBe(true);
   });
 
-  it('ADR 0013 5.2: 401 SESSION_TAKEN_OVER purges at once (this device is no longer the test)', async () => {
+  it('ADR 0013 5.2: 401 SESSION_TAKEN_OVER on the heartbeat purges everything, with the event route down', async () => {
     setupDevices();
     await startedSession();
     const store = new MemoryStore();
+    await prefill(store);
+    // Events are refused with a retry (503), so only the purge can have removed the batches.
     server.use(
-      http.post(`${cand}/session/events`, () =>
+      http.post(`${cand}/session/events`, () => HttpResponse.json({}, { status: 503 })),
+      http.post(`${cand}/session/heartbeat`, () =>
         HttpResponse.json({ code: 'SESSION_TAKEN_OVER' }, { status: 401 }),
       ),
     );
     const c = controllerFor(store);
     await c.init();
-    paste();
-    flush();
     await waitFor(() => expect(c.getState().endedBecause).toBe('reauth'), { timeout: 4000 });
-    await waitFor(() => expect(store.count(STORES.eventBatches)).toBe(0));
+    await waitFor(() => expectPurged(store));
+  });
+
+  it('ADR 0013 section 2: the key route saying "over" or "taken over" purges what an earlier load left, with no key', async () => {
+    setupDevices();
+    await startedSession();
+    for (const [status, code, because] of [
+      [409, 'SESSION_NOT_ACTIVE', 'not-active'],
+      [401, 'SESSION_TAKEN_OVER', 'reauth'],
+    ] as const) {
+      server.use(
+        http.post(`${cand}/session/proctor-key`, () => HttpResponse.json({ code }, { status })),
+      );
+      const store = new MemoryStore();
+      await prefill(store);
+      const c = controllerFor(store);
+      expect(await c.init()).toBe(false);
+      expect(c.getState().endedBecause).toBe(because);
+      await waitFor(() => expectPurged(store));
+      await c.stop();
+    }
+  });
+
+  it('ADR 0013 section 2: an expired token on the key route asks for a new code and keeps the outbox', async () => {
+    setupDevices();
+    await startedSession();
+    server.use(
+      http.post(`${cand}/session/proctor-key`, () =>
+        HttpResponse.json({ code: 'TOKEN_EXPIRED' }, { status: 401 }),
+      ),
+    );
+    const store = new MemoryStore();
+    await prefill(store);
+    const c = controllerFor(store);
+    await c.init();
+    expect(c.getState().endedBecause).toBe('reauth');
+    await wait(100);
+    expect(store.count(STORES.eventBatches)).toBe(1);
+    await c.stop();
+  });
+
+  it('ADR 0013 section 2: a purge that arrives while a detector is still starting stops that detector and writes nothing afterwards', async () => {
+    setupDevices();
+    const session = await startedSession();
+    let release: () => void = () => undefined;
+    const events = { started: 0, stopped: 0 };
+    const slow: Detector = {
+      id: 'slow',
+      start: () =>
+        new Promise<void>((resolve) => {
+          events.started += 1;
+          release = resolve;
+        }),
+      stop: () => {
+        events.stopped += 1;
+      },
+    };
+    // The heartbeat starts before the detectors, and the server says the session is over.
+    server.use(
+      http.post(`${cand}/session/heartbeat`, () =>
+        HttpResponse.json({ code: 'SESSION_NOT_ACTIVE' }, { status: 409 }),
+      ),
+    );
+    const store = new MemoryStore();
+    await prefill(store);
+    const c = controllerFor(store, { detectors: [slow] });
+    const starting = c.init();
+    await waitFor(() => expect(c.getState().endedBecause).toBe('not-active'), { timeout: 4000 });
+    // The purge is waiting for start() to finish; nothing was torn down under it.
+    expect(events.stopped).toBe(0);
+    release();
+    await starting;
+    await waitFor(() => expect(events.stopped).toBe(1));
+    await waitFor(() => expectPurged(store));
+    // No batch is written after the purge, and the beat has stopped.
+    const beats = testState(session).heartbeats;
+    await wait(200);
+    expectPurged(store);
+    expect(testState(session).heartbeats).toBe(beats);
+  });
+
+  it('ADR 0013 section 2: after a new code (epoch 2) batches signed under epoch 1 are dropped and the test goes on, with no new-code loop', async () => {
+    setupDevices();
+    const session = await startedSession();
+    // The server answers a batch signed under the old key with 409 KEY_EPOCH_STALE (before the
+    // duplicate check); batches signed under the new key are fine.
+    server.use(
+      http.post(`${cand}/session/proctor-key`, () =>
+        HttpResponse.json({ alg: 'HMAC-SHA256', key: btoa('k'.repeat(32)), keyEpoch: 2 }),
+      ),
+      http.post(`${cand}/session/events`, async ({ request }) => {
+        const body = (await request.clone().json()) as { seq: number; events: { type: string }[] };
+        if (body.seq === 7) return HttpResponse.json({ code: 'KEY_EPOCH_STALE' }, { status: 409 });
+        const s = testState(session);
+        s.batches.push({
+          seq: body.seq,
+          signature: request.headers.get('X-Signature') ?? '',
+          events: body.events,
+        });
+        return HttpResponse.json({ seq: body.seq, duplicate: false });
+      }),
+    );
+    const store = new MemoryStore();
+    await prefill(store);
+    const c = controllerFor(store);
+    await c.init();
+    paste();
+    await waitFor(
+      () => {
+        flush();
+        window.dispatchEvent(new Event('online'));
+        expect(testState(session).batches.flatMap((b) => b.events.map((e) => e.type))).toContain(
+          'PASTE_ATTEMPT',
+        );
+      },
+      { timeout: 8000 },
+    );
+    // The old batch is gone from the outbox and the candidate was never sent for another code.
+    expect(await store.get(STORES.eventBatches, `${SID}:${padSeq(7)}`)).toBeUndefined();
+    expect(c.getState().endedBecause).toBeNull();
   });
 
   it('ADR 0013 5.2: three TOKEN_EXPIRED 401s ask for a new code but keep the outbox for the next run', async () => {
@@ -308,6 +450,23 @@ describe('what the server sees (ADR 0013 5.3, ADR 0005)', () => {
     await c.stop();
   });
 
+  it('ADR 0013 5.3: the heartbeat recorder block lists segment and lastSeq per stream', async () => {
+    setupDevices();
+    await startedSession();
+    const seen = recordRequests();
+    const c = controllerFor(new MemoryStore());
+    await c.init();
+    await waitFor(() => {
+      const beat = seen.filter((q) => q.url.endsWith('/heartbeat')).at(-1)?.body as {
+        recorder?: { streams: Record<string, unknown>[] };
+      } | null;
+      expect(Object.keys(beat?.recorder?.streams[0] ?? {})).toEqual(
+        expect.arrayContaining(['stream', 'segment', 'lastSeq', 'bufferedBytes']),
+      );
+    });
+    await c.stop();
+  });
+
   it('NFR-05 S-10: the SDK counter backup holds only {seq, seenAt} and is removed when the test ends', async () => {
     setupDevices();
     await startedSession();
@@ -382,6 +541,13 @@ describe('retries (S-6)', () => {
     expect(result.ok).toBe(false);
     expect(n).toBe(3);
     expect(sleeps).toEqual([5000, 5000]);
+    // A 200 with a body that does not parse used up the one-shot key: never asked again.
+    let shape = 0;
+    await withRetry(() => {
+      shape += 1;
+      return Promise.resolve({ ok: false, kind: 'shape' } as const);
+    });
+    expect(shape).toBe(1);
     let m = 0;
     await withRetry(() => {
       m += 1;

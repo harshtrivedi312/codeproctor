@@ -114,7 +114,7 @@ describe('proctor transport (ADR 0013 5.2, 5.3)', () => {
     expect(await createProctorTransport(hooks()).sendBatch(batch)).toBe('RETRY');
   });
 
-  it('ADR 0013 5.2: 409 SESSION_NOT_ACTIVE stops, 409 KEY_EPOCH_STALE keeps the batch', async () => {
+  it('ADR 0013 5.2: 409 SESSION_NOT_ACTIVE stops, 409 KEY_EPOCH_STALE drops the batch', async () => {
     await signIn();
     const h = hooks();
     server.use(
@@ -129,10 +129,10 @@ describe('proctor transport (ADR 0013 5.2, 5.3)', () => {
         HttpResponse.json({ code: 'KEY_EPOCH_STALE' }, { status: 409 }),
       ),
     );
-    expect(await createProctorTransport(hooks()).sendBatch(batch)).toBe('RETRY');
+    expect(await createProctorTransport(hooks()).sendBatch(batch)).toBe('REJECTED');
   });
 
-  it('ADR 0013 5.2: a key that stays stale (the SDK cannot re-sign) is retried a bounded number of times, then a new code is asked for', async () => {
+  it('ADR 0013 5.2: a stale key drops the batch and NEVER asks for a new code (a new code cannot re-sign it)', async () => {
     await signIn();
     server.use(
       http.post(`${cand}/session/events`, () =>
@@ -141,10 +141,16 @@ describe('proctor transport (ADR 0013 5.2, 5.3)', () => {
     );
     const h = hooks();
     const t = createProctorTransport(h);
-    for (let i = 0; i < 5; i += 1) expect(await t.sendBatch(batch)).toBe('RETRY');
+    for (let i = 0; i < 12; i += 1) expect(await t.sendBatch(batch)).toBe('REJECTED');
     expect(h.onReauthRequired).not.toHaveBeenCalled();
-    expect(await t.sendBatch(batch)).toBe('RETRY');
-    expect(h.onReauthRequired).toHaveBeenCalledWith('KEY_STALE');
+  });
+
+  it('ADR 0013 section 2: once purging, nothing more is sent', async () => {
+    await signIn();
+    const seen = recordRequests();
+    const t = createProctorTransport({ ...hooks(), isPurged: () => true });
+    expect(await t.sendBatch(batch)).toBe('REJECTED');
+    expect(seen.some((q) => q.url.endsWith('/session/events'))).toBe(false);
   });
 
   it('ADR 0013 5.2: three 401s in a row ask for a new code; one does not', async () => {
@@ -300,7 +306,10 @@ describe('session id for the SDK storage', () => {
     const sid = '3f0e2a7c-6a52-4d5b-9a53-7e9b6a1c2d10';
     const payload = btoa(JSON.stringify({ sid })).replace(/=/g, '');
     expect(sessionIdFromToken(`h.${payload}.s`)).toBe(sid);
-    expect(sessionIdFromToken('mock-session-token-1')).toMatch(/^[0-9a-f-]{36}$/);
-    expect(sessionIdFromToken(null)).toMatch(/^[0-9a-f-]{36}$/);
+    expect(sessionIdFromToken('mock-session-token-1', true)).toMatch(/^[0-9a-f-]{36}$/);
+    expect(sessionIdFromToken(null, true)).toMatch(/^[0-9a-f-]{36}$/);
+    // Outside mock mode there is no fallback: the test does not start (fail closed).
+    expect(sessionIdFromToken('mock-session-token-1', false)).toBeNull();
+    expect(sessionIdFromToken(null, false)).toBeNull();
   });
 });

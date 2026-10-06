@@ -9,7 +9,8 @@ import {
 } from '@codeproctor/proctor-sdk';
 import { requestAt } from '@/features/candidate-flow/api';
 import { getSessionToken } from '@/features/candidate-flow/session-store';
-import { createAdrMediaApi, putChunk } from './media-api';
+import { mockingEnabled } from '@/lib/env';
+import { createAdrMediaApi, putChunk, type MediaProgress } from './media-api';
 import { withRetry } from './retry';
 import { createProctorTransport, type HeartbeatHealth } from './transport';
 import { PROCTOR_PAUSE, proctorKeySchema, type HeartbeatState, type ProctorKey } from './wire';
@@ -119,6 +120,20 @@ export async function seedCounters(
 }
 
 /**
+ * Deletes this session's signed batches and recording chunks from the browser. It needs no key and
+ * no running session, so it also works when the very first call said the session is over (ADR 0013
+ * section 2, Purge). The batch counter stays (a small integer, no candidate data); the SDK's own
+ * localStorage copy of it is removed separately.
+ */
+export async function purgeStore(store: IdbStore, sessionId: string): Promise<void> {
+  await Promise.allSettled([
+    store.deletePrefix(STORES.eventBatches, `${sessionId}:`),
+    store.deletePrefix(STORES.chunks, `${sessionId}:`),
+    store.deletePrefix(STORES.meta, `${sessionId}:segment:`),
+  ]);
+}
+
+/**
  * A detector that is not started in this build still says so (ADR 0005): DETECTOR_UNAVAILABLE and
  * a capability flag, so a reviewer can tell "off" from "no findings".
  */
@@ -194,6 +209,10 @@ export class ProctorController {
   private readonly monitors = createDefaultMonitors();
   private pipeline: RecordingPipeline | null = null;
   private initPromise: Promise<boolean> | null = null;
+  private store: IdbStore | null = null;
+  private readonly mediaProgress: MediaProgress = {};
+  /** Set when the data is being purged: nothing more may be sent or written. */
+  private purging = false;
   private stopped = false;
   private finishing = false;
   private torn = false;
@@ -221,7 +240,7 @@ export class ProctorController {
     // While finishing (or already stopped) the server's "not active" is the normal end.
     if (this.state.endedBecause || this.stopped || this.finishing) return;
     this.set({ phase: 'ended', endedBecause: because });
-    void this.teardown({ purge, awaitInit: false });
+    void this.teardown({ purge });
   }
 
   /** Fetch the key, seed the counters, start the SDK session and the recording queue. */
@@ -232,6 +251,9 @@ export class ProctorController {
 
   private async runInit(): Promise<boolean> {
     this.set({ phase: 'starting' });
+    // The store exists before the first call, so even a session that is over on arrival can purge.
+    const store = this.o.store ?? new IdbStore(safeIdbFactory());
+    this.store = store;
     const keyResult = await withRetry(
       () => requestAt(proctorKeySchema, '/session/proctor-key', { method: 'POST', authed: true }),
       this.o.retrySleep ? { sleep: this.o.retrySleep } : {},
@@ -241,15 +263,16 @@ export class ProctorController {
       // KEY_ALREADY_ISSUED: this epoch's key went out already (a reload). Only a new code, which
       // raises the epoch, gets a new key (ADR 0013 section 2).
       if (keyResult.kind === 'problem' && keyResult.status === 409) {
-        this.end(keyResult.code === 'SESSION_NOT_ACTIVE' ? 'not-active' : 'key', false);
+        // Over: purge what an earlier page load left (no key is needed to delete).
+        const over = keyResult.code === 'SESSION_NOT_ACTIVE';
+        this.end(over ? 'not-active' : 'key', over);
       } else if (keyResult.kind === 'problem' && keyResult.status === 401) {
-        this.end('reauth', false);
+        this.end('reauth', keyResult.code === 'SESSION_TAKEN_OVER');
       } else {
         this.end('key', false);
       }
       return false;
     }
-    const store = this.o.store ?? new IdbStore(safeIdbFactory());
     await seedCounters(store, this.o.sessionId, keyResult.data.counters);
     if (this.stopped) return false;
 
@@ -261,6 +284,7 @@ export class ProctorController {
       onNotActive: () => this.end('not-active', true),
       onReauthRequired: (reason) => this.end('reauth', reason === 'SESSION_TAKEN_OVER'),
       getHealth: () => this.health(),
+      isPurged: () => this.purging,
     });
     const consent = { recordedAt: this.o.consentRecordedAt };
     this.session.on('lock', (l) => {
@@ -298,7 +322,7 @@ export class ProctorController {
     if (this.stopped) return false;
     this.pipeline = new RecordingPipeline({
       sessionId: this.o.sessionId,
-      api: createAdrMediaApi(),
+      api: createAdrMediaApi(this.mediaProgress),
       store,
       assertConsent: () => {
         if (!consent.recordedAt) throw new Error('consent required');
@@ -335,8 +359,11 @@ export class ProctorController {
             recorder: {
               streams: MEDIA_STREAMS.map((stream) => ({
                 stream,
+                segment: this.mediaProgress[stream]?.segment ?? 0,
+                lastSeq: this.mediaProgress[stream]?.lastSeq ?? -1,
                 bufferedBytes: rec.bytesPendingByStream[stream],
               })),
+              bufferedChunks: rec.chunksPending,
               droppedChunks: rec.droppedChunks,
               droppedBytes: rec.droppedBytes,
             },
@@ -436,20 +463,27 @@ export class ProctorController {
     // finish() tears everything down itself.
     if (this.finishing) return Promise.resolve();
     this.stopped = true;
-    return this.teardown({ purge: false, awaitInit: true });
+    return this.teardown({ purge: false });
   }
 
-  private async teardown(o: { purge: boolean; awaitInit: boolean }): Promise<void> {
+  /**
+   * Always waits for init() first (end() does not wait for this, so there is no deadlock): a purge
+   * or a stop that ran while the SDK session was still starting would leave detectors running and
+   * write batches after the purge.
+   */
+  private async teardown(o: { purge: boolean }): Promise<void> {
     this.stopped = true;
     if (this.torn) return;
     this.torn = true;
-    if (o.awaitInit) await this.initPromise?.catch(() => undefined);
+    if (o.purge) this.purging = true;
+    await this.initPromise?.catch(() => undefined);
     if (o.purge) {
       // Purge: delete the signed batches and the chunks as well as stopping (ADR 0013 section 2).
       await Promise.allSettled([
         this.session.finish(0),
         this.pipeline?.finish({ drainTimeoutMs: 0 }),
       ]);
+      if (this.store) await purgeStore(this.store, this.o.sessionId);
       this.removeSeqBackup();
     } else {
       await this.session.stop().catch(() => undefined);
@@ -477,8 +511,16 @@ export class ProctorController {
   }
 }
 
-/** The session id the SDK names its storage with: the token's `sid` claim, else a random id. */
-export function sessionIdFromToken(token: string | null = getSessionToken()): string {
+/**
+ * The session id the SDK names its storage with: the token's `sid` claim. With no claim only mock
+ * mode (whose tokens are not JWTs) may use a random id; anywhere else this returns null and the
+ * test does not start (it fails closed: a random id would file the candidate's data under a name
+ * nobody can find or purge).
+ */
+export function sessionIdFromToken(
+  token: string | null = getSessionToken(),
+  allowRandom: boolean = mockingEnabled,
+): string | null {
   try {
     const payload = token?.split('.')[1];
     if (payload) {
@@ -489,7 +531,7 @@ export function sessionIdFromToken(token: string | null = getSessionToken()): st
       }
     }
   } catch {
-    // not a JWT (mock tokens): fall through
+    // not a JWT
   }
-  return crypto.randomUUID();
+  return allowRandom ? crypto.randomUUID() : null;
 }

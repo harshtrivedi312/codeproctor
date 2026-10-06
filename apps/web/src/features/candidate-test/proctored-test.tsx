@@ -58,6 +58,9 @@ export function ProctoredTest({
   // section 4), so a second controller (React StrictMode runs effects twice in development, and a
   // remount would too) would burn the key and end the test with KEY_ALREADY_ISSUED. The stop on
   // cleanup is deferred one tick and cancelled if the effect runs again straight away.
+  // Fixed for the life of this screen. Null (no session id in the token, outside mock mode) means
+  // the test does not start and the candidate is sent back to the link.
+  const [sessionId] = React.useState(() => sessionIdFromToken());
   const controllerRef = React.useRef<ProctorController | null>(null);
   const stopTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   // The test screen says when the section on screen is finished, so a heartbeat does not write the
@@ -66,12 +69,13 @@ export function ProctoredTest({
 
   React.useEffect(() => {
     if (typeof consentAt !== 'string') return undefined;
+    if (sessionId === null) return undefined;
     if (stopTimer.current !== null) clearTimeout(stopTimer.current);
     stopTimer.current = null;
     if (controllerRef.current === null) {
       const c = new ProctorController({
         consentRecordedAt: consentAt,
-        sessionId: sessionIdFromToken(),
+        sessionId,
         ...(timing ?? {}),
         root: document.getElementById('main') ?? document.body,
         onHeartbeat: (s, hb) => {
@@ -106,7 +110,7 @@ export function ProctoredTest({
         stopTimer.current = null;
       }, 0);
     };
-  }, [consentAt, queryClient, timing]);
+  }, [consentAt, sessionId, queryClient, timing]);
 
   const state = React.useSyncExternalStore(
     controller?.subscribe ?? NO_SUBSCRIBE,
@@ -115,7 +119,10 @@ export function ProctoredTest({
   );
 
   const needsNewCode =
-    consentAt === null || state.endedBecause === 'reauth' || state.endedBecause === 'key';
+    consentAt === null ||
+    sessionId === null ||
+    state.endedBecause === 'reauth' ||
+    state.endedBecause === 'key';
   React.useEffect(() => {
     if (needsNewCode) onSessionEnded();
   }, [needsNewCode, onSessionEnded]);

@@ -16,8 +16,12 @@ export async function withRetry<T>(
   for (let i = 0; i < tries; i += 1) {
     last = await call();
     if (last.ok) return last;
+    // A 200 with a body that does not parse (`shape`) is final: the call may have used a one-shot
+    // credential (the key is issued once) and asking again would not get it back.
     const transient =
-      last.kind !== 'problem' || last.status === 429 || last.status >= 500 || last.status === 408;
+      last.kind === 'network' ||
+      (last.kind === 'problem' &&
+        (last.status === 429 || last.status >= 500 || last.status === 408));
     if (!transient || i === tries - 1) return last;
     const wait =
       last.kind === 'problem' && last.retryAfterSeconds !== null

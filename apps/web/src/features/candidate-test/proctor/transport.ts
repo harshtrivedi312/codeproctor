@@ -20,25 +20,30 @@ export interface TransportHooks {
   onNotActive: () => void;
   /**
    * The candidate must pass the OTP again. `SESSION_TAKEN_OVER` (another device took over) means
-   * this device's data must be purged; three 401s in a row (`TOKEN_EXPIRED` or none) and a key that
-   * stays stale keep the outbox for the next run (ADR 0013 section 2, Purge).
+   * this device's data must be purged; three 401s in a row (`TOKEN_EXPIRED` or none) keep the
+   * outbox for the next run (ADR 0013 section 2, Purge).
    */
-  onReauthRequired: (reason: 'SESSION_TAKEN_OVER' | 'TOKEN_EXPIRED' | 'KEY_STALE') => void;
+  onReauthRequired: (reason: 'SESSION_TAKEN_OVER' | 'TOKEN_EXPIRED') => void;
   /** Health for the heartbeat body (ADR 0013 section 5.3). */
   getHealth?: () => HeartbeatHealth;
+  /** True once the data is being purged: nothing more may be sent (it would drain the outbox first). */
+  isPurged?: () => boolean;
 }
 
 export interface HeartbeatHealth {
+  /** ADR 0013 section 5.3. The SDK's health has no per-stream chunk counts or drops (FU-FEB-51). */
   recorder?: {
-    streams: { stream: string; bufferedBytes: number }[];
+    streams: { stream: string; segment: number; lastSeq: number; bufferedBytes: number }[];
+    bufferedChunks: number;
     droppedChunks: number;
     droppedBytes: number;
   };
-  queue?: { pendingEventBatches: number; pendingKeystrokeBatches: number; rejectedBatches: number };
+  queue?: {
+    pendingEventBatches: number;
+    pendingKeystrokeBatches: number;
+    rejectedBatches: number;
+  };
 }
-
-/** KEY_EPOCH_STALE retries before the candidate is sent for a new code (the SDK cannot re-sign). */
-export const MAX_STALE_RETRIES = 5;
 
 async function problemCode(response: Response): Promise<string | null> {
   try {
@@ -57,7 +62,6 @@ export function createProctorTransport(hooks: TransportHooks): EventTransport & 
   heartbeat(): Promise<boolean>;
 } {
   let unauthorized = 0;
-  let stale = 0;
   const handle401 = (code: string | null): void => {
     unauthorized += 1;
     if (code === 'SESSION_TAKEN_OVER') hooks.onReauthRequired('SESSION_TAKEN_OVER');
@@ -66,6 +70,7 @@ export function createProctorTransport(hooks: TransportHooks): EventTransport & 
 
   return {
     async sendBatch(batch: SignedBatch): Promise<SendResult> {
+      if (hooks.isPurged?.()) return 'REJECTED';
       const token = getSessionToken();
       if (token === null) return 'RETRY';
       let response: Response;
@@ -89,7 +94,6 @@ export function createProctorTransport(hooks: TransportHooks): EventTransport & 
       }
       if (response.ok) {
         unauthorized = 0;
-        stale = 0;
         return 'OK';
       }
       const code = await problemCode(response);
@@ -101,12 +105,11 @@ export function createProctorTransport(hooks: TransportHooks): EventTransport & 
         hooks.onNotActive();
         return 'REJECTED';
       }
-      // KEY_EPOCH_STALE: the SDK cannot re-sign yet (no setKey hook), so keep the batch and retry.
-      if (response.status === 409 && code === 'KEY_EPOCH_STALE') {
-        stale += 1;
-        if (stale > MAX_STALE_RETRIES) hooks.onReauthRequired('KEY_STALE');
-        return 'RETRY';
-      }
+      // KEY_EPOCH_STALE: the batch was signed under an older key. The SDK cannot re-sign (no setKey
+      // hook) and a new code can never fix it, so it must NOT ask for another code (that would
+      // loop, raising the epoch each time). Drop it: the SDK counts it as rejected and the server's
+      // sequence-gap detection shows the hole (ADR 0013 5.8).
+      if (response.status === 409 && code === 'KEY_EPOCH_STALE') return 'REJECTED';
       if (response.status === 408 || response.status === 429 || response.status >= 500)
         return 'RETRY';
       // 400, 403, SEQ_CONFLICT, 413, 415: dropped by the SDK and counted, never silently.
