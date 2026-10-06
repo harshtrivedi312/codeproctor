@@ -1,8 +1,8 @@
-import { STORES, padSeq, type Detector } from '@codeproctor/proctor-sdk';
+import { STORES, chunkKey, padSeq, type Detector } from '@codeproctor/proctor-sdk';
 import { screen, waitFor, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import * as React from 'react';
-import { http, HttpResponse } from 'msw';
+import { delay, http, HttpResponse } from 'msw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   recordRequests,
@@ -69,7 +69,12 @@ async function prefill(store: MemoryStore): Promise<void> {
     body: '{"seq":7,"events":[]}',
     signature: 'a'.repeat(64),
   });
-  await store.put(STORES.chunks, `${SID}:SCREEN:0:0`, { data: new ArrayBuffer(8) });
+  // The key the SDK itself writes for a chunk, so "left by an earlier load" is realistic.
+  await store.put(
+    STORES.chunks,
+    chunkKey(SID, { stream: 'SCREEN', segment: 0, seq: 0, bytes: 8, contentType: 'video/webm' }),
+    { data: new ArrayBuffer(8) },
+  );
   await store.put(STORES.meta, `${SID}:segment:SCREEN`, 0);
   localStorage.setItem(
     `codeproctor:eventseq:${SID}`,
@@ -295,6 +300,89 @@ describe('purge and keep on the way out (ADR 0013 section 2, Purge; TC-063)', ()
   });
 });
 
+const NOT_ACTIVE_BEAT = () =>
+  http.post(`${cand}/session/heartbeat`, () =>
+    HttpResponse.json({ code: 'SESSION_NOT_ACTIVE' }, { status: 409 }),
+  );
+
+describe('a device granted late writes nothing after a purge or a finish (candidate media)', () => {
+  it('FR-701: a webcam granted after the purge leaves no chunk, no segment counter and no upload', async () => {
+    const devices = setupDevices({ deferred: true });
+    await startedSession();
+    const store = new MemoryStore();
+    await prefill(store);
+    const seen = recordRequests();
+    const c = controllerFor(store);
+    await c.init();
+    const starting = c.startRecorders();
+    await waitFor(() => expect(devices.getUserMedia).toHaveBeenCalledTimes(1));
+    // The server says the session is over while the permission prompt is still open.
+    server.use(NOT_ACTIVE_BEAT());
+    await waitFor(() => expect(c.getState().endedBecause).toBe('not-active'), { timeout: 4000 });
+    await waitFor(() => expectPurged(store));
+    const before = seen.length;
+    devices.grantUser();
+    await starting;
+    await wait(150);
+    expect(devices.userStreams[0]?.stops).toHaveBeenCalled();
+    expectPurged(store);
+    expect(store.count(STORES.chunks)).toBe(0);
+    expect(seen.slice(before).some((q) => /media\/(presign|confirm)/.test(q.url))).toBe(false);
+  });
+
+  it('FR-701: the same after finish(): a microphone granted during the finish leaves nothing on disk', async () => {
+    const devices = setupDevices({ deferred: true });
+    await startedSession();
+    const store = new MemoryStore();
+    await prefill(store);
+    const c = controllerFor(store);
+    await c.init();
+    const starting = c.startRecorders();
+    await waitFor(() => expect(devices.getUserMedia).toHaveBeenCalledTimes(1));
+    await c.finish();
+    devices.grantUser();
+    await starting;
+    await wait(150);
+    expect(devices.userStreams[0]?.stops).toHaveBeenCalled();
+    expect(store.count(STORES.chunks)).toBe(0);
+    expect([...store.data.keys()].some((k) => k.includes(`${SID}:segment:`))).toBe(false);
+    expect(localStorage.getItem(`codeproctor:eventseq:${SID}`)).toBeNull();
+  });
+
+  it('FR-604: a screen share granted after the purge leaves nothing on disk either', async () => {
+    const devices = setupDevices({ deferred: true });
+    await startedSession();
+    const store = new MemoryStore();
+    await prefill(store);
+    const c = controllerFor(store);
+    await c.init();
+    const sharing = c.shareScreen();
+    await waitFor(() => expect(devices.getDisplayMedia).toHaveBeenCalledTimes(1));
+    server.use(NOT_ACTIVE_BEAT());
+    await waitFor(() => expect(c.getState().endedBecause).toBe('not-active'), { timeout: 4000 });
+    await waitFor(() => expectPurged(store));
+    devices.grantDisplay();
+    expect(await sharing).toEqual({ ok: false, reason: 'STOPPED' });
+    await wait(150);
+    expect(devices.display.stops).toHaveBeenCalled();
+    expectPurged(store);
+  });
+
+  it('FR-701: leaving the page (no purge) keeps the late chunk for the next load', async () => {
+    const devices = setupDevices({ deferred: true });
+    await startedSession();
+    const store = new MemoryStore();
+    const c = controllerFor(store);
+    await c.init();
+    const starting = c.startRecorders();
+    await waitFor(() => expect(devices.getUserMedia).toHaveBeenCalledTimes(1));
+    await c.stop();
+    devices.grantUser();
+    await starting;
+    expect(devices.userStreams[0]?.stops).toHaveBeenCalled();
+  });
+});
+
 describe('no device after the end (late grants)', () => {
   it('FR-604: a screen share granted after the test ended is switched off at once', async () => {
     const devices = setupDevices({ deferred: true });
@@ -491,6 +579,45 @@ describe('what the server sees (ADR 0013 5.3, ADR 0005)', () => {
     expect(testState(session).batches.flatMap((b) => b.events.map((e) => e.type))).toContain(
       'PASTE_ATTEMPT',
     );
+  });
+});
+
+describe('key call limits and progress seed', () => {
+  it('ADR 0013 section 4: the one-shot key call has a timeout, so a hanging server ends the test instead of hanging it', async () => {
+    setupDevices();
+    await startedSession();
+    server.use(http.post(`${cand}/session/proctor-key`, () => delay('infinite')));
+    const c = controllerFor(new MemoryStore(), { keyTimeoutMs: 80 });
+    expect(await c.init()).toBe(false);
+    expect(c.getState().endedBecause).toBe('key');
+  });
+
+  it('ADR 0013 5.3: the heartbeat reports where each stream continues from, before anything is uploaded', async () => {
+    setupDevices();
+    await startedSession();
+    server.use(
+      http.post(`${cand}/session/proctor-key`, () =>
+        HttpResponse.json({
+          alg: 'HMAC-SHA256',
+          key: btoa('k'.repeat(32)),
+          keyEpoch: 2,
+          counters: { media: { WEBCAM: { nextSeq: 400_003, nextSegment: 5 } } },
+        }),
+      ),
+    );
+    const seen = recordRequests();
+    const c = controllerFor(new MemoryStore());
+    await c.init();
+    await waitFor(() => {
+      const beat = seen.filter((q) => q.url.endsWith('/heartbeat')).at(-1)?.body as {
+        recorder?: { streams: { stream: string; segment: number; lastSeq: number }[] };
+      } | null;
+      expect(beat?.recorder?.streams.find((s) => s.stream === 'WEBCAM')).toMatchObject({
+        segment: 4,
+        lastSeq: 400_002,
+      });
+    });
+    await c.stop();
   });
 });
 

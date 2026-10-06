@@ -27,13 +27,18 @@ export interface MediaProgress {
   [stream: string]: { segment: number; lastSeq: number } | undefined;
 }
 
-export function createAdrMediaApi(progress: MediaProgress = {}): MediaApi {
+export function createAdrMediaApi(
+  progress: MediaProgress = {},
+  /** True while the data is purged or a late device is dropped: nothing may be sent then. */
+  isBlocked: () => boolean = () => false,
+): MediaApi {
   // Chunks this page has been given an upload URL for. `alreadyUploaded` is believed only for those
   // (the upload may have landed, the answer got lost); for any other chunk the seq belongs to
   // something this page did not send, so it is a conflict, never a silent "stored" (FU-FEB-36).
   const presigned = new Set<string>();
   return {
     async presign(c: ChunkRef): Promise<PresignedPut> {
+      if (isBlocked()) throw new MediaApiError('FATAL', 'PURGED');
       if (wireSeq(c) > MAX_WIRE_SEQ) throw new MediaApiError('FATAL', 'SEQ_OUT_OF_RANGE');
       const chunkId = `${c.stream}:${wireSeq(c)}`;
       const contentType = c.stream === 'AUDIO' ? 'audio/webm' : 'video/webm';
@@ -68,6 +73,7 @@ export function createAdrMediaApi(progress: MediaProgress = {}): MediaApi {
     },
 
     async confirm(c: ChunkRef): Promise<void> {
+      if (isBlocked()) throw new MediaApiError('FATAL', 'PURGED');
       const r = await requestAt(mediaConfirmSchema, '/session/media/confirm', {
         method: 'POST',
         authed: true,

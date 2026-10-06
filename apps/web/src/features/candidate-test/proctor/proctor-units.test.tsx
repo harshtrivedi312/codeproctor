@@ -302,7 +302,7 @@ describe('media api bridge (ADR 0013 5.5, FR-701)', () => {
 });
 
 describe('session id for the SDK storage', () => {
-  it('ADR 0013 5.10: uses the token sid claim when the token has one, else a random id', () => {
+  it('ADR 0013 5.10: uses the token sid claim when there is one; without one only mock mode gets a random id and everything else fails closed (null)', () => {
     const sid = '3f0e2a7c-6a52-4d5b-9a53-7e9b6a1c2d10';
     const payload = btoa(JSON.stringify({ sid })).replace(/=/g, '');
     expect(sessionIdFromToken(`h.${payload}.s`)).toBe(sid);

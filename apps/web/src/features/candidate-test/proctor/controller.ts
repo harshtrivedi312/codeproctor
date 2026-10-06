@@ -215,6 +215,8 @@ export class ProctorController {
   private readonly mediaProgress: MediaProgress = {};
   /** Set when the data is being purged: nothing more may be sent or written. */
   private purging = false;
+  /** Set while a device granted after the end is dropped: its last chunk must not be uploaded. */
+  private dropping = false;
   private stopped = false;
   private finishing = false;
   private torn = false;
@@ -339,7 +341,7 @@ export class ProctorController {
     if (this.stopped) return false;
     this.pipeline = new RecordingPipeline({
       sessionId: this.o.sessionId,
-      api: createAdrMediaApi(this.mediaProgress),
+      api: createAdrMediaApi(this.mediaProgress, () => this.purging || this.dropping),
       store,
       assertConsent: () => {
         if (!consent.recordedAt) throw new Error('consent required');
@@ -457,6 +459,7 @@ export class ProctorController {
   private async dropLate(stream: (typeof MEDIA_STREAMS)[number]): Promise<void> {
     if (!this.pipeline) return;
     if (this.purging || this.finishing) {
+      this.dropping = true;
       await this.pipeline.finish({ drainTimeoutMs: 0 }).catch(() => undefined);
       if (this.store) await purgeStore(this.store, this.o.sessionId);
       this.removeSeqBackup();
