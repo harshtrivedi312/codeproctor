@@ -1,6 +1,7 @@
-// The review fixes S1 (keys behind the filters), S3 (the interim READ control and the CS-4.4 WRITE
-// allowlist) and the CS-4.4 rules for proctor_events, on the rewritten arguments. No database. The same
-// rules against a real Postgres are in cs4-session-isolation.spec.ts. NFR-04, TC-008.
+// The review fixes S1 (keys behind the filters), S3 (the CS-4.4 READ allowlist, `omit`, the explicit-only
+// columns, the RUN filter, and the CS-4.4 WRITE allowlist with its grants) and the CS-4.4 rules for
+// proctor_events and consents, on the rewritten arguments. No database. The same rules against a real
+// Postgres are in cs4-session-isolation.spec.ts and cs4-columns-grants.spec.ts. NFR-04, TC-008.
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { CLIENT_EVENT_TYPES, EVENT_TYPES } from '@codeproctor/shared';
@@ -8,25 +9,29 @@ import { MediaStream } from '../generated/prisma/enums.js';
 import { createPrismaClient } from './create-prisma-client';
 import { deepFreeze } from './deep-freeze';
 import {
-  CANDIDATE_INTERIM_DENY,
+  CANDIDATE_READ,
   COMPOUND_UNIQUES,
+  hiddenColumnsOf,
   isFieldRef,
+  readAccess,
   ROW_RETURNING_OPERATIONS,
+  scalarColumnsOf,
 } from './candidate-interim';
 import { OrgScopeViolationError } from './errors';
 import type { CandidateFacts, SessionActor } from './org-context';
-import { SCOPED_OPERATIONS } from './org-scope-args';
 import { ORG_SCOPE } from './org-scope-map';
 import type { ModelName } from './org-scope-map';
 import { applySessionScope } from './session-scope-args';
 import {
   CANDIDATE_MODELS,
   CANDIDATE_OBJECT_KEYS,
+  GRANT_SITES,
   NEVER_WRITTEN_BY_CANDIDATE,
   READ_OPERATIONS,
   SERVER_ONLY_EVENT_TYPES,
   SESSION_SCOPE,
 } from './session-scope-map';
+import type { GrantView } from './session-scope-map';
 import { readModelMetas } from './testing/data-model';
 
 const ORG = '11111111-1111-4111-8111-111111111111';
@@ -39,15 +44,23 @@ const FACTS: CandidateFacts = {
 };
 
 /**
- * keystroke_batches.id is a global identity counter that a candidate may not read (#126 nit 1), so a
- * candidate call on that model names `seq` where the generic tests of the other models name `id`.
+ * The column a candidate names where the generic tests of the other models name `id`:
+ * keystroke_batches.id is a global identity counter that a candidate may not read (#126 nit 1), and
+ * session_sections and proctor_event_batches have no `id` column at all.
  */
+const ID_KEY: Partial<Record<ModelName, string>> = {
+  KeystrokeBatch: 'seq',
+  ProctorEventBatch: 'seq',
+  SessionSection: 'sectionId',
+};
+
 function keyed(model: ModelName, args: unknown): unknown {
-  if (model !== 'KeystrokeBatch' || typeof args !== 'object' || args === null) return args;
+  const key = ID_KEY[model];
+  if (key === undefined || typeof args !== 'object' || args === null) return args;
   const given = args as Record<string, unknown>;
   const rename = (value: unknown): unknown =>
     typeof value === 'object' && value !== null && !Array.isArray(value) && 'id' in value
-      ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k === 'id' ? 'seq' : k, v]))
+      ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k === 'id' ? key : k, v]))
       : value;
   return {
     ...given,
@@ -57,7 +70,13 @@ function keyed(model: ModelName, args: unknown): unknown {
 }
 
 /** Calls the scope exactly as given: no select is added for the caller. */
-function raw(actor: SessionActor, model: ModelName, operation: string, args: unknown) {
+function raw(
+  actor: SessionActor,
+  model: ModelName,
+  operation: string,
+  args: unknown,
+  grant?: GrantView,
+) {
   return applySessionScope({
     model,
     rule: ORG_SCOPE[model],
@@ -66,12 +85,13 @@ function raw(actor: SessionActor, model: ModelName, operation: string, args: unk
     orgId: ORG,
     session: { actor, sessionId: SID },
     facts: FACTS,
+    grant,
   });
 }
-const asCandidate = (model: ModelName, operation: string, args: unknown) =>
-  raw('CANDIDATE', model, operation, args);
-/** A candidate call with the arguments exactly as given (no renaming of `id` for keystroke_batches). */
-const asCandidateExact = (model: ModelName, operation: string, args: unknown) =>
+const asCandidate = (model: ModelName, operation: string, args: unknown, grant?: GrantView) =>
+  raw('CANDIDATE', model, operation, args, grant);
+/** A candidate call with the arguments exactly as given (no renaming of `id`). */
+const asCandidateExact = (model: ModelName, operation: string, args: unknown, grant?: GrantView) =>
   applySessionScope({
     model,
     rule: ORG_SCOPE[model],
@@ -80,9 +100,20 @@ const asCandidateExact = (model: ModelName, operation: string, args: unknown) =>
     orgId: ORG,
     session: { actor: 'CANDIDATE', sessionId: SID },
     facts: FACTS,
+    grant,
   });
-const asService = (model: ModelName, operation: string, args: unknown) =>
-  raw('SERVICE', model, operation, args);
+
+/**
+ * The grant of one CS-4.4 site, as the extension sees it: by the start of the site name, with all the
+ * site's columns unless `columns` narrows them. `ids` default to the scope's own session.
+ */
+function grantOf(site: string, ids: GrantView['ids'] = [SID], columns?: string[]): GrantView {
+  const found = GRANT_SITES.find((s) => s.name.startsWith(site));
+  if (found === undefined) throw new Error(`no grant site ${site}`);
+  return { model: found.model, columns: columns ?? [...found.columns], ids, mode: found.mode };
+}
+const asService = (model: ModelName, operation: string, args: unknown, grant?: GrantView) =>
+  raw('SERVICE', model, operation, args, grant);
 
 /** An object key of the scope's own session, in the folder ADR 0013 section 5.7 fixes for the column. */
 const OWN_PREFIX = `orgs/${ORG}/sessions/${SID}/`;
@@ -245,119 +276,284 @@ describe('S1: keys behind the filters cannot be written (ADR 0013 CS-4.2, CS-4.4
 });
 
 /**
- * CS-4.4's "Read" column, by Prisma field name, for every model on the CANDIDATE allowlist that a
- * candidate reads. Written out here, apart from candidate-interim.ts, so the two can be compared.
+ * CS-4.4's "Read" column, by Prisma field name, for every model on the CANDIDATE allowlist (18 models),
+ * written out here apart from candidate-interim.ts so the two can be compared:
+ *   read      the ADR's read column: readable, filterable, in the default select;
+ *   keys      the ids of the candidate's own org, session and test, which the scope fixes anyway (PR 1's
+ *             choice, FU-DB-195 (k)): readable and filterable although the ADR does not list them;
+ *   explicit  explicit-only: never in the default select, readable only under a grant that names it;
+ *   runOnly   readable only under the RUN filter (submissions), never in the default select;
+ *   hidden    every other column: never readable, always omitted.
+ * `gated` models (consent_texts, test_questions) are readable only under a grant of their own.
  */
-const CS44_READ: Record<string, readonly string[]> = {
-  Session: [
-    'id',
-    'status',
-    'startedAt',
-    'deadlineAt',
-    'pauseReasons',
-    'pausedMs',
-    'proctorPausedAt',
-    'submittedAt',
-    'authEpoch',
-  ],
-  SessionQuestion: [
-    'id',
-    'sessionId',
-    'position',
-    'points',
-    'finalCode',
-    'finalLanguage',
-    'answer',
-  ],
-  SessionSection: [
-    'sessionId',
-    'sectionId',
-    'position',
-    'timeLimitMs',
-    'startedAt',
-    'deadlineAt',
-    'endedAt',
-  ],
-  Submission: ['id', 'sessionQuestionId', 'kind', 'language', 'createdAt'],
-  IdentityCheck: ['id', 'attempt', 'status', 'createdAt'],
-  MediaChunk: ['id', 'stream', 'segment', 'seq', 'sizeBytes', 'uploadedAt'],
-  ProctorEventBatch: ['seq', 'signature', 'eventCount'],
-  KeystrokeBatch: ['seq', 'signature', 'startedAt'],
-  ProctorEvent: ['id', 'type', 'occurredAt', 'durationMs', 'batchSeq', 'createdAt'],
-  Consent: ['id', 'consentTextId', 'signedAt', 'declinedAt'],
-  Organization: ['id', 'name', 'retentionDays', 'currentConsentTextId'],
-  Candidate: ['id', 'fullName', 'email'],
-  Invitation: ['id', 'testId', 'candidateId', 'windowStart', 'windowEnd', 'usedAt'],
-  Test: ['id', 'name', 'description', 'durationMinutes', 'profile'],
-  TestSection: ['id', 'title', 'position', 'timeLimitMin'],
-  Question: ['id', 'type'],
+interface Cs44Read {
+  readonly read: readonly string[];
+  readonly keys: readonly string[];
+  readonly explicit: readonly string[];
+  readonly runOnly: readonly string[];
+  readonly hidden: readonly string[];
+}
+const CS44: Record<string, Cs44Read> = {
+  Session: {
+    read: [
+      'id',
+      'status',
+      'startedAt',
+      'deadlineAt',
+      'pauseReasons',
+      'pausedMs',
+      'proctorPausedAt',
+      'submittedAt',
+      'authEpoch',
+    ],
+    keys: ['orgId'],
+    explicit: ['hmacKeyEnc', 'deviceInfo'],
+    runOnly: [],
+    hidden: [
+      'invitationId',
+      'clientKind',
+      'totalScore',
+      'riskScore',
+      'riskBand',
+      'lastHeartbeat',
+      'retentionAnchorAt',
+      'reportKey',
+      'reportGeneratedAt',
+      'createdAt',
+    ],
+  },
+  SessionQuestion: {
+    read: ['id', 'sessionId', 'position', 'points', 'finalCode', 'finalLanguage', 'answer'],
+    keys: [],
+    explicit: ['testQuestionId'],
+    runOnly: [],
+    hidden: [
+      'questionVersionId',
+      'variantId',
+      'score',
+      'scoring',
+      'scoredById',
+      'scoredAt',
+      'scoringNote',
+    ],
+  },
+  SessionSection: {
+    read: [
+      'sessionId',
+      'sectionId',
+      'position',
+      'timeLimitMs',
+      'startedAt',
+      'deadlineAt',
+      'endedAt',
+    ],
+    keys: [],
+    explicit: [],
+    runOnly: [],
+    hidden: [],
+  },
+  Submission: {
+    read: ['id', 'sessionQuestionId', 'kind', 'language', 'createdAt'],
+    keys: [],
+    explicit: [],
+    runOnly: ['results', 'passed', 'total'],
+    hidden: ['sourceCode', 'score'],
+  },
+  IdentityCheck: {
+    read: ['id', 'attempt', 'status', 'createdAt'],
+    keys: ['sessionId'],
+    explicit: [],
+    runOnly: [],
+    hidden: [
+      'idImageKey',
+      'selfieKey',
+      'faceMatchScore',
+      'modelId',
+      'threshold',
+      'livenessPassed',
+      'reviewReason',
+      'manualDecision',
+      'reviewedById',
+      'reviewedAt',
+      'reviewNote',
+    ],
+  },
+  MediaChunk: {
+    read: ['id', 'stream', 'segment', 'seq', 'sizeBytes', 'uploadedAt'],
+    keys: ['sessionId'],
+    explicit: ['objectKey'],
+    runOnly: [],
+    hidden: ['startedAt', 'durationMs', 'deletedAt'],
+  },
+  ProctorEventBatch: {
+    read: ['seq', 'signature', 'eventCount'],
+    keys: ['sessionId'],
+    explicit: [],
+    runOnly: [],
+    hidden: ['receivedAt'],
+  },
+  KeystrokeBatch: {
+    read: ['seq', 'signature', 'startedAt'],
+    keys: ['sessionId', 'sessionQuestionId'],
+    explicit: [],
+    runOnly: [],
+    hidden: ['id', 'events'],
+  },
+  ProctorEvent: {
+    read: ['id', 'type', 'occurredAt', 'durationMs', 'batchSeq', 'createdAt'],
+    keys: ['sessionId'],
+    explicit: [],
+    runOnly: [],
+    hidden: ['severity', 'source', 'confidence', 'payload', 'evidenceKey'],
+  },
+  Consent: {
+    read: ['id', 'consentTextId', 'signedAt', 'declinedAt'],
+    keys: ['sessionId'],
+    explicit: [],
+    runOnly: [],
+    hidden: ['signedName', 'ip', 'userAgent', 'pdfKey', 'pdfGeneratedAt', 'copyEmailedAt'],
+  },
+  Organization: {
+    read: ['id', 'name', 'retentionDays', 'currentConsentTextId'],
+    keys: [],
+    explicit: ['settings'],
+    runOnly: [],
+    hidden: ['createdAt'],
+  },
+  Candidate: {
+    read: ['id', 'fullName', 'email'],
+    keys: ['orgId'],
+    explicit: [],
+    runOnly: [],
+    hidden: ['externalRef', 'erasureRequestedAt', 'erasedAt', 'createdAt'],
+  },
+  Invitation: {
+    read: ['id', 'testId', 'candidateId', 'windowStart', 'windowEnd', 'usedAt'],
+    keys: ['orgId'],
+    explicit: ['accommodations'],
+    runOnly: [],
+    hidden: ['tokenHash', 'sentAt', 'createdById', 'createdAt'],
+  },
+  Test: {
+    read: ['id', 'name', 'description', 'durationMinutes', 'profile'],
+    keys: ['orgId'],
+    explicit: ['settings'],
+    runOnly: [],
+    hidden: ['passScore', 'createdById', 'createdAt'],
+  },
+  TestSection: {
+    read: ['id', 'title', 'position', 'timeLimitMin'],
+    keys: ['testId'],
+    explicit: [],
+    runOnly: [],
+    hidden: [],
+  },
+  Question: {
+    read: ['id', 'type'],
+    keys: ['orgId'],
+    explicit: [],
+    runOnly: [],
+    hidden: ['slug', 'tags', 'currentVersionId', 'isArchived', 'createdById', 'createdAt'],
+  },
+  // Gated models: readable only under the grant of that model, and then through the grant's columns.
+  ConsentText: {
+    read: ['id', 'version', 'bodyMd', 'legalApprovedAt'],
+    keys: [],
+    explicit: [],
+    runOnly: [],
+    hidden: ['orgId', 'legalApprovedBy', 'createdById', 'createdAt'],
+  },
+  TestQuestion: {
+    read: ['id', 'sectionId'],
+    keys: [],
+    explicit: [],
+    runOnly: [],
+    hidden: ['questionVersionId', 'randomRule', 'points', 'position'],
+  },
 };
+const GATED: readonly string[] = ['ConsentText', 'TestQuestion'];
+const GATED_GRANT: Record<string, GrantView> = {
+  ConsentText: grantOf('ConsentService (consent text)', [OTHER]),
+  TestQuestion: grantOf('SectionGateService (step 2)', [OTHER]),
+};
+/** The grant a model needs to be readable at all (none for a model that is not gated). */
+const baseGrant = (model: string): GrantView | undefined => GATED_GRANT[model];
+/** A readable column to name next to the one under test (`id` is hidden or absent on some models). */
+const fillerOf = (model: string): string => CS44[model]?.read[0] ?? 'id';
+const MODELS = Object.keys(CS44) as ModelName[];
+const READABLE_MODELS = MODELS.filter((m) => !GATED.includes(m));
 
-/** The ids that tie a row to its own scope: not hidden (see the header of candidate-interim.ts). */
-const SCOPE_KEYS = ['id', 'orgId', 'sessionId', 'sessionQuestionId', 'testId', 'sectionId'];
-/**
- * Scope keys that ARE hidden: keystroke_batches.id is a global identity counter, so reading it tells a
- * candidate how many batches every candidate of the platform has inserted (#126 nit 1).
- */
-const HIDDEN_KEYS: Record<string, readonly string[]> = { KeystrokeBatch: ['id'] };
+describe('S3: the CS-4.4 READ allowlist (NFR-04, TC-008)', () => {
+  it('TC-008 CANDIDATE_READ is the CS-4.4 read column of the ADR, for exactly the 18 models on the allowlist', () => {
+    expect(Object.keys(CANDIDATE_READ).sort()).toEqual(MODELS.slice().sort());
+    expect(Object.keys(CANDIDATE_READ).sort()).toEqual(Object.keys(CANDIDATE_MODELS).sort());
+    for (const model of MODELS) {
+      const rule = CANDIDATE_READ[model];
+      expect({
+        model,
+        read: [...(rule?.read ?? [])].sort(),
+        keys: [...(rule?.keys ?? [])].sort(),
+        explicit: [...(rule?.explicit ?? [])].sort(),
+        runOnly: [...(rule?.runOnly ?? [])].sort(),
+      }).toEqual({
+        model,
+        read: [...(CS44[model]?.read ?? [])].sort(),
+        keys: [...(CS44[model]?.keys ?? [])].sort(),
+        explicit: [...(CS44[model]?.explicit ?? [])].sort(),
+        runOnly: [...(CS44[model]?.runOnly ?? [])].sort(),
+      });
+    }
+  });
 
-describe('S3: the interim READ control, CANDIDATE_INTERIM_DENY (NFR-04, TC-008)', () => {
-  const denyOf = (model: string): readonly string[] =>
-    CANDIDATE_INTERIM_DENY[model as ModelName]?.read ?? [];
-  const readColumns = Object.keys(CS44_READ).flatMap((model) =>
-    denyOf(model).map((column) => [model, column] as const),
-  );
-
-  it('TC-008 is the complement of the CS-4.4 read column: every column of every readable model is readable, a scope key, or denied, and none is two of those', async () => {
+  it('TC-008 every column of every model is exactly one of readable, key, explicit-only, RUN-only or hidden, and a new column of the schema fails here until it is classified', async () => {
     const metas = await readModelMetas();
-    expect(Object.keys(CS44_READ).sort()).toEqual(
-      Object.keys(CANDIDATE_MODELS)
-        .filter((m) => CANDIDATE_MODELS[m as ModelName]?.kind !== 'grant-only')
-        .sort(),
-    );
-    for (const [model, readable] of Object.entries(CS44_READ)) {
+    for (const model of MODELS) {
       const columns = (metas[model]?.fields ?? [])
         .filter((f) => f.kind === 'scalar' || f.kind === 'enum')
         .map((f) => f.name);
-      const deny = denyOf(model);
-      const hiddenKeys = HIDDEN_KEYS[model] ?? [];
-      const keys = SCOPE_KEYS.filter(
-        (k) => columns.includes(k) && !readable.includes(k) && !hiddenKeys.includes(k),
-      );
-      // Every entry is a column of the model.
-      for (const column of [...readable, ...deny]) {
-        expect(`${model}.${column}:${columns.includes(column)}`).toBe(`${model}.${column}:true`);
-      }
-      // No column is both readable and denied, and no key is denied.
-      expect(
-        deny.filter(
-          (c) => readable.includes(c) || (SCOPE_KEYS.includes(c) && !hiddenKeys.includes(c)),
-        ),
-      ).toEqual([]);
-      expect(hiddenKeys.filter((c) => !deny.includes(c))).toEqual([]);
-      // Nothing is left unclassified: a new column of the schema fails here until it is.
-      const unclassified = columns.filter(
-        (c) => !readable.includes(c) && !keys.includes(c) && !deny.includes(c),
-      );
-      expect({ model, unclassified }).toEqual({ model, unclassified: [] });
+      const expected = CS44[model];
+      if (expected === undefined) throw new Error('unreachable');
+      const classes = [
+        expected.read,
+        expected.keys,
+        expected.explicit,
+        expected.runOnly,
+        expected.hidden,
+      ];
+      const listed = classes.flat();
+      // No column twice, every entry is a column of the model, and no column of the model is left out.
+      expect({ model, twice: listed.filter((c, i) => listed.indexOf(c) !== i) }).toEqual({
+        model,
+        twice: [],
+      });
+      expect({ model, unknown: listed.filter((c) => !columns.includes(c)) }).toEqual({
+        model,
+        unknown: [],
+      });
+      expect({ model, unclassified: columns.filter((c) => !listed.includes(c)) }).toEqual({
+        model,
+        unclassified: [],
+      });
+      // What the extension derives from the generated client agrees.
+      expect([...scalarColumnsOf(model)].sort()).toEqual([...columns].sort());
+      expect([...hiddenColumnsOf(model)].sort()).toEqual([...expected.hidden].sort());
     }
   });
 
   it('TC-008 hides what the review named, and what CS-4.4 keeps from a candidate (the sealed key, the settings, the pass score, the invitation token, the erasure state)', () => {
     const must: Record<string, string[]> = {
       Session: [
-        'hmacKeyEnc',
-        'deviceInfo',
+        'invitationId',
         'totalScore',
         'riskScore',
         'riskBand',
         'reportKey',
-        'invitationId',
         'retentionAnchorAt',
         'clientKind',
         'reportGeneratedAt',
+        'lastHeartbeat',
       ],
-      Invitation: ['accommodations', 'tokenHash'],
+      Invitation: ['tokenHash'],
       IdentityCheck: [
         'faceMatchScore',
         'modelId',
@@ -370,161 +566,240 @@ describe('S3: the interim READ control, CANDIDATE_INTERIM_DENY (NFR-04, TC-008)'
         'idImageKey',
         'selfieKey',
       ],
-      Organization: ['settings'],
-      Test: ['settings', 'passScore'],
-      Submission: ['score', 'results', 'passed', 'total', 'sourceCode'],
-      SessionQuestion: [
-        'score',
-        'scoringNote',
-        'scoring',
-        'scoredById',
-        'scoredAt',
-        'testQuestionId',
-      ],
-      MediaChunk: ['objectKey'],
+      Test: ['passScore'],
+      Submission: ['score', 'sourceCode'],
+      SessionQuestion: ['score', 'scoringNote', 'scoring', 'scoredById', 'scoredAt'],
       Consent: ['ip', 'userAgent', 'signedName', 'pdfKey'],
-      ProctorEvent: ['severity', 'payload', 'evidenceKey', 'confidence'],
+      ProctorEvent: ['severity', 'payload', 'evidenceKey', 'confidence', 'source'],
       Candidate: ['erasureRequestedAt', 'erasedAt', 'externalRef'],
       KeystrokeBatch: ['id', 'events'],
     };
     for (const [model, columns] of Object.entries(must)) {
-      for (const column of columns) expect(denyOf(model)).toContain(column);
+      for (const column of columns) expect(hiddenColumnsOf(model as ModelName)).toContain(column);
+    }
+    // The explicit-only columns and the RUN columns are not hidden: a grant or the RUN filter opens them.
+    for (const [model, column] of [
+      ['Session', 'hmacKeyEnc'],
+      ['Session', 'deviceInfo'],
+      ['MediaChunk', 'objectKey'],
+      ['Organization', 'settings'],
+      ['Test', 'settings'],
+      ['Invitation', 'accommodations'],
+      ['SessionQuestion', 'testQuestionId'],
+      ['Submission', 'results'],
+    ] as const) {
+      expect(hiddenColumnsOf(model)).not.toContain(column);
     }
   });
 
   it('TC-008 every model it names is on the CANDIDATE allowlist (an entry for another would be dead)', () => {
-    for (const model of Object.keys(CANDIDATE_INTERIM_DENY)) {
+    for (const model of Object.keys(CANDIDATE_READ)) {
       expect(CANDIDATE_MODELS[model as ModelName]).toBeDefined();
     }
   });
 
-  describe('every call that returns rows names its select', () => {
-    const models = Object.keys(CANDIDATE_MODELS).filter(
-      (m) => CANDIDATE_MODELS[m as ModelName]?.kind !== 'grant-only',
-    ) as ModelName[];
+  describe('omit: the default select is narrowed, so a new column stays hidden until it is listed', () => {
+    /** The `omit` a candidate call with no select runs with. */
+    const omitOf = (model: ModelName, operation: string, args: Record<string, unknown>) =>
+      asCandidate(model, operation, args, baseGrant(model)).args.omit as
+        Record<string, unknown> | undefined;
+    const expectedOmit = (model: string): string[] => {
+      const spec = CS44[model];
+      if (spec === undefined) throw new Error('unreachable');
+      return [...spec.hidden, ...spec.explicit, ...spec.runOnly].sort();
+    };
 
-    it('TC-008 the row-returning operations are exactly the ones that carry rows', () => {
-      expect([...ROW_RETURNING_OPERATIONS].sort()).toEqual(
-        [
-          'findUnique',
-          'findUniqueOrThrow',
-          'findFirst',
-          'findFirstOrThrow',
-          'findMany',
-          'create',
-          'createManyAndReturn',
-          'update',
-          'updateManyAndReturn',
-          'upsert',
-          'delete',
-        ].sort(),
-      );
-      // Everything else in SCOPED_OPERATIONS returns a count or an aggregate.
-      expect(
-        SCOPED_OPERATIONS.filter((op) => !ROW_RETURNING_OPERATIONS.includes(op)).sort(),
-      ).toEqual(['aggregate', 'count', 'createMany', 'deleteMany', 'groupBy', 'updateMany'].sort());
-    });
-
-    it.each(models)(
-      'TC-008 %s: no select, an empty select and a null select are all refused for every row-returning call it may make',
+    it.each(MODELS)(
+      'TC-008 %s: every row-returning read with no select runs with omit = every column that is not in the default select',
       (model) => {
-        for (const operation of ROW_RETURNING_OPERATIONS) {
-          if (['delete'].includes(operation)) continue; // refused before: a candidate deletes nothing
-          const base = (): Record<string, unknown> => {
-            const args = writeArgs(operation, {});
-            delete args.select;
-            return args;
-          };
-          for (const select of [undefined, {}, null, true, [], 'id']) {
-            const args = { ...base(), ...(select === undefined ? {} : { select }) };
-            // Only operations this model allows reach the select rule.
-            const allowed = (() => {
-              try {
-                asCandidate(model, operation, { ...base(), select: { id: true } });
-                return true;
-              } catch {
-                return false;
-              }
-            })();
-            if (!allowed) continue;
-            expect(() => asCandidate(model, operation, args)).toThrow(/needs an explicit select/);
-          }
+        // A gated model's default select is the grant's columns (here all of them).
+        const grant = baseGrant(model);
+        for (const operation of READ_OPERATIONS.filter((op) =>
+          ROW_RETURNING_OPERATIONS.includes(op),
+        )) {
+          const omit = omitOf(model, operation, { where: { [fillerOf(model)]: 'x' } });
+          expect({ model, operation, omit: Object.keys(omit ?? {}).sort() }).toEqual({
+            model,
+            operation,
+            omit: expectedOmit(model),
+          });
+          expect(Object.values(omit ?? {}).every((v) => v === true)).toBe(true);
+          expect(grant === undefined || (CS44[model]?.read ?? []).length > 0).toBe(true);
         }
       },
     );
 
-    it.each(models)('TC-008 %s: a select that names a column passes', (model) => {
-      for (const operation of READ_OPERATIONS.filter((op) =>
+    it('TC-008 the omit never contains a column of the default select, and every other scalar column is in it', () => {
+      for (const model of MODELS) {
+        const omit = Object.keys(
+          readAccess(model, GATED.includes(model), baseGrant(model)).omit,
+        ).sort();
+        const spec = CS44[model];
+        if (spec === undefined) throw new Error('unreachable');
+        const inDefault = [...spec.read, ...spec.keys];
+        expect(omit.filter((c) => inDefault.includes(c))).toEqual([]);
+        expect([...scalarColumnsOf(model)].filter((c) => !inDefault.includes(c)).sort()).toEqual(
+          omit,
+        );
+      }
+    });
+
+    it.each(READABLE_MODELS)(
+      'TC-008 %s: a write that returns the row runs with the same omit (creates and updates included)',
+      (model) => {
+        const rule = CANDIDATE_MODELS[model];
+        if (rule?.kind !== 'session') return;
+        const calls: Array<[string, Record<string, unknown>]> = [];
+        if (rule.update !== undefined) {
+          calls.push(
+            ['update', writeArgs('update', {}, {})],
+            ['updateManyAndReturn', writeArgs('updateManyAndReturn', {})],
+          );
+        }
+        if (rule.create !== undefined) {
+          calls.push(
+            ['create', writeArgs('create', {})],
+            ['createManyAndReturn', writeArgs('createManyAndReturn', {})],
+          );
+        }
+        if (rule.create !== undefined && rule.update !== undefined) {
+          calls.push(['upsert', writeArgs('upsert', {}, {})]);
+        }
+        for (const [operation, args] of calls) {
+          const given: Record<string, unknown> = { ...args };
+          delete given.select;
+          expect({
+            model,
+            operation,
+            omit: Object.keys(omitOf(model, operation, given) ?? {}).sort(),
+          }).toEqual({ model, operation, omit: expectedOmit(model) });
+        }
+      },
+    );
+
+    it('TC-008 the omit of an update is the same row shape as a read: a hidden column does not come back from a write', () => {
+      const omit = omitOf('Session', 'update', {
+        where: { id: 'x' },
+        data: { lastHeartbeat: new Date() },
+      });
+      expect(omit).toMatchObject({ hmacKeyEnc: true, deviceInfo: true, invitationId: true });
+      expect(omit).not.toHaveProperty('status');
+      expect(omit).not.toHaveProperty('id');
+    });
+
+    it('TC-008 a select suppresses the omit (Prisma refuses both together), and a call that returns no rows gets none', () => {
+      // A session takes no create, so the rows-returning calls it may make are the reads and the updates.
+      for (const operation of [...READ_OPERATIONS, 'update', 'updateManyAndReturn'].filter((op) =>
         ROW_RETURNING_OPERATIONS.includes(op),
       )) {
-        expect(() =>
-          asCandidate(model, operation, { where: { id: 'x' }, select: { id: true } }),
-        ).not.toThrow();
+        const args = writeArgs(operation, {}, {});
+        expect(
+          asCandidate('Session', operation, { ...args, select: { id: true } }).args,
+        ).not.toHaveProperty('omit');
+      }
+      for (const [operation, args] of [
+        ['count', {}],
+        ['aggregate', { _count: true }],
+        ['groupBy', { by: ['status'], _count: true }],
+        ['updateMany', { where: { id: 'x' }, data: { lastHeartbeat: new Date() } }],
+      ] as const) {
+        expect(asCandidate('Session', operation, args).args).not.toHaveProperty('omit');
+      }
+      expect(
+        asCandidate('ProctorEventBatch', 'createMany', { data: [{ seq: 1, eventCount: 1 }] }).args,
+      ).not.toHaveProperty('omit');
+    });
+
+    it('TC-008 a caller omit is merged and ours wins: omit: { hmacKeyEnc: false } cannot bring a hidden column back', () => {
+      const omit = omitOf('Session', 'findMany', {
+        omit: { hmacKeyEnc: false, deviceInfo: false, status: true, invitationId: undefined },
+      });
+      expect(omit).toMatchObject({ hmacKeyEnc: true, deviceInfo: true, invitationId: true });
+      // The caller may hide more.
+      expect(omit?.status).toBe(true);
+    });
+
+    it('TC-008 select with omit, a select or an omit that is not an object, and an empty omit of nothing hidden: refused or merged', () => {
+      expect(() =>
+        asCandidate('Session', 'findMany', { select: { id: true }, omit: { status: true } }),
+      ).toThrow(/select and omit cannot be used together/);
+      for (const bad of [null, true, 'id', 7, [] as unknown[]]) {
+        expect(() => asCandidateExact('Session', 'findMany', { select: bad })).toThrow(
+          OrgScopeViolationError,
+        );
+      }
+      for (const bad of [null, true, 'id', 7]) {
+        expect(() => asCandidateExact('Session', 'findMany', { omit: bad })).toThrow(
+          OrgScopeViolationError,
+        );
       }
     });
 
-    it('TC-008 count, aggregate, groupBy, updateMany and createMany return no rows and need no select', () => {
-      expect(() => asCandidate('Session', 'count', {})).not.toThrow();
-      expect(() => asCandidate('Session', 'aggregate', { _count: true })).not.toThrow();
-      expect(() =>
-        asCandidate('Session', 'groupBy', { by: ['status'], _count: true }),
-      ).not.toThrow();
-      expect(() =>
-        asCandidate('SessionQuestion', 'updateMany', {
-          where: { id: 'x' },
-          data: { finalCode: 'x' },
-        }),
-      ).not.toThrow();
-      expect(() =>
-        asCandidate('ProctorEventBatch', 'createMany', { data: [{ seq: 1, eventCount: 1 }] }),
-      ).not.toThrow();
-    });
-
-    it('TC-008 SERVICE needs no select: no column limit', () => {
-      for (const operation of ROW_RETURNING_OPERATIONS) {
-        expect(() => asService('Session', operation, writeArgs(operation, {}))).not.toThrow();
-        const args = writeArgs(operation, {});
-        delete args.select;
-        expect(() => asService('Session', operation, args)).not.toThrow();
+    it('TC-008 SERVICE gets no omit and no select rule: no column limit', () => {
+      for (const operation of READ_OPERATIONS) {
+        expect(asService('Session', operation, {}).args).not.toHaveProperty('omit');
       }
     });
 
-    it('TC-008 a write that returns the row cannot read a hidden column back either', () => {
-      for (const operation of ['update', 'updateManyAndReturn']) {
-        expect(() =>
-          asCandidate('ProctorEvent', operation, {
-            ...writeArgs(operation, { durationMs: 1 }),
-            select: { id: true },
-          }),
-        ).not.toThrow();
-        expect(() =>
-          asCandidate('Session', operation, {
-            ...writeArgs(operation, { lastHeartbeat: new Date() }),
-            select: { hmacKeyEnc: true },
-          }),
-        ).toThrow(/the column hmacKeyEnc is not available/);
-      }
-      for (const operation of ['create', 'createManyAndReturn']) {
-        expect(() =>
-          asCandidate('ProctorEvent', operation, {
-            ...writeArgs(operation, { durationMs: 1 }),
-            select: { payload: true },
-          }),
-        ).toThrow(/the column payload is not available/);
-      }
+    it('TC-008 a column the schema gains stays hidden: the omit is computed from the generated client, not from a deny list', async () => {
+      await jest.isolateModulesAsync(async () => {
+        // A fresh module registry: a copy of the client namespace that this test alone changes.
+        const { Prisma } = (await import('../generated/prisma/client.js')) as unknown as {
+          Prisma: Record<string, Record<string, string>>;
+        };
+        const fields = Prisma.SessionScalarFieldEnum as Record<string, string>;
+        const original = { ...fields };
+        fields.brandNewColumn = 'brandNewColumn';
+        try {
+          const fresh = await import('./candidate-interim.js');
+          const access = fresh.readAccess('Session', false, undefined);
+          expect(access.omit.brandNewColumn).toBe(true);
+          expect(access.readable.has('brandNewColumn')).toBe(false);
+          expect(fresh.hiddenColumnsOf('Session')).toContain('brandNewColumn');
+          // And a call that names it is refused, in every place.
+          expect(() =>
+            fresh.assertCandidateColumns(
+              'Session',
+              'findMany',
+              { select: { brandNewColumn: true } },
+              false,
+              undefined,
+            ),
+          ).toThrow(/the column brandNewColumn is not available/);
+          expect(() =>
+            fresh.assertCandidateColumns(
+              'Session',
+              'count',
+              { where: { brandNewColumn: 1 } },
+              false,
+              undefined,
+            ),
+          ).toThrow(/the column brandNewColumn is not available/);
+        } finally {
+          for (const key of Object.keys(fields)) delete fields[key];
+          Object.assign(fields, original);
+        }
+      });
     });
   });
 
   describe('the read list is refused in select, where, having, orderBy, distinct, by and the aggregates', () => {
-    it.each(readColumns)(
+    // Every column a candidate may never name without a grant: the hidden ones, and the explicit-only ones
+    // when no grant is active. A gated model is read under its full grant, which still hides the rest.
+    const refusedColumns = MODELS.flatMap((model) => [
+      ...(CS44[model]?.hidden ?? []).map((column) => [model, column] as const),
+      ...(CS44[model]?.explicit ?? []).map((column) => [model, column] as const),
+    ]);
+
+    it.each(refusedColumns)(
       'TC-008 %s.%s: refused everywhere a column can be read, filtered or ordered on',
       (model, column) => {
-        const m = model as ModelName;
-        // The column under test is named as it is (no renaming of `id`), and the other arguments name a key
-        // the candidate may read: `id`, or `seq` where `id` is hidden.
-        const key = m === 'KeystrokeBatch' ? 'seq' : 'id';
+        const m = model;
+        const grant = baseGrant(model);
+        // The other arguments name a column the candidate may read.
+        const key = fillerOf(model);
         const listed = (operation: string, args: Record<string, unknown>): void => {
-          expect(() => asCandidateExact(m, operation, args)).toThrow(
+          expect(() => asCandidateExact(m, operation, args, grant)).toThrow(
             new RegExp(`the column ${column} is not available to a candidate`),
           );
         };
@@ -549,6 +824,9 @@ describe('S3: the interim READ control, CANDIDATE_INTERIM_DENY (NFR-04, TC-008)'
           });
           listed(operation, { select: { [key]: true }, distinct: [column] });
           listed(operation, { select: { [key]: true }, distinct: column });
+          // No select at all: the where and orderBy are still checked (the omit is the select).
+          listed(operation, { where: { [column]: { not: null } } });
+          listed(operation, { orderBy: { [column]: 'asc' } });
         }
         // count: its select, where and orderBy.
         listed('count', { select: { [column]: true } });
@@ -570,7 +848,7 @@ describe('S3: the interim READ control, CANDIDATE_INTERIM_DENY (NFR-04, TC-008)'
       },
     );
 
-    it('TC-008 a column that is not on the list passes in every one of those places', () => {
+    it('TC-008 a column that is on the list passes in every one of those places, and so does _all in count', () => {
       expect(() =>
         asCandidate('Session', 'findMany', {
           select: { id: true, authEpoch: true },
@@ -588,6 +866,48 @@ describe('S3: the interim READ control, CANDIDATE_INTERIM_DENY (NFR-04, TC-008)'
           orderBy: { _min: { startedAt: 'asc' } },
         }),
       ).not.toThrow();
+      expect(() =>
+        asCandidate('Session', 'count', { select: { _all: true, status: true } }),
+      ).not.toThrow();
+      // `_all` is not a column of anything else: it is allowed in count's select and `_count` only.
+      expect(() => asCandidate('Session', 'findMany', { select: { _all: true } })).toThrow(
+        /the column _all is not available/,
+      );
+    });
+
+    it('TC-008 every readable column of every model passes in select, where, orderBy and the aggregates (no over-refusal)', () => {
+      for (const model of MODELS) {
+        const spec = CS44[model];
+        if (spec === undefined) throw new Error('unreachable');
+        const grant = baseGrant(model);
+        for (const column of [...spec.read, ...spec.keys]) {
+          expect({
+            model,
+            column,
+            ok: tryCall(() =>
+              asCandidateExact(
+                model,
+                'findMany',
+                {
+                  select: { [column]: true },
+                  where: { [column]: { not: null } },
+                  orderBy: { [column]: 'asc' },
+                  distinct: [column],
+                },
+                grant,
+              ),
+            ),
+          }).toEqual({ model, column, ok: true });
+          expect(() =>
+            asCandidateExact(
+              model,
+              'aggregate',
+              { _count: { [column]: true }, _max: { [column]: true } },
+              grant,
+            ),
+          ).not.toThrow();
+        }
+      }
     });
 
     it('TC-008 a JSON path filter on a hidden column is refused: its key is the column', () => {
@@ -597,6 +917,12 @@ describe('S3: the interim READ control, CANDIDATE_INTERIM_DENY (NFR-04, TC-008)'
           where: { deviceInfo: { path: ['systemCheck', 'ok'], equals: true } },
         }),
       ).toThrow(/the column deviceInfo is not available/);
+      expect(() =>
+        asCandidate('ProctorEvent', 'findMany', {
+          select: { id: true },
+          where: { payload: { path: ['x'], equals: true } },
+        }),
+      ).toThrow(/the column payload is not available/);
     });
 
     it('TC-008 the message names the model, the column and the place, never a value', () => {
@@ -616,9 +942,9 @@ describe('S3: the interim READ control, CANDIDATE_INTERIM_DENY (NFR-04, TC-008)'
     });
 
     it('TC-008 SERVICE is not limited by the list', () => {
-      for (const [model, column] of readColumns) {
+      for (const [model, column] of refusedColumns) {
         expect(() =>
-          asService(model as ModelName, 'findMany', {
+          asService(model, 'findMany', {
             select: { [column]: true },
             where: { [column]: { not: null } },
             orderBy: { [column]: 'asc' },
@@ -634,7 +960,6 @@ describe('S3: the interim READ control, CANDIDATE_INTERIM_DENY (NFR-04, TC-008)'
       const found: Record<string, string[]> = {};
       for (const block of schema.split(/^model\s+/m).slice(1)) {
         const name = block.slice(0, block.indexOf(' ')).trim();
-        if (CANDIDATE_MODELS[name as ModelName]?.kind === 'grant-only') continue;
         if (CANDIDATE_MODELS[name as ModelName] === undefined) continue;
         for (const match of block.matchAll(/@@(?:unique|id)\(\[([^\]]+)\]/g)) {
           const columns = (match[1] ?? '').split(',').map((c) => c.trim());
@@ -672,8 +997,10 @@ describe('S3: the interim READ control, CANDIDATE_INTERIM_DENY (NFR-04, TC-008)'
         ['SessionSection', { sessionId_sectionId: { sessionId: SID, sectionId: OTHER } }],
       ] as const) {
         expect(() =>
-          asCandidate(model, 'findUnique', { where, select: { seq: true } }),
+          asCandidate(model, 'findUnique', { where, select: { [fillerOf(model)]: true } }),
         ).not.toThrow();
+        // With no select at all the omit is the selection: the compound key is still read through.
+        expect(() => asCandidate(model, 'findUnique', { where })).not.toThrow();
       }
     });
 
@@ -684,6 +1011,26 @@ describe('S3: the interim READ control, CANDIDATE_INTERIM_DENY (NFR-04, TC-008)'
           select: { id: true },
         }),
       ).toThrow(/the column tokenHash is not available/);
+    });
+
+    it('TC-008 a compound selector of an unknown model entry is read as one name, which is not a column: refused', () => {
+      expect(() =>
+        asCandidate('Session', 'findUnique', {
+          where: { id_orgId: { id: SID, orgId: ORG } },
+          select: { id: true },
+        }),
+      ).toThrow(/the column id_orgId is not available/);
+    });
+
+    it('TC-008 consent_texts orgId_version reads through to orgId, which a grant of the text does not unlock', () => {
+      expect(() =>
+        asCandidate(
+          'ConsentText',
+          'findUnique',
+          { where: { orgId_version: { orgId: ORG, version: '1' } }, select: { id: true } },
+          baseGrant('ConsentText'),
+        ),
+      ).toThrow(/the column orgId is not available/);
     });
   });
 
@@ -743,11 +1090,26 @@ describe('S3: the interim READ control, CANDIDATE_INTERIM_DENY (NFR-04, TC-008)'
  * well as the behaviour tests below. `sessionId` and `sessionQuestionId` are the session keys a typed
  * create must carry (Prisma's unchecked create input requires them); `sessionId` must match the scope.
  */
-const CS44_WRITE: Record<string, { create?: readonly string[]; update?: readonly string[] }> = {
-  Session: { update: ['lastHeartbeat'] },
+const CS44_WRITE: Record<
+  string,
+  {
+    create?: readonly string[];
+    update?: readonly string[];
+    /** Columns writable only while a grant names them (CS-4.4: the SessionStateService and DeviceInfoService grants). */
+    grantedUpdate?: readonly string[];
+    /** The one create that needs its grant (CS-4.4, item 9: the consents create under ConsentService). */
+    grantedCreate?: readonly string[];
+  }
+> = {
+  Session: {
+    update: ['lastHeartbeat'],
+    grantedUpdate: ['status', 'pauseReasons', 'submittedAt', 'deviceInfo'],
+  },
   SessionQuestion: { update: ['finalCode', 'finalLanguage', 'answer'] },
   SessionSection: {},
-  Submission: { create: ['sessionQuestionId', 'kind', 'language', 'sourceCode'] },
+  Submission: {
+    create: ['sessionQuestionId', 'kind', 'language', 'sourceCode', 'results', 'passed', 'total'],
+  },
   IdentityCheck: {
     create: ['sessionId', 'attempt', 'idImageKey', 'selfieKey', 'livenessPassed'],
   },
@@ -793,7 +1155,17 @@ const CS44_WRITE: Record<string, { create?: readonly string[]; update?: readonly
     ],
     update: ['durationMs'],
   },
-  Consent: { update: ['signedName', 'signedAt', 'declinedAt', 'ip', 'userAgent'] },
+  Consent: {
+    grantedCreate: [
+      'sessionId',
+      'consentTextId',
+      'signedName',
+      'signedAt',
+      'declinedAt',
+      'ip',
+      'userAgent',
+    ],
+  },
 };
 
 describe('S3: the WRITE allowlist of CS-4.4, exhaustive over the columns of every model (NFR-04, TC-008)', () => {
@@ -826,17 +1198,30 @@ describe('S3: the WRITE allowlist of CS-4.4, exhaustive over the columns of ever
   it('TC-008 the lists in CANDIDATE_MODELS are exactly the CS-4.4 write column', () => {
     expect(SESSION_RULES.map(([model]) => model).sort()).toEqual(Object.keys(CS44_WRITE).sort());
     for (const [model, rule] of SESSION_RULES) {
-      expect({ model, create: rule.create, update: rule.update }).toEqual({
+      expect({
+        model,
+        create: rule.create,
+        update: rule.update,
+        grantedUpdate: rule.grantedUpdate,
+        grantedCreate: rule.grantedCreate,
+      }).toEqual({
         model,
         create: CS44_WRITE[model]?.create,
         update: CS44_WRITE[model]?.update,
+        grantedUpdate: CS44_WRITE[model]?.grantedUpdate,
+        grantedCreate: CS44_WRITE[model]?.grantedCreate,
       });
     }
   });
 
   it('TC-008 the lists name real columns, and never id, orgId or a timestamp', () => {
     for (const [model, rule] of SESSION_RULES) {
-      for (const column of [...(rule.create ?? []), ...(rule.update ?? [])]) {
+      for (const column of [
+        ...(rule.create ?? []),
+        ...(rule.update ?? []),
+        ...(rule.grantedUpdate ?? []),
+        ...(rule.grantedCreate ?? []),
+      ]) {
         expect(`${model}.${column}:${columnsOf[model]?.includes(column)}`).toBe(
           `${model}.${column}:true`,
         );
@@ -858,12 +1243,18 @@ describe('S3: the WRITE allowlist of CS-4.4, exhaustive over the columns of ever
 
     it('TC-008 create: a listed column passes, every other column of the model throws', () => {
       for (const column of columnsOf[model] ?? []) {
-        const row = { [column]: valueOf(column) };
+        // results, passed and total are written on a RUN row only (CS-4.4).
+        const row = {
+          [column]: valueOf(column),
+          ...(model === 'Submission' && ['results', 'passed', 'total'].includes(column)
+            ? { kind: 'RUN' }
+            : {}),
+        };
         const listed = rule.create?.includes(column) === true;
         for (const operation of creates()) {
           if (rule.create === undefined) {
             expect(() => asCandidate(model, operation, createArgs(operation, row))).toThrow(
-              /cannot create this row|writes nothing here/,
+              /cannot create this row|writes nothing here|creates this row only under its create grant/,
             );
           } else if (listed) {
             expect({
@@ -888,7 +1279,7 @@ describe('S3: the WRITE allowlist of CS-4.4, exhaustive over the columns of ever
         for (const operation of updates()) {
           if (rule.update === undefined) {
             expect(() => asCandidate(model, operation, updateArgs(operation, row))).toThrow(
-              /cannot update this row|writes nothing here/,
+              /cannot update this row|writes nothing here|creates this row only under its create grant/,
             );
           } else if (listed) {
             expect({
@@ -977,7 +1368,7 @@ describe('S3: the WRITE allowlist of CS-4.4, exhaustive over the columns of ever
   });
 
   it('TC-008 a create on each update-only model throws', () => {
-    for (const model of ['Session', 'SessionQuestion', 'Consent']) {
+    for (const model of ['Session', 'SessionQuestion']) {
       for (const operation of [...CREATES, 'upsert']) {
         expect(() => asCandidate(model as ModelName, operation, writeArgs(operation, {}))).toThrow(
           /cannot create this row: CS-4\.4 grants updates only/,
@@ -1005,9 +1396,6 @@ describe('S3: the WRITE allowlist of CS-4.4, exhaustive over the columns of ever
     ['Session', 'pausedMs'],
     ['Session', 'hmacKeyEnc'],
     ['Session', 'riskScore'],
-    ['Submission', 'results'],
-    ['Submission', 'passed'],
-    ['Submission', 'total'],
     ['Submission', 'score'],
     ['IdentityCheck', 'status'],
     ['IdentityCheck', 'manualDecision'],
@@ -1062,29 +1450,6 @@ describe('S3: the WRITE allowlist of CS-4.4, exhaustive over the columns of ever
         select: { id: true },
       }),
     ).toThrow(/id is never written by a candidate/);
-  });
-
-  it('TC-008 the consent row: the five CS-4.4 columns update, consentTextId and pdfKey are refused', () => {
-    for (const operation of UPDATES) {
-      expect(() =>
-        asCandidate(
-          'Consent',
-          operation,
-          writeArgs(operation, {
-            signedName: 'x',
-            signedAt: new Date(),
-            declinedAt: null,
-            ip: '127.0.0.1',
-            userAgent: 'x',
-          }),
-        ),
-      ).not.toThrow();
-      for (const column of ['consentTextId', 'pdfKey']) {
-        expect(() =>
-          asCandidate('Consent', operation, writeArgs(operation, { [column]: 'x' })),
-        ).toThrow(/cannot be written by a candidate update here/);
-      }
-    }
   });
 
   it('TC-008 the submission create: kind is RUN or SUBMIT (the enum), and the rest is the CS-4.4 list', () => {
@@ -1304,7 +1669,7 @@ describe('B1: a field reference is refused in a where and a having (#126 round 3
     (base as unknown as Record<string, { fields: Record<string, unknown> }>)[lower(model)]?.fields[
       column
     ];
-  const MODELS = Object.keys(CS44_READ) as ModelName[];
+  const MODELS = READABLE_MODELS;
   let columnsOf: Record<string, string[]> = {};
   beforeAll(async () => {
     const metas = await readModelMetas();
@@ -1833,6 +2198,170 @@ describe('B2 round 4: sealed identity keys, Crockford ULIDs, the MediaStream enu
       ).toThrow(refusedKey);
     });
 
+    describe('FU-DB-199: an update, and the update branch of an upsert, are bound to the row their where names', () => {
+      const UPDATING = ['update', 'updateMany', 'updateManyAndReturn', 'upsert'] as const;
+      const call = (
+        operation: (typeof UPDATING)[number],
+        where: Record<string, unknown>,
+        data: Record<string, unknown>,
+        actor: 'CANDIDATE' | 'SERVICE' = 'CANDIDATE',
+      ) => {
+        const args =
+          operation === 'upsert'
+            ? { where, create: {}, update: data, select: { id: true } }
+            : operation === 'updateMany'
+              ? { where, data }
+              : { where, data, select: { id: true } };
+        return actor === 'CANDIDATE'
+          ? asCandidate('MediaChunk', operation, args)
+          : asService('MediaChunk', operation, args);
+      };
+      const byKey = (stream: string, seq: number): Record<string, unknown> => ({
+        sessionId_stream_seq: { sessionId: SID, stream, seq },
+      });
+
+      it.each(UPDATING)(
+        'TC-008 %s by sessionId_stream_seq: the key must be the key of that stream and seq',
+        (operation) => {
+          expect(() => call(operation, byKey('WEBCAM', 42), { objectKey: key })).not.toThrow();
+          for (const where of [byKey('WEBCAM', 43), byKey('SCREEN', 42), byKey('AUDIO', 1)]) {
+            expect(() => call(operation, where, { objectKey: key })).toThrow(refusedKey);
+          }
+          // The key written next to a segment: the segment is bound too, when the write carries it.
+          expect(() =>
+            call(operation, byKey('WEBCAM', 42), { objectKey: key, segment: 7 }),
+          ).not.toThrow();
+          expect(() =>
+            call(operation, byKey('WEBCAM', 42), { objectKey: key, segment: 8 }),
+          ).toThrow(refusedKey);
+        },
+      );
+
+      it.each(UPDATING)(
+        'TC-008 %s: plain equality on stream, segment and seq pins them too (bare value or { equals })',
+        (operation) => {
+          for (const where of [
+            { sessionId: SID, stream: 'WEBCAM', seq: 42 },
+            { stream: { equals: 'WEBCAM' }, seq: { equals: 42 }, segment: 7 },
+            { id: 5n, stream: 'WEBCAM', segment: 7, seq: 42 },
+          ]) {
+            expect(() => call(operation, where, { objectKey: key })).not.toThrow();
+          }
+          for (const where of [
+            { stream: 'SCREEN' },
+            { seq: 43 },
+            { seq: { equals: 43 } },
+            { segment: 6 },
+            { id: 5n, seq: 41 },
+          ]) {
+            expect(() => call(operation, where, { objectKey: key })).toThrow(refusedKey);
+          }
+        },
+      );
+
+      it.each(UPDATING)(
+        'TC-008 %s: what the write carries wins over the where (the row after the update), and a where that names nothing binds nothing',
+        (operation) => {
+          // The row is moved to seq 42 and written with the key of seq 42: the where only found it.
+          expect(() =>
+            call(operation, byKey('WEBCAM', 43), { objectKey: key, seq: 42 }),
+          ).not.toThrow();
+          expect(() => call(operation, byKey('WEBCAM', 42), { objectKey: key, seq: 43 })).toThrow(
+            refusedKey,
+          );
+          expect(() => call(operation, { id: 5n }, { objectKey: key })).not.toThrow();
+          expect(() => call(operation, {}, { objectKey: key })).not.toThrow();
+        },
+      );
+
+      it.each(UPDATING)(
+        'TC-008 %s: a where that mentions stream, segment or seq in a form that pins nothing is refused next to a key write',
+        (operation) => {
+          for (const where of [
+            { seq: { gt: 1 } },
+            { seq: { in: [42] } },
+            { seq: { not: 7 } },
+            { stream: { in: ['WEBCAM'] } },
+            { segment: { lte: 7 } },
+            { seq: { equals: 42, not: 7 } },
+            { AND: [{ seq: 42 }] },
+            { OR: [{ seq: 42 }, { seq: 43 }] },
+            { NOT: { seq: 5 } },
+            { AND: [{ OR: [{ stream: 'WEBCAM' }] }] },
+            { seq: 42, AND: [{ seq: 42 }] }, // pinned and loose at once: loose wins
+            { sessionId_stream_seq: { sessionId: SID, stream: 'WEBCAM', seq: { gt: 1 } } },
+          ]) {
+            expect(() => call(operation, where, { objectKey: key })).toThrow(refusedKey);
+          }
+          // The same where is fine when no key is written: only the key is bound.
+          for (const where of [{ seq: { gt: 1 } }, { OR: [{ seq: 42 }] }]) {
+            expect(() => call(operation, where, { durationMs: 5 })).not.toThrow();
+          }
+        },
+      );
+
+      it('TC-008 the upsert binds its create branch to its own data, and its update branch to the where and the update data', () => {
+        const create = { stream: 'WEBCAM', segment: 7, seq: 42, objectKey: key };
+        expect(() =>
+          asCandidate('MediaChunk', 'upsert', {
+            where: byKey('WEBCAM', 42),
+            create,
+            update: { objectKey: key },
+            select: { id: true },
+          }),
+        ).not.toThrow();
+        expect(() =>
+          asCandidate('MediaChunk', 'upsert', {
+            where: byKey('WEBCAM', 43),
+            create,
+            update: { objectKey: key },
+            select: { id: true },
+          }),
+        ).toThrow(refusedKey);
+        // The where names the row the update branch finds; a create branch is its own row.
+        expect(() =>
+          asCandidate('MediaChunk', 'upsert', {
+            where: byKey('WEBCAM', 43),
+            create,
+            update: { durationMs: 1 },
+            select: { id: true },
+          }),
+        ).not.toThrow();
+      });
+
+      it('TC-008 a create has no where to bind to: only its own data and the schema defaults', () => {
+        expect(() =>
+          asCandidate('MediaChunk', 'createMany', {
+            data: [{ stream: 'WEBCAM', segment: 7, seq: 42, objectKey: key }],
+          }),
+        ).not.toThrow();
+        expect(() =>
+          asCandidate('MediaChunk', 'create', {
+            where: byKey('WEBCAM', 43),
+            data: { stream: 'WEBCAM', segment: 7, seq: 42, objectKey: key },
+          }),
+        ).not.toThrow();
+      });
+
+      it('TC-008 the job is not bound by the where either, and the message never echoes the key', () => {
+        for (const operation of UPDATING) {
+          expect(() =>
+            call(operation, byKey('SCREEN', 1), { objectKey: 'anything' }, 'SERVICE'),
+          ).not.toThrow();
+        }
+        let message = '';
+        try {
+          call('update', byKey('SCREEN', 1), { objectKey: key });
+        } catch (error) {
+          message = (error as Error).message;
+        }
+        expect(message).toContain('MediaChunk.update');
+        expect(message).toContain('objectKey');
+        expect(message).not.toContain('orgs/');
+        expect(message).not.toContain(SID);
+      });
+    });
+
     it('TC-008 the job is not bound: a SERVICE scope writes a key that does not match its row', () => {
       expect(() =>
         asService(
@@ -1901,58 +2430,260 @@ describe('B2 round 4: sealed identity keys, Crockford ULIDs, the MediaStream enu
   });
 });
 
-describe('B3: consents are written once (FR-401, C-17; NFR-04, TC-008)', () => {
+describe('CS-4.4 consents: ONE create under the ConsentService grant (item 9, ADR 0013 PR #178; FR-401, C-17; NFR-04, TC-008)', () => {
+  const CTID = 'cccccccc-cccc-4ccc-8ccc-ccccccccccc1';
+  const OTHER_SESSION = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2';
+  const GRANT = grantOf('ConsentService (create)', [SID]);
   const signed = {
+    sessionId: SID,
+    consentTextId: CTID,
     signedName: 'Synthetic Name',
     signedAt: new Date(),
     ip: '203.0.113.7',
     userAgent: 'x',
   };
+  const declined = {
+    sessionId: SID,
+    consentTextId: CTID,
+    declinedAt: new Date(),
+    ip: '203.0.113.7',
+    userAgent: 'x',
+  };
+  const create = (data: Record<string, unknown>, grant: GrantView | undefined = GRANT) =>
+    asCandidate('Consent', 'create', { data }, grant);
 
-  it('TC-008 a candidate update carries signedAt = null AND declinedAt = null, on top of the session filter', () => {
-    for (const operation of UPDATES) {
-      const { args } = asCandidate('Consent', operation, writeArgs(operation, signed));
-      const where = args.where as { AND: unknown[] };
-      expect(where.AND).toContainEqual({ signedAt: null, declinedAt: null });
-      expect(where.AND).toContainEqual({ sessionId: SID });
+  it('TC-008 a sign and a decline are one create each: the keys are verified, nothing is stamped, there is no where', () => {
+    for (const row of [signed, declined]) {
+      const result = create(row);
+      expect(result.args.data).toEqual(row);
+      expect(result.args).not.toHaveProperty('where');
+      // The extension proves the consent text against the org's current one before the insert.
+      expect(result.consentTextIds).toEqual([CTID]);
+      expect(result.sessionQuestionIds).toEqual([]);
     }
   });
 
-  it('TC-008 a read is not narrowed by it, and neither is the job', () => {
-    for (const operation of READ_OPERATIONS.filter((op) => ROW_RETURNING_OPERATIONS.includes(op))) {
-      const { args } = asCandidate('Consent', operation, {
-        where: { id: 'x' },
-        select: { id: true, signedAt: true },
-      });
-      expect((args.where as { AND: unknown[] }).AND).not.toContainEqual({
-        signedAt: null,
-        declinedAt: null,
-      });
-    }
-    for (const operation of UPDATES) {
-      const { args } = asService('Consent', operation, writeArgs(operation, signed));
-      expect((args.where as { AND: unknown[] }).AND).not.toContainEqual({
-        signedAt: null,
-        declinedAt: null,
-      });
-    }
-  });
-
-  it('TC-008 the other models take no such filter', () => {
-    for (const [model, rule] of SESSION_RULES) {
-      expect({ model, updateFilter: rule.updateFilter }).toEqual({
-        model,
-        updateFilter: model === 'Consent' ? { signedAt: null, declinedAt: null } : undefined,
-      });
-    }
-  });
-
-  it('TC-008 a candidate cannot create the row (consentTextId is server-set), and cannot upsert it', () => {
-    for (const operation of [...CREATES, 'upsert']) {
+  it('TC-008 the row a create returns omits signedName, ip, userAgent and the PDF columns, and a select of them throws', () => {
+    const omit = create(signed).args.omit as Record<string, true>;
+    expect(Object.keys(omit).sort()).toEqual(
+      ['signedName', 'ip', 'userAgent', 'pdfKey', 'pdfGeneratedAt', 'copyEmailedAt'].sort(),
+    );
+    for (const column of ['signedName', 'ip', 'userAgent', 'pdfKey', 'pdfGeneratedAt']) {
       expect(() =>
-        asCandidate('Consent', operation, writeArgs(operation, { signedName: 'x' })),
-      ).toThrow(/cannot create this row: CS-4\.4 grants updates only/);
+        asCandidate('Consent', 'create', { data: signed, select: { [column]: true } }, GRANT),
+      ).toThrow(new RegExp(`the column ${column} is not available`));
     }
+    expect(
+      asCandidate(
+        'Consent',
+        'create',
+        { data: signed, select: { id: true, signedAt: true } },
+        GRANT,
+      ).args,
+    ).not.toHaveProperty('omit');
+  });
+
+  it('TC-008 outside the grant a consents create throws, in every operation; a grant of another model or another kind does not open it', () => {
+    for (const operation of [...CREATES, 'upsert']) {
+      for (const grant of [
+        undefined,
+        grantOf('KeyService'),
+        grantOf('ConsentService (consent text)', [OTHER]),
+      ]) {
+        expect(() =>
+          asCandidate('Consent', operation, writeArgs(operation, signed), grant),
+        ).toThrow(/creates this row only under its create grant/);
+      }
+    }
+  });
+
+  it('TC-008 under the grant only `create` is allowed: no batch, no upsert, no update, no delete', () => {
+    for (const operation of ['createMany', 'createManyAndReturn']) {
+      expect(() => asCandidate('Consent', operation, writeArgs(operation, signed), GRANT)).toThrow(
+        /takes only create/,
+      );
+    }
+    expect(() =>
+      asCandidate('Consent', 'upsert', writeArgs('upsert', signed, { ip: 'x' }), GRANT),
+    ).toThrow(/takes only create/);
+    for (const operation of UPDATES) {
+      for (const row of [signed, { ip: 'x' }, { signedAt: new Date() }, { pdfKey: 'x' }]) {
+        expect(() => asCandidate('Consent', operation, writeArgs(operation, row), GRANT)).toThrow(
+          /cannot update this row: CS-4\.4 grants create only/,
+        );
+      }
+    }
+    for (const operation of ['delete', 'deleteMany']) {
+      expect(() => asCandidate('Consent', operation, { where: { id: 'x' } }, GRANT)).toThrow(
+        /a candidate deletes nothing/,
+      );
+    }
+  });
+
+  it('TC-008 the update path of PR 1 is gone: no injected write-once where, on any operation', () => {
+    for (const [, rule] of SESSION_RULES) {
+      expect(rule).not.toHaveProperty('updateFilter');
+    }
+    const rule = CANDIDATE_MODELS.Consent;
+    expect(rule).toMatchObject({ kind: 'session' });
+    expect(rule).not.toHaveProperty('update');
+    expect(rule).not.toHaveProperty('create');
+  });
+
+  it('TC-008 sessionId and consentTextId are required: missing, null, a non-id and a non-string all throw', () => {
+    for (const key of ['sessionId', 'consentTextId']) {
+      for (const bad of [undefined, null, 7, 'not-an-id', { set: SID }, [SID]]) {
+        const row: Record<string, unknown> = { ...signed };
+        if (bad === undefined) delete row[key];
+        else row[key] = bad;
+        expect(() => create(row)).toThrow(new RegExp(`${key} is required in this create`));
+      }
+    }
+  });
+
+  it('TC-008 a wrong session id throws, and so does a session id that is not in the grant ids', () => {
+    expect(() => create({ ...signed, sessionId: OTHER_SESSION })).toThrow(
+      /sessionId in the data is not the session of this scope/,
+    );
+    expect(() => create(signed, grantOf('ConsentService (create)', [OTHER_SESSION]))).toThrow(
+      /sessionId in the data is not in the ids of the active grant/,
+    );
+    // Both ids: the session of the scope is among them. The grant never reaches another session.
+    expect(() =>
+      create(signed, grantOf('ConsentService (create)', [OTHER_SESSION, SID])),
+    ).not.toThrow();
+    // Upper case is the same id.
+    expect(() => create({ ...signed, sessionId: SID.toUpperCase() })).not.toThrow();
+  });
+
+  it('TC-008 a session id other than the scope own fails even when the grant lists it (the context decides)', () => {
+    expect(() =>
+      create(
+        { ...signed, sessionId: OTHER_SESSION },
+        grantOf('ConsentService (create)', [OTHER_SESSION]),
+      ),
+    ).toThrow(/is not the session of this scope/);
+  });
+
+  it('TC-008 the consent text id is reported lower-cased, for the extension to check against the current text', () => {
+    expect(create({ ...signed, consentTextId: CTID.toUpperCase() }).consentTextIds).toEqual([CTID]);
+  });
+
+  it('TC-008 exactly one of signedAt and declinedAt is set (the database CHECK), and signedName comes with signedAt', () => {
+    expect(() => create({ ...signed, declinedAt: new Date() })).toThrow(
+      /exactly one of signedAt and declinedAt/,
+    );
+    const neither: Record<string, unknown> = { ...signed };
+    delete neither.signedAt;
+    delete neither.signedName;
+    expect(() => create(neither)).toThrow(/exactly one of signedAt and declinedAt/);
+    expect(() => create({ ...signed, signedAt: null, declinedAt: null })).toThrow(
+      /exactly one of signedAt and declinedAt/,
+    );
+    // null counts as not set.
+    expect(() => create({ ...declined, signedAt: null })).not.toThrow();
+    expect(() => create({ ...signed, declinedAt: null })).not.toThrow();
+    for (const name of [undefined, null, '', '   ', 7]) {
+      expect(() => create({ ...signed, signedName: name })).toThrow(
+        /signedName is required with signedAt/,
+      );
+    }
+  });
+
+  it('TC-008 the written columns are signedName, signedAt, declinedAt, ip and userAgent, and nothing else', () => {
+    for (const column of [
+      'pdfKey',
+      'pdfGeneratedAt',
+      'copyEmailedAt',
+      'id',
+      'orgId',
+      'createdAt',
+      'status',
+      'session',
+      'consentText',
+    ]) {
+      expect(() => create({ ...signed, [column]: 'x' })).toThrow(OrgScopeViolationError);
+    }
+    // Every column of the model that is none of the seven is refused, a column set to undefined is not a write.
+    expect(() => create({ ...signed, pdfKey: undefined })).not.toThrow();
+  });
+
+  it('TC-008 the grant names the columns: a column the grant leaves out is refused, the keys included', () => {
+    const narrow = grantOf(
+      'ConsentService (create)',
+      [SID],
+      ['sessionId', 'consentTextId', 'declinedAt', 'userAgent'],
+    );
+    expect(() => create({ ...declined, ip: undefined }, narrow)).not.toThrow();
+    expect(() => create(declined, narrow)).toThrow(/ip cannot be written by a candidate create/);
+    expect(() => create(signed, narrow)).toThrow(OrgScopeViolationError);
+    const noKeys = grantOf('ConsentService (create)', [SID], ['declinedAt']);
+    expect(() => create(declined, noKeys)).toThrow(
+      /sessionId cannot be written by a candidate create/,
+    );
+  });
+
+  it('TC-008 a read of consents under the create grant is not filtered by its ids: the ids constrain the create only', () => {
+    for (const operation of READ_OPERATIONS) {
+      const { args } = asCandidate(
+        'Consent',
+        operation,
+        { where: { id: 'x' }, select: { id: true } },
+        GRANT,
+      );
+      expect(JSON.stringify(args)).not.toContain('"in"');
+    }
+  });
+
+  it('TC-008 a candidate reads id, consentTextId, signedAt and declinedAt of its row, and never the other columns (the grant changes nothing)', () => {
+    for (const grant of [undefined, GRANT]) {
+      expect(() =>
+        asCandidate(
+          'Consent',
+          'findFirst',
+          { select: { id: true, consentTextId: true, signedAt: true, declinedAt: true } },
+          grant,
+        ),
+      ).not.toThrow();
+      for (const column of [
+        'signedName',
+        'ip',
+        'userAgent',
+        'pdfKey',
+        'pdfGeneratedAt',
+        'copyEmailedAt',
+      ]) {
+        expect(() =>
+          asCandidate('Consent', 'findFirst', { select: { [column]: true } }, grant),
+        ).toThrow(new RegExp(`the column ${column} is not available`));
+        expect(() =>
+          asCandidate('Consent', 'count', { where: { [column]: { not: null } } }, grant),
+        ).toThrow(new RegExp(`the column ${column} is not available`));
+      }
+    }
+  });
+
+  it('TC-008 SERVICE writes a consent without a grant: the consent-PDF job writes pdfKey and the rest', () => {
+    expect(() =>
+      asService(
+        'Consent',
+        'update',
+        writeArgs('update', { pdfKey: 'x', pdfGeneratedAt: new Date() }),
+      ),
+    ).not.toThrow();
+    expect(asService('Consent', 'create', writeArgs('create', signed)).consentTextIds).toEqual([]);
+  });
+
+  it('TC-008 the error messages name the model, the operation and the column, never a value', () => {
+    let message = '';
+    try {
+      create({ ...signed, sessionId: OTHER_SESSION });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('Consent.create');
+    expect(message).not.toContain(OTHER_SESSION);
+    expect(message).not.toContain('Synthetic Name');
   });
 });
 
@@ -2050,7 +2781,8 @@ describe('nit 3: the scope tables are frozen at runtime (#126)', () => {
   it.each([
     ['SESSION_SCOPE', SESSION_SCOPE],
     ['CANDIDATE_MODELS', CANDIDATE_MODELS],
-    ['CANDIDATE_INTERIM_DENY', CANDIDATE_INTERIM_DENY],
+    ['CANDIDATE_READ', CANDIDATE_READ],
+    ['GRANT_SITES', GRANT_SITES],
     ['COMPOUND_UNIQUES', COMPOUND_UNIQUES],
     ['NEVER_WRITTEN_BY_CANDIDATE', NEVER_WRITTEN_BY_CANDIDATE],
     ['CANDIDATE_OBJECT_KEYS', CANDIDATE_OBJECT_KEYS],
@@ -2075,7 +2807,8 @@ describe('nit 3: the scope tables are frozen at runtime (#126)', () => {
     for (const [name, table] of Object.entries({
       SESSION_SCOPE,
       CANDIDATE_MODELS,
-      CANDIDATE_INTERIM_DENY,
+      CANDIDATE_READ,
+      GRANT_SITES,
       COMPOUND_UNIQUES,
       NEVER_WRITTEN_BY_CANDIDATE,
       CANDIDATE_OBJECT_KEYS,
@@ -2097,7 +2830,8 @@ describe('nit 3: the scope tables are frozen at runtime (#126)', () => {
     const dump = (): string =>
       JSON.stringify([
         CANDIDATE_MODELS,
-        CANDIDATE_INTERIM_DENY,
+        CANDIDATE_READ,
+        GRANT_SITES,
         COMPOUND_UNIQUES,
         NEVER_WRITTEN_BY_CANDIDATE,
       ]);
@@ -2114,7 +2848,7 @@ describe('nit 3: the scope tables are frozen at runtime (#126)', () => {
       delete (CANDIDATE_MODELS as unknown as Record<string, unknown>).Session;
     }).toThrow(TypeError);
     expect(() =>
-      (CANDIDATE_INTERIM_DENY as unknown as Record<string, { read: string[] }>).Session?.read.pop(),
+      (CANDIDATE_READ as unknown as Record<string, { read: string[] }>).Session?.read.pop(),
     ).toThrow(TypeError);
     expect(() => (NEVER_WRITTEN_BY_CANDIDATE as string[]).pop()).toThrow(TypeError);
     expect(() =>

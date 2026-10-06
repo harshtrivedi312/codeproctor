@@ -23,6 +23,8 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { Injectable } from '@nestjs/common';
 import type { UserRole } from '../generated/prisma/enums.js';
 import { OrgContextMissingError, OrgScopeViolationError } from './errors';
+import { GRANT_SITES } from './session-scope-map';
+import type { GrantSite, GrantView } from './session-scope-map';
 
 /**
  * Who is asking, inside the context. The interceptor builds it from BE-02's `AuthUser`
@@ -91,11 +93,38 @@ export type OrgScope =
     }
   | { readonly kind: 'system'; readonly reason: SystemScopeReason };
 
+/**
+ * What `withGrant` asks for (ADR 0013 CS-4.4, ADR 0006 section 8.5). `model` is the Prisma model name
+ * (`Session`, not `sessions`), `columns` are Prisma field names (`hmacKeyEnc`), and `ids` are the primary
+ * keys of the rows the grant reaches. All three are mandatory, and an empty `ids` throws. `ids` are never
+ * request input: they are read in the same scope, or resolved within the session (CS-2).
+ */
+export interface GrantRequest {
+  readonly model: string;
+  readonly columns: readonly string[];
+  readonly ids: readonly (string | bigint | number)[];
+}
+
+/**
+ * An active or finished grant, as the extension sees it (frozen). `active` is true while the callback of
+ * `withGrant` is running and false from the moment it settles: the extension refuses every query that runs
+ * under an inactive grant, and AsyncLocalStorage keeps the store of async work that `fn` started and did
+ * not await (a promise, `setTimeout`, an emitter or a stream callback) alive after `fn` settled, so this
+ * flag is what ends the grant. It cannot be set from outside: it reads a module-private set.
+ */
+export interface Grant extends GrantView {
+  /** The CS-4.4 grant site the columns belong to (for messages and the call-site test). */
+  readonly site: string;
+  readonly active: boolean;
+}
+
 /** What AsyncLocalStorage holds for one unit of work. */
 export interface ScopeStore {
   readonly scope?: OrgScope;
   /** Set only inside runRawSql: the written reason raw SQL is allowed. */
   readonly rawSqlReason?: string;
+  /** Set only inside withGrant: the one grant of this unit of work (grants do not nest). */
+  readonly grant?: Grant;
 }
 
 /** What the extension needs from the context. OrgContextService implements it. */
@@ -189,6 +218,82 @@ export function claimCandidateFactsSetter(): (facts: CandidateFacts) => void {
   };
 }
 
+/**
+ * The grants that are still running. Module-private on purpose: `Grant.active` reads it, and only
+ * `withGrant` removes a grant from it, so nothing that holds a grant (through `current()`) can switch one
+ * on again.
+ */
+const liveGrants = new WeakSet<object>();
+
+/** The ids of a grant, normalised to what the filter compares: lower-case uuids, or bigint. */
+function grantIds(site: GrantSite, ids: unknown): (string | bigint)[] {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw new OrgScopeViolationError(
+      `withGrant (${site.name}) needs ids, a non-empty list: ids are mandatory and an empty list throws ` +
+        '(ADR 0013 CS-4.4).',
+    );
+  }
+  const out = new Set<string | bigint>();
+  for (const id of ids as unknown[]) {
+    if (site.idKind === 'bigint') {
+      const big =
+        typeof id === 'bigint'
+          ? id
+          : typeof id === 'number' && Number.isSafeInteger(id)
+            ? BigInt(id)
+            : undefined;
+      if (big === undefined || big <= 0n) {
+        throw new OrgScopeViolationError(
+          `withGrant (${site.name}) needs ids that are positive integers (a bigint primary key).`,
+        );
+      }
+      out.add(big);
+    } else {
+      if (typeof id !== 'string' || !GUID.test(id)) {
+        throw new OrgScopeViolationError(`withGrant (${site.name}) needs ids in uuid form.`);
+      }
+      out.add(id.toLowerCase());
+    }
+  }
+  return [...out];
+}
+
+/** The one grant site of the model that names every requested column, or a throw. */
+function grantSiteOf(request: unknown): { site: GrantSite; columns: string[] } {
+  if (typeof request !== 'object' || request === null) {
+    throw new OrgScopeViolationError('withGrant needs { model, columns, ids }.');
+  }
+  const { model, columns } = request as Partial<GrantRequest>;
+  if (typeof model !== 'string' || !GRANT_SITES.some((site) => site.model === model)) {
+    throw new OrgScopeViolationError(
+      'withGrant: this model has no grant site in ADR 0013 CS-4.4 (the explicit-only and grant-only ' +
+        'models only).',
+    );
+  }
+  if (
+    !Array.isArray(columns) ||
+    columns.length === 0 ||
+    !columns.every((column): column is string => typeof column === 'string') ||
+    new Set(columns).size !== columns.length
+  ) {
+    throw new OrgScopeViolationError(
+      `withGrant (${model}) needs columns: a non-empty list of distinct column names.`,
+    );
+  }
+  // A grant names the columns of ONE site, so it cannot join the columns of two services.
+  const site = GRANT_SITES.find(
+    (candidate) =>
+      candidate.model === model && columns.every((column) => candidate.columns.includes(column)),
+  );
+  if (site === undefined) {
+    throw new OrgScopeViolationError(
+      `withGrant (${model}): these columns are not those of one grant site of ADR 0013 CS-4.4. A grant ` +
+        'unlocks a subset of ONE site columns, never a column outside the sites or columns of two sites.',
+    );
+  }
+  return { site, columns: [...columns] };
+}
+
 function isEmptyStore(store: ScopeStore | undefined): boolean {
   return store === undefined || Object.values(store).every((value) => value === undefined);
 }
@@ -228,10 +333,11 @@ export class OrgContextService implements ScopeSource {
    * the CANDIDATE model allowlist (CS-4.3), and may not use relations (CS-4.5). Raw SQL is refused.
    * Entering sends no SQL. Both ids are lower-cased on entry.
    *
-   * WARNING (interim): column safety in this scope is the fixed deny list CANDIDATE_INTERIM_DENY
-   * (candidate-interim.ts) plus the rule that every row-returning call names its `select`. It is NOT
-   * the CS-4.4 column allowlist, which is ADR 0013 CS-4 PR 2. Until PR 2 merges, a route must not rely
-   * on this scope to keep a column from a candidate that the deny list does not name.
+   * Column safety is the CS-4.4 allowlist (ADR 0013 CS-4 PR 2): a read names only readable columns, a
+   * call that returns rows and names no `select` gets an `omit` of everything that is not in the default
+   * select, the explicit-only columns need a grant (`withGrant`), and a write carries only the columns of
+   * the model's write list plus the ones a grant unlocks (candidate-interim.ts, session-scope-map.ts).
+   * Until the guard calls the candidate-facts setter, every query in this scope throws.
    */
   runAsCandidate<T>(orgId: string, sessionId: string, fn: () => T): Scoped<T> {
     return this.#enterSession('CANDIDATE', 'runAsCandidate', orgId, sessionId, fn);
@@ -265,6 +371,70 @@ export class OrgContextService implements ScopeSource {
       );
     }
     return this.#runWith({}, fn);
+  }
+
+  /**
+   * Run `fn` under a grant (ADR 0013 CS-4.4, ADR 0006 section 8.5): it unlocks exactly `columns` on exactly
+   * `model`, for rows whose id is in `ids`, and nothing else. Private to the services of the eleven CS-4.4
+   * grant sites; FU-DB-67 pins the call sites (FU-DB-189). All three fields are mandatory, and an empty
+   * `ids` throws. `ids` are never request input.
+   *
+   * What the extension does with it, in a CANDIDATE scope:
+   *   - `columns` are readable (an explicit-only column), or writable (a column of a write that CS-4.4 opens
+   *     only under a grant: `sessions.status`, `pauseReasons`, `submittedAt`, `deviceInfo`), on that model
+   *     only. A model that is readable only under a grant (`consent_texts`, `test_questions`) is readable
+   *     through them. The one candidate create of `consents` needs its grant, and its `sessionId` must be
+   *     one of the ids.
+   *   - `id IN ids` is ANDed into every query on that model (a create grant has no where, so the ids
+   *     constrain the checked session key instead). The model allowlist, the row filters, the session filter
+   *     and the org filter are never widened: a grant of candidate A cannot reach candidate B's row.
+   * It needs an org scope (none, or a system scope, throws), does not nest (a second grant inside the first
+   * throws, also inside a callback that outlived it), and ends when `fn` settles: the `active` flag is
+   * cleared in a `finally`, and any query under the inactive grant throws, so a promise or a timer that
+   * `fn` started and did not await cannot use it later. In another actor's scope (staff, plain org,
+   * SERVICE) there is no column limit, so the grant is validated and carries no filter.
+   */
+  withGrant<T>(request: GrantRequest, fn: () => T): Scoped<T> {
+    const current = storage.getStore();
+    const scope = current?.scope;
+    if (current === undefined || scope === undefined) throw new OrgContextMissingError('withGrant');
+    if (scope.kind !== 'org') {
+      throw new OrgScopeViolationError(
+        'withGrant needs an org scope: a grant exists only inside a scope that has an org.',
+      );
+    }
+    if (current.grant !== undefined) {
+      throw new OrgScopeViolationError(
+        'A grant is already set for this unit of work (it may have ended): grants do not nest.',
+      );
+    }
+    const { site, columns } = grantSiteOf(request);
+    const ids = grantIds(site, (request as { ids?: unknown }).ids);
+    const grant: Grant = Object.freeze({
+      model: site.model,
+      site: site.name,
+      mode: site.mode,
+      columns: Object.freeze(columns),
+      ids: Object.freeze(ids),
+      get active(): boolean {
+        return liveGrants.has(grant);
+      },
+    });
+    liveGrants.add(grant);
+    let result: Scoped<T>;
+    try {
+      result = this.#runWith({ ...current, grant }, fn);
+    } catch (error) {
+      liveGrants.delete(grant);
+      throw error;
+    }
+    if (isThenable(result)) {
+      return Promise.resolve(result).finally(() => {
+        liveGrants.delete(grant);
+      }) as Scoped<T>;
+    }
+    liveGrants.delete(grant);
+    return result;
   }
 
   /**

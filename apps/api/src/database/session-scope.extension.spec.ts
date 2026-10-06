@@ -114,7 +114,7 @@ describe('session scopes through the real client, without a database (ADR 0013 C
       }
     });
 
-    it('TC-008 the two grant-only models throw for every operation until grants exist (ADR 0013 CS-4 PR 2)', async () => {
+    it('TC-008 the two grant-only models throw for every operation without a grant of their own (ADR 0013 CS-4.3)', async () => {
       for (const model of ['ConsentText', 'TestQuestion']) {
         for (const operation of SCOPED_OPERATIONS) {
           await expect(
@@ -402,12 +402,17 @@ describe('session scopes through the real client, without a database (ADR 0013 C
       }
     });
 
-    it('TC-008 the other models need no fact', async () => {
+    it('TC-008 every other model throws while the facts are unset too (CS-4.4: any query on any model), and reads once they are set', async () => {
       for (const model of ['Organization', 'TestSection', 'Question', 'Session']) {
-        const error = await refusal(
+        await expect(
           orgContext.runAsCandidate(
             ORG,
             SID,
+            () => delegate(client, model).findMany?.(selectOf(model)) as Promise<unknown>,
+          ),
+        ).rejects.toThrow(/candidate facts are not set/);
+        const error = await refusal(
+          asCandidate(
             () => delegate(client, model).findMany?.(selectOf(model)) as Promise<unknown>,
           ),
         );
