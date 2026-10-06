@@ -2032,7 +2032,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         const epoch = (await sessionRow(inv.sessionId)).authEpoch;
         const spy = jest.spyOn(otp, 'verify').mockImplementationOnce(async () => {
           await owner.session.update({ where: { id: inv.sessionId }, data: { status: endStatus } });
-          return { kind: 'ok', hash: 'x' };
+          return { kind: 'ok', hash: 'x', codeLeftMs: 1000, attempts: 1, attemptsLeftMs: 1000 };
         });
         const res = await post('/start', { invitationToken: inv.token, otp: '123456' });
         spy.mockRestore();
@@ -2658,23 +2658,47 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       Number((await redis.get(`rl:${route}:${sid}`)) ?? 0);
     afterEach(() => jest.restoreAllMocks());
 
-    it('DL-37, FR-609: a busy heartbeat write gives the rate slot back; the retry works; another error keeps the slot', async () => {
+    it('DL-37, FR-609: a busy heartbeat write keeps its slot (the next beat is the retry); the retry works', async () => {
       const inv = await invite(liveSession());
       const spy = (jest.spyOn(scope, 'asCandidate') as jest.SpyInstance).mockRejectedValueOnce(
         busy(),
       );
       const first = await authed('post', '/heartbeat', tokenOf(inv));
+      // TODO(DL-37): this is 503 with Retry-After once Backend A's ProblemFilter mapping lands; the
+      // thrown error is busy-class (isBusyLockError) and the answer is a 5xx, never 409 or 200.
       expect(first.status).toBeGreaterThanOrEqual(500);
-      expect(await slot('heartbeat', inv.sessionId)).toBe(0);
+      expect(await slot('heartbeat', inv.sessionId)).toBe(1);
       spy.mockRestore();
       await authed('post', '/heartbeat', tokenOf(inv)).expect(200);
-      expect(await slot('heartbeat', inv.sessionId)).toBe(1);
-      // A different failure is not a retry case: its slot stays used.
-      (jest.spyOn(scope, 'asCandidate') as jest.SpyInstance).mockRejectedValueOnce(
-        new Error('other'),
-      );
-      expect((await authed('post', '/heartbeat', tokenOf(inv))).status).toBeGreaterThanOrEqual(500);
       expect(await slot('heartbeat', inv.sessionId)).toBe(2);
+    });
+
+    it('DL-37: slots given back are capped per window (2), never below zero, and a release after the window ended takes nothing off the new window', async () => {
+      const { SessionRateLimiter: Limiter } =
+        jest.requireActual<typeof import('./session-rate-limiter')>('./session-rate-limiter');
+      const limiter = new Limiter(redis);
+      const sid = randomUUID();
+      const failBusy = (): Promise<never> => Promise.reject(busy());
+      for (let i = 0; i < 4; i++)
+        await limiter.guarded('cap', sid, 100, 60, failBusy).catch(() => undefined);
+      // 4 hits, 4 busy failures, but only 2 releases in the window.
+      expect(await slot('cap', sid)).toBe(2);
+      // Other errors never release.
+      await limiter
+        .guarded('cap2', sid, 100, 60, () => Promise.reject(new Error('x')))
+        .catch(() => undefined);
+      expect(await slot('cap2', sid)).toBe(1);
+      // A release that lands after the window rolled over is refused.
+      const sid2 = randomUUID();
+      await limiter
+        .guarded('roll', sid2, 100, 1, async () => {
+          await new Promise((r) => setTimeout(r, 1300));
+          // The first window is over; a new request opens the next one.
+          await limiter.hit('roll', sid2, 100, 1);
+          throw busy();
+        })
+        .catch(() => undefined);
+      expect(await slot('roll', sid2)).toBe(1);
     });
 
     it('DL-37, FR-401: a busy consent sign or decline gives the slot back, leaves the session OPENED with no consent row, and the retry succeeds', async () => {
@@ -2719,39 +2743,137 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       await authed('post', '/test/start', tokenOf(inv)).expect(200);
     });
 
-    it('DL-37, FR-106, TC-007: a busy write after a correct code puts the code and its guess back; the same code works on the retry and the epoch moved once', async () => {
+    it('DL-37, FR-106: a busy write after a correct code puts the code back with its life and counter; the same code works on the retry and the epoch moved once', async () => {
       const inv = await invite();
       const code = await otpFor(inv);
       const spy = jest.spyOn(states, 'transition').mockRejectedValueOnce(busy());
       const first = await post('/start', { invitationToken: inv.token, otp: code });
+      // TODO(DL-37): 503 with Retry-After once Backend A's ProblemFilter mapping lands.
       expect(first.status).toBeGreaterThanOrEqual(500);
-      // The code is back (hashed, with a TTL), no wrong-guess is counted, and nothing was issued.
       expect(await redis.exists(`otp:${inv.invitationId}`)).toBe(1);
-      expect(Number((await redis.get(`otp-attempts:${inv.invitationId}`)) ?? 0)).toBe(0);
-      const row = await sessionRow(inv.sessionId);
-      expect(row).toMatchObject({ status: 'INVITED', authEpoch: 0 });
+      const left = await redis.pttl(`otp:${inv.invitationId}`);
+      expect(left).toBeGreaterThan(0);
+      expect(left).toBeLessThanOrEqual(600_000);
+      // This request's own guess stays counted (not forgiven).
+      expect(Number(await redis.get(`otp-attempts:${inv.invitationId}`))).toBe(1);
+      expect(await sessionRow(inv.sessionId)).toMatchObject({ status: 'INVITED', authEpoch: 0 });
       spy.mockRestore();
-      const retry = await post('/start', { invitationToken: inv.token, otp: code });
-      expect(retry.status).toBe(200);
+      expect((await post('/start', { invitationToken: inv.token, otp: code })).status).toBe(200);
       expect((await sessionRow(inv.sessionId)).authEpoch).toBe(1);
-      // And the code is single use again after the success.
       expect((await post('/start', { invitationToken: inv.token, otp: code })).status).toBe(400);
     });
 
-    it('DL-37, TC-097: OtpService.restore during a test clears the cooldown the spent guess set, and never replaces a newer code', async () => {
+    it('DL-37: a non-busy error after a correct code never puts it back', async () => {
+      const inv = await invite();
+      const code = await otpFor(inv);
+      jest.spyOn(states, 'transition').mockRejectedValueOnce(new Error('other'));
+      expect(
+        (await post('/start', { invitationToken: inv.token, otp: code })).status,
+      ).toBeGreaterThanOrEqual(500);
+      expect(await redis.exists(`otp:${inv.invitationId}`)).toBe(0);
+      expect((await post('/start', { invitationToken: inv.token, otp: code })).status).toBe(400);
+    });
+
+    it('DL-37, TC-007: restore keeps the wrong-guess counter honest: 2 wrong guesses and the busy request own guess leave 3, with the remaining life of the counter', async () => {
+      const inv = await invite();
+      const code = await otpFor(inv);
+      const wrong = code === '000000' ? '000001' : '000000';
+      for (let i = 0; i < 2; i++)
+        expect((await otp.verify(inv.invitationId, wrong, 'PRE_START')).kind).toBe('wrong');
+      const attemptsLeft = await redis.pttl(`otp-attempts:${inv.invitationId}`);
+      const ok = await otp.verify(inv.invitationId, code, 'PRE_START');
+      expect(ok).toMatchObject({ kind: 'ok', attempts: 3 });
+      // Spent: the counter is gone with the code.
+      expect(await redis.exists(`otp-attempts:${inv.invitationId}`)).toBe(0);
+      expect(await otp.restore(inv.invitationId, ok as never, 'PRE_START')).toBe(true);
+      expect(Number(await redis.get(`otp-attempts:${inv.invitationId}`))).toBe(3);
+      const counterLeft = await redis.pttl(`otp-attempts:${inv.invitationId}`);
+      expect(counterLeft).toBeGreaterThan(0);
+      expect(counterLeft).toBeLessThanOrEqual(attemptsLeft);
+      // Two more wrong guesses reach the fifth: the leaked-link attacker got no forgiveness.
+      expect((await otp.verify(inv.invitationId, wrong, 'PRE_START')).kind).toBe('wrong');
+      const fifth = await otp.verify(inv.invitationId, wrong, 'PRE_START');
+      expect(fifth).toMatchObject({ kind: 'wrong', blockedNow: true });
+    });
+
+    it('DL-37: the restored code has the life it had left, and a code that would have expired is not restored', async () => {
+      const inv = await invite();
+      const code = await otpFor(inv);
+      await redis.pexpire(`otp:${inv.invitationId}`, 100_000);
+      const ok = await otp.verify(inv.invitationId, code, 'PRE_START');
+      expect(ok.kind).toBe('ok');
+      const state = ok as never as { codeLeftMs: number };
+      expect(state.codeLeftMs).toBeGreaterThan(90_000);
+      expect(state.codeLeftMs).toBeLessThanOrEqual(100_000);
+      expect(await otp.restore(inv.invitationId, ok as never, 'PRE_START')).toBe(true);
+      const left = await redis.pttl(`otp:${inv.invitationId}`);
+      expect(left).toBeGreaterThan(80_000);
+      expect(left).toBeLessThanOrEqual(100_000);
+      // Spent again, with no life left: nothing comes back.
+      await redis.del(`otp:${inv.invitationId}`);
+      const inv2 = await invite();
+      const code2 = await otpFor(inv2);
+      const ok2 = await otp.verify(inv2.invitationId, code2, 'PRE_START');
+      expect(
+        await otp.restore(
+          inv2.invitationId,
+          { ...(ok2 as never as object), codeLeftMs: 0 } as never,
+          'PRE_START',
+        ),
+      ).toBe(false);
+      expect(await redis.exists(`otp:${inv2.invitationId}`)).toBe(0);
+    });
+
+    it('DL-37, TC-097: restore never touches the cooldown: one set by another request meanwhile stays, and the code comes back', async () => {
       const inv = await invite(liveSession());
       const code = await otpFor(inv);
-      const verified = await otp.verify(inv.invitationId, code, 'LIVE');
-      expect(verified.kind).toBe('ok');
+      const ok = await otp.verify(inv.invitationId, code, 'LIVE');
+      expect(ok.kind).toBe('ok');
       expect(await redis.exists(`otp-cooldown:${inv.invitationId}`)).toBe(0);
+      await redis.set(`otp-cooldown:${inv.invitationId}`, '1', 'PX', 20_000);
+      expect(await otp.restore(inv.invitationId, ok as never, 'LIVE')).toBe(true);
+      expect(await redis.exists(`otp:${inv.invitationId}`)).toBe(1);
+      const cooldown = await redis.pttl(`otp-cooldown:${inv.invitationId}`);
+      expect(cooldown).toBeGreaterThan(0);
+      expect(cooldown).toBeLessThanOrEqual(20_000);
+    });
+
+    it('DL-37: an older code never returns after a newer one was issued or used, a second restore does nothing, and a blocked link gets nothing back', async () => {
+      const inv = await invite();
+      const code1 = await otpFor(inv);
+      const ok1 = (await otp.verify(inv.invitationId, code1, 'PRE_START')) as never;
+      // A newer code is issued: the marker is gone, the old code cannot return.
+      const code2 = await otpFor(inv);
+      expect(await otp.restore(inv.invitationId, ok1, 'PRE_START')).toBe(false);
+      const hash2 = await redis.get(`otp:${inv.invitationId}`);
+      expect(hash2).not.toBeNull();
+      // The newer code is used: the marker names the newer one, the older still cannot return.
+      const ok2 = (await otp.verify(inv.invitationId, code2, 'PRE_START')) as never;
+      expect(await otp.restore(inv.invitationId, ok1, 'PRE_START')).toBe(false);
       expect(await redis.exists(`otp:${inv.invitationId}`)).toBe(0);
-      const hash = (verified as { hash: string }).hash;
-      await otp.restore(inv.invitationId, hash, 'LIVE');
-      expect(await redis.get(`otp:${inv.invitationId}`)).toBe(hash);
-      // A newer code is not overwritten by a late restore.
-      await redis.set(`otp:${inv.invitationId}`, 'newer', 'EX', 600);
-      await otp.restore(inv.invitationId, hash, 'LIVE');
-      expect(await redis.get(`otp:${inv.invitationId}`)).toBe('newer');
+      // The newer code can come back once, not twice.
+      expect(await otp.restore(inv.invitationId, ok2, 'PRE_START')).toBe(true);
+      await redis.del(`otp:${inv.invitationId}`);
+      expect(await otp.restore(inv.invitationId, ok2, 'PRE_START')).toBe(false);
+      // A wrong guess leaves no marker, so nothing can be restored from it.
+      const other = await invite();
+      const c = await otpFor(other);
+      await otp.verify(other.invitationId, c === '000000' ? '000001' : '000000', 'PRE_START');
+      expect(await redis.exists(`otp-spent:${other.invitationId}`)).toBe(0);
+      expect(
+        await otp.restore(
+          other.invitationId,
+          { ...(ok2 as object), hash: 'x' } as never,
+          'PRE_START',
+        ),
+      ).toBe(false);
+      // A blocked link: the code does not come back.
+      const blocked = await invite();
+      const cb = await otpFor(blocked);
+      const okb = (await otp.verify(blocked.invitationId, cb, 'PRE_START')) as never;
+      await redis.set(`otp-block:${blocked.invitationId}`, '1', 'EX', 1800);
+      expect(await otp.restore(blocked.invitationId, okb, 'PRE_START')).toBe(false);
+      expect(await redis.exists(`otp:${blocked.invitationId}`)).toBe(0);
     });
   });
 

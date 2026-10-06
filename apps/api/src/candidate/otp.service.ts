@@ -26,6 +26,8 @@ export const OTP_MAX_ATTEMPTS = 5;
 export const OTP_BLOCK_SECONDS = 1800;
 export const OTP_COOLDOWN_SECONDS = 30;
 export const OTP_SEND_COOLDOWN_SECONDS = 30;
+/** How long a spent code stays restorable. */
+const SPENT_MARKER_MS = 60_000;
 
 export type OtpPhase = 'PRE_START' | 'LIVE';
 
@@ -34,16 +36,26 @@ export type OtpIssue =
   | { readonly kind: 'blocked'; readonly retryAfterSeconds: number }
   | { readonly kind: 'wait'; readonly retryAfterSeconds: number };
 
+/** What verify() saw before it spent the code: enough to put the code back exactly (DL-37). */
+export interface OtpRestoreState {
+  readonly hash: string;
+  /** The code's remaining life in ms when it was spent. */
+  readonly codeLeftMs: number;
+  /** The wrong-guess count at that moment, this guess included (it is not forgiven). */
+  readonly attempts: number;
+  readonly attemptsLeftMs: number;
+}
+
 export type OtpVerification =
   /** `hash` lets the caller put the code back (restore) when a later write is busy (DL-37). */
-  | { readonly kind: 'ok'; readonly hash: string }
+  | ({ readonly kind: 'ok' } & OtpRestoreState)
   /** `blockedNow`: this guess was the one that blocked the link (notify the recruiter once). */
   | { readonly kind: 'wrong'; readonly blockedNow: boolean }
   | { readonly kind: 'blocked'; readonly retryAfterSeconds: number; readonly blockedNow: boolean }
   | { readonly kind: 'cooldown'; readonly retryAfterSeconds: number }
   | { readonly kind: 'none' };
 
-// KEYS: 1 otp, 2 send cooldown, 3 block. ARGV: 1 hash, 2 otp ttl, 3 send cooldown s, 4 phase.
+// KEYS: 1 otp, 2 send cooldown, 3 block, 4 spent marker. ARGV: 1 hash, 2 otp ttl, 3 send cooldown s, 4 phase.
 const ISSUE = `
 if ARGV[4] == 'PRE_START' then
   local blocked = redis.call('PTTL', KEYS[3])
@@ -53,6 +65,8 @@ local wait = redis.call('PTTL', KEYS[2])
 if wait > 0 then return {'wait', wait} end
 redis.call('SET', KEYS[2], '1', 'EX', ARGV[3])
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+-- A newer code makes any older spent code unrestorable.
+redis.call('DEL', KEYS[4])
 return {'issued', 0}
 `;
 
@@ -84,23 +98,40 @@ end
 return {'ok', hash, 0}
 `;
 
-// KEYS: 1 otp, 2 attempts, 3 cooldown. ARGV: 1 the hash that was compared.
+// KEYS: 1 otp, 2 attempts, 3 cooldown, 4 spent marker. ARGV: 1 the hash that was compared,
+// 2 marker life in ms. Returns {1, remaining code life ms, wrong-guess count, its remaining ms}: the
+// state the caller needs to put everything back if a later write is busy (DL-37), or {0, 0, 0, 0}.
 const CONSUME = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then
+  local otpLeft = redis.call('PTTL', KEYS[1])
+  local attempts = tonumber(redis.call('GET', KEYS[2])) or 0
+  local attemptsLeft = redis.call('PTTL', KEYS[2])
   redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])
-  return 1
+  redis.call('SET', KEYS[4], ARGV[1], 'PX', ARGV[2])
+  return {1, otpLeft, attempts, attemptsLeft}
 end
-return 0
+return {0, 0, 0, 0}
 `;
 
-// KEYS: 1 otp, 2 attempts, 3 cooldown. ARGV: 1 hash, 2 otp ttl, 3 phase.
+// KEYS: 1 otp, 2 attempts, 3 spent marker, 4 block.
+// ARGV: 1 hash, 2 code life left ms, 3 wrong-guess count, 4 its life left ms, 5 phase.
+// Restores only while the spent marker still names THIS code (so an older code never returns after
+// a newer one was issued or used), only with the life it had left, and never touches the cooldown.
 const RESTORE = `
-redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2], 'NX')
-if ARGV[3] == 'PRE_START' then
-  local n = tonumber(redis.call('GET', KEYS[2]))
-  if n and n > 0 then redis.call('DECR', KEYS[2]) end
-else
-  redis.call('DEL', KEYS[3])
+if redis.call('GET', KEYS[3]) ~= ARGV[1] then return 0 end
+redis.call('DEL', KEYS[3])
+if tonumber(ARGV[2]) <= 0 then return 0 end
+if redis.call('PTTL', KEYS[4]) > 0 then return 0 end
+if not redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2], 'NX') then return 0 end
+if ARGV[5] == 'PRE_START' and tonumber(ARGV[3]) > 0 then
+  local cur = tonumber(redis.call('GET', KEYS[2])) or 0
+  if cur < tonumber(ARGV[3]) then
+    if cur > 0 then
+      redis.call('SET', KEYS[2], ARGV[3], 'KEEPTTL')
+    else
+      redis.call('SET', KEYS[2], ARGV[3], 'PX', math.max(tonumber(ARGV[4]), 1000))
+    end
+  end
 end
 return 1
 `;
@@ -151,10 +182,11 @@ export class OtpService {
     await ensureConnected(this.redis);
     const [kind, value] = (await this.redis.eval(
       ISSUE,
-      3,
+      4,
       OtpService.key('otp', invitationId),
       OtpService.key('otp-send', invitationId),
       OtpService.key('otp-block', invitationId),
+      OtpService.key('otp-spent', invitationId),
       this.hashCode(invitationId, code),
       String(OTP_TTL_SECONDS),
       String(OTP_SEND_COOLDOWN_SECONDS),
@@ -175,23 +207,30 @@ export class OtpService {
   }
 
   /**
-   * Puts a code that verify() spent back, and gives back the guess it reserved: for a request whose
-   * later database write was busy (503, the client retries with the same code, DL-37). Only if no
-   * newer code replaced it (NX); before the test it takes one off the wrong-guess counter, during a
-   * test it clears the 30 s cooldown.
+   * Puts a code that verify() spent back, for a request whose later database write was busy (503;
+   * the client retries with the same code, DL-37). It restores the exact state verify() saw: the
+   * code with the life it had left, and before the test the wrong-guess count with its life (this
+   * guess included, so nothing is forgiven). It never touches the cooldown, never overwrites a
+   * newer code or a larger counter, does nothing when the code would have expired or the link is
+   * blocked, and works only while the spent marker still names this code (an older code never
+   * returns after a newer one was issued). Returns whether the code came back.
    */
-  async restore(invitationId: string, hash: string, phase: OtpPhase): Promise<void> {
+  async restore(invitationId: string, state: OtpRestoreState, phase: OtpPhase): Promise<boolean> {
     await ensureConnected(this.redis);
-    await this.redis.eval(
+    const restored = (await this.redis.eval(
       RESTORE,
-      3,
+      4,
       OtpService.key('otp', invitationId),
       OtpService.key('otp-attempts', invitationId),
-      OtpService.key('otp-cooldown', invitationId),
-      hash,
-      String(OTP_TTL_SECONDS),
+      OtpService.key('otp-spent', invitationId),
+      OtpService.key('otp-block', invitationId),
+      state.hash,
+      String(state.codeLeftMs),
+      String(state.attempts),
+      String(state.attemptsLeftMs),
       phase,
-    );
+    )) as number;
+    return restored === 1;
   }
 
   /** Seconds the link stays blocked before the test starts, or 0. */
@@ -231,17 +270,21 @@ export class OtpService {
     const candidate = Buffer.from(expected, 'utf8');
     const matches = stored.length === candidate.length && timingSafeEqual(stored, candidate);
     if (matches) {
-      const spent = (await this.redis.eval(
+      const [spent, codeLeftMs, attempts, attemptsLeftMs] = (await this.redis.eval(
         CONSUME,
-        3,
+        4,
         keys[0] as string,
         keys[1] as string,
         keys[3] as string,
+        OtpService.key('otp-spent', invitationId),
         String(value),
-      )) as number;
+        String(SPENT_MARKER_MS),
+      )) as [number, number, number, number];
       // 0: a concurrent request spent this code first (or a block removed it). Only one wins, and
       // the loser is not a wrong guess: it is told there is no code waiting, and nothing is logged.
-      return spent === 1 ? { kind: 'ok', hash: String(value) } : { kind: 'none' };
+      return spent === 1
+        ? { kind: 'ok', hash: String(value), codeLeftMs, attempts, attemptsLeftMs }
+        : { kind: 'none' };
     }
 
     const attempt = Number(extra);

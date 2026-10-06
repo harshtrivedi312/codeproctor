@@ -177,13 +177,9 @@ export class CandidateSessionController {
     @Candidate() ctx: CandidateContext,
     @Body() dto: HeartbeatDto,
   ): Promise<HeartbeatResultDto> {
-    const view = await this.limiter.guarded(
-      'heartbeat',
-      ctx.sessionId,
-      HEARTBEAT_LIMIT_PER_MINUTE,
-      60,
-      () => this.session.heartbeat(ctx, dto),
-    );
+    // No slot is given back on a busy error: the next beat is the retry (DL-37).
+    await this.limiter.hit('heartbeat', ctx.sessionId, HEARTBEAT_LIMIT_PER_MINUTE, 60);
+    const view = await this.session.heartbeat(ctx, dto);
     return {
       ...stateDto(view),
       ...(view.sessionToken !== undefined

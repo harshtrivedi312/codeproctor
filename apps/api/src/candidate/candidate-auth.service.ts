@@ -321,7 +321,7 @@ export class CandidateAuthService {
       // The code is spent. If a write below is busy (lock timeout, deadlock), the client retries
       // with the same code (503), so the code and the guess it used are put back first (DL-37).
       const sessionId = link.session.id;
-      let updated: { authEpoch: number };
+      let updated: { authEpoch: number; status: SessionStatus };
       try {
         // Read the status again: it may have moved since the first read (the test was submitted,
         // expired or declined on another device), and no token is issued for that.
@@ -345,18 +345,20 @@ export class CandidateAuthService {
         updated = await this.prisma.client.session.update({
           where: { id: sessionId },
           data: { authEpoch: { increment: 1 } },
-          select: { authEpoch: true },
+          select: { authEpoch: true, status: true },
         });
       } catch (e) {
         if (isBusyLockError(e)) {
-          await this.otp.restore(link.invitation.id, result.hash, phase).catch(() => undefined);
+          // Ids only in the log: never the hash.
+          const back = await this.otp.restore(link.invitation.id, result, phase).catch(() => false);
+          if (!back) {
+            this.logger.warn(
+              `OTP not restored after a busy write for invitation ${link.invitation.id}`,
+            );
+          }
         }
         throw e;
       }
-      const current = await this.prisma.client.session.findUnique({
-        where: { id: sessionId },
-        select: { status: true },
-      });
       const issued = this.tokens.sign(
         { sid: sessionId, oid: link.invitation.orgId, epoch: updated.authEpoch },
         now,
@@ -364,7 +366,7 @@ export class CandidateAuthService {
       return {
         token: issued.token,
         expiresAt: issued.expiresAt,
-        status: current?.status ?? link.session.status,
+        status: updated.status,
         epoch: updated.authEpoch,
       };
     });

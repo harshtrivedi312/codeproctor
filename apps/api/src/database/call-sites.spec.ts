@@ -41,7 +41,7 @@ const SRC = resolve(__dirname, '..');
 /**
  * Every file that may use a guarded name. Explicit paths, never folders. BE-07 adds ONE ENTRY PER FILE, with
  * `sites` naming the GRANT_SITES it holds, in the PR that builds it:
- *   'common/candidate/candidate-session.guard.ts':   { names: ['setCandidateFacts'], why: 'CandidateSessionGuard (DL-31)' },
+ *   'candidate/candidate-scope.ts':   { names: ['setCandidateFacts'], why: 'CandidateScope: the guard path and every asCandidate step (DL-31)' },
  *   'jobs/session-job.processor.ts':                 { names: ['detachForSessionJob'], why: 'SessionJobProcessor base class' },
  *   'candidate/session-state.service.ts':            { names: ['withGrant'], sites: ['SessionStateService'], why: '…' },
  */
