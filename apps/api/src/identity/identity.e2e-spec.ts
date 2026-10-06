@@ -509,6 +509,59 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
     expect(verify.calls).toHaveLength(0);
   });
 
+  it('ADR 0004 9.5: an erasure request stops the job before any image is presigned or read, and writes nothing', async () => {
+    const c = await session();
+    const inv = await owner.session.findUniqueOrThrow({
+      where: { id: c.sessionId },
+      select: { invitation: { select: { candidateId: true } } },
+    });
+    await owner.identityCheck.create({
+      data: {
+        sessionId: c.sessionId,
+        attempt: 1,
+        status: 'PENDING',
+        idImageKey: identitySealedKey(
+          { orgId: c.orgId, sessionId: c.sessionId },
+          1,
+          'id',
+          '1'.repeat(26),
+        ),
+        selfieKey: identitySealedKey(
+          { orgId: c.orgId, sessionId: c.sessionId },
+          1,
+          'selfie',
+          '1'.repeat(26),
+        ),
+        livenessPassed: true,
+      },
+    });
+    await owner.candidate.update({
+      where: { id: inv.invitation.candidateId },
+      data: { erasureRequestedAt: new Date() },
+    });
+    const jobs = app.get(
+      jest.requireActual<typeof import('./identity-jobs.service')>('./identity-jobs.service')
+        .IdentityJobsService,
+    );
+    const gets = storage.gets.length;
+    await jobs.process({
+      name: 'face-match',
+      data: { orgId: c.orgId, sessionId: c.sessionId, attempt: 1 },
+    });
+    expect(worker.calls).toHaveLength(0);
+    expect(storage.gets.length).toBe(gets); // nothing was presigned
+    const [row] = await rows(c.sessionId);
+    expect(row?.status).toBe('PENDING');
+    expect(verify.calls).toHaveLength(0);
+    // The reconciler leaves an erased or erasing session alone, too.
+    await owner.identityCheck.updateMany({
+      where: { sessionId: c.sessionId },
+      data: { createdAt: new Date(Date.now() - 10 * 60_000) },
+    });
+    await jobs.reconcilePending();
+    expect(worker.calls).toHaveLength(0);
+  });
+
   // ---------- a failing worker never blocks the candidate (D-05) ----------
 
   it('TC-033: a worker that is down ends in MANUAL_REVIEW with MATCH_ERROR after the retries, with the event and verify-session', async () => {
