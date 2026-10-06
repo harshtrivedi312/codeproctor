@@ -7,6 +7,7 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { passwordVersion } from '../auth/crypto.util';
 import type { TokenService } from '../common/auth/token.service';
+import { computeRevision } from './revision';
 import { createPrismaClient } from '../database/create-prisma-client';
 import { PrismaClient, UserRole } from '../generated/prisma/client';
 import { applyEnv, applyMigrations, startInfra } from '../test/containers';
@@ -72,7 +73,7 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
     await pg.connect();
     await pg.query(`ALTER ROLE app_user PASSWORD '${appPassword}'`);
     const url = `postgresql://app_user:${appPassword}@${infra.postgres.getHost()}:${infra.postgres.getMappedPort(5432)}/${infra.postgres.getDatabase()}`;
-    applyEnv(infra, { DATABASE_URL: url, LOG_LEVEL: 'silent' });
+    applyEnv(infra, { DATABASE_URL: url, LOG_LEVEL: 'silent', THROTTLE_DEFAULT_LIMIT: '100000' });
     owner = createPrismaClient(infra.postgres.getConnectionUri());
     orgA = (await owner.organization.create({ data: { name: 'Org A' } })).id;
     orgB = (await owner.organization.create({ data: { name: 'Org B' } })).id;
@@ -134,8 +135,28 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
   const idOf = (q: Json): string => q.id as string;
   const versionOf = (q: Json): Json => q.version as Json;
 
+  /**
+   * Stands in for the validate job (slice 4c): records a passing validation of the CURRENT content
+   * of the latest version, directly in the database.
+   */
+  async function markValidated(questionId: string, revision?: string): Promise<void> {
+    const head = await owner.questionVersion.findFirstOrThrow({
+      where: { questionId },
+      orderBy: { version: 'desc' },
+    });
+    const cases = await owner.testCase.findMany({ where: { questionVersionId: head.id } });
+    await owner.questionVersion.update({
+      where: { id: head.id },
+      data: {
+        validatedAt: new Date(),
+        validationReport: { passed: true, revision: revision ?? computeRevision(head, cases) },
+      },
+    });
+  }
+
   async function publishable(who: Made, over: Json = {}): Promise<Json> {
     const q = await create(who, codingBody(over));
+    await markValidated(idOf(q));
     await http()
       .post(`${API}/questions/${idOf(q)}/publish`)
       .set(who.auth)
@@ -240,6 +261,19 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
         codingBody({ testCases: Array.from({ length: 101 }, () => sampleCase) }),
         codingBody({ answerSpec: mcqSpec }),
         codingBody({ unknownField: 1 }),
+        codingBody({ title: 'a\u0000b' }),
+        codingBody({ statementMd: 'a\u0000b' }),
+        codingBody({ starterCode: { python: 'a\u0000b' } }),
+        codingBody({ referenceSolution: { python: 'lone \ud800 surrogate' } }),
+        codingBody({ testCases: [{ ...sampleCase, input: 'a\u0000b' }] }),
+        codingBody({ testCases: [{ ...sampleCase, expectedOutput: 'a\u0000b' }] }),
+        {
+          type: 'SHORT_ANSWER',
+          title: 'T',
+          statementMd: 'S',
+          difficulty: 'EASY',
+          answerSpec: { canonical: 'a\u0000b', acceptedVariants: [] },
+        },
         { ...codingBody(), title: undefined },
       ];
       for (const body of bad) {
@@ -317,7 +351,7 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       expect(text).not.toContain('HIDDEN-OUT-9');
       expect(text).not.toContain('referenceSolution');
       const cases = (res.body as { version: { testCases: Json[] } }).version.testCases;
-      expect(cases.map((c) => [c.isHidden, c.input === null])).toEqual([
+      expect(cases.map((c) => [c.isHidden, !('input' in c)])).toEqual([
         [false, false],
         [true, true],
       ]);
@@ -332,7 +366,7 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
   // ---- TC-011: candidate-facing view -----------------------------------------------------------
 
   describe('FR-202, TC-011: the candidate-facing view', () => {
-    it('TC-011: preview shows the statement and sample cases only, no hidden case, reference or key', async () => {
+    it('TC-011 (partial: author preview route; the candidate route is BE-07): preview shows the statement and sample cases only, no hidden case, reference or key', async () => {
       const author = await make(UserRole.AUTHOR);
       const q = await publishable(author);
       const res = await http()
@@ -354,7 +388,7 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       }
     });
 
-    it('TC-014, FR-205: an MCQ preview has the options but not the key', async () => {
+    it('TC-014 (partial: preview only; auto-scoring is BE-11), FR-205: an MCQ preview has the options but not the key', async () => {
       const author = await make(UserRole.AUTHOR);
       const q = await create(author, {
         type: 'MCQ',
@@ -403,7 +437,7 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       expect(await audit('QUESTION_UPDATED', id)).toHaveLength(1);
     });
 
-    it('TC-013: editing a published question creates version 2 as a draft; version 1 and the current pointer stay', async () => {
+    it('TC-013 (partial: row-level; no session fixture yet): editing a published question creates version 2 as a draft; version 1 and the current pointer stay', async () => {
       const a = await make(UserRole.AUTHOR);
       const q = await publishable(a);
       const id = idOf(q);
@@ -444,6 +478,7 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       expect(again.body).toMatchObject({ createdNewVersion: false });
       expect(await owner.questionVersion.count({ where: { questionId: id } })).toBe(2);
       // Publishing v2 moves the pointer; v1 is still published and untouched.
+      await markValidated(id);
       await http().post(`${API}/questions/${id}/publish`).set(a.auth).expect(200);
       const q2 = await owner.question.findUniqueOrThrow({ where: { id } });
       expect(q2.currentVersionId).not.toBe(v1Before.id);
@@ -549,6 +584,7 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
     it('FR-201: publishing sets the current version and audits; publishing again is 409', async () => {
       const a = await make(UserRole.AUTHOR);
       const q = await create(a);
+      await markValidated(idOf(q));
       const res = await http()
         .post(`${API}/questions/${idOf(q)}/publish`)
         .set(a.auth)
@@ -564,7 +600,7 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       expect(await audit('QUESTION_PUBLISHED', idOf(q))).toHaveLength(1);
     });
 
-    it('TC-014, FR-205: MCQ and short answer publish with a valid answer_spec; invalid specs are 400', async () => {
+    it('TC-014 (partial: create and publish; auto-scoring is BE-11), FR-205: MCQ and short answer publish with a valid answer_spec; invalid specs are 400', async () => {
       const a = await make(UserRole.AUTHOR);
       const base = { title: 'Q', statementMd: 'S', difficulty: 'EASY' };
       const mcq = await create(a, { ...base, type: 'MCQ', answerSpec: mcqSpec });
@@ -919,6 +955,617 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       await http().post(`${API}/questions/${id}/unarchive`).set(a.auth).expect(200);
       expect(await audit('QUESTION_UNARCHIVED', id)).toHaveLength(1);
       await http().patch(`${API}/questions/${id}`).set(a.auth).send({ title: 'x' }).expect(200);
+    });
+  });
+
+  // ---- staff view: nothing withheld reaches a recruiter, and only published versions ------------
+
+  describe('TC-011, FR-201..FR-205: staff view', () => {
+    it('TC-011, FR-201..FR-205 staff view: a RECRUITER response never contains any withheld field or value, on any route', async () => {
+      const author = await make(UserRole.AUTHOR);
+      const recruiter = await make(UserRole.RECRUITER);
+      const secrets = [
+        'SECRET-REF-PY',
+        'SECRET-REF-JAVA',
+        'SECRET-HIDDEN-IN',
+        'SECRET-HIDDEN-OUT',
+        'SECRET-REPORT',
+        'SECRET-PARAM',
+        'SECRET-OVERRIDE-IN',
+        'SECRET-OVERRIDE-OUT',
+        'SECRET-AI-REF',
+        'SECRET-CANONICAL',
+        'SECRET-ACCEPTED',
+      ];
+      const q = await create(
+        author,
+        codingBody({
+          allowedLanguages: ['python', 'java'],
+          referenceSolution: { python: 'SECRET-REF-PY', java: 'SECRET-REF-JAVA' },
+          testCases: [
+            sampleCase,
+            { input: 'SECRET-HIDDEN-IN', expectedOutput: 'SECRET-HIDDEN-OUT', isHidden: true },
+          ],
+        }),
+      );
+      const id = idOf(q);
+      const cases = await owner.testCase.findMany({
+        where: { questionVersion: { questionId: id } },
+        orderBy: { position: 'asc' },
+      });
+      const hiddenRow = cases[1];
+      const v1 = await owner.questionVersion.findFirstOrThrow({ where: { questionId: id } });
+      // Variants, per-slot overrides and AI references exist in the database (slices 4b, 4c).
+      const variant = await owner.questionVariant.create({
+        data: {
+          questionVersionId: v1.id,
+          params: { n: 'SECRET-PARAM' },
+          renderedStatement: 'rendered statement SECRET-REF-PY',
+        },
+      });
+      await owner.variantTestCase.create({
+        data: {
+          variantId: variant.id,
+          testCaseId: (hiddenRow as { id: string }).id,
+          input: 'SECRET-OVERRIDE-IN',
+          expectedOutput: 'SECRET-OVERRIDE-OUT',
+        },
+      });
+      await owner.aiReferenceSolution.create({
+        data: {
+          questionVersionId: v1.id,
+          assistant: 'a',
+          modelLabel: 'm',
+          language: 'python',
+          solutionCode: 'SECRET-AI-REF',
+          collectedAt: new Date(),
+          collectedById: author.id,
+        },
+      });
+      await markValidated(id);
+      const head = await owner.questionVersion.findUniqueOrThrow({ where: { id: v1.id } });
+      await owner.questionVersion.update({
+        where: { id: v1.id },
+        data: {
+          validationReport: {
+            ...(head.validationReport as Record<string, unknown>),
+            note: 'SECRET-REPORT',
+          },
+        },
+      });
+      await http().post(`${API}/questions/${id}/publish`).set(author.auth).expect(200);
+      await http()
+        .patch(`${API}/questions/${id}`)
+        .set(author.auth)
+        .send({ title: 'v2' })
+        .expect(200);
+      const sa = await create(author, {
+        type: 'SHORT_ANSWER',
+        title: 'SA',
+        statementMd: 'S',
+        difficulty: 'EASY',
+        answerSpec: { canonical: 'SECRET-CANONICAL', acceptedVariants: ['SECRET-ACCEPTED'] },
+      });
+      const mcq = await create(author, {
+        type: 'MCQ',
+        title: 'MC',
+        statementMd: 'S',
+        difficulty: 'EASY',
+        answerSpec: {
+          options: [
+            { id: 'a', text: 'x' },
+            { id: 'b', text: 'y' },
+          ],
+          correctOptionIds: ['b'],
+          multiple: false,
+        },
+      });
+      await http()
+        .post(`${API}/questions/${idOf(sa)}/publish`)
+        .set(author.auth)
+        .expect(200);
+      await http()
+        .post(`${API}/questions/${idOf(mcq)}/publish`)
+        .set(author.auth)
+        .expect(200);
+
+      const urls = [
+        `${API}/questions?includeArchived=true&pageSize=100`,
+        ...[id, idOf(sa), idOf(mcq)].flatMap((qid) => [
+          `${API}/questions/${qid}`,
+          `${API}/questions/${qid}?version=1`,
+          `${API}/questions/${qid}/preview`,
+          `${API}/questions/${qid}/preview?version=1`,
+        ]),
+      ];
+      for (const url of urls) {
+        const res = await http().get(url).set(recruiter.auth);
+        expect([url, res.status]).toEqual([url, 200]);
+        const text = JSON.stringify(res.body);
+        for (const secret of secrets) expect([url, text.includes(secret)]).toEqual([url, false]);
+        const keys = /referenceSolution|answerSpec|validationReport|correctOptionIds|revision/;
+        expect([url, keys.test(text)]).toEqual([url, false]);
+      }
+      // The draft version 2 is not reachable for a recruiter at all.
+      for (const url of [
+        `${API}/questions/${id}?version=2`,
+        `${API}/questions/${id}/preview?version=2`,
+      ]) {
+        expect([url, (await http().get(url).set(recruiter.auth)).status]).toEqual([url, 404]);
+      }
+      // Hidden cases carry no input or expectedOutput key at all (absent, not null).
+      const detail = await http().get(`${API}/questions/${id}?version=1`).set(recruiter.auth);
+      const hiddenRead = (detail.body as { version: { testCases: Json[] } }).version
+        .testCases[1] as Json;
+      expect(Object.keys(hiddenRead).sort()).toEqual(['id', 'isHidden', 'position', 'weight']);
+      // The writer view of the same version is full (the secrets are really stored and served).
+      const full = JSON.stringify(
+        (await http().get(`${API}/questions/${id}?version=1`).set(author.auth)).body,
+      );
+      for (const secret of [
+        'SECRET-REF-PY',
+        'SECRET-REF-JAVA',
+        'SECRET-HIDDEN-IN',
+        'SECRET-HIDDEN-OUT',
+        'SECRET-REPORT',
+      ]) {
+        expect(full).toContain(secret);
+      }
+    });
+
+    it('FR-201 staff view: every response to a writer carries the full view (create, patch, publish, test-case routes)', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a);
+      expect(JSON.stringify(q)).toContain('REFERENCE-SECRET');
+      expect(JSON.stringify(q)).toContain('HIDDEN-IN-9');
+      const id = idOf(q);
+      const patched = await http()
+        .patch(`${API}/questions/${id}`)
+        .set(a.auth)
+        .send({ title: 'p' })
+        .expect(200);
+      expect(JSON.stringify(patched.body)).toContain('REFERENCE-SECRET');
+      const added = await http()
+        .post(`${API}/questions/${id}/versions/1/test-cases`)
+        .set(a.auth)
+        .send(hiddenCase)
+        .expect(201);
+      expect(added.body).toMatchObject({ input: 'HIDDEN-IN-9', expectedOutput: 'HIDDEN-OUT-9' });
+      const upd = await http()
+        .patch(`${API}/questions/${id}/versions/1/test-cases/${(added.body as Json).id as string}`)
+        .set(a.auth)
+        .send({ weight: 3 })
+        .expect(200);
+      expect(upd.body).toMatchObject({ input: 'HIDDEN-IN-9' });
+      await markValidated(id);
+      const pub = await http().post(`${API}/questions/${id}/publish`).set(a.auth).expect(200);
+      expect(JSON.stringify(pub.body)).toContain('REFERENCE-SECRET');
+    });
+
+    it('TC-011, FR-201..FR-205 staff view: a recruiter cannot see a draft, cannot enumerate it via list, and gets the identical 404', async () => {
+      const author = await make(UserRole.AUTHOR);
+      const recruiter = await make(UserRole.RECRUITER);
+      const tag = `vis${++seq}`;
+      const draftOnly = await create(
+        author,
+        codingBody({ tags: [tag], title: 'DRAFT-ONLY-TITLE' }),
+      );
+      const pub = await publishable(author, { tags: [tag], title: 'Published title' });
+      await http()
+        .patch(`${API}/questions/${idOf(pub)}`)
+        .set(author.auth)
+        .send({ title: 'DRAFT-V2-TITLE' })
+        .expect(200);
+
+      const list = await http()
+        .get(`${API}/questions?tag=${tag}&pageSize=1`)
+        .set(recruiter.auth)
+        .expect(200);
+      expect(list.body).toMatchObject({ total: 1, page: 1, pageSize: 1 });
+      const item = (list.body as { items: Json[] }).items[0] as Json;
+      expect(item).toMatchObject({
+        id: idOf(pub),
+        published: { version: 1 },
+        latest: { version: 1, title: 'Published title' },
+      });
+      const all = JSON.stringify(
+        (await http().get(`${API}/questions?includeArchived=true&pageSize=100`).set(recruiter.auth))
+          .body,
+      );
+      expect(all).not.toContain('DRAFT-ONLY-TITLE');
+      expect(all).not.toContain('DRAFT-V2-TITLE');
+      expect(all).not.toContain(idOf(draftOnly));
+      const authorList = await http()
+        .get(`${API}/questions?tag=${tag}`)
+        .set(author.auth)
+        .expect(200);
+      expect((authorList.body as { total: number }).total).toBe(2);
+
+      const det = await http()
+        .get(`${API}/questions/${idOf(pub)}`)
+        .set(recruiter.auth)
+        .expect(200);
+      expect(versionOf(det.body as Json)).toMatchObject({ version: 1, title: 'Published title' });
+      expect(((det.body as Json).versions as Json[]).map((v) => v.version)).toEqual([1]);
+      expect(JSON.stringify(det.body)).not.toContain('DRAFT-V2-TITLE');
+      const prev = await http()
+        .get(`${API}/questions/${idOf(pub)}/preview`)
+        .set(recruiter.auth)
+        .expect(200);
+      expect(prev.body).toMatchObject({ title: 'Published title' });
+      await http()
+        .get(`${API}/questions/${idOf(pub)}/preview?version=1`)
+        .set(recruiter.auth)
+        .expect(200);
+
+      const ghost = await http().get(`${API}/questions/${GHOST}`).set(recruiter.auth);
+      expect(ghost.status).toBe(404);
+      const refused = [
+        `${API}/questions/${GHOST}?version=1`,
+        `${API}/questions/${GHOST}/preview`,
+        `${API}/questions/${idOf(pub)}?version=2`,
+        `${API}/questions/${idOf(pub)}?version=9`,
+        `${API}/questions/${idOf(pub)}/preview?version=2`,
+        `${API}/questions/${idOf(draftOnly)}`,
+        `${API}/questions/${idOf(draftOnly)}?version=1`,
+        `${API}/questions/${idOf(draftOnly)}/preview`,
+        `${API}/questions/${idOf(draftOnly)}/preview?version=1`,
+      ];
+      for (const url of refused) {
+        const res = await http().get(url).set(recruiter.auth);
+        expect([url, res.status]).toEqual([url, 404]);
+        expect(stable(res)).toEqual({ ...stable(ghost), ...{} });
+      }
+      await http()
+        .get(`${API}/questions/${idOf(pub)}?version=2`)
+        .set(author.auth)
+        .expect(200);
+      await http()
+        .get(`${API}/questions/${idOf(draftOnly)}/preview`)
+        .set(author.auth)
+        .expect(200);
+    });
+
+    it('TC-011 staff view: the recruiter-visible version and test-case objects have exactly these keys', async () => {
+      const author = await make(UserRole.AUTHOR);
+      const recruiter = await make(UserRole.RECRUITER);
+      const q = await publishable(author);
+      const res = await http()
+        .get(`${API}/questions/${idOf(q)}`)
+        .set(recruiter.auth)
+        .expect(200);
+      const v = versionOf(res.body as Json);
+      expect(Object.keys(v).sort()).toEqual(
+        [
+          'allowedLanguages',
+          'createdAt',
+          'difficulty',
+          'id',
+          'isPublished',
+          'limits',
+          'starterCode',
+          'statementMd',
+          'testCases',
+          'title',
+          'validatedAt',
+          'version',
+        ].sort(),
+      );
+      const [sample, hidden] = v.testCases as Json[];
+      expect(Object.keys(sample as Json).sort()).toEqual([
+        'expectedOutput',
+        'id',
+        'input',
+        'isHidden',
+        'position',
+        'weight',
+      ]);
+      expect(Object.keys(hidden as Json).sort()).toEqual(['id', 'isHidden', 'position', 'weight']);
+    });
+  });
+
+  // ---- publish gate: validation required, bound to the content ----------------------------------
+
+  describe('FR-203, TC-012 (partial: gate only; the validate job is slice 4c): publish needs a passing validation of this content', () => {
+    it('FR-203: a coding draft with no recorded validation cannot be published (422, fails closed)', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a);
+      const res = await http()
+        .post(`${API}/questions/${idOf(q)}/publish`)
+        .set(a.auth)
+        .expect(422);
+      expect(res.body).toMatchObject({
+        errors: expect.arrayContaining<string>([
+          'validation: a passing validation run of the current content is required',
+        ]) as string[],
+      });
+      expect(res.body).not.toHaveProperty('code');
+    });
+
+    it('FR-203: a failed report, or a report recorded for other content, is refused', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a);
+      const id = idOf(q);
+      const head = await owner.questionVersion.findFirstOrThrow({ where: { questionId: id } });
+      for (const report of [
+        { passed: false, revision: 'x' },
+        { passed: true },
+        { passed: true, revision: 'f'.repeat(64) },
+      ]) {
+        await owner.questionVersion.update({
+          where: { id: head.id },
+          data: { validatedAt: new Date(), validationReport: report },
+        });
+        await http().post(`${API}/questions/${id}/publish`).set(a.auth).expect(422);
+      }
+      await markValidated(id);
+      await http().post(`${API}/questions/${id}/publish`).set(a.auth).expect(200);
+    });
+
+    it('FR-203: any content write after a validation clears it, so the question must be validated again', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a);
+      const id = idOf(q);
+      await markValidated(id);
+      await http()
+        .patch(`${API}/questions/${id}`)
+        .set(a.auth)
+        .send({ statementMd: 'changed' })
+        .expect(200);
+      await http().post(`${API}/questions/${id}/publish`).set(a.auth).expect(422);
+      await markValidated(id);
+      await http()
+        .post(`${API}/questions/${id}/versions/1/test-cases`)
+        .set(a.auth)
+        .send(hiddenCase)
+        .expect(201);
+      await http().post(`${API}/questions/${id}/publish`).set(a.auth).expect(422);
+    });
+
+    it('FR-205: every allowed language needs a reference solution before publish (422)', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, codingBody({ allowedLanguages: ['python', 'java'] }));
+      await markValidated(idOf(q));
+      const res = await http()
+        .post(`${API}/questions/${idOf(q)}/publish`)
+        .set(a.auth)
+        .expect(422);
+      expect(JSON.stringify(res.body)).toContain(
+        'referenceSolution.java: required for an allowed language',
+      );
+    });
+  });
+
+  // ---- optimistic concurrency and races ----------------------------------------------------------
+
+  describe('FR-204: two editors, races', () => {
+    const revisionOf = async (who: Made, id: string): Promise<string> =>
+      (
+        (await http().get(`${API}/questions/${id}`).set(who.auth)).body as {
+          version: { revision: string };
+        }
+      ).version.revision;
+
+    it('FR-204: a stale expectedRevision is 409 (detail only, no code) and changes nothing; a matching one passes; omitted still works', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const b = await make(UserRole.AUTHOR);
+      const q = await create(a);
+      const id = idOf(q);
+      const loadedByA = await revisionOf(a, id);
+      expect(loadedByA).toMatch(/^[0-9a-f]{64}$/);
+      expect(await revisionOf(b, id)).toBe(loadedByA);
+      await http()
+        .patch(`${API}/questions/${id}`)
+        .set(b.auth)
+        .send({ title: 'B edit', expectedRevision: loadedByA })
+        .expect(200);
+      const stale = await http()
+        .patch(`${API}/questions/${id}`)
+        .set(a.auth)
+        .send({ title: 'A edit', expectedRevision: loadedByA });
+      expect(stale.status).toBe(409);
+      expect(stale.body).not.toHaveProperty('code');
+      expect(
+        (await owner.questionVersion.findFirstOrThrow({ where: { questionId: id } })).title,
+      ).toBe('B edit');
+      const fresh = await revisionOf(a, id);
+      expect(fresh).not.toBe(loadedByA);
+      await http()
+        .patch(`${API}/questions/${id}`)
+        .set(a.auth)
+        .send({ title: 'A edit', expectedRevision: fresh })
+        .expect(200);
+      await http()
+        .patch(`${API}/questions/${id}`)
+        .set(a.auth)
+        .send({ title: 'no token' })
+        .expect(200);
+      await http()
+        .patch(`${API}/questions/${id}`)
+        .set(a.auth)
+        .send({ title: 'x', expectedRevision: 'nope' })
+        .expect(400);
+      // A test case change also changes the revision, so a stale publish is refused too.
+      const before = await revisionOf(a, id);
+      await http()
+        .post(`${API}/questions/${id}/versions/1/test-cases`)
+        .set(b.auth)
+        .send(hiddenCase)
+        .expect(201);
+      await markValidated(id);
+      await http()
+        .post(`${API}/questions/${id}/publish`)
+        .set(a.auth)
+        .send({ expectedRevision: before })
+        .expect(409);
+      expect(
+        await owner.questionVersion.count({ where: { questionId: id, isPublished: true } }),
+      ).toBe(0);
+      await http()
+        .post(`${API}/questions/${id}/publish`)
+        .set(a.auth)
+        .send({ expectedRevision: await revisionOf(a, id) })
+        .expect(200);
+    });
+
+    it('FR-204: concurrent in-place edits of different fields are all kept (no lost update)', async () => {
+      const a = await make(UserRole.AUTHOR);
+      for (let round = 0; round < 3; round++) {
+        const q = await create(a);
+        const id = idOf(q);
+        const results = await Promise.all([
+          http()
+            .patch(`${API}/questions/${id}`)
+            .set(a.auth)
+            .send({ title: `T${round}` }),
+          http()
+            .patch(`${API}/questions/${id}`)
+            .set(a.auth)
+            .send({ statementMd: `S${round}` }),
+          http().patch(`${API}/questions/${id}`).set(a.auth).send({ difficulty: 'HARD' }),
+        ]);
+        expect(results.map((r) => r.status)).toEqual([200, 200, 200]);
+        const row = await owner.questionVersion.findFirstOrThrow({ where: { questionId: id } });
+        expect([row.title, row.statementMd, row.difficulty]).toEqual([
+          `T${round}`,
+          `S${round}`,
+          'HARD',
+        ]);
+      }
+    });
+
+    it('FR-201: publish racing a PATCH that empties the reference solution never publishes the emptied content', async () => {
+      const a = await make(UserRole.AUTHOR);
+      for (let round = 0; round < 4; round++) {
+        const q = await create(a);
+        const id = idOf(q);
+        await markValidated(id);
+        const [pub, patch] = await Promise.all([
+          http().post(`${API}/questions/${id}/publish`).set(a.auth),
+          http().patch(`${API}/questions/${id}`).set(a.auth).send({ referenceSolution: {} }),
+        ]);
+        expect([200, 409, 422]).toContain(pub.status);
+        expect([200, 409]).toContain(patch.status);
+        const published = await owner.questionVersion.findMany({
+          where: { questionId: id, isPublished: true },
+        });
+        for (const v of published) {
+          expect(Object.keys(v.referenceSolution as object)).not.toHaveLength(0);
+        }
+        const question = await owner.question.findUniqueOrThrow({ where: { id } });
+        if (pub.status === 200) {
+          expect(published).toHaveLength(1);
+          expect(question.currentVersionId).toBe(published[0]?.id);
+        } else {
+          expect(published).toHaveLength(0);
+          expect(question.currentVersionId).toBeNull();
+        }
+      }
+    });
+
+    it('FR-202: test case writes on an archived question are 409 and change nothing', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a);
+      const id = idOf(q);
+      const tc = ((versionOf(q).testCases as Json[])[0] as Json).id as string;
+      await http().post(`${API}/questions/${id}/archive`).set(a.auth).expect(200);
+      const base = `${API}/questions/${id}/versions/1/test-cases`;
+      await http().post(base).set(a.auth).send(sampleCase).expect(409);
+      await http().patch(`${base}/${tc}`).set(a.auth).send({ weight: 9 }).expect(409);
+      await http().delete(`${base}/${tc}`).set(a.auth).expect(409);
+      expect(await owner.testCase.count({ where: { questionVersion: { questionId: id } } })).toBe(
+        2,
+      );
+    });
+  });
+
+  // ---- input edge cases ---------------------------------------------------------------------------
+
+  describe('FR-201: null fields, ids, bodies, drafts', () => {
+    it('FR-201: an explicit null in a PATCH is 400 for every field and changes nothing (no version, no audit row)', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await publishable(a);
+      const id = idOf(q);
+      const nulls = [
+        'tags',
+        'title',
+        'statementMd',
+        'difficulty',
+        'allowedLanguages',
+        'limits',
+        'starterCode',
+        'referenceSolution',
+        'answerSpec',
+        'expectedRevision',
+      ];
+      for (const field of nulls) {
+        const res = await http()
+          .patch(`${API}/questions/${id}`)
+          .set(a.auth)
+          .send({ [field]: null });
+        expect([field, res.status]).toEqual([field, 400]);
+      }
+      expect(await owner.questionVersion.count({ where: { questionId: id } })).toBe(1);
+      expect(await audit('QUESTION_UPDATED', id)).toHaveLength(0);
+      expect(await audit('QUESTION_VERSION_CREATED', id)).toHaveLength(0);
+      const draft = await create(a);
+      const tc = ((versionOf(draft).testCases as Json[])[0] as Json).id as string;
+      for (const field of ['input', 'expectedOutput', 'isHidden', 'weight', 'position']) {
+        const res = await http()
+          .patch(`${API}/questions/${idOf(draft)}/versions/1/test-cases/${tc}`)
+          .set(a.auth)
+          .send({ [field]: null });
+        expect([field, res.status]).toEqual([field, 400]);
+      }
+      await http()
+        .post(`${API}/questions`)
+        .set(a.auth)
+        .send(codingBody({ tags: null, limits: null, starterCode: null }))
+        .expect(400);
+    });
+
+    it('FR-201: a huge or malformed version number is 400, never 500', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a);
+      for (const v of ['99999999999999999999999', '0', '-1', '1.5', 'abc', '1000001']) {
+        const res = await http()
+          .post(`${API}/questions/${idOf(q)}/versions/${v}/test-cases`)
+          .set(a.auth)
+          .send(sampleCase);
+        expect([v, res.status]).toEqual([v, 400]);
+      }
+    });
+
+    it('FR-205: previewing a draft MCQ whose answer_spec is not set yet is 422, not 500', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const q = await create(a, { type: 'MCQ', title: 'D', statementMd: 'S', difficulty: 'EASY' });
+      const res = await http()
+        .get(`${API}/questions/${idOf(q)}/preview`)
+        .set(a.auth);
+      expect(res.status).toBe(422);
+      expect(res.body).not.toHaveProperty('code');
+    });
+
+    it('FR-201: bodies above the default 100 KB are accepted up to 1 MB (refused above), and /client-errors still works', async () => {
+      const a = await make(UserRole.AUTHOR);
+      const big = codingBody({
+        starterCode: { python: 'x'.repeat(100_000) },
+        referenceSolution: { python: 'y'.repeat(100_000) },
+        testCases: [sampleCase, { ...hiddenCase, input: 'z'.repeat(100_000) }],
+      });
+      expect(JSON.stringify(big).length).toBeGreaterThan(300_000);
+      await http().post(`${API}/questions`).set(a.auth).send(big).expect(201);
+      // Above 1 MB the body is refused before any handler runs (the status is 500 today: the
+      // problem filter does not map body-parser errors, FU-BE-103) and nothing is written.
+      const before = await owner.question.count();
+      const refused = await http()
+        .post(`${API}/questions`)
+        .set(a.auth)
+        .send(codingBody({ statementMd: 'q'.repeat(1_200_000) }));
+      expect(refused.status).toBeGreaterThanOrEqual(400);
+      expect(await owner.question.count()).toBe(before);
+      // /client-errors keeps its own small cap and still works.
+      await http().post(`${API}/client-errors`).send({ message: 'boom' }).expect(204);
     });
   });
 

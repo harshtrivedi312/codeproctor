@@ -2,6 +2,7 @@
 // (FR-201, FR-202, FR-205). No database, no Nest: unit tested directly.
 import { CODE_LANGUAGES } from '@codeproctor/shared';
 import { z } from 'zod';
+import { isStorableText } from './text-rules';
 import { formatIssues, mcqAnswerSpecSchema, shortAnswerSpecSchema } from './answer-spec';
 
 export type QuestionKind = 'CODING' | 'MCQ' | 'SHORT_ANSWER';
@@ -12,7 +13,13 @@ export const DEFAULT_LIMITS = { cpu_ms: 2000, wall_ms: 5000, memory_kb: 262_144 
 export const MAX_CODE_LENGTH = 100_000;
 
 const codeMap = z
-  .record(z.string(), z.string().max(MAX_CODE_LENGTH))
+  .record(
+    z.string(),
+    z
+      .string()
+      .max(MAX_CODE_LENGTH)
+      .refine(isStorableText, 'contains a NUL byte or a lone surrogate'),
+  )
   .refine((m) => Object.keys(m).every((k) => (CODE_LANGUAGES as readonly string[]).includes(k)), {
     message: `keys must be one of ${CODE_LANGUAGES.join(', ')}`,
   });
@@ -103,16 +110,34 @@ export interface PublishFields extends ContentFields {
   title: string;
   statementMd: string;
   limits: unknown;
+  /** Set only by the validation job (BE-04 slice 4c, FR-203, ADR 0007 V-3). */
+  validatedAt: Date | null;
+  validationReport: unknown;
+}
+
+/** A recorded validation run that passed on this very content: validated_at set, report.passed === true and report.revision equal to the current revision. */
+export function hasPassingValidation(
+  v: Pick<PublishFields, 'validatedAt' | 'validationReport'>,
+  currentRevision: string,
+): boolean {
+  const report = isRecord(v.validationReport) ? v.validationReport : null;
+  return (
+    v.validatedAt !== null &&
+    report !== null &&
+    report['passed'] === true &&
+    // Bound to the content it ran on (revision.ts): a report of other content never counts.
+    report['revision'] === currentRevision
+  );
 }
 
 /**
- * Completeness rules for publishing (FR-201, FR-202, FR-205). The validation gates (reference
- * solution passes every test slot, AI references from enough assistants) come with the validate
- * job and the AI reference endpoints (BE-04 slices 4b, 4c).
+ * Completeness rules for publishing (FR-201, FR-202, FR-205) and the validation gate for coding
+ * questions. The AI reference gate comes with the AI reference endpoints (BE-04 slice 4c).
  */
 export function publishProblems(
   type: QuestionKind,
   v: PublishFields,
+  currentRevision: string,
   testCases: readonly PublishTestCase[],
 ): string[] {
   const problems = shapeProblems(type, v);
@@ -135,8 +160,18 @@ export function publishProblems(
   for (const k of refKeys) {
     if (!allowed.includes(k)) problems.push(`referenceSolution.${k}: language is not allowed`);
   }
+  // Fail closed: every allowed language needs a reference solution, so validation covers each.
+  for (const l of allowed) {
+    if (!refKeys.includes(l))
+      problems.push(`referenceSolution.${l}: required for an allowed language`);
+  }
   for (const k of Object.keys(starter)) {
     if (!allowed.includes(k)) problems.push(`starterCode.${k}: language is not allowed`);
+  }
+  // Fail closed (FR-203, ADR 0007 V-3, TC-012): nothing sets validated_at until the validate job
+  // exists (slice 4c), so until then a coding question cannot be published.
+  if (!hasPassingValidation(v, currentRevision)) {
+    problems.push('validation: a passing validation run of the current content is required');
   }
   if (testCases.length === 0) problems.push('testCases: at least one');
   if (!testCases.some((t) => !t.isHidden))

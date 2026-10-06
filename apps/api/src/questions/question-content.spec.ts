@@ -2,6 +2,12 @@ import { mcqAnswerSpecSchema, normalizeShortAnswer, shortAnswerSpecSchema } from
 import { checkLimits, limitsFromStored, publishProblems, shapeProblems } from './question-content';
 import type { PublishFields } from './question-content';
 
+const pp = (
+  t: Parameters<typeof publishProblems>[0],
+  v: PublishFields,
+  c: Parameters<typeof publishProblems>[3],
+): string[] => publishProblems(t, v, 'rev1', c);
+
 const coding: PublishFields = {
   title: 'T',
   statementMd: 'S',
@@ -10,6 +16,8 @@ const coding: PublishFields = {
   starterCode: { python: 'x' },
   referenceSolution: { python: 'print(1)' },
   answerSpec: null,
+  validatedAt: new Date(),
+  validationReport: { passed: true, revision: 'rev1' },
 };
 const good = [
   { isHidden: false, weight: 1 },
@@ -77,49 +85,77 @@ describe('answer_spec (FR-205, D-23)', () => {
 
 describe('content rules (FR-201, FR-202)', () => {
   it('FR-201: a complete coding question has no publish problems', () => {
-    expect(publishProblems('CODING', coding, good)).toEqual([]);
+    expect(pp('CODING', coding, good)).toEqual([]);
   });
 
   it('FR-202: publish needs a sample, a hidden test, positive weights and a reference solution', () => {
-    expect(publishProblems('CODING', coding, [])).toEqual(
-      expect.arrayContaining(['testCases: at least one']),
-    );
-    expect(publishProblems('CODING', coding, [{ isHidden: true, weight: 1 }])).toEqual(
+    expect(pp('CODING', coding, [])).toEqual(expect.arrayContaining(['testCases: at least one']));
+    expect(pp('CODING', coding, [{ isHidden: true, weight: 1 }])).toEqual(
       expect.arrayContaining(['testCases: at least one sample (not hidden)']),
     );
-    expect(publishProblems('CODING', coding, [{ isHidden: false, weight: 1 }])).toEqual(
+    expect(pp('CODING', coding, [{ isHidden: false, weight: 1 }])).toEqual(
       expect.arrayContaining(['testCases: at least one hidden test']),
     );
-    expect(publishProblems('CODING', coding, [...good, { isHidden: true, weight: 0 }])).toEqual(
+    expect(pp('CODING', coding, [...good, { isHidden: true, weight: 0 }])).toEqual(
       expect.arrayContaining(['testCases: every weight must be above 0']),
     );
-    expect(publishProblems('CODING', { ...coding, referenceSolution: {} }, good)).toEqual(
+    expect(pp('CODING', { ...coding, referenceSolution: {} }, good)).toEqual(
       expect.arrayContaining(['referenceSolution: at least one language']),
     );
-    expect(
-      publishProblems('CODING', { ...coding, referenceSolution: { java: 'x' } }, good),
-    ).toEqual(expect.arrayContaining(['referenceSolution.java: language is not allowed']));
-    expect(publishProblems('CODING', { ...coding, allowedLanguages: [] }, good)).toEqual(
+    expect(pp('CODING', { ...coding, referenceSolution: { java: 'x' } }, good)).toEqual(
+      expect.arrayContaining(['referenceSolution.java: language is not allowed']),
+    );
+    expect(pp('CODING', { ...coding, allowedLanguages: [] }, good)).toEqual(
       expect.arrayContaining(['allowedLanguages: at least one language']),
     );
   });
 
+  it('FR-203, TC-012: a coding question needs a passing validation run (fails closed)', () => {
+    const msg = 'validation: a passing validation run of the current content is required';
+    expect(pp('CODING', { ...coding, validatedAt: null }, good)).toContain(msg);
+    expect(pp('CODING', { ...coding, validationReport: null }, good)).toContain(msg);
+    expect(pp('CODING', { ...coding, validationReport: { passed: false } }, good)).toContain(msg);
+    expect(pp('CODING', { ...coding, validationReport: 'passed' }, good)).toContain(msg);
+    // A report recorded for other content (different revision) never counts.
+    expect(
+      pp('CODING', { ...coding, validationReport: { passed: true, revision: 'old' } }, good),
+    ).toContain(msg);
+    expect(pp('CODING', { ...coding, validationReport: { passed: true } }, good)).toContain(msg);
+  });
+
+  it('FR-201: every allowed language needs a reference solution', () => {
+    expect(pp('CODING', { ...coding, allowedLanguages: ['python', 'java'] }, good)).toContain(
+      'referenceSolution.java: required for an allowed language',
+    );
+  });
+
+  it('FR-205: text Postgres cannot store is refused (NUL, lone surrogate)', () => {
+    expect(shapeProblems('CODING', { ...coding, starterCode: { python: 'a\u0000b' } })).not.toEqual(
+      [],
+    );
+    expect(
+      mcqAnswerSpecSchema.safeParse({
+        options: [
+          { id: 'a', text: 'x\u0000' },
+          { id: 'b', text: 'B' },
+        ],
+        correctOptionIds: ['a'],
+        multiple: false,
+      }).success,
+    ).toBe(false);
+    expect(
+      shortAnswerSpecSchema.safeParse({ canonical: 'a\ud800', acceptedVariants: [] }).success,
+    ).toBe(false);
+  });
+
   it('FR-205: MCQ and short answer need a valid answer_spec and no test cases or code', () => {
     const base = { ...coding, allowedLanguages: [], starterCode: {}, referenceSolution: {} };
-    expect(publishProblems('SHORT_ANSWER', base, [])).toContain('answerSpec: required to publish');
+    expect(pp('SHORT_ANSWER', base, [])).toContain('answerSpec: required to publish');
     expect(
-      publishProblems(
-        'SHORT_ANSWER',
-        { ...base, answerSpec: { canonical: 'a', acceptedVariants: [] } },
-        [],
-      ),
+      pp('SHORT_ANSWER', { ...base, answerSpec: { canonical: 'a', acceptedVariants: [] } }, []),
     ).toEqual([]);
     expect(
-      publishProblems(
-        'SHORT_ANSWER',
-        { ...base, answerSpec: { canonical: 'a', acceptedVariants: [] } },
-        good,
-      ),
+      pp('SHORT_ANSWER', { ...base, answerSpec: { canonical: 'a', acceptedVariants: [] } }, good),
     ).toEqual(['testCases: not allowed on a SHORT_ANSWER question']);
     expect(shapeProblems('MCQ', { ...base, allowedLanguages: ['python'] })).toContain(
       'allowedLanguages: must be empty on a MCQ question',

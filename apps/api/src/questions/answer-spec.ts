@@ -1,13 +1,22 @@
 // answer_spec shapes (ADR 0007 section 5, D-23, FR-205). One zod schema per question type; the
 // column is null for CODING. answer_spec is never sent to candidates (see candidate-view.ts).
 import { z } from 'zod';
+import { isStorableText } from './text-rules';
+
+const text = (min: number, max: number): z.ZodString => z.string().min(min).max(max);
+const storable = { message: 'contains a NUL byte or a lone surrogate' };
 
 const OPTION_ID = /^[A-Za-z0-9_-]{1,32}$/;
 
 export const mcqAnswerSpecSchema = z
   .object({
     options: z
-      .array(z.object({ id: z.string().regex(OPTION_ID), text: z.string().min(1).max(1000) }))
+      .array(
+        z.object({
+          id: z.string().regex(OPTION_ID),
+          text: text(1, 1000).refine(isStorableText, storable),
+        }),
+      )
       .min(2)
       .max(10),
     correctOptionIds: z.array(z.string().regex(OPTION_ID)).min(1).max(10),
@@ -41,8 +50,8 @@ export function normalizeShortAnswer(text: string): string {
 
 export const shortAnswerSpecSchema = z
   .object({
-    canonical: z.string().min(1).max(500),
-    acceptedVariants: z.array(z.string().min(1).max(500)).max(20),
+    canonical: text(1, 500).refine(isStorableText, storable),
+    acceptedVariants: z.array(text(1, 500).refine(isStorableText, storable)).max(20),
   })
   .strict()
   .superRefine((spec, ctx) => {
