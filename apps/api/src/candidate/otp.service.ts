@@ -197,8 +197,9 @@ export class OtpService {
         keys[3] as string,
         String(value),
       )) as number;
-      // 0: a concurrent request spent this code first (or a block removed it). Only one wins.
-      return spent === 1 ? { kind: 'ok' } : { kind: 'wrong', blockedNow: false };
+      // 0: a concurrent request spent this code first (or a block removed it). Only one wins, and
+      // the loser is not a wrong guess: it is told there is no code waiting, and nothing is logged.
+      return spent === 1 ? { kind: 'ok' } : { kind: 'none' };
     }
 
     const attempt = Number(extra);

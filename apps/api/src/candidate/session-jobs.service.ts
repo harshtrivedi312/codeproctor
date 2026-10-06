@@ -33,6 +33,7 @@ const CONSENT_SWEEP_EVERY_MS = 300_000;
 const SWEEP_MIN_AGE_MS = 60_000;
 const DISCOVERY_BATCH = 500;
 const DISCONNECT_MARKER_TTL_SECONDS = 86_400;
+const SHUTDOWN_WAIT_MS = 3_000;
 
 const uuid = z.guid();
 const consentPdfData = z.object({ sessionId: uuid, orgId: uuid });
@@ -117,7 +118,27 @@ export class SessionJobsService implements OnModuleInit, OnApplicationShutdown {
   async onApplicationShutdown(): Promise<void> {
     this.closing = true;
     if (this.retry) clearTimeout(this.retry);
-    await Promise.allSettled([this.worker?.close(), this.queue?.close()]);
+    // A graceful close waits for Redis. With Redis down (the /health outage test) it would wait
+    // for ever and hold the whole shutdown, so each close is bounded and then forced.
+    const bounded = async (close: Promise<void> | undefined, force: () => Promise<void>): Promise<void> => {
+      if (close === undefined) return;
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), SHUTDOWN_WAIT_MS);
+      });
+      try {
+        if ((await Promise.race([close.then(() => 'closed' as const), timeout])) === 'timeout') {
+          // Not awaited: with Redis down even a forced disconnect may never settle.
+          void force().catch(() => undefined);
+        }
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
+    await Promise.allSettled([
+      bounded(this.worker?.close(), () => this.worker?.disconnect() ?? Promise.resolve()),
+      bounded(this.queue?.close(), () => this.queue?.disconnect() ?? Promise.resolve()),
+    ]);
   }
 
   private requireQueue(): Queue {

@@ -1,6 +1,7 @@
 // The routes that run before a session token exists: link, otp, start (ADR 0013 section 5.10 names
 // them as the only pre-JWT candidate routes; they are the only ones outside CandidateSessionGuard).
-// Public to the staff guard, throttled per IP at the stricter /candidate limit, never cached.
+// Public to the staff guard, throttled per IP by the stricter /candidate limit (THROTTLE_CANDIDATE_LIMIT),
+// limited per invitation by OtpService, never cached.
 import { Body, Controller, Header, HttpCode, Post, Req } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
@@ -11,7 +12,6 @@ import {
   ApiTags,
   ApiTooManyRequestsResponse,
 } from '@nestjs/swagger';
-import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { Public } from '../common/auth/decorators';
 import { CandidateAuthService } from './candidate-auth.service';
@@ -20,9 +20,6 @@ import { OTP_TTL_SECONDS } from './otp.service';
 import { LinkDto, LinkViewDto, OtpSentDto, SessionTokenDto, StartSessionDto } from './dto/candidate.dto';
 
 const NO_STORE = 'no-store';
-// Each of these can send an email or spend a guess: 10 per minute per address on top of the
-// per-invitation limits in OtpService.
-const STRICT = { candidate: { limit: 10, ttl: 60_000 } };
 
 function linkDto(view: LinkView): LinkViewDto {
   return {
@@ -45,7 +42,6 @@ export class CandidateAuthController {
   @Post('link')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)
-  @Throttle(STRICT)
   @ApiOperation({
     summary: 'What an invitation link shows: open, already used, expired, declined, blocked (L-3, L-4)',
     description: 'Sends nothing. A used link never sends an OTP (TC-021).',
@@ -60,7 +56,6 @@ export class CandidateAuthController {
   @Post('otp')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)
-  @Throttle(STRICT)
   @ApiOperation({ summary: 'Email a 6-digit code for an open link (FR-106)' })
   @ApiOkResponse({ type: OtpSentDto })
   @ApiTooManyRequestsResponse({ description: 'OTP_COOLDOWN: a code was sent less than 30 s ago' })
@@ -79,7 +74,6 @@ export class CandidateAuthController {
   @Post('start')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)
-  @Throttle(STRICT)
   @ApiOperation({
     summary: 'Exchange the invitation token and the email OTP for a candidate session token',
     description:
