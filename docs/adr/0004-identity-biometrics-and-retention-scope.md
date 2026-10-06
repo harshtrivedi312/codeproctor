@@ -184,7 +184,7 @@ Alternative: keep text and define the values in packages/shared only.
 
 ## 9. Proposed amendment 2026-10-05: retention clocks and erasure (C-04, C-06, C-17, C-18, C-26, C-27, C-35)
 
-**Status: Proposed. The owner accepts or amends.** Source: the owner's compliance decisions in docs/compliance/decisions.md (PR #44).
+**Status: Accepted 2026-10-06 (D-54); proposed 2026-10-05.** Open items inside this section that the owner has not answered in docs/status.md stay open there. Source: the owner's compliance decisions in docs/compliance/decisions.md (PR #44).
 - "(owner decision C-xx)" marks what that file decides.
 - "(architect detail)" marks what this ADR adds, for the owner to confirm.
 - "(flag for owner/Legal advice, not verified by the architect)" marks legal points the architect raises but has not verified.
