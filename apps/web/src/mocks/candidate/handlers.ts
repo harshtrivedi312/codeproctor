@@ -83,6 +83,8 @@ interface SessionRecord {
   identityAttempts: number;
   uploads: number;
   roomScans: number;
+  /** ROOM_SCAN chunks by seq, like UNIQUE(session_id, stream, seq) (database.md). */
+  roomChunks: Map<number, { segment: number; confirmed: boolean }>;
   sideCameraPaired: boolean;
 }
 
@@ -234,6 +236,7 @@ export function createCandidateHandlers() {
         identityAttempts: 0,
         uploads: 0,
         roomScans: 0,
+        roomChunks: new Map(),
         sideCameraPaired: false,
       });
       return HttpResponse.json({
@@ -340,10 +343,18 @@ export function createCandidateHandlers() {
       if (!s) return problem(401, 'UNAUTHENTICATED');
       const body = (await request.json()) as {
         stream?: string;
+        segment?: number;
+        seq?: number;
         bytes?: number;
         durationMs?: number;
       };
-      if (body.stream !== 'ROOM_SCAN') return problem(400, 'VALIDATION_FAILED');
+      if (
+        body.stream !== 'ROOM_SCAN' ||
+        typeof body.seq !== 'number' ||
+        typeof body.segment !== 'number'
+      ) {
+        return problem(400, 'VALIDATION_FAILED');
+      }
       if (
         !body.bytes ||
         body.bytes > 16 * 1024 * 1024 ||
@@ -352,6 +363,10 @@ export function createCandidateHandlers() {
       ) {
         return problem(400, 'VALIDATION_FAILED');
       }
+      const existing = s.roomChunks.get(body.seq);
+      if (existing && existing.segment !== body.segment) return problem(409, 'SEQ_CONFLICT');
+      if (existing?.confirmed) return HttpResponse.json({ alreadyUploaded: true });
+      s.roomChunks.set(body.seq, { segment: body.segment, confirmed: false });
       s.uploads += 1;
       return HttpResponse.json({
         url: `${apiBaseUrl}/mock-upload/room-${s.uploads}`,
@@ -361,9 +376,13 @@ export function createCandidateHandlers() {
       });
     }),
 
-    http.post(`${base}/media/confirm`, ({ request }) => {
+    http.post(`${base}/media/confirm`, async ({ request }) => {
       const s = bearer(request);
       if (!s) return problem(401, 'UNAUTHENTICATED');
+      const body = (await request.json()) as { seq?: number };
+      const chunk = typeof body.seq === 'number' ? s.roomChunks.get(body.seq) : undefined;
+      if (!chunk) return problem(404, 'CHUNK_NOT_PRESIGNED');
+      chunk.confirmed = true;
       s.roomScans += 1;
       return HttpResponse.json({ uploaded: true, sizeBytes: 1024 });
     }),

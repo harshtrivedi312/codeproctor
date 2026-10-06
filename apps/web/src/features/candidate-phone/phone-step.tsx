@@ -47,12 +47,21 @@ export function PhoneStep({
     if (data && !data.required) onDone();
   }, [data, onRequiredKnown, onDone]);
 
-  const link = useMutation({ mutationFn: () => candidateApi.createSideCameraLink() });
+  // gcTime 0: the link token must not stay in the mutation cache after this step closes.
+  const link = useMutation({ mutationFn: () => candidateApi.createSideCameraLink(), gcTime: 0 });
   const [qr, setQr] = React.useState<string | null>(null);
   const [showLink, setShowLink] = React.useState(false);
   const requested = React.useRef(false);
 
   const linkResult = link.data;
+  const linkUnauthorized =
+    linkResult !== undefined &&
+    !linkResult.ok &&
+    linkResult.kind === 'problem' &&
+    linkResult.status === 401;
+  React.useEffect(() => {
+    if (linkUnauthorized) onSessionEnded();
+  }, [linkUnauthorized, onSessionEnded]);
   const linkToken = linkResult?.ok ? linkResult.data.linkToken : null;
   const linkUrl = linkToken ? phoneLinkUrl(window.location.origin, linkToken) : null;
 
@@ -110,7 +119,7 @@ export function PhoneStep({
       <StepFrame title="Your phone camera is connected" focusKey="connected">
         <Alert tone="success" role="status" data-testid="phone-paired">
           Your phone is connected. Keep it standing so it shows your desk and screen, and keep its
-          page open.
+          page open. Its video is not recorded yet.
         </Alert>
         <Button size="lg" className="min-h-11" onClick={onDone}>
           Continue
@@ -151,7 +160,8 @@ export function PhoneStep({
           <p role="status">{link.isPending ? 'Making your QR code...' : 'No QR code yet.'}</p>
         )}
         <p role="status" className="text-sm" data-testid="phone-waiting">
-          Waiting for your phone to connect.
+          Waiting for your phone to connect. For now the phone only connects and shows a preview:
+          its video is not recorded yet.
         </p>
         <div className="flex flex-wrap gap-3">
           <Button

@@ -176,7 +176,8 @@ export type SideCameraStatus = z.infer<typeof sideCameraStatusSchema>;
 
 /** PROVISIONAL: a short-lived single-use link token for the phone page. Never logged or stored. */
 export const sideCameraLinkSchema = z.object({
-  linkToken: z.string().min(20),
+  // The phone page accepts exactly this shape (candidate-phone/phone-store.ts).
+  linkToken: z.string().regex(/^[A-Za-z0-9_-]{20,128}$/),
   expiresAt: z.string(),
 });
 

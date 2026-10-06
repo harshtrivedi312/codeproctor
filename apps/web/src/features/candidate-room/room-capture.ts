@@ -7,6 +7,10 @@
  * (the wire limit), held in memory until it is uploaded and then dropped.
  */
 export const MAX_CLIP_MS = 60_000;
+/** Stop a second early so the measured duration is never clamped to the wire limit. */
+export const AUTO_STOP_MS = MAX_CLIP_MS - 1000;
+/** About 1.2 Mbps: 60 s is then about 9 MiB, under the 16 MiB chunk limit (Chrome's default is higher). */
+export const VIDEO_BITS_PER_SECOND = 1_200_000;
 export const MAX_CLIP_BYTES = 16 * 1024 * 1024;
 
 export interface RoomClip {
@@ -47,7 +51,10 @@ export const defaultRoomScanDeps: RoomScanDeps = {
     }),
   startRecording: (stream) => {
     const mimeType = pickMime();
-    const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+    const recorder = new MediaRecorder(stream, {
+      videoBitsPerSecond: VIDEO_BITS_PER_SECOND,
+      ...(mimeType ? { mimeType } : {}),
+    });
     const parts: Blob[] = [];
     const startedAt = new Date();
     const t0 = performance.now();
@@ -101,3 +108,22 @@ export const STATIONARY_STEPS = [
   'From where you sit, hold the camera still and show as much of the room as you can.',
   'Now show the desk surface: your keyboard, your hands and everything on the desk.',
 ] as const;
+
+/**
+ * ROOM_SCAN chunk numbers. The server keeps `seq` unique and increasing per stream across segments
+ * (database.md UNIQUE(session_id, stream, seq); ADR 0013 section 5.5 answers a reused seq with 409
+ * SEQ_CONFLICT), so every clip gets a fresh number and segment = seq. The counter lives in memory
+ * for the page's life, so it survives the step closing and reopening. After a reload it starts at 0
+ * again; the sender then follows the server's answers (SEQ_CONFLICT, alreadyUploaded) and advances.
+ */
+let nextRoomSeq = 0;
+export function currentRoomSeq(): number {
+  return nextRoomSeq;
+}
+export function advanceRoomSeq(): number {
+  nextRoomSeq = Math.min(9_999, nextRoomSeq + 1);
+  return nextRoomSeq;
+}
+export function resetRoomSeq(): void {
+  nextRoomSeq = 0;
+}

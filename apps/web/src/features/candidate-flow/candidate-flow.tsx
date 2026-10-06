@@ -5,6 +5,7 @@ import { ConsentStep } from '@/features/consent/consent-step';
 import type { IdentityDeps } from '@/features/identity/capture';
 import { PhoneStep } from '@/features/candidate-phone/phone-step';
 import { PracticeStep } from '@/features/candidate-practice/practice-step';
+import { resetRoomSeq } from '@/features/candidate-room/room-capture';
 import { RoomScanStep } from '@/features/candidate-room/room-scan-step';
 import type { RoomScanDeps } from '@/features/candidate-room/room-capture';
 import { IdentityStep } from '@/features/identity/identity-step';
@@ -90,6 +91,7 @@ export function CandidateFlow({
     return () => {
       // Leaving the flow forgets everything held in memory.
       clearCandidateCredentials();
+      resetRoomSeq();
     };
   }, [token]);
 

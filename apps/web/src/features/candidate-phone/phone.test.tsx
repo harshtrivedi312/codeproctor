@@ -1,12 +1,15 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { http, HttpResponse } from 'msw';
 import { axe } from 'vitest-axe';
+import { apiBaseUrl } from '@/lib/env';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { candidateApi } from '@/features/candidate-flow/api';
 import { setSessionToken } from '@/features/candidate-flow/session-store';
 import {
   recordRequests,
   renderWithQuery,
+  server,
   setupCandidateServer,
 } from '@/features/candidate-flow/test-helpers';
 import { MOCK_OTP, MOCK_TOKENS } from '@/mocks/candidate/handlers';
@@ -43,7 +46,7 @@ async function signIn(token: string): Promise<void> {
   setSessionToken(r.data.sessionToken);
 }
 
-describe('phone step on the computer (FR-405, TC-036)', () => {
+describe('phone step on the computer (FR-405)', () => {
   it('FR-405: a test that needs no side camera moves on by itself', async () => {
     await signIn(MOCK_TOKENS.consented);
     const onDone = vi.fn();
@@ -199,5 +202,77 @@ describe('phone link hand-off (FR-405, ADR 0003)', () => {
     window.history.replaceState(null, '', '/t/phone/enter#nope');
     expect(readPhoneTokenFromHash()).toBeNull();
     expect(phoneLinkUrl('https://x.test', 'abc')).toBe('https://x.test/t/phone/enter#abc');
+  });
+});
+
+describe('phone fixes from review (FR-405)', () => {
+  it('FR-405: pressing connect twice quickly opens one camera', async () => {
+    capturePhoneToken('mock-phone-link-token-aaaaaaaaaaaa');
+    const open = vi.fn(
+      () =>
+        new Promise<MediaStream>((resolve) =>
+          setTimeout(
+            () => resolve({ getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream),
+            30,
+          ),
+        ),
+    );
+    const user = userEvent.setup();
+    renderWithQuery(<PhoneCamera deps={{ openCamera: open }} />);
+    await user.dblClick(screen.getByRole('button', { name: /turn on the camera and connect/i }));
+    await waitFor(() => expect(open).toHaveBeenCalledTimes(1));
+  });
+
+  it('FR-405: an expired link clears the link token from memory', async () => {
+    capturePhoneToken('mock-phone-link-token-not-issued-00');
+    const user = userEvent.setup();
+    renderWithQuery(
+      <PhoneCamera
+        deps={{
+          openCamera: () =>
+            Promise.resolve({ getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream),
+        }}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: /turn on the camera and connect/i }));
+    await screen.findByRole('alert');
+    expect(getPhoneToken()).toBeNull();
+  });
+
+  it('FR-405: leaving the phone page forgets the link token', async () => {
+    capturePhoneToken('mock-phone-link-token-aaaaaaaaaaaa');
+    const view = renderWithQuery(<PhoneCamera />);
+    view.unmount();
+    await waitFor(() => expect(getPhoneToken()).toBeNull());
+  });
+
+  it('FR-405: an ended session while asking for a QR code ends the step', async () => {
+    await signIn(MOCK_TOKENS.strict);
+    setSessionToken('unknown-session');
+    const onSessionEnded = vi.fn();
+    server.use(
+      http.get(`${apiBaseUrl}/v1/candidate/session/side-camera`, () =>
+        HttpResponse.json({ required: true, connected: false }),
+      ),
+    );
+    renderWithQuery(<PhoneStep pollMs={5000} onDone={vi.fn()} onSessionEnded={onSessionEnded} />);
+    await waitFor(() => expect(onSessionEnded).toHaveBeenCalled());
+  });
+
+  it('FR-405: both sides say the phone video is not recorded yet', async () => {
+    await signIn(MOCK_TOKENS.strict);
+    renderWithQuery(<PhoneStep pollMs={5000} onDone={vi.fn()} onSessionEnded={vi.fn()} />);
+    expect(await screen.findByTestId('phone-waiting')).toHaveTextContent(/not recorded yet/i);
+  });
+
+  it('FR-405: a malformed link token from the API is rejected at the boundary', async () => {
+    const { sideCameraLinkSchema } = await import('@/features/candidate-flow/wire');
+    expect(
+      sideCameraLinkSchema.safeParse({ linkToken: 'a'.repeat(30), expiresAt: 'x' }).success,
+    ).toBe(true);
+    expect(
+      sideCameraLinkSchema.safeParse({ linkToken: 'has spaces and / slash 123456', expiresAt: 'x' })
+        .success,
+    ).toBe(false);
   });
 });

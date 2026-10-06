@@ -2,7 +2,7 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { axe } from 'vitest-axe';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { candidateApi } from '@/features/candidate-flow/api';
 import { setSessionToken } from '@/features/candidate-flow/session-store';
 import {
@@ -14,7 +14,14 @@ import {
 } from '@/features/candidate-flow/test-helpers';
 import { apiBaseUrl } from '@/lib/env';
 import { MOCK_OTP, MOCK_TOKENS } from '@/mocks/candidate/handlers';
-import { ROTATE_STEPS, STATIONARY_STEPS } from './room-capture';
+import {
+  AUTO_STOP_MS,
+  VIDEO_BITS_PER_SECOND,
+  advanceRoomSeq,
+  resetRoomSeq,
+  ROTATE_STEPS,
+  STATIONARY_STEPS,
+} from './room-capture';
 import { RoomScanStep } from './room-scan-step';
 
 vi.hoisted(() => {
@@ -26,6 +33,7 @@ vi.mock('@/lib/mock-ready', () => ({
 }));
 
 setupCandidateServer();
+beforeEach(() => resetRoomSeq());
 
 async function signIn(): Promise<void> {
   const r = await candidateApi.startSession(MOCK_TOKENS.consented, MOCK_OTP);
@@ -204,7 +212,7 @@ describe('room scan step (FR-404, TC-035)', () => {
     expect(seen.filter((r) => r.url.endsWith('/media/confirm'))).toHaveLength(1);
   });
 
-  it('FR-404: recording again starts a new segment', async () => {
+  it('FR-404: recording again before sending presigns only the clip that is sent', async () => {
     await signIn();
     const seen = recordRequests();
     const { deps } = fakeRoomDeps();
@@ -215,7 +223,9 @@ describe('room scan step (FR-404, TC-035)', () => {
     await recordRotation(user);
     await user.click(await screen.findByRole('button', { name: /send this recording/i }));
     await screen.findByTestId('room-done');
-    expect(seen.find((r) => r.url.endsWith('/media/presign'))?.body).toMatchObject({ segment: 1 });
+    const presigns = seen.filter((r) => r.url.endsWith('/media/presign'));
+    expect(presigns).toHaveLength(1);
+    expect(presigns[0]?.body).toMatchObject({ segment: 0, seq: 0 });
   });
 
   it('FR-404: the camera is stopped once recording ends', async () => {
@@ -268,5 +278,208 @@ describe('room scan step (FR-404, TC-035)', () => {
     await user.click(screen.getByRole('button', { name: /send this recording/i }));
     await screen.findByTestId('room-done');
     expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('FR-404: after a failed send, Record again and Send uses a new seq and succeeds (no SEQ_CONFLICT forever)', async () => {
+    await signIn();
+    const seen = recordRequests();
+    let outcome: 'ok' | 'failed' = 'failed';
+    const { deps } = fakeRoomDeps();
+    const user = userEvent.setup();
+    renderWithQuery(
+      <RoomScanStep
+        deps={{ ...deps, upload: () => Promise.resolve(outcome) }}
+        onDone={vi.fn()}
+        onSessionEnded={vi.fn()}
+      />,
+    );
+    await recordRotation(user);
+    await user.click(await screen.findByRole('button', { name: /send this recording/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/upload did not finish/i);
+    outcome = 'ok';
+    await user.click(screen.getByRole('button', { name: /record again/i }));
+    await recordRotation(user);
+    await user.click(await screen.findByRole('button', { name: /send this recording/i }));
+    expect(await screen.findByTestId('room-done')).toBeInTheDocument();
+    const seqs = seen
+      .filter((r) => r.url.endsWith('/media/presign'))
+      .map((r) => (r.body as { seq: number; segment: number }).seq);
+    // The failed send retried the same chunk (seq 0); the re-recorded clip got a new seq.
+    expect(seqs[0]).toBe(0);
+    expect(seqs.at(-1)).toBeGreaterThan(0);
+    const last = seen.filter((r) => r.url.endsWith('/media/presign')).at(-1)?.body as {
+      seq: number;
+      segment: number;
+    };
+    expect(last.segment).toBe(last.seq);
+  });
+
+  it('FR-404: a second clip after the step reopens (resume) does not reuse the first clip seq', async () => {
+    await signIn();
+    const seen = recordRequests();
+    const { deps } = fakeRoomDeps();
+    const user = userEvent.setup();
+    const first = renderWithQuery(
+      <RoomScanStep deps={deps} onDone={vi.fn()} onSessionEnded={vi.fn()} />,
+    );
+    await recordRotation(user);
+    await user.click(await screen.findByRole('button', { name: /send this recording/i }));
+    await screen.findByTestId('room-done');
+    first.unmount();
+    renderWithQuery(<RoomScanStep deps={deps} onDone={vi.fn()} onSessionEnded={vi.fn()} />);
+    await recordRotation(user);
+    await user.click(await screen.findByRole('button', { name: /send this recording/i }));
+    await screen.findByTestId('room-done');
+    const seqs = seen
+      .filter((r) => r.url.endsWith('/media/presign'))
+      .map((r) => (r.body as { seq: number }).seq);
+    expect(seqs).toEqual([0, 1]);
+  });
+
+  it('FR-404: after a page reload the counter restarts, and alreadyUploaded for a clip this page did not send is not "received"', async () => {
+    await signIn();
+    const seen = recordRequests();
+    const { deps: base } = fakeRoomDeps();
+    const upload = vi.fn(() => Promise.resolve('ok' as const));
+    const deps = { ...base, upload };
+    const user = userEvent.setup();
+    // An earlier page load stored and confirmed seq 0.
+    const prior = await candidateApi.presignMedia({
+      stream: 'ROOM_SCAN',
+      segment: 0,
+      seq: 0,
+      bytes: 10,
+      contentType: 'video/webm',
+      startedAt: '2026-10-05T09:00:00.000Z',
+      durationMs: 1000,
+    });
+    expect(prior.ok).toBe(true);
+    await candidateApi.confirmMedia({ stream: 'ROOM_SCAN', segment: 0, seq: 0 });
+    resetRoomSeq();
+    renderWithQuery(<RoomScanStep deps={deps} onDone={vi.fn()} onSessionEnded={vi.fn()} />);
+    await recordRotation(user);
+    await user.click(await screen.findByRole('button', { name: /send this recording/i }));
+    expect(await screen.findByTestId('room-done')).toBeInTheDocument();
+    // The clip really was uploaded, under a seq the server did not already hold.
+    const presigns = seen.filter((r) => r.url.endsWith('/media/presign'));
+    expect(presigns.map((r) => (r.body as { seq: number }).seq).slice(-2)).toEqual([0, 1]);
+    expect(upload).toHaveBeenCalledTimes(1);
+  });
+
+  it('FR-404: SEQ_CONFLICT moves on to the next seq and presigns again', async () => {
+    await signIn();
+    const seen = recordRequests();
+    let first = true;
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/session/media/presign`, async ({ request }) => {
+        const body = (await request.json()) as { seq: number };
+        if (first) {
+          first = false;
+          return HttpResponse.json({ code: 'SEQ_CONFLICT' }, { status: 409 });
+        }
+        return HttpResponse.json({
+          url: `${apiBaseUrl}/mock-upload/x-${body.seq}`,
+          method: 'PUT',
+          headers: { 'Content-Type': 'video/webm' },
+          expiresAt: '2026-10-05T10:00:00.000Z',
+        });
+      }),
+    );
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/session/media/confirm`, () =>
+        HttpResponse.json({ uploaded: true, sizeBytes: 5 }),
+      ),
+    );
+    const { deps } = fakeRoomDeps();
+    const user = userEvent.setup();
+    renderWithQuery(<RoomScanStep deps={deps} onDone={vi.fn()} onSessionEnded={vi.fn()} />);
+    await recordRotation(user);
+    await user.click(await screen.findByRole('button', { name: /send this recording/i }));
+    expect(await screen.findByTestId('room-done')).toBeInTheDocument();
+    const seqs = seen
+      .filter((r) => r.url.endsWith('/media/presign'))
+      .map((r) => (r.body as { seq: number }).seq);
+    expect(seqs).toEqual([0, 1]);
+    expect(advanceRoomSeq()).toBeGreaterThan(1);
+  });
+
+  it('FR-404: presign 429 and SESSION_NOT_ACTIVE give their own messages', async () => {
+    await signIn();
+    const user = userEvent.setup();
+    const { deps } = fakeRoomDeps();
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/session/media/presign`, () =>
+        HttpResponse.json(
+          { code: 'RATE_LIMITED' },
+          { status: 429, headers: { 'Retry-After': '17' } },
+        ),
+      ),
+    );
+    renderWithQuery(<RoomScanStep deps={deps} onDone={vi.fn()} onSessionEnded={vi.fn()} />);
+    await recordRotation(user);
+    await user.click(await screen.findByRole('button', { name: /send this recording/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/wait 17 seconds/i);
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/session/media/presign`, () =>
+        HttpResponse.json({ code: 'SESSION_NOT_ACTIVE' }, { status: 409 }),
+      ),
+    );
+    await user.click(screen.getByRole('button', { name: /send this recording/i }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/no longer active/i));
+  });
+
+  it('FR-404: the recorder is limited to about 1.2 Mbps and stops a second before the wire limit', () => {
+    expect(VIDEO_BITS_PER_SECOND).toBeLessThanOrEqual(1_500_000);
+    // 60 s at that rate is well under the 16 MiB chunk limit.
+    expect((VIDEO_BITS_PER_SECOND / 8) * 60).toBeLessThan(16 * 1024 * 1024);
+    expect(AUTO_STOP_MS).toBe(59_000);
+  });
+
+  it('FR-404: a recorder that cannot start stops the camera and explains', async () => {
+    await signIn();
+    const stopped = vi.fn();
+    const user = userEvent.setup();
+    renderWithQuery(
+      <RoomScanStep
+        deps={{
+          openCamera: () =>
+            Promise.resolve({ getTracks: () => [{ stop: stopped }] } as unknown as MediaStream),
+          startRecording: () => {
+            throw new Error('NotSupportedError');
+          },
+        }}
+        onDone={vi.fn()}
+        onSessionEnded={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: /start the room scan/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not start the recording/i);
+    expect(stopped).toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /start the room scan/i })).toBeEnabled();
+  });
+
+  it('FR-404: pressing start twice quickly opens one camera', async () => {
+    await signIn();
+    const open = vi.fn(
+      () =>
+        new Promise<MediaStream>((resolve) =>
+          setTimeout(
+            () => resolve({ getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream),
+            30,
+          ),
+        ),
+    );
+    const { deps } = fakeRoomDeps();
+    const user = userEvent.setup();
+    renderWithQuery(
+      <RoomScanStep
+        deps={{ ...deps, openCamera: open }}
+        onDone={vi.fn()}
+        onSessionEnded={vi.fn()}
+      />,
+    );
+    await user.dblClick(screen.getByRole('button', { name: /start the room scan/i }));
+    await screen.findByTestId('room-step');
+    expect(open).toHaveBeenCalledTimes(1);
   });
 });

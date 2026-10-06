@@ -5,7 +5,12 @@ import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { candidateApi } from '@/features/candidate-flow/api';
 import { StepFrame } from '@/features/candidate-flow/step-frame';
-import { clearPhoneToken, getPhoneToken } from './phone-store';
+import {
+  cancelClearPhoneToken,
+  clearPhoneToken,
+  getPhoneToken,
+  scheduleClearPhoneToken,
+} from './phone-store';
 
 export interface PhoneCameraDeps {
   openCamera: () => Promise<MediaStream>;
@@ -42,18 +47,22 @@ export function PhoneCamera({
   const [problem, setProblem] = React.useState<string | null>(null);
   const [paired, setPaired] = React.useState(false);
   const streamRef = React.useRef<MediaStream | null>(null);
+  const startingRef = React.useRef(false);
+  const [starting, setStarting] = React.useState(false);
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const [hasLink] = React.useState(() => getPhoneToken() !== null);
 
   React.useEffect(() => {
     if (videoRef.current) videoRef.current.srcObject = stream;
   }, [stream, paired]);
-  React.useEffect(
-    () => () => {
+  // Leaving the page stops the camera and forgets the link token.
+  React.useEffect(() => {
+    cancelClearPhoneToken();
+    return () => {
       streamRef.current?.getTracks().forEach((t) => t.stop());
-    },
-    [],
-  );
+      scheduleClearPhoneToken();
+    };
+  }, []);
 
   const pair = useMutation({
     mutationFn: async () => {
@@ -64,7 +73,22 @@ export function PhoneCamera({
   });
 
   async function start(): Promise<void> {
+    if (startingRef.current) return;
+    startingRef.current = true;
+    setStarting(true);
+    try {
+      await connect();
+    } finally {
+      startingRef.current = false;
+      setStarting(false);
+    }
+  }
+
+  async function connect(): Promise<void> {
     setProblem(null);
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    setStream(null);
     let s: MediaStream;
     try {
       s = await deps.openCamera();
@@ -86,6 +110,7 @@ export function PhoneCamera({
     s.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     setStream(null);
+    if (result.kind === 'problem' && [404, 409, 410].includes(result.status)) clearPhoneToken();
     setProblem(
       result.kind === 'problem' &&
         (result.status === 404 || result.status === 409 || result.status === 410)
@@ -127,16 +152,16 @@ export function PhoneCamera({
             <Button
               size="lg"
               className="min-h-11"
-              disabled={pair.isPending}
+              disabled={starting || pair.isPending}
               onClick={() => void start()}
             >
-              {pair.isPending ? 'Connecting...' : 'Turn on the camera and connect'}
+              {starting || pair.isPending ? 'Connecting...' : 'Turn on the camera and connect'}
             </Button>
           </div>
         ) : (
           <div className="space-y-4">
             <Alert tone="success" role="status" data-testid="phone-connected">
-              Connected. Look at your computer: it will tell you when to continue.
+              Connected. Look at your computer: it moves on when it sees this phone.
             </Alert>
             <ol className="list-decimal space-y-1 pl-6">
               <li>
@@ -145,7 +170,10 @@ export function PhoneCamera({
               <li>
                 Keep this page open and the phone plugged in or charged. Do not lock the screen.
               </li>
-              <li>If you close this page, your computer will tell you to reconnect.</li>
+              <li>
+                If you close this page, the connection ends. Open the QR code link again to
+                reconnect.
+              </li>
             </ol>
           </div>
         )}

@@ -5,8 +5,10 @@ import { Button } from '@/components/ui/button';
 import { candidateApi } from '@/features/candidate-flow/api';
 import { StepFrame } from '@/features/candidate-flow/step-frame';
 import {
+  AUTO_STOP_MS,
   MAX_CLIP_BYTES,
-  MAX_CLIP_MS,
+  advanceRoomSeq,
+  currentRoomSeq,
   ROTATE_STEPS,
   STATIONARY_STEPS,
   defaultRoomScanDeps,
@@ -20,12 +22,14 @@ type Mode = 'rotate' | 'stationary';
 
 /** Wire retries: a missing object or a mismatch asks for a new presign (ADR 0013 section 5.5). */
 const MAX_SEND_ATTEMPTS = 3;
+/** How many times a taken seq number is skipped before giving up. */
+const MAX_SEQ_ADVANCES = 8;
 
 export const ROOM_COPY = {
   intro:
     'We ask for a short video of the room you are in, to see that you are alone and what is on your desk. It has no sound. It is recorded only after you signed the consent document, and it is used only for the review of this assessment.',
   stationaryNote:
-    'If you cannot turn the camera around, choose "I cannot rotate my camera". You will show the room from where you sit instead, and a reviewer will see that. You can also ask your recruiter about an accommodation before you start.',
+    'If you cannot turn the camera around, choose "I cannot rotate my camera". The video will show the room from where you sit instead. Tell your recruiter if you need an accommodation, before you start.',
 } as const;
 
 /** FR-404 room scan (TC-035). Candidate-paced steps; the clip is uploaded as stream ROOM_SCAN. */
@@ -49,11 +53,13 @@ export function RoomScanStep({
   const [clip, setClip] = React.useState<{ clip: RoomClip; url: string | null } | null>(null);
   const [problem, setProblem] = React.useState<string | null>(null);
   const [elapsed, setElapsed] = React.useState(0);
-  const [attempt, setAttempt] = React.useState(0);
   const streamRef = React.useRef<MediaStream | null>(null);
   const recorderRef = React.useRef<RoomRecorder | null>(null);
   const clipRef = React.useRef<{ url: string | null } | null>(null);
   const sendingRef = React.useRef(false);
+  const startingRef = React.useRef(false);
+  const uploadedSeqs = React.useRef(new Set<number>());
+  const [starting, setStarting] = React.useState(false);
   const videoRef = React.useRef<HTMLVideoElement>(null);
 
   const steps = mode === 'rotate' ? ROTATE_STEPS : STATIONARY_STEPS;
@@ -97,26 +103,44 @@ export function RoomScanStep({
     return () => window.clearInterval(id);
   }, [phase]);
   React.useEffect(() => {
-    if (phase === 'recording' && elapsed * 1000 >= MAX_CLIP_MS - 500) void finishRecording();
+    if (phase === 'recording' && elapsed * 1000 >= AUTO_STOP_MS) void finishRecording();
   }, [elapsed, phase, finishRecording]);
 
   async function begin(chosen: Mode): Promise<void> {
-    setProblem(null);
-    setMode(chosen);
+    if (startingRef.current) return;
+    startingRef.current = true;
+    setStarting(true);
     try {
-      const s = await deps.openCamera();
+      setProblem(null);
+      setMode(chosen);
+      stopCamera();
+      let s: MediaStream;
+      try {
+        s = await deps.openCamera();
+      } catch {
+        setProblem(
+          'The camera could not start. Click the camera or lock icon in the address bar, allow the camera, close other apps that use it, then press the button again.',
+        );
+        return;
+      }
       streamRef.current = s;
       setStream(s);
-    } catch {
-      setProblem(
-        'The camera could not start. Click the camera or lock icon in the address bar, allow the camera, close other apps that use it, then press the button again.',
-      );
-      return;
+      try {
+        recorderRef.current = deps.startRecording(s);
+      } catch {
+        stopCamera();
+        setProblem(
+          'This browser could not start the recording. Use the latest Chrome or Edge, then press the button again.',
+        );
+        return;
+      }
+      setStepIndex(0);
+      setElapsed(0);
+      setPhase('recording');
+    } finally {
+      startingRef.current = false;
+      setStarting(false);
     }
-    recorderRef.current = deps.startRecording(streamRef.current);
-    setStepIndex(0);
-    setElapsed(0);
-    setPhase('recording');
   }
 
   function discard(): void {
@@ -124,7 +148,6 @@ export function RoomScanStep({
     clipRef.current = null;
     setClip(null);
     setProblem(null);
-    setAttempt((a) => a + 1);
     setPhase('intro');
   }
 
@@ -136,12 +159,18 @@ export function RoomScanStep({
     try {
       const { blob, durationMs, startedAt } = clip.clip;
       if (blob.size < 1 || blob.size > MAX_CLIP_BYTES) {
-        setProblem('That recording is empty or too large. Please record it again.');
+        setProblem(
+          'That recording is empty or too large. Please record it again and keep it shorter.',
+        );
         setPhase('review');
         return;
       }
-      const ref = { stream: 'ROOM_SCAN', segment: attempt, seq: 0 } as const;
-      for (let n = 0; n < MAX_SEND_ATTEMPTS; n += 1) {
+      let seq = currentRoomSeq();
+      let tries = 0;
+      let conflicts = 0;
+      let message: string | null = null;
+      while (tries < MAX_SEND_ATTEMPTS && conflicts < MAX_SEQ_ADVANCES) {
+        const ref = { stream: 'ROOM_SCAN', segment: seq, seq } as const;
         const presign = await candidateApi.presignMedia({
           ...ref,
           bytes: blob.size,
@@ -150,18 +179,45 @@ export function RoomScanStep({
           durationMs,
         });
         if (!presign.ok) {
-          if (presign.kind === 'problem' && presign.status === 401) {
+          if (presign.kind !== 'problem') break;
+          if (presign.status === 401) {
             onSessionEnded();
             return;
           }
+          if (presign.status === 409 && presign.code === 'SEQ_CONFLICT') {
+            // This number is taken by another clip: use the next one.
+            seq = advanceRoomSeq();
+            conflicts += 1;
+            continue;
+          }
+          if (presign.status === 409 && presign.code === 'SESSION_NOT_ACTIVE') {
+            message =
+              'Your session is no longer active, so the recording cannot be sent. Open the link from your invitation email again.';
+          } else if (presign.status === 429) {
+            message = `Too many tries in a row. Wait ${presign.retryAfterSeconds ?? 60} seconds, then press "Send this recording" again.`;
+          }
           break;
         }
-        if (!('alreadyUploaded' in presign.data)) {
+        if ('alreadyUploaded' in presign.data) {
+          // Stored already. That is only our clip if this component sent this exact one; otherwise
+          // the number belongs to an earlier clip, so move on to a fresh one.
+          if (!uploadedSeqs.current.has(seq)) {
+            seq = advanceRoomSeq();
+            conflicts += 1;
+            continue;
+          }
+        } else {
           const outcome = await deps.upload(presign.data.url, presign.data.headers, blob);
-          if (outcome === 'failed') continue;
+          if (outcome === 'failed') {
+            tries += 1;
+            continue;
+          }
+          uploadedSeqs.current.add(seq);
         }
         const confirm = await candidateApi.confirmMedia(ref);
         if (confirm.ok) {
+          advanceRoomSeq();
+          uploadedSeqs.current.clear();
           if (clipRef.current?.url) URL.revokeObjectURL(clipRef.current.url);
           clipRef.current = null;
           setClip(null);
@@ -173,11 +229,19 @@ export function RoomScanStep({
           return;
         }
         // 409 UPLOAD_NOT_FOUND and 422 UPLOAD_MISMATCH: ask for a new URL and upload again.
-        if (!(confirm.kind === 'problem' && (confirm.status === 409 || confirm.status === 422)))
-          break;
+        if (confirm.kind === 'problem' && (confirm.status === 409 || confirm.status === 422)) {
+          uploadedSeqs.current.delete(seq);
+          tries += 1;
+          continue;
+        }
+        break;
       }
+      // A failed clip never keeps its number: the next try (or a re-record) starts fresh.
+      advanceRoomSeq();
+      uploadedSeqs.current.clear();
       setProblem(
-        'The upload did not finish. Check your internet connection and press "Send this recording" again. Your recording is still here.',
+        message ??
+          'The upload did not finish. Check your internet connection and press "Send this recording" again. Your recording is still here.',
       );
       setPhase('review');
     } finally {
@@ -219,17 +283,23 @@ export function RoomScanStep({
           <ol className="list-decimal space-y-1 pl-6">
             <li>Press the button. Your camera turns on and recording starts.</li>
             <li>Follow each instruction at your own pace and press &quot;Done, next&quot;.</li>
-            <li>It usually takes about 15 to 30 seconds. The most it can run is 60 seconds.</li>
+            <li>It usually takes about 15 to 30 seconds. The most it can run is 59 seconds.</li>
           </ol>
           <p>{ROOM_COPY.stationaryNote}</p>
           <div className="flex flex-wrap gap-3">
-            <Button size="lg" className="min-h-11" onClick={() => void begin('rotate')}>
+            <Button
+              size="lg"
+              className="min-h-11"
+              disabled={starting}
+              onClick={() => void begin('rotate')}
+            >
               Start the room scan
             </Button>
             <Button
               size="lg"
               variant="outline"
               className="min-h-11"
+              disabled={starting}
               onClick={() => void begin('stationary')}
             >
               I cannot rotate my camera
@@ -265,7 +335,10 @@ export function RoomScanStep({
             {steps[stepIndex]}
           </p>
           {elapsed >= 45 ? (
-            <p role="status">The recording stops at 60 seconds. You can record again afterwards.</p>
+            <p role="status">
+              The recording stops at 59 seconds. Keep it shorter if you can; you can record again
+              afterwards.
+            </p>
           ) : null}
           <div className="flex flex-wrap gap-3">
             {stepIndex < steps.length - 1 ? (
