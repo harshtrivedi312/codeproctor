@@ -11,7 +11,7 @@ export class AppThrottlerGuard extends ThrottlerGuard {
       return await super.handleRequest(requestProps);
     } catch (e) {
       if (e instanceof ThrottleBackendUnavailableError) {
-        throw new ServiceUnavailableException('Temporarily unavailable.');
+        throw new ServiceUnavailableException('Service is temporarily unavailable.');
       }
       throw e;
     }
