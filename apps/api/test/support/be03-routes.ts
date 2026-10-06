@@ -811,7 +811,7 @@ const BE04_ROUTES: Be03Route[] = [
     metadataShape: { testCaseId: isUuid, version: isInt },
     mutating: true,
     takesBody: false,
-    ok: [204],
+    ok: [200],
     prepare: async (h, orgId) => {
       const f = await questionFixture(h, orgId);
       return {
@@ -917,7 +917,7 @@ const BE04_ROUTES: Be03Route[] = [
     metadataShape: { variantId: isUuid, version: isInt },
     mutating: true,
     takesBody: false,
-    ok: [204],
+    ok: [200],
     prepare: async (h, orgId) => {
       const f = await variantFixture(h, orgId);
       return {
@@ -961,7 +961,7 @@ const BE04_ROUTES: Be03Route[] = [
     metadataShape: { testCaseId: isUuid, variantId: isUuid, version: isInt },
     mutating: true,
     takesBody: false,
-    ok: [204],
+    ok: [200],
     prepare: async (h, orgId) => {
       const f = await variantFixture(h, orgId, { override: true });
       return {
