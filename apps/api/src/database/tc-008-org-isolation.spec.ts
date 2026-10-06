@@ -1379,6 +1379,90 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         expect(await snapshot()).toEqual(before);
       });
 
+      it("TC-008 FR-305 ADR 0015 4: nested writes through identityCheck.videoCheckBy (and reviewedBy) and the parent-side videoCheckedIdentityChecks are refused, and org I's user is unchanged", async () => {
+        // L's WAIVED identity check names org I's user as the one who recorded the video check (the
+        // database allows it: the foreign key is rule (i), not composite). L's fixture check is
+        // PENDING with nothing set, so it can become WAIVED with the three video columns.
+        const identityCheckId = id(L, 'IdentityCheck');
+        await owner.identityCheck.update({
+          where: { id: identityCheckId },
+          data: {
+            status: 'WAIVED',
+            videoCheckDone: true,
+            videoCheckById: I.userId,
+            videoCheckAt: new Date('2026-10-05T12:00:00.000Z'),
+          },
+        });
+        const before = await snapshot();
+        const attempts: Array<() => Promise<unknown>> = [
+          () =>
+            prisma.client.identityCheck.update({
+              where: { id: identityCheckId },
+              data: { videoCheckBy: { update: { passwordHash: 'pwned' } } },
+            }),
+          () =>
+            prisma.client.identityCheck.update({
+              where: { id: identityCheckId },
+              data: {
+                videoCheckBy: {
+                  connect: { id: I.userId },
+                  update: { email: 'attacker@example.test', passwordHash: 'pwned' },
+                },
+              },
+            }),
+          () =>
+            prisma.client.identityCheck.update({
+              where: { id: identityCheckId },
+              data: { videoCheckBy: { delete: true } },
+            }),
+          () =>
+            prisma.client.identityCheck.update({
+              where: { id: identityCheckId },
+              data: { videoCheckBy: { disconnect: true } },
+            }),
+          () =>
+            prisma.client.identityCheck.update({
+              where: { id: identityCheckId },
+              data: { reviewedBy: { update: { passwordHash: 'pwned' } } },
+            }),
+          () =>
+            prisma.client.user.update({
+              where: { id: L.userId },
+              data: {
+                videoCheckedIdentityChecks: {
+                  updateMany: { where: {}, data: { reviewNote: 'overwritten' } },
+                },
+              },
+            }),
+          () =>
+            prisma.client.user.update({
+              where: { id: L.userId },
+              data: { videoCheckedIdentityChecks: { deleteMany: {} } },
+            }),
+        ];
+        for (const attempt of attempts) {
+          await expect(asL(attempt)).rejects.toBeInstanceOf(OrgScopeViolationError);
+        }
+        expect(await snapshot()).toEqual(before);
+        const victim = await owner.user.findUniqueOrThrow({ where: { id: I.userId } });
+        expect({ passwordHash: victim.passwordHash, email: victim.email }).toEqual({
+          passwordHash: 'not-a-real-hash',
+          email: 'staff-i@example.test',
+        });
+        // The scalar foreign key is the way in, and it is rule (i): the service loads the user
+        // through the scoped client first. Here L's own user is written and read back.
+        await asL(() =>
+          prisma.client.identityCheck.update({
+            where: { id: identityCheckId },
+            data: { videoCheckById: L.userId },
+          }),
+        );
+        expect(
+          (await owner.identityCheck.findUniqueOrThrow({ where: { id: identityCheckId } }))
+            .videoCheckById,
+        ).toBe(L.userId);
+      });
+
       it('TC-008 a child-side connect and disconnect through the same relations are refused, and the scalar foreign keys work', async () => {
         await expect(
           asL(() =>

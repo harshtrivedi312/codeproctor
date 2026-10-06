@@ -65,8 +65,8 @@ const WRITE_OPERATIONS: Array<[string, (data: Args) => Args]> = [
 describe('nested relation writes are denied by default (NFR-04, FR-103; ADR 0006 section 8)', () => {
   const relations = relationKeys().map((key) => key.split('.') as [ModelName, string]);
 
-  it('TC-008 the relation table covers all 116 relation fields of the schema, both sides of 58 foreign keys', () => {
-    expect(relations).toHaveLength(116);
+  it('TC-008 the relation table covers all 118 relation fields of the schema, both sides of 59 foreign keys', () => {
+    expect(relations).toHaveLength(118);
   });
 
   it.each(NESTED_OPERATIONS)(
@@ -144,6 +144,52 @@ describe('nested relation writes are denied by default (NFR-04, FR-103; ADR 0006
           reviewer: { connect: { id: ID_OF_B }, update: { email: 'a@x.test', passwordHash: 'p' } },
         },
       });
+    });
+
+    it('TC-008 FR-305 ADR 0015 4: nested writes through identity_checks.video_check_by, a RULE_I staff relation, are refused on both sides, like reviewed_by', () => {
+      for (const [model, field] of [
+        ['IdentityCheck', 'videoCheckBy'],
+        ['IdentityCheck', 'reviewedBy'],
+      ] as const) {
+        refused(model, 'update', {
+          where: { id: 'x' },
+          data: { [field]: { update: { passwordHash: 'p' } } },
+        });
+        refused(model, 'update', {
+          where: { id: 'x' },
+          data: {
+            [field]: { connect: { id: ID_OF_B }, update: { email: 'a@x.test', passwordHash: 'p' } },
+          },
+        });
+        refused(model, 'update', { where: { id: 'x' }, data: { [field]: { delete: true } } });
+        refused(model, 'update', { where: { id: 'x' }, data: { [field]: { disconnect: true } } });
+        refused(model, 'create', {
+          data: { sessionId: 's', [field]: { connect: { id: ID_OF_B } } },
+        });
+      }
+      for (const field of ['videoCheckedIdentityChecks', 'reviewedIdentityChecks'] as const) {
+        refused('User', 'update', {
+          where: { id: 'x' },
+          data: { [field]: { updateMany: { where: {}, data: { reviewNote: 'n' } } } },
+        });
+        refused('User', 'update', { where: { id: 'x' }, data: { [field]: { deleteMany: {} } } });
+        refused('User', 'update', {
+          where: { id: 'x' },
+          data: { [field]: { connect: { id: ID_OF_B } } },
+        });
+      }
+      // The scalar foreign key is not a relation write: services write it after loading the user in scope.
+      expect(() =>
+        scope('IdentityCheck', 'update', {
+          where: { id: 'x' },
+          data: { videoCheckDone: true, videoCheckById: ID_OF_B, videoCheckAt: new Date() },
+        }),
+      ).not.toThrow();
+      expect(() =>
+        scope('IdentityCheck', 'create', {
+          data: { sessionId: 's', attempt: 1, status: 'WAIVED' },
+        }),
+      ).not.toThrow();
     });
 
     it('TC-008 B2(a): connect through a COMPOSITE relation rewrites org_id, so it is refused (update and create)', () => {
