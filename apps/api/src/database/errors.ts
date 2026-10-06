@@ -46,6 +46,29 @@ export class RawQueryNotAllowedError extends OrgScopeError {
 // the calling code: each is an expected outcome that the caller maps. They are plain Errors and not
 // OrgScopeErrors, so a handler for scoping bugs does not catch them. Their messages carry no value,
 // never the session id.
+//
+// Each has a STABLE DISCRIMINATOR for the code that maps it: the exported class (`instanceof`) and a read-only `code`
+// (a getter on the prototype, so it is not an own property, it cannot be reassigned, and it never shows in a
+// serialised error). The global ProblemFilter (docs/api-contract.md section 8, Backend A) matches database SQLSTATEs;
+// these three have none, so without a discriminator a route would answer 500.
+//
+//   SessionNotFoundError      `SESSION_NOT_FOUND`    404 on the accommodations PATCH (ADR 0015 section 6); a session
+//                                                    job drops the job (a poison job, ADR 0006 section 8.4).
+//   SessionLockRetryError     `SESSION_LOCK_RETRY`   503 `BUSY` with `Retry-After` via ProblemFilter on a route
+//                                                    (the proctor-resume: ADR 0013 5.7), never 500; a BullMQ retry
+//                                                    through `busy-lock.ts` (SessionJobProcessor, Backend B).
+//   AccommodationLockedError  `ACCOMMODATION_LOCKED` 409, a state conflict (ADR 0015 section 6); the retention site
+//                                                    retries through BullMQ.
+
+/** The `code` of each lock error. A caller switches on the code or on `instanceof`. */
+export const SESSION_LOCK_ERROR_CODES = {
+  notFound: 'SESSION_NOT_FOUND',
+  retry: 'SESSION_LOCK_RETRY',
+  accommodationLocked: 'ACCOMMODATION_LOCKED',
+} as const;
+
+export type SessionLockErrorCode =
+  (typeof SESSION_LOCK_ERROR_CODES)[keyof typeof SESSION_LOCK_ERROR_CODES];
 
 /**
  * The session is not visible in this scope: another org's session, an unknown id, or an id that is
@@ -57,26 +80,39 @@ export class SessionNotFoundError extends Error {
     super('The session was not found in this scope.');
     this.name = new.target.name;
   }
+
+  get code(): typeof SESSION_LOCK_ERROR_CODES.notFound {
+    return SESSION_LOCK_ERROR_CODES.notFound;
+  }
 }
 
 /**
  * guardLive or lockAnySession lost its compare-and-set three times in a row: the status kept changing
- * between the read and the lock. The job fails and its own retry (BullMQ) runs it again.
+ * between the read and the lock. It carries no SQLSTATE, so ProblemFilter does not match it by itself: a route maps it
+ * to 503 `BUSY` with `Retry-After` (Backend A), a job to a BullMQ retry (`busy-lock.ts`, Backend B). Never a 500.
  */
 export class SessionLockRetryError extends Error {
   constructor() {
     super('The session lock could not be taken: the status kept changing. Retry the job.');
     this.name = new.target.name;
   }
+
+  get code(): typeof SESSION_LOCK_ERROR_CODES.retry {
+    return SESSION_LOCK_ERROR_CODES.retry;
+  }
 }
 
 /**
  * lockForAccommodation lost its compare-and-set three times in a row. The accommodation routes
- * answer 409 ACCOMMODATION_LOCKED (ADR 0015 section 6); the retention jobs retry through BullMQ.
+ * answer 409 ACCOMMODATION_LOCKED, a state conflict (ADR 0015 section 6); the retention site retries through BullMQ.
  */
 export class AccommodationLockedError extends Error {
   constructor() {
     super('The accommodation lock could not be taken: the session status kept changing.');
     this.name = new.target.name;
+  }
+
+  get code(): typeof SESSION_LOCK_ERROR_CODES.accommodationLocked {
+    return SESSION_LOCK_ERROR_CODES.accommodationLocked;
   }
 }

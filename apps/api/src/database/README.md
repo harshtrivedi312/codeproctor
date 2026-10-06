@@ -757,6 +757,17 @@ coreGuardLive }`) or as a namespace (`import * as locks`), **never under its own
 The errors are exported from `index.ts` (`SessionNotFoundError`, `SessionLockRetryError`,
 `AccommodationLockedError`), so a caller can map them without importing the module.
 
+**Error codes and who maps them.** Each error has a stable, read-only `code` (a prototype getter, not an own property)
+and an exported class for `instanceof`; `SESSION_LOCK_ERROR_CODES` and `SessionLockErrorCode` are exported too. The
+global `ProblemFilter` (docs/api-contract.md section 8, Backend A) matches database SQLSTATEs and Prisma codes, and
+these three carry none, so without a mapping a route would answer 500.
+
+| Error                      | `code`                 | Route                                                                                             | Job                                                         |
+| -------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `SessionNotFoundError`     | `SESSION_NOT_FOUND`    | 404 (the accommodations PATCH, ADR 0015 section 6)                                                | drop the job (a poison job, ADR 0006 8.4)                   |
+| `SessionLockRetryError`    | `SESSION_LOCK_RETRY`   | **503 `BUSY` with `Retry-After`** via ProblemFilter (the proctor-resume, ADR 0013 5.7), never 500 | a BullMQ retry through `busy-lock.ts` (SessionJobProcessor) |
+| `AccommodationLockedError` | `ACCOMMODATION_LOCKED` | **409**, a state conflict (ADR 0015 section 6)                                                    | a BullMQ retry (the retention site)                         |
+
 ### How the lock works
 
 Read `status` in the caller's scope; then

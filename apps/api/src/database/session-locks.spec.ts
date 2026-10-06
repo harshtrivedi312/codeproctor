@@ -14,6 +14,7 @@ import * as sessionLocks from './session-locks';
 import { SessionStatus } from '../generated/prisma/enums.js';
 import {
   AccommodationLockedError,
+  SESSION_LOCK_ERROR_CODES,
   OrgScopeError,
   OrgScopeViolationError,
   SessionLockRetryError,
@@ -538,5 +539,54 @@ describe('the three errors (ADR 0013 section 5.7, ADR 0015 section 6)', () => {
     }
     expect(new SessionNotFoundError()).not.toBeInstanceOf(SessionLockRetryError);
     expect(new SessionLockRetryError()).not.toBeInstanceOf(AccommodationLockedError);
+  });
+
+  it('TC-008 each has a stable `code` that the ProblemFilter and busy-lock.ts can switch on (no SQLSTATE, so no 500)', () => {
+    expect(new SessionNotFoundError().code).toBe('SESSION_NOT_FOUND');
+    expect(new SessionLockRetryError().code).toBe('SESSION_LOCK_RETRY');
+    expect(new AccommodationLockedError().code).toBe('ACCOMMODATION_LOCKED');
+    expect(SESSION_LOCK_ERROR_CODES).toEqual({
+      notFound: 'SESSION_NOT_FOUND',
+      retry: 'SESSION_LOCK_RETRY',
+      accommodationLocked: 'ACCOMMODATION_LOCKED',
+    });
+    expect(new Set(Object.values(SESSION_LOCK_ERROR_CODES)).size).toBe(3);
+  });
+
+  it('TC-008 the code is read-only and not an own property: it cannot be reassigned and never shows in a serialised error', () => {
+    for (const error of [
+      new SessionNotFoundError(),
+      new SessionLockRetryError(),
+      new AccommodationLockedError(),
+    ]) {
+      expect(Object.hasOwn(error, 'code')).toBe(false);
+      expect(() => {
+        (error as { code: string }).code = 'BUSY';
+      }).toThrow(TypeError);
+      expect(JSON.parse(JSON.stringify(error))).toEqual({ name: error.name });
+    }
+  });
+
+  it('TC-008 the real locks throw them with their codes: a lost compare-and-set gives SESSION_LOCK_RETRY or ACCOMMODATION_LOCKED, no row gives SESSION_NOT_FOUND', async () => {
+    const lost = () => fakeTx(moving(['OPENED', 'CONSENTED', 'VERIFIED', 'IN_PROGRESS'])).tx;
+    const codeOf = async (run: () => Promise<unknown>): Promise<unknown> => {
+      const error = await run().then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      return (error as { code?: unknown }).code;
+    };
+    expect(await codeOf(() => inService(() => guardLive(lost(), SID)))).toBe('SESSION_LOCK_RETRY');
+    expect(await codeOf(() => inService(() => lockAnySession(lost(), SID)))).toBe(
+      'SESSION_LOCK_RETRY',
+    );
+    expect(await codeOf(() => inStaff(() => lockForAccommodation(lost(), SID)))).toBe(
+      'ACCOMMODATION_LOCKED',
+    );
+    const none = fakeTx({ read: () => null, update: () => 1 }).tx;
+    expect(await codeOf(() => inService(() => guardLive(none, SID)))).toBe('SESSION_NOT_FOUND');
+    expect(await codeOf(() => inStaff(() => lockForAccommodation(none, SID)))).toBe(
+      'SESSION_NOT_FOUND',
+    );
   });
 });
