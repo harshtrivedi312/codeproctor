@@ -143,6 +143,9 @@ def _size(face: DetectedFace) -> float:
     return float(max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1])))
 
 
+face_size = _size  # public: the ID-photo ghost-portrait rule is shared with the INT-01 locator
+
+
 class FaceMatcher:
     """The face-matching interface of ADR 0004 section 2 plus the decision flow."""
 

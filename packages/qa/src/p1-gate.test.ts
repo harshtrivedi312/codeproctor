@@ -63,7 +63,9 @@ function jest(
       testResults: [
         {
           name: 'x.test.ts',
-          status: extra.fileStatus ?? 'passed',
+          // Real Jest and Vitest reporters set the file to "failed" when any assertion failed.
+          status:
+            extra.fileStatus ?? (results.some((t) => t.status === 'failed') ? 'failed' : 'passed'),
           assertionResults: results.map((t) => ({
             title: t.title,
             fullName: ('fullName' in t ? t.fullName : undefined) ?? t.title,
@@ -346,6 +348,8 @@ describe('P1 gate: Playwright JSON', () => {
   it('does not count a spec with an empty tests array as staged', T, () => {
     const rep = pw([{ title: 'TC-905 empty', ok: true, tests: [] }]);
     const r = gate([rep, jest([ok('TC-902 ok')])]);
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/TC-905\s+no automated run yet/);
     expect(r.out).not.toMatch(/TC-905\s+0 passing, 1 staged/);
   });
 
@@ -371,6 +375,8 @@ describe('P1 gate: Playwright JSON', () => {
         ),
         jest([ok('TC-902 ok')]),
       ]);
+      expect(plain.code).toBe(0);
+      expect(plain.out).toMatch(/TC-905\s+no automated run yet/);
       expect(plain.out).not.toMatch(/TC-905\s+1 test\(s\) passing/);
       expect(plain.out).not.toMatch(/TC-905\s+0 passing, 1 staged/);
     },
@@ -404,22 +410,119 @@ describe('P1 gate: Playwright JSON', () => {
 
 describe('P1 gate: a failed file next to a failing non-P1 test', () => {
   it(
-    'still records the file when only a P2 test failed in it (a beforeAll crash cannot hide)',
+    'does not report a crashed file when only a P2 test failed in it (real reporters mark the file failed)',
     T,
     () => {
-      const r = gate([
-        jest([ok('TC-902 ok'), ['TC-903 p2 broken', 'failed']], { fileStatus: 'failed' }),
-      ]);
-      expect(r.code).toBe(1);
-      expect(r.out).toContain('failed with no failed test recorded');
+      const r = gate([jest([ok('TC-902 ok'), ['TC-903 p2 broken', 'failed']])]);
+      expect(r.code).toBe(0);
+      expect(r.out).toContain('TC-903 (P2) has 1 failing');
+      expect(r.out).not.toContain('failed with no failed test recorded');
     },
   );
 
+  it('does not fail on an untagged failing test alone', T, () => {
+    const r = gate([jest([ok('TC-902 ok'), ['no id broken', 'failed']])]);
+    expect(r.code).toBe(0);
+    expect(r.out).not.toContain('failed with no failed test recorded');
+  });
+
   it('does not double-report when a P1 test in the file failed', T, () => {
-    const r = gate([
-      jest([ok('TC-902 ok'), ['TC-901 broken', 'failed']], { fileStatus: 'failed' }),
-    ]);
+    const r = gate([jest([ok('TC-902 ok'), ['TC-901 broken', 'failed']])]);
     expect(r.code).toBe(1);
     expect(r.out).not.toContain('failed with no failed test recorded');
+  });
+
+  it(
+    'fails when a P2 test failed and a beforeAll crash skipped P1 tests of the file (a P2 leaf inside a P1 describe block)',
+    T,
+    () => {
+      const r = gate([
+        jest([
+          { title: 'TC-903 inner p2', fullName: 'TC-901 block TC-903 inner p2', status: 'failed' },
+          { title: 'other', fullName: 'TC-901 block other', status: 'pending' },
+          ok('TC-902 ok'),
+        ]),
+      ]);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain('left P1 test(s) skipped');
+      expect(r.out).toContain('x.test.ts');
+    },
+  );
+
+  it('a failed file with a P2 failure and only P2 or untagged skipped tests passes', T, () => {
+    const r = gate([
+      jest([ok('TC-902 ok'), ['TC-903 p2 broken', 'failed'], ['TC-903 later', 'pending']]),
+    ]);
+    expect(r.code).toBe(0);
+  });
+
+  it('treats Jest status "disabled" as staged', T, () => {
+    const rep = jest([
+      ok('TC-901 a'),
+      { title: 'TC-901 off', status: 'disabled' as Status },
+      ok('TC-902 ok'),
+    ]);
+    expect(gate([rep]).out).toMatch(/TC-901.*1 staged \(skipped\)/);
+    expect(gate([rep], ['--strict']).code).toBe(1);
+  });
+});
+
+describe('P1 gate: Playwright describe titles and distinct reasons', () => {
+  it('sees a TC id and KNOWN DEFECT that only the test.describe title carries', T, () => {
+    const rep = write(
+      'e2e-describe.json',
+      JSON.stringify({
+        suites: [
+          {
+            title: 'f.spec.ts',
+            suites: [
+              {
+                title: 'KNOWN DEFECT QA-D-09 TC-901 flow',
+                specs: [{ title: 'does a thing', ok: true, tests: [{ status: 'expected' }] }],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const r = gate([rep, jest([ok('TC-902 ok')])]);
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/TC-901\s+KNOWN DEFECT open/);
+  });
+
+  it('gives each failure kind its own reason', T, () => {
+    const pwErr = write('e2e-e.json', JSON.stringify({ suites: [], errors: [{ message: 'x' }] }));
+    const pwUnexpected = write(
+      'e2e-u.json',
+      JSON.stringify({ suites: [], stats: { unexpected: 1 } }),
+    );
+    const rt = jest([ok('TC-902 ok')], { top: { numRuntimeErrorTestSuites: 1 } });
+    const out = gate([pwErr, pwUnexpected, rt]).out;
+    expect(out).toMatch(/Playwright errors\[\] has 1/);
+    expect(out).toMatch(/Playwright stats\.unexpected 1 is more than/);
+    expect(out).toMatch(/Jest reported 1 test file\(s\) that failed to run/);
+    expect(out).not.toMatch(/Playwright errors.*failed with no failed test recorded/);
+  });
+});
+
+describe('P1 gate: a node:test file that fails to load (JUnit)', () => {
+  it('fails an untagged <failure> named after a test file', T, () => {
+    const r = gate([
+      jest([ok('TC-902 ok')]),
+      junit(
+        '<testcase classname="test" name="/repo/packages/shared/src/x.test.mjs"><failure message="Cannot find module"/></testcase>',
+      ),
+    ]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('x.test.mjs');
+    expect(r.out).toContain('failed to load or run');
+  });
+
+  it('does not fail an untagged <failure> whose name is not a file', T, () => {
+    const r = gate([
+      jest([ok('TC-902 ok')]),
+      junit('<testcase classname="t" name="some helper check"><failure message="x"/></testcase>'),
+    ]);
+    expect(r.code).toBe(0);
   });
 });
