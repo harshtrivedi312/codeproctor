@@ -183,18 +183,18 @@ Resources:
                 aws:ResourceAccount: !Sub '${AWS::AccountId}'
               'Null':
                 ec2:SourceInstanceARN: 'false'
+            # Decrypt and GenerateDataKey only, and only through S3 (SSE-KMS with the pilot data key). No direct Encrypt or ReEncrypt.
           - Sid: 'KmsPilotKeys'
             Effect: 'Allow'
             Action:
               - 'kms:Decrypt'
-              - 'kms:Encrypt'
               - 'kms:GenerateDataKey*'
-              - 'kms:ReEncrypt*'
               - 'kms:DescribeKey'
             Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
             Condition:
               StringEquals:
                 aws:ResourceTag/Environment: 'pilot'
+                kms:ViaService: !Sub 's3.${AWS::Region}.amazonaws.com'
               'Null':
                 ec2:SourceInstanceARN: 'false'
           - Sid: 'SecretsPilot'

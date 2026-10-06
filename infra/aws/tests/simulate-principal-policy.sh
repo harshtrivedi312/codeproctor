@@ -65,6 +65,12 @@ for act in PutBucketPolicy DeleteBucketPolicy PutBucketAcl PutBucketPublicAccess
   check "$DEPLOY" denied "S3 ${act} on pilot backups bucket" "s3:${act}" "arn:aws:s3:::codeproctor-pilot-backups"
 done
 check "$DEPLOY" allowed "S3 read bucket policy of pilot backups" s3:GetBucketPolicy "arn:aws:s3:::codeproctor-pilot-backups" "aws:ResourceAccount=${ACCOUNT}"
+for b in media results consent backup; do
+  check "$DEPLOY" denied "S3 PutBucketPolicy on ${b} bucket (PR 1b)" s3:PutBucketPolicy "arn:aws:s3:::codeproctor-pilot-${b}-${ACCOUNT}"
+  check "$DEPLOY" denied "S3 GetObject on ${b} bucket (PR 1b)" s3:GetObject "arn:aws:s3:::codeproctor-pilot-${b}-${ACCOUNT}/orgs/o/x"
+done
+check "$DEPLOY" denied  "KMS PutKeyPolicy on the data key (PR 1b)" kms:PutKeyPolicy "arn:aws:kms:${REGION}:${ACCOUNT}:key/00000000-0000-0000-0000-000000000000" "$PILOT_TAG" "aws:ResourceTag/Purpose=data"
+check "$DEPLOY" denied  "KMS alias update on the data key (PR 1b)" kms:UpdateAlias "arn:aws:kms:${REGION}:${ACCOUNT}:alias/codeproctor-pilot-data"
 check "$DEPLOY" denied  "KMS create key" kms:CreateKey "*" "$REQ_TAG"
 check "$DEPLOY" denied  "KMS put key policy" kms:PutKeyPolicy "arn:aws:kms:${REGION}:${ACCOUNT}:key/00000000-0000-0000-0000-000000000000" "$PILOT_TAG"
 check "$DEPLOY" denied  "Secrets put resource policy" secretsmanager:PutResourcePolicy "arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:codeproctor-pilot-db-AbCdEf" "$PILOT_TAG"

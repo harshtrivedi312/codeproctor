@@ -211,9 +211,10 @@ requests do not receive OIDC tokens by default. The owner has not decided. Recom
 ```sh
 python3 -m venv .venv && .venv/bin/pip install pyyaml
 .venv/bin/python infra/aws/tests/test_isolation.py
+.venv/bin/python infra/aws/tests/test_data_buckets.py
 ```
 
-The test runs 285 cases (all pass) and 20 structural checks. It parses the template, resolves intrinsic functions (owner `example-owner`, repo
+`test_isolation.py` runs 288 cases (all pass) and 20 structural checks; `test_data_buckets.py` runs 134 cases and 45 structural checks. It parses the template, resolves intrinsic functions (owner `example-owner`, repo
 `example-repo`, account `111111111111`), and evaluates each case with explicit-deny-wins semantics,
 boundary intersection, bucket and key policies and the trust conditions. Each case table row lists the
 context keys supplied by hand. It exits non-zero on any mismatch. TC IDs for these cases are for QA to
@@ -239,3 +240,55 @@ one. cfn-lint was run offline with no findings (a dev tool, not a repository dep
 
 - The deploy mechanism (ADR 0017, pending): SSM or SSH, and what `codeproctor-pilot-instance-ssm` is for.
 - PR 2 Terraform, PR 3 workflow, PR 4 costs and PR 5 ordered manual steps remain on hold or open.
+
+## PR 1b: owner-applied data stores (`pilot-data-buckets.yaml`)
+
+Apply **after** PR 1 (the deploy role's denies, which protect these resources, come from PR 1). Stack
+name `codeproctor-pilot-data`, region us-east-1, parameters below, no IAM capability needed. CI never
+applies it.
+
+| Resource          | Name                                                                     | Holds                                                                                                  | Backstop expiry (source)                                                                                                                                        |
+| ----------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Bucket            | `codeproctor-pilot-media-<account id>`                                   | Recordings, room scans, ID images, selfies, evidence (keys under `orgs/<org>/sessions/`, ADR 0013 5.7) | `MediaExpiryDays` = 90 (C-04, C-27; retention schedule)                                                                                                         |
+| Bucket            | `codeproctor-pilot-results-<account id>`                                 | Report PDFs                                                                                            | `ResultsExpiryDays` = 365 (C-26, ADR 0004 R-10)                                                                                                                 |
+| Bucket            | `codeproctor-pilot-consent-<account id>`                                 | Signed consent PDFs (`orgs/<org>/consents/`)                                                           | `ConsentExpiryDays` = 1095 (C-04, C-17, ADR 0004 R-9)                                                                                                           |
+| Bucket            | `codeproctor-pilot-backup-<account id>`                                  | Nightly dumps (`db/dumps/`, written by `infra/backup/backup.sh`) and WAL (`db/wal/`)                   | `BackupRetentionDays` = 14 (retention schedule); `WalRetentionDays` = 14 (**flagged**: the schedule does not name WAL; conservative default equal to the dumps) |
+| KMS key and alias | `alias/codeproctor-pilot-data`, tags `Environment=pilot`, `Purpose=data` | One customer-managed key for all four buckets, rotation on, Bucket Keys on                             | none                                                                                                                                                            |
+
+Every bucket: Block Public Access (all four), ownership enforced, TLS-only policy, default SSE-KMS with
+the one key, abort-incomplete-multipart after 7 days, `Retain` on delete, no versioning.
+
+- **No versioning, by design.** ADR 0004 9.2 makes RetentionService fail closed if versioning was ever
+  on without a one-day noncurrent expiry, and noncurrent versions would break the 14 day backup rule.
+- **The key.** The owner administers it through IAM (root delegation). The key policy lets only the
+  instance role (`InstanceRoleName`, default `codeproctor-pilot-app`) use it, for `Decrypt`,
+  `GenerateDataKey*` and `DescribeKey` through S3. Every other `codeproctor-*` role is denied use and
+  administration, so CI cannot touch it. The tag `Purpose=data` and the alias match the PR 1 denies.
+  The instance role need not exist yet (the key policy matches it by ARN condition, not as a named principal).
+- **Bucket policies** deny object access to every `codeproctor-*` role except the instance role, and
+  deny bucket configuration changes to every `codeproctor-*` role. You (the owner) are not one of them.
+  The deploy role of PR 1 can still read configuration and list keys.
+- **Lifecycle is a backstop.** RetentionService deletes on the real clocks (anchor plus
+  `retention_days`, the face clock, review and appeal holds). Expiry by object age cannot see holds or an
+  organisation's setting above 90 days.
+
+### Blocker for the lifecycle rules: the API uses one media bucket today
+
+`.env.example` has `S3_MEDIA_BUCKET` (media, IDs, report PDFs and consent PDFs together under
+`orgs/<org>/...`) and `S3_BACKUP_BUCKET`. S3 lifecycle prefixes are literal, so media, results and
+consent can only be expired separately in separate buckets. Until the API writes reports and consent
+PDFs to their own buckets (a Backend and architect change, not in this PR), keep
+`SeparateBucketsInUse=false`: the media, results and consent expiry rules are created **disabled** and
+nothing is deleted early. Set it to `true` afterwards. With `false` the backup bucket rules (14 days)
+still apply, because that bucket already exists in the API configuration. Also flagged: with holds,
+a report can be needed after 365 days from its creation; consider `ResultsExpiryDays` of 400 or more.
+
+### Owner steps for PR 1b
+
+Apply order: (1) account-level S3 Block Public Access on and IAM Access Analyzer (step 8 above),
+(2) PR 1 stack `codeproctor-github-oidc`, (3) PR 1b stack `codeproctor-pilot-data` with
+`InstanceRoleName` matching the instance role you will create, `SeparateBucketsInUse` = `false`, the
+other values as listed. Copy the bucket names from the Outputs into the pilot environment
+configuration (`S3_MEDIA_BUCKET`, `S3_BACKUP_BUCKET`). Verify with
+`simulate-principal-policy.sh` and the two offline tests. Presigned URLs: verify at first deploy that
+upload and playback still work with the bucket policy (they are signed by the instance role).
