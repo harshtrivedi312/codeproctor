@@ -435,3 +435,24 @@ M-05 steps 5, 5a and 6 need a way to run the retention job with a shifted clock,
 - Replaces the stale section 13 gate bullet: `stats.unexpected` is count-based (failing tagged specs are subtracted, so an untagged failure next to a tagged P2 failure still fails), an empty Playwright spec is neither a pass nor staged (no result at all), a failing P2 file is not a gate failure, and the gate suite is now 40 tests, not 34.
 - Mock builds: local Playwright runs need `ALLOW_MOCKING_IN_PRODUCTION_BUILD=staging-only` at build time once PR #94 (fe-cand/mock-guards) lands. The guard is in `next.config.ts` and keys on the production build phase only, so the `next start` webServer env in `playwright.config.ts` is unchanged. Section 1 and the config header comment are updated; no `.github` change (qa.yml already sets it). There is no README under packages/qa.
 - TC-008 matrix row lists `tc-006-reissue.int.test.ts` (its title at line ~153 names TC-004 and TC-008).
+
+## 15. QA-07 (2026-10-06): BE-04 slice 4a question bank (branch qa/be04-4a, on backend/step-4 @23b3caf; no PR, co-landed with the backend PR)
+
+### 15.1 What was added
+
+- The 11 slice 4a routes are in `BE03_ROUTES` as `step: 'BE-04'` (`BE04_DEFAULT = true`), so `tc-004-rbac.int.test.ts` (401, 403, cross-org 404, same 404 for a random id, effect check) and `tc-006-audit.int.test.ts` (one row, right action, org, actor, IP, no secrets, no row when refused or invalid) drive them. Nothing is in `COVERED_ELSEWHERE`. PATCH /questions/:id has two entries (draft edit, QUESTION_UPDATED; edit of a published question, QUESTION_VERSION_CREATED). New `metadataKeys` field checks the exact metadata keys (ids and field names, never content); fixture `questionFixture` and the secrets `REF_SECRET`, `HIDDEN_IN`, `HIDDEN_OUT` are in be03-routes.ts.
+- The audit rows are written by the service in the mutation's own transaction, so the routes carry no `audited` flag; the existing "matrix `audited` flag agrees with the QA list" test confirms it.
+- Acceptance files: `tc-010.int.test.ts` (9), `tc-011.int.test.ts` (9), `tc-013.int.test.ts` (9); explicit "recruiter PATCH /questions/:id is 403 and the row is unchanged" test in tc-004-rbac.int.test.ts (the old it.todo is removed). Helpers in `apps/api/test/support/be04-helpers.ts`.
+- Full API integration run: 18 suites, 376 passed, 0 failed, 40 skipped (BE-13), 2 todo.
+
+### 15.2 Defects
+
+None confirmed. Every assertion in the three acceptance files and the 123 table-driven BE-04 tests passed against backend/step-4 @23b3caf.
+
+### 15.3 Gaps and observations (not defects)
+
+1. **should-fix, backend-engineer (BE-04 slice 4b):** TC-012 cannot be tested. Publish in slice 4a checks completeness only; the reference solution is never run against the tests or variants, there are no variant routes, and the `ValidationReportSink` is not wired (FU-BEB-01, FU-BEB-07, FU-BEB-14). Until slice 4b a question with a wrong reference solution can be published. `POST /questions/:id/validate` (fsd.md section 4, permission `question:validate`) is not in the route matrix yet: when it lands, add it to the BE-04 list (the registry test will fail until then).
+2. **should-fix, architecture hub (docs):** fsd.md section 4 lists only `GET/POST/PATCH /questions, /questions/:id` and `POST /questions/:id/validate` (role "Author"). The code and route-permissions.ts also serve publish, archive, unarchive, preview and the three test-case routes, and let RECRUITER read questions (ADR 0010 section 3). Add the rows and the read roles to the table.
+3. **should-fix, qa-engineer / backend-engineer (TC-011, TC-013 session half):** no candidate or session route returns a question yet, so the candidate fetch of TC-011 and the "past session still shows the old version" screen of TC-013 are proven only through GET /questions/:id/preview, the recruiter read and the session_question pointer. Re-test both against the real candidate routes (BE-07, BE-11) and the review screen (BE-13).
+4. **nit, qa-engineer:** FR-203 variant parameters and `validation_report` content, AI reference solutions are only exercised by the backend's own questions.e2e-spec.ts (Jest in apps/api/src, not in the QA gate's inputs). If the P1 gate should see TC-012 later, write it as `tc-012.int.test.ts` in the QA suite.
+5. **nit, backend-engineer:** draft questions (and draft hidden tests, shown as null input and output) are readable by RECRUITER through GET /questions/:id?version=N. That matches the contract (recruiters see samples and the statement), but confirm the owner wants drafts visible to recruiters; if not, restrict recruiters to published versions.

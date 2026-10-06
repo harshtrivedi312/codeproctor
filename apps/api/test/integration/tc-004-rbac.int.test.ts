@@ -28,11 +28,13 @@ import {
   allowedRoles,
   BE03_READY,
   BE03_ROUTES,
+  BE04_READY,
   BE13_READY,
   Be03Route,
   COVERED_ELSEWHERE,
   hasPathId,
   loadBackendRegistry,
+  questionFixture,
   PRINCIPALS,
   randomIdOf,
   routeKey,
@@ -250,6 +252,11 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
 
 rbacSuite('TC-004: BE-03 routes by role (401, 403, 404, success)', BE03_READY, routesFor('BE-03'));
 rbacSuite(
+  'TC-004 (FR-103, FR-201, FR-202, FR-204): BE-04 question routes by role (401, 403, 404, success)',
+  BE04_READY,
+  routesFor('BE-04'),
+);
+rbacSuite(
   'TC-004 [BE-13 pending]: review routes by role (401, 403, 404, success)',
   BE13_READY,
   routesFor('BE-13'),
@@ -276,7 +283,9 @@ rbacSuite(
       expect([key, key in ROUTE_PERMISSIONS]).toEqual([key, true]);
     // BE-13 routes count only once the BE-13 switch is on (they do not exist before).
     const listed = new Set(
-      [...routesFor('BE-03'), ...(BE13_READY ? routesFor('BE-13') : [])].map(routeKey),
+      [...routesFor('BE-03'), ...routesFor('BE-04'), ...(BE13_READY ? routesFor('BE-13') : [])].map(
+        routeKey,
+      ),
     );
     const missing = Object.entries(ROUTE_PERMISSIONS)
       .filter(([key, access]) => access !== 'public' && !(key in COVERED_ELSEWHERE))
@@ -286,8 +295,8 @@ rbacSuite(
     // action, body and fixtures (or to COVERED_ELSEWHERE, next to the file that tests it).
     expect(missing).toEqual([]);
 
-    // Every BE-03 route QA lists is served, with the permission QA expects.
-    for (const r of routesFor('BE-03')) {
+    // Every BE-03 and BE-04 route QA lists is served, with the permission QA expects.
+    for (const r of [...routesFor('BE-03'), ...routesFor('BE-04')]) {
       const entry = ROUTE_PERMISSIONS[routeKey(r)];
       expect(entry).toBeDefined();
       expect(entry === 'public' ? 'public' : entry?.permission).toBe(r.permission);
@@ -326,6 +335,47 @@ rbacSuite(
     }
   });
 });
+
+(BE04_READY ? describe : describe.skip)(
+  'TC-004 (FR-103, FR-204): the TC-004 scenario as written',
+  () => {
+    let h: Harness;
+    beforeAll(async () => {
+      h = await boot();
+    });
+    afterAll(async () => {
+      await h?.close();
+    });
+
+    it('TC-004: a recruiter calling PATCH /questions/:id directly gets 403, the question and its version rows are unchanged, and no audit row is written', async () => {
+      const recruiter = await actor(h, UserRole.RECRUITER);
+      for (const published of [false, true]) {
+        const f = await questionFixture(h, h.orgId, { published });
+        const dump = async (): Promise<string> =>
+          JSON.stringify(
+            {
+              q: await h.owner.question.findUniqueOrThrow({ where: { id: f.id } }),
+              v: await h.owner.questionVersion.findMany({ where: { questionId: f.id } }),
+              t: await h.owner.testCase.findMany({
+                where: { questionVersion: { questionId: f.id } },
+              }),
+            },
+            (_k, x: unknown) => (typeof x === 'bigint' ? String(x) : x),
+          );
+        const before = await dump();
+        const audits = await h.owner.auditLog.count({ where: { entityId: f.id } });
+        const res = await call(h, 'PATCH', `/questions/${f.id}`, recruiter.token, {
+          title: 'recruiter edit',
+          statementMd: 'recruiter statement',
+          tags: ['hacked'],
+        });
+        expect(res.status).toBe(403);
+        expect(await dump()).toBe(before);
+        expect(await h.owner.auditLog.count({ where: { entityId: f.id } })).toBe(audits);
+      }
+    });
+  },
+);
 
 (BE03_READY ? describe : describe.skip)('TC-004: guard coverage', () => {
   let h: Harness;

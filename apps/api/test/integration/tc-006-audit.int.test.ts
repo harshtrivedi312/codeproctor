@@ -20,6 +20,7 @@ import {
   ADMIN_USERS,
   BE03_READY,
   BE03_ROUTES,
+  BE04_READY,
   BE13_READY,
   Be03Route,
   hasPathId,
@@ -155,6 +156,11 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
               expect(meta?.method).toBe(route.method);
               expect(meta?.route).toBe(`/api/v1${route.template}`);
             }
+            if (route.metadataKeys) {
+              // Service-written row (BE-04): ids and changed field NAMES only, never content.
+              const meta = row.metadata as Record<string, unknown> | null;
+              expect(Object.keys(meta ?? {}).sort()).toEqual([...route.metadataKeys].sort());
+            }
             const entityId = t.entityId ?? (await t.resolveEntityId?.());
             expect(entityId).toBeDefined(); // every audited route names its entity
             expect(row.entityId).toBe(entityId);
@@ -242,6 +248,11 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
 }
 
 auditSuite('TC-006: staff user routes are audited', BE03_READY, routesFor('BE-03'));
+auditSuite(
+  'TC-006 (FR-105, FR-201..FR-204): question routes write one audit row per mutation, reads none',
+  BE04_READY,
+  routesFor('BE-04'),
+);
 auditSuite(
   'TC-006 [BE-13 pending]: review routes are audited (a reviewer opening a review)',
   BE13_READY,

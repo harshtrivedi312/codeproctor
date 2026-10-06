@@ -23,7 +23,14 @@
 //         metadata ONLY {method, route '/api/v1/admin/users/:userId/invite'}, NOT @Audited (no `audited`
 //         flag in the matrix). Listed ONLY when the backend's ROUTE_PERMISSIONS has the key (see below).
 //
-// Switches: the BE-03 tests run by default (BE03_DEFAULT = true). The review routes (BE-13) stay off
+// BE-04 (slice 4a, question bank): 11 routes under /questions, listed below in the same table so the
+// generic 401, 403, cross-org 404, effect and audit tests drive them. The audit rows are written by
+// the service in the mutation's own transaction (NOT @Audited, so no `audited` flag in the matrix):
+// entity `question`, entity id the question, metadata of ids and changed field NAMES only (never
+// content), listed per route in `metadataKeys`. Reads are not audited (a question is not candidate
+// data). Question reads: SUPER_ADMIN, RECRUITER, AUTHOR; writes: SUPER_ADMIN, AUTHOR.
+//
+// Switches: the BE-03 and BE-04 tests run by default (BE03_DEFAULT, BE04_DEFAULT = true). The review routes (BE-13) stay off
 // until BE13_DEFAULT is flipped, or `BE13_READY=1` in the environment for a trial run. The BE-13
 // entries are still ASSUMED.
 import { hasPermission, PRINCIPALS, USER_ROLES } from '../../../../packages/shared/src/permissions';
@@ -33,8 +40,10 @@ import { Harness, PASSWORD } from './harness';
 
 // BE-03 is merged (PR #84): the BE-03 tests run on every PR. BE-13 stays staged.
 const BE03_DEFAULT = true;
+const BE04_DEFAULT = true; // backend/step-4 (slice 4a) routes; the registry test fails if they go missing
 const BE13_DEFAULT = false; // flip to true when BE-13 is merged
 export const BE03_READY: boolean = BE03_DEFAULT || process.env.BE03_READY === '1';
+export const BE04_READY: boolean = BE04_DEFAULT || process.env.BE04_READY === '1';
 export const BE13_READY: boolean = BE13_DEFAULT || process.env.BE13_READY === '1';
 
 export { PRINCIPALS, USER_ROLES };
@@ -103,7 +112,7 @@ export interface Target {
 
 export interface Be03Route {
   id: string;
-  step: 'BE-03' | 'BE-13';
+  step: 'BE-03' | 'BE-04' | 'BE-13';
   method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   /** Path template as the backend registry writes it (no query string), under /api/v1. */
   template: string;
@@ -122,6 +131,11 @@ export interface Be03Route {
    * route being '/api/v1' + template, and which names the target entity.
    */
   routeMetadata?: boolean;
+  /**
+   * A service-written row (in the mutation's transaction) whose metadata has exactly these keys
+   * (sorted): ids and changed field names, never content (BE-04).
+   */
+  metadataKeys?: readonly string[];
   mutating: boolean;
   /** true: a successful call sends a mail whose URL carries a token (checked for leaks). */
   sendsMail?: boolean;
@@ -277,8 +291,371 @@ const reissueRoutes: Be03Route[] = backendHasRoute('POST /admin/users/:userId/in
     ]
   : [];
 
+// ---- BE-04 question fixtures (owner role: need only the schema, not any route) ----------------------
+/** Secrets that must never reach an audit row, a log line or a candidate view. */
+export const REF_SECRET = 'QA-REFERENCE-SOLUTION-SECRET';
+export const HIDDEN_IN = 'QA-HIDDEN-INPUT-7';
+export const HIDDEN_OUT = 'QA-HIDDEN-OUTPUT-7';
+export const MCQ_KEY_TEXT = 'QA-MCQ-KEY-OPTION';
+
+export interface QuestionFix {
+  id: string;
+  title: string;
+  /** Version rows by number. */
+  versionIds: Record<number, string>;
+  sampleId: string;
+  hiddenId: string;
+}
+
+/**
+ * A CODING question in `orgId`: version 1 with python, a reference solution, one sample and one
+ * hidden test. `published` makes version 1 the current published version; `archived` archives it;
+ * `testCases: false` leaves the version without tests (an incomplete draft).
+ */
+export async function questionFixture(
+  h: Harness,
+  orgId: string,
+  opts: { published?: boolean; archived?: boolean; testCases?: boolean } = {},
+): Promise<QuestionFix> {
+  const t = uniq();
+  const title = `QA question ${t}`;
+  const q = await h.owner.question.create({
+    data: {
+      orgId,
+      slug: `qa-q-${t}`,
+      type: 'CODING',
+      tags: ['qa'],
+      isArchived: opts.archived ?? false,
+    },
+  });
+  const v = await h.owner.questionVersion.create({
+    data: {
+      questionId: q.id,
+      version: 1,
+      title,
+      statementMd: 'Add two numbers.',
+      difficulty: 'EASY',
+      allowedLanguages: ['python'],
+      starterCode: { python: 'def solve(): ...' },
+      referenceSolution: { python: REF_SECRET },
+      isPublished: opts.published ?? false,
+    },
+  });
+  let sampleId = '';
+  let hiddenId = '';
+  if (opts.testCases !== false) {
+    sampleId = (
+      await h.owner.testCase.create({
+        data: {
+          questionVersionId: v.id,
+          input: '1 2',
+          expectedOutput: '3',
+          isHidden: false,
+          position: 0,
+        },
+      })
+    ).id;
+    hiddenId = (
+      await h.owner.testCase.create({
+        data: {
+          questionVersionId: v.id,
+          input: HIDDEN_IN,
+          expectedOutput: HIDDEN_OUT,
+          isHidden: true,
+          weight: 2,
+          position: 1,
+        },
+      })
+    ).id;
+  }
+  if (opts.published) {
+    await h.owner.question.update({ where: { id: q.id }, data: { currentVersionId: v.id } });
+  }
+  return { id: q.id, title, versionIds: { 1: v.id }, sampleId, hiddenId };
+}
+
+const questionRow = (h: Harness, id: string) =>
+  h.owner.question.findUniqueOrThrow({ where: { id } });
+const versionCount = (h: Harness, id: string): Promise<number> =>
+  h.owner.questionVersion.count({ where: { questionId: id } });
+
+/** The create body: a complete coding question with one sample and one hidden test. */
+const createBody = (slug: string): Record<string, unknown> => ({
+  slug,
+  title: 'QA created question',
+  statementMd: 'Add two numbers.',
+  difficulty: 'EASY',
+  tags: ['qa'],
+  allowedLanguages: ['python'],
+  starterCode: { python: 'def solve(): ...' },
+  referenceSolution: { python: REF_SECRET },
+  testCases: [
+    { input: '1 2', expectedOutput: '3', isHidden: false },
+    { input: HIDDEN_IN, expectedOutput: HIDDEN_OUT, isHidden: true, weight: 2 },
+  ],
+});
+
+const QUESTIONS = '/questions';
+const qSecrets = [REF_SECRET, HIDDEN_IN, HIDDEN_OUT];
+
+/** A question-route entry with the shared BE-04 defaults; each route overrides what differs. */
+function q04(
+  r: Omit<Be03Route, 'step' | 'prepare'> & { prepare: Be03Route['prepare'] },
+): Be03Route {
+  return { step: 'BE-04', ...r };
+}
+
+const BE04_ROUTES: Be03Route[] = [
+  q04({
+    id: 'questions-list',
+    method: 'GET',
+    template: QUESTIONS,
+    permission: 'question:read',
+    audit: null,
+    mutating: false,
+    ok: [200],
+    prepare: () =>
+      Promise.resolve({ path: `${QUESTIONS}?page=1&pageSize=50`, secrets: [], unchanged: noop }),
+  }),
+  q04({
+    id: 'questions-create',
+    method: 'POST',
+    template: QUESTIONS,
+    permission: 'question:create',
+    audit: { action: 'QUESTION_CREATED', entityType: 'question' },
+    metadataKeys: ['testCases', 'type', 'version'],
+    mutating: true,
+    ok: [201],
+    prepare: (h, orgId) => {
+      const slug = `qa-create-${uniq()}`;
+      const lookup = (): Promise<{ id: string } | null> =>
+        h.owner.question.findFirst({ where: { orgId, slug }, select: { id: true } });
+      return Promise.resolve({
+        path: QUESTIONS,
+        body: createBody(slug),
+        secrets: qSecrets,
+        resolveEntityId: async () => (await lookup())?.id,
+        unchanged: async () => (await lookup()) === null,
+      });
+    },
+  }),
+  q04({
+    id: 'questions-get',
+    method: 'GET',
+    template: `${QUESTIONS}/:id`,
+    permission: 'question:read',
+    audit: null,
+    mutating: false,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      return { path: `${QUESTIONS}/${f.id}`, entityId: f.id, secrets: [], unchanged: noop };
+    },
+  }),
+  q04({
+    id: 'questions-preview',
+    method: 'GET',
+    template: `${QUESTIONS}/:id/preview`,
+    permission: 'question:read',
+    audit: null,
+    mutating: false,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId, { published: true });
+      return {
+        path: `${QUESTIONS}/${f.id}/preview`,
+        entityId: f.id,
+        secrets: [],
+        unchanged: noop,
+      };
+    },
+  }),
+  q04({
+    id: 'questions-update-draft',
+    method: 'PATCH',
+    template: `${QUESTIONS}/:id`,
+    variant: 'edit draft in place',
+    permission: 'question:update',
+    audit: { action: 'QUESTION_UPDATED', entityType: 'question' },
+    metadataKeys: ['fields', 'version'],
+    mutating: true,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}`,
+        body: { title: 'QA edited title' },
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () =>
+          (
+            await h.owner.questionVersion.findUniqueOrThrow({
+              where: { id: f.versionIds[1] as string },
+            })
+          ).title === f.title,
+      };
+    },
+  }),
+  q04({
+    id: 'questions-update-published',
+    method: 'PATCH',
+    template: `${QUESTIONS}/:id`,
+    variant: 'edit published creates a version',
+    permission: 'question:update',
+    audit: { action: 'QUESTION_VERSION_CREATED', entityType: 'question' },
+    metadataKeys: ['fields', 'fromVersion', 'version'],
+    mutating: true,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId, { published: true });
+      return {
+        path: `${QUESTIONS}/${f.id}`,
+        body: { title: 'QA edited title' },
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () => (await versionCount(h, f.id)) === 1,
+      };
+    },
+  }),
+  q04({
+    id: 'questions-publish',
+    method: 'POST',
+    template: `${QUESTIONS}/:id/publish`,
+    permission: 'question:update',
+    audit: { action: 'QUESTION_PUBLISHED', entityType: 'question' },
+    metadataKeys: ['version'],
+    mutating: true,
+    takesBody: false,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/publish`,
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () =>
+          (await questionRow(h, f.id)).currentVersionId === null &&
+          !(
+            await h.owner.questionVersion.findUniqueOrThrow({
+              where: { id: f.versionIds[1] as string },
+            })
+          ).isPublished,
+      };
+    },
+  }),
+  q04({
+    id: 'questions-archive',
+    method: 'POST',
+    template: `${QUESTIONS}/:id/archive`,
+    permission: 'question:update',
+    audit: { action: 'QUESTION_ARCHIVED', entityType: 'question' },
+    metadataKeys: [],
+    mutating: true,
+    takesBody: false,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/archive`,
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () => !(await questionRow(h, f.id)).isArchived,
+      };
+    },
+  }),
+  q04({
+    id: 'questions-unarchive',
+    method: 'POST',
+    template: `${QUESTIONS}/:id/unarchive`,
+    permission: 'question:update',
+    audit: { action: 'QUESTION_UNARCHIVED', entityType: 'question' },
+    metadataKeys: [],
+    mutating: true,
+    takesBody: false,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId, { archived: true });
+      return {
+        path: `${QUESTIONS}/${f.id}/unarchive`,
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () => (await questionRow(h, f.id)).isArchived,
+      };
+    },
+  }),
+  q04({
+    id: 'questions-testcase-add',
+    method: 'POST',
+    template: `${QUESTIONS}/:id/versions/:version/test-cases`,
+    permission: 'question:update',
+    audit: { action: 'QUESTION_TEST_CASE_ADDED', entityType: 'question' },
+    metadataKeys: ['isHidden', 'testCaseId', 'version'],
+    mutating: true,
+    ok: [201],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      const before = await h.owner.testCase.count({
+        where: { questionVersionId: f.versionIds[1] as string },
+      });
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/test-cases`,
+        body: { input: HIDDEN_IN, expectedOutput: HIDDEN_OUT, isHidden: true },
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () =>
+          (await h.owner.testCase.count({
+            where: { questionVersionId: f.versionIds[1] as string },
+          })) === before,
+      };
+    },
+  }),
+  q04({
+    id: 'questions-testcase-update',
+    method: 'PATCH',
+    template: `${QUESTIONS}/:id/versions/:version/test-cases/:testCaseId`,
+    permission: 'question:update',
+    audit: { action: 'QUESTION_TEST_CASE_UPDATED', entityType: 'question' },
+    metadataKeys: ['fields', 'testCaseId', 'version'],
+    mutating: true,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/test-cases/${f.hiddenId}`,
+        body: { expectedOutput: 'QA-CHANGED-OUTPUT' },
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () =>
+          (await h.owner.testCase.findUniqueOrThrow({ where: { id: f.hiddenId } }))
+            .expectedOutput === HIDDEN_OUT,
+      };
+    },
+  }),
+  q04({
+    id: 'questions-testcase-remove',
+    method: 'DELETE',
+    template: `${QUESTIONS}/:id/versions/:version/test-cases/:testCaseId`,
+    permission: 'question:update',
+    audit: { action: 'QUESTION_TEST_CASE_REMOVED', entityType: 'question' },
+    metadataKeys: ['testCaseId', 'version'],
+    mutating: true,
+    takesBody: false,
+    ok: [204],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/test-cases/${f.hiddenId}`,
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () => (await h.owner.testCase.count({ where: { id: f.hiddenId } })) === 1,
+      };
+    },
+  }),
+];
+
 export const BE03_ROUTES: Be03Route[] = [
   ...reissueRoutes,
+  ...BE04_ROUTES,
   {
     id: 'users-list',
     step: 'BE-03',
