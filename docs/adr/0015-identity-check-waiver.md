@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Proposed** 2026-10-05; revised after review rounds 1 to 6 and owner decision C-34 (recorded on `origin/dl/compliance-c34`; see section 1); section 6 reconciled with Delivery Lead decision DL-30 on 2026-10-06 (the window is unchanged; owner question 10). The owner accepts or amends. "(owner decision C-xx)" marks what docs/compliance/decisions.md (PR #44) decides. "(architect detail)" marks what this ADR adds, which the owner must confirm. Section 9 lists the owner questions. |
+| Status | **Accepted 2026-10-06 (D-54):** the owner accepted it in the Delivery Lead's session (the Delivery Lead records the decision in docs/status.md); it was Proposed on 2026-10-05; revised after review rounds 1 to 6 and owner decision C-34 (recorded on `origin/dl/compliance-c34`; see section 1); section 6 reconciled with Delivery Lead decision DL-30 on 2026-10-06 (the window is unchanged; owner question 10). "(owner decision C-xx)" marks what docs/compliance/decisions.md (PR #44) decides. "(architect detail)" marks what this ADR adds, which the owner must confirm. Section 9 lists the owner questions. |
 | Author | architecture hub |
 | Decides | How C-02 ("no face match"), C-19 and C-25 are built: the two accommodation settings, schema, shared contract, API, locking, audit, state machine, scoring and reporting |
 | Serves | FR-305, FR-403, FR-606, FR-105, FR-805, FR-901, FR-1001, FR-1003; BR-12; NFR-05 |

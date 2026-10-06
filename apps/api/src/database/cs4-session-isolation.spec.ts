@@ -304,7 +304,15 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
             await expect(
               d().update?.({ where: theirs.unique, data: touch, ...sel }),
             ).rejects.toMatchObject({ code: 'P2025' });
-            if (actor === 'SERVICE') {
+            if (actor === 'SERVICE' && model === 'Session') {
+              // Session rows are never deleted: app_user has no DELETE on sessions (ADR 0004 §9.3).
+              await expect(d().deleteMany?.({ where: theirs.filter })).rejects.toThrow(
+                /permission denied for table sessions/,
+              );
+              await expect(d().delete?.({ where: theirs.unique, ...sel })).rejects.toThrow(
+                /permission denied for table sessions/,
+              );
+            } else if (actor === 'SERVICE') {
               expect(await d().deleteMany?.({ where: theirs.filter })).toEqual({ count: 0 });
               await expect(d().delete?.({ where: theirs.unique, ...sel })).rejects.toMatchObject({
                 code: 'P2025',
