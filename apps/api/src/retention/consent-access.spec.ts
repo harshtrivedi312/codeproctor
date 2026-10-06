@@ -17,8 +17,10 @@ const ALLOWED: Record<string, string> = {
   // ADR 0013 CS-4.4 (#126). The CANDIDATE scope names the column to ALLOW the candidate to write its own
   // consent (signing) and to REFUSE any read of it; neither reads the column, and neither can see
   // another candidate's consent (the session filter). One reviewed place each.
-  'database/session-scope-map.ts': 'candidate write allowlist: consents update signedName (CS-4.4)',
-  'database/candidate-interim.ts': 'candidate interim read deny list: signedName is never readable',
+  'database/session-scope-map.ts':
+    'names the column in the candidate write allowlist; never reads it',
+  'database/candidate-interim.ts':
+    'names the column in the read deny list (hides it from candidate reads); never reads it',
 };
 
 function files(dir: string): string[] {
