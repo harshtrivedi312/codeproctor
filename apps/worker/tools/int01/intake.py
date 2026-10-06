@@ -87,7 +87,10 @@ def _delete_original(path: Path) -> bool:
         path.unlink(missing_ok=True)
     except OSError:
         return False
-    return not path.exists()
+    try:
+        return not path.exists()  # Path.exists() re-raises some OSErrors (for example permissions)
+    except OSError:
+        return False  # cannot tell: report it as not deleted
 
 
 def intake_id_photo(
@@ -143,7 +146,10 @@ def intake_id_photo(
         deleted = _delete_original(src)
     if not deleted:
         if wrote:
-            dest.unlink(missing_ok=True)
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass  # the crop is ours to remove; DELETE_FAILED is what must reach the operator
         raise IntakeError("DELETE_FAILED") from None
     if error is not None:
         raise error from None

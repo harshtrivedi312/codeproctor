@@ -270,3 +270,49 @@ def test_c11_a_failed_delete_is_reported_even_behind_an_unexpected_error_and_spa
     assert (
         earlier.read_bytes() == b"someone else's crop"
     )  # this call wrote nothing, so it removes nothing
+
+
+def test_c11_a_failure_removing_our_own_crop_still_ends_in_delete_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    src = write_id(tmp_path)
+    dest = tmp_path / "p.png"
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == dest:
+            raise PermissionError("SECRET-dest")  # cleaning up our own crop fails
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(intake, "_delete_original", lambda p: False)
+    loc = locator.DetectorLocator(FakeDetector([face(on_card())]), CFG)
+    code = crop_id.run(src, dest, loc)
+    err = capsys.readouterr().err
+    assert code == 2 and "DELETE_FAILED" in err and "original may remain" in err
+    assert "SECRET" not in err
+
+
+def test_c11_when_exists_cannot_tell_the_original_counts_as_not_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = write_id(tmp_path)
+
+    def exists(self: Path) -> bool:
+        raise PermissionError("SECRET-src")
+
+    monkeypatch.setattr(Path, "exists", exists)
+    assert intake._delete_original(src) is False  # noqa: SLF001 - an unknown state is a failure
+
+
+def test_c11_ctrl_c_during_intake_is_reported_and_the_unexpected_branch_has_the_hint(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Interrupt:
+        def locate(self, image: intake.Image) -> list[intake.Box]:
+            raise KeyboardInterrupt
+
+    src = write_id(tmp_path)
+    assert crop_id.run(src, tmp_path / "p.png", Interrupt()) == 130
+    assert "interrupted" in capsys.readouterr().err
+    assert not src.exists()  # the finally block still deleted the original
