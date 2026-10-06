@@ -29,6 +29,7 @@
 //
 // A pure function over a scope value, so it is tested with synthetic scopes (an unknown kind, an unknown actor) that
 // no public entry can build. NFR-04.
+import { deepFreeze } from './deep-freeze';
 import type { OrgScope } from './org-context';
 
 /** The scopes one lock passes in. A scope that is not listed is refused. */
@@ -41,12 +42,17 @@ export interface LockScopePolicy {
   readonly plainOrg: boolean;
 }
 
-/** The three policies, by lock name (the merged ADR 0006 section 8.5). The tests check them against a literal matrix. */
-export const LOCK_SCOPE_POLICY = {
+/**
+ * The three policies, by lock name (the merged ADR 0006 section 8.5). The tests check them against a literal
+ * matrix. FROZEN, deeply, when the module loads (`as const` is compile-time only): code that holds a reference
+ * could otherwise write `LOCK_SCOPE_POLICY.lockAnySession.staff = true` and widen the run-time allowlist for the
+ * rest of the process (the same rule as the CS-4 scope tables, deep-freeze.ts).
+ */
+export const LOCK_SCOPE_POLICY = deepFreeze({
   guardLive: { service: true, staff: true, plainOrg: false },
   lockAnySession: { service: true, staff: false, plainOrg: false },
   lockForAccommodation: { service: false, staff: true, plainOrg: true },
-} as const satisfies Record<string, LockScopePolicy>;
+} as const satisfies Record<string, LockScopePolicy>);
 
 /** The scopes of `policy`, in words, for a refusal message. */
 function allowedText(policy: LockScopePolicy): string {
@@ -83,7 +89,15 @@ export function lockScopeRefusal(
   }
   const orgScope = scope as Extract<OrgScope, { kind: 'org' }>;
   const session: unknown = orgScope.session;
-  if (session !== undefined) {
+  const user: unknown = orgScope.user;
+  // Fail closed on shape: a session or a user that is present but is not an object (null, a string, a
+  // boolean) is neither a session scope nor STAFF nor a plain org scope: refused for every lock.
+  const present = (value: unknown): boolean => value !== undefined;
+  const isObject = (value: unknown): value is object => typeof value === 'object' && value !== null;
+  if ((present(session) && !isObject(session)) || (present(user) && !isObject(user))) {
+    return 'This session lock is refused for a scope of an unexpected shape: only a well-formed scope may take it.';
+  }
+  if (isObject(session)) {
     const actor: unknown = (session as { readonly actor?: unknown }).actor;
     if (actor === 'SERVICE') {
       return policy.service
@@ -98,7 +112,7 @@ export function lockScopeRefusal(
     }
     return `This session lock is refused for this actor of a session scope: only ${allowed} may take it.`;
   }
-  if (orgScope.user !== undefined) {
+  if (isObject(user)) {
     return policy.staff
       ? undefined
       : `This session lock is refused in a STAFF scope: only ${allowed} may take it.`;

@@ -136,3 +136,62 @@ describe('lockScopeRefusal: the messages say what is refused and what is allowed
     });
   });
 });
+
+describe('the policy table is frozen and the scope shape fails closed (S-A and N-a of the re-review of #208): NFR-04, TC-008', () => {
+  it('TC-008 S-A the policy table and every policy in it are frozen: a write throws, and the allowlist stays as it was', () => {
+    expect(Object.isFrozen(LOCK_SCOPE_POLICY)).toBe(true);
+    for (const lock of Object.keys(LOCK_SCOPE_POLICY) as LockName[]) {
+      expect({ lock, frozen: Object.isFrozen(LOCK_SCOPE_POLICY[lock]) }).toEqual({
+        lock,
+        frozen: true,
+      });
+    }
+    expect(() => {
+      (LOCK_SCOPE_POLICY.lockAnySession as { staff: boolean }).staff = true;
+    }).toThrow(TypeError);
+    expect(() => {
+      (LOCK_SCOPE_POLICY as unknown as Record<string, unknown>)['sneaky'] = {
+        service: true,
+        staff: true,
+        plainOrg: true,
+      };
+    }).toThrow(TypeError);
+    expect(() => {
+      delete (LOCK_SCOPE_POLICY as unknown as Record<string, unknown>)['guardLive'];
+    }).toThrow(TypeError);
+    // Still refused after the attempts.
+    expect(lockScopeRefusal(staff, LOCK_SCOPE_POLICY.lockAnySession)).toBeDefined();
+    expect(lockScopeRefusal(service, LOCK_SCOPE_POLICY.lockForAccommodation)).toBeDefined();
+  });
+
+  const shapes: Array<[string, unknown]> = [
+    ['a null session', { kind: 'org', orgId: ORG, session: null }],
+    ['a string session', { kind: 'org', orgId: ORG, session: 'SERVICE' }],
+    ['a boolean session', { kind: 'org', orgId: ORG, session: true }],
+    ['a null user', { kind: 'org', orgId: ORG, user: null }],
+    ['a string user', { kind: 'org', orgId: ORG, user: 'staff' }],
+    ['a boolean user', { kind: 'org', orgId: ORG, user: true }],
+    ['a numeric user', { kind: 'org', orgId: ORG, user: 1 }],
+    ['a null session and a real user', { kind: 'org', orgId: ORG, session: null, user: USER }],
+  ];
+
+  describe.each(Object.keys(LOCK_SCOPE_POLICY) as LockName[])(
+    '%s: a malformed scope is refused',
+    (lock) => {
+      it.each(shapes)('TC-008 N-a %s, with a message that names no value', (_what, scope) => {
+        const message = lockScopeRefusal(scope as OrgScope, LOCK_SCOPE_POLICY[lock]);
+        expect(message).toMatch(/unexpected shape/);
+        expect(message).not.toContain(ORG);
+        expect(message).not.toContain(SID);
+      });
+    },
+  );
+
+  it('TC-008 N-a an object user or session still follows its own rule, and an undefined one is simply absent', () => {
+    const undefinedUser = { kind: 'org', orgId: ORG, user: undefined } as OrgScope;
+    expect(lockScopeRefusal(undefinedUser, LOCK_SCOPE_POLICY.lockForAccommodation)).toBeUndefined();
+    expect(lockScopeRefusal(undefinedUser, LOCK_SCOPE_POLICY.guardLive)).toMatch(/plain org scope/);
+    expect(lockScopeRefusal(staff, LOCK_SCOPE_POLICY.guardLive)).toBeUndefined();
+    expect(lockScopeRefusal(service, LOCK_SCOPE_POLICY.guardLive)).toBeUndefined();
+  });
+});
