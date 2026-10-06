@@ -3100,13 +3100,18 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
             post(`2fa/reset/${b.id}`, a.token, OK),
             post(`2fa/reset/${a.id}`, b.token, OK),
           ]);
-          expect(ra.status).toBe(204);
-          expect(rb.status).toBe(204);
+          // A reset ends the target's access tokens at once (the Redis marker also refuses a token
+          // issued in the same second). Each admin's own request races the other admin's reset, so
+          // the loser of that race is refused 401 by the guard before the route runs. That is the
+          // designed behaviour, not a lock problem: what must never happen is a 5xx (deadlock,
+          // lock timeout) or an audit row for a request that did not finish.
+          for (const r of [ra, rb]) expect([204, 401]).toContain(r.status);
+          const finished = [ra, rb].filter((r) => r.status === 204).length;
           expect(
             await prisma.auditLog.count({
               where: { action: 'AUTH_2FA_RESET_BY_ADMIN', entityId: { in: [a.id, b.id] } },
             }),
-          ).toBe(2);
+          ).toBe(finished);
         }
       });
     });
