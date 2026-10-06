@@ -144,9 +144,7 @@ def analyze_similarity_route(req: SimilarityRequest) -> SimilarityResult:
 @app.post("/risk", dependencies=[Internal])
 def risk_route(req: RiskRequest) -> RiskResultOut:
     r: RiskResult = calculate_risk(req.events, req.config)
-    routing = route_for_review(
-        r.band, req.identity_review_pending, req.short_answer_pending, req.config
-    )
+    routing = route_for_review(r.band, req.identity_review_pending, req.short_answer_pending)
     return RiskResultOut(
         score=r.score,
         band=r.band,
