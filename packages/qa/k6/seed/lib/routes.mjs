@@ -1,6 +1,7 @@
 // Every route and body shape the seeder depends on, in one place.
 //
-// Marker: DOC = pinned by FSD section 4 or an ADR; ASSUMED = not pinned anywhere on main (BE-07 is
+// Marker: DOC = pinned by FSD section 4 or an ADR (ADR 0013 is still Proposed, so DOC from it is
+// 'DOC (Proposed ADR 0013)': re-check when it is accepted); ASSUMED = not pinned anywhere on main (BE-07 is
 // not merged at the time of writing), chosen to match the closest doc text. When BE-07/BE-09 land,
 // re-check each ASSUMED line against apps/api and packages/shared and edit only this file.
 export const ROUTES = {
@@ -12,9 +13,9 @@ export const ROUTES = {
   start: '/candidate/session/start', // DOC path; ASSUMED body { token, otp } -> { sessionToken, sessionTokenExpiresAt? }
   consent: '/candidate/session/consent', // DOC; GET -> { version?, text }
   consentSign: '/candidate/session/consent/sign', // DOC path; ASSUMED body below (C-30 age confirmation)
-  systemCheck: '/candidate/session/system-check', // DOC ADR 0013 5.4
-  presign: '/candidate/session/media/presign', // DOC ADR 0013 5.5 (ROOM_SCAN in CONSENTED)
-  confirm: '/candidate/session/media/confirm', // DOC ADR 0013 5.5
+  systemCheck: '/candidate/session/system-check', // DOC (Proposed ADR 0013) 5.4
+  presign: '/candidate/session/media/presign', // DOC (Proposed ADR 0013) 5.5 (ROOM_SCAN in CONSENTED)
+  confirm: '/candidate/session/media/confirm', // DOC (Proposed ADR 0013) 5.5
   startTest: '/candidate/session/test/start', // ASSUMED: ADR 0013 names "the start-test call" without a path
 };
 

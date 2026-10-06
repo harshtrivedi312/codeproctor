@@ -8,9 +8,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { Writable } from 'node:stream';
 import { main } from '../seed.mjs';
-import { createClient } from '../lib/http.mjs';
+import { createClient, createLimiter } from '../lib/http.mjs';
 import { startMock, MOCK } from '../mock/mock-api.mjs';
 import { totp } from '../lib/totp.mjs';
+import { createStaff } from '../lib/staff.mjs';
 import { redact } from '../lib/redact.mjs';
 import { assertSafeOutPath, checkStorageUrl, loadConfig } from '../lib/config.mjs';
 import { assertSyntheticDomain } from '../lib/synthetic.mjs';
@@ -139,7 +140,9 @@ test('TC-090 seed: secrets, tokens, OTPs and presigned URLs never reach output',
       assert.ok(!r.all.includes(s.otp));
     }
     assert.ok(!/X-Amz-Signature|\/storage\//.test(r.all));
-    assert.ok(!r.all.includes(env.SEED_OUT) || r.out.includes('mode 0600'));
+    // paths are printed whole (the redactor would otherwise swallow them)
+    assert.ok(r.out.includes(`sessions file (bearer tokens, mode 0600): ${env.SEED_OUT}`), r.out);
+    assert.ok(r.out.includes(`manifest (ids only): ${env.SEED_OUT}.manifest.json`), r.out);
   } finally {
     await m.close();
   }
@@ -258,10 +261,11 @@ test('TC-090 seed: --dry-run prints the plan and sends no request, secrets not p
   assert.match(bad.out, /MISSING/);
 });
 
-test('TC-090 seed: retries 429 and 503 with Retry-After, then succeeds', async () => {
+test('TC-090 seed: retries 429, and 503 only on routes that do not process it, then succeeds', async () => {
   const m = await startMock({
     faults: {
-      'POST /candidate/session/start': ['429', '503'],
+      'POST /candidate/session/start': ['429'],
+      'POST /candidate/session/system-check': ['503', '503'],
       [`POST /tests/${MOCK.testId}/invitations`]: ['429'],
     },
   });
@@ -270,7 +274,8 @@ test('TC-090 seed: retries 429 and 503 with Retry-After, then succeeds', async (
     const r = await run(['--count', '1'], envFor(m, dir));
     assert.equal(r.code, 0, r.all);
     const starts = m.st.requests.filter((q) => q.key === 'POST /candidate/session/start');
-    assert.equal(starts.length, 3);
+    assert.equal(starts.length, 2);
+    assert.equal(m.st.requests.filter((q) => q.key.endsWith('/system-check')).length, 3);
   } finally {
     await m.close();
   }
@@ -358,9 +363,13 @@ test('TC-094 seed: a partial run keeps a manifest so --cleanup can remove it', a
     assert.equal(r.code, 1);
     assert.ok(!fs.existsSync(env.SEED_OUT));
     const runId = /run id: (k6seed-\S+)/.exec(r.out)[1];
-    const c = await run(['--cleanup', '--run-id', runId], env);
-    assert.equal(c.code, 0, c.all);
+    // S5: the invitation that never answered is listed by email for a human, not guessed
+    const stuck = await run(['--cleanup', '--run-id', runId], env);
+    assert.equal(stuck.code, 1);
     assert.equal(m.st.erased.length, 2);
+    assert.match(stuck.out, new RegExp(`${runId}-\\d{3}@example\\.test`));
+    const c = await run(['--cleanup', '--run-id', runId, '--ignore-pending'], env);
+    assert.equal(c.code, 0, c.all);
     // --allow-partial writes what worked
     const m2 = await startMock({ failInviteAt: 2 });
     try {
@@ -468,4 +477,251 @@ test('TC-090 seed: redact removes URLs, tokens, JWTs, bearer headers, OTPs and k
     assert.ok(!out.includes(leak), `${leak} leaked: ${out}`);
   }
   assert.ok(out.includes('k6seed-20261005120000-abc123'), 'run id stays readable');
+});
+
+test('TC-090 seed: http is refused for a listed non-local API or mail host, before any request', async () => {
+  const dir = tmp();
+  const base = {
+    ALLOWED_HOSTS: 'staging.example.com,mail.example.com',
+    SEED_STAFF_EMAIL: 'a@example.test',
+    SEED_STAFF_PASSWORD: 'x'.repeat(12),
+    SEED_ORG_NAME: 'SYNTHETIC',
+    SEED_TEST_ID: MOCK.testId,
+    SEED_OUT: path.join(dir, 's.json'),
+    API_BASE_URL: 'https://staging.example.com/api/v1',
+    SEED_MAIL_URL: 'https://mail.example.com',
+  };
+  let fetched = 0;
+  const fetchImpl = async () => (fetched++, new Response('{}'));
+  for (const over of [
+    { API_BASE_URL: 'http://staging.example.com/api/v1' },
+    { SEED_MAIL_URL: 'http://mail.example.com' },
+  ]) {
+    const r = await run([], { ...base, ...over }, { fetchImpl });
+    assert.equal(r.code, 2, JSON.stringify(over));
+    assert.match(r.err, /https/);
+  }
+  const ok = await run(['--dry-run'], base, { fetchImpl });
+  assert.equal(ok.code, 0, ok.all);
+  assert.equal(fetched, 0);
+});
+
+test('TC-090 seed: the temp file is exclusive, random and never follows a planted symlink', async () => {
+  const m = await startMock();
+  const dir = tmp();
+  try {
+    const env = envFor(m, dir);
+    const victim = path.join(dir, 'victim.txt');
+    fs.writeFileSync(victim, 'keep');
+    fs.symlinkSync(victim, `${env.SEED_OUT}.tmp-${process.pid}`); // the old predictable name
+    fs.symlinkSync(victim, env.SEED_OUT);
+    const r = await run(['--count', '1', '--force'], env);
+    assert.equal(r.code, 0, r.all);
+    assert.equal(fs.readFileSync(victim, 'utf8'), 'keep');
+    assert.ok(!fs.lstatSync(env.SEED_OUT).isSymbolicLink());
+    assert.equal(fs.statSync(env.SEED_OUT).mode & 0o777, 0o600);
+    assert.deepEqual(
+      fs.readdirSync(dir).filter((f) => f.includes('.tmp-') && !f.endsWith(`.tmp-${process.pid}`)),
+      [],
+    );
+    // a group/world-writable directory without the sticky bit is refused
+    const open = tmp();
+    fs.chmodSync(open, 0o777);
+    const r2 = await run(['--count', '1'], envFor(m, dir, { SEED_OUT: path.join(open, 's.json') }));
+    assert.equal(r2.code, 1);
+    assert.match(r2.err, /writable/);
+  } finally {
+    await m.close();
+  }
+});
+
+test('TC-094 seed: a bare 404 is a failure; only CANDIDATE_NOT_FOUND counts as gone', async () => {
+  const m = await startMock();
+  const dir = tmp();
+  try {
+    const env = envFor(m, dir);
+    const r = await run(['--count', '2'], env);
+    const runId = /run id: (k6seed-\S+)/.exec(r.out)[1];
+    m.st.faults[`POST /candidates/${[...m.st.byCandidate.keys()][0]}/erasure`] = ['404'];
+    const c = await run(['--cleanup', '--run-id', runId], env);
+    assert.equal(c.code, 1);
+    assert.ok(fs.existsSync(env.SEED_OUT), 'sessions file kept');
+    assert.equal(
+      JSON.parse(fs.readFileSync(`${env.SEED_OUT}.manifest.json`, 'utf8')).cleaned,
+      false,
+    );
+    const again = await run(['--cleanup', '--run-id', runId], env);
+    assert.equal(again.code, 0, again.all);
+    assert.ok(!fs.existsSync(env.SEED_OUT));
+  } finally {
+    await m.close();
+  }
+});
+
+test('TC-090 seed: an uncleaned manifest blocks a new run, --force included', async () => {
+  const m = await startMock();
+  const dir = tmp();
+  try {
+    const env = envFor(m, dir);
+    assert.equal((await run(['--count', '1'], env)).code, 0);
+    const before = m.st.requests.length;
+    for (const argv of [
+      ['--count', '1', '--force'],
+      [
+        '--count',
+        '1',
+        '--out',
+        path.join(dir, 'other.json'),
+        '--manifest',
+        `${env.SEED_OUT}.manifest.json`,
+      ],
+    ]) {
+      const r = await run(argv, env);
+      assert.equal(r.code, 1);
+      assert.match(r.err, /not cleaned up/);
+    }
+    assert.equal(m.st.requests.length, before, 'refused before any request');
+  } finally {
+    await m.close();
+  }
+});
+
+test('TC-094 seed: a tampered manifest is refused before any request', async () => {
+  const m = await startMock();
+  const dir = tmp();
+  try {
+    const env = envFor(m, dir);
+    const r = await run(['--count', '1'], env);
+    const runId = /run id: (k6seed-\S+)/.exec(r.out)[1];
+    const mf = `${env.SEED_OUT}.manifest.json`;
+    const orig = fs.readFileSync(mf, 'utf8');
+    const before = m.st.requests.length;
+    for (const edit of [
+      (j) => (j.items[0].candidateId = '../../auth/logout'),
+      (j) => (j.sessionsFile = '/etc/hosts'),
+      (j) => (j.sessionsFile = path.join(dir, 'elsewhere.json')),
+    ]) {
+      const j = JSON.parse(orig);
+      edit(j);
+      fs.writeFileSync(mf, JSON.stringify(j));
+      const c = await run(['--cleanup', '--run-id', runId], env);
+      assert.equal(c.code, 1);
+    }
+    assert.equal(m.st.requests.length, before);
+    assert.ok(fs.existsSync('/etc/hosts'));
+  } finally {
+    await m.close();
+  }
+});
+
+test('TC-090 seed: concurrent 401s cause exactly one re-login and never reuse a TOTP step', async () => {
+  const m = await startMock({ twoFactor: true });
+  try {
+    const client = createClient({ baseUrl: m.url, rps: 50, sleep: async () => {} });
+    const staff = createStaff({
+      client,
+      credentials: { email: MOCK.email, password: MOCK.password, totpSecret: MOCK.totpSecret },
+      expectOrgName: MOCK.org,
+      secrets: [],
+      sleep: async () => {},
+    });
+    await staff.login();
+    assert.equal(m.st.logins, 1);
+    m.st.staffTokens.clear(); // every token is now stale
+    const url = `/tests/${MOCK.testId}/invitations`;
+    const body = {
+      candidateName: 'K',
+      candidateEmail: 'k@example.test',
+      accommodations: { identityCheckWaiver: {} },
+    };
+    const rs = await Promise.all(
+      [1, 2, 3, 4].map(() => staff.call('POST', url, { body, idempotent: false })),
+    );
+    assert.ok(rs.every((r) => r.status === 201));
+    assert.equal(m.st.logins, 2, 'one shared re-login');
+    assert.equal(m.st.usedSteps.size, 2, 'two different TOTP steps');
+  } finally {
+    await m.close();
+  }
+});
+
+test('TC-090 seed: a network error on a POST is not retried, on a GET it is', async () => {
+  for (const [method, expected] of [
+    ['POST', 1],
+    ['GET', 5],
+  ]) {
+    let calls = 0;
+    const client = createClient({
+      baseUrl: 'http://127.0.0.1:1',
+      rps: 50,
+      sleep: async () => {},
+      fetchImpl: async () => (calls++, Promise.reject(new TypeError('fetch failed'))),
+    });
+    await assert.rejects(client.request(method, '/x', { body: {} }), /network error/);
+    assert.equal(calls, expected, method);
+  }
+});
+
+test('TC-090 seed: start-test gives up at the verify timeout; fatal 409 codes stop at once', async () => {
+  const dir = tmp();
+  const slow = await startMock({ verifyPolls: 1e9 });
+  try {
+    const r = await run(['--count', '1'], envFor(slow, dir, { SEED_VERIFY_TIMEOUT_S: '1' }));
+    assert.equal(r.code, 1);
+    assert.match(r.err, /start test: HTTP 409/);
+  } finally {
+    await slow.close();
+  }
+  const fatal = await startMock({ startTestCode: 'SYSTEM_CHECK_BLOCKED' });
+  try {
+    const r = await run(
+      ['--count', '1'],
+      envFor(fatal, dir, { SEED_OUT: path.join(dir, 'f.json') }),
+    );
+    assert.equal(r.code, 1);
+    assert.equal(fatal.st.requests.filter((q) => q.key.endsWith('/test/start')).length, 1);
+    assert.match(r.err, /SYSTEM_CHECK_BLOCKED/);
+  } finally {
+    await fatal.close();
+  }
+});
+
+test('TC-090 seed: SEED_INVITE_LINK_REGEX needs a capture group', () => {
+  const env = {
+    API_BASE_URL: 'http://localhost:4000/api/v1',
+    SEED_STAFF_EMAIL: 'a@example.test',
+    SEED_STAFF_PASSWORD: 'pw',
+    SEED_ORG_NAME: 'SYNTHETIC',
+    SEED_TEST_ID: MOCK.testId,
+    SEED_MAIL_URL: 'http://localhost:8025',
+    SEED_OUT: '/var/tmp/x.json',
+  };
+  assert.throws(
+    () => loadConfig([], { ...env, SEED_INVITE_LINK_REGEX: '/invite/[a-z]+' }),
+    /capture group/,
+  );
+  assert.throws(
+    () => loadConfig([], { ...env, SEED_INVITE_LINK_REGEX: '(' }),
+    /regular expression/,
+  );
+  assert.doesNotThrow(() => loadConfig([], { ...env, SEED_INVITE_LINK_REGEX: '/invite/([a-z]+)' }));
+});
+
+test('TC-090 seed: the shared limiter spaces API and mail-sink requests together', async () => {
+  let clock = 0;
+  const starts = [];
+  const limiter = createLimiter({
+    rps: 5,
+    now: () => clock,
+    sleep: async (ms) => void (clock += ms),
+  });
+  const mk = () =>
+    createClient({
+      baseUrl: 'http://127.0.0.1:1',
+      limiter,
+      fetchImpl: async () => (starts.push(clock), new Response('{}')),
+    });
+  const [a, b] = [mk(), mk()];
+  for (let i = 0; i < 6; i++) await (i % 2 ? a : b).request('GET', '/x');
+  for (let i = 1; i < starts.length; i++) assert.ok(starts[i] - starts[i - 1] >= 200);
 });

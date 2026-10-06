@@ -16,6 +16,13 @@ export function createMailpitSource({
 }) {
   const tokenRe = new RegExp(linkRe);
 
+  const SKEW_MS = 5 * 60 * 1000; // the sink's clock may differ from ours; addresses are unique per run
+  const stripHtml = (h) =>
+    h
+      .replace(/<(style|script)[\s\S]*?<\/\1>/gi, ' ')
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/&#?\w+;/g, ' ');
+
   async function findMessage(email, since, accept) {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
@@ -24,7 +31,7 @@ export function createMailpitSource({
         step: 'mail search',
       });
       const messages = (json?.messages ?? [])
-        .filter((m) => Date.parse(m.Created) >= since - 2000)
+        .filter((m) => Date.parse(m.Created) >= since - SKEW_MS)
         .sort((a, b) => Date.parse(b.Created) - Date.parse(a.Created));
       for (const m of messages) {
         const { json: full } = await client.request(
@@ -32,7 +39,8 @@ export function createMailpitSource({
           `/api/v1/message/${encodeURIComponent(m.ID)}`,
           { step: 'mail read' },
         );
-        const hit = accept(`${full?.Text ?? ''}\n${full?.HTML ?? ''}`);
+        const text = full?.Text?.trim() ? full.Text : stripHtml(full?.HTML ?? '');
+        const hit = accept(text, `${full?.Text ?? ''}\n${full?.HTML ?? ''}`);
         if (hit) return hit;
       }
       if (Date.now() > deadline) {
@@ -46,11 +54,11 @@ export function createMailpitSource({
 
   return {
     getInviteToken: (email, since) =>
-      findMessage(email, since, (text) => tokenRe.exec(text)?.[1] ?? null),
+      findMessage(email, since, (_text, raw) => tokenRe.exec(raw)?.[1] ?? null),
     // The OTP email carries no invitation link; a six-digit number is the first match not inside it.
     getOtp: (email, since) =>
-      findMessage(email, since, (text) =>
-        tokenRe.test(text) ? null : (OTP_RE.exec(text.replace(/<[^>]*>/g, ' '))?.[1] ?? null),
+      findMessage(email, since, (text, raw) =>
+        tokenRe.test(raw) ? null : (OTP_RE.exec(text)?.[1] ?? null),
       ),
   };
 }

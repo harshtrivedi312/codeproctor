@@ -2,10 +2,12 @@
 // Session seeder for the k6 load tests (TC-090, TC-091). See README.md in this folder.
 // Public API only; no database access; staging with synthetic data only (ADR 0009).
 import fs from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import crypto from 'node:crypto';
+import path from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { loadConfig, USAGE } from './lib/config.mjs';
-import { createClient } from './lib/http.mjs';
+import { loadConfig, assertSafeOutPath, USAGE } from './lib/config.mjs';
+import { createClient, createLimiter } from './lib/http.mjs';
 import { createStaff } from './lib/staff.mjs';
 import { createMailpitSource } from './lib/mail.mjs';
 import { seedOne } from './lib/flow.mjs';
@@ -13,17 +15,47 @@ import { ROUTES } from './lib/routes.mjs';
 import { newRunId } from './lib/synthetic.mjs';
 import { redact, SeedError } from './lib/redact.mjs';
 
-// Writes `data` to `file` with mode 0600 (temp file, then rename, so a crash leaves no partial file).
+// Writes `data` to `file` with mode 0600. The temp file is created exclusively (wx: never follows a
+// planted symlink or reuses an existing file) under an unpredictable name that the k6 .gitignore
+// pattern sessions*.json still matches, then renamed over the target.
 async function writeSecure(file, data, { force = false } = {}) {
   if (!force && existsSync(file)) {
     throw new Error(
       'The output file already exists; use --force to replace it, or pick another path.',
     );
   }
-  const tmp = `${file}.tmp-${process.pid}`;
-  await fs.writeFile(tmp, data, { flag: 'w', mode: 0o600 });
-  await fs.chmod(tmp, 0o600);
-  await fs.rename(tmp, file);
+  const dir = path.dirname(file);
+  const st = await fs.stat(dir);
+  // group/world-writable without the sticky bit lets another user swap or remove files
+  if ((st.mode & 0o022) !== 0 && (st.mode & 0o1000) === 0) {
+    throw new Error('The output directory is group or world writable without the sticky bit.');
+  }
+  const tmp = `${file}.tmp-${crypto.randomBytes(8).toString('hex')}.json`;
+  try {
+    await fs.writeFile(tmp, data, { flag: 'wx', mode: 0o600 });
+    await fs.chmod(tmp, 0o600);
+    await fs.rename(tmp, file);
+  } catch (e) {
+    await fs.rm(tmp, { force: true });
+    throw e;
+  }
+}
+
+// An existing manifest that is not marked cleaned still points at live synthetic data: refuse to
+// replace it (even with --force) until `--cleanup` has finished.
+function assertManifestFree(file) {
+  if (!existsSync(file)) return;
+  let cleaned = false;
+  try {
+    cleaned = JSON.parse(readFileSync(file, 'utf8')).cleaned === true;
+  } catch {
+    /* unreadable: treat as not cleaned */
+  }
+  if (!cleaned) {
+    throw new Error(
+      'A manifest from an earlier run exists and is not cleaned up; run --cleanup first.',
+    );
+  }
 }
 
 function plan(cfg, runId) {
@@ -61,6 +93,7 @@ export async function main(
   }
   const log = (s) => stderr.write(`${redact(s, secrets)}\n`);
   const say = (s) => stdout.write(`${redact(s, secrets)}\n`);
+  const plain = (s) => stdout.write(`${s}\n`); // paths and run ids only, never secrets
   const sleepFn = sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
 
   let cfg;
@@ -87,31 +120,45 @@ export async function main(
     return 0;
   }
 
-  const http = (baseUrl) => createClient({ baseUrl, rps: cfg.rps, fetchImpl, sleep: sleepFn });
+  const limiter = createLimiter({ rps: cfg.rps, sleep: sleepFn }); // one rate for API and mail sink
+  const http = (baseUrl) => createClient({ baseUrl, limiter, fetchImpl, sleep: sleepFn });
   const apiClient = http(cfg.apiBase);
   const staff = createStaff({
     client: apiClient,
     credentials: cfg.staff,
     expectOrgName: cfg.orgName,
     secrets,
+    sleep: sleepFn,
   });
 
   try {
     return cfg.cleanup
-      ? await cleanup({ cfg, staff, runId, say, log })
-      : await seed({ cfg, staff, apiClient, http, runId, say, log, secrets, sleep: sleepFn });
+      ? await cleanup({ cfg, staff, runId, say, plain, log })
+      : await seed({
+          cfg,
+          staff,
+          apiClient,
+          http,
+          runId,
+          say,
+          plain,
+          log,
+          secrets,
+          sleep: sleepFn,
+        });
   } catch (e) {
     log(`Failed: ${e instanceof SeedError || e instanceof Error ? e.message : 'unknown error'}`);
     return 1;
   }
 }
 
-async function seed({ cfg, staff, apiClient, http, runId, say, log, secrets, sleep }) {
+async function seed({ cfg, staff, apiClient, http, runId, say, plain, log, secrets, sleep }) {
   if (cfg.out && existsSync(cfg.out) && !cfg.force) {
     throw new Error(
       'The output file already exists; use --force to replace it, or pick another path.',
     );
   }
+  assertManifestFree(cfg.manifest); // before any request, --force or not
   await staff.login();
   const mail = createMailpitSource({ client: http(cfg.mailUrl), linkRe: cfg.linkRe, sleep });
   const manifest = {
@@ -128,8 +175,8 @@ async function seed({ cfg, staff, apiClient, http, runId, say, log, secrets, sle
       writeSecure(cfg.manifest, JSON.stringify(manifest, null, 2), { force: true }),
     ));
   const record = (item) => {
-    manifest.items.push(item);
-    void save();
+    if (!manifest.items.includes(item)) manifest.items.push(item);
+    save().catch(() => {}); // a failed write surfaces at the final save()
   };
 
   log(`run ${runId}: seeding ${cfg.count} synthetic candidates`);
@@ -167,11 +214,11 @@ async function seed({ cfg, staff, apiClient, http, runId, say, log, secrets, sle
   if (complete || (cfg.allowPartial && ok.length > 0)) {
     await writeSecure(cfg.out, JSON.stringify(ok), { force: true });
   }
-  say(`run id: ${runId}`);
+  plain(`run id: ${runId}`);
   say(`seeded: ${ok.length} of ${cfg.count}`);
-  say(`manifest (ids only): ${cfg.manifest}`);
+  plain(`manifest (ids only): ${cfg.manifest}`);
   if (complete || (cfg.allowPartial && ok.length > 0))
-    say(`sessions file (bearer tokens, mode 0600): ${cfg.out}`);
+    plain(`sessions file (bearer tokens, mode 0600): ${cfg.out}`);
   if (!complete) {
     say(`failed candidates: ${failures.sort((a, b) => a - b).join(', ')}`);
     say(
@@ -186,7 +233,12 @@ async function seed({ cfg, staff, apiClient, http, runId, say, log, secrets, sle
   return 0;
 }
 
-async function cleanup({ cfg, staff, runId, say, log }) {
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Only this problem code means "the candidate is already erased". A bare 404 (wrong route, wrong
+// host, proxy) is a failure: it must not mark anything cleaned or delete the sessions file.
+export const GONE_CODE = 'CANDIDATE_NOT_FOUND';
+
+async function cleanup({ cfg, staff, runId, say, plain, log }) {
   let manifest;
   try {
     manifest = JSON.parse(await fs.readFile(cfg.manifest, 'utf8'));
@@ -196,41 +248,73 @@ async function cleanup({ cfg, staff, runId, say, log }) {
   if (manifest.runId !== runId) throw new Error('The manifest belongs to a different run id.');
   if (manifest.orgName !== cfg.orgName)
     throw new Error('The manifest belongs to a different organisation.');
+  // The manifest is a file on disk and may have been edited: validate everything it drives
+  // (ids go into URL paths, sessionsFile into an unlink) before the first request.
+  if (!Array.isArray(manifest.items)) throw new Error('The manifest has no item list.');
+  for (const item of manifest.items) {
+    if (item.candidateId != null && !UUID_RE.test(item.candidateId)) {
+      throw new Error('The manifest holds a candidate id that is not a UUID; refusing.');
+    }
+  }
+  let sessionsFile = null;
+  if (manifest.sessionsFile) {
+    sessionsFile = assertSafeOutPath(manifest.sessionsFile);
+    if (cfg.out && sessionsFile !== cfg.out) {
+      throw new Error('The manifest names a different sessions file than --out / SEED_OUT.');
+    }
+  }
   await staff.login();
   let removed = 0;
   let already = 0;
   const failed = [];
+  const pending = [];
   for (const item of manifest.items) {
     if (item.state === 'ERASED') {
       already++;
       continue;
     }
+    if (!item.candidateId) {
+      // The invitation POST never answered: the candidate may or may not exist. No route to look
+      // it up by email is documented, so a human checks.
+      pending.push(item);
+      continue;
+    }
     try {
-      // 404/410: already gone (idempotent). The erasure itself completes asynchronously (C-06).
       const r = await staff.call('POST', ROUTES.erase(item.candidateId), {
         step: 'erase candidate',
         idempotent: false,
         body: {},
         expect: [200, 202, 204, 404, 410],
       });
-      item.state = 'ERASED';
-      if (r.status === 404 || r.status === 410) already++;
-      else removed++;
+      if (r.status === 404 || r.status === 410) {
+        if (r.json?.code !== GONE_CODE) {
+          throw new SeedError(`erase candidate: HTTP ${r.status} without ${GONE_CODE}.`);
+        }
+        already++;
+      } else removed++;
+      item.state = 'ERASED'; // erasure completes asynchronously (C-06)
     } catch (e) {
       failed.push(item.index + 1);
       log(`#${String(item.index + 1).padStart(3, '0')} erase failed: ${e.message}`);
     }
   }
-  manifest.cleaned = failed.length === 0;
+  const unresolved = cfg.ignorePending ? [] : pending;
+  manifest.cleaned = failed.length === 0 && unresolved.length === 0;
   await writeSecure(cfg.manifest, JSON.stringify(manifest, null, 2), { force: true });
-  if (failed.length === 0 && manifest.sessionsFile)
-    await fs.rm(manifest.sessionsFile, { force: true });
-  say(`run id: ${runId}`);
+  if (manifest.cleaned && sessionsFile) await fs.rm(sessionsFile, { force: true });
+  plain(`run id: ${runId}`);
   say(`erasure requested: ${removed}, already gone: ${already}, failed: ${failed.length}`);
   if (failed.length) {
     say(`failed candidates: ${failed.join(', ')} (run --cleanup again)`);
-    return 1;
   }
+  if (pending.length) {
+    plain(
+      `${pending.length} invitation(s) never got an answer, so no candidate id is known. ` +
+        `Check the staging admin UI for these synthetic emails: ${pending.map((p) => p.email).join(', ')}. ` +
+        (cfg.ignorePending ? 'Ignored (--ignore-pending).' : 'Then re-run with --ignore-pending.'),
+    );
+  }
+  if (!manifest.cleaned) return 1;
   say(
     "Sessions file removed. Also delete the run's mail-sink messages and storage objects (README).",
   );

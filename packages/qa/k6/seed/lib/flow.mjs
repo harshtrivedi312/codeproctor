@@ -35,20 +35,23 @@ export async function seedOne({
   const tag = `#${String(index + 1).padStart(3, '0')}`;
   const since = Date.now();
 
-  // 1. Invitation (creates the candidate, the invitation and the session in INVITED).
+  // 1. Invitation (creates the candidate, the invitation and the session in INVITED). The planned
+  // email goes into the manifest first: if the POST times out after the server created the rows,
+  // --cleanup can still find them by email.
+  const item = { index, email: cand.email, state: 'PENDING' };
+  record(item);
   const inv = await staff.call('POST', ROUTES.invite(cfg.testId), {
     step: 'invite',
     idempotent: false,
     body: inviteBody({ name: cand.name, email: cand.email, runId }),
   });
   const body = Array.isArray(inv.json) ? inv.json[0] : (inv.json?.invitations?.[0] ?? inv.json);
-  const item = {
-    index,
+  Object.assign(item, {
     invitationId: id(body?.id ?? body?.invitationId, 'invitation id'),
     candidateId: id(body?.candidateId, 'candidate id'),
     sessionId: body?.sessionId ? id(body.sessionId, 'session id') : null,
     state: 'INVITED',
-  };
+  });
   record(item);
   log(`${tag} invited`);
 
@@ -93,6 +96,7 @@ export async function seedOne({
     token,
     step: 'system check',
     idempotent: false,
+    retry503: true, // ADR 0013: 503 + Retry-After, not processed
     body: systemCheckBody(),
   });
   if (sc.json?.passed !== true) {
@@ -162,6 +166,7 @@ export async function seedOne({
         token,
         step: 'start test',
         idempotent: false,
+        retry503: true, // start-session is idempotent; 503 + Retry-After (ADR 0013)
         body: {},
         expect: [200, 201],
       });

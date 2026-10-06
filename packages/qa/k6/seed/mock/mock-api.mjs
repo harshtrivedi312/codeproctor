@@ -21,6 +21,8 @@ export async function startMock(opts = {}) {
     byCandidate: new Map(),
     mail: [],
     staffTokens: new Set(),
+    usedSteps: new Set(),
+    logins: 0,
     erased: [],
     requests: [],
     faults: structuredClone(opts.faults ?? {}), // "METHOD path" -> ['429', '503', '500', ...]
@@ -80,6 +82,7 @@ export async function startMock(opts = {}) {
 
       // ---- staff ----
       if (key === 'POST /auth/login') {
+        st.logins++;
         if (body.email !== MOCK.email || body.password !== MOCK.password) {
           return problem(res, 401, 'INVALID_CREDENTIALS');
         }
@@ -100,7 +103,12 @@ export async function startMock(opts = {}) {
         });
       }
       if (key === 'POST /auth/2fa/verify') {
-        if (body.code !== totp(MOCK.totpSecret)) return problem(res, 400, 'INVALID_CODE');
+        // like totp.service.ts: one step of drift either way, each step accepted once (FU-BE-20)
+        const step = [-1, 0, 1]
+          .map((d) => Math.floor(Date.now() / 30000) + d)
+          .find((x) => body.code === totp(MOCK.totpSecret, x * 30000));
+        if (step === undefined || st.usedSteps.has(step)) return problem(res, 400, 'INVALID_CODE');
+        st.usedSteps.add(step);
         const t = `acc-${crypto.randomBytes(24).toString('hex')}`;
         st.staffTokens.add(t);
         return send(res, 200, { accessToken: t, user: { orgName: opts.orgName ?? MOCK.org } });
@@ -141,7 +149,7 @@ export async function startMock(opts = {}) {
       if (er) {
         if (!staffOk) return problem(res, 401, 'UNAUTHENTICATED');
         const s = st.byCandidate.get(er[1]);
-        if (!s || s.erased) return problem(res, 404, 'NOT_FOUND');
+        if (!s || s.erased) return problem(res, 404, 'CANDIDATE_NOT_FOUND');
         s.erased = true;
         st.erased.push(er[1]);
         return send(res, 202, {});
@@ -206,6 +214,7 @@ export async function startMock(opts = {}) {
           return send(res, 200, { uploaded: true, sizeBytes: sess.uploaded });
         }
         if (key === 'POST /candidate/session/test/start') {
+          if (opts.startTestCode) return problem(res, 409, opts.startTestCode);
           if (sess.status === 'CONSENTED') {
             if (!(sess.sysCheck && sess.roomScan)) return problem(res, 409, 'SESSION_NOT_VERIFIED');
             if (++sess.polls <= st.verifyPolls) return problem(res, 409, 'SESSION_NOT_VERIFIED');

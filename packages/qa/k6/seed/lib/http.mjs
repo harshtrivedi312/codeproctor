@@ -5,25 +5,34 @@ import { SeedError } from './redact.mjs';
 
 const CODE_RE = /^[A-Z][A-Z0-9_]{2,60}$/;
 
+// One limiter can be shared by several clients (API and mail sink) so the run stays under one rate.
+export function createLimiter({
+  rps = 5,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  now = () => Date.now(),
+} = {}) {
+  const gap = rps > 0 ? Math.ceil(1000 / rps) : 0;
+  let nextSlot = 0;
+  return async function slot() {
+    const t = now();
+    const at = Math.max(t, nextSlot);
+    nextSlot = at + gap;
+    if (at > t) await sleep(at - t);
+  };
+}
+
 export function createClient({
   baseUrl,
   rps = 5,
+  limiter,
   maxRetries = 4,
   timeoutMs = 30000,
   fetchImpl = fetch,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   now = () => Date.now(),
 }) {
-  const gap = rps > 0 ? Math.ceil(1000 / rps) : 0;
-  let nextSlot = 0;
-
   // Serialises request starts so the whole run stays under `rps` requests per second.
-  async function slot() {
-    const t = now();
-    const at = Math.max(t, nextSlot);
-    nextSlot = at + gap;
-    if (at > t) await sleep(at - t);
-  }
+  const slot = limiter ?? createLimiter({ rps, sleep, now });
 
   function backoff(attempt, retryAfter) {
     if (retryAfter !== null && Number.isFinite(retryAfter)) {
@@ -32,7 +41,8 @@ export function createClient({
     return Math.min(500 * 2 ** attempt, 8000) + Math.floor(Math.random() * 250);
   }
 
-  // opts: { token, body, step, idempotent, expect: [statuses], raw: Buffer, headers, absolute }
+  // opts: { token, body, step, idempotent, retry503, expect: [statuses], raw: Buffer, headers, absolute }
+  // retry503: the route answers 503 + Retry-After without processing (ADR 0013), so a repeat is safe.
   // `absolute` is a full URL (storage PUT); otherwise `path` is joined to baseUrl.
   async function request(method, path, opts = {}) {
     const step = opts.step ?? `${method} ${path.split('?')[0].replace(/[0-9a-f-]{36}/g, ':id')}`;
@@ -85,10 +95,11 @@ export function createClient({
       }
       const ra = res.headers.get('retry-after');
       const retryAfter = ra === null ? null : Number(ra);
-      // 429 and 503 with Retry-After mean "not processed, try later"; 502/504 only for repeatable calls.
+      // 429 means "not processed". 503 is repeated only for repeatable calls or routes flagged retry503;
+      // 502/504 only for repeatable calls.
       const retryable =
         res.status === 429 ||
-        (res.status === 503 && (safeToRepeat || retryAfter !== null)) ||
+        (res.status === 503 && (safeToRepeat || opts.retry503 === true)) ||
         ((res.status === 502 || res.status === 504) && safeToRepeat);
       if (retryable && attempt < maxRetries) {
         await sleep(backoff(attempt, retryAfter));

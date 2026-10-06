@@ -15,7 +15,14 @@ export const USAGE = `Usage: node seed.mjs [--count N] [--out FILE] [--dry-run] 
 Configuration is read from environment variables only (see seed/README.md).`;
 
 const FLAGS_WITH_VALUE = new Set(['--count', '--out', '--run-id', '--manifest']);
-const FLAGS = new Set(['--dry-run', '--cleanup', '--allow-partial', '--force', '--help']);
+const FLAGS = new Set([
+  '--dry-run',
+  '--cleanup',
+  '--allow-partial',
+  '--force',
+  '--ignore-pending',
+  '--help',
+]);
 
 export function parseArgs(argv) {
   const args = {};
@@ -40,6 +47,14 @@ function intIn(name, raw, min, max) {
     throw new Error(`${name} must be an integer from ${min} to ${max}.`);
   }
   return n;
+}
+
+// Bearer tokens, OTPs and the staff password must not cross a network in clear text: http is
+// accepted only for the local hosts (the guard itself allows http for any listed host).
+function requireHttps(url, host, name) {
+  if (!/^https:\/\//i.test(url) && !LOCAL_HOSTS.includes(host)) {
+    throw new Error(`${name} must use https unless the host is local (localhost, 127.0.0.1).`);
+  }
 }
 
 // Returns the path if it is safe for a file holding bearer tokens, or throws.
@@ -88,7 +103,10 @@ export function loadConfig(argv, env) {
 
   const apiBase = (need('API_BASE_URL') ?? '').replace(/\/+$/, '');
   let host = null;
-  if (apiBase) host = checkTarget(apiBase, env.ALLOWED_HOSTS); // same guard as the k6 scripts
+  if (apiBase) {
+    host = checkTarget(apiBase, env.ALLOWED_HOSTS); // same guard as the k6 scripts
+    requireHttps(apiBase, host, 'API_BASE_URL');
+  }
   need('SEED_STAFF_EMAIL');
   need('SEED_STAFF_PASSWORD');
   const orgName = need('SEED_ORG_NAME');
@@ -103,7 +121,20 @@ export function loadConfig(argv, env) {
   let mailUrl = null;
   if (!cleanup) {
     mailUrl = (need('SEED_MAIL_URL') ?? '').replace(/\/+$/, '');
-    if (mailUrl) checkTarget(mailUrl, env.ALLOWED_HOSTS); // the mail sink holds tokens: same guard
+    if (mailUrl) {
+      // the mail sink holds tokens and OTPs: same guard, same https rule
+      requireHttps(mailUrl, checkTarget(mailUrl, env.ALLOWED_HOSTS), 'SEED_MAIL_URL');
+    }
+  }
+  if (env.SEED_INVITE_LINK_REGEX) {
+    let probe;
+    try {
+      probe = new RegExp(`${env.SEED_INVITE_LINK_REGEX}|`).exec('');
+    } catch {
+      throw new Error('SEED_INVITE_LINK_REGEX is not a valid regular expression.');
+    }
+    if (probe.length - 1 < 1)
+      throw new Error('SEED_INVITE_LINK_REGEX needs one capture group for the token.');
   }
   const domain = assertSyntheticDomain(env.SEED_EMAIL_DOMAIN || 'example.test');
   if (env.SEED_STAFF_TOTP_SECRET !== undefined && env.SEED_STAFF_TOTP_SECRET === '') {
@@ -137,6 +168,7 @@ export function loadConfig(argv, env) {
     dryRun,
     allowPartial: Boolean(args['allow-partial']),
     force: Boolean(args.force),
+    ignorePending: Boolean(args['ignore-pending']),
     missing,
     apiBase,
     host,
