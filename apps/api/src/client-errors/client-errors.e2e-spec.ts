@@ -1,5 +1,6 @@
 import { request as httpRequest } from 'node:http';
 import type { Server } from 'node:http';
+import { connect } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { gzipSync } from 'node:zlib';
 import { INestApplication } from '@nestjs/common';
@@ -486,7 +487,11 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
         // Only one chunk is written and the request is never ended: a server that closes with unread
         // bytes still arriving would RST the connection and the client could lose the answer, which
         // is a property of TCP, not of this route. The 413 must come from the declared length alone.
-        const noAnswer = setTimeout(() => reject(new Error('no response within 5 s')), 5_000);
+        let answered = false;
+        const noAnswer = setTimeout(() => {
+          req.destroy();
+          reject(new Error('no response within 8 s'));
+        }, 8_000);
         noAnswer.unref();
         const req = httpRequest(
           {
@@ -497,6 +502,7 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
             headers: { 'content-type': 'application/json', 'content-length': String(total) },
           },
           (res) => {
+            answered = true;
             clearTimeout(noAnswer);
             resolve({ status: res.statusCode ?? 0, connection: res.headers['connection'] });
             res.on('error', () => undefined);
@@ -504,20 +510,47 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
             req.destroy();
           },
         );
-        let answered = false;
-        req.on('response', () => {
-          answered = true;
-        });
         req.on('error', (e) => {
           if (!answered) {
             clearTimeout(noAnswer);
             reject(e);
           }
         });
-        req.write(Buffer.alloc(64 * 1024, 0x61));
+        // Under the 16 KB cap: only the declared length can explain the 413 (without that check the
+        // read deadline would answer 408 after 10 s).
+        req.write(Buffer.alloc(1024, 0x61));
       },
     );
     expect(result.status).toBe(413);
     expect(result.connection).toBe('close');
+  });
+
+  it('C-32, FU-BE-100: after a rejected report the server closes the connection (FIN after the 413, not a timeout)', async () => {
+    await restart({});
+    const server = app.getHttpServer() as unknown as Server;
+    if (server.address() === null) await new Promise<void>((resolve) => server.listen(0, resolve));
+    const { port } = server.address() as AddressInfo;
+    const started = Date.now();
+    const raw = await new Promise<string>((resolve, reject) => {
+      const socket = connect(port, '127.0.0.1');
+      let text = '';
+      socket.on('data', (d: Buffer) => {
+        text += d.toString('utf8');
+      });
+      // Headers only, no body bytes: the server has nothing unread, so it ends the connection with
+      // a clean FIN and the client can read the whole answer.
+      socket.on('end', () => resolve(text));
+      socket.on('close', () => resolve(text));
+      socket.on('error', reject);
+      socket.write(
+        'POST /api/v1/client-errors HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n' +
+          'Content-Length: 1048576\r\n\r\n',
+      );
+      setTimeout(() => socket.destroy(), 8_000).unref();
+    });
+    expect(raw.split('\r\n')[0]).toMatch(/^HTTP\/1\.1 413/);
+    expect(raw).toMatch(/connection: close/i);
+    // Well below the 10 s client-errors read deadline and the 30 s request timeout.
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 });
