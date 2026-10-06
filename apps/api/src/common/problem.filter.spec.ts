@@ -95,8 +95,8 @@ describe('ProblemFilter logging of failures (S8)', () => {
   });
 });
 
-describe('ProblemFilter scrubs Prisma errors before logging (NFR-04, FU-BE-83)', () => {
-  it('NFR-04: a validation error whose message holds an argument value is logged without that value', () => {
+describe('ProblemFilter scrubs Prisma errors before logging (TC-003, NFR-04, FU-BE-83)', () => {
+  it('TC-003, NFR-04: a validation error whose message holds an argument value is logged without that value', () => {
     const { Prisma } = jest.requireActual<typeof import('../generated/prisma/client')>(
       '../generated/prisma/client',
     );
@@ -125,6 +125,37 @@ describe('ProblemFilter scrubs Prisma errors before logging (NFR-04, FU-BE-83)',
       expect(logged).not.toContain(secret);
       expect(logged).toContain('PrismaClientValidationError');
       expect(logged).toContain('trace-1');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('TC-003, NFR-04: a bare driver adapter error from a failed transaction commit is logged without its values, keeping kind and SQLSTATE', () => {
+    const { Logger } = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+    const secret = 'leaked-token-hash-4f9c';
+    const error = Object.assign(new Error(`could not serialize: ${secret}`), {
+      name: 'DriverAdapterError',
+      cause: {
+        kind: 'TransactionWriteConflict',
+        originalCode: '40001',
+        originalMessage: `row (${secret}) conflicted`,
+        detail: `Key (token_hash)=(${secret})`,
+      },
+    });
+    const spy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    try {
+      const { status, body } = run(error);
+      expect(status).toBe(500);
+      expect(JSON.stringify(body)).not.toContain(secret);
+      const logged = JSON.stringify(
+        spy.mock.calls.map(([first]) => {
+          const e = (first as { err: Error & { cause?: unknown } }).err;
+          return { message: e.message, stack: e.stack, name: e.name, cause: e.cause };
+        }),
+      );
+      expect(logged).not.toContain(secret);
+      expect(logged).toContain('TransactionWriteConflict');
+      expect(logged).toContain('40001');
     } finally {
       spy.mockRestore();
     }

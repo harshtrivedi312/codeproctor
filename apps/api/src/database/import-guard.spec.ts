@@ -1,6 +1,6 @@
 // One guard that keeps five things out of new code (architect condition Q9, review S4, FU-DB-91).
 // Each of them reaches Postgres without the org scope:
-//   - database/prisma.module: BE-02's interim unscoped Prisma client, for auth only (FU-DB-58);
+//   - database/prisma.module: BE-02's interim unscoped Prisma client, removed (FU-DB-58); it must not come back;
 //   - database/create-prisma-client: building a client of your own;
 //   - PG_POOL: BE-01's raw pg Pool token;
 //   - the `pg` package: a raw connection or pool of your own;
@@ -28,7 +28,7 @@ export const RULES: readonly GuardRule[] = [
   {
     name: 'database/prisma.module',
     module: 'database/prisma.module',
-    why: "BE-02's interim unscoped client, for auth only (FU-DB-58). Inject PrismaService from database/prisma.service.ts.",
+    why: "BE-02's interim unscoped client was removed (FU-DB-58) and must not come back. Inject PrismaService from database/prisma.service.ts.",
     allowed: [], // deleted with FU-DB-58: auth and the guard run on the scoped client
   },
   {
