@@ -13,11 +13,11 @@ import {
   passOtp,
   recordRequests,
   renderWithQuery,
-  useCandidateServer,
+  setupCandidateServer,
 } from './test-helpers';
 import { fireEvent } from '@testing-library/react';
 
-useCandidateServer();
+setupCandidateServer();
 
 const ok = (message: string): CheckOutcome => ({ status: 'passed', message });
 const checker: SystemChecker = {

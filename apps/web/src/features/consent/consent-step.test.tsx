@@ -12,12 +12,12 @@ import {
   renderWithQuery,
   server,
   spyOnMedia,
-  useCandidateServer,
+  setupCandidateServer,
 } from '@/features/candidate-flow/test-helpers';
 import { apiBaseUrl } from '@/lib/env';
 import { MOCK_CONSENT_ID, MOCK_RECRUITER_CONTACT, MOCK_TOKENS } from '@/mocks/candidate/handlers';
 
-useCandidateServer();
+setupCandidateServer();
 
 async function toConsent(token: string = MOCK_TOKENS.open) {
   const user = userEvent.setup();

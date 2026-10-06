@@ -7,13 +7,13 @@ import { setSessionToken } from '@/features/candidate-flow/session-store';
 import {
   recordRequests,
   renderWithQuery,
-  useCandidateServer,
+  setupCandidateServer,
 } from '@/features/candidate-flow/test-helpers';
 import { MOCK_OTP, MOCK_TOKENS } from '@/mocks/candidate/handlers';
 import type { CheckOutcome, SystemChecker } from './checks';
 import { SystemCheckStep } from './system-check-step';
 
-useCandidateServer();
+setupCandidateServer();
 
 const ok = (message: string): CheckOutcome => ({ status: 'passed', message });
 

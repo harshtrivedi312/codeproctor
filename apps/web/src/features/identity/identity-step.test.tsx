@@ -7,13 +7,13 @@ import { setSessionToken } from '@/features/candidate-flow/session-store';
 import {
   recordRequests,
   renderWithQuery,
-  useCandidateServer,
+  setupCandidateServer,
 } from '@/features/candidate-flow/test-helpers';
 import { MOCK_OTP, MOCK_TOKENS } from '@/mocks/candidate/handlers';
 import type { IdentityDeps } from './capture';
 import { IDENTITY_COPY, IdentityStep } from './identity-step';
 
-useCandidateServer();
+setupCandidateServer();
 
 async function signIn(token: string = MOCK_TOKENS.consented): Promise<void> {
   const r = await candidateApi.startSession(token, MOCK_OTP);

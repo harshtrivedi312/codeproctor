@@ -50,3 +50,14 @@ export function clearCandidateCredentials(): void {
 export function scrubTokenFromUrl(win: Pick<Window, 'history'> = window): void {
   win.history.replaceState(win.history.state as unknown, '', SCRUBBED_PATH);
 }
+
+/**
+ * Reads an invitation token from the URL fragment ("#<token>" or "#token=<token>"). A fragment is
+ * never sent to the server, so it stays out of access logs and proxies, unlike a path segment.
+ * Returns null when there is none or it does not look like a token. The fragment is removed by
+ * scrubTokenFromUrl together with the path.
+ */
+export function readTokenFromHash(win: Pick<Window, 'location'> = window): string | null {
+  const raw = win.location.hash.replace(/^#/, '').replace(/^token=/, '');
+  return INVITATION_TOKEN_PATTERN.test(raw) ? raw : null;
+}

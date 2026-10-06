@@ -11,6 +11,7 @@ import { OtpStep } from './otp-step';
 import { terminalForConflict } from './problems';
 import {
   captureInvitationToken,
+  readTokenFromHash,
   clearCandidateCredentials,
   clearInvitationToken,
   getInvitationToken,
@@ -52,6 +53,12 @@ export function CandidateFlow({
   const [sent, setSent] = React.useState<CodeSentInfo | null>(null);
   const [resuming, setResuming] = React.useState(false);
 
+  // A token in the fragment wins over one in the path: the fragment never reaches the server. The
+  // value is read once, here, so a development double-mount cannot lose it after the scrub.
+  const [urlToken] = React.useState(() =>
+    typeof window === 'undefined' ? token : (readTokenFromHash() ?? token),
+  );
+
   // False while rendering on the server, true in the browser. The token is only ever touched in
   // the browser: module state on the server would be shared between visitors.
   const inBrowser = React.useSyncExternalStore(
@@ -62,13 +69,13 @@ export function CandidateFlow({
 
   // Read the token, then take it out of the address bar and history straight away.
   React.useEffect(() => {
-    captureInvitationToken(token);
+    captureInvitationToken(urlToken);
     scrubTokenFromUrl();
     return () => {
       // Leaving the flow forgets everything held in memory.
       clearCandidateCredentials();
     };
-  }, [token]);
+  }, [urlToken]);
 
   const link = useQuery({
     queryKey: ['candidate', 'link'],
@@ -77,7 +84,7 @@ export function CandidateFlow({
     staleTime: Number.POSITIVE_INFINITY,
     retry: false,
     queryFn: async () => {
-      captureInvitationToken(token);
+      captureInvitationToken(urlToken);
       const invitation = getInvitationToken();
       if (invitation === null)
         return {

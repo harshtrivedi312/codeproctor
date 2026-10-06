@@ -27,7 +27,8 @@ function env(overrides: Partial<CheckerEnvironment['navigator']> = {}): CheckerE
 }
 
 function track(settings: Record<string, unknown> = {}) {
-  return { stop: vi.fn(), getSettings: () => settings } as unknown as MediaStreamTrack;
+  const stop = vi.fn();
+  return { stop, track: { stop, getSettings: () => settings } as unknown as MediaStreamTrack };
 }
 function stream(tracks: MediaStreamTrack[]): MediaStream {
   return {
@@ -80,7 +81,7 @@ describe('device and screen checks (FR-402, TC-032)', () => {
   });
 
   it('FR-402: a working camera returns the stream for the preview', async () => {
-    const s = stream([track()]);
+    const s = stream([track().track]);
     const getUserMedia = vi.fn(() => Promise.resolve(s));
     const enumerateDevices = vi.fn(() =>
       Promise.resolve([{ kind: 'videoinput', label: 'FaceTime HD' }]),
@@ -94,7 +95,7 @@ describe('device and screen checks (FR-402, TC-032)', () => {
   });
 
   it('FR-610: a virtual camera name is noted, not blocked', async () => {
-    const s = stream([track()]);
+    const s = stream([track().track]);
     const result = await new BrowserSystemChecker(
       env({
         mediaDevices: {
@@ -111,7 +112,7 @@ describe('device and screen checks (FR-402, TC-032)', () => {
   it('FR-604: sharing a window instead of the entire screen fails with a hint, and the share is stopped', async () => {
     const t = track({ displaySurface: 'window' });
     const result = await new BrowserSystemChecker(
-      env({ mediaDevices: { getDisplayMedia: () => Promise.resolve(stream([t])) } }),
+      env({ mediaDevices: { getDisplayMedia: () => Promise.resolve(stream([t.track])) } }),
     ).screen();
     expect(result).toMatchObject({ kind: 'OTHER', status: 'failed' });
     expect(result.help).toMatch(/entire screen/i);
@@ -121,7 +122,7 @@ describe('device and screen checks (FR-402, TC-032)', () => {
   it('FR-604: sharing the entire screen passes and the share is stopped straight away', async () => {
     const t = track({ displaySurface: 'monitor' });
     const result = await new BrowserSystemChecker(
-      env({ mediaDevices: { getDisplayMedia: () => Promise.resolve(stream([t])) } }),
+      env({ mediaDevices: { getDisplayMedia: () => Promise.resolve(stream([t.track])) } }),
     ).screen();
     expect(result).toMatchObject({ kind: 'MONITOR', status: 'passed' });
     expect(t.stop).toHaveBeenCalled();
@@ -129,7 +130,7 @@ describe('device and screen checks (FR-402, TC-032)', () => {
 
   it('FR-604: a browser that cannot say what was shared passes with a note, never silently', async () => {
     const result = await new BrowserSystemChecker(
-      env({ mediaDevices: { getDisplayMedia: () => Promise.resolve(stream([track({})])) } }),
+      env({ mediaDevices: { getDisplayMedia: () => Promise.resolve(stream([track({}).track])) } }),
     ).screen();
     expect(result).toMatchObject({ kind: 'UNVERIFIABLE', status: 'warning' });
   });

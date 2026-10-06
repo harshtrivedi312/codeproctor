@@ -10,10 +10,10 @@ import {
   passOtp,
   recordRequests,
   renderWithQuery,
-  useCandidateServer,
+  setupCandidateServer,
 } from './test-helpers';
 
-useCandidateServer();
+setupCandidateServer();
 
 function open(token: string) {
   window.history.replaceState(null, '', `/t/${token}`);
@@ -63,6 +63,20 @@ describe('invitation link and token handling (FR-303, FR-401, ADR 0003)', () => 
     log.mockRestore();
     error.mockRestore();
     warn.mockRestore();
+  });
+
+  it('FR-401: a token in the URL fragment is read and removed too, and never reaches the server', async () => {
+    const seen = recordRequests();
+    window.history.replaceState(null, '', `/t/link#${MOCK_TOKENS.open}`);
+    renderWithQuery(<CandidateFlow token="link" />);
+    await screen.findByRole('heading', {
+      level: 1,
+      name: /welcome to your proctored coding test/i,
+    });
+    expect(window.location.hash).toBe('');
+    expect(window.location.href).not.toContain(MOCK_TOKENS.open);
+    expect(getInvitationToken()).toBe(MOCK_TOKENS.open);
+    expect(seen.some((r) => r.url.includes(MOCK_TOKENS.open))).toBe(false);
   });
 
   it('FR-401: a reload (token already gone from the URL) shows how to open the link again', async () => {

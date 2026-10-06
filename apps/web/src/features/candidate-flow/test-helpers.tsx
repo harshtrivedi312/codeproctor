@@ -13,7 +13,7 @@ import {
 import { clearCandidateCredentials } from './session-store';
 
 /**
- * Shared test setup for the candidate flow. Call `useCandidateServer()` at the top of a describe
+ * Shared test setup for the candidate flow. Call `setupCandidateServer()` at the top of a describe
  * block. The handlers are the PROVISIONAL mocks in src/mocks/candidate.
  */
 export const server = setupServer(
@@ -21,7 +21,7 @@ export const server = setupServer(
   http.get(`${apiBaseUrl}/v1/health`, () => HttpResponse.json({ status: 'ok' })),
 );
 
-export function useCandidateServer(): void {
+export function setupCandidateServer(): void {
   beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
   beforeEach(() => {
     resetMockCandidateState();
@@ -44,7 +44,7 @@ export function renderWithQuery(ui: React.ReactElement) {
 export function recordRequests(): { method: string; url: string; body: unknown }[] {
   const seen: { method: string; url: string; body: unknown }[] = [];
   server.events.on('request:start', async ({ request }) => {
-    let body: unknown = null;
+    let body: unknown;
     try {
       body = await request.clone().json();
     } catch {
