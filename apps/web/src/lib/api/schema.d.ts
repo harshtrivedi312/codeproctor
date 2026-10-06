@@ -450,6 +450,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v1/questions/ai-policy': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** REAL. The AI reference policy of your organization (permission ai_reference:read, held by Author and Super Admin; recruiters and reviewers get 403). Read-only. */
+    get: operations['getAiPolicy'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/v1/questions/{questionId}': {
     parameters: {
       query?: never;
@@ -481,7 +498,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** REAL. Publish the latest draft (question:update). 422 with errors[] while the draft is incomplete; for a CODING question also until a passing validation of the current revision exists (slice BE-04c), so coding questions cannot be published yet. 409 when there is no draft, the question is archived, or expectedRevision no longer matches. */
+    /** REAL. Publish the latest draft (question:update). 422 with errors[] while the draft is incomplete; for a CODING question also until a passing validation run of the current revision exists and every allowed language has enough AI reference solutions. 409 when there is no draft, the question is archived, or expectedRevision no longer matches. */
     post: operations['publishQuestion'];
     delete?: never;
     options?: never;
@@ -561,7 +578,7 @@ export interface paths {
     get?: never;
     put?: never;
     post?: never;
-    /** REAL. Remove a test case from a draft version (question:update). */
+    /** REAL. Remove a test case from a draft version (question:update). The revision check is a query parameter. */
     delete: operations['removeTestCase'];
     options?: never;
     head?: never;
@@ -813,8 +830,10 @@ export interface components {
       weight: number;
       /** @description Default after the last slot */
       position?: number;
+      expectedRevision?: string;
     };
     TestCasePatch: {
+      expectedRevision?: string;
       input?: string;
       expectedOutput?: string;
       isHidden?: boolean;
@@ -867,19 +886,6 @@ export interface components {
       pageSize: number;
       total: number;
     };
-    /**
-     * @description The executor's verdicts, plus MISSING_REFERENCE when an allowed language has no reference solution.
-     * @enum {string}
-     */
-    ValidationVerdict:
-      | 'FAILED'
-      | 'COMPILE_ERROR'
-      | 'TIME_LIMIT'
-      | 'MEMORY_LIMIT'
-      | 'OUTPUT_LIMIT'
-      | 'RUNTIME_ERROR'
-      | 'INTERNAL_ERROR'
-      | 'MISSING_REFERENCE';
     ValidationCell: {
       language: components['schemas']['Language'];
       passed: boolean;
@@ -890,8 +896,9 @@ export interface components {
       language: components['schemas']['Language'];
       testCaseId: string | null;
       position: number | null;
-      verdict: components['schemas']['ValidationVerdict'];
-      /** @description Only for a visible (sample) slot */
+      /** @description A string on the API. Known values: FAILED, COMPILE_ERROR, TIME_LIMIT, MEMORY_LIMIT, OUTPUT_LIMIT, RUNTIME_ERROR, INTERNAL_ERROR, MISSING_REFERENCE. A client must cope with a value it does not know. */
+      verdict: string;
+      /** @description Only for a visible (sample) slot, never a hidden one */
       actualOutput?: string;
       diagnostic?: string;
     };
@@ -1052,7 +1059,16 @@ export interface components {
     PublishRequest: {
       expectedRevision?: string;
     };
-    /** @description RFC 7807 problem body of the question routes. 409 and 422 carry detail and errors[] only: no machine code, the caller tells cases apart by endpoint and status. */
+    /**
+     * @description The machine codes the API's problem filter can set (problem.filter.ts PROBLEM_CODES). Guard 403s carry none.
+     * @enum {string}
+     */
+    ProblemCode:
+      | 'REAUTH_FAILED'
+      | 'TWO_FACTOR_REQUIRED_FOR_ROLE'
+      | 'SETTINGS_CONFLICT'
+      | 'VARIANT_HAS_AI_REFERENCES';
+    /** @description RFC 7807 problem body of the question routes. 409 and 422 carry detail and errors[]. `code` is present only where a route defines one: VARIANT_HAS_AI_REFERENCES (409, deleting a variant that has AI reference rows). The UI branches on status and endpoint, and on that code. */
     Problem: {
       type: string;
       title: string;
@@ -1061,6 +1077,7 @@ export interface components {
       instance?: string;
       traceId?: string;
       errors?: string[];
+      code?: components['schemas']['ProblemCode'];
     };
     /** @description One test slot's input and expected output for a variant. isHidden and position come from the slot. */
     VariantOverride: {
@@ -1130,8 +1147,16 @@ export interface components {
         }[];
       };
     };
+    AiPolicy: {
+      /** @description Assistants required per language to publish; 0 is off. */
+      minAssistants: number;
+      /** @description True when the org has no valid setting and the default applies */
+      isDefault: boolean;
+      /** @description AI-4 refresh interval in days; null until the API implements the setting. */
+      refreshIntervalDays: number | null;
+    };
     CreateAiReference: {
-      /** @description Assistant product name */
+      /** @description Assistant product name, for example ChatGPT */
       assistant: string;
       modelLabel: string;
       language: components['schemas']['Language'];
@@ -1179,7 +1204,7 @@ export interface components {
       referenceSolution: string;
       slots: {
         testCaseId: string;
-        /** @description The input that applies to this variant */
+        /** @description The input that applies to this variant (override or default) */
         input: string;
       }[];
     };
@@ -1187,7 +1212,7 @@ export interface components {
       proposals: {
         testCaseId: string;
         expectedOutput?: string;
-        /** @description Why no output could be produced (runtime error */
+        /** @description Why no output could be produced (runtime error, limit) */
         error?: string;
       }[];
     };
@@ -1203,8 +1228,7 @@ export interface components {
       instance: string;
       traceId: string;
       errors?: string[];
-      /** @enum {string} */
-      code?: 'REAUTH_FAILED' | 'TWO_FACTOR_REQUIRED_FOR_ROLE';
+      code?: components['schemas']['ProblemCode'];
     };
     RecoveryCodes: {
       recoveryCodes: string[];
@@ -1353,13 +1377,13 @@ export interface components {
     };
   };
   responses: {
-    /** @description The role is not allowed to call this route (FR-103) */
+    /** @description The role is not allowed to call this route (FR-103). A guard 403 has no code. */
     Forbidden: {
       headers: {
         [name: string]: unknown;
       };
       content: {
-        'application/json': components['schemas']['ApiError'];
+        'application/json': components['schemas']['ProblemDetails'];
       };
     };
   };
@@ -2477,6 +2501,27 @@ export interface operations {
       };
     };
   };
+  getAiPolicy: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The policy */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['AiPolicy'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+    };
+  };
   getQuestion: {
     parameters: {
       query?: {
@@ -2556,7 +2601,7 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
-      /** @description The question is archived, or it changed since it was loaded (expectedRevision); detail only, no code */
+      /** @description The question is archived, or it changed since it was loaded (expectedRevision) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -2729,7 +2774,7 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
-      /** @description The version is published (immutable), or the question is archived */
+      /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
       409: {
         headers: {
           [name: string]: unknown;
@@ -2751,7 +2796,9 @@ export interface operations {
   };
   removeTestCase: {
     parameters: {
-      query?: never;
+      query?: {
+        expectedRevision?: string;
+      };
       header?: never;
       path: {
         questionId: string;
@@ -2779,7 +2826,7 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
-      /** @description The version is published (immutable), or the question is archived */
+      /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
       409: {
         headers: {
           [name: string]: unknown;
@@ -2835,7 +2882,7 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
-      /** @description The version is published (immutable), or the question is archived */
+      /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
       409: {
         headers: {
           [name: string]: unknown;
@@ -2984,7 +3031,7 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
-      /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
+      /** @description The version is published (immutable), the question is archived, expectedRevision is stale, or the variant has AI reference rows (code VARIANT_HAS_AI_REFERENCES: they are never deleted, set the variant inactive instead) */
       409: {
         headers: {
           [name: string]: unknown;

@@ -15,10 +15,10 @@ import { formatDate } from '@/features/admin/format';
 import { ApiFailure } from '@/features/admin/queries';
 import type { Schemas } from '@/lib/api/client';
 import { aiReferenceFormSchema, type AiReferenceFormValues } from '../ai-schema';
-import { LANGUAGE_LABELS, variantName } from '../draft';
-import { aiGate, aiRefreshDue, DEFAULT_AI_POLICY } from '../gate';
+import { isDraftVariantId, LANGUAGE_LABELS, variantName } from '../draft';
+import { aiGate, aiRefreshDue } from '../gate';
 import { MonacoField } from '../monaco-field';
-import { useAddAiReference, useAiReferences } from '../queries';
+import { useAddAiReference, useAiPolicy, useAiReferences } from '../queries';
 import { useDraftField, type ApiTabProps } from '../use-draft-field';
 
 type Ref = Schemas['AiReference'];
@@ -42,6 +42,7 @@ export function AiTab({ form, readOnly, questionId, version }: Props): React.JSX
   const [languages] = useDraftField(form, 'allowedLanguages');
   const [variants] = useDraftField(form, 'variants');
   const refs = useAiReferences(questionId ?? '', version);
+  const policyQuery = useAiPolicy();
   const [dialog, setDialog] = React.useState<{ supersede: Ref | null } | null>(null);
 
   if (questionId === null) {
@@ -52,17 +53,25 @@ export function AiTab({ form, readOnly, questionId, version }: Props): React.JSX
     );
   }
   const rows = refs.data?.items ?? [];
-  // The API does not expose the organisation's policy to Authors: these are the web's defaults.
-  const policy = DEFAULT_AI_POLICY;
+  // The organisation's real policy; until it is known the requirement is unknown and not "Ready".
+  const policy = policyQuery.data ?? null;
   const gates = aiGate(languages, rows, policy);
-  const due = aiRefreshDue(rows, policy, new Date());
+  const due = aiRefreshDue(
+    rows.filter((r) => r.supersededAt === null),
+    policy?.refreshIntervalDays ?? null,
+    new Date(),
+  );
   const aiLanguages = languages.filter((l) => AI_REFERENCE_LANGUAGES.includes(l));
 
   return (
     <div className="space-y-5">
       <Alert tone="info">
-        Collect a solution for each language from at least {policy.minAssistants} different AI
-        assistants (business or team plans that do not train on inputs). They are compared with
+        {policy === null
+          ? 'Collect a solution for each language from several different AI assistants'
+          : policy.minAssistants === 0
+            ? 'Your organisation does not require AI solutions to publish, but you can still collect them from different AI assistants'
+            : `Collect a solution for each language from at least ${policy.minAssistants} different AI assistants`}{' '}
+        (business or team plans that do not train on inputs). They are compared with
         candidates&apos; code to spot copying. They are <strong>never</strong> used for grading and
         candidates never see them. They belong to version {version}: a new version starts with none,
         so collect them again for a new draft before publishing it.
@@ -81,13 +90,23 @@ export function AiTab({ form, readOnly, questionId, version }: Props): React.JSX
         </div>
         {due ? (
           <p className="text-sm text-muted-foreground">
-            The newest solution is older than {policy.refreshDays} days. Collect fresh ones and
-            supersede the old rows.
+            The newest solution is older than {policy?.refreshIntervalDays} days. Collect fresh ones
+            and supersede the old rows.
           </p>
         ) : null}
-        {policy.minAssistants === 0 ? (
+        {policy === null ? (
+          <p role="status" className="text-sm text-muted-foreground">
+            {policyQuery.isError
+              ? "We could not read your organisation's requirement, so Publish stays off. Reload the page to try again."
+              : "Checking your organisation's requirement…"}
+          </p>
+        ) : policy.minAssistants === 0 ? (
           <p className="text-sm text-muted-foreground">
-            The organisation turned this requirement off.
+            Your organisation turned this requirement off.
+          </p>
+        ) : policy.isDefault ? (
+          <p className="text-sm text-muted-foreground">
+            This is the standard requirement: your organisation has not set its own.
           </p>
         ) : null}
         <ul className="space-y-1">
@@ -95,10 +114,15 @@ export function AiTab({ form, readOnly, questionId, version }: Props): React.JSX
             <li key={g.language} className="flex flex-wrap items-center gap-2 text-sm">
               <span className="font-medium">{LANGUAGE_LABELS[g.language]}</span>
               <Badge tone={g.ok ? 'success' : 'warning'}>
-                {g.ok ? 'Ready' : `Needs ${g.required - g.assistants.length} more`}
+                {g.ok
+                  ? 'Ready'
+                  : policy === null
+                    ? 'Unknown'
+                    : `Needs ${g.required - g.assistants.length} more`}
               </Badge>
               <span className="text-muted-foreground">
-                {g.assistants.length}/{g.required} assistants
+                {g.assistants.length}
+                {policy === null ? '' : `/${g.required}`} assistants
                 {g.assistants.length > 0 ? `: ${g.assistants.join(', ')}` : ''}
               </span>
             </li>
@@ -204,7 +228,9 @@ export function AiTab({ form, readOnly, questionId, version }: Props): React.JSX
           version={version}
           supersede={dialog.supersede}
           languages={aiLanguages}
-          variants={variants.map((v, i) => ({ id: v.id, label: variantName(i) }))}
+          variants={variants
+            .map((v, i) => ({ id: v.id, label: variantName(i) }))
+            .filter((v) => !isDraftVariantId(v.id))}
           onClose={() => setDialog(null)}
         />
       ) : null}

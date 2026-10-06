@@ -411,7 +411,7 @@ describe('The editor saves variants through the real routes (FR-203, FR-204)', (
     );
     await u.click(
       within(screen.getByRole('region', { name: 'Variant 2' })).getByRole('button', {
-        name: 'Remove variant',
+        name: 'Remove Variant 2',
       }),
     );
     await u.click(screen.getByRole('button', { name: 'Add variant' }));
@@ -516,10 +516,12 @@ describe('A save that stops half way says where (FR-204)', () => {
     return { u, card };
   }
 
-  it('FR-204: a failure in the variants step after the content was saved names the step and offers Reload', async () => {
+  it('FR-204: a failure in the variants step after the content was saved names the step, keeps the edits and lets the author press Save again', async () => {
+    let fail = true;
     server.use(
-      http.put(`${apiBaseUrl}/v1/questions/q-rotate/versions/1/variants/ro-v1/test-cases/:id`, () =>
-        HttpResponse.json({ detail: 'busy' }, { status: 500 }),
+      http.put(
+        `${apiBaseUrl}/v1/questions/q-rotate/versions/1/variants/ro-v1/test-cases/:id`,
+        () => (fail ? HttpResponse.json({ detail: 'busy' }, { status: 500 }) : undefined),
       ),
     );
     const { u } = await openAndEdit();
@@ -528,9 +530,20 @@ describe('A save that stops half way says where (FR-204)', () => {
     expect(
       await screen.findByText(/Some of your changes were saved, but the variants could not be/),
     ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Reload the latest version/ })).toBeInTheDocument();
-    // The title WAS saved by the first step.
+    // A draft: no reload is forced (nothing is conflicting) and the edits are still on the page.
+    expect(
+      screen.queryByRole('button', { name: /Reload the latest version/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Title')).toHaveValue('Rotate an array!');
+    // The title WAS saved by the content step.
     expect((await detail('q-rotate')).version.title).toMatch(/!$/);
+    // The editor took the server's revision, so the retry works instead of ending in a 409.
+    fail = false;
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled());
+    await u.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText(/^Saved/)).toBeInTheDocument();
+    const after = (await detail('q-rotate')).version.variants.find((v) => v.id === 'ro-v1')!;
+    expect(after.testCaseOverrides).toHaveLength(1);
   });
 
   it('FR-204: a 409 in a later step says the question changed meanwhile, and keeps the edits', async () => {
@@ -575,10 +588,11 @@ describe('A save that stops half way says where (FR-204)', () => {
 });
 
 describe('A save whose test-case call fails (FR-204)', () => {
-  it('FR-204: the content PATCH goes through, a test-case call fails with 500: partial message, no Saved notice, and the retry is a 409 that asks for a reload', async () => {
+  it('FR-204: the content PATCH goes through, a test-case call fails with 500: partial message, no Saved notice, and a retry finishes the job', async () => {
+    let fail = true;
     server.use(
       http.post(`${apiBaseUrl}/v1/questions/q-rotate/versions/1/test-cases`, () =>
-        HttpResponse.json({ detail: 'busy' }, { status: 500 }),
+        fail ? HttpResponse.json({ detail: 'busy' }, { status: 500 }) : undefined,
       ),
     );
     nav.pathname = '/admin/questions/q-rotate';
@@ -598,11 +612,11 @@ describe('A save whose test-case call fails (FR-204)', () => {
       await screen.findByText(/Some of your changes were saved, but the test cases could not be/),
     ).toBeInTheDocument();
     expect(screen.queryByText(/^Saved/)).not.toBeInTheDocument();
-    // The title was committed by the first step, so the editor's revision is now stale.
     expect((await detail('q-rotate')).version.title).toMatch(/!$/);
+    fail = false;
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled());
     await u.click(screen.getByRole('button', { name: 'Save' }));
-    expect(
-      await screen.findByText('This question changed since you opened it'),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/^Saved/)).toBeInTheDocument();
+    expect((await detail('q-rotate')).version.testCases).toHaveLength(3);
   });
 });
