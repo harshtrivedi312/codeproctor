@@ -251,27 +251,37 @@ suite('TC-004 TC-006: invite re-issue route', () => {
 });
 
 // Last on purpose: the Redis container is stopped for good (as in tc-003's outage test).
+// Since #175 the global throttle guard answers 503 "Service is temporarily unavailable." before
+// any handler when Redis is down, so this suite boots with the in-memory throttle store and skips
+// the JWT guard's own Redis freshness check (same wording as the handler), so the request reaches
+// the re-issue handler (UsersService.takeInviteSlot) and ITS fail-closed branch is what answers.
 suite('TC-004: invite re-issue with Redis down', () => {
   let h: Harness;
   beforeAll(async () => {
-    h = await boot();
+    h = await boot({ memoryThrottle: true });
   });
   afterAll(async () => {
     await h?.close();
   });
 
-  it('TC-004: the re-issue answers 503 (not 500), rotates nothing, sends no mail and writes no row', async () => {
+  it('TC-004: the re-issue answers the handler 503 (not 500), rotates nothing, sends no mail and writes no row', async () => {
     const admin = await actor(h, UserRole.SUPER_ADMIN);
     const target = await createUser(h, { password: null });
     const hashBefore = (await h.owner.user.findUniqueOrThrow({ where: { id: target.id } }))
       .setPasswordTokenHash;
     const before = (await h.owner.auditLog.findFirst({ orderBy: { id: 'desc' } }))?.id ?? 0n;
     const mailsBefore = h.mails.length;
+    h.skipFreshnessCheck();
     await h.infra.redis.stop();
     const res = await call(h, 'POST', reissuePath(target.id), admin.token, {
       currentPassword: PASSWORD,
     }).timeout({ response: 30000, deadline: 40000 });
     expect(res.status).toBe(503);
+    expect(res.headers['content-type']).toContain('application/problem+json');
+    // The handler's own text; the throttler's 503 says "Service is temporarily unavailable."
+    expect((res.body as Body).detail).toBe('Verification is temporarily unavailable.');
+    expect(JSON.stringify(res.body)).not.toContain('Service is temporarily unavailable.');
+    expect(res.headers['set-cookie']).toBeUndefined();
     expect(
       (await h.owner.user.findUniqueOrThrow({ where: { id: target.id } })).setPasswordTokenHash,
     ).toBe(hashBefore);
