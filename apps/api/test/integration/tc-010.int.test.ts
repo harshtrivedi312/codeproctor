@@ -14,6 +14,7 @@ import {
   mcqBody,
   REF_SECRET,
   SAMPLE_IN,
+  SAMPLE_OUT,
   shortAnswerBody,
   staff,
   Staff,
@@ -92,6 +93,11 @@ describe('TC-010 (FR-201, FR-202): create a coding question gives a draft versio
       isPublished: false,
       validatedAt: null,
       title: 'QA two sum',
+      statementMd: '# Two sum\n\nAdd two numbers.',
+      starterCode: {
+        python: 'def solve(a, b):\n    pass\n',
+        javascript: 'function solve(a, b) {}\n',
+      },
       difficulty: 'MEDIUM',
       allowedLanguages: ['python', 'javascript'],
       answerSpec: null, // CODING carries no answer_spec
@@ -102,11 +108,13 @@ describe('TC-010 (FR-201, FR-202): create a coding question gives a draft versio
       where: { questionVersionId: v?.id },
       orderBy: { position: 'asc' },
     });
-    expect(tests.map((t) => [t.input, t.isHidden, Number(t.weight), t.position])).toEqual([
-      [SAMPLE_IN, false, 1, 0],
-      [`${SAMPLE_IN}-b`, false, 1, 1],
-      [HIDDEN_IN, true, 3, 2],
-      ['QA-HIDDEN-INPUT-8', true, 5, 3],
+    expect(
+      tests.map((t) => [t.input, t.expectedOutput, t.isHidden, Number(t.weight), t.position]),
+    ).toEqual([
+      [SAMPLE_IN, SAMPLE_OUT, false, 1, 0],
+      [`${SAMPLE_IN}-b`, `${SAMPLE_OUT}-b`, false, 1, 1],
+      [HIDDEN_IN, HIDDEN_OUT, true, 3, 2],
+      ['QA-HIDDEN-INPUT-8', 'QA-HIDDEN-OUTPUT-8', true, 5, 3],
     ]);
     // Creating a question audits it once, ids and counts only, never content.
     const rows = await h.owner.auditLog.findMany({
@@ -140,23 +148,24 @@ describe('TC-010 (FR-201, FR-202): create a coding question gives a draft versio
     expect(versionOf(bare)).toMatchObject({ version: 1, isPublished: false, testCases: [] });
   });
 
-  it('TC-010: the new draft is listed for authors and recruiters, with tag, difficulty and type filters, and not for another org', async () => {
+  it('TC-010: the new draft is listed for authors and admins, not for recruiters (published versions only), and not for another org; filters work', async () => {
     const q = await createQuestion(
       h,
       s.author,
       codingBody({ tags: ['qa-list-tag'], difficulty: 'HARD' }),
     );
     const id = idOf(q);
-    for (const who of [s.author, s.recruiter, s.admin]) {
-      const res = await call(
-        h,
-        'GET',
-        '/questions?tag=qa-list-tag&difficulty=HARD&type=CODING',
-        who.token,
-      ).expect(200);
-      const ids = (res.body as { items: { id: string }[] }).items.map((i) => i.id);
-      expect(ids).toEqual([id]);
+    const filter = '/questions?tag=qa-list-tag&difficulty=HARD&type=CODING';
+    for (const who of [s.author, s.admin]) {
+      const res = await call(h, 'GET', filter, who.token).expect(200);
+      expect((res.body as { items: { id: string }[] }).items.map((i) => i.id)).toEqual([id]);
     }
+    // Backend A decision: roles without question:update see published versions only.
+    const rec = await call(h, 'GET', filter, s.recruiter.token).expect(200);
+    expect((rec.body as { items: unknown[]; total: number }).items).toEqual([]);
+    await call(h, 'POST', `/questions/${id}/publish`, s.author.token).expect(200);
+    const after = await call(h, 'GET', filter, s.recruiter.token).expect(200);
+    expect((after.body as { items: { id: string }[] }).items.map((i) => i.id)).toEqual([id]);
     const none = await call(
       h,
       'GET',
@@ -167,6 +176,18 @@ describe('TC-010 (FR-201, FR-202): create a coding question gives a draft versio
     const other = await actor(h, UserRole.AUTHOR, orgB);
     const theirs = await call(h, 'GET', '/questions?tag=qa-list-tag', other.token).expect(200);
     expect((theirs.body as { total: number }).total).toBe(0);
+  });
+
+  it('FR-201, TC-010: a SUPER_ADMIN may create too, and the audit row names that admin as the actor', async () => {
+    const q = await createQuestion(h, s.admin, codingBody());
+    const rows = await h.owner.auditLog.findMany({
+      where: { action: 'QUESTION_CREATED', entityId: idOf(q) },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ actorId: s.admin.id, orgId: h.orgId });
+    expect((await h.owner.question.findUniqueOrThrow({ where: { id: idOf(q) } })).createdById).toBe(
+      s.admin.id,
+    );
   });
 
   it('TC-010: MCQ and short-answer questions are created as draft version 1 as well (FR-205); the key is stored, not echoed in the list', async () => {
@@ -185,7 +206,7 @@ describe('TC-010 (FR-201, FR-202): create a coding question gives a draft versio
       where: { questionId: idOf(mcq) },
     });
     expect(stored.answerSpec).toMatchObject({ correctOptionIds: ['QAKEY'], multiple: false });
-    const list = await call(h, 'GET', '/questions?type=MCQ', s.recruiter.token).expect(200);
+    const list = await call(h, 'GET', '/questions?type=MCQ', s.author.token).expect(200);
     expect(list.text).not.toContain('correctOptionIds');
     expect(list.text).not.toContain('answerSpec');
   });

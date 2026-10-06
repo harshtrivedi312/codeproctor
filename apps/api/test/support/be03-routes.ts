@@ -30,8 +30,8 @@
 // content), listed per route in `metadataKeys`. Reads are not audited (a question is not candidate
 // data). Question reads: SUPER_ADMIN, RECRUITER, AUTHOR; writes: SUPER_ADMIN, AUTHOR.
 //
-// Switches: the BE-03 and BE-04 tests run by default (BE03_DEFAULT, BE04_DEFAULT = true). The review routes (BE-13) stay off
-// until BE13_DEFAULT is flipped, or `BE13_READY=1` in the environment for a trial run. The BE-13
+// Switches: the BE-03 and BE-04 tests run by default (BE03_DEFAULT, BE04_DEFAULT = true). The
+// review routes (BE-13) stay off until BE13_DEFAULT is flipped, or `BE13_READY=1` in the environment for a trial run. The BE-13
 // entries are still ASSUMED.
 import { hasPermission, PRINCIPALS, USER_ROLES } from '../../../../packages/shared/src/permissions';
 import type { Permission, Principal } from '../../../../packages/shared/src/permissions';
@@ -40,10 +40,12 @@ import { Harness, PASSWORD } from './harness';
 
 // BE-03 is merged (PR #84): the BE-03 tests run on every PR. BE-13 stays staged.
 const BE03_DEFAULT = true;
-const BE04_DEFAULT = true; // backend/step-4 (slice 4a) routes; the registry test fails if they go missing
+// BE-04 (slice 4a) is always on: the registry test fails when a backend route is missing from the QA
+// list, so these tests must run whenever the routes exist. There is no environment switch.
+const BE04_DEFAULT = true;
 const BE13_DEFAULT = false; // flip to true when BE-13 is merged
 export const BE03_READY: boolean = BE03_DEFAULT || process.env.BE03_READY === '1';
-export const BE04_READY: boolean = BE04_DEFAULT || process.env.BE04_READY === '1';
+export const BE04_READY: boolean = BE04_DEFAULT;
 export const BE13_READY: boolean = BE13_DEFAULT || process.env.BE13_READY === '1';
 
 export { PRINCIPALS, USER_ROLES };
@@ -136,6 +138,8 @@ export interface Be03Route {
    * (sorted): ids and changed field names, never content (BE-04).
    */
   metadataKeys?: readonly string[];
+  /** Value check per metadata key (types and formats, not just names). */
+  metadataShape?: Readonly<Record<string, (v: unknown) => boolean>>;
   mutating: boolean;
   /** true: a successful call sends a mail whose URL carries a token (checked for leaks). */
   sendsMail?: boolean;
@@ -296,7 +300,34 @@ const reissueRoutes: Be03Route[] = backendHasRoute('POST /admin/users/:userId/in
 export const REF_SECRET = 'QA-REFERENCE-SOLUTION-SECRET';
 export const HIDDEN_IN = 'QA-HIDDEN-INPUT-7';
 export const HIDDEN_OUT = 'QA-HIDDEN-OUTPUT-7';
-export const MCQ_KEY_TEXT = 'QA-MCQ-KEY-OPTION';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const FIELD_NAMES = [
+  'title',
+  'statementMd',
+  'difficulty',
+  'allowedLanguages',
+  'limits',
+  'starterCode',
+  'referenceSolution',
+  'answerSpec',
+  'tags',
+  'input',
+  'expectedOutput',
+  'isHidden',
+  'weight',
+  'position',
+];
+const isInt = (v: unknown): boolean => Number.isInteger(v) && (v as number) >= 1;
+const isUuid = (v: unknown): boolean => typeof v === 'string' && UUID_RE.test(v);
+const isBool = (v: unknown): boolean => typeof v === 'boolean';
+const isCount = (v: unknown): boolean => Number.isInteger(v) && (v as number) >= 0;
+const isType = (v: unknown): boolean => ['CODING', 'MCQ', 'SHORT_ANSWER'].includes(v as string);
+/** `fields`: a non-empty array of DTO field NAMES, never values. */
+const isFieldList = (v: unknown): boolean =>
+  Array.isArray(v) &&
+  v.length > 0 &&
+  v.every((x) => typeof x === 'string' && FIELD_NAMES.includes(x));
 
 export interface QuestionFix {
   id: string;
@@ -396,7 +427,16 @@ const createBody = (slug: string): Record<string, unknown> => ({
 });
 
 const QUESTIONS = '/questions';
-const qSecrets = [REF_SECRET, HIDDEN_IN, HIDDEN_OUT];
+// Content that must never reach an audit row: the fixture and request body values too.
+const qSecrets = [
+  REF_SECRET,
+  HIDDEN_IN,
+  HIDDEN_OUT,
+  'QA-CHANGED-OUTPUT',
+  'QA edited title',
+  'QA created question',
+  'Add two numbers.',
+];
 
 /** A question-route entry with the shared BE-04 defaults; each route overrides what differs. */
 function q04(
@@ -424,6 +464,7 @@ const BE04_ROUTES: Be03Route[] = [
     permission: 'question:create',
     audit: { action: 'QUESTION_CREATED', entityType: 'question' },
     metadataKeys: ['testCases', 'type', 'version'],
+    metadataShape: { testCases: isCount, type: isType, version: isInt },
     mutating: true,
     ok: [201],
     prepare: (h, orgId) => {
@@ -448,7 +489,7 @@ const BE04_ROUTES: Be03Route[] = [
     mutating: false,
     ok: [200],
     prepare: async (h, orgId) => {
-      const f = await questionFixture(h, orgId);
+      const f = await questionFixture(h, orgId, { published: true }); // recruiters read published versions only
       return { path: `${QUESTIONS}/${f.id}`, entityId: f.id, secrets: [], unchanged: noop };
     },
   }),
@@ -478,6 +519,7 @@ const BE04_ROUTES: Be03Route[] = [
     permission: 'question:update',
     audit: { action: 'QUESTION_UPDATED', entityType: 'question' },
     metadataKeys: ['fields', 'version'],
+    metadataShape: { fields: isFieldList, version: isInt },
     mutating: true,
     ok: [200],
     prepare: async (h, orgId) => {
@@ -504,6 +546,7 @@ const BE04_ROUTES: Be03Route[] = [
     permission: 'question:update',
     audit: { action: 'QUESTION_VERSION_CREATED', entityType: 'question' },
     metadataKeys: ['fields', 'fromVersion', 'version'],
+    metadataShape: { fields: isFieldList, fromVersion: isInt, version: isInt },
     mutating: true,
     ok: [200],
     prepare: async (h, orgId) => {
@@ -524,6 +567,7 @@ const BE04_ROUTES: Be03Route[] = [
     permission: 'question:update',
     audit: { action: 'QUESTION_PUBLISHED', entityType: 'question' },
     metadataKeys: ['version'],
+    metadataShape: { version: isInt },
     mutating: true,
     takesBody: false,
     ok: [200],
@@ -590,6 +634,7 @@ const BE04_ROUTES: Be03Route[] = [
     permission: 'question:update',
     audit: { action: 'QUESTION_TEST_CASE_ADDED', entityType: 'question' },
     metadataKeys: ['isHidden', 'testCaseId', 'version'],
+    metadataShape: { isHidden: isBool, testCaseId: isUuid, version: isInt },
     mutating: true,
     ok: [201],
     prepare: async (h, orgId) => {
@@ -616,6 +661,7 @@ const BE04_ROUTES: Be03Route[] = [
     permission: 'question:update',
     audit: { action: 'QUESTION_TEST_CASE_UPDATED', entityType: 'question' },
     metadataKeys: ['fields', 'testCaseId', 'version'],
+    metadataShape: { fields: isFieldList, testCaseId: isUuid, version: isInt },
     mutating: true,
     ok: [200],
     prepare: async (h, orgId) => {
@@ -638,6 +684,7 @@ const BE04_ROUTES: Be03Route[] = [
     permission: 'question:update',
     audit: { action: 'QUESTION_TEST_CASE_REMOVED', entityType: 'question' },
     metadataKeys: ['testCaseId', 'version'],
+    metadataShape: { testCaseId: isUuid, version: isInt },
     mutating: true,
     takesBody: false,
     ok: [204],

@@ -7,7 +7,7 @@
 // version is published. The session-level screen is not covered.
 import { UserRole } from '../../src/generated/prisma/client';
 import { actor, call } from '../support/be03-helpers';
-import { boot, Harness } from '../support/harness';
+import { boot, Harness, stableProblem } from '../support/harness';
 import {
   createQuestion,
   HIDDEN_IN,
@@ -264,6 +264,55 @@ describe('TC-013 (FR-204): editing a published question creates a new version; p
     // Tags live on the question, not on a version: changing them creates no version.
     await call(h, 'PATCH', `/questions/${id}`, s.author.token, { tags: ['tag-only'] }).expect(200);
     expect(await h.owner.questionVersion.count({ where: { questionId: id } })).toBe(2);
+    const tagRows = (
+      await h.owner.auditLog.findMany({ where: { entityId: id, action: 'QUESTION_UPDATED' } })
+    ).filter((r) => JSON.stringify(r.metadata) === JSON.stringify({ fields: ['tags'] }));
+    expect(tagRows).toHaveLength(1); // QUESTION_UPDATED {fields:['tags']}, no version key
+  });
+
+  it('TC-013: archive and unarchive that change nothing write no audit row (200, idempotent)', async () => {
+    const id = idOf(await createQuestion(h, s.author));
+    const count = (action: string): Promise<number> =>
+      h.owner.auditLog.count({ where: { entityId: id, action } });
+    await call(h, 'POST', `/questions/${id}/unarchive`, s.author.token).expect(200); // not archived: no-op
+    expect(await count('QUESTION_UNARCHIVED')).toBe(0);
+    await call(h, 'POST', `/questions/${id}/archive`, s.author.token).expect(200);
+    await call(h, 'POST', `/questions/${id}/archive`, s.author.token).expect(200); // already archived: no-op
+    expect(await count('QUESTION_ARCHIVED')).toBe(1);
+    await call(h, 'POST', `/questions/${id}/unarchive`, s.author.token).expect(200);
+    expect(await count('QUESTION_UNARCHIVED')).toBe(1);
+  });
+
+  it("TC-008 TC-013: a test case id of another org on the caller's own question is the same 404 as a random test case id, and the other org's row is unchanged", async () => {
+    const orgB = (await h.owner.organization.create({ data: { name: 'QA Org B tc-013' } })).id;
+    const bAuthor = await actor(h, UserRole.AUTHOR, orgB);
+    const own = idOf(await createQuestion(h, bAuthor));
+    const foreign = await h.owner.testCase.findFirstOrThrow({
+      where: { questionVersion: { question: { orgId: h.orgId } }, isHidden: true },
+    });
+    const before = JSON.stringify(foreign, (_k, x: unknown) =>
+      typeof x === 'bigint' ? String(x) : x,
+    );
+    const random = crypto.randomUUID();
+    const path = (tc: string): string => `/questions/${own}/versions/1/test-cases/${tc}`;
+    const norm = (res: Awaited<ReturnType<typeof call>>, tc: string): string =>
+      JSON.stringify(stableProblem(res)).split(tc).join('ID');
+    const patch = (tc: string) =>
+      call(h, 'PATCH', path(tc), bAuthor.token, { expectedOutput: 'x' });
+    const del = (tc: string) => call(h, 'DELETE', path(tc), bAuthor.token);
+    const [pf, pr, df, dr] = [
+      await patch(foreign.id),
+      await patch(random),
+      await del(foreign.id),
+      await del(random),
+    ];
+    expect([pf.status, pr.status, df.status, dr.status]).toEqual([404, 404, 404, 404]);
+    expect(norm(pf, foreign.id)).toBe(norm(pr, random));
+    expect(norm(df, foreign.id)).toBe(norm(dr, random));
+    const after = await h.owner.testCase.findUniqueOrThrow({ where: { id: foreign.id } });
+    expect(JSON.stringify(after, (_k, x: unknown) => (typeof x === 'bigint' ? String(x) : x))).toBe(
+      before,
+    );
   });
 
   it('TC-013: a published version is immutable: test case add, change and remove on version 1 are 409 and change nothing', async () => {

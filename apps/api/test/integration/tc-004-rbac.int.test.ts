@@ -173,6 +173,11 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
             // No id in the path: the call must act inside the caller's org only. Seed org A with
             // known rows and assert none of them appears in the answer (not only the org id).
             const leaks = Object.values(byRole).flatMap((a) => [a.id, a.email]);
+            if (route.template.startsWith('/questions')) {
+              // Org A questions (id and title) must not show in an org B list or create answer.
+              const f = await questionFixture(h, h.orgId, { published: true });
+              leaks.push(f.id, f.title);
+            }
             if (route.template.startsWith('/review')) {
               leaks.push((await sessionFixture(h, h.orgId)).sessionId);
             }
@@ -181,6 +186,13 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
             expect(route.ok).toContain(res.status);
             const text = JSON.stringify(res.body);
             for (const x of [...leaks, h.orgId]) expect(text).not.toContain(x);
+            if (route.template.startsWith('/questions') && route.method === 'POST') {
+              // A created question belongs to the caller's org, never to the org named elsewhere.
+              const id = await t.resolveEntityId?.();
+              expect(id).toBeDefined();
+              const row = await h.owner.question.findUniqueOrThrow({ where: { id: id as string } });
+              expect(row.orgId).toBe(orgB);
+            }
           }
         },
       );
