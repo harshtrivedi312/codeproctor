@@ -676,6 +676,7 @@ describe('ADR 0013 CS-4.4: column allowlists and grants against Postgres (NFR-04
         'signedName',
         'signedAt',
         'declinedAt',
+        'ageConfirmedAt',
         'ip',
         'userAgent',
       ],
@@ -686,6 +687,7 @@ describe('ADR 0013 CS-4.4: column allowlists and grants against Postgres (NFR-04
       consentTextId: textId,
       signedName: `Synthetic Name ${chain.label}`,
       signedAt: WHEN,
+      ageConfirmedAt: WHEN,
       ip: '203.0.113.7',
       userAgent: 'synthetic-agent',
     });
@@ -725,6 +727,7 @@ describe('ADR 0013 CS-4.4: column allowlists and grants against Postgres (NFR-04
         signedName: `Synthetic Name ${C.label}`,
         signedAt: WHEN,
         declinedAt: null,
+        ageConfirmedAt: WHEN,
         ip: '203.0.113.7',
         userAgent: 'synthetic-agent',
         pdfKey: null,
@@ -741,8 +744,39 @@ describe('ADR 0013 CS-4.4: column allowlists and grants against Postgres (NFR-04
         signedName: null,
         signedAt: null,
         declinedAt: WHEN,
+        ageConfirmedAt: null,
         ip: '203.0.113.8',
       });
+    });
+
+    it('FR-401 C-30 TC-095 the sign create stores ageConfirmedAt, the row it returns omits it, and a decline leaves it NULL (D-55)', async () => {
+      const C = await freshSession('c2a');
+      const returned = await make(C, signedRow(C));
+      expect(Object.keys(returned as Row)).not.toContain('ageConfirmedAt');
+      expect((await consentOf(C))?.ageConfirmedAt).toEqual(WHEN);
+      const D = await freshSession('c2b');
+      await make(D, declinedRow(D));
+      expect((await consentOf(D))?.ageConfirmedAt).toBeNull();
+    });
+
+    it('FR-401 C-30 TC-008 a create that carries ageConfirmedAt is refused without the grant, and under a grant that leaves the column out: no statement, no row', async () => {
+      const C = await freshSession('c2c');
+      await db.statements.reset();
+      await asCandidate(C, async () => {
+        await expect(client.consent.create({ data: signedRow(C) })).rejects.toThrow(
+          /creates this row only under its create grant/,
+        );
+        // The create grant of the model, narrowed so that it does not name the column.
+        const narrowed = {
+          ...create(C),
+          columns: create(C).columns.filter((column) => column !== 'ageConfirmedAt'),
+        };
+        await expect(
+          grant(narrowed, () => client.consent.create({ data: signedRow(C) })),
+        ).rejects.toThrow(/ageConfirmedAt cannot be written by a candidate create/);
+      });
+      expect(await statementCount()).toBe(0);
+      expect(await consentOf(C)).toBeNull();
     });
 
     it('TC-008 write-once: a second create for the session fails with P2002 (the service answers 409), and the first row is as it was', async () => {
@@ -964,7 +998,7 @@ describe('ADR 0013 CS-4.4: column allowlists and grants against Postgres (NFR-04
       expect(await statementCount()).toBe(0);
     });
 
-    it('TC-008 a candidate reads id, consentTextId, signedAt and declinedAt of its consent, and never signedName, ip or userAgent', async () => {
+    it('FR-401 C-30 TC-008 a candidate reads id, consentTextId, signedAt and declinedAt of its consent, and never signedName, ip, userAgent or ageConfirmedAt', async () => {
       const C = await freshSession('c13');
       await make(C, signedRow(C));
       await asCandidate(C, async () => {
@@ -977,6 +1011,7 @@ describe('ADR 0013 CS-4.4: column allowlists and grants against Postgres (NFR-04
           'signedName',
           'ip',
           'userAgent',
+          'ageConfirmedAt',
           'pdfKey',
           'pdfGeneratedAt',
           'copyEmailedAt',
@@ -1064,6 +1099,38 @@ describe('ADR 0013 CS-4.4: column allowlists and grants against Postgres (NFR-04
       );
       expect(changed).toEqual({ count: 1 });
       expect((await consentOf(C))?.pdfGeneratedAt).toEqual(WHEN);
+    });
+
+    it('FR-401 C-30 TC-008 no CHECK on ageConfirmedAt (D-55): the consent-PDF job (SERVICE) updates a signed row that has none, as for a row signed before C-30', async () => {
+      const C = await freshSession('c16a');
+      // A row as it was written before C-30: signed, with the typed name, and no age confirmation.
+      await owner.consent.create({
+        data: {
+          sessionId: C.sessionId,
+          consentTextId: T.consentTextId,
+          signedName: `Synthetic Name ${C.label}`,
+          signedAt: WHEN,
+        },
+      });
+      expect((await consentOf(C))?.ageConfirmedAt).toBeNull();
+      const sentAt = new Date('2026-10-06T01:00:00.000Z');
+      const changed = await asService(C, () =>
+        client.consent.updateMany({
+          where: { sessionId: C.sessionId },
+          data: {
+            pdfKey: `orgs/${C.orgId}/sessions/${C.sessionId}/consent.pdf`,
+            pdfGeneratedAt: WHEN,
+            copyEmailedAt: sentAt,
+          },
+        }),
+      );
+      expect(changed).toEqual({ count: 1 });
+      expect(await consentOf(C)).toMatchObject({
+        pdfGeneratedAt: WHEN,
+        copyEmailedAt: sentAt,
+        signedAt: WHEN,
+        ageConfirmedAt: null,
+      });
     });
 
     it('TC-008 the create and the state transition run one after the other in ONE transaction, each under its own grant, and roll back together', async () => {

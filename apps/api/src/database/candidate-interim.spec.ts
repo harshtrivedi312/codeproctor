@@ -416,7 +416,15 @@ const CS44: Record<string, Cs44Read> = {
     keys: ['sessionId'],
     explicit: [],
     runOnly: [],
-    hidden: ['signedName', 'ip', 'userAgent', 'pdfKey', 'pdfGeneratedAt', 'copyEmailedAt'],
+    hidden: [
+      'signedName',
+      'ip',
+      'userAgent',
+      'ageConfirmedAt',
+      'pdfKey',
+      'pdfGeneratedAt',
+      'copyEmailedAt',
+    ],
   },
   Organization: {
     read: ['id', 'name', 'retentionDays', 'currentConsentTextId'],
@@ -577,7 +585,7 @@ describe('S3: the CS-4.4 READ allowlist (NFR-04, TC-008)', () => {
       Test: ['passScore'],
       Submission: ['score', 'sourceCode'],
       SessionQuestion: ['score', 'scoringNote', 'scoring', 'scoredById', 'scoredAt'],
-      Consent: ['ip', 'userAgent', 'signedName', 'pdfKey'],
+      Consent: ['ip', 'userAgent', 'signedName', 'ageConfirmedAt', 'pdfKey'],
       ProctorEvent: ['severity', 'payload', 'evidenceKey', 'confidence', 'source'],
       Candidate: ['erasureRequestedAt', 'erasedAt', 'externalRef'],
       KeystrokeBatch: ['id', 'events'],
@@ -1170,6 +1178,7 @@ const CS44_WRITE: Record<
       'signedName',
       'signedAt',
       'declinedAt',
+      'ageConfirmedAt',
       'ip',
       'userAgent',
     ],
@@ -2692,6 +2701,7 @@ describe('CS-4.4 consents: ONE create under the ConsentService grant (item 9, AD
     consentTextId: CTID,
     signedName: 'Synthetic Name',
     signedAt: new Date(),
+    ageConfirmedAt: new Date(),
     ip: '203.0.113.7',
     userAgent: 'x',
   };
@@ -2716,12 +2726,27 @@ describe('CS-4.4 consents: ONE create under the ConsentService grant (item 9, AD
     }
   });
 
-  it('TC-008 the row a create returns omits signedName, ip, userAgent and the PDF columns, and a select of them throws', () => {
+  it('TC-008 the row a create returns omits signedName, ip, userAgent, ageConfirmedAt and the PDF columns, and a select of them throws', () => {
     const omit = create(signed).args.omit as Record<string, true>;
     expect(Object.keys(omit).sort()).toEqual(
-      ['signedName', 'ip', 'userAgent', 'pdfKey', 'pdfGeneratedAt', 'copyEmailedAt'].sort(),
+      [
+        'signedName',
+        'ip',
+        'userAgent',
+        'ageConfirmedAt',
+        'pdfKey',
+        'pdfGeneratedAt',
+        'copyEmailedAt',
+      ].sort(),
     );
-    for (const column of ['signedName', 'ip', 'userAgent', 'pdfKey', 'pdfGeneratedAt']) {
+    for (const column of [
+      'signedName',
+      'ip',
+      'userAgent',
+      'ageConfirmedAt',
+      'pdfKey',
+      'pdfGeneratedAt',
+    ]) {
       expect(() =>
         asCandidate('Consent', 'create', { data: signed, select: { [column]: true } }, GRANT),
       ).toThrow(new RegExp(`the column ${column} is not available`));
@@ -2843,7 +2868,7 @@ describe('CS-4.4 consents: ONE create under the ConsentService grant (item 9, AD
     }
   });
 
-  it('TC-008 the written columns are signedName, signedAt, declinedAt, ip and userAgent, and nothing else', () => {
+  it('TC-008 the written columns are signedName, signedAt, declinedAt, ageConfirmedAt, ip and userAgent, and nothing else', () => {
     for (const column of [
       'pdfKey',
       'pdfGeneratedAt',
@@ -2857,7 +2882,7 @@ describe('CS-4.4 consents: ONE create under the ConsentService grant (item 9, AD
     ]) {
       expect(() => create({ ...signed, [column]: 'x' })).toThrow(OrgScopeViolationError);
     }
-    // Every column of the model that is none of the seven is refused, a column set to undefined is not a write.
+    // Every column of the model that is none of the eight is refused, a column set to undefined is not a write.
     expect(() => create({ ...signed, pdfKey: undefined })).not.toThrow();
   });
 
@@ -2888,6 +2913,63 @@ describe('CS-4.4 consents: ONE create under the ConsentService grant (item 9, AD
     }
   });
 
+  it('FR-401 C-30 TC-008 ageConfirmedAt is written under the create grant, and only while the grant names it (D-55)', () => {
+    expect(create(signed).args.data).toHaveProperty('ageConfirmedAt', signed.ageConfirmedAt);
+    // The create grant of this model, with its columns but without ageConfirmedAt.
+    const without = grantOf(
+      'ConsentService (create)',
+      [SID],
+      GRANT.columns.filter((column) => column !== 'ageConfirmedAt'),
+    );
+    expect(() => create(signed, without)).toThrow(
+      /ageConfirmedAt cannot be written by a candidate create/,
+    );
+    // Without the grant altogether: the whole create is refused, whatever the columns are.
+    expect(() => asCandidate('Consent', 'create', { data: signed }, undefined)).toThrow(
+      /creates this row only under its create grant/,
+    );
+    // The column is neither the session key nor one of the server-set ones: it is plain data of the create.
+    const bare: Record<string, unknown> = { ...signed };
+    delete bare.ageConfirmedAt;
+    expect(() => create(bare)).not.toThrow();
+  });
+
+  it('FR-401 C-30 TC-008 a candidate cannot write ageConfirmedAt by any update, and never reads it, in a select, a where or an aggregate', () => {
+    for (const operation of UPDATES) {
+      expect(() =>
+        asCandidate(
+          'Consent',
+          operation,
+          writeArgs(operation, { ageConfirmedAt: new Date() }),
+          GRANT,
+        ),
+      ).toThrow(/cannot update this row: CS-4\.4 grants create only/);
+    }
+    for (const grant of [undefined, GRANT]) {
+      for (const args of [
+        { select: { ageConfirmedAt: true } },
+        { where: { ageConfirmedAt: { not: null } } },
+        { orderBy: { ageConfirmedAt: 'asc' } },
+        { select: { id: true }, where: { ageConfirmedAt: null } },
+      ]) {
+        expect(() => asCandidate('Consent', 'findMany', args, grant)).toThrow(
+          /the column ageConfirmedAt is not available/,
+        );
+      }
+      expect(() =>
+        asCandidate('Consent', 'count', { where: { ageConfirmedAt: { not: null } } }, grant),
+      ).toThrow(/the column ageConfirmedAt is not available/);
+      expect(() =>
+        asCandidate('Consent', 'aggregate', { _max: { ageConfirmedAt: true } }, grant),
+      ).toThrow(/the column ageConfirmedAt is not available/);
+      // No select: the default omit names it, so no row carries it.
+      expect(
+        (asCandidate('Consent', 'findMany', {}, grant).args.omit as Record<string, true>)
+          .ageConfirmedAt,
+      ).toBe(true);
+    }
+  });
+
   it('TC-008 a candidate reads id, consentTextId, signedAt and declinedAt of its row, and never the other columns (the grant changes nothing)', () => {
     for (const grant of [undefined, GRANT]) {
       expect(() =>
@@ -2902,6 +2984,7 @@ describe('CS-4.4 consents: ONE create under the ConsentService grant (item 9, AD
         'signedName',
         'ip',
         'userAgent',
+        'ageConfirmedAt',
         'pdfKey',
         'pdfGeneratedAt',
         'copyEmailedAt',
