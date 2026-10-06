@@ -146,6 +146,24 @@ Columns:
 
 DB-07 and DB-08 items from the Database B (ops) session. IDs are FU-DBB-NN. Rows moved from Database A's list keep a back-reference to their FU-DB id.
 
+### Triage for the pilot (Delivery Lead request, 2026-10-06)
+
+**Must fix before the pilot** (candidate data, a restore that works, or a gate that would otherwise silently pass):
+
+| Item | Why it blocks the pilot | Next step |
+| ---- | ----------------------- | --------- |
+| FU-DBB-02 | Without `erasure-list.sh append` before the erasure commits, a restore silently brings erased candidates back (C-06; candidate data). | The erasure slice (#144) gains an `ErasureListPort` (append before the first fence, complete after anonymisation); Backend B binds the S3 adapter. |
+| FU-DBB-01, FU-DBB-23 | `reapply-erasures.sql` does not follow the hold, `ERASED` or the day-28 rule, so a restore re-applies erasure differently from the service. | After #91 merges: align the SQL with the service, add the TC-094 checks and the `sessions` DELETE assertion to the restore drill. |
+| FU-DBB-03, FU-DBB-22 | CI skips the backup and schema tests when a tool is missing, and shellchecks no backup script. | Hub (CI config): `REQUIRE_DB_DRILL=1`, `postgres:16`, `redis:8.8`, `shellcheck -x infra/backup/*.sh`. |
+| FU-DBB-04, FU-DBB-07 | No nightly staging backup runs until the owner adds the staging secrets (the workflow now names the missing ones, PR #163). | Owner (secrets, names in FU-DBB-04). |
+| FU-DBB-06 | Pilot backups are not scheduled anywhere. | DEP-03. |
+| FU-DBB-20 | TC-072 and TC-094 are `todo` in the schema harness. | After #91 and the erasure slice merge. |
+| FU-DBB-26 (b), (c), (l), (n) | No 3-day tier-failure alert, no scheduler or real store bound, ADR 0015 lock order, and the appeal race that BE-07's fence closes. | Backend B (BE-07, BE-09) and the alert port. |
+| FU-DBB-25 (c), (d) | `bullmq` is not an `apps/api` dependency and the `set-password` processor does not exist, so `provision-org` cannot run in the pilot. | BE-06. |
+
+**Later** (nits and test hardening): FU-DBB-05, 08, 09, 12 to 17, 21, 24.
+
+
 | ID | Source | Type | Item | Owner | Target | Status |
 | --- | --- | --- | --- | --- | --- | --- |
 | FU-DBB-01 | DB-07 engineer, code-reviewer S1 | should-fix | `infra/backup/reapply-erasures.sql` mirrors the database part of erasure as of ADR 0004 section 9.5 and the schema at DB-03 (consent record kept, per C-17; session epoch raised by 1,000,000 and keys cleared). Gaps until DB-06 lands: it ignores the review and appeal hold (C-06) and erases every session of the candidate; it anonymises at once instead of at day 28 (so the `erasure-completed` email is impossible); it sets no `ERASED` or `CLOSED_ERASED` (values do not exist yet); it writes no re-application log row (ADR 0004 9.7). Align when DB-06 lands. `verify-backup.test.mjs` has the TC-094 checks to extend. | Database A (DB-06), Database B | after DB-06 | open |
