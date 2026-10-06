@@ -118,7 +118,11 @@ class Resolver:
         return {kk: self.r(vv) for kk, vv in n.items()}
 
 
-def load(create_plan="true", create_state="true", existing=""):
+ZONE = "Z0ASSESSEXAMPLE"
+OTHERZONE = "Z0MAINEXAMPLE"
+
+
+def load(create_plan="true", create_state="true", existing="", assess=ZONE):
     with open(TEMPLATE) as fh:
         raw = yaml.load(fh, Loader)
     params = {
@@ -128,6 +132,7 @@ def load(create_plan="true", create_state="true", existing=""):
         "CreatePlanRole": create_plan,
         "CreateStateBucket": create_state,
         "MaxVolumeSizeGiB": "100",
+        "AssessHostedZoneId": assess,
         "AllowedInstanceTypes": ["m7i.large", "t3.small", "t3.medium"],
     }
     rs = Resolver(raw, params)
@@ -383,7 +388,12 @@ def cases():
     add("KMS schedule deletion of state key", D, "kms:ScheduleKeyDeletion", key(), {**T, **tag(Purpose="tfstate"), "kms:ScheduleKeyDeletionPendingWindowInDays": "30"}, "DENY")
     add("KMS decrypt with pilot data key", D, "kms:Decrypt", key(), {**T, **tag(Purpose="data")}, "DENY")
     add("KMS decrypt with state key", D, "kms:Decrypt", key(), {**T, **tag(Purpose="tfstate")}, "ALLOW")
-    add("KMS (CI never changes keys) create grant for AWS service", D, "kms:CreateGrant", key(), {**T, "kms:GrantIsForAWSResource": "true"}, "DENY")
+    VIA_EC2 = {"kms:ViaService": "ec2.us-east-1.amazonaws.com"}
+    add("KMS create grant for AWS service through EC2 on a pilot-tagged key (no explicit deny; the deploy role has no CMK allow, EBS uses aws/ebs)", D, "kms:CreateGrant", key(), {**T, **VIA_EC2, "kms:GrantIsForAWSResource": "true"}, "NODENY")
+    add("KMS create grant on aws/ebs key through EC2 (untagged AWS-managed key; its key policy allows it)", D, "kms:CreateGrant", key(), {**VIA_EC2, "kms:GrantIsForAWSResource": "true"}, "NODENY")
+    add("KMS decrypt on aws/ebs key through EC2 (no explicit deny)", D, "kms:Decrypt", key(), VIA_EC2, "NODENY")
+    add("KMS create grant for AWS service but not through EC2", D, "kms:CreateGrant", key(), {**T, "kms:GrantIsForAWSResource": "true"}, "DENY")
+    add("KMS create grant on state key through EC2", D, "kms:CreateGrant", key(), {**T, **tag(Purpose="tfstate"), **VIA_EC2, "kms:GrantIsForAWSResource": "true"}, "DENY")
     add("KMS create grant for a principal", D, "kms:CreateGrant", key(), {**T, "kms:GrantIsForAWSResource": "false"}, "DENY")
     add("KMS (CI never changes keys) create alias codeproctor-pilot-data", D, "kms:CreateAlias", arn("kms", "alias/codeproctor-pilot-data"), {}, "DENY")
     add("KMS create alias other name", D, "kms:CreateAlias", arn("kms", "alias/codeproctor-staging-data"), {}, "DENY")
@@ -614,7 +624,34 @@ def cases():
     add("Scheduler boundary: stop untagged instance", SC, "ec2:StopInstances", arn("ec2", "instance/i-1"), {}, "DENY")
     add("Scheduler boundary: terminate pilot instance", SC, "ec2:TerminateInstances", arn("ec2", "instance/i-1"), T, "DENY")
     add("Scheduler boundary: read pilot recordings", SC, "s3:GetObject", "arn:aws:s3:::codeproctor-pilot-recordings/a.webm", SRC, "DENY")
-    add("Scheduler boundary: decrypt with pilot key", SC, "kms:Decrypt", key(), {**T, **SRC}, "DENY")
+    add("Scheduler boundary: decrypt with pilot key outside EC2", SC, "kms:Decrypt", key(), {**T, **SRC}, "DENY")
+    add("Scheduler boundary: scheduled start, EC2 creates a grant for an encrypted volume", SC, "kms:CreateGrant", key(), {**VIA_EC2, "kms:GrantIsForAWSResource": "true"}, "ALLOW")
+    add("Scheduler boundary: scheduled start, EC2 decrypts the volume key", SC, "kms:Decrypt", key(), VIA_EC2, "ALLOW")
+    add("Scheduler boundary: scheduled start, EC2 GenerateDataKeyWithoutPlaintext", SC, "kms:GenerateDataKeyWithoutPlaintext", key(), VIA_EC2, "ALLOW")
+    add("Scheduler boundary: CreateGrant not for an AWS service", SC, "kms:CreateGrant", key(), {**VIA_EC2, "kms:GrantIsForAWSResource": "false"}, "DENY")
+    add("Scheduler boundary: CreateGrant outside EC2", SC, "kms:CreateGrant", key(), {"kms:GrantIsForAWSResource": "true"}, "DENY")
+    add("Scheduler boundary: PutKeyPolicy through EC2", SC, "kms:PutKeyPolicy", key(), VIA_EC2, "DENY")
+    add("Boundary (instance role): decrypt through EC2 (EBS uses grants made by the starter; the instance role is not involved)", W, "kms:Decrypt", key(), {**T, **tag(Purpose="data"), **VIA_EC2, **SRC}, "DENY")
+    # --- Route 53 guard (hosted zones other than the assess zone are untouchable for every agent role)
+    ZARN = lambda z: f"arn:aws:route53:::hostedzone/{z}"
+    for who, label in ((D, "deploy"), ("plan", "plan"), (W, "workload"), (SC, "scheduler")):
+        ctxs = SRC if who in (W, SC) else {}
+        add(f"Route53 {label}: change records in another hosted zone", who, "route53:ChangeResourceRecordSets", ZARN(OTHERZONE), ctxs, "DENY")
+        add(f"Route53 {label}: list hosted zones (account-wide)", who, "route53:ListHostedZones", "*", ctxs, "DENY")
+        add(f"Route53 {label}: change records in the assess zone (no allow yet: implicit)", who, "route53:ChangeResourceRecordSets", ZARN(ZONE), ctxs, "DENY-IMPLICIT")
+        add(f"Route53 {label}: create hosted zone", who, "route53:CreateHostedZone", "*", ctxs, "DENY")
+        add(f"Route53 {label}: delete the assess hosted zone is not explicitly denied (owner-only, no allow)", who, "route53:DeleteHostedZone", ZARN(ZONE), ctxs, "DENY-IMPLICIT")
+    add("Route53 deploy: delete other hosted zone", D, "route53:DeleteHostedZone", ZARN(OTHERZONE), {}, "DENY")
+    add("Route53 deploy: associate VPC with other hosted zone", D, "route53:AssociateVPCWithHostedZone", ZARN(OTHERZONE), {}, "DENY")
+    add("Route53 deploy: route53domains transfer", D, "route53domains:TransferDomain", "*", {}, "DENY")
+    add("Route53 admin identity under the boundary: other zone", W, "route53:ChangeResourceRecordSets", ZARN(OTHERZONE), SRC, "DENY")
+    add("Route53 admin identity under the boundary: assess zone, no allow in the boundary yet", W, "route53:ChangeResourceRecordSets", ZARN(ZONE), SRC, "DENY-IMPLICIT")
+    add("Route53 admin identity under the scheduler boundary: assess zone", SC, "route53:ChangeResourceRecordSets", ZARN(ZONE), {}, "DENY-IMPLICIT")
+    add("Session Manager agent: DescribeLogGroups for the session log group", W, "logs:DescribeLogGroups", arn("logs", "log-group:*"), SRC, "ALLOW")
+    add("Session Manager agent: write session log stream", W, "logs:PutLogEvents", arn("logs", "log-group:codeproctor-pilot-ssm-sessions:log-stream:i-1"), SRC, "ALLOW")
+    add("CI cannot start a Session Manager session", D, "ssm:StartSession", arn("ec2", "instance/i-1"), T, "DENY")
+    add("CI cannot send a command", D, "ssm:SendCommand", arn("ec2", "instance/i-1"), T, "DENY")
+    add("CI cannot import a key pair (no SSH)", D, "ec2:ImportKeyPair", arn("ec2", "key-pair/k"), P, "DENY")
     add("Scheduler boundary: create IAM user", SC, "iam:CreateUser", f"arn:aws:iam::{A}:user/x", {}, "DENY")
     # --- resource policies of the state bucket / key (principals with admin identity policies)
     add("Bucket policy: app role reads state (admin identity)", "app-admin", "s3:GetObject", TF + "/pilot/terraform.tfstate", {}, "DENY")
@@ -678,6 +715,11 @@ def main():
     checks.append(("no deploy or plan Allow grants bucket control plane, CreateKey, PutKeyPolicy or secret resource policies", not bad))
     _, res_ex = load("true", "true", OIDC_ARN)
     checks.append(("ExistingOidcProviderArn set: provider not created, trust names the existing ARN", "GitHubOidcProvider" not in res_ex and res_ex["PilotDeployRole"]["Properties"]["AssumeRolePolicyDocument"]["Statement"][0]["Principal"]["Federated"] == OIDC_ARN))
+    _, res_z = load("true", "true", "", "")
+    nz = [st for st in res_z["PilotDeployIamGuardPolicy"]["Properties"]["PolicyDocument"]["Statement"] if st["Sid"] == "DenyRoute53OutsideAssessZone"][0]
+    checks.append(("AssessHostedZoneId empty: no hosted zone is permitted (NotResource names no real zone)", nz["NotResource"] == ["arn:aws:route53:::hostedzone/"]))
+    checks.append(("Route 53 deny present in deploy, plan, boundary and scheduler boundary", all(any(st["Sid"] == "DenyRoute53OutsideAssessZone" for st in res[k]["Properties"]["PolicyDocument"]["Statement"]) for k in ("PilotDeployIamGuardPolicy", "PilotPlanGuardPolicy", "PilotBoundaryPolicy", "PilotSchedulerBoundaryPolicy"))))
+    checks.append(("no Cloudflare token or secret mentioned", "cloudflare" not in text.lower()))
     print("Structural checks")
     for n, ok in checks:
         print(f"  [{'PASS' if ok else 'FAIL'}] {n}")
@@ -723,7 +765,7 @@ def main():
     print("\n%-*s  %-9s  %-6s %-6s %-8s %s" % (w, "case", "principal", "expect", "got", "result", "keys (hand-supplied; * = harness default)"))
     npass = 0
     for (n, pr, act, exp, got, why, keys) in rows:
-        ok = exp == got
+        ok = (exp == got) or (exp == "NODENY" and not why.startswith("explicit")) or (exp == "DENY-IMPLICIT" and got == "DENY" and why == "implicit deny")
         npass += ok
         if not ok:
             fails.append(n)

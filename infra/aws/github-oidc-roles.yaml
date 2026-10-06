@@ -32,7 +32,11 @@ Description: >-
 # EventBridge Scheduler | ARN prefix: schedule group and schedules codeproctor-pilot-*
 # AWS Budgets    | ARN prefix budget/codeproctor-pilot-* (no tag condition)
 # IAM            | ARN prefix + permissions boundary condition + explicit denies
-# RDS, ELB, NAT, peering, transit gateway, VPN | Explicit Deny (cost guard rails)
+# RDS, ELB, NAT, Elastic IP, peering, transit gateway, VPN, key pairs | Explicit Deny (cost guard
+#                | rails); ModifyVolume, ModifyInstanceMetadataOptions denied; instance type
+#                | on Modify checked via ec2:Attribute/InstanceType
+# Route 53       | Explicit Deny on route53:* and route53domains:* for every role except the
+#                | assess hosted zone (AssessHostedZoneId; empty = none)
 #
 # Policies are split into managed policies because an IAM role's inline policies are capped at
 # 10240 characters and a managed policy at 6144. They sit under the path /codeproctor-guardrails/
@@ -59,6 +63,7 @@ Metadata:
           - CreatePlanRole
           - AllowedInstanceTypes
           - MaxVolumeSizeGiB
+          - AssessHostedZoneId
 
 Parameters:
   GitHubOwner:
@@ -92,6 +97,11 @@ Parameters:
     Default: m7i.large,t3.small,t3.medium
     Description: Instance types the deploy role may launch (cost guard rail, for the m7i.large app host and a small Judge0 host)
 
+  AssessHostedZoneId:
+    Type: String
+    Default: ''
+    AllowedPattern: ^$|^Z[A-Z0-9]{5,32}$
+    Description: Hosted zone id of the assess zone. Empty means no hosted zone is permitted to any agent-managed role. Never any other zone (C-50 to C-52)
   MaxVolumeSizeGiB:
     Type: Number
     Default: 100
@@ -155,7 +165,7 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          # Workloads may use objects in the pilot buckets (recordings, backups). Every allow below works only with instance-profile credentials (ec2:SourceInstanceARN present), so a role assumed from anywhere else gets nothing.
+          # Workloads may use objects in the pilot buckets (media, backups). Every allow below except KmsPilotKeys requires instance-profile credentials (ec2:SourceInstanceARN present); KmsPilotKeys is pinned to calls through S3 instead.
           - Sid: 'S3PilotData'
             Effect: 'Allow'
             Action:
@@ -207,6 +217,7 @@ Resources:
             Condition:
               'Null':
                 ec2:SourceInstanceARN: 'false'
+            # Also the Session Manager session log group (codeproctor-pilot-* or /codeproctor/pilot/*). It is not KMS-encrypted: CloudWatch encrypts at rest by default, and a CMK for logs adds cost and key-policy work.
           - Sid: 'LogsPilot'
             Effect: 'Allow'
             Action:
@@ -216,6 +227,14 @@ Resources:
             Resource:
               - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/codeproctor/pilot/*'
               - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:codeproctor-pilot-*'
+            Condition:
+              'Null':
+                ec2:SourceInstanceARN: 'false'
+            # The SSM agent checks the session log group.
+          - Sid: 'LogsDescribeGroups'
+            Effect: 'Allow'
+            Action: 'logs:DescribeLogGroups'
+            Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
             Condition:
               'Null':
                 ec2:SourceInstanceARN: 'false'
@@ -255,6 +274,8 @@ Resources:
             Effect: 'Allow'
             Action:
               - 'ssm:UpdateInstanceInformation'
+              - 'ssm:DescribeAssociation'
+              - 'ssm:GetDeployablePatchSnapshotForInstance'
               - 'ssm:ListInstanceAssociations'
               - 'ssm:ListAssociations'
               - 'ssm:GetDocument'
@@ -288,6 +309,14 @@ Resources:
                 cloudwatch:namespace: 'codeproctor-pilot'
               'Null':
                 ec2:SourceInstanceARN: 'false'
+            # No agent-managed role may hold any permission on any hosted zone except the assess zone (AssessHostedZoneId; empty means none). Account-wide actions (ListHostedZones, CreateHostedZone, DeleteHostedZone, AssociateVPCWithHostedZone, ChangeResourceRecordSets on other zones, route53domains) are denied whether or not the main zone is in this account (OQ-22).
+          - Sid: 'DenyRoute53OutsideAssessZone'
+            Effect: 'Deny'
+            Action:
+              - 'route53:*'
+              - 'route53domains:*'
+            NotResource:
+              - !Sub 'arn:${AWS::Partition}:route53:::hostedzone/${AssessHostedZoneId}'
             # Workloads never touch Terraform state or its key.
           - Sid: 'DenyTfstate'
             Effect: 'Deny'
@@ -333,6 +362,41 @@ Resources:
             Condition:
               StringEquals:
                 aws:ResourceTag/Environment: 'pilot'
+            # EC2 creates KMS grants on the caller's behalf when an encrypted volume is attached or an instance with one starts: only through EC2.
+          - Sid: 'SchedulerKmsForEncryptedVolumes'
+            Effect: 'Allow'
+            Action:
+              - 'kms:CreateGrant'
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKeyWithoutPlaintext'
+              - 'kms:ReEncrypt*'
+              - 'kms:DescribeKey'
+            Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub 'ec2.${AWS::Region}.amazonaws.com'
+          - Sid: 'SchedulerGrantsOnlyForAwsServices'
+            Effect: 'Deny'
+            Action: 'kms:CreateGrant'
+            Resource: '*'
+            Condition:
+              Bool:
+                kms:GrantIsForAWSResource: 'false'
+            # No agent-managed role may hold any permission on any hosted zone except the assess zone (AssessHostedZoneId; empty means none). Account-wide actions (ListHostedZones, CreateHostedZone, DeleteHostedZone, AssociateVPCWithHostedZone, ChangeResourceRecordSets on other zones, route53domains) are denied whether or not the main zone is in this account (OQ-22).
+          - Sid: 'DenyRoute53OutsideAssessZone'
+            Effect: 'Deny'
+            Action:
+              - 'route53:*'
+              - 'route53domains:*'
+            NotResource:
+              - !Sub 'arn:${AWS::Partition}:route53:::hostedzone/${AssessHostedZoneId}'
+          - Sid: 'DenyKmsOutsideEc2'
+            Effect: 'Deny'
+            Action: 'kms:*'
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                kms:ViaService: !Sub 'ec2.${AWS::Region}.amazonaws.com'
           - Sid: 'DenyEverythingElseRisky'
             Effect: 'Deny'
             Action:
@@ -343,7 +407,6 @@ Resources:
               - 'rds:*'
               - 'elasticloadbalancing:*'
               - 's3:*'
-              - 'kms:*'
               - 'secretsmanager:*'
             Resource: '*'
   PilotInstanceSsmPolicy:
@@ -359,6 +422,8 @@ Resources:
             Effect: 'Allow'
             Action:
               - 'ssm:UpdateInstanceInformation'
+              - 'ssm:DescribeAssociation'
+              - 'ssm:GetDeployablePatchSnapshotForInstance'
               - 'ssm:ListInstanceAssociations'
               - 'ssm:ListAssociations'
               - 'ssm:GetDocument'
@@ -489,7 +554,7 @@ Resources:
               StringEquals:
                 aws:ResourceTag/Environment: 'pilot'
                 aws:ResourceTag/Purpose: 'tfstate'
-          # Secrets Manager: name prefix plus tags. The role can manage secrets but never read values.
+          # Secrets Manager: name prefix plus tags. The role can manage secret containers but never read values.
           - Sid: 'SecretsCreateTagged'
             Effect: 'Allow'
             Action:
@@ -731,7 +796,6 @@ Resources:
                   - 'CreateSecurityGroup'
                   - 'CreateRouteTable'
                   - 'CreateInternetGateway'
-                  - 'AllocateAddress'
                   - 'CreateVolume'
           - Sid: 'Ec2ManagePilot'
             Effect: 'Allow'
@@ -1183,6 +1247,21 @@ Resources:
             Resource:
               - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}'
               - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}/*'
+            # EC2 creates grants for encrypted volumes on the caller's behalf. Any other CreateGrant is denied. The data key is also protected by its own key policy.
+          - Sid: 'DenyGrantsNotFromEc2'
+            Effect: 'Deny'
+            Action: 'kms:CreateGrant'
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                kms:ViaService: !Sub 'ec2.${AWS::Region}.amazonaws.com'
+          - Sid: 'DenyStateKeyGrants'
+            Effect: 'Deny'
+            Action: 'kms:CreateGrant'
+            Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Purpose: 'tfstate'
             # No key (data CMK or state key) can be changed, disabled, deleted, re-aliased or re-tagged by CI.
           - Sid: 'DenyKeyLifecycle'
             Effect: 'Deny'
@@ -1193,7 +1272,6 @@ Resources:
               - 'kms:DisableKeyRotation'
               - 'kms:EnableKeyRotation'
               - 'kms:PutKeyPolicy'
-              - 'kms:CreateGrant'
               - 'kms:CreateAlias'
               - 'kms:DeleteAlias'
               - 'kms:UpdateAlias'
@@ -1229,6 +1307,14 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
+          # No agent-managed role may hold any permission on any hosted zone except the assess zone (AssessHostedZoneId; empty means none). Account-wide actions (ListHostedZones, CreateHostedZone, DeleteHostedZone, AssociateVPCWithHostedZone, ChangeResourceRecordSets on other zones, route53domains) are denied whether or not the main zone is in this account (OQ-22).
+          - Sid: 'DenyRoute53OutsideAssessZone'
+            Effect: 'Deny'
+            Action:
+              - 'route53:*'
+              - 'route53domains:*'
+            NotResource:
+              - !Sub 'arn:${AWS::Partition}:route53:::hostedzone/${AssessHostedZoneId}'
           # IAM guard rails. See README for the escalation paths each statement closes.
           - Sid: 'DenyIdentityAdministration'
             Effect: 'Deny'
@@ -1492,7 +1578,15 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          # Tag value guards: nothing may be created or tagged with an Environment value other than pilot, and nothing tagged otherwise may be touched.
+          # No agent-managed role may hold any permission on any hosted zone except the assess zone (AssessHostedZoneId; empty means none). Account-wide actions (ListHostedZones, CreateHostedZone, DeleteHostedZone, AssociateVPCWithHostedZone, ChangeResourceRecordSets on other zones, route53domains) are denied whether or not the main zone is in this account (OQ-22).
+          - Sid: 'DenyRoute53OutsideAssessZone'
+            Effect: 'Deny'
+            Action:
+              - 'route53:*'
+              - 'route53domains:*'
+            NotResource:
+              - !Sub 'arn:${AWS::Partition}:route53:::hostedzone/${AssessHostedZoneId}'
+            # Tag value guards: nothing may be created or tagged with an Environment value other than pilot, and nothing tagged otherwise may be touched.
           - Sid: 'DenyForeignEnvironmentTagOnRequest'
             Effect: 'Deny'
             Action: '*'
