@@ -11,6 +11,7 @@ import {
   Logger,
   NotFoundException,
   BeforeApplicationShutdown,
+  OnApplicationShutdown,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -94,9 +95,11 @@ function isRetryable(e: unknown): boolean {
 
 /** How long shutdown waits for deferred reset and lock mail. */
 const SHUTDOWN_SETTLE_MS = 5_000;
+/** Second, catch-all settle in onApplicationShutdown. */
+const SHUTDOWN_CATCH_ALL_MS = 1_000;
 
 @Injectable()
-export class AuthService implements BeforeApplicationShutdown {
+export class AuthService implements BeforeApplicationShutdown, OnApplicationShutdown {
   private readonly webOrigin: string;
   private readonly logger = new Logger(AuthService.name);
   /** Deferred forgot-password work still running; awaited by tests and at shutdown. */
@@ -946,14 +949,23 @@ export class AuthService implements BeforeApplicationShutdown {
   }
 
   /**
-   * Nest runs this before any onApplicationShutdown, so deferred reset and lock mail reaches the
-   * email queue while it still accepts (the queue stops in its own onApplicationShutdown).
+   * Nest 11 order: onModuleDestroy, beforeApplicationShutdown, dispose() (the HTTP server closes),
+   * onApplicationShutdown. This hook gives deferred reset and lock mail up to 5 s to reach the
+   * email queue, which is still accepting at this point. Bounded so a stuck query cannot stall
+   * shutdown until SIGKILL; the deferred work is only mail, so giving up loses at most a reset or
+   * lock email.
    */
   async beforeApplicationShutdown(): Promise<void> {
-    // Bounded: a stuck query must not stall shutdown until SIGKILL. The deferred work is only
-    // mail, so abandoning it after the bound loses at most a reset or lock email. There is
-    // deliberately no onApplicationShutdown settle: this hook already ran before it.
     await this.settleDeferredBounded(SHUTDOWN_SETTLE_MS);
+  }
+
+  /**
+   * Catch-all for work deferred after the hook above but before dispose() closed the server. Short
+   * bound. It is not guaranteed to run before the email queue stops (hook order between providers
+   * is not defined), so such a mail can still be dropped; the queue logs the count then.
+   */
+  async onApplicationShutdown(): Promise<void> {
+    await this.settleDeferredBounded(SHUTDOWN_CATCH_ALL_MS);
   }
 
   /** Like settleDeferred, but gives up after timeoutMs and logs a fixed line (no payload). */

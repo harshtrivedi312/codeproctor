@@ -22,6 +22,17 @@ describe('FU-BE-162 bounded shutdown settle of deferred auth mail', () => {
     await svc.settleDeferredBounded(50);
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(lines).toEqual(['Shutdown gave up waiting for 1 deferred tasks after 50 ms']);
+    // The abandoned task is still counted, nothing pretends it finished.
+    expect(shape.deferred.size).toBe(1);
+  });
+
+  it('FU-BE-162: onApplicationShutdown is a short bounded catch-all with the same fixed line', async () => {
+    const { svc, lines, shape } = bare();
+    shape.deferred.add(new Promise<void>(() => undefined));
+    const started = Date.now();
+    await svc.onApplicationShutdown();
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(lines).toEqual(['Shutdown gave up waiting for 1 deferred tasks after 1000 ms']);
   });
 
   it('FU-BE-162: deferred work that finishes in time is awaited with no warning', async () => {

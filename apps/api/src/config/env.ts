@@ -205,6 +205,8 @@ export const envSchema = z
         'AWS_WEB_IDENTITY_TOKEN_FILE',
         'AWS_ROLE_ARN',
       ] as const) {
+        // `!== ''` mirrors the AWS SDK's own truthiness checks: an empty value is ignored by the
+        // SDK, a whitespace one is not. Do not turn this into a trim.
         if (env[name] !== undefined && env[name] !== '') {
           ctx.addIssue({
             code: 'custom',

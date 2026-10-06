@@ -87,9 +87,11 @@ export class InProcessEmailQueue extends EmailQueuePort implements OnApplication
   }
 
   /**
-   * Shutdown order: AuthService settles its deferred mail in beforeApplicationShutdown, which Nest
-   * runs before every onApplicationShutdown, so those mails reach this queue while it still
-   * accepts. Here the queue drains for drainMs, then stops and drops what is left (count logged).
+   * Shutdown: AuthService settles its deferred mail (up to 5 s) in beforeApplicationShutdown,
+   * which Nest runs before every onApplicationShutdown, so those mails reach this queue while it
+   * still accepts. Here the queue drains for drainMs, then stops and drops what is left (counts
+   * logged). Guaranteed: mail enqueued before this hook starts gets the drain window. Not
+   * guaranteed: mail deferred later, e.g. by an AuthService catch-all that runs after this hook.
    */
   async onApplicationShutdown(): Promise<void> {
     let timer: NodeJS.Timeout | undefined;

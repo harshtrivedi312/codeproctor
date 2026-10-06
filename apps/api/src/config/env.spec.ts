@@ -275,6 +275,45 @@ describe('NFR-04 environment validation', () => {
       );
     });
 
+    it('C-31: whitespace-only SES settings are invalid, never echoed; mixed-case http endpoint is refused in live', () => {
+      for (const env of [
+        { ...valid, EMAIL_PROVIDER: 'ses', SES_FROM_ADDRESS: ' ' },
+        { ...live, SES_FROM_ADDRESS: ' ' },
+      ]) {
+        let text = '';
+        try {
+          validateEnv(env);
+        } catch (e) {
+          text = String(e);
+        }
+        expect(text).toContain('SES_FROM_ADDRESS');
+        expect(text).not.toContain('SES_FROM_ADDRESS: " "');
+      }
+      expect(() => validateEnv({ ...valid, SES_ENDPOINT: ' ' })).toThrow(/SES_ENDPOINT/);
+      expect(() => validateEnv({ ...live, SES_ENDPOINT: 'HTTP://127.0.0.1:4566' })).toThrow(
+        /SES_ENDPOINT/,
+      );
+    });
+
+    it('C-31: each refused AWS variable set to a space is refused in live, set to empty is accepted', () => {
+      for (const name of [
+        'AWS_ACCESS_KEY_ID',
+        'AWS_SECRET_ACCESS_KEY',
+        'AWS_SESSION_TOKEN',
+        'AWS_PROFILE',
+        'AWS_SHARED_CREDENTIALS_FILE',
+        'AWS_CONFIG_FILE',
+        'AWS_CONTAINER_CREDENTIALS_FULL_URI',
+        'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
+        'AWS_CONTAINER_AUTHORIZATION_TOKEN',
+        'AWS_WEB_IDENTITY_TOKEN_FILE',
+        'AWS_ROLE_ARN',
+      ]) {
+        expect(() => validateEnv({ ...live, [name]: ' ' })).toThrow(new RegExp(name));
+        expect(() => validateEnv({ ...live, [name]: '' })).not.toThrow();
+      }
+    });
+
     it('C-31: ses needs a valid SES_FROM_ADDRESS', () => {
       expect(() => validateEnv({ ...live, SES_FROM_ADDRESS: undefined })).toThrow(
         /SES_FROM_ADDRESS/,
