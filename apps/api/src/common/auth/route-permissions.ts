@@ -1,22 +1,59 @@
 // The route permission matrix (FR-103, TC-004). One entry per controller route, as
-// "METHOD /path" without the global prefix (/api/v1). A route is either public or lists the
+// "METHOD /path" without the global prefix (/api/v1). A route is public, a candidate route, or lists the
 // roles that may call it and the permission it needs (the resource:action vocabulary of
 // packages/shared permissions, ADR 0010 section 6). Deny by default: the guard refuses a route
 // that is neither @Public() nor @Roles(), and two tests fail when a controller route is missing
 // here or its decorators disagree with this file: route-registry.spec.ts and the TC-004 test in
 // users/users.e2e-spec.ts, which walks the real module graph. Add the route here in the same change that adds the controller.
+import type { Permission } from '@codeproctor/shared';
 import type { UserRole } from '../../generated/prisma/client';
 
-export type RouteAccess =
-  | 'public'
-  | {
-      readonly roles: readonly UserRole[];
-      readonly permission: string;
-      /** The route carries @Audited (FR-105). The registry test checks both directions. */
-      readonly audited?: true;
-      /** The route reads or changes candidate data (FR-105): it must be audited. */
-      readonly candidateData?: true;
-    };
+/** A staff route: JwtAuthGuard checks the role, the matrix lists roles and the permission. */
+export interface StaffAccess {
+  readonly roles: readonly UserRole[];
+  // TODO(FU-BE-75): type as Permission together with the typed staff parity check.
+  readonly permission: string;
+  /** The route carries @Audited (FR-105). The registry test checks both directions. */
+  readonly audited?: true;
+  /** The route reads or changes candidate data (FR-105): it must be audited. */
+  readonly candidateData?: true;
+}
+
+/** The permissions of the CANDIDATE pseudo-role (ADR 0010 section 6). */
+export type CandidatePermission = Extract<Permission, `candidate_${string}`>;
+
+/**
+ * Candidate routes the matrix may list as plain 'public': the pre-JWT bootstrap routes that run
+ * without CandidateSessionGuard (ADR 0013 section 5.10: invitation-link resolve, OTP send, OTP
+ * verify). Any other /candidate/ key listed 'public' is a matrix problem.
+ * TODO(FU-BE-90): fill in the three real keys when BE-07 defines them; empty until then.
+ */
+export const CANDIDATE_BOOTSTRAP_ROUTES: readonly string[] = [];
+
+/** A candidate route (pseudo-role CANDIDATE): @Public() to the staff guard plus @CandidateRoute(). */
+export interface CandidateAccess {
+  readonly principal: 'CANDIDATE';
+  readonly permission: CandidatePermission;
+}
+
+export type RouteAccess = 'public' | StaffAccess | CandidateAccess;
+
+export const isPublic = (access: RouteAccess): access is 'public' => access === 'public';
+export const isCandidate = (access: RouteAccess): access is CandidateAccess =>
+  typeof access === 'object' && 'principal' in access;
+export const isStaff = (access: RouteAccess): access is StaffAccess =>
+  typeof access === 'object' && 'roles' in access;
+
+// How to add a candidate route (BE-07 onwards). All of 1 to 3 are mandatory: @Public() only
+// switches the staff guard off, so without the guard the route is unauthenticated.
+//   1. On the handler put @Public(), @CandidateRoute('candidate_answer:run') (a candidate_*
+//      permission from packages/shared) and @UseGuards(CandidateSessionGuard) (BE-07; until it
+//      exists, do not merge a candidate route). No @Roles(), no @Audited() (ADR 0013).
+//   2. Here add 'POST /candidate/answers/:questionId/run':
+//      { principal: 'CANDIDATE', permission: 'candidate_answer:run' }.
+//   3. The registry tests fail when the decorators, the guard and this entry disagree.
+// The three pre-JWT bootstrap routes are the only /candidate/ routes listed 'public'
+// (CANDIDATE_BOOTSTRAP_ROUTES).
 
 const ALL_STAFF: readonly UserRole[] = ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'REVIEWER'];
 const SUPER_ADMIN: readonly UserRole[] = ['SUPER_ADMIN'];

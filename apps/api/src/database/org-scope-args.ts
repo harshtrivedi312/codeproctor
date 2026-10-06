@@ -194,10 +194,11 @@ function assertNoRowMove(
 }
 
 /**
- * The checks that apply in system scope, where nothing is filtered: no nested relation write
+ * The checks that apply in system scope, where nothing is filtered: only a known operation (deny
+ * by default, as in an org scope; ADR 0006 section 8.2, FU-DB-160), no nested relation write
  * (ADR 0006 section 8), and no `orgId` or first-hop scope key in an update (assertNoRowMove). Org
- * scope has the nested-write check inside applyOrgScope, with the filter and stamping on top, and
- * keeps rule (i) for first-hop keys.
+ * scope has the same operation and nested-write checks inside applyOrgScope, with the filter and
+ * stamping on top, and keeps rule (i) for first-hop keys.
  */
 export function assertSystemScopeWrite(
   model: ModelName,
@@ -205,6 +206,15 @@ export function assertSystemScopeWrite(
   operation: string,
   args: unknown,
 ): void {
+  // An operation this file does not know (one a future Prisma adds, or a Mongo-only one such as
+  // findRaw) has unknown semantics, so it is refused here too rather than run unfiltered.
+  if (!isScopedOperation(operation)) {
+    throw violation(
+      model,
+      operation,
+      'unknown operation in system scope. Add it to SCOPED_OPERATIONS and handle it.',
+    );
+  }
   assertNoNestedWritesIn(model, operation, args);
   if (!isPlainObject(args)) return;
   switch (operation) {
