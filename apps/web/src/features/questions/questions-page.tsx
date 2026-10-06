@@ -10,13 +10,16 @@ import { formatDate } from '@/features/admin/format';
 import { useAuth } from '@/features/auth/auth-provider';
 import { RequireRole } from '@/features/auth/require-role';
 import { can, rolesWith } from '@/features/staff/permissions';
-import type { Schemas } from '@/lib/api/client';
 import { DIFFICULTY_LABEL, STATUS_LABEL, TYPE_LABEL } from './labels';
-import { useQuestions } from './queries';
+import { statusOf, useQuestions, type QuestionStatus, type QuestionSummary } from './queries';
 
-type Row = Schemas['QuestionSummary'];
+type Row = QuestionSummary;
 
-const STATUS_TONE: Record<Row['status'], 'neutral' | 'success' | 'warning'> = {
+/** The title, difficulty and status come from the version references (the list carries no content). */
+const titleOf = (q: Row) => q.latest.title;
+const difficultyOf = (q: Row) => (q.published ?? q.latest).difficulty;
+
+const STATUS_TONE: Record<QuestionStatus, 'neutral' | 'success' | 'warning'> = {
   DRAFT: 'warning',
   PUBLISHED: 'success',
   ARCHIVED: 'neutral',
@@ -36,8 +39,9 @@ export function QuestionsPage(): React.JSX.Element {
 
 function QuestionsContent(): React.JSX.Element {
   const { role } = useAuth();
-  const questions = useQuestions();
   const editable = can(role, 'question:update');
+  // Writers also list archived questions; the API never lists them for anyone else.
+  const questions = useQuestions(editable);
   const [tag, setTag] = React.useState('');
 
   const tags = React.useMemo(
@@ -54,15 +58,15 @@ function QuestionsContent(): React.JSX.Element {
       {
         id: 'title',
         header: 'Question',
-        sortValue: (q) => q.title.toLowerCase(),
-        searchValue: (q) => `${q.title} ${q.slug} ${q.tags.join(' ')}`,
+        sortValue: (q) => titleOf(q).toLowerCase(),
+        searchValue: (q) => `${titleOf(q)} ${q.slug} ${q.tags.join(' ')}`,
         // Every reader opens the question: writers get the editor, others the read-only summary.
         cell: (q) => (
           <Link
             href={`/admin/questions/${q.id}`}
             className="font-medium text-primary underline-offset-4 hover:underline"
           >
-            {q.title}
+            {titleOf(q)}
           </Link>
         ),
       },
@@ -76,13 +80,13 @@ function QuestionsContent(): React.JSX.Element {
       {
         id: 'difficulty',
         header: 'Difficulty',
-        sortValue: (q) => ['EASY', 'MEDIUM', 'HARD'].indexOf(q.difficulty),
+        sortValue: (q) => ['EASY', 'MEDIUM', 'HARD'].indexOf(difficultyOf(q)),
         facet: {
           label: 'Difficulty',
-          value: (q) => q.difficulty,
+          value: (q) => difficultyOf(q),
           options: facetOptions(DIFFICULTY_LABEL),
         },
-        cell: (q) => DIFFICULTY_LABEL[q.difficulty],
+        cell: (q) => DIFFICULTY_LABEL[difficultyOf(q)],
       },
       {
         id: 'tags',
@@ -96,21 +100,21 @@ function QuestionsContent(): React.JSX.Element {
       {
         id: 'status',
         header: 'Status',
-        sortValue: (q) => q.status,
-        facet: { label: 'Status', value: (q) => q.status, options: facetOptions(STATUS_LABEL) },
-        cell: (q) => <Badge tone={STATUS_TONE[q.status]}>{STATUS_LABEL[q.status]}</Badge>,
+        sortValue: (q) => statusOf(q),
+        facet: { label: 'Status', value: (q) => statusOf(q), options: facetOptions(STATUS_LABEL) },
+        cell: (q) => <Badge tone={STATUS_TONE[statusOf(q)]}>{STATUS_LABEL[statusOf(q)]}</Badge>,
       },
       {
         id: 'version',
         header: 'Version',
-        sortValue: (q) => q.version,
-        cell: (q) => `v${q.version}`,
+        sortValue: (q) => q.latest.version,
+        cell: (q) => `v${q.latest.version}`,
       },
       {
         id: 'updated',
         header: 'Updated',
-        sortValue: (q) => q.updatedAt,
-        cell: (q) => formatDate(q.updatedAt),
+        sortValue: (q) => q.latest.createdAt,
+        cell: (q) => formatDate(q.latest.createdAt),
       },
       ...(editable
         ? [
@@ -121,7 +125,7 @@ function QuestionsContent(): React.JSX.Element {
                 <Link
                   href={`/admin/questions/${q.id}/versions`}
                   className="text-primary underline-offset-4 hover:underline"
-                  aria-label={`Version history of ${q.title}`}
+                  aria-label={`Version history of ${titleOf(q)}`}
                 >
                   Versions
                 </Link>

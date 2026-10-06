@@ -7,6 +7,7 @@ import { api } from '@/lib/api/client';
 import { getAccessToken } from '@/lib/auth-token';
 import { apiBaseUrl } from '@/lib/env';
 import { MOCK_USERS } from '@/mocks/auth-handlers';
+import { setMockQuestionScenario } from '@/mocks/question-handlers';
 import { server } from '@/mocks/server';
 import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
 import { full } from '@/test/question-api';
@@ -69,7 +70,7 @@ describe('Test cases tab (FR-202)', () => {
     expect(await screen.findByText('Enter a weight.')).toBeInTheDocument();
     await u.type(weight, '0');
     await save(u);
-    expect(await screen.findByText('The weight must be greater than 0.')).toBeInTheDocument();
+    expect(await screen.findByText('The weight must be at least 0.01.')).toBeInTheDocument();
 
     // Hidden toggle: hiding the only visible test warns that candidates see no sample.
     await u.clear(weight);
@@ -84,7 +85,7 @@ describe('Test cases tab (FR-202)', () => {
     const { data } = await api.GET('/v1/questions/{questionId}', {
       params: { path: { questionId: 'q-twosum' } },
     });
-    expect(full(data).current.testCases.map((t) => t.weight)).toEqual([1, 1, 2]);
+    expect(full(data).version.testCases.map((t) => t.weight)).toEqual([1, 1, 2]);
 
     await u.click(screen.getByRole('button', { name: 'Remove test 3' }));
     expect(screen.getByText(/2 tests, total weight 2/)).toBeInTheDocument();
@@ -183,14 +184,19 @@ describe('Variants tab (FR-203, ADR 0007)', () => {
     await setText(u, within(card).getByLabelText('Expected output, slot 2'), '9 9');
     await save(u);
     expect(await screen.findByText(/Saved/)).toBeInTheDocument();
+    // q-merge is published, so the save created version 3; the override is saved on it (the forked
+    // draft's test cases have new ids, and the variants were mapped onto them).
     const { data } = await api.GET('/v1/questions/{questionId}', {
       params: { path: { questionId: 'q-merge' } },
     });
-    // q-merge is published, so the save created version 3 with the new override.
-    expect(
-      full(data).current.variants[1]?.overrides.find((o) => o.testCaseId === 'mi-t2')
-        ?.expectedOutput,
-    ).toBe('9 9');
+    const latest = full(data).version;
+    expect(latest.version).toBe(3);
+    const variants = await api.GET('/v1/questions/{questionId}/variants', {
+      params: { path: { questionId: 'q-merge' }, query: { version: 3 } },
+    });
+    const second = variants.data?.variants[1];
+    const slot2 = latest.testCases.find((t) => t.position === 1);
+    expect(second?.overrides.find((o) => o.testCaseId === slot2?.id)?.expectedOutput).toBe('9 9');
   });
 });
 
@@ -216,8 +222,7 @@ describe('Answer tab (FR-205)', () => {
     const { data } = await api.GET('/v1/questions/{questionId}', {
       params: { path: { questionId: 'q-bigo' } },
     });
-    expect(full(data).current.answerSpec).toMatchObject({
-      type: 'MCQ',
+    expect(full(data).version.answerSpec).toMatchObject({
       multiple: true,
       correctOptionIds: ['o2', 'o3'],
     });
@@ -258,7 +263,7 @@ describe('Answer tab (FR-205)', () => {
     const { data } = await api.GET('/v1/questions/{questionId}', {
       params: { path: { questionId: 'q-http' } },
     });
-    expect(full(data).current.answerSpec).toMatchObject({
+    expect(full(data).version.answerSpec).toMatchObject({
       canonical: '201',
       acceptedVariants: ['201 created', 'http 201', 'created (201)'],
     });
@@ -381,6 +386,8 @@ describe('Validate and publish (TC-012, AI-5)', () => {
   });
 
   it('TC-012: fixing the variant, validating again and collecting the AI solutions enables Publish', async () => {
+    // The validate job is BE-04c: the mock only publishes coding questions when this scenario is on.
+    setMockQuestionScenario({ validationJob: true });
     const u = await openEditor('q-rotate');
     await u.click(screen.getByRole('button', { name: 'Validate' }));
     await screen.findByText('Validation failed');
@@ -443,14 +450,18 @@ describe('Validate and publish (TC-012, AI-5)', () => {
 
 describe('Publish that fails (DL-32): honest messages, never marked published', () => {
   async function openPublishable() {
-    const u = await openEditor('q-publish-unavailable');
-    expect(checkText('validated')).toMatch(/Done/);
+    const u = await openEditor('q-mcq-draft');
     expect(screen.getByRole('button', { name: 'Publish' })).toBeEnabled();
     return u;
   }
   const publishButton = () => screen.getByRole('button', { name: 'Publish' });
 
   it('FR-203 TC-012: a publish answered 501 says it is not available yet, publishes nothing, and stays off', async () => {
+    server.use(
+      http.post(`${base}/q-mcq-draft/publish`, () =>
+        HttpResponse.json({ detail: 'x' }, { status: 501 }),
+      ),
+    );
     const u = await openPublishable();
     await u.click(publishButton());
     expect(await screen.findByText(/Publishing is not available yet/)).toBeInTheDocument();
@@ -459,16 +470,16 @@ describe('Publish that fails (DL-32): honest messages, never marked published', 
     expect(publishButton()).toBeDisabled();
     // Nothing was marked published on the server either.
     const { data } = await api.GET('/v1/questions/{questionId}', {
-      params: { path: { questionId: 'q-publish-unavailable' } },
+      params: { path: { questionId: 'q-mcq-draft' } },
     });
-    expect(full(data).current.isPublished).toBe(false);
+    expect(full(data).version.isPublished).toBe(false);
   });
 
   it.each([404, 405])(
     'FR-203: a publish answered %i is treated as not available yet',
     async (status) => {
       server.use(
-        http.post(`${base}/q-publish-unavailable/publish`, () =>
+        http.post(`${base}/q-mcq-draft/publish`, () =>
           HttpResponse.json({ detail: 'x' }, { status }),
         ),
       );
@@ -481,7 +492,7 @@ describe('Publish that fails (DL-32): honest messages, never marked published', 
 
   it('TC-012: a 422 shows the gate message from errors[] and waits for a change before another try', async () => {
     server.use(
-      http.post(`${base}/q-publish-unavailable/publish`, () =>
+      http.post(`${base}/q-mcq-draft/publish`, () =>
         HttpResponse.json(
           { detail: 'Not ready', errors: ['Validation is required.', 'Add the AI solutions.'] },
           { status: 422 },
@@ -505,7 +516,7 @@ describe('Publish that fails (DL-32): honest messages, never marked published', 
 
   it('TC-012: a 409 on publish asks for a reload instead of claiming anything', async () => {
     server.use(
-      http.post(`${base}/q-publish-unavailable/publish`, () =>
+      http.post(`${base}/q-mcq-draft/publish`, () =>
         HttpResponse.json({ detail: 'changed' }, { status: 409 }),
       ),
     );
@@ -523,7 +534,7 @@ describe('Publish that fails (DL-32): honest messages, never marked published', 
     async (status) => {
       let calls = 0;
       server.use(
-        http.post(`${base}/q-publish-unavailable/publish`, () => {
+        http.post(`${base}/q-mcq-draft/publish`, () => {
           calls += 1;
           return HttpResponse.json({ detail: 'busy' }, { status });
         }),
@@ -540,7 +551,7 @@ describe('Publish that fails (DL-32): honest messages, never marked published', 
   );
 
   it('FR-203: a network error on publish is transient too and publishes nothing', async () => {
-    server.use(http.post(`${base}/q-publish-unavailable/publish`, () => HttpResponse.error()));
+    server.use(http.post(`${base}/q-mcq-draft/publish`, () => HttpResponse.error()));
     const u = await openPublishable();
     await u.click(publishButton());
     expect(await screen.findByText(/so nothing was published/)).toBeInTheDocument();
@@ -561,16 +572,17 @@ describe('Versions (FR-204, TC-013)', () => {
       ),
     ).toBeInTheDocument();
 
-    const v2 = await api.GET('/v1/questions/{questionId}/versions/{version}', {
-      params: { path: { questionId: 'q-merge', version: 2 } },
+    const v2 = await api.GET('/v1/questions/{questionId}', {
+      params: { path: { questionId: 'q-merge' }, query: { version: 2 } },
     });
-    expect(full(v2.data).current.title).toBe('Merge intervals');
-    expect(full(v2.data).current.isPublished).toBe(true);
-    const v3 = await api.GET('/v1/questions/{questionId}/versions/{version}', {
-      params: { path: { questionId: 'q-merge', version: 3 } },
+    expect(full(v2.data).version.title).toBe('Merge intervals');
+    expect(full(v2.data).version.isPublished).toBe(true);
+    const v3 = await api.GET('/v1/questions/{questionId}', {
+      params: { path: { questionId: 'q-merge' }, query: { version: 3 } },
     });
-    expect(full(v3.data).current.title).toBe('Merge intervals (revised)');
-    expect(full(v3.data).current.isPublished).toBe(false);
+    expect(full(v3.data).version.title).toBe('Merge intervals (revised)');
+    expect(full(v3.data).version.isPublished).toBe(false);
+    expect(full(v3.data).createdNewVersion).toBe(false);
   });
 
   it('FR-204: the history lists every version, newest first, with a link to each', async () => {

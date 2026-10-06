@@ -26,6 +26,21 @@ type Proposal = Schemas['PrefillResponse']['proposals'][number];
  * author accepts them.
  */
 export function VariantsTab({ form, readOnly, questionId }: ApiTabProps): React.JSX.Element {
+  if (questionId === null) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        Save the question first. Variants belong to a saved draft; add them after the first save.
+      </p>
+    );
+  }
+  return <VariantsBody form={form} readOnly={readOnly} questionId={questionId} />;
+}
+
+function VariantsBody({
+  form,
+  readOnly,
+  questionId,
+}: Omit<ApiTabProps, 'questionId'> & { questionId: string }): React.JSX.Element {
   const [variants, setVariants] = useDraftField(form, 'variants');
   const statement = useWatch({ control: form.control, name: 'statementMd' });
   const starter = useWatch({ control: form.control, name: 'starterCode' });
