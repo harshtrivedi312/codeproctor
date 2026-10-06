@@ -169,6 +169,13 @@ describe('TC-012 validate job: the stored report', () => {
       failures: [],
     };
     expect(buildReport(built, fewer, meta).passed).toBe(false);
+    // A duplicate passing cell for the same (variant, language) is not coverage.
+    const dup: PortResult = {
+      passed: true,
+      cells: [...allPass.cells, cell('v1', 'python')],
+      failures: [],
+    };
+    expect(buildReport(built, dup, meta).passed).toBe(false);
   });
 
   it('FR-203: an execution error report is never passed and has no per-variant rows', () => {

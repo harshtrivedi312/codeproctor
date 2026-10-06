@@ -506,18 +506,23 @@ describe('Validate job and AI references (FR-202, FR-203, TC-011, TC-012)', () =
       expect(port.calls).toHaveLength(1);
     });
 
-    it('FR-203: the job records audit rows with ids and outcome only', async () => {
+    it('FR-203, FU-BE-130: the job records a start and a finish audit row with ids and outcome only', async () => {
       const a = await make(UserRole.AUTHOR);
       const id = await create(a);
       await validate(a, id);
+      await validation.whenIdle();
       const rows = await owner.auditLog.findMany({
         where: { entityId: id, action: { startsWith: 'QUESTION_VALIDATION' } },
         orderBy: { createdAt: 'asc' },
       });
-      // Only the start is audited: a finish row would land asynchronously, after the request's own
-      // audit window. The outcome is in validation_report.
-      expect(rows.map((r) => r.action)).toEqual(['QUESTION_VALIDATION_STARTED']);
-      expect(rows.map((r) => r.metadata)).toEqual([{ version: 1, variants: 1 }]);
+      expect(rows.map((r) => r.action)).toEqual([
+        'QUESTION_VALIDATION_STARTED',
+        'QUESTION_VALIDATION_FINISHED',
+      ]);
+      expect(rows[0]?.metadata).toEqual({ version: 1, variants: 1 });
+      const finished = rows[1]?.metadata as { version: number; outcome: string; revision: string };
+      expect([finished.version, finished.outcome]).toEqual([1, 'PASSED']);
+      expect(finished.revision).toMatch(/^[0-9a-f]{12}$/);
       expect(rows.every((r) => r.actorId === a.id && r.orgId === orgA)).toBe(true);
       expect(
         JSON.stringify(rows, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v)),

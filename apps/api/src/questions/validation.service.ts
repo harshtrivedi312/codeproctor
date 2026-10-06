@@ -62,6 +62,8 @@ type JobStatus = Exclude<ValidationStatus, 'NONE'>;
 interface Job {
   readonly jobId: string;
   readonly orgId: string;
+  /** The author who started the run: the actor of the finish audit row (a system write). */
+  readonly starterId: string;
   readonly questionId: string;
   readonly versionId: string;
   readonly version: number;
@@ -137,6 +139,7 @@ export class ValidationService {
         const job: Job = {
           jobId: randomUUID(),
           orgId: actor.orgId,
+          starterId: actor.id,
           questionId: id,
           versionId: head.id,
           version: head.version,
@@ -255,6 +258,22 @@ export class ValidationService {
           : report.passed
             ? 'PASSED'
             : 'FAILED';
+      if (current !== null) {
+        // The outcome outlives the report (the next run clears it): ids, the outcome and a revision
+        // prefix only. A system write on behalf of the author who started the run (FU-BE-130).
+        await audit(
+          tx,
+          { id: job.starterId, orgId: job.orgId },
+          'QUESTION_VALIDATION_FINISHED',
+          job.questionId,
+          {},
+          {
+            version: job.version,
+            outcome: status,
+            revision: job.revision.slice(0, 12),
+          },
+        );
+      }
       if (!stale) {
         await tx.questionVersion.updateMany({
           where: { id: job.versionId, isPublished: false },
