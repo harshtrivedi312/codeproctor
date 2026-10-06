@@ -3,8 +3,8 @@
 // as the reference. Nothing here runs `prisma migrate reset` or `db push` (ADR 0009); the only
 // Prisma commands are `migrate deploy` and `migrate diff` against the throwaway server.
 // Skipped with a message when docker, psql or the postgres:16 image is missing. REQUIRE_DB_DRILL=1
-// turns that, and a missing origin/main for the migration guard, into a failure. CI does not set it
-// yet: it needs the hub's CI change in FU-DBB-03 (pull the image, fetch-depth: 0, set the flag).
+// (set in CI) turns that into a failure. The migration guard fetches origin/main by itself when the
+// checkout is shallow (verify-migration-guard.mjs).
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';

@@ -14,27 +14,38 @@ function hasBase(cwd) {
   );
 }
 
+const scrub = (text) =>
+  text
+    .trim()
+    .replace(/\/\/[^@/\s]+@/g, '//')
+    .slice(0, 200);
+const MAIN = 'main:refs/remotes/origin/main';
+
 /**
- * Makes origin/main and a merge base available: fetches main, then deepens the history in steps.
+ * Makes origin/main and a merge base available. A complete clone gets a plain fetch of main. A
+ * shallow one (a CI checkout: depth 1, no origin/main) gets main at limited depth and is then
+ * deepened in steps until a merge base exists. A complete clone is never made shallow.
  * The fetch is anonymous https for this public repository (a CI checkout keeps no credentials).
  * @returns {{ ok: boolean, reason?: string }}
  */
 export function ensureBase(cwd, { steps = 6, deepen = 100 } = {}) {
   if (hasBase(cwd)) return { ok: true };
-  const fetched = git(cwd, [
+  const shallow = git(cwd, ['rev-parse', '--is-shallow-repository']).stdout.trim() === 'true';
+  const first = git(cwd, [
     'fetch',
     '--no-tags',
-    `--depth=${deepen}`,
+    ...(shallow ? [`--depth=${deepen}`] : []),
     'origin',
-    'main:refs/remotes/origin/main',
+    MAIN,
   ]);
-  if (fetched.status !== 0)
-    return {
-      ok: false,
-      reason: `git fetch origin main failed: ${fetched.stderr.trim().slice(0, 200)}`,
-    };
-  for (let i = 0; i < steps && !hasBase(cwd); i++) {
-    const more = git(cwd, ['fetch', '--no-tags', `--deepen=${deepen}`, 'origin']);
+  if (first.status !== 0)
+    return { ok: false, reason: `git fetch origin main failed: ${scrub(first.stderr)}` };
+  // Deepen main AND the commit that is checked out: the PR merge commit is on no configured
+  // refspec, so deepening main alone would never connect the two histories. Naming both also keeps
+  // the fetch to those two (without refspecs a CI checkout would fetch every branch head).
+  const head = git(cwd, ['rev-parse', 'HEAD']).stdout.trim();
+  for (let i = 0; shallow && i < steps && !hasBase(cwd); i++) {
+    const more = git(cwd, ['fetch', '--no-tags', `--deepen=${deepen}`, 'origin', MAIN, head]);
     if (more.status !== 0) break;
   }
   if (!hasBase(cwd))
@@ -49,28 +60,31 @@ export function ensureBase(cwd, { steps = 6, deepen = 100 } = {}) {
 export function migrationChanges(cwd) {
   const base = ensureBase(cwd);
   if (!base.ok) return { ok: false, reason: base.reason ?? 'no base' };
+  // -z: NUL-separated, so a path with unusual characters is never quoted by git.
   const diff = git(cwd, [
     'diff',
     '--name-status',
     '--no-renames',
+    '-z',
     'origin/main...HEAD',
     '--',
     'prisma/migrations',
   ]);
-  if (diff.status !== 0)
-    return { ok: false, reason: `git diff failed: ${diff.stderr.trim().slice(0, 200)}` };
-  const changed = diff.stdout
-    .trim()
-    .split('\n')
-    .filter((l) => {
-      if (l === '') return false;
-      if (!l.startsWith('A\t')) return true;
-      // A new file is fine only inside a NEW migration directory.
-      const parts = l.split('\t')[1].split('/');
-      if (parts.length < 4) return true;
-      return (
-        git(cwd, ['cat-file', '-e', `origin/main:${parts.slice(0, 3).join('/')}`]).status === 0
-      );
-    });
+  if (diff.status !== 0) return { ok: false, reason: `git diff failed: ${scrub(diff.stderr)}` };
+  const tokens = diff.stdout.split('\0').filter((t) => t !== '');
+  const changed = [];
+  for (let i = 0; i + 1 < tokens.length; i += 2) {
+    const [status, path] = [tokens[i], tokens[i + 1]];
+    if (status === 'A') {
+      // A new file is fine only inside a NEW migration directory. The check is against the tip of
+      // origin/main, which is stricter than the merge base: a name main already uses is refused.
+      const parts = path.split('/');
+      const inExistingDir =
+        parts.length < 4 ||
+        git(cwd, ['cat-file', '-e', `origin/main:${parts.slice(0, 3).join('/')}`]).status === 0;
+      if (!inExistingDir) continue;
+    }
+    changed.push(`${status}\t${path}`);
+  }
   return { ok: true, changed };
 }

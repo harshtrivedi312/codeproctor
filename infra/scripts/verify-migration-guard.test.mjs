@@ -117,6 +117,86 @@ describe('DB-08 migration guard on a shallow checkout (FR-105)', () => {
     });
   });
 
+  it('a rename is caught (it shows as a removal plus an addition)', () => {
+    const clone = ciCheckout('renames', (r) =>
+      git(
+        r,
+        'mv',
+        'prisma/migrations/20261002000001_init',
+        'prisma/migrations/20261002000009_renamed',
+      ),
+    );
+    const result = migrationChanges(clone);
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.changed, [`D\t${M1}`]);
+  });
+
+  it('a bare file directly under prisma/migrations is flagged', () => {
+    const clone = ciCheckout('bare', (r) => write(r, 'prisma/migrations/foo.sql', 'SELECT 1;\n'));
+    assert.deepEqual(migrationChanges(clone), {
+      ok: true,
+      changed: ['A\tprisma/migrations/foo.sql'],
+    });
+  });
+
+  it('a path with unusual characters inside an existing directory is flagged, not quoted away', () => {
+    const clone = ciCheckout('odd', (r) =>
+      write(r, 'prisma/migrations/20261002000001_init/caf\u00e9 \u00fc.sql', 'SELECT 1;\n'),
+    );
+    const result = migrationChanges(clone);
+    assert.equal(result.ok, true);
+    assert.equal(result.changed.length, 1);
+  });
+
+  it('works on the checkout actions/checkout makes: a detached depth-1 PR merge commit', () => {
+    // main moves on after the PR branched, and GitHub's refs/pull/N/merge is a merge of both.
+    const run = (name, change) => {
+      git(origin, 'checkout', '-q', '-B', name, 'main');
+      change(origin);
+      git(origin, 'add', '-A');
+      git(origin, 'commit', '-q', '-m', name);
+      git(origin, 'checkout', '-q', 'main');
+      write(origin, `moved-${name}.txt`, 'main moved');
+      git(origin, 'add', '-A');
+      git(origin, 'commit', '-q', '-m', `main after ${name}`);
+      git(origin, 'checkout', '-q', '--detach', 'main');
+      git(origin, 'merge', '-q', '--no-ff', '-m', `merge ${name}`, name);
+      git(origin, 'update-ref', `refs/pull/${name}/merge`, 'HEAD');
+      git(origin, 'checkout', '-q', 'main');
+      const clone = join(root, `pr-${name}`);
+      mkdirSync(clone);
+      git(clone, 'init', '-q');
+      git(clone, 'remote', 'add', 'origin', `file://${origin}`);
+      git(
+        clone,
+        'fetch',
+        '-q',
+        '--no-tags',
+        '--depth=1',
+        'origin',
+        `+refs/pull/${name}/merge:refs/remotes/pull/${name}/merge`,
+      );
+      git(clone, 'checkout', '-q', '--detach', `refs/remotes/pull/${name}/merge`);
+      return clone;
+    };
+    const good = run('prgood', (r) =>
+      write(r, 'prisma/migrations/20261004000001_new/migration.sql', 'SELECT 1;\n'),
+    );
+    assert.equal(git(good, 'rev-parse', '--is-shallow-repository'), 'true');
+    assert.deepEqual(migrationChanges(good), { ok: true, changed: [] });
+    const bad = run('prbad', (r) => write(r, M1, 'CREATE TABLE a (id text);\n'));
+    assert.deepEqual(migrationChanges(bad), { ok: true, changed: [`M\t${M1}`] });
+  });
+
+  it('a complete clone is never made shallow by the guard', () => {
+    const full = join(root, 'full');
+    git(root, 'clone', '-q', '--single-branch', '--branch', 'edits', `file://${origin}`, full);
+    assert.equal(git(full, 'rev-parse', '--is-shallow-repository'), 'false');
+    const result = migrationChanges(full);
+    assert.equal(result.ok, true);
+    assert.equal(git(full, 'rev-parse', '--is-shallow-repository'), 'false');
+  });
+
   it('reports, never passes, when the base cannot be fetched', () => {
     const clone = ciCheckout('offline', (r) => write(r, 'y.txt', 'y'));
     git(clone, 'remote', 'set-url', 'origin', join(root, 'does-not-exist'));
