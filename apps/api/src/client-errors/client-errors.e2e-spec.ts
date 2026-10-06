@@ -475,7 +475,7 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
     expect(res.headers['x-request-id']).toBe((res.body as ProblemDetails).traceId);
   });
 
-  it('C-32, FU-BE-100: a rejected report carries Connection: close and the client still reads the 413 while streaming a declared 1 MB body slowly', async () => {
+  it('C-32, FU-BE-100: a rejected report (declared 1 MB body, only the first chunk sent) is answered 413 with Connection: close before the body is read', async () => {
     await restart({});
     const server = app.getHttpServer() as unknown as Server;
     if (server.address() === null) await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -483,7 +483,11 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
     const total = 1024 * 1024;
     const result = await new Promise<{ status: number; connection: string | undefined }>(
       (resolve, reject) => {
-        let gotResponse = false;
+        // Only one chunk is written and the request is never ended: a server that closes with unread
+        // bytes still arriving would RST the connection and the client could lose the answer, which
+        // is a property of TCP, not of this route. The 413 must come from the declared length alone.
+        const noAnswer = setTimeout(() => reject(new Error('no response within 5 s')), 5_000);
+        noAnswer.unref();
         const req = httpRequest(
           {
             host: '127.0.0.1',
@@ -493,25 +497,24 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
             headers: { 'content-type': 'application/json', 'content-length': String(total) },
           },
           (res) => {
-            // The status line and headers are what matter: the server may close the socket right
-            // after answering, so the rest of the exchange can end in an RST that is not a failure.
-            gotResponse = true;
-            clearInterval(timer);
+            clearTimeout(noAnswer);
             resolve({ status: res.statusCode ?? 0, connection: res.headers['connection'] });
-            res.resume();
             res.on('error', () => undefined);
+            res.resume();
+            req.destroy();
           },
         );
-        req.on('error', (e) => {
-          if (!gotResponse) reject(e);
+        let answered = false;
+        req.on('response', () => {
+          answered = true;
         });
-        let sent = 0;
-        const timer = setInterval(() => {
-          if (sent >= total || req.destroyed || gotResponse) return clearInterval(timer);
-          sent += 64 * 1024;
-          req.write(Buffer.alloc(64 * 1024, 0x61));
-        }, 20);
-        timer.unref();
+        req.on('error', (e) => {
+          if (!answered) {
+            clearTimeout(noAnswer);
+            reject(e);
+          }
+        });
+        req.write(Buffer.alloc(64 * 1024, 0x61));
       },
     );
     expect(result.status).toBe(413);
