@@ -410,6 +410,61 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       expect(after.setPasswordTokenHash).toBe(row.setPasswordTokenHash);
     });
 
+    it('FR-103, TC-006: a duplicate email is 409 and leaves one USER_INVITE_CONFLICT row with no email and no user id (DL-36)', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const other = await make(UserRole.RECRUITER, { orgId: orgB });
+      const before = await owner.auditLog.count({ where: { action: 'USER_INVITE_CONFLICT' } });
+      const res = await http()
+        .post(`${API}/admin/users`)
+        .set(admin.auth)
+        .send({ currentPassword: PASSWORD, email: other.email, name: 'Dup', role: 'RECRUITER' })
+        .expect(409);
+      expect(JSON.stringify(res.body)).not.toContain(other.email);
+      const rows = await owner.auditLog.findMany({
+        where: { action: 'USER_INVITE_CONFLICT', actorId: admin.id },
+      });
+      expect(await owner.auditLog.count({ where: { action: 'USER_INVITE_CONFLICT' } })).toBe(
+        before + 1,
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ orgId: orgA, entityId: null, metadata: {} });
+      // The rolled-back invite left no USER_INVITED row.
+      expect(JSON.stringify(rows[0]?.metadata)).not.toContain(other.email);
+      expect(
+        await owner.auditLog.count({ where: { action: 'USER_INVITED', actorId: admin.id } }),
+      ).toBe(0);
+    });
+
+    it('FR-103, TC-006: if the conflict row cannot be written the invite fails (500), not a 409 answered unrecorded (DL-36)', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const other = await make(UserRole.RECRUITER, { orgId: orgB });
+      const { PrismaService } = jest.requireActual<typeof import('../database/prisma.service')>(
+        '../database/prisma.service',
+      );
+      const client = app.get(PrismaService).client;
+      const create = jest.spyOn(client.auditLog, 'create').mockRejectedValue(new Error('disk'));
+      let status: number | undefined;
+      let body: string | undefined;
+      try {
+        const res = await http()
+          .post(`${API}/admin/users`)
+          .set(admin.auth)
+          .send({ currentPassword: PASSWORD, email: other.email, name: 'Dup', role: 'RECRUITER' });
+        status = res.status;
+        body = JSON.stringify(res.body);
+      } finally {
+        create.mockRestore();
+      }
+      expect(status).toBe(500);
+      expect(body ?? '').not.toContain('already exists');
+      expect(body ?? '').not.toContain(other.email);
+      expect(
+        await owner.auditLog.count({
+          where: { action: 'USER_INVITE_CONFLICT', actorId: admin.id },
+        }),
+      ).toBe(0);
+    });
+
     it('FR-103: a duplicate email is 409; a bad body is 400', async () => {
       const admin = await make(UserRole.SUPER_ADMIN);
       const other = await make(UserRole.RECRUITER, { orgId: orgB });
