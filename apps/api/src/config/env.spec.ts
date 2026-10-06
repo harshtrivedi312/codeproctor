@@ -70,6 +70,10 @@ describe('NFR-04 environment validation', () => {
       JUDGE0_URL: 'https://judge0.example.com',
       JUDGE0_AUTH_TOKEN: token,
       JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
+      // Candidate settings (BE-07) are also required in pilot and production.
+      JWT_CANDIDATE_SECRET: 'c'.repeat(48),
+      OTP_PEPPER: 'p'.repeat(48),
+      REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
     };
     expect(validateEnv(live).JUDGE0_URL).toBe('https://judge0.example.com');
     expect(() => validateEnv({ ...live, JUDGE0_URL: undefined })).toThrow(/JUDGE0_URL/);

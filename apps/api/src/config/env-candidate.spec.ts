@@ -45,15 +45,21 @@ describe('Candidate session environment (BE-07, ADR 0003, ADR 0007 section 6, AD
   });
 
   it('NFR-04: pilot and production require the candidate secrets and Legal-approved consent', () => {
+    // The code runner settings (FR-503) are required in these environments too.
+    const judge0 = {
+      JUDGE0_URL: 'https://judge0.example.com',
+      JUDGE0_AUTH_TOKEN: 't'.repeat(32),
+      JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
+    };
     for (const APP_ENV of ['pilot', 'production']) {
-      expect(() => validateEnv({ ...valid, APP_ENV, REQUIRE_LEGAL_APPROVED_CONSENT: 'true' })).toThrow(
+      expect(() => validateEnv({ ...valid, ...judge0, APP_ENV, REQUIRE_LEGAL_APPROVED_CONSENT: 'true' })).toThrow(
         /JWT_CANDIDATE_SECRET/,
       );
-      expect(() => validateEnv({ ...valid, ...candidate, APP_ENV })).toThrow(
+      expect(() => validateEnv({ ...valid, ...judge0, ...candidate, APP_ENV })).toThrow(
         /REQUIRE_LEGAL_APPROVED_CONSENT/,
       );
       expect(
-        validateEnv({ ...valid, ...candidate, APP_ENV, REQUIRE_LEGAL_APPROVED_CONSENT: 'true' }).APP_ENV,
+        validateEnv({ ...valid, ...judge0, ...candidate, APP_ENV, REQUIRE_LEGAL_APPROVED_CONSENT: 'true' }).APP_ENV,
       ).toBe(APP_ENV);
     }
   });
