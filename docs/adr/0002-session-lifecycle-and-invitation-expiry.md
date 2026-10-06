@@ -5,7 +5,7 @@
 | Status | **Accepted** 2026-10-01 (D-16): A-03 option (a); every other recommendation as proposed; amended by D-17 (consent declined), D-21 (OTP during a test) and D-23 (manual scoring routing). See section 9. Section 10 (C-28 and ERASED) is a proposed amendment awaiting the owner. Applied to database.md; deltas in ADR 0008. |
 | Author | architect |
 | Decides | **A-03 per-section timing**, Q-01, Q-02 (column only), Q-23, Q-24, A-06 |
-| Serves | FR-301, FR-303, FR-305, FR-403, FR-505, FR-601, FR-604, FR-609, FR-903, FR-904; FR-805; NFR-05; NFR-08; TC-021, TC-022, TC-024, TC-033, TC-036, TC-045, TC-046, TC-047, TC-050, TC-055, TC-063, TC-079, TC-080 |
+| Serves | FR-301, FR-303, FR-305, FR-403, FR-505, FR-601, FR-604, FR-609, FR-903, FR-904, FR-805; NFR-05, NFR-08; TC-021, TC-022, TC-024, TC-033, TC-036, TC-045, TC-046, TC-047, TC-050, TC-055, TC-063, TC-079, TC-080 |
 | Hands off | Candidate token storage, HMAC key delivery and reload recovery: ARC-03. GRADED ordering (Q-22): ARC-04. |
 
 DDL deltas are written against the reference DDL in database.md. No migration exists yet, so DB-02 applies them directly. This ADR is longer than one page because it carries A-03 and the pause and resume policy (D-03, D-08).
