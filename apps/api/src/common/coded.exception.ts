@@ -10,12 +10,14 @@ export const PROBLEM_CODES = [
   'BUSY',
 ] as const;
 export type ProblemCode = (typeof PROBLEM_CODES)[number];
+/** The codes a coded exception may carry: BUSY belongs to the lock path of ProblemFilter alone. */
+export type ExceptionProblemCode = Exclude<ProblemCode, 'BUSY'>;
 
 /** A 403 that carries a stable machine code, so clients never have to match on `detail`. */
 export class CodedForbiddenException extends ForbiddenException {
   constructor(
     message: string,
-    readonly code: ProblemCode,
+    readonly code: ExceptionProblemCode,
   ) {
     super({ message, code });
   }
@@ -25,7 +27,7 @@ export class CodedForbiddenException extends ForbiddenException {
 export class CodedConflictException extends ConflictException {
   constructor(
     message: string,
-    readonly code: ProblemCode,
+    readonly code: ExceptionProblemCode,
   ) {
     super({ message, code });
   }

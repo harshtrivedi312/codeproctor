@@ -1,5 +1,6 @@
 // DL-37, FU-BE-42: database lock contention is 503 + Retry-After on every route.
 import { ArgumentsHost, ConflictException, HttpException, Logger } from '@nestjs/common';
+import { CodedConflictException, CodedForbiddenException } from './coded.exception';
 import { Prisma } from '../generated/prisma/client.js';
 import { lockContentionCode } from './db-contention';
 import { ProblemFilter } from './problem.filter';
@@ -196,6 +197,16 @@ describe('ProblemFilter database lock contention (DL-37, FU-BE-42, NFR-04)', () 
     expect(r.status).toBe(409);
     expect(r.headers['Retry-After']).toBeUndefined();
     expect(run(new HttpException('x', 404)).status).toBe(404);
+  });
+
+  it('DL-37: a coded 409 or 403 built with BUSY (cast) never emits it', () => {
+    const busy = 'BUSY' as unknown as ConstructorParameters<typeof CodedConflictException>[1];
+    const conflict = run(new CodedConflictException('x', busy));
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.code).toBeUndefined();
+    const forbidden = run(new CodedForbiddenException('x', busy));
+    expect(forbidden.status).toBe(403);
+    expect(forbidden.body.code).toBeUndefined();
   });
 
   it('FU-BE-42: a cyclic or very deep cause chain terminates', () => {

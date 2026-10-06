@@ -136,7 +136,9 @@ export class ProblemFilter implements ExceptionFilter {
       if (
         (exception instanceof CodedForbiddenException ||
           exception instanceof CodedConflictException) &&
-        status < 500
+        status < 500 &&
+        // BUSY is set by the lock path only, whatever a coded exception was built with.
+        (exception.code as string) !== LOCK_CONTENTION_CODE
       ) {
         problem.code = exception.code;
       }
