@@ -145,14 +145,14 @@ describe('ADR 0013 CS-4 interim: nothing a client sends picks a row', () => {
         f.path === 'candidate/session-jobs.service.ts'
           ? ['discoverDisconnected', 'sweepConsentPdfs'].map((m) => methodRange(f.text, m))
           : f.path === 'candidate/test-start.service.ts'
-            ? [methodRange(f.text, 'resolveRandom')]
+            ? [methodRange(f.text, 'assignRandom')]
             : [];
       for (const { call, args, index } of prismaCalls(f.text)) {
         if (exempt.some(([a, b]) => index >= a && index < b)) continue;
         if (!PREDICATE.test(args)) unfiltered.push(`${f.path}: ${call}`);
       }
     }
-    // The only calls without a predicate are the discovery and sweep methods and resolveRandom,
+    // The only calls without a predicate are the discovery and sweep methods and assignRandom,
     // all exempted by method above.
     expect(unfiltered).toEqual([]);
   });

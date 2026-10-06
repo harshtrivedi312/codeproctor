@@ -1221,6 +1221,76 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       }
     });
 
+    it('FR-203, FU-BE-154: nested random rules that the save-time check accepts always start (exact matching, not greedy)', async () => {
+      const t = await createTenant(owner, 'nest');
+      // Only two questions match {tags:[arrays]}; only one of them also has x. Greedy picking
+      // fails for the first slot half the time; the matching never does.
+      const [p1, p2, p3] = t.test.randomPoolVersionIds;
+      const tagOf = async (versionId: string | undefined, tags: string[]): Promise<void> => {
+        const v = await owner.questionVersion.findUniqueOrThrow({
+          where: { id: versionId as string },
+        });
+        await owner.question.update({ where: { id: v.questionId }, data: { tags } });
+      };
+      await tagOf(p1, ['arrays']);
+      await tagOf(p2, ['arrays', 'x']);
+      await tagOf(p3, ['other']);
+      // Slots: two random ones in section 1 and none fixed.
+      await owner.testQuestion.deleteMany({
+        where: { id: { in: [t.test.testQuestionIds[0], t.test.testQuestionIds[2]] } },
+      });
+      await owner.testQuestion.update({
+        where: { id: t.test.testQuestionIds[1] },
+        data: { randomRule: { tags: ['arrays'] } },
+      });
+      await owner.testQuestion.create({
+        data: {
+          sectionId: t.test.sectionIds[0],
+          randomRule: { tags: ['arrays', 'x'] },
+          points: 10,
+          position: 3,
+        },
+      });
+      for (let i = 0; i < 14; i++) {
+        const inv = await invite(verified(), t);
+        await authed('post', '/test/start', tokenFor(inv, t)).expect(200);
+        const rows = await owner.sessionQuestion.findMany({
+          where: { sessionId: inv.sessionId },
+          orderBy: { position: 'asc' },
+        });
+        expect(rows.map((r) => r.questionVersionId)).toEqual([p1, p2]);
+      }
+    });
+
+    it('FR-203: rules that nothing can serve together still fail the start with 409 RANDOM_RULE_UNSATISFIABLE', async () => {
+      const t = await createTenant(owner, 'nest2');
+      const v = await owner.questionVersion.findUniqueOrThrow({
+        where: { id: t.test.randomPoolVersionIds[0] as string },
+      });
+      for (const id of t.test.randomPoolVersionIds.slice(1)) {
+        const other = await owner.questionVersion.findUniqueOrThrow({ where: { id } });
+        await owner.question.update({ where: { id: other.questionId }, data: { tags: ['other'] } });
+      }
+      // One question matches {tags:[arrays]}, and two slots want it.
+      await owner.testQuestion.deleteMany({
+        where: { id: { in: [t.test.testQuestionIds[0], t.test.testQuestionIds[2]] } },
+      });
+      await owner.testQuestion.create({
+        data: {
+          sectionId: t.test.sectionIds[0],
+          randomRule: { tags: ['arrays'] },
+          points: 10,
+          position: 3,
+        },
+      });
+      expect(v.questionId).toBeTruthy();
+      const inv = await invite(verified(), t);
+      const res = await authed('post', '/test/start', tokenFor(inv, t));
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: 'RANDOM_RULE_UNSATISFIABLE' });
+      expect((await sessionRow(inv.sessionId)).status).toBe('VERIFIED');
+    });
+
     it('FR-203: a random rule nothing matches fails the start cleanly and leaves the session VERIFIED', async () => {
       const t = await createTenant(owner, 'norule');
       await owner.testQuestion.update({
