@@ -5,6 +5,7 @@ export const PROBLEM_CODES = [
   'REAUTH_FAILED',
   'TWO_FACTOR_REQUIRED_FOR_ROLE',
   'SETTINGS_CONFLICT',
+  'VARIANT_HAS_AI_REFERENCES',
 ] as const;
 export type ProblemCode = (typeof PROBLEM_CODES)[number];
 
