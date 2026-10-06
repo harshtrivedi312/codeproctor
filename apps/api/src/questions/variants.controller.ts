@@ -29,7 +29,11 @@ import type { AuthedRequest } from '../common/auth/auth.types';
 import { Roles } from '../common/auth/decorators';
 import { ctxOf } from '../common/request-context';
 import { UserRole } from '../generated/prisma/client';
-import { CandidateQuestionPreviewDto, VersionParamDto } from './dto/questions.dto';
+import {
+  CandidateQuestionPreviewDto,
+  RevisionResultDto,
+  VersionParamDto,
+} from './dto/questions.dto';
 import {
   CreateVariantDto,
   RevisionQueryDto,
@@ -41,7 +45,6 @@ import {
   VariantParamDto,
   VariantTestCaseParamDto,
 } from './dto/variants.dto';
-import { RevisionResultDto } from './dto/questions.dto';
 import type { CandidateQuestionView } from './candidate-view';
 import type { Actor } from './question-tx';
 import { VariantsService } from './variants.service';
@@ -144,7 +147,7 @@ export class VariantsController {
     description:
       'The version is published (immutable), the question is archived, stale revision, or the variant has AI reference rows (ADR 0005 AI-1; it cannot be deleted, set it inactive)',
   })
-  async remove(
+  remove(
     @Param() p: VariantParamDto,
     @Query() q: RevisionQueryDto,
     @Req() req: AuthedRequest,
@@ -205,7 +208,7 @@ export class VariantsController {
     description:
       'The version is published (immutable), the question is archived, or stale revision',
   })
-  async removeOverride(
+  removeOverride(
     @Param() p: VariantTestCaseParamDto,
     @Query() q: RevisionQueryDto,
     @Req() req: AuthedRequest,

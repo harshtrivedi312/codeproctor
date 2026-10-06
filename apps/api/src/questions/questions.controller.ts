@@ -145,7 +145,7 @@ export class QuestionsController {
     @Body() dto: UpdateQuestionDto,
     @Req() req: AuthedRequest,
   ): Promise<QuestionUpdateResultDto> {
-    return this.questions.update(actorOf(req), params.id, dto, ctxOf(req), canSeeAnswers(req));
+    return this.questions.update(actorOf(req), params.id, dto, ctxOf(req));
   }
 
   @Post(':id/publish')
@@ -214,14 +214,7 @@ export class QuestionsController {
     @Body() dto: CreateTestCaseDto,
     @Req() req: AuthedRequest,
   ): Promise<TestCaseMutationDto> {
-    return this.questions.addTestCase(
-      actorOf(req),
-      params.id,
-      params.version,
-      dto,
-      ctxOf(req),
-      canSeeAnswers(req),
-    );
+    return this.questions.addTestCase(actorOf(req), params.id, params.version, dto, ctxOf(req));
   }
 
   @Patch(':id/versions/:version/test-cases/:testCaseId')
@@ -247,7 +240,6 @@ export class QuestionsController {
       params.testCaseId,
       dto,
       ctxOf(req),
-      canSeeAnswers(req),
     );
   }
 
@@ -266,7 +258,7 @@ export class QuestionsController {
     description:
       'The version is published (immutable), the question is archived, or stale expectedRevision',
   })
-  async removeTestCase(
+  removeTestCase(
     @Param() params: TestCaseParamDto,
     @Query() q: RevisionQueryDto,
     @Req() req: AuthedRequest,

@@ -5,6 +5,7 @@ import { INestApplication, Logger } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
 import { Client } from 'pg';
 import request from 'supertest';
+import { computeRevision } from './revision';
 import type { App } from 'supertest/types';
 import { passwordVersion } from '../auth/crypto.util';
 import type { TokenService } from '../common/auth/token.service';
@@ -648,7 +649,19 @@ describe('Validate job and AI references (FR-202, FR-203, TC-011, TC-012)', () =
       const id = await create(a);
       const variantId = await addVariant(a, id, 3);
       await addAi(a, id).expect(201);
-      await delVariant(a, id, variantId).expect(200);
+      const del = await delVariant(a, id, variantId).expect(200);
+      expect(Object.keys(del.body as Json)).toEqual(['revision']);
+      const head = await owner.questionVersion.findFirstOrThrow({ where: { questionId: id } });
+      expect((del.body as Json).revision).toBe(
+        computeRevision(
+          head,
+          await owner.testCase.findMany({ where: { questionVersionId: head.id } }),
+          await owner.questionVariant.findMany({
+            where: { questionVersionId: head.id },
+            include: { testCaseOverrides: true },
+          }),
+        ),
+      );
       expect(await owner.questionVariant.count({ where: { id: variantId } })).toBe(0);
       expect(
         await owner.aiReferenceSolution.count({ where: { questionVersion: { questionId: id } } }),

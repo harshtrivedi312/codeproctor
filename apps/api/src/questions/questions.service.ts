@@ -14,7 +14,9 @@
 // always question row, then version row.
 //
 // Mutations write their audit row in the same transaction. Audit metadata names ids and changed
-// fields only, never content. `full` (see staff-view.ts) is decided once in the controller.
+// fields only, never content. `full` (see staff-view.ts) is decided once in the controller; the
+// write paths that answer a revision (update, test cases) are writer-only and always use the full
+// view, so they take no `full` and a future role change cannot expose a revision.
 import {
   BadRequestException,
   ConflictException,
@@ -284,7 +286,6 @@ export class QuestionsService {
     id: string,
     dto: UpdateQuestionDto,
     ctx: RequestContext,
-    full: boolean,
   ): Promise<QuestionUpdateResultDto> {
     const { tags, expectedRevision, ...rest } = dto;
     const contentFields = (Object.keys(rest) as (keyof typeof rest)[]).filter(
@@ -298,8 +299,11 @@ export class QuestionsService {
         // The answer is read inside the transaction, after the change, under the question lock:
         // `revision` is the revision of the version this edit left (the new one after a fork).
         const done = async (forked: boolean): Promise<QuestionUpdateResultDto> => {
-          const detail = await this.detail(tx, id, undefined, full, forked);
-          return { ...detail, revision: await currentRevision(tx, detail.version.id) };
+          // Writers only: always the full view, so version.revision is present (never a flag).
+          const detail = await this.detail(tx, id, undefined, true, forked);
+          const revision = detail.version.revision;
+          if (revision === undefined) throw new Error('The full version view carries a revision');
+          return { ...detail, revision };
         };
         const question = await lockWritable(tx, id);
         const head = await latestVersion(tx, id);
@@ -548,7 +552,6 @@ export class QuestionsService {
     version: number,
     dto: CreateTestCaseDto,
     ctx: RequestContext,
-    full: boolean,
   ): Promise<TestCaseMutationDto> {
     return this.prisma.client.$transaction(async (tx) => {
       const v = await lockDraft(tx, id, version);
@@ -582,7 +585,7 @@ export class QuestionsService {
         testCaseId: created.id,
         isHidden: created.isHidden,
       });
-      return { ...toTestCaseDto(created, full), revision: await currentRevision(tx, v.id) };
+      return { ...toTestCaseDto(created, true), revision: await currentRevision(tx, v.id) };
     });
   }
 
@@ -593,7 +596,6 @@ export class QuestionsService {
     testCaseId: string,
     dto: UpdateTestCaseDto,
     ctx: RequestContext,
-    full: boolean,
   ): Promise<TestCaseMutationDto> {
     const fields = (Object.keys(dto) as (keyof UpdateTestCaseDto)[]).filter(
       (k) => k !== 'expectedRevision' && dto[k] !== undefined,
@@ -622,7 +624,7 @@ export class QuestionsService {
         testCaseId,
         fields,
       });
-      return { ...toTestCaseDto(row, full), revision: await currentRevision(tx, v.id) };
+      return { ...toTestCaseDto(row, true), revision: await currentRevision(tx, v.id) };
     });
   }
 
