@@ -9,6 +9,7 @@ import { Module } from '@nestjs/common';
 import { DatabaseModule } from '../database';
 import { LegalHoldPort, NoLegalHold } from './legal-hold.port';
 import { loadRetentionConfig } from './retention.config';
+import { ConsentRetentionRepository } from './consent-retention.repository';
 import { RetentionRepository } from './retention.repository';
 import { RETENTION_CONFIG, RetentionService } from './retention.service';
 
@@ -37,6 +38,7 @@ export class RetentionModule {
       ],
       providers: [
         RetentionRepository,
+        ConsentRetentionRepository,
         RetentionService,
         { provide: RETENTION_CONFIG, useFactory: () => loadRetentionConfig(process.env) },
         ...(options.legalHold ? [] : [{ provide: LegalHoldPort, useClass: NoLegalHold }]),
