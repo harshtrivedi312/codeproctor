@@ -109,3 +109,35 @@ The six owner questions were answered by C-21 (2026-10-05, D-49) and are recorde
 - BE-02: a successful re-auth does not reset the failed-login counter on main (it only refunds its own reservation); confirm or change.
 - Backend follow-up: add `req.body.currentPassword`, `req.body.password`, `req.body.newPassword` (and `err` equivalents) to the pino redact list in `apps/api/src/app.module.ts` (no body paths on main today).
 - Backend follow-up: audit every re-auth failure and a successful `setup/start` (today only completed actions and the lock-triggering failure are audited).
+
+## Hub review follow-ups (2026-10-06 batch)
+
+From the ADR 0013 / 0006 section 8 / 0014 / 0016 reviews and the CI PRs. Owner-gated items are marked.
+
+### ADR 0013 (merged as Proposed)
+- F1: the consent-PDF renderer must be named as a carve-out reader of `signedName`, `ip`, `userAgent` in ADR 0004 section 9.5 (the lint fails closed until then).
+- F2: the SERVICE pool needs a whole-transaction bound (Prisma `$transaction` timeout about 5 s, `idle_in_transaction_session_timeout`); the bounded PUT under the lock gets its own timeout.
+- F3: main-pool candidate writes outside `$transaction` have no `statement_timeout`; add one or state that every candidate write runs in a `$transaction`.
+- F4: name the enforcement for "no other transaction API" (lint or the FU-DB-67 test rejecting `$transaction` in session-job code outside `SessionJobProcessor`).
+- Wording: the candidate session field is `sessionStatus`, not `status` (done in this PR, lines 132 and 193).
+- ADR 0004 section 9.5 step 4 predicate text: copy `where: { id, status: <read>, NOT: { status: 'ERASED' } }` and the `withLiveSession` / `withAnySession` names so the three ADRs read the same.
+
+### ADR 0006 section 8 (merged)
+- F5: add "the erasure re-run" to the `withAnySession` list. F6: name `withLiveSession` and `withAnySession` in FU-DB-67 (high priority before its implementation). F7: state the SERVICE pool decision (`lock_timeout=1000`, `statement_timeout=10000`) and add its client to the 8.6 importer list with the "extension is applied" test. F8: pick one form for the pool `statement_timeout` (pg field or `options`) for the BE-07 spike.
+- Code gaps recorded in the as-built table: unknown system-scope write operations pass through (Database A is making it deny-by-default against SCOPED_OPERATIONS); org-scope delete of the Organization row is closed by #82 (FU-DB-68).
+
+### ADR 0014 (merged as Proposed)
+- Nonce race: after the signature verifies, do an atomic check-and-insert. The corpus read must re-check fences just before `/v1/analyze/similarity`, or record that residual. List exactly which unsigned codes the API accepts as genuine (413 and 400 are sent before the signature check). An injected unsigned 401 is an availability residual: note it or probe `/v1/ready` first. Cap `Retry-After` on the API side.
+- Frontend constraint (FU-FEB-03): the production-build mock guard must read `process.env.ALLOW_MOCKING_IN_PRODUCTION_BUILD === 'staging-only'` at build time in `next.config.ts` and never expose it through `nextConfig.env` or a `NEXT_PUBLIC_` alias.
+
+### ADR 0016 (merged as Proposed)
+- DNS Firewall rule groups associate per VPC: a shared pilot VPC allowlist must cover the app host's names, or Judge0 gets its own VPC (layout ADR decides; preferred: separate VPC).
+- Integrity B benchmark: AuraFace about 279 ms per embedding (1 thread about 3.6 per second, 4 threads about 11.2 per second). Without a selfie cache, 200 concurrent candidates need about 4.0 per second, so 2 vCPU is thin. Rerun the benchmark on the chosen instance type before the pilot; this feeds the cache recommendation in ADR 0004 Q1 / ADR 0014 Q7 (owner questions via the Delivery Lead).
+
+### CI (PRs #86, #87, #105, #110)
+- `qa.yml`: reject an empty host in the three allow-list steps; lowercase `host` consistently (`ALLOWED_HOSTS`, `web_host`, `api_host`); run the ZAP verdict step with `if: ${{ !cancelled() }}`; the node tests for `packages/qa/zap` and `k6/lib/guard.test.mjs` do not run in CI (needs a QA A script); the `K6_SESSIONS_JSON` secret may exceed 48 KB for 200 sessions.
+- `backup-nightly.yml`: `PGSSLROOTCERT=system` needs a publicly signed certificate matching `STAGING_BACKUP_PGHOST`; document in the runbook. Pin `postgres:16` by digest in both workflow files, kept in sync with `POSTGRES_IMAGE` in `verify-drill-support.mjs`. The `verify` job may need a longer `timeout-minutes` now that it runs the restore drill.
+
+### Owner-gated (not done here)
+- ADR 0011 amendment: `currentPassword` step-up also covers `POST /admin/users`, `PATCH /admin/users/:userId` and `POST .../unlock`. ADR 0010 section 6: `account:self`, heartbeat, appeals, reports and webhooks permissions and a CANDIDATE route variant (PR #113 adds `candidate_session:read|start|heartbeat|key`).
+- CLAUDE.md rule 9/11 amendment (merge by the Delivery Lead, no re-run for disjoint changes); ADR 0004 section 9 and ADR 0015 acceptance with the database.md update for migrations #91 and #100; C-30 age-confirmation storage; BE-07 B-1 exception.
