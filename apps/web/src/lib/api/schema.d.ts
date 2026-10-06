@@ -772,6 +772,44 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v1/tests': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** REAL. Test templates of your organisation (test:read), newest first. */
+    get: operations['listTests'];
+    put?: never;
+    /** REAL. Create a test with ordered sections, fixed or random questions, a STANDARD or STRICT profile and a pass score (test:create). */
+    post: operations['createTest'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/tests/{testId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        testId: string;
+      };
+      cookie?: never;
+    };
+    /** REAL. One test with its sections and questions (test:read). */
+    get: operations['getTest'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** REAL. Edit a test that has no invitation or session yet (test:update). Sections, when sent, replace ALL sections. There is NO revision or If-Match: two editors are last-write-wins. passScore cannot be cleared once set. */
+    patch: operations['updateTest'];
+    trace?: never;
+  };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1215,6 +1253,93 @@ export interface components {
         /** @description Why no output could be produced (runtime error, limit) */
         error?: string;
       }[];
+    };
+    /**
+     * @description STANDARD records the web session; STRICT adds a second camera. LOCKDOWN is not offered in this build.
+     * @enum {string}
+     */
+    TestProfile: 'STANDARD' | 'STRICT';
+    /** @description Exactly { tags?, difficulty?, type? }; unknown keys are refused. There is NO count: one question slot picks one question, and N slots with the same rule need N different matching published questions. Tags are lower-cased, 1 to 20, all must match. */
+    RandomRule: {
+      tags?: string[];
+      difficulty?: components['schemas']['Difficulty'];
+      type?: components['schemas']['QuestionType'];
+    };
+    /** @description Exactly one of questionVersionId and randomRule. */
+    TestQuestionInput: {
+      /** @description A PUBLISHED version of a non-archived question */
+      questionVersionId?: string;
+      randomRule?: components['schemas']['RandomRule'];
+      /** @default 100 */
+      points: number;
+      position?: number;
+    };
+    TestSectionInput: {
+      title: string;
+      position?: number;
+      /** @description Section limits together may not exceed durationMinutes (ADR 0002) */
+      timeLimitMin?: number;
+      questions: components['schemas']['TestQuestionInput'][];
+    };
+    CreateTest: {
+      name: string;
+      description?: string;
+      durationMinutes: number;
+      profile?: components['schemas']['TestProfile'];
+      /** @description From 0 to the points of all questions together */
+      passScore?: number;
+      sections: components['schemas']['TestSectionInput'][];
+    };
+    UpdateTest: {
+      name?: string;
+      description?: string;
+      durationMinutes?: number;
+      profile?: components['schemas']['TestProfile'];
+      passScore?: number;
+      sections?: components['schemas']['TestSectionInput'][];
+    };
+    TestQuestion: {
+      id: string;
+      position: number;
+      points: number;
+      questionVersionId: string | null;
+      title: string | null;
+      /** @enum {string|null} */
+      difficulty: 'EASY' | 'MEDIUM' | 'HARD' | null;
+      randomRule: {
+        [key: string]: unknown;
+      } | null;
+    };
+    TestSection: {
+      id: string;
+      title: string;
+      position: number;
+      timeLimitMin: number | null;
+      questions: components['schemas']['TestQuestion'][];
+    };
+    TestSummary: {
+      id: string;
+      name: string;
+      description: string | null;
+      durationMinutes: number;
+      profile: components['schemas']['TestProfile'];
+      passScore: number | null;
+      createdById: string | null;
+      /** Format: date-time */
+      createdAt: string;
+      sectionCount: number;
+      questionCount: number;
+      /** @description The test has an invitation or a session */
+      used: boolean;
+    };
+    TestDetail: components['schemas']['TestSummary'] & {
+      sections: components['schemas']['TestSection'][];
+    };
+    TestList: {
+      items: components['schemas']['TestSummary'][];
+      page: number;
+      pageSize: number;
+      total: number;
     };
     ApiError: {
       code: string;
@@ -3525,6 +3650,199 @@ export interface operations {
         };
       };
       /** @description The replacement language is not allowed */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  listTests: {
+    parameters: {
+      query?: {
+        page?: number;
+        pageSize?: number;
+        search?: string;
+        profile?: components['schemas']['TestProfile'];
+        /** @description true only tests that already have invitations, false only tests that have none */
+        used?: boolean;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description One page */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['TestList'];
+        };
+      };
+      /** @description Invalid query, or a page deeper than 10 000 rows */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+    };
+  };
+  createTest: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['CreateTest'];
+      };
+    };
+    responses: {
+      /** @description Created */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['TestDetail'];
+        };
+      };
+      /** @description Validation failed (LOCKDOWN, section limits above the duration, a bad random rule, positions, an unknown field); errors[] says what */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description A fixed question version does not exist, is a draft, or is not in your organisation (one answer) */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description A fixed version belongs to an archived question, or a random rule matches too few published questions */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  getTest: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        testId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The test */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['TestDetail'];
+        };
+      };
+      /** @description Not a UUID */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description No such test in your organisation */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  updateTest: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        testId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['UpdateTest'];
+      };
+    };
+    responses: {
+      /** @description The test after the edit */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['TestDetail'];
+        };
+      };
+      /** @description Validation failed, or nothing to change */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description No such test (or question version) in your organisation */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description The test already has an invitation or a session and cannot be edited */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description A fixed version belongs to an archived question, or a random rule is unsatisfiable */
       422: {
         headers: {
           [name: string]: unknown;

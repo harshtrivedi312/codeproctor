@@ -1513,6 +1513,138 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+  # ---------------------------------------------------------------------------------------------
+  # Tests (FR-301, FR-302; REAL since BE-06a, apps/api/src/tests). Roles: SUPER_ADMIN and RECRUITER
+  # (test:read, test:create, test:update); an Author or Reviewer gets 403. No revision and no
+  # delete or archive route exists. 404 is identical for a missing and a cross-organisation id.
+  # ---------------------------------------------------------------------------------------------
+  /v1/tests:
+    get:
+      operationId: listTests
+      summary: REAL. Test templates of your organisation (test:read), newest first.
+      parameters:
+        - {
+            name: page,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 100000, default: 1 },
+          }
+        - {
+            name: pageSize,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 100, default: 20 },
+          }
+        - { name: search, in: query, schema: { type: string, minLength: 1, maxLength: 100 } }
+        - { name: profile, in: query, schema: { $ref: '#/components/schemas/TestProfile' } }
+        - name: used
+          in: query
+          description: true only tests that already have invitations, false only tests that have none
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: One page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestList' }
+        '400':
+          description: Invalid query, or a page deeper than 10 000 rows
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      operationId: createTest
+      summary: REAL. Create a test with ordered sections, fixed or random questions, a STANDARD or STRICT profile and a pass score (test:create).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestDetail' }
+        '400':
+          description: Validation failed (LOCKDOWN, section limits above the duration, a bad random rule, positions, an unknown field); errors[] says what
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: A fixed question version does not exist, is a draft, or is not in your organisation (one answer)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: A fixed version belongs to an archived question, or a random rule matches too few published questions
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /v1/tests/{testId}:
+    parameters:
+      - name: testId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getTest
+      summary: REAL. One test with its sections and questions (test:read).
+      responses:
+        '200':
+          description: The test
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestDetail' }
+        '400':
+          description: Not a UUID
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such test in your organisation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    patch:
+      operationId: updateTest
+      summary: >-
+        REAL. Edit a test that has no invitation or session yet (test:update). Sections, when sent,
+        replace ALL sections. There is NO revision or If-Match: two editors are last-write-wins.
+        passScore cannot be cleared once set.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateTest' }
+      responses:
+        '200':
+          description: The test after the edit
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestDetail' }
+        '400':
+          description: Validation failed, or nothing to change
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such test (or question version) in your organisation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: The test already has an invitation or a session and cannot be edited
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: A fixed version belongs to an archived question, or a random rule is unsatisfiable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
 
 components:
   responses:
@@ -2223,6 +2355,157 @@ components:
                   type: string,
                   description: 'Why no output could be produced (runtime error, limit)',
                 }
+    TestProfile:
+      type: string
+      description: STANDARD records the web session; STRICT adds a second camera. LOCKDOWN is not offered in this build.
+      enum: [STANDARD, STRICT]
+    RandomRule:
+      type: object
+      additionalProperties: false
+      description: >-
+        Exactly { tags?, difficulty?, type? }; unknown keys are refused. There is NO count: one
+        question slot picks one question, and N slots with the same rule need N different matching
+        published questions. Tags are lower-cased, 1 to 20, all must match.
+      properties:
+        tags: { type: array, minItems: 1, maxItems: 20, items: { type: string } }
+        difficulty: { $ref: '#/components/schemas/Difficulty' }
+        type: { $ref: '#/components/schemas/QuestionType' }
+    TestQuestionInput:
+      type: object
+      additionalProperties: false
+      description: Exactly one of questionVersionId and randomRule.
+      properties:
+        questionVersionId:
+          { type: string, description: A PUBLISHED version of a non-archived question }
+        randomRule: { $ref: '#/components/schemas/RandomRule' }
+        points: { type: number, minimum: 0.01, maximum: 9999.99, default: 100 }
+        position: { type: integer, minimum: 1, maximum: 50 }
+    TestSectionInput:
+      type: object
+      additionalProperties: false
+      required: [title, questions]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        position: { type: integer, minimum: 1, maximum: 20 }
+        timeLimitMin:
+          type: integer
+          minimum: 1
+          maximum: 480
+          description: Section limits together may not exceed durationMinutes (ADR 0002)
+        questions:
+          {
+            type: array,
+            minItems: 1,
+            maxItems: 50,
+            items: { $ref: '#/components/schemas/TestQuestionInput' },
+          }
+    CreateTest:
+      type: object
+      additionalProperties: false
+      required: [name, durationMinutes, sections]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, maxLength: 5000 }
+        durationMinutes: { type: integer, minimum: 5, maximum: 480 }
+        profile: { $ref: '#/components/schemas/TestProfile' }
+        passScore:
+          {
+            type: number,
+            minimum: 0,
+            maximum: 9999.99,
+            description: From 0 to the points of all questions together,
+          }
+        sections:
+          {
+            type: array,
+            minItems: 1,
+            maxItems: 20,
+            items: { $ref: '#/components/schemas/TestSectionInput' },
+          }
+    UpdateTest:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, maxLength: 5000 }
+        durationMinutes: { type: integer, minimum: 5, maximum: 480 }
+        profile: { $ref: '#/components/schemas/TestProfile' }
+        passScore: { type: number, minimum: 0, maximum: 9999.99 }
+        sections:
+          {
+            type: array,
+            minItems: 1,
+            maxItems: 20,
+            items: { $ref: '#/components/schemas/TestSectionInput' },
+          }
+    TestQuestion:
+      type: object
+      required: [id, position, points, questionVersionId, title, difficulty, randomRule]
+      properties:
+        id: { type: string }
+        position: { type: integer }
+        points: { type: number }
+        questionVersionId: { type: string, nullable: true }
+        title: { type: string, nullable: true }
+        difficulty: { type: string, nullable: true, enum: [EASY, MEDIUM, HARD] }
+        randomRule: { type: object, nullable: true, additionalProperties: true }
+    TestSection:
+      type: object
+      required: [id, title, position, timeLimitMin, questions]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        position: { type: integer }
+        timeLimitMin: { type: integer, nullable: true }
+        questions: { type: array, items: { $ref: '#/components/schemas/TestQuestion' } }
+    TestSummary:
+      type: object
+      required:
+        [
+          id,
+          name,
+          description,
+          durationMinutes,
+          profile,
+          passScore,
+          createdById,
+          createdAt,
+          sectionCount,
+          questionCount,
+          used,
+        ]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        durationMinutes: { type: integer }
+        profile: { $ref: '#/components/schemas/TestProfile' }
+        passScore: { type: number, nullable: true }
+        createdById: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        sectionCount: { type: integer }
+        questionCount: { type: integer }
+        used:
+          {
+            type: boolean,
+            description: The test has an invitation or a session,
+            so it can no longer be edited,
+          }
+    TestDetail:
+      allOf:
+        - $ref: '#/components/schemas/TestSummary'
+        - type: object
+          required: [sections]
+          properties:
+            sections: { type: array, items: { $ref: '#/components/schemas/TestSection' } }
+    TestList:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/TestSummary' } }
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer }
     ApiError:
       type: object
       required: [code, message]
