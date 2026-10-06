@@ -19,6 +19,7 @@ describe('C-31 SesMailTransport against a local stub (never real AWS)', () => {
   let seen: Captured[];
   let status = 200;
   let hang = false;
+  let errorType: string | undefined;
   const saved: Record<string, string | undefined> = {};
 
   beforeAll(async () => {
@@ -45,6 +46,7 @@ describe('C-31 SesMailTransport against a local stub (never real AWS)', () => {
         });
         res.setHeader('content-type', 'application/json');
         res.statusCode = status;
+        if (errorType) res.setHeader('x-amzn-ErrorType', errorType);
         res.end(
           status === 200
             ? JSON.stringify({ MessageId: 'stub-1' })
@@ -67,6 +69,7 @@ describe('C-31 SesMailTransport against a local stub (never real AWS)', () => {
     seen = [];
     status = 200;
     hang = false;
+    errorType = undefined;
   });
 
   const make = (extra: object = {}): SesMailTransport =>
@@ -211,5 +214,39 @@ describe('C-31 SesMailTransport against a local stub (never real AWS)', () => {
       });
     }
     expect(seen).toHaveLength(0);
+  });
+
+  it('C-31: SES error classification decides whether the queue retries', async () => {
+    const attempt = async (): Promise<unknown> => {
+      try {
+        await make().send({ to: 'a@example.com', subject: 's', html: 'h', text: 't' });
+      } catch (e) {
+        return e;
+      }
+      return undefined;
+    };
+    status = 400;
+    errorType = 'TooManyRequestsException';
+    expect(await attempt()).toMatchObject({
+      permanent: false,
+      causeName: 'TooManyRequestsException',
+    });
+    errorType = 'MessageRejected';
+    expect(await attempt()).toMatchObject({ permanent: true, causeName: 'MessageRejected' });
+    status = 500;
+    errorType = 'InternalFailure';
+    expect(await attempt()).toMatchObject({ permanent: false });
+    errorType = undefined;
+    status = 503;
+    expect(await attempt()).toMatchObject({ permanent: false });
+    // A network error (nothing listening) is retryable too.
+    const dead = new SesMailTransport({
+      region: 'us-east-1',
+      fromAddress: 'no-reply@example.com',
+      endpoint: 'http://127.0.0.1:1',
+    });
+    await expect(
+      dead.send({ to: 'a@example.com', subject: 's', html: 'h', text: 't' }),
+    ).rejects.toMatchObject({ permanent: false });
   });
 });

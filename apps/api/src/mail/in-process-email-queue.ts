@@ -4,7 +4,7 @@
 // id, a random job id, the attempt and the error class name, never the payload.
 import { randomUUID } from 'node:crypto';
 import { Logger } from '@nestjs/common';
-import type { OnModuleDestroy } from '@nestjs/common';
+import type { OnApplicationShutdown } from '@nestjs/common';
 import { EmailQueuePort } from './email-queue.port';
 import type { EmailJobHandler, EnqueueOutcome } from './email-queue.port';
 import type { EmailJob } from './mail-templates';
@@ -24,6 +24,8 @@ export interface InProcessQueueOptions {
   /** Jobs waiting or running above this are rejected. */
   capacity?: number;
   logger?: QueueLogger;
+  /** How long shutdown waits for waiting and retrying jobs before dropping them. Default 5 s. */
+  drainMs?: number;
 }
 
 interface Entry {
@@ -32,12 +34,13 @@ interface Entry {
   attempt: number;
 }
 
-export class InProcessEmailQueue extends EmailQueuePort implements OnModuleDestroy {
+export class InProcessEmailQueue extends EmailQueuePort implements OnApplicationShutdown {
   private readonly concurrency: number;
   private readonly maxAttempts: number;
   private readonly baseBackoffMs: number;
   private readonly maxBackoffMs: number;
   private readonly capacity: number;
+  private readonly drainMs: number;
   private readonly logger: QueueLogger;
   private readonly ready: Entry[] = [];
   private readonly timers = new Map<string, NodeJS.Timeout>();
@@ -56,6 +59,7 @@ export class InProcessEmailQueue extends EmailQueuePort implements OnModuleDestr
     this.baseBackoffMs = opts.baseBackoffMs ?? 1_000;
     this.maxBackoffMs = opts.maxBackoffMs ?? 60_000;
     this.capacity = opts.capacity ?? 1_000;
+    this.drainMs = opts.drainMs ?? 5_000;
     this.logger = opts.logger ?? new Logger('EmailQueue');
   }
 
@@ -82,7 +86,25 @@ export class InProcessEmailQueue extends EmailQueuePort implements OnModuleDestr
     return new Promise((resolve) => this.idleWaiters.push(resolve));
   }
 
-  onModuleDestroy(): void {
+  /**
+   * Shutdown order: AuthService settles its deferred mail in beforeApplicationShutdown, which Nest
+   * runs before every onApplicationShutdown, so those mails reach this queue while it still
+   * accepts. Here the queue drains for drainMs, then stops and drops what is left (count logged).
+   */
+  async onApplicationShutdown(): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      this.idle(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, this.drainMs);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    this.stop();
+  }
+
+  /** Stops accepting, cancels retries and drops waiting jobs (count logged, no payload). */
+  stop(): void {
     this.stopped = true;
     const dropped = this.ready.length + this.retrying.size;
     if (dropped > 0) this.logger.warn(`mail queue stopped, dropped ${dropped} waiting jobs`);
@@ -114,7 +136,11 @@ export class InProcessEmailQueue extends EmailQueuePort implements OnModuleDestr
         this.logger.error(
           `mail job ${entry.id} template=${entry.job.template} dropped after ${entry.attempt} attempts${permanent ? ' (permanent)' : ''} error=${errName}`,
         );
-      } else if (!this.stopped) {
+      } else if (this.stopped) {
+        this.logger.error(
+          `mail job ${entry.id} template=${entry.job.template} dropped (stopped) error=${errName}`,
+        );
+      } else {
         this.logger.warn(
           `mail job ${entry.id} template=${entry.job.template} attempt ${entry.attempt} failed error=${errName}`,
         );

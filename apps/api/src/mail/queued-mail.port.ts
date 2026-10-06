@@ -83,7 +83,7 @@ export class QueuedMailPort extends MailPort {
   }
   sendConsentCopy(to: string, m: ConsentCopyMail): Promise<MailOutcome> {
     // Never queue "the consent you signed is attached" without a key to attach.
-    if (!m.pdfKey) return Promise.resolve('failed');
+    if (!m.pdfKey.trim()) return Promise.resolve('failed');
     return this.put({ template: 'consent-copy', to, params: { pdfKey: m.pdfKey } });
   }
   sendErasureDelayed(to: string, m: ErasureDelayedMail): Promise<MailOutcome> {

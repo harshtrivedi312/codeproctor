@@ -111,6 +111,10 @@ export const envSchema = z
     AWS_ACCESS_KEY_ID: z.string().optional(),
     AWS_SECRET_ACCESS_KEY: z.string().optional(),
     AWS_SESSION_TOKEN: z.string().optional(),
+    // Profile and credential-file settings would also bypass the instance role.
+    AWS_PROFILE: z.string().optional(),
+    AWS_SHARED_CREDENTIALS_FILE: z.string().optional(),
+    AWS_CONFIG_FILE: z.string().optional(),
     SES_FROM_ADDRESS: z.email().optional(),
     SES_CONFIGURATION_SET: z.string().min(1).optional(),
     SES_ENDPOINT: z.url().optional(),
@@ -178,6 +182,9 @@ export const envSchema = z
         'AWS_ACCESS_KEY_ID',
         'AWS_SECRET_ACCESS_KEY',
         'AWS_SESSION_TOKEN',
+        'AWS_PROFILE',
+        'AWS_SHARED_CREDENTIALS_FILE',
+        'AWS_CONFIG_FILE',
       ] as const) {
         if (env[name] !== undefined && env[name] !== '') {
           ctx.addIssue({

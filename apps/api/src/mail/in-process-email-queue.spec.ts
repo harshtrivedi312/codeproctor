@@ -27,7 +27,7 @@ describe('FU-BE-21 in-process email queue', () => {
     expect(await q.enqueue(job(2))).toBe('accepted');
     expect(await q.enqueue(job(3))).toBe('rejected');
     expect(cap.lines).toContain('mail enqueue rejected template=otp reason=full');
-    q.onModuleDestroy();
+    q.stop();
     expect(cap.lines.some((l) => l.includes('dropped 1 waiting jobs'))).toBe(true);
     expect(await q.enqueue(job(4))).toBe('rejected');
     expect(cap.lines).toContain('mail enqueue rejected template=otp reason=stopped');
@@ -129,7 +129,7 @@ describe('FU-BE-21 in-process email queue', () => {
     const q = new InProcessEmailQueue(
       () => {
         calls++;
-        q.onModuleDestroy();
+        q.stop();
         return Promise.reject(new MailError('x'));
       },
       { baseBackoffMs: 1, logger: capture().logger },
@@ -139,5 +139,51 @@ describe('FU-BE-21 in-process email queue', () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(calls).toBe(1);
     expect(q.size()).toBe(0);
+  });
+
+  it('FU-BE-21: shutdown drains first, so mail enqueued while deferrals settle is still sent', async () => {
+    const sent: string[] = [];
+    const cap = capture();
+    const q = new InProcessEmailQueue(
+      async (j) => {
+        await new Promise((r) => setTimeout(r, 20));
+        sent.push(j.to);
+      },
+      { drainMs: 1_000, logger: cap.logger },
+    );
+    await q.enqueue(job(1));
+    const shutdown = q.onApplicationShutdown();
+    // A deferred reset mail arriving during shutdown is still accepted.
+    expect(await q.enqueue(job(2))).toBe('accepted');
+    await shutdown;
+    expect(sent.sort()).toEqual(['u1@example.com', 'u2@example.com']);
+    expect(await q.enqueue(job(3))).toBe('rejected');
+  });
+
+  it('FU-BE-21: shutdown gives up after drainMs, drops what is left and logs the count', async () => {
+    const cap = capture();
+    const q = new InProcessEmailQueue(() => new Promise<void>(() => undefined), {
+      concurrency: 1,
+      drainMs: 30,
+      logger: cap.logger,
+    });
+    await q.enqueue(job(1));
+    await q.enqueue(job(2));
+    await q.onApplicationShutdown();
+    expect(cap.lines.some((l) => l.includes('dropped 1 waiting jobs'))).toBe(true);
+  });
+
+  it('FU-BE-21: a transient failure after stop is logged as dropped (stopped)', async () => {
+    const cap = capture();
+    const q = new InProcessEmailQueue(
+      () => {
+        q.stop();
+        return Promise.reject(new MailError('x'));
+      },
+      { logger: cap.logger },
+    );
+    await q.enqueue(job());
+    await q.idle();
+    expect(cap.lines.some((l) => l.includes('dropped (stopped)'))).toBe(true);
   });
 });

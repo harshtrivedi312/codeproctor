@@ -273,7 +273,14 @@ describe('NFR-04 environment validation', () => {
     });
 
     it('C-31: static AWS credentials are refused in live environments, naming only the variable', () => {
-      for (const name of ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN']) {
+      for (const name of [
+        'AWS_ACCESS_KEY_ID',
+        'AWS_SECRET_ACCESS_KEY',
+        'AWS_SESSION_TOKEN',
+        'AWS_PROFILE',
+        'AWS_SHARED_CREDENTIALS_FILE',
+        'AWS_CONFIG_FILE',
+      ]) {
         for (const APP_ENV of ['pilot', 'production']) {
           let text = '';
           try {
