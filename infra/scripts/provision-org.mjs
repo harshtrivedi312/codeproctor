@@ -18,10 +18,11 @@
 // whether anything was created); 2 the org and admin exist but the job could not be queued: run
 // `reissue`. Output is ids only. The email, the token and the link are never printed, logged or kept.
 import { randomUUID } from 'node:crypto';
-import { lstatSync, readFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
+  connectRedis,
   EnqueueError,
   InputError,
   provisionOrg,
@@ -42,7 +43,11 @@ const closeAll = async () => {
   await Promise.allSettled(
     [queue?.close(), prisma?.$disconnect()].filter(Boolean).map((p) => withTimeout(p, 3000)),
   );
-  connection?.disconnect();
+  try {
+    connection?.disconnect();
+  } catch {
+    // already closed
+  }
 };
 const fail = async (message, code = 1) => {
   console.error(`provision-org: ${message}`);
@@ -67,12 +72,26 @@ for (const name of ['DATABASE_URL', 'REDIS_URL']) {
 
 let input;
 try {
-  const info = lstatSync(file);
-  if (info.isSymbolicLink() || !info.isFile())
+  // One handle for the checks and the read, so a link swapped in between cannot be followed.
+  let fd;
+  try {
+    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
     await fail('--file must be a regular file, not a link');
-  if (info.size > MAX_FILE_BYTES) await fail('--file is larger than 64 KiB');
-  if (info.mode & 0o077) await fail('--file must not be readable by group or others (chmod 600)');
-  input = validateInput(JSON.parse(readFileSync(file, 'utf8')), {
+  }
+  let text;
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile()) await fail('--file must be a regular file, not a link');
+    if (info.size > MAX_FILE_BYTES) await fail('--file is larger than 64 KiB');
+    if (info.mode & 0o077) await fail('--file must not be readable by group or others (chmod 600)');
+    if (info.uid !== process.getuid())
+      await fail('--file must be owned by the user running this script');
+    text = readFileSync(fd, 'utf8');
+  } finally {
+    closeSync(fd);
+  }
+  input = validateInput(JSON.parse(text), {
     forReissue: command === 'reissue',
   });
 } catch (error) {
@@ -113,21 +132,17 @@ try {
   let IORedis;
   try {
     // Never from outside this checkout (a parent directory or NODE_PATH).
-    if (!requireFromApi.resolve('bullmq').startsWith(REPO_ROOT)) throw new Error('outside');
+    for (const name of ['bullmq', 'ioredis']) {
+      if (!requireFromApi.resolve(name).startsWith(REPO_ROOT)) throw new Error('outside');
+    }
     bullmq = requireFromApi('bullmq');
     IORedis = requireFromApi('ioredis');
   } catch {
     await fail('bullmq is not installed in apps/api (it arrives with BE-06). Nothing was created.');
   }
   // A short-lived producer: fail fast when Redis is down instead of waiting forever.
-  connection = new IORedis(process.env.REDIS_URL, {
-    maxRetriesPerRequest: 1,
-    enableOfflineQueue: false,
-    connectTimeout: 5000,
-  });
-  connection.on('error', () => {}); // errors surface through the calls below; never print them (they can hold the URL)
   try {
-    await withTimeout(connection.ping(), 8000);
+    connection = await connectRedis(IORedis, process.env.REDIS_URL);
   } catch {
     await fail('cannot reach Redis. Nothing was created.');
   }
@@ -140,6 +155,7 @@ try {
       : await reissueSetPassword({ prisma, queue, input, runId });
   console.log(`provision-org: ${command} done. org=${result.orgId} user=${result.userId}`);
   await closeAll();
+  process.exit(0); // a close that timed out must not keep the process alive
 } catch (error) {
   if (error instanceof EnqueueError) {
     await fail(

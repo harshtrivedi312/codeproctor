@@ -10,7 +10,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { REPO_ROOT } from './test-support.mjs';
-import { JOB_NAME, jobIdFor, QUEUE_NAME, validateInput } from './provision-org-core.mjs';
+import { createRequire } from 'node:module';
+import {
+  connectRedis,
+  JOB_NAME,
+  jobIdFor,
+  QUEUE_NAME,
+  validateInput,
+} from './provision-org-core.mjs';
 import { applyMigrations, drillUnavailable, startPostgres } from './verify-drill-support.mjs';
 
 const EMAIL = 'sentinel.admin+9f3c@pilot-corp.example';
@@ -71,7 +78,7 @@ describe('provision-org input (ADR 0006 8.9)', () => {
       { ...GOOD, adminName: 'Pat\u0000Admin' },
       { ...GOOD, expectedDatabase: 'pilot; DROP' },
       { orgName: 'A', adminEmail: 'a@b.test', adminName: 'N' },
-      { ...GOOD, 'a.admin@pilot-corp.example': '' },
+      { ...GOOD, [EMAIL]: '' },
       [],
       null,
     ];
@@ -426,6 +433,38 @@ describe('provision-org against a real database (ADR 0006 8.9, FR-105)', { skip 
     );
   });
 
+  it('the CLI refuses an app_user role that has become a superuser or bypasses row security', () => {
+    const path = file('powerful.json', {
+      ...GOOD,
+      orgName: 'Powerful Org',
+      adminEmail: 'powerful@pilot-corp.example',
+    });
+    const orgs = q('SELECT count(*) FROM organizations');
+    pg.psql('pilot', 'ALTER ROLE app_user BYPASSRLS');
+    try {
+      const r = run(['create', '--file', path], {
+        DATABASE_URL: appUrl(),
+        REDIS_URL: 'redis://127.0.0.1:1',
+      });
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /bypasses row security/);
+      assert.equal(q('SELECT count(*) FROM organizations'), orgs);
+    } finally {
+      pg.psql('pilot', 'ALTER ROLE app_user NOBYPASSRLS');
+    }
+  });
+
+  it('the CLI refuses a file that is a link to the real one (O_NOFOLLOW)', () => {
+    const real = file('target.json', GOOD);
+    const link = join(dir, 'swap.json');
+    symlinkSync(real, link);
+    assert.match(
+      run(['create', '--file', link], { DATABASE_URL: appUrl(), REDIS_URL: 'redis://127.0.0.1:1' })
+        .stderr,
+      /not a link/,
+    );
+  });
+
   it('the CLI refuses owner credentials, and without BullMQ it creates nothing', () => {
     const path = file('cli.json', {
       orgName: 'Cli Org',
@@ -453,5 +492,64 @@ describe('provision-org against a real database (ADR 0006 8.9, FR-105)', { skip 
           !(r.stdout + r.stderr).includes(appPassword),
       );
     }
+  });
+});
+
+// The Redis check protects "nothing is created when Redis is down", and it needs real ioredis behaviour
+// (a fake cannot show the offline-queue trap). redis:8.8 is the image the dev stack uses.
+const redisSkip = (() => {
+  const base = drillUnavailable(['psql']);
+  if (base) return base;
+  if (spawnSync('docker', ['image', 'inspect', 'redis:8.8'], { stdio: 'ignore' }).status !== 0) {
+    return 'redis:8.8 is not pulled';
+  }
+  try {
+    createRequire(join(REPO_ROOT, 'apps/api/package.json'))('ioredis');
+  } catch {
+    return 'ioredis is not installed in apps/api';
+  }
+  return false;
+})();
+
+describe('provision-org Redis connection (ADR 0006 8.9)', { skip: redisSkip }, () => {
+  const IORedis = createRequire(join(REPO_ROOT, 'apps/api/package.json'))('ioredis');
+  let id;
+  let port;
+  before(() => {
+    id = spawnSync(
+      'docker',
+      ['run', '-d', '--rm', '--label', 'codeproctor.drill=1', '-p', '127.0.0.1::6379', 'redis:8.8'],
+      { encoding: 'utf8' },
+    ).stdout.trim();
+    port = Number(
+      spawnSync('docker', ['port', id, '6379/tcp'], { encoding: 'utf8' })
+        .stdout.trim()
+        .split('\n')[0]
+        .split(':')
+        .pop(),
+    );
+  });
+  after(() => void spawnSync('docker', ['rm', '-f', id], { stdio: 'ignore' }));
+
+  it('connects and pings a running Redis even with the offline queue off', async () => {
+    let connection;
+    for (let i = 0; i < 20 && !connection; i++) {
+      connection = await connectRedis(IORedis, `redis://127.0.0.1:${port}`, {
+        timeoutMs: 2000,
+      }).catch(() => undefined);
+      if (!connection) await new Promise((r) => setTimeout(r, 500));
+    }
+    assert.ok(connection, 'Redis was reachable');
+    assert.equal(await connection.ping(), 'PONG');
+    connection.disconnect();
+  });
+
+  it('gives up quickly, and without the credentials in the error, when Redis is not there', async () => {
+    const started = Date.now();
+    await assert.rejects(
+      connectRedis(IORedis, 'redis://user:SENTINEL-PW@127.0.0.1:1', { timeoutMs: 3000 }),
+      (e) => !String(e?.message).includes('SENTINEL-PW'),
+    );
+    assert.ok(Date.now() - started < 6000, 'it did not hang');
   });
 });

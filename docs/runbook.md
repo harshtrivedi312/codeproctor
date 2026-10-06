@@ -243,7 +243,7 @@ and re-applies erasures.
 
 ## Provisioning a pilot organization (ADR 0006 section 8.9)
 
-Owner: Database B (ops) track. Files: `infra/scripts/provision-org.mjs`, `provision-org-core.mjs`;
+Owner: Database B (ops) track. Files: `infra/scripts/provision-org.mjs`, `provision-org-core.mjs` (and `provision-org-driver.mjs`, test only);
 tests `infra/scripts/provision-org.test.mjs`. Only the owner runs this, on the pilot host (over SSH from a
 GitHub Actions job, or on a self-hosted runner inside the pilot network), never from a developer machine
 or an agent session (ADR 0009, D-38). A GitHub-hosted runner never connects straight to the pilot database.
@@ -293,7 +293,7 @@ job runs in the wrong API, changes nothing, and the exit code is still 0.
 
 `create` prints `org=<id> user=<id>` and nothing else. Exit code 0: done. Exit code 1: bad input,
 configuration or a failure (an error that names a field, never a value; the message says whether anything
-was created; Redis is checked first, so an unreachable Redis creates nothing). Exit code 2: the org and
+was created; Redis is checked after the database checks and before any write, so an unreachable Redis creates nothing). Exit code 2: the org and
 admin exist but the job could not be queued: run `reissue` with the same file. `reissue` works only for
 an active SUPER_ADMIN of the named org who has no password yet. It writes a `SET_PASSWORD_REISSUED` audit
 row and queues the job; if queuing fails it also writes `SET_PASSWORD_REISSUE_FAILED`. A new link replaces

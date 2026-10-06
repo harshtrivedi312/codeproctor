@@ -89,6 +89,31 @@ export function withTimeout(promise, ms) {
 }
 export const ENQUEUE_TIMEOUT_MS = 15_000;
 
+/**
+ * A short-lived producer connection that fails fast. With the offline queue off, a command sent
+ * before the connection is ready is refused, so it connects first (bounded) and then pings. Errors are
+ * never printed here or by the caller: they can hold the URL.
+ * @param {new (url: string, options: object) => any} IORedis
+ */
+export async function connectRedis(IORedis, url, { timeoutMs = 8000 } = {}) {
+  const connection = new IORedis(url, {
+    maxRetriesPerRequest: 1,
+    enableOfflineQueue: false,
+    connectTimeout: 5000,
+    lazyConnect: true,
+    retryStrategy: () => null, // one attempt, then give up
+  });
+  connection.on('error', () => {});
+  try {
+    await withTimeout(connection.connect(), timeoutMs);
+    await withTimeout(connection.ping(), timeoutMs);
+  } catch (error) {
+    connection.disconnect();
+    throw error;
+  }
+  return connection;
+}
+
 async function enqueue(queue, orgId, userId) {
   try {
     await withTimeout(
@@ -181,17 +206,22 @@ export async function reissueSetPassword({ prisma, queue, input, runId }) {
   try {
     await enqueue(queue, user.orgId, user.id);
   } catch (error) {
-    // The first row says a reissue was requested; this one says it did not reach the queue.
-    await prisma.auditLog.create({
-      data: {
-        orgId: user.orgId,
-        actorId: null,
-        action: ACTION_REISSUE_FAILED,
-        entityType: 'user',
-        entityId: user.id,
-        metadata: { runId, orgId: user.orgId, userId: user.id },
-      },
-    });
+    // The first row says a reissue was requested; this one says it did not reach the queue. If this
+    // write fails too, the original error still wins: the operator needs exit 2 and the ids.
+    try {
+      await prisma.auditLog.create({
+        data: {
+          orgId: user.orgId,
+          actorId: null,
+          action: ACTION_REISSUE_FAILED,
+          entityType: 'user',
+          entityId: user.id,
+          metadata: { runId, orgId: user.orgId, userId: user.id },
+        },
+      });
+    } catch {
+      // see above
+    }
     throw error;
   }
   return { orgId: user.orgId, userId: user.id };
