@@ -15,6 +15,7 @@ import { JwtAuthGuard } from './common/auth/jwt-auth.guard';
 import { buildPinoHttpOptions } from './common/pino-http.config';
 import { TokenModule } from './common/auth/token.service';
 import { DatabaseModule } from './database/database.module';
+import { ExecutionModule } from './execution/execution.module';
 import { MailModule } from './mail/mail.module';
 import { HealthModule } from './health/health.module';
 import { InfrastructureModule } from './infrastructure/infrastructure.module';
@@ -80,6 +81,7 @@ function areaOf(context: ExecutionContext): Area {
     AuthModule,
     UsersModule,
     HealthModule,
+    ExecutionModule,
   ],
   // Order matters: throttle first, then authenticate (deny by default).
   providers: [

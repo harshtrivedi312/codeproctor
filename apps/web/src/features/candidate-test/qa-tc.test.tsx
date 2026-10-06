@@ -8,6 +8,8 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { axe } from 'vitest-axe';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { http, HttpResponse } from 'msw';
+import { apiBaseUrl } from '@/lib/env';
 import { server } from '@/mocks/server';
 import { computeClockOffset, remainingMs } from './timer';
 import { initialLockState, isEditorReadOnly, lockReducer } from './lock-state';
@@ -16,6 +18,16 @@ import { useAutosave } from './use-autosave';
 import { useServerClock } from './use-clock';
 import * as React from 'react';
 import { act, renderHook } from '@testing-library/react';
+
+vi.hoisted(() => {
+  process.env.NEXT_PUBLIC_API_MOCKING = 'enabled';
+});
+
+// Mock mode is on for this file (for the demo controls), but there is no browser worker in jsdom.
+vi.mock('@/lib/mock-ready', () => ({
+  mockingReady: Promise.resolve(),
+  markMockingReady: () => undefined,
+}));
 
 vi.mock('next/dynamic', () => ({
   default: () =>
@@ -152,36 +164,39 @@ describe('TC-047 client clock tampering (FR-505), UI side', () => {
 });
 
 describe('TC-047 clock moved after load (FR-505), UI side', () => {
-  // KNOWN DEFECT (frontend-engineer, docs/followups/qa.md): useServerClock reads /v1/time once
-  // (staleTime Infinity) and never re-syncs, so an OS clock moved forward after load shortens the
-  // countdown shown to the candidate. `it.fails` keeps CI green while the defect is open; change it
-  // to `it` when the hook re-syncs (for example from the heartbeat response).
-  it.fails(
-    'TC-047 KNOWN DEFECT: moving the OS clock forward one hour after load keeps the countdown',
-    async () => {
-      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-      const wrapper = ({ children }: { children: React.ReactNode }) => (
-        <QueryClientProvider client={client}>{children}</QueryClientProvider>
-      );
-      const { result } = renderHook(() => useServerClock(), { wrapper });
-      await waitFor(() => expect(result.current.ready).toBe(true));
-      const deadline = new Date(Date.now() + 90_000 + 60 * 60_000).toISOString();
-      const before = result.current.remaining(deadline) ?? 0;
-      // The candidate moves the OS clock forward one hour after the page loaded.
-      const realNow = Date.now.bind(Date);
-      const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 60 * 60_000);
-      try {
-        // The hook ticks once per second; wait for the next tick to read the new Date.now().
-        await waitFor(() => expect(result.current.remaining(deadline) ?? 0).not.toBe(before), {
-          timeout: 3_000,
-        });
-        // Expected by TC-047: the server deadline is unchanged, so the countdown is too.
-        expect(result.current.remaining(deadline) ?? 0).toBeGreaterThan(before - 5_000);
-      } finally {
-        spy.mockRestore();
-      }
-    },
-  );
+  // Fixed in Step 10 prep (FU-QA-01): the clock ticks from a monotonic source and re-syncs from
+  // the save responses and a periodic /v1/time re-fetch, so the OS clock cannot move the countdown.
+  it('TC-047 moving the OS clock forward one hour after load keeps the countdown', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    // The server clock does not move when the candidate changes the OS clock, so /v1/time keeps
+    // answering with real time while Date.now() in the browser is moved.
+    const realServerNow = Date.now.bind(Date);
+    server.use(
+      http.get(`${apiBaseUrl}/v1/time`, () =>
+        HttpResponse.json({ serverNow: new Date(realServerNow() + 90_000).toISOString() }),
+      ),
+    );
+    const { result } = renderHook(() => useServerClock(), { wrapper });
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    const deadline = new Date(Date.now() + 90_000 + 60 * 60_000).toISOString();
+    const before = result.current.remaining(deadline) ?? 0;
+    // The candidate moves the OS clock forward one hour after the page loaded.
+    const realNow = Date.now.bind(Date);
+    const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 60 * 60_000);
+    try {
+      // The hook ticks once per second; wait for the next tick to read the new Date.now().
+      await waitFor(() => expect(result.current.remaining(deadline) ?? 0).not.toBe(before), {
+        timeout: 3_000,
+      });
+      // Expected by TC-047: the server deadline is unchanged, so the countdown is too.
+      expect(result.current.remaining(deadline) ?? 0).toBeGreaterThan(before - 5_000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe('TC-050 fullscreen exit (FR-601), UI side', () => {

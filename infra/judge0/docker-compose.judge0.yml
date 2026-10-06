@@ -1,0 +1,110 @@
+# Judge0 CE self-hosting fragment (BE-05, FR-503, architecture "Judge0 isolated on a private network").
+#
+# NOT VALIDATED on macOS or Apple Silicon: the sandbox (isolate) needs a Linux x86_64 host, privileged
+# containers and the cgroup layout Judge0 1.13.x supports (cgroup v1; see README.md and R-01). Use it
+# on the Linux x86 runner or VM that ARC-05 confirms. It is not started by CI.
+#
+# Use:  docker compose -f infra/judge0/docker-compose.judge0.yml --env-file .env up -d
+# Needs JUDGE0_AUTH_TOKEN, JUDGE0_AUTHZ_TOKEN, JUDGE0_DB_PASSWORD and JUDGE0_REDIS_PASSWORD in the environment (no defaults on purpose).
+#
+# Isolation:
+#   - judge0_internal is `internal: true`: no route to the internet. db, redis and the workers are
+#     attached to it only, so candidate code (which runs in the workers) has no egress.
+#   - Only the server (a thin HTTP API; it never runs candidate code) also joins judge0_edge so it can
+#     publish 127.0.0.1:2358 for the API. Compose cannot publish ports from an internal-only network.
+#   - Judge0 gets its own Postgres and Redis, separate from the application's.
+#   - Workers are privileged (isolate needs it). Treat the host as sacrificial: no secrets on it.
+
+x-judge0-env: &judge0-env
+  RAILS_ENV: production
+  REDIS_HOST: judge0-redis
+  REDIS_PASSWORD: ${JUDGE0_REDIS_PASSWORD:?set JUDGE0_REDIS_PASSWORD}
+  REDIS_PORT: '6379'
+  POSTGRES_HOST: judge0-db
+  POSTGRES_PORT: '5432'
+  POSTGRES_DB: judge0
+  POSTGRES_USER: judge0
+  POSTGRES_PASSWORD: ${JUDGE0_DB_PASSWORD:?set JUDGE0_DB_PASSWORD}
+  # Authenticate callers with X-Auth-Token (JUDGE0_AUTH_TOKEN in the API).
+  AUTHN_HEADER: X-Auth-Token
+  AUTHN_TOKEN: ${JUDGE0_AUTH_TOKEN:?set JUDGE0_AUTH_TOKEN}
+  # Judge0 authorizes DELETE /submissions/:token separately (X-Auth-User); without AUTHZ_TOKEN it
+  # answers 403. The API sends JUDGE0_AUTHZ_TOKEN on DELETE.
+  AUTHZ_HEADER: X-Auth-User
+  AUTHZ_TOKEN: ${JUDGE0_AUTHZ_TOKEN:?set JUDGE0_AUTHZ_TOKEN}
+  # The API sends enable_network=false; refuse anyone who tries to turn it on.
+  ALLOW_ENABLE_NETWORK: 'false'
+  ALLOW_ENABLE_PER_PROCESS_AND_THREAD_TIME_LIMIT: 'false'
+  ALLOW_ENABLE_PER_PROCESS_AND_THREAD_MEMORY_LIMIT: 'false'
+  # Hard caps, kept in step with LIMIT_CAPS in apps/api/src/execution/limits.ts.
+  MAX_CPU_TIME_LIMIT: '10'
+  MAX_WALL_TIME_LIMIT: '20'
+  MAX_MEMORY_LIMIT: '524288'
+  MAX_STACK_LIMIT: '65536'
+  MAX_MAX_FILE_SIZE: '1024'
+  MAX_PROCESSES_AND_OR_THREADS: '60'
+  MAX_EXTRACT_SIZE: '10240'
+  # Batch size matches HttpJudge0Client maxBatchSize (20).
+  MAX_SUBMISSION_BATCH_SIZE: '20'
+  # Queue cap: a full queue rejects new submissions. BE-11 must size this for 200 candidates
+  # running samples plus the validate job, and handle the rejection.
+  MAX_QUEUE_SIZE: '200'
+  ENABLE_WAIT_RESULT: 'false'
+  ENABLE_COMPILER_OPTIONS: 'false'
+  ENABLE_COMMAND_LINE_ARGUMENTS: 'false'
+  # The API DELETEs each submission once its results are read, so candidate source, stdin and
+  # hidden test data do not stay in Judge0's database. Delete needs AUTHN and AUTHZ tokens above.
+  ENABLE_SUBMISSION_DELETE: 'true'
+  ENABLE_CALLBACKS: 'false'
+  # Workers run this many sandboxes at once; tune on the real host.
+  COUNT: '2'
+
+services:
+  judge0-server:
+    image: judge0/judge0:1.13.1
+    restart: unless-stopped
+    command: ['./scripts/server']
+    environment: *judge0-env
+    ports:
+      - '127.0.0.1:2358:2358'
+    depends_on: [judge0-db, judge0-redis]
+    networks: [judge0_internal, judge0_edge]
+
+  judge0-worker:
+    image: judge0/judge0:1.13.1
+    restart: unless-stopped
+    command: ['./scripts/workers']
+    environment: *judge0-env
+    privileged: true
+    depends_on: [judge0-db, judge0-redis]
+    networks: [judge0_internal]
+
+  judge0-db:
+    image: postgres:16.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: judge0
+      POSTGRES_USER: judge0
+      POSTGRES_PASSWORD: ${JUDGE0_DB_PASSWORD:?set JUDGE0_DB_PASSWORD}
+    volumes:
+      - judge0-db-data:/var/lib/postgresql/data
+    networks: [judge0_internal]
+
+  judge0-redis:
+    image: redis:7.2
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - exec redis-server --appendonly no --requirepass "$$JUDGE0_REDIS_PASSWORD"
+    environment:
+      JUDGE0_REDIS_PASSWORD: ${JUDGE0_REDIS_PASSWORD:?set JUDGE0_REDIS_PASSWORD}
+    networks: [judge0_internal]
+
+networks:
+  judge0_internal:
+    internal: true
+  judge0_edge: {}
+
+volumes:
+  judge0-db-data: {}

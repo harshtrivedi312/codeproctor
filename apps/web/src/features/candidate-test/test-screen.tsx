@@ -1,5 +1,5 @@
 'use client';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import dynamic from 'next/dynamic';
 import { CheckCircle2, Clock, Loader2, Play, RotateCcw, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
@@ -11,13 +11,41 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { api, type Schemas } from '@/lib/api/client';
 import { cooldownRemainingMs, cooldownSeconds } from './cooldown';
 import { LANGUAGE_LABELS } from './keywords';
-import { initialLockState, isEditorReadOnly, lockReducer } from './lock-state';
+import {
+  initialLockState,
+  isEditorReadOnly,
+  lockReducer,
+  type LockEvent,
+  type LockState,
+} from './lock-state';
 import { Markdown } from './markdown';
 import { OutputPanel } from './output-panel';
 import { FinishSectionDialog, FullscreenLockOverlay, StartGate } from './overlays';
 import { formatClock, timerWarning } from './timer';
 import { useAutosave } from './use-autosave';
 import { useServerClock } from './use-clock';
+
+/**
+ * Demo-only controls (simulate fullscreen exit, continue without fullscreen, demo banner). The
+ * mock-mode check reads process.env.NEXT_PUBLIC_* inline so the bundler replaces it with a
+ * constant and drops the dynamic import, and with it demo-controls.tsx, from a production build.
+ * Do not move this check behind a helper or a variable.
+ */
+const IS_DEMO = process.env.NEXT_PUBLIC_API_MOCKING === 'enabled';
+const DemoBanner =
+  process.env.NEXT_PUBLIC_API_MOCKING === 'enabled'
+    ? React.lazy(() => import('./demo-controls').then((m) => ({ default: m.DemoBanner })))
+    : null;
+const DemoFooterControl =
+  process.env.NEXT_PUBLIC_API_MOCKING === 'enabled'
+    ? React.lazy(() => import('./demo-controls').then((m) => ({ default: m.DemoFooterControl })))
+    : null;
+const DemoContinueWithoutFullscreen =
+  process.env.NEXT_PUBLIC_API_MOCKING === 'enabled'
+    ? React.lazy(() =>
+        import('./demo-controls').then((m) => ({ default: m.DemoContinueWithoutFullscreen })),
+      )
+    : null;
 
 const CodeEditor = dynamic(() => import('./code-editor'), {
   ssr: false,
@@ -29,9 +57,28 @@ interface Drafts {
   mcq: Record<string, string>;
 }
 
+interface DraftResponse {
+  response: Response;
+  data?: { savedAt: string };
+}
+
+function omit<T>(record: Record<string, T>, key: string): Record<string, T> {
+  return Object.fromEntries(Object.entries(record).filter(([k]) => k !== key));
+}
+
 const codeKey = (questionId: string, language: CodeLanguage) => `${questionId}:${language}`;
 
+/** A section the server has finished. Kept outside the per-section screen (ADR 0002). */
+interface FinishedSection {
+  sectionId: string;
+  title: string;
+  nextSectionId: string | null;
+  /** The session as re-read from the server, when the finish was confirmed that way. */
+  next?: Schemas['CandidateSession'];
+}
+
 export function TestScreen(): React.JSX.Element {
+  const queryClient = useQueryClient();
   const session = useQuery({
     queryKey: ['candidate-session'],
     staleTime: Infinity,
@@ -41,11 +88,17 @@ export function TestScreen(): React.JSX.Element {
       return data;
     },
   });
+  // The lock state (fullscreen, warnings) belongs to the whole test, not to one section.
+  const [lock, dispatchLock] = React.useReducer(lockReducer, initialLockState);
+  const [finishedSection, setFinishedSection] = React.useState<FinishedSection | null>(null);
+  const [advancing, setAdvancing] = React.useState(false);
 
+  // Show the load error only when there is nothing to show: a failed background refetch must
+  // never replace a running test (it would drop unsaved drafts and the lock state).
   if (session.isPending) {
     return <p className="p-8 text-center text-muted-foreground">Loading your test…</p>;
   }
-  if (session.isError) {
+  if (!session.data) {
     return (
       <div role="alert" className="mx-auto my-24 max-w-md text-center">
         <h1 className="text-lg font-semibold">We could not load your test</h1>
@@ -58,26 +111,87 @@ export function TestScreen(): React.JSX.Element {
       </div>
     );
   }
-  return <TestScreenInner session={session.data} />;
+  const current = session.data;
+  const finishedHere = finishedSection?.sectionId === current.section.id ? finishedSection : null;
+
+  const advance = async () => {
+    if (!finishedSection) return;
+    setAdvancing(true);
+    try {
+      if (finishedSection.next)
+        queryClient.setQueryData(['candidate-session'], finishedSection.next);
+      else await session.refetch();
+    } finally {
+      setAdvancing(false);
+    }
+  };
+
+  return (
+    <>
+      <TestScreenInner
+        key={current.section.id}
+        session={current}
+        lock={lock}
+        dispatchLock={dispatchLock}
+        finished={finishedHere !== null}
+        onFinished={setFinishedSection}
+      />
+      {finishedHere && (
+        <div
+          role="status"
+          className="fixed inset-x-0 bottom-16 z-40 mx-auto w-fit rounded-lg border bg-card p-4 shadow-lg"
+        >
+          <p className="font-medium">
+            <CheckCircle2 className="mr-2 inline h-5 w-5 text-success" aria-hidden />
+            The {finishedHere.title} section is finished and cannot be reopened.
+          </p>
+          {finishedHere.nextSectionId || finishedHere.next ? (
+            <Button className="mt-3" onClick={() => void advance()} disabled={advancing}>
+              Continue to the next section
+            </Button>
+          ) : (
+            IS_DEMO && (
+              <p className="mt-1 text-sm text-muted-foreground">
+                Demo: the next section is not part of this preview.
+              </p>
+            )
+          )}
+        </div>
+      )}
+    </>
+  );
 }
 
-function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }): React.JSX.Element {
+function TestScreenInner({
+  session,
+  lock,
+  dispatchLock,
+  finished,
+  onFinished,
+}: {
+  session: Schemas['CandidateSession'];
+  lock: LockState;
+  dispatchLock: React.Dispatch<LockEvent>;
+  finished: boolean;
+  onFinished: (info: FinishedSection) => void;
+}): React.JSX.Element {
   const { questions, section } = session;
   const [activeId, setActiveId] = React.useState(questions[0]?.id ?? '');
   const [languages, setLanguages] = React.useState<Record<string, CodeLanguage>>({});
   const [drafts, setDrafts] = React.useState<Drafts>({ code: {}, mcq: {} });
-  const [lock, dispatchLock] = React.useReducer(lockReducer, initialLockState);
   const [fsFailed, setFsFailed] = React.useState(false);
   const [finishOpen, setFinishOpen] = React.useState(false);
   const [finishing, setFinishing] = React.useState(false);
-  const [finished, setFinished] = React.useState(false);
+  const [finishError, setFinishError] = React.useState<string | null>(null);
   const [resetOpen, setResetOpen] = React.useState(false);
 
   const [running, setRunning] = React.useState(false);
   const [lastRunAt, setLastRunAt] = React.useState<number | null>(null);
   const [now, setNow] = React.useState(0);
-  const [result, setResult] = React.useState<Schemas['RunResult'] | null>(null);
-  const [runError, setRunError] = React.useState<string | null>(null);
+  // Run output is kept per question, so a slow run never shows under another question.
+  const [runningId, setRunningId] = React.useState<string | null>(null);
+  const [results, setResults] = React.useState<Record<string, Schemas['RunResult']>>({});
+  const [runErrors, setRunErrors] = React.useState<Record<string, string>>({});
 
   const clock = useServerClock();
   const testLeft = clock.remaining(session.testDeadlineAt);
@@ -88,13 +202,15 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
   const question = questions.find((q) => q.id === activeId) ?? questions[0];
   const language: CodeLanguage =
     (question && languages[question.id]) ?? question?.languages?.[0] ?? 'python';
-  const readOnly = isEditorReadOnly(lock, expired) || finished;
+  const readOnly = isEditorReadOnly(lock, expired) || finished || clock.unavailable;
 
   // Autosave every 10 s (FR-504). Compared by identity: any edit creates a new Drafts object.
   const lastSaved = React.useRef<Drafts>({ code: {}, mcq: {} });
+  const [savedSnapshot, setSavedSnapshot] = React.useState<Drafts>({ code: {}, mcq: {} });
   const autosave = useAutosave(drafts, async (snapshot) => {
     const previous = lastSaved.current;
-    const jobs: Promise<unknown>[] = [];
+    const jobs: Promise<DraftResponse>[] = [];
+    const requestStart = performance.now();
     for (const [key, code] of Object.entries(snapshot.code)) {
       if (previous.code[key] === code) continue;
       const [questionId, lang] = key.split(':') as [string, CodeLanguage];
@@ -115,9 +231,14 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
       );
     }
     const responses = await Promise.all(jobs);
-    if (responses.some((r) => (r as { error?: unknown }).error !== undefined))
-      throw new Error('save');
+    const responseEnd = performance.now();
+    if (responses.some((r) => !r.response.ok || r.data === undefined)) throw new Error('save');
+    // The save response carries the server time: re-sync the countdown offset (FR-505, TC-047).
+    const serverTimes = responses.flatMap((r) => (r.data ? [r.data.savedAt] : []));
+    const latestServerTime = serverTimes[serverTimes.length - 1];
+    if (latestServerTime) clock.syncFromServer(latestServerTime, requestStart, responseEnd);
     lastSaved.current = snapshot;
+    setSavedSnapshot(snapshot);
   });
 
   // Cooldown tick: only while a cooldown is active.
@@ -125,7 +246,7 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
   const cooling = cooldownMs > 0;
   React.useEffect(() => {
     if (!cooling) return;
-    const id = window.setInterval(() => setNow(Date.now()), 250);
+    const id = window.setInterval(() => setNow(performance.now()), 250);
     return () => window.clearInterval(id);
   }, [cooling]);
 
@@ -139,17 +260,7 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
       );
     document.addEventListener('fullscreenchange', onChange);
     return () => document.removeEventListener('fullscreenchange', onChange);
-  }, []);
-
-  // Demo-only shortcut for the fullscreen-exit lock: Alt+Shift+X.
-  React.useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.altKey && e.shiftKey && e.code === 'KeyX')
-        dispatchLock({ type: 'fullscreen-exited', simulated: true });
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [dispatchLock]);
 
   const requestFullscreen = async (): Promise<boolean> => {
     try {
@@ -169,34 +280,101 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
     return Object.keys(drafts.code).some((k) => k.startsWith(`${q.id}:`));
   };
 
+  const isSaved = (q: Schemas['Question']): boolean => {
+    if (q.type === 'mcq') return savedSnapshot.mcq[q.id] === drafts.mcq[q.id];
+    return Object.entries(drafts.code)
+      .filter(([k]) => k.startsWith(`${q.id}:`))
+      .every(([k, code]) => savedSnapshot.code[k] === code);
+  };
+
   const run = async () => {
-    const started = Date.now();
+    const questionId = question.id;
+    const started = performance.now(); // monotonic: the OS clock cannot shorten the cooldown
     setLastRunAt(started);
     setNow(started);
     setRunning(true);
-    setResult(null);
-    setRunError(null);
-    await autosave.flush(); // FR-504: autosave on every run
-    const { data, response } = await api.POST('/v1/candidate/questions/{questionId}/run', {
-      params: { path: { questionId: question.id } },
-      body: { language, code: value },
-    });
-    setRunning(false);
-    if (data) setResult(data);
-    else if (response.status === 429)
-      setRunError('You can run once every 5 seconds. Wait a moment and press Run again.');
-    else setRunError('The run could not finish. Check your connection and press Run again.');
+    setRunningId(questionId);
+    setResults((r) => omit(r, questionId));
+    setRunErrors((e) => omit(e, questionId));
+    const fail = (message: string) => setRunErrors((e) => ({ ...e, [questionId]: message }));
+    try {
+      await autosave.flush(); // FR-504: autosave on every run; a failed save does not block Run
+      const { data, response } = await api.POST('/v1/candidate/questions/{questionId}/run', {
+        params: { path: { questionId } },
+        body: { language, code: value },
+      });
+      if (response.ok && data) setResults((r) => ({ ...r, [questionId]: data }));
+      else if (response.status === 429)
+        fail('You can run once every 5 seconds. Wait a moment and press Run again.');
+      else fail('The run could not finish. Check your connection and press Run again.');
+    } catch {
+      fail('The run could not finish. Check your connection and press Run again.');
+    } finally {
+      setRunning(false);
+      setRunningId(null);
+    }
   };
 
   const finishSection = async () => {
     setFinishing(true);
-    await autosave.flush();
-    await api.POST('/v1/candidate/sections/{sectionId}/finish', {
-      params: { path: { sectionId: section.id } },
-    });
-    setFinishing(false);
-    setFinishOpen(false);
-    setFinished(true);
+    setFinishError(null);
+    const markFinished = (nextSectionId: string | null, next?: Schemas['CandidateSession']) => {
+      onFinished({ sectionId: section.id, title: section.title, nextSectionId, next });
+      setFinishOpen(false);
+    };
+    // After a failure, or a 409 (which can also mean a paused or inactive session), we cannot tell
+    // whether the server finished the section. Re-read the session with a plain request that does
+    // not touch the query cache: if it now reports another section, the finish went through
+    // (ADR 0002: finishing is final). The cache is only updated when the candidate continues.
+    const confirmOrExplain = async (fallback: string) => {
+      try {
+        const { data: fresh } = await api.GET('/v1/candidate/session');
+        if (!fresh) throw new Error('session');
+        if (fresh.section.id !== section.id) {
+          markFinished(fresh.section.id, fresh);
+          return;
+        }
+        setFinishError(fallback);
+      } catch {
+        setFinishError(
+          'We could not confirm whether the section was finished. Check your connection and try again; if it was already finished, the screen will say so.',
+        );
+      }
+    };
+    try {
+      const saved = await autosave.flush();
+      if (!saved) {
+        setFinishError(
+          'We could not save your latest answers, so the section is not finished. Check your connection and try again.',
+        );
+        return;
+      }
+      const { data, response } = await api.POST('/v1/candidate/sections/{sectionId}/finish', {
+        params: { path: { sectionId: section.id } },
+      });
+      // ADR 0002: finishing is final. Only an OK response with a body marks it finished. A 409 is
+      // not trusted by itself (the contract does not say which conflict it is); it goes through
+      // the verified re-read below.
+      if (response.ok && data) {
+        markFinished(data.nextSectionId ?? null);
+        return;
+      }
+      if (response.status === 409) {
+        await confirmOrExplain(
+          'The server could not finish the section right now (your session may be paused). Nothing changed and you can keep working. Try again in a moment, or tell the person running the test.',
+        );
+        return;
+      }
+      await confirmOrExplain(
+        'We could not finish the section, so nothing changed and you can keep working. Check your connection and try again.',
+      );
+    } catch {
+      await confirmOrExplain(
+        'We could not reach the server, so the section is not finished. Check your connection and try again.',
+      );
+    } finally {
+      setFinishing(false);
+    }
   };
 
   const testWarning = testLeft === null ? 'none' : timerWarning(testLeft);
@@ -206,19 +384,18 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
     sectionWarning === 'one-minute' && 'One minute left in this section.',
     testWarning === 'five-minutes' && 'Five minutes left in the test.',
     testWarning === 'one-minute' && 'One minute left in the test.',
-    expired && 'Time is up. Your editor is read-only.',
+    // Expiry is announced once, by the role="alert" banner below.
   ]
     .filter(Boolean)
     .join(' ');
 
   return (
     <div className="flex h-dvh flex-col">
-      <div
-        className="bg-warning-soft px-4 py-1.5 text-center text-sm font-medium text-warning"
-        data-testid="demo-banner"
-      >
-        Demo — mocked data. Nothing here is real, saved or scored.
-      </div>
+      {DemoBanner && (
+        <React.Suspense fallback={null}>
+          <DemoBanner />
+        </React.Suspense>
+      )}
 
       <header className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b bg-card px-4 py-2">
         <div className="min-w-0">
@@ -246,9 +423,21 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
         {announcement}
       </p>
 
+      {clock.unavailable && (
+        <div role="alert" className="bg-destructive-soft px-4 py-2 text-sm text-destructive">
+          We cannot check the time with the server, so the editor is paused. Check your internet
+          connection, then{' '}
+          <button type="button" className="underline" onClick={clock.retry}>
+            try again
+          </button>
+          . Your time is not affected.
+        </div>
+      )}
+
       {expired && (
         <p role="alert" className="bg-destructive-soft px-4 py-2 text-sm text-destructive">
-          Time is up. In the real test your latest saved work is submitted automatically.
+          Time is up. {IS_DEMO ? 'In the real test your' : 'Your'} latest saved work is submitted
+          automatically.
         </p>
       )}
 
@@ -268,7 +457,7 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
               >
                 Question {i + 1}
                 <span className="ml-1 text-xs text-muted-foreground">
-                  {isAnswered(q) ? '(saved draft)' : '(not started)'}
+                  {!isAnswered(q) ? '(not started)' : isSaved(q) ? '(saved)' : '(not saved yet)'}
                 </span>
               </button>
             ))}
@@ -351,6 +540,9 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
                 >
                   <RotateCcw className="h-4 w-4" aria-hidden /> Reset to starter code
                 </Button>
+                <p className="text-xs text-muted-foreground">
+                  Tab inserts an indent. To move focus out of the editor, press Ctrl+M, then Tab.
+                </p>
                 <Button
                   className="ml-auto"
                   onClick={() => void run()}
@@ -402,7 +594,11 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
                 />
               </div>
               <div className="min-h-0 flex-[2] border-t">
-                <OutputPanel running={running} result={result} errorMessage={runError} />
+                <OutputPanel
+                  running={runningId === question.id}
+                  result={results[question.id] ?? null}
+                  errorMessage={runErrors[question.id] ?? null}
+                />
               </div>
             </>
           ) : (
@@ -415,20 +611,22 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
       </div>
 
       <footer className="flex flex-wrap items-center gap-3 border-t bg-card px-4 py-2">
-        <Button variant="outline" onClick={() => setFinishOpen(true)} disabled={finished}>
+        <Button
+          variant="outline"
+          onClick={() => {
+            setFinishError(null);
+            setFinishOpen(true);
+          }}
+          disabled={finished}
+        >
           Finish section
         </Button>
         <span className="text-xs text-muted-foreground">Finishing a section is final.</span>
-        <div className="ml-auto flex items-center gap-2 rounded-md border border-dashed px-2 py-1 text-xs">
-          <span className="text-muted-foreground">Demo control:</span>
-          <button
-            type="button"
-            className="underline underline-offset-2"
-            onClick={() => dispatchLock({ type: 'fullscreen-exited', simulated: true })}
-          >
-            Simulate fullscreen exit (Alt+Shift+X)
-          </button>
-        </div>
+        {DemoFooterControl && (
+          <React.Suspense fallback={null}>
+            <DemoFooterControl dispatchLock={dispatchLock} />
+          </React.Suspense>
+        )}
       </footer>
 
       {lock.phase === 'gate' && (
@@ -440,7 +638,13 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
               else setFsFailed(true);
             })
           }
-          onContinueWithout={() => dispatchLock({ type: 'start', fullscreen: false })}
+          demoAction={
+            DemoContinueWithoutFullscreen && (
+              <React.Suspense fallback={null}>
+                <DemoContinueWithoutFullscreen dispatchLock={dispatchLock} />
+              </React.Suspense>
+            )
+          }
         />
       )}
       {lock.phase === 'running' && lock.locked && (
@@ -463,6 +667,7 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
         onOpenChange={setFinishOpen}
         onConfirm={() => void finishSection()}
         busy={finishing}
+        error={finishError}
         sectionTitle={section.title}
       />
 
@@ -492,21 +697,6 @@ function TestScreenInner({ session }: { session: Schemas['CandidateSession'] }):
           </div>
         </DialogContent>
       </Dialog>
-
-      {finished && (
-        <div
-          role="status"
-          className="fixed inset-x-0 bottom-16 z-40 mx-auto w-fit rounded-lg border bg-card p-4 shadow-lg"
-        >
-          <p className="font-medium">
-            <CheckCircle2 className="mr-2 inline h-5 w-5 text-success" aria-hidden />
-            The {section.title} section is finished and cannot be reopened.
-          </p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Demo: the next section is not part of this preview.
-          </p>
-        </div>
-      )}
     </div>
   );
 }
@@ -542,7 +732,12 @@ function SavedIndicator({
     error: 'Could not save. Check your connection; we will retry in 10 seconds.',
   }[status];
   return (
-    <p role="status" className="flex items-center gap-1.5 text-sm" data-testid="saved-indicator">
+    // No live region for routine states (they change every 10 s); only a failed save is announced.
+    <p
+      role={status === 'error' ? 'alert' : undefined}
+      className="flex items-center gap-1.5 text-sm"
+      data-testid="saved-indicator"
+    >
       {status === 'error' ? (
         <TriangleAlert className="h-4 w-4 text-destructive" aria-hidden />
       ) : status === 'saving' ? (
