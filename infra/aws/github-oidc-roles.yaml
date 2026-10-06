@@ -1,0 +1,1472 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  CodeProctor pilot: GitHub OIDC deploy role (codeproctor-pilot-deploy), permissions boundary,
+  optional read-only plan role and optional Terraform state bucket. Single account, us-east-1.
+  Infrastructure code only: no credentials, keys or account ids live in this file.
+
+# =============================================================================================
+# How the pilot role is limited (details and escalation analysis: infra/aws/README.md)
+#
+# Design: ONE x86 EC2 instance (Docker Compose), started and stopped by EventBridge Scheduler,
+# S3 for backups and recordings, SES, CloudWatch. No RDS, NAT gateway or load balancer, and no
+# staging on AWS. The deploy role can touch only resources named codeproctor-pilot-* or tagged
+# Environment=pilot. Anything else (other names, other tag values, no tag) is not allowed.
+#
+# Service        | Control used by the deploy role
+# ---------------|------------------------------------------------------------------------------
+# S3             | ARN name prefix codeproctor-pilot-* (bucket tags are not relied on). Object
+#                | access only on the state bucket; data objects are denied
+# KMS            | Tags: aws:RequestTag on CreateKey, aws:ResourceTag on use and change;
+#                | alias ARN prefix alias/codeproctor-pilot-*; Decrypt denied except the state key
+# Secrets Mgr    | ARN prefix + tags (RequestTag on create, ResourceTag on change). GetSecretValue
+#                | denied
+# CloudWatch Logs| ARN prefix (/codeproctor/pilot/* or codeproctor-pilot-*) + tags. Reading log
+#                | events denied
+# CloudWatch alarms | ARN prefix only (updates cannot be tag-conditioned reliably)
+# SSM parameters | Path prefix /codeproctor/pilot/*. Write and delete only, reads denied
+# SES            | Tags only: identities are not name-prefixed. Configuration sets by prefix.
+#                | Sending denied for the deploy role
+# EC2            | Tags only (ids carry no names): RequestTag on create, ResourceTag on change.
+#                | Describe* is account-wide (no resource-level support): known limitation
+# EventBridge Scheduler | ARN prefix: schedule group and schedules codeproctor-pilot-*
+# AWS Budgets    | ARN prefix budget/codeproctor-pilot-*
+# IAM            | ARN prefix + permissions boundary condition + explicit denies
+# RDS, ELB, NAT, peering, transit gateway, VPN | Explicit Deny (cost guard rails)
+#
+# Policies are split into managed policies because an IAM role's inline policies are capped at
+# 10240 characters and a managed policy at 6144. They sit under the path /codeproctor-guardrails/
+# so that their ARNs never match the codeproctor-pilot-* allow patterns (the deploy role cannot
+# edit its own policies), and are also covered by explicit denies.
+# =============================================================================================
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: GitHub repository
+        Parameters:
+          - GitHubOwner
+          - GitHubRepo
+      - Label:
+          default: OIDC provider
+        Parameters:
+          - ExistingOidcProviderArn
+      - Label:
+          default: Options
+        Parameters:
+          - CreatePlanRole
+          - AllowedInstanceTypes
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Description: GitHub user or organisation that owns the repository (type the real value; no default)
+    AllowedPattern: ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$
+    ConstraintDescription: 1 to 39 letters, digits or hyphens, not starting or ending with a hyphen
+  GitHubRepo:
+    Type: String
+    Description: GitHub repository name (type the real value; no default)
+    AllowedPattern: ^[A-Za-z0-9._-]{1,100}$
+    ConstraintDescription: 1 to 100 letters, digits, dots, hyphens or underscores
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ''
+    Description: Leave empty to create the GitHub OIDC provider. If the account already has one, paste its ARN (an account can have only one provider per URL)
+    AllowedPattern: ^$|^arn:aws:iam::[0-9]{12}:oidc-provider/token\.actions\.githubusercontent\.com$
+    ConstraintDescription: Empty, or the ARN of the existing token.actions.githubusercontent.com provider
+  CreatePlanRole:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['false', 'true']
+    Description: OPTIONAL read-only plan role for pull_request workflows. Read the README risk section first
+  AllowedInstanceTypes:
+    Type: CommaDelimitedList
+    Default: t3.large,t3a.large,m5.large,m6i.large
+    Description: Instance types the deploy role may launch (cost guard rail; about 2 vCPU and 8 GB, x86)
+
+Rules:
+  RegionMustBeUsEast1:
+    Assertions:
+      - Assert: !Equals [!Ref 'AWS::Region', us-east-1]
+        AssertDescription: This stack must be created in us-east-1 (C-03, C-31)
+
+Conditions:
+  CreateOidcProvider: !Equals [!Ref ExistingOidcProviderArn, '']
+  CreatePlan: !Equals [!Ref CreatePlanRole, 'true']
+
+Resources:
+  # OIDC identity provider. IAM no longer validates the thumbprint for GitHub (it uses its trusted root CA library), so ThumbprintList is omitted.
+  GitHubOidcProvider:
+    Type: 'AWS::IAM::OIDCProvider'
+    Condition: 'CreateOidcProvider'
+    Properties:
+      Url: 'https://token.actions.githubusercontent.com'
+      ClientIdList:
+        - 'sts.amazonaws.com'
+      Tags:
+        - Key: 'Environment'
+          Value: 'pilot'
+        - Key: 'ManagedBy'
+          Value: 'codeproctor-github-oidc'
+  # Permissions boundary for every role the deploy role creates (instance role, scheduler execution role). Allows what the workloads need and nothing IAM-related.
+  PilotBoundaryPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: 'codeproctor-pilot-boundary'
+      Path: '/codeproctor-guardrails/'
+      Description: 'Permissions boundary for roles created by the pilot deploy role'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Workloads may use objects in the pilot buckets (recordings, backups).
+          - Sid: 'S3PilotData'
+            Effect: 'Allow'
+            Action:
+              - 's3:GetObject'
+              - 's3:PutObject'
+              - 's3:DeleteObject'
+              - 's3:AbortMultipartUpload'
+              - 's3:ListMultipartUploadParts'
+              - 's3:GetObjectTagging'
+              - 's3:PutObjectTagging'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-*/*'
+          - Sid: 'S3PilotList'
+            Effect: 'Allow'
+            Action:
+              - 's3:ListBucket'
+              - 's3:GetBucketLocation'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-*'
+          - Sid: 'KmsPilotKeys'
+            Effect: 'Allow'
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:Encrypt'
+              - 'kms:GenerateDataKey*'
+              - 'kms:ReEncrypt*'
+              - 'kms:DescribeKey'
+            Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Environment: 'pilot'
+          - Sid: 'SecretsPilot'
+            Effect: 'Allow'
+            Action:
+              - 'secretsmanager:GetSecretValue'
+              - 'secretsmanager:DescribeSecret'
+            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:codeproctor-pilot-*'
+          - Sid: 'LogsPilot'
+            Effect: 'Allow'
+            Action:
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+              - 'logs:DescribeLogStreams'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/codeproctor/pilot/*'
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:codeproctor-pilot-*'
+            # SES identities are not name-prefixed: the tag is the only control (the owner tags the identity Environment=pilot).
+          - Sid: 'SesSendPilotIdentities'
+            Effect: 'Allow'
+            Action:
+              - 'ses:SendEmail'
+              - 'ses:SendRawEmail'
+            Resource: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Environment: 'pilot'
+          - Sid: 'SsmParametersPilot'
+            Effect: 'Allow'
+            Action:
+              - 'ssm:GetParameter'
+              - 'ssm:GetParameters'
+              - 'ssm:GetParametersByPath'
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/codeproctor/pilot/*'
+            # Session Manager agent registration (no SSH keys). These actions do not support resource-level permissions.
+          - Sid: 'SsmAgentSessionManager'
+            Effect: 'Allow'
+            Action:
+              - 'ssm:UpdateInstanceInformation'
+              - 'ssmmessages:CreateControlChannel'
+              - 'ssmmessages:CreateDataChannel'
+              - 'ssmmessages:OpenControlChannel'
+              - 'ssmmessages:OpenDataChannel'
+            Resource: '*'
+          - Sid: 'MetricsPilotNamespace'
+            Effect: 'Allow'
+            Action: 'cloudwatch:PutMetricData'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                cloudwatch:namespace: 'codeproctor-pilot'
+            # For the EventBridge Scheduler execution role: start and stop of the tagged pilot instance only.
+          - Sid: 'SchedulerStartStopPilotInstance'
+            Effect: 'Allow'
+            Action:
+              - 'ec2:StartInstances'
+              - 'ec2:StopInstances'
+            Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Environment: 'pilot'
+            # Workloads never touch Terraform state or its key.
+          - Sid: 'DenyTfstate'
+            Effect: 'Deny'
+            Action: 's3:*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}/*'
+          - Sid: 'DenyTfstateKey'
+            Effect: 'Deny'
+            Action: 'kms:*'
+            Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Purpose: 'tfstate'
+          - Sid: 'DenyIdentityAndChaining'
+            Effect: 'Deny'
+            Action:
+              - 'iam:*'
+              - 'organizations:*'
+              - 'account:*'
+              - 'sts:AssumeRole'
+              - 'sts:AssumeRoleWithSAML'
+              - 'sts:AssumeRoleWithWebIdentity'
+              - 'rds:*'
+              - 'elasticloadbalancing:*'
+            Resource: '*'
+  # Deploy role: assumable only from the GitHub environment pilot.
+  PilotDeployRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: 'codeproctor-pilot-deploy'
+      Path: '/codeproctor-guardrails/'
+      Description: 'GitHub Actions deploy role for the pilot environment'
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 'GitHubEnvironmentPilot'
+            Effect: 'Allow'
+            Principal:
+              Federated:
+                !If [CreateOidcProvider, !Ref GitHubOidcProvider, !Ref ExistingOidcProviderArn]
+            Action: 'sts:AssumeRoleWithWebIdentity'
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: 'sts.amazonaws.com'
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOwner}/${GitHubRepo}:environment:pilot'
+      Tags:
+        - Key: 'Environment'
+          Value: 'pilot'
+        - Key: 'ManagedBy'
+          Value: 'codeproctor-github-oidc'
+  PilotDeployCorePolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: 'codeproctor-pilot-deploy-core'
+      Path: '/codeproctor-guardrails/'
+      Description: 'Pilot deploy: S3, KMS, Secrets Manager, Logs, alarms, SSM, SES, Budgets'
+      Roles:
+        - !Ref PilotDeployRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # S3: pilot buckets by name prefix (tag conditions on buckets are not relied on). Object access only to the state bucket.
+          - Sid: 'S3PilotBucketConfig'
+            Effect: 'Allow'
+            Action:
+              - 's3:CreateBucket'
+              - 's3:DeleteBucket*'
+              - 's3:GetBucket*'
+              - 's3:PutBucket*'
+              - 's3:ListBucket'
+              - 's3:GetEncryptionConfiguration'
+              - 's3:PutEncryptionConfiguration'
+              - 's3:GetLifecycleConfiguration'
+              - 's3:PutLifecycleConfiguration'
+              - 's3:GetAccelerateConfiguration'
+              - 's3:GetReplicationConfiguration'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-*'
+            # Optional Terraform state (PR 2 is on hold); S3 native lock file.
+          - Sid: 'S3StateObjects'
+            Effect: 'Allow'
+            Action:
+              - 's3:GetObject'
+              - 's3:GetObjectVersion'
+              - 's3:PutObject'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}/*'
+          - Sid: 'S3StateLockDelete'
+            Effect: 'Allow'
+            Action: 's3:DeleteObject'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}/*.tflock'
+          # KMS: tag conditions (CreateKey supports aws:RequestTag; the rest aws:ResourceTag); aliases by name prefix.
+          - Sid: 'KmsCreateKeyTagged'
+            Effect: 'Allow'
+            Action: 'kms:CreateKey'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:RequestTag/Environment: 'pilot'
+          - Sid: 'KmsManagePilotKeys'
+            Effect: 'Allow'
+            Action:
+              - 'kms:DescribeKey'
+              - 'kms:GetKeyPolicy'
+              - 'kms:GetKeyRotationStatus'
+              - 'kms:ListResourceTags'
+              - 'kms:ListGrants'
+              - 'kms:EnableKeyRotation'
+              - 'kms:DisableKeyRotation'
+              - 'kms:EnableKey'
+              - 'kms:DisableKey'
+              - 'kms:ScheduleKeyDeletion'
+              - 'kms:CancelKeyDeletion'
+              - 'kms:PutKeyPolicy'
+              - 'kms:UpdateKeyDescription'
+              - 'kms:TagResource'
+              - 'kms:UntagResource'
+              - 'kms:CreateAlias'
+              - 'kms:DeleteAlias'
+              - 'kms:UpdateAlias'
+              - 'kms:RevokeGrant'
+              - 'kms:Encrypt'
+              - 'kms:GenerateDataKeyWithoutPlaintext'
+            Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Environment: 'pilot'
+          - Sid: 'KmsGrantsForAwsServices'
+            Effect: 'Allow'
+            Action: 'kms:CreateGrant'
+            Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Environment: 'pilot'
+              Bool:
+                kms:GrantIsForAWSResource: 'true'
+          - Sid: 'KmsAliasPrefix'
+            Effect: 'Allow'
+            Action:
+              - 'kms:CreateAlias'
+              - 'kms:DeleteAlias'
+              - 'kms:UpdateAlias'
+            Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/codeproctor-pilot-*'
+          - Sid: 'KmsListAliases'
+            Effect: 'Allow'
+            Action: 'kms:ListAliases'
+            Resource: '*'
+          - Sid: 'KmsStateKeyUse'
+            Effect: 'Allow'
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:Encrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:DescribeKey'
+            Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Environment: 'pilot'
+                aws:ResourceTag/Purpose: 'tfstate'
+          # Secrets Manager: name prefix plus tags. The role can manage secrets but never read values.
+          - Sid: 'SecretsCreateTagged'
+            Effect: 'Allow'
+            Action:
+              - 'secretsmanager:CreateSecret'
+              - 'secretsmanager:TagResource'
+            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:codeproctor-pilot-*'
+            Condition:
+              StringEquals:
+                aws:RequestTag/Environment: 'pilot'
+          - Sid: 'SecretsManagePilot'
+            Effect: 'Allow'
+            Action:
+              - 'secretsmanager:DescribeSecret'
+              - 'secretsmanager:GetResourcePolicy'
+              - 'secretsmanager:PutResourcePolicy'
+              - 'secretsmanager:DeleteResourcePolicy'
+              - 'secretsmanager:UpdateSecret'
+              - 'secretsmanager:DeleteSecret'
+              - 'secretsmanager:RestoreSecret'
+              - 'secretsmanager:UntagResource'
+              - 'secretsmanager:RotateSecret'
+            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:codeproctor-pilot-*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Environment: 'pilot'
+          # CloudWatch Logs: name prefix plus tags (CreateLogGroup supports aws:RequestTag). DescribeLogGroups is authorised on the account-wide pattern.
+          - Sid: 'LogsCreateTagged'
+            Effect: 'Allow'
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:TagResource'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/codeproctor/pilot/*'
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:codeproctor-pilot-*'
+            Condition:
+              StringEquals:
+                aws:RequestTag/Environment: 'pilot'
+          - Sid: 'LogsManagePilot'
+            Effect: 'Allow'
+            Action:
+              - 'logs:DeleteLogGroup'
+              - 'logs:PutRetentionPolicy'
+              - 'logs:DeleteRetentionPolicy'
+              - 'logs:AssociateKmsKey'
+              - 'logs:DisassociateKmsKey'
+              - 'logs:UntagResource'
+              - 'logs:ListTagsForResource'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/codeproctor/pilot/*'
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:codeproctor-pilot-*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Environment: 'pilot'
+          - Sid: 'LogsDescribe'
+            Effect: 'Allow'
+            Action: 'logs:DescribeLogGroups'
+            Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group::log-stream:*'
+          # CloudWatch alarms: name prefix only (PutMetricAlarm updates cannot be tag-conditioned reliably).
+          - Sid: 'AlarmsPilot'
+            Effect: 'Allow'
+            Action:
+              - 'cloudwatch:PutMetricAlarm'
+              - 'cloudwatch:DeleteAlarms'
+              - 'cloudwatch:EnableAlarmActions'
+              - 'cloudwatch:DisableAlarmActions'
+              - 'cloudwatch:TagResource'
+              - 'cloudwatch:UntagResource'
+              - 'cloudwatch:ListTagsForResource'
+            Resource: !Sub 'arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:codeproctor-pilot-*'
+          - Sid: 'AlarmsDescribe'
+            Effect: 'Allow'
+            Action: 'cloudwatch:DescribeAlarms'
+            Resource: '*'
+          # SSM parameters: path prefix /codeproctor/pilot/ only. Write and delete, never read values.
+          - Sid: 'SsmParametersWrite'
+            Effect: 'Allow'
+            Action:
+              - 'ssm:PutParameter'
+              - 'ssm:DeleteParameter'
+              - 'ssm:DeleteParameters'
+              - 'ssm:AddTagsToResource'
+              - 'ssm:RemoveTagsFromResource'
+              - 'ssm:ListTagsForResource'
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/codeproctor/pilot/*'
+          - Sid: 'SsmDescribe'
+            Effect: 'Allow'
+            Action: 'ssm:DescribeParameters'
+            Resource: '*'
+          # SES: identities are not name-prefixed (domains and addresses): tag condition only. Configuration sets by name prefix.
+          - Sid: 'SesIdentityCreateTagged'
+            Effect: 'Allow'
+            Action:
+              - 'ses:CreateEmailIdentity'
+              - 'ses:TagResource'
+            Resource: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
+            Condition:
+              StringEquals:
+                aws:RequestTag/Environment: 'pilot'
+          - Sid: 'SesIdentityManagePilot'
+            Effect: 'Allow'
+            Action:
+              - 'ses:GetEmailIdentity'
+              - 'ses:DeleteEmailIdentity'
+              - 'ses:PutEmailIdentity*'
+              - 'ses:UntagResource'
+              - 'ses:ListTagsForResource'
+            Resource: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Environment: 'pilot'
+          - Sid: 'SesConfigurationSets'
+            Effect: 'Allow'
+            Action:
+              - 'ses:CreateConfigurationSet'
+              - 'ses:DeleteConfigurationSet'
+              - 'ses:GetConfigurationSet'
+              - 'ses:PutConfigurationSet*'
+              - 'ses:TagResource'
+              - 'ses:UntagResource'
+            Resource: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/codeproctor-pilot-*'
+          # AWS Budgets: budgets named codeproctor-pilot-* (cost alerts). Whether CreateBudget is authorised on this ARN is unverified.
+          - Sid: 'BudgetsPilot'
+            Effect: 'Allow'
+            Action:
+              - 'budgets:ViewBudget'
+              - 'budgets:ModifyBudget'
+              - 'budgets:TagResource'
+              - 'budgets:UntagResource'
+              - 'budgets:ListTagsForResource'
+            Resource: !Sub 'arn:${AWS::Partition}:budgets::${AWS::AccountId}:budget/codeproctor-pilot-*'
+  PilotDeployComputePolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: 'codeproctor-pilot-deploy-compute'
+      Path: '/codeproctor-guardrails/'
+      Description: 'Pilot deploy: EC2 and EventBridge Scheduler'
+      Roles:
+        - !Ref PilotDeployRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # EC2 resource ids carry no names, so every control is a tag: aws:RequestTag on create, aws:ResourceTag on change and delete.
+          - Sid: 'Ec2CreateTopLevelTagged'
+            Effect: 'Allow'
+            Action:
+              - 'ec2:CreateVpc'
+              - 'ec2:CreateInternetGateway'
+              - 'ec2:AllocateAddress'
+              - 'ec2:CreateVolume'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:vpc/*'
+              - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:internet-gateway/*'
+              - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:elastic-ip/*'
+              - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*'
+            Condition:
+              StringEquals:
+                aws:RequestTag/Environment: 'pilot'
+          - Sid: 'Ec2CreateChildTagged'
+            Effect: 'Allow'
+            Action:
+              - 'ec2:CreateSubnet'
+              - 'ec2:CreateSecurityGroup'
+              - 'ec2:CreateRouteTable'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*'
+              - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*'
+              - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:route-table/*'
+            Condition:
+              StringEquals:
+                aws:RequestTag/Environment: 'pilot'
+          - Sid: 'Ec2ChildNeedsPilotVpc'
+            Effect: 'Allow'
+            Action:
+              - 'ec2:CreateSubnet'
+              - 'ec2:CreateSecurityGroup'
+              - 'ec2:CreateRouteTable'
+            Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:vpc/*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Environment: 'pilot'
+            # RunInstances: IMDSv2 required and instance type restricted to the AllowedInstanceTypes parameter (cost guard rail).
+          - Sid: 'Ec2RunInstance'
+            Effect: 'Allow'
+            Action: 'ec2:RunInstances'
+            Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+            Condition:
+              StringEquals:
+                aws:RequestTag/Environment: 'pilot'
+                ec2:MetadataHttpTokens: 'required'
+                ec2:InstanceType: !Ref AllowedInstanceTypes
+            # Encrypted EBS volumes only.
+          - Sid: 'Ec2RunVolumeAndNic'
+            Effect: 'Allow'
+            Action: 'ec2:RunInstances'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*'
+              - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*'
+            Condition:
+              StringEquals:
+                aws:RequestTag/Environment: 'pilot'
+              Bool:
+                ec2:Encrypted: 'true'
+          - Sid: 'Ec2RunNicTagged'
+            Effect: 'Allow'
+            Action: 'ec2:RunInstances'
+            Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*'
+            Condition:
+              StringEquals:
+                aws:RequestTag/Environment: 'pilot'
+          - Sid: 'Ec2RunInParents'
+            Effect: 'Allow'
+            Action: 'ec2:RunInstances'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*'
+              - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Environment: 'pilot'
+          - Sid: 'Ec2RunImage'
+            Effect: 'Allow'
+            Action: 'ec2:RunInstances'
+            Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}::image/*'
+          - Sid: 'Ec2TagOnCreate'
+            Effect: 'Allow'
+            Action: 'ec2:CreateTags'
+            Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:*/*'
+            Condition:
+              StringEquals:
+                aws:RequestTag/Environment: 'pilot'
+                ec2:CreateAction:
+                  - 'RunInstances'
+                  - 'CreateVpc'
+                  - 'CreateSubnet'
+                  - 'CreateSecurityGroup'
+                  - 'CreateRouteTable'
+                  - 'CreateInternetGateway'
+                  - 'AllocateAddress'
+                  - 'CreateVolume'
+          - Sid: 'Ec2ManagePilot'
+            Effect: 'Allow'
+            Action:
+              - 'ec2:StartInstances'
+              - 'ec2:StopInstances'
+              - 'ec2:RebootInstances'
+              - 'ec2:TerminateInstances'
+              - 'ec2:ModifyInstanceAttribute'
+              - 'ec2:ModifyInstanceMetadataOptions'
+              - 'ec2:AssociateIamInstanceProfile'
+              - 'ec2:ReplaceIamInstanceProfileAssociation'
+              - 'ec2:DisassociateIamInstanceProfile'
+              - 'ec2:DeleteVolume'
+              - 'ec2:ModifyVolume'
+              - 'ec2:AttachVolume'
+              - 'ec2:DetachVolume'
+              - 'ec2:DeleteVpc'
+              - 'ec2:ModifyVpcAttribute'
+              - 'ec2:DeleteSubnet'
+              - 'ec2:ModifySubnetAttribute'
+              - 'ec2:DeleteSecurityGroup'
+              - 'ec2:AuthorizeSecurityGroupIngress'
+              - 'ec2:AuthorizeSecurityGroupEgress'
+              - 'ec2:RevokeSecurityGroupIngress'
+              - 'ec2:RevokeSecurityGroupEgress'
+              - 'ec2:ModifySecurityGroupRules'
+              - 'ec2:UpdateSecurityGroupRuleDescriptionsIngress'
+              - 'ec2:UpdateSecurityGroupRuleDescriptionsEgress'
+              - 'ec2:DeleteRouteTable'
+              - 'ec2:CreateRoute'
+              - 'ec2:DeleteRoute'
+              - 'ec2:ReplaceRoute'
+              - 'ec2:AssociateRouteTable'
+              - 'ec2:DisassociateRouteTable'
+              - 'ec2:DeleteInternetGateway'
+              - 'ec2:AttachInternetGateway'
+              - 'ec2:DetachInternetGateway'
+              - 'ec2:ReleaseAddress'
+              - 'ec2:AssociateAddress'
+              - 'ec2:DisassociateAddress'
+              - 'ec2:CreateTags'
+              - 'ec2:DeleteTags'
+            Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:*/*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Environment: 'pilot'
+            # Describe actions do not support resource-level permissions or tag conditions: metadata only, account-wide (known limitation).
+          - Sid: 'Ec2Describe'
+            Effect: 'Allow'
+            Action: 'ec2:Describe*'
+            Resource: '*'
+          # EventBridge Scheduler: schedules must live in a group named codeproctor-pilot-* (name prefix only; schedules do not support tag conditions).
+          - Sid: 'SchedulerPilotGroups'
+            Effect: 'Allow'
+            Action:
+              - 'scheduler:CreateScheduleGroup'
+              - 'scheduler:DeleteScheduleGroup'
+              - 'scheduler:GetScheduleGroup'
+              - 'scheduler:TagResource'
+              - 'scheduler:UntagResource'
+              - 'scheduler:ListTagsForResource'
+            Resource: !Sub 'arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule-group/codeproctor-pilot-*'
+          - Sid: 'SchedulerPilotSchedules'
+            Effect: 'Allow'
+            Action:
+              - 'scheduler:CreateSchedule'
+              - 'scheduler:UpdateSchedule'
+              - 'scheduler:DeleteSchedule'
+              - 'scheduler:GetSchedule'
+            Resource: !Sub 'arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/codeproctor-pilot-*/*'
+          - Sid: 'SchedulerList'
+            Effect: 'Allow'
+            Action:
+              - 'scheduler:ListSchedules'
+              - 'scheduler:ListScheduleGroups'
+            Resource: '*'
+  PilotDeployIamPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: 'codeproctor-pilot-deploy-iam'
+      Path: '/codeproctor-guardrails/'
+      Description: 'Pilot deploy: IAM limited to codeproctor-pilot-* with the boundary'
+      Roles:
+        - !Ref PilotDeployRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # IAM: only roles, policies and instance profiles named codeproctor-pilot-*, roles only with the boundary, no AWS managed policies.
+          - Sid: 'IamReadPilot'
+            Effect: 'Allow'
+            Action:
+              - 'iam:GetRole'
+              - 'iam:GetRolePolicy'
+              - 'iam:ListRolePolicies'
+              - 'iam:ListAttachedRolePolicies'
+              - 'iam:ListRoleTags'
+              - 'iam:GetPolicy'
+              - 'iam:GetPolicyVersion'
+              - 'iam:ListPolicyVersions'
+              - 'iam:GetInstanceProfile'
+              - 'iam:ListInstanceProfilesForRole'
+              - 'iam:ListInstanceProfileTags'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-pilot-*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-pilot-*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/codeproctor-pilot-*'
+          - Sid: 'IamCreateRoleWithBoundary'
+            Effect: 'Allow'
+            Action:
+              - 'iam:CreateRole'
+            Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-pilot-*'
+            Condition:
+              StringEquals:
+                aws:RequestTag/Environment: 'pilot'
+                iam:PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-guardrails/codeproctor-pilot-boundary'
+          - Sid: 'IamRolePolicyWriteOnBoundedRoles'
+            Effect: 'Allow'
+            Action:
+              - 'iam:PutRolePolicy'
+              - 'iam:DeleteRolePolicy'
+            Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-pilot-*'
+            Condition:
+              StringEquals:
+                iam:PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-guardrails/codeproctor-pilot-boundary'
+          - Sid: 'IamAttachDetachPilotPolicies'
+            Effect: 'Allow'
+            Action:
+              - 'iam:AttachRolePolicy'
+              - 'iam:DetachRolePolicy'
+            Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-pilot-*'
+            Condition:
+              StringEquals:
+                iam:PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-guardrails/codeproctor-pilot-boundary'
+              ArnLike:
+                iam:PolicyARN: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-pilot-*'
+          - Sid: 'IamManagePilotRoles'
+            Effect: 'Allow'
+            Action:
+              - 'iam:DeleteRole'
+              - 'iam:UpdateRole'
+              - 'iam:UpdateRoleDescription'
+              - 'iam:UpdateAssumeRolePolicy'
+              - 'iam:TagRole'
+              - 'iam:UntagRole'
+            Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-pilot-*'
+          - Sid: 'IamManagePilotPolicies'
+            Effect: 'Allow'
+            Action:
+              - 'iam:CreatePolicy'
+              - 'iam:CreatePolicyVersion'
+              - 'iam:DeletePolicy'
+              - 'iam:DeletePolicyVersion'
+              - 'iam:SetDefaultPolicyVersion'
+              - 'iam:TagPolicy'
+              - 'iam:UntagPolicy'
+            Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-pilot-*'
+          - Sid: 'IamInstanceProfiles'
+            Effect: 'Allow'
+            Action:
+              - 'iam:CreateInstanceProfile'
+              - 'iam:TagInstanceProfile'
+              - 'iam:DeleteInstanceProfile'
+              - 'iam:AddRoleToInstanceProfile'
+              - 'iam:RemoveRoleFromInstanceProfile'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/codeproctor-pilot-*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-pilot-*'
+            # ec2.amazonaws.com: the instance profile role. scheduler.amazonaws.com: the EventBridge Scheduler execution role (start/stop only, enforced by the boundary). No other service.
+          - Sid: 'IamPassPilotRoles'
+            Effect: 'Allow'
+            Action: 'iam:PassRole'
+            Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-pilot-*'
+            Condition:
+              StringEquals:
+                iam:PassedToService:
+                  - 'ec2.amazonaws.com'
+                  - 'scheduler.amazonaws.com'
+  PilotDeployGuardPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: 'codeproctor-pilot-deploy-guard'
+      Path: '/codeproctor-guardrails/'
+      Description: 'Pilot deploy: explicit denies (tags, data plane, cost guard rails, state)'
+      Roles:
+        - !Ref PilotDeployRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Tag value guards: nothing may be created or tagged with an Environment value other than pilot, and nothing tagged otherwise may be touched.
+          - Sid: 'DenyForeignEnvironmentTagOnRequest'
+            Effect: 'Deny'
+            Action: '*'
+            Resource: '*'
+            Condition:
+              'Null':
+                aws:RequestTag/Environment: 'false'
+              StringNotEquals:
+                aws:RequestTag/Environment: 'pilot'
+          - Sid: 'DenyForeignEnvironmentTagOnResource'
+            Effect: 'Deny'
+            Action: '*'
+            Resource: '*'
+            Condition:
+              'Null':
+                aws:ResourceTag/Environment: 'false'
+              StringNotEquals:
+                aws:ResourceTag/Environment: 'pilot'
+          # Data plane: this role deploys infrastructure and never reads or writes data.
+          # Object access is denied on every bucket except the state bucket (the state bucket needs it).
+          - Sid: 'DenyObjectDataPlane'
+            Effect: 'Deny'
+            Action:
+              - 's3:GetObject*'
+              - 's3:PutObject*'
+              - 's3:DeleteObject*'
+              - 's3:RestoreObject'
+              - 's3:AbortMultipartUpload'
+            NotResource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}/*'
+          - Sid: 'DenyKmsDecryptData'
+            Effect: 'Deny'
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:ReEncrypt*'
+            Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+            Condition:
+              StringNotEquals:
+                aws:ResourceTag/Purpose: 'tfstate'
+          - Sid: 'DenySecretValues'
+            Effect: 'Deny'
+            Action:
+              - 'secretsmanager:GetSecretValue'
+              - 'secretsmanager:BatchGetSecretValue'
+            Resource: '*'
+          - Sid: 'DenyLogReads'
+            Effect: 'Deny'
+            Action:
+              - 'logs:GetLogEvents'
+              - 'logs:FilterLogEvents'
+              - 'logs:StartQuery'
+              - 'logs:GetQueryResults'
+              - 'logs:StartLiveTail'
+              - 'logs:GetLogRecord'
+              - 'logs:Unmask'
+            Resource: '*'
+          - Sid: 'DenyParameterReads'
+            Effect: 'Deny'
+            Action:
+              - 'ssm:GetParameter'
+              - 'ssm:GetParameters'
+              - 'ssm:GetParametersByPath'
+              - 'ssm:GetParameterHistory'
+              - 'ssm:StartSession'
+              - 'ssm:SendCommand'
+            Resource: '*'
+          - Sid: 'DenySesSending'
+            Effect: 'Deny'
+            Action: 'ses:Send*'
+            Resource: '*'
+          # Cost guard rails (minimal cost design: one instance, no RDS, NAT gateway or load balancer). Structural: these cannot be created even by mistake.
+          - Sid: 'DenyCostlyServices'
+            Effect: 'Deny'
+            Action:
+              - 'rds:*'
+              - 'rds-db:*'
+              - 'rds-data:*'
+              - 'elasticloadbalancing:*'
+              - 'ec2:CreateNatGateway'
+              - 'ec2:*TransitGateway*'
+              - 'ec2:*VpcPeering*'
+              - 'ec2:*Vpn*'
+              - 'ec2:*ClientVpn*'
+            Resource: '*'
+            # No SSH keys: access is through SSM Session Manager.
+          - Sid: 'DenyKeyPairs'
+            Effect: 'Deny'
+            Action:
+              - 'ec2:CreateKeyPair'
+              - 'ec2:ImportKeyPair'
+            Resource: '*'
+          # Environment tag tamper: EC2 tags are protected from edits after creation.
+          - Sid: 'DenyRemoveEnvironmentTag'
+            Effect: 'Deny'
+            Action: 'ec2:DeleteTags'
+            Resource: '*'
+            Condition:
+              ForAnyValue:StringEquals:
+                aws:TagKeys: 'Environment'
+          - Sid: 'DenyRetagEnvironmentAfterCreate'
+            Effect: 'Deny'
+            Action: 'ec2:CreateTags'
+            Resource: '*'
+            Condition:
+              ForAnyValue:StringEquals:
+                aws:TagKeys: 'Environment'
+              'Null':
+                ec2:CreateAction: 'true'
+          # State bucket and its key are owned by this stack.
+          - Sid: 'DenyStateBucketChange'
+            Effect: 'Deny'
+            Action:
+              - 's3:DeleteObjectVersion'
+              - 's3:DeleteBucket*'
+              - 's3:PutBucket*'
+              - 's3:PutEncryptionConfiguration'
+              - 's3:PutLifecycleConfiguration'
+              - 's3:PutReplicationConfiguration'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}/*'
+          - Sid: 'DenyStateKeyChange'
+            Effect: 'Deny'
+            Action:
+              - 'kms:ScheduleKeyDeletion'
+              - 'kms:DisableKey'
+              - 'kms:PutKeyPolicy'
+              - 'kms:CreateGrant'
+              - 'kms:DeleteAlias'
+              - 'kms:UpdateAlias'
+              - 'kms:TagResource'
+              - 'kms:UntagResource'
+            Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Purpose: 'tfstate'
+          # Code execution and role chaining: no service that runs code is allowed, so PassRole to it cannot help.
+          - Sid: 'DenyCodeExecutionAndChaining'
+            Effect: 'Deny'
+            Action:
+              - 'lambda:*'
+              - 'ecs:*'
+              - 'cloudformation:*'
+              - 'codebuild:*'
+              - 'glue:*'
+              - 'sagemaker:*'
+              - 'batch:*'
+              - 'datapipeline:*'
+              - 'sts:AssumeRole'
+              - 'organizations:*'
+              - 'account:*'
+            Resource: '*'
+  PilotDeployIamGuardPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: 'codeproctor-pilot-deploy-iamguard'
+      Path: '/codeproctor-guardrails/'
+      Description: 'Pilot deploy: explicit IAM denies'
+      Roles:
+        - !Ref PilotDeployRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # IAM guard rails. See README for the escalation paths each statement closes.
+          - Sid: 'DenyIdentityAdministration'
+            Effect: 'Deny'
+            Action:
+              - 'iam:*User*'
+              - 'iam:*AccessKey*'
+              - 'iam:*LoginProfile*'
+              - 'iam:*Group*'
+              - 'iam:*SAMLProvider*'
+              - 'iam:*OpenIDConnectProvider*'
+              - 'iam:*ServiceSpecificCredential*'
+              - 'iam:*SSHPublicKey*'
+              - 'iam:*SigningCertificate*'
+              - 'iam:*MFADevice*'
+              - 'iam:*AccountPasswordPolicy*'
+              - 'iam:*AccountAlias*'
+            Resource: '*'
+            # The deploy role, the plan role and everything under the guardrails path are untouchable.
+          - Sid: 'DenyProtectedRoles'
+            Effect: 'Deny'
+            Action: 'iam:*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-pilot-deploy'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-pilot-plan'
+            # The boundary and the deploy and plan policies cannot be changed, deleted or re-versioned.
+          - Sid: 'DenyProtectedPolicies'
+            Effect: 'Deny'
+            Action: 'iam:*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-guardrails/*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-pilot-boundary'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-pilot-deploy-*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-pilot-plan-*'
+          - Sid: 'DenyAttachingProtectedPolicies'
+            Effect: 'Deny'
+            Action:
+              - 'iam:AttachRolePolicy'
+              - 'iam:PutRolePolicy'
+            Resource: '*'
+            Condition:
+              ArnLike:
+                iam:PolicyARN:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-guardrails/*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-pilot-boundary'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-pilot-deploy-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-pilot-plan-*'
+            # The boundary is set at CreateRole and never changed.
+          - Sid: 'DenyBoundaryRemovalOrSwap'
+            Effect: 'Deny'
+            Action:
+              - 'iam:DeleteRolePermissionsBoundary'
+              - 'iam:PutRolePermissionsBoundary'
+            Resource: '*'
+          - Sid: 'DenyCreateRoleWithoutBoundary'
+            Effect: 'Deny'
+            Action: 'iam:CreateRole'
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                iam:PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-guardrails/codeproctor-pilot-boundary'
+          - Sid: 'DenyPassRoleToOtherServices'
+            Effect: 'Deny'
+            Action: 'iam:PassRole'
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                iam:PassedToService:
+                  - 'ec2.amazonaws.com'
+                  - 'scheduler.amazonaws.com'
+          - Sid: 'DenyServiceLinkedRoles'
+            Effect: 'Deny'
+            Action: 'iam:CreateServiceLinkedRole'
+            Resource: '*'
+  # OPTIONAL read-only plan role (CreatePlanRole). Trusted from any pull_request workflow of the repository: read the README risk section before enabling.
+  PilotPlanRole:
+    Type: 'AWS::IAM::Role'
+    Condition: 'CreatePlan'
+    Properties:
+      RoleName: 'codeproctor-pilot-plan'
+      Path: '/codeproctor-guardrails/'
+      Description: 'Optional read-only plan role for pull_request workflows'
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 'GitHubPullRequest'
+            Effect: 'Allow'
+            Principal:
+              Federated:
+                !If [CreateOidcProvider, !Ref GitHubOidcProvider, !Ref ExistingOidcProviderArn]
+            Action: 'sts:AssumeRoleWithWebIdentity'
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: 'sts.amazonaws.com'
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOwner}/${GitHubRepo}:pull_request'
+      Tags:
+        - Key: 'Environment'
+          Value: 'pilot'
+        - Key: 'ManagedBy'
+          Value: 'codeproctor-github-oidc'
+  PilotPlanReadPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Condition: 'CreatePlan'
+    Properties:
+      ManagedPolicyName: 'codeproctor-pilot-plan-read'
+      Path: '/codeproctor-guardrails/'
+      Description: 'Pilot plan: read-only metadata and state read/lock'
+      Roles:
+        - !Ref PilotPlanRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Read-only infrastructure metadata plus read and lock of the pilot state.
+          - Sid: 'Ec2Describe'
+            Effect: 'Allow'
+            Action: 'ec2:Describe*'
+            Resource: '*'
+          - Sid: 'S3BucketConfigRead'
+            Effect: 'Allow'
+            Action:
+              - 's3:GetBucket*'
+              - 's3:ListBucket'
+              - 's3:GetEncryptionConfiguration'
+              - 's3:GetLifecycleConfiguration'
+              - 's3:GetAccelerateConfiguration'
+              - 's3:GetReplicationConfiguration'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-*'
+          - Sid: 'StateRead'
+            Effect: 'Allow'
+            Action:
+              - 's3:GetObject'
+              - 's3:GetObjectVersion'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}/*'
+          - Sid: 'StateLockWrite'
+            Effect: 'Allow'
+            Action:
+              - 's3:PutObject'
+              - 's3:DeleteObject'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}/*.tflock'
+          - Sid: 'KmsRead'
+            Effect: 'Allow'
+            Action:
+              - 'kms:DescribeKey'
+              - 'kms:GetKeyPolicy'
+              - 'kms:GetKeyRotationStatus'
+              - 'kms:ListResourceTags'
+            Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Environment: 'pilot'
+          - Sid: 'KmsListAliases'
+            Effect: 'Allow'
+            Action: 'kms:ListAliases'
+            Resource: '*'
+          - Sid: 'KmsStateKeyUse'
+            Effect: 'Allow'
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:Encrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:DescribeKey'
+            Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Environment: 'pilot'
+                aws:ResourceTag/Purpose: 'tfstate'
+          - Sid: 'SecretsDescribe'
+            Effect: 'Allow'
+            Action:
+              - 'secretsmanager:DescribeSecret'
+              - 'secretsmanager:GetResourcePolicy'
+            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:codeproctor-pilot-*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Environment: 'pilot'
+          - Sid: 'LogsDescribe'
+            Effect: 'Allow'
+            Action:
+              - 'logs:DescribeLogGroups'
+              - 'logs:ListTagsForResource'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group::log-stream:*'
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/codeproctor/pilot/*'
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:codeproctor-pilot-*'
+          - Sid: 'CloudWatchDescribe'
+            Effect: 'Allow'
+            Action:
+              - 'cloudwatch:DescribeAlarms'
+              - 'cloudwatch:ListTagsForResource'
+            Resource: '*'
+          - Sid: 'SsmDescribe'
+            Effect: 'Allow'
+            Action: 'ssm:DescribeParameters'
+            Resource: '*'
+          - Sid: 'SesRead'
+            Effect: 'Allow'
+            Action:
+              - 'ses:GetEmailIdentity'
+              - 'ses:ListTagsForResource'
+            Resource: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Environment: 'pilot'
+          - Sid: 'SchedulerRead'
+            Effect: 'Allow'
+            Action:
+              - 'scheduler:GetSchedule'
+              - 'scheduler:GetScheduleGroup'
+              - 'scheduler:ListSchedules'
+              - 'scheduler:ListScheduleGroups'
+            Resource: '*'
+          - Sid: 'BudgetsRead'
+            Effect: 'Allow'
+            Action: 'budgets:ViewBudget'
+            Resource: !Sub 'arn:${AWS::Partition}:budgets::${AWS::AccountId}:budget/codeproctor-pilot-*'
+          - Sid: 'IamRead'
+            Effect: 'Allow'
+            Action:
+              - 'iam:GetRole'
+              - 'iam:GetRolePolicy'
+              - 'iam:ListRolePolicies'
+              - 'iam:ListAttachedRolePolicies'
+              - 'iam:ListRoleTags'
+              - 'iam:GetPolicy'
+              - 'iam:GetPolicyVersion'
+              - 'iam:ListPolicyVersions'
+              - 'iam:GetInstanceProfile'
+              - 'iam:ListInstanceProfilesForRole'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-pilot-*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-pilot-*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/codeproctor-pilot-*'
+  PilotPlanGuardPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Condition: 'CreatePlan'
+    Properties:
+      ManagedPolicyName: 'codeproctor-pilot-plan-guard'
+      Path: '/codeproctor-guardrails/'
+      Description: 'Pilot plan: explicit denies'
+      Roles:
+        - !Ref PilotPlanRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Tag value guards: nothing may be created or tagged with an Environment value other than pilot, and nothing tagged otherwise may be touched.
+          - Sid: 'DenyForeignEnvironmentTagOnRequest'
+            Effect: 'Deny'
+            Action: '*'
+            Resource: '*'
+            Condition:
+              'Null':
+                aws:RequestTag/Environment: 'false'
+              StringNotEquals:
+                aws:RequestTag/Environment: 'pilot'
+          - Sid: 'DenyForeignEnvironmentTagOnResource'
+            Effect: 'Deny'
+            Action: '*'
+            Resource: '*'
+            Condition:
+              'Null':
+                aws:ResourceTag/Environment: 'false'
+              StringNotEquals:
+                aws:ResourceTag/Environment: 'pilot'
+          # Data plane: this role deploys infrastructure and never reads or writes data.
+          # Object access is denied on every bucket except the state bucket (the state bucket needs it).
+          - Sid: 'DenyObjectDataPlane'
+            Effect: 'Deny'
+            Action:
+              - 's3:GetObject*'
+              - 's3:PutObject*'
+              - 's3:DeleteObject*'
+              - 's3:RestoreObject'
+              - 's3:AbortMultipartUpload'
+            NotResource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}/*'
+          - Sid: 'DenyKmsDecryptData'
+            Effect: 'Deny'
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:ReEncrypt*'
+            Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+            Condition:
+              StringNotEquals:
+                aws:ResourceTag/Purpose: 'tfstate'
+          - Sid: 'DenySecretValues'
+            Effect: 'Deny'
+            Action:
+              - 'secretsmanager:GetSecretValue'
+              - 'secretsmanager:BatchGetSecretValue'
+            Resource: '*'
+          - Sid: 'DenyLogReads'
+            Effect: 'Deny'
+            Action:
+              - 'logs:GetLogEvents'
+              - 'logs:FilterLogEvents'
+              - 'logs:StartQuery'
+              - 'logs:GetQueryResults'
+              - 'logs:StartLiveTail'
+              - 'logs:GetLogRecord'
+              - 'logs:Unmask'
+            Resource: '*'
+          - Sid: 'DenyParameterReads'
+            Effect: 'Deny'
+            Action:
+              - 'ssm:GetParameter'
+              - 'ssm:GetParameters'
+              - 'ssm:GetParametersByPath'
+              - 'ssm:GetParameterHistory'
+              - 'ssm:StartSession'
+              - 'ssm:SendCommand'
+            Resource: '*'
+          - Sid: 'DenySesSending'
+            Effect: 'Deny'
+            Action: 'ses:Send*'
+            Resource: '*'
+          - Sid: 'DenyWritesOutsideLock'
+            Effect: 'Deny'
+            Action:
+              - 'iam:Create*'
+              - 'iam:Put*'
+              - 'iam:Attach*'
+              - 'iam:Update*'
+              - 'iam:Delete*'
+              - 'iam:Detach*'
+              - 'iam:Add*'
+              - 'iam:Remove*'
+              - 'iam:Tag*'
+              - 'iam:Untag*'
+              - 'iam:Set*'
+              - 'iam:PassRole'
+              - 'rds:*'
+              - 'rds-db:*'
+              - 'rds-data:*'
+              - 'elasticloadbalancing:*'
+              - 'sts:AssumeRole'
+              - 'lambda:*'
+              - 'ecs:*'
+              - 'cloudformation:*'
+            Resource: '*'
+            # Plan role: objects can be written or deleted only if they are *.tflock lock objects.
+          - Sid: 'DenyStateObjectWritesExceptLock'
+            Effect: 'Deny'
+            Action:
+              - 's3:PutObject*'
+              - 's3:DeleteObject*'
+            NotResource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}/*.tflock'
+  # Terraform state (optional: PR 2 is on hold). One CMK, one bucket.
+  PilotStateKey:
+    Type: 'AWS::KMS::Key'
+    DeletionPolicy: 'Retain'
+    UpdateReplacePolicy: 'Retain'
+    Properties:
+      Description: 'codeproctor pilot Terraform state key'
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 'AllowAccountRootAndIamPolicies'
+            Effect: 'Allow'
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: 'DenyKeyUseToOtherCodeproctorRoles'
+            Effect: 'Deny'
+            Principal:
+              AWS: '*'
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:Encrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:CreateGrant'
+            Resource: '*'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+              ArnNotEquals:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/codeproctor-pilot-deploy'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/codeproctor-pilot-plan'
+      Tags:
+        - Key: 'Environment'
+          Value: 'pilot'
+        - Key: 'ManagedBy'
+          Value: 'codeproctor-github-oidc'
+        - Key: 'Purpose'
+          Value: 'tfstate'
+  PilotStateKeyAlias:
+    Type: 'AWS::KMS::Alias'
+    DeletionPolicy: 'Retain'
+    UpdateReplacePolicy: 'Retain'
+    Properties:
+      AliasName: 'alias/codeproctor-pilot-tfstate'
+      TargetKeyId: !Ref PilotStateKey
+  PilotStateBucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: 'Retain'
+    UpdateReplacePolicy: 'Retain'
+    Properties:
+      BucketName: !Sub 'codeproctor-pilot-tfstate-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: 'Enabled'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !GetAtt PilotStateKey.Arn
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: 'BucketOwnerEnforced'
+      LifecycleConfiguration:
+        Rules:
+          - Id: 'expire-old-state-versions'
+            Status: 'Enabled'
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 180
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: 'Environment'
+          Value: 'pilot'
+        - Key: 'ManagedBy'
+          Value: 'codeproctor-github-oidc'
+        - Key: 'Purpose'
+          Value: 'tfstate'
+  PilotStateBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref PilotStateBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 'DenyInsecureTransport'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          - Sid: 'DenyObjectAccessToOtherCodeproctorRoles'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:GetObject*'
+              - 's3:PutObject*'
+              - 's3:DeleteObject*'
+              - 's3:RestoreObject'
+              - 's3:AbortMultipartUpload'
+              - 's3:ListMultipartUploadParts'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}/*'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+              ArnNotEquals:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/codeproctor-pilot-deploy'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/codeproctor-pilot-plan'
+          - Sid: 'DenyDeletingObjectVersions'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:DeleteObjectVersion'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}/*'
+          - Sid: 'DenyConfigChangeFromCodeproctorRoles'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:PutBucket*'
+              - 's3:DeleteBucket*'
+              - 's3:PutEncryptionConfiguration'
+              - 's3:PutLifecycleConfiguration'
+              - 's3:PutReplicationConfiguration'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+
+Outputs:
+  PilotDeployRoleArn:
+    Description: 'Set as GitHub environment pilot variable AWS_ROLE_ARN (not a secret)'
+    Value: !GetAtt PilotDeployRole.Arn
+  PilotPlanRoleArn:
+    Condition: 'CreatePlan'
+    Description: 'Optional: repository variable AWS_PLAN_ROLE_ARN (not a secret)'
+    Value: !GetAtt PilotPlanRole.Arn
+  PilotBoundaryPolicyArn:
+    Description: 'Permissions boundary to put on every role the deploy role creates'
+    Value: !Ref PilotBoundaryPolicy
+  OidcProviderArn:
+    Value: !If [CreateOidcProvider, !Ref GitHubOidcProvider, !Ref ExistingOidcProviderArn]
+  PilotStateBucketName:
+    Description: 'Optional Terraform state bucket'
+    Value: !Ref PilotStateBucket
+  PilotStateKeyAlias:
+    Value: 'alias/codeproctor-pilot-tfstate'
