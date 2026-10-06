@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { Client } from 'pg';
 import request from 'supertest';
 import type { App } from 'supertest/types';
+import { orgSettingsViewSchema } from '@codeproctor/shared';
 import { hash } from '@node-rs/argon2';
 import { MAX_FAILED_LOGINS } from '../auth/auth.service';
 import { passwordVersion } from '../auth/crypto.util';
@@ -104,6 +105,9 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
     return { id: user.id, auth: { Authorization: `Bearer ${token}` } };
   }
 
+  /** Every 200 body of the route must satisfy the shared response schema. */
+  const view = (res: request.Response): unknown => orgSettingsViewSchema.parse(res.body);
+
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
   const setStored = (orgId: string, settings: Prisma.InputJsonValue): Promise<unknown> =>
     owner.organization.update({ where: { id: orgId }, data: { settings } });
@@ -154,6 +158,45 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
       expect(await audits(orgA)).toHaveLength(0);
     });
 
+    it('FU-DB-202, CS-4 a token whose org claim is the org id in UPPER CASE is 401 on GET and PATCH and nothing changes (lower-case org id invariant)', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      const token = tokens.sign(
+        {
+          sub: admin.id,
+          org: orgA.toUpperCase(),
+          role: 'SUPER_ADMIN',
+          kind: 'access',
+          pwv: passwordVersion(await passwordHashOf()),
+        },
+        900,
+      );
+      expect(orgA.toUpperCase()).not.toBe(orgA);
+      const auth = { Authorization: `Bearer ${token}` };
+      await http().get(URL).set(auth).expect(401);
+      await http()
+        .patch(URL)
+        .set(auth)
+        .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 1 } })
+        .expect(401);
+      // The same token with the lower-case org is accepted, so the case is the only difference.
+      const ok = tokens.sign(
+        {
+          sub: admin.id,
+          org: orgA,
+          role: 'SUPER_ADMIN',
+          kind: 'access',
+          pwv: passwordVersion(await passwordHashOf()),
+        },
+        900,
+      );
+      await http()
+        .get(URL)
+        .set({ Authorization: `Bearer ${ok}` })
+        .expect(200);
+      expect(await stored(orgA)).toEqual({});
+      expect(await audits(orgA)).toHaveLength(0);
+    });
+
     it.each([UserRole.RECRUITER, UserRole.AUTHOR, UserRole.REVIEWER])(
       'TC-004 %s gets 403 and nothing changes',
       async (role) => {
@@ -174,7 +217,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
     it('AI-5 GET reports the default when nothing is stored', async () => {
       const admin = await make(UserRole.SUPER_ADMIN);
       const res = await http().get(URL).set(admin.auth).expect(200);
-      expect(res.body).toEqual({ aiReferences: { minAssistants: 2, isDefault: true } });
+      expect(view(res)).toEqual({ aiReferences: { minAssistants: 2, isDefault: true } });
     });
 
     it('AI-5 PATCH sets the value, GET returns it, one audit row has the old and new number', async () => {
@@ -184,9 +227,9 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
         .set(admin.auth)
         .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 4 } })
         .expect(200);
-      expect(res.body).toEqual({ aiReferences: { minAssistants: 4, isDefault: false } });
+      expect(view(res)).toEqual({ aiReferences: { minAssistants: 4, isDefault: false } });
       const got = await http().get(URL).set(admin.auth).expect(200);
-      expect(got.body).toEqual(res.body);
+      expect(view(got)).toEqual(view(res));
       const rows = await audits(orgA);
       expect(rows).toEqual([
         {
@@ -224,7 +267,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
         .set(admin.auth)
         .send({ currentPassword: PASSWORD, aiReferences: { minAssistants: 3 } })
         .expect(200);
-      expect(res.body).toEqual({ aiReferences: { minAssistants: 3, isDefault: false } });
+      expect(view(res)).toEqual({ aiReferences: { minAssistants: 3, isDefault: false } });
       expect(await audits(orgA)).toHaveLength(0);
     });
 
@@ -304,7 +347,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
         const admin = await make(UserRole.SUPER_ADMIN);
         await pg.query('UPDATE organizations SET settings = $1::jsonb WHERE id = $2', [json, orgA]);
         const got = await http().get(URL).set(admin.auth).expect(200);
-        expect(got.body).toEqual({ aiReferences: { minAssistants: eff, isDefault: true } });
+        expect(view(got)).toEqual({ aiReferences: { minAssistants: eff, isDefault: true } });
         // Even writing the default value repairs the structure and is audited.
         await http()
           .patch(URL)
@@ -315,7 +358,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
         expect(after.aiReferences.minAssistants).toBe(2);
         if (json.includes('"retention"')) expect(after).toHaveProperty('retention', { days: 9 });
         expect(await audits(orgA)).toHaveLength(1);
-        expect((await http().get(URL).set(admin.auth).expect(200)).body).toEqual({
+        expect(view(await http().get(URL).set(admin.auth).expect(200))).toEqual({
           aiReferences: { minAssistants: 2, isDefault: false },
         });
       },
@@ -334,6 +377,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
         ),
       );
       const ok = results.filter((r) => r.status === 200);
+      for (const r of results.filter((x) => x.status === 200)) view(r);
       const lost = results.filter((r) => r.status === 409);
       // The shared step-up reservation can refuse a concurrent attempt of the same admin: 403
       // REAUTH_FAILED, exactly as on the sibling admin routes. It changes nothing.
@@ -492,7 +536,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
         somethingNew: true,
       });
       const res = await http().get(URL).set(admin.auth).expect(200);
-      expect(res.body).toEqual({ aiReferences: { minAssistants: 4, isDefault: false } });
+      expect(view(res)).toEqual({ aiReferences: { minAssistants: 4, isDefault: false } });
       expect(minAssistantsFromSettings(await stored(orgA))).toBe(4);
     });
 
@@ -667,10 +711,10 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
         ((await stored(orgB)) as { aiReferences: { minAssistants: number } }).aiReferences
           .minAssistants,
       ).toBe(0);
-      expect((await http().get(URL).set(adminA.auth).expect(200)).body).toEqual({
+      expect(view(await http().get(URL).set(adminA.auth).expect(200))).toEqual({
         aiReferences: { minAssistants: 3, isDefault: false },
       });
-      expect((await http().get(URL).set(adminB.auth).expect(200)).body).toEqual({
+      expect(view(await http().get(URL).set(adminB.auth).expect(200))).toEqual({
         aiReferences: { minAssistants: 0, isDefault: false },
       });
       expect(await audits(orgA)).toHaveLength(0);
