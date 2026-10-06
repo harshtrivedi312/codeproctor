@@ -357,3 +357,32 @@ Also fixed on PR #141 (authorization): `publishSession` in `lib/auth-session.ts`
 
 - **Should-fix (message):** `question-editor.tsx` ~228-229 (`describe`, 401 branch) and `features/security/api.ts` ~45 (`session` failure) say "You will be asked to sign in again, and the edits on this page will be lost" after a role-only change, where `refreshForReplay` now returns null (generation bumped) but a session still exists and nothing signs the user out; on `/admin/questions/new` the form stays intact and pressing Save again works. Reword to "Your access changed or your session ended; nothing was saved. Try again, or sign in if asked." or let the caller tell "replay refused because the generation moved but a session exists" from a real session loss.
 - **Nits:** a role-only refresh while the 2FA dialog is open makes a successful disable close the dialog without `signOutRevoked` (the server still ends the sessions; the next request signs this tab out) and makes `refreshStatus` skip re-reading `totpEnabled`; this only adds a rare trigger to the stale-stamp item already recorded above. Comment in `auth-session.ts` ~42-46 that the role branch deliberately leaves `inFlight` alone because `beginSession` and `invalidateRefreshes` already cover sign-in.
+
+### BE-04a sync (web contract and mocks aligned to the real API, PR #146)
+
+The question section of `apps/web/openapi/openapi.yaml`, the generated `schema.d.ts`, the mocks (`src/mocks/question-*.ts`) and the UI now follow the real `apps/api/src/questions` exactly where BE-04a serves a route. This supersedes the "Partly superseded" bullets in [ARC-02] above and the DL-32 notes where they differ.
+
+**Now matches #146 (mock produces exactly these shapes):**
+- `GET /v1/questions` returns `{items, page, pageSize, total}`; an item is `QuestionSummary` `{id, slug, type, tags, isArchived, createdAt, published, latest}` with version refs `{id, version, isPublished, title, difficulty, validatedAt, createdAt}`. Status is derived in the UI (`statusOf`); there is no `status` or `createdByName` field.
+- `GET /v1/questions/{id}?version=N`: writers get `QuestionDetail` (summary + `versions` + `version` + `createdNewVersion`), where `version` has `statementMd`, `allowedLanguages`, `limits`, `starterCode`, `referenceSolution`, `answerSpec` (no `type` key), `validationReport`, `testCases` and the writer-only opaque `revision` (SHA-256 of the content). Recruiters get `QuestionDetailRedacted` (`additionalProperties: false`), built field by field, for PUBLISHED versions only: a draft, a never-published question, a missing one and an unknown version are the same 404; a published archived question is readable; the recruiter list hides archived and never-published questions. A hidden test case reaches a recruiter as exactly `{id, position, isHidden, weight}`; no `revision`.
+- `PATCH` takes optional fields and NO test cases, edits a draft in place or forks the next draft of a published version (`createdNewVersion: true`, test cases copied with new ids); `expectedRevision` mismatch is 409, publish takes `expectedRevision` too. 404/409/422 are problem bodies with `detail` and `errors[]`, no machine code. Test cases have their own routes (`POST/PATCH/DELETE .../versions/{n}/test-cases`); the editor's save orchestrates PATCH then those calls (with old-to-new id mapping after a fork) and refetches.
+- Real limits and rules are enforced in the mock and the form: limits ranges (wall >= cpu), weight 0.01 to 9999.99 with 2 decimals, tags (20, pattern), MCQ 2 to 10 options with ids of at most 32 characters, short-answer canonical and variants limits.
+- Recruiter summary: shows the statement, meta and the VISIBLE sample cases with "You can see the statement and the visible sample cases. The rest of this question is hidden for your role." I chose a count-free note on purpose: the API does expose hidden rows (id, weight), but their number is a hint about the answer set, so the screen does not show it. Easy to change if product wants "N hidden cases".
+
+**Still web-only and provisional (no API route yet; each is marked WEB-ONLY in the openapi file):**
+- BE-04b: `GET/PUT /v1/questions/{id}/variants` (variants are not in `QuestionVersion` in #146; the editor loads them with a separate call) and `POST .../prefill`.
+- BE-04c: `POST .../validate`, `GET .../validation/{jobId}` (job and report carry a `revision` field; the name is a guess), AI references (`GET/POST .../ai-references`, supersede) and `aiReferencePolicy` (returned in the list response; where Authors read it is still open).
+- Coding publish: #146 fails closed (422) until BE-04c, so the web's publish checklist still shows "validated" and "AI solutions" for CODING only; the mock refuses coding publish by default and a test scenario flag unlocks it.
+
+**Technical debt: web routes the API does not serve (remove the mock when the slice merges):** `GET/PUT /v1/questions/{id}/variants`, `POST /v1/questions/{id}/prefill`, `POST /v1/questions/{id}/validate`, `GET /v1/questions/{id}/validation/{jobId}`, `GET/POST /v1/questions/{id}/ai-references`, `POST /v1/questions/{id}/ai-references/{refId}/supersede`. Removed from the web: `GET /v1/questions/{id}/versions[/{n}]` (replaced by `detail.versions` and `?version=N`), `paramSchema`, `expectedUpdatedAt` and `validatedForUpdatedAt`.
+
+**Where the real contract differed from the earlier assumptions (nothing blocking):**
+- `revision` is an opaque content hash, not a counter or timestamp; PATCH does not take test cases; `answerSpec` has no `type`; `status` and `createdBy` are not on the API; recruiters get hidden rows as ids and weights rather than no rows; a recruiter 404s on drafts instead of seeing a redacted draft. The web code, copy and tests were changed for all of these.
+
+**Open questions for Backend A:**
+1. Will BE-04b return variants inside `QuestionVersion` (and accept them in PATCH or a sibling route), and are variant `overrides` keyed by test-case id (ids change on fork)?
+2. Validate job: is the field `revision`, and does a failed or stale job report a 409 or a `failed` status?
+3. Where do Authors read `refreshDays` and `minAssistants` (org settings are SUPER_ADMIN only)?
+4. Are AI rows per question version, and does a fork copy them?
+5. Should the recruiter read view carry the hidden-case count at all (`isHidden` rows are there today)?
+6. A PATCH whose only change is `tags` on a published question: it edits tags in place (no fork) in the mock because #146's code does so; confirm that is intended.

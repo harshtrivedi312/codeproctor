@@ -4,7 +4,8 @@ import {
   draftSchema,
   emptyDraft,
   normalizeShortAnswer,
-  toContent,
+  toUpdate,
+  toVariants,
   type DraftValues,
 } from './draft';
 import { aiGate, aiRefreshDue, canPublish, publishChecks } from './gate';
@@ -119,7 +120,6 @@ describe('AI reference gate (D-20, ADR 0005 AI-4, AI-5)', () => {
     // Other types have no AI gate.
     expect(publishChecks({ ...base, type: 'MCQ', aiGates: [] }).map((c) => c.id)).toEqual([
       'saved',
-      'validated',
     ]);
     expect(canPublish({ ...base, type: 'MCQ', aiGates: [] })).toBe(true);
   });
@@ -143,7 +143,7 @@ describe('question draft (FR-201..FR-205)', () => {
     ).toBe(false);
     expect(draftSchema.safeParse(valid({ testCases: [{ ...tc, weight: 2 }] })).success).toBe(true);
   });
-  it('FR-203: toContent keeps only overrides of existing slots and drops other languages', () => {
+  it('FR-203: toVariants keeps only overrides of existing slots; toUpdate drops other languages and sends no test cases', () => {
     const d = valid({
       allowedLanguages: ['python'],
       starterCode: { python: 'a', java: 'b' },
@@ -161,9 +161,51 @@ describe('question draft (FR-201..FR-205)', () => {
         },
       ],
     });
-    const c = toContent(d);
-    expect(c.starterCode).toEqual({ python: 'a' });
-    expect(c.variants[0]).toMatchObject({ label: 'V', params: { n: 2 } });
-    expect(c.variants[0]?.overrides).toHaveLength(1);
+    const update = toUpdate(d);
+    expect(update.starterCode).toEqual({ python: 'a' });
+    expect(update).not.toHaveProperty('testCases');
+    expect(update).not.toHaveProperty('answerSpec');
+    const [variant] = toVariants(d);
+    expect(variant).toMatchObject({ label: 'V', params: { n: 2 } });
+    expect(variant?.overrides).toHaveLength(1);
+  });
+
+  it('FR-205: an answer spec has no `type` key (the question type decides) and option ids fit the API rule', () => {
+    const mcq = valid({ type: 'MCQ', allowedLanguages: [] });
+    mcq.mcq = {
+      options: [
+        { id: 'a', text: 'A' },
+        { id: 'b', text: 'B' },
+      ],
+      correctOptionIds: ['a'],
+      multiple: false,
+    };
+    expect(toUpdate(mcq).answerSpec).toEqual({
+      options: [
+        { id: 'a', text: 'A' },
+        { id: 'b', text: 'B' },
+      ],
+      correctOptionIds: ['a'],
+      multiple: false,
+    });
+    expect(emptyDraft('MCQ').mcq.options.every((o) => /^[A-Za-z0-9_-]{1,32}$/.test(o.id))).toBe(
+      true,
+    );
+    const short = valid({ type: 'SHORT_ANSWER', allowedLanguages: [] });
+    short.short = { canonical: ' 201 ', acceptedVariants: [{ key: 'k', value: ' ok ' }] };
+    expect(toUpdate(short).answerSpec).toEqual({ canonical: '201', acceptedVariants: ['ok'] });
+  });
+
+  it('FR-201: limits and tags follow the API rules', () => {
+    expect(
+      draftSchema.safeParse(valid({ limits: { cpuMs: 2000, wallMs: 25_000, memoryKb: 262_144 } }))
+        .success,
+    ).toBe(false);
+    expect(
+      draftSchema.safeParse(valid({ limits: { cpuMs: 2000, wallMs: 1000, memoryKb: 262_144 } }))
+        .success,
+    ).toBe(false);
+    expect(draftSchema.safeParse(valid({ tagsText: 'arrays, Sorting' })).success).toBe(true);
+    expect(draftSchema.safeParse(valid({ tagsText: '!bad' })).success).toBe(false);
   });
 });

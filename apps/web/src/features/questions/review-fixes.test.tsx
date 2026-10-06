@@ -33,6 +33,7 @@ afterAll(() => server.close());
 beforeEach(() => resetAuthTestState());
 
 const base = `${apiBaseUrl}/v1/questions`;
+const OTHER_REVISION = '0'.repeat(64);
 type User = ReturnType<typeof userEvent.setup>;
 
 async function openEditor(
@@ -66,9 +67,7 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
     let release = false;
     server.use(
       http.get(`${base}/q-rotate/validation/:jobId`, () =>
-        release
-          ? undefined
-          : HttpResponse.json({ jobId: 'x', validatedForUpdatedAt: 'x', status: 'running' }),
+        release ? undefined : HttpResponse.json({ jobId: 'x', revision: 'x', status: 'running' }),
       ),
     );
     const { u } = await openEditor('q-rotate');
@@ -87,9 +86,14 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
       http.get(`${base}/q-running/validation/:jobId`, ({ params }) =>
         HttpResponse.json({
           jobId: String(params.jobId),
-          validatedForUpdatedAt: '2000-01-01T00:00:00.000Z',
+          revision: OTHER_REVISION,
           status: 'done',
-          report: { passed: true, finishedAt: new Date().toISOString(), results: [] },
+          report: {
+            passed: true,
+            revision: OTHER_REVISION,
+            finishedAt: new Date().toISOString(),
+            results: [],
+          },
         }),
       ),
     );
@@ -112,17 +116,16 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
     const started = await api.POST('/v1/questions/{questionId}/validate', {
       params: { path: { questionId: 'q-running' } },
     });
-    const { jobId, validatedForUpdatedAt } = started.data!;
-    expect(validatedForUpdatedAt).toBe(before.current.updatedAt);
+    const { jobId, revision } = started.data!;
+    expect(revision).toBe(before.version.revision);
 
-    // Someone saves new content while the job runs.
-    const content = { ...before.current, title: 'Running average (changed)' };
+    // Someone saves new content while the job runs: the revision moves.
     const saved = await api.PATCH('/v1/questions/{questionId}', {
       params: { path: { questionId: 'q-running' } },
-      body: { ...content, expectedUpdatedAt: validatedForUpdatedAt },
+      body: { title: 'Running average (changed)', expectedRevision: revision },
     });
-    const savedAt = saved.data!.current.updatedAt;
-    expect(savedAt).not.toBe(validatedForUpdatedAt);
+    const savedRevision = saved.data!.version.revision;
+    expect(savedRevision).not.toBe(revision);
     const poll = () =>
       api.GET('/v1/questions/{questionId}/validation/{jobId}', {
         params: { path: { questionId: 'q-running', jobId } },
@@ -130,24 +133,24 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
     await poll();
     const done = await poll();
     expect(done.data?.status).toBe('done');
-    expect(done.data?.validatedForUpdatedAt).toBe(validatedForUpdatedAt);
+    expect(done.data?.revision).toBe(revision);
     // The report was NOT written onto the newer content.
     const after = (await detail('q-running')).data!;
-    expect(after.current.validationReport).toBeNull();
-    expect(after.current.validatedAt).toBeNull();
+    expect(after.version.validationReport).toBeNull();
+    expect(after.version.validatedAt).toBeNull();
 
-    const publish = (expectedUpdatedAt: string) =>
+    const publish = (expectedRevision: string) =>
       api.POST('/v1/questions/{questionId}/publish', {
         params: { path: { questionId: 'q-running' } },
-        body: { expectedUpdatedAt },
+        body: { expectedRevision },
       });
-    const stale = await publish(validatedForUpdatedAt);
+    const stale = await publish(revision);
     expect(stale.response.status).toBe(409);
     // 409 and 422 carry detail (and errors[]) only: no machine code to branch on.
     expect(stale.error).not.toHaveProperty('code');
     expect(stale.error).toHaveProperty('detail');
-    // Even the current content is refused without a validation of it: 422 with errors[].
-    const unvalidated = await publish(savedAt);
+    // Even the current content is refused: a coding question fails closed (422 with errors[]).
+    const unvalidated = await publish(savedRevision);
     expect(unvalidated.response.status).toBe(422);
     expect(unvalidated.error).not.toHaveProperty('code');
     expect((unvalidated.error as { errors: string[] }).errors.length).toBeGreaterThan(0);
@@ -157,14 +160,15 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
     renderAsStaff(<div />, MOCK_USERS.author);
     await waitFor(async () => expect((await detail('q-merge')).response.status).toBe(200));
     const v2 = (await detail('q-merge')).data!;
-    expect(v2.current.validationReport?.passed).toBe(true);
+    expect(v2.version.validationReport?.passed).toBe(true);
     const saved = await api.PATCH('/v1/questions/{questionId}', {
       params: { path: { questionId: 'q-merge' } },
-      body: { ...v2.current, title: 'Merge intervals 2', expectedUpdatedAt: v2.current.updatedAt },
+      body: { title: 'Merge intervals 2', expectedRevision: v2.version.revision },
     });
-    expect(saved.data?.current.version).toBe(3);
-    expect(saved.data?.current.validationReport).toBeNull();
-    expect(saved.data?.current.validatedAt).toBeNull();
+    expect(saved.data?.createdNewVersion).toBe(true);
+    expect(saved.data?.version.version).toBe(3);
+    expect(saved.data && full(saved.data).version.validationReport).toBeNull();
+    expect(saved.data?.version.validatedAt).toBeNull();
   });
 
   it('TC-012: a validation that finishes without a report, or never finishes, ends with a retry message', async () => {
@@ -172,7 +176,7 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
       http.get(`${base}/q-running/validation/:jobId`, ({ params }) =>
         HttpResponse.json({
           jobId: String(params.jobId),
-          validatedForUpdatedAt: 'x',
+          revision: 'x',
           status: 'done',
         }),
       ),
@@ -186,7 +190,7 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
       http.get(`${base}/q-running/validation/:jobId`, ({ params }) =>
         HttpResponse.json({
           jobId: String(params.jobId),
-          validatedForUpdatedAt: 'x',
+          revision: 'x',
           status: 'running',
         }),
       ),
@@ -208,22 +212,18 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
     expect(starts).toBe(1);
   });
 
-  it('TC-012: the finished validation is also in the cache and the history refreshes', async () => {
-    let versionsCalls = 0;
-    server.events.on('request:start', ({ request }) => {
-      if (request.url.endsWith('/q-rotate/versions')) versionsCalls += 1;
-    });
+  it('TC-012: the finished validation is also in the cache', async () => {
     const { u } = await openEditor('q-rotate');
     await u.click(screen.getByRole('button', { name: 'Validate' }));
     await screen.findByText('Validation failed');
     const cached = (await detail('q-rotate')).data!;
-    expect(cached.current.validationReport?.passed).toBe(false);
-    expect(versionsCalls).toBe(0); // nobody had the history open: nothing to refresh, no request
+    expect(cached.version.validationReport?.passed).toBe(false);
   });
 
   it('FR-103: a validation report loaded with the page is announced as a status, one just run as an alert', () => {
     const report = {
       passed: false,
+      revision: OTHER_REVISION,
       finishedAt: new Date().toISOString(),
       results: [
         {
@@ -246,18 +246,13 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
   });
 });
 
-describe('Concurrent edits (expectedUpdatedAt, 409)', () => {
+describe('Concurrent edits (expectedRevision, 409)', () => {
   it("FR-204: saving over someone else's newer save is refused; the edit stays on screen and Reload loads theirs", async () => {
     const { u } = await openEditor('q-twosum');
-    const current = (await detail('q-twosum')).data!;
-    // Another author saves first.
+    // Another author saves first (no expectedRevision: it moves the revision under us).
     await api.PATCH('/v1/questions/{questionId}', {
       params: { path: { questionId: 'q-twosum' } },
-      body: {
-        ...current.current,
-        title: 'Two sum (by someone else)',
-        expectedUpdatedAt: current.current.updatedAt,
-      },
+      body: { title: 'Two sum (by someone else)' },
     });
     await u.type(screen.getByLabelText('Title'), ' mine');
     await u.click(screen.getByRole('button', { name: 'Save' }));
