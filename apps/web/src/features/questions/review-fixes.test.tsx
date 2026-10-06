@@ -7,6 +7,7 @@ import { AuthProvider, useAuth } from '@/features/auth/auth-provider';
 import { api } from '@/lib/api/client';
 import { apiBaseUrl } from '@/lib/env';
 import { MOCK_USERS, seedMockRefresh } from '@/mocks/auth-handlers';
+import { resetMockQuestionState } from '@/mocks/question-handlers';
 import { server } from '@/mocks/server';
 import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
 import { full } from '@/test/question-api';
@@ -57,6 +58,19 @@ async function setText(u: User, el: HTMLElement, text: string): Promise<void> {
   await u.click(el);
   if (text !== '') await u.paste(text);
 }
+/** A validation status body as the API answers it, for tests that script a particular answer. */
+const statusBody = (over: Record<string, unknown>) => ({
+  status: 'RUNNING',
+  jobId: 'job-x',
+  version: 1,
+  currentRevision: OTHER_REVISION,
+  revision: OTHER_REVISION,
+  startedAt: '2026-10-01T00:00:00.000Z',
+  finishedAt: null,
+  validatedAt: null,
+  report: null,
+  ...over,
+});
 const detail = async (id: string) => {
   const r = await api.GET('/v1/questions/{questionId}', { params: { path: { questionId: id } } });
   return { response: r.response, data: r.data ? full(r.data) : undefined };
@@ -66,8 +80,8 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
   it('TC-012: while a validation runs, Save is off and the content is read-only', async () => {
     let release = false;
     server.use(
-      http.get(`${base}/q-rotate/validation/:jobId`, () =>
-        release ? undefined : HttpResponse.json({ jobId: 'x', revision: 'x', status: 'running' }),
+      http.get(`${base}/q-rotate/validation`, () =>
+        release ? undefined : HttpResponse.json(statusBody({ status: 'RUNNING' })),
       ),
     );
     const { u } = await openEditor('q-rotate');
@@ -83,18 +97,21 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
 
   it('TC-012: a result for other content is dropped, with an explanation, and Publish stays off', async () => {
     server.use(
-      http.get(`${base}/q-running/validation/:jobId`, ({ params }) =>
-        HttpResponse.json({
-          jobId: String(params.jobId),
-          revision: OTHER_REVISION,
-          status: 'done',
-          report: {
-            passed: true,
-            revision: OTHER_REVISION,
-            finishedAt: new Date().toISOString(),
-            results: [],
-          },
-        }),
+      http.get(`${base}/q-running/validation`, () =>
+        HttpResponse.json(
+          statusBody({
+            status: 'PASSED',
+            validatedAt: '2026-10-01T00:01:00.000Z',
+            finishedAt: '2026-10-01T00:01:00.000Z',
+            report: {
+              passed: true,
+              revision: OTHER_REVISION,
+              startedAt: '2026-10-01T00:00:00.000Z',
+              finishedAt: '2026-10-01T00:01:00.000Z',
+              perVariant: [],
+            },
+          }),
+        ),
       ),
     );
     const { u } = await openEditor('q-running');
@@ -109,17 +126,22 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
     expect(screen.getByRole('button', { name: 'Publish' })).toBeDisabled();
   });
 
-  it('TC-012: the API writes no report onto content saved after Validate started, and publishing stale content is 409 with no machine code', async () => {
+  it('TC-012: the API writes no report onto content saved after Validate started (STALE), and publishing stale content is 409 with no machine code', async () => {
     renderAsStaff(<div />, MOCK_USERS.author);
     await waitFor(async () => expect((await detail('q-running')).response.status).toBe(200));
     const before = (await detail('q-running')).data!;
     const started = await api.POST('/v1/questions/{questionId}/validate', {
       params: { path: { questionId: 'q-running' } },
+      body: { expectedRevision: before.version.revision },
     });
-    const { jobId, revision } = started.data!;
+    expect(started.response.status).toBe(202);
+    const { jobId, revision, status } = started.data!;
+    expect(status).toBe('RUNNING');
     expect(revision).toBe(before.version.revision);
+    // Starting clears the earlier passing result: the gate is closed while it runs.
+    expect((await detail('q-running')).data?.version.validatedAt).toBeNull();
 
-    // Someone saves new content while the job runs: the revision moves.
+    // Someone saves new content while the run is on: the revision moves.
     const saved = await api.PATCH('/v1/questions/{questionId}', {
       params: { path: { questionId: 'q-running' } },
       body: { title: 'Running average (changed)', expectedRevision: revision },
@@ -127,13 +149,15 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
     const savedRevision = saved.data!.version.revision;
     expect(savedRevision).not.toBe(revision);
     const poll = () =>
-      api.GET('/v1/questions/{questionId}/validation/{jobId}', {
-        params: { path: { questionId: 'q-running', jobId } },
+      api.GET('/v1/questions/{questionId}/validation', {
+        params: { path: { questionId: 'q-running' } },
       });
-    await poll();
+    expect((await poll()).data?.status).toBe('RUNNING');
     const done = await poll();
-    expect(done.data?.status).toBe('done');
+    expect(done.data?.status).toBe('STALE');
+    expect(done.data?.jobId).toBe(jobId);
     expect(done.data?.revision).toBe(revision);
+    expect(done.data?.currentRevision).toBe(savedRevision);
     // The report was NOT written onto the newer content.
     const after = (await detail('q-running')).data!;
     expect(after.version.validationReport).toBeNull();
@@ -149,11 +173,13 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
     // 409 and 422 carry detail (and errors[]) only: no machine code to branch on.
     expect(stale.error).not.toHaveProperty('code');
     expect(stale.error).toHaveProperty('detail');
-    // Even the current content is refused: a coding question fails closed (422 with errors[]).
+    // Even the current content is refused without a passing run of it: 422 with errors[].
     const unvalidated = await publish(savedRevision);
     expect(unvalidated.response.status).toBe(422);
     expect(unvalidated.error).not.toHaveProperty('code');
-    expect((unvalidated.error as { errors: string[] }).errors.length).toBeGreaterThan(0);
+    expect((unvalidated.error as { errors: string[] }).errors.join(' ')).toMatch(
+      /validation: a passing validation run of the current content is required/,
+    );
   });
 
   it("TC-012 TC-013: a new draft version does not inherit the previous version's validation", async () => {
@@ -171,30 +197,61 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
     expect(saved.data?.version.validatedAt).toBeNull();
   });
 
-  it('TC-012: a validation that finishes without a report, or never finishes, ends with a retry message', async () => {
-    server.use(
-      http.get(`${base}/q-running/validation/:jobId`, ({ params }) =>
-        HttpResponse.json({
-          jobId: String(params.jobId),
-          revision: 'x',
-          status: 'done',
-        }),
-      ),
-    );
+  it('TC-012: a validation that finishes without a report, never finishes, is lost or errors ends with a retry message', async () => {
+    const answer = (over: Record<string, unknown>) =>
+      http.get(`${base}/q-running/validation`, ({ request }) => {
+        void request;
+        return HttpResponse.json(statusBody(over));
+      });
+    // The current revision of q-running is what the editor starts on: read it from the API.
+    const res = await fetch(`${base}/q-running`, {
+      headers: { authorization: 'Bearer mock-access-AUTHOR-direct' },
+    });
+    const rev = ((await res.json()) as { version: { revision: string } }).version.revision;
+    const bound = { currentRevision: rev, revision: rev };
+
+    server.use(answer({ ...bound, status: 'PASSED', report: null }));
     const first = await openEditor('q-running');
     await first.u.click(screen.getByRole('button', { name: 'Validate' }));
     expect(await screen.findByText(/finished without a report/)).toBeInTheDocument();
     first.unmount();
 
+    // Each case starts its own run: the fake server keeps the earlier one RUNNING.
+    resetMockQuestionState();
+    server.use(answer({ ...bound, status: 'NONE', revision: null }));
+    const lost = await openEditor('q-running');
+    await lost.u.click(screen.getByRole('button', { name: 'Validate' }));
+    expect(await screen.findByText(/The validation run was lost/)).toBeInTheDocument();
+    lost.unmount();
+
+    // Each case starts its own run: the fake server keeps the earlier one RUNNING.
+    resetMockQuestionState();
     server.use(
-      http.get(`${base}/q-running/validation/:jobId`, ({ params }) =>
-        HttpResponse.json({
-          jobId: String(params.jobId),
-          revision: 'x',
-          status: 'running',
-        }),
-      ),
+      answer({
+        ...bound,
+        status: 'ERROR',
+        report: {
+          passed: false,
+          revision: rev,
+          startedAt: '2026-10-01T00:00:00.000Z',
+          finishedAt: '2026-10-01T00:00:10.000Z',
+          error: 'TIMEOUT',
+          perVariant: [],
+        },
+      }),
     );
+    const errored = await openEditor('q-running');
+    await errored.u.click(screen.getByRole('button', { name: 'Validate' }));
+    expect(
+      (await screen.findAllByText(/The validation could not complete/)).length,
+    ).toBeGreaterThan(1); // the report's alert and the retry message
+    expect(screen.getAllByText(/The code runner took too long/).length).toBeGreaterThan(0);
+    expect(checkText('validated')).toMatch(/To do/);
+    errored.unmount();
+
+    // Each case starts its own run: the fake server keeps the earlier one RUNNING.
+    resetMockQuestionState();
+    server.use(answer({ ...bound, status: 'RUNNING' }));
     const second = await openEditor('q-running', { maxPolls: 3 });
     await second.u.click(screen.getByRole('button', { name: 'Validate' }));
     expect(await screen.findByText(/taking longer than expected/)).toBeInTheDocument();
@@ -224,24 +281,38 @@ describe('A stale validation never opens the publish gate (TC-012)', () => {
     const report = {
       passed: false,
       revision: OTHER_REVISION,
+      startedAt: new Date().toISOString(),
       finishedAt: new Date().toISOString(),
-      results: [
+      perVariant: [
         {
           variantId: null,
-          variantLabel: 'Base statement',
-          testCaseId: 't',
-          position: 1,
-          language: 'python' as const,
-          outcome: 'wrong_answer' as const,
+          passed: false,
+          cells: [{ language: 'python' as const, passed: false, testsPassed: 0, testsTotal: 2 }],
+          failures: [
+            {
+              language: 'python' as const,
+              testCaseId: 't',
+              position: 1,
+              verdict: 'FAILED' as const,
+            },
+          ],
         },
       ],
     };
     const { rerender } = render(
-      <ValidationPanel report={report} isCoding stale={false} fresh={false} />,
+      <ValidationPanel
+        report={report}
+        isCoding
+        stale={false}
+        fresh={false}
+        variantNames={new Map()}
+      />,
     );
     expect(screen.getByRole('status')).toHaveTextContent('Validation failed');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    rerender(<ValidationPanel report={report} isCoding stale={false} fresh />);
+    rerender(
+      <ValidationPanel report={report} isCoding stale={false} fresh variantNames={new Map()} />,
+    );
     expect(screen.getByRole('alert')).toHaveTextContent('Validation failed');
   });
 });
@@ -263,12 +334,9 @@ describe('Concurrent edits (expectedRevision, 409)', () => {
     expect(screen.getByRole('button', { name: 'Publish' })).toBeDisabled();
 
     await u.click(screen.getByRole('button', { name: /Reload the latest version/ }));
-    // The loader can show "Loading the question…" for a moment while the reloaded version settles
-    // (this made the test flaky in CI): wait for the editor itself, not just for the value.
-    await waitFor(() => {
-      expect(screen.queryByText('Loading the question…')).not.toBeInTheDocument();
-      expect(screen.getByLabelText('Title')).toHaveValue('Two sum (by someone else)');
-    });
+    // The editor stays mounted (no loader in between), so the notice is there to read.
+    expect(await screen.findByText('Loaded the latest saved version.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Title')).toHaveValue('Two sum (by someone else)');
     expect(screen.queryByText('This question changed since you opened it')).not.toBeInTheDocument();
     await u.type(await screen.findByLabelText('Title'), '!');
     await u.click(screen.getByRole('button', { name: 'Save' }));

@@ -25,9 +25,12 @@ const ref = (
   assistant,
   modelLabel: 'm',
   solutionCode: 'x',
+  variantId: null,
+  promptText: null,
   collectedAt,
-  collectedByName: 'a',
+  collectedById: 'a',
   supersededAt,
+  createdAt: collectedAt,
 });
 
 describe('templates (FR-203, ADR 0007 V-2)', () => {

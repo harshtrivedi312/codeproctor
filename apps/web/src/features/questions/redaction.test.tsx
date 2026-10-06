@@ -187,10 +187,21 @@ describe('Recruiter detail routes: 200 with an allowlisted view (DL-32, BE-04a)'
     renderAsStaff(<div />, MOCK_USERS.recruiter);
     await waitFor(async () => expect((await api.GET('/v1/questions')).response.status).toBe(200));
     const id = { params: { path: { questionId: 'q-merge' } } };
-    expect((await api.GET('/v1/questions/{questionId}/ai-references', id)).response.status).toBe(
-      403,
-    );
+    const v2 = { params: { path: { questionId: 'q-merge', version: 2 } } };
+    expect(
+      (await api.GET('/v1/questions/{questionId}/versions/{version}/ai-references', v2)).response
+        .status,
+    ).toBe(403);
+    expect(
+      (
+        await api.POST('/v1/questions/{questionId}/versions/{version}/ai-references', {
+          ...v2,
+          body: { assistant: 'A', modelLabel: 'm', language: 'python', solutionCode: 'x' },
+        })
+      ).response.status,
+    ).toBe(403);
     expect((await api.POST('/v1/questions/{questionId}/validate', id)).response.status).toBe(403);
+    expect((await api.GET('/v1/questions/{questionId}/validation', id)).response.status).toBe(403);
     expect(
       (
         await api.POST('/v1/questions/{questionId}/publish', {

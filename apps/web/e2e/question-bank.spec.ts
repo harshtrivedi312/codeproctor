@@ -85,12 +85,11 @@ test.describe('FR-201..FR-205 question bank', () => {
       await expect(dialog).toBeHidden();
     }
     await expect(page.getByRole('button', { name: 'Publish' })).toBeEnabled();
-    // The real API cannot publish a coding question until its validate job exists (BE-04c): the
-    // mock fails closed with 422 and the screen says so, publishing nothing.
+    // The API publishes only after a passing run of this very content and the AI gate (BE-04c).
     await page.getByRole('button', { name: 'Publish' }).click();
-    await expect(page.getByText(/Publishing was refused: .*passing validation run/)).toBeVisible();
-    await expect(page.getByText(/is published\./)).toHaveCount(0);
+    await expect(page.getByText(/Version 1 is published\. Editing it later/)).toBeVisible();
     await expect(page.getByRole('button', { name: 'Publish' })).toBeDisabled();
+    await expectNoAxeViolations(page);
   });
 
   test('FR-204 TC-013: editing a published question creates a draft version; an older version is read-only', async ({

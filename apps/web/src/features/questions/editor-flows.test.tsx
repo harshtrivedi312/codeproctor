@@ -7,7 +7,6 @@ import { api } from '@/lib/api/client';
 import { getAccessToken } from '@/lib/auth-token';
 import { apiBaseUrl } from '@/lib/env';
 import { MOCK_USERS } from '@/mocks/auth-handlers';
-import { setMockQuestionScenario } from '@/mocks/question-handlers';
 import { server } from '@/mocks/server';
 import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
 import { full } from '@/test/question-api';
@@ -58,10 +57,12 @@ describe('Test cases tab (FR-202)', () => {
   it('FR-202: adds, removes and toggles hidden, and rejects a weight of 0 or an empty weight', async () => {
     const u = await openEditor('q-twosum');
     await goTab(u, 'Test cases');
-    expect(screen.getAllByRole('row')).toHaveLength(3); // header + 2 tests
+    const rows = () =>
+      within(screen.getByRole('table', { name: 'Test cases' })).getAllByRole('row');
+    expect(rows()).toHaveLength(3); // header + 2 tests
 
     await u.click(screen.getByRole('button', { name: 'Add test case' }));
-    expect(screen.getAllByRole('row')).toHaveLength(4);
+    expect(rows()).toHaveLength(4);
     expect(screen.getByText(/3 tests, total weight 3/)).toBeInTheDocument();
 
     const weight = screen.getByLabelText('Weight of test 3');
@@ -430,8 +431,6 @@ describe('Validate and publish (TC-012, AI-5)', () => {
   });
 
   it('TC-012: fixing the variant, validating again and collecting the AI solutions enables Publish', async () => {
-    // The validate job is BE-04c: the mock only publishes coding questions when this scenario is on.
-    setMockQuestionScenario({ validationJob: true });
     const u = await openEditor('q-rotate');
     await u.click(screen.getByRole('button', { name: 'Validate' }));
     await screen.findByText('Validation failed');
