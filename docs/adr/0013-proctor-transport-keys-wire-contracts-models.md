@@ -540,7 +540,7 @@ Any model not listed throws. Within one org, the org filter alone would expose o
 | `test_sections` | `id`, `title`, `position`, `time_limit_min` | — | — |
 | `questions` | `id`, `type` | — | — |
 
-- **SERVER events** come only from SERVICE scope: the outcome handlers, the watchdog and `server-event` jobs (CS-4.7). A candidate route that needs one (RECONNECTED on a heartbeat) enqueues a job.
+- **SERVER events** come only from SERVICE scope: the outcome handlers, the watchdog and `server-event` jobs (CS-4.7). A candidate route that needs one (RECONNECTED on a heartbeat) enqueues a job. **The one exception is the STAFF proctor pause and resume** (FR-903): they write the SERVER events `PROCTOR_PAUSE` and `PROCTOR_RESUME` (LOW, weight 0, ADR 0005) from STAFF scope, in the same transaction as the state change (`proctorResume` after `guardLive`, 5.7). The payload `{ proctorUserId }` is the authenticated staff user's id taken from the request context, never from input.
 - **CS-4.4a Status changes.** CANDIDATE scope writes status columns only through `SessionStateService.transition()`. That method enters an AsyncLocalStorage grant for the state columns; without the grant the extension refuses them (runtime, not lint only). In CANDIDATE scope the method allows only these:
 
   | Transition or change | Candidate route |
