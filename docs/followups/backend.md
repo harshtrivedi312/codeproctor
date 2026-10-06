@@ -224,7 +224,9 @@ Triage of the open FU-BE rows for the Delivery Lead's pilot plan. Tier 1 is deli
 | FU-BE-98, FU-BE-104 | No read deadline on body parsers (slowloris); the 1 MB JSON limit applies to public routes before the throttler       | Backend A + Caddy; one PR                             |
 | FU-BE-21, 89, 79    | Real mail (BullMQ + SES) for reset and invite; failed invite mail is silent; lock-alert flood to SUPER_ADMINs         | Backend A (BE-06b, after #98); BullMQ dependency      |
 | FU-BE-72            | Per-IP or progressive lockout (a known email can be kept locked); P-03 says before production                         | Backend A + hub                                       |
-| FU-BE-14, FU-BE-87  | Unhandled errors logged as full Error objects; `scrubPrismaError` does not follow `error.cause`                       | Backend A + Database A (`database/error-scrub.ts`)    |
+| FU-BE-86 | A forced-enrollment challenge issued before a password reset or deactivation can still overwrite the pending TOTP secret (write bound only to `totpEnabled: false`): a session weakness, rule 3 | Backend A (PR D with FU-BE-64, 58) |
+| FU-BE-77 | Cross-org 409 on invite is an oracle for whether an email has an account in another tenant; the unlock edge allows one extra password guess | Backend A + hub + DB: fix (lock generation, needs a schema ADR) or an owner-accepted risk before pilot |
+| FU-BE-87, FU-BE-14  | `scrubPrismaError` does not follow `error.cause` or `AggregateError`; verify and close FU-BE-14 (ProblemFilter already logs the scrubbed error per FU-BE-65/83)                       | Backend A + Database A (`database/error-scrub.ts`)    |
 | FU-BE-64, 58        | Rate counter INCR then EXPIRE can leave a key without TTL; wrong 2FA code on disable reports a password error        | Backend A                                             |
 | FU-BE-99            | CloudWatch Logs data-protection policy at ingest (backstop for the heuristic scrubber)                                | DEP / owner (AWS)                                     |
 | FU-BE-125, 128, 122 | Validate job is in-process (BullMQ swap), no per-org concurrency cap or cancellation, unbounded variant override data | Backend A + hub (BullMQ approval); after mail PR      |
@@ -234,11 +236,11 @@ Triage of the open FU-BE rows for the Delivery Lead's pilot plan. Tier 1 is deli
 
 ### Tier 2: should fix soon
 
-FU-BE-12, 95, 13 (request-id and 404 echo hardening, one PR with FU-BE-98/104); FU-BE-42 (lock waits and deadlocks surface as 500, map to 503); FU-BE-62, 56 (weak Redis-wait and disable-race tests); FU-BE-67 (200-char cap on `users.full_name` and `organizations.name`); FU-BE-28, 115 (flaky TC-098, TC-002); FU-BE-2, 15 (open handles, drop `--forceExit`); FU-BE-18 (candidate throttle too tight for heartbeats, with BE-10); FU-BE-107, 105, 106, 123, 119, 131 (question bank payload size, revision and test gaps); FU-BE-109, 126, 118, 124, 102, 103, 112, 75, 80, 22, 77 (hub decisions and schema questions; FU-BE-77 is low-severity and security-adjacent); FU-BE-91, 121 (QA and web contract); FU-BE-24 (move forgot-password constants to env).
+FU-BE-12, 95, 13 (request-id and 404 echo hardening, one PR with FU-BE-98/104); FU-BE-42 (lock waits and deadlocks surface as 500, map to 503); FU-BE-62, 56 (weak Redis-wait and disable-race tests); FU-BE-67 (200-char cap on `users.full_name` and `organizations.name`); FU-BE-28, 115 (flaky TC-098, TC-002); FU-BE-2, 15 (open handles, drop `--forceExit`); FU-BE-18 (candidate throttle too tight for heartbeats, with BE-10); FU-BE-107, 105, 106, 123, 119, 131 (question bank payload size, revision and test gaps); FU-BE-109, 126, 118, 124, 102, 103, 112, 75, 80, 22 (hub decisions and schema questions); FU-BE-121 (web contract); FU-BE-133 (org-settings route, in review as PR #165); FU-BE-38, 85 (auth-path test gaps: concurrent recovery-code use, held-lock role races); FU-BE-24 (move forgot-password constants to env).
 
 ### Tier 3: nice to have
 
-FU-BE-5, 6, 7, 11, 16, 17, 81, 96, 23, 25, 37, 38, 85, 43, 78, 60, 61, 63, 68, 69, 71, 86, 76, 88, 92, 93, 94, 110, 108, 113, 117, 120, 127, 132, 134. FU-BE-47 looks implemented (Redis `commandTimeout` from `HEALTH_TIMEOUT_MS`); only the test gaps in FU-BE-62 remain. FU-BE-100 is folded into FU-BE-98.
+FU-BE-5, 6, 7, 11, 16, 17, 81, 96, 23, 25, 37, 43, 78, 60, 61, 63, 68, 69, 71, 76, 88, 92, 93, 94 (BE-07 must never issue UUID-shaped invitation tokens, see FU-BE-90), 110, 108, 113, 117, 120, 127, 132, 134. FU-BE-47 looks implemented (Redis `commandTimeout` from `HEALTH_TIMEOUT_MS`); only the test gaps in FU-BE-62 remain. FU-BE-100 is folded into FU-BE-98.
 
 ### Suggested order and batching
 
@@ -246,12 +248,12 @@ FU-BE-5, 6, 7, 11, 16, 17, 81, 96, 23, 25, 37, 38, 85, 43, 78, 60, 61, 63, 68, 6
 2. PR A, config and throttle: FU-BE-97 and FU-BE-1.
 3. PR B, HTTP hardening: FU-BE-98, 104, 12, 95, 13, 11.
 4. PR C, logging scrub: FU-BE-14 and 87 (coordinate with Database A).
-5. PR D, auth hardening: FU-BE-64, 58, 28.
+5. PR D, auth hardening: FU-BE-64, 58, 86, 28.
 6. PR E, mail: FU-BE-21, 89, 79 (BullMQ and SES; needs #98 and the hub's dependency approval).
 7. PR F, validate job on BullMQ: FU-BE-125, 128, 122 (builds on PR E).
 8. PR G: FU-BE-114, 116, 101.
 9. PR H with the hub: FU-BE-111 and 3.
-10. FU-BE-72 (Backend A, then hub); FU-BE-70 and 99 are deploy and infrastructure (owner for anything in AWS).
+10. FU-BE-72 and FU-BE-77 (Backend A, then hub and owner); FU-BE-70 and 99 are deploy and infrastructure (owner for anything in AWS).
 
 ## Backend B (candidate) (D-51)
 
