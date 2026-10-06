@@ -296,7 +296,10 @@ export class UsersService {
     return this.toDto(updated);
   }
 
-  /** Fixed window per org and hour. Redis down is a 503 (fail closed), over the limit a 429. */
+  /**
+   * Fixed window per org and hour. Redis down is a 503 (fail closed), over the limit a 429.
+   * Returns the window key that was counted, so a failed attempt can give its slot back.
+   */
   private async takeInviteSlot(orgId: string): Promise<string> {
     const key = `invite:org:${orgId}:${Math.floor(Date.now() / (INVITE_WINDOW_SECONDS * 1000))}`;
     let count: number;

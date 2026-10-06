@@ -210,8 +210,10 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         await this.refundAttempt(user).catch(() => undefined);
         throw this.invalid();
       }
-      // DL-37: the password was already right and the session transaction hit lock contention
-      // (503, retry): give back the attempt of THIS request only. Failed-guess counts (wrong
+      // DL-37: the password was already right and opening the session hit lock contention (503,
+      // retry): give back the attempt of THIS request only. startSession runs on the root client
+      // here, with no transaction: the refresh-family INSERT may already have committed when
+      // clearFailures fails, leaving a family whose token was never delivered (unusable; FU-BE-174). Failed-guess counts (wrong
       // password, wrong code) are never refunded, so contention cannot erase an attacker's count.
       if (lockContentionCode(e) !== undefined)
         await this.refundAttempt(user).catch(() => undefined);
@@ -285,8 +287,10 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
   /**
    * Runs `fn` with the challenge marked used (Redis SET NX), so one challenge cannot mint two
    * sessions. A Redis outage is a 503 (nothing is reserved or counted yet). The mark is released
-   * only when `fn` ends in a wrong code or an outage, so a retry stays possible; once state may
-   * have changed the challenge stays spent. If releasing the mark also fails (Redis
+   * when `fn` ends in a wrong code, an outage or database lock contention (503 + Retry-After), so
+   * a retry stays possible. Other errors leave it spent. Contention can follow a committed refresh
+   * family INSERT (the TOTP path has no transaction around startSession), which then never
+   * reaches the client: unusable, and tracked by FU-BE-174. If releasing the mark also fails (Redis
    * still down), the challenge stays spent until its TTL: the user signs in again.
    */
   private async withChallengeUse<T>(jti: string, fn: () => Promise<T>): Promise<T> {
@@ -587,7 +591,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     try {
       if (/^\d{6}$/.test(code)) {
         if (!(await this.verifyTotp(user, secret, code))) {
-          wrongCode = true;
+          wrongCode = true; // a failed guess is never refunded (DL-37)
           return await this.failCode(user, ctx);
         }
         return await this.startSession(user, this.prisma.client, secret);
@@ -610,6 +614,8 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         return this.startSession(user, tx, secret);
       });
     } catch (e) {
+      // A wrong recovery code is a failed guess: counted by failCode, returned before any refund
+      // below, so it is never refunded (DL-37).
       if (e instanceof WrongRecoveryCodeSignal) return this.failCode(user, ctx);
       if (e instanceof PasswordChangedSignal) {
         await this.refundAttempt(user).catch(() => undefined);

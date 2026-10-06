@@ -332,6 +332,36 @@ describe('Re-issue a pending invite (DL-23, FR-103, FR-105, TC-004, TC-008)', ()
     }
   });
 
+  it('DL-37, FR-103: a re-issue that hits lock contention is 503 with Retry-After and gives its slot back; a 409 keeps its slot', async () => {
+    const org = (await owner.organization.create({ data: { name: 'Reissue Refund Org' } })).id;
+    const admin = await make(UserRole.SUPER_ADMIN, { orgId: org });
+    const pending = await make(UserRole.AUTHOR, { orgId: org, pending: true });
+    const live = await make(UserRole.AUTHOR, { orgId: org });
+    const { UsersService } =
+      jest.requireActual<typeof import('./users.service')>('./users.service');
+    const svc = app.get(UsersService);
+    const before = Reflect.get(svc, 'inviteLimit') as number;
+    Reflect.set(svc, 'inviteLimit', 1);
+    const busy = jest
+      .spyOn(svc as unknown as { requireSameAdmin: () => Promise<void> }, 'requireSameAdmin')
+      .mockRejectedValueOnce(Object.assign(new Error('lock wait'), { code: '55P03' }));
+    try {
+      const res = await reissue(admin, pending.id).expect(503);
+      expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+      // Limit 1: this only succeeds because the failed attempt gave its slot back.
+      await reissue(admin, pending.id).expect(200);
+      // The slot is spent now; a refused re-issue (409) does not get one back either.
+      await reissue(admin, live.id).expect(429);
+      // Counted so far: 503 (refunded), 200, 429 (a refused hit counts). Room for one more.
+      Reflect.set(svc, 'inviteLimit', 4);
+      await reissue(admin, live.id).expect(409);
+      await reissue(admin, live.id).expect(429);
+    } finally {
+      busy.mockRestore();
+      Reflect.set(svc, 'inviteLimit', before);
+    }
+  });
+
   it('FR-103: a re-issue racing the invitee accepting waits on the row lock, then is a 409 and does not overwrite the new password or revive a link', async () => {
     const admin = await make(UserRole.SUPER_ADMIN);
     const pending = await make(UserRole.AUTHOR, { pending: true });

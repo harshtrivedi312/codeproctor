@@ -1046,6 +1046,35 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
   // docs/test-cases.md; names cite FR-101/102 and the decision id.
   describe('DL-37 (FR-101, FR-102): contention gives back only the attempt that failed for contention', () => {
     const lockError = (): Error => Object.assign(new Error('lock wait'), { code: '55P03' });
+    const markExists = async (challengeToken: string): Promise<boolean> => {
+      const { jti } = JSON.parse(
+        Buffer.from(challengeToken.split('.')[1] ?? '', 'base64url').toString(),
+      ) as { jti: string };
+      const redis = app.get<import('ioredis').Redis>(
+        jest.requireActual<typeof import('../infrastructure/infrastructure.module')>(
+          '../infrastructure/infrastructure.module',
+        ).REDIS_CLIENT,
+      );
+      return (await redis.exists(`auth:challenge:used:${jti}`)) === 1;
+    };
+    const failedLogins = async (id: string): Promise<number> =>
+      (await prisma.user.findUniqueOrThrow({ where: { id } })).failedLogins;
+    const registerFailureSpy = (): jest.SpyInstance =>
+      jest.spyOn(
+        authService as unknown as { registerFailure: () => Promise<void> },
+        'registerFailure',
+      );
+    const verify2fa = (challengeToken: string, code: string): request.Test =>
+      request(app.getHttpServer()).post(`${API}/2fa/verify`).send({ challengeToken, code });
+    const RECOVERY = 'ABCDEFGHJKLMNPQR';
+    const reviewerWithRecovery = async (): Promise<{ id: string; email: string }> => {
+      const u = await createUser({ role: UserRole.REVIEWER, totp: 'JBSWY3DPEHPK3PXP' });
+      await prisma.user.update({
+        where: { id: u.id },
+        data: { recoveryCodeHashes: [sha256Hex(RECOVERY)] },
+      });
+      return u;
+    };
     const startSessionSpy = (): jest.SpyInstance =>
       jest.spyOn(
         authService as unknown as { startSession: () => Promise<unknown> },
@@ -1083,17 +1112,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           .expect(503);
         expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
         expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).failedLogins).toBe(0);
-        const jti = (
-          JSON.parse(Buffer.from(challengeToken.split('.')[1] ?? '', 'base64url').toString()) as {
-            jti: string;
-          }
-        ).jti;
-        const redis = app.get<import('ioredis').Redis>(
-          jest.requireActual<typeof import('../infrastructure/infrastructure.module')>(
-            '../infrastructure/infrastructure.module',
-          ).REDIS_CLIENT,
-        );
-        expect(await redis.exists(`auth:challenge:used:${jti}`)).toBe(0);
+        expect(await markExists(challengeToken)).toBe(false);
       } finally {
         spy.mockRestore();
       }
@@ -1115,8 +1134,85 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           .send({ challengeToken, code: '000000' })
           .expect(503);
         expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).failedLogins).toBe(1);
+        expect(await markExists(challengeToken)).toBe(false);
       } finally {
         fail.mockRestore();
+      }
+    });
+
+    it('FR-101: a wrong password whose failure write hits contention is 503 and is still counted', async () => {
+      const u = await createUser();
+      const fail = registerFailureSpy().mockRejectedValueOnce(lockError());
+      try {
+        const res = await login(u.email, 'not-the-password-at-all-1').expect(503);
+        expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+        expect(await failedLogins(u.id)).toBe(1);
+      } finally {
+        fail.mockRestore();
+      }
+    });
+
+    it('FR-102: a wrong recovery code whose failure write hits contention is 503, stays counted, keeps the code and releases the challenge', async () => {
+      const u = await reviewerWithRecovery();
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      const fail = registerFailureSpy().mockRejectedValueOnce(lockError());
+      try {
+        await verify2fa(challengeToken, 'STUVWXYZ23456723').expect(503);
+        expect(await failedLogins(u.id)).toBe(1);
+        expect(
+          (await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).recoveryCodeHashes,
+        ).toEqual([sha256Hex(RECOVERY)]);
+        expect(await markExists(challengeToken)).toBe(false);
+      } finally {
+        fail.mockRestore();
+      }
+    });
+
+    it('FR-102: contention on the recovery-code consume UPDATE is 503, gives the attempt back and the code is still there', async () => {
+      const u = await reviewerWithRecovery();
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      const real = (
+        authService as unknown as {
+          raw: (r: string, f: () => Promise<unknown>) => Promise<unknown>;
+        }
+      ).raw.bind(authService);
+      const raw = jest
+        .spyOn(
+          authService as unknown as {
+            raw: (reason: string, run: () => Promise<unknown>) => Promise<unknown>;
+          },
+          'raw',
+        )
+        .mockImplementation((reason, run) =>
+          reason.includes('consume one recovery code')
+            ? Promise.reject(lockError())
+            : real(reason, run),
+        );
+      try {
+        await verify2fa(challengeToken, RECOVERY).expect(503);
+        expect(await failedLogins(u.id)).toBe(0);
+        expect(
+          (await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).recoveryCodeHashes,
+        ).toEqual([sha256Hex(RECOVERY)]);
+        expect(await markExists(challengeToken)).toBe(false);
+      } finally {
+        raw.mockRestore();
+      }
+    });
+
+    it('FR-102: a right recovery code whose session open hits contention is 503, refunds, restores the code, and the retry signs in', async () => {
+      const u = await reviewerWithRecovery();
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      const spy = startSessionSpy().mockRejectedValueOnce(lockError());
+      try {
+        await verify2fa(challengeToken, RECOVERY).expect(503);
+        expect(await failedLogins(u.id)).toBe(0);
+        expect(
+          (await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).recoveryCodeHashes,
+        ).toEqual([sha256Hex(RECOVERY)]);
+        await verify2fa(challengeToken, RECOVERY).expect(200);
+      } finally {
+        spy.mockRestore();
       }
     });
   });
