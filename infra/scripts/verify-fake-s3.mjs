@@ -9,8 +9,8 @@ import { createServer } from 'node:http';
 const xml = (body) => `<?xml version="1.0" encoding="UTF-8"?>${body}`;
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
-/** @returns {Promise<{ port: number, faults: { failList: boolean }, objects: Map<string, Buffer>, versions: Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>, metas: Map<string, Record<string, string>>, close: () => Promise<void> }>} */
-export async function startFakeS3({ versioned = true } = {}) {
+/** @returns {Promise<{ port: number, faults: { failList: boolean }, objects: Map<string, Buffer>, versions: Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>, metas: Map<string, Record<string, string>>, deletes: string[], close: () => Promise<void> }>} */
+export async function startFakeS3({ versioned = false } = {}) {
   /** Set to true to make every listing fail with a 500. */
   const faults = { failList: false };
   /** @type {Map<string, Buffer>} key = "bucket/key" */
@@ -20,6 +20,8 @@ export async function startFakeS3({ versioned = true } = {}) {
   /** Metadata of the current object per key. */
   const metas = new Map();
   let counter = 0;
+  /** Every DELETE request, as "bucket/key" (tests assert versioned backups issue none). */
+  const deletes = [];
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://x');
     const path = decodeURIComponent(url.pathname.slice(1));
@@ -44,6 +46,7 @@ export async function startFakeS3({ versioned = true } = {}) {
         return send(200, '', { etag: '"fake"', 'x-amz-version-id': id });
       }
       if (req.method === 'DELETE') {
+        deletes.push(path);
         objects.delete(path);
         return send(204);
       }
@@ -86,11 +89,7 @@ export async function startFakeS3({ versioned = true } = {}) {
           etag: '"fake"',
           'last-modified': new Date().toUTCString(),
           'content-type': 'application/octet-stream',
-          ...(version && objects.get(path) === (wanted ? version.body : body)
-            ? { 'x-amz-version-id': version.id }
-            : wanted && version
-              ? { 'x-amz-version-id': version.id }
-              : {}),
+          ...(version ? { 'x-amz-version-id': version.id } : {}),
           ...Object.fromEntries(Object.entries(meta).map(([k, v]) => [`x-amz-meta-${k}`, v])),
         });
         return res.end(req.method === 'HEAD' ? undefined : body);
@@ -106,6 +105,7 @@ export async function startFakeS3({ versioned = true } = {}) {
     objects,
     versions,
     metas,
+    deletes,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }

@@ -16,12 +16,12 @@ the nightly workflow (below). Tests: `infra/scripts/verify-backup.test.mjs`.
 | `infra/backup/backup.sh` | `pg_dump` (custom format, compressed) to a file. It checks that the dump is readable and that every table has a data entry, then uploads it as one object whose **metadata** carries the checksum (`sha256`), the dump time (`dumped-at`) and the row counts (`counts`), so they can never belong to another object. It checks the stored size and checksum. `BACKUP_MODE=versioned` (default, pilot and production) writes the fixed key `<prefix>dump/latest.dump` in a versioned bucket and **never deletes anything**; the bucket's lifecycle rotates the versions. `BACKUP_MODE=timestamped` (staging, Cloudflare R2 has no versioning) writes `<prefix>dumps/codeproctor-<UTC stamp>.dump`, keeps the newest 3 whatever their age, deletes the others after 14 days, and prunes erasure-list entries that no remaining backup needs (C-55). |
 | `infra/backup/restore.sh` | Downloads a backup (the latest, or an object version id in versioned mode, or a dump file name in timestamped mode), verifies the checksum from its metadata, restores into a **new** database, compares row counts with the counts taken at backup time, then re-applies the erasure list. Never restores over an existing database and never drops one. |
 | `infra/backup/erasure-list.sh` | The erased-candidate list kept outside the database and its backups (see below). |
-| Nightly workflow (proposed to the architecture hub, which owns CI config; not in this PR) | 02:17 UTC every night: backs up staging with repository secrets, then restores the new backup into a throwaway Postgres 16 service container and compares counts. Until it lands, nothing schedules the backup (FU-DBB-07). |
+| Nightly workflow (`.github/workflows/backup-nightly.yml`) | 02:17 UTC every night: backs up staging (`BACKUP_MODE=timestamped`) with the `staging` environment's secrets, then restores the new backup into a throwaway Postgres 16 service container and compares counts. It first fails with the names of any missing secret. |
 
 Settings (names match `.env.example`): `PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE`,
 `S3_BACKUP_BUCKET S3_ENDPOINT S3_REGION S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY S3_FORCE_PATH_STYLE`,
 and optionally `BACKUP_PREFIX` (default `db/`), `BACKUP_RETENTION_DAYS` (default 14),
-`BACKUP_SSE` (for example `AES256` on AWS S3), `PG_BIN_DIR`. The scripts take no secrets as
+`BACKUP_SSE` (for example `AES256` on AWS S3), `PG_BIN_DIR`. Timestamped mode must have `BACKUP_MODE=timestamped` set in the environment of every script that touches the bucket (`backup.sh`, `restore.sh`, `erasure-list.sh`). The scripts take no secrets as
 arguments, so nothing shows up in `ps`, and they never print a URL, key or password.
 
 Environments: staging writes to Cloudflare R2 (synthetic data only). Pilot and production write
@@ -59,8 +59,13 @@ The erasure service (DB-06) calls, in this order:
 2. `erasure-list.sh complete <uuid>` once the candidate row is anonymised and `ERASURE_COMPLETED` is
    written. An erasure can finish weeks after the request (review or appeal hold, the re-run after
    the fence, anonymisation at day 28), and every backup taken until then still holds the personal
-   data. So `backup.sh` prunes an entry only when its **completion** is more than a day older than the oldest remaining
-   backup, and never prunes an entry without a completion marker.
+   data. So in timestamped mode `backup.sh` prunes an entry only when its **completion** is more than a day older than the oldest remaining
+   backup, and never prunes an entry without a completion marker. In **versioned** mode `backup.sh` and
+   `erasure-list.sh prune` never delete: the owner-applied expiry function (its own role, a daily
+   schedule, never on the instance; ADR 0017 5.3) prunes entries older than the oldest kept backup.
+   Its lifecycle rule on the backup bucket must be filtered to the `<prefix>dump/latest.dump` key only
+   (`<prefix>erasure-list/` and `<prefix>erasure-completed/` never expire by lifecycle), and the Object
+   Lock default retention (12 days, governance) must stay shorter than the 30-day erasure window (C-06).
 
 `restore.sh` also raises `auth_epoch` by 1,000,000 on **every** restored session, so a token revoked since the backup (a device that lost its session to another device) does not work again; candidates sign in again. It also revokes every staff refresh token, so staff sign in again (a restore would otherwise un-revoke and un-rotate them).
 
@@ -217,7 +222,7 @@ SELECT has_database_privilege('app_user', current_database(), 'TEMPORARY');    -
 ### 6. Backups on (a person creates the secrets once; then the workflow does the rest)
 
 1. Create a private bucket on Cloudflare R2 for backups. No public access, and **no object versioning**
-   (noncurrent copies would outlive the 14-day limit, ADR 0004 section 9.7).
+   (a noncurrent copy would outlive the retention rule, C-55).
    (Stricter than the general rule above, which allows versioning with a short noncurrent-version
    lifecycle rule: on R2 we simply do not turn it on.)
 2. Create an R2 token limited to that bucket. Create the backup's database role as a person: `LOGIN`
@@ -230,6 +235,7 @@ SELECT has_database_privilege('app_user', current_database(), 'TEMPORARY');    -
 4. Run the nightly workflow once by hand (`workflow_dispatch` on `main`). A green run means: a dump with
    its metadata (`sha256`, `dumped-at`, `counts`) is in `staging/dumps/` in the bucket, and the restore drill step restored
    it into the throwaway Postgres service with matching row counts.
+   (A staging bucket used by the earlier design may still hold `.dump.gz`, `.sha256` and `.counts.tsv` files; they are never pruned and cannot be restored: delete them once by hand.)
 5. Check the bucket now holds one dump. After 14 days it should hold about 15 (today plus 14 days), plus any manual runs, and never fewer than the newest 3 (C-55).
    `staging/erasure-list/` and `staging/erasure-completed/` hold only `<stamp>-<candidate uuid>.json`
    objects (an id and a time, no names or emails).

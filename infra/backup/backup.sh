@@ -108,6 +108,13 @@ remote=$(s3api head-object --bucket "$BUCKET" --key "$key" --query ContentLength
 stored=$(s3api head-object --bucket "$BUCKET" --key "$key" --query 'Metadata.sha256' --output text)
 [ "$stored" = "$sum" ] || die "the stored object does not carry this dump's checksum."
 log "uploaded $key ($size bytes, dumped at $stamp)."
+if [ "$BACKUP_MODE" = versioned ]; then
+  # A bucket without versioning would have just overwritten the only backup: fail loudly (the
+  # backups the owner counts on are then fewer than C-55 promises).
+  vid=$(s3api head-object --bucket "$BUCKET" --key "$key" --query VersionId --output text)
+  case "$vid" in '' | None | null) die "the bucket does not return a version id for $key: it is not versioned. The previous backup was overwritten." ;; esac
+  log "stored as version $vid."
+fi
 
 if [ "$BACKUP_MODE" = versioned ]; then
   log "versioned mode: nothing is deleted; the bucket's lifecycle rotates the versions. The erasure list is pruned by the owner-applied expiry function."

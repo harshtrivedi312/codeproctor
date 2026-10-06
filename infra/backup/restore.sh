@@ -107,8 +107,9 @@ else
   printf '%s' "$backup" | grep -q '^[A-Za-z0-9._-]\{1,128\}$' || die "--backup must be latest or an object version id."
   vid=$backup
 fi
-# Stores without versioning report no version id: the current object is used.
-case "$vid" in None | null) vid= ;; esac
+# A store without versioning (staging) reports no version id for `latest`: the current object is used.
+# A requested version id is never rewritten ("null" is a real version id on AWS).
+if [ "$backup" = latest ]; then case "$vid" in None | null) vid= ;; esac; fi
 set --
 [ -z "$vid" ] || set -- --version-id "$vid"
 meta=$(s3api head-object --bucket "$BUCKET" --key "$key" "$@" --query 'Metadata.[sha256,"dumped-at",counts]' --output text) ||

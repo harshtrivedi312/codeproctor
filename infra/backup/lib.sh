@@ -26,10 +26,15 @@ init_s3() {
     export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
   fi
   AWS_DEFAULT_REGION=${S3_REGION:-us-east-1}
-  AWS_REQUEST_CHECKSUM_CALCULATION=when_required
-  AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
+  # R2 and other stores reject some of the CLI's default checksums; AWS S3 (no endpoint) keeps the
+  # defaults, which an Object Lock bucket needs on uploads.
+  if [ -n "${S3_ENDPOINT:-}" ]; then
+    AWS_REQUEST_CHECKSUM_CALCULATION=when_required
+    AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
+    export AWS_REQUEST_CHECKSUM_CALCULATION AWS_RESPONSE_CHECKSUM_VALIDATION
+  fi
   AWS_PAGER=
-  export AWS_DEFAULT_REGION AWS_REQUEST_CHECKSUM_CALCULATION AWS_RESPONSE_CHECKSUM_VALIDATION AWS_PAGER
+  export AWS_DEFAULT_REGION AWS_PAGER
   if [ "${S3_FORCE_PATH_STYLE:-false}" = "true" ]; then
     # An aws config file is the only way to choose path-style addressing.
     AWS_CONFIG_FILE=${WORK:?}/aws-config
