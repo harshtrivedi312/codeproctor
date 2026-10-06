@@ -15,7 +15,13 @@ import { MOCK_INGEST_GRACE_MS, testState } from '@/mocks/candidate/test-handlers
 import { createAdrSource } from '../adr-source';
 import { ProctoredTest } from '../proctored-test';
 import { ProctorController, seedCounters } from './controller';
-import { MemoryStore, installFullscreen, setupDevices, startedSession } from './test-support';
+import {
+  MemoryStore,
+  installFullscreen,
+  setFullscreen,
+  setupDevices,
+  startedSession,
+} from './test-support';
 import { withRetry } from './retry';
 
 vi.hoisted(() => {
@@ -340,10 +346,12 @@ describe('a device granted late writes nothing after a purge or a finish (candid
     const starting = c.startRecorders();
     await waitFor(() => expect(devices.getUserMedia).toHaveBeenCalledTimes(1));
     await c.finish();
+    const seen = recordRequests();
     devices.grantUser();
     await starting;
     await wait(150);
     expect(devices.userStreams[0]?.stops).toHaveBeenCalled();
+    expect(seen.some((q) => /media\/(presign|confirm)/.test(q.url))).toBe(false);
     expect(store.count(STORES.chunks)).toBe(0);
     expect([...store.data.keys()].some((k) => k.includes(`${SID}:segment:`))).toBe(false);
     expect(localStorage.getItem(`codeproctor:eventseq:${SID}`)).toBeNull();
@@ -393,6 +401,60 @@ describe('a device granted late writes nothing after a purge or a finish (candid
 function confirmedChunks(session: object): Record<string, number> {
   return (session as { confirmedChunks: Record<string, number> }).confirmedChunks;
 }
+
+describe('finish leaves nothing from earlier loads, and nothing after it (candidate data)', () => {
+  it('FR-505: finish while the key call is still in flight purges what an earlier page load left', async () => {
+    setupDevices();
+    await startedSession();
+    // The key route is slow; the timer runs out meanwhile. The default handler answers after.
+    server.use(
+      http.post(`${cand}/session/proctor-key`, async () => {
+        await delay(300);
+        return undefined;
+      }),
+    );
+    const store = new MemoryStore();
+    await prefill(store);
+    const c = controllerFor(store);
+    const starting = c.init();
+    await c.finish();
+    await starting;
+    expectPurged(store);
+    // No session was started under the finished test: nothing is written afterwards.
+    await wait(150);
+    expectPurged(store);
+  });
+
+  it('FR-701: a stream granted while the devices are being released after the drain is dropped, never uploaded', async () => {
+    const devices = setupDevices({ deferUser: true });
+    await startedSession();
+    const store = new MemoryStore();
+    const c = controllerFor(store, { finishDrainMs: 2000 });
+    await c.init();
+    await c.shareScreen();
+    expect(await c.enterFullscreen()).toBe(true);
+    // Leaving fullscreen takes a moment, so the answer lands after the drain, before finish() ends.
+    Object.defineProperty(document, 'exitFullscreen', {
+      configurable: true,
+      value: vi.fn(async () => {
+        await wait(250);
+        setFullscreen(false);
+      }),
+    });
+    const starting = c.startRecorders();
+    await waitFor(() => expect(devices.getUserMedia).toHaveBeenCalledTimes(1));
+    const seen = recordRequests();
+    const finishing = c.finish();
+    await wait(120); // drained, now inside releaseDevices
+    const before = seen.length;
+    devices.grantUser();
+    await Promise.all([finishing, starting]);
+    await wait(100);
+    expect(seen.slice(before).some((q) => /media\/(presign|confirm)/.test(q.url))).toBe(false);
+    expect(store.count(STORES.chunks)).toBe(0);
+    expect([...store.data.keys()].some((k) => k.includes(`${SID}:segment:`))).toBe(false);
+  });
+});
 
 describe('the real final evidence survives a late device answer during finish (FR-505, ADR 0013 5.5)', () => {
   // A slow presign that then falls through to the mock's own handler (which records the chunk, so

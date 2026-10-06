@@ -137,7 +137,7 @@ export function CandidateFlow({
   }, [me]);
 
   const endSession = React.useCallback(() => {
-    if (activeFlow !== me) return;
+    if (activeFlow !== null && activeFlow !== me) return;
     clearCandidateCredentials();
     setTerminal({ reason: 'SESSION_ENDED' });
   }, [me]);
@@ -149,7 +149,7 @@ export function CandidateFlow({
 
   const finishWith = React.useCallback(
     (t: Terminal) => {
-      if (activeFlow !== me) return;
+      if (activeFlow !== null && activeFlow !== me) return;
       clearCandidateCredentials();
       setTerminal(t);
     },

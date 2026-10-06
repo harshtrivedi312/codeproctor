@@ -215,6 +215,8 @@ export class ProctorController {
   private readonly mediaProgress: MediaProgress = {};
   /** Set when the data is being purged: nothing more may be sent or written. */
   private purging = false;
+  /** Set once finish() has drained and purged: a device that answers after this is dropped at once. */
+  private drained = false;
   /** The running finish(), so a late device answer can wait for the real final chunks to go. */
   private finishPromise: Promise<{ lostBatches: number }> | null = null;
   /** Set while a device granted after the end is dropped: its last chunk must not be uploaded. */
@@ -463,8 +465,8 @@ export class ProctorController {
    */
   private async dropLate(stream: (typeof MEDIA_STREAMS)[number]): Promise<void> {
     if (!this.pipeline) return;
-    if (this.purging) {
-      // The data is being deleted: nothing this late recorder wrote may stay or be sent.
+    if (this.purging || this.drained) {
+      // The data is deleted (or being deleted): nothing this late recorder wrote may stay or be sent.
       await this.discardLate();
       return;
     }
@@ -515,6 +517,10 @@ export class ProctorController {
     } catch {
       // release below
     }
+    // Whatever an earlier page load left (and anything the SDK could not delete, for example when
+    // the key call was still in flight and no session or pipeline ever started) goes now.
+    if (this.store) await purgeStore(this.store, this.o.sessionId);
+    this.drained = true;
     await this.releaseDevices();
     this.removeSeqBackup();
     this.torn = true;
