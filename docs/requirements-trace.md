@@ -15,8 +15,8 @@ Status values: Not started, In progress, Done (merged), Verified (the TC passed 
 | Functional requirements (FR-101..FR-1103) | 58 | fsd.md section 2 (FR-107 added 2026-10-01, D-22) |
 | Non-functional requirements (NFR-01..NFR-09) | 9 | fsd.md section 5 |
 | Requirements traced (BR + FR + NFR) | 82 | |
-| Test cases (TC) | 72 (51 P1, 17 P2, 4 P3) | counted from test-cases.md; matches its intro line (TC-095..TC-099 added 2026-10-01) |
-| TC types | 29 F, 18 I, 20 S, 2 P, 2 R, 1 A | |
+| Test cases (TC) | 73 (52 P1, 17 P2, 4 P3) | counted from test-cases.md; matches its intro line (TC-095..TC-099 added 2026-10-01; TC-100 added 2026-10-06) |
+| TC types | 29 F, 18 I, 21 S, 2 P, 2 R, 1 A | |
 | FRs with no test case | 10 | FR-302, FR-406, FR-501, FR-702, FR-801, FR-1001, FR-1002, FR-1101, FR-1102, FR-1103 |
 | NFRs with no direct test case | 4 | NFR-03, NFR-07, NFR-08, NFR-09 (NFR-07 and NFR-08 have indirect coverage, see section 4) |
 | BRs with no test case through their FRs | 1 | BR-11 |
@@ -63,11 +63,11 @@ Notes:
 | FR-106 | M1 | Candidate auth by one-time token plus email OTP; lockout only before the test starts (D-21) | BE-06, BE-07, FE-09 | TC-007, TC-097 | Not started | OTP in Redis (ADR 0003, Q-04 resolved); no lockout during a test (D-21) |
 | FR-107 | M1 | Staff self-service password reset, single-use link, short expiry, 2FA kept (added 2026-10-01, D-22) | BE-02, FE-02, BE-06 (template) | TC-098 | Not started | ADR 0003 section 6 |
 | FR-201 | M2 | Author creates coding questions | BE-04, FE-04 | TC-010 | Not started | |
-| FR-202 | M2 | Sample and hidden test cases with weights | BE-04, FE-04 | TC-011 | Not started | No candidate fetch endpoint in FSD (Q-18) |
+| FR-202 | M2 | Sample and hidden test cases with weights | BE-04, FE-04 | TC-011, TC-100 | Not started | No candidate fetch endpoint in FSD (Q-18) |
 | FR-203 | M2 | Variant params with per-variant test data; reference solution must pass every variant | BE-04, BE-05, FE-04 | TC-012 | Not started | `variant_test_cases` (ADR 0007, A-01 option (b)) |
 | FR-204 | M2 | Versioning; past attempts unchanged | BE-04, FE-04 | TC-013 | Not started | |
 | FR-205 | M2 | MCQ and short-answer secondary types; short answers by normalized match plus accepted variants, else manual scoring (D-23) | BE-04, BE-11, BE-13, FE-04, FE-10, FE-11 | TC-014, TC-099 | Not started | Resolved: `answer_spec`, `session_questions.answer` and manual scoring (ADR 0007, Q-14) |
-| FR-301 | M3 | Test from fixed or random picks, durations; sequential sections with server-enforced limits | BE-06, BE-07, BE-11, FE-05, FE-10 | TC-020, TC-024 | Not started | `session_sections` (ADR 0002, A-03 option (a)) |
+| FR-301 | M3 | Test from fixed or random picks, durations; sequential sections with server-enforced limits | BE-06, BE-07, BE-11, FE-05, FE-10 | TC-020, TC-024, TC-100 | Not started | `session_sections` (ADR 0002, A-03 option (a)) |
 | FR-302 | M3 | Proctoring profile STANDARD, STRICT (LOCKDOWN not offered in this build) | BE-06, FE-05, FE-09 | none | Not started | No TC (Q-29); LOCKDOWN removed from the enum until the lockdown client (ADR 0007, D-13) |
 | FR-303 | M3 | Email invite, unique link, start window, usable once | BE-06, BE-07, FE-09 | TC-021, TC-022 | Not started | Resolved: `used_at` set at start, resume rules and expiry job (ADR 0002, Q-01, Q-23) |
 | FR-304 | M3 | Bulk CSV invites; reminder 24 h before close | BE-06, FE-05 | TC-023 | Not started | |
@@ -146,6 +146,7 @@ Requirement column is copied from test-cases.md. "Named" = the prompts name this
 | TC-098 (added 2026-10-01) | FR-107 | S | P1 | BE-02, FE-02 | Yes | Not started |
 | TC-010 | FR-201 | F | P1 | BE-04 | Yes | Not started |
 | TC-011 | FR-202 | S | P1 | BE-04 | Yes | Not started |
+| TC-100 (added 2026-10-06; staff and recruiter redaction, extends TC-011; DL-32, DL-34) | FR-202, FR-301 | S | P1 | BE-04, BE-06 | Yes | Not started |
 | TC-012 | FR-203 | F | P1 | BE-05, FE-04 | Yes | Not started |
 | TC-013 | FR-204 | F | P1 | BE-04 | Yes | Not started |
 | TC-014 | FR-205 | F | P3 | BE-04, BE-11 | Yes | Not started |
