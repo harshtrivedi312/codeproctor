@@ -60,9 +60,12 @@ async function sendAll(port: QueuedMailPort): Promise<void> {
 
 /** Every field of the queue, with Map contents spread so held jobs would show up. */
 function heldState(q: InProcessEmailQueue): string {
-  return JSON.stringify(
-    Object.entries(q).map(([k, v]) => [k, v instanceof Map ? [...v.values()] : v]),
-  );
+  const fields: Array<[string, unknown]> = Object.entries(q);
+  const shown: unknown[] = fields.map(([k, v]): unknown => {
+    const held: unknown = v instanceof Map ? Array.from((v as Map<unknown, unknown>).values()) : v;
+    return [k, held];
+  });
+  return JSON.stringify(shown);
 }
 
 function expectClean(haystack: string): void {

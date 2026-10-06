@@ -89,7 +89,7 @@ function make(
 
 /** Only https links (http too when allowHttp, outside live environments); never javascript: etc. */
 function assertSafeLink(raw: string, allowHttp: boolean): void {
-  let protocol = '';
+  let protocol: string;
   try {
     protocol = new URL(raw).protocol;
   } catch {
