@@ -1,6 +1,6 @@
 # Retention and destruction schedule
 
-Status: **DRAFT v0.3 for owner approval** (C-17, C-18, C-26, C-27, C-32 and owner fill-ins applied 2026-10-05) (C-04, C-05, C-06). Drafted 2026-10-05 by the Delivery Lead. Approver: Harsh Trivedi. This text has not had professional legal review (C-15).
+Status: **DRAFT v0.4 for owner approval** (C-55 applied 2026-10-06; C-17, C-18, C-26, C-27, C-32 and owner fill-ins applied 2026-10-05) (C-04, C-05, C-06). Drafted 2026-10-05 by the Delivery Lead. Approver: Harsh Trivedi. This text has not had professional legal review (C-15).
 
 Once approved, this text is published as a public page. The consent document and the candidate portal link to it (C-05; FE-09). Items in [square brackets] must be filled in before publication. The drafting notes at the end are not published.
 
@@ -33,7 +33,7 @@ For most data the clock starts when your assessment is finished. That is the lat
 | Optional demographic answers | Only if you chose to answer the optional post-test questions | Stored separately from your test, never shown to reviewers or recruiters, never used in decisions, and **deleted with your recordings, [N] days (the organisation's setting, default 90)** after the assessment is finished |
 | Signed consent record | The consent document version, your typed name, the time you signed, your IP address and browser, and the signed PDF | **3 years** after you sign, to prove you consented; then deleted |
 | Results | Your scores, your submitted code and answers, the integrity events (without images), the reviewer's decision and notes, and the report | **1 year** after the test, as US hiring record-keeping rules require; then deleted, leaving only anonymised statistics [unless a legal hold applies: OQ-10] |
-| Backups | Encrypted copies of the database | **14 days**. Data deleted from the live system leaves the backups within 14 days |
+| Backups | Encrypted copies of the database | **14 days, on a rotation.** Data deleted from the live system leaves the backups within 14 days. If backups stop for a while, we keep the newest 3 copies until backups start again, so that the service can always be restored, and never beyond the 30-day deletion deadline below [unless the approver records a decision: drafting note 7] |
 
 [N] is set by the organisation that invited you, between 7 and 730 days, and is normally 90. **Images of your face (the ID image, the selfie and re-check frames that didn't match) are never kept more than 90 days, whatever that setting says.** In every case we never keep biometric data more than 3 years after your last interaction with us.
 
@@ -66,3 +66,4 @@ Contact privacy@example.com. This schedule was last updated on [date].
 4. **BIPA:** C-27 caps face images (the ID image, selfie and mismatch frames) at 90 days. The engineering rule for DB-06 is to cap these items at 90 days, whatever `retention_days` says. Evidence snapshots and webcam recordings follow `retention_days`, as C-27 doesn't list them.
 5. **Volunteer tuning set (C-11).** BIPA's public policy must cover every biometric identifier we hold, so the tuning set has its own row above. That matches the volunteer form's drafting note 2.
 6. **S3 versioning.** Permanent deletion needs versioning off, or a lifecycle rule that expires noncurrent versions within days (ARC-05, DEP-03).
+7. **Backups (C-55, 2026-10-06).** Backups follow a 14-day rotation, and the newest 3 are never deleted, whatever their age. If backups have stalled, the newest 3 are kept until backups resume, and never beyond the 30-day erasure window without your explicit decision. You get an alarm after 2 days with no new backup, and the Delivery Lead proposes a second alarm before the newest kept backup reaches 30 days. Choose the published wording: either keep the bracket in the backups row ("unless the approver records a decision"), or remove it and promise the 30-day limit outright.
