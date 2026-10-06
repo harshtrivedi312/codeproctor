@@ -11,6 +11,7 @@ import type { Env } from './config/env';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
+import { TestsModule } from './tests/tests.module';
 import { JwtAuthGuard } from './common/auth/jwt-auth.guard';
 import { buildPinoHttpOptions } from './common/pino-http.config';
 import { TokenModule } from './common/auth/token.service';
@@ -101,6 +102,7 @@ function areaOf(context: ExecutionContext): Area {
     AuditModule,
     AuthModule,
     UsersModule,
+    TestsModule,
     HealthModule,
     ClientErrorsModule,
     ExecutionModule,
