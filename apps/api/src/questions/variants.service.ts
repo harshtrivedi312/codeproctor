@@ -17,11 +17,11 @@
 // params, no hidden cases, no reference solution, no answer_spec (candidate-view.ts).
 import {
   BadRequestException,
-  ConflictException,
   Injectable,
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { CodedConflictException } from '../common/coded.exception';
 import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
 import { Prisma } from '../generated/prisma/client';
@@ -207,8 +207,7 @@ export class VariantsService {
       }
       const aiRows = await tx.aiReferenceSolution.count({ where: { variantId } });
       if (aiRows > 0) {
-        // TODO(code): VARIANT_HAS_AI_REFERENCES once CodedConflictException is on main
-        throw new ConflictException(VARIANT_HAS_AI_DETAIL);
+        throw new CodedConflictException(VARIANT_HAS_AI_DETAIL, 'VARIANT_HAS_AI_REFERENCES');
       }
       // Overrides go with it (ON DELETE CASCADE).
       const { count } = await tx.questionVariant.deleteMany({
@@ -221,13 +220,13 @@ export class VariantsService {
 
   /** True when the variant exists in this version and org and is now row-locked. */
   private async lockVariantRow(
-    tx: Pick<PrismaService['client'], '$queryRaw'>,
+    tx: Db & Pick<PrismaService['client'], '$queryRaw'>,
     orgId: string,
     versionId: string,
     variantId: string,
   ): Promise<boolean> {
     const rows = await this.orgContext.runRawSql(
-      'Lock one question_variants row FOR UPDATE before counting its AI rows; the model API has no row lock. Filtered by variant, version and org through the version and question joins.',
+      'Lock one question_variants row FOR UPDATE before counting its AI rows; the model API has no row lock. Filtered by variant, version and org (variant -> version -> question, the org-scope path); only the variant row is locked.',
       () =>
         tx.$queryRaw<{ id: string }[]>(Prisma.sql`
           SELECT v.id FROM question_variants v

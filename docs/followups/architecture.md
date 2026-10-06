@@ -166,3 +166,7 @@ The architecture hub session hasn't been running since 2026-10-06 02:25 UTC, so 
    - Publish `accommodationsSchema` in packages/shared. build-plan BE-06 says the hub records it in an ADR. If no approved ADR covers it, it's **owner** (CLAUDE.md rule 7).
    - docs/prompts/backend.md Step 6 still names Resend or Brevo. C-31 says Amazon SES.
 8. **FU-FEB-34 (Frontend B).** There is no room-scan waiver in FR-305. Decide whether the accommodations waiver covers FR-404's room scan (**owner** if it changes the FSD).
+
+### Cross-tenant email signal on staff invite (found in the #170 review, 2026-10-06)
+
+`POST /admin/users` answers 409 when the email exists in **any** organisation (`users.email` is globally unique, because staff log in by email alone), so a SUPER_ADMIN of one organisation can learn that an address is registered in another. It is limited by the step-up, the per-organisation invite limit (20 an hour) and SUPER_ADMIN-only access, and an organisation can enumerate only addresses it already guesses. It is existing code on main, not added by #170. Options: accept and record it (hub recommendation for the pilot: staff emails are not candidate data; a neutral response would break the legitimate duplicate-in-own-organisation message, and per-organisation emails would change login), or return a neutral response. This is a design choice with a privacy trade-off, so it goes to the owner through the Delivery Lead with the recommendation to accept.
