@@ -2,7 +2,7 @@
 // must fetch its base and still catch an edited, removed or misplaced migration. Local file
 // repositories only; no network.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -249,6 +249,89 @@ describe('DB-08 migration guard on a shallow checkout (FR-105)', () => {
     assert.deepEqual(migrationChanges(good, options), { ok: true, changed: [] });
     const bad = build('movedbad', (r) => write(r, M1, 'CREATE TABLE a (id text);\n'));
     assert.deepEqual(migrationChanges(bad, options), { ok: true, changed: [`M\t${M1}`] });
+  });
+
+  it('FR-105: while GitHub rebuilds the merge ref (briefly missing), the guard waits and retries instead of failing', () => {
+    git(origin, 'checkout', '-q', '-B', 'rebuild', 'main');
+    write(origin, 'prisma/migrations/20261005000031_rb/migration.sql', 'SELECT 1;\n');
+    git(origin, 'add', '-A');
+    git(origin, 'commit', '-q', '-m', 'rebuild');
+    git(origin, 'checkout', '-q', '--detach', 'main');
+    git(origin, 'merge', '-q', '--no-ff', '-m', 'merge rebuild 1', 'rebuild');
+    git(origin, 'update-ref', 'refs/pull/91/merge', 'HEAD');
+    git(origin, 'checkout', '-q', 'main');
+    const clone = join(root, 'rebuild-clone');
+    mkdirSync(clone);
+    git(clone, 'init', '-q');
+    git(clone, 'remote', 'add', 'origin', `file://${origin}`);
+    git(
+      clone,
+      'fetch',
+      '-q',
+      '--no-tags',
+      '--depth=1',
+      'origin',
+      '+refs/pull/91/merge:refs/remotes/pull/91/merge',
+    );
+    git(clone, 'checkout', '-q', '--detach', 'refs/remotes/pull/91/merge');
+    write(origin, 'moved-after-rebuild.txt', 'main moved');
+    git(origin, 'add', '-A');
+    git(origin, 'commit', '-q', '-m', 'main moved after rebuild');
+    git(origin, 'checkout', '-q', '--detach', 'main');
+    git(origin, 'merge', '-q', '--no-ff', '-m', 'merge rebuild 2', 'rebuild');
+    const rebuilt = git(origin, 'rev-parse', 'HEAD');
+    git(origin, 'checkout', '-q', 'main');
+    // The old merge ref is gone; the new one appears about a second later.
+    git(origin, 'update-ref', '-d', 'refs/pull/91/merge');
+    spawn('sh', ['-c', `sleep 1; git -C "${origin}" update-ref refs/pull/91/merge ${rebuilt}`], {
+      detached: true,
+      stdio: 'ignore',
+    }).unref();
+    const result = ensureBase(clone, {
+      githubRef: 'refs/pull/91/merge',
+      headBySha: false,
+      refTries: 12,
+      refDelayMs: 300,
+    });
+    assert.equal(result.ok, true, result.reason);
+    assert.equal(result.headRef, 'refs/remotes/pr-merge');
+  });
+
+  it('FR-105: a merge ref that never appears fails with the fetch error, not a vague message', () => {
+    git(origin, 'checkout', '-q', '-B', 'neverref', 'main');
+    write(origin, 'nr.txt', 'x');
+    git(origin, 'add', '-A');
+    git(origin, 'commit', '-q', '-m', 'neverref');
+    git(origin, 'checkout', '-q', '--detach', 'main');
+    git(origin, 'merge', '-q', '--no-ff', '-m', 'merge neverref', 'neverref');
+    git(origin, 'update-ref', 'refs/pull/92/merge', 'HEAD');
+    git(origin, 'checkout', '-q', 'main');
+    const clone = join(root, 'neverref-clone');
+    mkdirSync(clone);
+    git(clone, 'init', '-q');
+    git(clone, 'remote', 'add', 'origin', `file://${origin}`);
+    git(
+      clone,
+      'fetch',
+      '-q',
+      '--no-tags',
+      '--depth=1',
+      'origin',
+      '+refs/pull/92/merge:refs/remotes/pull/92/merge',
+    );
+    git(clone, 'checkout', '-q', '--detach', 'refs/remotes/pull/92/merge');
+    write(origin, 'moved-after-neverref.txt', 'main moved');
+    git(origin, 'add', '-A');
+    git(origin, 'commit', '-q', '-m', 'main moved after neverref');
+    git(origin, 'update-ref', '-d', 'refs/pull/92/merge');
+    const result = ensureBase(clone, {
+      githubRef: 'refs/pull/92/merge',
+      headBySha: false,
+      refTries: 2,
+      refDelayMs: 10,
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /git fetch of refs\/pull\/92\/merge failed after 2 tries/);
   });
 
   it('FR-105: if the pull request head moved while the job ran, it does not compare different content', () => {

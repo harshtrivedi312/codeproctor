@@ -34,6 +34,9 @@ const scrub = (text) =>
     .replace(/\/\/[^@/\s]+@/g, '//')
     .slice(0, 200);
 const MAIN = 'main:refs/remotes/origin/main';
+const sleep = (ms) => {
+  if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
 
 /**
  * Makes origin/main and a merge base available. A complete clone gets a plain fetch of main. A
@@ -52,7 +55,14 @@ const MAIN = 'main:refs/remotes/origin/main';
  */
 export function ensureBase(
   cwd,
-  { steps = 6, deepen = 100, githubRef = process.env.GITHUB_REF, headBySha = true } = {},
+  {
+    steps = 6,
+    deepen = 100,
+    githubRef = process.env.GITHUB_REF,
+    headBySha = true,
+    refTries = 6,
+    refDelayMs = 5000,
+  } = {},
 ) {
   if (hasBase(cwd)) return { ok: true, headRef: 'HEAD', baseRef: 'origin/main' };
   const shallow = git(cwd, ['rev-parse', '--is-shallow-repository']).stdout.trim() === 'true';
@@ -81,14 +91,26 @@ export function ensureBase(
     if (typeof githubRef !== 'string' || !PR_MERGE_REF.test(githubRef)) break;
     const wanted = secondParent(cwd);
     if (wanted === null) break; // not a merge commit: another checkout shape, nothing to follow
-    const fetched = git(cwd, [
-      'fetch',
-      '--no-tags',
-      `--depth=${deepen}`,
-      'origin',
-      `+${githubRef}:refs/remotes/pr-merge`,
-    ]);
-    if (fetched.status !== 0) break;
+    // While GitHub rebuilds the merge ref after main moved, the ref can be briefly missing or the
+    // fetch can fail: try again a few times before giving up (the run is otherwise red for nothing).
+    let fetched = { status: 1, stderr: '' };
+    for (let t = 0; t < refTries; t++) {
+      if (t > 0) sleep(refDelayMs);
+      fetched = git(cwd, [
+        'fetch',
+        '--no-tags',
+        `--depth=${deepen}`,
+        'origin',
+        `+${githubRef}:refs/remotes/pr-merge`,
+      ]);
+      if (fetched.status === 0) break;
+    }
+    if (fetched.status !== 0) {
+      return {
+        ok: false,
+        reason: `git fetch of ${githubRef} failed after ${refTries} tries: ${scrub(fetched.stderr)}`,
+      };
+    }
     const got = git(cwd, [
       'rev-parse',
       '--verify',
