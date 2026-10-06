@@ -1,8 +1,11 @@
-// app_user has no TEMPORARY on the database (ADR 0006 section 8.8, DL-26). PostgreSQL grants it to
-// PUBLIC on every new database; the app_user_no_temp migration revokes that, keeps it for the
-// owner, and fails instead of only warning when the running role cannot revoke it.
+// app_user has no TEMPORARY and no CREATE on the database (ADR 0006 section 8.8, DL-26).
+// PostgreSQL grants TEMPORARY to PUBLIC on every new database; the app_user_no_temp migration
+// revokes that, keeps it for the owner, and fails instead of only warning when the running role
+// cannot revoke it.
 //
-// Real Postgres 16 (Testcontainers; Docker is required) with the real migrations.
+// Real Postgres 16 (Testcontainers; Docker is required) with the real migrations. The container's
+// own user is a superuser, so the hosted case (an owner without SUPERUSER, as on RDS or Neon) runs
+// in a scratch database owned by a NOSUPERUSER role.
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -15,6 +18,8 @@ const MIGRATION_SQL = readFileSync(
   'utf8',
 );
 
+const OK = 'ok';
+
 async function withClient<T>(url: string, fn: (client: Client) => Promise<T>): Promise<T> {
   const client = new Client({ connectionString: url });
   await client.connect();
@@ -25,18 +30,28 @@ async function withClient<T>(url: string, fn: (client: Client) => Promise<T>): P
   }
 }
 
-async function sqlState(url: string, sql: string): Promise<string | undefined> {
+/** `OK` when the statement succeeds, else the SQLSTATE (or the message if there is none). */
+async function outcome(url: string, sql: string): Promise<string> {
   return withClient(url, async (client) => {
     try {
       await client.query(sql);
-      return undefined;
+      return OK;
     } catch (error) {
-      return (error as { code?: string }).code;
+      const { code, message } = error as { code?: string; message?: string };
+      return code ?? `no SQLSTATE: ${String(message)}`;
     }
   });
 }
 
-describe('app_user has no TEMPORARY on the database (NFR-04, TC-006; ADR 0006 section 8.8)', () => {
+function urlFor(base: string, user: string, password: string, database?: string): string {
+  const url = new URL(base);
+  url.username = user;
+  url.password = password;
+  if (database !== undefined) url.pathname = `/${database}`;
+  return url.toString();
+}
+
+describe('app_user has no TEMPORARY or CREATE on the database (NFR-04, TC-008; ADR 0006 section 8.8, DL-26)', () => {
   let db: MigratedDatabase;
 
   beforeAll(async () => {
@@ -47,7 +62,7 @@ describe('app_user has no TEMPORARY on the database (NFR-04, TC-006; ADR 0006 se
     await db?.stop();
   });
 
-  it('TC-006 has_database_privilege: app_user has neither TEMPORARY nor CREATE', async () => {
+  it('TC-008 has_database_privilege: app_user has neither TEMPORARY nor CREATE', async () => {
     const row = await withClient(db.appUserUrl, async (client) => {
       const result = await client.query<{ temp: boolean; create: boolean }>(
         `SELECT has_database_privilege('app_user', current_database(), 'TEMPORARY') AS temp,
@@ -58,38 +73,71 @@ describe('app_user has no TEMPORARY on the database (NFR-04, TC-006; ADR 0006 se
     expect(row).toEqual({ temp: false, create: false });
   });
 
-  it('TC-006 PUBLIC no longer holds TEMPORARY in the database ACL', async () => {
-    const grantees = await withClient(db.ownerUrl, async (client) => {
+  it('TC-008 only the database owner holds TEMPORARY in the database ACL, not PUBLIC', async () => {
+    const { grantees, owner } = await withClient(db.ownerUrl, async (client) => {
       const result = await client.query<{ grantee: string }>(
         `SELECT CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee
            FROM pg_database d, aclexplode(d.datacl) a
           WHERE d.datname = current_database() AND a.privilege_type = 'TEMPORARY'
           ORDER BY 1`,
       );
-      return result.rows.map((r) => r.grantee);
+      const datdba = await client.query<{ owner: string }>(
+        'SELECT pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname = current_database()',
+      );
+      return { grantees: result.rows.map((r) => r.grantee), owner: datdba.rows[0]?.owner };
     });
-    expect(grantees).not.toContain('PUBLIC');
-    expect(grantees).not.toContain('app_user');
-    expect(grantees.length).toBeGreaterThan(0); // the owner keeps it explicitly
+    expect(grantees).toEqual([owner]);
   });
 
-  it('TC-006 app_user cannot create a temporary table (42501)', async () => {
-    expect(await sqlState(db.appUserUrl, 'CREATE TEMP TABLE t_probe (x int)')).toBe('42501');
+  it('TC-008 app_user cannot create a temporary table (42501)', async () => {
+    expect(await outcome(db.appUserUrl, 'CREATE TEMP TABLE t_probe (x int)')).toBe('42501');
     expect(
-      await sqlState(db.appUserUrl, 'CREATE TEMPORARY TABLE t_probe (x int) ON COMMIT DROP'),
+      await outcome(db.appUserUrl, 'CREATE TEMPORARY TABLE t_probe (x int) ON COMMIT DROP'),
     ).toBe('42501');
   });
 
-  it('TC-006 the owner can still create a temporary table (backup re-application, restore drill)', async () => {
-    expect(await sqlState(db.ownerUrl, 'CREATE TEMP TABLE t_probe (x int)')).toBeUndefined();
+  it('TC-008 re-running the migration as the owner is harmless and keeps the result', async () => {
+    expect(await outcome(db.ownerUrl, MIGRATION_SQL)).toBe(OK);
+    expect(await outcome(db.appUserUrl, 'CREATE TEMP TABLE t_probe (x int)')).toBe('42501');
   });
 
-  it('TC-006 re-running the migration as the owner is harmless and keeps the result', async () => {
-    expect(await sqlState(db.ownerUrl, MIGRATION_SQL)).toBeUndefined();
-    expect(await sqlState(db.appUserUrl, 'CREATE TEMP TABLE t_probe (x int)')).toBe('42501');
+  it('TC-008 a direct grant to app_user is revoked too, not only PUBLIC', async () => {
+    await withClient(db.ownerUrl, async (client) => {
+      await client.query(
+        `DO $$ BEGIN EXECUTE format('GRANT TEMPORARY, CREATE ON DATABASE %I TO app_user', current_database()); END $$`,
+      );
+    });
+    expect(await outcome(db.appUserUrl, 'CREATE TEMP TABLE t_probe (x int)')).toBe(OK);
+    expect(await outcome(db.ownerUrl, MIGRATION_SQL)).toBe(OK);
+    expect(await outcome(db.appUserUrl, 'CREATE TEMP TABLE t_probe (x int)')).toBe('42501');
   });
 
-  it('TC-006 run by a role that does not own the database, the migration fails instead of only warning', async () => {
+  it('TC-008 an owner without SUPERUSER (as on RDS or Neon) can run it and keeps TEMPORARY', async () => {
+    const password = randomBytes(24).toString('hex');
+    await withClient(db.ownerUrl, async (client) => {
+      await client.query(
+        `CREATE ROLE ns_owner LOGIN NOSUPERUSER PASSWORD ${client.escapeLiteral(password)}`,
+      );
+      await client.query('CREATE DATABASE scratch_ns OWNER ns_owner');
+    });
+    try {
+      const nsOwner = urlFor(db.ownerUrl, 'ns_owner', password, 'scratch_ns');
+      expect(await outcome(nsOwner, MIGRATION_SQL)).toBe(OK);
+      expect(await outcome(nsOwner, 'CREATE TEMP TABLE t_probe (x int)')).toBe(OK);
+      const appUserInScratch = new URL(db.appUserUrl);
+      appUserInScratch.pathname = '/scratch_ns';
+      expect(await outcome(appUserInScratch.toString(), 'CREATE TEMP TABLE t_probe (x int)')).toBe(
+        '42501',
+      );
+    } finally {
+      await withClient(db.ownerUrl, async (client) => {
+        await client.query('DROP DATABASE IF EXISTS scratch_ns');
+        await client.query('DROP ROLE IF EXISTS ns_owner');
+      });
+    }
+  });
+
+  it('TC-008 run by a role that does not own the database, the migration fails instead of only warning', async () => {
     // Put PUBLIC's default back, then run the migration as a role that cannot revoke it: REVOKE
     // only warns there, so the check at the end must raise.
     const password = randomBytes(24).toString('hex');
@@ -99,11 +147,9 @@ describe('app_user has no TEMPORARY on the database (NFR-04, TC-006; ADR 0006 se
         `DO $$ BEGIN EXECUTE format('GRANT TEMPORARY ON DATABASE %I TO PUBLIC', current_database()); END $$`,
       );
     });
+    let failure: { code?: string; message?: string } | undefined;
     try {
-      const notOwner = new URL(db.ownerUrl);
-      notOwner.username = 'not_owner';
-      notOwner.password = password;
-      const failure = await withClient(notOwner.toString(), async (client) => {
+      failure = await withClient(urlFor(db.ownerUrl, 'not_owner', password), async (client) => {
         try {
           await client.query(MIGRATION_SQL);
           return undefined;
@@ -111,16 +157,16 @@ describe('app_user has no TEMPORARY on the database (NFR-04, TC-006; ADR 0006 se
           return error as { code?: string; message?: string };
         }
       });
-      expect(failure?.code).toBe('P0001'); // RAISE EXCEPTION
-      expect(failure?.message).toContain('app_user still has TEMPORARY on database');
-      expect(failure?.message).toContain('not_owner');
     } finally {
-      // Back to the migrated state, as the owner.
+      // Back to the migrated state, as the owner. A failure here must not hide the one above.
       await withClient(db.ownerUrl, async (client) => {
         await client.query(MIGRATION_SQL);
-        await client.query('DROP ROLE not_owner');
-      });
+        await client.query('DROP ROLE IF EXISTS not_owner');
+      }).catch(() => undefined);
     }
-    expect(await sqlState(db.appUserUrl, 'CREATE TEMP TABLE t_probe (x int)')).toBe('42501');
+    expect(failure?.code).toBe('P0001'); // RAISE EXCEPTION
+    expect(failure?.message).toContain('app_user still has TEMPORARY or CREATE on database');
+    expect(failure?.message).toContain('not_owner');
+    expect(await outcome(db.appUserUrl, 'CREATE TEMP TABLE t_probe (x int)')).toBe('42501');
   });
 });
