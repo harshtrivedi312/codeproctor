@@ -96,6 +96,15 @@ describe('DB-08 schema against docs/database.md (FR-105)', { skip }, () => {
   });
   after(() => pg?.stop());
 
+  it('every named CHECK in the document (CONSTRAINT <name> CHECK ...) exists in the catalog on that table', () => {
+    const named = [...doc.tables].flatMap(([table, t]) => t.checkNames.map((n) => `${table}|${n}`));
+    assert.ok(named.length >= 2, 'the document names at least the two WAIVED CHECK constraints');
+    const db = rows(
+      "SELECT c.relname || '|' || k.conname FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid WHERE k.contype = 'c' AND k.connamespace = 'public'::regnamespace",
+    );
+    for (const n of named) assert.ok(db.includes(n), `not in the database: ${n}`);
+  });
+
   it('every table in the document exists, and nothing else is in public (31 tables)', () => {
     const db = rows(
       "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> '_prisma_migrations' ORDER BY 1",
