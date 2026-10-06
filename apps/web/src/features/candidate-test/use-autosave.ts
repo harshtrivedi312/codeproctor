@@ -12,35 +12,52 @@ export function useAutosave<T>(
   value: T,
   save: (value: T) => Promise<void>,
   intervalMs: number = AUTOSAVE_INTERVAL_MS,
-): { status: SaveStatus; savedAt: Date | null; flush: () => Promise<void> } {
+): { status: SaveStatus; savedAt: Date | null; flush: () => Promise<boolean> } {
   const [lastSaved, setLastSaved] = React.useState<T>(value);
   const [phase, setPhase] = React.useState<'idle' | 'saving' | 'error'>('idle');
   const [savedAt, setSavedAt] = React.useState<Date | null>(null);
   const latest = React.useRef(value);
   const lastSavedRef = React.useRef(value);
   const saveRef = React.useRef(save);
-  const inFlight = React.useRef(false);
+  const inFlight = React.useRef<Promise<boolean> | null>(null);
 
   React.useEffect(() => {
     saveRef.current = save;
     latest.current = value;
   });
 
-  const flush = React.useCallback(async () => {
-    if (inFlight.current || Object.is(latest.current, lastSavedRef.current)) return;
-    const toSave = latest.current;
-    inFlight.current = true;
-    setPhase('saving');
-    try {
-      await saveRef.current(toSave);
-      lastSavedRef.current = toSave;
-      setLastSaved(toSave);
-      setSavedAt(new Date());
-      setPhase('idle');
-    } catch {
-      setPhase('error');
-    } finally {
-      inFlight.current = false;
+  /**
+   * Resolves true when everything the candidate typed so far is saved, false when a save failed.
+   * Waits for a save already in flight, then saves again if the value changed meanwhile (FR-504).
+   */
+  const flush = React.useCallback(async (): Promise<boolean> => {
+    for (;;) {
+      const pending = inFlight.current;
+      if (pending) {
+        await pending;
+        continue;
+      }
+      if (Object.is(latest.current, lastSavedRef.current)) return true;
+      const toSave = latest.current;
+      const attempt = (async (): Promise<boolean> => {
+        setPhase('saving');
+        try {
+          await saveRef.current(toSave);
+          lastSavedRef.current = toSave;
+          setLastSaved(toSave);
+          setSavedAt(new Date());
+          setPhase('idle');
+          return true;
+        } catch {
+          setPhase('error');
+          return false;
+        }
+      })();
+      inFlight.current = attempt;
+      const ok = await attempt;
+      // The owner continues first (its await was registered first), so waiters see it cleared.
+      inFlight.current = null;
+      if (!ok) return false;
     }
   }, []);
 
