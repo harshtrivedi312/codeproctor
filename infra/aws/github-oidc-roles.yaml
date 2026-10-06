@@ -172,18 +172,21 @@ Resources:
                 aws:ResourceAccount: !Sub '${AWS::AccountId}'
               'Null':
                 ec2:SourceInstanceARN: 'false'
+            # GetBucketVersioning and GetLifecycleConfiguration: RetentionService fails closed without them (ADR 0004 9.2).
           - Sid: 'S3PilotList'
             Effect: 'Allow'
             Action:
               - 's3:ListBucket'
               - 's3:GetBucketLocation'
+              - 's3:GetBucketVersioning'
+              - 's3:GetLifecycleConfiguration'
             Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-*'
             Condition:
               StringEquals:
                 aws:ResourceAccount: !Sub '${AWS::AccountId}'
               'Null':
                 ec2:SourceInstanceARN: 'false'
-            # Decrypt and GenerateDataKey only, and only through S3 (SSE-KMS with the pilot data key). No direct Encrypt or ReEncrypt.
+            # Decrypt and GenerateDataKey only, and only through S3 (SSE-KMS with the pilot data key). No direct Encrypt or ReEncrypt. No SourceInstanceARN here: pinned to kms:ViaService=s3, and every S3 allow already requires it.
           - Sid: 'KmsPilotKeys'
             Effect: 'Allow'
             Action:
@@ -195,8 +198,6 @@ Resources:
               StringEquals:
                 aws:ResourceTag/Environment: 'pilot'
                 kms:ViaService: !Sub 's3.${AWS::Region}.amazonaws.com'
-              'Null':
-                ec2:SourceInstanceARN: 'false'
           - Sid: 'SecretsPilot'
             Effect: 'Allow'
             Action:
@@ -420,17 +421,23 @@ Resources:
         Version: '2012-10-17'
         Statement:
           # S3: pilot buckets by name prefix (tag conditions on buckets are not relied on). Object access only to the state bucket.
-          # Data buckets are created and configured by the owner (pilot-data-buckets.yaml), never by CI: read-only here.
+          # No ListBucket: CI cannot list candidate object keys. Data buckets are created and configured by the owner (pilot-data-buckets.yaml), never by CI: read-only here.
           - Sid: 'S3PilotBucketRead'
             Effect: 'Allow'
             Action:
               - 's3:GetBucket*'
-              - 's3:ListBucket'
               - 's3:GetEncryptionConfiguration'
               - 's3:GetLifecycleConfiguration'
               - 's3:GetAccelerateConfiguration'
               - 's3:GetReplicationConfiguration'
             Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-*'
+            Condition:
+              StringEquals:
+                aws:ResourceAccount: !Sub '${AWS::AccountId}'
+          - Sid: 'S3StateList'
+            Effect: 'Allow'
+            Action: 's3:ListBucket'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-tfstate-${AWS::AccountId}'
             Condition:
               StringEquals:
                 aws:ResourceAccount: !Sub '${AWS::AccountId}'
@@ -570,14 +577,18 @@ Resources:
             Action: 'ssm:DescribeParameters'
             Resource: '*'
           # SES: identities are not name-prefixed (domains and addresses): tag condition only. Configuration sets by name prefix.
-          # Tag on create happens inside CreateEmailIdentity only.
+          # CreateEmailIdentity with tags also needs TagResource on the new identity.
           - Sid: 'SesIdentityCreateTagged'
             Effect: 'Allow'
-            Action: 'ses:CreateEmailIdentity'
+            Action:
+              - 'ses:CreateEmailIdentity'
+              - 'ses:TagResource'
             Resource: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
             Condition:
               StringEquals:
                 aws:RequestTag/Environment: 'pilot'
+              'Null':
+                aws:ResourceTag/Environment: 'true'
             # Existing identities: TagResource needs the identity to already carry Environment=pilot.
           - Sid: 'SesIdentityManagePilot'
             Effect: 'Allow'
@@ -631,12 +642,10 @@ Resources:
             Action:
               - 'ec2:CreateVpc'
               - 'ec2:CreateInternetGateway'
-              - 'ec2:AllocateAddress'
               - 'ec2:CreateVolume'
             Resource:
               - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:vpc/*'
               - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:internet-gateway/*'
-              - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:elastic-ip/*'
               - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*'
             Condition:
               StringEquals:
@@ -732,12 +741,10 @@ Resources:
               - 'ec2:RebootInstances'
               - 'ec2:TerminateInstances'
               - 'ec2:ModifyInstanceAttribute'
-              - 'ec2:ModifyInstanceMetadataOptions'
               - 'ec2:AssociateIamInstanceProfile'
               - 'ec2:ReplaceIamInstanceProfileAssociation'
               - 'ec2:DisassociateIamInstanceProfile'
               - 'ec2:DeleteVolume'
-              - 'ec2:ModifyVolume'
               - 'ec2:AttachVolume'
               - 'ec2:DetachVolume'
               - 'ec2:DeleteVpc'
@@ -761,9 +768,6 @@ Resources:
               - 'ec2:DeleteInternetGateway'
               - 'ec2:AttachInternetGateway'
               - 'ec2:DetachInternetGateway'
-              - 'ec2:ReleaseAddress'
-              - 'ec2:AssociateAddress'
-              - 'ec2:DisassociateAddress'
               - 'ec2:CreateTags'
               - 'ec2:DeleteTags'
             Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:*/*'
@@ -841,6 +845,16 @@ Resources:
                 iam:PermissionsBoundary:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-guardrails/codeproctor-pilot-boundary'
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-guardrails/codeproctor-pilot-boundary-scheduler'
+            # Tags passed to CreateRole. Owner-made codeproctor-pilot-* roles must be tagged Environment=owner (any other value) so they stay out of scope; an untagged one could be adopted by tagging.
+          - Sid: 'IamTagRoleOnCreate'
+            Effect: 'Allow'
+            Action: 'iam:TagRole'
+            Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-pilot-*'
+            Condition:
+              StringEquals:
+                aws:RequestTag/Environment: 'pilot'
+              'Null':
+                aws:ResourceTag/Environment: 'true'
           - Sid: 'IamRolePolicyWriteOnBoundedRoles'
             Effect: 'Allow'
             Action:
@@ -852,6 +866,7 @@ Resources:
                 iam:PermissionsBoundary:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-guardrails/codeproctor-pilot-boundary'
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-guardrails/codeproctor-pilot-boundary-scheduler'
+                aws:ResourceTag/Environment: 'pilot'
           - Sid: 'IamAttachDetachPilotPolicies'
             Effect: 'Allow'
             Action:
@@ -863,6 +878,7 @@ Resources:
                 iam:PermissionsBoundary:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-guardrails/codeproctor-pilot-boundary'
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-guardrails/codeproctor-pilot-boundary-scheduler'
+                aws:ResourceTag/Environment: 'pilot'
               ArnLike:
                 iam:PolicyARN: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-pilot-*'
             # Only roles that already carry Environment=pilot: an untagged owner-made codeproctor-pilot-* role is not editable.
@@ -1006,7 +1022,7 @@ Resources:
             Effect: 'Deny'
             Action: 'ses:Send*'
             Resource: '*'
-          # Cost guard rails (minimal cost design: one instance, no RDS, NAT gateway or load balancer). Structural: these cannot be created even by mistake.
+          # Cost guard rails (minimal cost design: no RDS, NAT gateway, load balancer or Elastic IP (C-48)). Structural. ModifyVolume and ModifyInstanceMetadataOptions are denied outright: size is set at launch and IMDSv2 is enforced at launch; the owner resizes by hand.
           - Sid: 'DenyCostlyServices'
             Effect: 'Deny'
             Action:
@@ -1019,6 +1035,12 @@ Resources:
               - 'ec2:*VpcPeering*'
               - 'ec2:*Vpn*'
               - 'ec2:*ClientVpn*'
+              - 'ec2:AllocateAddress'
+              - 'ec2:AssociateAddress'
+              - 'ec2:DisassociateAddress'
+              - 'ec2:ReleaseAddress'
+              - 'ec2:ModifyVolume'
+              - 'ec2:ModifyInstanceMetadataOptions'
             Resource: '*'
             # No SSH keys: access is through SSM Session Manager.
           - Sid: 'DenyKeyPairs'
@@ -1056,6 +1078,12 @@ Resources:
               - 's3:PutReplicationConfiguration'
               - 's3:PutAccelerateConfiguration'
               - 's3:PutAccountPublicAccessBlock'
+              - 's3:CreateAccessPoint*'
+              - 's3:DeleteAccessPoint*'
+              - 's3:PutAccessPointPolicy*'
+              - 's3:PutInventoryConfiguration'
+              - 's3:PutAnalyticsConfiguration'
+              - 's3:PutMetricsConfiguration'
             Resource: '*'
             # A caller-supplied key policy cannot be inspected by IAM, so CreateKey is denied outright (the state key is created by this stack). Resource policies on secrets are denied.
           - Sid: 'DenyKeyAndSecretPolicies'
@@ -1105,20 +1133,27 @@ Resources:
           # Cost guard: instance type, volume size and type, IMDSv2.
           - Sid: 'DenyOtherInstanceTypes'
             Effect: 'Deny'
-            Action:
-              - 'ec2:RunInstances'
-              - 'ec2:ModifyInstanceAttribute'
+            Action: 'ec2:RunInstances'
             Resource: '*'
             Condition:
               'Null':
                 ec2:InstanceType: 'false'
               StringNotEquals:
                 ec2:InstanceType: !Ref AllowedInstanceTypes
-          - Sid: 'DenyLargeOrOtherVolumes'
+            # ec2:InstanceType is the CURRENT type on Modify; the new value is ec2:Attribute/InstanceType.
+          - Sid: 'DenyModifyToOtherInstanceTypes'
+            Effect: 'Deny'
+            Action: 'ec2:ModifyInstanceAttribute'
+            Resource: '*'
+            Condition:
+              'Null':
+                ec2:Attribute/InstanceType: 'false'
+              StringNotEquals:
+                ec2:Attribute/InstanceType: !Ref AllowedInstanceTypes
+          - Sid: 'DenyLargeVolumes'
             Effect: 'Deny'
             Action:
               - 'ec2:CreateVolume'
-              - 'ec2:ModifyVolume'
               - 'ec2:RunInstances'
             Resource: '*'
             Condition:
@@ -1128,7 +1163,6 @@ Resources:
             Effect: 'Deny'
             Action:
               - 'ec2:CreateVolume'
-              - 'ec2:ModifyVolume'
               - 'ec2:RunInstances'
             Resource: '*'
             Condition:
@@ -1136,15 +1170,6 @@ Resources:
                 ec2:VolumeType: 'false'
               StringNotEquals:
                 ec2:VolumeType: 'gp3'
-          - Sid: 'DenyWeakeningImds'
-            Effect: 'Deny'
-            Action: 'ec2:ModifyInstanceMetadataOptions'
-            Resource: '*'
-            Condition:
-              'Null':
-                ec2:MetadataHttpTokens: 'false'
-              StringNotEquals:
-                ec2:MetadataHttpTokens: 'required'
           # State bucket and its key are owned by this stack.
           - Sid: 'DenyStateBucketChange'
             Effect: 'Deny'
@@ -1238,6 +1263,7 @@ Resources:
               - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-pilot-boundary*'
               - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-pilot-deploy-*'
               - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-pilot-plan-*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codeproctor-pilot-instance-ssm'
           - Sid: 'DenyAttachingProtectedPolicies'
             Effect: 'Deny'
             Action: 'iam:AttachRolePolicy'
