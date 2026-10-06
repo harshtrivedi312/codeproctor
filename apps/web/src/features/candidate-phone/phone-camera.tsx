@@ -50,15 +50,18 @@ export function PhoneCamera({
   const startingRef = React.useRef(false);
   const [starting, setStarting] = React.useState(false);
   const videoRef = React.useRef<HTMLVideoElement>(null);
-  const [hasLink] = React.useState(() => getPhoneToken() !== null);
+  const [hasLink, setHasLink] = React.useState(() => getPhoneToken() !== null);
+  const mountedRef = React.useRef(false);
 
   React.useEffect(() => {
     if (videoRef.current) videoRef.current.srcObject = stream;
   }, [stream, paired]);
   // Leaving the page stops the camera and forgets the link token.
   React.useEffect(() => {
+    mountedRef.current = true;
     cancelClearPhoneToken();
     return () => {
+      mountedRef.current = false;
       streamRef.current?.getTracks().forEach((t) => t.stop());
       scheduleClearPhoneToken();
     };
@@ -80,7 +83,7 @@ export function PhoneCamera({
       await connect();
     } finally {
       startingRef.current = false;
-      setStarting(false);
+      if (mountedRef.current) setStarting(false);
     }
   }
 
@@ -93,14 +96,24 @@ export function PhoneCamera({
     try {
       s = await deps.openCamera();
     } catch {
+      if (!mountedRef.current) return;
       setProblem(
         'The camera could not start. Allow the camera for this page in your phone browser settings, close other apps that use it, then press the button again.',
       );
       return;
     }
+    if (!mountedRef.current) {
+      // The page closed while the camera prompt was open: switch the camera straight off.
+      s.getTracks().forEach((t) => t.stop());
+      return;
+    }
     streamRef.current = s;
     setStream(s);
     const result = await pair.mutateAsync();
+    if (!mountedRef.current) {
+      s.getTracks().forEach((t) => t.stop());
+      return;
+    }
     if (result.ok) {
       // The link token has done its job: forget it.
       clearPhoneToken();
@@ -110,7 +123,15 @@ export function PhoneCamera({
     s.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     setStream(null);
-    if (result.kind === 'problem' && [404, 409, 410].includes(result.status)) clearPhoneToken();
+    if (result.kind === 'problem' && [404, 409, 410].includes(result.status)) {
+      // The link is spent: forget it and show the "needs the QR code" view with the reason.
+      clearPhoneToken();
+      setHasLink(false);
+      setProblem(
+        'This QR code has expired or was already used. On your computer, press "New QR code" and scan it again.',
+      );
+      return;
+    }
     setProblem(
       result.kind === 'problem' &&
         (result.status === 404 || result.status === 409 || result.status === 410)
@@ -123,6 +144,11 @@ export function PhoneCamera({
     return (
       <main id="main" className="mx-auto max-w-xl space-y-4 px-4 py-8">
         <StepFrame title="This page needs the QR code from your computer">
+          {problem ? (
+            <Alert tone="error" role="alert">
+              {problem}
+            </Alert>
+          ) : null}
           <p>
             Scan the QR code shown on your computer screen with your phone camera. If you reloaded
             this page, scan the QR code again: for your safety the link is not kept.

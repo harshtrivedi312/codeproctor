@@ -12,7 +12,9 @@ let linkToken: string | null = null;
 
 export function capturePhoneToken(token: string): void {
   cancelClearPhoneToken();
-  if (linkToken === null && PHONE_TOKEN_PATTERN.test(token)) linkToken = token;
+  // A valid new link replaces an old one (a rescan). The scheduled clear is cancelled above, so a
+  // development double-mount cannot drop it.
+  if (PHONE_TOKEN_PATTERN.test(token)) linkToken = token;
 }
 export function getPhoneToken(): string | null {
   return linkToken;

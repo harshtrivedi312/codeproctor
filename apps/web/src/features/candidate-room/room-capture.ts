@@ -111,10 +111,12 @@ export const STATIONARY_STEPS = [
 
 /**
  * ROOM_SCAN chunk numbers. The server keeps `seq` unique and increasing per stream across segments
- * (database.md UNIQUE(session_id, stream, seq); ADR 0013 section 5.5 answers a reused seq with 409
- * SEQ_CONFLICT), so every clip gets a fresh number and segment = seq. The counter lives in memory
- * for the page's life, so it survives the step closing and reopening. After a reload it starts at 0
- * again; the sender then follows the server's answers (SEQ_CONFLICT, alreadyUploaded) and advances.
+ * (database.md UNIQUE(session_id, stream, seq)), so every clip gets a fresh number, and segment =
+ * seq. With segment = seq a 409 SEQ_CONFLICT cannot happen from this client; the sender still
+ * handles it as defence. The counter lives in memory for the page's life, so it survives the step
+ * closing and reopening. After a reload it starts at 0 again; the sender then follows the server:
+ * `alreadyUploaded` (a confirmed chunk) or a 412 on the first PUT of a number means the number is
+ * taken by an older clip, and it moves on to the next.
  */
 let nextRoomSeq = 0;
 export function currentRoomSeq(): number {

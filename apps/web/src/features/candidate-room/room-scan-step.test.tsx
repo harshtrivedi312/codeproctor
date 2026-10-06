@@ -18,6 +18,7 @@ import {
   AUTO_STOP_MS,
   VIDEO_BITS_PER_SECOND,
   advanceRoomSeq,
+  currentRoomSeq,
   resetRoomSeq,
   ROTATE_STEPS,
   STATIONARY_STEPS,
@@ -169,14 +170,110 @@ describe('room scan step (FR-404, TC-035)', () => {
     expect(await screen.findByTestId('room-done')).toBeInTheDocument();
   });
 
-  it('FR-404: a 412 on the PUT (already stored) and alreadyUploaded both go straight to confirm', async () => {
+  it('FR-404: a 412 after our own earlier PUT (response lost) is accepted and confirmed', async () => {
     await signIn();
-    const { deps } = fakeRoomDeps('exists');
+    const outcomes: ('failed' | 'exists')[] = ['failed', 'exists'];
+    const upload = vi.fn(() => Promise.resolve(outcomes.shift() ?? 'exists'));
+    const seen = recordRequests();
+    const { deps } = fakeRoomDeps();
+    const user = userEvent.setup();
+    renderWithQuery(
+      <RoomScanStep deps={{ ...deps, upload }} onDone={vi.fn()} onSessionEnded={vi.fn()} />,
+    );
+    await recordRotation(user);
+    await user.click(await screen.findByRole('button', { name: /send this recording/i }));
+    expect(await screen.findByTestId('room-done')).toBeInTheDocument();
+    const seqs = seen
+      .filter((r) => r.url.endsWith('/media/presign'))
+      .map((r) => (r.body as { seq: number }).seq);
+    expect(seqs).toEqual([0, 0]); // same number: it was our own first PUT that landed
+  });
+
+  it('FR-404: a 412 on the first PUT of a number (a stored object that is not ours) moves on to a new number', async () => {
+    await signIn();
+    const outcomes: ('exists' | 'ok')[] = ['exists', 'ok'];
+    const upload = vi.fn(() => Promise.resolve(outcomes.shift() ?? 'ok'));
+    const seen = recordRequests();
+    const { deps } = fakeRoomDeps();
+    const user = userEvent.setup();
+    renderWithQuery(
+      <RoomScanStep deps={{ ...deps, upload }} onDone={vi.fn()} onSessionEnded={vi.fn()} />,
+    );
+    await recordRotation(user);
+    await user.click(await screen.findByRole('button', { name: /send this recording/i }));
+    expect(await screen.findByTestId('room-done')).toBeInTheDocument();
+    expect(upload).toHaveBeenCalledTimes(2);
+    const confirms = seen.filter((r) => r.url.endsWith('/media/confirm'));
+    expect(confirms).toHaveLength(1);
+    expect(confirms[0]?.body).toMatchObject({ seq: 1 });
+  });
+
+  it('FR-404: when every number is taken the candidate is told to press Send again', async () => {
+    await signIn();
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/session/media/presign`, () =>
+        HttpResponse.json({ alreadyUploaded: true }),
+      ),
+    );
+    const { deps } = fakeRoomDeps();
     const user = userEvent.setup();
     renderWithQuery(<RoomScanStep deps={deps} onDone={vi.fn()} onSessionEnded={vi.fn()} />);
     await recordRotation(user);
     await user.click(await screen.findByRole('button', { name: /send this recording/i }));
-    expect(await screen.findByTestId('room-done')).toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /press "send this recording" again/i,
+    );
+  });
+
+  it('FR-404: the step closing while the camera prompt is open switches the camera off', async () => {
+    await signIn();
+    const stop = vi.fn();
+    let resolveCamera: (s: MediaStream) => void = () => undefined;
+    const startRecording = vi.fn();
+    const user = userEvent.setup();
+    const view = renderWithQuery(
+      <RoomScanStep
+        deps={{
+          openCamera: () =>
+            new Promise<MediaStream>((resolve) => {
+              resolveCamera = resolve;
+            }),
+          startRecording,
+        }}
+        onDone={vi.fn()}
+        onSessionEnded={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: /start the room scan/i }));
+    view.unmount();
+    resolveCamera({ getTracks: () => [{ stop }] } as unknown as MediaStream);
+    await waitFor(() => expect(stop).toHaveBeenCalled());
+    expect(startRecording).not.toHaveBeenCalled();
+  });
+
+  it('FR-404: closing the step during a send does not keep sending or move the counter', async () => {
+    await signIn();
+    const seen = recordRequests();
+    let release: () => void = () => undefined;
+    const upload = vi.fn(
+      () =>
+        new Promise<'ok'>((resolve) => {
+          release = () => resolve('ok');
+        }),
+    );
+    const { deps } = fakeRoomDeps();
+    const user = userEvent.setup();
+    const view = renderWithQuery(
+      <RoomScanStep deps={{ ...deps, upload }} onDone={vi.fn()} onSessionEnded={vi.fn()} />,
+    );
+    await recordRotation(user);
+    await user.click(await screen.findByRole('button', { name: /send this recording/i }));
+    await waitFor(() => expect(upload).toHaveBeenCalled());
+    view.unmount();
+    release();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(seen.some((r) => r.url.endsWith('/media/confirm'))).toBe(false);
+    expect(currentRoomSeq()).toBe(0);
   });
 
   it('FR-404: confirm 409 UPLOAD_NOT_FOUND asks for a new URL and uploads again', async () => {

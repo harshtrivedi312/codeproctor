@@ -276,3 +276,53 @@ describe('phone fixes from review (FR-405)', () => {
     ).toBe(false);
   });
 });
+
+describe('phone page, closing while waiting (FR-405)', () => {
+  it('FR-405: closing the page while the camera prompt is open switches the camera off', async () => {
+    capturePhoneToken('mock-phone-link-token-aaaaaaaaaaaa');
+    const stop = vi.fn();
+    let resolveCamera: (s: MediaStream) => void = () => undefined;
+    const user = userEvent.setup();
+    const view = renderWithQuery(
+      <PhoneCamera
+        deps={{
+          openCamera: () =>
+            new Promise<MediaStream>((resolve) => {
+              resolveCamera = resolve;
+            }),
+        }}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: /turn on the camera and connect/i }));
+    view.unmount();
+    resolveCamera({ getTracks: () => [{ stop }] } as unknown as MediaStream);
+    await waitFor(() => expect(stop).toHaveBeenCalled());
+  });
+
+  it('FR-405: a spent link switches to the "needs the QR code" view with the reason, and no button', async () => {
+    capturePhoneToken('mock-phone-link-token-not-issued-00');
+    const user = userEvent.setup();
+    renderWithQuery(
+      <PhoneCamera
+        deps={{
+          openCamera: () =>
+            Promise.resolve({ getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream),
+        }}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: /turn on the camera and connect/i }));
+    expect(
+      await screen.findByRole('heading', { level: 1, name: /needs the qr code/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(/expired or was already used/i);
+    expect(screen.queryByRole('button', { name: /connect/i })).not.toBeInTheDocument();
+  });
+
+  it('FR-405: a new valid link replaces an old one', () => {
+    capturePhoneToken('mock-phone-link-token-aaaaaaaaaaaa');
+    capturePhoneToken('mock-phone-link-token-bbbbbbbbbbbb');
+    expect(getPhoneToken()).toBe('mock-phone-link-token-bbbbbbbbbbbb');
+    capturePhoneToken('bad token');
+    expect(getPhoneToken()).toBe('mock-phone-link-token-bbbbbbbbbbbb');
+  });
+});

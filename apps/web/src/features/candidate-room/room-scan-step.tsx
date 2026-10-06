@@ -58,7 +58,10 @@ export function RoomScanStep({
   const clipRef = React.useRef<{ url: string | null } | null>(null);
   const sendingRef = React.useRef(false);
   const startingRef = React.useRef(false);
-  const uploadedSeqs = React.useRef(new Set<number>());
+  // Seq numbers this component has already PUT to (any outcome). Only for those may a 412 mean "our
+  // earlier PUT landed"; for any other seq the stored object belongs to an older clip.
+  const attemptedSeqs = React.useRef(new Set<number>());
+  const mountedRef = React.useRef(false);
   const [starting, setStarting] = React.useState(false);
   const videoRef = React.useRef<HTMLVideoElement>(null);
 
@@ -74,11 +77,17 @@ export function RoomScanStep({
     setStream(null);
   }, []);
 
-  // Leaving the step stops the camera and drops the clip.
+  // Leaving the step stops the camera and the recorder and drops the clip. Anything still waiting
+  // (the camera prompt, an upload) checks mountedRef afterwards and does nothing more.
   React.useEffect(() => {
+    mountedRef.current = true;
     const holder = clipRef;
     return () => {
+      mountedRef.current = false;
       streamRef.current?.getTracks().forEach((t) => t.stop());
+      const recorder = recorderRef.current;
+      recorderRef.current = null;
+      if (recorder) void recorder.stop().catch(() => undefined);
       if (holder.current?.url) URL.revokeObjectURL(holder.current.url);
     };
   }, []);
@@ -88,6 +97,7 @@ export function RoomScanStep({
     if (!recorder) return;
     recorderRef.current = null;
     const result = await recorder.stop();
+    if (!mountedRef.current) return;
     stopCamera();
     const url = typeof URL.createObjectURL === 'function' ? URL.createObjectURL(result.blob) : null;
     clipRef.current = { url };
@@ -118,9 +128,15 @@ export function RoomScanStep({
       try {
         s = await deps.openCamera();
       } catch {
+        if (!mountedRef.current) return;
         setProblem(
           'The camera could not start. Click the camera or lock icon in the address bar, allow the camera, close other apps that use it, then press the button again.',
         );
+        return;
+      }
+      if (!mountedRef.current) {
+        // The step closed while the camera prompt was open: switch the camera straight off.
+        s.getTracks().forEach((t) => t.stop());
         return;
       }
       streamRef.current = s;
@@ -139,7 +155,7 @@ export function RoomScanStep({
       setPhase('recording');
     } finally {
       startingRef.current = false;
-      setStarting(false);
+      if (mountedRef.current) setStarting(false);
     }
   }
 
@@ -178,6 +194,7 @@ export function RoomScanStep({
           startedAt: startedAt.toISOString(),
           durationMs,
         });
+        if (!mountedRef.current) return;
         if (!presign.ok) {
           if (presign.kind !== 'problem') break;
           if (presign.status === 401) {
@@ -199,25 +216,31 @@ export function RoomScanStep({
           break;
         }
         if ('alreadyUploaded' in presign.data) {
-          // Stored already. That is only our clip if this component sent this exact one; otherwise
-          // the number belongs to an earlier clip, so move on to a fresh one.
-          if (!uploadedSeqs.current.has(seq)) {
-            seq = advanceRoomSeq();
-            conflicts += 1;
-            continue;
-          }
-        } else {
-          const outcome = await deps.upload(presign.data.url, presign.data.headers, blob);
-          if (outcome === 'failed') {
-            tries += 1;
-            continue;
-          }
-          uploadedSeqs.current.add(seq);
+          // Only a confirmed chunk answers this way, and this component never leaves one
+          // unconfirmed unless it finished. So the number belongs to an older clip: use a fresh one.
+          seq = advanceRoomSeq();
+          conflicts += 1;
+          continue;
+        }
+        const priorPut = attemptedSeqs.current.has(seq);
+        const outcome = await deps.upload(presign.data.url, presign.data.headers, blob);
+        if (!mountedRef.current) return;
+        attemptedSeqs.current.add(seq);
+        if (outcome === 'failed') {
+          tries += 1;
+          continue;
+        }
+        if (outcome === 'exists' && !priorPut) {
+          // A 412 on our first PUT of this number: the stored object is not ours.
+          seq = advanceRoomSeq();
+          conflicts += 1;
+          continue;
         }
         const confirm = await candidateApi.confirmMedia(ref);
+        if (!mountedRef.current) return;
         if (confirm.ok) {
           advanceRoomSeq();
-          uploadedSeqs.current.clear();
+          attemptedSeqs.current.clear();
           if (clipRef.current?.url) URL.revokeObjectURL(clipRef.current.url);
           clipRef.current = null;
           setClip(null);
@@ -230,7 +253,6 @@ export function RoomScanStep({
         }
         // 409 UPLOAD_NOT_FOUND and 422 UPLOAD_MISMATCH: ask for a new URL and upload again.
         if (confirm.kind === 'problem' && (confirm.status === 409 || confirm.status === 422)) {
-          uploadedSeqs.current.delete(seq);
           tries += 1;
           continue;
         }
@@ -238,7 +260,11 @@ export function RoomScanStep({
       }
       // A failed clip never keeps its number: the next try (or a re-record) starts fresh.
       advanceRoomSeq();
-      uploadedSeqs.current.clear();
+      attemptedSeqs.current.clear();
+      if (conflicts >= MAX_SEQ_ADVANCES) {
+        message =
+          'We could not find a free place for the recording. Press "Send this recording" again.';
+      }
       setProblem(
         message ??
           'The upload did not finish. Check your internet connection and press "Send this recording" again. Your recording is still here.',
