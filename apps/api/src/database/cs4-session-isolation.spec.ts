@@ -16,9 +16,11 @@
 //   - review fixes: S1 (keys behind the filters), S2 (wrong facts only narrow), S3 (the interim column
 //     control and the proctor_events source filter), S7 (same-tick findUnique of two candidates).
 //   - statement counts (pg_stat_statements): entering a scope sends no SQL.
-// A CANDIDATE call that returns rows names its select (candidate-interim.ts), so every candidate read
-// and write here does. The pure rules are in session-scope-args.spec.ts, candidate-interim.spec.ts and
-// org-context-session.spec.ts. NFR-04, TC-008.
+// A CANDIDATE call that returns rows and names no select gets the default `omit` (candidate-interim.ts);
+// most calls here still name a select, so the rows can be told apart, and the bare reads of every model are
+// in the S3 block. The pure rules are in session-scope-args.spec.ts, candidate-interim.spec.ts and
+// org-context-session.spec.ts; grants, the RUN filter and the consents create are in cs4-columns-grants.spec.ts.
+// NFR-04, TC-008.
 import { randomUUID } from 'node:crypto';
 import { setCandidateFacts } from './candidate-facts';
 import { createPrismaClient } from './create-prisma-client';
@@ -28,7 +30,7 @@ import type { CandidateFacts } from './org-context';
 import { createOrgScopedClient } from './org-scope.extension';
 import { Prisma } from '../generated/prisma/client.js';
 import type { PrismaClient } from '../generated/prisma/client.js';
-import { CANDIDATE_INTERIM_DENY } from './candidate-interim';
+import { CANDIDATE_READ, hiddenColumnsOf } from './candidate-interim';
 import { startMigratedDatabase } from './testing/migrated-postgres';
 import type { MigratedDatabase } from './testing/migrated-postgres';
 import { createCandidateChain, createTenant } from './testing/tenant-fixtures';
@@ -138,28 +140,22 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
     ['SERVICE', asService],
   ] as const;
   /**
-   * CS-4.4 grants a candidate an UPDATE on these (session_questions: three columns; consents: five;
-   * media_chunks; proctor_events: durationMs; sessions: lastHeartbeat). The other session models are
-   * create only (submissions, identity_checks, the two batch tables) or take no write at all
-   * (session_sections), so only the job updates their rows.
+   * CS-4.4 grants a candidate an UPDATE on these (session_questions: three columns; media_chunks;
+   * proctor_events: durationMs; sessions: lastHeartbeat, and the state columns under a grant). The other
+   * session models are create only (submissions, identity_checks, the two batch tables, and consents
+   * under the ConsentService grant) or take no write at all (session_sections), so only the job updates
+   * their rows.
    */
   const CANDIDATE_UPDATES: readonly ChainModel[] = [
     'Session',
     'SessionQuestion',
     'MediaChunk',
     'ProctorEvent',
-    'Consent',
   ];
   const NO_CANDIDATE_UPDATE = SESSION_MODELS.filter((m) => !CANDIDATE_UPDATES.includes(m));
   const writersOf = (model: ChainModel) =>
     ACTORS.filter(([actor]) => actor === 'SERVICE' || CANDIDATE_UPDATES.includes(model));
-  // consents are written once (B3): a candidate update reaches no row, so "it changes its own row" is
-  // for the job there, and the write-once test below shows the candidate's 0 rows.
-  const ownWritersOf = (model: ChainModel) =>
-    ACTORS.filter(
-      ([actor]) =>
-        actor === 'SERVICE' || (CANDIDATE_UPDATES.includes(model) && model !== 'Consent'),
-    );
+  const ownWritersOf = writersOf;
 
   const scoped = (model: string): Delegate =>
     (client as unknown as Record<string, Delegate>)[lowerFirst(model)] as Delegate;
@@ -367,7 +363,8 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
         await asCandidate(A, async () => {
           for (const chain of [A, B, O]) {
             const row = chain.rows[model];
-            const refused = /cannot update this row|writes nothing here/;
+            const refused =
+              /cannot update this row|writes nothing here|creates this row only under its create grant/;
             await expect(
               scoped(model).update?.({ where: row.unique, data: touch, ...sel }),
             ).rejects.toThrow(refused);
@@ -379,7 +376,9 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
             ).rejects.toThrow(refused);
             await expect(
               scoped(model).upsert?.({ where: row.unique, update: touch, create: {}, ...sel }),
-            ).rejects.toThrow(/cannot (create|update) this row|writes nothing here/);
+            ).rejects.toThrow(
+              /cannot (create|update) this row|writes nothing here|creates this row only under its create grant/,
+            );
           }
         });
         expect(await snapshot()).toEqual(before);
@@ -917,25 +916,33 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
     });
   });
 
-  describe('S3: the interim column control (candidate-interim.ts), against the real database', () => {
-    it('TC-008 every model a candidate reads names its select: a bare read throws, and nothing reaches Postgres', async () => {
-      await db.statements.reset();
+  describe('S3: the CS-4.4 column control (candidate-interim.ts), against the real database', () => {
+    /** The columns a bare read of `model` may return: the default select (CS-4.4 read column and scope keys). */
+    const defaultColumns = (model: ChainModel): string[] => {
+      const rule = CANDIDATE_READ[model];
+      return [...(rule?.read ?? []), ...(rule?.keys ?? [])].sort();
+    };
+
+    it('TC-008 a bare read (no select) of every model returns the default columns only: the omit is real, in every row-returning read', async () => {
       await asCandidate(A, async () => {
         for (const model of CHAIN_MODELS) {
-          for (const operation of ['findMany', 'findFirst', 'findFirstOrThrow']) {
-            await expect(scoped(model)[operation]?.({})).rejects.toThrow(
-              /needs an explicit select/,
-            );
+          const d = scoped(model);
+          const where = A.rows[model].unique;
+          const rows = [
+            ...((await d.findMany?.({})) as Row[]),
+            (await d.findFirst?.({})) as Row,
+            (await d.findFirstOrThrow?.({})) as Row,
+            (await d.findUnique?.({ where })) as Row,
+            (await d.findUniqueOrThrow?.({ where })) as Row,
+          ];
+          for (const row of rows) {
+            expect({ model, columns: Object.keys(row).sort() }).toEqual({
+              model,
+              columns: defaultColumns(model),
+            });
           }
-          await expect(scoped(model).findUnique?.({ where: A.rows[model].unique })).rejects.toThrow(
-            /needs an explicit select/,
-          );
-          await expect(
-            scoped(model).findUniqueOrThrow?.({ where: A.rows[model].unique }),
-          ).rejects.toThrow(/needs an explicit select/);
         }
       });
-      expect(await statementCount()).toBe(0);
     });
 
     it('TC-008 a select returns exactly the columns named: the hidden ones are not in the row', async () => {
@@ -960,18 +967,21 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       }
     });
 
+    // Every column no candidate may name without a grant: the hidden ones and the explicit-only ones. The
+    // two gated models (consent_texts, test_questions) are not reachable here at all (no grant).
     it.each(
-      Object.entries(CANDIDATE_INTERIM_DENY).flatMap(([model, deny]) =>
-        (deny?.read ?? []).map((column) => [model, column] as const),
-      ),
+      CHAIN_MODELS.flatMap((model) => [
+        ...hiddenColumnsOf(model).map((column) => [model, column] as const),
+        ...(CANDIDATE_READ[model]?.explicit ?? []).map((column) => [model, column] as const),
+      ]),
     )(
       'TC-008 %s.%s: refused in select, where, orderBy and the aggregates, and no statement reaches Postgres',
       async (model, column) => {
         await db.statements.reset();
         await asCandidate(A, async () => {
           const d = scoped(model);
-          // keystroke_batches.id is itself hidden, so that model is probed through seq.
-          const key = model === 'KeystrokeBatch' ? 'seq' : 'id';
+          // Some models have no `id` a candidate may read: name a column it may.
+          const key = CANDIDATE_READ[model]?.read[0] ?? 'id';
           const only = { select: { [key]: true } };
           for (const args of [
             { select: { [key]: true, [column]: true } },
@@ -1013,51 +1023,8 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       }
     });
 
-    it('TC-008 the hidden-test outcome of a SUBMIT row is neither readable nor countable (the CS-4.4 oracle), until the RUN filter of PR 2', async () => {
-      const submit = await owner.submission.create({
-        data: {
-          sessionQuestionId: A.sessionQuestionId,
-          kind: 'SUBMIT',
-          language: 'cs4-hidden',
-          sourceCode: 'x',
-          results: [{ testCaseId: 'hidden-1', passed: false }],
-          passed: 2,
-          total: 5,
-          score: 40,
-        },
-      });
-      try {
-        await asCandidate(A, async () => {
-          const d = scoped('Submission');
-          for (const column of ['results', 'passed', 'total', 'score']) {
-            await expect(d.findMany?.({ select: { id: true, [column]: true } })).rejects.toThrow(
-              new RegExp(`the column ${column} is not available to a candidate`),
-            );
-          }
-          // `count({ where: { kind: 'SUBMIT', passed: N } })` is the oracle CS-4.4 closes.
-          await expect(d.count?.({ where: { kind: 'SUBMIT', passed: 2 } })).rejects.toThrow(
-            /the column passed is not available/,
-          );
-          await expect(d.aggregate?.({ _sum: { passed: true, total: true } })).rejects.toThrow(
-            /is not available to a candidate/,
-          );
-          await expect(d.findMany?.({ ...ID, orderBy: { passed: 'desc' } })).rejects.toThrow(
-            /the column passed is not available/,
-          );
-          // What a candidate may know about its own submissions: that they exist, and their kind.
-          const rows = (await d.findMany?.({
-            where: { kind: 'SUBMIT' },
-            select: { id: true, kind: true, language: true },
-          })) as Row[];
-          expect(rows).toEqual([{ id: submit.id, kind: 'SUBMIT', language: 'cs4-hidden' }]);
-        });
-      } finally {
-        await owner.submission.delete({ where: { id: submit.id } });
-      }
-    });
-
     it.each([
-      // Session: lastHeartbeat only. The state columns come with PR 2's grants.
+      // Session: lastHeartbeat only without a grant; the state columns need the SessionStateService grant.
       ['Session', 'status', { status: 'SUBMITTED' }],
       ['Session', 'authEpoch', { authEpoch: 9 }],
       ['Session', 'pauseReasons', { pauseReasons: ['PROCTOR'] }],
@@ -1116,7 +1083,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
         const before = await snapshot();
         const own = A.rows[model];
         const refused = new RegExp(
-          `${column} cannot be written by a candidate update here|cannot update this row`,
+          `${column} cannot be written by a candidate update here|cannot update this row|creates this row only under its create grant`,
         );
         await asCandidate(A, async () => {
           const d = scoped(model);
@@ -1152,10 +1119,14 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
           language: 'python',
           sourceCode: 'x',
         } as const;
-        for (const extra of [{ score: 100 }, { results: [] }, { passed: 1 }, { total: 1 }]) {
+        // score is never written. results, passed and total are RUN-row columns (CS-4.4): not on a SUBMIT row.
+        await expect(
+          client.submission.create({ data: { ...submit, score: 100 }, ...ID }),
+        ).rejects.toThrow(/cannot be written by a candidate create here/);
+        for (const extra of [{ results: [] }, { passed: 1 }, { total: 1 }]) {
           await expect(
             client.submission.create({ data: { ...submit, ...extra }, ...ID }),
-          ).rejects.toThrow(/cannot be written by a candidate create here/);
+          ).rejects.toThrow(/can be written only on a row whose kind is RUN/);
         }
         await expect(
           client.submission.create({ data: { ...submit, createdAt: WHEN }, ...ID }),
@@ -2276,89 +2247,55 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
     });
   });
 
-  describe('B3: consents are written once (FR-401, C-17)', () => {
-    it('TC-008 a candidate cannot rewrite its signed consent, nor a declined one: 0 rows, and the row is as it was; the job can', async () => {
-      // C declines (the database CHECK: exactly one of signed_at and declined_at is set).
-      const declined = await owner.consent.findUniqueOrThrow({
-        where: { id: C.rows.Consent.filter.id as string },
-      });
-      await owner.consent.update({
-        where: { id: declined.id },
-        data: { signedAt: null, signedName: null, declinedAt: WHEN },
-      });
+  describe('B3: a candidate has no update path on consents (item 9: create only, under the ConsentService grant; FR-401, C-17)', () => {
+    it('TC-008 every update operation on the consent row throws before the database, and the row is as it was; the job can still change it', async () => {
       const before = await snapshot();
-      try {
-        for (const [chain, row] of [
-          [A, A.rows.Consent],
-          [C, C.rows.Consent],
-        ] as const) {
-          await asCandidate(chain, async () => {
-            const data = { signedName: 'Forged Name', ip: '198.51.100.9', userAgent: 'forged' };
-            expect(await client.consent.updateMany({ where: row.filter, data })).toEqual({
-              count: 0,
-            });
-            expect(
-              await client.consent.updateManyAndReturn({ where: row.filter, data, ...ID }),
-            ).toEqual([]);
-            await expect(
-              client.consent.update({ where: row.unique as never, data, ...ID }),
-            ).rejects.toMatchObject({
-              code: 'P2025',
-            });
-            // A signed or declined consent cannot be turned into the other either.
-            expect(
-              await client.consent.updateMany({
-                where: row.filter,
-                data: { declinedAt: WHEN, signedAt: null },
-              }),
-            ).toEqual({ count: 0 });
-            // Reading it is not narrowed: the candidate still sees that it signed (or declined).
-            const seen = (await client.consent.findMany({
-              select: { id: true, signedAt: true, declinedAt: true },
-            })) as Row[];
-            expect(seen).toHaveLength(1);
-            expect(seen[0]?.id).toBe(row.filter.id);
-          });
-        }
-        expect(await snapshot()).toEqual(before);
-        // The job is not limited by it.
-        const changed = await asService(A, () =>
-          client.consent.updateMany({
-            where: A.rows.Consent.filter,
-            data: { userAgent: 'job-update' },
-          }),
-        );
-        expect(changed).toEqual({ count: 1 });
-      } finally {
-        await owner.consent.update({
-          where: { id: declined.id },
-          data: {
-            signedName: declined.signedName,
-            signedAt: declined.signedAt,
-            declinedAt: declined.declinedAt,
-          },
-        });
-        await owner.consent.update({
-          where: { id: A.rows.Consent.filter.id as string },
-          data: { userAgent: null },
+      await db.statements.reset();
+      for (const chain of [A, C]) {
+        await asCandidate(chain, async () => {
+          const data = {
+            ip: '198.51.100.9',
+            userAgent: 'forged',
+            declinedAt: WHEN,
+            signedAt: null,
+          };
+          const own = chain.rows.Consent;
+          const refused = /cannot update this row|creates this row only under its create grant/;
+          await expect(client.consent.updateMany({ where: own.filter, data })).rejects.toThrow(
+            refused,
+          );
+          await expect(
+            client.consent.updateManyAndReturn({ where: own.filter, data, ...ID }),
+          ).rejects.toThrow(refused);
+          await expect(
+            client.consent.update({ where: own.unique as never, data, ...ID }),
+          ).rejects.toThrow(refused);
+          await expect(
+            client.consent.upsert({
+              where: own.unique as never,
+              create: { sessionId: chain.sessionId, consentTextId: T.consentTextId },
+              update: data,
+              ...ID,
+            }),
+          ).rejects.toThrow(refused);
+          await expect(client.consent.deleteMany({ where: own.filter })).rejects.toThrow(
+            /a candidate deletes nothing/,
+          );
         });
       }
-    });
-
-    it('TC-008 no row is ever in the state the update reaches: the database refuses a consent that is neither signed nor declined (so a candidate cannot sign by update, and cannot create the row)', async () => {
-      await expect(
-        owner.consent.update({
-          where: { id: A.rows.Consent.filter.id as string },
-          data: { signedAt: null, signedName: null },
+      expect(await statementCount()).toBe(0);
+      expect(await snapshot()).toEqual(before);
+      // The consent-PDF job (SERVICE) writes its own columns: no column limit.
+      const changed = await asService(A, () =>
+        client.consent.updateMany({
+          where: A.rows.Consent.filter,
+          data: { userAgent: 'job-update' },
         }),
-      ).rejects.toThrow(/consents_check/);
-      await asCandidate(A, async () => {
-        await expect(
-          client.consent.create({
-            data: { sessionId: A.sessionId, consentTextId: T.consentTextId },
-            ...ID,
-          }),
-        ).rejects.toThrow(/cannot create this row: CS-4\.4 grants updates only/);
+      );
+      expect(changed).toEqual({ count: 1 });
+      await owner.consent.update({
+        where: { id: A.rows.Consent.filter.id as string },
+        data: { userAgent: null },
       });
     });
   });
@@ -2889,7 +2826,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
             create: { sessionId: A.sessionId, signedName: 'Candidate a' } as never,
             ...ID,
           }),
-        ).rejects.toThrow(/cannot create this row: CS-4\.4 grants updates only/);
+        ).rejects.toThrow(/creates this row only under its create grant/);
         await expect(
           client.sessionQuestion.upsert({
             where: { id: B.sessionQuestionId },
@@ -3006,12 +2943,12 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
           // create-only models, which refuse first; elsewhere the key itself is refused.
           const refused =
             actor === 'CANDIDATE' && NO_CANDIDATE_UPDATE.includes(model)
-              ? /cannot update this row|writes nothing here/
+              ? /cannot update this row|writes nothing here|creates this row only under its create grant/
               : new RegExp(`${key} is a session key`);
           // An upsert needs both a create and an update: only media_chunks and proctor_events have both.
           const refusedUpsert =
             actor === 'CANDIDATE' && model !== 'MediaChunk' && model !== 'ProctorEvent'
-              ? /cannot (create|update) this row|writes nothing here/
+              ? /cannot (create|update) this row|writes nothing here|creates this row only under its create grant/
               : /session key/;
           await run(A, async () => {
             for (const data of [to(B), to(O), to(A)]) {
@@ -3092,8 +3029,10 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       expect(statements[0]?.query).toMatch(/^\s*SELECT/i);
       await db.statements.reset();
       await expect(
-        asCandidate(A, () => client.session.findUnique({ where: { id: A.sessionId } })),
-      ).rejects.toThrow(/needs an explicit select/);
+        asCandidate(A, () =>
+          client.session.findUnique({ where: { id: A.sessionId }, select: { hmacKeyEnc: true } }),
+        ),
+      ).rejects.toThrow(/the column hmacKeyEnc is not available/);
       expect(await statementCount()).toBe(0);
     });
 

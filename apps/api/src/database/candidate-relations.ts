@@ -29,6 +29,7 @@
 import { OrgScopeViolationError } from './errors';
 import type { ModelName } from './org-scope-map';
 import { relationOf } from './org-scope-relations';
+import { ownValue } from './plain-args';
 
 type PlainObject = Record<string, unknown>;
 
@@ -120,9 +121,9 @@ function assertOrderBy(model: ModelName, operation: string, orderBy: unknown, de
  */
 export function assertNoRelationVectors(model: ModelName, operation: string, args: unknown): void {
   if (!isPlainObject(args)) return;
-  assertSelection(model, operation, 'include', args.include);
-  assertSelection(model, operation, 'select', args.select);
-  assertWhere(model, operation, args.where, 0);
-  assertWhere(model, operation, args.having, 0);
-  assertOrderBy(model, operation, args.orderBy, 0);
+  assertSelection(model, operation, 'include', ownValue(args, 'include'));
+  assertSelection(model, operation, 'select', ownValue(args, 'select'));
+  assertWhere(model, operation, ownValue(args, 'where'), 0);
+  assertWhere(model, operation, ownValue(args, 'having'), 0);
+  assertOrderBy(model, operation, ownValue(args, 'orderBy'), 0);
 }
