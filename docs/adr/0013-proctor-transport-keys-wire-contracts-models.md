@@ -129,7 +129,7 @@ Decision: **unsigned, token-authenticated, advisory input, flagged as unsigned**
 | --- | --- |
 | Route | `POST /candidate/session/proctor-key`, no body |
 | Auth | Candidate token; epoch must equal `sessions.auth_epoch`; org scope through the session |
-| States | IN_PROGRESS, PAUSED; otherwise 409 `SESSION_NOT_ACTIVE` with extension `status` |
+| States | IN_PROGRESS, PAUSED; otherwise 409 `SESSION_NOT_ACTIVE` with extension `sessionStatus` |
 | 200 | `{ alg: "HMAC-SHA256", key: <base64, 32 bytes>, keyEpoch: int, counters: { eventSeqStart, keystrokeSeqStart, media: { SCREEN \| WEBCAM \| AUDIO: { nextSeq, nextSegment } } } }`, `Cache-Control: no-store` |
 | Errors | 401; 409 `KEY_ALREADY_ISSUED` (same epoch, already issued: the client re-runs the OTP resume); 409 `SESSION_NOT_ACTIVE`; 429 |
 | Limit | 5 per minute per session |
@@ -190,7 +190,7 @@ Decision: **unsigned, token-authenticated, advisory input, flagged as unsigned**
 | Route | `POST /candidate/session/heartbeat` every 10 s, unsigned |
 | Body (optional; the SDK fills it from a `getHealth()` provider wired to the recorder and the queues) | `{ capabilities?: CapabilityFlag[] (≤ 32, only when changed), recorder?: { streams: [{ stream, segment, lastSeq, bufferedChunks, bufferedBytes, droppedChunks, droppedBytes }] }, queue?: { pendingEventBatches, pendingKeystrokeBatches, rejectedBatches } }` |
 | 200 | `Cache-Control: no-store`. `{ serverTime, status: "IN_PROGRESS" \| "PAUSED", deadlineAt, sectionDeadlineAt \| null, pauseReasons: [] }`, plus optional `sessionToken` and `sessionTokenExpiresAt`, present only when the server renews the candidate token (backend.md Step 7; lifetime in ARC-03 part 2). The SDK passes them to the app through `onToken` and never stores them |
-| Errors | 401; 409 `SESSION_NOT_ACTIVE` with `status` (the SDK stops the heartbeat and fires an `ended` event instead of reporting "offline"); 429 |
+| Errors | 401; 409 `SESSION_NOT_ACTIVE` with `sessionStatus` (the SDK stops the heartbeat and fires an `ended` event instead of reporting "offline"); 429 |
 | Limit | 12 per minute per session |
 
 Server behaviour:
@@ -319,7 +319,7 @@ Each environment has its own bucket (D-10, D-11), so keys carry no environment. 
 
   | Tier | When | Deletes | Nulls |
   | --- | --- | --- | --- |
-  | Face (C-27) | **face clock** = COALESCE(`submitted_at`, latest capture, terminal transition time, `sessions.created_at`), as ADR 0004 section 9 defines it. *Latest capture* is the newest `identity_checks.created_at` or the `occurred_at` of the newest FACE_MISMATCH event. The *terminal transition time* is the **first** terminal transition: expiry, decline or the erasure fence. A session that expired and was later erased uses its expiry time. The tier deletes at face clock + LEAST(`retention_days`, 90). **No review hold applies** (C-35), and a shorter `retention_days` shortens it (C-27) | `identity/**` and `evidence/sealed/**` | `identity_checks.id_image_key`, `selfie_key`; `proctor_events.evidence_key` of FACE_MISMATCH rows |
+  | Face (C-27) | **face clock** = COALESCE(`submitted_at`, latest capture, terminal transition time, `sessions.created_at`), as ADR 0004 section 9 defines it. *Latest capture* is the newest `identity_checks.created_at` or the `occurred_at` of the newest FACE_MISMATCH event. The *terminal transition time* is the **first** terminal transition: expiry, decline or the erasure fence. A session that expired and was later erased uses its expiry time. **Source:** for a session that was never submitted, `sessions.retention_anchor_at`, which the state machine stamps at its first terminal status (COMPLETED, EXPIRED or DECLINED; for a never-submitted session, in practice expiry or decline) and the erasure fence keeps or sets; never `updated_at` (ADR 0004 9.2). The tier deletes at face clock + LEAST(`retention_days`, 90). **No review hold applies** (C-35), and a shorter `retention_days` shortens it (C-27) | `identity/**` and `evidence/sealed/**` | `identity_checks.id_image_key`, `selfie_key`; `proctor_events.evidence_key` of FACE_MISMATCH rows |
   | Media (R-4) | anchor + `retention_days` | everything under `orgs/{orgId}/sessions/{sessionId}/` **except `reports/`** (also the final backstop for orphans) | the R-4 columns except `sessions.report_key` |
   | Results (R-10, C-26) | anchor + 1 year | the **whole** session prefix, `reports/` included, with its own whole-prefix verification. R-10 does **not** wait for the face or media markers (ADR 0004 section 9); it is the backstop for every earlier tier | `sessions.report_key`; R-10 also deletes the `submissions` rows (proposed ADR 0004 section 9) |
 
@@ -406,9 +406,14 @@ Org scoping (ADR 0006, C-1) does not stop one candidate from reading another can
   - Lifetime, storage and device binding are left to ARC-03 part 2.
   - Staff tokens are rejected on `/candidate/*` (401), and candidate tokens on staff routes (401). The guard checks `typ` and the secret, not only the role.
 - **Guard (BE-07), matching ADR 0006 section 8.4 (PR #41).** `CandidateSessionGuard` runs on every `/candidate/*` route except the three pre-JWT routes: invitation-link resolve, OTP send and OTP verify (the exchange). Only those three use `AUTH_BOOTSTRAP`, because no session JWT exists yet. Routes behind the guard use no system scope.
-  - The guard verifies the JWT, then enters the narrowed scope straight from the verified claims with `runAsCandidate(oid, sid)` (CS-4). It loads `sessions` with `id = sid` **inside** that scope, together with its invitation, and puts `candidateId`, `invitationId` and `testId` into the context for CS-4.3.
-  - A session in another org is simply not found, which answers 401. No cross-org read ever happens.
-  - It checks `auth_epoch` against the token's `epoch`, answering 401 `SESSION_TAKEN_OVER` when the token's is lower.
+  - **Candidate-facts pre-read (DL-31, FU-DB-185; architect detail, DL-31 interim pick, owner accepts under P-15).** The narrower variant (only `invitations` read in org scope, `sessions.invitation_id` read inside CANDIDATE scope under a grant) was considered and not chosen: its granted read would be a candidate-scope query before the facts are set, and leaving and re-entering a candidate scope is forbidden (CS-4.1, ADR 0006 8.5). The candidate facts cannot be loaded inside CANDIDATE scope: `invitations` is filtered there by `ctx.invitationId` (CS-4.3), which is not set yet. So, after verifying the JWT, the guard first reads them in a plain `runInOrg(oid)`, entered from no scope with the verified `oid`:
+    - the session's `invitation_id` (`sessions` with `id = sid`, `select: { invitationId: true }` only);
+    - then that invitation's `candidate_id` and `test_id` (`select: { candidateId: true, testId: true }` only).
+
+    These are two column-only selects, never `accommodations` and never a full row. The `runInOrg` callback returns these three ids and exits **before** `runAsCandidate(oid, sid)` is entered; it is never nested (CS-4.1). This is the only non-CANDIDATE read on the routes behind the guard, and it is a FU-DB-67 `runInOrg` call site.
+  - A missing session, a session in another org (the org filter finds nothing), or a missing invitation answers 401, all three with the same problem body and code, so the response does not tell them apart. No cross-org read ever happens.
+  - The guard then enters the narrowed scope straight from the verified claims with `runAsCandidate(oid, sid)` (CS-4). Its **first** action there is `setCandidateFacts({ candidateId, invitationId, testId })`, before any other candidate-scope query. This order is enforced by the extension, not only by a test: until the facts are set, every CANDIDATE query on any model throws (CS-4.4, "Candidate facts").
+  - Inside that scope it loads `sessions` with `id = sid` (default columns, CS-4.4) and checks `auth_epoch` against the token's `epoch`, answering 401 `SESSION_TAKEN_OVER` when the token's is lower.
   - The `CandidateContext { sessionId, orgId, epoch, status }` lives **per unit of work on AsyncLocalStorage** (ADR 0001 C-1 as amended in PR #41), not in a Nest REQUEST-scoped provider.
 - **Rule CS-1.** The session id comes **only** from `CandidateContext`. No candidate route has a `:sessionId` parameter, and session ids in bodies or queries are stripped and ignored.
 - **Rule CS-2.** Every other id a candidate sends is resolved **within** the context session. An id that does not belong to it returns 404, the same as a cross-org read (TC-008). This covers:
@@ -468,7 +473,7 @@ Any model not listed throws. Within one org, the org filter alone would expose o
 | --- | --- | --- |
 | session-path models (CS-4.2) | per CS-4.4 | CS-4.2, plus the extra row filters in CS-4.4 |
 | `organizations` | read | `id = ctx.orgId` (direct) |
-| `candidates` | read | `id = ctx.candidateId` (context value loaded by the guard from the session's invitation) |
+| `candidates` | read | `id = ctx.candidateId` (context value loaded by the guard's org-scope pre-read from the session's invitation, 5.10) |
 | `invitations` | read | `id = ctx.invitationId` (context value) |
 | `tests` | read | `id = ctx.testId` (context value) |
 | `consent_texts` | read, only under the `ConsentService` grant | `id IN grant.ids`. The grant carries the two ids, `organizations.current_consent_text_id` and this session's `consents.consent_text_id`. The extension ANDs the filter itself and throws when the grant has no ids. |
@@ -477,6 +482,7 @@ Any model not listed throws. Within one org, the org filter alone would expose o
 | `test_questions` | read, columns `id` and `section_id` only, and only under the `SectionGateService` grant | `id IN grant.ids`. The grant carries the single `test_question_id` read in step 1. The extension ANDs the filter itself, never trusting a caller's `where`, and throws when the grant has no ids. |
 
 - **Read-only means every write operation throws.**
+- **Context-value filters fail closed.** The `candidates`, `invitations` and `tests` filters use `ctx.candidateId`, `ctx.invitationId` and `ctx.testId`. If a value is missing, the extension throws instead of passing `undefined` to Prisma, and every CANDIDATE query throws until the guard has set the facts (CS-4.4, "Candidate facts").
 - **Question content is not on the allowlist.** That covers `question_versions`, `question_variants`, `test_cases` and `variant_test_cases` (CS-4.6). `test_questions` is readable only as (`id`, `section_id`), for the section gate.
 - **Shape without content (N6).** `questions (id, type)` and `test_sections` stay readable for every section of the session. They reveal how many questions of each type there are and the section titles and limits, which the candidate sees in the test outline anyway; no statement, code, sample or key is in them.
 
@@ -497,7 +503,6 @@ Any model not listed throws. Within one org, the org filter alone would expose o
   | --- | --- | --- | --- |
   | `SessionStateService.transition()` | `sessions` | `status`, `pause_reasons`, `submitted_at` | `[ctx.sessionId]` |
   | `KeyService` | `sessions` | `hmac_key_enc` | `[ctx.sessionId]` |
-  | `CandidateSessionGuard` | `sessions` | `invitation_id` | `[sid from the verified JWT]` |
   | `DeviceInfoService` | `sessions` | `device_info` | `[ctx.sessionId]` |
   | `StorageService` | `media_chunks` | `object_key` | ids of the chunk rows resolved through CS-2 for the (stream, seq) in hand |
   | `OrgSettingsService` | `organizations` | `settings` | `[ctx.orgId]` |
@@ -506,11 +511,14 @@ Any model not listed throws. Within one org, the org filter alone would expose o
   | `SectionGateService`, step 1 | `session_questions` | `test_question_id` | `[sessionQuestionId resolved through CS-2]` |
   | `SectionGateService`, step 2 | `test_questions` | `id`, `section_id` | `[test_question_id from step 1]` |
   | `ConsentService` | `consent_texts` | `id`, `version`, `body_md`, `legal_approved_at` | `[current_consent_text_id, this session's consents.consent_text_id]` |
-- **Candidate facts.** `ctx.candidateId`, `ctx.invitationId` and `ctx.testId` drive injected filters. They are set by one private setter in `org-context.ts`, which only `CandidateSessionGuard` may call, once per scope; afterwards they are immutable. The setter is a FU-DB-67 call-site entry in both ADRs.
+  - `CandidateSessionGuard` has **no grant** (DL-31): it reads `sessions.invitation_id` in its org-scope pre-read (5.10), outside CANDIDATE scope, so `invitation_id` is not readable in CANDIDATE scope at all.
+- **Candidate facts.** `ctx.candidateId`, `ctx.invitationId` and `ctx.testId` drive injected filters. They are set by one private setter in `org-context.ts` (`setCandidateFacts`), which only `CandidateSessionGuard` may call, once per scope, as the first action in the scope before any other query; afterwards they are immutable.
+  - **Fail closed while unset (security).** In CANDIDATE scope the extension throws on **any** query on **any** model while the candidate facts are unset. An injected filter whose context value is missing fails closed (throws) and is never passed to Prisma as `undefined`, which Prisma would drop from the `where`, returning every candidate, invitation or test in the org. `setCandidateFacts` throws if called a second time in the scope or with any id missing or empty.
+  - The values come from the guard's `runInOrg(oid)` pre-read (5.10). The setter and that `runInOrg` call are FU-DB-67 call-site entries in both ADRs.
 
 | Model | Read | Write | Extra row filter |
 | --- | --- | --- | --- |
-| `sessions` | `id`, `status`, `started_at`, `deadline_at`, `pause_reasons`, `paused_ms`, `proctor_paused_at`, `submitted_at`, `auth_epoch` (`paused_ms` and `proctor_paused_at` feed `effectiveDeadline`). Explicit-only: `hmac_key_enc` (KeyService), `invitation_id` (CandidateSessionGuard), `device_info` (DeviceInfoService) | `last_heartbeat`; `device_info` only through DeviceInfoService (grant, below); `status`, `pause_reasons`, `submitted_at` only under the SessionStateService grant (CS-4.4a) | — |
+| `sessions` | `id`, `status`, `started_at`, `deadline_at`, `pause_reasons`, `paused_ms`, `proctor_paused_at`, `submitted_at`, `auth_epoch` (`paused_ms` and `proctor_paused_at` feed `effectiveDeadline`). Explicit-only: `hmac_key_enc` (KeyService), `device_info` (DeviceInfoService). Not readable: `invitation_id` (read only by the guard's org-scope pre-read, 5.10) | `last_heartbeat`; `device_info` only through DeviceInfoService (grant, below); `status`, `pause_reasons`, `submitted_at` only under the SessionStateService grant (CS-4.4a) | — |
 | `session_sections` | all columns | none. Writers: the SERVICE jobs `close-section` and `start-session` (`started_at`, `deadline_at`, `ended_at`), and the proctor-resume transition (ADR 0002 P-3), which runs in a **staff** route, not a SERVICE job, and adds the open section's credit to its `deadline_at` after `guardLive` locks `sessions` | — |
 | `session_questions` | `id`, `session_id`, `position`, `points`, `final_code`, `final_language`, `answer`. Explicit-only: `test_question_id` (`SectionGateService.sectionOf`) | `final_code`, `final_language`, `answer` | — |
 | `submissions` | `id`, `session_question_id`, `kind`, `language`, `created_at`; plus `results`, `passed`, `total` under the extra filter | create only: `session_question_id`, `kind` (`RUN` or `SUBMIT`), `language`, `source_code`; and `results`, `passed`, `total` on `RUN` rows | **Mechanism:** whenever `results`, `passed` or `total` appears anywhere in `select`, `where`, `orderBy`, `groupBy` or an aggregate, the extension ANDs `kind: 'RUN'` into the query, so `count({ where: { kind: 'SUBMIT', passed: N } })` returns 0. **`score` is never readable.** |
@@ -674,6 +682,7 @@ All of it comes from one projection:
 - `proctor_events` reads never return SERVER rows. `submissions.score` and `SUBMIT` results are never readable.
 - Injected filters: one test per CS-4.3 row.
 - Actor crossing and raw SQL refusal.
+- Guard pre-read (5.10, DL-31): it selects only `sessions.invitation_id` and `invitations (candidate_id, test_id)`, never `accommodations`; its `runInOrg` callback has returned before `runAsCandidate` is entered; `setCandidateFacts` runs before any other candidate-scope query; a CANDIDATE query on any model before `setCandidateFacts` throws; an injected filter with a missing context value throws rather than being dropped; `setCandidateFacts` called twice or with a missing id throws; the three 401 cases return the same body and code; a missing or other-org session answers 401; `sessions.invitation_id` throws when read in CANDIDATE scope.
 - **Rule CS-5: sockets and storage.**
   - Candidate sockets (OI-2, if any) authenticate with the same token and join only the room `session:{sessionId}` taken from it. The server ignores any session id in a socket payload.
   - Every presign route builds the key from the token's org and session (5.7), and confirm refuses any key or (stream, seq) outside the token's session.

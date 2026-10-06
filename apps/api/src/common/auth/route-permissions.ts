@@ -59,6 +59,12 @@ const ALL_STAFF: readonly UserRole[] = ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'R
 const SUPER_ADMIN: readonly UserRole[] = ['SUPER_ADMIN'];
 
 const own = { roles: ALL_STAFF, permission: 'account:self' } as const;
+const questionRead = {
+  roles: ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR'],
+  permission: 'question:read',
+} as const;
+const questionCreate = { roles: ['SUPER_ADMIN', 'AUTHOR'], permission: 'question:create' } as const;
+const questionUpdate = { roles: ['SUPER_ADMIN', 'AUTHOR'], permission: 'question:update' } as const;
 const userManage = { roles: SUPER_ADMIN, permission: 'user:manage' } as const;
 
 export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
@@ -92,4 +98,18 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'POST /admin/users/:userId/invite': userManage,
   'PATCH /admin/users/:userId': userManage,
   'POST /admin/users/:userId/unlock': userManage,
+
+  // Question bank (FR-201..FR-205). Reads: SUPER_ADMIN, RECRUITER, AUTHOR; writes: SUPER_ADMIN,
+  // AUTHOR (ADR 0010 section 3). Publish, archive and test cases are changes: question:update.
+  'GET /questions': questionRead,
+  'POST /questions': questionCreate,
+  'GET /questions/:id': questionRead,
+  'GET /questions/:id/preview': questionRead,
+  'PATCH /questions/:id': questionUpdate,
+  'POST /questions/:id/publish': questionUpdate,
+  'POST /questions/:id/archive': questionUpdate,
+  'POST /questions/:id/unarchive': questionUpdate,
+  'POST /questions/:id/versions/:version/test-cases': questionUpdate,
+  'PATCH /questions/:id/versions/:version/test-cases/:testCaseId': questionUpdate,
+  'DELETE /questions/:id/versions/:version/test-cases/:testCaseId': questionUpdate,
 };
