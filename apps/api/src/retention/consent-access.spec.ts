@@ -177,7 +177,15 @@ describe('consent access (FR-105, NFR-05, C-17)', () => {
       {
         method: 'create',
         select: null,
-        data: ['consentTextId', 'ip', 'sessionId', 'signedAt', 'signedName', 'userAgent'],
+        data: [
+          'ageConfirmedAt',
+          'consentTextId',
+          'ip',
+          'sessionId',
+          'signedAt',
+          'signedName',
+          'userAgent',
+        ],
       },
       // Decline.
       {
@@ -190,7 +198,15 @@ describe('consent access (FR-105, NFR-05, C-17)', () => {
       // The PDF job reads the name once, to print it; it writes only the PDF and email columns.
       {
         method: 'findUnique',
-        select: ['consentTextId', 'copyEmailedAt', 'id', 'pdfKey', 'signedAt', 'signedName'],
+        select: [
+          'ageConfirmedAt',
+          'consentTextId',
+          'copyEmailedAt',
+          'id',
+          'pdfKey',
+          'signedAt',
+          'signedName',
+        ],
         data: null,
       },
       { method: 'updateMany', select: null, data: ['pdfGeneratedAt', 'pdfKey'] },

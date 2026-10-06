@@ -812,6 +812,8 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(consent.consentTextId).toBe(tenant.consentTextId);
       expect(consent.signedName).toBe('Ada Lovelace');
       expect(consent.signedAt?.getTime()).toBe(signedAtResponse);
+      // D-55: the 18+ confirmation is stored as the server time of the signature, in the same create.
+      expect(consent.ageConfirmedAt?.getTime()).toBe(signedAtResponse);
       expect(consent.declinedAt).toBeNull();
       expect(consent.userAgent).toBe('TestBrowser/1.0');
       expect(consent.ip).toMatch(/^(::ffff:)?127\.0\.0\.1$|^::1$/);
@@ -835,7 +837,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(copy?.pdf.subarray(0, 5).toString('latin1')).toBe('%PDF-');
       expect(copy?.documentVersion).toBe('v1-main');
       expect(copy?.filename).toBe('consent-v1-main.pdf');
-      // The 18+ confirmation is in the audit row (no consents column yet); the name is not.
+      // The audit row keeps the ids and the 18+ flag only; the name is not in it.
       const audit = await owner.auditLog.findFirstOrThrow({
         where: { action: 'CANDIDATE_CONSENT_SIGNED', entityId: inv.sessionId },
       });
@@ -942,6 +944,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(consent.declinedAt).not.toBeNull();
       expect(consent.signedAt).toBeNull();
       expect(consent.signedName).toBeNull();
+      expect(consent.ageConfirmedAt).toBeNull();
       expect(consent.pdfKey).toBeNull();
       expect(
         await owner.invitation.findUniqueOrThrow({ where: { id: inv.invitationId } }),

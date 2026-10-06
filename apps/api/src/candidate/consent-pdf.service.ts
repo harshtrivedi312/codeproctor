@@ -38,6 +38,7 @@ export class ConsentPdfService {
           consentTextId: true,
           signedName: true,
           signedAt: true,
+          ageConfirmedAt: true,
           pdfKey: true,
           copyEmailedAt: true,
         },
@@ -71,7 +72,7 @@ export class ConsentPdfService {
         signedAt: consent.signedAt,
         consentId: consent.id,
         sessionId,
-        ageConfirmed: true,
+        ageConfirmed: consent.ageConfirmedAt !== null,
       });
 
       if (consent.pdfKey === null) {
