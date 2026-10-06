@@ -26,7 +26,7 @@ describe('TC-003 (FR-102): parallel 2FA sign-ins right after boot', () => {
   // lazy client was 'connecting', so a concurrent command met enableOfflineQueue:false and
   // /2fa/verify answered 503. Now every caller waits for the shared ready promise. This is a plain
   // regression test: any failure of any kind among the five sign-ins fails it.
-  it('TC-003 QA-D-04 (FR-102): five parallel 2FA sign-ins on a cold API all succeed (no 503 from the Redis connect race)', async () => {
+  it('TC-003 QA-D-04 (FR-102): five parallel 2FA sign-ins on a cold API all succeed (no 503 on the first Redis use of a cold client)', async () => {
     // Password sign-in does not touch Redis, so phase 1 leaves the lazy client untouched.
     const challenges = await Promise.all(
       users.map(async (u) => ((await login(h, u.email).expect(200)).body as Body).challengeToken),
@@ -37,7 +37,7 @@ describe('TC-003 (FR-102): parallel 2FA sign-ins right after boot', () => {
       typeof import('../../src/infrastructure/infrastructure.module')
     >('../../src/infrastructure/infrastructure.module');
     expect(h.app.get<Redis>(REDIS_CLIENT, { strict: false }).status).toBe('wait');
-    // Phase 2: five verifies fired together, so they all race the first connect.
+    // Phase 2: five verifies fired together, so they all make the first Redis use of a cold client together.
     const code = authenticator.generate(TOTP_SECRET);
     const results = await Promise.allSettled(
       challenges.map((challengeToken) =>

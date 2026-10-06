@@ -3,9 +3,8 @@
 // Per route and role: no token and bad tokens 401; a role without the permission 403 and nothing
 // changes; a user of another org 404 and nothing changes; an allowed role succeeds.
 //
-// The tests marked "[BE-03 pending]" are real but switched off until BE-03's routes exist:
-// set BE03_READY = true in support/be03-routes.ts (or run with BE03_READY=1). Same for
-// "[BE-13 pending]" and BE13_READY. The matrix-only tests at the top always run.
+// The BE-03 tests run by default (BE03_DEFAULT in support/be03-routes.ts). The tests marked
+// "[BE-13 pending]" stay switched off until BE-13's routes exist (BE13_READY=1 for a trial run).
 // Contract: the FINAL BE-03 routes under /admin/users (see support/be03-routes.ts). The three
 // mutating routes need the acting admin's own currentPassword; a wrong one is 403 REAUTH_FAILED
 // and the 404 for a missing or other-org id is only given after a correct password.
@@ -249,94 +248,86 @@ function rbacSuite(title: string, ready: boolean, routes: Be03Route[]): void {
   });
 }
 
-rbacSuite(
-  'TC-004 [BE-03 pending]: BE-03 routes by role (401, 403, 404, success)',
-  BE03_READY,
-  routesFor('BE-03'),
-);
+rbacSuite('TC-004: BE-03 routes by role (401, 403, 404, success)', BE03_READY, routesFor('BE-03'));
 rbacSuite(
   'TC-004 [BE-13 pending]: review routes by role (401, 403, 404, success)',
   BE13_READY,
   routesFor('BE-13'),
 );
 
-(BE03_READY ? describe : describe.skip)(
-  'TC-004 [BE-03 pending]: route registry matches the QA list',
-  () => {
-    let h: Harness;
-    beforeAll(async () => {
-      h = await boot();
-    });
-    afterAll(async () => {
-      await h?.close();
-    });
+(BE03_READY ? describe : describe.skip)('TC-004: route registry matches the QA list', () => {
+  let h: Harness;
+  beforeAll(async () => {
+    h = await boot();
+  });
+  afterAll(async () => {
+    await h?.close();
+  });
 
-    it('TC-004 [BE-03 pending]: the backend matrix agrees with the controllers, and every non-public route is in the QA route list or covered in tc-003', () => {
-      const { ROUTE_PERMISSIONS, listRoutes, matrixProblems } = loadBackendRegistry();
-      // The app was built from a fresh module registry (jest.resetModules), so take the class from it.
-      const { ModulesContainer } =
-        jest.requireActual<typeof import('@nestjs/core')>('@nestjs/core');
-      const routes = listRoutes(h.app.get(ModulesContainer));
-      expect(matrixProblems(routes)).toEqual([]);
+  it('TC-004: the backend matrix agrees with the controllers, and every non-public route is in the QA route list or covered in tc-003', () => {
+    const { ROUTE_PERMISSIONS, listRoutes, matrixProblems } = loadBackendRegistry();
+    // The app was built from a fresh module registry (jest.resetModules), so take the class from it.
+    const { ModulesContainer } = jest.requireActual<typeof import('@nestjs/core')>('@nestjs/core');
+    const routes = listRoutes(h.app.get(ModulesContainer));
+    expect(matrixProblems(routes)).toEqual([]);
 
-      // Every key QA says is covered elsewhere must really exist (a rename must not go unnoticed).
-      for (const key of Object.keys(COVERED_ELSEWHERE))
-        expect([key, key in ROUTE_PERMISSIONS]).toEqual([key, true]);
-      // BE-13 routes count only once the BE-13 switch is on (they do not exist before).
-      const listed = new Set(
-        [...routesFor('BE-03'), ...(BE13_READY ? routesFor('BE-13') : [])].map(routeKey),
-      );
-      const missing = Object.entries(ROUTE_PERMISSIONS)
-        .filter(([key, access]) => access !== 'public' && !(key in COVERED_ELSEWHERE))
-        .map(([key]) => key)
-        .filter((key) => !listed.has(key));
-      // A new backend route with no QA entry fails here: add it to be03-routes.ts with its audit
-      // action, body and fixtures (or to COVERED_ELSEWHERE, next to the file that tests it).
-      expect(missing).toEqual([]);
+    // Every key QA says is covered elsewhere must really exist (a rename must not go unnoticed).
+    for (const key of Object.keys(COVERED_ELSEWHERE))
+      expect([key, key in ROUTE_PERMISSIONS]).toEqual([key, true]);
+    // BE-13 routes count only once the BE-13 switch is on (they do not exist before).
+    const listed = new Set(
+      [...routesFor('BE-03'), ...(BE13_READY ? routesFor('BE-13') : [])].map(routeKey),
+    );
+    const missing = Object.entries(ROUTE_PERMISSIONS)
+      .filter(([key, access]) => access !== 'public' && !(key in COVERED_ELSEWHERE))
+      .map(([key]) => key)
+      .filter((key) => !listed.has(key));
+    // A new backend route with no QA entry fails here: add it to be03-routes.ts with its audit
+    // action, body and fixtures (or to COVERED_ELSEWHERE, next to the file that tests it).
+    expect(missing).toEqual([]);
 
-      // Every BE-03 route QA lists is served, with the permission QA expects.
-      for (const r of routesFor('BE-03')) {
-        const entry = ROUTE_PERMISSIONS[routeKey(r)];
-        expect(entry).toBeDefined();
-        expect(entry === 'public' ? 'public' : entry?.permission).toBe(r.permission);
+    // Every BE-03 route QA lists is served, with the permission QA expects.
+    for (const r of routesFor('BE-03')) {
+      const entry = ROUTE_PERMISSIONS[routeKey(r)];
+      expect(entry).toBeDefined();
+      expect(entry === 'public' ? 'public' : entry?.permission).toBe(r.permission);
+    }
+    // Staff user routes are SUPER_ADMIN only in the matrix itself.
+    for (const [key, access] of Object.entries(ROUTE_PERMISSIONS)) {
+      if (access !== 'public' && access.permission === 'user:manage') {
+        expect([key, access.roles]).toEqual([key, ['SUPER_ADMIN']]);
       }
-      // Staff user routes are SUPER_ADMIN only in the matrix itself.
-      for (const [key, access] of Object.entries(ROUTE_PERMISSIONS)) {
-        if (access !== 'public' && access.permission === 'user:manage') {
-          expect([key, access.roles]).toEqual([key, ['SUPER_ADMIN']]);
-        }
-      }
-    });
+    }
+  });
 
-    it('TC-006 [BE-03 pending]: the list routes carry audited === true in the matrix', () => {
-      const { ROUTE_PERMISSIONS } = loadBackendRegistry();
-      for (const key of ['GET /admin/users', 'GET /admin/users/lock-events']) {
-        const entry = ROUTE_PERMISSIONS[key];
-        expect([key, entry !== 'public' && entry?.audited]).toEqual([key, true]);
-      }
-    });
+  it('TC-006: the list routes carry audited === true in the matrix', () => {
+    const { ROUTE_PERMISSIONS } = loadBackendRegistry();
+    for (const key of ['GET /admin/users', 'GET /admin/users/lock-events']) {
+      const entry = ROUTE_PERMISSIONS[key];
+      expect([key, entry !== 'public' && entry?.audited]).toEqual([key, true]);
+    }
+  });
 
-    it('TC-004 TC-006 [BE-03 pending]: the matrix `audited` flag (route carries @Audited) agrees with the QA list, and a route marked candidateData is audited', () => {
-      const { ROUTE_PERMISSIONS } = loadBackendRegistry();
-      const known = ['audited', 'candidateData', 'permission', 'roles'];
-      for (const [key, access] of Object.entries(ROUTE_PERMISSIONS)) {
-        if (access === 'public') continue;
-        // A renamed or new matrix field must fail here, not be silently ignored.
-        expect([key, Object.keys(access).filter((k) => !known.includes(k))]).toEqual([key, []]);
-        const mine = BE03_ROUTES.filter((r) => routeKey(r) === key);
-        if (mine.length > 0) {
-          // `audited` = the interceptor writes the row. Service-written rows (invite, role, unlock)
-          // do not carry the flag but still write a row (every mutating route lists an audit action).
-          expect([key, access.audited === true]).toEqual([key, mine.some((r) => r.interceptor)]);
-          if (access.candidateData) expect(mine.every((r) => r.audit !== null)).toBe(true);
-        }
-        if (access.candidateData) expect([key, access.audited === true]).toEqual([key, true]);
+  it('TC-004 TC-006: the matrix `audited` flag (route carries @Audited) agrees with the QA list, and a route marked candidateData is audited', () => {
+    const { ROUTE_PERMISSIONS } = loadBackendRegistry();
+    const known = ['audited', 'candidateData', 'permission', 'roles'];
+    for (const [key, access] of Object.entries(ROUTE_PERMISSIONS)) {
+      if (access === 'public') continue;
+      // A renamed or new matrix field must fail here, not be silently ignored.
+      expect([key, Object.keys(access).filter((k) => !known.includes(k))]).toEqual([key, []]);
+      const mine = BE03_ROUTES.filter((r) => routeKey(r) === key);
+      if (mine.length > 0) {
+        // `audited` = the interceptor writes the row. Service-written rows (invite, role, unlock)
+        // do not carry the flag but still write a row (every mutating route lists an audit action).
+        expect([key, access.audited === true]).toEqual([key, mine.some((r) => r.interceptor)]);
+        if (access.candidateData) expect(mine.every((r) => r.audit !== null)).toBe(true);
       }
-    });
-  },
-);
+      if (access.candidateData) expect([key, access.audited === true]).toEqual([key, true]);
+    }
+  });
+});
 
-(BE03_READY ? describe : describe.skip)('TC-004 [BE-03 pending]: guard coverage', () => {
+(BE03_READY ? describe : describe.skip)('TC-004: guard coverage', () => {
   let h: Harness;
   beforeAll(async () => {
     h = await boot();
@@ -348,7 +339,7 @@ rbacSuite(
   const patch = (admin: Actor, id: string, body: object) =>
     call(h, 'PATCH', `${ADMIN_USERS}/${id}`, admin.token, { currentPassword: PASSWORD, ...body });
 
-  it('TC-004 [BE-03 pending]: a deactivated user is refused on the next call even with an unexpired token (FR-103)', async () => {
+  it('TC-004: a deactivated user is refused on the next call even with an unexpired token (FR-103)', async () => {
     const admin = await actor(h, UserRole.SUPER_ADMIN);
     const victim = await actor(h, UserRole.SUPER_ADMIN);
     await h.owner.user.update({ where: { id: victim.id }, data: { isActive: false } });
@@ -356,7 +347,7 @@ rbacSuite(
     await call(h, 'GET', ADMIN_USERS, victim.token).expect(401);
   });
 
-  it('TC-004 [BE-03 pending]: a role changed directly in the database is not trusted from the token (stale SUPER_ADMIN token loses access at once)', async () => {
+  it('TC-004: a role changed directly in the database is not trusted from the token (stale SUPER_ADMIN token loses access at once)', async () => {
     const admin = await actor(h, UserRole.SUPER_ADMIN);
     await h.owner.user.update({ where: { id: admin.id }, data: { role: UserRole.RECRUITER } });
     // The guard re-reads the user on every request (tc-004.int.test.ts, FU-BE-19): 401.
@@ -371,7 +362,7 @@ rbacSuite(
     // A token issued in the same second as the change is refused too (marker at epoch seconds).
     new Promise((resolve) => setTimeout(resolve, 1100));
 
-  it('TC-004 [BE-03 pending]: an access token issued before a deactivate then reactivate is still refused (401); a new sign-in works', async () => {
+  it('TC-004: an access token issued before a deactivate then reactivate is still refused (401); a new sign-in works', async () => {
     const admin = await actor(h, UserRole.SUPER_ADMIN);
     const victim = await actor(h, UserRole.AUTHOR);
     await probe(victim.token).expect(200);
@@ -385,7 +376,7 @@ rbacSuite(
     await probe(fresh.Authorization.replace('Bearer ', '')).expect(200);
   });
 
-  it('TC-004 [BE-03 pending]: an access token issued before a role flip (A then B then A) is refused (401) at each step; a new sign-in works', async () => {
+  it('TC-004: an access token issued before a role flip (A then B then A) is refused (401) at each step; a new sign-in works', async () => {
     const admin = await actor(h, UserRole.SUPER_ADMIN);
     const victim = await actor(h, UserRole.AUTHOR);
     await probe(victim.token).expect(200);
@@ -398,7 +389,7 @@ rbacSuite(
     await probe(fresh.Authorization.replace('Bearer ', '')).expect(200);
   });
 
-  it('TC-004 [BE-03 pending]: a demoted SUPER_ADMIN loses the admin routes at once, and the old token stays dead after the role is restored', async () => {
+  it('TC-004: a demoted SUPER_ADMIN loses the admin routes at once, and the old token stays dead after the role is restored', async () => {
     const admin = await actor(h, UserRole.SUPER_ADMIN);
     const other = await actor(h, UserRole.SUPER_ADMIN);
     await call(h, 'GET', ADMIN_USERS, other.token).expect(200);
@@ -408,7 +399,7 @@ rbacSuite(
     await call(h, 'GET', ADMIN_USERS, other.token).expect(401);
   });
 
-  it('TC-004 [BE-03 pending]: a deactivation or role change revokes the refresh sessions of the target', async () => {
+  it('TC-004: a deactivation or role change revokes the refresh sessions of the target', async () => {
     const admin = await actor(h, UserRole.SUPER_ADMIN);
     const victim = await createUser(h, { role: UserRole.AUTHOR });
     await login(h, victim.email).expect(200);
@@ -421,7 +412,7 @@ rbacSuite(
     ).toBe(0);
   });
 
-  it('TC-004 [BE-03 pending]: 429 once an organization sends too many invites, and the limit is per organization (another org is not slowed)', async () => {
+  it('TC-004: 429 once an organization sends too many invites, and the limit is per organization (another org is not slowed)', async () => {
     const orgC = (await h.owner.organization.create({ data: { name: 'QA Org C rate' } })).id;
     const orgD = (await h.owner.organization.create({ data: { name: 'QA Org D rate' } })).id;
     const adminC = await actor(h, UserRole.SUPER_ADMIN, orgC);
@@ -463,7 +454,7 @@ rbacSuite(
     await invite(adminD, emailOf(9999)).expect(201);
   });
 
-  it('TC-004 [BE-03 pending]: GET /admin/users has the contracted shape, statuses and pagination', async () => {
+  it('TC-004: GET /admin/users has the contracted shape, statuses and pagination', async () => {
     const orgE = (await h.owner.organization.create({ data: { name: 'QA Org E list' } })).id;
     const admin = await actor(h, UserRole.SUPER_ADMIN, orgE);
     const active = await createUser(h, { orgId: orgE });
@@ -521,7 +512,7 @@ rbacSuite(
     }
   });
 
-  it('TC-004 [BE-03 pending]: invite validation and duplicates (400 bad body or unknown field, 409 duplicate email, one user row)', async () => {
+  it('TC-004: invite validation and duplicates (400 bad body or unknown field, 409 duplicate email, one user row)', async () => {
     const admin = await actor(h, UserRole.SUPER_ADMIN);
     const email = `qa-dup-${Date.now()}@example.com`;
     const good = { email, name: 'Dup Test', role: 'AUTHOR', currentPassword: PASSWORD };
@@ -542,7 +533,7 @@ rbacSuite(
     expect(await h.owner.user.count({ where: { email } })).toBe(1);
   });
 
-  it('TC-004 [BE-03 pending]: PATCH validation (400 for a non-uuid id, an empty body or a bad role) and the self-change rules (409, nothing changes)', async () => {
+  it('TC-004: PATCH validation (400 for a non-uuid id, an empty body or a bad role) and the self-change rules (409, nothing changes)', async () => {
     const admin = await actor(h, UserRole.SUPER_ADMIN);
     const target = await createUser(h, { role: UserRole.AUTHOR });
     await patch(admin, 'not-a-uuid', { active: false }).expect(400);
@@ -555,7 +546,7 @@ rbacSuite(
     await call(h, 'GET', ADMIN_USERS, admin.token).expect(200); // still signed in
   });
 
-  it('TC-004 [BE-03 pending]: two admins demoting or deactivating each other at the same moment never leave the org with no active SUPER_ADMIN', async () => {
+  it('TC-004: two admins demoting or deactivating each other at the same moment never leave the org with no active SUPER_ADMIN', async () => {
     const orgF = (await h.owner.organization.create({ data: { name: 'QA Org F last admin' } })).id;
     const a = await actor(h, UserRole.SUPER_ADMIN, orgF);
     const b = await actor(h, UserRole.SUPER_ADMIN, orgF);
@@ -581,7 +572,7 @@ rbacSuite(
     expect(statuses.filter((c) => c !== 200 && c !== 409 && c !== 401 && c !== 403)).toEqual([]);
   });
 
-  it('TC-004 [BE-03 pending]: a SUPER_ADMIN may unlock their own account with their password (204, counter reset) and a non-uuid id is 400', async () => {
+  it('TC-004: a SUPER_ADMIN may unlock their own account with their password (204, counter reset) and a non-uuid id is 400', async () => {
     const admin = await actor(h, UserRole.SUPER_ADMIN);
     // Not locked (a locked admin fails their own password check, so another admin must unlock them).
     await h.owner.user.update({ where: { id: admin.id }, data: { failedLogins: 3 } });

@@ -160,7 +160,14 @@ describe('API foundation in production (NFR-04)', () => {
 
   beforeAll(async () => {
     infra = await startInfra();
-    applyEnv(infra, { NODE_ENV: 'production', APP_ENV: 'production' });
+    applyEnv(infra, {
+      NODE_ENV: 'production',
+      APP_ENV: 'production',
+      // Pilot and production require the code runner settings (FR-503); synthetic values.
+      JUDGE0_URL: 'https://judge0.test.invalid',
+      JUDGE0_AUTH_TOKEN: 'a'.repeat(32),
+      JUDGE0_AUTHZ_TOKEN: 'b'.repeat(32),
+    });
     app = await createApp();
   });
 

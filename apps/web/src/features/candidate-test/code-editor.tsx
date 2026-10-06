@@ -77,6 +77,16 @@ export default function CodeEditor(props: CodeEditorProps): React.JSX.Element {
     contentRef.current = onContentChange;
   });
 
+  // Everything attached in onMount is released on unmount.
+  const disposers = React.useRef<Array<() => void>>([]);
+  React.useEffect(
+    () => () => {
+      for (const dispose of disposers.current) dispose();
+      disposers.current = [];
+    },
+    [],
+  );
+
   const onMount: OnMount = (editor) => {
     const dom = editor.getDomNode();
     const block = (kind: 'paste' | 'drop') => (event: Event) => {
@@ -84,17 +94,23 @@ export default function CodeEditor(props: CodeEditorProps): React.JSX.Element {
       event.stopPropagation();
       blockedRef.current(kind);
     };
-    dom?.addEventListener('paste', block('paste'), true);
-    dom?.addEventListener('drop', block('drop'), true);
-    dom?.addEventListener('dragover', (e) => e.preventDefault(), true);
+    const listen = (type: string, handler: (event: Event) => void) => {
+      dom?.addEventListener(type, handler, true);
+      disposers.current.push(() => dom?.removeEventListener(type, handler, true));
+    };
+    listen('paste', block('paste'));
+    listen('drop', block('drop'));
+    listen('dragover', (e) => e.preventDefault());
     // Safety net: if Monaco still applies a paste, revert it.
-    editor.onDidPaste(() => {
+    const paste = editor.onDidPaste(() => {
       editor.trigger('paste-guard', 'undo', null);
       blockedRef.current('paste');
     });
-    editor.onDidChangeModelContent((e) => {
+    disposers.current.push(() => paste.dispose());
+    const content = editor.onDidChangeModelContent((e) => {
       contentRef.current?.({ versionId: e.versionId, changes: e.changes });
     });
+    disposers.current.push(() => content.dispose());
   };
 
   return (

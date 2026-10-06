@@ -70,6 +70,8 @@ WORK=$(mktemp -d)
 # command under `set -e` passes on its own status (psql and aws can return 2), and the runbook
 # reads 2 as "restored, counts differ", so every other failure is mapped to 1.
 deliberate=0
+# It runs through the EXIT trap, which shellcheck cannot see (SC2317).
+# shellcheck disable=SC2317
 finish() {
   rc=$?
   rm -rf "$WORK"
@@ -149,7 +151,7 @@ if [ "$reapply" = yes ]; then
   {
     printf 'CREATE TEMP TABLE _reapply_erasures (candidate_id uuid PRIMARY KEY, erased_at timestamptz NOT NULL);\n'
     while read -r stamp id; do
-      is_uuid "$id" && is_stamp "$stamp" || die "the erasure list holds a malformed entry."
+      if ! is_uuid "$id" || ! is_stamp "$stamp"; then die "the erasure list holds a malformed entry."; fi
       iso=$(printf '%s' "$stamp" | sed 's/^\(....\)\(..\)\(..\)T\(..\)\(..\)\(..\)Z$/\1-\2-\3T\4:\5:\6Z/')
       printf "INSERT INTO _reapply_erasures VALUES ('%s', '%s') ON CONFLICT DO NOTHING;\n" "$id" "$iso"
     done < "$WORK/erasures.txt"

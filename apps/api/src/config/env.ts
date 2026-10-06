@@ -36,6 +36,8 @@ export const envSchema = z
     HEALTH_TIMEOUT_MS: positiveInt.default(2_000),
     // Number of reverse proxies in front of the API (0 locally, 1 behind Caddy). FU-BE-08.
     TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
+    // Staff invites per organization per hour (FR-103); a stolen admin session cannot mass-create.
+    INVITE_RATE_LIMIT_PER_ORG_HOUR: positiveInt.default(20),
     // OpenAPI is opt-in and refused in pilot and production. FU-BE-10.
     ENABLE_API_DOCS: z
       .enum(['true', 'false'])
@@ -49,9 +51,51 @@ export const envSchema = z
     ENCRYPTION_KEY: aesKey,
     // Issuer label shown in authenticator apps.
     TOTP_ISSUER: z.string().min(1).default('CodeProctor'),
+    // Code runner (BE-05, FR-503). Unset means runs fail as "unavailable". Token is a secret.
+    JUDGE0_URL: z.url().optional(),
+    JUDGE0_AUTH_TOKEN: z.string().min(1).optional(),
+    // Judge0 AUTHZ token (X-Auth-User): needed to DELETE submissions after use. Never log.
+    JUDGE0_AUTHZ_TOKEN: z.string().min(1).optional(),
+    JUDGE0_REQUEST_TIMEOUT_MS: positiveInt.default(10_000),
+    JUDGE0_POLL_DEADLINE_MS: positiveInt.default(60_000),
   })
   .superRefine((env, ctx) => {
     const live = env.APP_ENV === 'pilot' || env.APP_ENV === 'production';
+    if (live || env.NODE_ENV === 'production') {
+      // The code runner holds candidate source and test data: it must be configured, authenticated
+      // with a strong token, and not reached over plain HTTP unless it is on this host.
+      if (!env.JUDGE0_URL) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['JUDGE0_URL'],
+          message: 'is required in pilot and production',
+        });
+      } else {
+        const url = new URL(env.JUDGE0_URL);
+        const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+        if (url.protocol !== 'https:' && !loopback) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['JUDGE0_URL'],
+            message: 'must use https unless it is a loopback address',
+          });
+        }
+      }
+      if (!env.JUDGE0_AUTH_TOKEN || env.JUDGE0_AUTH_TOKEN.length < 32) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['JUDGE0_AUTH_TOKEN'],
+          message: 'is required in pilot and production, at least 32 characters',
+        });
+      }
+      if (!env.JUDGE0_AUTHZ_TOKEN || env.JUDGE0_AUTHZ_TOKEN.length < 32) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['JUDGE0_AUTHZ_TOKEN'],
+          message: 'is required in pilot and production, at least 32 characters',
+        });
+      }
+    }
     if ((live || env.NODE_ENV === 'production') && env.ENABLE_API_DOCS) {
       ctx.addIssue({
         code: 'custom',

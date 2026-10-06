@@ -5,7 +5,7 @@ import random
 import pytest
 from pydantic import ValidationError
 
-from worker.config import IntegrityConfig
+from worker.config import IntegrityConfig, ReviewPathConfig
 from worker.events import EventType, RiskBand
 from worker.risk import (
     QueueItem,
@@ -15,6 +15,11 @@ from worker.risk import (
     queue_sort_key,
     route_for_review,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_review_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RISK_FAST_REVIEW_BANDS", raising=False)
 
 
 def cfg(**risk: object) -> IntegrityConfig:
@@ -188,12 +193,50 @@ def test_fr805_c28_pending_identity_or_short_answer_forces_the_full_path() -> No
     assert both.reasons == ["RISK_HIGH", "IDENTITY_MANUAL_REVIEW", "SHORT_ANSWER_MANUAL_SCORING"]
 
 
-def test_fr805_c28_fast_path_bands_may_only_hold_low_or_be_empty() -> None:
-    assert route_for_review("LOW", config=cfg(fastReviewBands=[])).review_path == "full"
-    assert cfg(fast_review_bands=["LOW"]).risk.fast_review_bands == {"LOW"}
-    for bad in (["MEDIUM"], ["LOW", "MEDIUM"], ["HIGH"], ["URGENT"]):
+def test_fr805_c28_dl18_fast_path_bands_come_from_system_env_low_only_or_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("RISK_FAST_REVIEW_BANDS", raising=False)
+    assert ReviewPathConfig.from_env({}).fast_review_bands == {"LOW"}
+    assert route_for_review("LOW").review_path == "fast"  # default from the real environment
+    monkeypatch.setenv("RISK_FAST_REVIEW_BANDS", "")  # set but empty: nothing is fast
+    assert route_for_review("LOW").review_path == "full"
+    monkeypatch.setenv("RISK_FAST_REVIEW_BANDS", " LOW , ")
+    assert route_for_review("LOW").review_path == "fast"
+    for bad in ("MEDIUM", "LOW,MEDIUM", "HIGH", "URGENT", "low"):
+        monkeypatch.setenv("RISK_FAST_REVIEW_BANDS", bad)
         with pytest.raises(ValidationError):
-            cfg(fastReviewBands=bad)
+            route_for_review("LOW")  # invalid env fails loudly, never falls back silently
+
+
+def test_fr805_c28_dl18_route_accepts_an_explicit_system_config() -> None:
+    off = ReviewPathConfig(fast_review_bands=frozenset())
+    assert route_for_review("LOW", system=off).review_path == "full"
+    with pytest.raises(ValidationError):
+        ReviewPathConfig(fast_review_bands=frozenset({"MEDIUM"}))
+
+
+def test_fr805_c28_dl18_fast_review_bands_are_not_an_org_setting() -> None:
+    for key in ("fastReviewBands", "fast_review_bands"):
+        with pytest.raises(ValidationError):
+            cfg(**{key: ["LOW"]})  # RiskConfig forbids it
+        with pytest.raises(ValidationError):
+            IntegrityConfig.model_validate({key: ["LOW"]})
+    assert "fast_review_bands" not in IntegrityConfig.model_fields
+
+
+def test_fr804_non_finite_config_values_are_rejected() -> None:
+    inf, nan = float("inf"), float("nan")
+    for bad in (
+        {"severityPoints": {"LOW": inf}},
+        {"severityPoints": {"HIGH": nan}},
+        {"weightByType": {"TAB_SWITCH": inf}},
+        {"weightByType": {"TAB_SWITCH": nan}},
+        {"mediumMinScore": nan},
+        {"highMinScore": inf},
+    ):
+        with pytest.raises(ValidationError):
+            cfg(**bad)
 
 
 def test_fr805_c28_queue_rank_puts_high_first_then_medium_then_low() -> None:
@@ -225,5 +268,5 @@ def test_fr804_fr305_c28_accommodated_detectors_stay_out_of_the_score_and_the_ba
     face: EventType = "NO_FACE"
     r = calculate_risk([gaze, gaze, gaze, face, face, face], c)
     assert r.score == 0.0 and r.band == "LOW" and r.ignored_disabled == 6
-    routing = route_for_review(r.band, config=c)
+    routing = route_for_review(r.band)
     assert routing.needs_review is True and routing.review_path == "fast"  # still reviewed

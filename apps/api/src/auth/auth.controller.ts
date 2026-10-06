@@ -30,7 +30,8 @@ import type { AuthedRequest } from '../common/auth/auth.types';
 import { Public, Roles } from '../common/auth/decorators';
 import { UserRole } from '../generated/prisma/client';
 import { AuthService, REFRESH_TTL_MS } from './auth.service';
-import type { RequestContext, SessionOutcome } from './auth.service';
+import type { SessionOutcome } from './auth.service';
+import { ctxOf } from '../common/request-context';
 import {
   AcceptedDto,
   AuthSessionDto,
@@ -61,10 +62,6 @@ const cookieOptions: CookieOptions = {
   signed: true,
   path: '/api/v1/auth',
 };
-
-function ctxOf(req: Request): RequestContext {
-  return { ip: req.ip };
-}
 
 function setRefreshCookie(res: Response, outcome: SessionOutcome): void {
   if (outcome.refreshToken) {
@@ -264,7 +261,7 @@ export class AuthController {
   @HttpCode(204)
   @ApiOperation({
     summary:
-      "Super admin clears another user's 2FA and revokes their refresh sessions; needs the admin's own current password (FR-102). Access tokens already issued expire within 15 minutes; this is not an immediate compromise response.",
+      "Super admin clears another user's 2FA and revokes their refresh sessions; needs the admin's own current password (FR-102). The target's access tokens issued so far end at once (Redis marker; 503 and no change if Redis is down).",
   })
   @ApiNoContentResponse()
   @ApiBadRequestResponse({ description: 'Not a UUID, or the caller targeted themselves' })

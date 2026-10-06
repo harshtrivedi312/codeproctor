@@ -18,9 +18,11 @@ import { ConfigService } from '@nestjs/config';
 import { Redis } from 'ioredis';
 import { randomUUID } from 'node:crypto';
 import type { Env } from '../config/env';
-import { PrismaService } from '../database/prisma.module';
+import { OrgContextService } from '../database/org-context';
+import { PrismaService } from '../database/prisma.service';
+import type { OrgScopedPrismaClient } from '../database/org-scope.extension';
 import { Prisma, UserRole } from '../generated/prisma/client';
-import type { User } from '../generated/prisma/client';
+import type { RefreshToken, User } from '../generated/prisma/client';
 import { REDIS_CLIENT } from '../infrastructure/infrastructure.module';
 import { ensureConnected } from '../infrastructure/redis-ready';
 import { MailPort } from '../mail/mail.port';
@@ -32,14 +34,18 @@ import {
   passwordVersion,
   sha256Hex,
 } from './crypto.util';
+import type { RequestContext } from '../common/request-context';
+import { errorName } from '../common/request-context';
+import { ACCESS_TTL_SECONDS } from '../common/auth/access-ttl';
 import { TokenService } from '../common/auth/token.service';
+import { TokenValidityService } from '../common/auth/token-validity.service';
 import { CodedForbiddenException, reauthFailed } from '../common/coded.exception';
 import { PasswordService } from './password.service';
 import { TotpService } from './totp.service';
 
 export const MAX_FAILED_LOGINS = 5;
 export const LOCKOUT_MINUTES = 15;
-export const ACCESS_TTL_SECONDS = 15 * 60;
+export { ACCESS_TTL_SECONDS };
 export const REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const RESET_TTL_MS = 30 * 60 * 1000;
 const CHALLENGE_TTL_SECONDS = 5 * 60;
@@ -49,13 +55,19 @@ const FORGOT_PER_IP = 10;
 const FORGOT_WINDOW_SECONDS = 60 * 60;
 /** Matches no user; used so unknown accounts run the same UPDATE as real ones. */
 const NO_USER_ID = '00000000-0000-0000-0000-000000000000';
+/** The org of the nil user: the same statement shape, matching no row. */
+const NO_ORG_ID = '00000000-0000-0000-0000-000000000000';
 
 /** Roles that must use TOTP (FR-102). */
 const TOTP_REQUIRED_ROLES: readonly UserRole[] = [UserRole.SUPER_ADMIN, UserRole.REVIEWER];
 
-export interface RequestContext {
-  ip?: string;
-}
+/** The org-scoped client or one of its transactions: what the helpers below accept. */
+type Db = Pick<
+  OrgScopedPrismaClient,
+  'user' | 'refreshToken' | 'auditLog' | '$queryRaw' | '$executeRaw'
+>;
+
+export type { RequestContext };
 
 export type UserWithOrg = User & { org: { name: string } };
 
@@ -88,7 +100,9 @@ export class AuthService implements OnApplicationShutdown {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly orgContext: OrgContextService,
     private readonly tokens: TokenService,
+    private readonly validity: TokenValidityService,
     private readonly passwords: PasswordService,
     private readonly totp: TotpService,
     private readonly mail: MailPort,
@@ -98,9 +112,35 @@ export class AuthService implements OnApplicationShutdown {
     this.webOrigin = config.get('WEB_ORIGIN', { infer: true });
   }
 
+  // ---- org scope (FU-DB-58, database/README.md 'Auth bootstrap recipe') ----------------------
+  //
+  // Every entry point that runs before the caller is known (login, 2FA completion, refresh,
+  // logout, forgot and reset) enters runSystem('AUTH_BOOTSTRAP') for its lookup and narrows to
+  // the user's org with runAsUser as soon as the user row is in hand. Entry points behind the
+  // guard run in the org scope the interceptor already set. Raw SQL is reviewed one statement at
+  // a time through runRawSql. Entering a context sends no statement.
+
+  /** Raw SQL for one statement; the reason is for the reviewer. */
+  private raw<T>(reason: string, run: () => Promise<T>): Promise<T> {
+    return this.orgContext.runRawSql(reason, run);
+  }
+
+  /** Narrows system scope to the user's org (a no-op change of scope inside the same org). */
+  private asUser<T>(user: Pick<User, 'id' | 'orgId' | 'role'>, fn: () => Promise<T>): Promise<T> {
+    return this.orgContext.runAsUser({ orgId: user.orgId, userId: user.id, role: user.role }, fn);
+  }
+
   // ---- FR-101: login ------------------------------------------------------------------------
 
-  async login(email: string, password: string, ctx: RequestContext): Promise<SessionOutcome> {
+  login(email: string, password: string, ctx: RequestContext): Promise<SessionOutcome> {
+    return this.orgContext.runSystem('AUTH_BOOTSTRAP', () => this.doLogin(email, password, ctx));
+  }
+
+  private async doLogin(
+    email: string,
+    password: string,
+    ctx: RequestContext,
+  ): Promise<SessionOutcome> {
     const user = await this.prisma.client.user.findUnique({
       where: { email },
       include: { org: { select: { name: true } } },
@@ -110,26 +150,36 @@ export class AuthService implements OnApplicationShutdown {
       // password, against a nil id, so the work done does not reveal the account (FU-BE-22/30).
       return this.rejectWithSameWork(password, ctx);
     }
+    const { passwordHash } = user;
+    return this.asUser(user, () => this.loginKnownUser(user, passwordHash, password, ctx));
+  }
+
+  private async loginKnownUser(
+    user: UserWithOrg,
+    passwordHash: string,
+    password: string,
+    ctx: RequestContext,
+  ): Promise<SessionOutcome> {
     // The attempt is reserved atomically before the password is verified, so parallel guesses
     // cannot exceed the limit (FU-BE-26). A locked account gets the same answer and the same
     // statements as a wrong password: never reveal that the account exists or is locked.
     if ((await this.reserveAttempt(user, ctx)) !== 'granted') {
       return this.burnAndFail(password, ctx);
     }
-    if (!(await this.passwords.verify(user.passwordHash, password))) {
+    if (!(await this.passwords.verify(passwordHash, password))) {
       await this.registerFailure(user, ctx);
       throw this.invalid();
     }
 
     if (user.totpEnabled) {
       // The password was right: give the reservation back. The 2FA step reserves its own.
-      await this.refundAttempt(user.id);
+      await this.refundAttempt(user);
       return {
         body: { status: 'two_factor_required', challengeToken: this.challenge(user) },
       };
     }
     if (TOTP_REQUIRED_ROLES.includes(user.role)) {
-      await this.refundAttempt(user.id);
+      await this.refundAttempt(user);
       return {
         body: {
           status: 'two_factor_enrollment_required',
@@ -143,7 +193,7 @@ export class AuthService implements OnApplicationShutdown {
       // A reset landed while the password was being verified: the sign-in is refused and the
       // reserved attempt is given back, as the password was right when it was checked.
       if (e instanceof PasswordChangedSignal) {
-        await this.refundAttempt(user.id).catch(() => undefined);
+        await this.refundAttempt(user).catch(() => undefined);
         throw this.invalid();
       }
       throw e;
@@ -177,7 +227,13 @@ export class AuthService implements OnApplicationShutdown {
    * Validates a 2FA challenge token and returns the user and its single-use id. The challenge is
    * bound to the password it was issued under, so a reset invalidates it (FU-BE-27).
    */
-  async resolveChallenge(token: string): Promise<{ userId: string; jti: string; pwv: string }> {
+  resolveChallenge(token: string): Promise<{ userId: string; jti: string; pwv: string }> {
+    return this.orgContext.runSystem('AUTH_BOOTSTRAP', () => this.doResolveChallenge(token));
+  }
+
+  private async doResolveChallenge(
+    token: string,
+  ): Promise<{ userId: string; jti: string; pwv: string }> {
     let claims: { sub?: unknown; kind?: unknown; jti?: unknown; pwv?: unknown };
     try {
       claims = this.tokens.verify(token) as typeof claims;
@@ -253,8 +309,23 @@ export class AuthService implements OnApplicationShutdown {
       await this.registerFailure(user, ctx);
       throw reauthFailed();
     }
-    await this.refundAttempt(user.id);
+    await this.refundAttempt(user);
     return user;
+  }
+
+  /**
+   * Step-up for the SUPER_ADMIN user-management routes (follows the FR-102 re-auth decision): the
+   * admin's current password on the login path (reserve, equal work, shared lockout). A wrong or
+   * locked password is the same 403 REAUTH_FAILED. Returns the verified hash so the caller can bind
+   * its transaction to it.
+   */
+  async verifyCurrentPassword(
+    userId: string,
+    password: string,
+    ctx: RequestContext,
+  ): Promise<{ passwordHash: string }> {
+    const user = await this.requireCurrentPassword(userId, password, ctx);
+    return { passwordHash: user.passwordHash ?? '' };
   }
 
   /** A signed-in user begins optional TOTP enrollment; needs the current password (FU-BE-39). */
@@ -285,14 +356,26 @@ export class AuthService implements OnApplicationShutdown {
     };
   }
 
-  async startEnrollment(userId: string): Promise<TotpEnrollmentDto> {
-    const user = await this.loadActive(userId);
+  /** Forced enrollment at login: public (the challenge is the credential), so it starts in system scope. */
+  startEnrollment(userId: string): Promise<TotpEnrollmentDto> {
+    return this.orgContext.runSystem('AUTH_BOOTSTRAP', async () => {
+      const user = await this.loadActive(userId);
+      return this.asUser(user, () => this.beginEnrollment(user));
+    });
+  }
+
+  private async beginEnrollment(user: UserWithOrg): Promise<TotpEnrollmentDto> {
     if (user.totpEnabled) throw new ConflictException('Two-factor authentication is already on.');
     const enrollment = await this.totp.createEnrollment(user.email);
-    await this.prisma.client.user.update({
-      where: { id: user.id },
+    // Conditional write: an enroll/confirm that committed after the read above must not have its
+    // live secret replaced while totpEnabled stays true.
+    const stored = await this.prisma.client.user.updateMany({
+      where: { id: user.id, totpEnabled: false },
       data: { totpSecretEnc: enrollment.encrypted },
     });
+    if (stored.count !== 1) {
+      throw new ConflictException('Two-factor authentication is already on.');
+    }
     return {
       manualKey: enrollment.secret,
       otpauthUri: enrollment.otpauthUrl,
@@ -329,11 +412,13 @@ export class AuthService implements OnApplicationShutdown {
     ctx: RequestContext,
     challenge: { jti: string; pwv: string },
   ): Promise<{ session: SessionOutcome; recoveryCodes: string[] }> {
-    return this.withChallengeUse(challenge.jti, async () => {
-      const done = await this.doConfirmEnrollment(userId, code, ctx, true, challenge.pwv);
-      if (!done.session) throw new Error('Enrollment finished without a session');
-      return { session: done.session, recoveryCodes: done.recoveryCodes };
-    });
+    return this.orgContext.runSystem('AUTH_BOOTSTRAP', () =>
+      this.withChallengeUse(challenge.jti, async () => {
+        const done = await this.doConfirmEnrollment(userId, code, ctx, true, challenge.pwv);
+        if (!done.session) throw new Error('Enrollment finished without a session');
+        return { session: done.session, recoveryCodes: done.recoveryCodes };
+      }),
+    );
   }
 
   /**
@@ -349,6 +434,19 @@ export class AuthService implements OnApplicationShutdown {
     boundPasswordHash?: string,
   ): Promise<{ session?: SessionOutcome; recoveryCodes: string[] }> {
     const user = await this.loadActive(userId);
+    return this.asUser(user, () =>
+      this.confirmKnownUser(user, code, ctx, openSession, challengePwv, boundPasswordHash),
+    );
+  }
+
+  private async confirmKnownUser(
+    user: UserWithOrg,
+    code: string,
+    ctx: RequestContext,
+    openSession: boolean,
+    challengePwv?: string,
+    boundPasswordHash?: string,
+  ): Promise<{ session?: SessionOutcome; recoveryCodes: string[] }> {
     if (challengePwv !== undefined) this.requireChallengePassword(user, challengePwv);
     if (boundPasswordHash !== undefined && user.passwordHash !== boundPasswordHash) {
       throw reauthFailed();
@@ -384,7 +482,7 @@ export class AuthService implements OnApplicationShutdown {
         }
         await this.audit(user, 'AUTH_TOTP_ENABLED', ctx, {}, tx);
         if (!openSession) {
-          await this.clearFailures(user.id, tx);
+          await this.clearFailures(user, tx);
           return undefined;
         }
         // The row was loaded before the update above, so report the state just written.
@@ -393,7 +491,7 @@ export class AuthService implements OnApplicationShutdown {
       return { session, recoveryCodes: codes };
     } catch (e) {
       // The code was right, so the reservation is not a failed guess.
-      await this.refundAttempt(user.id).catch(() => undefined);
+      await this.refundAttempt(user).catch(() => undefined);
       if (e instanceof AlreadyEnrolledSignal) {
         throw new ConflictException('Two-factor authentication could not be turned on. Try again.');
       }
@@ -412,7 +510,7 @@ export class AuthService implements OnApplicationShutdown {
     try {
       return await this.totp.verify(user.id, encryptedSecret, code);
     } catch (e) {
-      await this.refundAttempt(user.id).catch(() => undefined);
+      await this.refundAttempt(user).catch(() => undefined);
       throw e;
     }
   }
@@ -424,8 +522,10 @@ export class AuthService implements OnApplicationShutdown {
     ctx: RequestContext,
     challenge: { jti: string; pwv: string },
   ): Promise<SessionOutcome> {
-    return this.withChallengeUse(challenge.jti, () =>
-      this.doCompleteLogin(userId, code, ctx, challenge.pwv),
+    return this.orgContext.runSystem('AUTH_BOOTSTRAP', () =>
+      this.withChallengeUse(challenge.jti, () =>
+        this.doCompleteLogin(userId, code, ctx, challenge.pwv),
+      ),
     );
   }
 
@@ -436,6 +536,15 @@ export class AuthService implements OnApplicationShutdown {
     challengePwv: string,
   ): Promise<SessionOutcome> {
     const user = await this.loadActive(userId);
+    return this.asUser(user, () => this.completeKnownUser(user, code, ctx, challengePwv));
+  }
+
+  private async completeKnownUser(
+    user: UserWithOrg,
+    code: string,
+    ctx: RequestContext,
+    challengePwv: string,
+  ): Promise<SessionOutcome> {
     this.requireChallengePassword(user, challengePwv);
     const secret = user.totpSecretEnc;
     if (!user.totpEnabled || !secret) throw this.challengeExpired();
@@ -453,10 +562,14 @@ export class AuthService implements OnApplicationShutdown {
       // refuses the session also puts the code back.
       return await this.prisma.client.$transaction(async (tx) => {
         // The check and the removal are one statement, so two concurrent uses cannot both win.
-        const used = await tx.$executeRaw`
-          UPDATE users SET recovery_code_hashes = array_remove(recovery_code_hashes, ${hash}),
-                           updated_at = now()
-          WHERE id = ${user.id}::uuid AND ${hash} = ANY(recovery_code_hashes)`;
+        const used = await this.raw(
+          'consume one recovery code atomically: check and removal in one UPDATE (FR-102)',
+          () => tx.$executeRaw`
+            UPDATE users SET recovery_code_hashes = array_remove(recovery_code_hashes, ${hash}),
+                             updated_at = now()
+            WHERE id = ${user.id}::uuid AND org_id = ${user.orgId}::uuid
+              AND ${hash} = ANY(recovery_code_hashes)`,
+        );
         if (used !== 1) throw new WrongRecoveryCodeSignal();
         await this.audit(user, 'AUTH_RECOVERY_CODE_USED', ctx, {}, tx);
         return this.startSession(user, tx, secret);
@@ -464,7 +577,7 @@ export class AuthService implements OnApplicationShutdown {
     } catch (e) {
       if (e instanceof WrongRecoveryCodeSignal) return this.failCode(user, ctx);
       if (e instanceof PasswordChangedSignal) {
-        await this.refundAttempt(user.id).catch(() => undefined);
+        await this.refundAttempt(user).catch(() => undefined);
         throw this.challengeExpired();
       }
       throw e;
@@ -497,8 +610,8 @@ export class AuthService implements OnApplicationShutdown {
    * recovery hashes (users row first), then revokes every refresh-token family of the user,
    * including the caller's own (users before refresh_tokens, the lock order every other path
    * uses), and audits. A refresh or a 2FA login racing this either waits on the users row lock
-   * and is refused, or commits first and is revoked here. Access tokens already issued live
-   * until they expire (15 minutes); the BE-03 tokens-valid-after marker will close that.
+   * and is refused, or commits first and is revoked here. Access tokens already issued end at
+   * once through the BE-03 tokens-valid-after marker (set in the same transaction).
    */
   async disableTwoFactor(
     userId: string,
@@ -515,7 +628,7 @@ export class AuthService implements OnApplicationShutdown {
       throw reauthFailed();
     }
     // Both factors passed: the reservation is not a failed guess.
-    await this.refundAttempt(user.id).catch(() => undefined);
+    await this.refundAttempt(user).catch(() => undefined);
     if (TOTP_REQUIRED_ROLES.includes(user.role)) throw this.twoFactorRequiredForRole();
     await this.prisma.client.$transaction(async (tx) => {
       const updated = await tx.user.updateMany({
@@ -533,6 +646,8 @@ export class AuthService implements OnApplicationShutdown {
         where: { userId: user.id, revokedAt: null },
         data: { revokedAt: new Date() },
       });
+      // Access tokens issued so far end too (Redis marker; a Redis outage rolls this back, 503).
+      await this.validity.invalidateIssuedTokens(user.id);
       await this.audit(user, 'AUTH_2FA_DISABLED', ctx, { sessionsRevoked: revoked.count }, tx);
     });
   }
@@ -558,11 +673,7 @@ export class AuthService implements OnApplicationShutdown {
   }
 
   /** Why a bound write matched nothing: password changed (403 REAUTH_FAILED), or the 2FA state moved (409). */
-  private async explainRefusedChange(
-    tx: Prisma.TransactionClient,
-    user: User,
-    fromDisable: boolean,
-  ): Promise<never> {
+  private async explainRefusedChange(tx: Db, user: User, fromDisable: boolean): Promise<never> {
     const now = await tx.user.findUnique({ where: { id: user.id } });
     if (now?.passwordHash !== user.passwordHash) throw reauthFailed();
     // The enforced-role refusal only applies to disable; a regenerate race is a plain 409.
@@ -587,9 +698,9 @@ export class AuthService implements OnApplicationShutdown {
    * refresh()'s FOR SHARE, but not with the FOR KEY SHARE the audit insert takes on the actor row
    * through audit_logs.actor_id, so two admins resetting each other cannot deadlock). Then
    * refresh_tokens, same order as a password reset. A session being opened from the old second
-   * factor is refused by startSession's bound secret. Access tokens already issued stay valid
-   * until they expire (15 minutes): the guard keys on the password version, which this does not
-   * change; the refresh families are all revoked, so none renews. A role that requires 2FA is
+   * factor is refused by startSession's bound secret. Access tokens already issued end at once
+   * through the Redis tokens-valid-after marker (the password version does not change); the refresh
+   * families are all revoked, so none renews. A role that requires 2FA is
    * sent through forced enrollment at the next login (FR-102).
    */
   async resetTwoFactorOf(
@@ -620,10 +731,14 @@ export class AuthService implements OnApplicationShutdown {
         },
       });
       if (stillAdmin !== 1) throw reauthFailed();
-      const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
-        SELECT id FROM users
-        WHERE id = ${targetId}::uuid AND org_id = ${actor.orgId}::uuid
-        FOR NO KEY UPDATE`);
+      const locked = await this.raw(
+        'row lock on the target user, FOR NO KEY UPDATE, same org only',
+        () =>
+          tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+          SELECT id FROM users
+          WHERE id = ${targetId}::uuid AND org_id = ${actor.orgId}::uuid
+          FOR NO KEY UPDATE`),
+      );
       if (locked.length !== 1) throw new NotFoundException('User not found.');
       // Also enforced after the lock, on the id as the database sees it.
       if (locked[0]?.id === actorId) {
@@ -638,6 +753,8 @@ export class AuthService implements OnApplicationShutdown {
         where: { userId: targetId, revokedAt: null },
         data: { revokedAt: new Date() },
       });
+      // Access tokens issued so far end too (Redis marker; a Redis outage rolls this back, 503).
+      await this.validity.invalidateIssuedTokens(targetId);
       await tx.auditLog.create({
         data: {
           orgId: actor.orgId,
@@ -658,33 +775,56 @@ export class AuthService implements OnApplicationShutdown {
 
   // ---- FR-104: refresh and logout -----------------------------------------------------------
 
-  async refresh(rawToken: string | undefined, ctx: RequestContext): Promise<SessionOutcome> {
+  refresh(rawToken: string | undefined, ctx: RequestContext): Promise<SessionOutcome> {
+    return this.orgContext.runSystem('AUTH_BOOTSTRAP', () => this.doRefresh(rawToken, ctx));
+  }
+
+  private async doRefresh(
+    rawToken: string | undefined,
+    ctx: RequestContext,
+  ): Promise<SessionOutcome> {
     if (!rawToken) throw new UnauthorizedException('Authentication required.');
     const tokenHash = sha256Hex(rawToken);
     const existing = await this.prisma.client.refreshToken.findUnique({ where: { tokenHash } });
     if (!existing) throw new UnauthorizedException('Authentication required.');
+    // The token names its user (a foreign key), so the org is known from here on.
+    const user = await this.prisma.client.user.findUnique({
+      where: { id: existing.userId },
+      include: { org: { select: { name: true } } },
+    });
+    if (!user) throw new UnauthorizedException('Authentication required.');
+    return this.asUser(user, () => this.rotate(existing, user, ctx));
+  }
 
+  private async rotate(
+    existing: RefreshToken,
+    user: UserWithOrg,
+    ctx: RequestContext,
+  ): Promise<SessionOutcome> {
     if (existing.revokedAt) {
       // A rotated or revoked token came back: assume theft and kill the whole family (TC-005).
       const revoked = await this.revokeFamily(existing.familyId);
-      const owner = await this.prisma.client.user.findUnique({ where: { id: existing.userId } });
       // Audit only when the reuse actually killed live tokens, not on every later retry.
-      if (owner && revoked > 0) await this.audit(owner, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
+      if (revoked > 0) await this.audit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
       throw new UnauthorizedException('Authentication required.');
     }
     if (existing.expiresAt.getTime() <= Date.now()) {
       throw new UnauthorizedException('Authentication required.');
     }
-    const user = await this.prisma.client.user.findUnique({
-      where: { id: existing.userId },
-      include: { org: { select: { name: true } } },
-    });
-    if (!user?.isActive) {
+    if (!user.isActive) {
+      await this.revokeFamily(existing.familyId);
+      throw new UnauthorizedException('Authentication required.');
+    }
+    // Defence in depth: a role that requires 2FA never gets a token from a family that was not
+    // opened through 2FA (a promotion racing a password sign-in). Same 401, family revoked.
+    if (TOTP_REQUIRED_ROLES.includes(user.role) && !user.totpEnabled) {
       await this.revokeFamily(existing.familyId);
       throw new UnauthorizedException('Authentication required.');
     }
 
     const next = newOpaqueToken();
+    // Signed before the rotation commits, like startSession (S1).
+    const body = this.authenticated(user);
     try {
       await this.prisma.client.$transaction(async (tx) => {
         // The new token exists only while the account is active and still has the password hash
@@ -692,15 +832,20 @@ export class AuthService implements OnApplicationShutdown {
         // WHERE fails), and a reset arriving later waits for this commit and revokes the new
         // token too. This also closes the race with deactivation (FR-104, FR-107).
         // `?? ''` is deliberate: an empty hash can never match, so nothing is inserted.
-        const created = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
-          INSERT INTO refresh_tokens (user_id, family_id, token_hash, expires_at)
-          SELECT u.id, ${existing.familyId}::uuid, ${sha256Hex(next)},
-                 ${new Date(Date.now() + REFRESH_TTL_MS)}::timestamptz
-          FROM users u
-          WHERE u.id = ${user.id}::uuid AND u.is_active
-            AND u.password_hash = ${user.passwordHash ?? ''}
-          FOR SHARE OF u
-          RETURNING id`);
+        const created = await this.raw(
+          'rotate refresh token: INSERT ... SELECT ... FOR SHARE of the user row (FR-104, FR-107)',
+          () =>
+            tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+              INSERT INTO refresh_tokens (user_id, family_id, token_hash, expires_at)
+              SELECT u.id, ${existing.familyId}::uuid, ${sha256Hex(next)},
+                     ${new Date(Date.now() + REFRESH_TTL_MS)}::timestamptz
+              FROM users u
+              WHERE u.id = ${user.id}::uuid AND u.org_id = ${user.orgId}::uuid AND u.is_active
+                AND u.password_hash = ${user.passwordHash ?? ''}
+                AND u.role = ${user.role}::user_role
+              FOR SHARE OF u
+              RETURNING id`),
+        );
         const createdId = created[0]?.id;
         if (created.length !== 1 || !createdId) throw new PasswordChangedSignal();
         // Only one caller can flip revokedAt from null; a concurrent second use loses here.
@@ -716,24 +861,31 @@ export class AuthService implements OnApplicationShutdown {
         throw new UnauthorizedException('Authentication required.');
       }
       if (e instanceof RefreshReuseSignal) {
-        await this.revokeFamily(existing.familyId);
-        await this.audit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
+        // Only a real reuse kills live tokens; a reset that revoked the family first does not
+        // raise a theft alert (FU-BE-41).
+        const revoked = await this.revokeFamily(existing.familyId);
+        if (revoked > 0) await this.audit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
         throw new UnauthorizedException('Authentication required.');
       }
       throw e;
     }
-    return { body: this.authenticated(user), refreshToken: next };
+    return { body, refreshToken: next };
   }
 
-  async logout(rawToken: string | undefined, ctx: RequestContext): Promise<void> {
-    if (!rawToken) return;
-    const existing = await this.prisma.client.refreshToken.findUnique({
-      where: { tokenHash: sha256Hex(rawToken) },
+  logout(rawToken: string | undefined, ctx: RequestContext): Promise<void> {
+    if (!rawToken) return Promise.resolve();
+    return this.orgContext.runSystem('AUTH_BOOTSTRAP', async () => {
+      const existing = await this.prisma.client.refreshToken.findUnique({
+        where: { tokenHash: sha256Hex(rawToken) },
+      });
+      if (!existing) return;
+      const user = await this.prisma.client.user.findUnique({ where: { id: existing.userId } });
+      if (!user) return;
+      await this.asUser(user, async () => {
+        await this.revokeFamily(existing.familyId);
+        await this.audit(user, 'AUTH_LOGOUT', ctx);
+      });
     });
-    if (!existing) return;
-    await this.revokeFamily(existing.familyId);
-    const user = await this.prisma.client.user.findUnique({ where: { id: existing.userId } });
-    if (user) await this.audit(user, 'AUTH_LOGOUT', ctx);
   }
 
   // ---- FR-107: password reset ---------------------------------------------------------------
@@ -754,7 +906,7 @@ export class AuthService implements OnApplicationShutdown {
 
     // Everything that depends on the account happens after this method has returned, so the
     // response is the same for a real, pending, deactivated or unknown account (FU-BE-31).
-    this.defer(() => this.deliverReset(email));
+    this.defer(() => this.orgContext.runSystem('AUTH_BOOTSTRAP', () => this.deliverReset(email)));
   }
 
   /** Waits for deferred work (tests and graceful shutdown). */
@@ -787,35 +939,62 @@ export class AuthService implements OnApplicationShutdown {
     // 72-hour invite token and gets nothing (FU-BE-32).
     if (user?.isActive !== true || user.passwordHash === null) return;
     const token = newOpaqueToken();
-    await this.prisma.client.user.update({
-      where: { id: user.id },
-      data: {
-        setPasswordTokenHash: sha256Hex(token),
-        setPasswordExpiresAt: new Date(Date.now() + RESET_TTL_MS),
-      },
-    });
+    await this.asUser(user, () =>
+      this.prisma.client.user.update({
+        where: { id: user.id },
+        data: {
+          setPasswordTokenHash: sha256Hex(token),
+          setPasswordExpiresAt: new Date(Date.now() + RESET_TTL_MS),
+        },
+      }),
+    );
     const url = `${this.webOrigin}/admin/reset-password#token=${token}`;
     await this.mail.sendPasswordReset(user.email, url);
   }
 
-  async resetPassword(token: string, newPassword: string, ctx: RequestContext): Promise<void> {
-    const tokenHash = sha256Hex(token);
-    const user = await this.prisma.client.user.findUnique({
-      where: { setPasswordTokenHash: tokenHash },
+  resetPassword(token: string, newPassword: string, ctx: RequestContext): Promise<void> {
+    return this.orgContext.runSystem('AUTH_BOOTSTRAP', async () => {
+      const tokenHash = sha256Hex(token);
+      const user = await this.prisma.client.user.findUnique({
+        where: { setPasswordTokenHash: tokenHash },
+      });
+      if (!user) throw this.invalidResetLink();
+      await this.asUser(user, () => this.setPassword(user, tokenHash, newPassword, ctx));
     });
+  }
+
+  /**
+   * Both the 30 minute reset link (FR-107) and the 72 hour staff invite link (ADR 0003 section 4)
+   * land here: they share the set_password_* columns and the same hardening. Single use and expiry
+   * are enforced by the UPDATE itself, the new hash, the spent token and the revocation of every
+   * refresh family are one transaction, the response is the same generic 400 for every refusal,
+   * and nobody is signed in. An invite (no password yet) is audited as AUTH_INVITE_ACCEPTED,
+   * a reset as AUTH_PASSWORD_RESET (FU-BE-32).
+   */
+  private async setPassword(
+    user: User,
+    tokenHash: string,
+    newPassword: string,
+    ctx: RequestContext,
+  ): Promise<void> {
     if (
-      !user?.isActive ||
+      !user.isActive ||
       !user.setPasswordExpiresAt ||
       user.setPasswordExpiresAt.getTime() <= Date.now()
     ) {
       throw this.invalidResetLink();
     }
+    const wasInvite = user.passwordHash === null;
     const passwordHash = await this.passwords.hash(newPassword);
     const done = await this.prisma.client.$transaction(async (tx) => {
       // Single use: the token is only valid while it is still stored and unexpired.
       const updated = await tx.user.updateMany({
         where: {
           id: user.id,
+          isActive: true,
+          // The password state the link was read under (null for an invite): a change in
+          // between, such as a deactivation or another reset, refuses this one.
+          passwordHash: user.passwordHash,
           setPasswordTokenHash: tokenHash,
           setPasswordExpiresAt: { gt: new Date() },
         },
@@ -836,7 +1015,7 @@ export class AuthService implements OnApplicationShutdown {
         data: {
           orgId: user.orgId,
           actorId: user.id,
-          action: 'AUTH_PASSWORD_RESET',
+          action: wasInvite ? 'AUTH_INVITE_ACCEPTED' : 'AUTH_PASSWORD_RESET',
           entityType: 'user',
           entityId: user.id,
           ip: ctx.ip ?? null,
@@ -889,10 +1068,15 @@ export class AuthService implements OnApplicationShutdown {
     const open = Prisma.sql`(old.locked_until IS NULL AND old.failed_logins < ${MAX_FAILED_LOGINS}::int)`;
     const stale = Prisma.sql`(old.locked_until IS NULL AND old.failed_logins >= ${MAX_FAILED_LOGINS}::int
       AND old.updated_at < now() - interval '2 minutes')`;
-    const rows = await this.prisma.client.$queryRaw<{ granted: boolean }[]>(Prisma.sql`
+    const rows = await this.raw(
+      'atomic login-attempt reservation under a row lock (FU-BE-26)',
+      () =>
+        this.prisma.client.$queryRaw<{ granted: boolean }[]>(Prisma.sql`
       WITH old AS (
         SELECT id, failed_logins, locked_until, updated_at
-        FROM users WHERE id = ${user?.id ?? NO_USER_ID}::uuid FOR UPDATE)
+        FROM users
+        WHERE id = ${user?.id ?? NO_USER_ID}::uuid AND org_id = ${user?.orgId ?? NO_ORG_ID}::uuid
+        FOR UPDATE)
       UPDATE users u SET
         failed_logins = CASE WHEN ${lockExpired} THEN 1
                              WHEN ${open} THEN old.failed_logins + 1
@@ -901,30 +1085,41 @@ export class AuthService implements OnApplicationShutdown {
                             ELSE now() + make_interval(mins => ${LOCKOUT_MINUTES}::int) END
       FROM old
       WHERE u.id = old.id AND (${lockExpired} OR ${open} OR ${stale})
-      RETURNING (${lockExpired} OR ${open}) AS granted`);
+      RETURNING (${lockExpired} OR ${open}) AS granted`),
+    );
     const row = rows[0];
     if (!row) return 'denied';
     if (row.granted) return 'granted';
     // The stuck window was just locked here.
-    if (user) await this.audit(user, 'AUTH_ACCOUNT_LOCKED', ctx, { minutes: LOCKOUT_MINUTES });
+    if (user) await this.recordLock(user, ctx);
     return 'denied';
   }
 
   /** Gives back a reservation whose secret turned out right but whose login is not finished. */
-  private async refundAttempt(userId: string): Promise<void> {
-    await this.prisma.client.$executeRaw`
-      UPDATE users SET failed_logins = failed_logins - 1
-      WHERE id = ${userId}::uuid AND locked_until IS NULL AND failed_logins > 0`;
+  private async refundAttempt(user: Pick<User, 'id' | 'orgId'>): Promise<void> {
+    await this.raw(
+      'give back one reserved attempt, never below zero or under a lock',
+      () =>
+        this.prisma.client.$executeRaw`
+        UPDATE users SET failed_logins = failed_logins - 1
+        WHERE id = ${user.id}::uuid AND org_id = ${user.orgId}::uuid
+          AND locked_until IS NULL AND failed_logins > 0`,
+    );
   }
 
   /** Clears the counter after a success, but never a lock a sibling request just set. */
   private async clearFailures(
-    userId: string,
-    db: Prisma.TransactionClient = this.prisma.client,
+    user: Pick<User, 'id' | 'orgId'>,
+    db: Db = this.prisma.client,
   ): Promise<void> {
-    await db.$executeRaw`
-      UPDATE users SET failed_logins = 0, locked_until = NULL, updated_at = now()
-      WHERE id = ${userId}::uuid AND (locked_until IS NULL OR locked_until <= now())`;
+    await this.raw(
+      'clear the failure counter without clearing a live lock',
+      () =>
+        db.$executeRaw`
+        UPDATE users SET failed_logins = 0, locked_until = NULL, updated_at = now()
+        WHERE id = ${user.id}::uuid AND org_id = ${user.orgId}::uuid
+          AND (locked_until IS NULL OR locked_until <= now())`,
+    );
   }
 
   /**
@@ -934,17 +1129,53 @@ export class AuthService implements OnApplicationShutdown {
    * same round trips.
    */
   private async registerFailure(user: User | null, ctx: RequestContext): Promise<void> {
-    const locked = await this.prisma.client.$queryRaw<{ id: string }[]>(Prisma.sql`
-      UPDATE users SET
-        locked_until = now() + make_interval(mins => ${LOCKOUT_MINUTES}::int),
-        updated_at = now()
-      WHERE id = ${user?.id ?? NO_USER_ID}::uuid
-        AND failed_logins >= ${MAX_FAILED_LOGINS}::int
-        AND locked_until IS NULL
-      RETURNING id`);
-    if (user && locked.length === 1) {
-      await this.audit(user, 'AUTH_ACCOUNT_LOCKED', ctx, { minutes: LOCKOUT_MINUTES });
-    }
+    const locked = await this.raw(
+      'set the lockout once, after the last reserved attempt fails',
+      () =>
+        this.prisma.client.$queryRaw<{ id: string }[]>(Prisma.sql`
+        UPDATE users SET
+          locked_until = now() + make_interval(mins => ${LOCKOUT_MINUTES}::int),
+          updated_at = now()
+        WHERE id = ${user?.id ?? NO_USER_ID}::uuid AND org_id = ${user?.orgId ?? NO_ORG_ID}::uuid
+          AND failed_logins >= ${MAX_FAILED_LOGINS}::int
+          AND locked_until IS NULL
+        RETURNING id`),
+    );
+    if (user && locked.length === 1) await this.recordLock(user, ctx);
+  }
+
+  /**
+   * The one place a lock is recorded: the AUTH_ACCOUNT_LOCKED audit row (which the SUPER_ADMIN
+   * lock-events list reads) and, after the response, an email to the org's SUPER_ADMINs (P-03).
+   * The alert is deferred and its failures only logged by name, so it never changes the answer,
+   * the status or the statements of the locked user's request. Locked accounts are shown only to
+   * SUPER_ADMINs of the same org (FU-BE-22).
+   */
+  private async recordLock(user: User, ctx: RequestContext): Promise<void> {
+    await this.audit(user, 'AUTH_ACCOUNT_LOCKED', ctx, { minutes: LOCKOUT_MINUTES });
+    const { orgId, email, fullName } = user;
+    this.defer(() => this.alertAdmins(orgId, email, fullName));
+  }
+
+  private alertAdmins(orgId: string, email: string, name: string): Promise<void> {
+    return this.orgContext.runInOrg(orgId, async () => {
+      const admins = await this.prisma.client.user.findMany({
+        where: { role: UserRole.SUPER_ADMIN, isActive: true, passwordHash: { not: null } },
+        select: { email: true },
+      });
+      for (const admin of admins) {
+        try {
+          await this.mail.sendStaffAccountLocked(admin.email, {
+            email,
+            name,
+            minutes: LOCKOUT_MINUTES,
+          });
+        } catch (e) {
+          // Name only: the error may carry an address.
+          this.logger.error(`Lock alert email failed (${errorName(e)})`);
+        }
+      }
+    });
   }
 
   private async audit(
@@ -952,7 +1183,7 @@ export class AuthService implements OnApplicationShutdown {
     action: string,
     ctx: RequestContext,
     metadata: Prisma.InputJsonObject = {},
-    db: Prisma.TransactionClient = this.prisma.client,
+    db: Db = this.prisma.client,
   ): Promise<void> {
     await db.auditLog.create({
       data: {
@@ -1007,34 +1238,48 @@ export class AuthService implements OnApplicationShutdown {
   /** Full sign-in: clears the failure counter and opens a new refresh-token family. */
   private async startSession(
     user: UserWithOrg,
-    db: Prisma.TransactionClient = this.prisma.client,
+    db: Db = this.prisma.client,
     boundTotpSecret?: string,
   ): Promise<SessionOutcome> {
     const refreshToken = newOpaqueToken();
+    // The access token is signed BEFORE the refresh family commits, so its iat can never be later
+    // than the time a concurrent 2FA disable, admin reset, role change or deactivation writes its
+    // tokens-valid-after marker after waiting for this insert (S1). It is returned only if the
+    // insert below succeeds.
+    const body = this.authenticated(user);
     // The token exists only if the password is still the one that was verified. FOR SHARE (not
     // FOR KEY SHARE, which does not conflict with a non-key UPDATE) locks the user row in this
     // statement: it waits for an in-flight reset, re-checks the WHERE against the new row version
     // and inserts nothing; a reset arriving later waits for this commit, so its revoke-all sees
     // the token. A family can never outlive a reset (FR-104, FR-107).
     // `?? ''` is deliberate: an empty hash can never equal a stored hash, so it inserts nothing.
+    // The role read at sign-in is bound too: a promotion to a 2FA-required role in between inserts
+    // nothing, so no family exists that skipped 2FA (the guard refuses the old-role access token,
+    // but a refresh would re-read the new role).
     // A 2FA completion also binds the TOTP secret it checked: an admin reset of the user's 2FA
     // that lands in between clears it, so no session is opened from the old second factor.
     const totpBound =
       boundTotpSecret === undefined
         ? Prisma.empty
         : Prisma.sql`AND u.totp_enabled AND u.totp_secret_enc = ${boundTotpSecret}`;
-    const inserted = await db.$queryRaw<{ id: string }[]>(Prisma.sql`
-      INSERT INTO refresh_tokens (user_id, family_id, token_hash, expires_at)
-      SELECT u.id, ${randomUUID()}::uuid, ${sha256Hex(refreshToken)},
-             ${new Date(Date.now() + REFRESH_TTL_MS)}::timestamptz
-      FROM users u
-      WHERE u.id = ${user.id}::uuid AND u.is_active AND u.password_hash = ${user.passwordHash ?? ''}
-        ${totpBound}
-      FOR SHARE OF u
-      RETURNING id`);
+    const inserted = await this.raw(
+      'open a refresh family: INSERT ... SELECT ... FOR SHARE of the user row (FR-104, FR-107)',
+      () =>
+        db.$queryRaw<{ id: string }[]>(Prisma.sql`
+          INSERT INTO refresh_tokens (user_id, family_id, token_hash, expires_at)
+          SELECT u.id, ${randomUUID()}::uuid, ${sha256Hex(refreshToken)},
+                 ${new Date(Date.now() + REFRESH_TTL_MS)}::timestamptz
+          FROM users u
+          WHERE u.id = ${user.id}::uuid AND u.org_id = ${user.orgId}::uuid AND u.is_active
+            AND u.password_hash = ${user.passwordHash ?? ''}
+            AND u.role = ${user.role}::user_role
+            ${totpBound}
+          FOR SHARE OF u
+          RETURNING id`),
+    );
     if (inserted.length !== 1) throw new PasswordChangedSignal();
-    await this.clearFailures(user.id, db);
-    return { body: this.authenticated(user), refreshToken };
+    await this.clearFailures(user, db);
+    return { body, refreshToken };
   }
 
   private session(user: UserWithOrg, accessToken: string): AuthSessionDto {
@@ -1062,8 +1307,4 @@ export class AuthService implements OnApplicationShutdown {
       return null;
     }
   }
-}
-
-function errorName(e: unknown): string {
-  return e instanceof Error ? e.name : 'unknown';
 }
