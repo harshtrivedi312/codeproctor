@@ -42,9 +42,11 @@ This tab turns each business requirement into testable functional requirements (
 
 - **FR-301** Recruiters build a test from fixed questions or random picks by tag and difficulty, with total duration and per-section time limits. Sections run in order; the server enforces each section's deadline, and a finished section cannot be reopened. Extra time scales section limits by the same percentage as the total (ADR 0002).
 - **FR-302** Proctoring profile per test: STANDARD (web), STRICT (web + second camera), LOCKDOWN (desktop client required). LOCKDOWN is not offered in this build; it returns with the lockdown client in a later phase (D-13, ADR 0007).
-- **FR-303** Invitations are sent by email with a unique token link, valid within a start window (for example 7 days) and usable once.
-- **FR-304** Bulk invitations by CSV upload; reminders 24 hours before window closes.
+- **FR-303** Invitations are sent by email with a unique token link and usable once. The recruiter picks a slot when inviting (C-46, ADR 0017): the invitation carries the slot start (`window_start`) and the last moment a candidate may start (`window_end`, the slot start plus a late-start allowance of 15 minutes, an architect detail). The candidate cannot start before the slot opens; after `window_end` the link shows the expired page and the session becomes EXPIRED (ADR 0002). A candidate cannot self-book or reschedule: a reschedule request goes to the recruiter, who changes the slot.
+- **FR-304** Bulk invitations by CSV upload, with a slot per row or one slot for the batch (subject to the capacity rule of FR-306). Reminders are sent by the app while it runs, in the daily maintenance window before the slot (ADR 0017 sections 4.5 and 4.6), and at invitation time, because nothing can send one while the instances are off; and the invitation email states the slot's start and end in the candidate's time zone and in UTC.
 - **FR-305** Per-candidate accommodations: extra time percentage, disabled detectors, allowed assistive tools.
+- **FR-306** Slot capacity and booking limits (C-43, ADR 0017). No slot may be created that would put more than 5 candidates in overlapping windows (the capacity of the pilot, NFR-02; a configured limit), or whose window overlaps the daily maintenance wake or an outstanding ceiling stop (ADR 0017 4.3), or that would take the booked instance-hours of the month above the configured budget limit. A refused slot returns a clear error that names the reason, and the recruiter picks another.
+- **FR-307** Staff schedule view and review windows (C-43). Recruiters and reviewers see the schedule: slots, their windows and capacity, the daily maintenance window and the review windows. A reviewer can request a review window for a time when the instances are running or for a later slot; the request is created while the app runs and the app schedules the start and the ceiling as for a slot (ADR 0017 4.1). Staff can use the app only while the instances run (ADR 0017 4.6); the schedule view says when the next window opens.
 
 ### M4 Candidate Portal
 
@@ -60,6 +62,7 @@ This tab turns each business requirement into testable functional requirements (
 - **FR-404** Room scan: candidate rotates the camera 360 degrees and shows the desk surface; stored as a clip.
 - **FR-405** STRICT profile: candidate opens a QR-code link on a phone that streams a side view of the desk.
 - **FR-406** A practice question lets candidates try the editor before the timed test.
+- **FR-407** Closed-instance page (C-46, ADR 0017 4.6). While the instances are off, the invitation link opens a static page on Cloudflare Pages that says the test is not open yet and that the start time is in the invitation email. The page holds no candidate data, token or time, and stores nothing; it does not tell a candidate whether a slot exists. It switches to the normal flow when the API answers.
 
 ### M5 Coding Environment & Execution
 
@@ -149,7 +152,9 @@ Rules and timing details: ADR 0002 (updated 2026-10-01, D-16, D-17).
 | GET/POST/PATCH | /questions, /questions/:id | Author | CRUD and versions |
 | POST | /questions/:id/validate | Author | Run reference solution on all tests and variants |
 | GET/POST/PATCH | /tests, /tests/:id | Recruiter | Test templates |
-| POST | /tests/:id/invitations | Recruiter | Single or bulk invite |
+| POST | /tests/:id/invitations | Recruiter | Single or bulk invite, with a slot (FR-303, FR-306) |
+| GET | /schedule | Recruiter, Reviewer | Slots, windows, capacity and the next window (FR-307) |
+| POST | /review-windows | Reviewer | Request a review window (FR-307) |
 | POST | /candidate/session/start | Candidate | Exchange invitation token + OTP for session token |
 | GET | /candidate/session/consent | Candidate | The consent document for this session (version and text) |
 | POST | /candidate/session/consent/sign | Candidate | Sign with the typed full legal name; server timestamps it, stores the PDF and emails a copy (FR-401) |
@@ -172,8 +177,8 @@ Rules and timing details: ADR 0002 (updated 2026-10-01, D-16, D-17).
 | ID | Area | Requirement |
 | --- | --- | --- |
 | NFR-01 | Performance | API p95 under 300 ms excluding code execution; code run result under 5 s p95 |
-| NFR-02 | Capacity | 200 concurrent candidates on the pilot deployment |
-| NFR-03 | Availability | 99.5% during scheduled test windows |
+| NFR-02 | Capacity | 5 concurrent candidates on the pilot deployment (C-43; two scheduled instances, ADR 0017), proven by the load test on the real instances before the first candidate (C-43a). 200 concurrent candidates is the production target |
+| NFR-03 | Availability | 99.5% during the scheduled windows of the two-instance pilot (C-43, ADR 0017): measured from the start of a slot's window to its end, with the 45-minute early start, the health check and the owner alarm as the means; a failed start that is reported and rescheduled before the slot counts as no outage |
 | NFR-04 | Security | OWASP ASVS Level 2; TLS 1.2+; secrets in environment vault; rate limits on all public endpoints |
 | NFR-05 | Privacy | Data minimization, encryption at rest, retention jobs, deletion on request within 30 days. Provisional (D-19, Legal to confirm): erasure waits while a review or appeal is open and runs as soon as it closes; the candidate is told. Proposed wording for Legal (D-27): erasure completes within 30 days of the request, or within 30 days after an open review or appeal closes, whichever is later; the candidate is told about any delay. The hold is configurable |
 | NFR-06 | Accessibility | WCAG 2.1 AA on candidate and staff screens |
