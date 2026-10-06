@@ -15,6 +15,13 @@ pnpm dev:web:mock        # from the repo root; same as: pnpm --filter @codeproct
 Open <http://localhost:3000/t/demo/test> for the mocked candidate test screen preview. The token
 `demo` only works when `NEXT_PUBLIC_API_MOCKING=enabled`.
 
+Mock mode is blocked in builds: `next build` fails when `NEXT_PUBLIC_API_MOCKING=enabled`, whatever
+`NODE_ENV` is (`next.config.ts`). CI and QA throwaway builds can opt in with
+`ALLOW_MOCKING_IN_PRODUCTION_BUILD=staging-only`; never use it in any deployed image.
+If the mock worker fails to start, the app shows a toast and API calls stop waiting after 5 s.
+`public/mockServiceWorker.js` is committed and still ships as a static file; it does nothing unless
+the mock code registers it, and that code is removed from builds without mock mode.
+
 Without mocks: `pnpm dev:web` (expects the API at `NEXT_PUBLIC_API_URL`, default
 `http://localhost:4000`).
 
