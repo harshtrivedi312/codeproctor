@@ -7,11 +7,13 @@
 //                                         been ERASED (the erasure fence, ADR 0004 section 9). When it
 //                                         says ERASED the caller writes nothing. Retry error:
 //                                         SessionLockRetryError.
-//   lockForAccommodation(tx, sessionId)   The accommodation writers (the PATCH, redact-note, the
-//                                         video-check PUT, and the reductions of erasure, R-10 and
-//                                         R-4). The same lock in ANY status, ERASED included, and it
-//                                         returns the status it read under the lock. Retry error:
-//                                         AccommodationLockedError (409 ACCOMMODATION_LOCKED).
+//   lockForAccommodation(tx, sessionId)   The STAFF accommodation routes (the PATCH, redact-note and the
+//                                         video-check PUT, through SessionStateService) and the one
+//                                         org-job site, RetentionRepository.casAccommodations in a
+//                                         plain runInOrg (erasure, R-4 and R-10). The same lock in ANY
+//                                         status, ERASED included, and it returns the status it read
+//                                         under the lock. Retry error: AccommodationLockedError (409
+//                                         ACCOMMODATION_LOCKED).
 //   lockAnySession(tx, sessionId)         The erasure-compatible JOBS (ingest close and key
 //                                         destruction, the sweeps, evidence-expire, the erasure re-run,
 //                                         the consent-PDF job): the same lock in ANY status, ERASED
@@ -36,8 +38,10 @@
 //                         and ONE named STAFF method in SessionStateService, the proctor-resume transition
 //                         (ADR 0002 P-3: it writes session_sections.deadline_at and must stop at ERASED);
 //   lockAnySession        only withAnySession (SessionJobProcessor), through SessionStateService;
-//   lockForAccommodation  the accommodation writers and the erasure, R-4 and R-10 jobs, through
-//                         SessionStateService.
+//   lockForAccommodation  the STAFF accommodation routes (PATCH, redact-note, video-check PUT) through
+//                         SessionStateService, and ONE org-job site, RetentionRepository.casAccommodations
+//                         (retention/retention.repository.ts) in a plain runInOrg, for erasure, R-4 and R-10.
+//                         R-4 runs there too: it has no SERVICE caller.
 // A file outside `database/` may not export any of the three names, nor an alias of one.
 //
 // SCOPES, an allowlist of actors (the hub's rulings, session-lock-scope.ts). All three work in a SERVICE
@@ -251,7 +255,8 @@ async function lockAnyStatus(
  * lock as guardLive, in ANY status, ERASED included, because the reduction of an erased session's
  * accommodations must run. The first row lock of the transaction (lock order: the ADR 0004 advisory
  * lock where used, then this, then `invitations`). Called by SessionStateService.lockForAccommodation
- * only, for the accommodation writers and the erasure, R-4 and R-10 jobs.
+ * only, for the STAFF accommodation routes (PATCH, redact-note, video-check PUT) and, from a plain `runInOrg`,
+ * RetentionRepository.casAccommodations (erasure, R-4, R-10).
  *
  * @returns the status the session had when it was locked, so the caller can apply the refusal list of
  *   ADR 0015 section 6 (c) (an ERASED status, the erasure facts, the results marker) on a status that

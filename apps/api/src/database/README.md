@@ -682,11 +682,11 @@ parameter, is gone: the module exports exactly the three locks, `erasedStatusOf`
 
 ### Who calls what (FU-DB-67, the hub's rulings)
 
-| Lock                   | Callers outside `database/`                                                                                                                                                                                                  | The wrapper                                |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| `guardLive`            | **exactly two**: `SessionJobProcessor.withLiveSession` (SERVICE) and **one** named STAFF method, `SessionStateService.proctorResume` (the proctor-resume transition, ADR 0002 P-3: it writes `session_sections.deadline_at`) | `SessionStateService.guardLive`            |
-| `lockAnySession`       | only `SessionJobProcessor.withAnySession`, through SessionStateService                                                                                                                                                       | `SessionStateService.lockAnySession`       |
-| `lockForAccommodation` | the accommodation writers (PATCH, redact-note, video-check PUT: `AccommodationsService`) and **one** retention file, `retention/retention.repository.ts` (`RetentionRepository.casAccommodations`: R-4, R-10 and erasure)    | `SessionStateService.lockForAccommodation` |
+| Lock                   | Callers outside `database/`                                                                                                                                                                                                                                                                                                              | The wrapper                                |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `guardLive`            | **exactly two**: `SessionJobProcessor.withLiveSession` (SERVICE) and **one** named STAFF method, `SessionStateService.proctorResume` (the proctor-resume transition, ADR 0002 P-3: it writes `session_sections.deadline_at`)                                                                                                             | `SessionStateService.guardLive`            |
+| `lockAnySession`       | only `SessionJobProcessor.withAnySession`, through SessionStateService                                                                                                                                                                                                                                                                   | `SessionStateService.lockAnySession`       |
+| `lockForAccommodation` | **STAFF**, through SessionStateService: the accommodations PATCH, redact-note and the video-check PUT (`AccommodationsService`). And **one** org-job site: `retention/retention.repository.ts`, `RetentionRepository.casAccommodations`, in a plain `runInOrg`, for erasure, R-4 and R-10 (R-4 runs there too: it has no SERVICE caller) | `SessionStateService.lockForAccommodation` |
 
 Four tests pin it, all with an **empty** list outside the defining file today:
 
@@ -702,9 +702,10 @@ Four tests pin it, all with an **empty** list outside the defining file today:
     definition; the `withLiveSession` file has exactly one `.guardLive(` call (a text count; a reviewer backs it up).
   - `lockAnySession`: at most two entries (SessionStateService and SessionJobProcessor), each `why` naming
     `withAnySession`.
-  - `lockForAccommodation`: each entry's `why` names an accommodation writer (at most two such files:
-    SessionStateService and AccommodationsService) or the entry is `retention/retention.repository.ts` (at most one
-    retention file) with a `why` naming the **erasure, R-4 and R-10** jobs.
+  - `lockForAccommodation`: each entry's `why` names the accommodation writer **and one of the STAFF routes**
+    (PATCH, redact-note, video-check PUT; at most two such files: SessionStateService and AccommodationsService), or
+    the entry is `retention/retention.repository.ts` (at most one org-job file, in a plain `runInOrg`) with a `why`
+    naming the **erasure, R-4 and R-10** jobs.
   - Inside `database/`, only `database/session-locks.ts` may name a lock.
 - **The export check** (`findLockExports`, same spec, **no allowlist**): no file outside `database/` exports a
   lock or an alias of one, other than through `export ... from` (the import guard catches that): not
@@ -718,13 +719,15 @@ Four tests pin it, all with an **empty** list outside the defining file today:
 - **Backend B**, in the PR that builds SessionStateService: exactly **its SessionStateService file** to `allowed`
   of the import-guard rule, and entries to `CALL_SITES` for SessionStateService (`guardLive`,
   `lockForAccommodation`, `lockAnySession`, with a `why` naming `proctorResume`, `withAnySession` and the
-  accommodation writers), `SessionJobProcessor` (`guardLive` with `withLiveSession`, `lockAnySession` with
-  `withAnySession`) and `AccommodationsService` (`lockForAccommodation`, why naming the accommodation writers). Nothing else.
+  accommodation writers: PATCH, redact-note, video-check PUT), `SessionJobProcessor` (`guardLive` with
+  `withLiveSession`, `lockAnySession` with `withAnySession`) and `AccommodationsService` (`lockForAccommodation`, why
+  naming the STAFF accommodation writers and a route). Nothing else.
   Import the cores under an alias or call them as `locks.guardLive(...)` inside the wrapper, and keep the
   `proctorResume` call as the one `this.guardLive(`.
 - **Database B**, in **its own PR**: the entry `retention/retention.repository.ts` (`lockForAccommodation`, `why`
-  naming the erasure, R-4 and R-10 jobs). Not before: the stale-entry check fails while the call does not exist.
-  It calls SessionStateService's wrapper, not the core.
+  naming the erasure, R-4 and R-10 jobs and the plain `runInOrg`). Not before: the stale-entry check fails while the
+  call does not exist. `casAccommodations` calls SessionStateService's wrapper, not the core, in a plain
+  `runInOrg(orgId)`; R-4 runs there too, there is no SERVICE caller of `lockForAccommodation`.
 
 The errors are exported from `index.ts` (`SessionNotFoundError`, `SessionLockRetryError`,
 `AccommodationLockedError`), so a caller can map them without importing the module.
@@ -781,8 +784,8 @@ and no UPDATE.
   A **STAFF or SERVICE call under the SessionStateService grant is fine** (ADR 0015 section 6, ADR 0013 section
   5.7): no grant is needed there (FU-DB-232, checked after CS-4 PR 2), and an active one changes nothing (tested).
 - **Why `lockForAccommodation` alone passes in a plain `runInOrg`** (ADR 0015 section 6(b), ADR 0006 section 8.5):
-  Database B's retention jobs (erasure, R-4, R-10) run per session in `runInOrg(orgId)`, and their per-candidate
-  advisory lock is raw SQL, which session scopes refuse. The conditions: the target session id comes from the
+  Database B's one retention site, `RetentionRepository.casAccommodations` (erasure, R-4 and R-10), runs per session in
+  `runInOrg(orgId)`, and the per-candidate advisory lock it takes first is raw SQL, which session scopes refuse. The conditions: the target session id comes from the
   job's own query and the update runs under the org filter, so another org's session reads no row and throws
   `SessionNotFoundError`, never a lock on another org's row (tested); CANDIDATE, system and every other kind stay
   refused for it too; the same-value `updateMany` shape and the any-status semantics (ERASED included) are

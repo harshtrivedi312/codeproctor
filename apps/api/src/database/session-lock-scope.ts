@@ -5,7 +5,8 @@
 //              accommodation routes);
 // and `lockForAccommodation`, ONLY it, also passes in
 //   - a plain org JOB scope: `runInOrg(orgId)`, an org scope with no user, no session and not system. Database B's
-//     retention jobs (erasure, R-4, R-10) run per session there (ADR 0015 section 6(b), ADR 0006 section 8.5).
+//     retention site, RetentionRepository.casAccommodations (erasure, R-4, R-10), runs there, one session at a
+//     time (ADR 0015 section 6(b), ADR 0006 section 8.5); R-4 has no SERVICE caller.
 // Everything else is refused at run time, before any statement, with a value-free OrgScopeViolationError:
 //   - a CANDIDATE scope, with or without a grant, for every lock (a candidate path never takes a session lock:
 //     `SessionStateService.transition()`'s own compare-and-set UPDATE is the first `sessions` lock of a

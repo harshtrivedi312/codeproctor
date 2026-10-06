@@ -307,8 +307,9 @@ export const LOCK_CALLER_RULES = {
   lockAnySession:
     'at most two files outside database/ (SessionStateService and SessionJobProcessor), each why naming withAnySession',
   lockForAccommodation:
-    'an accommodation writer (why names the accommodation writer, via SessionStateService) or, at most one, ' +
-    'retention/retention.repository.ts (why names the erasure, R-4 and R-10 jobs)',
+    'a STAFF accommodation route through SessionStateService (why names the accommodation writer and one of ' +
+    'PATCH, redact-note, video-check) or, at most one, retention/retention.repository.ts, ' +
+    'RetentionRepository.casAccommodations in a plain runInOrg (why names the erasure, R-4 and R-10 jobs)',
 } as const;
 
 /** The pinned retention call site of lockForAccommodation (Database B: RetentionRepository.casAccommodations). */
@@ -328,8 +329,8 @@ const callCount = (code: string, pattern: RegExp): number =>
  *     most one names each; with `files`, the proctorResume file has exactly one `this.guardLive(` call and the
  *     withLiveSession file exactly one `.guardLive(` call (a text count, which a reviewer backs up);
  *   - lockAnySession: at most two entries outside database/, each why naming `withAnySession`;
- *   - lockForAccommodation: each entry outside database/ is an accommodation writer (why names the accommodation
- *     writer; at most two such files) or `retention/retention.repository.ts` (at most one retention file, why
+ *   - lockForAccommodation: each entry outside database/ is a STAFF accommodation route through SessionStateService
+ *     (why names the accommodation writer and one of PATCH, redact-note, video-check; at most two such files) or `retention/retention.repository.ts` (at most one retention file, why
  *     naming the erasure, R-4 and R-10 jobs); anything else is an extra entry and fails.
  * Database B adds the retention entry in its own PR (not before: the stale-entry check would fail).
  */
@@ -426,9 +427,12 @@ export function lockCallSiteProblems(
     );
   }
   for (const [path, entry] of writers) {
-    if (!hasWord(entry.why, 'ccommodation')) {
+    if (
+      !hasWord(entry.why, 'ccommodation') ||
+      !hasWord(entry.why, 'PATCH|redact-note|video-check')
+    ) {
       out.push(
-        `${path}: a lockForAccommodation entry's why must name an accommodation writer (or be ${RETENTION_LOCK_FILE})`,
+        `${path}: a lockForAccommodation entry's why must name the accommodation writer and one of PATCH, redact-note, video-check (or be ${RETENTION_LOCK_FILE})`,
       );
     }
   }

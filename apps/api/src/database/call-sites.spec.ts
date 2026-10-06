@@ -547,7 +547,7 @@ export class SessionStateService {
   const GOOD: CallSiteList = {
     [STATE]: {
       names: ['guardLive', 'lockForAccommodation', 'lockAnySession'],
-      why: 'SessionStateService: the wrappers of the three locks; its single STAFF method proctorResume calls guardLive; withAnySession and the accommodation writers use the other two',
+      why: 'SessionStateService: the wrappers of the three locks; its single STAFF method proctorResume calls guardLive; withAnySession and the accommodation writers (PATCH, redact-note, video-check PUT) use the other two',
     },
     [PROCESSOR]: {
       names: ['guardLive', 'lockAnySession'],
@@ -555,11 +555,11 @@ export class SessionStateService {
     },
     [ACCOMMODATIONS]: {
       names: ['lockForAccommodation'],
-      why: 'AccommodationsService: the accommodation writers (PATCH, redact-note, video-check)',
+      why: 'AccommodationsService: the STAFF accommodation writers (PATCH, redact-note, video-check PUT)',
     },
     [RETENTION_LOCK_FILE]: {
       names: ['lockForAccommodation'],
-      why: 'RetentionRepository.casAccommodations: the erasure, R-4 and R-10 jobs',
+      why: 'RetentionRepository.casAccommodations, plain runInOrg: the erasure, R-4 and R-10 jobs',
     },
   };
   const GOOD_FILES: SourceFile[] = [
@@ -675,9 +675,34 @@ export class SessionStateService {
     ).toEqual([
       expect.stringContaining('lockForAccommodation: 3 accommodation-writer files'),
       expect.stringContaining(
-        "webhooks/webhooks.service.ts: a lockForAccommodation entry's why must name an accommodation writer",
+        "webhooks/webhooks.service.ts: a lockForAccommodation entry's why must name the accommodation writer and one of PATCH, redact-note, video-check",
       ),
     ]);
+  });
+
+  it('TC-008 lockForAccommodation: the STAFF routes are named (PATCH, redact-note, video-check PUT), and the retention site is a plain runInOrg job, with no SERVICE caller of R-4', () => {
+    // An accommodation file whose why names no route fails; one route is enough.
+    expect(
+      lockCallSiteProblems({
+        ...GOOD,
+        [ACCOMMODATIONS]: { names: ['lockForAccommodation'], why: 'the accommodation writers' },
+      }),
+    ).toEqual([
+      `${ACCOMMODATIONS}: a lockForAccommodation entry's why must name the accommodation writer and one of PATCH, redact-note, video-check (or be ${RETENTION_LOCK_FILE})`,
+    ]);
+    for (const route of ['PATCH', 'redact-note', 'video-check']) {
+      expect(
+        lockCallSiteProblems({
+          ...GOOD,
+          [ACCOMMODATIONS]: {
+            names: ['lockForAccommodation'],
+            why: `the accommodation writers, ${route}`,
+          },
+        }),
+      ).toEqual([]);
+    }
+    expect(LOCK_CALLER_RULES.lockForAccommodation).toContain('PATCH, redact-note, video-check');
+    expect(LOCK_CALLER_RULES.lockForAccommodation).toContain('plain runInOrg');
   });
 
   it('TC-008 lockForAccommodation: at most ONE retention file, and it is retention/retention.repository.ts, with a why naming the erasure, R-4 and R-10 jobs', () => {

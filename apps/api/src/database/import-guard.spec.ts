@@ -64,8 +64,9 @@ export const RULES: readonly GuardRule[] = [
       'and .lockAnySession are thin wrappers, and everyone else calls the wrappers. Who calls what is pinned in ' +
       'call-sites.spec.ts (CALL_SITES): guardLive from SessionJobProcessor.withLiveSession and the single STAFF ' +
       'method SessionStateService.proctorResume only; lockAnySession from SessionJobProcessor.withAnySession ' +
-      'only; lockForAccommodation from the accommodation writers and RetentionRepository.casAccommodations (the ' +
-      'erasure, R-4 and R-10 jobs) only. The core itself refuses at run time a CANDIDATE scope and system scope ' +
+      'only; lockForAccommodation from the STAFF accommodation routes (PATCH, redact-note, video-check PUT) ' +
+      'through SessionStateService and from RetentionRepository.casAccommodations in a plain runInOrg ' +
+      '(erasure, R-4 and R-10) only. The core itself refuses at run time a CANDIDATE scope and system scope ' +
       '(all three locks) and a plain runInOrg (guardLive and lockAnySession); a STAFF or SERVICE call under the ' +
       'SessionStateService grant is fine (ADR 0015 section 6, ADR 0013 section 5.7). That entry in `allowed` is ' +
       'the review point.',
@@ -460,6 +461,8 @@ describe('import guard: the session write locks have no importer yet (FU-DB-67, 
     expect(locks.why).toContain('SessionStateService.proctorResume');
     expect(locks.why).toContain('withAnySession');
     expect(locks.why).toContain('RetentionRepository.casAccommodations');
+    expect(locks.why).toContain('PATCH, redact-note, video-check PUT');
+    expect(locks.why).toContain('plain runInOrg');
     expect(locks.why).toContain('CANDIDATE scope and system scope');
     expect(locks.why).toContain('under the SessionStateService grant is fine');
     expect(locks.why).toContain('#205');
