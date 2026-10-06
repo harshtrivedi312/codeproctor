@@ -40,6 +40,7 @@ class ScoredPair:
     subject: str  # random volunteer code, never a name; not written to the report
     kind: str  # "genuine" or "impostor"
     score: float
+    unscored: bool = False  # no score could be computed (capture failure); see score_pairs
 
 
 @dataclass(frozen=True, slots=True)

@@ -28,19 +28,25 @@ def load_scores(path: Path) -> list[groups.ScoredPair]:
     pairs: list[groups.ScoredPair] = []
     with path.open(newline="") as fh:
         reader = csv.DictReader(fh)
-        if set(reader.fieldnames or ()) != {"subject", "kind", "score"}:
-            raise ValueError("scores.csv columns must be exactly: subject,kind,score")
+        names = set(reader.fieldnames or ())
+        if names not in ({"subject", "kind", "score"}, {"subject", "kind", "score", "status"}):
+            raise ValueError("scores.csv columns must be: subject,kind,score[,status]")
         for row in reader:
             if row["kind"] not in ("genuine", "impostor"):
                 raise ValueError("kind must be genuine or impostor")
             subject = (row["subject"] or "").strip()
+            status = (row.get("status") or "scored").strip()
+            if status not in ("scored", "unscored"):
+                raise ValueError("status must be scored or unscored")
             try:
-                score = float(row["score"])
+                score = float(row["score"]) if row["score"] not in ("", None) else float("nan")
             except (TypeError, ValueError):
                 raise ValueError("score must be a number") from None
+            if status == "scored" and score != score:  # NaN: a scored row needs a number
+                raise ValueError("score must be a number")
             if not subject:
                 raise ValueError("subject must not be empty")
-            pairs.append(groups.ScoredPair(subject, row["kind"], score))
+            pairs.append(groups.ScoredPair(subject, row["kind"], score, status == "unscored"))
     return pairs
 
 
@@ -61,12 +67,15 @@ def run(
     data_label: str,
     dimension: str | None = None,
 ) -> str:
-    g = [p.score for p in pairs if p.kind == "genuine"]
-    i = [p.score for p in pairs if p.kind == "impostor"]
+    # An unscored genuine pair would go to manual review, so its stored -1.0 counts as a false
+    # non-match. An unscored impostor pair cannot be a false match: it is left out and counted.
+    usable = [p for p in pairs if not (p.kind == "impostor" and p.unscored)]
+    g = [p.score for p in usable if p.kind == "genuine"]
+    i = [p.score for p in usable if p.kind == "impostor"]
     points = metrics.sweep(g, i, metrics.default_thresholds())
     rec = metrics.recommend(points, target_fmr)
     grp = (
-        groups.group_report(pairs, demographics, rec.point.threshold, dimension)
+        groups.group_report(usable, demographics, rec.point.threshold, dimension)
         if rec.point is not None and demographics and dimension
         else []
     )
@@ -77,6 +86,9 @@ def run(
         rec=rec,
         groups=grp,
         synthetic=synthetic_data,
+        unscored_genuine=sum(1 for p in pairs if p.kind == "genuine" and p.unscored),
+        genuine_total=len(g),
+        dropped_impostor=sum(1 for p in pairs if p.kind == "impostor" and p.unscored),
     )
 
 
