@@ -186,13 +186,14 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
         });
 
         if (route.id === 'questions-validate') {
-          it(`TC-006 FR-203: ${label} writes exactly one QUESTION_VALIDATION_FINISHED row when the job ends (system write by the starter, no IP, outcome and 12-hex revision only)`, async () => {
+          it(`TC-006 FR-203: ${label} writes exactly one QUESTION_VALIDATION_FINISHED row when the job ends (ADR 0001 C-3: a job row has actor NULL and IP NULL, metadata names the starter and the STARTED row)`, async () => {
             const who = await as(roleFor(route));
             const t = await route.prepare(h, h.orgId);
             const before = await lastId();
             const res = await call(h, route.method, t.path, who.token, t.body);
             expect(route.ok).toContain(res.status);
             await settleValidation(h);
+            const started202 = res.body as { version: number; revision: string };
 
             const rows = await since(before);
             expect(rows.map((r) => r.action).sort()).toEqual([
@@ -206,16 +207,72 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
             expect(row.entityType).toBe('question');
             expect(row.entityId).toBe(t.entityId);
             expect(row.orgId).toBe(h.orgId);
-            expect(row.actorId).toBe(who.id);
-            expect(row.ip).toBeNull(); // a system write: no request, so no caller IP
+            expect(row.actorId).toBeNull(); // a job, not a request (ADR 0001 C-3)
+            expect(row.ip).toBeNull();
             const meta = row.metadata as Record<string, unknown>;
-            expect(Object.keys(meta).sort()).toEqual(['outcome', 'revision', 'version']);
+            expect(Object.keys(meta).sort()).toEqual([
+              'initiatedBy',
+              'outcome',
+              'revision',
+              'startedAuditId',
+              'system',
+              'version',
+            ]);
+            expect(meta.system).toBe(true);
+            expect(meta.initiatedBy).toBe(who.id);
+            // startedAuditId resolves to exactly the STARTED row of this question and version.
+            const target = await h.owner.auditLog.findMany({
+              where: { id: BigInt(meta.startedAuditId as string | number) },
+            });
+            expect(target).toHaveLength(1);
+            expect(target[0]?.id).toBe(started.id);
+            expect([
+              target[0]?.action,
+              target[0]?.entityId,
+              target[0]?.actorId,
+              target[0]?.orgId,
+            ]).toEqual(['QUESTION_VALIDATION_STARTED', t.entityId, who.id, h.orgId]);
             expect(['PASSED', 'FAILED', 'ERROR', 'STALE']).toContain(meta.outcome);
-            expect(meta.outcome).toBe('ERROR'); // no JUDGE0_URL in the harness: the run cannot execute
+            expect(meta.outcome).toBe('ERROR'); // the harness port never executes code
             expect(meta.revision).toMatch(/^[0-9a-f]{12}$/);
-            expect(meta.version).toBe((started.metadata as { version: number }).version);
+            expect(meta.revision).toBe(started202.revision.slice(0, 12));
+            expect(meta.version).toBe(started202.version);
             expect(row.createdAt.getTime()).toBeGreaterThanOrEqual(started.createdAt.getTime());
             expectNoSecrets(row, [...t.secrets, who.token]);
+          });
+
+          it(`TC-006 FR-203: ${label} writes no FINISHED row when the question is archived while the job runs (STARTED stays)`, async () => {
+            const who = await as(roleFor(route));
+            const t = await route.prepare(h, h.orgId);
+            let release: () => void = () => undefined;
+            const held = new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            h.setValidationPort({
+              validate: async () => {
+                await held;
+                throw new Error('held job released');
+              },
+            });
+            try {
+              const before = await lastId();
+              const res = await call(h, route.method, t.path, who.token, t.body);
+              expect(route.ok).toContain(res.status);
+              await h.owner.question.update({
+                where: { id: t.entityId as string },
+                data: { isArchived: true },
+              });
+              release();
+              await settleValidation(h);
+              expect((await since(before)).map((r) => r.action)).toEqual([
+                'QUESTION_VALIDATION_STARTED',
+              ]);
+            } finally {
+              release();
+              h.setValidationPort({
+                validate: () => Promise.reject(new Error('harness: no code execution')),
+              });
+            }
           });
 
           it(`TC-006: ${label} refused (401, 403) or on another org's question (404) writes neither STARTED nor FINISHED, even after the job queue is idle`, async () => {
@@ -234,10 +291,6 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
             await settleValidation(h);
             expect(await since(before)).toEqual([]);
           });
-          // GAP: "no FINISHED row when the question is archived or gone while the job runs" is not
-          // driven here: with no JUDGE0_URL the job ends in milliseconds, so an owner-DB archive
-          // cannot be timed between start and finish. The backend's question-validation.e2e-spec
-          // (stubbed port) covers it; recorded in docs/followups/qa.md.
         }
 
         it(`TC-006: ${label} writes no audit row when refused (401, 403) or when the target is in another org (404)`, async () => {
