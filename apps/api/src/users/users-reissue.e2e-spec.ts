@@ -392,11 +392,11 @@ describe('Re-issue a pending invite (DL-23, FR-103, FR-105, TC-004, TC-008)', ()
       typeof import('../infrastructure/infrastructure.module')
     >('../infrastructure/infrastructure.module');
     const redis = app.get<import('ioredis').Redis>(REDIS_CLIENT);
-    const set = jest.spyOn(redis, 'set').mockRejectedValue(new Error('redis down'));
+    const evalSpy = jest.spyOn(redis, 'eval').mockRejectedValue(new Error('redis down'));
     try {
       await reissue(admin, pending.id).expect(503);
     } finally {
-      set.mockRestore();
+      evalSpy.mockRestore();
     }
     expect(await tokenHashOf(pending.id)).toBe(before);
     expect(await auditCount(pending.id)).toBe(0);

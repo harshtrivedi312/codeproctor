@@ -72,6 +72,10 @@ export interface DraftValues {
   short: { canonical: string; acceptedVariants: { key: string; value: string }[] };
 }
 
+/** Ids the form makes for variants that are not saved yet; the API's ids never start like this. */
+export const DRAFT_VARIANT_PREFIX = 'draft-var';
+export const isDraftVariantId = (id: string): boolean => id.startsWith(DRAFT_VARIANT_PREFIX);
+
 export const variantName = (index: number): string => `Variant ${index + 1}`;
 
 export const DEFAULT_LIMITS = { cpuMs: 2000, wallMs: 5000, memoryKb: 262_144 };
@@ -412,7 +416,8 @@ export const draftSchema = z
           return;
         }
         const errors = checkParams(parsed.value);
-        const missing = missingPlaceholders(parsed.value, used);
+        // An inactive variant is never rendered (the API checks it again when it is switched on).
+        const missing = v.active ? missingPlaceholders(parsed.value, used) : [];
         if (missing.length > 0) {
           errors.push(
             `Needs a value for ${names(missing)}: the question uses ${missing.length === 1 ? 'it' : 'them'} as a placeholder.`,

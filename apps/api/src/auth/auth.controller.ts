@@ -106,7 +106,7 @@ export class AuthController {
   @ApiUnauthorizedResponse({ description: 'Challenge expired' })
   async enrollStart(@Body() dto: ChallengeDto): Promise<TotpEnrollmentDto> {
     const challenge = await this.auth.resolveChallenge(dto.challengeToken);
-    return this.auth.startEnrollment(challenge.userId);
+    return this.auth.startEnrollment(challenge.userId, challenge.pwv);
   }
 
   @Public()
@@ -212,7 +212,7 @@ export class AuthController {
   @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
   @ApiForbiddenResponse({
     description:
-      "Wrong or locked current password, or a wrong or replayed TOTP code (same body): code 'REAUTH_FAILED' (not a session expiry). 2FA required for this role: code 'TWO_FACTOR_REQUIRED_FOR_ROLE', checked after the password",
+      "Wrong or locked current password, or a wrong or replayed TOTP code (one identical body, detail 'The password or code is incorrect.', so it does not say which part was wrong): code 'REAUTH_FAILED' (not a session expiry). A code that was already used to sign in counts as replayed: wait for the next code. 2FA required for this role: code 'TWO_FACTOR_REQUIRED_FOR_ROLE', checked after the password",
   })
   @ApiConflictResponse({ description: '2FA is not on' })
   @ApiServiceUnavailableResponse({ description: 'Code verification is temporarily unavailable' })
