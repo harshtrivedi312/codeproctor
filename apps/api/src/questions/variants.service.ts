@@ -33,6 +33,7 @@ import { computeRevision } from './revision';
 import {
   audit,
   checkRevision,
+  currentRevision,
   loadVariants,
   lockDraft,
   NOT_FOUND,
@@ -47,9 +48,10 @@ import type {
   VariantListDto,
   VariantMutationDto,
   VariantOverrideFieldsDto,
+  VariantOverrideMutationDto,
 } from './dto/variants.dto';
 import { MAX_VARIANTS } from './dto/variants.dto';
-import type { VariantDto, VariantTestCaseOverrideDto } from './dto/questions.dto';
+import type { VariantDto, RevisionResultDto } from './dto/questions.dto';
 
 const VARIANT_NOT_FOUND = 'Variant not found.';
 const SLOT_NOT_FOUND = 'Test case not found.';
@@ -193,8 +195,8 @@ export class VariantsService {
     variantId: string,
     expectedRevision: string | undefined,
     ctx: RequestContext,
-  ): Promise<void> {
-    await this.prisma.client.$transaction(async (tx) => {
+  ): Promise<RevisionResultDto> {
+    return this.prisma.client.$transaction(async (tx) => {
       const v = await lockDraft(tx, id, version, 'variants');
       await checkRevision(tx, v, expectedRevision);
       // ADR 0005 AI-1: AI reference rows are append-only and variant_id cascades on delete, so a
@@ -215,6 +217,7 @@ export class VariantsService {
       });
       if (count !== 1) throw new NotFoundException(VARIANT_NOT_FOUND);
       await audit(tx, actor, 'QUESTION_VARIANT_REMOVED', id, ctx, { version, variantId });
+      return { revision: await currentRevision(tx, v.id) };
     });
   }
 
@@ -250,7 +253,7 @@ export class VariantsService {
     testCaseId: string,
     dto: VariantOverrideFieldsDto,
     ctx: RequestContext,
-  ): Promise<VariantTestCaseOverrideDto> {
+  ): Promise<VariantOverrideMutationDto> {
     return this.prisma.client.$transaction(async (tx) => {
       const v = await lockDraft(tx, id, version, 'variants');
       await checkRevision(tx, v, dto.expectedRevision);
@@ -282,6 +285,7 @@ export class VariantsService {
         position: slot.position,
         input: dto.input,
         expectedOutput: dto.expectedOutput,
+        revision: await currentRevision(tx, v.id),
       };
     });
   }
@@ -295,8 +299,8 @@ export class VariantsService {
     testCaseId: string,
     expectedRevision: string | undefined,
     ctx: RequestContext,
-  ): Promise<void> {
-    await this.prisma.client.$transaction(async (tx) => {
+  ): Promise<RevisionResultDto> {
+    return this.prisma.client.$transaction(async (tx) => {
       const v = await lockDraft(tx, id, version, 'variants');
       await checkRevision(tx, v, expectedRevision);
       await this.requireVariant(tx, v.id, variantId);
@@ -307,6 +311,7 @@ export class VariantsService {
         variantId,
         testCaseId,
       });
+      return { revision: await currentRevision(tx, v.id) };
     });
   }
 
@@ -360,6 +365,6 @@ export class VariantsService {
     const row = variants.find((x) => x.id === variantId);
     if (!row) throw new NotFoundException(VARIANT_NOT_FOUND);
     const variant: VariantDto = toVariantDto(row, cases);
-    return { variant, revision: computeRevision(v, cases, variants) };
+    return { variant, revision: await currentRevision(tx, v.id) };
   }
 }
