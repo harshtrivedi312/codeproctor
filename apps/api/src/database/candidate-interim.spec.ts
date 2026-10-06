@@ -2928,10 +2928,111 @@ describe('CS-4.4 consents: ONE create under the ConsentService grant (item 9, AD
     expect(() => asCandidate('Consent', 'create', { data: signed }, undefined)).toThrow(
       /creates this row only under its create grant/,
     );
-    // The column is neither the session key nor one of the server-set ones: it is plain data of the create.
-    const bare: Record<string, unknown> = { ...signed };
-    delete bare.ageConfirmedAt;
-    expect(() => create(bare)).not.toThrow();
+    // A decline is written without it (it carries none, see the FU-DB-260 tests below).
+    expect(() => create(declined)).not.toThrow();
+  });
+
+  it('FR-401 C-30 TC-095 FU-DB-260 a sign carries ageConfirmedAt as a valid Date: absent, undefined, null, an invalid Date, an ISO string, a number and the like are refused', () => {
+    const ISO = '2026-10-06T12:00:00.000Z';
+    const absent: Record<string, unknown> = { ...signed };
+    delete absent.ageConfirmedAt;
+    const refused: Record<string, unknown>[] = [
+      absent,
+      { ...signed, ageConfirmedAt: undefined },
+      { ...signed, ageConfirmedAt: null },
+      { ...signed, ageConfirmedAt: new Date(Number.NaN) },
+      { ...signed, ageConfirmedAt: ISO },
+      { ...signed, ageConfirmedAt: 1_791_288_000_000 },
+      { ...signed, ageConfirmedAt: true },
+      { ...signed, ageConfirmedAt: {} },
+      { ...signed, ageConfirmedAt: { set: new Date() } },
+      { ...signed, ageConfirmedAt: [new Date()] },
+      { ...signed, ageConfirmedAt: 'true' },
+    ];
+    for (const row of refused) {
+      expect(() => create(row)).toThrow(
+        /ageConfirmedAt is required with signedAt in this create, as a valid Date set by the service \(ADR 0013 CS-4\.4\)/,
+      );
+    }
+    // No value in the message: not the string, not the number.
+    for (const value of [ISO, 1_791_288_000_000]) {
+      let message = '';
+      try {
+        create({ ...signed, ageConfirmedAt: value });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toContain('Consent.create');
+      expect(message).not.toContain(String(value));
+      expect(message).not.toContain('Synthetic Name');
+    }
+    // A valid Date passes, and so does a sign in the same create as the keys and the name.
+    expect(() => create({ ...signed, ageConfirmedAt: new Date() })).not.toThrow();
+    expect(() => create({ ...signed, ageConfirmedAt: new Date(0) })).not.toThrow();
+  });
+
+  it('FR-401 C-30 TC-095 FU-DB-260 a decline never carries ageConfirmedAt: a Date, an ISO string, a number and a false are refused; null and undefined count as not carried', () => {
+    for (const value of [
+      new Date(),
+      new Date(Number.NaN),
+      '2026-10-06T12:00:00.000Z',
+      7,
+      false,
+      0,
+      '',
+    ]) {
+      expect(() => create({ ...declined, ageConfirmedAt: value })).toThrow(
+        /ageConfirmedAt cannot be set with declinedAt in this create \(ADR 0013 CS-4\.4\)/,
+      );
+    }
+    // The decline with no value in the message.
+    let message = '';
+    try {
+      create({ ...declined, ageConfirmedAt: '2026-10-06T12:00:00.000Z' });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('Consent.create');
+    expect(message).not.toContain('2026-10-06');
+    // Not carried: null, undefined and absent.
+    expect(() => create({ ...declined, ageConfirmedAt: null })).not.toThrow();
+    expect(() => create({ ...declined, ageConfirmedAt: undefined })).not.toThrow();
+    expect(() => create(declined)).not.toThrow();
+    // The existing rule still comes first: a row with both times is the XOR's.
+    expect(() => create({ ...signed, declinedAt: new Date() })).toThrow(
+      /exactly one of signedAt and declinedAt/,
+    );
+  });
+
+  it('FR-401 C-30 TC-095 FU-DB-260 the two rules are declared on the consents create and nowhere else, and bind the CANDIDATE create only', () => {
+    const rule = CANDIDATE_MODELS.Consent as Record<string, unknown>;
+    expect(rule.createNeedsDate).toEqual({ signedAt: 'ageConfirmedAt' });
+    expect(rule.createForbids).toEqual({ declinedAt: ['ageConfirmedAt'] });
+    for (const [model, other] of Object.entries(CANDIDATE_MODELS)) {
+      if (model === 'Consent') continue;
+      expect(other).not.toHaveProperty('createNeedsDate');
+      expect(other).not.toHaveProperty('createForbids');
+    }
+    // SERVICE writes of the same model (the consent-PDF job, a seed-like create) are untouched.
+    const bareSign: Record<string, unknown> = { ...signed };
+    delete bareSign.ageConfirmedAt;
+    expect(() => asService('Consent', 'create', writeArgs('create', bareSign))).not.toThrow();
+    expect(() =>
+      asService('Consent', 'create', writeArgs('create', { ...declined, ageConfirmedAt: 7 })),
+    ).not.toThrow();
+    for (const operation of UPDATES) {
+      expect(() =>
+        asService(
+          'Consent',
+          operation,
+          writeArgs(operation, {
+            pdfKey: 'x',
+            pdfGeneratedAt: new Date(),
+            copyEmailedAt: new Date(),
+          }),
+        ),
+      ).not.toThrow();
+    }
   });
 
   it('FR-401 C-30 TC-008 a candidate cannot write ageConfirmedAt by any update, and never reads it, in a select, a where or an aggregate', () => {

@@ -759,7 +759,7 @@ describe('ADR 0013 CS-4.4: column allowlists and grants against Postgres (NFR-04
       expect((await consentOf(D))?.ageConfirmedAt).toBeNull();
     });
 
-    it('FR-401 C-30 TC-008 a create that carries ageConfirmedAt is refused without the grant, and under a grant that leaves the column out: no statement, no row', async () => {
+    it('FR-401 C-30 TC-008 a grant that leaves ageConfirmedAt out refuses a create that carries it, and so does no grant at all: no statement, no row', async () => {
       const C = await freshSession('c2c');
       await db.statements.reset();
       await asCandidate(C, async () => {
@@ -777,6 +777,38 @@ describe('ADR 0013 CS-4.4: column allowlists and grants against Postgres (NFR-04
       });
       expect(await statementCount()).toBe(0);
       expect(await consentOf(C)).toBeNull();
+    });
+
+    it('FR-401 C-30 TC-095 FU-DB-260 a sign with no valid ageConfirmedAt is refused under the create grant, and a decline that carries one is refused: no statement, no row', async () => {
+      const C = await freshSession('c2d');
+      await db.statements.reset();
+      const absent: Row = { ...signedRow(C) };
+      delete absent.ageConfirmedAt;
+      for (const row of [
+        absent,
+        { ...signedRow(C), ageConfirmedAt: undefined },
+        { ...signedRow(C), ageConfirmedAt: null },
+        { ...signedRow(C), ageConfirmedAt: new Date(Number.NaN) },
+        { ...signedRow(C), ageConfirmedAt: WHEN.toISOString() },
+        { ...signedRow(C), ageConfirmedAt: WHEN.getTime() },
+      ]) {
+        await expect(make(C, row)).rejects.toThrow(
+          /ageConfirmedAt is required with signedAt in this create, as a valid Date/,
+        );
+      }
+      for (const value of [WHEN, WHEN.toISOString(), 1]) {
+        await expect(make(C, { ...declinedRow(C), ageConfirmedAt: value })).rejects.toThrow(
+          /ageConfirmedAt cannot be set with declinedAt in this create/,
+        );
+      }
+      expect(await statementCount()).toBe(0);
+      expect(await consentOf(C)).toBeNull();
+      // The valid sign and the plain decline still go through (null on a decline counts as not carried).
+      await make(C, signedRow(C));
+      expect((await consentOf(C))?.ageConfirmedAt).toEqual(WHEN);
+      const D = await freshSession('c2e');
+      await make(D, { ...declinedRow(D), ageConfirmedAt: null });
+      expect((await consentOf(D))?.ageConfirmedAt).toBeNull();
     });
 
     it('TC-008 write-once: a second create for the session fails with P2002 (the service answers 409), and the first row is as it was', async () => {

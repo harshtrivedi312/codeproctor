@@ -450,6 +450,21 @@ export type CandidateModelRule =
        */
       readonly createNeeds?: Readonly<Record<string, string>>;
       /**
+       * A create that sets the key column must also carry the value column as a valid `Date` (`instanceof
+       * Date` and not NaN): `undefined`, `null`, an invalid Date, an ISO string and a number are refused.
+       * Consents (C-30, D-55, FU-DB-260): `signedAt` needs `ageConfirmedAt`. The service sets server time
+       * as a Date, so a string means a bug. There is no database CHECK for it (it would block the PDF job's
+       * update of a row signed before C-30), so this is the net under ConsentService. It binds the
+       * CANDIDATE create only: SERVICE and STAFF writes, and every update, are untouched.
+       */
+      readonly createNeedsDate?: Readonly<Record<string, string>>;
+      /**
+       * A create that sets the key column may not carry any of the listed columns (`null` and `undefined`
+       * count as not carried, as for `createXor`). Consents (C-30, D-55, FU-DB-260): a decline
+       * (`declinedAt`) never carries `ageConfirmedAt`.
+       */
+      readonly createForbids?: Readonly<Record<string, readonly string[]>>;
+      /**
        * The create names a consent text that the extension checks against the organisation's current one
        * (`organizations.current_consent_text_id`, one read on the factory client) before the insert. Only
        * the consents create sets it.
@@ -582,7 +597,9 @@ export const CANDIDATE_MODELS: Readonly<Partial<Record<ModelName, CandidateModel
     // `copyEmailedAt` stay with the consent-PDF job. The row a create returns omits `signedName`, `ip`,
     // `userAgent` and `ageConfirmedAt` (read allowlist, candidate-interim.ts). The database has no CHECK
     // on `ageConfirmedAt` (it would block the PDF job's update of a pre-C-30 signed row), so ConsentService
-    // is what requires it. This replaces PR 1's update-only, write-once update path (FU-DB-195 (h)).
+    // requires it, and this create is the net under it (FU-DB-260, hub option (a)): a sign carries
+    // `ageConfirmedAt` as a valid Date (`createNeedsDate`) and a decline never carries it (`createForbids`),
+    // thrown before any statement. This replaces PR 1's update-only, write-once update path (FU-DB-195 (h)).
     Consent: {
       kind: 'session',
       grantedCreate: [
@@ -599,6 +616,8 @@ export const CANDIDATE_MODELS: Readonly<Partial<Record<ModelName, CandidateModel
       createRequired: ['sessionId', 'consentTextId'],
       createXor: ['signedAt', 'declinedAt'],
       createNeeds: { signedAt: 'signedName' },
+      createNeedsDate: { signedAt: 'ageConfirmedAt' },
+      createForbids: { declinedAt: ['ageConfirmedAt'] },
       checksConsentText: true,
     },
     // CS-4.4: create only: `session_question_id`, `kind` (RUN or SUBMIT), `language`, `source_code`, and

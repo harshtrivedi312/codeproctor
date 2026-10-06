@@ -508,11 +508,14 @@ so a widened list fails.
   facts check and before the insert. A create is therefore **two statements** (the read, then the insert), also
   inside a `$transaction` (the read then uses a second connection). A text published between the read and the
   insert is not caught by the extension; the read narrows that window, ConsentService's own version check
-  (`CONSENT_TEXT_CHANGED`) is the other half. Exactly one of `signedAt` and `declinedAt` is set, and `signedName`
-  comes with `signedAt` (thrown before the database). Writable: `signedName`, `signedAt`, `declinedAt`,
-  `ageConfirmedAt` (C-30, D-55: server time, set at sign; ConsentService requires the body's `ageConfirmed: true`,
-  because the database has no CHECK on it, which would block the PDF job's update of a row signed before C-30),
-  `ip`, `userAgent`; `pdfKey`, `pdfGeneratedAt` and `copyEmailedAt` are the consent-PDF job's (SERVICE). The row
+  (`CONSENT_TEXT_CHANGED`) is the other half. Exactly one of `signedAt` and `declinedAt` is set, `signedName` comes
+  with `signedAt`, a sign carries `ageConfirmedAt` as a valid `Date` (`createNeedsDate`: an ISO string, a number,
+  `null` or an invalid Date is refused) and a decline never carries it (`createForbids`), all thrown before the
+  database with the column names only. These rules bind the CANDIDATE create only: a SERVICE or STAFF write and
+  every update, the consent-PDF job's update of a pre-C-30 row included, are untouched. Writable: `signedName`, `signedAt`, `declinedAt`,
+  `ageConfirmedAt` (C-30, D-55: server time, set at sign; ConsentService requires the body's `ageConfirmed: true`;
+  the database has no CHECK on it, which would block the PDF job's update of a row signed before C-30, so the
+  create is the net under the service, FU-DB-260), `ip`, `userAgent`; `pdfKey`, `pdfGeneratedAt` and `copyEmailedAt` are the consent-PDF job's (SERVICE). The row
   the create returns omits `signedName`, `ip`, `userAgent` and `ageConfirmedAt`, and a `select` of them throws,
   grant or not.
   The create and `SessionStateService.transition()` run **one after the other in one transaction, each under
