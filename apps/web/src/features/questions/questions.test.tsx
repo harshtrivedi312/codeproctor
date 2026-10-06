@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react';
+import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { axe } from 'vitest-axe';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -112,17 +112,6 @@ describe('Question list (FR-201..FR-205)', () => {
       MOCK_USERS.reviewer,
     );
     expect(await screen.findByText(/Your role does not have access/)).toBeInTheDocument();
-  });
-
-  it('FR-103 TC-004: the mock refuses the detail routes to a recruiter, so reference solutions never reach other roles', async () => {
-    renderAsStaff(<div />, MOCK_USERS.recruiter);
-    const { api } = await import('@/lib/api/client');
-    await waitFor(async () => {
-      const { response } = await api.GET('/v1/questions/{questionId}', {
-        params: { path: { questionId: 'q-merge' } },
-      });
-      expect(response.status).toBe(403);
-    });
   });
 
   it('WCAG 2.1 AA: the list has no axe violations', async () => {

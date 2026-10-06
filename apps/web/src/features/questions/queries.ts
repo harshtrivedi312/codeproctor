@@ -19,12 +19,22 @@ export const questionKeys = {
   ai: (id: string) => ['questions', 'ai', id] as const,
 };
 
+/**
+ * The question routes answer RFC 7807 problem bodies. 409 and 422 carry `detail` and `errors[]`
+ * only (no machine code), so callers tell cases apart by endpoint and status, never by a code.
+ */
 function fail(response: Response, error: unknown): never {
-  const message =
-    error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
-  const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
-  throw new ApiFailure(response.status, message, code);
+  const body = error && typeof error === 'object' ? (error as Record<string, unknown>) : {};
+  const text = (v: unknown) => (typeof v === 'string' ? v : '');
+  const errors = Array.isArray(body.errors) ? body.errors.map((e) => text(e)).filter(Boolean) : [];
+  throw new ApiFailure(response.status, text(body.detail) || text(body.message), '', errors);
 }
+
+export type FullQuestion = Schemas['QuestionDetail'];
+export type RedactedQuestion = Schemas['QuestionDetailRedacted'];
+/** What a detail route returns: the full detail for writers, the allowlisted view for other readers. */
+export type QuestionView = FullQuestion | RedactedQuestion;
+export const isFullQuestion = (d: QuestionView): d is FullQuestion => 'current' in d;
 
 export function useQuestions() {
   return useQuery({
@@ -37,7 +47,7 @@ export function useQuestions() {
   });
 }
 
-export async function fetchQuestion(id: string): Promise<Schemas['QuestionDetail']> {
+export async function fetchQuestion(id: string): Promise<QuestionView> {
   const { data, error, response } = await api.GET('/v1/questions/{questionId}', {
     params: { path: { questionId: id } },
   });
@@ -103,10 +113,13 @@ export function useCreateQuestion() {
 export function useSaveQuestion(id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (vars: { content: Schemas['QuestionContent']; expectedRevision: number }) => {
+    mutationFn: async (vars: {
+      content: Schemas['QuestionContent'];
+      expectedUpdatedAt: string;
+    }) => {
       const { data, error, response } = await api.PATCH('/v1/questions/{questionId}', {
         params: { path: { questionId: id } },
-        body: { ...vars.content, expectedRevision: vars.expectedRevision },
+        body: { ...vars.content, expectedUpdatedAt: vars.expectedUpdatedAt },
       });
       if (!data) fail(response, error);
       return data;
@@ -146,10 +159,10 @@ export async function fetchValidationJob(
 export function usePublishQuestion(id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (expectedRevision: number) => {
+    mutationFn: async (expectedUpdatedAt: string) => {
       const { data, error, response } = await api.POST('/v1/questions/{questionId}/publish', {
         params: { path: { questionId: id } },
-        body: { expectedRevision },
+        body: { expectedUpdatedAt },
       });
       if (!data) fail(response, error);
       return data;

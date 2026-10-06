@@ -12,7 +12,7 @@ import { Textarea } from '@/components/ui/textarea';
 import type { Schemas } from '@/lib/api/client';
 import { LANGUAGE_LABELS, newId, type VariantValues } from '../draft';
 import { MarkdownPreview } from '../markdown-preview';
-import { checkParams, parseParams, undeclaredPlaceholders } from '../params';
+import { checkParams, missingPlaceholders, parseParams } from '../params';
 import { usePrefill } from '../queries';
 import { placeholdersOf, renderTemplate } from '../template';
 import { errorAt, useDraftField, type ApiTabProps } from '../use-draft-field';
@@ -26,7 +26,6 @@ type Proposal = Schemas['PrefillResponse']['proposals'][number];
  * author accepts them.
  */
 export function VariantsTab({ form, readOnly, questionId }: ApiTabProps): React.JSX.Element {
-  const [defs, setDefs] = useDraftField(form, 'paramSchema');
   const [variants, setVariants] = useDraftField(form, 'variants');
   const statement = useWatch({ control: form.control, name: 'statementMd' });
   const starter = useWatch({ control: form.control, name: 'starterCode' });
@@ -34,7 +33,6 @@ export function VariantsTab({ form, readOnly, questionId }: ApiTabProps): React.
   const used = placeholdersOf(
     [statement, ...Object.values(starter), ...Object.values(reference)].join('\n'),
   );
-  const undeclared = undeclaredPlaceholders(used, defs);
 
   function patchVariant(id: string, patch: Partial<VariantValues>): void {
     setVariants(variants.map((v) => (v.id === id ? { ...v, ...patch } : v)));
@@ -49,91 +47,16 @@ export function VariantsTab({ form, readOnly, questionId }: ApiTabProps): React.
         pass all of them before the question can be published.
       </Alert>
 
-      <section aria-labelledby="params-heading" className="space-y-2">
-        <h3 id="params-heading" className="text-sm font-medium">
-          Parameters
-        </h3>
-        <p className="text-sm text-muted-foreground">
-          Declare every placeholder the statement, starter code or reference solution uses.
+      <p className="text-sm text-muted-foreground" data-testid="placeholders-used">
+        {used.length > 0
+          ? `Placeholders used by this question: ${used.map((n) => `{{${n}}}`).join(', ')}. Give each variant a value for every one of them.`
+          : 'This question uses no {{name}} placeholders yet, so a variant can only override test data.'}
+      </p>
+      {errorAt(form, 'variants') ? (
+        <p role="alert" className="text-sm text-destructive">
+          {errorAt(form, 'variants')}
         </p>
-        {undeclared.length > 0 ? (
-          <Alert tone="warning" role="status">
-            Used but not declared: {undeclared.map((n) => `"${n}"`).join(', ')}.
-          </Alert>
-        ) : null}
-        {errorAt(form, 'paramSchema') ? (
-          <p role="alert" className="text-sm text-destructive">
-            {errorAt(form, 'paramSchema')}
-          </p>
-        ) : null}
-        <ul className="space-y-2">
-          {defs.map((d, i) => (
-            <li key={d.key} className="flex flex-wrap items-start gap-2">
-              <Field
-                id={`param-name-${i}`}
-                label={`Parameter ${i + 1} name`}
-                error={errorAt(form, `paramSchema.${i}.name`)}
-              >
-                {(aria) => (
-                  <Input
-                    {...aria}
-                    className="w-48 font-mono"
-                    value={d.name}
-                    disabled={readOnly}
-                    onChange={(e) =>
-                      setDefs(defs.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))
-                    }
-                  />
-                )}
-              </Field>
-              <Field id={`param-type-${i}`} label={`Parameter ${i + 1} type`}>
-                {(aria) => (
-                  <Select
-                    {...aria}
-                    value={d.type}
-                    disabled={readOnly}
-                    onChange={(e) =>
-                      setDefs(
-                        defs.map((x, j) =>
-                          j === i ? { ...x, type: e.target.value as typeof d.type } : x,
-                        ),
-                      )
-                    }
-                  >
-                    <option value="string">string</option>
-                    <option value="number">number</option>
-                    <option value="boolean">boolean</option>
-                    <option value="array">array</option>
-                  </Select>
-                )}
-              </Field>
-              {readOnly ? null : (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="mt-7"
-                  aria-label={`Remove parameter ${d.name || i + 1}`}
-                  onClick={() => setDefs(defs.filter((_, j) => j !== i))}
-                >
-                  <Trash2 className="size-4" aria-hidden="true" />
-                </Button>
-              )}
-            </li>
-          ))}
-        </ul>
-        {readOnly ? null : (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => setDefs([...defs, { name: '', type: 'number', key: newId('param') }])}
-          >
-            <Plus className="size-4" aria-hidden="true" />
-            Add parameter
-          </Button>
-        )}
-      </section>
+      ) : null}
 
       <section aria-labelledby="variants-heading" className="space-y-4">
         <h3 id="variants-heading" className="text-sm font-medium">
@@ -152,7 +75,7 @@ export function VariantsTab({ form, readOnly, questionId }: ApiTabProps): React.
             form={form}
             readOnly={readOnly}
             questionId={questionId}
-            defs={defs}
+            used={used}
             statement={statement}
             reference={reference}
             onChange={(patch) => patchVariant(v.id, patch)}
@@ -169,22 +92,7 @@ export function VariantsTab({ form, readOnly, questionId }: ApiTabProps): React.
                 {
                   id: newId('var'),
                   label: `Variant ${variants.length + 1}`,
-                  paramsText: JSON.stringify(
-                    Object.fromEntries(
-                      defs.map((d) => [
-                        d.name,
-                        d.type === 'number'
-                          ? 0
-                          : d.type === 'boolean'
-                            ? false
-                            : d.type === 'array'
-                              ? []
-                              : '',
-                      ]),
-                    ),
-                    null,
-                    2,
-                  ),
+                  paramsText: JSON.stringify(Object.fromEntries(used.map((n) => [n, ''])), null, 2),
                   active: true,
                   overrides: [],
                 },
@@ -203,7 +111,7 @@ export function VariantsTab({ form, readOnly, questionId }: ApiTabProps): React.
 interface CardProps extends Pick<ApiTabProps, 'form' | 'readOnly' | 'questionId'> {
   index: number;
   variant: VariantValues;
-  defs: Schemas['ParamDef'][];
+  used: string[];
   statement: string;
   reference: Record<string, string>;
   onChange: (patch: Partial<VariantValues>) => void;
@@ -216,7 +124,7 @@ function VariantCard({
   form,
   readOnly,
   questionId,
-  defs,
+  used,
   statement,
   reference,
   onChange,
@@ -225,7 +133,15 @@ function VariantCard({
   const [tests] = useDraftField(form, 'testCases');
   const [languages] = useDraftField(form, 'allowedLanguages');
   const parsed = parseParams(variant.paramsText);
-  const problems = parsed.ok ? checkParams(parsed.value, defs) : [parsed.error];
+  const missing = parsed.ok ? missingPlaceholders(parsed.value, used) : [];
+  const problems = parsed.ok
+    ? [
+        ...checkParams(parsed.value),
+        ...(missing.length > 0
+          ? [`Needs a value for ${missing.map((m) => `"${m}"`).join(', ')}.`]
+          : []),
+      ]
+    : [parsed.error];
   const formError = errorAt(form, `variants.${index}.paramsText`);
   const rendered = parsed.ok ? renderTemplate(statement, parsed.value) : null;
   const headingId = `variant-${variant.id}`;

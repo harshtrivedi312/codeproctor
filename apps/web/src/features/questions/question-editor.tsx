@@ -24,7 +24,9 @@ import { MonacoScope } from './monaco-field';
 import { STATUS_LABEL, TYPE_LABEL } from './labels';
 import {
   fetchQuestion,
+  isFullQuestion,
   questionKeys,
+  type QuestionView,
   useAiReferences,
   useCreateQuestion,
   usePublishQuestion,
@@ -101,8 +103,8 @@ interface Meta {
   questionId: string | null;
   status: Schemas['QuestionStatus'];
   version: number;
-  /** Content revision of the question: ties a validation to the exact saved content. */
-  revision: number;
+  /** Opaque token of the saved content (`updatedAt`): concurrency check and ties a validation to it. */
+  updatedAt: string;
   isPublished: boolean;
   validatedAt: string | null;
   report: Report | null;
@@ -113,21 +115,19 @@ function metaOf(detail: QuestionDetail | undefined): Meta {
     questionId: detail?.id ?? null,
     status: detail?.status ?? 'DRAFT',
     version: detail?.current.version ?? 1,
-    revision: detail?.current.revision ?? 1,
+    updatedAt: detail?.current.updatedAt ?? '',
     isPublished: detail?.current.isPublished ?? false,
     validatedAt: detail?.current.validatedAt ?? null,
     report: detail?.current.validationReport ?? null,
   };
 }
 
-const PUBLISH_REFUSAL: Record<string, string> = {
-  validation_required:
-    'The saved version has no passing validation. Press Validate and fix every failing test.',
-  ai_references_missing: 'AI reference solutions are missing.',
-  already_published: 'This version is already published.',
-  stale_version:
-    'This question changed after it was validated. Reload the latest version, then validate again.',
-};
+/**
+ * Why a publish did not happen, from the status alone (409 and 422 carry no machine code):
+ * 409 the question changed since (reload), 422 the gate message(s) in errors[], 404/405/501 the
+ * server cannot publish yet (permanent until reload), anything else is treated as transient.
+ */
+type PublishBlock = 'unavailable' | 'refused' | null;
 
 /**
  * FR-201..FR-205 editor. One react-hook-form holds the whole draft; the tabs edit parts of it.
@@ -170,11 +170,12 @@ export function QuestionEditor({
   const [notice, setNotice] = React.useState<string | null>(null);
   const [problem, setProblem] = React.useState<string | null>(null);
   const [publishProblem, setPublishProblem] = React.useState<string | null>(null);
-  /** The server has a newer revision than this editor started from (409 stale_version). */
+  const [publishBlock, setPublishBlock] = React.useState<PublishBlock>(null);
+  /** The server has newer content than this editor started from (409 on a call that sent expectedUpdatedAt). */
   const [conflict, setConflict] = React.useState(false);
   /** True only for a report that just came back from a job (an alert), not one loaded with the page. */
   const [reportFresh, setReportFresh] = React.useState(false);
-  const revisionRef = React.useRef(meta.revision);
+  const updatedAtRef = React.useRef(meta.updatedAt);
   // Double clicks on Validate or Publish start one action, not two.
   const busy = React.useRef(false);
   // Every Monaco model of this editor lives under this prefix and is disposed with the editor.
@@ -190,8 +191,8 @@ export function QuestionEditor({
   const [validating, setValidating] = React.useState(false);
   const alive = React.useRef(true);
   React.useEffect(() => {
-    revisionRef.current = meta.revision;
-  }, [meta.revision]);
+    updatedAtRef.current = meta.updatedAt;
+  }, [meta.updatedAt]);
   React.useEffect(() => {
     alive.current = true;
     return () => {
@@ -243,12 +244,13 @@ export function QuestionEditor({
         router.replace(`/admin/questions/${created.id}`);
         return;
       }
-      const saved = await save.mutateAsync({ content, expectedRevision: meta.revision });
+      const saved = await save.mutateAsync({ content, expectedUpdatedAt: meta.updatedAt });
       form.reset(toDraft(saved.type, saved.current.tags, saved.current));
       const newVersion = saved.current.version !== meta.version;
       setMeta(metaOf(saved));
       setPolicy(saved.aiReferencePolicy);
       setPublishProblem(null);
+      setPublishBlock((b) => (b === 'refused' ? null : b));
       setConflict(false);
       setReportFresh(false);
       setNotice(
@@ -257,7 +259,8 @@ export function QuestionEditor({
           : 'Saved. Validate again before publishing.',
       );
     } catch (e) {
-      if (e instanceof ApiFailure && e.status === 409 && e.code === 'stale_version') {
+      // A 409 on the save that sent expectedUpdatedAt means the content changed since it was loaded.
+      if (e instanceof ApiFailure && e.status === 409) {
         setConflict(true);
       } else setProblem(describe(e));
     }
@@ -267,6 +270,7 @@ export function QuestionEditor({
   async function reloadLatest(): Promise<void> {
     try {
       const latest = await fetchQuestion(meta.questionId ?? '');
+      if (!isFullQuestion(latest)) throw new ApiFailure(403, '');
       qc.setQueryData(questionKeys.detail(latest.id), latest);
       form.reset(toDraft(latest.type, latest.current.tags, latest.current));
       setMeta(metaOf(latest));
@@ -299,13 +303,14 @@ export function QuestionEditor({
     busy.current = true;
     setProblem(null);
     setPublishProblem(null);
+    setPublishBlock((b) => (b === 'refused' ? null : b));
     setValidating(true);
     try {
       const questionId = meta.questionId ?? '';
-      // The result only counts for the exact content revision it was started on (TC-012).
+      // The result only counts for the exact saved content it was started on (TC-012).
       const started = await startValidation.mutateAsync();
-      const startedRevision = revisionRef.current;
-      if (started.revision !== startedRevision) {
+      const startedFor = updatedAtRef.current;
+      if (started.validatedForUpdatedAt !== startedFor) {
         setProblem('The question changed on the server. Reload the latest version, then validate.');
         return;
       }
@@ -327,7 +332,7 @@ export function QuestionEditor({
           setProblem('The validation finished without a report. Press Validate to try again.');
           return;
         }
-        if (state.revision !== startedRevision || revisionRef.current !== startedRevision) {
+        if (state.validatedForUpdatedAt !== startedFor || updatedAtRef.current !== startedFor) {
           setProblem(
             'The question changed while it was being validated, so that result was dropped. Press Validate again.',
           );
@@ -337,8 +342,8 @@ export function QuestionEditor({
         setMeta((m) => ({ ...m, report, validatedAt }));
         setReportFresh(true);
         // Keep the cache in step with what the editor shows, and the history's "validated" column.
-        qc.setQueryData<QuestionDetail>(questionKeys.detail(questionId), (old) =>
-          old && old.current.revision === startedRevision
+        qc.setQueryData<QuestionView>(questionKeys.detail(questionId), (old) =>
+          old && isFullQuestion(old) && old.current.updatedAt === startedFor
             ? { ...old, current: { ...old.current, validatedAt, validationReport: report } }
             : old,
         );
@@ -347,7 +352,9 @@ export function QuestionEditor({
       }
       setProblem('Validation is taking longer than expected. Press Validate to try again.');
     } catch (e) {
-      if (alive.current) setProblem(describe(e));
+      // A 409 on validate: the content changed on the server since it was loaded.
+      if (e instanceof ApiFailure && e.status === 409) setConflict(true);
+      else if (alive.current) setProblem(describe(e));
     } finally {
       busy.current = false;
       if (alive.current) setValidating(false);
@@ -360,17 +367,37 @@ export function QuestionEditor({
     setPublishProblem(null);
     setNotice(null);
     try {
-      const done = await publish.mutateAsync(meta.revision);
+      const done = await publish.mutateAsync(meta.updatedAt);
+      // Only a 200 from the server marks the question published here, never anything earlier.
       setMeta(metaOf(done));
       setNotice(
         `Version ${done.current.version} is published. Editing it later creates a new version.`,
       );
     } catch (e) {
-      if (e instanceof ApiFailure && e.status === 409) {
+      if (!(e instanceof ApiFailure)) {
         setPublishProblem(
-          `${PUBLISH_REFUSAL[e.code] ?? 'Publishing was refused.'}${e.code === 'ai_references_missing' && e.message ? ` ${e.message}` : ''}`,
+          'We could not reach the server, so nothing was published. Check your connection and try again.',
         );
-      } else setPublishProblem(describe(e));
+      } else if (e.status === 409) {
+        setConflict(true);
+      } else if (e.status === 422) {
+        setPublishBlock('refused');
+        setPublishProblem(
+          `Publishing was refused: ${e.errors.length > 0 ? e.errors.join(' ') : e.message || 'the question does not meet the requirements yet.'}`,
+        );
+      } else if (e.status === 404 || e.status === 405 || e.status === 501) {
+        setPublishBlock('unavailable');
+        setPublishProblem(
+          'Publishing is not available yet. Nothing was published; your question is saved as a draft.',
+        );
+      } else if (e.status === 401 || e.status === 403) {
+        setPublishProblem(describe(e));
+      } else {
+        // 5xx and the like: probably temporary, so Publish stays available for another try.
+        setPublishProblem(
+          'The server could not publish this right now. Nothing was published. Try again in a moment.',
+        );
+      }
     } finally {
       busy.current = false;
     }
@@ -421,7 +448,13 @@ export function QuestionEditor({
                 </Button>
                 <Button
                   type="button"
-                  disabled={!canPublish(input) || publish.isPending || validating || conflict}
+                  disabled={
+                    !canPublish(input) ||
+                    publish.isPending ||
+                    validating ||
+                    conflict ||
+                    publishBlock !== null
+                  }
                   aria-describedby="publish-checks"
                   onClick={() => void onPublish()}
                 >

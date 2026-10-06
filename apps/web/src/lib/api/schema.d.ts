@@ -459,14 +459,14 @@ export interface paths {
       };
       cookie?: never;
     };
-    /** The current version with its tests, variants, reference solutions and answer key. Author only, never sent to candidates (TC-011). */
+    /** The current version. Callers with question:update get the full QuestionDetail (tests, variants, reference solutions, answer key); every other reader (Recruiter) gets the allowlisted QuestionDetailRedacted (DL-32). Never sent to candidates (TC-011). */
     get: operations['getQuestion'];
     put?: never;
     post?: never;
     delete?: never;
     options?: never;
     head?: never;
-    /** Save the content. A published version is immutable, so this creates the next draft version (FR-204). Needs the revision the editor started from; 409 stale_version when someone saved since. */
+    /** Save the content. A published version is immutable, so this creates the next draft version (FR-204). Needs expectedUpdatedAt (the version's updatedAt the editor loaded); 409 when it changed since. */
     patch: operations['updateQuestion'];
     trace?: never;
   };
@@ -578,7 +578,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Publish the current draft version. Refused (409) without a passing validation of the saved content (TC-012), without the AI reference solutions of the publish gate (ADR 0005 AI-5), or when the revision is not the current one (stale_version). */
+    /** Publish the current draft version. Refused with 422 (detail and errors[] only) without a passing validation of the saved content (TC-012) or without the AI reference solutions of the publish gate (ADR 0005 AI-5), and with 409 when updatedAt is not the current one. Fails closed until BE-04c (422, or 501-style). */
     post: operations['publishQuestion'];
     delete?: never;
     options?: never;
@@ -672,12 +672,6 @@ export interface components {
       /** Format: date-time */
       updatedAt: string;
     };
-    /** @enum {string} */
-    ParamType: 'string' | 'number' | 'boolean' | 'array';
-    ParamDef: {
-      name: string;
-      type: components['schemas']['ParamType'];
-    };
     Limits: {
       cpuMs: number;
       wallMs: number;
@@ -699,8 +693,9 @@ export interface components {
     Variant: {
       id: string;
       label: string;
+      /** @description Explicit values per placeholder (ADR 0007), no parameter schema */
       params: {
-        [key: string]: unknown;
+        [key: string]: string | number;
       };
       active: boolean;
       overrides: components['schemas']['VariantOverride'][];
@@ -725,7 +720,7 @@ export interface components {
     AnswerSpec: components['schemas']['McqAnswerSpec'] | components['schemas']['ShortAnswerSpec'];
     QuestionContent: {
       title: string;
-      /** @description Markdown */
+      /** @description Markdown, no raw HTML; may contain Mustache placeholders */
       statementMd: string;
       difficulty: components['schemas']['Difficulty'];
       tags: string[];
@@ -737,17 +732,23 @@ export interface components {
       referenceSolution: {
         [key: string]: string;
       };
-      paramSchema: components['schemas']['ParamDef'][];
       testCases: components['schemas']['TestCase'][];
       variants: components['schemas']['Variant'][];
       answerSpec: components['schemas']['AnswerSpec'] | null;
     };
     QuestionUpdate: components['schemas']['QuestionContent'] & {
-      expectedRevision: number;
+      /**
+       * Format: date-time
+       * @description The updatedAt of the version the editor loaded (opaque); 409 if it changed since
+       */
+      expectedUpdatedAt: string;
     };
     PublishRequest: {
-      /** @description The revision that was validated; 409 stale_version if the question was saved since */
-      expectedRevision: number;
+      /**
+       * Format: date-time
+       * @description The updatedAt of the version that was validated; 409 if it changed since
+       */
+      expectedUpdatedAt: string;
     };
     QuestionCreate: components['schemas']['QuestionContent'] & {
       type: components['schemas']['QuestionType'];
@@ -773,13 +774,19 @@ export interface components {
     };
     ValidationJobRef: {
       jobId: string;
-      /** @description The content revision the job validates */
-      revision: number;
+      /**
+       * Format: date-time
+       * @description The updatedAt of the content the job validates
+       */
+      validatedForUpdatedAt: string;
     };
     ValidationJob: {
       jobId: string;
-      /** @description The content revision the job validated; a report for an older revision must never be shown as current */
-      revision: number;
+      /**
+       * Format: date-time
+       * @description The updatedAt of the content the job validated; a report for older content must never be shown as current
+       */
+      validatedForUpdatedAt: string;
       /** @enum {string} */
       status: 'queued' | 'running' | 'done' | 'failed';
       report?: components['schemas']['ValidationReport'];
@@ -792,8 +799,11 @@ export interface components {
     };
     QuestionVersion: components['schemas']['QuestionContent'] & {
       version: number;
-      /** @description Content revision of the question */
-      revision: number;
+      /**
+       * Format: date-time
+       * @description Changes on every save of this version; used as the opaque concurrency token and to tie a validation to the exact content
+       */
+      updatedAt: string;
       isPublished: boolean;
       /** Format: date-time */
       createdAt: string;
@@ -812,6 +822,40 @@ export interface components {
       latestVersion: number;
       aiReferencePolicy: components['schemas']['AiReferencePolicy'];
       current: components['schemas']['QuestionVersion'];
+    };
+    /** @description What a caller without question:update (a Recruiter) gets from the detail routes: an allowlist, never a denylist. PROVISIONAL list pending BE-04a. No reference solution, answer key, validation report, variant parameters, AI reference solutions or hidden tests. */
+    QuestionDetailRedacted: {
+      id: string;
+      slug: string;
+      title: string;
+      type: components['schemas']['QuestionType'];
+      status: components['schemas']['QuestionStatus'];
+      difficulty: components['schemas']['Difficulty'];
+      tags: string[];
+      statementMd: string;
+      version: number;
+      /** Format: date-time */
+      updatedAt: string;
+      starterCode: {
+        [key: string]: string;
+      };
+      limits: components['schemas']['Limits'];
+      allowedLanguages: components['schemas']['Language'][];
+      /** @description Visible (non-hidden) cases only */
+      sampleTestCases: {
+        input: string;
+        expectedOutput: string;
+      }[];
+    };
+    /** @description RFC 7807 problem body of the question routes. 409 and 422 carry detail and errors[] only: no machine code, the caller tells cases apart by endpoint and status. */
+    Problem: {
+      type: string;
+      title: string;
+      status: number;
+      detail?: string;
+      instance?: string;
+      traceId?: string;
+      errors?: string[];
     };
     QuestionVersionSummary: {
       version: number;
@@ -2117,7 +2161,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['Problem'];
         };
       };
       403: components['responses']['Forbidden'];
@@ -2140,7 +2184,9 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['QuestionDetail'];
+          'application/json':
+            | components['schemas']['QuestionDetail']
+            | components['schemas']['QuestionDetailRedacted'];
         };
       };
       403: components['responses']['Forbidden'];
@@ -2150,7 +2196,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['Problem'];
         };
       };
     };
@@ -2185,7 +2231,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['Problem'];
         };
       };
       403: components['responses']['Forbidden'];
@@ -2195,16 +2241,16 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['Problem'];
         };
       };
-      /** @description stale_version, the question was saved by someone else since the editor loaded it */
+      /** @description The question changed since the editor loaded it (detail and errors[] only, no code) */
       409: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['Problem'];
         };
       };
     };
@@ -2238,7 +2284,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['Problem'];
         };
       };
     };
@@ -2261,7 +2307,9 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['QuestionDetail'];
+          'application/json':
+            | components['schemas']['QuestionDetail']
+            | components['schemas']['QuestionDetailRedacted'];
         };
       };
       403: components['responses']['Forbidden'];
@@ -2271,7 +2319,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['Problem'];
         };
       };
     };
@@ -2303,7 +2351,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['Problem'];
         };
       };
     };
@@ -2338,7 +2386,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['Problem'];
         };
       };
       403: components['responses']['Forbidden'];
@@ -2372,7 +2420,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['Problem'];
         };
       };
     };
@@ -2408,16 +2456,34 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['Problem'];
         };
       };
-      /** @description validation_required, ai_references_missing, or stale_version */
+      /** @description The version changed since it was validated (expectedUpdatedAt) */
       409: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description The gate is not met (no passing validation, missing AI reference solutions); detail and errors[] only */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Publishing is not available yet (until BE-04c) */
+      501: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
         };
       };
     };
@@ -2451,7 +2517,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['Problem'];
         };
       };
     };
@@ -2486,7 +2552,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['Problem'];
         };
       };
       403: components['responses']['Forbidden'];
@@ -2496,7 +2562,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['Problem'];
         };
       };
     };
@@ -2532,7 +2598,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['Problem'];
         };
       };
       403: components['responses']['Forbidden'];
@@ -2542,7 +2608,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ApiError'];
+          'application/json': components['schemas']['Problem'];
         };
       };
     };

@@ -13,7 +13,8 @@ import { rolesWith } from '@/features/staff/permissions';
 import type { Schemas } from '@/lib/api/client';
 import { TYPE_LABEL } from './labels';
 import { QuestionEditor } from './question-editor';
-import { useQuestion, useQuestionVersion, useQuestionVersions } from './queries';
+import { QuestionSummary } from './question-summary';
+import { isFullQuestion, useQuestion, useQuestionVersion, useQuestionVersions } from './queries';
 
 function LoadError({ error }: { error: unknown }): React.JSX.Element {
   const notFound = error instanceof ApiFailure && error.status === 404;
@@ -48,7 +49,7 @@ export function QuestionEditorRoute({
   maxPolls?: number;
 }): React.JSX.Element {
   return (
-    <RequireRole roles={rolesWith('question:update')}>
+    <RequireRole roles={rolesWith('question:read')}>
       <EditorLoader id={id} {...(pollMs ? { pollMs } : {})} {...(maxPolls ? { maxPolls } : {})} />
     </RequireRole>
   );
@@ -66,6 +67,9 @@ function EditorLoader({
   const question = useQuestion(id);
   if (question.isPending) return <Loading />;
   if (question.isError) return <LoadError error={question.error} />;
+  // The API decides: a caller without question:update gets the allowlisted view, and that is
+  // all this screen can show (no editor).
+  if (!isFullQuestion(question.data)) return <SummaryPage data={question.data} />;
   return (
     <>
       <p className="mb-3 text-sm">
@@ -83,6 +87,23 @@ function EditorLoader({
         {...(pollMs ? { pollMs } : {})}
         {...(maxPolls ? { maxPolls } : {})}
       />
+    </>
+  );
+}
+
+function SummaryPage({
+  data,
+}: {
+  data: Parameters<typeof QuestionSummary>[0]['data'];
+}): React.JSX.Element {
+  return (
+    <>
+      <p className="mb-3 text-sm">
+        <Link href="/admin/questions" className="text-primary underline underline-offset-4">
+          Back to the question bank
+        </Link>
+      </p>
+      <QuestionSummary data={data} />
     </>
   );
 }
@@ -226,7 +247,7 @@ export function QuestionVersionRoute({
   version: number;
 }): React.JSX.Element {
   return (
-    <RequireRole roles={rolesWith('question:update')}>
+    <RequireRole roles={rolesWith('question:read')}>
       <VersionLoader id={id} version={version} />
     </RequireRole>
   );
@@ -236,6 +257,7 @@ function VersionLoader({ id, version }: { id: string; version: number }): React.
   const data = useQuestionVersion(id, version);
   if (data.isPending) return <Loading />;
   if (data.isError) return <LoadError error={data.error} />;
+  if (!isFullQuestion(data.data)) return <SummaryPage data={data.data} />;
   return (
     <>
       <p className="mb-3 text-sm">

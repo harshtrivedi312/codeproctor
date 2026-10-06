@@ -10,6 +10,8 @@ export class ApiFailure extends Error {
     message: string,
     /** The API's machine code (for example `validation_required`), when it sent one. */
     readonly code: string = '',
+    /** RFC 7807 `errors[]` strings (409 and 422 bodies carry detail and errors only). */
+    readonly errors: readonly string[] = [],
   ) {
     super(message);
   }

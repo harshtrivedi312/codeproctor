@@ -129,6 +129,36 @@ test.describe('FR-201..FR-205 question bank', () => {
     await expect(page).toHaveURL(/\/versions$/);
   });
 
+  test('DL-32: a publish that fails closed (501) is explained honestly and publishes nothing', async ({
+    page,
+  }) => {
+    await signInAt(page, AUTHOR, '/admin/questions');
+    await page.getByLabel('Status', { exact: true }).selectOption('DRAFT');
+    await page
+      .getByRole('link', { name: 'Publishing unavailable (scenario)', exact: true })
+      .click();
+    await expect(page.getByRole('tablist', { name: 'Question sections' })).toBeVisible();
+    await page.getByRole('button', { name: 'Publish' }).click();
+    await expect(page.getByText(/Publishing is not available yet/)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Publish' })).toBeDisabled();
+    await expect(page.getByText(/is published\./)).toHaveCount(0);
+    await expectNoAxeViolations(page);
+  });
+
+  test('DL-32 FR-103: a recruiter opening a question gets a read-only summary with the hidden parts left out', async ({
+    page,
+  }) => {
+    await signInAt(page, RECRUITER, '/admin/questions');
+    await page.goto('/admin/questions/q-merge');
+    await expect(page.getByRole('heading', { name: 'Merge intervals', level: 1 })).toBeVisible();
+    await expect(page.getByText(/hidden for your role/)).toBeVisible();
+    await expect(page.getByRole('table', { name: 'Visible sample test cases' })).toBeVisible();
+    await expect(page.getByRole('tablist')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Save|Validate|Publish/ })).toHaveCount(0);
+    expect(await page.content()).not.toContain('out.append');
+    await expectNoAxeViolations(page);
+  });
+
   test('FR-103 TC-004: a recruiter reads the list but cannot open the editor', async ({ page }) => {
     await signInAt(page, RECRUITER, '/admin/questions');
     await expect(page.getByRole('row', { name: /Merge intervals/ })).toBeVisible();

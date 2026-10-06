@@ -10,8 +10,8 @@ export type ValidationReport = Schemas['ValidationReport'];
 
 export interface MockVersion extends Content {
   version: number;
-  /** Question-wide content revision, bumped by every save (also when a save creates a version). */
-  revision: number;
+  /** Opaque concurrency token: changes on every save of this version (DL-32, replaces the integer revision). */
+  updatedAt: string;
   isPublished: boolean;
   createdAt: string;
   createdByName: string;
@@ -79,7 +79,6 @@ prints
         "const t = require('fs').readFileSync(0, 'utf8').trim().split(/\\s+/).map(Number);\nconst n = t[0];\nconst iv = [];\nfor (let i = 0; i < n; i++) iv.push([t[1 + 2 * i], t[2 + 2 * i]]);\niv.sort((a, b) => a[0] - b[0]);\nconst out = [];\nfor (const [s, e] of iv) {\n  if (out.length && s <= out[out.length - 1][1]) out[out.length - 1][1] = Math.max(out[out.length - 1][1], e);\n  else out.push([s, e]);\n}\nfor (const [s, e] of out) console.log(s + ' ' + e);\n",
       java: 'import java.util.*;\n\npublic class Main {\n    public static void main(String[] args) {\n        Scanner in = new Scanner(System.in);\n        int n = in.nextInt();\n        int[][] iv = new int[n][2];\n        for (int i = 0; i < n; i++) { iv[i][0] = in.nextInt(); iv[i][1] = in.nextInt(); }\n        Arrays.sort(iv, (a, b) -> a[0] - b[0]);\n        int[] cur = iv[0];\n        for (int i = 1; i < n; i++) {\n            if (iv[i][0] <= cur[1]) cur[1] = Math.max(cur[1], iv[i][1]);\n            else { System.out.println(cur[0] + " " + cur[1]); cur = iv[i]; }\n        }\n        System.out.println(cur[0] + " " + cur[1]);\n    }\n}\n',
     },
-    paramSchema: [{ name: 'count', type: 'number' }],
     testCases: [
       {
         id: 'mi-t1',
@@ -141,7 +140,6 @@ prints
       javascript:
         "const [n, a, t] = require('fs').readFileSync(0, 'utf8').trim().split('\\n');\nconst nums = a.split(' ').map(Number);\nconst seen = new Map();\nfor (let i = 0; i < nums.length; i++) {\n  if (seen.has(Number(t) - nums[i])) { console.log(seen.get(Number(t) - nums[i]) + ' ' + i); break; }\n  seen.set(nums[i], i);\n}\n",
     },
-    paramSchema: [],
     testCases: [
       { id: 'ts-t1', input: '4\n2 7 11 15\n9', expectedOutput: '0 1', isHidden: false, weight: 1 },
       { id: 'ts-t2', input: '3\n3 2 4\n6', expectedOutput: '1 2', isHidden: true, weight: 1 },
@@ -163,10 +161,6 @@ prints
       python:
         'a = list(map(int, input().split()))\nk = {{steps}} % len(a)\nprint(*(a[-k:] + a[:-k]))\n',
     },
-    paramSchema: [
-      { name: 'size', type: 'number' },
-      { name: 'steps', type: 'number' },
-    ],
     testCases: [
       { id: 'ro-t1', input: '1 2 3 4 5', expectedOutput: '4 5 1 2 3', isHidden: false, weight: 1 },
       {
@@ -212,7 +206,6 @@ prints
       javascript:
         "const xs = require('fs').readFileSync(0, 'utf8').trim().split(' ').map(Number);\nlet t = 0;\nxs.forEach((x, i) => { t += x; console.log((t / (i + 1)).toFixed(2)); });\n",
     },
-    paramSchema: [],
     testCases: [
       {
         id: 'ra-t1',
@@ -237,7 +230,6 @@ prints
     limits: LIMITS,
     starterCode: {},
     referenceSolution: {},
-    paramSchema: [],
     testCases: [],
     variants: [],
     answerSpec: {
@@ -263,7 +255,6 @@ prints
     limits: LIMITS,
     starterCode: {},
     referenceSolution: {},
-    paramSchema: [],
     testCases: [],
     variants: [],
     answerSpec: {
@@ -287,9 +278,9 @@ prints
   ): MockVersion => ({
     ...structuredClone(c),
     version,
-    revision: version,
     isPublished: false,
     createdAt: daysAgo(30 - version),
+    updatedAt: daysAgo(30 - version),
     createdByName: o.by ?? 'Avery Author',
     validatedAt: null,
     validationReport: null,
@@ -328,7 +319,6 @@ prints
             ...mergeBase,
             statementMd: mergeBase.statementMd.replace('{{count}}', 'some'),
             variants: [],
-            paramSchema: [],
           },
           1,
           {
@@ -399,6 +389,26 @@ prints
       archived: false,
       versions: [
         ver(bigO, 1, { isPublished: true, validatedAt: daysAgo(15), validationReport: passing() }),
+      ],
+      aiRefs: [],
+    },
+    {
+      // Scenario for the editor's handling of a publish that fails closed (501, DL-32 point 4).
+      id: 'q-publish-unavailable',
+      slug: 'publish-unavailable',
+      type: 'MCQ',
+      archived: false,
+      versions: [
+        ver(
+          {
+            ...bigO,
+            title: 'Publishing unavailable (scenario)',
+            statementMd:
+              'A validated draft whose publish call answers 501, to see the failure handling.',
+          },
+          1,
+          { validatedAt: daysAgo(1), validationReport: passing() },
+        ),
       ],
       aiRefs: [],
     },
