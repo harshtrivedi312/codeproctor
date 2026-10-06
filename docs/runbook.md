@@ -113,3 +113,50 @@ trusted root certificate. See FU-DBB-04.
   they can differ by the rows written in between; the nightly job runs when traffic is lowest.
 - The staging workflow assumes the staging database host accepts connections from GitHub-hosted
   runners (or a tunnel set up in the workflow). That is a staging deployment question (DEP-01).
+
+## Provisioning a pilot organization (ADR 0006 section 8.9)
+
+Owner: Database B (ops) track. Files: `infra/scripts/provision-org.mjs`, `provision-org-core.mjs`;
+tests `infra/scripts/provision-org.test.mjs`. Only the owner runs this, on the pilot host (over SSH from a
+GitHub Actions job, or on a self-hosted runner inside the pilot network), never from a developer machine
+or an agent session (ADR 0009, D-38). A GitHub-hosted runner never connects straight to the pilot database.
+
+What it does: creates the organization and its first SUPER_ADMIN (no password) and one `audit_logs` row
+in one transaction, then queues a `set-password` job that emails the admin a one-time link (72 hours,
+single use). The link is built by the job, never by this script: no link or token is ever printed,
+logged, written to a file or put in a queue payload.
+
+### Inputs
+
+A JSON file on the pilot host (or written from a secret), never command-line values, environment
+variables or `workflow_dispatch` inputs (the email is personal data, and masking does not hide inputs
+in run metadata):
+
+```json
+{ "orgName": "Example Corp", "retentionDays": 90, "adminEmail": "admin@example.com", "adminName": "A. Admin" }
+```
+
+`retentionDays` is optional (default 90; 7 to 730). `reissue` takes only `orgName` and `adminEmail`.
+Environment: `DATABASE_URL` (the `app_user` URL; the script refuses any other role and has no
+`MIGRATION_DATABASE_URL` fallback) and `REDIS_URL`. Nothing else is read.
+
+### Run
+
+```bash
+node --import tsx infra/scripts/provision-org.mjs create  --file /secure/path/org.json
+node --import tsx infra/scripts/provision-org.mjs reissue --file /secure/path/org.json
+```
+
+`create` prints `org=<id> user=<id>` and nothing else. Exit code 0: done. Exit code 1: bad input,
+configuration or a failure (an error that names a field, never a value; nothing was created, except when
+the message says otherwise). Exit code 2: the org and admin exist but the job could not be queued
+(Redis down): run `reissue` with the same file. `reissue` works only for an active SUPER_ADMIN of the
+named org who has no password yet; each run queues the job again, and only the last link works.
+
+### Before the first run
+
+- The API's `set-password` job processor (BE-06) must be deployed, and `bullmq` must be installed in
+  `apps/api`; until then the script stops before it creates anything.
+- Run `pnpm db:generate` once on the host (the script loads the Prisma client from `apps/api`).
+- After `create`, delete the input file if it came from a secret mount.
+- Check `audit_logs` for one `ORG_PROVISIONED` row (ids only, no email) and that the admin got the email.
