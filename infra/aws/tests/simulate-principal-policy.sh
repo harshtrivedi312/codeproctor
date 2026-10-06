@@ -43,10 +43,15 @@ check() {
   args=(iam simulate-principal-policy --profile "$PROFILE" --region "$REGION" --policy-source-arn "$role"
         --action-names "$action" --resource-arns "$resource" --query 'EvaluationResults[0].EvalDecision' --output text)
   if [ ${#entries[@]} -gt 0 ]; then args+=(--context-entries "${entries[@]}"); fi
-  got="$(aws "${args[@]}" 2>/dev/null)" || got="ERROR"
+  errfile="$(mktemp)"
+  got="$(aws "${args[@]}" 2>"$errfile")" || got="ERROR"
+  firsterr="$(head -n 1 "$errfile")"; rm -f "$errfile"
   if [ "$got" = "allowed" ]; then actual=allowed; elif [ "$got" = "ERROR" ]; then actual=ERROR; else actual=denied; fi
   if [ "$actual" = "$expect" ]; then pass=$((pass+1)); printf 'PASS  %-62s %s\n' "$name" "$expect"
-  else fail=$((fail+1)); printf 'FAIL  %-62s expected %s, got %s (%s)\n' "$name" "$expect" "$actual" "$got"; fi
+  else
+    fail=$((fail+1)); printf 'FAIL  %-62s expected %s, got %s (%s)\n' "$name" "$expect" "$actual" "$got"
+    if [ -n "$firsterr" ]; then printf '      aws said: %s\n' "$firsterr"; fi
+  fi
 }
 
 PILOT_TAG="aws:ResourceTag/Environment=pilot"
@@ -55,12 +60,25 @@ INST="arn:aws:ec2:${REGION}:${ACCOUNT}:instance/i-0123456789abcdef0"
 ROLE_APP="arn:aws:iam::${ACCOUNT}:role/codeproctor-pilot-app"
 
 echo "Deploy role: ${DEPLOY}"
-check "$DEPLOY" allowed "S3 create bucket codeproctor-pilot-x" s3:CreateBucket "arn:aws:s3:::codeproctor-pilot-x" "$REQ_TAG"
+check "$DEPLOY" denied  "S3 create bucket (owner template only)" s3:CreateBucket "arn:aws:s3:::codeproctor-pilot-x" "$REQ_TAG"
+for act in PutBucketPolicy DeleteBucketPolicy PutBucketAcl PutBucketPublicAccessBlock PutBucketOwnershipControls PutBucketVersioning PutLifecycleConfiguration; do
+  check "$DEPLOY" denied "S3 ${act} on pilot backups bucket" "s3:${act}" "arn:aws:s3:::codeproctor-pilot-backups"
+done
+check "$DEPLOY" allowed "S3 read bucket policy of pilot backups" s3:GetBucketPolicy "arn:aws:s3:::codeproctor-pilot-backups" "aws:ResourceAccount=${ACCOUNT}"
+check "$DEPLOY" denied  "KMS create key" kms:CreateKey "*" "$REQ_TAG"
+check "$DEPLOY" denied  "KMS put key policy" kms:PutKeyPolicy "arn:aws:kms:${REGION}:${ACCOUNT}:key/00000000-0000-0000-0000-000000000000" "$PILOT_TAG"
+check "$DEPLOY" denied  "Secrets put resource policy" secretsmanager:PutResourcePolicy "arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:codeproctor-pilot-db-AbCdEf" "$PILOT_TAG"
+check "$DEPLOY" denied  "Secrets forced deletion" secretsmanager:DeleteSecret "arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:codeproctor-pilot-db-AbCdEf" "$PILOT_TAG" "secretsmanager:ForceDeleteWithoutRecovery=true"
+check "$DEPLOY" denied  "KMS key deletion, 7 day window" kms:ScheduleKeyDeletion "arn:aws:kms:${REGION}:${ACCOUNT}:key/00000000-0000-0000-0000-000000000000" "$PILOT_TAG" "kms:ScheduleKeyDeletionPendingWindowInDays=7"
+check "$DEPLOY" denied  "EC2 modify instance type to a huge type" ec2:ModifyInstanceAttribute "$INST" "$PILOT_TAG" "ec2:InstanceType=m5.24xlarge"
+check "$DEPLOY" denied  "IAM update trust of untagged owner-made role" iam:UpdateAssumeRolePolicy "$ROLE_APP"
 check "$DEPLOY" denied  "S3 create bucket other name" s3:CreateBucket "arn:aws:s3:::codeproctor-staging-x" "$REQ_TAG"
 check "$DEPLOY" denied  "S3 read object in pilot data bucket" s3:GetObject "arn:aws:s3:::codeproctor-pilot-recordings/a.webm"
 check "$DEPLOY" denied  "S3 read object in other bucket" s3:GetObject "arn:aws:s3:::other-bucket/a"
-check "$DEPLOY" allowed "State object read" s3:GetObject "${TF}/pilot/terraform.tfstate"
-check "$DEPLOY" denied  "State bucket policy change" s3:PutBucketPolicy "$TF"
+if aws s3api head-bucket --profile "$PROFILE" --bucket "codeproctor-pilot-tfstate-${ACCOUNT}" >/dev/null 2>&1; then
+  check "$DEPLOY" allowed "State object read" s3:GetObject "${TF}/pilot/terraform.tfstate" "aws:ResourceAccount=${ACCOUNT}"
+  check "$DEPLOY" denied  "State bucket policy change" s3:PutBucketPolicy "$TF"
+fi
 check "$DEPLOY" allowed "EC2 start tagged instance" ec2:StartInstances "$INST" "$PILOT_TAG"
 check "$DEPLOY" allowed "EC2 stop tagged instance" ec2:StopInstances "$INST" "$PILOT_TAG"
 check "$DEPLOY" denied  "EC2 terminate untagged instance" ec2:TerminateInstances "$INST"
@@ -83,16 +101,16 @@ check "$DEPLOY" denied  "IAM remove a role boundary" iam:DeleteRolePermissionsBo
 check "$DEPLOY" denied  "IAM create user" iam:CreateUser "arn:aws:iam::${ACCOUNT}:user/x"
 check "$DEPLOY" denied  "IAM create access key" iam:CreateAccessKey "arn:aws:iam::${ACCOUNT}:user/x"
 check "$DEPLOY" denied  "IAM create OIDC provider" iam:CreateOpenIDConnectProvider "arn:aws:iam::${ACCOUNT}:oidc-provider/evil.example"
-check "$DEPLOY" allowed "IAM pass pilot role to ec2" iam:PassRole "$ROLE_APP" "iam:PassedToService=ec2.amazonaws.com"
-check "$DEPLOY" allowed "IAM pass pilot role to scheduler" iam:PassRole "arn:aws:iam::${ACCOUNT}:role/codeproctor-pilot-scheduler" "iam:PassedToService=scheduler.amazonaws.com"
+check "$DEPLOY" allowed "IAM pass tagged pilot role to ec2" iam:PassRole "$ROLE_APP" "iam:PassedToService=ec2.amazonaws.com" "$PILOT_TAG"
+check "$DEPLOY" allowed "IAM pass tagged scheduler role to scheduler" iam:PassRole "arn:aws:iam::${ACCOUNT}:role/codeproctor-pilot-scheduler" "iam:PassedToService=scheduler.amazonaws.com" "$PILOT_TAG"
 check "$DEPLOY" denied  "IAM pass pilot role to lambda" iam:PassRole "$ROLE_APP" "iam:PassedToService=lambda.amazonaws.com"
 check "$DEPLOY" denied  "IAM pass other role to ec2" iam:PassRole "arn:aws:iam::${ACCOUNT}:role/admin" "iam:PassedToService=ec2.amazonaws.com"
 
 if aws iam get-role --profile "$PROFILE" --role-name codeproctor-pilot-plan --query 'Role.Arn' --output text >/dev/null 2>&1; then
   echo "Plan role: ${PLAN}"
-  check "$PLAN" allowed "State read" s3:GetObject "${TF}/pilot/terraform.tfstate"
-  check "$PLAN" allowed "Lock object write" s3:PutObject "${TF}/pilot/terraform.tfstate.tflock"
-  check "$PLAN" denied  "State write" s3:PutObject "${TF}/pilot/terraform.tfstate"
+  check "$PLAN" allowed "State read" s3:GetObject "${TF}/pilot/terraform.tfstate" "aws:ResourceAccount=${ACCOUNT}"
+  check "$PLAN" allowed "Lock object write" s3:PutObject "${TF}/pilot/terraform.tfstate.tflock" "aws:ResourceAccount=${ACCOUNT}"
+  check "$PLAN" denied  "State write" s3:PutObject "${TF}/pilot/terraform.tfstate" "aws:ResourceAccount=${ACCOUNT}"
   check "$PLAN" denied  "Data object read" s3:GetObject "arn:aws:s3:::codeproctor-pilot-recordings/a.webm"
   check "$PLAN" denied  "Secret value read" secretsmanager:GetSecretValue "arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:codeproctor-pilot-db-AbCdEf" "$PILOT_TAG"
   check "$PLAN" denied  "KMS decrypt with a data key" kms:Decrypt "arn:aws:kms:${REGION}:${ACCOUNT}:key/00000000-0000-0000-0000-000000000000" "$PILOT_TAG" "aws:ResourceTag/Purpose=data"

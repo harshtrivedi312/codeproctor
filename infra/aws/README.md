@@ -1,181 +1,210 @@
 # AWS: GitHub OIDC deploy role for the pilot (DEP-01 / DEP-03, PR 1)
 
 Infrastructure code only. **No credentials, keys, tokens or account ids are in this directory, and
-no agent session ever touches AWS.** The owner uploads the template to their own AWS account and
+no agent session ever touches AWS.** The owner uploads the templates to their own AWS account and
 approves every apply. Nothing here runs in CI.
 
-## Scope after the owner rescope
+How the pilot is deployed (SSM, SSH or another mechanism) is open and belongs to **ADR 0017
+(pending)**. This README does not decide it: `ssm:SendCommand` and `ssm:StartSession` are denied to the
+deploy role until that ADR says otherwise.
 
-- The pilot is one x86 EC2 instance (about 2 vCPU and 8 GB) running API, worker, Judge0, Postgres
-  and Redis through Docker Compose. It runs only in scheduled windows (EventBridge Scheduler starts
-  and stops it). Nightly Postgres backups and the recordings go to encrypted S3 buckets under
-  lifecycle rules. SES sends mail, CloudWatch holds logs and alarms.
-- There is no RDS, NAT gateway or load balancer, and **no staging on AWS** (staging stays local and
-  on free tiers). The template therefore knows one environment only: `pilot`.
-- Single AWS account, no Organizations, region `us-east-1` (the template refuses any other region).
-- This PR is the first of five. Later PRs are on hold (see the last section).
+## Scope
 
-## What the stack creates
+- One AWS account, no Organizations, region `us-east-1` (the template refuses any other region).
+- One environment: `pilot`. Staging is not on AWS.
+- The pilot runs on a small number of EC2 instances started and stopped by EventBridge Scheduler,
+  with S3, SES and CloudWatch. No RDS, NAT gateway or load balancer (explicitly denied to CI).
+- Two templates, applied by the owner in this order: PR 1 `github-oidc-roles.yaml` (this section),
+  then PR 1b `pilot-data-buckets.yaml` (last section).
 
-| Resource                  | Name                                                                        | Purpose                                                                                                               |
-| ------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| IAM OIDC provider         | `token.actions.githubusercontent.com` (audience `sts.amazonaws.com`)        | Created only if `ExistingOidcProviderArn` is empty. IAM no longer validates the thumbprint for GitHub, so none is set |
-| Role                      | `codeproctor-pilot-deploy`                                                  | Assumable only by the workflow job that uses the GitHub environment `pilot`                                           |
-| Managed policies          | `codeproctor-pilot-deploy-core`, `-compute`, `-iam`, `-guard`, `-iamguard`  | The role's permissions. Managed, not inline, because of IAM size limits                                               |
-| Managed policy            | `codeproctor-pilot-boundary`                                                | Permissions boundary for every role the deploy role creates                                                           |
-| Role (optional)           | `codeproctor-pilot-plan` plus `-plan-read`, `-plan-guard`                   | Read-only plan role, only if `CreatePlanRole=true`                                                                    |
-| S3 bucket, KMS key, alias | `codeproctor-pilot-tfstate-<account id>`, `alias/codeproctor-pilot-tfstate` | Optional Terraform state (see below)                                                                                  |
+## What PR 1 creates
 
-All roles and policies of the stack sit under the IAM path `/codeproctor-guardrails/`. Their ARNs
-therefore never match the `codeproctor-pilot-*` allow patterns (the deploy role cannot edit itself),
-and explicit denies cover them as well. The role name stays `codeproctor-pilot-deploy`; use the ARN
-from the stack Outputs, which includes the path.
+| Resource                             | Name                                                                        | Purpose                                                                                                                                                 |
+| ------------------------------------ | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| IAM OIDC provider                    | `token.actions.githubusercontent.com`, audience `sts.amazonaws.com`         | Created only if `ExistingOidcProviderArn` is empty. No thumbprint: IAM no longer validates it for GitHub                                                |
+| Role                                 | `codeproctor-pilot-deploy`                                                  | Assumable only by a workflow job that uses the GitHub environment `pilot`                                                                               |
+| Managed policies                     | `codeproctor-pilot-deploy-core`, `-compute`, `-iam`, `-guard`, `-iamguard`  | The role's permissions (managed, because inline policies are capped at 10240 characters per role)                                                       |
+| Managed policy                       | `codeproctor-pilot-boundary`                                                | Permissions boundary for the instance role and other workload roles. Usable only with instance-profile credentials                                      |
+| Managed policy                       | `codeproctor-pilot-boundary-scheduler`                                      | Separate boundary for the EventBridge Scheduler execution role: start and stop of the tagged instances only                                             |
+| Managed policy                       | `codeproctor-pilot-instance-ssm`                                            | Session Manager and SSM agent permissions for the instance role. **Not attached by this stack.** Whether SSM is the deploy path is an ADR 0017 question |
+| Role (optional)                      | `codeproctor-pilot-plan` with `-plan-read`, `-plan-guard`                   | Read-only plan role. `CreatePlanRole`, default `false`                                                                                                  |
+| S3 bucket, KMS key, alias (optional) | `codeproctor-pilot-tfstate-<account id>`, `alias/codeproctor-pilot-tfstate` | Terraform state. `CreateStateBucket`, default `false`                                                                                                   |
+
+Every role and policy of the stack sits under the IAM path `/codeproctor-guardrails/`. Their ARNs
+therefore never match the `codeproctor-pilot-*` allow patterns (the deploy role cannot edit its own
+policies), and explicit denies cover them as well. The role name stays `codeproctor-pilot-deploy`;
+use the ARN from the stack Outputs, which includes the path. Reserved names (denied to CI):
+`codeproctor-pilot-deploy`, `-plan`, `codeproctor-pilot-deploy-*`, `codeproctor-pilot-plan-*`,
+`codeproctor-pilot-boundary*`.
+
+## What CI can and cannot do
+
+The deploy role deploys compute. It does **not** create or configure data stores.
+
+| Allowed to CI (pilot only)                                                                                                                               | Never allowed to CI                                                                                                                          |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Start, stop, run and terminate the tagged instances; EBS volumes; security groups and VPC pieces; tags                                                   | Create or delete any bucket; change any bucket policy, ACL, Block Public Access, ownership, versioning, lifecycle, encryption or replication |
+| EventBridge Scheduler: a schedule group and schedules named `codeproctor-pilot-*`                                                                        | Create a KMS key, change a key policy, disable, re-alias, re-tag or delete any key                                                           |
+| Secrets Manager containers `codeproctor-pilot-*` (including the Cloudflare DNS API token as a secret). Values are written by the owner, never read by CI | Read a secret value; change a secret's resource policy; delete a secret without its recovery window                                          |
+| IAM: instance role, instance profile and scheduler role named `codeproctor-pilot-*`, with a boundary, tagged `Environment=pilot`                         | Users, access keys, login profiles, SAML or OIDC providers; change the deploy role, the boundaries or their policies                         |
+| CloudWatch log groups, alarms; SES identities and configuration sets (tags); AWS Budgets                                                                 | Read log events, SSM parameter values, object data; send mail; RDS, load balancers, NAT, peering, transit gateway, VPN                       |
+
+The recordings and backup buckets, their policies, Block Public Access, lifecycle and the data CMK
+are created by the owner in a separate owner-applied template (PR 1b, below), never by CI.
+
+### Controls by service
+
+| Service                                      | Why                                                                | Control used                                                                                                                                                                                                                                                                                                                                                                                                     |
+| -------------------------------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| EC2                                          | Run, start, stop, terminate the instances                          | Tags only (ids carry no names): `aws:RequestTag` on create, `aws:ResourceTag` on change and delete. RunInstances also requires IMDSv2, encrypted volumes, Amazon-owned AMIs and an instance type from `AllowedInstanceTypes`; `ModifyInstanceAttribute` cannot switch to another type; volumes are gp3 and at most `MaxVolumeSizeGiB`; IMDSv2 cannot be weakened. `Describe*` is account-wide (known limitation) |
+| EventBridge Scheduler                        | Start and stop windows                                             | ARN prefix on the schedule group and schedules (no tag support)                                                                                                                                                                                                                                                                                                                                                  |
+| S3                                           | Read configuration of the pilot buckets; the optional state bucket | ARN prefix `codeproctor-pilot-*` plus `aws:ResourceAccount` equal to this account. All bucket control-plane writes denied. Object access only on the state bucket                                                                                                                                                                                                                                                |
+| KMS                                          | Read key metadata; use the state key                               | Tags (`aws:ResourceTag`); `Decrypt` denied except the state key and calls made through EC2 (`kms:ViaService`)                                                                                                                                                                                                                                                                                                    |
+| SES                                          | Identities and configuration sets                                  | Identities are not name-prefixed: tags only. Tag on create only inside `CreateEmailIdentity`; `TagResource` needs the identity to already carry `Environment=pilot`. Configuration sets by prefix. Sending denied to CI                                                                                                                                                                                          |
+| CloudWatch Logs                              | Log groups                                                         | ARN prefix (`/codeproctor/pilot/*` or `codeproctor-pilot-*`) plus tags; `DescribeLogGroups` on `log-group:*`. Reading events denied                                                                                                                                                                                                                                                                              |
+| CloudWatch alarms                            | Alarms                                                             | ARN prefix only (updates cannot be tag-conditioned reliably)                                                                                                                                                                                                                                                                                                                                                     |
+| Secrets Manager                              | Containers (Cloudflare DNS token and others)                       | ARN prefix plus tags. `GetSecretValue`, resource policy changes and forced deletion denied                                                                                                                                                                                                                                                                                                                       |
+| SSM Parameter Store                          | Parameters under `/codeproctor/pilot/`                             | Path prefix. Write and delete only; reads denied. `SendCommand` and `StartSession` denied (ADR 0017)                                                                                                                                                                                                                                                                                                             |
+| AWS Budgets                                  | Cost alerts                                                        | ARN name prefix only. `ModifyBudget` covers create and update; there is no tag condition                                                                                                                                                                                                                                                                                                                         |
+| IAM                                          | Instance role, scheduler role, policies                            | Prefix, boundary condition, tags, explicit denies                                                                                                                                                                                                                                                                                                                                                                |
+| RDS, ELB, NAT, peering, transit gateway, VPN | Not used                                                           | Explicit deny (cost guard rails)                                                                                                                                                                                                                                                                                                                                                                                 |
+
+Also denied: Lambda, ECS, CloudFormation, CodeBuild, Glue, SageMaker, Batch and `sts:AssumeRole`.
 
 ## Owner steps (AWS console)
 
 You type the repository values yourself. This document uses the placeholders `<owner>` and `<repo>`.
 
-1. Check whether the account already has the GitHub OIDC provider: IAM, Identity providers. If
-   `token.actions.githubusercontent.com` is listed, copy its ARN for step 4. An account can have only one.
-2. Sign in to the AWS console in **us-east-1** with your own admin identity (never paste credentials
-   anywhere else).
-3. CloudFormation, Create stack, With new resources. Upload the file `infra/aws/github-oidc-roles.yaml`.
-4. Stack name: `codeproctor-github-oidc`. Parameters:
-   - `GitHubOwner` = `<owner>` (your GitHub user or organisation)
-   - `GitHubRepo` = `<repo>` (the repository name only, no owner)
-   - `ExistingOidcProviderArn` = empty if there is no provider, otherwise the ARN from step 1
-   - `CreatePlanRole` = `false` unless you decided to enable it (see "Plan role" below)
-   - `AllowedInstanceTypes` = keep the default (`t3.large,t3a.large,m5.large,m6i.large`) or narrow it
-5. On the capabilities page tick **I acknowledge that AWS CloudFormation might create IAM resources
-   with custom names** (`CAPABILITY_NAMED_IAM`). Review the change, create the stack.
-6. When the stack is `CREATE_COMPLETE`, open the Outputs tab. Copy `PilotDeployRoleArn`.
-7. In GitHub, repository Settings, Environments: create the environment **`pilot`** and enable
-   **Required reviewers** (you). Add the environment variable `AWS_ROLE_ARN` with the role ARN and
-   `AWS_REGION` = `us-east-1`. Role ARNs are not secrets and no access keys exist, so there is no
-   secret to create. Do not create a `staging` environment for AWS. If you enabled the plan role,
-   add the repository variable `AWS_PLAN_ROLE_ARN` from the Outputs.
-8. Verify with your own credentials (AWS CLI v2, an SSO or named profile). The script asks IAM
-   itself and prints PASS or FAIL per case; it is the authoritative check:
+1. IAM, Identity providers: check whether `token.actions.githubusercontent.com` already exists. If it
+   does, copy its ARN for step 4 and make sure it lists `sts.amazonaws.com` as an audience. The ARN
+   must be in this account (the template refuses another account's ARN).
+2. Sign in to the AWS console in **us-east-1** with your own admin identity. Never paste credentials
+   anywhere else.
+3. CloudFormation, Create stack, With new resources. Upload `infra/aws/github-oidc-roles.yaml`.
+4. Stack name `codeproctor-github-oidc`. Parameters:
+   - `GitHubOwner` = `<owner>` and `GitHubRepo` = `<repo>` (repository name only)
+   - `ExistingOidcProviderArn` = empty, or the ARN from step 1
+   - `CreateStateBucket` = `false` and `CreatePlanRole` = `false` (recommended; see the optional sections)
+   - `AllowedInstanceTypes` = default `m7i.large,t3.small,t3.medium`, or narrow it
+   - `MaxVolumeSizeGiB` = default `100`
+5. Tick **I acknowledge that AWS CloudFormation might create IAM resources with custom names**
+   (`CAPABILITY_NAMED_IAM`). Review and create.
+6. When the stack is `CREATE_COMPLETE`, open Outputs and copy `PilotDeployRoleArn`, the two boundary
+   ARNs and `PilotInstanceSsmPolicyArn`.
+7. GitHub, repository Settings, Environments: create **`pilot`** and set:
+   - **Required reviewers**: you. Turn on **Prevent self-review** if there is a second reviewer.
+   - **Deployment branches and tags**: **Selected branches and tags**, add `main` only (and make `main`
+     a protected branch).
+   - Do not allow administrators to bypass protection rules.
+   - Variables: `AWS_ROLE_ARN` = the role ARN, `AWS_REGION` = `us-east-1`. Role ARNs are not secrets and
+     no access keys exist, so there is no secret to create.
+   - Do not create a `staging` environment for AWS.
+8. Account-level protections (once per account, console):
+   - S3, Block Public Access settings for this account: turn on all four.
+   - IAM Access Analyzer: create an account analyzer for external access (us-east-1).
+9. SES: request production access (leave the sandbox), verify the sender identity and tag the identity
+   `Environment=pilot` (the boundary allows sending only from identities with that tag).
+10. Apply PR 1b (below), then verify with your own credentials (AWS CLI v2, a named or SSO profile):
 
-   ```sh
-   infra/aws/tests/simulate-principal-policy.sh --account-id <12 digits> --profile <profile>
-   ```
+    ```sh
+    infra/aws/tests/simulate-principal-policy.sh --account-id <12 digits> --profile <profile>
+    ```
 
-9. Update: change the parameters or upload a new template with Update stack and read the change set.
-   Rollback: CloudFormation rolls a failed update back automatically; to go back after a successful
-   update, update with the previous template version. Delete: Delete stack. The state bucket and its
-   key have `DeletionPolicy: Retain` and survive; empty and delete them by hand if you want them gone.
-   The OIDC provider is deleted with the stack only if the stack created it.
+11. Update: Update stack, read the change set. Rollback: a failed update rolls back by itself; after a
+    successful update, update again with the previous template. Delete: Delete stack. State bucket and
+    key (if created) are retained. To remove the state bucket, first remove its bucket policy (it
+    denies deleting object versions), then empty it, then delete it.
 
-Later, in PR 5, the Delivery Lead gives you the ordered manual steps for SES, the instance and the
-rest. Do not run Terraform or deploy anything from this PR.
+### About the trust policy
 
-## How the deploy role is limited
+The `sub` claim of a job that uses an environment is `repo:<owner>/<repo>:environment:pilot` and
+**carries no branch or ref**. The trust policy therefore cannot, by itself, stop a workflow on another
+branch from assuming the role if that workflow job uses the `pilot` environment. The controls are on
+the GitHub side: required reviewers and the "main only" deployment branch rule in step 7. A stricter
+option is a custom `sub` claim template for the repository (GitHub's OIDC customisation) that includes
+`ref`; then tighten the trust policy to match. That is not done here. Other repositories, `pull_request`
+workflows and other environments cannot assume the role (tested).
 
-Trust: only `sub` equal to `repo:<owner>/<repo>:environment:pilot` and `aud` equal to
-`sts.amazonaws.com` (both `StringEquals`, no wildcards). Branches, pull requests, other repositories
-and other environments cannot assume it. Required reviewers on the `pilot` environment mean a human
-approves every job that assumes it.
+## Explicit denies and escalation paths
 
-Permissions: an Allow list that is as small as this design needs, restricted to names starting with
-`codeproctor-pilot-` or resources tagged `Environment=pilot`, plus explicit denies. Anything with
-another name, another tag value or no tag is not allowed.
+| Path                                                                                        | How it is closed                                                                                                                                       |
+| ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Reconfigure a data bucket (policy, ACL, public access, ownership, versioning, lifecycle)    | Not allowed, and denied for every bucket                                                                                                               |
+| Create a KMS key with a chosen policy, or change a key policy                               | `CreateKey` and `PutKeyPolicy` denied (IAM cannot inspect a caller-supplied policy)                                                                    |
+| Re-tag a key `Purpose=tfstate` to unlock state decryption, or strip the tag                 | Explicit deny on `TagResource`, `UntagResource`, `CreateKey` touching `Purpose`; all key tagging denied                                                |
+| Change a secret's resource policy                                                           | `PutResourcePolicy`, `DeleteResourcePolicy` denied                                                                                                     |
+| Create a role without limits                                                                | `CreateRole` only with the pilot boundary or the scheduler boundary, prefix `codeproctor-pilot-*`, tag `Environment=pilot`; explicit deny otherwise    |
+| Use a role from outside the instance                                                        | Every boundary allow requires `ec2:SourceInstanceARN`: a role assumed from elsewhere gets nothing                                                      |
+| Edit an owner-made, untagged `codeproctor-pilot-*` role                                     | `UpdateAssumeRolePolicy`, `DeleteRole`, tagging, `PassRole` and instance-profile changes need `aws:ResourceTag/Environment=pilot` on the role          |
+| Remove or swap the boundary, or edit it                                                     | `Put/DeleteRolePermissionsBoundary` denied; boundary policies are under the guardrails path with explicit `iam:*` denies                               |
+| Attach AdministratorAccess or any AWS managed policy                                        | `AttachRolePolicy` only with `iam:PolicyARN` like `policy/codeproctor-pilot-*`, on bounded roles                                                       |
+| Attach the boundary or deploy policies as ordinary policies                                 | Explicit deny on those policy ARNs                                                                                                                     |
+| Change the deploy role, its policies or its trust                                           | Explicit `iam:*` deny, path ARN and bare name                                                                                                          |
+| IAM users, access keys, login profiles, groups, service credentials, SAML or OIDC providers | Not allowed; explicit deny by wildcard                                                                                                                 |
+| Pass a powerful role to a code-running service                                              | `PassRole` only to `ec2` and `scheduler`, on tagged `codeproctor-pilot-*` roles; Lambda, ECS, CloudFormation, CodeBuild, Glue, SageMaker, Batch denied |
+| Service-linked roles, `sts:AssumeRole`                                                      | Denied                                                                                                                                                 |
+| Re-tag a resource into or out of scope                                                      | Any request or resource with another `Environment` value is denied; the EC2 `Environment` tag cannot be removed or rewritten                           |
+| Cost blow-out                                                                               | Explicit deny on RDS, ELB, NAT, peering, transit gateway, VPN, key pairs, other instance types, large or non-gp3 volumes                               |
 
-| Service                                                              | Why it is there                                                                                | Control used                                                                                                                                                                                                                                                           |
-| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| EC2 (instance, EBS, security groups, VPC pieces, Elastic IP, tags)   | Run, start, stop and terminate the one instance                                                | Tags only: ids carry no names. `aws:RequestTag` on create, `aws:ResourceTag` on change and delete. RunInstances also requires IMDSv2, encrypted volumes and an instance type from `AllowedInstanceTypes`. `Describe*` has no resource-level support (known limitation) |
-| EventBridge Scheduler                                                | Windows that start and stop the instance                                                       | ARN prefix: schedule group and schedules `codeproctor-pilot-*` (no tag support)                                                                                                                                                                                        |
-| S3                                                                   | Backup and recordings buckets with lifecycle, encryption, public access block, TLS-only policy | ARN prefix `codeproctor-pilot-*`. The role configures buckets; it cannot read or write data objects (explicit deny), except the state bucket                                                                                                                           |
-| KMS                                                                  | One pilot CMK and aliases                                                                      | Tags (`RequestTag` on CreateKey, `ResourceTag` on use) and alias prefix `alias/codeproctor-pilot-*`. `Decrypt` is denied except on the state key                                                                                                                       |
-| SES                                                                  | Pilot sender identities and configuration sets                                                 | Tags only for identities (they are domains or addresses, not name-prefixed: the owner tags them `Environment=pilot`), prefix for configuration sets. Sending is denied to the deploy role                                                                              |
-| CloudWatch Logs                                                      | Log groups                                                                                     | ARN prefix (`/codeproctor/pilot/*` or `codeproctor-pilot-*`) plus tags. Reading events is denied                                                                                                                                                                       |
-| CloudWatch alarms                                                    | Alarms                                                                                         | ARN prefix only: updates cannot be tag-conditioned reliably                                                                                                                                                                                                            |
-| Secrets Manager                                                      | Secret containers                                                                              | ARN prefix plus tags. Values can never be read (`GetSecretValue` denied)                                                                                                                                                                                               |
-| SSM Parameter Store                                                  | Parameters under `/codeproctor/pilot/`                                                         | Path prefix. Write and delete only; reads denied. Instance access is through Session Manager (no SSH keys: key-pair creation is denied)                                                                                                                                |
-| AWS Budgets                                                          | Cost alerts                                                                                    | ARN prefix `budget/codeproctor-pilot-*` (whether CreateBudget honours this ARN is unverified)                                                                                                                                                                          |
-| IAM                                                                  | Instance role and profile, scheduler execution role, their policies                            | Prefix `codeproctor-pilot-*`, the boundary condition, the denies below                                                                                                                                                                                                 |
-| RDS, load balancers, NAT gateways, VPC peering, transit gateway, VPN | Not used                                                                                       | **Explicit deny**: cost guard rails, so the cost design cannot be exceeded by mistake                                                                                                                                                                                  |
+### Scheduler role and `iam:PassRole`
 
-Also denied: Lambda, ECS, CloudFormation, CodeBuild, Glue, SageMaker, Batch, `sts:AssumeRole`.
+`ec2.amazonaws.com` is for the instance-profile role. `scheduler.amazonaws.com` is for the EventBridge
+Scheduler execution role. That role must use its own boundary, `codeproctor-pilot-boundary-scheduler`,
+which allows only `ec2:StartInstances` and `ec2:StopInstances` on instances tagged `Environment=pilot`
+and no data access. It does not share the data boundary. `monitoring.rds.amazonaws.com` is not allowed
+because RDS is not used.
 
-### Why `iam:PassRole` allows two services
+### Residual risks (stated plainly)
 
-`ec2.amazonaws.com` for the instance profile role. `scheduler.amazonaws.com` for the EventBridge
-Scheduler execution role, which must be passed to the schedule. The boundary lets that role do
-nothing but `ec2:StartInstances` and `ec2:StopInstances` on instances tagged `Environment=pilot`
-(plus whatever its own policy allows inside the boundary). The `monitoring.rds.amazonaws.com`
-passing is not allowed because RDS is not used.
+- **Trust documents.** `CreateRole` and `UpdateAssumeRolePolicy` let the caller choose a trust policy
+  (IAM has no condition key for it). A compromised pilot deploy job could trust an outside principal
+  with a pilot role. The role is still capped by its boundary and, for the data boundary, only usable from
+  an instance. Mitigation: required reviewers, CloudTrail alerts on `CreateRole` and
+  `UpdateAssumeRolePolicy`.
+- **Data loss through compute.** CI can still terminate instances, delete EBS volumes (`Terminate`,
+  `DeleteVolume`) and delete secrets within their recovery window. Bucket lifecycle and data
+  configuration are out of CI's reach, but a terminated instance loses anything not on S3. Recommended:
+  a CloudTrail alert (EventBridge rule to SNS) for `TerminateInstances`, `DeleteVolume`, `DeleteSecret`,
+  `ScheduleKeyDeletion`, `PutBucketPolicy`, `PutLifecycleConfiguration`.
+- **Indirect data access.** A deploy role that can launch an instance with a role and user data can
+  indirectly reach what that role reaches. The deploy role is isolated from everything else in the
+  account, not from the pilot's own data. Required reviewers are the control.
+- **Account-wide metadata reads.** `ec2:Describe*`, `ssm:DescribeParameters`, `scheduler:List*`,
+  `cloudwatch:DescribeAlarms`, `kms:ListAliases` cannot be filtered by IAM.
+- **`s3:ListBucket`** is used to read bucket configuration and also lists object keys. Candidate media
+  keys are listed, never read.
 
-### IAM escalation paths considered
+## Optional: Terraform state (`CreateStateBucket`, default false)
 
-| Path                                                                                      | How it is closed                                                                                                                                                                                      |
-| ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Create a role without limits                                                              | `CreateRole` only with `iam:PermissionsBoundary` equal to the pilot boundary and prefix `codeproctor-pilot-*`; explicit deny when the boundary differs or is missing                                  |
-| Remove or swap the boundary                                                               | `DeleteRolePermissionsBoundary` and `PutRolePermissionsBoundary` denied for all roles                                                                                                                 |
-| Edit the boundary policy                                                                  | The boundary is under the guardrails path and covered by explicit deny on `iam:*` (path and bare ARNs); `CreatePolicyVersion`, `SetDefaultPolicyVersion`, `DeletePolicy` cannot match                 |
-| Attach or put a policy on an unbounded role                                               | `AttachRolePolicy`, `PutRolePolicy` require the boundary condition on the target role                                                                                                                 |
-| Attach AdministratorAccess or any AWS managed policy                                      | `AttachRolePolicy` only with `iam:PolicyARN` like `policy/codeproctor-pilot-*`                                                                                                                        |
-| Attach the boundary or deploy policies as ordinary policies                               | Explicit deny on those policy ARNs                                                                                                                                                                    |
-| Change the deploy role (trust, policies, delete, tags)                                    | Explicit `iam:*` deny on the deploy and plan roles and the guardrails path, under the path ARN and the bare name                                                                                      |
-| Edit the deploy role's own policies through `CreatePolicyVersion`                         | They live under `/codeproctor-guardrails/`, which no allow matches, plus explicit deny; the reserved names `codeproctor-pilot-deploy-*` and `codeproctor-pilot-plan-*` are also denied                |
-| New IAM user, access key, login profile, group, service credential, SAML or OIDC provider | Not allowed; explicit deny by wildcard (`iam:*User*`, `*AccessKey*`, ...). Changing the GitHub provider's thumbprint or client ids is denied too                                                      |
-| Pass a powerful role to a code-running service                                            | `PassRole` only on `codeproctor-pilot-*` roles and only to `ec2` and `scheduler`; everything else denied. Lambda, ECS, CloudFormation, CodeBuild, Glue, SageMaker, Batch denied outright              |
-| Service-linked roles                                                                      | `CreateServiceLinkedRole` denied (RDS, ELB not used)                                                                                                                                                  |
-| Assume another role                                                                       | `sts:AssumeRole` denied                                                                                                                                                                               |
-| Re-tag a resource into or out of scope                                                    | Explicit deny on any request that tags `Environment` with another value, on any resource tagged with another value, and on removing or re-writing the `Environment` tag of EC2 resources after create |
-| Change state bucket or its key                                                            | Explicit deny, plus the bucket policy and key policy deny `codeproctor-*` roles that are not the deploy or plan role                                                                                  |
+`codeproctor-pilot-tfstate-<account id>` (S3 names are global, hence the suffix; it still matches
+`codeproctor-pilot-*`) has versioning, SSE-KMS with its own CMK `alias/codeproctor-pilot-tfstate`,
+Block Public Access, TLS-only, and a bucket policy that denies other `codeproctor-*` roles object access
+and everyone deleting object versions. Locking uses the native S3 lock file (`use_lockfile`, Terraform
+1.10 or later, no DynamoDB): `<key>.tflock` in the same bucket, which is why the roles may write and
+delete `*.tflock`. The state key prefix assumed by the plan role is `pilot/`. The key is tagged
+`Purpose=tfstate`, which every other control keys off. PR 2 (Terraform) is on hold; the owner may
+never use it. Recommended: leave it off.
 
-Residual risks, stated plainly:
+## Optional: plan role (`CreatePlanRole`, default false; needs `CreateStateBucket=true`)
 
-- `iam:UpdateAssumeRolePolicy` and `CreateRole` allow a trust policy of the role's choice (IAM has no
-  condition key for the trust document). A compromised pilot deploy job could create a
-  `codeproctor-pilot-*` role trusting an outside principal. That role is still capped by the
-  boundary (pilot data only). Mitigations: the `pilot` environment's required reviewers, CloudTrail
-  alerting on `CreateRole` and `UpdateAssumeRolePolicy`.
-- A deploy role that can launch an instance with a role and user data, or change an instance
-  setting, can indirectly reach the pilot data that the instance role can reach. The role is
-  isolated from everything else in the account, not from the pilot's own data.
-- The same is true of other indirect routes inside the pilot (for example `ModifyInstanceAttribute`).
-  The explicit data-plane denies stop mistakes and direct reads; they do not make the pilot deploy role
-  harmless inside its own environment. Required reviewers are the control for that.
-- `ec2:Describe*`, `ssm:DescribeParameters`, `scheduler:List*`, `cloudwatch:DescribeAlarms` and
-  `kms:ListAliases` are account-wide metadata reads: IAM cannot filter them. The account holds only
-  pilot resources by design; keep it that way (a separate account for anything else is the stronger
-  isolation).
-- `s3:ListBucket` is needed to configure buckets (HeadBucket) and also lists object keys. Candidate
-  media keys are listed, never read.
-
-## Optional: Terraform state
-
-The state bucket `codeproctor-pilot-tfstate-<account id>` (S3 names are global, hence the account id
-suffix; it still matches `codeproctor-pilot-*`) has versioning, SSE-KMS with its own CMK, Block
-Public Access, ownership enforced, TLS-only, and a bucket policy that denies other `codeproctor-*`
-roles (workload roles) object access and denies everyone deleting object versions. Locking uses
-Terraform's native S3 lock file (`use_lockfile`, Terraform 1.10 or later, no DynamoDB table): the
-lock object is `<key>.tflock` in the same bucket, which is why the roles may write and delete
-`*.tflock` objects. The state key is tagged `Purpose=tfstate`; every other control keys off that.
-
-PR 2 (Terraform) is on hold. The owner may decide not to use Terraform for a single instance: then
-ignore this bucket (it costs almost nothing) or remove it from the template. No Terraform is
-designed or written here.
-
-## Optional: plan role (open question for the owner)
-
-`CreatePlanRole` defaults to `false`. A GitHub environment with required reviewers makes every job
-that uses it wait for approval, so the deploy role cannot run an automatic plan on pull requests.
-`codeproctor-pilot-plan` is trusted for `repo:<owner>/<repo>:pull_request` and can read infrastructure
-metadata and the state, and write only the `*.tflock` lock objects. It cannot read secrets, data
-objects, log events or parameters, cannot decrypt any key except the state key, and cannot change
-anything.
+A GitHub environment with required reviewers makes every job that uses it wait for approval, so the
+deploy role cannot run an automatic plan on pull requests. `codeproctor-pilot-plan` is trusted for
+`repo:<owner>/<repo>:pull_request` and reads infrastructure metadata and the state; it writes only
+`pilot/*.tflock` objects and can list only the state bucket. It cannot read secrets, data objects, log
+events or parameters, cannot decrypt any key but the state key, and changes nothing.
 
 Residual risk: it is reachable from **any** `pull_request` workflow in this repository, including a
-workflow file changed by the pull request's author. Such a workflow can read infrastructure metadata
-and the state, and Terraform state can contain sensitive attributes. It can also write or delete
-lock objects (a denial-of-service on applies, never data loss). Mitigations: secrets are generated
-by AWS and never in Terraform, so state holds no secret values; branch protection and required
-review of workflow changes; fork pull requests do not receive OIDC tokens by default. With staging
-gone and Terraform on hold, the question is whether one read-only plan role is worth a role that
-any pull request can reach. The recommended default is `false` until PR 2 exists.
+workflow file changed by the pull request's author. Such a workflow can read infrastructure metadata and
+the state, and state can contain sensitive attributes. It can also write or delete lock objects (a
+denial of service on applies, never data loss). Mitigations: secrets are created by AWS or the owner and
+are not in Terraform state; branch protection and required review of workflow changes; fork pull
+requests do not receive OIDC tokens by default. The owner has not decided. Recommendation: off.
+
+## Cost notes (decisions for PR 4)
+
+- An Elastic IP costs about 3.65 USD per month. The compute design uses DNS updates instead; any
+  Elastic IP is a PR 4 decision.
+- Stopped instances still bill for their EBS volumes. Costs are written in PR 4, not here.
 
 ## Offline test and its limits
 
@@ -184,29 +213,29 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 .venv/bin/python infra/aws/tests/test_isolation.py
 ```
 
-It parses the template, resolves intrinsic functions (owner `example-owner`, repo `example-repo`,
-account `111111111111`), and evaluates over 200 cases with explicit-deny-wins semantics, permissions
-boundary intersection, bucket and key policies and the trust policy conditions. It exits non-zero on
-any mismatch. It approximates IAM: it cannot model which actions honour which condition keys in
-real services, eventual consistency of tag conditions, or multi-resource actions such as
-`RunInstances` in full. **`simulate-principal-policy.sh`, run by the owner against the deployed
-roles, is the authoritative check**, and the first real deploy is the final one. cfn-lint was run
-offline with no findings (a dev tool, not a repository dependency).
+The test runs 285 cases (all pass) and 20 structural checks. It parses the template, resolves intrinsic functions (owner `example-owner`, repo
+`example-repo`, account `111111111111`), and evaluates each case with explicit-deny-wins semantics,
+boundary intersection, bucket and key policies and the trust conditions. Each case table row lists the
+context keys supplied by hand. It exits non-zero on any mismatch. TC IDs for these cases are for QA to
+allocate (`docs/test-cases.md` has no DEP section).
 
-## Known limitations and things to verify at the first apply
+It approximates IAM: it cannot model which actions honour which condition keys in real services, tag
+propagation delay, or multi-resource actions in full. **`simulate-principal-policy.sh`, run by the
+owner against the deployed roles, is the authoritative check**, and the first real deploy is the final
+one. cfn-lint was run offline with no findings (a dev tool, not a repository dependency).
 
-- Tag conditions for SES identities, CloudWatch Logs `CreateLogGroup` and Budgets ARNs are my reading
-  of the AWS service authorization reference and are not verified against a live account.
-- `ec2:RunInstances` requires tags on the instance, volume and network interface (tag
-  specifications), subnets and security groups tagged `Environment=pilot`, encrypted volumes and
-  IMDSv2. An untagged default subnet will be refused: use a tagged VPC or tag the subnet.
-- Creating encrypted EBS volumes may need KMS actions that the data-plane denies block; if a launch
-  fails with a KMS error, adjust deliberately rather than loosening the denies.
-- `kms` tag conditions can lag a few seconds after tagging.
+## Things to verify at the first apply
+
+- Tag-condition support for SES identities and CloudWatch Logs `CreateLogGroup`; the `aws:ResourceTag`
+  evaluation for `iam:PassRole`; `ec2:Owner` on AMIs.
+- `ec2:RunInstances` needs tag specifications on the instance, volume and network interface, plus
+  subnets and security groups tagged `Environment=pilot`. Encrypted volumes use the `aws/ebs` key.
+- Presigned URLs: the boundary requires `ec2:SourceInstanceARN`, so URLs must be signed by code running
+  with the instance role. Check at first deploy that upload and playback URLs still work.
+- KMS tag conditions can lag a few seconds after tagging.
 - Policy size: each managed policy stays under 6144 characters (checked by the test).
 
-## On hold
+## Open items for the Delivery Lead
 
-PR 2 Terraform (owner may skip it), PR 3 deploy workflow (SSM or SSH, backups, schedule), PR 4
-costs (the Delivery Lead writes the numbers), PR 5 the owner's ordered manual steps (SES
-verification and tagging, S3 lifecycle, GitHub environment, first start).
+- The deploy mechanism (ADR 0017, pending): SSM or SSH, and what `codeproctor-pilot-instance-ssm` is for.
+- PR 2 Terraform, PR 3 workflow, PR 4 costs and PR 5 ordered manual steps remain on hold or open.

@@ -584,3 +584,10 @@ None found in application code. Observation for the backend owner: the identical
 ## Deploy check: AWS credential sources on pilot and production (hub, 2026-10-06; from Backend A #203)
 
 Defence in depth beside the API's own boot refusal (static AWS keys, `AWS_PROFILE`, `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` are refused in pilot and production, and so is `EMAIL_PROVIDER=noop`). The deploy workflow or the host provisioning check (QA or DEP-03) also refuses, on pilot and production hosts: the environment variables `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, `AWS_CONTAINER_CREDENTIALS_FULL_URI`, `AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`, and any `~/.aws` directory (credentials or config files) for the service user. The SDK default chain must end at the EC2 instance role (IMDSv2) and nothing else. DEP-01 and DEP-03 add the check to the go-live checklist (DEP-02).
+
+## DEP-01 PR 1 (deploy track, files under qa)
+
+| ID | Type | Owner | Item |
+| --- | --- | --- | --- |
+| FU-QA-13 | should-fix | QA / Deploy | Verify at the owner's first apply (infra/aws/README.md, "Things to verify"): tag conditions for SES identities and `logs:CreateLogGroup`; `aws:ResourceTag` on `iam:PassRole`; `ec2:Owner` on AMIs; `ec2:RunInstances` tag specifications on instance, volume and NIC; presigned URLs with the `ec2:SourceInstanceARN` boundary. |
+| FU-QA-14 | nit | Owner | Decide whether to keep the optional plan role (reachable from any pull_request workflow) and the optional Terraform state bucket while PR 2 is on hold. Both default to off; recommended off. |
