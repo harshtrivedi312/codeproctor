@@ -14,7 +14,7 @@
 //
 // TODO for DB-03: DDL features Prisma cannot express.
 // `prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script` was loaded next to
-// the reference DDL and the two catalogs were diffed. Tables (31), columns (297), enums (20, with
+// the reference DDL and the two catalogs were diffed. Tables (31), columns (298), enums (20, with
 // values and order), primary keys (31), foreign keys (59, with ON DELETE and ON UPDATE), unique
 // indexes (20) and the 22 non-partial indexes match. The differences are exactly these:
 //
@@ -23,6 +23,10 @@
 // (identity_checks.video_check_done, video_check_by, video_check_at), +1 foreign key
 // (identity_checks.video_check_by to users, NO ACTION, not org-composite) and +2 CHECKs (item 2).
 // identity_check_status gains WAIVED, last; the enum count stays 20.
+//
+// And the D-55 delta (migration ..._consent_age_confirmed_at, owner decision C-30): +1 column
+// (consents.age_confirmed_at, nullable timestamptz; no CHECK and no backfill). 297 columns before it,
+// 298 with it. Nothing else changes: tables, enums, keys, CHECKs and indexes keep their counts.
 //
 //  1. Extensions. Prisma emits none. Put these first in the init migration, before any CITEXT column:
 //       CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -774,6 +778,10 @@ model Consent {
   pdfKey         String?   @map("pdf_key")
   pdfGeneratedAt DateTime? @map("pdf_generated_at") @db.Timestamptz(6)
   copyEmailedAt  DateTime? @map("copy_emailed_at") @db.Timestamptz(6)
+  // D-55 (C-30): the candidate's 18+ confirmation, server time, set at sign. NULL on a decline and on a
+  // row signed before C-30. Deliberately no CHECK: one on signed rows would block the consent-PDF job's
+  // later update of a pre-C-30 signed row (the requirement is enforced at create, by ConsentService).
+  ageConfirmedAt DateTime? @map("age_confirmed_at") @db.Timestamptz(6)
 
   session     Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   consentText ConsentText @relation(fields: [consentTextId], references: [id], onDelete: NoAction, onUpdate: NoAction)

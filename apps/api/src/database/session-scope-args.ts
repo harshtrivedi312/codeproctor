@@ -626,7 +626,10 @@ function assertCreateWhen(
 /**
  * The shape of a create row that the database would otherwise answer with a constraint violation (the
  * consents CHECKs, named in the rule): exactly one of the two `createXor` columns is set, and a column of
- * `createNeeds` that is set brings its partner as a non-empty string. Thrown first, with no value in it.
+ * `createNeeds` that is set brings its partner as a non-empty string. Then the two rules that have no database
+ * CHECK (C-30, D-55, FU-DB-260; a CHECK would block the consent-PDF job's update of a pre-C-30 row): a column
+ * of `createNeedsDate` that is set brings its partner as a valid Date, and a column of `createForbids` that is
+ * set brings none of the listed columns. Thrown first, with no value in it.
  */
 function assertCreateShape(
   model: string,
@@ -653,6 +656,27 @@ function assertCreateShape(
         model,
         operation,
         `${partner} is required with ${column} in this create (ADR 0013 CS-4.4).`,
+      );
+    }
+  }
+  for (const [column, partner] of Object.entries(rule.createNeedsDate ?? {})) {
+    const value = data[partner];
+    if (isSet(column) && !(value instanceof Date && !Number.isNaN(value.getTime()))) {
+      throw violation(
+        model,
+        operation,
+        `${partner} is required with ${column} in this create, as a valid Date set by the service ` +
+          '(ADR 0013 CS-4.4).',
+      );
+    }
+  }
+  for (const [column, forbidden] of Object.entries(rule.createForbids ?? {})) {
+    const carried = forbidden.filter((name) => isSet(name));
+    if (isSet(column) && carried.length > 0) {
+      throw violation(
+        model,
+        operation,
+        `${carried.join(', ')} cannot be set with ${column} in this create (ADR 0013 CS-4.4).`,
       );
     }
   }
