@@ -287,7 +287,9 @@ function candidateGate(input: SessionScopeInput, args: PlainObject): CandidateGa
     readFilter:
       rule.kind === 'read'
         ? candidateReadFilter(model, rule.filter, session.sessionId, facts)
-        : undefined,
+        : rule.kind === 'grant-only' && rule.filter !== undefined
+          ? candidateReadFilter(model, rule.filter, session.sessionId, facts)
+          : undefined,
     columns,
   };
 }

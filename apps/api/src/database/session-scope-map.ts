@@ -120,7 +120,14 @@ export type CandidateReadFilter =
   /** `test_sections`: `sessionSections: { some: { sessionId } }` (injected relation filter). */
   | 'sections'
   /** `questions`: `versions: { some: { sessionQuestions: { some: { sessionId } } } }`. */
-  | 'questions';
+  | 'questions'
+  /**
+   * `test_questions` (under its grant): `sessionQuestions: { some: { sessionId } }`, so the grant reaches
+   * only a test question that one of THIS session's questions points to. CS-4.3 names `id IN grant.ids`
+   * alone; the session filter is the stricter reading (FU-DB-212): without it a service that passed another
+   * candidate's `test_question_id` would read its `section_id`.
+   */
+  | 'testQuestions';
 
 /**
  * Columns that no candidate write names, ever (the review's rule): the primary key (a create that names
@@ -472,7 +479,12 @@ export type CandidateModelRule =
    * every query, and only the columns the grant names are readable (CS-4.4: `consent_texts`
    * `id`, `version`, `body_md`, `legal_approved_at`; `test_questions` `id` and `section_id`).
    */
-  | { readonly kind: 'grant-only'; readonly grantSite: string };
+  | {
+      readonly kind: 'grant-only';
+      readonly grantSite: string;
+      /** A row filter ANDed on top of the grant's `id IN ids` (test_questions: the session's own). */
+      readonly filter?: CandidateReadFilter;
+    };
 
 /**
  * CS-4.3: the CANDIDATE allowlist. A model that is not here throws (deny by default). The write
@@ -599,7 +611,11 @@ export const CANDIDATE_MODELS: Readonly<Partial<Record<ModelName, CandidateModel
     Question: { kind: 'read', filter: 'questions' },
     // Readable only under a grant of that model (CS-4.3): `id IN grant.ids`, and the grant's columns.
     ConsentText: { kind: 'grant-only', grantSite: 'ConsentService' },
-    TestQuestion: { kind: 'grant-only', grantSite: 'SectionGateService (step 2)' },
+    TestQuestion: {
+      kind: 'grant-only',
+      grantSite: 'SectionGateService (step 2)',
+      filter: 'testQuestions',
+    },
   });
 
 export function candidateRuleFor(model: string): CandidateModelRule | undefined {
@@ -655,5 +671,7 @@ export function candidateReadFilter(
       return { sessionSections: { some: { sessionId } } };
     case 'questions':
       return { versions: { some: { sessionQuestions: { some: { sessionId } } } } };
+    case 'testQuestions':
+      return { sessionQuestions: { some: { sessionId } } };
   }
 }
