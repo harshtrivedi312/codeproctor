@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import { createTestRunHandlers, startMockTest } from './test-handlers';
+import { createTestRunHandlers, ingestOpen, startMockTest, testState } from './test-handlers';
 import { apiBaseUrl } from '@/lib/env';
 import type {
   ConsentDocument,
@@ -364,7 +364,17 @@ export function createCandidateHandlers() {
         seq?: number;
         bytes?: number;
         durationMs?: number;
+        contentType?: string;
       };
+      // Everything but the room scan needs a running test (or the ingest grace after it).
+      if (body.stream !== 'ROOM_SCAN' && !ingestOpen(testState(s))) {
+        return problem(409, 'SESSION_NOT_ACTIVE');
+      }
+      const wantType = body.stream === 'AUDIO' ? 'audio/webm' : 'video/webm';
+      if (body.contentType !== wantType) return problem(400, 'VALIDATION_FAILED');
+      if (body.stream === 'AUDIO' && (body.bytes ?? 0) > 4 * 1024 * 1024) {
+        return problem(400, 'VALIDATION_FAILED');
+      }
       if (
         !['ROOM_SCAN', 'SCREEN', 'WEBCAM', 'AUDIO'].includes(body.stream ?? '') ||
         typeof body.seq !== 'number' ||

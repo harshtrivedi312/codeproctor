@@ -1,31 +1,39 @@
-import type { ClientProctorEvent } from '@codeproctor/shared';
+import type { ClientProctorEvent, ProctorDetector } from '@codeproctor/shared';
 import {
   IdbStore,
   ProctorSession,
   RecordingPipeline,
+  STORES,
   createDefaultMonitors,
   type Detector,
 } from '@codeproctor/proctor-sdk';
 import { requestAt } from '@/features/candidate-flow/api';
 import { getSessionToken } from '@/features/candidate-flow/session-store';
 import { createAdrMediaApi, putChunk } from './media-api';
-import { createProctorTransport } from './transport';
-import { PROCTOR_PAUSE, proctorKeySchema, type HeartbeatState } from './wire';
+import { withRetry } from './retry';
+import { createProctorTransport, type HeartbeatHealth } from './transport';
+import { PROCTOR_PAUSE, proctorKeySchema, type HeartbeatState, type ProctorKey } from './wire';
 
 /**
  * Wires the proctor SDK into the real test (ADR 0013; FR-601..FR-603, FR-609, FR-701, FR-702).
  * The SDK is consumed through its public exports only.
  *
  * What it does: fetches the HMAC key once (memory only, handed to the SDK, never stored or logged),
- * starts the SDK session with the fullscreen, visibility, clipboard, shortcut, devtools,
- * multi-screen, virtual-camera and screen-share monitors, runs the signed event queue and the 10 s
- * heartbeat, records screen, webcam and audio in 10 s chunks through the presign and confirm
- * routes, and turns the SDK's locks and the server's pause reasons into one UI state.
+ * seeds the event and media counters from the key response (max of local and server, ADR 0013
+ * section 2), starts the SDK session with the fullscreen, visibility, clipboard, shortcut,
+ * devtools, multi-screen, virtual-camera and screen-share monitors, runs the signed event queue
+ * and the 10 s heartbeat (with recorder and queue health), records screen, webcam and audio in
+ * 10 s chunks through the presign and confirm routes, and turns the SDK's locks and the server's
+ * pause reasons into one UI state.
  *
- * What it does not do yet (docs/followups/frontend.md): keystroke batches (FR-608: the SDK has no
- * keystroke queue), the ML detectors (FR-606, FR-607: WebAssembly is not allowed by the CSP in this
- * document, and the model files are not served), key persistence and re-signing after an epoch
- * change (the SDK has no setKey hooks), and the side camera stream.
+ * When the session is over (409 SESSION_NOT_ACTIVE) or taken over (401 SESSION_TAKEN_OVER) it
+ * purges the signed batches and the recording chunks from the browser and releases every device
+ * (ADR 0013 section 2, Purge). Other endings keep the outbox for the next page load.
+ *
+ * Not done yet (docs/followups/frontend.md): keystroke batches (FR-608: the SDK has no keystroke
+ * queue), the ML detectors (FR-606, FR-607: WebAssembly is not allowed by the CSP in this
+ * document; they are reported as unavailable, not silently absent), key persistence and re-signing
+ * after an epoch change (the SDK has no setKey hooks), and the side camera stream.
  */
 export interface ProctorUiState {
   /** Nothing proctored has started yet. */
@@ -40,10 +48,26 @@ export interface ProctorUiState {
   /** Why the test cannot go on: the session is over, or a new code is needed. */
   endedBecause: null | 'not-active' | 'reauth' | 'key';
   /** A blocked action to tell the candidate about (paste, drop, shortcut), cleared by the UI. */
-  notice: null | { kind: 'paste' | 'drop' | 'copy' | 'shortcut' | 'right-click'; at: number };
-  /** Devices that did not start (camera or microphone denied, recording not supported). */
+  notice: null | { kind: NoticeKind; at: number };
+  /** Recording that did not start (camera or microphone denied, recording not supported). */
   unavailable: string[];
 }
+
+export type NoticeKind = 'paste' | 'drop' | 'copy' | 'shortcut' | 'right-click';
+
+export const initialProctorState: ProctorUiState = {
+  phase: 'idle',
+  locks: { fullscreen: true, screenShare: true },
+  pauseReasons: [],
+  online: true,
+  shared: false,
+  endedBecause: null,
+  notice: null,
+  unavailable: [],
+};
+
+/** The SDK's own counter backup in localStorage (a batch number, no candidate data). */
+const SEQ_BACKUP_PREFIX = 'codeproctor:eventseq:';
 
 /**
  * The SDK's own storage. When IndexedDB does not exist at all (some privacy modes), the SDK's
@@ -59,16 +83,89 @@ function safeIdbFactory(): IDBFactory {
   } as unknown as IDBFactory;
 }
 
-export const initialProctorState: ProctorUiState = {
-  phase: 'idle',
-  locks: { fullscreen: true, screenShare: true },
-  pauseReasons: [],
-  online: true,
-  shared: false,
-  endedBecause: null,
-  notice: null,
-  unavailable: [],
-};
+/** Wire seq = segment * 100000 + seq (media-api.ts), so a segment must also clear nextSeq. */
+const WIRE_SEQ_PER_SEGMENT = 100_000;
+const MEDIA_STREAMS = ['SCREEN', 'WEBCAM', 'AUDIO'] as const;
+
+/**
+ * Continues the counters where the server says they are (ADR 0013 section 2): the larger of the
+ * local value and the server's, written through the SDK's own store before the SDK reads it. A
+ * failure to write leaves the SDK on its own (safe) defaults.
+ */
+export async function seedCounters(
+  store: IdbStore,
+  sessionId: string,
+  counters: ProctorKey['counters'],
+): Promise<void> {
+  if (!counters) return;
+  try {
+    if (counters.eventSeqStart !== undefined) {
+      const key = `${sessionId}:nextEventSeq`;
+      const local = (await store.get<number>(STORES.meta, key)) ?? 0;
+      await store.put(STORES.meta, key, Math.max(local, counters.eventSeqStart));
+    }
+    for (const stream of MEDIA_STREAMS) {
+      const c = counters.media?.[stream];
+      if (!c) continue;
+      const nextSegment = Math.max(c.nextSegment, Math.ceil(c.nextSeq / WIRE_SEQ_PER_SEGMENT));
+      const key = `${sessionId}:segment:${stream}`;
+      const local = (await store.get<number>(STORES.meta, key)) ?? -1;
+      // The SDK stores the last segment used and starts the next one after it.
+      await store.put(STORES.meta, key, Math.max(local, nextSegment - 1));
+    }
+  } catch {
+    // no storage: the SDK reports it and uses its own floor
+  }
+}
+
+/**
+ * A detector that is not started in this build still says so (ADR 0005): DETECTOR_UNAVAILABLE and
+ * a capability flag, so a reviewer can tell "off" from "no findings".
+ */
+class NotStartedDetector implements Detector {
+  constructor(
+    readonly id: string,
+    readonly accommodationId: ProctorDetector,
+  ) {}
+  start(ctx: Parameters<Detector['start']>[0]): void {
+    ctx.emit('DETECTOR_UNAVAILABLE', { detector: this.accommodationId, reason: 'UNSUPPORTED' });
+    ctx.setCapability({
+      id: this.id,
+      status: 'UNSUPPORTED',
+      detail: 'The in-browser detector is not started in this build.',
+    });
+  }
+  stop(): void {
+    // nothing to stop
+  }
+}
+
+function notStartedDetectors(): Detector[] {
+  return [
+    new NotStartedDetector('face', 'FACE'),
+    new NotStartedDetector('gaze', 'GAZE'),
+    new NotStartedDetector('object', 'OBJECT'),
+    new NotStartedDetector('voice', 'VOICE'),
+  ];
+}
+
+function noticeKind(type: string): NoticeKind | null {
+  switch (type) {
+    case 'PASTE_ATTEMPT':
+      return 'paste';
+    case 'DROP_ATTEMPT':
+      return 'drop';
+    case 'COPY_ATTEMPT':
+    case 'CUT_ATTEMPT':
+      return 'copy';
+    case 'SHORTCUT_BLOCKED':
+      return 'shortcut';
+    case 'RIGHT_CLICK':
+      return 'right-click';
+    default:
+      return null;
+  }
+}
 
 export interface ProctorControllerOptions {
   /** The server time of the consent signature: nothing starts without it (D-17). */
@@ -79,11 +176,13 @@ export interface ProctorControllerOptions {
   /** Heartbeat state with timing, so the app can re-sync its countdown from the server time. */
   onHeartbeat?: (state: HeartbeatState, timing: { startedAt: number; endedAt: number }) => void;
   /** Test seams: real code never passes these. */
+  store?: IdbStore;
   detectors?: Detector[];
   heartbeatIntervalMs?: number;
   flushIntervalMs?: number;
   /** How long to wait for queued events and chunks when the test ends (SDK default 15 s). */
   finishDrainMs?: number;
+  retrySleep?: (ms: number) => Promise<void>;
 }
 
 type Listener = (state: ProctorUiState) => void;
@@ -94,7 +193,10 @@ export class ProctorController {
   private readonly session = new ProctorSession();
   private readonly monitors = createDefaultMonitors();
   private pipeline: RecordingPipeline | null = null;
+  private initPromise: Promise<boolean> | null = null;
   private stopped = false;
+  private finishing = false;
+  private torn = false;
 
   constructor(private readonly o: ProctorControllerOptions) {}
 
@@ -110,47 +212,57 @@ export class ProctorController {
     for (const l of this.listeners) l(this.state);
   }
 
-  private end(because: NonNullable<ProctorUiState['endedBecause']>): void {
-    if (this.state.endedBecause) return;
-    this.set({ phase: 'ended', endedBecause: because });
-    void this.stop();
-  }
-
   /** Clears the "blocked action" notice once the UI has shown it. */
   clearNotice(): void {
     this.set({ notice: null });
   }
 
-  /** Fetch the key, start the SDK session and the recording queue. No device is touched yet. */
-  async init(): Promise<boolean> {
+  private end(because: NonNullable<ProctorUiState['endedBecause']>, purge: boolean): void {
+    // While finishing (or already stopped) the server's "not active" is the normal end.
+    if (this.state.endedBecause || this.stopped || this.finishing) return;
+    this.set({ phase: 'ended', endedBecause: because });
+    void this.teardown({ purge, awaitInit: false });
+  }
+
+  /** Fetch the key, seed the counters, start the SDK session and the recording queue. */
+  init(): Promise<boolean> {
+    this.initPromise ??= this.runInit();
+    return this.initPromise;
+  }
+
+  private async runInit(): Promise<boolean> {
     this.set({ phase: 'starting' });
-    const keyResult = await requestAt(proctorKeySchema, '/session/proctor-key', {
-      method: 'POST',
-      authed: true,
-    });
+    const keyResult = await withRetry(
+      () => requestAt(proctorKeySchema, '/session/proctor-key', { method: 'POST', authed: true }),
+      this.o.retrySleep ? { sleep: this.o.retrySleep } : {},
+    );
     if (this.stopped) return false;
     if (!keyResult.ok) {
       // KEY_ALREADY_ISSUED: this epoch's key went out already (a reload). Only a new code, which
       // raises the epoch, gets a new key (ADR 0013 section 2).
       if (keyResult.kind === 'problem' && keyResult.status === 409) {
-        this.end(keyResult.code === 'SESSION_NOT_ACTIVE' ? 'not-active' : 'key');
+        this.end(keyResult.code === 'SESSION_NOT_ACTIVE' ? 'not-active' : 'key', false);
       } else if (keyResult.kind === 'problem' && keyResult.status === 401) {
-        this.end('reauth');
+        this.end('reauth', false);
       } else {
-        this.end('key');
+        this.end('key', false);
       }
       return false;
     }
+    const store = this.o.store ?? new IdbStore(safeIdbFactory());
+    await seedCounters(store, this.o.sessionId, keyResult.data.counters);
+    if (this.stopped) return false;
+
     const transport = createProctorTransport({
       onState: (s, timing) => {
         this.set({ pauseReasons: s.pauseReasons, online: true });
         this.o.onHeartbeat?.(s, timing);
       },
-      onNotActive: () => this.end('not-active'),
-      onReauthRequired: () => this.end('reauth'),
+      onNotActive: () => this.end('not-active', true),
+      onReauthRequired: (reason) => this.end('reauth', reason === 'SESSION_TAKEN_OVER'),
+      getHealth: () => this.health(),
     });
     const consent = { recordedAt: this.o.consentRecordedAt };
-    const store = new IdbStore(safeIdbFactory());
     this.session.on('lock', (l) => {
       this.set({
         locks: {
@@ -163,17 +275,11 @@ export class ProctorController {
       // A failed heartbeat only means "offline" if the session is still alive.
       if (!this.state.endedBecause) this.set({ online: c.online });
     });
-    this.session.on('capability', (f) => {
-      if (f.status === 'DENIED' || f.status === 'UNSUPPORTED') {
-        if (!this.state.unavailable.includes(f.id)) {
-          this.set({ unavailable: [...this.state.unavailable, f.id] });
-        }
-      }
-    });
+    this.session.on('capability', (f) => this.noteCapability(f.id, f.status));
     this.session.on('event', (e) => this.onEvent(e));
     try {
       await this.session.start({
-        // The key goes straight into the SDK, which imports it as a non-extractable CryptoKey.
+        // The key goes straight into the SDK, which imports it as a CryptoKey.
         sessionId: this.o.sessionId,
         hmacKeyBase64: keyResult.data.key,
         root: this.o.root,
@@ -182,12 +288,13 @@ export class ProctorController {
         store,
         ...(this.o.heartbeatIntervalMs ? { heartbeatIntervalMs: this.o.heartbeatIntervalMs } : {}),
         ...(this.o.flushIntervalMs ? { flushIntervalMs: this.o.flushIntervalMs } : {}),
-        detectors: this.o.detectors ?? Object.values(this.monitors),
+        detectors: this.o.detectors ?? [...Object.values(this.monitors), ...notStartedDetectors()],
       });
     } catch {
-      this.end('key');
+      this.end('key', false);
       return false;
     }
+    // Stopped while starting: teardown() waits for this function, then stops what just started.
     if (this.stopped) return false;
     this.pipeline = new RecordingPipeline({
       sessionId: this.o.sessionId,
@@ -197,80 +304,172 @@ export class ProctorController {
         if (!consent.recordedAt) throw new Error('consent required');
       },
       put: putChunk,
-      onCapability: (f) => {
-        if (
-          (f.status === 'DENIED' || f.status === 'UNSUPPORTED') &&
-          !this.state.unavailable.includes(f.id)
-        )
-          this.set({ unavailable: [...this.state.unavailable, f.id] });
-      },
+      onCapability: (f) => this.noteCapability(f.id, f.status),
     });
-    await this.pipeline.start();
+    try {
+      await this.pipeline.start();
+    } catch {
+      // The recording queue could not start: the test goes on and says recording is unavailable.
+      this.noteCapability('recording-storage', 'UNSUPPORTED');
+      this.pipeline = null;
+    }
+    if (this.stopped) return false;
     this.set({ phase: 'running' });
     return true;
   }
 
+  /** Only recording problems reach the candidate; detector flags are for the reviewer. */
+  private noteCapability(id: string, status: string): void {
+    if (status !== 'DENIED' && status !== 'UNSUPPORTED') return;
+    if (!id.startsWith('record')) return;
+    if (!this.state.unavailable.includes(id))
+      this.set({ unavailable: [...this.state.unavailable, id] });
+  }
+
+  private health(): HeartbeatHealth {
+    const rec = this.pipeline?.health();
+    const queue = this.session.getQueueStats();
+    return {
+      ...(rec
+        ? {
+            recorder: {
+              streams: MEDIA_STREAMS.map((stream) => ({
+                stream,
+                bufferedBytes: rec.bytesPendingByStream[stream],
+              })),
+              droppedChunks: rec.droppedChunks,
+              droppedBytes: rec.droppedBytes,
+            },
+          }
+        : {}),
+      ...(queue
+        ? {
+            queue: {
+              pendingEventBatches: queue.unsentBatches,
+              pendingKeystrokeBatches: 0,
+              rejectedBatches: queue.rejectedBatches,
+            },
+          }
+        : {}),
+    };
+  }
+
   private onEvent(e: ClientProctorEvent): void {
-    const kind = (
-      {
-        PASTE_ATTEMPT: 'paste',
-        DROP_ATTEMPT: 'drop',
-        COPY_ATTEMPT: 'copy',
-        CUT_ATTEMPT: 'copy',
-        SHORTCUT_BLOCKED: 'shortcut',
-        RIGHT_CLICK: 'right-click',
-      } as const
-    )[e.type as 'PASTE_ATTEMPT'];
+    const kind = noticeKind(e.type);
     if (kind) this.set({ notice: { kind, at: Date.now() } });
   }
 
   /** Needs a click. The whole screen must be shared (FR-604); anything else is refused. */
   async shareScreen(): Promise<{ ok: true } | { ok: false; reason: string }> {
+    if (this.stopped) return { ok: false, reason: 'STOPPED' };
     const outcome = await this.monitors.screenShare.request();
+    if (this.stopped) {
+      // Granted after the test ended: switch it straight off.
+      if (outcome.ok) outcome.stream.getTracks().forEach((t) => t.stop());
+      this.monitors.screenShare.stop();
+      return { ok: false, reason: 'STOPPED' };
+    }
     if (!outcome.ok) return { ok: false, reason: outcome.reason };
     this.set({ shared: true });
     await this.pipeline?.recordScreen(outcome.stream);
+    if (this.stopped) await this.pipeline?.stopStream('SCREEN');
     return { ok: true };
   }
 
   /** Needs a click. */
-  enterFullscreen(): Promise<boolean> {
-    return this.monitors.fullscreen.enter();
+  async enterFullscreen(): Promise<boolean> {
+    if (this.stopped) return false;
+    const ok = await this.monitors.fullscreen.enter();
+    if (this.stopped && ok && document.fullscreenElement) {
+      await document.exitFullscreen().catch(() => undefined);
+      return false;
+    }
+    return ok;
   }
 
   /** Webcam and microphone recording. Each may be denied: that is reported, never hidden. */
   async startRecorders(): Promise<void> {
-    await this.pipeline?.recordWebcam();
-    await this.pipeline?.recordAudio();
+    if (this.stopped || !this.pipeline) return;
+    const webcam = await this.pipeline.recordWebcam();
+    if (this.stopped) {
+      webcam?.getTracks().forEach((t) => t.stop());
+      await this.pipeline.stopStream('WEBCAM');
+      return;
+    }
+    const audio = await this.pipeline.recordAudio();
+    if (this.stopped) {
+      audio?.getTracks().forEach((t) => t.stop());
+      await this.pipeline.stopStream('AUDIO');
+    }
   }
 
-  /** The test is over: flush what is queued, stop every device, purge the SDK's own storage. */
+  /**
+   * The test is over: stop the recorders (final chunks are flushed), then drain events and media in
+   * parallel, purge the SDK's own storage and release every device.
+   */
   async finish(): Promise<{ lostBatches: number }> {
+    if (this.finishing || this.torn) return { lostBatches: 0 };
+    this.finishing = true;
     this.stopped = true;
+    await this.initPromise?.catch(() => undefined);
+    const drain = this.o.finishDrainMs;
     let lost = 0;
     try {
-      const drain = this.o.finishDrainMs;
-      lost = (await this.session.finish(drain)).lostBatches;
-      await this.pipeline?.finish(drain === undefined ? {} : { drainTimeoutMs: drain });
+      for (const s of MEDIA_STREAMS) await this.pipeline?.stopStream(s).catch(() => undefined);
+      const [sessionResult] = await Promise.all([
+        this.session.finish(drain),
+        this.pipeline?.finish(drain === undefined ? {} : { drainTimeoutMs: drain }),
+      ]);
+      lost = sessionResult.lostBatches;
     } catch {
-      // stop below
+      // release below
     }
-    await this.stopAll();
+    await this.releaseDevices();
+    this.removeSeqBackup();
+    this.torn = true;
     this.set({ phase: 'ended' });
     return { lostBatches: lost };
   }
 
-  /** Leaving the page without finishing: keep unsent data for a reload, stop the devices. */
-  async stop(): Promise<void> {
+  /** Leaving the page without finishing: keep unsent data for a reload, release the devices. */
+  stop(): Promise<void> {
+    // finish() tears everything down itself.
+    if (this.finishing) return Promise.resolve();
     this.stopped = true;
-    await this.session.stop().catch(() => undefined);
-    await this.pipeline?.stop().catch(() => undefined);
-    await this.stopAll();
+    return this.teardown({ purge: false, awaitInit: true });
   }
 
-  private async stopAll(): Promise<void> {
+  private async teardown(o: { purge: boolean; awaitInit: boolean }): Promise<void> {
+    this.stopped = true;
+    if (this.torn) return;
+    this.torn = true;
+    if (o.awaitInit) await this.initPromise?.catch(() => undefined);
+    if (o.purge) {
+      // Purge: delete the signed batches and the chunks as well as stopping (ADR 0013 section 2).
+      await Promise.allSettled([
+        this.session.finish(0),
+        this.pipeline?.finish({ drainTimeoutMs: 0 }),
+      ]);
+      this.removeSeqBackup();
+    } else {
+      await this.session.stop().catch(() => undefined);
+      await this.pipeline?.stop().catch(() => undefined);
+    }
+    await this.releaseDevices();
+  }
+
+  private async releaseDevices(): Promise<void> {
     this.monitors.screenShare.stop();
     if (document.fullscreenElement) await document.exitFullscreen().catch(() => undefined);
+  }
+
+  /** The SDK keeps a batch counter per session in localStorage; it goes when the test ends. */
+  private removeSeqBackup(): void {
+    try {
+      globalThis.localStorage?.removeItem(`${SEQ_BACKUP_PREFIX}${this.o.sessionId}`);
+    } catch {
+      // storage disabled
+    }
   }
 
   hasPause(reason: string = PROCTOR_PAUSE): boolean {

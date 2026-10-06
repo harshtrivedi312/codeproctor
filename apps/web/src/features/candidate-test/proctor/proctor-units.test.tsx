@@ -132,6 +132,21 @@ describe('proctor transport (ADR 0013 5.2, 5.3)', () => {
     expect(await createProctorTransport(hooks()).sendBatch(batch)).toBe('RETRY');
   });
 
+  it('ADR 0013 5.2: a key that stays stale (the SDK cannot re-sign) is retried a bounded number of times, then a new code is asked for', async () => {
+    await signIn();
+    server.use(
+      http.post(`${cand}/session/events`, () =>
+        HttpResponse.json({ code: 'KEY_EPOCH_STALE' }, { status: 409 }),
+      ),
+    );
+    const h = hooks();
+    const t = createProctorTransport(h);
+    for (let i = 0; i < 5; i += 1) expect(await t.sendBatch(batch)).toBe('RETRY');
+    expect(h.onReauthRequired).not.toHaveBeenCalled();
+    expect(await t.sendBatch(batch)).toBe('RETRY');
+    expect(h.onReauthRequired).toHaveBeenCalledWith('KEY_STALE');
+  });
+
   it('ADR 0013 5.2: three 401s in a row ask for a new code; one does not', async () => {
     await signIn();
     server.use(
@@ -145,7 +160,7 @@ describe('proctor transport (ADR 0013 5.2, 5.3)', () => {
     await t.sendBatch(batch);
     expect(h.onReauthRequired).not.toHaveBeenCalled();
     await t.sendBatch(batch);
-    expect(h.onReauthRequired).toHaveBeenCalledTimes(1);
+    expect(h.onReauthRequired).toHaveBeenCalledWith('TOKEN_EXPIRED');
   });
 
   it('ADR 0013 5.3: a heartbeat passes the server state and timing to the app, and a renewed token goes to memory only', async () => {
@@ -230,6 +245,26 @@ describe('media api bridge (ADR 0013 5.5, FR-701)', () => {
       http.put(`${apiBaseUrl}/mock-upload/x`, () => new HttpResponse(null, { status: 412 })),
     );
     expect(await putChunk(`${apiBaseUrl}/mock-upload/x`, new ArrayBuffer(1), {})).toBe(200);
+  });
+
+  it('FU-FEB-36: alreadyUploaded for a chunk this page was never given a URL for is a conflict, not "stored"', async () => {
+    await signIn();
+    const api = createAdrMediaApi();
+    server.use(
+      http.post(`${cand}/session/media/presign`, () =>
+        HttpResponse.json({ alreadyUploaded: true }),
+      ),
+    );
+    await expect(api.presign(chunk(0, 1))).rejects.toMatchObject({ kind: 'FATAL' });
+  });
+
+  it('ADR 0013 5.5: a wire seq above 99,999,999 is refused before any request', async () => {
+    await signIn();
+    const seen = recordRequests();
+    await expect(createAdrMediaApi().presign(chunk(1000, 0))).rejects.toMatchObject({
+      kind: 'FATAL',
+    });
+    expect(seen.some((q) => q.url.endsWith('/media/presign'))).toBe(false);
   });
 
   it('ADR 0013 5.5: session over and seq conflicts are fatal (dropped), everything else is retried', async () => {

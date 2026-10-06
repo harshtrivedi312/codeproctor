@@ -18,9 +18,27 @@ export interface TransportHooks {
   onState: (state: HeartbeatState, timing: { startedAt: number; endedAt: number }) => void;
   /** 409 SESSION_NOT_ACTIVE: the session is over (submitted, expired). Stop; do not report offline. */
   onNotActive: () => void;
-  /** 401 SESSION_TAKEN_OVER, or three 401s in a row: the candidate must pass the OTP again. */
-  onReauthRequired: () => void;
+  /**
+   * The candidate must pass the OTP again. `SESSION_TAKEN_OVER` (another device took over) means
+   * this device's data must be purged; three 401s in a row (`TOKEN_EXPIRED` or none) and a key that
+   * stays stale keep the outbox for the next run (ADR 0013 section 2, Purge).
+   */
+  onReauthRequired: (reason: 'SESSION_TAKEN_OVER' | 'TOKEN_EXPIRED' | 'KEY_STALE') => void;
+  /** Health for the heartbeat body (ADR 0013 section 5.3). */
+  getHealth?: () => HeartbeatHealth;
 }
+
+export interface HeartbeatHealth {
+  recorder?: {
+    streams: { stream: string; bufferedBytes: number }[];
+    droppedChunks: number;
+    droppedBytes: number;
+  };
+  queue?: { pendingEventBatches: number; pendingKeystrokeBatches: number; rejectedBatches: number };
+}
+
+/** KEY_EPOCH_STALE retries before the candidate is sent for a new code (the SDK cannot re-sign). */
+export const MAX_STALE_RETRIES = 5;
 
 async function problemCode(response: Response): Promise<string | null> {
   try {
@@ -39,9 +57,11 @@ export function createProctorTransport(hooks: TransportHooks): EventTransport & 
   heartbeat(): Promise<boolean>;
 } {
   let unauthorized = 0;
+  let stale = 0;
   const handle401 = (code: string | null): void => {
     unauthorized += 1;
-    if (code === 'SESSION_TAKEN_OVER' || unauthorized >= 3) hooks.onReauthRequired();
+    if (code === 'SESSION_TAKEN_OVER') hooks.onReauthRequired('SESSION_TAKEN_OVER');
+    else if (unauthorized >= 3) hooks.onReauthRequired('TOKEN_EXPIRED');
   };
 
   return {
@@ -69,6 +89,7 @@ export function createProctorTransport(hooks: TransportHooks): EventTransport & 
       }
       if (response.ok) {
         unauthorized = 0;
+        stale = 0;
         return 'OK';
       }
       const code = await problemCode(response);
@@ -81,7 +102,11 @@ export function createProctorTransport(hooks: TransportHooks): EventTransport & 
         return 'REJECTED';
       }
       // KEY_EPOCH_STALE: the SDK cannot re-sign yet (no setKey hook), so keep the batch and retry.
-      if (response.status === 409 && code === 'KEY_EPOCH_STALE') return 'RETRY';
+      if (response.status === 409 && code === 'KEY_EPOCH_STALE') {
+        stale += 1;
+        if (stale > MAX_STALE_RETRIES) hooks.onReauthRequired('KEY_STALE');
+        return 'RETRY';
+      }
       if (response.status === 408 || response.status === 429 || response.status >= 500)
         return 'RETRY';
       // 400, 403, SEQ_CONFLICT, 413, 415: dropped by the SDK and counted, never silently.
@@ -92,7 +117,7 @@ export function createProctorTransport(hooks: TransportHooks): EventTransport & 
       const startedAt = performance.now();
       const result = await requestAt(heartbeatSchema, '/session/heartbeat', {
         method: 'POST',
-        body: {},
+        body: hooks.getHealth?.() ?? {},
         authed: true,
       });
       const endedAt = performance.now();

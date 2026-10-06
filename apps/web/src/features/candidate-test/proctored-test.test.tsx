@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -12,8 +12,15 @@ import {
   storedKeys,
 } from '@/features/candidate-flow/test-helpers';
 import { apiBaseUrl } from '@/lib/env';
-import { MOCK_OTP, MOCK_TOKENS, getMockSession } from '@/mocks/candidate/handlers';
+import { MOCK_OTP, MOCK_TOKENS } from '@/mocks/candidate/handlers';
 import { testState } from '@/mocks/candidate/test-handlers';
+import {
+  fakeStream,
+  installFullscreen,
+  setFullscreen,
+  setupDevices,
+  startedSession,
+} from './proctor/test-support';
 import { createAdrSource } from './adr-source';
 import { ProctoredTest } from './proctored-test';
 
@@ -36,101 +43,7 @@ setupCandidateServer();
 const cand = `${apiBaseUrl}/v1/candidate`;
 const TIMING = { heartbeatIntervalMs: 60, flushIntervalMs: 60, finishDrainMs: 300 };
 
-/** A fake MediaStream whose tracks can be ended, with a count of stops. */
-function fakeStream(settings: Record<string, unknown> = {}) {
-  const stops = vi.fn();
-  const listeners: (() => void)[] = [];
-  const track = {
-    stop: stops,
-    getSettings: () => settings,
-    applyConstraints: () => Promise.resolve(),
-    addEventListener: (type: string, fn: () => void) => {
-      if (type === 'ended') listeners.push(fn);
-    },
-  };
-  const stream = {
-    getTracks: () => [track],
-    getVideoTracks: () => [track],
-    getAudioTracks: () => [],
-  } as unknown as MediaStream;
-  return { stream, stops, end: () => listeners.forEach((fn) => fn()) };
-}
-
-interface Devices {
-  display: ReturnType<typeof fakeStream>;
-  getDisplayMedia: ReturnType<typeof vi.fn>;
-  getUserMedia: ReturnType<typeof vi.fn>;
-  recorders: FakeRecorder[];
-}
-
-class FakeRecorder {
-  static instances: FakeRecorder[] = [];
-  static isTypeSupported = (): boolean => true;
-  state = 'inactive';
-  ondataavailable: ((e: { data: Blob }) => void) | null = null;
-  onstop: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  constructor() {
-    FakeRecorder.instances.push(this);
-  }
-  start(): void {
-    this.state = 'recording';
-  }
-  emit(): void {
-    this.ondataavailable?.({ data: new Blob(['chunk-bytes']) });
-  }
-  stop(): void {
-    this.state = 'inactive';
-    this.emit();
-    this.onstop?.();
-  }
-}
-
-function setupDevices(options: { deny?: 'camera' | 'all' } = {}): Devices {
-  const display = fakeStream({ displaySurface: 'monitor' });
-  const getDisplayMedia = vi.fn(() => Promise.resolve(display.stream));
-  const getUserMedia = vi.fn(() =>
-    options.deny
-      ? Promise.reject(new DOMException('no', 'NotAllowedError'))
-      : Promise.resolve(fakeStream().stream),
-  );
-  Object.defineProperty(navigator, 'mediaDevices', {
-    configurable: true,
-    value: { getDisplayMedia, getUserMedia, enumerateDevices: () => Promise.resolve([]) },
-  });
-  FakeRecorder.instances = [];
-  vi.stubGlobal('MediaRecorder', FakeRecorder);
-  return { display, getDisplayMedia, getUserMedia, recorders: FakeRecorder.instances };
-}
-
-let fullscreenElement: Element | null = null;
-function setFullscreen(on: boolean): void {
-  fullscreenElement = on ? document.documentElement : null;
-  document.dispatchEvent(new Event('fullscreenchange'));
-}
-
-beforeEach(() => {
-  fullscreenElement = null;
-  Object.defineProperty(document, 'fullscreenEnabled', { configurable: true, value: true });
-  Object.defineProperty(document, 'fullscreenElement', {
-    configurable: true,
-    get: () => fullscreenElement,
-  });
-  Object.defineProperty(document, 'exitFullscreen', {
-    configurable: true,
-    value: vi.fn(() => {
-      setFullscreen(false);
-      return Promise.resolve();
-    }),
-  });
-  Object.defineProperty(document.documentElement, 'requestFullscreen', {
-    configurable: true,
-    value: vi.fn(() => {
-      setFullscreen(true);
-      return Promise.resolve();
-    }),
-  });
-});
+beforeEach(() => installFullscreen());
 afterEach(async () => {
   // Unmount now and let the controller's async stop() settle: it leaves fullscreen, which would
   // otherwise land in the next test's page.
@@ -138,19 +51,6 @@ afterEach(async () => {
   await new Promise((r) => setTimeout(r, 150));
   vi.unstubAllGlobals();
 });
-
-async function startedSession(token: string = MOCK_TOKENS.consented): Promise<object> {
-  const r = await candidateApi.startSession(token, MOCK_OTP);
-  if (!r.ok) throw new Error('mock sign-in failed');
-  setSessionToken(r.data.sessionToken);
-  if (token !== MOCK_TOKENS.resume) {
-    const started = await candidateApi.startTest();
-    if (!started.ok) throw new Error('mock start failed');
-  }
-  const session = getMockSession(r.data.sessionToken);
-  if (!session) throw new Error('no mock session');
-  return session;
-}
 
 function mount(handlers: { onSessionEnded?: () => void; onSubmitted?: () => void } = {}) {
   const onSessionEnded = handlers.onSessionEnded ?? vi.fn();
@@ -444,8 +344,12 @@ describe('proctored test (ADR 0013, FR-601..FR-603, FR-609, FR-701, TC-030)', ()
     expect(await screen.findByTestId('test-submitted')).toBeInTheDocument();
     await waitFor(() => expect(onSubmitted).toHaveBeenCalled(), { timeout: 6000 });
     expect(devices.display.stops).toHaveBeenCalled();
-    expect(fullscreenElement).toBeNull();
+    expect(document.fullscreenElement).toBeNull();
     expect(testState(session).submitted).toBe(true);
+    // The events queued during the test were flushed before the end, not dropped.
+    expect(testState(session).batches.flatMap((b) => b.events.map((e) => e.type))).toContain(
+      'FULLSCREEN_RESTORED',
+    );
   });
 });
 
@@ -460,6 +364,3 @@ function getMockConfirmed(session: object): Record<string, number> {
   // The mock keeps confirmed chunk counts per stream on the session record.
   return (session as { confirmedChunks: Record<string, number> }).confirmedChunks;
 }
-
-import { within } from '@testing-library/react';
-void fireEvent;

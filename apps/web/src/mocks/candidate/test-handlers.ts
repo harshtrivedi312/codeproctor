@@ -8,6 +8,8 @@ import { apiBaseUrl } from '@/lib/env';
  * the routes (ADR 0012). Two sections: section 1 has a coding and a multiple-choice question,
  * section 2 has one coding question; finishing section 2 submits the test.
  */
+/** ADR 0013 section 2: ingestion closes this long after the test ends (PROCTOR_INGEST_GRACE_SECONDS). */
+export const MOCK_INGEST_GRACE_MS = 300_000;
 export const MOCK_SECTION_MS = 10 * 60_000;
 export const MOCK_TEST_MS = 30 * 60_000;
 
@@ -17,6 +19,8 @@ export interface TestRunState {
   /** Section positions (1 based) with their start time; the open one is the highest. */
   sectionStarts: Map<number, number>;
   submitted: boolean;
+  /** When the test was submitted (ms). Events and media are still accepted for the ingest grace. */
+  submittedAt: number;
   /** Pause reasons the server holds (PROCTOR, SCREEN_SHARE_STOPPED, SIDE_CAMERA_LOST). */
   pauseReasons: string[];
   lastRunAt: number;
@@ -40,6 +44,7 @@ export function testState(session: object): TestRunState {
       startedAt: 0,
       sectionStarts: new Map(),
       submitted: false,
+      submittedAt: 0,
       pauseReasons: [],
       lastRunAt: 0,
       drafts: new Map(),
@@ -52,6 +57,11 @@ export function testState(session: object): TestRunState {
     states.set(session, s);
   }
   return s;
+}
+
+/** True while events and media are accepted: running, or submitted within the grace. */
+export function ingestOpen(s: TestRunState, now = Date.now()): boolean {
+  return s.started && (!s.submitted || now - s.submittedAt <= MOCK_INGEST_GRACE_MS);
 }
 
 export function startMockTest(session: object, now = Date.now()): TestRunState {
@@ -183,7 +193,7 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
       const session = bearer(request);
       if (!session) return problem(401, 'UNAUTHENTICATED');
       const s = testState(session);
-      if (!s.started || s.submitted) return problem(409, 'SESSION_NOT_ACTIVE');
+      if (!ingestOpen(s)) return problem(409, 'SESSION_NOT_ACTIVE');
       const signature = request.headers.get('X-Signature') ?? '';
       if (!/^[0-9a-f]{64}$/.test(signature)) return problem(400, 'VALIDATION_FAILED');
       const raw = await request.text();
@@ -317,6 +327,7 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
       const now = Date.now();
       if (position >= 2) {
         r.s.submitted = true;
+        r.s.submittedAt = now;
         return HttpResponse.json({ finishedAt: iso(now), nextSectionId: null, submitted: true });
       }
       r.s.sectionStarts.set(position + 1, now);

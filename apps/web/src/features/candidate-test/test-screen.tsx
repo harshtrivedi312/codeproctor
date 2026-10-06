@@ -88,6 +88,7 @@ export function TestScreen({
   source = demoSource,
   proctor,
   registerClockSync,
+  onSectionFinishedChange,
   onSubmitted,
 }: {
   source?: TestSource;
@@ -95,6 +96,8 @@ export function TestScreen({
   proctor?: ProctorBridge;
   /** Hands the clock's re-sync function to the owner, so a heartbeat can correct the countdown. */
   registerClockSync?: (sync: (serverNowIso: string, start: number, end: number) => void) => void;
+  /** Tells the owner when the section on screen is finished (until the candidate moves on). */
+  onSectionFinishedChange?: (finished: boolean) => void;
   /** Called once when the test is submitted (the last section was finished). */
   onSubmitted?: () => void;
 } = {}): React.JSX.Element {
@@ -109,6 +112,13 @@ export function TestScreen({
   const [lock, dispatchLock] = React.useReducer(lockReducer, initialLockState);
   const [finishedSection, setFinishedSection] = React.useState<FinishedSection | null>(null);
   const [advancing, setAdvancing] = React.useState(false);
+
+  const finishedNow =
+    finishedSection !== null && finishedSection.sectionId === session.data?.section.id;
+  React.useEffect(
+    () => onSectionFinishedChange?.(finishedNow),
+    [onSectionFinishedChange, finishedNow],
+  );
 
   // Show the load error only when there is nothing to show: a failed background refetch must
   // never replace a running test (it would drop unsaved drafts and the lock state).
@@ -925,11 +935,7 @@ function SubmittedPanel({ onShown }: { onShown?: (() => void) | undefined }): Re
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return (
-    <main
-      id="main"
-      className="mx-auto my-24 max-w-md px-4 text-center"
-      data-testid="test-submitted"
-    >
+    <div className="mx-auto my-24 max-w-md px-4 text-center" data-testid="test-submitted">
       <CheckCircle2 className="mx-auto h-10 w-10 text-success" aria-hidden />
       <h1
         ref={headingRef}
@@ -945,6 +951,6 @@ function SubmittedPanel({ onShown }: { onShown?: (() => void) | undefined }): Re
       <p className="mt-2 text-sm text-muted-foreground">
         A person reviews every assessment. The hiring team will contact you about next steps.
       </p>
-    </main>
+    </div>
   );
 }

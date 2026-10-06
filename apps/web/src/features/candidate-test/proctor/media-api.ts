@@ -19,10 +19,18 @@ import { mediaConfirmSchema, mediaPresignSchema } from '@/features/candidate-flo
 export const ALREADY_UPLOADED_URL = 'already-uploaded:';
 
 const wireSeq = (c: ChunkRef): number => c.segment * 100_000 + c.seq;
+/** The wire allows seq 0..99,999,999 (ADR 0013 section 5.5). */
+const MAX_WIRE_SEQ = 99_999_999;
 
 export function createAdrMediaApi(): MediaApi {
+  // Chunks this page has been given an upload URL for. `alreadyUploaded` is believed only for those
+  // (the upload may have landed, the answer got lost); for any other chunk the seq belongs to
+  // something this page did not send, so it is a conflict, never a silent "stored" (FU-FEB-36).
+  const presigned = new Set<string>();
   return {
     async presign(c: ChunkRef): Promise<PresignedPut> {
+      if (wireSeq(c) > MAX_WIRE_SEQ) throw new MediaApiError('FATAL', 'SEQ_OUT_OF_RANGE');
+      const chunkId = `${c.stream}:${wireSeq(c)}`;
       const contentType = c.stream === 'AUDIO' ? 'audio/webm' : 'video/webm';
       const r = await requestAt(mediaPresignSchema, '/session/media/presign', {
         method: 'POST',
@@ -39,7 +47,11 @@ export function createAdrMediaApi(): MediaApi {
         },
       });
       if (r.ok) {
-        if ('alreadyUploaded' in r.data) return { url: ALREADY_UPLOADED_URL };
+        if ('alreadyUploaded' in r.data) {
+          if (!presigned.has(chunkId)) throw new MediaApiError('FATAL', 'SEQ_CONFLICT');
+          return { url: ALREADY_UPLOADED_URL };
+        }
+        presigned.add(chunkId);
         return { url: r.data.url, headers: { 'Content-Type': contentType, ...r.data.headers } };
       }
       if (r.kind === 'problem') {

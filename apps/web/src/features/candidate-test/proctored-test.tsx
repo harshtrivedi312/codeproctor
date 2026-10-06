@@ -4,6 +4,7 @@ import * as React from 'react';
 import { candidateApi } from '@/features/candidate-flow/api';
 import type { Schemas } from '@/lib/api/client';
 import type { ProctorBridge } from './proctor/bridge';
+import { withRetry } from './proctor/retry';
 import {
   ProctorController,
   initialProctorState,
@@ -44,7 +45,7 @@ export function ProctoredTest({
 
   React.useEffect(() => {
     let alive = true;
-    void candidateApi.getConsent().then((r) => {
+    void withRetry(() => candidateApi.getConsent()).then((r) => {
       if (!alive) return;
       setConsent({ at: r.ok && r.data.signed ? r.data.signedAt : null });
     });
@@ -53,36 +54,57 @@ export function ProctoredTest({
     };
   }, []);
 
+  // The controller lives in a ref, outside the effect: the key is issued once per epoch (ADR 0013
+  // section 4), so a second controller (React StrictMode runs effects twice in development, and a
+  // remount would too) would burn the key and end the test with KEY_ALREADY_ISSUED. The stop on
+  // cleanup is deferred one tick and cancelled if the effect runs again straight away.
+  const controllerRef = React.useRef<ProctorController | null>(null);
+  const stopTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The test screen says when the section on screen is finished, so a heartbeat does not write the
+  // next section's deadline into it.
+  const sectionFinished = React.useRef(false);
+
   React.useEffect(() => {
     if (typeof consentAt !== 'string') return undefined;
-    const c = new ProctorController({
-      consentRecordedAt: consentAt,
-      sessionId: sessionIdFromToken(),
-      ...(timing ?? {}),
-      root: document.getElementById('main') ?? document.body,
-      onHeartbeat: (s, timing) => {
-        // The server clock corrects the countdown, and the deadlines it reports (a proctor pause
-        // adds its credit on resume, ADR 0002 P-3) replace the ones on screen.
-        clockSync.current?.(s.serverTime, timing.startedAt, timing.endedAt);
-        queryClient.setQueryData<Schemas['CandidateSession']>(['candidate-session'], (old) =>
-          old
-            ? {
-                ...old,
-                testDeadlineAt: s.deadlineAt ?? old.testDeadlineAt,
-                section: {
-                  ...old.section,
-                  deadlineAt: s.sectionDeadlineAt ?? old.section.deadlineAt,
-                },
-              }
-            : old,
-        );
-      },
-    });
-    // A fresh controller for each run of this effect (a stopped one cannot start again).
-    setController(c);
-    void c.init();
+    if (stopTimer.current !== null) clearTimeout(stopTimer.current);
+    stopTimer.current = null;
+    if (controllerRef.current === null) {
+      const c = new ProctorController({
+        consentRecordedAt: consentAt,
+        sessionId: sessionIdFromToken(),
+        ...(timing ?? {}),
+        root: document.getElementById('main') ?? document.body,
+        onHeartbeat: (s, hb) => {
+          // The server clock corrects the countdown, and the deadlines it reports (a proctor pause
+          // adds its credit on resume, ADR 0002 P-3) replace the ones on screen.
+          clockSync.current?.(s.serverTime, hb.startedAt, hb.endedAt);
+          queryClient.setQueryData<Schemas['CandidateSession']>(['candidate-session'], (old) =>
+            old
+              ? {
+                  ...old,
+                  testDeadlineAt: s.deadlineAt ?? old.testDeadlineAt,
+                  section: {
+                    ...old.section,
+                    deadlineAt: sectionFinished.current
+                      ? old.section.deadlineAt
+                      : (s.sectionDeadlineAt ?? old.section.deadlineAt),
+                  },
+                }
+              : old,
+          );
+        },
+      });
+      controllerRef.current = c;
+      setController(c);
+      void c.init();
+    }
     return () => {
-      void c.stop();
+      const c = controllerRef.current;
+      stopTimer.current = setTimeout(() => {
+        void c?.stop();
+        if (controllerRef.current === c) controllerRef.current = null;
+        stopTimer.current = null;
+      }, 0);
     };
   }, [consentAt, queryClient, timing]);
 
@@ -128,6 +150,9 @@ export function ProctoredTest({
       registerClockSync={(sync) => {
         clockSync.current = sync;
       }}
+      onSectionFinishedChange={(finished) => {
+        sectionFinished.current = finished;
+      }}
       onSubmitted={() => {
         setSubmitted(true);
         void controller?.finish().then(onSubmitted);
@@ -143,7 +168,7 @@ function InactivePanel(): React.JSX.Element {
     ref.current?.focus();
   }, []);
   return (
-    <main id="main" className="mx-auto my-24 max-w-md px-4 text-center" data-testid="test-inactive">
+    <div className="mx-auto my-24 max-w-md px-4 text-center" data-testid="test-inactive">
       <h1 ref={ref} tabIndex={-1} className="text-2xl font-semibold outline-none">
         This test is no longer running
       </h1>
@@ -154,6 +179,6 @@ function InactivePanel(): React.JSX.Element {
       <p className="mt-2 text-sm text-muted-foreground">
         If you think this is a mistake, tell the person who invited you.
       </p>
-    </main>
+    </div>
   );
 }
