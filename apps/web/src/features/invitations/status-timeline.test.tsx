@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { axe } from 'vitest-axe';
-import { StatusTimeline, timelineSteps } from './status-timeline';
+import { STATUS_LABEL, StatusTimeline, timelineSteps } from './status-timeline';
 
 const at = (n: number) => new Date(Date.UTC(2026, 5, 1, n)).toISOString();
 const hist = (...s: string[]) => s.map((status, i) => ({ status, at: at(i) })) as never;
@@ -54,6 +54,23 @@ describe('FR-303 ADR 0002: the status timeline', () => {
     expect(states(e)).toEqual(['INVITED:done', 'EXPIRED:ended']);
     const d = timelineSteps('DECLINED', hist('INVITED', 'OPENED', 'DECLINED'));
     expect(states(d)).toEqual(['INVITED:done', 'OPENED:done', 'DECLINED:ended']);
+  });
+
+  it('D-54 ERASED shows what was reached, then only that the data was erased, with no scores or candidate details', () => {
+    const e = timelineSteps(
+      'ERASED',
+      hist('INVITED', 'OPENED', 'CONSENTED', 'COMPLETED', 'ERASED'),
+    );
+    expect(states(e)).toEqual([
+      'INVITED:done',
+      'OPENED:done',
+      'CONSENTED:done',
+      'COMPLETED:done',
+      'ERASED:ended',
+    ]);
+    expect(e.at(-1)).toMatchObject({ label: 'Data erased', state: 'ended' });
+    expect(STATUS_LABEL.ERASED).toBe('Data erased');
+    expect(JSON.stringify(e)).not.toMatch(/\d+\s?%|score of|flagged|@/i);
   });
 
   it('renders an ordered list with aria-current and text for state, and passes axe', async () => {

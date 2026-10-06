@@ -102,6 +102,7 @@ export const STATUS_LABEL: Record<Status, string> = {
   EXPIRED: 'Expired',
   APPEALED: 'Appeal open',
   DECLINED: 'Declined consent',
+  ERASED: 'Data erased',
 };
 
 export const STATUS_TONE: Record<Status, 'neutral' | 'success' | 'warning' | 'error'> = {
@@ -118,6 +119,7 @@ export const STATUS_TONE: Record<Status, 'neutral' | 'success' | 'warning' | 'er
   EXPIRED: 'error',
   APPEALED: 'warning',
   DECLINED: 'error',
+  ERASED: 'neutral',
 };
 
 export interface TimelineItem {
@@ -133,7 +135,7 @@ export interface TimelineItem {
 export function timelineSteps(status: Status, history: readonly Step[]): TimelineItem[] {
   const timeOf = (from: readonly Status[]): string | null =>
     history.find((h) => from.includes(h.status))?.at ?? null;
-  const terminal = status === 'EXPIRED' || status === 'DECLINED';
+  const terminal = status === 'EXPIRED' || status === 'DECLINED' || status === 'ERASED';
   const here = POSITION[status];
   const items: TimelineItem[] = [];
   STEPS.forEach((step, i) => {
@@ -193,6 +195,17 @@ export function timelineSteps(status: Status, history: readonly Step[]): Timelin
         'The candidate declined the consent document. Nothing was recorded. Offer the alternatives or accommodations your organisation has.',
       state: 'ended',
       at: timeOf(['DECLINED']),
+    });
+  }
+  if (status === 'ERASED') {
+    // D-54 (ADR 0004 section 9): only the fact and the time are shown, nothing else about the person.
+    items.push({
+      key: 'ERASED',
+      label: 'Data erased',
+      description:
+        "The candidate's data was erased under the retention or erasure policy. Only the fact and the time of the erasure are kept.",
+      state: 'ended',
+      at: timeOf(['ERASED']),
     });
   }
   return items;
