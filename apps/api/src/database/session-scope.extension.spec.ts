@@ -33,6 +33,13 @@ const FACTS = {
 };
 
 type Delegate = Record<string, (args?: unknown) => Promise<unknown>>;
+
+/** One harmless column per model, so a candidate read names its select (candidate-interim.ts). */
+const KEY_COLUMN: Record<string, string> = { SessionSection: 'position', ProctorEventBatch: 'seq' };
+const selectOf = (model: string): { select: Record<string, true> } => ({
+  select: { [KEY_COLUMN[model] ?? 'id']: true },
+});
+
 const lowerFirst = (name: string): string => name.charAt(0).toLowerCase() + name.slice(1);
 
 describe('session scopes through the real client, without a database (ADR 0013 CS-4; NFR-04, TC-008)', () => {
@@ -187,7 +194,9 @@ describe('session scopes through the real client, without a database (ADR 0013 C
         'Question',
       ]) {
         const error = await refusal(
-          asCandidate(() => delegate(client, model).findMany?.({}) as Promise<unknown>),
+          asCandidate(
+            () => delegate(client, model).findMany?.(selectOf(model)) as Promise<unknown>,
+          ),
         );
         expect(error).toBeDefined();
         expect(error).not.toBeInstanceOf(OrgScopeError);
@@ -343,16 +352,19 @@ describe('session scopes through the real client, without a database (ADR 0013 C
               occurredAt: new Date(),
               session: { connect: { id: OTHER_SID } },
             },
+            select: { id: true },
           }),
         () =>
           client.sessionQuestion.update({
             where: { id: SQ },
             data: { submissions: { create: { kind: 'RUN', language: 'python', sourceCode: 'x' } } },
+            select: { id: true },
           }),
         () =>
           client.session.update({
             where: { id: SID },
             data: { invitation: { connect: { id: FACTS.invitationId } } },
+            select: { id: true },
           }),
       ];
       for (const run of [asCandidate, asService]) {
@@ -370,11 +382,13 @@ describe('session scopes through the real client, without a database (ADR 0013 C
           orgContext.runAsCandidate(
             ORG,
             SID,
-            () => delegate(client, model).findMany?.({}) as Promise<unknown>,
+            () => delegate(client, model).findMany?.(selectOf(model)) as Promise<unknown>,
           ),
         ).rejects.toThrow(/candidate facts are not set/);
         const error = await refusal(
-          asCandidate(() => delegate(client, model).findMany?.({}) as Promise<unknown>),
+          asCandidate(
+            () => delegate(client, model).findMany?.(selectOf(model)) as Promise<unknown>,
+          ),
         );
         expect(error).not.toBeInstanceOf(OrgScopeError);
       }
@@ -386,7 +400,7 @@ describe('session scopes through the real client, without a database (ADR 0013 C
           orgContext.runAsCandidate(
             ORG,
             SID,
-            () => delegate(client, model).findMany?.({}) as Promise<unknown>,
+            () => delegate(client, model).findMany?.(selectOf(model)) as Promise<unknown>,
           ),
         );
         expect(error).not.toBeInstanceOf(OrgScopeError);
@@ -404,6 +418,7 @@ describe('session scopes through the real client, without a database (ADR 0013 C
     }
     const submission = (id: string) => ({
       data: { sessionQuestionId: id, kind: 'RUN' as const, language: 'python', sourceCode: 'x' },
+      select: { id: true as const },
     });
 
     it('TC-008 a submission or keystroke batch create asks ONE scoped primary-key question, then runs', async () => {
@@ -438,6 +453,7 @@ describe('session scopes through the real client, without a database (ADR 0013 C
                 startedAt: new Date(),
                 events: [],
               } as never,
+              select: { id: true },
             }),
           ),
         );
@@ -460,47 +476,69 @@ describe('session scopes through the real client, without a database (ADR 0013 C
       expect(miss).toBeInstanceOf(OrgScopeViolationError);
     });
 
-    it('TC-008 no question is asked for a refused create, a null reference, a read or an update', async () => {
+    it('TC-008 no question is asked for a refused create, a null reference, a read or an update (each outcome pinned)', async () => {
       const count = jest.fn<Promise<number>, [Record<string, unknown>]>().mockResolvedValue(1);
       const scoped = withLookup(count);
-      await refusal(
+      const batch = {
+        seq: 1,
+        signature: Buffer.from('s'),
+        startedAt: new Date(),
+        events: [],
+      };
+
+      // A create naming another session is refused by the session rule, before any lookup.
+      const wrongSession = await refusal(
         asCandidate(() =>
           scoped.keystrokeBatch.create({
-            data: {
-              sessionId: OTHER_SID,
-              seq: 1,
-              signature: Buffer.from('s'),
-              startedAt: new Date(),
-              events: [],
-              sessionQuestionId: SQ,
-            },
+            data: { ...batch, sessionId: OTHER_SID, sessionQuestionId: SQ },
+            select: { id: true },
           }),
         ),
       );
-      await refusal(
+      expect(wrongSession).toBeInstanceOf(OrgScopeViolationError);
+      expect((wrongSession as Error).message).toMatch(/not the session of this scope/);
+
+      // A null reference is a valid create with nothing to prove: it reaches the closed port, so
+      // the error is the driver's and not the scope's.
+      const nullRef = await refusal(
         asCandidate(() =>
           scoped.keystrokeBatch.create({
-            data: {
-              seq: 1,
-              signature: Buffer.from('s'),
-              startedAt: new Date(),
-              events: [],
-              sessionQuestionId: null,
-            } as never,
+            data: { ...batch, sessionQuestionId: null } as never,
+            select: { id: true },
           }),
         ),
       );
-      await refusal(asCandidate(() => scoped.submission.findMany({})));
-      await refusal(
-        asCandidate(() => scoped.submission.updateMany({ where: {}, data: { language: 'x' } })),
-      );
-      await refusal(
-        asCandidate(() =>
+      expect(nullRef).toBeDefined();
+      expect(nullRef).not.toBeInstanceOf(OrgScopeError);
+
+      // A read and an update ask nothing either; both are allowed and reach the closed port.
+      const allowedCalls: Array<() => Promise<unknown>> = [
+        () => scoped.submission.findMany({ select: { id: true } }),
+        () => scoped.submission.updateMany({ where: {}, data: { language: 'x' } }),
+        () =>
           scoped.proctorEvent.create({
             data: { type: 'TAB_SWITCH', severity: 'LOW', occurredAt: new Date() } as never,
+            select: { id: true },
+          }),
+      ];
+      for (const call of allowedCalls) {
+        const error = await refusal(asCandidate(call));
+        expect(error).toBeDefined();
+        expect(error).not.toBeInstanceOf(OrgScopeError);
+      }
+
+      // A create that names a hidden column is refused by the interim rule, before any lookup.
+      const hidden = await refusal(
+        asCandidate(() =>
+          scoped.submission.create({
+            data: { ...submission(SQ).data, score: 1 },
+            select: { id: true },
           }),
         ),
       );
+      expect(hidden).toBeInstanceOf(OrgScopeViolationError);
+      expect((hidden as Error).message).toMatch(/the column score is not available/);
+
       expect(count).not.toHaveBeenCalled();
     });
 
@@ -511,14 +549,149 @@ describe('session scopes through the real client, without a database (ADR 0013 C
       );
     });
 
-    it('TC-008 a failing lookup does not let the create through, and its error is the scrubbed one', async () => {
+    it('TC-008 a failing lookup is rethrown as it is (through scrubPrismaError), and the create does not run', async () => {
+      const failure = new Error('connection lost');
       const count = jest
         .fn<Promise<number>, [Record<string, unknown>]>()
-        .mockRejectedValue(new Error('connection lost'));
+        .mockRejectedValue(failure);
       const scoped = withLookup(count);
       const error = await refusal(asCandidate(() => scoped.submission.create(submission(SQ))));
-      expect(error).toBeInstanceOf(Error);
+      // The very error of the lookup: had the create run, the closed port would have answered instead.
+      expect(error).toBe(failure);
+      expect(error).not.toBeInstanceOf(OrgScopeError);
       expect(count).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('nit 5: the CANDIDATE allowlist runs before the `unscoped` early return', () => {
+    // No model is unscoped today, so one is made so for the test (the map is a plain object).
+    const unscoped = {
+      kind: 'unscoped',
+      reason: 'a model that is global on purpose (test only)',
+    } as const;
+
+    it('TC-008 an unscoped model that is not on the allowlist throws the allowlist error, not a pass-through', async () => {
+      const restore = jest.replaceProperty(ORG_SCOPE, 'AuditLog', unscoped);
+      try {
+        for (const operation of SCOPED_OPERATIONS) {
+          await expect(
+            asCandidate(
+              () =>
+                delegate(client, 'AuditLog')[operation]?.({
+                  where: {},
+                  data: {},
+                  select: { id: true },
+                }) as Promise<unknown>,
+            ),
+          ).rejects.toThrow(/AuditLog\.\w+: this model is not on the CANDIDATE allowlist/);
+        }
+      } finally {
+        restore.restore();
+      }
+    });
+
+    it('TC-008 an unscoped model that IS on the allowlist has no row filter, so it fails closed for a candidate', async () => {
+      const restore = jest.replaceProperty(ORG_SCOPE, 'Test', unscoped);
+      try {
+        await expect(
+          asCandidate(() => client.test.findMany({ select: { id: true } })),
+        ).rejects.toThrow(/an unscoped model has no CANDIDATE row filter/);
+      } finally {
+        restore.restore();
+      }
+    });
+
+    it('TC-008 every other actor still passes an unscoped model through (a control: the refusal is the candidate rule)', async () => {
+      const restore = jest.replaceProperty(ORG_SCOPE, 'AuditLog', unscoped);
+      try {
+        for (const run of [
+          asService,
+          <T>(fn: () => Promise<T>): Promise<T> => orgContext.runInOrg(ORG, fn),
+          <T>(fn: () => Promise<T>): Promise<T> => orgContext.runSystem('BACKGROUND_JOB', fn),
+          <T>(fn: () => Promise<T>): Promise<T> => fn(),
+        ]) {
+          const error = await refusal(run(() => client.auditLog.findMany({})));
+          expect(error).toBeDefined();
+          expect(error).not.toBeInstanceOf(OrgScopeError);
+        }
+      } finally {
+        restore.restore();
+      }
+    });
+  });
+
+  describe('CS-4.5 vector 6, the fluent API, through the real client (S6)', () => {
+    // Prisma 7 runs `findUnique(...).questions()` as a findUnique on the PARENT model with
+    // `select: { questions: true }`, so vector 2 sees a relation in select and refuses it. These
+    // tests pin that on Prisma 7.10, so a release that changes the shape breaks the build.
+    it('TC-008 a fluent relation call throws as a relation select, for every find operation', async () => {
+      const calls: Array<[string, () => Promise<unknown>, RegExp]> = [
+        [
+          'findUnique(...).questions()',
+          () => client.session.findUnique({ where: { id: SID } }).questions(),
+          /Session\.questions in select \(vector 2\)/,
+        ],
+        [
+          'findUniqueOrThrow(...).invitation()',
+          () => client.session.findUniqueOrThrow({ where: { id: SID } }).invitation(),
+          /Session\.invitation in select \(vector 2\)/,
+        ],
+        [
+          'findFirst(...).org()',
+          () => client.session.findFirst({ where: { id: SID } }).org(),
+          /Session\.org in select \(vector 2\)/,
+        ],
+        [
+          'findFirstOrThrow(...).questions()',
+          () => client.session.findFirstOrThrow({ where: { id: SID } }).questions(),
+          /Session\.questions in select \(vector 2\)/,
+        ],
+        [
+          'a sessionQuestion to its questionVersion',
+          () => client.sessionQuestion.findUnique({ where: { id: SQ } }).questionVersion(),
+          /SessionQuestion\.questionVersion in select \(vector 2\)/,
+        ],
+        [
+          'a sessionQuestion to its questionVersion and on to its testCases (a chain)',
+          () =>
+            client.sessionQuestion
+              .findUnique({ where: { id: SQ } })
+              .questionVersion()
+              .testCases(),
+          /SessionQuestion\.questionVersion in select \(vector 2\)/,
+        ],
+        [
+          'a session to its invitation and on to its candidate (a chain)',
+          () =>
+            client.session
+              .findUnique({ where: { id: SID } })
+              .invitation()
+              .candidate(),
+          /Session\.invitation in select \(vector 2\)/,
+        ],
+        [
+          'a to-many with its own arguments',
+          () => client.session.findUnique({ where: { id: SID } }).questions({ take: 1 }),
+          /Session\.questions in select \(vector 2\)/,
+        ],
+      ];
+      for (const [name, call, message] of calls) {
+        const error = await refusal(asCandidate(call));
+        expect({ name, refused: error instanceof OrgScopeViolationError }).toEqual({
+          name,
+          refused: true,
+        });
+        expect((error as Error).message).toMatch(message);
+        expect((error as Error).message).toMatch(/CS-4\.5/);
+      }
+    });
+
+    it('TC-008 the same call is not refused for SERVICE (CS-4.1: no relation limit)', async () => {
+      const error = await refusal(
+        asService(() => client.session.findUnique({ where: { id: SID } }).questions()),
+      );
+      expect(error).toBeDefined();
+      expect(error).not.toBeInstanceOf(OrgScopeError);
     });
   });
 });

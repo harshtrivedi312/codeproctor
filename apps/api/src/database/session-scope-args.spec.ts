@@ -8,6 +8,7 @@ import { applyOrgScope, SCOPED_OPERATIONS } from './org-scope-args';
 import { ORG_SCOPE, orgFilter } from './org-scope-map';
 import type { ModelName } from './org-scope-map';
 import { FK_CLASSES } from './org-scope-relations';
+import { ROW_RETURNING_OPERATIONS } from './candidate-interim';
 import { applySessionScope, sessionQuestionsWhere } from './session-scope-args';
 import { CANDIDATE_MODELS, READ_OPERATIONS, SESSION_SCOPE } from './session-scope-map';
 import { readModelMetas } from './testing/data-model';
@@ -37,11 +38,23 @@ function apply(
   /** `null`: the guard has not set the facts yet. */
   facts: CandidateFacts | null = FACTS,
 ) {
+  // A CANDIDATE call that returns rows names its select (candidate-interim.ts). These tests are about
+  // the other rules, so a call that carries neither `select` nor `include` gets `{ id: true }`. The
+  // tests of the select rule itself call applySessionScope directly (candidate-interim.spec.ts).
+  const given = (args ?? {}) as Record<string, unknown>;
+  const withSelect =
+    actor === 'CANDIDATE' &&
+    ROW_RETURNING_OPERATIONS.includes(operation) &&
+    given.select === undefined &&
+    given.include === undefined &&
+    (args === undefined || (typeof args === 'object' && args !== null && !Array.isArray(args)))
+      ? { ...given, select: { id: true } }
+      : args;
   return applySessionScope({
     model,
     rule: ORG_SCOPE[model],
     operation,
-    args,
+    args: withSelect,
     orgId: ORG,
     session: { actor, sessionId: SID },
     facts: facts ?? undefined,
@@ -64,13 +77,46 @@ function expectFilter(args: Record<string, unknown>, filter: unknown): void {
   );
 }
 
-/** The operations a CANDIDATE may attempt on `model` without the allowlist gate refusing them first. */
+/**
+ * Whether a CANDIDATE may attempt `operation` on `model` at all, before arguments are looked at:
+ * on the allowlist, no delete, no write on a read-only model or on session_sections, and no create
+ * of a session or a session_question.
+ */
+function candidateAllows(model: ModelName, operation: string): boolean {
+  const rule = CANDIDATE_MODELS[model];
+  if (rule === undefined || rule.kind === 'grant-only') return false;
+  if (READ_OPERATIONS.includes(operation)) return true;
+  if (rule.kind === 'read') return false;
+  if (['delete', 'deleteMany'].includes(operation)) return false;
+  if (rule.writes === 'none') return false;
+  if (rule.writes === 'no-create' && CREATE_LIKE.includes(operation)) return false;
+  return true;
+}
+
+const CREATE_LIKE = ['create', 'createMany', 'createManyAndReturn', 'upsert'];
+
+/** The operations an actor may attempt on `model`: SERVICE all, a candidate those it is granted. */
+function opsFor(actor: SessionActor, model: ModelName, operations: readonly string[]): string[] {
+  return actor === 'SERVICE'
+    ? [...operations]
+    : operations.filter((op) => candidateAllows(model, op));
+}
+
+/** The operations a CANDIDATE may attempt on `model` without the gate refusing them first. */
 function candidateOperations(model: ModelName): string[] {
-  const readOnly = CANDIDATE_MODELS[model]?.kind === 'read';
-  return SCOPED_OPERATIONS.filter(
-    (op) => !['delete', 'deleteMany'].includes(op) && (!readOnly || READ_OPERATIONS.includes(op)),
+  return opsFor('CANDIDATE', model, SCOPED_OPERATIONS);
+}
+
+/** The models whose rows `actor` may create: every session-path model for SERVICE, the granted ones for a candidate. */
+function creatableModels(actor: SessionActor): ModelName[] {
+  return SESSION_MODELS.filter((m) => SESSION_SCOPE[m]?.createKey !== undefined).filter(
+    (m) => actor === 'SERVICE' || candidateAllows(m, 'create'),
   );
 }
+
+/** A harmless column to update on `model` (proctor_events: duration_ms only). */
+const harmless = (model: ModelName): Record<string, unknown> =>
+  model === 'ProctorEvent' ? { durationMs: 1 } : { note: 'x' };
 
 const lowerFirst = (name: string): string => name.charAt(0).toLowerCase() + name.slice(1);
 
@@ -202,27 +248,21 @@ describe('CS-4.2 the session filter, both actors (NFR-04, TC-008)', () => {
     it.each(SESSION_MODELS)(
       'TC-008 %s: update, updateMany, updateManyAndReturn and the where of upsert get the session filter',
       (model) => {
-        for (const operation of UPDATES) {
+        for (const operation of opsFor(actor, model, UPDATES)) {
           const { args } = apply(actor, model, operation, { where: { id: 'x' }, data: {} });
           expectFilter(args, expectedFilter[model]);
           expectFilter(args, orgFilter(ORG_SCOPE[model], ORG));
         }
-        const upsert = apply(actor, model, 'upsert', {
-          where: { id: 'x' },
-          update: {},
-          create: model === 'Submission' ? { sessionQuestionId: SQ } : {},
-        }).args;
-        expectFilter(upsert, expectedFilter[model]);
+        for (const operation of opsFor(actor, model, ['upsert'])) {
+          const upsert = apply(actor, model, operation, {
+            where: { id: 'x' },
+            update: {},
+            create: model === 'Submission' ? { sessionQuestionId: SQ } : {},
+          }).args;
+          expectFilter(upsert, expectedFilter[model]);
+        }
       },
     );
-
-    it.each(SESSION_MODELS)('TC-008 %s: delete and deleteMany get it too (SERVICE)', (model) => {
-      if (actor === 'CANDIDATE') return;
-      for (const operation of ['delete', 'deleteMany']) {
-        const { args } = apply(actor, model, operation, { where: { id: 'x' } });
-        expectFilter(args, expectedFilter[model]);
-      }
-    });
 
     it.each(SESSION_MODELS)('TC-008 %s: a cursor is refused', (model) => {
       for (const operation of ['findMany', 'findFirst', 'count', 'aggregate']) {
@@ -232,6 +272,17 @@ describe('CS-4.2 the session filter, both actors (NFR-04, TC-008)', () => {
       }
     });
   });
+
+  it.each(SESSION_MODELS)(
+    'TC-008 %s: delete and deleteMany get the session filter too (SERVICE only; a candidate deletes nothing)',
+    (model) => {
+      for (const operation of ['delete', 'deleteMany']) {
+        const { args } = apply('SERVICE', model, operation, { where: { id: 'x' } });
+        expectFilter(args, expectedFilter[model]);
+        expectFilter(args, orgFilter(ORG_SCOPE[model], ORG));
+      }
+    },
+  );
 
   it('TC-008 a model outside the ten gets no session filter (cross-session models stay org-scoped)', () => {
     for (const model of ALL_MODELS.filter((m) => !SESSION_MODELS.includes(m))) {
@@ -251,9 +302,9 @@ describe('CS-4.2 the session filter, both actors (NFR-04, TC-008)', () => {
 });
 
 describe('CS-4.2 creates take the session from the context (NFR-04, TC-008)', () => {
-  const direct = SESSION_MODELS.filter((m) => SESSION_SCOPE[m]?.createKey !== undefined);
-
   describe.each(ACTORS)('actor %s', (actor) => {
+    const direct = creatableModels(actor);
+
     it.each(direct)(
       'TC-008 %s: create stamps the session when missing and keeps a matching one',
       (model) => {
@@ -364,7 +415,7 @@ describe('CS-4.2 creates take the session from the context (NFR-04, TC-008)', ()
     });
 
     it('TC-008 other models carry no session_question reference to check', () => {
-      for (const model of SESSION_MODELS.filter(
+      for (const model of creatableModels(actor).filter(
         (m) => !['Submission', 'KeystrokeBatch'].includes(m),
       )) {
         expect(
@@ -408,9 +459,9 @@ describe('CS-4.2 session keys are immutable, both actors (NFR-04, TC-008)', () =
 
     it('TC-008 an update of any other column, and an undefined key, is not refused', () => {
       for (const model of SESSION_MODELS) {
-        for (const operation of UPDATES) {
+        for (const operation of opsFor(actor, model, UPDATES)) {
           const data = {
-            note: 'x',
+            ...harmless(model),
             ...Object.fromEntries(
               (SESSION_SCOPE[model]?.immutable ?? []).map((k) => [k, undefined]),
             ),
@@ -519,15 +570,18 @@ describe('CS-4.1 SERVICE: org filter plus session filter only (NFR-04, TC-008)',
             {},
           ]) {
             const data = { [field]: nested };
-            expect(() => apply(actor, model, 'create', { data })).toThrow(
-              /nested relation write refused/,
-            );
-            expect(() => apply(actor, model, 'update', { where: { id: 'x' }, data })).toThrow(
-              /nested relation write refused|CANDIDATE|read-only/,
-            );
-            expect(() =>
-              apply(actor, model, 'upsert', { where: { id: 'x' }, create: {}, update: data }),
-            ).toThrow(OrgScopeViolationError);
+            for (const operation of opsFor(actor, model, ['create', 'update'])) {
+              // A candidate update of proctor_events is limited to duration_ms first (CS-4.4): the
+              // nested write is refused either way.
+              expect(() => apply(actor, model, operation, { where: { id: 'x' }, data })).toThrow(
+                /nested relation write refused|CS-4\.4 allows durationMs only/,
+              );
+            }
+            for (const operation of opsFor(actor, model, ['upsert'])) {
+              expect(() =>
+                apply(actor, model, operation, { where: { id: 'x' }, create: {}, update: data }),
+              ).toThrow(/nested relation write refused|CS-4\.4 allows durationMs only/);
+            }
           }
         }
       }
@@ -637,13 +691,16 @@ describe('CS-4.3 the CANDIDATE allowlist, deny by default (NFR-04, TC-008)', () 
     },
   );
 
-  it.each(SESSION_MODELS)('TC-008 %s: reads and the other writes pass the allowlist', (model) => {
-    for (const operation of [...READ_OPERATIONS, ...UPDATES]) {
-      expect(() =>
-        apply('CANDIDATE', model, operation, { where: { id: 'x' }, data: {} }),
-      ).not.toThrow();
-    }
-  });
+  it.each(SESSION_MODELS)(
+    'TC-008 %s: reads and the writes it is granted pass the allowlist',
+    (model) => {
+      for (const operation of opsFor('CANDIDATE', model, [...READ_OPERATIONS, ...UPDATES])) {
+        expect(() =>
+          apply('CANDIDATE', model, operation, { where: { id: 'x' }, data: {} }),
+        ).not.toThrow();
+      }
+    },
+  );
 
   it.each([...readOnly, ...SESSION_MODELS])(
     'TC-008 %s: a cursor is refused for a candidate',
@@ -667,11 +724,13 @@ describe('CS-4.3 the CANDIDATE allowlist, deny by default (NFR-04, TC-008)', () 
 });
 
 describe('CS-4.3 the row filters of the models a candidate reads (NFR-04, TC-008)', () => {
+  // S2: a fact is ANDed with a filter derived from the scope's own session, so a wrong fact narrows.
+  const ofThisSession = { invitations: { some: { sessions: { some: { id: SID } } } } };
   const rows: ReadonlyArray<readonly [ModelName, unknown]> = [
     ['Organization', undefined],
-    ['Candidate', { id: FACTS.candidateId }],
-    ['Invitation', { id: FACTS.invitationId }],
-    ['Test', { id: FACTS.testId }],
+    ['Candidate', { id: FACTS.candidateId, ...ofThisSession }],
+    ['Invitation', { id: FACTS.invitationId, sessions: { some: { id: SID } } }],
+    ['Test', { id: FACTS.testId, ...ofThisSession }],
     ['TestSection', { sessionSections: { some: { sessionId: SID } } }],
     ['Question', { versions: { some: { sessionQuestions: { some: { sessionId: SID } } } } }],
   ];
@@ -709,11 +768,11 @@ describe('CS-4.3 the row filters of the models a candidate reads (NFR-04, TC-008
     },
   );
 
-  it('TC-008 the facts are the whole filter: a caller that names another id only narrows', () => {
+  it('TC-008 the facts and the session are the whole filter: a caller that names another id only narrows', () => {
     const { args } = apply('CANDIDATE', 'Candidate', 'findMany', {
       where: { id: 'another-candidate', OR: [{ id: 'b' }] },
     });
-    expectFilter(args, { id: FACTS.candidateId });
+    expectFilter(args, { id: FACTS.candidateId, ...ofThisSession });
     expect(args.where).toMatchObject({ id: 'another-candidate' });
   });
 });
@@ -752,9 +811,9 @@ describe('CS-4.5 a CANDIDATE scope refuses relation vectors 1 to 5 (NFR-04, TC-0
           /vector 1/,
         );
       }
-      expect(() =>
-        run('Session', 'findMany', { include: { invitation: undefined } }),
-      ).not.toThrow();
+      expect(() => run('Session', 'findMany', { include: { invitation: undefined } })).not.toThrow(
+        /vector/,
+      );
     });
   });
 
@@ -817,7 +876,7 @@ describe('CS-4.5 a CANDIDATE scope refuses relation vectors 1 to 5 (NFR-04, TC-0
 
     it('TC-008 the where of an upsert and of a groupBy having are walked too', () => {
       expect(() =>
-        run('Session', 'upsert', { where: { invitation: { is: {} } }, create: {}, update: {} }),
+        run('ProctorEvent', 'upsert', { where: { session: { is: {} } }, create: {}, update: {} }),
       ).toThrow(/vector 3/);
       expect(() =>
         run('Session', 'groupBy', { by: ['status'], having: { invitation: { is: {} } } }),
@@ -830,10 +889,21 @@ describe('CS-4.5 a CANDIDATE scope refuses relation vectors 1 to 5 (NFR-04, TC-0
       ).toThrow(/vector 3/);
     });
 
-    it('TC-008 a where nested absurdly deep is refused, not walked to the end', () => {
-      let where: Record<string, unknown> = { invitation: { is: {} } };
-      for (let i = 0; i < 40; i++) where = { NOT: where };
-      expect(() => run('Session', 'findMany', { where })).toThrow(/CS-4.5/);
+    it('TC-008 a where nested absurdly deep is refused for its depth alone, with no relation in it', () => {
+      // No relation anywhere: only the depth limit can refuse this, so it fails if the limit goes.
+      const nest = (depth: number): Record<string, unknown> => {
+        let where: Record<string, unknown> = { id: 'x' };
+        for (let i = 0; i < depth; i++) where = { NOT: where };
+        return where;
+      };
+      expect(() => run('Session', 'findMany', { where: nest(40) })).toThrow(
+        /a where nested more than 32 levels deep/,
+      );
+      expect(() => run('Session', 'findMany', { where: nest(33) })).toThrow(
+        /a where nested more than 32 levels deep/,
+      );
+      // The limit is the limit: 32 levels still pass.
+      expect(() => run('Session', 'findMany', { where: nest(32) })).not.toThrow();
     });
   });
 
@@ -948,9 +1018,28 @@ describe('CS-4.5 a CANDIDATE scope refuses relation vectors 1 to 5 (NFR-04, TC-0
     expect(checked).toBeGreaterThan(40);
   });
 
-  it.todo(
-    'CS-4.5 vector 6, the fluent API (findUnique(...).questionVersion() runs on the parent model with an internal data path): ADR 0013 CS-4 PR 3',
-  );
+  it('TC-008 vector 6, the fluent API, reaches the extension as a relation select, which vector 2 refuses', () => {
+    // Prisma 7 runs `findUnique(...).questionVersion()` as findUnique on the parent model with
+    // `select: { questionVersion: true }` (shown through the real client in
+    // session-scope.extension.spec.ts). So vector 2 is the control; this is the same shape.
+    for (const [model, relation] of [
+      ['SessionQuestion', 'questionVersion'],
+      ['Session', 'questions'],
+      ['Session', 'invitation'],
+      ['Submission', 'sessionQuestion'],
+    ] as const) {
+      for (const operation of [
+        'findUnique',
+        'findUniqueOrThrow',
+        'findFirst',
+        'findFirstOrThrow',
+      ]) {
+        expect(() =>
+          run(model, operation, { where: { id: 'x' }, select: { [relation]: true } }),
+        ).toThrow(/vector 2/);
+      }
+    }
+  });
 
   it('TC-008 messages name the model, the relation and the vector, never a value', () => {
     let message = '';

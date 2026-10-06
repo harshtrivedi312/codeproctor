@@ -10,18 +10,24 @@
 //   - cross-candidate: every model a candidate may reach returns only A's rows; B's and O's rows are
 //     not found by any read operation, and every write against B's rows is refused or changes nothing
 //     (the rows are compared before and after). Positive controls prove A reads and writes its own.
-//   - one test per CS-4.3 row, the relation vectors 1 to 5, creates (stamped session, one scoped
-//     existence check on session_questions), immutable session keys, raw SQL, and the SERVICE actor.
+//   - one test per CS-4.3 row, the relation vectors 1 to 5 and the fluent API, creates (stamped
+//     session, one scoped existence check on session_questions), immutable session keys, raw SQL, and
+//     the SERVICE actor.
+//   - review fixes: S1 (keys behind the filters), S2 (wrong facts only narrow), S3 (the interim column
+//     control and the proctor_events source filter), S7 (same-tick findUnique of two candidates).
 //   - statement counts (pg_stat_statements): entering a scope sends no SQL.
-// The pure rules are in session-scope-args.spec.ts, the context in org-context-session.spec.ts.
-// NFR-04, TC-008.
+// A CANDIDATE call that returns rows names its select (candidate-interim.ts), so every candidate read
+// and write here does. The pure rules are in session-scope-args.spec.ts, candidate-interim.spec.ts and
+// org-context-session.spec.ts. NFR-04, TC-008.
 import { randomUUID } from 'node:crypto';
 import { setCandidateFacts } from './candidate-facts';
 import { createPrismaClient } from './create-prisma-client';
 import { OrgScopeError, OrgScopeViolationError, RawQueryNotAllowedError } from './errors';
 import { OrgContextService } from './org-context';
+import type { CandidateFacts } from './org-context';
 import { createOrgScopedClient } from './org-scope.extension';
 import type { PrismaClient } from '../generated/prisma/client.js';
+import { CANDIDATE_INTERIM_DENY } from './candidate-interim';
 import { startMigratedDatabase } from './testing/migrated-postgres';
 import type { MigratedDatabase } from './testing/migrated-postgres';
 import { createCandidateChain, createTenant } from './testing/tenant-fixtures';
@@ -54,16 +60,21 @@ const CHAIN_MODELS: readonly ChainModel[] = [
   'Submission',
 ];
 const SESSION_MODELS = CHAIN_MODELS.slice(6) as readonly ChainModel[];
+// Organization has its own test (A and B share it); the other five are filtered per candidate.
 const READ_ONLY_MODELS = CHAIN_MODELS.slice(0, 6) as readonly ChainModel[];
+const FILTERED_READ_ONLY_MODELS = READ_ONLY_MODELS.filter((m) => m !== 'Organization');
 const lowerFirst = (name: string): string => name.charAt(0).toLowerCase() + name.slice(1);
 
 const WHEN = new Date('2026-10-06T00:00:00.000Z');
-/** One harmless change per session-path model. Dates are fixed so results are stable. */
+/**
+ * One harmless change per session-path model, a column a candidate may write. Dates are fixed so
+ * results are stable.
+ */
 const TOUCH: Record<string, Row> = {
   Session: { lastHeartbeat: WHEN },
   SessionQuestion: { finalCode: 'print(1)' },
   SessionSection: { startedAt: WHEN },
-  IdentityCheck: { reviewNote: 'changed' },
+  IdentityCheck: { livenessPassed: true },
   MediaChunk: { durationMs: 5 },
   ProctorEventBatch: { eventCount: 2 },
   ProctorEvent: { durationMs: 1 },
@@ -91,13 +102,26 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
   let orphanQuestionId: string;
   let orphanSectionId: string;
 
+  const factsOf = (chain: SessionChain): CandidateFacts => ({
+    candidateId: chain.candidateId,
+    invitationId: chain.invitationId,
+    testId: chain.testId,
+  });
+
+  /** A candidate scope as the guard builds it: facts first, then everything else. */
   const asCandidate = <T2>(chain: SessionChain, fn: () => Promise<T2>): Promise<T2> =>
     orgContext.runAsCandidate(chain.orgId, chain.sessionId, async () => {
-      setCandidateFacts(orgContext, {
-        candidateId: chain.candidateId,
-        invitationId: chain.invitationId,
-        testId: chain.testId,
-      });
+      setCandidateFacts(orgContext, factsOf(chain));
+      return fn();
+    });
+  /** A candidate scope whose guard set `facts` (which can be wrong). */
+  const asCandidateWith = <T2>(
+    chain: SessionChain,
+    facts: CandidateFacts,
+    fn: () => Promise<T2>,
+  ): Promise<T2> =>
+    orgContext.runAsCandidate(chain.orgId, chain.sessionId, async () => {
+      setCandidateFacts(orgContext, facts);
       return fn();
     });
   const asService = <T2>(chain: SessionChain, fn: () => Promise<T2>): Promise<T2> =>
@@ -108,11 +132,20 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
     ['CANDIDATE', asCandidate],
     ['SERVICE', asService],
   ] as const;
+  /** Session_sections: CS-4.4 grants a candidate no write there, so only the job writes. */
+  const writersOf = (model: ChainModel) =>
+    ACTORS.filter(([actor]) => actor === 'SERVICE' || model !== 'SessionSection');
 
   const scoped = (model: string): Delegate =>
     (client as unknown as Record<string, Delegate>)[lowerFirst(model)] as Delegate;
   const plain = (model: string): Delegate =>
     (owner as unknown as Record<string, Delegate>)[lowerFirst(model)] as Delegate;
+
+  /** The select a candidate call names: the columns of the row's own key, so the rows can be told apart. */
+  const S = (model: ChainModel): { select: Record<string, true> } => ({
+    select: Object.fromEntries(Object.keys(A.rows[model].filter).map((key) => [key, true])),
+  });
+  const ID = { select: { id: true as const } };
 
   /** Every row of every model a CS-4 scope can reach, as text, so a test can prove nothing changed. */
   async function snapshot(): Promise<Record<string, string[]>> {
@@ -126,6 +159,9 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
   /** True when `row` has every key of `filter` with an equal value. */
   const matches = (row: Row, filter: Row): boolean =>
     Object.entries(filter).every(([key, value]) => row[key] === value);
+
+  const statementCount = async (): Promise<number> =>
+    (await db.statements.read()).reduce((sum, s) => sum + s.calls, 0);
 
   beforeAll(async () => {
     db = await startMigratedDatabase({ statementStats: true });
@@ -187,8 +223,9 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       "TC-008 %s: reads only its own session's rows; B's and another org's rows are not found by any read operation",
       async (_actor, run) => {
         const own = A.rows[model];
+        const sel = S(model);
         await run(A, async () => {
-          const rows = (await d().findMany?.({})) as Row[];
+          const rows = (await d().findMany?.({ ...sel })) as Row[];
           expect(rows).toHaveLength(1);
           expect(matches(rows[0] as Row, own.filter)).toBe(true);
           expect(await d().count?.({})).toBe(1);
@@ -197,24 +234,24 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
             (await d().groupBy?.({ by: [Object.keys(own.filter)[0]], _count: true })) as unknown[],
           ).toHaveLength(1);
           // Positive controls: A's own row is found by each read operation.
-          expect(await d().findFirst?.({ where: own.filter })).not.toBeNull();
-          expect(await d().findFirstOrThrow?.({ where: own.filter })).toBeDefined();
-          expect(await d().findUnique?.({ where: own.unique })).not.toBeNull();
-          expect(await d().findUniqueOrThrow?.({ where: own.unique })).toBeDefined();
+          expect(await d().findFirst?.({ where: own.filter, ...sel })).not.toBeNull();
+          expect(await d().findFirstOrThrow?.({ where: own.filter, ...sel })).toBeDefined();
+          expect(await d().findUnique?.({ where: own.unique, ...sel })).not.toBeNull();
+          expect(await d().findUniqueOrThrow?.({ where: own.unique, ...sel })).toBeDefined();
           expect(await d().count?.({ where: own.filter })).toBe(1);
 
           for (const other of [B, O]) {
             const theirs: RowSelector = other.rows[model];
             const by = Object.keys(theirs.filter)[0] as string;
-            expect(await d().findMany?.({ where: theirs.filter })).toEqual([]);
-            expect(await d().findFirst?.({ where: theirs.filter })).toBeNull();
-            await expect(d().findFirstOrThrow?.({ where: theirs.filter })).rejects.toMatchObject({
-              code: 'P2025',
-            });
-            expect(await d().findUnique?.({ where: theirs.unique })).toBeNull();
-            await expect(d().findUniqueOrThrow?.({ where: theirs.unique })).rejects.toMatchObject({
-              code: 'P2025',
-            });
+            expect(await d().findMany?.({ where: theirs.filter, ...sel })).toEqual([]);
+            expect(await d().findFirst?.({ where: theirs.filter, ...sel })).toBeNull();
+            await expect(
+              d().findFirstOrThrow?.({ where: theirs.filter, ...sel }),
+            ).rejects.toMatchObject({ code: 'P2025' });
+            expect(await d().findUnique?.({ where: theirs.unique, ...sel })).toBeNull();
+            await expect(
+              d().findUniqueOrThrow?.({ where: theirs.unique, ...sel }),
+            ).rejects.toMatchObject({ code: 'P2025' });
             expect(await d().count?.({ where: theirs.filter })).toBe(0);
             expect(await d().aggregate?.({ where: theirs.filter, _count: true })).toEqual({
               _count: 0,
@@ -227,28 +264,27 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       },
     );
 
-    it.each(ACTORS)(
+    it.each(writersOf(model))(
       "TC-008 %s: every write against B's and another org's row is refused or changes nothing",
       async (actor, run) => {
         const before = await snapshot();
         const touch = TOUCH[model] as Row;
+        const sel = S(model);
         await run(A, async () => {
           for (const other of [B, O]) {
             const theirs = other.rows[model];
             expect(await d().updateMany?.({ where: theirs.filter, data: touch })).toEqual({
               count: 0,
             });
-            expect(await d().updateManyAndReturn?.({ where: theirs.filter, data: touch })).toEqual(
-              [],
-            );
-            await expect(d().update?.({ where: theirs.unique, data: touch })).rejects.toMatchObject(
-              {
-                code: 'P2025',
-              },
-            );
+            expect(
+              await d().updateManyAndReturn?.({ where: theirs.filter, data: touch, ...sel }),
+            ).toEqual([]);
+            await expect(
+              d().update?.({ where: theirs.unique, data: touch, ...sel }),
+            ).rejects.toMatchObject({ code: 'P2025' });
             if (actor === 'SERVICE') {
               expect(await d().deleteMany?.({ where: theirs.filter })).toEqual({ count: 0 });
-              await expect(d().delete?.({ where: theirs.unique })).rejects.toMatchObject({
+              await expect(d().delete?.({ where: theirs.unique, ...sel })).rejects.toMatchObject({
                 code: 'P2025',
               });
             } else {
@@ -256,7 +292,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
               await expect(d().deleteMany?.({ where: theirs.filter })).rejects.toThrow(
                 /a candidate deletes nothing/,
               );
-              await expect(d().delete?.({ where: theirs.unique })).rejects.toThrow(
+              await expect(d().delete?.({ where: theirs.unique, ...sel })).rejects.toThrow(
                 /a candidate deletes nothing/,
               );
             }
@@ -266,46 +302,51 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       },
     );
 
-    it.each(ACTORS)('TC-008 %s: it changes its own row, and only its own', async (_actor, run) => {
-      const own = A.rows[model];
-      const touch = TOUCH[model] as Row;
-      const original = (await plain(model).findFirst?.({ where: own.filter })) as Row;
-      const before = await snapshot();
-      await run(A, async () => {
-        expect(await d().updateMany?.({ where: own.filter, data: touch })).toEqual({ count: 1 });
-      });
-      const after = await snapshot();
-      // Exactly one row of this model differs from before: A's. No other model changed.
-      expect(after[model]?.filter((row) => !before[model]?.includes(row))).toHaveLength(1);
-      expect(before[model]?.filter((row) => !after[model]?.includes(row))).toHaveLength(1);
-      for (const other of CHAIN_MODELS.filter((m) => m !== model)) {
-        expect(after[other]).toEqual(before[other]);
-      }
-      const now = (await plain(model).findFirst?.({ where: own.filter })) as Row;
-      expect(Object.fromEntries(Object.keys(touch).map((k) => [k, now[k]]))).toEqual(touch);
-      // Put the fixture back, so the next test starts from it again.
-      await plain(model).updateMany?.({
-        where: own.filter,
-        data: Object.fromEntries(Object.keys(touch).map((k) => [k, original[k]])),
-      });
-      expect(await snapshot()).toEqual(before);
-    });
+    it.each(writersOf(model))(
+      '%s: it changes its own row, and only its own (TC-008)',
+      async (_actor, run) => {
+        const own = A.rows[model];
+        const touch = TOUCH[model] as Row;
+        const original = (await plain(model).findFirst?.({ where: own.filter })) as Row;
+        const before = await snapshot();
+        await run(A, async () => {
+          expect(await d().updateMany?.({ where: own.filter, data: touch })).toEqual({ count: 1 });
+        });
+        const after = await snapshot();
+        // Exactly one row of this model differs from before: A's. No other model changed.
+        expect(after[model]?.filter((row) => !before[model]?.includes(row))).toHaveLength(1);
+        expect(before[model]?.filter((row) => !after[model]?.includes(row))).toHaveLength(1);
+        for (const other of CHAIN_MODELS.filter((m) => m !== model)) {
+          expect(after[other]).toEqual(before[other]);
+        }
+        const now = (await plain(model).findFirst?.({ where: own.filter })) as Row;
+        expect(Object.fromEntries(Object.keys(touch).map((k) => [k, now[k]]))).toEqual(touch);
+        // Put the fixture back, so the next test starts from it again.
+        await plain(model).updateMany?.({
+          where: own.filter,
+          data: Object.fromEntries(Object.keys(touch).map((k) => [k, original[k]])),
+        });
+        expect(await snapshot()).toEqual(before);
+      },
+    );
   });
 
   describe('CS-4.3: the six read-only models', () => {
-    it.each(READ_ONLY_MODELS)(
+    it.each(FILTERED_READ_ONLY_MODELS)(
       "TC-008 %s: A reads its own row and never B's or another org's",
       async (model) => {
-        if (model === 'Organization') return; // covered by its own test below (same org for A and B)
         const own = A.rows[model];
+        const sel = S(model);
         await asCandidate(A, async () => {
-          const rows = (await scoped(model).findMany?.({})) as Row[];
+          const rows = (await scoped(model).findMany?.({ ...sel })) as Row[];
           expect(rows).toHaveLength(1);
           expect(matches(rows[0] as Row, own.filter)).toBe(true);
           for (const other of [B, O]) {
-            expect(await scoped(model).findFirst?.({ where: other.rows[model].filter })).toBeNull();
             expect(
-              await scoped(model).findUnique?.({ where: other.rows[model].unique }),
+              await scoped(model).findFirst?.({ where: other.rows[model].filter, ...sel }),
+            ).toBeNull();
+            expect(
+              await scoped(model).findUnique?.({ where: other.rows[model].unique, ...sel }),
             ).toBeNull();
             expect(await scoped(model).count?.({ where: other.rows[model].filter })).toBe(0);
           }
@@ -336,6 +377,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
                 data: {},
                 create: {},
                 update: {},
+                ...ID,
               }),
             ).rejects.toThrow(/read-only in a CANDIDATE scope/);
           }
@@ -347,9 +389,11 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
     it('TC-008 organizations: id = ctx.orgId (A and B see their org, never the other one)', async () => {
       for (const chain of [A, B]) {
         await asCandidate(chain, async () => {
-          const rows = (await scoped('Organization').findMany?.({})) as Row[];
+          const rows = (await scoped('Organization').findMany?.({ ...ID })) as Row[];
           expect(rows.map((r) => r.id)).toEqual([T.orgId]);
-          expect(await scoped('Organization').findUnique?.({ where: { id: O.orgId } })).toBeNull();
+          expect(
+            await scoped('Organization').findUnique?.({ where: { id: O.orgId }, ...ID }),
+          ).toBeNull();
           expect(await scoped('Organization').count?.({ where: { id: O.orgId } })).toBe(0);
         });
       }
@@ -357,15 +401,20 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
 
     it('TC-008 candidates: id = ctx.candidateId (the other candidate of the org is not there)', async () => {
       await asCandidate(A, async () => {
-        const rows = (await scoped('Candidate').findMany?.({})) as Row[];
+        const rows = (await scoped('Candidate').findMany?.({ ...ID })) as Row[];
         expect(rows.map((r) => r.id)).toEqual([A.candidateId]);
-        expect(await scoped('Candidate').findUnique?.({ where: { id: B.candidateId } })).toBeNull();
         expect(
-          await scoped('Candidate').findFirst?.({ where: { email: { contains: 'candidate-b' } } }),
+          await scoped('Candidate').findUnique?.({ where: { id: B.candidateId }, ...ID }),
+        ).toBeNull();
+        expect(
+          await scoped('Candidate').findFirst?.({
+            where: { email: { contains: 'candidate-b' } },
+            ...ID,
+          }),
         ).toBeNull();
       });
       await asCandidate(B, async () => {
-        const rows = (await scoped('Candidate').findMany?.({})) as Row[];
+        const rows = (await scoped('Candidate').findMany?.({ ...ID })) as Row[];
         expect(rows.map((r) => r.id)).toEqual([B.candidateId]);
       });
       // The owner sees both candidates of the org and the other org's: the filter did the work.
@@ -374,10 +423,10 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
 
     it('TC-008 invitations: id = ctx.invitationId (accommodations of the other candidate are not reachable)', async () => {
       await asCandidate(A, async () => {
-        const rows = (await scoped('Invitation').findMany?.({})) as Row[];
+        const rows = (await scoped('Invitation').findMany?.({ ...ID })) as Row[];
         expect(rows.map((r) => r.id)).toEqual([A.invitationId]);
         expect(
-          await scoped('Invitation').findUnique?.({ where: { id: B.invitationId } }),
+          await scoped('Invitation').findUnique?.({ where: { id: B.invitationId }, ...ID }),
         ).toBeNull();
         expect(await scoped('Invitation').count?.({ where: { candidateId: B.candidateId } })).toBe(
           0,
@@ -388,9 +437,9 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
 
     it("TC-008 tests: id = ctx.testId (the other candidate's test is not there)", async () => {
       await asCandidate(A, async () => {
-        const rows = (await scoped('Test').findMany?.({})) as Row[];
+        const rows = (await scoped('Test').findMany?.({ ...ID })) as Row[];
         expect(rows.map((r) => r.id)).toEqual([A.testId]);
-        expect(await scoped('Test').findUnique?.({ where: { id: B.testId } })).toBeNull();
+        expect(await scoped('Test').findUnique?.({ where: { id: B.testId }, ...ID })).toBeNull();
       });
       expect(await owner.test.count()).toBe(3);
     });
@@ -398,13 +447,16 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
     it('TC-008 test_sections: only the sections of this session (an unopened section of the same test is not)', async () => {
       await asCandidate(A, async () => {
         const rows = (await scoped('TestSection').findMany?.({
+          ...ID,
           orderBy: { position: 'asc' },
         })) as Row[];
         expect(rows.map((r) => r.id)).toEqual([A.sectionId]);
         expect(
-          await scoped('TestSection').findUnique?.({ where: { id: orphanSectionId } }),
+          await scoped('TestSection').findUnique?.({ where: { id: orphanSectionId }, ...ID }),
         ).toBeNull();
-        expect(await scoped('TestSection').findUnique?.({ where: { id: B.sectionId } })).toBeNull();
+        expect(
+          await scoped('TestSection').findUnique?.({ where: { id: B.sectionId }, ...ID }),
+        ).toBeNull();
         expect(await scoped('TestSection').count?.({ where: { testId: A.testId } })).toBe(1);
       });
       expect(await owner.testSection.count({ where: { testId: A.testId } })).toBe(2);
@@ -412,15 +464,17 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
 
     it("TC-008 questions: only the questions of this session's question versions (an unused question is not)", async () => {
       await asCandidate(A, async () => {
-        const rows = (await scoped('Question').findMany?.({})) as Row[];
+        const rows = (await scoped('Question').findMany?.({ ...ID })) as Row[];
         expect(rows.map((r) => r.id)).toEqual([A.questionId]);
         expect(
-          await scoped('Question').findUnique?.({ where: { id: orphanQuestionId } }),
+          await scoped('Question').findUnique?.({ where: { id: orphanQuestionId }, ...ID }),
         ).toBeNull();
-        expect(await scoped('Question').findUnique?.({ where: { id: B.questionId } })).toBeNull();
+        expect(
+          await scoped('Question').findUnique?.({ where: { id: B.questionId }, ...ID }),
+        ).toBeNull();
       });
       await asCandidate(B, async () => {
-        const rows = (await scoped('Question').findMany?.({})) as Row[];
+        const rows = (await scoped('Question').findMany?.({ ...ID })) as Row[];
         expect(rows.map((r) => r.id)).toEqual([B.questionId]);
       });
       expect(await owner.question.count({ where: { orgId: T.orgId } })).toBe(3);
@@ -430,9 +484,11 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       'TC-008 %s: readable only under a grant, and grants are PR 2, so it throws in a CANDIDATE scope',
       async (model) => {
         await asCandidate(A, async () => {
-          await expect(scoped(model).findMany?.({})).rejects.toThrow(/readable only under a grant/);
+          await expect(scoped(model).findMany?.({ ...ID })).rejects.toThrow(
+            /readable only under a grant/,
+          );
           await expect(
-            scoped(model).findUnique?.({ where: { id: T.consentTextId } }),
+            scoped(model).findUnique?.({ where: { id: T.consentTextId }, ...ID }),
           ).rejects.toThrow(/readable only under a grant/);
         });
         // (The same rows are readable for a session job: no allowlist.)
@@ -448,7 +504,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
           const seen: string[] = [];
           for (let i = 0; i < 3; i++) {
             await new Promise((resolve) => setTimeout(resolve, delay));
-            const rows = (await scoped('Candidate').findMany?.({})) as Row[];
+            const rows = (await scoped('Candidate').findMany?.({ ...ID })) as Row[];
             seen.push(...rows.map((r) => r.id as string));
           }
           return seen;
@@ -461,6 +517,660 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       results.forEach((seen, i) => {
         const expected = i % 2 === 0 ? A.candidateId : B.candidateId;
         expect(seen).toEqual([expected, expected, expected]);
+      });
+    });
+  });
+
+  describe('S2: a wrong fact can only narrow, never widen (DL-31, FU-DB-185)', () => {
+    const readFacts = async (chain: SessionChain, facts: CandidateFacts) =>
+      asCandidateWith(chain, facts, async () => ({
+        candidates: ((await client.candidate.findMany({ ...ID })) as Row[]).map((r) => r.id),
+        invitations: ((await client.invitation.findMany({ ...ID })) as Row[]).map((r) => r.id),
+        tests: ((await client.test.findMany({ ...ID })) as Row[]).map((r) => r.id),
+        candidateCount: await client.candidate.count(),
+        invitationCount: await client.invitation.count(),
+        testCount: await client.test.count(),
+      }));
+
+    it("TC-008 a guard that sets B's facts in A's scope (same org) reads nothing", async () => {
+      expect(await readFacts(A, factsOf(B))).toEqual({
+        candidates: [],
+        invitations: [],
+        tests: [],
+        candidateCount: 0,
+        invitationCount: 0,
+        testCount: 0,
+      });
+      expect(await readFacts(B, factsOf(A))).toEqual({
+        candidates: [],
+        invitations: [],
+        tests: [],
+        candidateCount: 0,
+        invitationCount: 0,
+        testCount: 0,
+      });
+    });
+
+    it("TC-008 a guard that sets another org's candidate facts reads nothing either", async () => {
+      expect(await readFacts(A, factsOf(O))).toEqual({
+        candidates: [],
+        invitations: [],
+        tests: [],
+        candidateCount: 0,
+        invitationCount: 0,
+        testCount: 0,
+      });
+    });
+
+    it('TC-008 one wrong fact narrows only its own model: the right ones still read', async () => {
+      const mixed = await readFacts(A, {
+        candidateId: A.candidateId,
+        invitationId: B.invitationId,
+        testId: A.testId,
+      });
+      expect(mixed.candidates).toEqual([A.candidateId]);
+      expect(mixed.invitations).toEqual([]);
+      expect(mixed.tests).toEqual([A.testId]);
+      const swapped = await readFacts(A, {
+        candidateId: B.candidateId,
+        invitationId: A.invitationId,
+        testId: B.testId,
+      });
+      expect(swapped.candidates).toEqual([]);
+      expect(swapped.invitations).toEqual([A.invitationId]);
+      expect(swapped.tests).toEqual([]);
+    });
+
+    it("TC-008 the right facts read the candidate's own rows (the control)", async () => {
+      expect(await readFacts(A, factsOf(A))).toMatchObject({
+        candidates: [A.candidateId],
+        invitations: [A.invitationId],
+        tests: [A.testId],
+        candidateCount: 1,
+        invitationCount: 1,
+        testCount: 1,
+      });
+    });
+
+    it('TC-008 the guard recipe (DL-31 option a): read the session and its invitation in runInOrg, then enter runAsCandidate and set the facts before any other query', async () => {
+      // 1. The only org-wide read, in trusted guard code: two selects, in a plain org scope.
+      const loaded = await orgContext.runInOrg(A.orgId, async () => {
+        const session = await client.session.findUnique({
+          where: { id: A.sessionId },
+          select: { invitationId: true },
+        });
+        const invitation = await client.invitation.findUnique({
+          where: { id: session?.invitationId ?? '' },
+          select: { id: true, candidateId: true, testId: true },
+        });
+        return invitation;
+      });
+      expect(loaded).toEqual({
+        id: A.invitationId,
+        candidateId: A.candidateId,
+        testId: A.testId,
+      });
+      // 2. Leave that scope, enter the candidate scope and set the facts first.
+      const rows = await orgContext.runAsCandidate(A.orgId, A.sessionId, async () => {
+        setCandidateFacts(orgContext, {
+          candidateId: loaded?.candidateId ?? '',
+          invitationId: loaded?.id ?? '',
+          testId: loaded?.testId ?? '',
+        });
+        return client.candidate.findMany({ ...ID });
+      });
+      expect((rows as Row[]).map((r) => r.id)).toEqual([A.candidateId]);
+    });
+  });
+
+  describe('S1: keys behind the filters cannot be written (ADR 0013 CS-4.2, CS-4.4)', () => {
+    /** What the candidate can reach through the filters that follow these keys. */
+    const reach = (chain: SessionChain) =>
+      asCandidate(chain, async () => ({
+        questions: ((await client.question.findMany({ ...ID })) as Row[]).map((r) => r.id).sort(),
+        sections: ((await client.testSection.findMany({ ...ID })) as Row[]).map((r) => r.id).sort(),
+        candidates: ((await client.candidate.findMany({ ...ID })) as Row[]).map((r) => r.id),
+        invitations: ((await client.invitation.findMany({ ...ID })) as Row[]).map((r) => r.id),
+        tests: ((await client.test.findMany({ ...ID })) as Row[]).map((r) => r.id),
+      }));
+    const REACH_A = () => ({
+      questions: [A.questionId],
+      sections: [A.sectionId],
+      candidates: [A.candidateId],
+      invitations: [A.invitationId],
+      tests: [A.testId],
+    });
+
+    it('TC-008 pin: the keys really do feed the filters (written by the OWNER, a repointed row widens what the candidate reads)', async () => {
+      // This is the attack the immutability prevents. It is done as the owner, outside any scope, to
+      // show that the filters follow the keys, and undone.
+      const sq = await owner.sessionQuestion.findUniqueOrThrow({
+        where: { id: A.sessionQuestionId },
+      });
+      await owner.sessionQuestion.update({
+        where: { id: A.sessionQuestionId },
+        data: { questionVersionId: B.questionVersionId },
+      });
+      const section = await owner.sessionSection.create({
+        data: { sessionId: A.sessionId, sectionId: B.sectionId, position: 5 },
+      });
+      try {
+        const widened = await reach(A);
+        expect(widened.questions).toEqual([B.questionId]);
+        expect(widened.sections.sort()).toEqual([A.sectionId, B.sectionId].sort());
+      } finally {
+        await owner.sessionSection.delete({
+          where: { sessionId_sectionId: { sessionId: A.sessionId, sectionId: B.sectionId } },
+        });
+        await owner.sessionQuestion.update({
+          where: { id: A.sessionQuestionId },
+          data: { questionVersionId: sq.questionVersionId },
+        });
+      }
+      expect(section.sectionId).toBe(B.sectionId);
+      expect(await reach(A)).toEqual(REACH_A());
+    });
+
+    describe.each(ACTORS)('actor %s', (actor, run) => {
+      it("TC-008 sessions.invitationId cannot be pointed at B's invitation, and nothing changes", async () => {
+        const before = await snapshot();
+        await run(A, async () => {
+          for (const value of [
+            B.invitationId,
+            O.invitationId,
+            A.invitationId,
+            { set: B.invitationId },
+          ]) {
+            const data = { invitationId: value } as never;
+            await expect(
+              client.session.update({ where: { id: A.sessionId }, data, ...ID }),
+            ).rejects.toThrow(/invitationId is a session key/);
+            await expect(
+              client.session.updateMany({ where: { id: A.sessionId }, data }),
+            ).rejects.toThrow(/invitationId is a session key/);
+            await expect(
+              client.session.updateManyAndReturn({ where: { id: A.sessionId }, data, ...ID }),
+            ).rejects.toThrow(/invitationId is a session key/);
+            await expect(
+              client.session.upsert({
+                where: { id: A.sessionId },
+                update: data,
+                create: {} as never,
+                ...ID,
+              }),
+            ).rejects.toThrow(OrgScopeViolationError);
+          }
+        });
+        expect(await snapshot()).toEqual(before);
+        expect(actor).toBeDefined();
+      });
+    });
+
+    it.each(['questionVersionId', 'testQuestionId', 'variantId'] as const)(
+      "TC-008 CANDIDATE: session_questions.%s cannot be repointed to B's rows, and the questions filter does not widen",
+      async (key) => {
+        const before = await snapshot();
+        const to = {
+          questionVersionId: B.questionVersionId,
+          testQuestionId: B.testQuestionId,
+          variantId: null,
+        }[key];
+        await asCandidate(A, async () => {
+          const data = { [key]: to } as never;
+          await expect(
+            client.sessionQuestion.update({
+              where: { id: A.sessionQuestionId },
+              data,
+              ...ID,
+            }),
+          ).rejects.toThrow(new RegExp(`${key} is a session key`));
+          await expect(
+            client.sessionQuestion.updateMany({ where: { id: A.sessionQuestionId }, data }),
+          ).rejects.toThrow(/session key/);
+          await expect(
+            client.sessionQuestion.updateManyAndReturn({
+              where: { id: A.sessionQuestionId },
+              data,
+              ...ID,
+            }),
+          ).rejects.toThrow(/session key/);
+        });
+        expect(await snapshot()).toEqual(before);
+        expect(await reach(A)).toEqual(REACH_A());
+      },
+    );
+
+    it('TC-008 SERVICE may write them (the job that assigns the questions), CANDIDATE may write what CS-4.4 grants', async () => {
+      await asService(A, async () => {
+        const row = await client.sessionQuestion.update({
+          where: { id: A.sessionQuestionId },
+          data: { questionVersionId: A.questionVersionId, variantId: null },
+        });
+        expect(row.questionVersionId).toBe(A.questionVersionId);
+      });
+      await asCandidate(A, async () => {
+        const row = await client.sessionQuestion.update({
+          where: { id: A.sessionQuestionId },
+          data: { finalCode: 'print(2)', finalLanguage: 'python', answer: { a: 1 } },
+          select: { id: true, finalCode: true, finalLanguage: true, answer: true },
+        });
+        expect(row).toEqual({
+          id: A.sessionQuestionId,
+          finalCode: 'print(2)',
+          finalLanguage: 'python',
+          answer: { a: 1 },
+        });
+      });
+      await owner.sessionQuestion.update({
+        where: { id: A.sessionQuestionId },
+        data: { finalCode: null, finalLanguage: null, answer: undefined },
+      });
+    });
+
+    it("TC-008 CANDIDATE: a planted session_question (naming B's question version) is refused, so the questions filter does not widen", async () => {
+      const before = await snapshot();
+      await asCandidate(A, async () => {
+        const data = {
+          sessionId: A.sessionId,
+          testQuestionId: A.testQuestionId,
+          questionVersionId: B.questionVersionId,
+          position: 7,
+          points: 1,
+        };
+        await expect(client.sessionQuestion.create({ data, ...ID })).rejects.toThrow(
+          /cannot create this row/,
+        );
+        await expect(client.sessionQuestion.createMany({ data: [data] })).rejects.toThrow(
+          /cannot create this row/,
+        );
+        await expect(
+          client.sessionQuestion.createManyAndReturn({ data: [data], ...ID }),
+        ).rejects.toThrow(/cannot create this row/);
+        await expect(
+          client.sessionQuestion.upsert({
+            where: { id: randomUUID() },
+            update: {},
+            create: data,
+            ...ID,
+          }),
+        ).rejects.toThrow(/cannot create this row/);
+        // A planted session as well: it has no CS-4.4 create either.
+        await expect(
+          client.session.create({
+            data: { id: A.sessionId, orgId: A.orgId, invitationId: B.invitationId },
+            ...ID,
+          }),
+        ).rejects.toThrow(/cannot create this row/);
+      });
+      expect(await snapshot()).toEqual(before);
+      expect(await reach(A)).toEqual(REACH_A());
+    });
+
+    it('TC-008 CANDIDATE: session_sections takes no write at all (CS-4.4 "none"): a planted or repointed row is refused, so the test_sections filter does not widen', async () => {
+      const before = await snapshot();
+      await asCandidate(A, async () => {
+        const planted = { sessionId: A.sessionId, sectionId: B.sectionId, position: 9 };
+        await expect(
+          client.sessionSection.create({ data: planted, select: { position: true } }),
+        ).rejects.toThrow(/writes nothing here/);
+        await expect(client.sessionSection.createMany({ data: [planted] })).rejects.toThrow(
+          /writes nothing here/,
+        );
+        await expect(
+          client.sessionSection.upsert({
+            where: { sessionId_sectionId: { sessionId: A.sessionId, sectionId: B.sectionId } },
+            update: {},
+            create: planted,
+            select: { position: true },
+          }),
+        ).rejects.toThrow(/writes nothing here/);
+        // The key, the deadlines and the timestamps of the row it has.
+        const own = { sessionId_sectionId: { sessionId: A.sessionId, sectionId: A.sectionId } };
+        for (const data of [
+          { sectionId: B.sectionId },
+          { deadlineAt: new Date('2030-01-01T00:00:00Z') },
+          { endedAt: WHEN },
+          { startedAt: WHEN },
+          { timeLimitMs: 1n },
+          { position: 3 },
+        ]) {
+          await expect(
+            client.sessionSection.update({ where: own, data, select: { position: true } }),
+          ).rejects.toThrow(/writes nothing here/);
+          await expect(
+            client.sessionSection.updateMany({ where: { sessionId: A.sessionId }, data }),
+          ).rejects.toThrow(/writes nothing here/);
+        }
+      });
+      expect(await snapshot()).toEqual(before);
+      expect(await reach(A)).toEqual(REACH_A());
+    });
+
+    it('TC-008 SERVICE still opens and closes sections (the job writes the deadlines)', async () => {
+      await asService(A, async () => {
+        const r = await client.sessionSection.updateMany({
+          where: { sessionId: A.sessionId },
+          data: { startedAt: WHEN, deadlineAt: WHEN, endedAt: WHEN },
+        });
+        expect(r.count).toBe(1);
+        await client.sessionSection.updateMany({
+          where: { sessionId: A.sessionId },
+          data: { startedAt: null, deadlineAt: null, endedAt: null },
+        });
+      });
+    });
+  });
+
+  describe('S3: the interim column control (candidate-interim.ts), against the real database', () => {
+    it('TC-008 every model a candidate reads names its select: a bare read throws, and nothing reaches Postgres', async () => {
+      await db.statements.reset();
+      await asCandidate(A, async () => {
+        for (const model of CHAIN_MODELS) {
+          for (const operation of ['findMany', 'findFirst', 'findFirstOrThrow']) {
+            await expect(scoped(model)[operation]?.({})).rejects.toThrow(
+              /needs an explicit select/,
+            );
+          }
+          await expect(scoped(model).findUnique?.({ where: A.rows[model].unique })).rejects.toThrow(
+            /needs an explicit select/,
+          );
+          await expect(
+            scoped(model).findUniqueOrThrow?.({ where: A.rows[model].unique }),
+          ).rejects.toThrow(/needs an explicit select/);
+        }
+      });
+      expect(await statementCount()).toBe(0);
+    });
+
+    it('TC-008 a select returns exactly the columns named: the hidden ones are not in the row', async () => {
+      await owner.session.update({
+        where: { id: A.sessionId },
+        data: { hmacKeyEnc: 'sealed-key-not-real', riskScore: 77 },
+      });
+      try {
+        const row = await asCandidate(A, () =>
+          client.session.findUniqueOrThrow({
+            where: { id: A.sessionId },
+            select: { id: true, status: true, lastHeartbeat: true },
+          }),
+        );
+        expect(Object.keys(row).sort()).toEqual(['id', 'lastHeartbeat', 'status']);
+        expect(JSON.stringify(row)).not.toContain('sealed-key-not-real');
+      } finally {
+        await owner.session.update({
+          where: { id: A.sessionId },
+          data: { hmacKeyEnc: null, riskScore: null },
+        });
+      }
+    });
+
+    it.each(
+      Object.entries(CANDIDATE_INTERIM_DENY).flatMap(([model, deny]) =>
+        (deny?.read ?? []).map((column) => [model, column] as const),
+      ),
+    )(
+      'TC-008 %s.%s: refused in select, where, orderBy and the aggregates, and no statement reaches Postgres',
+      async (model, column) => {
+        await db.statements.reset();
+        await asCandidate(A, async () => {
+          const d = scoped(model);
+          for (const args of [
+            { select: { id: true, [column]: true } },
+            { ...ID, where: { [column]: { not: null } } },
+            { ...ID, orderBy: { [column]: 'asc' } },
+            { ...ID, distinct: [column] },
+          ]) {
+            await expect(d.findMany?.(args)).rejects.toThrow(
+              new RegExp(`the column ${column} is not available to a candidate`),
+            );
+          }
+          await expect(d.count?.({ where: { [column]: { not: null } } })).rejects.toThrow(
+            /is not available to a candidate/,
+          );
+          await expect(d.aggregate?.({ _max: { [column]: true } })).rejects.toThrow(
+            /is not available to a candidate/,
+          );
+          await expect(d.groupBy?.({ by: [column], _count: true })).rejects.toThrow(
+            /is not available to a candidate/,
+          );
+        });
+        expect(await statementCount()).toBe(0);
+      },
+    );
+
+    it('TC-008 no boolean oracle: a filter on a hidden column cannot tell A whether a value matches', async () => {
+      await owner.session.update({ where: { id: A.sessionId }, data: { riskScore: 77 } });
+      try {
+        await asCandidate(A, async () => {
+          await expect(client.session.count({ where: { riskScore: { gte: 50 } } })).rejects.toThrow(
+            /riskScore is not available/,
+          );
+          await expect(
+            client.session.count({ where: { deviceInfo: { path: ['x'], equals: 1 } } }),
+          ).rejects.toThrow(/deviceInfo is not available/);
+        });
+      } finally {
+        await owner.session.update({ where: { id: A.sessionId }, data: { riskScore: null } });
+      }
+    });
+
+    it.each([
+      ['Session', 'status', { status: 'SUBMITTED' }],
+      ['Session', 'authEpoch', { authEpoch: 9 }],
+      ['Session', 'pauseReasons', { pauseReasons: ['PROCTOR'] }],
+      ['Session', 'submittedAt', { submittedAt: WHEN }],
+      ['Session', 'startedAt', { startedAt: WHEN }],
+      ['Session', 'deadlineAt', { deadlineAt: new Date('2031-01-01T00:00:00Z') }],
+      ['Session', 'pausedMs', { pausedMs: 0n }],
+      ['Session', 'hmacKeyEnc', { hmacKeyEnc: 'x' }],
+      ['Session', 'deviceInfo', { deviceInfo: { a: 1 } }],
+      ['Session', 'totalScore', { totalScore: 100 }],
+      ['Session', 'riskScore', { riskScore: 0 }],
+      ['Session', 'riskBand', { riskBand: 'LOW' }],
+      ['Session', 'reportKey', { reportKey: 'k' }],
+      ['SessionQuestion', 'score', { score: 100 }],
+      ['SessionQuestion', 'scoringNote', { scoringNote: 'x' }],
+      ['Submission', 'score', { score: 100 }],
+      ['IdentityCheck', 'status', { status: 'PASSED' }],
+      ['IdentityCheck', 'manualDecision', { manualDecision: 'APPROVED' }],
+      ['IdentityCheck', 'reviewReason', { reviewReason: 'FACE_MISMATCH' }],
+      ['IdentityCheck', 'reviewedById', { reviewedById: randomUUID() }],
+      ['IdentityCheck', 'reviewNote', { reviewNote: 'x' }],
+      ['IdentityCheck', 'faceMatchScore', { faceMatchScore: 1 }],
+    ] as const)(
+      'TC-008 CANDIDATE: %s.%s cannot be written, and the row is as it was (SERVICE can)',
+      async (model, column, data) => {
+        const before = await snapshot();
+        const own = A.rows[model];
+        await asCandidate(A, async () => {
+          const d = scoped(model);
+          await expect(d.update?.({ where: own.unique, data, ...S(model) })).rejects.toThrow(
+            new RegExp(`the column ${column} is not available to a candidate in a write`),
+          );
+          await expect(d.updateMany?.({ where: own.filter, data })).rejects.toThrow(
+            /not available to a candidate in a write/,
+          );
+          await expect(
+            d.updateManyAndReturn?.({ where: own.filter, data, ...S(model) }),
+          ).rejects.toThrow(/not available to a candidate in a write/);
+        });
+        expect(await snapshot()).toEqual(before);
+      },
+    );
+
+    it('TC-008 CANDIDATE: a create of identity_checks and submissions cannot carry a hidden column either', async () => {
+      const before = await snapshot();
+      await asCandidate(A, async () => {
+        await expect(
+          client.identityCheck.create({
+            data: { attempt: 5, status: 'PASSED', faceMatchScore: 1 } as never,
+            ...ID,
+          }),
+        ).rejects.toThrow(/not available to a candidate in a write/);
+        await expect(
+          client.submission.create({
+            data: {
+              sessionQuestionId: A.sessionQuestionId,
+              kind: 'SUBMIT',
+              language: 'python',
+              sourceCode: 'x',
+              score: 100,
+            },
+            ...ID,
+          }),
+        ).rejects.toThrow(/the column score is not available/);
+      });
+      expect(await snapshot()).toEqual(before);
+    });
+
+    it('TC-008 SERVICE writes and reads those columns (no column limit): the control for the list above', async () => {
+      await asService(A, async () => {
+        const row = await client.session.update({
+          where: { id: A.sessionId },
+          data: { riskScore: 5, status: 'OPENED', authEpoch: 1 },
+          select: { riskScore: true, status: true, authEpoch: true, hmacKeyEnc: true },
+        });
+        expect(row).toEqual({ riskScore: 5, status: 'OPENED', authEpoch: 1, hmacKeyEnc: null });
+        await client.session.update({
+          where: { id: A.sessionId },
+          data: { riskScore: null, status: 'INVITED', authEpoch: 0 },
+        });
+      });
+    });
+
+    describe('proctor_events: source = CLIENT only (CS-4.4)', () => {
+      const serverEvent = (chain: SessionChain) =>
+        owner.proctorEvent.create({
+          data: {
+            sessionId: chain.sessionId,
+            type: 'IDENTITY_MANUAL_REVIEW',
+            severity: 'HIGH',
+            source: 'SERVER',
+            occurredAt: WHEN,
+            payload: { similarity: 0.12 },
+          },
+        });
+
+      it('TC-008 SERVER events are invisible to a candidate in every read operation, and visible to the job', async () => {
+        const hidden = await serverEvent(A);
+        const hiddenOfB = await serverEvent(B);
+        try {
+          await asCandidate(A, async () => {
+            const rows = (await client.proctorEvent.findMany({
+              select: { id: true, type: true, source: true },
+            })) as Row[];
+            expect(rows.map((r) => r.id)).toEqual([A.rows.ProctorEvent.filter.id]);
+            expect(rows.every((r) => r.source === 'CLIENT')).toBe(true);
+            expect(await client.proctorEvent.count()).toBe(1);
+            expect(await client.proctorEvent.count({ where: { source: 'SERVER' } })).toBe(0);
+            expect(await client.proctorEvent.count({ where: { id: hidden.id } })).toBe(0);
+            expect(
+              await client.proctorEvent.findUnique({ where: { id: hidden.id }, ...ID }),
+            ).toBeNull();
+            expect(
+              await client.proctorEvent.findFirst({
+                where: { type: 'IDENTITY_MANUAL_REVIEW' },
+                ...ID,
+              }),
+            ).toBeNull();
+            expect(await client.proctorEvent.aggregate({ _count: true })).toEqual({ _count: 1 });
+            expect(await client.proctorEvent.groupBy({ by: ['source'], _count: true })).toEqual([
+              { source: 'CLIENT', _count: 1 },
+            ]);
+          });
+          await asService(A, async () => {
+            expect(await client.proctorEvent.count()).toBe(2);
+            expect(await client.proctorEvent.count({ where: { source: 'SERVER' } })).toBe(1);
+          });
+        } finally {
+          await owner.proctorEvent.deleteMany({ where: { id: { in: [hidden.id, hiddenOfB.id] } } });
+        }
+      });
+
+      it('TC-008 a candidate cannot update a SERVER event (not found), and cannot change a CLIENT one except its duration', async () => {
+        const hidden = await serverEvent(A);
+        const before = await snapshot();
+        try {
+          await asCandidate(A, async () => {
+            expect(
+              await client.proctorEvent.updateMany({
+                where: { id: hidden.id },
+                data: { durationMs: 99 },
+              }),
+            ).toEqual({ count: 0 });
+            await expect(
+              client.proctorEvent.update({
+                where: { id: hidden.id },
+                data: { durationMs: 99 },
+                ...ID,
+              }),
+            ).rejects.toMatchObject({ code: 'P2025' });
+            const own = { id: A.rows.ProctorEvent.filter.id as bigint };
+            for (const data of [
+              { payload: { a: 1 } },
+              { severity: 'LOW' },
+              { source: 'SERVER' },
+              { type: 'TAB_SWITCH' },
+              { evidenceKey: 'k' },
+              { confidence: 0.1 },
+              { occurredAt: WHEN },
+              { batchSeq: 4 },
+            ] as const) {
+              await expect(client.proctorEvent.update({ where: own, data, ...ID })).rejects.toThrow(
+                /cannot be written by a candidate update here/,
+              );
+            }
+          });
+          expect((await snapshot()).ProctorEvent).toEqual(before.ProctorEvent);
+        } finally {
+          await owner.proctorEvent.delete({ where: { id: hidden.id } });
+        }
+      });
+
+      it('TC-008 a candidate create carries source = CLIENT: stamped by the scope, and SERVER is refused', async () => {
+        const created = await asCandidate(A, () =>
+          client.proctorEvent.create({
+            data: { type: 'TAB_SWITCH', severity: 'LOW', occurredAt: WHEN } as never,
+            select: { id: true, source: true, sessionId: true },
+          }),
+        );
+        expect(created.source).toBe('CLIENT');
+        expect(created.sessionId).toBe(A.sessionId);
+        await owner.proctorEvent.delete({ where: { id: created.id } });
+        const before = await snapshot();
+        await asCandidate(A, async () => {
+          for (const source of ['SERVER', 'client', null]) {
+            const data = {
+              type: 'TAB_SWITCH',
+              severity: 'LOW',
+              occurredAt: WHEN,
+              source,
+            } as never;
+            await expect(client.proctorEvent.create({ data, ...ID })).rejects.toThrow(
+              /source must be CLIENT/,
+            );
+            await expect(client.proctorEvent.createMany({ data: [data] })).rejects.toThrow(
+              /source must be CLIENT/,
+            );
+            await expect(
+              client.proctorEvent.createManyAndReturn({ data: [data], ...ID }),
+            ).rejects.toThrow(/source must be CLIENT/);
+          }
+        });
+        expect(await snapshot()).toEqual(before);
+      });
+
+      it('TC-008 a candidate updates the duration of its own CLIENT event (the 5.9 pairing still works)', async () => {
+        const own = { id: A.rows.ProctorEvent.filter.id as bigint };
+        const row = await asCandidate(A, () =>
+          client.proctorEvent.update({
+            where: own,
+            data: { durationMs: 1234 },
+            select: { id: true, durationMs: true },
+          }),
+        );
+        expect(row.durationMs).toBe(1234);
+        await owner.proctorEvent.update({ where: own, data: { durationMs: null } });
       });
     });
   });
@@ -506,21 +1216,31 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
         () =>
           client.session.findMany({
             where: { questions: { some: { finalCode: { contains: 'a' } } } },
+            ...ID,
           }),
       ],
       [
         '3 where every',
-        () => client.session.findMany({ where: { questions: { every: { points: { gt: 0 } } } } }),
+        () =>
+          client.session.findMany({
+            where: { questions: { every: { points: { gt: 0 } } } },
+            ...ID,
+          }),
       ],
       [
         '3 where none',
-        () => client.session.findMany({ where: { questions: { none: { score: { gt: 99 } } } } }),
+        () =>
+          client.session.findMany({
+            where: { questions: { none: { score: { gt: 99 } } } },
+            ...ID,
+          }),
       ],
       [
         '3 where is',
         () =>
           client.session.findMany({
             where: { invitation: { is: { candidateId: B.candidateId } } },
+            ...ID,
           }),
       ],
       [
@@ -528,6 +1248,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
         () =>
           client.session.findMany({
             where: { invitation: { isNot: { candidateId: B.candidateId } } },
+            ...ID,
           }),
       ],
       [
@@ -544,15 +1265,16 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
             where: {
               OR: [{ NOT: { questionVersion: { testCases: { some: { isHidden: true } } } } }],
             },
+            ...ID,
           }),
       ],
       [
         '4 orderBy',
-        () => client.session.findMany({ orderBy: { invitation: { windowStart: 'asc' } } }),
+        () => client.session.findMany({ orderBy: { invitation: { windowStart: 'asc' } }, ...ID }),
       ],
       [
         '4 orderBy (relation _count)',
-        () => client.session.findMany({ orderBy: { questions: { _count: 'desc' } } }),
+        () => client.session.findMany({ orderBy: { questions: { _count: 'desc' } }, ...ID }),
       ],
       [
         '5 _count',
@@ -574,12 +1296,59 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       },
     );
 
+    it('TC-008 vector 6, the fluent API: each call reaches the extension as a relation select and throws, and no statement reaches Postgres (S6)', async () => {
+      const fluent: Array<[string, () => Promise<unknown>]> = [
+        [
+          'session.questions()',
+          () => client.session.findUnique({ where: { id: A.sessionId } }).questions(),
+        ],
+        [
+          'session.invitation()',
+          () => client.session.findUniqueOrThrow({ where: { id: A.sessionId } }).invitation(),
+        ],
+        ['session.org()', () => client.session.findFirst({ where: { id: A.sessionId } }).org()],
+        [
+          'sessionQuestion.questionVersion().testCases()',
+          () =>
+            client.sessionQuestion
+              .findUnique({ where: { id: A.sessionQuestionId } })
+              .questionVersion()
+              .testCases(),
+        ],
+        [
+          'session.invitation().candidate() (the other candidates through a chain)',
+          () =>
+            client.session
+              .findUnique({ where: { id: A.sessionId } })
+              .invitation()
+              .candidate(),
+        ],
+      ];
+      await db.statements.reset();
+      for (const [name, call] of fluent) {
+        const error = await asCandidate(A, call).then(
+          () => undefined,
+          (e: unknown) => e,
+        );
+        expect({ name, refused: error instanceof OrgScopeViolationError }).toEqual({
+          name,
+          refused: true,
+        });
+        expect((error as Error).message).toMatch(/\(vector 2\)/);
+      }
+      expect(await statementCount()).toBe(0);
+    });
+
     it('TC-008 the same shapes run for a session job (SERVICE has no relation limit)', async () => {
       const rows = await asService(A, () =>
         client.session.findMany({ include: { invitation: { include: { candidate: true } } } }),
       );
       expect(rows).toHaveLength(1);
       expect(rows[0]?.invitation.candidate.id).toBe(A.candidateId);
+      const fluent = await asService(A, () =>
+        client.session.findUnique({ where: { id: A.sessionId } }).questions(),
+      );
+      expect(fluent?.map((q) => q.id)).toEqual([A.sessionQuestionId]);
     });
 
     it("TC-008 the extension's own relation filters are not refused: the submission, section and question reads work", async () => {
@@ -596,17 +1365,15 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
           where: { id: A.sessionId },
           select: { id: true },
         });
-        const questions = await client.sessionQuestion.findMany({});
-        const submissions = await client.submission.findMany({});
+        const questions = await client.sessionQuestion.findMany({ ...ID });
+        const submissions = await client.submission.findMany({
+          select: { sessionQuestionId: true },
+        });
         expect(session?.id).toBe(A.sessionId);
         expect(questions.map((q) => q.id)).toEqual([A.sessionQuestionId]);
         expect(submissions.map((s) => s.sessionQuestionId)).toEqual([A.sessionQuestionId]);
       });
     });
-
-    it.todo(
-      'CS-4.5 vector 6, the fluent API (findUnique(...).questionVersion()): ADR 0013 CS-4 PR 3; whether a query extension sees the data path in Prisma 7 is not verified',
-    );
   });
 
   describe('every model not on the CS-4.3 allowlist throws against the database too', () => {
@@ -711,6 +1478,66 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
     });
   });
 
+  describe('S7: same-tick findUnique of two candidates in one org (Prisma batches findUnique calls)', () => {
+    // Prisma's dataloader merges findUnique calls issued in the same tick with the same shape into
+    // one query. The extension runs per call, before any batching, and adds a different filter for
+    // each scope, so a call must never be answered with another call's row.
+    it.each(['findUnique', 'findUniqueOrThrow'] as const)(
+      "TC-008 %s: every call gets its own scope's answer, however many are in flight",
+      async (operation) => {
+        const call = (
+          run: (chain: SessionChain, fn: () => Promise<unknown>) => Promise<unknown>,
+          as: SessionChain,
+          id: string,
+        ) =>
+          run(as, async () => {
+            const d = scoped('Session');
+            try {
+              return await d[operation]?.({ where: { id }, ...ID });
+            } catch (error) {
+              return (error as { code?: string }).code ?? 'error';
+            }
+          });
+        const missing = operation === 'findUnique' ? null : 'P2025';
+        for (let round = 0; round < 8; round++) {
+          const results = await Promise.all([
+            call(asCandidate, A, A.sessionId),
+            call(asCandidate, B, A.sessionId),
+            call(asCandidate, A, B.sessionId),
+            call(asCandidate, B, B.sessionId),
+            call(asService, A, B.sessionId),
+            call(asService, B, A.sessionId),
+            call(asService, A, A.sessionId),
+            call(asCandidate, A, O.sessionId),
+          ]);
+          const ids = results.map((r) => (r !== null && typeof r === 'object' ? (r as Row).id : r));
+          expect(ids).toEqual([
+            A.sessionId,
+            missing,
+            missing,
+            B.sessionId,
+            missing,
+            missing,
+            A.sessionId,
+            missing,
+          ]);
+        }
+      },
+    );
+
+    it('TC-008 the same on a model read by facts: two candidates ask for the same candidate id in one tick', async () => {
+      const ask = (as: SessionChain, id: string) =>
+        asCandidate(as, () => client.candidate.findUnique({ where: { id }, ...ID }));
+      const results = await Promise.all([
+        ask(A, A.candidateId),
+        ask(B, A.candidateId),
+        ask(A, B.candidateId),
+        ask(B, B.candidateId),
+      ]);
+      expect(results.map((r) => r?.id ?? null)).toEqual([A.candidateId, null, null, B.candidateId]);
+    });
+  });
+
   describe('CS-4.2 creates take the session from the context', () => {
     const batch = (seq: number): Row => ({
       seq,
@@ -718,30 +1545,28 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       startedAt: WHEN,
       events: [],
     });
+    const eventData = (extra: Row = {}) =>
+      ({ type: 'TAB_SWITCH', severity: 'LOW', occurredAt: WHEN, ...extra }) as never;
 
     it.each(ACTORS)(
       "TC-008 %s: an event without a session id is stamped with the scope's",
       async (_actor, run) => {
         const event = await run(A, () =>
           client.proctorEvent.create({
-            data: { type: 'TAB_SWITCH', severity: 'LOW', occurredAt: WHEN } as never,
+            data: eventData(),
+            ...ID,
+            select: { id: true, sessionId: true },
           }),
         );
         expect(event.sessionId).toBe(A.sessionId);
         const many = await run(A, () =>
           client.proctorEvent.createManyAndReturn({
-            data: [
-              { type: 'TAB_SWITCH', severity: 'LOW', occurredAt: WHEN },
-              { type: 'TAB_SWITCH', severity: 'LOW', occurredAt: WHEN, sessionId: A.sessionId },
-            ] as never,
+            data: [eventData(), eventData({ sessionId: A.sessionId })],
+            select: { id: true, sessionId: true },
           }),
         );
         expect(many.map((e) => e.sessionId)).toEqual([A.sessionId, A.sessionId]);
-        await run(A, () =>
-          client.proctorEvent.createMany({
-            data: [{ type: 'TAB_SWITCH', severity: 'LOW', occurredAt: WHEN }] as never,
-          }),
-        );
+        await run(A, () => client.proctorEvent.createMany({ data: [eventData()] }));
         expect(
           await owner.proctorEvent.count({ where: { sessionId: A.sessionId } }),
         ).toBeGreaterThanOrEqual(4);
@@ -757,35 +1582,40 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
         const before = await snapshot();
         await run(A, async () => {
           for (const sessionId of [B.sessionId, O.sessionId, randomUUID()]) {
-            const data = {
-              sessionId,
-              type: 'TAB_SWITCH',
-              severity: 'LOW',
-              occurredAt: WHEN,
-            } as never;
-            await expect(client.proctorEvent.create({ data })).rejects.toBeInstanceOf(
+            const data = eventData({ sessionId });
+            await expect(client.proctorEvent.create({ data, ...ID })).rejects.toBeInstanceOf(
               OrgScopeViolationError,
             );
             await expect(client.proctorEvent.createMany({ data: [data] })).rejects.toBeInstanceOf(
               OrgScopeViolationError,
             );
             await expect(
-              client.proctorEvent.createManyAndReturn({ data: [data] }),
+              client.proctorEvent.createManyAndReturn({ data: [data], ...ID }),
             ).rejects.toBeInstanceOf(OrgScopeViolationError);
             await expect(
-              client.proctorEvent.upsert({ where: { id: 1n }, update: {}, create: data }),
+              client.proctorEvent.upsert({
+                where: { id: 1n },
+                update: { durationMs: 1 },
+                create: data,
+                ...ID,
+              }),
             ).rejects.toBeInstanceOf(OrgScopeViolationError);
             await expect(
               client.mediaChunk.create({
                 data: { sessionId, stream: 'SCREEN', seq: 9, startedAt: WHEN, durationMs: 1 },
+                ...ID,
               }),
             ).rejects.toBeInstanceOf(OrgScopeViolationError);
             await expect(
-              client.consent.create({ data: { sessionId, consentTextId: T.consentTextId } }),
+              client.consent.create({
+                data: { sessionId, consentTextId: T.consentTextId },
+                ...ID,
+              }),
             ).rejects.toBeInstanceOf(OrgScopeViolationError);
             await expect(
               client.session.create({
                 data: { id: sessionId, orgId: A.orgId, invitationId: B.invitationId },
+                ...ID,
               }),
             ).rejects.toBeInstanceOf(OrgScopeViolationError);
           }
@@ -795,15 +1625,18 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
     );
 
     it.each(ACTORS)(
-      "TC-008 %s: a create may repeat the scope's own session id",
+      "TC-008 %s: a create may repeat the scope's own session id, in any case",
       async (_actor, run) => {
-        const created = await run(A, () =>
-          client.proctorEvent.create({
-            data: { sessionId: A.sessionId, type: 'TAB_SWITCH', severity: 'LOW', occurredAt: WHEN },
-          }),
-        );
-        expect(created.sessionId).toBe(A.sessionId);
-        await owner.proctorEvent.delete({ where: { id: created.id } });
+        for (const sessionId of [A.sessionId, A.sessionId.toUpperCase()]) {
+          const created = await run(A, () =>
+            client.proctorEvent.create({
+              data: eventData({ sessionId }),
+              select: { id: true, sessionId: true },
+            }),
+          );
+          expect(created.sessionId).toBe(A.sessionId);
+          await owner.proctorEvent.delete({ where: { id: created.id } });
+        }
       },
     );
 
@@ -816,7 +1649,10 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
         'TC-008 %s: a submission for its own question is created',
         async (_actor, run) => {
           const created = await run(A, () =>
-            client.submission.create(submission(A.sessionQuestionId, 'cs4-own')),
+            client.submission.create({
+              ...submission(A.sessionQuestionId, 'cs4-own'),
+              select: { id: true, sessionQuestionId: true },
+            }),
           );
           expect(created.sessionQuestionId).toBe(A.sessionQuestionId);
           await owner.submission.delete({ where: { id: created.id } });
@@ -829,25 +1665,27 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
           const before = await snapshot();
           await run(A, async () => {
             for (const id of [B.sessionQuestionId, O.sessionQuestionId, randomUUID()]) {
-              await expect(client.submission.create(submission(id))).rejects.toThrow(
+              await expect(client.submission.create({ ...submission(id), ...ID })).rejects.toThrow(
                 /sessionQuestionId is not a question of this session/,
               );
               await expect(
                 client.submission.createMany({ data: [submission(id).data] }),
               ).rejects.toThrow(/not a question of this session/);
               await expect(
-                client.submission.createManyAndReturn({ data: [submission(id).data] }),
+                client.submission.createManyAndReturn({ data: [submission(id).data], ...ID }),
               ).rejects.toThrow(/not a question of this session/);
               await expect(
                 client.submission.upsert({
                   where: { id: randomUUID() },
-                  update: {},
+                  update: { language: 'x' },
                   create: submission(id).data,
+                  ...ID,
                 }),
               ).rejects.toThrow(/not a question of this session/);
               await expect(
                 client.keystrokeBatch.create({
                   data: { ...batch(10), sessionQuestionId: id } as never,
+                  ...ID,
                 }),
               ).rejects.toThrow(/not a question of this session/);
               await expect(
@@ -882,12 +1720,14 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
           const none = await run(A, () =>
             client.keystrokeBatch.create({
               data: { ...batch(20), sessionQuestionId: null } as never,
+              select: { id: true, sessionId: true },
             }),
           );
           expect(none.sessionId).toBe(A.sessionId);
           const own = await run(A, () =>
             client.keystrokeBatch.create({
               data: { ...batch(21), sessionQuestionId: A.sessionQuestionId } as never,
+              select: { id: true, sessionQuestionId: true },
             }),
           );
           expect(own.sessionQuestionId).toBe(A.sessionQuestionId);
@@ -905,32 +1745,68 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
           }),
         ).toBe(1);
         await expect(
-          asCandidate(A, () => client.submission.create(submission(B.sessionQuestionId))),
+          asCandidate(A, () =>
+            client.submission.create({ ...submission(B.sessionQuestionId), ...ID }),
+          ),
         ).rejects.toThrow(/not a question of this session/);
       });
 
-      it('TC-008 statement count: a submission create that needs the check sends the count and the insert', async () => {
+      it('TC-008 the same question id in another case is the same question: it is found, once', async () => {
+        const created = await asCandidate(A, () =>
+          client.submission.create({
+            ...submission(A.sessionQuestionId.toUpperCase(), 'cs4-case'),
+            select: { id: true, sessionQuestionId: true },
+          }),
+        );
+        expect(created.sessionQuestionId).toBe(A.sessionQuestionId);
+        await owner.submission.delete({ where: { id: created.id } });
+      });
+
+      it('TC-008 statement count: a submission create that needs the check sends the count and the insert (2)', async () => {
         await db.statements.reset();
         const created = await asCandidate(A, () =>
-          client.submission.create(submission(A.sessionQuestionId, 'cs4-count')),
+          client.submission.create({
+            ...submission(A.sessionQuestionId, 'cs4-count'),
+            select: { id: true },
+          }),
         );
         const statements = await db.statements.read();
-        const total = statements.reduce((sum, s) => sum + s.calls, 0);
         expect(statements.filter((s) => /^\s*SELECT COUNT/i.test(s.query))).toHaveLength(1);
         expect(
           statements.filter((s) => /^\s*INSERT INTO "?public"?\."?submissions/i.test(s.query)),
         ).toHaveLength(1);
-        expect(total).toBe(2);
+        expect(await statementCount()).toBe(2);
         await owner.submission.delete({ where: { id: created.id } });
         // A create that needs no check is one statement.
         await db.statements.reset();
         const event = await asCandidate(A, () =>
-          client.proctorEvent.create({
-            data: { type: 'TAB_SWITCH', severity: 'LOW', occurredAt: WHEN } as never,
-          }),
+          client.proctorEvent.create({ data: eventData(), select: { id: true } }),
         );
-        expect((await db.statements.read()).reduce((sum, s) => sum + s.calls, 0)).toBe(1);
+        expect(await statementCount()).toBe(1);
         await owner.proctorEvent.delete({ where: { id: event.id } });
+      });
+
+      it('TC-008 statement count: a createMany of 3 rows is 2 statements, one count and one insert, whatever the number of rows', async () => {
+        // S5: pinned, not only reported. The distinct session_question ids are counted once.
+        const rows = [1, 2, 3].map(() => submission(A.sessionQuestionId, 'cs4-many').data);
+        await db.statements.reset();
+        const result = await asCandidate(A, () => client.submission.createMany({ data: rows }));
+        expect(result).toEqual({ count: 3 });
+        const statements = await db.statements.read();
+        expect(statements.filter((s) => /^\s*SELECT COUNT/i.test(s.query))).toHaveLength(1);
+        expect(
+          statements.filter((s) => /^\s*INSERT INTO "?public"?\."?submissions/i.test(s.query)),
+        ).toHaveLength(1);
+        expect(await statementCount()).toBe(2);
+        // 30 rows are still 2 statements.
+        const many = Array.from(
+          { length: 30 },
+          () => submission(A.sessionQuestionId, 'cs4-many').data,
+        );
+        await db.statements.reset();
+        await asService(A, () => client.submission.createMany({ data: many }));
+        expect(await statementCount()).toBe(2);
+        await owner.submission.deleteMany({ where: { language: 'cs4-many' } });
       });
     });
   });
@@ -938,25 +1814,11 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
   describe("upsert against the other candidate's row", () => {
     it.each(ACTORS)(
       "TC-008 %s: the where cannot reach B's row, and the create branch (stamped with A's session) collides with it, leaving it unchanged",
-      async (_actor, run) => {
+      async (actor, run) => {
         const before = await snapshot();
         await run(A, async () => {
           // The where is filtered, so B's row is not matched; the create then names B's primary key
-          // and the database refuses it. A session question, a submission and a consent (one per session).
-          await expect(
-            client.sessionQuestion.upsert({
-              where: { id: B.sessionQuestionId },
-              update: { position: 9 },
-              create: {
-                id: B.sessionQuestionId,
-                sessionId: A.sessionId,
-                testQuestionId: A.testQuestionId,
-                questionVersionId: A.questionVersionId,
-                position: 5,
-                points: 1,
-              },
-            }),
-          ).rejects.toMatchObject({ code: 'P2002' });
+          // and the database refuses it. A submission and a consent (one per session).
           await expect(
             client.submission.upsert({
               where: { id: B.rows.Submission.filter.id as string },
@@ -968,6 +1830,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
                 language: 'python',
                 sourceCode: 'x',
               },
+              ...ID,
             }),
           ).rejects.toMatchObject({ code: 'P2002' });
           await expect(
@@ -980,8 +1843,26 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
                 signedName: 'Candidate a',
                 signedAt: WHEN,
               },
+              ...ID,
             }),
           ).rejects.toMatchObject({ code: 'P2002' });
+          // A session question has no create for a candidate (S1); the job collides on the key.
+          const create = {
+            id: B.sessionQuestionId,
+            sessionId: A.sessionId,
+            testQuestionId: A.testQuestionId,
+            questionVersionId: A.questionVersionId,
+            position: 5,
+            points: 1,
+          };
+          const upsert = client.sessionQuestion.upsert({
+            where: { id: B.sessionQuestionId },
+            update: { position: 9 },
+            create,
+            ...ID,
+          });
+          if (actor === 'CANDIDATE') await expect(upsert).rejects.toThrow(/cannot create this row/);
+          else await expect(upsert).rejects.toMatchObject({ code: 'P2002' });
         });
         expect(await snapshot()).toEqual(before);
       },
@@ -995,6 +1876,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
           where: { id: own },
           update: { userAgent: 'cs4-upsert' },
           create: { sessionId: A.sessionId, consentTextId: T.consentTextId },
+          select: { id: true, userAgent: true },
         }),
       );
       expect(row.userAgent).toBe('cs4-upsert');
@@ -1003,7 +1885,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
   });
 
   describe('CS-4.2 session keys are immutable, in both actors', () => {
-    const keyWrites: Array<[string, string, (chain: SessionChain) => Row]> = [
+    const keyWrites: Array<[ChainModel, string, (chain: SessionChain) => Row]> = [
       ['SessionQuestion', 'sessionId', (c) => ({ sessionId: c.sessionId })],
       ['SessionSection', 'sessionId', (c) => ({ sessionId: c.sessionId })],
       ['IdentityCheck', 'sessionId', (c) => ({ sessionId: c.sessionId })],
@@ -1015,29 +1897,47 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       ['Consent', 'sessionId', (c) => ({ sessionId: c.sessionId })],
       ['Submission', 'sessionQuestionId', (c) => ({ sessionQuestionId: c.sessionQuestionId })],
       ['Session', 'id', (c) => ({ id: c.sessionId })],
+      ['Session', 'invitationId', (c) => ({ invitationId: c.invitationId })],
       ['SessionQuestion', 'id', (c) => ({ id: c.sessionQuestionId })],
     ];
 
-    describe.each(ACTORS)('actor %s', (_actor, run) => {
+    describe.each(ACTORS)('actor %s', (actor, run) => {
       it.each(keyWrites)(
         "TC-008 %s.%s cannot be pointed at B's session or question, and the rows stay as they are",
         async (model, key, to) => {
           const before = await snapshot();
-          const own = A.rows[model as ChainModel];
+          const own = A.rows[model];
+          // A candidate has no write at all on session_sections (CS-4.4 "none"), which refuses first.
+          const refused =
+            actor === 'CANDIDATE' && model === 'SessionSection'
+              ? /writes nothing here/
+              : new RegExp(`${key} is a session key`);
           await run(A, async () => {
             for (const data of [to(B), to(O), to(A)]) {
-              await expect(scoped(model).update?.({ where: own.unique, data })).rejects.toThrow(
-                new RegExp(`${key} is a session key`),
-              );
+              await expect(
+                scoped(model).update?.({ where: own.unique, data, ...S(model) }),
+              ).rejects.toThrow(refused);
               await expect(scoped(model).updateMany?.({ where: own.filter, data })).rejects.toThrow(
-                /session key/,
+                refused,
               );
               await expect(
-                scoped(model).updateManyAndReturn?.({ where: own.filter, data }),
-              ).rejects.toThrow(/session key/);
+                scoped(model).updateManyAndReturn?.({ where: own.filter, data, ...S(model) }),
+              ).rejects.toThrow(refused);
+              // The create branch of an upsert is a create: a candidate has none on sessions,
+              // session_questions and session_sections, so that refuses first there.
               await expect(
-                scoped(model).upsert?.({ where: own.unique, update: data, create: {} }),
-              ).rejects.toThrow(/session key/);
+                scoped(model).upsert?.({
+                  where: own.unique,
+                  update: data,
+                  create: {},
+                  ...S(model),
+                }),
+              ).rejects.toThrow(
+                actor === 'CANDIDATE' &&
+                  ['Session', 'SessionQuestion', 'SessionSection'].includes(model)
+                  ? /cannot create this row|writes nothing here/
+                  : /session key/,
+              );
             }
           });
           expect(await snapshot()).toEqual(before);
@@ -1088,21 +1988,43 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
     it('TC-008 a candidate read of its own session is one statement, and a refusal is none', async () => {
       await db.statements.reset();
       const session = await asCandidate(A, () =>
-        client.session.findUnique({ where: { id: A.sessionId } }),
+        client.session.findUnique({ where: { id: A.sessionId }, ...ID }),
       );
       expect(session?.id).toBe(A.sessionId);
       const statements = await db.statements.read();
-      expect(statements.reduce((sum, s) => sum + s.calls, 0)).toBe(1);
+      expect(await statementCount()).toBe(1);
       expect(statements[0]?.query).toMatch(/^\s*SELECT/i);
+      await db.statements.reset();
+      await expect(
+        asCandidate(A, () => client.session.findUnique({ where: { id: A.sessionId } })),
+      ).rejects.toThrow(/needs an explicit select/);
+      expect(await statementCount()).toBe(0);
     });
 
-    it('TC-008 the same read as the plain org scope sends the same single statement shape plus one more AND per filter', async () => {
-      await db.statements.reset();
-      await orgContext.runInOrg(A.orgId, () =>
-        client.session.findUnique({ where: { id: A.sessionId } }),
+    it('TC-008 the same read in a plain org scope is also one statement, and differs by exactly the session filter', async () => {
+      // S5: the statement text is compared, not only its count. WHERE (id = $1 AND (org_id = $2
+      // [AND id = $3])): the candidate's statement has the session filter, the org scope's has not.
+      const read = (run: (fn: () => Promise<unknown>) => Promise<unknown>): Promise<string> =>
+        (async () => {
+          await db.statements.reset();
+          await run(() => client.session.findUnique({ where: { id: A.sessionId }, ...ID }));
+          const statements = await db.statements.read();
+          expect(statements).toHaveLength(1);
+          expect(statements[0]?.calls).toBe(1);
+          return (statements[0] as { query: string }).query;
+        })();
+      const orgOnly = await read((fn) => orgContext.runInOrg(A.orgId, fn));
+      const candidate = await read((fn) => asCandidate(A, fn));
+      const normalise = (sql: string): string => sql.replace(/\s+/g, ' ');
+      expect(normalise(orgOnly)).toContain(
+        'WHERE ("public"."sessions"."id" = $1 AND "public"."sessions"."org_id" = $2) LIMIT $3 OFFSET $4',
       );
-      const orgOnly = await db.statements.read();
-      expect(orgOnly.reduce((sum, s) => sum + s.calls, 0)).toBe(1);
+      expect(normalise(candidate)).toContain(
+        'WHERE ("public"."sessions"."id" = $1 AND ("public"."sessions"."org_id" = $2 AND "public"."sessions"."id" = $3)) LIMIT $4 OFFSET $5',
+      );
+      // Same SELECT list: only the WHERE differs.
+      const select = (sql: string): string => normalise(sql).split(' WHERE ')[0] as string;
+      expect(select(candidate)).toBe(select(orgOnly));
     });
   });
 
@@ -1147,8 +2069,30 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
     });
 
     it('TC-008 the scope is gone after the unit of work: a later query has no context', async () => {
-      await asCandidate(A, () => client.session.findMany());
+      await asCandidate(A, () => client.session.findMany({ ...ID }));
       await expect(client.session.findMany()).rejects.toBeInstanceOf(OrgScopeError);
+    });
+
+    it('TC-008 ids in another case enter the same scope: the filters match, and nothing leaks', async () => {
+      const rows = await orgContext.runAsCandidate(
+        A.orgId.toUpperCase(),
+        A.sessionId.toUpperCase(),
+        async () => {
+          setCandidateFacts(orgContext, {
+            candidateId: A.candidateId.toUpperCase(),
+            invitationId: A.invitationId.toUpperCase(),
+            testId: A.testId.toUpperCase(),
+          });
+          return {
+            sessions: await client.session.findMany({ ...ID }),
+            candidates: await client.candidate.findMany({ ...ID }),
+            invitations: await client.invitation.findMany({ ...ID }),
+          };
+        },
+      );
+      expect(rows.sessions.map((s) => s.id)).toEqual([A.sessionId]);
+      expect(rows.candidates.map((c) => c.id)).toEqual([A.candidateId]);
+      expect(rows.invitations.map((i) => i.id)).toEqual([A.invitationId]);
     });
   });
 });

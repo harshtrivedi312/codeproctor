@@ -10,7 +10,13 @@
 //      object), at any depth of AND, OR and NOT
 //   4  a relation field in `orderBy`
 //   5  a relation `_count`, in `select` or `include`
-//   6  the fluent API (`findUnique(...).questionVersion()`): NOT here. ADR 0013 CS-4 PR 3.
+//   6  the fluent API (`findUnique(...).questionVersion()`). Prisma 7 runs it as a findUnique on the
+//      PARENT model with `select: { questionVersion: true }` (nested for a chain), so it arrives as
+//      vector 2 and is refused there. session-scope.extension.spec.ts pins this on Prisma 7.10 through
+//      the real client, for every find operation and for chains; a release that changed the shape
+//      would fail that test. (ADR 0013 CS-4.5 asked for this to be verified: it holds, so the CANDIDATE
+//      client does not need to be a wrapper without fluent methods. The lint rule that bans fluent
+//      relation calls across apps/api stays an extra check.)
 //
 // Only the filters the extension injects itself (CS-4.2 and CS-4.3: `sessionQuestion: { sessionId }`,
 // `sessionSections: { some: ... }`, the org path) may use relations. The caller's arguments are

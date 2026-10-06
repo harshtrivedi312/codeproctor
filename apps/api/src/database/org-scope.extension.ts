@@ -63,7 +63,11 @@ import { applyOrgScope, assertSystemScopeWrite, isScopedOperation } from './org-
 import { scrubPrismaError } from './error-scrub';
 import { ORG_SCOPE } from './org-scope-map';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
-import { applySessionScope, sessionQuestionsWhere } from './session-scope-args';
+import {
+  applySessionScope,
+  assertCandidateModelAllowed,
+  sessionQuestionsWhere,
+} from './session-scope-args';
 
 interface HookArgs {
   readonly model?: string;
@@ -154,9 +158,22 @@ export function orgScopeExtension(
             `${model}.${operation}: unknown operation. Add it to SCOPED_OPERATIONS and handle it.`,
           );
         }
-        if (rule.kind === 'unscoped') return execute(query, args);
 
         const scope = store?.scope;
+        const isCandidate = scope?.kind === 'org' && scope.session?.actor === 'CANDIDATE';
+        // CS-4.3 deny by default comes first, before the `unscoped` early return: a model that is
+        // global on purpose is still not reachable by a candidate unless the allowlist names it.
+        if (isCandidate) assertCandidateModelAllowed(model, operation);
+        if (rule.kind === 'unscoped') {
+          if (isCandidate) {
+            // On the allowlist and global: no row filter exists for it yet, so it fails closed.
+            throw new OrgScopeViolationError(
+              `${model}.${operation}: an unscoped model has no CANDIDATE row filter (ADR 0013 CS-4.3).`,
+            );
+          }
+          return execute(query, args);
+        }
+
         if (scope === undefined) throw new OrgContextMissingError(`${model}.${operation}`);
         if (scope.kind === 'system') {
           // System scope is unfiltered, but an unknown operation, a nested relation write, an orgId
