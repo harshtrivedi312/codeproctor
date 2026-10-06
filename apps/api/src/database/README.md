@@ -682,52 +682,77 @@ parameter, is gone: the module exports exactly the three locks, `erasedStatusOf`
 
 ### Who calls what (FU-DB-67, the hub's rulings)
 
-| Lock                   | Callers outside `database/`                                                                                                                                                                                                                                                                                                              | The wrapper                                |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| `guardLive`            | **exactly two**: `SessionJobProcessor.withLiveSession` (SERVICE) and **one** named STAFF method, `SessionStateService.proctorResume` (the proctor-resume transition, ADR 0002 P-3: it writes `session_sections.deadline_at`)                                                                                                             | `SessionStateService.guardLive`            |
-| `lockAnySession`       | only `SessionJobProcessor.withAnySession`, through SessionStateService                                                                                                                                                                                                                                                                   | `SessionStateService.lockAnySession`       |
-| `lockForAccommodation` | **STAFF**, through SessionStateService: the accommodations PATCH, redact-note and the video-check PUT (`AccommodationsService`). And **one** org-job site: `retention/retention.repository.ts`, `RetentionRepository.casAccommodations`, in a plain `runInOrg`, for erasure, R-4 and R-10 (R-4 runs there too: it has no SERVICE caller) | `SessionStateService.lockForAccommodation` |
+The files are pinned by **path**, in `testing/lock-call-sites.ts` (the constants are Backend B's real paths from #98 and
+#206, and Database B's):
 
-Four tests pin it, all with an **empty** list outside the defining file today:
+| Constant                 | Path                                |
+| ------------------------ | ----------------------------------- |
+| `SESSION_STATE_FILE`     | `session/session-state.service.ts`  |
+| `SESSION_PROCESSOR_FILE` | `session/session-job.processor.ts`  |
+| `ACCOMMODATIONS_FILE`    | `session/accommodations.ts`         |
+| `RETENTION_LOCK_FILE`    | `retention/retention.repository.ts` |
+
+| Lock                   | Callers outside `database/` (allowed files)                                                                                                                                                                                                                                                                                                                      | The wrapper                                |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `guardLive`            | **exactly two**: `SessionJobProcessor.withLiveSession` (SERVICE; `session-job.processor.ts`) and **one** named STAFF method, `SessionStateService.proctorResume` (the proctor-resume transition, ADR 0002 P-3: it writes `session_sections.deadline_at`; `session-state.service.ts`)                                                                             | `SessionStateService.guardLive`            |
+| `lockAnySession`       | only `SessionJobProcessor.withAnySession` (`session-job.processor.ts`), through SessionStateService (`session-state.service.ts`)                                                                                                                                                                                                                                 | `SessionStateService.lockAnySession`       |
+| `lockForAccommodation` | **STAFF**, through SessionStateService: the accommodations PATCH, redact-note and the video-check PUT (`accommodations.ts`, `session-state.service.ts`). And **one** org-job site: `retention/retention.repository.ts`, `RetentionRepository.casAccommodations`, in a plain `runInOrg`, for erasure, R-4 and R-10 (R-4 runs there too: it has no SERVICE caller) | `SessionStateService.lockForAccommodation` |
+
+Five tests pin it, all with an **empty** list outside the defining file today:
 
 - **The import guard** (`import-guard.spec.ts`, rule `database/session-locks`, `allowed: []`): only the
-  SessionStateService file imports the module. Nothing else does, nothing in `database/` either, and a
-  re-export from `index.ts` is refused. It reads `from '...'`, `require(...)`, `import(...)` with single quotes,
-  double quotes or backticks, and a specifier ending in any of `.js .ts .mjs .mts .cjs .cts`.
+  SessionStateService file imports the module, and the allowlist must stay a **subset of that one path**
+  (`lockImportProblems`). Nothing else imports it, nothing in `database/` either, and a re-export from `index.ts` is
+  refused. It reads `from '...'`, `require(...)`, `import(...)` with single quotes, double quotes or backticks, and a
+  specifier ending in any of `.js .ts .mjs .mts .cjs .cts`.
 - **The call-site test** (`call-sites.spec.ts`, `CALL_SITES`): `guardLive`, `lockForAccommodation` and
   `lockAnySession` are in `GUARDED_NAMES`. Today the only file that may use them is `database/session-locks.ts`.
-- **The caller rules** (`lockCallSiteProblems`, same spec), **mechanical, so an extra entry fails**:
-  - `guardLive`: at most **two** entries, each `why` naming `withLiveSession` or `proctorResume`, at most one
-    naming each. The `proctorResume` file has exactly **one** `this.guardLive(` call besides the wrapper's own
-    definition; the `withLiveSession` file has exactly one `.guardLive(` call (a text count; a reviewer backs it up).
-  - `lockAnySession`: at most two entries (SessionStateService and SessionJobProcessor), each `why` naming
-    `withAnySession`.
-  - `lockForAccommodation`: each entry's `why` names the accommodation writer **and one of the STAFF routes**
-    (PATCH, redact-note, video-check PUT; at most two such files: SessionStateService and AccommodationsService), or
-    the entry is `retention/retention.repository.ts` (at most one org-job file, in a plain `runInOrg`) with a `why`
-    naming the **erasure, R-4 and R-10** jobs.
-  - Inside `database/`, only `database/session-locks.ts` may name a lock.
-- **The export check** (`findLockExports`, same spec, **no allowlist**): no file outside `database/` exports a
-  lock or an alias of one, other than through `export ... from` (the import guard catches that): not
+- **The caller rules** (`lockCallSiteProblems`, over the real tree in `call-sites.spec.ts`, pinned on synthetic
+  files in `lock-call-sites.spec.ts`), **mechanical, so an extra entry fails**. Outside `database/`, a lock may be
+  listed only for its allowed files (a subset rule): `guardLive` and `lockAnySession` for the state and processor
+  files, `lockForAccommodation` for the state, accommodations and retention files. Inside `database/`, only
+  `database/session-locks.ts` may name a lock. The `why` of an entry names its callers: `proctorResume` (state,
+  `guardLive`), `withLiveSession` (processor, `guardLive`), `withAnySession` (`lockAnySession`), the accommodation
+  writer and one of PATCH, redact-note, video-check (state and accommodations, `lockForAccommodation`), the erasure,
+  R-4 and R-10 jobs (retention).
+- **The per-file rules**, for each listed file that exists (text rules over the source with comments stripped):
+  - **The state file** (`session-state.service.ts`): each core is **imported under an alias** (`import { guardLive as
+coreGuardLive }`) or as a namespace (`import * as locks`), **never under its own name**; each core is **called
+    exactly once, inside the wrapper method of the same name** (`async guardLive(...) { return coreGuardLive(...) }`),
+    and the alias is used nowhere else (not passed, returned, stored, or called in another method or an exported
+    function). Every other mention of a lock name is the wrapper's definition or a member call. There is **exactly one
+    `this.guardLive(` call, inside the brace-matched `proctorResume` body**. Write the wrappers as **methods with a
+    body** (the scan looks for `async name(...) {`), and keep inline object types out of their return types.
+  - **The processor file** (`session-job.processor.ts`): `.guardLive(` **exactly once, inside `withLiveSession`**;
+    `.lockAnySession(` **exactly once, inside `withAnySession`**; every mention of a lock name is a member call
+    (`this.state.guardLive(...)`).
+  - **The accommodations and retention files:** every mention of a lock name is a member call
+    (`this.state.lockForAccommodation(...)`); nothing is held, bound or passed.
+- **The export check** (`findLockExports`, **no allowlist**, the state file included): no file outside `database/`
+  exports a lock or an alias of one, other than through `export ... from` (the import guard catches that): not
   `export { guardLive as g }`, `export const g = guardLive`, `export default guardLive`, `export default { guardLive }`,
-  `module.exports = { guardLive }`, nor the same through a local variable. A class that merely has a method with
-  the name is fine. Backend B's SessionStateService file is checked by the same test: that is the mechanical
-  review point.
+  `module.exports = { guardLive }`, nor the same through a local variable. It also finds a **wrapper under a new
+  name**: an exported function, arrow or object whose text calls a lock or an alias
+  (`export function g(tx, s) { return guardLive(tx, s) }`, `export const g = (tx, s) => core(tx, s)`), and a
+  **static property** that holds or calls one (`static g = guardLive`). A class that merely has a method with the
+  name is fine. Backend B's SessionStateService file is checked by the same test: that is the mechanical review
+  point.
 
 **What to add, and when.**
 
-- **Backend B**, in the PR that builds SessionStateService: exactly **its SessionStateService file** to `allowed`
-  of the import-guard rule, and entries to `CALL_SITES` for SessionStateService (`guardLive`,
-  `lockForAccommodation`, `lockAnySession`, with a `why` naming `proctorResume`, `withAnySession` and the
-  accommodation writers: PATCH, redact-note, video-check PUT), `SessionJobProcessor` (`guardLive` with
-  `withLiveSession`, `lockAnySession` with `withAnySession`) and `AccommodationsService` (`lockForAccommodation`, why
-  naming the STAFF accommodation writers and a route). Nothing else.
-  Import the cores under an alias or call them as `locks.guardLive(...)` inside the wrapper, and keep the
-  `proctorResume` call as the one `this.guardLive(`.
+- **Backend B**, in the PR that builds SessionStateService: exactly **`session/session-state.service.ts`** to `allowed`
+  of the import-guard rule, and `CALL_SITES` entries for `session/session-state.service.ts` (`guardLive`,
+  `lockForAccommodation`, `lockAnySession`; a `why` naming `proctorResume`, `withAnySession`, and the accommodation
+  writers with PATCH, redact-note, video-check PUT), `session/session-job.processor.ts` (`guardLive` with
+  `withLiveSession`, `lockAnySession` with `withAnySession`) and `session/accommodations.ts` (`lockForAccommodation`,
+  why naming the STAFF accommodation writers and a route). Nothing else. Write the wrappers and the call sites as
+  described above: `grep` for `.guardLive(` in your files and check there are exactly the calls the table lists.
 - **Database B**, in **its own PR**: the entry `retention/retention.repository.ts` (`lockForAccommodation`, `why`
   naming the erasure, R-4 and R-10 jobs and the plain `runInOrg`). Not before: the stale-entry check fails while the
   call does not exist. `casAccommodations` calls SessionStateService's wrapper, not the core, in a plain
-  `runInOrg(orgId)`; R-4 runs there too, there is no SERVICE caller of `lockForAccommodation`.
+  `runInOrg(orgId)`; R-4 runs there too, there is no SERVICE caller of `lockForAccommodation`. The ADRs also say
+  "and the erasure job files": the rule stays narrow (`retention.repository.ts` only, fail-closed) until the hub rules
+  on that (FU-DB-242).
 
 The errors are exported from `index.ts` (`SessionNotFoundError`, `SessionLockRetryError`,
 `AccommodationLockedError`), so a caller can map them without importing the module.
@@ -782,6 +807,11 @@ adds the org filter (and in a session scope the session filter) to the read and 
 session, another session of the same org (in a session scope) and an unknown id all give `SessionNotFoundError`
 and no UPDATE.
 
+**The STAFF and plain-org split is advisory at run time until the ADR 0006 nesting rows (lines 412 and 413, Planned)
+are built (FU-DB-241):** today a `runInOrg` nested inside `runAsUser` drops the user (it becomes a plain org scope,
+where `guardLive` and `lockAnySession` are refused and `lockForAccommodation` passes), and `runAsUser` works from a
+plain org scope (it becomes STAFF). Two tests show it. The call-site rules above carry the split until then.
+
 - **CANDIDATE is the hub's ruling, not a relaxable default.** A candidate path never takes a session lock.
   ADR 0013's "candidate transactions lock `sessions` first too" is an ordering rule: `transition()`'s own
   compare-and-set UPDATE is the first `sessions` lock. So the wrappers are never called in a CANDIDATE scope.
@@ -808,9 +838,12 @@ and no UPDATE.
 - Lock timeouts are not set here. SERVICE session jobs use a pool whose `pg` options set `lock_timeout` and
   `statement_timeout` (ADR 0013 5.7), because `SET LOCAL` is raw SQL and refused in session scopes. A wait that
   ends in SQLSTATE 55P03 or a deadlock (40P01) propagates as a Prisma error and stays with the caller:
-  `SessionJobProcessor` maps it to a BullMQ retry; a staff route retries once and then answers 409 (ADR 0015
-  section 6; staff routes on the main pool end at the Prisma transaction timeout, P2028, since the main pool sets no
-  `lock_timeout`: FU-DB-235).
+  `SessionJobProcessor` maps it to a BullMQ retry; a staff route of ADR 0015 retries once on 40P01 or 40001 (ADR
+  0015 line 211) and then answers 409; staff routes run on the main pool, which sets no `lock_timeout`, so a wait
+  there ends at the Prisma interactive-transaction timeout (P2028), not at 55P03 (FU-DB-235). **`proctorResume` is
+  the exception** (ADR 0013 5.7, line 350): exhausted retries, a lock timeout (55P03) and a deadlock (40P01)
+  answer **503 with `Retry-After`**, never 500 (a 409 `SESSION_ERASED` on an ERASED session), and its staff
+  transaction uses a Prisma `timeout` of **5 s**, because the SERVICE pool's `lock_timeout` does not apply to it.
 
 ### ERASED detection
 
