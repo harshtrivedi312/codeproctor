@@ -40,7 +40,12 @@ export function crumbsFor(pathname: string): Crumb[] {
   let href = '/admin';
   for (const segment of segments.slice(1)) {
     href += `/${segment}`;
-    crumbs.push({ href, label: LABELS[segment] ?? safeDecode(segment) });
+    // "new" names what it creates: a question under Questions, a test under Tests.
+    const label =
+      segment === 'new' && segments[segments.indexOf(segment) - 1] === 'tests'
+        ? 'New test'
+        : (LABELS[segment] ?? safeDecode(segment));
+    crumbs.push({ href, label });
   }
   return crumbs;
 }
