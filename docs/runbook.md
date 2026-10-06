@@ -159,8 +159,9 @@ for psql and `pg_dump` (the backup and the drill), and the equivalent parameters
 for Prisma's migration engine (`STAGING_MIGRATION_DATABASE_URL`) and the API's node-postgres driver
 (`STAGING_DATABASE_URL`). `PGSSLMODE` does not reach those two clients, and `sslmode=require` encrypts
 without checking the server, so a man-in-the-middle could capture the owner or `app_user` login. The
-deploy job fails if a URL lacks the verifying parameter (FU-DBB-04); confirm the exact spelling for
-Prisma 7 and `pg` before the first deploy. If the database is not reachable
+deploy job must fail if a URL lacks the verifying parameter (FU-DBB-24(c)); until it does, the person
+creating each secret checks the parameter is there. Confirm the exact spelling for Prisma 7 and `pg`
+before the first deploy. If the database is not reachable
 from GitHub-hosted runners, the job runs over SSH on the staging server or on a self-hosted runner
 inside the network; decide this before step 3 (DEP-01).
 
