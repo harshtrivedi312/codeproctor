@@ -1,5 +1,7 @@
 import type { Schemas } from '@/lib/api/client';
 import { mockRevision } from './question-revision';
+import { renderTemplate } from './question-template';
+import type { ParamValue } from './question-template';
 
 /*
  * Seed data of the mock question bank (FE-04). Fake questions only. The reference solutions, hidden
@@ -7,7 +9,6 @@ import { mockRevision } from './question-revision';
  */
 
 type Language = Schemas['Language'];
-type Variant = Schemas['Variant'];
 export type ValidationReport = Schemas['ValidationReport'];
 export type AnswerSpec = Schemas['AnswerSpec'];
 
@@ -18,6 +19,24 @@ export interface MockTestCase {
   weight: number;
   input: string;
   expectedOutput: string;
+}
+
+/** A variant as the mock stores it; the DTO adds isHidden and position of each overridden slot. */
+export interface MockVariant {
+  id: string;
+  isActive: boolean;
+  params: Record<string, ParamValue>;
+  renderedStatement: string;
+  overrides: { testCaseId: string; input: string; expectedOutput: string }[];
+}
+
+/** The seed's own variant shape: it still has a label (the API has none) that only documents the data. */
+interface SeedVariant {
+  id: string;
+  label: string;
+  params: Record<string, ParamValue>;
+  active: boolean;
+  overrides: { testCaseId: string; input: string; expectedOutput: string }[];
 }
 
 /** One version as the mock stores it (the API's question_versions row plus its test cases). */
@@ -38,8 +57,9 @@ export interface MockVersion {
   answerSpec: AnswerSpec | null;
   validationReport: ValidationReport | null;
   testCases: MockTestCase[];
-  /** WEB-ONLY placeholder [BE-04b]: the API has no variants yet. */
-  variants: Variant[];
+  variants: MockVariant[];
+  /** AI reference solutions belong to ONE version (BE-04c); a fork starts with none. */
+  aiRefs: Schemas['AiReference'][];
 }
 
 export interface MockQuestion {
@@ -50,8 +70,6 @@ export interface MockQuestion {
   isArchived: boolean;
   createdAt: string;
   versions: MockVersion[];
-  /** WEB-ONLY placeholder [BE-04c]. */
-  aiRefs: Schemas['AiReference'][];
 }
 
 /** The shape the seed data below is written in; `convert` turns it into the API shape. */
@@ -71,7 +89,7 @@ interface SeedContent {
     isHidden: boolean;
     weight: number;
   }[];
-  variants: Variant[];
+  variants: SeedVariant[];
   answerSpec:
     | ({ type: 'MCQ' } & Schemas['McqAnswerSpec'])
     | ({ type: 'SHORT_ANSWER' } & Schemas['ShortAnswerSpec'])
@@ -84,7 +102,8 @@ interface SeedVersion extends SeedContent {
   createdAt: string;
   createdByName: string;
   validatedAt: string | null;
-  validationReport: { passed: boolean; finishedAt: string; results: [] } | null;
+  /** Only `passed` and the time matter: `convert` builds the real report for the content. */
+  validationReport: { passed: boolean; finishedAt: string } | null;
 }
 interface SeedQuestion {
   id: string;
@@ -100,8 +119,8 @@ const daysAgo = (d: number) => new Date(NOW - d * 86_400_000).toISOString();
 
 const LIMITS = { cpuMs: 2000, wallMs: 5000, memoryKb: 262_144 };
 
-function passing(): { passed: true; finishedAt: string; results: [] } {
-  return { passed: true, finishedAt: daysAgo(2), results: [] };
+function passing(): { passed: true; finishedAt: string } {
+  return { passed: true, finishedAt: daysAgo(2) };
 }
 
 export function seedQuestions(): MockQuestion[] {
@@ -369,8 +388,9 @@ prints
     promptText: 'Solve the question as stated. Return only code.',
     collectedAt: daysAgo(ageDays),
     variantId: null,
-    collectedByName: 'Avery Author',
+    collectedById: 'user-author',
     supersededAt: null,
+    createdAt: daysAgo(ageDays),
   });
 
   const legacy: SeedQuestion[] = [
@@ -509,6 +529,37 @@ prints
   return legacy.map(convert);
 }
 
+/** A passing report in the real shape: one result per active variant (or the base), one passing cell per language. */
+function passingReport(
+  v: {
+    allowedLanguages: Language[];
+    testCases: { id: string }[];
+    variants: MockVariant[];
+  },
+  revision: string,
+  finishedAt: string,
+): ValidationReport {
+  const active = v.variants.filter((x) => x.isActive).sort((a, b) => (a.id < b.id ? -1 : 1));
+  const targets: (string | null)[] = active.length > 0 ? active.map((x) => x.id) : [null];
+  return {
+    passed: true,
+    revision,
+    startedAt: finishedAt,
+    finishedAt,
+    perVariant: targets.map((variantId) => ({
+      variantId,
+      passed: true,
+      cells: v.allowedLanguages.map((language) => ({
+        language,
+        passed: true,
+        testsPassed: v.testCases.length,
+        testsTotal: v.testCases.length,
+      })),
+      failures: [],
+    })),
+  };
+}
+
 /** Seed shape to the API shape: positions, ids, an answer spec without `type`, a revision-bound report. */
 function convert(q: SeedQuestion): MockQuestion {
   const last = q.versions[q.versions.length - 1]!;
@@ -536,12 +587,34 @@ function convert(q: SeedQuestion): MockQuestion {
         return { canonical: a.canonical, acceptedVariants: a.acceptedVariants };
       })(),
       testCases: v.testCases.map((t, position) => ({ ...t, position })),
-      variants: v.variants,
+      variants: v.variants.map((x): MockVariant => {
+        const rendered = renderTemplate(v.statementMd, x.params);
+        return {
+          id: x.id,
+          isActive: x.active,
+          params: x.params,
+          renderedStatement: rendered.ok ? rendered.text : v.statementMd,
+          overrides: x.overrides.map((o) => ({ ...o })),
+        };
+      }),
     };
-    const report = v.validationReport
-      ? { ...v.validationReport, revision: mockRevision(base) }
-      : null;
-    return { ...base, validationReport: report };
+    const revision = mockRevision({
+      ...base,
+      variants: base.variants.map((x) => ({ ...x })),
+    });
+    // Only coding questions are validated: the real API never records a run for the other types.
+    const coding = q.type === 'CODING';
+    const report: ValidationReport | null =
+      coding && v.validationReport
+        ? passingReport(base, revision, v.validationReport.finishedAt)
+        : null;
+    const isLast = v.version === last.version;
+    return {
+      ...base,
+      validatedAt: coding ? base.validatedAt : null,
+      validationReport: report,
+      aiRefs: isLast ? q.aiRefs : [],
+    };
   });
   return {
     id: q.id,
@@ -551,6 +624,5 @@ function convert(q: SeedQuestion): MockQuestion {
     isArchived: q.archived,
     createdAt: daysAgo(40),
     versions,
-    aiRefs: q.aiRefs,
   };
 }

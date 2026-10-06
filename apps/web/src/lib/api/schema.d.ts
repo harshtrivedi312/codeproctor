@@ -569,23 +569,88 @@ export interface paths {
     patch: operations['updateTestCase'];
     trace?: never;
   };
-  '/v1/questions/{questionId}/variants': {
+  '/v1/questions/{questionId}/versions/{version}/variants': {
     parameters: {
-      query?: {
-        version?: number;
-      };
+      query?: never;
       header?: never;
       path: {
         questionId: string;
+        version: number;
       };
       cookie?: never;
     };
-    /** WEB-ONLY placeholder [BE-04b] (ADR 0007, explicit params per variant). Variants of a version, question:update only. */
-    get: operations['getVariants'];
-    /** WEB-ONLY placeholder [BE-04b]. Replace the variants of the latest draft version. */
-    put: operations['putVariants'];
+    /** REAL. The variants of a version with params and per-slot overrides, plus the version revision (question:update). The writer detail carries the same variants in version.variants. */
+    get: operations['listVariants'];
+    put?: never;
+    /** REAL. Add a variant to a draft version (question:update). Every {{placeholder}} of the statement, starter code and reference solution of an ACTIVE variant needs a param (400 otherwise). At most 50 per version. */
+    post: operations['createVariant'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/questions/{questionId}/versions/{version}/variants/{variantId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+        version: number;
+        variantId: string;
+      };
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /** REAL. Remove a variant and its overrides from a draft (question:update). The revision check is a query parameter. */
+    delete: operations['removeVariant'];
+    options?: never;
+    head?: never;
+    /** REAL. Change the params or the active flag of a variant of a draft (question:update). An empty body is 400. */
+    patch: operations['updateVariant'];
+    trace?: never;
+  };
+  '/v1/questions/{questionId}/versions/{version}/variants/{variantId}/preview': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+        version: number;
+        variantId: string;
+      };
+      cookie?: never;
+    };
+    /** REAL. The candidate-shaped view of one variant: rendered statement and starter code, its own sample cases, no params, hidden data, reference solution or answer spec (question:read). Without question:update only published versions and active variants are visible (404 otherwise). A variant that does not render is 422 with reasons for a writer and a plain 422 for others. */
+    get: operations['previewVariant'];
+    put?: never;
     post?: never;
     delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/questions/{questionId}/versions/{version}/variants/{variantId}/test-cases/{testCaseId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+        version: number;
+        variantId: string;
+        testCaseId: string;
+      };
+      cookie?: never;
+    };
+    get?: never;
+    /** REAL. Override the input and expected output of one test slot for a variant (question:update). The slot must belong to the same version; its hidden flag and weight stay the slot's. Returns the override only, not a revision. */
+    put: operations['setVariantOverride'];
+    post?: never;
+    /** REAL. Remove an override; the slot's own input and output apply again (question:update). */
+    delete: operations['removeVariantOverride'];
     options?: never;
     head?: never;
     patch?: never;
@@ -602,7 +667,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** WEB-ONLY placeholder [BE-04b/c]. Run the reference solution on a variant's inputs and PROPOSE expected outputs (ADR 0007). Nothing is stored; the author must accept the proposals. */
+    /** WEB-ONLY placeholder (BE-04b did not add a prefill route; ADR 0007 helper). Run the reference solution on a variant's inputs and PROPOSE expected outputs (ADR 0007). Nothing is stored; the author must accept the proposals. */
     post: operations['prefillVariantOutputs'];
     delete?: never;
     options?: never;
@@ -621,7 +686,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** WEB-ONLY placeholder [BE-04c] (permission question:validate). Start a validation job of the current content; the job binds to the revision it validated and stores it in the validation report. */
+    /** REAL. Start validating the latest DRAFT (question:validate, coding questions only): the reference solution of every allowed language runs on every test slot of every active variant with that variant's data. The run happens after the response; poll GET .../validation. The result is bound to the revision returned here. One run per question at a time. */
     post: operations['validateQuestion'];
     delete?: never;
     options?: never;
@@ -629,18 +694,17 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  '/v1/questions/{questionId}/validation/{jobId}': {
+  '/v1/questions/{questionId}/validation': {
     parameters: {
       query?: never;
       header?: never;
       path: {
         questionId: string;
-        jobId: string;
       };
       cookie?: never;
     };
-    /** WEB-ONLY placeholder [BE-04c]. Poll a validation job. */
-    get: operations['getValidationJob'];
+    /** REAL. The state of the latest validation run of the latest version and its stored report (question:validate). There is no job id in the path: one status per question. A run whose content changed meanwhile is STALE and never opens the publish gate. */
+    get: operations['getValidation'];
     put?: never;
     post?: never;
     delete?: never;
@@ -649,19 +713,20 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  '/v1/questions/{questionId}/ai-references': {
+  '/v1/questions/{questionId}/versions/{version}/ai-references': {
     parameters: {
       query?: never;
       header?: never;
       path: {
         questionId: string;
+        version: number;
       };
       cookie?: never;
     };
-    /** WEB-ONLY placeholder [BE-04c] (ADR 0005, D-20). AI reference solutions of the question with the publish policy (Authors cannot read org settings). Similarity only, never grading. */
+    /** REAL. The AI reference solutions of a version, current and superseded (ai_reference:read). Rows belong to ONE version; a new version starts with none. Never shown to recruiters or candidates, never used for grading. */
     get: operations['listAiReferences'];
     put?: never;
-    /** WEB-ONLY placeholder [BE-04c]. Add a solution collected from an AI assistant (audited as ai_reference.create). */
+    /** REAL. Record an AI reference solution for a language of a version (ai_reference:create, append-only). collectedAt is the server's time. */
     post: operations['addAiReference'];
     delete?: never;
     options?: never;
@@ -669,19 +734,20 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  '/v1/questions/{questionId}/ai-references/{referenceId}/supersede': {
+  '/v1/questions/{questionId}/versions/{version}/ai-references/{aiReferenceId}/supersede': {
     parameters: {
       query?: never;
       header?: never;
       path: {
         questionId: string;
-        referenceId: string;
+        version: number;
+        aiReferenceId: string;
       };
       cookie?: never;
     };
     get?: never;
     put?: never;
-    /** WEB-ONLY placeholder [BE-04c]. Replace a row with a newer one; the old row keeps existing with supersededAt set (append-only, ADR 0005 AI-1). */
+    /** REAL. Retire a row (sets supersededAt; the row stays), optionally inserting its replacement in the same transaction (ai_reference:supersede). */
     post: operations['supersedeAiReference'];
     delete?: never;
     options?: never;
@@ -801,42 +867,90 @@ export interface components {
       pageSize: number;
       total: number;
     };
-    /** @enum {string} */
-    ValidationOutcome:
-      'pass' | 'wrong_answer' | 'runtime_error' | 'compile_error' | 'limit_exceeded';
-    ValidationResult: {
-      /** @description Null for the base statement */
-      variantId: string | null;
-      variantLabel: string;
-      testCaseId: string;
-      position: number;
+    /**
+     * @description The executor's verdicts, plus MISSING_REFERENCE when an allowed language has no reference solution.
+     * @enum {string}
+     */
+    ValidationVerdict:
+      | 'FAILED'
+      | 'COMPILE_ERROR'
+      | 'TIME_LIMIT'
+      | 'MEMORY_LIMIT'
+      | 'OUTPUT_LIMIT'
+      | 'RUNTIME_ERROR'
+      | 'INTERNAL_ERROR'
+      | 'MISSING_REFERENCE';
+    ValidationCell: {
       language: components['schemas']['Language'];
-      outcome: components['schemas']['ValidationOutcome'];
-      message?: string;
+      passed: boolean;
+      testsPassed: number;
+      testsTotal: number;
     };
-    /** @description Stored in the version's validationReport. The API defines `passed` and `revision` (the content revision the run validated; publish ignores a report of another revision). The other members are a WEB-ONLY placeholder [BE-04c]. */
+    ValidationFailure: {
+      language: components['schemas']['Language'];
+      testCaseId: string | null;
+      position: number | null;
+      verdict: components['schemas']['ValidationVerdict'];
+      /** @description Only for a visible (sample) slot */
+      actualOutput?: string;
+      diagnostic?: string;
+    };
+    ValidationVariantResult: {
+      /** @description Null for the base content (a version with no active variant) */
+      variantId: string | null;
+      passed: boolean;
+      cells: components['schemas']['ValidationCell'][];
+      failures: components['schemas']['ValidationFailure'][];
+    };
+    /** @description Stored in the version's validationReport (question:update readers only). `revision` is the content revision the run was bound to, taken under the question lock at start: publish refuses a report of any other revision. `error` is set when the run could not complete; then passed is false and perVariant is empty. */
     ValidationReport: {
       passed: boolean;
       revision: string;
       /** Format: date-time */
-      finishedAt?: string;
-      results?: components['schemas']['ValidationResult'][];
-    } & {
-      [key: string]: unknown;
-    };
-    ValidationJobRef: {
-      jobId: string;
-      /** @description The content revision the job validates */
-      revision: string;
-    };
-    ValidationJob: {
-      jobId: string;
-      /** @description The content revision the job validated; a report for another revision must never be shown as current */
-      revision: string;
+      startedAt: string;
+      /** Format: date-time */
+      finishedAt: string;
       /** @enum {string} */
-      status: 'queued' | 'running' | 'done' | 'failed';
-      report?: components['schemas']['ValidationReport'];
-      error?: string;
+      error?: 'EXECUTION_ERROR' | 'TIMEOUT';
+      perVariant: components['schemas']['ValidationVariantResult'][];
+    };
+    StartValidation: {
+      expectedRevision?: string;
+    };
+    ValidationStarted: {
+      jobId: string;
+      /** @enum {string} */
+      status: 'RUNNING';
+      /** @description The content revision this run validates */
+      revision: string;
+      version: number;
+      /** Format: date-time */
+      startedAt: string;
+    };
+    ValidationStatus: {
+      /**
+       * @description NONE never run on this content; RUNNING; PASSED or FAILED finished on the current content; STALE the content changed while it ran, the result was discarded (publish stays closed); ERROR the run could not complete (fail closed).
+       * @enum {string}
+       */
+      status: 'NONE' | 'RUNNING' | 'PASSED' | 'FAILED' | 'STALE' | 'ERROR';
+      jobId: string | null;
+      version: number;
+      currentRevision: string;
+      /** @description The revision the run was bound to */
+      revision: string | null;
+      /** Format: date-time */
+      startedAt: string | null;
+      /** Format: date-time */
+      finishedAt: string | null;
+      /**
+       * Format: date-time
+       * @description Set only by a passing run of the current content
+       */
+      validatedAt: string | null;
+      /** @description A ValidationReport when one is stored */
+      report: {
+        [key: string]: unknown;
+      } | null;
     };
     /** @description The full version a caller with question:update gets */
     QuestionVersion: components['schemas']['QuestionVersionRef'] & {
@@ -851,9 +965,11 @@ export interface components {
       };
       answerSpec: components['schemas']['AnswerSpec'] | null;
       validationReport: components['schemas']['ValidationReport'] | null;
-      /** @description Opaque SHA-256 of the version content and test cases (question:update only). Send it back as expectedRevision; it changes with every content or test-case change. */
+      /** @description Opaque SHA-256 of the version content, test cases and variants with their overrides (question:update only). Send it back as expectedRevision; it changes with every content, test-case, variant or override change. */
       revision: string;
       testCases: components['schemas']['TestCase'][];
+      /** @description Variants with params and overrides (writers only; a reader never gets this key). */
+      variants: components['schemas']['Variant'][];
     };
     /** @description What a reader without question:update gets of a version: an allowlist. No revision, referenceSolution, answerSpec or validationReport, and hidden test cases without input and expectedOutput. */
     QuestionVersionRead: {
@@ -946,49 +1062,113 @@ export interface components {
       traceId?: string;
       errors?: string[];
     };
+    /** @description One test slot's input and expected output for a variant. isHidden and position come from the slot. */
     VariantOverride: {
       testCaseId: string;
+      isHidden: boolean;
+      position: number;
       input: string;
       expectedOutput: string;
     };
-    /** @description WEB-ONLY placeholder [BE-04b]. Explicit params per variant (ADR 0007), no parameter schema. */
+    /** @description An explicit variant (ADR 0007). It has NO label or name: the UI names it by its place in the list and its params. renderedStatement is the statement rendered with params, kept for the author. Variants are sorted by id, which is NOT a meaningful order, and a fork gives every variant a new id. */
     Variant: {
       id: string;
-      label: string;
+      isActive: boolean;
       params: {
-        [key: string]: string | number;
+        [key: string]: string | number | boolean;
       };
-      active: boolean;
-      overrides: components['schemas']['VariantOverride'][];
+      renderedStatement: string;
+      testCaseOverrides: components['schemas']['VariantOverride'][];
     };
     VariantList: {
-      variants: components['schemas']['Variant'][];
+      items: components['schemas']['Variant'][];
+      revision: string;
     };
-    /** @description Org settings aiReferences.* (ADR 0005 AI-4, AI-5), read-only here because Authors cannot read org settings */
-    AiReferencePolicy: {
-      refreshDays: number;
-      minAssistants: number;
+    VariantMutation: {
+      variant: components['schemas']['Variant'];
+      /** @description The new revision of the version */
+      revision: string;
     };
-    AiReferenceInput: {
+    CreateVariant: {
+      params: {
+        [key: string]: string | number | boolean;
+      };
+      /** @default true */
+      isActive: boolean;
+      expectedRevision?: string;
+    };
+    UpdateVariant: {
+      params?: {
+        [key: string]: string | number | boolean;
+      };
+      isActive?: boolean;
+      expectedRevision?: string;
+    };
+    OverrideInput: {
+      input: string;
+      expectedOutput: string;
+      expectedRevision?: string;
+    };
+    CandidateQuestionPreview: {
+      type: components['schemas']['QuestionType'];
+      title: string;
+      statementMd: string;
+      languages: string[];
+      limits: components['schemas']['Limits'];
+      starterCode: {
+        [key: string]: string;
+      };
+      samples: {
+        input: string;
+        expectedOutput: string;
+      }[];
+      mcq?: {
+        multiple: boolean;
+        options: {
+          id: string;
+          text: string;
+        }[];
+      };
+    };
+    CreateAiReference: {
+      /** @description Assistant product name */
       assistant: string;
       modelLabel: string;
       language: components['schemas']['Language'];
       solutionCode: string;
       promptText?: string;
-      /** Format: date-time */
-      collectedAt: string;
-      /** @description Null means the base statement */
-      variantId?: string | null;
+      /** @description A variant of this version; absent means the base statement */
+      variantId?: string;
     };
-    AiReference: components['schemas']['AiReferenceInput'] & {
+    AiReference: {
       id: string;
-      collectedByName: string;
+      variantId: string | null;
+      assistant: string;
+      modelLabel: string;
+      language: components['schemas']['Language'];
+      solutionCode: string;
+      promptText: string | null;
+      /**
+       * Format: date-time
+       * @description Server time of the insert
+       */
+      collectedAt: string;
+      /** @description The user id; the API sends no name */
+      collectedById: string;
       /** Format: date-time */
       supersededAt: string | null;
+      /** Format: date-time */
+      createdAt: string;
     };
     AiReferenceList: {
       items: components['schemas']['AiReference'][];
-      policy: components['schemas']['AiReferencePolicy'];
+    };
+    SupersedeAiReference: {
+      replacement?: components['schemas']['CreateAiReference'];
+    };
+    SupersedeResult: {
+      superseded: components['schemas']['AiReference'];
+      replacement: components['schemas']['AiReference'] | null;
     };
     PrefillRequest: {
       language: components['schemas']['Language'];
@@ -2666,20 +2846,19 @@ export interface operations {
       };
     };
   };
-  getVariants: {
+  listVariants: {
     parameters: {
-      query?: {
-        version?: number;
-      };
+      query?: never;
       header?: never;
       path: {
         questionId: string;
+        version: number;
       };
       cookie?: never;
     };
     requestBody?: never;
     responses: {
-      /** @description Variants */
+      /** @description Variants and the revision to send back as expectedRevision */
       200: {
         headers: {
           [name: string]: unknown;
@@ -2689,7 +2868,7 @@ export interface operations {
         };
       };
       403: components['responses']['Forbidden'];
-      /** @description Not found */
+      /** @description No such question or version in your organization */
       404: {
         headers: {
           [name: string]: unknown;
@@ -2700,33 +2879,32 @@ export interface operations {
       };
     };
   };
-  putVariants: {
+  createVariant: {
     parameters: {
-      query?: {
-        version?: number;
-      };
+      query?: never;
       header?: never;
       path: {
         questionId: string;
+        version: number;
       };
       cookie?: never;
     };
     requestBody: {
       content: {
-        'application/json': components['schemas']['VariantList'];
+        'application/json': components['schemas']['CreateVariant'];
       };
     };
     responses: {
-      /** @description Saved */
-      200: {
+      /** @description Created */
+      201: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['VariantList'];
+          'application/json': components['schemas']['VariantMutation'];
         };
       };
-      /** @description Invalid */
+      /** @description Validation failed or a placeholder has no param */
       400: {
         headers: {
           [name: string]: unknown;
@@ -2736,7 +2914,7 @@ export interface operations {
         };
       };
       403: components['responses']['Forbidden'];
-      /** @description Not found */
+      /** @description No such question or version in your organization */
       404: {
         headers: {
           [name: string]: unknown;
@@ -2745,7 +2923,268 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
-      /** @description The version is published (immutable), or the question is archived */
+      /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Not a coding question, or too many variants */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  removeVariant: {
+    parameters: {
+      query?: {
+        expectedRevision?: string;
+      };
+      header?: never;
+      path: {
+        questionId: string;
+        version: number;
+        variantId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Removed */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Invalid expectedRevision */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description No such question, version or variant in your organization */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  updateVariant: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+        version: number;
+        variantId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['UpdateVariant'];
+      };
+    };
+    responses: {
+      /** @description Changed */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['VariantMutation'];
+        };
+      };
+      /** @description Validation failed, a placeholder has no param, or no field sent */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description No such question, version or variant in your organization */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  previewVariant: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+        version: number;
+        variantId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The candidate view */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['CandidateQuestionPreview'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description No such question, version or variant in your organization */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description The variant does not render */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  setVariantOverride: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+        version: number;
+        variantId: string;
+        testCaseId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['OverrideInput'];
+      };
+    };
+    responses: {
+      /** @description The override */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['VariantOverride'];
+        };
+      };
+      /** @description Validation failed */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description No such question, version, variant or test slot in your organization */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  removeVariantOverride: {
+    parameters: {
+      query?: {
+        expectedRevision?: string;
+      };
+      header?: never;
+      path: {
+        questionId: string;
+        version: number;
+        variantId: string;
+        testCaseId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Removed */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      403: components['responses']['Forbidden'];
+      /** @description No such question, version, variant or override in your organization */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
       409: {
         headers: {
           [name: string]: unknown;
@@ -2801,7 +3240,11 @@ export interface operations {
       };
       cookie?: never;
     };
-    requestBody?: never;
+    requestBody?: {
+      content: {
+        'application/json': components['schemas']['StartValidation'];
+      };
+    };
     responses: {
       /** @description Job accepted */
       202: {
@@ -2809,12 +3252,39 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ValidationJobRef'];
+          'application/json': components['schemas']['ValidationStarted'];
+        };
+      };
+      /** @description Validation failed (a malformed expectedRevision, an unknown field) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
         };
       };
       403: components['responses']['Forbidden'];
-      /** @description Not found */
+      /** @description No such question in your organization */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description No draft to validate, the question is archived, a run is already in progress, or the draft changed since expectedRevision */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Not a coding question, or a variant does not render (errors[] says which) */
+      422: {
         headers: {
           [name: string]: unknown;
         };
@@ -2824,29 +3294,28 @@ export interface operations {
       };
     };
   };
-  getValidationJob: {
+  getValidation: {
     parameters: {
       query?: never;
       header?: never;
       path: {
         questionId: string;
-        jobId: string;
       };
       cookie?: never;
     };
     requestBody?: never;
     responses: {
-      /** @description Job state; the report is present when done */
+      /** @description The status */
       200: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ValidationJob'];
+          'application/json': components['schemas']['ValidationStatus'];
         };
       };
       403: components['responses']['Forbidden'];
-      /** @description Not found */
+      /** @description No such question in your organization */
       404: {
         headers: {
           [name: string]: unknown;
@@ -2863,12 +3332,13 @@ export interface operations {
       header?: never;
       path: {
         questionId: string;
+        version: number;
       };
       cookie?: never;
     };
     requestBody?: never;
     responses: {
-      /** @description Rows (including superseded ones) and the policy */
+      /** @description Rows, newest first */
       200: {
         headers: {
           [name: string]: unknown;
@@ -2878,7 +3348,7 @@ export interface operations {
         };
       };
       403: components['responses']['Forbidden'];
-      /** @description Not found */
+      /** @description No such question or version in your organization */
       404: {
         headers: {
           [name: string]: unknown;
@@ -2895,12 +3365,13 @@ export interface operations {
       header?: never;
       path: {
         questionId: string;
+        version: number;
       };
       cookie?: never;
     };
     requestBody: {
       content: {
-        'application/json': components['schemas']['AiReferenceInput'];
+        'application/json': components['schemas']['CreateAiReference'];
       };
     };
     responses: {
@@ -2913,7 +3384,7 @@ export interface operations {
           'application/json': components['schemas']['AiReference'];
         };
       };
-      /** @description Invalid */
+      /** @description Validation failed */
       400: {
         headers: {
           [name: string]: unknown;
@@ -2923,8 +3394,26 @@ export interface operations {
         };
       };
       403: components['responses']['Forbidden'];
-      /** @description Not found */
+      /** @description No such question, version or variant in your organization */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description The question is archived */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Not a coding question, or the language is not an allowed language of the version */
+      422: {
         headers: {
           [name: string]: unknown;
         };
@@ -2940,26 +3429,27 @@ export interface operations {
       header?: never;
       path: {
         questionId: string;
-        referenceId: string;
+        version: number;
+        aiReferenceId: string;
       };
       cookie?: never;
     };
     requestBody: {
       content: {
-        'application/json': components['schemas']['AiReferenceInput'];
+        'application/json': components['schemas']['SupersedeAiReference'];
       };
     };
     responses: {
-      /** @description The new row */
-      201: {
+      /** @description The retired row and the replacement, if any */
+      200: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['AiReference'];
+          'application/json': components['schemas']['SupersedeResult'];
         };
       };
-      /** @description Invalid */
+      /** @description Validation failed */
       400: {
         headers: {
           [name: string]: unknown;
@@ -2969,8 +3459,26 @@ export interface operations {
         };
       };
       403: components['responses']['Forbidden'];
-      /** @description Not found */
+      /** @description No such question, version or AI reference solution in your organization */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Already superseded, or the question is archived */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description The replacement language is not allowed */
+      422: {
         headers: {
           [name: string]: unknown;
         };

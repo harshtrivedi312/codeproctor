@@ -1,9 +1,12 @@
 /*
  * MOCK content revision. The real API's `revision` is an opaque SHA-256 over the version content
- * and test cases (apps/api/src/questions/revision.ts). This mock uses a simple deterministic digest
- * instead (four cyrb53-style rounds, 64 hex characters, so it has the same format). It depends on
- * exactly the same inputs: the content and the test cases, not the tags and not the variants. It
- * changes when the content changes and not otherwise. It is NOT a cryptographic hash.
+ * content, test cases and (since BE-04b) variants with their per-slot overrides
+ * (apps/api/src/questions/revision.ts). This mock uses a simple deterministic digest instead (four
+ * cyrb53-style rounds, 64 hex characters, so it has the same format). It depends on the same
+ * inputs: the content, the test cases and the variants (id, params, isActive, overrides; the
+ * rendered statement is derived, so it is not hashed; the `variants` key is left out when there
+ * are none), not the tags. It changes when any of them changes and not otherwise. It is NOT a
+ * cryptographic hash.
  */
 
 export interface RevisionInput {
@@ -22,6 +25,12 @@ export interface RevisionInput {
     weight: number;
     input: string;
     expectedOutput: string;
+  }[];
+  variants?: readonly {
+    id: string;
+    params: unknown;
+    isActive: boolean;
+    overrides: readonly { testCaseId: string; input: string; expectedOutput: string }[];
   }[];
 }
 
@@ -65,6 +74,24 @@ export function mockRevision(v: RevisionInput): string {
       referenceSolution: v.referenceSolution,
       answerSpec: v.answerSpec ?? null,
       testCases: sorted,
+      ...(v.variants && v.variants.length > 0
+        ? {
+            variants: [...v.variants]
+              .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+              .map((x) => ({
+                id: x.id,
+                params: x.params,
+                isActive: x.isActive,
+                overrides: [...x.overrides]
+                  .sort((a, b) => (a.testCaseId < b.testCaseId ? -1 : 1))
+                  .map((o) => ({
+                    testCaseId: o.testCaseId,
+                    input: o.input,
+                    expectedOutput: o.expectedOutput,
+                  })),
+              })),
+          }
+        : {}),
     }),
   );
   return [1, 2, 3, 4]

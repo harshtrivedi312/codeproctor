@@ -12,10 +12,11 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { formatDate } from '@/features/admin/format';
+import { ApiFailure } from '@/features/admin/queries';
 import type { Schemas } from '@/lib/api/client';
 import { aiReferenceFormSchema, type AiReferenceFormValues } from '../ai-schema';
-import { LANGUAGE_LABELS } from '../draft';
-import { aiGate, aiRefreshDue } from '../gate';
+import { LANGUAGE_LABELS, variantName } from '../draft';
+import { aiGate, aiRefreshDue, DEFAULT_AI_POLICY } from '../gate';
 import { MonacoField } from '../monaco-field';
 import { useAddAiReference, useAiReferences } from '../queries';
 import { useDraftField, type ApiTabProps } from '../use-draft-field';
@@ -23,7 +24,8 @@ import { useDraftField, type ApiTabProps } from '../use-draft-field';
 type Ref = Schemas['AiReference'];
 
 interface Props extends ApiTabProps {
-  policy: Schemas['AiReferencePolicy'];
+  /** The version these solutions belong to: AI rows are per version, a new version starts with none. */
+  version: number;
 }
 
 /**
@@ -31,15 +33,15 @@ interface Props extends ApiTabProps {
  * the new row and keeps the old one (marked superseded). They are used for similarity checks only,
  * never for grading, and candidates never see them.
  */
-export function AiTab({
-  form,
-  readOnly,
-  questionId,
-  policy: fallbackPolicy,
-}: Props): React.JSX.Element {
+function variantLabel(variants: readonly { id: string }[], id: string): string {
+  const at = variants.findIndex((v) => v.id === id);
+  return at >= 0 ? variantName(at) : 'A variant';
+}
+
+export function AiTab({ form, readOnly, questionId, version }: Props): React.JSX.Element {
   const [languages] = useDraftField(form, 'allowedLanguages');
   const [variants] = useDraftField(form, 'variants');
-  const refs = useAiReferences(questionId ?? '');
+  const refs = useAiReferences(questionId ?? '', version);
   const [dialog, setDialog] = React.useState<{ supersede: Ref | null } | null>(null);
 
   if (questionId === null) {
@@ -50,8 +52,8 @@ export function AiTab({
     );
   }
   const rows = refs.data?.items ?? [];
-  // The policy comes with the list (WEB-ONLY placeholder [BE-04c]); until it loads, the default.
-  const policy = refs.data?.policy ?? fallbackPolicy;
+  // The API does not expose the organisation's policy to Authors: these are the web's defaults.
+  const policy = DEFAULT_AI_POLICY;
   const gates = aiGate(languages, rows, policy);
   const due = aiRefreshDue(rows, policy, new Date());
   const aiLanguages = languages.filter((l) => AI_REFERENCE_LANGUAGES.includes(l));
@@ -62,7 +64,8 @@ export function AiTab({
         Collect a solution for each language from at least {policy.minAssistants} different AI
         assistants (business or team plans that do not train on inputs). They are compared with
         candidates&apos; code to spot copying. They are <strong>never</strong> used for grading and
-        candidates never see them.
+        candidates never see them. They belong to version {version}: a new version starts with none,
+        so collect them again for a new draft before publishing it.
       </Alert>
 
       <section aria-labelledby="ai-gate-heading" className="space-y-2">
@@ -152,9 +155,6 @@ export function AiTab({
                     Collected
                   </th>
                   <th scope="col" className="px-3 py-2">
-                    By
-                  </th>
-                  <th scope="col" className="px-3 py-2">
                     Status
                   </th>
                   <th scope="col" className="px-3 py-2">
@@ -169,12 +169,9 @@ export function AiTab({
                     <td className="px-3 py-2">{r.assistant}</td>
                     <td className="px-3 py-2">{r.modelLabel}</td>
                     <td className="px-3 py-2">
-                      {r.variantId
-                        ? (variants.find((v) => v.id === r.variantId)?.label ?? 'A variant')
-                        : 'Base statement'}
+                      {r.variantId ? variantLabel(variants, r.variantId) : 'Base statement'}
                     </td>
                     <td className="px-3 py-2">{formatDate(r.collectedAt)}</td>
-                    <td className="px-3 py-2">{r.collectedByName}</td>
                     <td className="px-3 py-2">
                       <Badge tone={r.supersededAt ? 'neutral' : 'success'}>
                         {r.supersededAt ? 'Superseded' : 'Current'}
@@ -204,9 +201,10 @@ export function AiTab({
       {dialog ? (
         <AiDialog
           questionId={questionId}
+          version={version}
           supersede={dialog.supersede}
           languages={aiLanguages}
-          variants={variants.map((v) => ({ id: v.id, label: v.label }))}
+          variants={variants.map((v, i) => ({ id: v.id, label: variantName(i) }))}
           onClose={() => setDialog(null)}
         />
       ) : null}
@@ -214,22 +212,22 @@ export function AiTab({
   );
 }
 
-const today = () => new Date().toISOString().slice(0, 10);
-
 function AiDialog({
   questionId,
+  version,
   supersede,
   languages,
   variants,
   onClose,
 }: {
   questionId: string;
+  version: number;
   supersede: Ref | null;
   languages: CodeLanguage[];
   variants: { id: string; label: string }[];
   onClose: () => void;
 }): React.JSX.Element {
-  const add = useAddAiReference(questionId);
+  const add = useAddAiReference(questionId, version);
   const [serverError, setServerError] = React.useState<string | null>(null);
   const {
     register,
@@ -243,7 +241,6 @@ function AiDialog({
       modelLabel: supersede?.modelLabel ?? '',
       language: supersede?.language ?? languages[0] ?? 'python',
       variantId: supersede?.variantId ?? '',
-      collectedAt: today(),
       solutionCode: '',
       promptText: supersede?.promptText ?? '',
     },
@@ -261,14 +258,19 @@ function AiDialog({
           modelLabel: v.modelLabel.trim(),
           language: v.language as Schemas['Language'],
           solutionCode: v.solutionCode,
-          collectedAt: new Date(`${v.collectedAt}T12:00:00`).toISOString(),
           ...(v.promptText.trim() ? { promptText: v.promptText } : {}),
-          variantId: v.variantId === '' ? null : v.variantId,
+          ...(v.variantId === '' ? {} : { variantId: v.variantId }),
         },
       });
       onClose();
-    } catch {
-      setServerError('We could not save this solution. Check your connection and try again.');
+    } catch (e) {
+      setServerError(
+        e instanceof ApiFailure && e.status === 409
+          ? 'This solution was already replaced, or the question is archived. Close this window and reload the question.'
+          : e instanceof ApiFailure && (e.status === 400 || e.status === 422 || e.status === 404)
+            ? `The server did not accept this solution: ${[e.message, ...e.errors].filter(Boolean).join(' ')}`
+            : 'We could not save this solution. Check your connection and try again.',
+      );
     }
   }
 
@@ -341,9 +343,6 @@ function AiDialog({
                   ))}
                 </Select>
               )}
-            </Field>
-            <Field id="ai-date" label="Date collected" error={errors.collectedAt?.message}>
-              {(aria) => <Input {...aria} type="date" {...register('collectedAt')} />}
             </Field>
           </div>
           <Controller
