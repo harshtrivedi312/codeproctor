@@ -1510,7 +1510,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       const findSpy = jest.spyOn(appPrisma.user, 'findUnique');
       const writeSpy = jest.spyOn(appPrisma.user, 'update');
       const writeManySpy = jest.spyOn(appPrisma.user, 'updateMany');
-      const incrSpy = jest.spyOn(redis, 'eval');
+      const evalSpy = jest.spyOn(redis, 'eval');
       const sendSpy = jest.spyOn(fakeMail, 'sendPasswordReset');
       const ctx = { ip: '203.0.113.50' };
       const awaited: Record<string, number[]> = {};
@@ -1522,10 +1522,10 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           ['inactive', inactive.email],
           ['unknown', 'nobody-equal-work@example.com'],
         ] as const) {
-          for (const spy of [findSpy, writeSpy, writeManySpy, incrSpy, sendSpy]) spy.mockClear();
+          for (const spy of [findSpy, writeSpy, writeManySpy, evalSpy, sendSpy]) spy.mockClear();
           await authService.forgotPassword(email, ctx);
           // Measured the moment the awaited work is done: no account-dependent call yet.
-          awaited[name] = [findSpy, writeSpy, writeManySpy, incrSpy, sendSpy].map(
+          awaited[name] = [findSpy, writeSpy, writeManySpy, evalSpy, sendSpy].map(
             (spy) => spy.mock.calls.length,
           );
           await authService.settleDeferred();
@@ -1539,7 +1539,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           }
         }
       } finally {
-        for (const spy of [findSpy, writeSpy, writeManySpy, incrSpy, sendSpy]) spy.mockRestore();
+        for (const spy of [findSpy, writeSpy, writeManySpy, evalSpy, sendSpy]) spy.mockRestore();
       }
       expect(awaited.real).toEqual([0, 0, 0, 2, 0]);
       expect(awaited.pending).toEqual(awaited.real);
@@ -2021,13 +2021,13 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           '../infrastructure/infrastructure.module',
         ).REDIS_CLIENT,
       );
-      const incr = jest.spyOn(redis, 'eval').mockRejectedValue(new Error(`down ${u.email}`));
+      const evalSpy = jest.spyOn(redis, 'eval').mockRejectedValue(new Error(`down ${u.email}`));
       logged.length = 0;
       try {
         await authService.forgotPassword(u.email, { ip: '203.0.113.77' });
         await authService.settleDeferred();
       } finally {
-        incr.mockRestore();
+        evalSpy.mockRestore();
       }
       expect(logged.join('')).toContain('reset limiter unavailable');
       expect(logged.join('')).not.toContain(u.email);
@@ -2155,8 +2155,16 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
             '../infrastructure/infrastructure.module',
           ).REDIS_CLIENT,
         );
-        // Only the marker uses a Redis script, so failing eval fails exactly the marker write.
-        return jest.spyOn(redis, 'eval').mockRejectedValue(new Error('redis down'));
+        // Other callers also use eval (forgot counters, invite slot, throttler), so only the
+        // marker write (key auth:tokens-valid-after:*) is failed; everything else runs for real.
+        const realEval = redis.eval.bind(redis) as (...args: unknown[]) => Promise<unknown>;
+        return jest
+          .spyOn(redis, 'eval')
+          .mockImplementation((...args: unknown[]) =>
+            String(args[2]).startsWith('auth:tokens-valid-after:')
+              ? Promise.reject(new Error('redis down'))
+              : realEval(...args),
+          );
       }
 
       it('TC-003, FR-104: an access token issued before a successful disable is 401 afterwards, even in the same second', async () => {

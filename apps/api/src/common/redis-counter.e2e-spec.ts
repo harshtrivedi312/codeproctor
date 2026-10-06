@@ -69,7 +69,9 @@ describe('hitWindowCounter (FU-BE-64, NFR-04)', () => {
     await new Promise((r) => setTimeout(r, 1200));
     const again = await hitWindowCounter(redis, key, 1);
     expect(again.count).toBe(1);
-    expect(await redis.ttl(key)).toBeGreaterThanOrEqual(0);
+    expect(again.ttlSeconds).toBeGreaterThan(0);
+    expect(again.ttlSeconds).toBeLessThanOrEqual(1);
+    expect(await redis.ttl(key)).toBeGreaterThan(0);
   });
 
   it('FU-BE-64: a Redis error is thrown to the caller (it chooses 503 or fail closed)', async () => {

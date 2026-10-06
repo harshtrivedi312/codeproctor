@@ -958,11 +958,11 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
           .post(`${API}/auth/2fa/reset/${user.id}`)
           .set(admin.auth)
           .send({ currentPassword: PASSWORD });
-      const set = jest.spyOn(redis, 'eval').mockRejectedValue(new Error('redis down'));
+      const evalSpy = jest.spyOn(redis, 'eval').mockRejectedValue(new Error('redis down'));
       try {
         expect((await reset()).status).toBe(503);
       } finally {
-        set.mockRestore();
+        evalSpy.mockRestore();
       }
       expect((await owner.user.findUniqueOrThrow({ where: { id: user.id } })).totpEnabled).toBe(
         true,

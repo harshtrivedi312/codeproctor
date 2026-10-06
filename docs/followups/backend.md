@@ -140,6 +140,7 @@ Should-fix items and nits from Backend-track work. Same columns as `docs/followu
 | FU-BE-143 | pilot PR D | should-fix | QA: `test/support/harness.ts` `expectReauthFailed` asserts the old detail, so the `/auth/2fa/disable` calls in `test/integration/tc-003.int.test.ts` fail. Add a disable helper that asserts 'The password or code is incorrect.' (backend specs already do). | qa | next QA PR | open |
 | FU-BE-144 | pilot PR D | nit | Hub: `docs/api-contract.md` (REAUTH_FAILED section) and the frontend dialog copy for disable (now 'Password or code incorrect', not 'Password incorrect'). | architecture hub, frontend | next docs PR | open |
 | FU-BE-145 | pilot PR D | nit | `/auth/2fa/enroll/start` now refuses a stale challenge (reset or deactivation after the read) with the 401 the confirm route gives; no other Redis `INCR`/`EXPIRE` pair exists (TOTP and challenge markers are `SET NX EX`, the token marker is one script). | backend | any | open |
+| FU-BE-146 | PR D review | nit | `POST /2fa/enroll/start` is not single-use within the challenge TTL: a challenge holder can keep rotating the pending secret (limited only by the auth throttler). Consider claiming the jti or a per-challenge limit. | backend | any | open |
 
 ### Contract changes from the BE-02 addendum (architecture hub and frontend)
 
