@@ -22,6 +22,9 @@ const CRITICAL = [
   'recoveryCodes',
   'candidateToken',
   'objectKey',
+  'sessionToken',
+  'hmacKeyEnc',
+  'pdfKey',
 ];
 
 describe('log redaction (FR-101, FR-102, NFR-04)', () => {
@@ -73,5 +76,16 @@ describe('log redaction (FR-101, FR-102, NFR-04)', () => {
   it('FR-101: otpauthUri carries the TOTP secret and is redacted', () => {
     const out = capture({ otpauthUri: 'otpauth://totp/x?secret=SECRET-B32' });
     expect(out).not.toContain('SECRET-B32');
+  });
+
+  it('NFR-04, BE-07: the candidate session token, the wrapped HMAC key and the consent PDF key are redacted', () => {
+    const out = capture({
+      res: { body: { sessionToken: 'SECRET-SESSION-TOKEN' } },
+      session: { hmacKeyEnc: 'SECRET-WRAPPED-KEY', consent: { pdfKey: 'SECRET-PDF-KEY' } },
+      hmacKeyEnc: 'SECRET-WRAPPED-KEY-2',
+    });
+    for (const secret of ['SECRET-SESSION-TOKEN', 'SECRET-WRAPPED-KEY', 'SECRET-PDF-KEY']) {
+      expect(out).not.toContain(secret);
+    }
   });
 });

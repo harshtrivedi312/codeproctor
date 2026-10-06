@@ -20,6 +20,8 @@ allowBuilds:
   prisma: true
   # Postinstall only runs a version check; the runtime library needs nothing from it.
   protobufjs: false
+  # Optional native speed-up for msgpack in bullmq's dependencies; bullmq falls back to plain JavaScript without it.
+  msgpackr-extract: false
   # Install script only tries to compile an optional native crypto binding; ssh2 falls back to Node's crypto module.
   ssh2: false
   # Postinstall only fetches a native binding when the prebuilt optional platform package is missing.
