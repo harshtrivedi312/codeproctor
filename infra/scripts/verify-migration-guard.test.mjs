@@ -2,7 +2,7 @@
 // must fetch its base and still catch an edited, removed or misplaced migration. Local file
 // repositories only; no network.
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -251,7 +251,7 @@ describe('DB-08 migration guard on a shallow checkout (FR-105)', () => {
     assert.deepEqual(migrationChanges(bad, options), { ok: true, changed: [`M\t${M1}`] });
   });
 
-  it('FR-105: while GitHub rebuilds the merge ref (briefly missing), the guard waits and retries instead of failing', () => {
+  it('FR-105, DB-08: while GitHub rebuilds the merge ref (briefly missing), the guard waits and retries instead of failing', () => {
     git(origin, 'checkout', '-q', '-B', 'rebuild', 'main');
     write(origin, 'prisma/migrations/20261005000031_rb/migration.sql', 'SELECT 1;\n');
     git(origin, 'add', '-A');
@@ -281,18 +281,20 @@ describe('DB-08 migration guard on a shallow checkout (FR-105)', () => {
     git(origin, 'merge', '-q', '--no-ff', '-m', 'merge rebuild 2', 'rebuild');
     const rebuilt = git(origin, 'rev-parse', 'HEAD');
     git(origin, 'checkout', '-q', 'main');
-    // The old merge ref is gone; the new one appears about a second later.
+    // The old merge ref is gone; the new one appears only after the guard has slept twice.
     git(origin, 'update-ref', '-d', 'refs/pull/91/merge');
-    spawn('sh', ['-c', `sleep 1; git -C "${origin}" update-ref refs/pull/91/merge ${rebuilt}`], {
-      detached: true,
-      stdio: 'ignore',
-    }).unref();
+    let sleeps = 0;
     const result = ensureBase(clone, {
       githubRef: 'refs/pull/91/merge',
       headBySha: false,
-      refTries: 12,
-      refDelayMs: 300,
+      refTries: 5,
+      refDelayMs: 1,
+      sleep: () => {
+        sleeps += 1;
+        if (sleeps === 2) git(origin, 'update-ref', 'refs/pull/91/merge', rebuilt);
+      },
     });
+    assert.equal(sleeps, 2);
     assert.equal(result.ok, true, result.reason);
     assert.equal(result.headRef, 'refs/remotes/pr-merge');
   });

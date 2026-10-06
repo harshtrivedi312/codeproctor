@@ -34,7 +34,8 @@ const scrub = (text) =>
     .replace(/\/\/[^@/\s]+@/g, '//')
     .slice(0, 200);
 const MAIN = 'main:refs/remotes/origin/main';
-const sleep = (ms) => {
+// Synchronous on purpose: this is a test-time script and `ensureBase` is synchronous.
+const defaultSleep = (ms) => {
   if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 };
 
@@ -50,7 +51,7 @@ const sleep = (ms) => {
  * request content on top of the new main. `headBySha: false` forces that path (a test knob).
  * It only does so when the new merge commit has the same pull-request head as the checked-out one
  * (same second parent): the guard must judge exactly the content CI tested. The base is then that
- * merge commit's own first parent, the main it was merged onto. `headBySha` is a test knob.
+ * merge commit's own first parent, the main it was merged onto. Test knobs: `headBySha`, `refTries`, `refDelayMs`, `sleep`.
  * @returns {{ ok: boolean, reason?: string, headRef?: string, baseRef?: string }}
  */
 export function ensureBase(
@@ -62,6 +63,7 @@ export function ensureBase(
     headBySha = true,
     refTries = 6,
     refDelayMs = 5000,
+    sleep = defaultSleep,
   } = {},
 ) {
   if (hasBase(cwd)) return { ok: true, headRef: 'HEAD', baseRef: 'origin/main' };
@@ -94,7 +96,7 @@ export function ensureBase(
     // While GitHub rebuilds the merge ref after main moved, the ref can be briefly missing or the
     // fetch can fail: try again a few times before giving up (the run is otherwise red for nothing).
     let fetched = { status: 1, stderr: '' };
-    for (let t = 0; t < refTries; t++) {
+    for (let t = 0; t < Math.max(1, refTries); t++) {
       if (t > 0) sleep(refDelayMs);
       fetched = git(cwd, [
         'fetch',
@@ -160,13 +162,12 @@ export function migrationChanges(cwd, options = {}) {
       // A new file is fine only inside a NEW migration directory. The check is against the base ref
       // (origin/main, or the new merge commit's first parent), which is stricter than the merge base: a name main already uses is refused.
       const parts = path.split('/');
+      // Existing in EITHER the base ref or origin/main (a lagging merge ref must not hide a name main uses).
+      const dir = parts.slice(0, 3).join('/');
       const inExistingDir =
         parts.length < 4 ||
-        git(cwd, [
-          'cat-file',
-          '-e',
-          `${base.baseRef ?? 'origin/main'}:${parts.slice(0, 3).join('/')}`,
-        ]).status === 0;
+        ok(cwd, ['cat-file', '-e', `${base.baseRef ?? 'origin/main'}:${dir}`]) ||
+        ok(cwd, ['cat-file', '-e', `origin/main:${dir}`]);
       if (!inExistingDir) continue;
     }
     changed.push(`${status}\t${path}`);
