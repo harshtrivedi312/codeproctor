@@ -232,11 +232,12 @@ describe('TC-100 (FR-202, FR-204, DL-32): the revision comes back from every con
     expect(refused.status).toBe(409);
     expect(refused.body).not.toHaveProperty('revision');
     expect(await live(s.author, q)).toBe(r2);
-    // A tag-only edit changes no version content: the revision is the one a GET returns.
+    // A tag-only edit changes no version content (tags are not hashed): the revision is unchanged.
     const tags = await call(h, 'PATCH', `/questions/${q}`, s.author.token, {
       tags: ['qa-rev'],
     }).expect(200);
-    expect((tags.body as Json).revision).toBe(await live(s.author, q));
+    expect((tags.body as Json).revision).toBe(r2);
+    expect(await live(s.author, q)).toBe(r2);
 
     // Editing a published question forks the next version: the response revision is the draft's.
     await publishQuestion(h, s.author, q);
@@ -257,7 +258,7 @@ describe('TC-100 (FR-202, FR-204, DL-32): the revision comes back from every con
     const tc = ((await call(h, 'GET', `/questions/${q}`, s.author.token)).body as Json)
       .version as Json;
     const slot = ((tc.testCases as Json[])[0] as Json).id as string;
-    const attempts: [string, string, unknown][] = [
+    const attempts: ['PATCH' | 'POST' | 'DELETE', string, unknown][] = [
       ['PATCH', `/questions/${q}`, { title: 'x' }],
       ['POST', `${base(q)}/test-cases`, { input: 'a', expectedOutput: 'b' }],
       ['PATCH', `${base(q)}/test-cases/${slot}`, { expectedOutput: 'b' }],
@@ -266,7 +267,7 @@ describe('TC-100 (FR-202, FR-204, DL-32): the revision comes back from every con
     ];
     for (const who of [s.recruiter, s.reviewer]) {
       for (const [method, path, body] of attempts) {
-        const res = await call(h, method as 'GET', path, who.token, body);
+        const res = await call(h, method, path, who.token, body);
         expect([method, path, res.status]).toEqual([method, path, 403]);
         expect(res.text).not.toMatch(/revision/i);
         expectNoneOf(res, SECRETS);
@@ -334,13 +335,14 @@ describe('TC-100 (FR-202, FR-204, DL-32): the revision comes back from every con
     }
     // Positive control: the same GET for a writer does carry it.
     expect(await live(s.author, q)).toMatch(HEX64);
-    // The variant list is writer-only (403/404 for a recruiter); the variant preview is a
+    // The variant list is writer-only (exactly 403 for a recruiter); the variant preview is a
     // candidate-level rendering and carries no revision, override or reference data.
     const variantId = (wr.body as { variant: Json }).variant.id as string;
     const list = await call(h, 'GET', `${base(q)}/variants`, rec);
-    expect([403, 404]).toContain(list.status);
+    expect(list.status).toBe(403);
     expect(list.text).not.toMatch(/revision/i);
-    const prev = await call(h, 'GET', `${base(q)}/variants/${variantId}/preview`, rec);
+    const prev = await call(h, 'GET', `${base(q)}/variants/${variantId}/preview`, rec).expect(200);
+    expect(prev.text).toContain('Sum 1 and 2.'); // positive control: the rendered variant
     expect(prev.text).not.toMatch(/revision/i);
     expectNoneOf(prev, [...SECRETS, 'REF-REV-SECRET', writerRevision, published]);
   });
@@ -355,16 +357,43 @@ describe('TC-100 (FR-202, FR-204, DL-32): the revision comes back from every con
           .testCases as Json[]
       )[0] as Json
     ).id as string;
+    const vq = await createQuestion(h, s.author, templated());
+    const vqId = idOf(vq);
+    const vslot = (versionOf(vq).testCases as Json[])[0] as Json;
+    const made = await call(h, 'POST', `${base(vqId)}/variants`, s.author.token, {
+      params: { a: 1, b: 2 },
+    }).expect(201);
+    const vid = (made.body as { variant: Json }).variant.id as string;
+    await call(
+      h,
+      'PUT',
+      `${base(vqId)}/variants/${vid}/test-cases/${vslot.id as string}`,
+      s.author.token,
+      {
+        input: OV_IN,
+        expectedOutput: OV_OUT,
+      },
+    ).expect(200);
     const r0 = await live(s.author, q);
-    for (const [method, path, body] of [
+    const v0 = await live(s.author, vqId);
+    const vb = `${base(vqId)}/variants`;
+    const sweep: ['PATCH' | 'POST' | 'PUT' | 'DELETE', string, unknown][] = [
       ['PATCH', `/questions/${q}`, { title: 'x' }],
       ['POST', `${base(q)}/test-cases`, { input: 'a', expectedOutput: 'b' }],
       ['DELETE', `${base(q)}/test-cases/${slot}`, undefined],
-    ] as const) {
+      ['POST', vb, { params: { a: 3, b: 4 } }],
+      ['PUT', `${vb}/${vid}/test-cases/${vslot.id as string}`, { input: 'x', expectedOutput: 'y' }],
+      ['DELETE', `${vb}/${vid}/test-cases/${vslot.id as string}`, undefined],
+      ['DELETE', `${vb}/${vid}`, undefined],
+    ];
+    for (const [method, path, body] of sweep) {
       const res = await call(h, method, path, outsider.token, body);
-      expect([path, res.status]).toEqual([path, 404]);
+      expect([method, path, res.status]).toEqual([method, path, 404]);
       expect(res.text).not.toMatch(/revision/i);
     }
+    expect(await h.owner.questionVariant.count({ where: { id: vid } })).toBe(1);
+    expect(await h.owner.variantTestCase.count({ where: { variantId: vid } })).toBe(1);
+    expect(await live(s.author, vqId)).toBe(v0);
     expect(await live(s.author, q)).toBe(r0);
   });
 });
