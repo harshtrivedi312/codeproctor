@@ -16,7 +16,7 @@ async function load() {
   return (await import('./msw-init')).MswInit;
 }
 
-describe('FR-505 MswInit starts the mock worker safely', () => {
+describe('FU-FEB-03 (step-1 item 1) MswInit starts the mock worker safely', () => {
   beforeEach(() => {
     start.mockReset();
     toastError.mockReset();
@@ -25,7 +25,7 @@ describe('FR-505 MswInit starts the mock worker safely', () => {
   });
   afterEach(() => vi.unstubAllEnvs());
 
-  it('FR-505 starts once under StrictMode and marks mocking ready', async () => {
+  it('FU-FEB-03 starts once under StrictMode and marks mocking ready', async () => {
     start.mockResolvedValue(undefined);
     const MswInit = await load();
     render(
@@ -38,15 +38,18 @@ describe('FR-505 MswInit starts the mock worker safely', () => {
     expect(toastError).not.toHaveBeenCalled();
   });
 
-  it('FR-505 a failed worker.start() shows a toast and still marks mocking ready', async () => {
+  it('FU-FEB-03 a failed worker.start() shows a toast and still marks mocking ready', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     start.mockRejectedValue(new Error('no service worker'));
     const MswInit = await load();
     render(<MswInit />);
     await vi.waitFor(() => expect(markReady).toHaveBeenCalled());
     expect(toastError).toHaveBeenCalledWith(expect.stringMatching(/could not start/i));
+    expect(warn).toHaveBeenCalledWith('MSW start failed:', 'Error');
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('no service worker');
   });
 
-  it('FR-505 does nothing when mocking is off', async () => {
+  it('FU-FEB-03 does nothing when mocking is off', async () => {
     vi.stubEnv('NEXT_PUBLIC_API_MOCKING', '');
     const MswInit = await load();
     render(<MswInit />);
