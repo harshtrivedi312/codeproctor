@@ -1,13 +1,12 @@
-// ADR 0004 section 9 migrations (proposed; built on the reviewed text, merged only after the owner
-// accepts it): the ERASED and CLOSED_ERASED enum values (9.5), the partial index for the retention
+// ADR 0004 section 9 migrations (accepted, D-54): the ERASED and CLOSED_ERASED enum values (9.5), the partial index for the retention
 // markers (9.2), and no DELETE or TRUNCATE on sessions for app_user (9.3). Serves FR-704 and NFR-05.
 // A real Postgres 16 (Testcontainers, Docker required) with the real migrations applied; the code
 // under test connects as app_user through the real client factory, so the real grants are in force.
 // Fixtures and the teardown path use the owner role.
 //
 // The grants checks follow the pattern of TC-006 (audit_logs is append-only for app_user): ask the
-// catalog, then try the statement and expect 42501. TC-008 (tc-008-org-isolation.spec.ts) runs the
-// per-model delete checks and has its own Session branch.
+// catalog, then try the statement and expect 42501. TC-008 (tc-008-org-isolation.spec.ts) and the CS-4
+// SERVICE matrix (cs4-session-isolation.spec.ts) run the per-model delete checks, each with a Session branch.
 import { Client } from 'pg';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import { AppealStatus, SessionStatus } from '../generated/prisma/enums.js';
@@ -275,7 +274,7 @@ describe('ADR 0004 section 9 migrations: erasure statuses, retention marker inde
     });
 
     it('FR-704 TC-008 session.delete and session.deleteMany through the org-scoped client are refused in org scope and in the retention and erasure system scope, and the consent row survives', async () => {
-      const refused = /permission denied/i;
+      const refused = /permission denied for table sessions/i;
       await orgContext.runInOrg(T.orgId, async () => {
         await expect(scoped.session.delete({ where: { id: sessionId() } })).rejects.toThrow(
           refused,
