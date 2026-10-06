@@ -1,6 +1,5 @@
 'use client';
 import { useQuery } from '@tanstack/react-query';
-import { useRouter } from 'next/navigation';
 import * as React from 'react';
 import { ConsentStep } from '@/features/consent/consent-step';
 import type { IdentityDeps } from '@/features/identity/capture';
@@ -12,12 +11,10 @@ import { OtpStep } from './otp-step';
 import { terminalForConflict } from './problems';
 import {
   captureInvitationToken,
-  readTokenFromHash,
+  hasUrlFragment,
   clearCandidateCredentials,
   clearInvitationToken,
   getInvitationToken,
-  SCRUBBED_PATH,
-  urlNeedsScrub,
   setSessionToken,
 } from './session-store';
 import { Stepper } from './step-frame';
@@ -31,13 +28,13 @@ import type { LinkView, SessionTokenResponse } from './wire';
  * The candidate pre-test stepper (FR-401 to FR-403; ADR 0002, 0003, 0013), served from the static
  * route /t/link.
  *
- * Credentials: a link shaped /t/<token> opens a thin page (TokenHandoff) that moves the token into
- * memory and replaces the route with /t/link, so Next's route tree and history state never hold it.
- * A link shaped /t/link#<token> is read here; the fragment never reaches the server, and is removed
- * through router.replace. The token is sent only in POST bodies. The session token lives in memory
- * only. A reload loses both: the candidate opens the link again and enters a new code, which is what
- * resuming means (ADR 0002). Progress is the server's session status, so a candidate resumes at the
- * right step.
+ * Credentials: links shaped /t/<token> or /t/start#<token> open a thin entry page (token-handoff.tsx)
+ * that moves the token into memory and replaces the route with /t/link. This component only takes
+ * the token from memory. It never reads a fragment: if /t/link is loaded with one anyway, it shows
+ * an error asking for the email link again instead of trusting any clean-up. The token is sent only
+ * in POST bodies; the session token lives in memory only. A reload loses both: the candidate opens
+ * the link again and enters a new code, which is what resuming means (ADR 0002). Progress is the
+ * server's session status, so a candidate resumes at the right step.
  */
 export interface FlowOverrides {
   checker?: SystemChecker;
@@ -54,15 +51,14 @@ export function CandidateFlow({
   /** Test seam: real browsers never pass this. */
   overrides?: FlowOverrides;
 }): React.JSX.Element {
-  const router = useRouter();
   const [terminal, setTerminal] = React.useState<Terminal | null>(null);
   const [step, setStep] = React.useState<StepId>('welcome');
   const [sent, setSent] = React.useState<CodeSentInfo | null>(null);
   const [resuming, setResuming] = React.useState(false);
 
-  // Where the token comes from, in order: the URL fragment (never reaches the server), memory
-  // (handed over by /t/[token]), then a test seam. Held in a ref so it can be dropped once the code
-  // is verified, and so a development double-mount cannot lose it after the scrub.
+  // Where the token comes from: memory (handed over by the entry routes), then a test seam. Held in
+  // a ref so it can be dropped once the code is verified, and so a development double-mount (which
+  // clears memory in the cleanup below) cannot lose it.
   const seedRef = React.useRef<string | null>(null);
 
   // False while rendering on the server, true in the browser. The token is only ever touched in
@@ -73,22 +69,24 @@ export function CandidateFlow({
     () => false,
   );
 
-  // Read the token, then take it out of the address bar and history straight away.
+  // Take the token from memory. Leaving the flow forgets it.
   React.useEffect(() => {
-    seedRef.current ??= readTokenFromHash() ?? getInvitationToken() ?? token ?? null;
+    seedRef.current ??= getInvitationToken() ?? token ?? null;
     const t = seedRef.current;
     if (t !== null) captureInvitationToken(t);
-    // Through the router, so Next's own copy of the URL (fragment included) is cleaned too.
-    if (urlNeedsScrub(t)) router.replace(SCRUBBED_PATH);
     return () => {
       // Leaving the flow forgets everything held in memory.
       clearCandidateCredentials();
     };
-  }, [token, router]);
+  }, [token]);
+
+  // The entry routes hand the token over and navigate here without a fragment. A fragment on this
+  // route means something unexpected (an old link, a bookmark): do not read or trust it.
+  const fragmentPresent = inBrowser && hasUrlFragment();
 
   const link = useQuery({
     queryKey: ['candidate', 'link'],
-    enabled: inBrowser,
+    enabled: inBrowser && !fragmentPresent,
     gcTime: 0,
     staleTime: Number.POSITIVE_INFINITY,
     retry: false,
@@ -133,6 +131,8 @@ export function CandidateFlow({
 
   if (terminal) {
     body = <TerminalScreen terminal={terminal} />;
+  } else if (fragmentPresent) {
+    body = <TerminalScreen terminal={{ reason: 'INVALID' }} />;
   } else if (!inBrowser || link.isPending) {
     body = (
       <p role="status" className="py-10 text-center">

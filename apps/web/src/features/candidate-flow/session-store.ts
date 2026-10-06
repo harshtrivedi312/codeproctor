@@ -41,26 +41,21 @@ export function clearCandidateCredentials(): void {
   sessionToken = null;
 }
 
-/**
- * True when the address bar or the history state still carries something other than the clean
- * /t/link: a fragment, another path, or a state that mentions the token. The fix is always
- * router.replace(SCRUBBED_PATH): Next.js keeps its own copy of the URL (with the fragment) and of
- * the route tree in history.state and re-writes them on the next router update, so changing the
- * URL behind the router's back with history.replaceState does not hold.
- */
-export function urlNeedsScrub(
-  token: string | null,
-  win: Pick<Window, 'history' | 'location'> = window,
-): boolean {
-  if (win.location.hash !== '' || win.location.pathname !== SCRUBBED_PATH) return true;
-  return token !== null && (JSON.stringify(win.history.state as unknown) ?? '').includes(token);
+/** True when the address bar carries a fragment. The stepper never expects one (see below). */
+export function hasUrlFragment(win: Pick<Window, 'location'> = window): boolean {
+  return win.location.hash !== '';
 }
 
 /**
  * Reads an invitation token from the URL fragment ("#<token>" or "#token=<token>"). A fragment is
  * never sent to the server, so it stays out of access logs and proxies, unlike a path segment.
- * Returns null when there is none or it does not look like a token. The fragment is removed by
- * scrubTokenFromUrl together with the path.
+ * Returns null when there is none or it does not look like a token.
+ *
+ * Only the thin entry route /t/start (FragmentHandoff) reads it, then navigates to /t/link with
+ * router.replace. Nothing here changes the URL: Next keeps its own copy of the URL and route tree,
+ * so the only thing that is known to work is arriving at /t/link through the router from a route
+ * Next has not cached. Whether the token is really gone from the address bar and history is checked
+ * in a real browser (FU-FEB-23), not by the unit tests.
  */
 export function readTokenFromHash(win: Pick<Window, 'location'> = window): string | null {
   const raw = win.location.hash.replace(/^#/, '').replace(/^token=/, '');

@@ -1,5 +1,4 @@
 import { screen, waitFor } from '@testing-library/react';
-import { router } from '@/test/nav-mock';
 import userEvent from '@testing-library/user-event';
 import { axe } from 'vitest-axe';
 import { describe, expect, it, vi } from 'vitest';
@@ -26,7 +25,7 @@ function open(token: string) {
 }
 
 describe('invitation link and token handling (FR-303, FR-401, ADR 0003)', () => {
-  it('FR-401: on the clean /t/link no router replace is needed and nothing holds the token', async () => {
+  it('FR-401: on /t/link the stepper starts from the in-memory token and leaves the URL and state alone', async () => {
     open(MOCK_TOKENS.open);
     await screen.findByRole('heading', {
       level: 1,
@@ -34,7 +33,6 @@ describe('invitation link and token handling (FR-303, FR-401, ADR 0003)', () => 
     });
     expect(window.location.pathname).toBe(SCRUBBED_PATH);
     expect(window.location.href).not.toContain(MOCK_TOKENS.open);
-    expect(router.replace).not.toHaveBeenCalled();
     expect(JSON.stringify(window.history.state)).not.toContain(MOCK_TOKENS.open);
     // The token lives in memory only.
     expect(getInvitationToken()).toBe(MOCK_TOKENS.open);
@@ -69,21 +67,15 @@ describe('invitation link and token handling (FR-303, FR-401, ADR 0003)', () => 
     warn.mockRestore();
   });
 
-  it('FR-401: a token in the URL fragment is read and removed too, and never reaches the server', async () => {
+  it('FR-401: a fragment on /t/link is never read or trusted: it shows the open-the-email-link-again page and sends nothing', async () => {
     const seen = recordRequests();
     window.history.replaceState(null, '', `/t/link#${MOCK_TOKENS.open}`);
     renderWithQuery(<CandidateFlow />);
-    await screen.findByRole('heading', {
-      level: 1,
-      name: /welcome to your proctored coding test/i,
-    });
-    // The fragment is removed through the router, so Next's own copy of the URL loses it too.
-    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(SCRUBBED_PATH));
-    expect(window.location.hash).toBe('');
-    expect(window.location.href).not.toContain(MOCK_TOKENS.open);
-    expect(JSON.stringify(window.history.state)).not.toContain(MOCK_TOKENS.open);
-    expect(getInvitationToken()).toBe(MOCK_TOKENS.open);
-    expect(seen.some((r) => r.url.includes(MOCK_TOKENS.open))).toBe(false);
+    expect(
+      await screen.findByRole('heading', { level: 1, name: /could not open this link/i }),
+    ).toBeInTheDocument();
+    expect(getInvitationToken()).toBeNull();
+    expect(seen).toHaveLength(0);
   });
 
   it('FR-401: a reload (token already gone from the URL) shows how to open the link again', async () => {
