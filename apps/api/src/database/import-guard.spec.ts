@@ -58,13 +58,17 @@ export const RULES: readonly GuardRule[] = [
     name: 'database/session-locks',
     module: 'database/session-locks',
     why:
-      'guardLive, lockForAccommodation and lockAnySession are the lock core (ADR 0013 section 5.7, ADR ' +
-      '0006 section 8.5, ADR 0015 section 6; FU-DB-67). SessionStateService.guardLive, ' +
-      '.lockForAccommodation and the job entry withAnySession are thin wrappers over them (hub ruling, ' +
-      'ADR PR #205), so ONLY SessionStateService may import this module: Backend B adds exactly its ' +
-      'SessionStateService file to `allowed` in its PR, and nothing else. Not SessionJobProcessor and not ' +
-      'the retention and erasure jobs: they call the SessionStateService wrappers. That entry in ' +
-      '`allowed` is the review point. Candidate paths use SessionStateService.transition(), never these.',
+      'The lock core (ADR 0013 section 5.7, ADR 0006 section 8.5, ADR 0015 section 6; FU-DB-67; hub rulings, ' +
+      '#205 and its follow-ups). ONLY the SessionStateService file imports this module: Backend B adds exactly ' +
+      'that file to `allowed` in its PR, and nothing else. SessionStateService.guardLive, .lockForAccommodation ' +
+      'and .lockAnySession are thin wrappers, and everyone else calls the wrappers. Who calls what is pinned in ' +
+      'call-sites.spec.ts (CALL_SITES): guardLive from SessionJobProcessor.withLiveSession and the single STAFF ' +
+      'method SessionStateService.proctorResume only; lockAnySession from SessionJobProcessor.withAnySession ' +
+      'only; lockForAccommodation from the accommodation writers and RetentionRepository.casAccommodations (the ' +
+      'erasure, R-4 and R-10 jobs) only. The core itself refuses at run time a CANDIDATE scope and system scope ' +
+      '(all three locks) and a plain runInOrg (guardLive and lockAnySession); a STAFF or SERVICE call under the ' +
+      'SessionStateService grant is fine (ADR 0015 section 6, ADR 0013 section 5.7). That entry in `allowed` is ' +
+      'the review point.',
     allowed: [], // nobody outside database/ yet: Backend B adds exactly its SessionStateService file, nothing else
   },
   {
@@ -449,11 +453,15 @@ describe('import guard: the session write locks have no importer yet (FU-DB-67, 
     expect(locks.module).toBe('database/session-locks');
     expect(locks.allowed).toEqual([]);
     // The reason is the review point: it says who adds what, in which pull request, and who must not.
-    expect(locks.why).toContain('ONLY SessionStateService may import this module');
-    expect(locks.why).toContain('exactly its SessionStateService file');
-    expect(locks.why).toContain('Not SessionJobProcessor');
-    expect(locks.why).toContain('retention and erasure jobs');
-    expect(locks.why).toContain('lockAnySession');
+    expect(locks.why).toContain('ONLY the SessionStateService file imports this module');
+    expect(locks.why).toContain('exactly that file');
+    expect(locks.why).toContain('and nothing else');
+    expect(locks.why).toContain('SessionJobProcessor.withLiveSession');
+    expect(locks.why).toContain('SessionStateService.proctorResume');
+    expect(locks.why).toContain('withAnySession');
+    expect(locks.why).toContain('RetentionRepository.casAccommodations');
+    expect(locks.why).toContain('CANDIDATE scope and system scope');
+    expect(locks.why).toContain('under the SessionStateService grant is fine');
     expect(locks.why).toContain('#205');
     expect(locks.why).toContain('review point');
   });
@@ -527,12 +535,12 @@ describe('import guard: the session write locks have no importer yet (FU-DB-67, 
   });
 
   it('TC-008 a re-export is refused even in a file that is on the allowlist', () => {
-    const allowed: GuardRule = { ...locks, allowed: ['jobs/session-job.processor.ts'] };
+    const allowed: GuardRule = { ...locks, allowed: ['candidate/session-state.service.ts'] };
     expect(
       findViolations(
         [
           stray(
-            'jobs/session-job.processor.ts',
+            'candidate/session-state.service.ts',
             "import { guardLive } from '../database/session-locks';",
           ),
         ],
@@ -543,13 +551,54 @@ describe('import guard: the session write locks have no importer yet (FU-DB-67, 
       findViolations(
         [
           stray(
-            'jobs/session-job.processor.ts',
+            'candidate/session-state.service.ts',
             "export { guardLive } from '../database/session-locks';",
           ),
         ],
         allowed,
       ),
-    ).toEqual(['jobs/session-job.processor.ts']);
+    ).toEqual(['candidate/session-state.service.ts']);
+  });
+
+  it('TC-008 S2: a template-literal specifier (backticks, no ${}) is an import too, in every form', () => {
+    for (const text of [
+      'const m = await import(`../database/session-locks`);',
+      'const { guardLive } = require(`../database/session-locks`);',
+      'import { guardLive } from `../database/session-locks`;',
+      'export { guardLive } from `../database/session-locks`;',
+      'import(`../database/session-locks.js`);',
+    ]) {
+      expect({ text, found: findViolations([stray('billing/t.ts', text)], locks) }).toEqual({
+        text,
+        found: ['billing/t.ts'],
+      });
+    }
+    expect(specifiersOf('await import(`./a`); require(`./b`); x = `plain ${y} text`;')).toEqual([
+      './a',
+      './b',
+    ]);
+  });
+
+  it('TC-008 S2: the module is found through every extension a specifier can carry: .js .ts .mjs .mts .cjs .cts', () => {
+    for (const ext of ['', '.js', '.ts', '.mjs', '.mts', '.cjs', '.cts']) {
+      expect(resolveSpecifier('billing/x.ts', `../database/session-locks${ext}`)).toBe(
+        'database/session-locks',
+      );
+      expect({
+        ext,
+        found: findViolations(
+          [stray('billing/x.ts', `import { guardLive } from '../database/session-locks${ext}';`)],
+          locks,
+        ),
+      }).toEqual({ ext, found: ['billing/x.ts'] });
+    }
+    // A longer extension or a different module name is not the module.
+    expect(resolveSpecifier('billing/x.ts', '../database/session-locks.json')).toBe(
+      'database/session-locks.json',
+    );
+    expect(resolveSpecifier('billing/x.ts', '../database/session-locks.d.ts')).toBe(
+      'database/session-locks.d',
+    );
   });
 
   it('TC-008 unrelated imports do not match: errors.ts, the barrel and a similarly named module', () => {

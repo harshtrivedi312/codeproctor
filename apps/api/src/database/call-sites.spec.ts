@@ -29,9 +29,13 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, relative, resolve, sep } from 'node:path';
 import {
   findCallSiteViolations,
+  findLockExports,
   findStaleEntries,
   GUARDED_NAMES,
   importersOf,
+  lockCallSiteProblems,
+  LOCK_CALLER_RULES,
+  RETENTION_LOCK_FILE,
   stripComments,
   usesOf,
 } from './testing/call-site-guard';
@@ -447,5 +451,268 @@ describe('call-site guard patterns (NFR-04, TC-008)', () => {
       'auth/other.ts',
       'database/database.module.ts',
     ]);
+  });
+});
+
+describe('call-site guard: the exports and the caller rules of the session locks (S3, hub rulings; NFR-04, TC-008)', () => {
+  const file = (path: string, text: string): SourceFile => ({ path, text });
+  const exported = (text: string, path = 'candidate/session-state.service.ts'): string[] =>
+    findLockExports([file(path, text)]);
+
+  it('TC-008 S3 every way to export a lock without `from` is found: a rename, a variable, a default, an object, an array, a function, a class, CommonJS', () => {
+    for (const name of ['guardLive', 'lockForAccommodation', 'lockAnySession']) {
+      for (const text of [
+        `import { ${name} } from '../database/session-locks';\nexport { ${name} };`,
+        `import { ${name} } from '../database/session-locks';\nexport { ${name} as g };`,
+        `import { ${name} } from '../database/session-locks';\nexport type { ${name} };`,
+        `import { ${name} as g } from '../database/session-locks';\nexport { g };`,
+        `export const g = ${name};`,
+        `export const g: unknown = ${name};`,
+        `export let g = ${name};`,
+        `export default ${name};`,
+        `export default { ${name} };`,
+        `export default [${name}];`,
+        `export const locks = { ${name} };`,
+        `export const locks = { a: 1, ${name}, b: 2 };`,
+        `const g = ${name};\nexport { g };`,
+        `const g = ${name};\nconst h = g;\nexport { h };`,
+        `const locks = { ${name} };\nexport default locks;`,
+        `const { ${name}: g } = locks;\nexport { g };`,
+        `export function ${name}() { return 1; }`,
+        `export async function ${name}() { return 1; }`,
+        `export const ${name} = () => 1;`,
+        `export class ${name} {}`,
+        `module.exports = ${name};`,
+        `module.exports = { ${name} };`,
+        `exports.g = ${name};`,
+        `exports['g'] = ${name};`,
+      ]) {
+        expect({ text, found: exported(text).length > 0 }).toEqual({ text, found: true });
+      }
+    }
+    // A rename exports both names: the lock and its alias.
+    expect(exported('export { guardLive as g };')).toEqual([
+      'candidate/session-state.service.ts: exports g',
+      'candidate/session-state.service.ts: exports guardLive',
+    ]);
+    expect(exported('const g = guardLive;\nexport { g };')).toEqual([
+      'candidate/session-state.service.ts: exports g',
+    ]);
+  });
+
+  it('TC-008 S3 the wrapper class is not an export of the lock: methods named like the locks, calls, imports, comments and strings are fine', () => {
+    for (const text of [
+      `import { guardLive as coreGuardLive } from '../database/session-locks';
+export class SessionStateService {
+  async guardLive(tx: Tx, sid: string) { return coreGuardLive(tx, sid); }
+  async lockForAccommodation(tx: Tx, sid: string) { return 1; }
+  async lockAnySession(tx: Tx, sid: string) { return 1; }
+  async proctorResume() { return this.guardLive(tx, sid); }
+}`,
+      'export default class SessionStateService { guardLive() {} }',
+      'export class A { static guardLive() {} }',
+      'export const service = new SessionStateService();',
+      'export { SessionStateService };',
+      'export { SessionStateService as default };',
+      '// export { guardLive };\nexport const x = 1;',
+      'export const guardLiveWith = 1;',
+      'export const lockAnySessionLater = 1;',
+      'await this.state.guardLive(tx, sid);\nexport const x = 1;',
+    ]) {
+      expect({ text, found: exported(text) }).toEqual({ text, found: [] });
+    }
+  });
+
+  it('TC-008 S3 FAIL-SAFE: a string that spells out an export is flagged like code (strings are not stripped), a comment is not', () => {
+    expect(exported("export const m = 'export { guardLive }';")).toEqual([
+      'candidate/session-state.service.ts: exports guardLive',
+    ]);
+    expect(exported("// export { guardLive }\nexport const m = 'text';")).toEqual([]);
+  });
+
+  it('TC-008 S3 a file that names no lock is skipped, and the findings are sorted by path', () => {
+    expect(findLockExports([file('a/none.ts', 'export const x = 1;')])).toEqual([]);
+    expect(
+      findLockExports([
+        file('b/two.ts', 'export { lockAnySession };'),
+        file('a/one.ts', 'export { guardLive };'),
+      ]),
+    ).toEqual(['a/one.ts: exports guardLive', 'b/two.ts: exports lockAnySession']);
+  });
+
+  // ---- the caller rules --------------------------------------------------------------------------------------------
+  const STATE = 'candidate/session-state.service.ts';
+  const PROCESSOR = 'jobs/session-job.processor.ts';
+  const ACCOMMODATIONS = 'accommodations/accommodations.service.ts';
+  const GOOD: CallSiteList = {
+    [STATE]: {
+      names: ['guardLive', 'lockForAccommodation', 'lockAnySession'],
+      why: 'SessionStateService: the wrappers of the three locks; its single STAFF method proctorResume calls guardLive; withAnySession and the accommodation writers use the other two',
+    },
+    [PROCESSOR]: {
+      names: ['guardLive', 'lockAnySession'],
+      why: 'SessionJobProcessor: withLiveSession calls guardLive, withAnySession calls lockAnySession',
+    },
+    [ACCOMMODATIONS]: {
+      names: ['lockForAccommodation'],
+      why: 'AccommodationsService: the accommodation writers (PATCH, redact-note, video-check)',
+    },
+    [RETENTION_LOCK_FILE]: {
+      names: ['lockForAccommodation'],
+      why: 'RetentionRepository.casAccommodations: the erasure, R-4 and R-10 jobs',
+    },
+  };
+  const GOOD_FILES: SourceFile[] = [
+    file(STATE, 'class S { async proctorResume() { await this.guardLive(tx, sid); } }'),
+    file(PROCESSOR, 'class P { async withLiveSession() { await this.state.guardLive(tx, sid); } }'),
+  ];
+  const withEntry = (path: string, entry: CallSiteList[string]): CallSiteList => ({
+    ...GOOD,
+    [path]: entry,
+  });
+
+  it('TC-008 the complete list passes: SessionStateService, SessionJobProcessor, AccommodationsService and the retention repository, with the calls counted in the files', () => {
+    expect(lockCallSiteProblems(GOOD, GOOD_FILES)).toEqual([]);
+    expect(lockCallSiteProblems(GOOD)).toEqual([]); // without files, only the entries are checked
+    // The defining file is exempt, and an empty list is fine.
+    expect(
+      lockCallSiteProblems({
+        'database/session-locks.ts': { names: ['guardLive'], why: 'defines it' },
+      }),
+    ).toEqual([]);
+    expect(lockCallSiteProblems({})).toEqual([]);
+  });
+
+  it('TC-008 the rules are written out for Backend B and Database B', () => {
+    expect(LOCK_CALLER_RULES.guardLive).toContain('withLiveSession');
+    expect(LOCK_CALLER_RULES.guardLive).toContain('proctorResume');
+    expect(LOCK_CALLER_RULES.lockAnySession).toContain('withAnySession');
+    expect(LOCK_CALLER_RULES.lockForAccommodation).toContain(RETENTION_LOCK_FILE);
+    expect(RETENTION_LOCK_FILE).toBe('retention/retention.repository.ts');
+  });
+
+  it('TC-008 guardLive: a third file fails, and so does a why that names neither withLiveSession nor proctorResume', () => {
+    expect(
+      lockCallSiteProblems(
+        withEntry('x/extra.ts', { names: ['guardLive'], why: 'withLiveSession again' }),
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('guardLive: 3 entries'),
+        'guardLive: more than one entry names withLiveSession',
+      ]),
+    );
+    expect(
+      lockCallSiteProblems({
+        ...GOOD,
+        [PROCESSOR]: { names: ['guardLive'], why: 'SessionJobProcessor, some other method' },
+      }),
+    ).toEqual([`${PROCESSOR}: a guardLive entry's why must name withLiveSession or proctorResume`]);
+  });
+
+  it('TC-008 guardLive: more than one entry naming the same caller fails', () => {
+    expect(
+      lockCallSiteProblems({
+        ...GOOD,
+        [PROCESSOR]: { names: ['guardLive'], why: 'proctorResume too' },
+      }),
+    ).toEqual(['guardLive: more than one entry names proctorResume']);
+  });
+
+  it('TC-008 guardLive: exactly ONE this.guardLive( call in the proctorResume file, and exactly one .guardLive( call in the withLiveSession file', () => {
+    const two = file(
+      STATE,
+      'class S { async proctorResume() { await this.guardLive(a, b); await this.guardLive(c, d); } }',
+    );
+    const none = file(STATE, 'class S { async proctorResume() { return 1; } }');
+    const noMethod = file(STATE, 'class S { async other() { await this.guardLive(a, b); } }');
+    expect(lockCallSiteProblems(GOOD, [two, GOOD_FILES[1] as SourceFile])).toEqual([
+      `${STATE}: proctorResume file has 2 this.guardLive( calls, exactly one is allowed`,
+    ]);
+    expect(lockCallSiteProblems(GOOD, [none, GOOD_FILES[1] as SourceFile])).toEqual([
+      `${STATE}: proctorResume file has 0 this.guardLive( calls, exactly one is allowed`,
+    ]);
+    expect(lockCallSiteProblems(GOOD, [noMethod, GOOD_FILES[1] as SourceFile])).toEqual([
+      `${STATE}: no proctorResume method found`,
+    ]);
+    const twoLive = file(
+      PROCESSOR,
+      'class P { async withLiveSession() { await this.s.guardLive(a, b); await this.t.guardLive(c, d); } }',
+    );
+    expect(lockCallSiteProblems(GOOD, [GOOD_FILES[0] as SourceFile, twoLive])).toEqual([
+      `${PROCESSOR}: withLiveSession file has 2 .guardLive( calls, exactly one is allowed`,
+    ]);
+    // The wrapper's own method definition and a mention in a comment are not calls.
+    const commented = file(
+      STATE,
+      'class S { async guardLive() { return 1; } // this.guardLive(x)\n async proctorResume() { await this.guardLive(a, b); } }',
+    );
+    expect(lockCallSiteProblems(GOOD, [commented, GOOD_FILES[1] as SourceFile])).toEqual([]);
+  });
+
+  it('TC-008 lockAnySession: only withAnySession, in at most two files', () => {
+    expect(
+      lockCallSiteProblems({
+        ...GOOD,
+        [PROCESSOR]: { names: ['guardLive', 'lockAnySession'], why: 'withLiveSession only' },
+      }),
+    ).toEqual([`${PROCESSOR}: a lockAnySession entry's why must name withAnySession`]);
+    expect(
+      lockCallSiteProblems(
+        withEntry('x/other.ts', { names: ['lockAnySession'], why: 'withAnySession as well' }),
+      ),
+    ).toEqual([expect.stringContaining('lockAnySession: 3 entries')]);
+  });
+
+  it('TC-008 lockForAccommodation: an entry that names neither an accommodation writer nor the retention repository is an extra entry and fails', () => {
+    expect(
+      lockCallSiteProblems(
+        withEntry('webhooks/webhooks.service.ts', {
+          names: ['lockForAccommodation'],
+          why: 'sends webhooks',
+        }),
+      ),
+    ).toEqual([
+      expect.stringContaining('lockForAccommodation: 3 accommodation-writer files'),
+      expect.stringContaining(
+        "webhooks/webhooks.service.ts: a lockForAccommodation entry's why must name an accommodation writer",
+      ),
+    ]);
+  });
+
+  it('TC-008 lockForAccommodation: at most ONE retention file, and it is retention/retention.repository.ts, with a why naming the erasure, R-4 and R-10 jobs', () => {
+    expect(
+      lockCallSiteProblems(
+        withEntry('retention/retention.service.ts', {
+          names: ['lockForAccommodation'],
+          why: 'the erasure, R-4 and R-10 jobs',
+        }),
+      ),
+    ).toEqual([
+      'lockForAccommodation: more than one retention file, only retention/retention.repository.ts',
+      'retention/retention.service.ts: the only retention file that may use lockForAccommodation is retention/retention.repository.ts',
+    ]);
+    expect(
+      lockCallSiteProblems({
+        ...GOOD,
+        [RETENTION_LOCK_FILE]: { names: ['lockForAccommodation'], why: 'the erasure job only' },
+      }),
+    ).toEqual([
+      `${RETENTION_LOCK_FILE}: a retention lockForAccommodation entry's why must name the R-10 job`,
+      `${RETENTION_LOCK_FILE}: a retention lockForAccommodation entry's why must name the R-4 job`,
+    ]);
+  });
+
+  it('TC-008 inside database/ only database/session-locks.ts may name a lock', () => {
+    expect(
+      lockCallSiteProblems({
+        ...GOOD,
+        'database/other.ts': { names: ['guardLive'], why: 'withLiveSession' },
+      }),
+    ).toEqual(
+      expect.arrayContaining([
+        'database/other.ts: only database/session-locks.ts may name a session lock inside database/',
+      ]),
+    );
   });
 });
