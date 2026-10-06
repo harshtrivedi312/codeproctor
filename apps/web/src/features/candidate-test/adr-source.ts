@@ -1,7 +1,9 @@
 import type { Schemas } from '@/lib/api/client';
 import { requestAt, type ApiResult } from '@/features/candidate-flow/api';
 import {
+  RUNNING_STATUSES,
   draftSavedSchema,
+  isOverStatus,
   questionViewSchema,
   runResultSchema,
   sectionFinishedSchema,
@@ -117,8 +119,12 @@ export function createAdrSource(hooks: { onSessionEnded: () => void }): TestSour
         authed: true,
       });
       ended(state);
-      if (state.ok && !['IN_PROGRESS', 'PAUSED'].includes(state.data.status)) {
+      if (state.ok && isOverStatus(state.data.status)) {
         return { submitted: true };
+      }
+      // Any other status that is not running (an unknown value) is "could not read", not "over".
+      if (state.ok && !(RUNNING_STATUSES as readonly string[]).includes(state.data.status)) {
+        return null;
       }
       if (
         !state.ok &&

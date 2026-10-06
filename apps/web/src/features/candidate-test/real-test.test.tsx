@@ -4,7 +4,7 @@ import { http, HttpResponse } from 'msw';
 import { axe } from 'vitest-axe';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { candidateApi } from '@/features/candidate-flow/api';
-import { getSessionToken, setSessionToken } from '@/features/candidate-flow/session-store';
+import { setSessionToken } from '@/features/candidate-flow/session-store';
 import {
   recordRequests,
   renderWithQuery,
@@ -334,8 +334,6 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     // The server submits the test, but the answer never arrives.
     server.use(
       http.post(`${cand}/sections/:position/finish`, () => {
-        const token = getSessionToken();
-        void token;
         return HttpResponse.error();
       }),
       http.get(`${cand}/session`, () =>
@@ -367,5 +365,47 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
       ),
     );
     expect(await source.readSession()).toEqual({ submitted: true });
+  });
+
+  it('ADR 0002: an unknown status (drift, lower case, empty) is "could not read", never "submitted"', async () => {
+    await startedSession();
+    const source = createAdrSource({ onSessionEnded: vi.fn() });
+    for (const status of ['submitted', 'DONE', '', 'FINISHED']) {
+      server.use(
+        http.get(`${cand}/session`, () =>
+          HttpResponse.json({
+            serverTime: new Date().toISOString(),
+            status,
+            startedAt: null,
+            deadlineAt: null,
+            sectionDeadlineAt: null,
+            pauseReasons: [],
+          }),
+        ),
+      );
+      expect(await source.readSession()).toBeNull();
+    }
+    for (const status of [
+      'SUBMITTED',
+      'GRADED',
+      'UNDER_REVIEW',
+      'COMPLETED',
+      'APPEALED',
+      'EXPIRED',
+    ]) {
+      server.use(
+        http.get(`${cand}/session`, () =>
+          HttpResponse.json({
+            serverTime: new Date().toISOString(),
+            status,
+            startedAt: null,
+            deadlineAt: null,
+            sectionDeadlineAt: null,
+            pauseReasons: [],
+          }),
+        ),
+      );
+      expect(await source.readSession()).toEqual({ submitted: true });
+    }
   });
 });

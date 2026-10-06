@@ -7,7 +7,7 @@ import { createHandlers } from '../handlers';
  * The candidate test-screen mocks share paths with the older demo mocks (/t/demo/test, the QA
  * specs). A request with no Authorization header is the demo's and must reach the demo handler.
  */
-describe('FU-FEB-08 candidate test mocks do not shadow the demo routes', () => {
+describe('FU-FEB-08 FR-505 candidate test mocks do not shadow the demo routes', () => {
   it('FU-FEB-08 a request without a credential gets the demo answers, one with an unknown token the candidate 401', async () => {
     const server = setupServer(...createHandlers({ saveLatencyMs: 0, runLatencyMs: 0 }));
     server.listen({ onUnhandledFrame: 'error' });

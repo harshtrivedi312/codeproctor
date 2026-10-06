@@ -11,6 +11,26 @@ import { z } from 'zod';
  */
 
 /** GET /candidate/session (BE-07). The server clock and the deadlines the timers run on. */
+/**
+ * States in which the test is over (ADR 0002 section 3). Only these mean "submitted" to the screen;
+ * a status that is in neither list is treated as "could not read" (never as over), so a renamed or
+ * lower-case value cannot show the submitted page and clear the candidate's credentials.
+ */
+export const RUNNING_STATUSES = ['IN_PROGRESS', 'PAUSED'] as const;
+export const OVER_STATUSES = [
+  'SUBMITTED',
+  'GRADED',
+  'UNDER_REVIEW',
+  'COMPLETED',
+  'APPEALED',
+  'EXPIRED',
+  'ERASED',
+] as const;
+
+export function isOverStatus(status: string): boolean {
+  return (OVER_STATUSES as readonly string[]).includes(status);
+}
+
 export const sessionStateSchema = z.object({
   serverTime: z.string(),
   status: z.string(),
