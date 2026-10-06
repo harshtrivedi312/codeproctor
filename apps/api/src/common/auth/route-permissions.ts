@@ -122,4 +122,19 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
     principal: 'CANDIDATE',
     permission: 'candidate_media:presign',
   },
+
+  // Candidate identity check (FR-403; BE-08b). The status read reuses the upload permission: the
+  // shared contract has no candidate_identity:read yet (hub question, design notes section 7).
+  'POST /candidate/session/identity/presign': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_identity:upload',
+  },
+  'POST /candidate/session/identity': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_identity:upload',
+  },
+  'GET /candidate/session/identity': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_identity:upload',
+  },
 };

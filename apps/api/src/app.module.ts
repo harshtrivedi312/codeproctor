@@ -18,6 +18,7 @@ import { TokenModule } from './common/auth/token.service';
 import { DatabaseModule } from './database/database.module';
 import { ExecutionModule } from './execution/execution.module';
 import { MailModule } from './mail/mail.module';
+import { IdentityModule } from './identity/identity.module';
 import { MediaModule } from './media/media.module';
 import { HealthModule } from './health/health.module';
 import { InfrastructureModule } from './infrastructure/infrastructure.module';
@@ -83,6 +84,7 @@ function areaOf(context: ExecutionContext): Area {
     AuthModule,
     CandidateModule,
     MediaModule,
+    IdentityModule,
     UsersModule,
     HealthModule,
     ExecutionModule,

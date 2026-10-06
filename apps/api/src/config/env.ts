@@ -106,6 +106,20 @@ export const envSchema = z
       .enum(['true', 'false'])
       .default('false')
       .transform((v) => v === 'true'),
+    // Analysis worker (BE-08b, ADR 0014 section 4): the API calls it over HMAC-signed HTTP. Unset
+    // means the identity match answers MANUAL_REVIEW (the candidate continues, D-05). The key id is
+    // short and the key is a secret (32 random bytes, base64; never log).
+    WORKER_BASE_URL: z.url().optional(),
+    WORKER_HMAC_KEY_ID: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]{1,32}$/)
+      .optional(),
+    WORKER_HMAC_KEY: z
+      .string()
+      .refine((v) => /^[A-Za-z0-9+/_-]+={0,2}$/.test(v) && Buffer.from(v, 'base64').length >= 32, {
+        message: 'must be at least 32 bytes, base64 encoded',
+      })
+      .optional(),
   })
   .superRefine((env, ctx) => {
     const live = env.APP_ENV === 'pilot' || env.APP_ENV === 'production';
@@ -165,6 +179,28 @@ export const envSchema = z
         if (env[key] === undefined) {
           ctx.addIssue({ code: 'custom', path: [key], message: 'is required outside development' });
         }
+      }
+    }
+    const workerSet = [env.WORKER_BASE_URL, env.WORKER_HMAC_KEY_ID, env.WORKER_HMAC_KEY].filter(
+      (v) => v !== undefined,
+    ).length;
+    if (workerSet !== 0 && workerSet !== 3) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['WORKER_HMAC_KEY'],
+        message: 'WORKER_BASE_URL, WORKER_HMAC_KEY_ID and WORKER_HMAC_KEY must be set together',
+      });
+    }
+    if (env.WORKER_BASE_URL !== undefined) {
+      const url = new URL(env.WORKER_BASE_URL);
+      const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+      // ADR 0014 4.4: plain HTTP only on the single-host internal network; anywhere else TLS.
+      if (live && url.protocol !== 'https:' && !loopback && !/^[a-z0-9-]+$/.test(url.hostname)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['WORKER_BASE_URL'],
+          message: 'must be https unless the worker is on the same host network',
+        });
       }
     }
     if ((env.S3_ACCESS_KEY_ID === undefined) !== (env.S3_SECRET_ACCESS_KEY === undefined)) {

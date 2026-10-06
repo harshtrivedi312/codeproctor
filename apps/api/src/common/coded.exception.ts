@@ -44,6 +44,12 @@ export const CANDIDATE_PROBLEM_CODES = [
   'PRESIGN_QUOTA_EXCEEDED',
   'STORAGE_UNCONFIGURED',
   'STORAGE_UNAVAILABLE',
+  // Identity check (BE-08b, ADR 0013 5.6, ADR 0015 section 3, ADR 0004 section 1).
+  'IDENTITY_CHECK_WAIVED',
+  'IDENTITY_CHECK_PENDING',
+  'IDENTITY_ATTEMPTS_EXHAUSTED',
+  'IDENTITY_NAME_INVALID',
+  'IDENTITY_IMAGE_REJECTED',
 ] as const;
 export type CandidateProblemCode = (typeof CANDIDATE_PROBLEM_CODES)[number];
 export type ProblemCode = (typeof PROBLEM_CODES)[number];
