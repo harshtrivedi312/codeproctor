@@ -134,7 +134,9 @@ describe('stepper end to end (FR-401 to FR-403)', () => {
     expect(screen.getAllByText(/\(done\)/i)).toHaveLength(4);
     await user.click(screen.getByRole('button', { name: /start the test/i }));
     // Start hands over to the test screen in the same document (FU-FEB-10, option (c)).
-    expect(await screen.findByRole('dialog', { name: /share your entire screen/i })).toBeInTheDocument();
+    expect(
+      await screen.findByRole('dialog', { name: /share your entire screen/i }),
+    ).toBeInTheDocument();
 
     expect(window.location.pathname).toBe('/t/link');
     const order = seen.map((r) => new URL(r.url).pathname.split('/').pop());
@@ -195,7 +197,9 @@ describe('stepper end to end (FR-401 to FR-403)', () => {
     open(MOCK_TOKENS.resume);
     await passOtp(user);
     await user.click(await screen.findByRole('button', { name: /continue my test/i }));
-    expect(await screen.findByRole('dialog', { name: /share your entire screen/i })).toBeInTheDocument();
+    expect(
+      await screen.findByRole('dialog', { name: /share your entire screen/i }),
+    ).toBeInTheDocument();
     expect(seen.some((r) => r.url.endsWith('/test/start'))).toBe(false);
     expect(window.location.pathname).toBe('/t/link');
     expect(storedKeys()).toEqual([]);

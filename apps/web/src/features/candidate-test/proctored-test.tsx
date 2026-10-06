@@ -25,15 +25,21 @@ export function ProctoredTest({
   source,
   onSubmitted,
   onSessionEnded,
+  timing,
 }: {
   source: TestSource;
   onSubmitted: () => void;
   onSessionEnded: () => void;
+  /** Test seam: faster heartbeat and flush. Real code never passes it. */
+  timing?: { heartbeatIntervalMs: number; flushIntervalMs: number; finishDrainMs?: number };
 }): React.JSX.Element {
   const queryClient = useQueryClient();
   const [consent, setConsent] = React.useState<{ at: string | null } | null>(null);
   const consentAt = consent === null ? undefined : consent.at;
   const [controller, setController] = React.useState<ProctorController | null>(null);
+  // Set when the test was submitted by the candidate: the server's "not active" that follows is
+  // the normal end, not a problem, and must not replace the "submitted" page.
+  const [submitted, setSubmitted] = React.useState(false);
   const clockSync = React.useRef<((iso: string, start: number, end: number) => void) | null>(null);
 
   React.useEffect(() => {
@@ -52,6 +58,7 @@ export function ProctoredTest({
     const c = new ProctorController({
       consentRecordedAt: consentAt,
       sessionId: sessionIdFromToken(),
+      ...(timing ?? {}),
       root: document.getElementById('main') ?? document.body,
       onHeartbeat: (s, timing) => {
         // The server clock corrects the countdown, and the deadlines it reports (a proctor pause
@@ -77,7 +84,7 @@ export function ProctoredTest({
     return () => {
       void c.stop();
     };
-  }, [consentAt, queryClient]);
+  }, [consentAt, queryClient, timing]);
 
   const state = React.useSyncExternalStore(
     controller?.subscribe ?? NO_SUBSCRIBE,
@@ -112,7 +119,7 @@ export function ProctoredTest({
       </p>
     );
   }
-  if (state.endedBecause === 'not-active') return <InactivePanel />;
+  if (state.endedBecause === 'not-active' && !submitted) return <InactivePanel />;
 
   return (
     <TestScreen
@@ -122,6 +129,7 @@ export function ProctoredTest({
         clockSync.current = sync;
       }}
       onSubmitted={() => {
+        setSubmitted(true);
         void controller?.finish().then(onSubmitted);
       }}
     />

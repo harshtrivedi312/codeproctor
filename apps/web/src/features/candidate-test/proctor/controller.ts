@@ -80,6 +80,10 @@ export interface ProctorControllerOptions {
   onHeartbeat?: (state: HeartbeatState, timing: { startedAt: number; endedAt: number }) => void;
   /** Test seams: real code never passes these. */
   detectors?: Detector[];
+  heartbeatIntervalMs?: number;
+  flushIntervalMs?: number;
+  /** How long to wait for queued events and chunks when the test ends (SDK default 15 s). */
+  finishDrainMs?: number;
 }
 
 type Listener = (state: ProctorUiState) => void;
@@ -176,6 +180,8 @@ export class ProctorController {
         consent,
         transport,
         store,
+        ...(this.o.heartbeatIntervalMs ? { heartbeatIntervalMs: this.o.heartbeatIntervalMs } : {}),
+        ...(this.o.flushIntervalMs ? { flushIntervalMs: this.o.flushIntervalMs } : {}),
         detectors: this.o.detectors ?? Object.values(this.monitors),
       });
     } catch {
@@ -243,8 +249,9 @@ export class ProctorController {
     this.stopped = true;
     let lost = 0;
     try {
-      lost = (await this.session.finish()).lostBatches;
-      await this.pipeline?.finish();
+      const drain = this.o.finishDrainMs;
+      lost = (await this.session.finish(drain)).lostBatches;
+      await this.pipeline?.finish(drain === undefined ? {} : { drainTimeoutMs: drain });
     } catch {
       // stop below
     }
