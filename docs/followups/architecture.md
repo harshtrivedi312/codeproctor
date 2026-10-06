@@ -47,7 +47,7 @@ Verdict: approve after the blocker fixes below. Fixed on this branch: `RunReques
 - **[ARC-05, DEP-02] RLS revisit (FU-DB-77).** Revisit Postgres row-level security on `org_id` (ADR 0006 section 1, option b) before production. Not for build or pilot (ADR 0006 section 8.3).
 - **TODO (FU-DB-60): link `apps/api/src/database/README.md` from docs/architecture.md.** PR #30 is merged, so the README is on main. The link is the architect's next docs change.
 - **[integrity; db-engineer, backend-engineer] Same-parent check for cross-chain references (ADR 0006 section 8.1).** Rule (i) proves only that a target is in the same org. `variant_test_cases.test_case_id` is cross-chain, so a variant test case could point to a test case of a different question version than its `variant_id`. The same applies to `ai_reference_solutions.variant_id` and to `question_version_id`, `test_question_id` and `variant_id` on `session_questions`. Options: a service check that the targets share the parent (BE-04, BE-07), or a later composite foreign key through an ADR 0008 amendment. For `session_questions.variant_id`, see also ADR 0013 CS-4.6 (render-question correctness).
-- **[db-engineer] Scope exits and grant sites (FU-DB-67, ADR 0006 section 8.5).** The FU-DB-67 allow-list must also cover `exit`, `enterWith` and `disable` on the OrgContext store, `detachForSessionJob` (allowed from no scope only), the eleven ADR 0013 CS-4.4 grant sites (with the candidate-facts setter), and the candidate-write datasource as an allowed client importer. Its row in docs/followups/database.md still lists only `runSystem`, `runInOrg` and `runRawSql`.
+- **[db-engineer] Scope exits and grant sites (FU-DB-67, ADR 0006 section 8.5).** The FU-DB-67 allow-list must also cover `exit`, `enterWith` and `disable` on the OrgContext store, `detachForSessionJob` (allowed from no scope only), the ten ADR 0013 CS-4.4 grant sites (with the candidate-facts setter; `CandidateSessionGuard` has no grant since DL-31), the guard's `runInOrg` candidate-facts pre-read (ADR 0013 section 5.10), and the candidate-write datasource as an allowed client importer. Its row in docs/followups/database.md still lists only `runSystem`, `runInOrg` and `runRawSql`.
 - **[db-engineer, Delivery Lead] Nested writes are denied by default (ADR 0006 section 8.2, DL-14).**
   - Built in main (7c5d2e0), in org and system scope, with an empty `NESTED_WRITE_ALLOWLIST` (FU-DB-101).
   - The DB-05 merge gate is satisfied; the remaining deltas are listed in ADR 0006 section 8.0.
@@ -109,3 +109,60 @@ The six owner questions were answered by C-21 (2026-10-05, D-49) and are recorde
 - BE-02: a successful re-auth does not reset the failed-login counter on main (it only refunds its own reservation); confirm or change.
 - Backend follow-up: add `req.body.currentPassword`, `req.body.password`, `req.body.newPassword` (and `err` equivalents) to the pino redact list in `apps/api/src/app.module.ts` (no body paths on main today).
 - Backend follow-up: audit every re-auth failure and a successful `setup/start` (today only completed actions and the lock-triggering failure are audited).
+
+## Hub review follow-ups (2026-10-06 batch)
+
+From the ADR 0013 / 0006 section 8 / 0014 / 0016 reviews and the CI PRs. Owner-gated items are marked.
+
+### ADR 0013 (merged as Proposed)
+- F1: the consent-PDF renderer must be named as a carve-out reader of `signedName`, `ip`, `userAgent` in ADR 0004 section 9.5 (the lint fails closed until then).
+- F2: the SERVICE pool needs a whole-transaction bound (Prisma `$transaction` timeout about 5 s, `idle_in_transaction_session_timeout`); the bounded PUT under the lock gets its own timeout.
+- F3: main-pool candidate writes outside `$transaction` have no `statement_timeout`; add one or state that every candidate write runs in a `$transaction`.
+- F4: name the enforcement for "no other transaction API" (lint or the FU-DB-67 test rejecting `$transaction` in session-job code outside `SessionJobProcessor`).
+- Wording: the 409 `SESSION_NOT_ACTIVE` problem extension member is `sessionStatus` (not `status`, which RFC 7807 reserves for the HTTP code); 200 bodies keep `status` (done in this PR, ADR 0013 lines 132 and 193). Add `sessionStatus` to docs/api-contract.md (which lists `code` as the only extension member) when BE-07 or BE-10 implements it.
+- fsd.md section 4: publish, archive and unarchive need their guard named (presumably `question:update`; validate uses `question:validate`); a question-publish permission would amend ADR 0010 section 6 (owner).
+- ADR 0004 section 9.5 step 4 predicate text: copy `where: { id, status: <read>, NOT: { status: 'ERASED' } }` and the `withLiveSession` / `withAnySession` names so the three ADRs read the same.
+
+### ADR 0006 section 8 (merged)
+- F5: add "the erasure re-run" to the `withAnySession` list. F6: name `withLiveSession` and `withAnySession` in FU-DB-67 (high priority before its implementation). F7: state the SERVICE pool decision (`lock_timeout=1000`, `statement_timeout=10000`) and add its client to the 8.6 importer list with the "extension is applied" test. F8: pick one form for the pool `statement_timeout` (pg field or `options`) for the BE-07 spike.
+- Code gaps recorded in the as-built table: unknown system-scope write operations pass through (Database A is making it deny-by-default against SCOPED_OPERATIONS); org-scope delete of the Organization row is closed by #82 (FU-DB-68).
+
+### ADR 0014 (merged as Proposed)
+- Nonce race: after the signature verifies, do an atomic check-and-insert. The corpus read must re-check fences just before `/v1/analyze/similarity`, or record that residual. List exactly which unsigned codes the API accepts as genuine (413 and 400 are sent before the signature check). An injected unsigned 401 is an availability residual: note it or probe `/v1/ready` first. Cap `Retry-After` on the API side.
+- Frontend constraint (FU-FEB-03): the production-build mock guard must read `process.env.ALLOW_MOCKING_IN_PRODUCTION_BUILD === 'staging-only'` at build time in `next.config.ts` and never expose it through `nextConfig.env` or a `NEXT_PUBLIC_` alias.
+
+### ADR 0016 (merged as Proposed)
+- DNS Firewall rule groups associate per VPC: a shared pilot VPC allowlist must cover the app host's names, or Judge0 gets its own VPC (layout ADR decides; preferred: separate VPC).
+- Integrity B benchmark: AuraFace about 279 ms per embedding (1 thread about 3.6 per second, 4 threads about 11.2 per second). Without a selfie cache, 200 concurrent candidates need about 4.0 per second, so 2 vCPU is thin. Rerun the benchmark on the chosen instance type before the pilot; this feeds the cache recommendation in ADR 0004 Q1 / ADR 0014 Q7 (owner questions via the Delivery Lead).
+
+### CI (PRs #86, #87, #105, #110)
+- `qa.yml`: reject an empty host in the three allow-list steps; lowercase `host` consistently (`ALLOWED_HOSTS`, `web_host`, `api_host`); run the ZAP verdict step with `if: ${{ !cancelled() }}`; the node tests for `packages/qa/zap` and `k6/lib/guard.test.mjs` do not run in CI (needs a QA A script); the `K6_SESSIONS_JSON` secret may exceed 48 KB for 200 sessions.
+- `backup-nightly.yml`: `PGSSLROOTCERT=system` needs a publicly signed certificate matching `STAGING_BACKUP_PGHOST`; document in the runbook. Pin `postgres:16` by digest in both workflow files, kept in sync with `POSTGRES_IMAGE` in `verify-drill-support.mjs`. The `verify` job may need a longer `timeout-minutes` now that it runs the restore drill.
+
+### Owner-gated (not done here)
+- ADR 0011 amendment: `currentPassword` step-up also covers `POST /admin/users`, `PATCH /admin/users/:userId` and `POST .../unlock`. ADR 0010 section 6: `account:self`, heartbeat, appeals, reports and webhooks permissions and a CANDIDATE route variant (PR #113 adds `candidate_session:read|start|heartbeat|key`).
+- CLAUDE.md rule 9/11 amendment (merge by the Delivery Lead, no re-run for disjoint changes); ADR 0004 section 9 and ADR 0015 acceptance with the database.md update for migrations #91 and #100; C-30 age-confirmation storage; BE-07 B-1 exception.
+
+## Delivery Lead relay queue (2026-10-06)
+
+The architecture hub session hasn't been running since 2026-10-06 02:25 UTC, so the Delivery Lead queues hub items here. The hub works through them when it restarts and strikes each one through with its PR number. Decisions that also need the owner are marked **owner**.
+
+### ADR text corrections, before the owner accepts under P-15
+~~1. **ADR 0013 §5.10 (DL-31, FU-DB-185).** The guard reads the session's `invitation_id`, then the invitation's `candidate_id` and `test_id`, in a plain `runInOrg(oid)`. These are column-only selects, never `accommodations`. The callback returns before `runAsCandidate(oid, sid)`. A missing or other-org session returns 401. `setCandidateFacts` runs before any other candidate-scope query. Update §5.10, the CS-4.4 `CandidateSessionGuard` grant row and its copy in ADR 0006 §8.4 (not needed under option (a)), and the FU-DB-67 call-site list. Alternatively, choose the narrower variant (only `invitations` read in org scope, with the grant row kept).~~ **Done in PR #140 (pending merge).**
+~~2. **ADR 0015 (DL-30).** Reconcile §6 with DL-30. Keep §6's window: a waiver may be set only while no identity attempt exists. Apply DL-30's rule (every earlier attempt's sealed ID image and selfie is deleted at once, and the attempt row keeps only ids, status and timestamps) to the race, and to any path where images already exist when a waiver lands. Widening §6 to allow a waiver after a match has run is **owner** (C-02, C-19), because it would let a failed match be waived away. Integrity B raised it in docs/briefs/BE-08b-design.md.~~ **Done in PR #140 (pending merge).**
+~~3. **ADR 0004 §9.2, the face-clock bullet** (raised by Database B in #134, merged; not a DL row). Replace "earliest terminal-transition audit row written by SessionStateService.transition()" with: "Terminal transition time: for a session that was never submitted, `sessions.retention_anchor_at`, which the state machine stamps at its first terminal status (expiry, decline) and the erasure fence keeps or sets. Never updated_at." ADR 0013 §5.7 already says "terminal transition time".~~ **Done in PR #140 (pending merge).**
+
+### Contracts and packages/shared
+4. **BE-08b (Integrity B, #129; FU-INB-29..37).** `GET /candidate/session/identity` with `canRetry`; the `IDENTITY_ATTEMPTS_EXHAUSTED` error code; BE-09's name state and `capturedAt`; and who builds `withLiveSession`, `guardLive` and verify-session.
+5. **FU-FEB-10, the token hand-off (ARC-03 part 2, Frontend B).**
+6. **BE-04 (Backend A, DL-32).**
+   - FU-BE-101: a declarative variant parameter schema is new scope and a schema change (**owner**). BE-04b follows ADR 0007 as written meanwhile.
+   - FU-BE-102: move the short-answer normalisation and the answer_spec zod schema (D-23) into packages/shared. It must match the web editor's copy.
+   - Decide whether publish and archive get a separate `question:publish` permission. It amends accepted ADR 0010 §6, so it's **owner** (as P-15 was).
+7. **BE-06 (Backend A, DL-33).**
+   - Copy-or-archive for tests (ADR 0002) has no `archived_at` or `source_test_id` column. Decide the schema (an ADR 0008 delta, **owner**) or another design.
+   - fsd.md §4 and api-contract rows are missing for test copy and archive, invitation list, read, resend and revoke, and the accommodations PATCH. New FSD rows are **owner**. Bulk invite already exists (fsd.md `POST /tests/:id/invitations`, FR-304, `invitation:create`); only the CSV upload format (multipart shape and row-error report) is missing from api-contract.md.
+   - New permissions `invitation:read` and a revoke permission amend accepted ADR 0010 §6, so they're **owner**.
+   - Publish `accommodationsSchema` in packages/shared. build-plan BE-06 says the hub records it in an ADR. If no approved ADR covers it, it's **owner** (CLAUDE.md rule 7).
+   - docs/prompts/backend.md Step 6 still names Resend or Brevo. C-31 says Amazon SES.
+8. **FU-FEB-34 (Frontend B).** There is no room-scan waiver in FR-305. Decide whether the accommodations waiver covers FR-404's room scan (**owner** if it changes the FSD).

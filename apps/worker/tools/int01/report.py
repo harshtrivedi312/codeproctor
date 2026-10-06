@@ -25,6 +25,10 @@ def render(
     rec: Recommendation,
     groups: Sequence[DimensionReport],
     synthetic: bool,
+    unscored_genuine: int = 0,
+    genuine_total: int = 0,
+    dropped_impostor: int = 0,
+    missing_pairs: int = 0,
 ) -> str:
     lines = ["# Face-match threshold report (INT-01)", ""]
     if synthetic:
@@ -54,6 +58,25 @@ def render(
             f"({p.false_non_matches} of {p.n_genuine}; 95% upper bound {_pct(p.fnmr_upper95)}).",
         ]
     lines += [
+        "",
+        "Failure to capture: "
+        f"{unscored_genuine} of {genuine_total} genuine pairs could not be scored (no usable face "
+        "or a model error). They would go to manual review in production, so they are counted in "
+        f"the FNMR column. {dropped_impostor} impostor pairs could not be scored; they cannot be "
+        "false matches and are left out of the FMR.",
+        "",
+        *(
+            [
+                f"{missing_pairs} pairs named image files that could not be read (usually a "
+                "manifest error). They are left out of every rate.",
+                "",
+            ]
+            if missing_pairs
+            else []
+        ),
+        "Scope: the manual-review rate excludes liveness failures (liveness is a client signal and "
+        "is assumed confirmed here), and the FMR covers zero-effort impostors only, not "
+        "presentation attacks or morphs.",
         "",
         "Caveat: impostor pairs reuse the same volunteers, so pairs are not independent and the "
         "bounds understate the uncertainty. A target of 0.1% needs about 3,000 effectively "

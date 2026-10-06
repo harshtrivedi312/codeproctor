@@ -278,6 +278,57 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
     assert.equal(q("SELECT has_table_privilege('app_user', 'audit_logs', 'DELETE')"), 'f');
   });
 
+  it('NFR-03, ADR 0006 8.8: the restored database gives app_user no TEMPORARY privilege (FU-DB-163)', async () => {
+    const q = (sql) => pg.psql(restored, sql);
+    assert.equal(
+      q("SELECT has_database_privilege('app_user', current_database(), 'TEMPORARY')"),
+      'f',
+    );
+    assert.equal(q("SELECT has_database_privilege('app_user', current_database(), 'CREATE')"), 'f');
+    // PUBLIC no longer holds it either, so no other role gets it by default.
+    assert.equal(
+      q(
+        "SELECT count(*) FROM aclexplode((SELECT coalesce(datacl, acldefault('d', datdba)) FROM pg_database WHERE datname = current_database())) a WHERE a.grantee = 0 AND a.privilege_type = 'TEMPORARY'",
+      ),
+      '0',
+    );
+  });
+
+  it('NFR-03, ADR 0006 8.8: a restore that cannot revoke TEMPORARY says not to use the database', async () => {
+    const r = await run(RESTORE, ['--target-db', 'restored_temp', '--skip-erasures'], {
+      ...env,
+      FAKE_PSQL_FAIL_ON: 'REVOKE TEMPORARY',
+    });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /could not revoke TEMPORARY on database restored_temp. Do not use it/);
+  });
+
+  it('NFR-03, ADR 0006 8.8: a check that cannot run is exit 1, never "counts differ" (status 2 from psql)', async () => {
+    const r = await run(RESTORE, ['--target-db', 'restored_temp2', '--skip-erasures'], {
+      ...env,
+      FAKE_PSQL_FAIL_ON: 'NOT has_database_privilege',
+      FAKE_PSQL_FAIL_STATUS: '2',
+    });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(
+      r.stderr,
+      /could not check the TEMPORARY privilege on database restored_temp2. Do not use it/,
+    );
+  });
+
+  it('NFR-03, ADR 0006 8.8: app_user that still has TEMPORARY or CREATE fails the restore', async () => {
+    const r = await run(RESTORE, ['--target-db', 'restored_temp3', '--skip-erasures'], {
+      ...env,
+      FAKE_PSQL_OUTPUT_ON: 'NOT has_database_privilege',
+      FAKE_PSQL_OUTPUT: 'f',
+    });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(
+      r.stderr,
+      /app_user still has TEMPORARY or CREATE on database restored_temp3. Do not use it/,
+    );
+  });
+
   it('NFR-03: restore never goes over an existing database', async () => {
     const r = await run(RESTORE, ['--target-db', restored], env);
     assert.equal(r.status, 1);
