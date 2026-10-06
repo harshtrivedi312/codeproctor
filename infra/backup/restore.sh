@@ -2,7 +2,13 @@
 # Restores a named backup into a FRESH database, then re-applies the erasures made since
 # (DB-07, NFR-03, ADR 0004 R-7). It never restores over an existing database and never drops one.
 #
-#   restore.sh --target-db <new database name> [--backup <dump file name>|latest] [--skip-erasures]
+#   restore.sh --target-db <new database name> [--backup <version id or dump name>|latest] [--skip-erasures]
+#
+# BACKUP_MODE=versioned (default): the backup is an object version of <prefix>dump/latest.dump
+# (ADR 0017 5.3). `latest` is the current version; to restore an older one pass its version id (the
+# runbook shows how to list versions by their dumped-at metadata).
+# BACKUP_MODE=timestamped (staging): `latest` is the newest <prefix>dumps/codeproctor-<stamp>.dump, or
+# pass that file name. The checksum and the row counts come from the object's own metadata.
 #
 # Environment: PGHOST PGPORT PGUSER PGPASSWORD for the server to restore INTO (the role needs
 # CREATEDB, and the privileges pg_restore needs to create extensions), plus the S3_* and
@@ -46,7 +52,7 @@ while [ "$#" -gt 0 ]; do
       reapply=no
       shift
       ;;
-    *) die "unknown argument. Usage: restore.sh --target-db <name> [--backup <file>|latest] [--skip-erasures]" ;;
+    *) die "unknown argument. Usage: restore.sh --target-db <name> [--backup <version id>|latest] [--skip-erasures]" ;;
   esac
 done
 printf '%s' "$target" | grep -q '^[a-z_][a-z0-9_]\{0,62\}$' ||
@@ -82,21 +88,41 @@ trap finish EXIT
 trap 'exit 1' INT TERM HUP
 init_s3
 
-if [ "$backup" = latest ]; then
-  load_keys "$DUMP_PREFIX"
-  backup=$(printf '%s\n' "$KEYS" | sed -n "s#^$DUMP_PREFIX\\(codeproctor-$STAMP_RE\\.dump\\.gz\\)\$#\\1#p" | sort | tail -1)
-  [ -n "$backup" ] || die "the bucket has no backup under $DUMP_PREFIX."
+# 1. Find the backup, download it and verify the checksum before touching the server. The checksum,
+#    the dump time and the row counts are the metadata of that exact object (version).
+key=$DUMP_KEY
+vid=
+if [ "$BACKUP_MODE" = timestamped ]; then
+  if [ "$backup" = latest ]; then
+    load_keys "$DUMP_PREFIX"
+    backup=$(printf '%s\n' "$KEYS" | sed -n "s#^$DUMP_PREFIX\\(codeproctor-$STAMP_RE\\.dump\\)\$#\\1#p" | sort | tail -1)
+    [ -n "$backup" ] || die "the bucket has no backup under $DUMP_PREFIX."
+  fi
+  printf '%s' "$backup" | grep -q "^codeproctor-$STAMP_RE\\.dump\$" || die "--backup must be latest or a file name like codeproctor-20261005T020000Z.dump."
+  key=$DUMP_PREFIX$backup
+elif [ "$backup" = latest ]; then
+  vid=$(s3api head-object --bucket "$BUCKET" --key "$key" --query VersionId --output text) ||
+    die "the bucket has no backup at $key."
+else
+  printf '%s' "$backup" | grep -q '^[A-Za-z0-9._-]\{1,128\}$' || die "--backup must be latest or an object version id."
+  vid=$backup
 fi
-printf '%s' "$backup" | grep -q "^codeproctor-$STAMP_RE\\.dump\\.gz\$" || die "--backup must be a file name like codeproctor-20261005T020000Z.dump.gz."
-log "restoring $backup into new database $target..."
-
-# 1. Download and verify the checksum before touching the server.
-s3cp "s3://$BUCKET/$DUMP_PREFIX$backup" "$WORK/$backup"
-s3cp "s3://$BUCKET/$DUMP_PREFIX$backup.sha256" "$WORK/$backup.sha256"
-[ "$(sha256_of "$WORK/$backup")" = "$(tr -d ' \n' < "$WORK/$backup.sha256")" ] || die "checksum mismatch. The backup is damaged."
-gzip -t "$WORK/$backup" || die "the gzip stream is damaged."
-counts=${backup%.dump.gz}.counts.tsv
-s3cp "s3://$BUCKET/$DUMP_PREFIX$counts" "$WORK/expected-counts.tsv"
+# Stores without versioning report no version id: the current object is used.
+case "$vid" in None | null) vid= ;; esac
+set --
+[ -z "$vid" ] || set -- --version-id "$vid"
+meta=$(s3api head-object --bucket "$BUCKET" --key "$key" "$@" --query 'Metadata.[sha256,"dumped-at",counts]' --output text) ||
+  die "the backup ${vid:-$backup} of $key does not exist."
+sum=$(printf '%s' "$meta" | cut -f1)
+dumped_at=$(printf '%s' "$meta" | cut -f2)
+counts=$(printf '%s' "$meta" | cut -f3)
+printf '%s' "$sum" | grep -q '^[0-9a-f]\{64\}$' || die "the backup has no checksum in its metadata."
+is_stamp "$dumped_at" || die "the backup has no dump time in its metadata."
+printf '%s' "$counts" | grep -q '^[a-z0-9_=,]\{1,\}$' || die "the backup has no row counts in its metadata."
+log "restoring the backup dumped at $dumped_at (version ${vid:-current}) into new database $target..."
+s3api get-object --bucket "$BUCKET" --key "$key" "$@" "$WORK/dump" > /dev/null || die "cannot download the backup."
+[ "$(sha256_of "$WORK/dump")" = "$sum" ] || die "checksum mismatch. The backup is damaged."
+printf '%s\n' "$counts" | tr ',' '\n' | tr '=' '\t' > "$WORK/expected-counts.tsv"
 
 # 2. Preconditions on the server: the client matches, the target is new, and app_user exists.
 require_matching_client postgres pg_restore
@@ -116,7 +142,7 @@ psql_admin -c "CREATE DATABASE \"$target\"" > /dev/null
 # app_user has no TEMP, so revoke it here, as the role that owns the new database. (FU-DB-163)
 psql_admin -c "REVOKE TEMPORARY ON DATABASE \"$target\" FROM PUBLIC" > /dev/null ||
   die "could not revoke TEMPORARY on database $target. Do not use it."
-gzip -dc "$WORK/$backup" | pg_restore --no-owner --exit-on-error --dbname "$target" ||
+pg_restore --no-owner --exit-on-error --dbname "$target" < "$WORK/dump" ||
   die "pg_restore failed. Database $target was left in place for inspection."
 
 # 3b. The role must end up without TEMPORARY or CREATE (ADR 0006 8.8). Checked as well as set, because a

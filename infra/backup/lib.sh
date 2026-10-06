@@ -43,6 +43,15 @@ init_s3() {
   printf '%s' "$PREFIX" | grep -q '^[A-Za-z0-9_/-]*$' || die "BACKUP_PREFIX may hold only letters, digits, underscore, hyphen and slash."
   case "$PREFIX" in /* | *//*) die "BACKUP_PREFIX must be a relative path." ;; esac
   # These are read by the scripts that source this file.
+  # BACKUP_MODE (ADR 0017 5.3, owner decision C-55):
+  #   versioned    (default; pilot and production) one fixed key, a versioned bucket, a lifecycle rule
+  #                that keeps the newest 3 versions, and a backup role that cannot delete anything.
+  #   timestamped  (staging: Cloudflare R2 has no object versioning) one key per dump, and the script
+  #                itself keeps the newest 3 and prunes the rest after 14 days.
+  BACKUP_MODE=${BACKUP_MODE:-versioned}
+  case "$BACKUP_MODE" in versioned | timestamped) ;; *) die "BACKUP_MODE must be versioned or timestamped." ;; esac
+  # shellcheck disable=SC2034
+  DUMP_KEY="${PREFIX}dump/latest.dump"
   # shellcheck disable=SC2034
   DUMP_PREFIX="${PREFIX}dumps/"
   # shellcheck disable=SC2034
@@ -101,7 +110,7 @@ sha256_of() {
   fi
 }
 
-# Dump keys look like <prefix>dumps/codeproctor-20261005T020000Z.dump.gz
+# Timestamped-mode dump keys look like <prefix>dumps/codeproctor-20261005T020000Z.dump
 STAMP_RE='[0-9]\{8\}T[0-9]\{6\}Z'
 UUID_RE='^[0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}$'
 
