@@ -113,3 +113,98 @@ trusted root certificate. See FU-DBB-04.
   they can differ by the rows written in between; the nightly job runs when traffic is lowest.
 - The staging workflow assumes the staging database host accepts connections from GitHub-hosted
   runners (or a tunnel set up in the workflow). That is a staging deployment question (DEP-01).
+
+## Staging database setup (DEP-01)
+
+Owner: Database B (ops) track, for DEP-01. Serves ADR 0006 sections 7.3 to 7.5 and 8.8, ADR 0009 and
+NFR-03. Staging holds synthetic data only (Cloudflare R2, no real candidates). Staging credentials
+live only in GitHub Actions secrets (environment `staging`) and on the staging server (D-38); no
+step below is run from a developer machine or an agent session.
+
+The steps run in this order. A person does steps 1, 4 and 6 (they handle credentials); the deploy
+job does 3 and 5.
+
+### 1. The database and its owner role (a person, once)
+
+- PostgreSQL 16, reachable from the deploy job on a **direct** connection (not a pooler: `migrate
+  deploy` needs session features that Supabase and Neon poolers do not give).
+- A migration owner role that owns the database. It needs `CREATE` on the database and must be able
+  to create the `citext` and `pgcrypto` extensions (both are trusted extensions in PostgreSQL 13 and
+  later, so the database owner may create them).
+- If that role can create roles (RDS master, Neon default owner, Postgres on EC2), the first
+  `migrate deploy` creates `app_user` itself. If it cannot, create the role first as an administrator:
+  `CREATE ROLE app_user LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;`
+  (ADR 0006 section 7.5 lists each host).
+- Put the owner role's URL in the GitHub environment secret `STAGING_MIGRATION_DATABASE_URL`. It never
+  goes into the API's environment.
+
+### 2. Network
+
+The deploy job and the nightly backup job must reach the database over TLS. Use
+`PGSSLMODE=verify-full` with a trusted root certificate (FU-DBB-04). If the database is not reachable
+from GitHub-hosted runners, the job runs over SSH on the staging server or on a self-hosted runner
+inside the network; decide this before step 3 (DEP-01).
+
+### 3. Apply the migrations (the deploy job)
+
+```bash
+pnpm exec prisma migrate deploy      # with MIGRATION_DATABASE_URL from the secret
+```
+
+Only `migrate deploy`. Never `migrate dev`, `migrate reset` or `db push` against staging (ADR 0009). A
+second run must print "No pending migrations". The migrations create `app_user` with no password (no
+password is ever in migration history) and grant it DML only; `audit_logs` is append-only for it and
+`_prisma_migrations` is closed to it.
+
+### 4. Give `app_user` its password (a person, once, and on every rotation)
+
+Connect as an administrator on the server and run `\password app_user` in psql (the client encrypts it, so
+the cleartext reaches no history and no server log), or set a SCRAM verifier computed in the job. Store the
+`app_user` `DATABASE_URL` as the secret `STAGING_DATABASE_URL`, and nowhere else. The password is never put
+on a command line or in a workflow input. To rotate: repeat, update the secret, restart the API.
+
+### 5. Check the role (the deploy job, after every migrate)
+
+Run these as the owner role; each must give the shown result. They are the same checks DB-08 runs
+(`infra/scripts/verify-schema.test.mjs`) and that the API's readiness check repeats at runtime.
+
+```sql
+SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls
+  FROM pg_roles WHERE rolname = 'app_user';                                   -- f
+SELECT count(*) FROM pg_auth_members WHERE member = 'app_user'::regrole;       -- 0
+SELECT has_database_privilege('app_user', current_database(), 'CREATE');       -- f
+SELECT has_schema_privilege('app_user', 'public', 'CREATE');                   -- f
+SELECT has_table_privilege('app_user', 'audit_logs', 'UPDATE');                -- f
+SELECT has_table_privilege('app_user', '_prisma_migrations', 'SELECT');        -- f
+SELECT has_database_privilege('app_user', current_database(), 'TEMPORARY');    -- f once the TEMP migration (FU-DBB-18) is applied
+```
+
+### 6. Backups on (a person creates the secrets once; then the workflow does the rest)
+
+1. Create a private bucket on Cloudflare R2 for backups. No public access, and **no object versioning**
+   (noncurrent copies would outlive the 14-day limit, ADR 0004 section 9.7).
+2. Create an R2 token limited to that bucket, and a read-only database role for the backup
+   (`pg_read_all_data` or equivalent).
+3. Create the nine secrets in the `staging` environment (names in FU-DBB-04): the bucket and endpoint,
+   the access key id and secret, and the database host, port, user, password and name. Restrict the
+   `staging` environment to the `main` branch, with no required reviewers.
+4. Run the nightly workflow once by hand (`workflow_dispatch` on `main`). A green run means: a dump, its
+   `.sha256` and `.counts.tsv` are in `staging/dumps/` in the bucket, and the restore drill step restored
+   it into the throwaway Postgres service with matching row counts.
+5. Check the bucket now holds one dump. After 14 days it should hold about 14 (never more than 15), and
+   `staging/erasure-list/` holds only candidate ids.
+
+### 7. The restore drill
+
+The nightly workflow restores each new backup into a throwaway server and fails the job when the row
+counts differ (exit code 2) or anything else goes wrong (exit code 1). Treat a red run as an incident:
+until a restore works, there is no backup. Once a quarter, and before the pilot, run the drill by hand
+from the workflow with a **named older backup** (not the newest) to prove that old backups restore too.
+For a real restore, follow "Restoring for real (an incident)" above; it runs as the migration owner role
+and re-applies erasures.
+
+### Open items
+
+- Staging runs no seed data from the repository's `db:seed` (it is local-only by design, ADR 0009).
+  Synthetic staging data comes from the QA fixtures (QA-A track); the database track provides none.
+- Whether runners can reach the database, and who runs the deploy job, are DEP-01 decisions.
