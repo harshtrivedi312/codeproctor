@@ -41,14 +41,22 @@ def post(path: str, payload: dict[str, object]) -> httpx.Response:
     return asyncio.run(go())
 
 
-def test_v1_validation_error_is_400_with_field_paths_and_no_input_echo() -> None:
+def test_fr403_v1_validation_error_is_400_with_field_paths_and_no_input_echo() -> None:
     r = post("/v1/x", {"count": "SENTINEL-SECRET", "extra-SENTINEL": 1})
     assert r.status_code == 400
     assert r.headers["content-type"].startswith("application/problem+json")
     assert r.json()["code"] == "VALIDATION_FAILED"
-    assert "SENTINEL" not in r.text.replace("extra-SENTINEL", "")
-    assert "count" in r.json()["fields"]
+    assert "SENTINEL" not in r.text  # not even the caller's own key names
+    assert r.json()["fields"] == ["*", "count"]
 
 
-def test_non_v1_routes_keep_the_default_422() -> None:
+def test_fr403_nested_caller_chosen_keys_and_404_405_never_echo_and_are_problem_json() -> None:
+    r = post("/v1/x", {"count": 1, "nested-SENTINEL": {"deep-SENTINEL": 1}})
+    assert r.status_code == 400 and "SENTINEL" not in r.text
+    r = post("/v1/nope-SENTINEL", {})
+    assert r.status_code == 404 and r.headers["content-type"].startswith("application/problem")
+    assert r.json()["code"] == "NOT_FOUND" and "SENTINEL" not in r.text
+
+
+def test_fr403_non_v1_routes_keep_the_default_422() -> None:
     assert post("/old", {"count": "x"}).status_code == 422

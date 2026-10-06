@@ -20,6 +20,8 @@ from typing import Final, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 _HEX64: Final = re.compile(r"^[0-9a-f]{64}$")
+_SPDX: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+-]*$")
+COMPONENTS: Final = frozenset({"FACE_EMBED", "FACE_LANDMARK", "VAD", "NONE"})
 
 
 class ModelLockError(Exception):
@@ -53,6 +55,16 @@ class LockEntry(BaseModel):
             raise ValueError("hash and size are required unless blocked")
         if self.sha256 is not None and not _HEX64.match(self.sha256):
             raise ValueError("sha256 must be 64 lowercase hex characters")
+        if self.component not in COMPONENTS or (self.component == "NONE") != (
+            self.status == "blocked"
+        ):
+            raise ValueError("component must be a known one; NONE only for blocked")
+        if self.status == "approved" and not _SPDX.match(self.licence):
+            raise ValueError("approved needs an SPDX licence id")
+        if self.status == "approved" and self.licence.lower() == "unverified":
+            raise ValueError("approved cannot be unverified")
+        if self.status == "unverified" and self.licence != "unverified":
+            raise ValueError("unverified needs the literal licence 'unverified'")
         return self
 
 
@@ -67,6 +79,10 @@ class ModelLock(BaseModel):
         names = [f.name for f in self.files]
         if len(set(names)) != len(names):
             raise ValueError("duplicate name")
+        usable = [f.sha256 for f in self.files if f.status != "blocked"]
+        blocked = {f.sha256 for f in self.files if f.status == "blocked" and f.sha256}
+        if len(set(usable)) != len(usable) or blocked & set(usable):
+            raise ValueError("a hash may belong to one entry, and never to a blocked one")
         return self
 
 
@@ -109,20 +125,31 @@ def check_models(loaded: LoadedLock, models_dir: Path) -> ModelCheck:
         f.sha256 for f in loaded.lock.files if f.status == "blocked" and f.sha256 is not None
     }
     present: set[str] = set()
+    if models_dir.is_symlink():
+        raise ModelLockError("MODEL_SYMLINK")
     if models_dir.is_dir():
-        for path in sorted(p for p in models_dir.rglob("*") if p.is_file() or p.is_symlink()):
+        for path in sorted(models_dir.rglob("*")):
             if path.is_symlink():
                 raise ModelLockError("MODEL_SYMLINK")
+            if path.is_dir():
+                continue
+            if not path.is_file():  # FIFO, socket, device
+                raise ModelLockError("MODEL_SPECIAL_FILE")
             name = path.relative_to(models_dir).as_posix()
             entry = by_name.get(name)
             if entry is not None and entry.status == "blocked":
                 raise ModelLockError("MODEL_BLOCKED")
+            if entry is None:
+                # Unlisted, but a renamed copy of a blocked file is reported as blocked.
+                if _sha256_file(path) in blocked_hashes:
+                    raise ModelLockError("MODEL_BLOCKED")
+                raise ModelLockError("MODEL_UNLISTED")
+            if path.stat().st_size != entry.bytes:  # cheap check first: no hashing of a wrong file
+                raise ModelLockError("MODEL_HASH_MISMATCH")
             digest = _sha256_file(path)
             if digest in blocked_hashes:
                 raise ModelLockError("MODEL_BLOCKED")
-            if entry is None:
-                raise ModelLockError("MODEL_UNLISTED")
-            if digest != entry.sha256 or path.stat().st_size != entry.bytes:
+            if digest != entry.sha256:
                 raise ModelLockError("MODEL_HASH_MISMATCH")
             present.add(name)
     wanted = [f for f in loaded.lock.files if f.status != "blocked"]

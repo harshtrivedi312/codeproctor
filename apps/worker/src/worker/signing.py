@@ -12,12 +12,13 @@ import base64
 import binascii
 import hashlib
 import hmac
+import logging
 import re
 import threading
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from worker.problem import problem_body
 
@@ -30,13 +31,20 @@ ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
 REQ_PREFIX: Final = "CP-WORKER-V1"
 RESP_PREFIX: Final = "CP-WORKER-V1-RESP"
 WINDOW_SECONDS: Final = 60
-NONCE_TTL_SECONDS: Final = 120
+# Twice the window plus one: a nonce signed at the edge of the window cannot be replayed after
+# its cache entry is gone.
+NONCE_TTL_SECONDS: Final = 2 * WINDOW_SECONDS + 1
 MIN_KEY_BYTES: Final = 32
 MAX_KEYS: Final = 2
 DEFAULT_NONCE_CACHE_ENTRIES: Final = 20_000
 DEFAULT_BODY_LIMIT: Final = 16 * 1024
 _KID: Final = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
-_B64URL: Final = re.compile(r"^[A-Za-z0-9_-]+$")
+_B64URL: Final = re.compile(r"[A-Za-z0-9_-]+")
+_DIGITS: Final = re.compile(r"[0-9]{1,12}")  # ASCII only: str.isdigit() accepts "²"
+# Paths that keep their own authentication or none (everything else needs a signature, 4.2).
+UNSIGNED_PATHS: Final = frozenset({"/health", "/risk", "/docs", "/redoc", "/openapi.json"})
+UNSIGNED_PREFIXES: Final = ("/analyze/",)  # legacy X-Internal-Token routes until BE-12
+log = logging.getLogger(__name__)
 
 
 class KeyConfigError(Exception):
@@ -109,25 +117,33 @@ class NonceCache:
             self._sweep(self._clock())
             return nonce in self._items
 
-    def record(self, nonce: str) -> bool:
-        """False when the cache is full (the caller answers 503 WORKER_BUSY)."""
+    def record(self, nonce: str) -> Literal["recorded", "duplicate", "full"]:
+        """One atomic check-and-insert. Never evicts a live entry."""
         with self._lock:
             now = self._clock()
             self._sweep(now)
             if nonce in self._items:
-                return True
+                return "duplicate"
             if len(self._items) >= self._max:
-                return False
+                return "full"
             self._items[nonce] = now + NONCE_TTL_SECONDS
-            return True
+            return "recorded"
 
     def __len__(self) -> int:
         with self._lock:
             return len(self._items)
 
 
+class _TooLarge(Exception):
+    pass
+
+
+class _Disconnected(Exception):
+    pass
+
+
 class SigningMiddleware:
-    """Signs and verifies `/v1/` traffic. `/health` and non-/v1 paths pass through unchanged."""
+    """Signs and verifies every HTTP route except the explicit unsigned list (ADR 0014 4.2)."""
 
     def __init__(
         self,
@@ -137,17 +153,19 @@ class SigningMiddleware:
         body_limits: Mapping[str, int] | None = None,
         nonce_cache_entries: int = DEFAULT_NONCE_CACHE_ENTRIES,
         clock: Callable[[], float] = time.time,
-        protected_prefix: str = "/v1/",
+        unsigned_paths: frozenset[str] = UNSIGNED_PATHS,
+        unsigned_prefixes: tuple[str, ...] = UNSIGNED_PREFIXES,
     ) -> None:
         self.app = app
         self._keys = dict(keys)
         self._limits = dict(body_limits or {})
         self._clock = clock
         self._nonces = NonceCache(nonce_cache_entries, clock)
-        self._prefix = protected_prefix
+        self._unsigned = unsigned_paths
+        self._unsigned_prefixes = unsigned_prefixes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or not scope["path"].startswith(self._prefix):
+        if scope["type"] != "http" or self._is_unsigned(scope["path"]):
             await self.app(scope, receive, send)
             return
         if not self._keys:  # no key: refuse to serve rather than run open (ADR 0014 4.3)
@@ -159,12 +177,19 @@ class SigningMiddleware:
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
         limit = self._limits.get(scope["path"], DEFAULT_BODY_LIMIT)
         declared = headers.get("content-length")
-        if declared is not None and (not declared.isdigit() or int(declared) > limit):
+        if declared is not None:
+            if not _DIGITS.fullmatch(declared):
+                await self._plain(send, 400, "VALIDATION_FAILED", "Bad content length")
+                return
+            if int(declared) > limit:
+                await self._plain(send, 413, "PAYLOAD_TOO_LARGE", "Payload too large")
+                return
+        try:
+            body = await self._read_body(receive, limit)
+        except _TooLarge:
             await self._plain(send, 413, "PAYLOAD_TOO_LARGE", "Payload too large")
             return
-        body = await self._read_body(receive, limit)
-        if body is None:
-            await self._plain(send, 413, "PAYLOAD_TOO_LARGE", "Payload too large")
+        except _Disconnected:
             return
         kid = headers.get("x-cp-key-id", "")
         nonce = headers.get("x-cp-nonce", "")
@@ -174,21 +199,31 @@ class SigningMiddleware:
             await self._reject(send)
             return
         expected = sign(key, request_string(kid, scope["method"], scope["path"], ts, nonce, body))
-        if not hmac.compare_digest(expected, headers.get("x-cp-signature", "")):
+        # Bytes, not str: compare_digest raises TypeError on non-ASCII str, which must be a 401.
+        given = headers.get("x-cp-signature", "").encode("latin-1")
+        if not hmac.compare_digest(expected.encode(), given):
             await self._reject(send)
             return
-        if not self._nonces.record(nonce):  # only after the signature verified (step 6)
+        outcome = self._nonces.record(nonce)  # only after the signature verified (step 6)
+        if outcome == "duplicate":  # a race between the lookup and the insert
+            await self._reject(send)
+            return
+        if outcome == "full":
+            log.error("signing event NONCE_CACHE_FULL")  # fixed code only: the alert hook
             await self._signed_plain(send, kid, nonce, 503, "WORKER_BUSY", "Worker busy", True)
             return
-        await self._dispatch(scope, send, body, key, kid, nonce)
+        await self._dispatch(scope, receive, send, body, key, kid, nonce)
 
     # --- steps ---
 
+    def _is_unsigned(self, path: str) -> bool:
+        return path in self._unsigned or path.startswith(self._unsigned_prefixes)
+
     def _fresh(self, ts: str) -> bool:
-        return ts.isdigit() and len(ts) <= 12 and abs(self._clock() - int(ts)) <= WINDOW_SECONDS
+        return bool(_DIGITS.fullmatch(ts)) and abs(self._clock() - int(ts)) <= WINDOW_SECONDS
 
     def _nonce_ok(self, nonce: str) -> bool:
-        if not (16 <= len(nonce) <= 32 and _B64URL.match(nonce)):
+        if not (16 <= len(nonce) <= 32 and _B64URL.fullmatch(nonce)):
             return False
         try:
             raw = base64.urlsafe_b64decode(nonce + "=" * (-len(nonce) % 4))
@@ -197,30 +232,37 @@ class SigningMiddleware:
         return len(raw) == 16 and not self._nonces.seen(nonce)
 
     @staticmethod
-    async def _read_body(receive: Receive, limit: int) -> bytes | None:
+    async def _read_body(receive: Receive, limit: int) -> bytes:
         chunks: list[bytes] = []
         size = 0
         while True:
             message = await receive()
             if message["type"] != "http.request":
-                return None
+                raise _Disconnected
             chunk: bytes = message.get("body", b"")
             size += len(chunk)
             if size > limit:
-                return None
+                raise _TooLarge
             chunks.append(chunk)
             if not message.get("more_body", False):
                 return b"".join(chunks)
 
     async def _dispatch(
-        self, scope: Scope, send: Send, body: bytes, key: bytes, kid: str, nonce: str
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        body: bytes,
+        key: bytes,
+        kid: str,
+        nonce: str,
     ) -> None:
         sent = False
 
         async def replay() -> Message:
             nonlocal sent
             if sent:
-                return {"type": "http.disconnect"}
+                return await receive()  # the real disconnect signal, not a fake one
             sent = True
             return {"type": "http.request", "body": body, "more_body": False}
 
@@ -238,7 +280,8 @@ class SigningMiddleware:
 
         try:
             await self.app(scope, replay, capture)
-        except Exception:  # noqa: BLE001 - nothing from the exception leaves the worker
+        except Exception:
+            log.error("signing event HANDLER_ERROR")  # fixed code only: no text from the exception
             status, parts = 500, [problem_body(500, "INTERNAL", "Internal error")]
             resp_headers = [(b"content-type", b"application/problem+json")]
         out = b"".join(parts)

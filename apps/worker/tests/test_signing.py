@@ -101,7 +101,9 @@ def call(app: Any, path: str, headers: dict[str, str], body: bytes, method: str 
     return asyncio.run(go())
 
 
-def test_valid_request_reaches_the_route_with_the_same_raw_body_and_response_is_signed() -> None:
+def test_fr403_valid_request_reaches_the_route_with_the_same_raw_body_and_response_is_signed() -> (
+    None
+):
     app, _, bodies = build()
     h, body, n = signed()
     r = call(app, "/v1/echo", h, body)
@@ -111,7 +113,7 @@ def test_valid_request_reaches_the_route_with_the_same_raw_body_and_response_is_
     assert r.headers["x-cp-signature"] == expected
 
 
-def test_tampered_body_old_and_future_timestamps_and_unknown_kid_give_unsigned_401() -> None:
+def test_fr403_tampered_body_old_and_future_timestamps_and_unknown_kid_give_unsigned_401() -> None:
     app, _, bodies = build()
     h, body, _ = signed()
     cases = [
@@ -129,18 +131,18 @@ def test_tampered_body_old_and_future_timestamps_and_unknown_kid_give_unsigned_4
     assert bodies == []
 
 
-def test_timestamp_inside_the_window_is_accepted() -> None:
+def test_fr403_timestamp_inside_the_window_is_accepted() -> None:
     app, _, _ = build()
     assert call(app, "/v1/echo", *signed(ts=NOW - 60)[:2]).status_code == 200
 
 
-def test_query_string_is_refused_with_400() -> None:
+def test_fr403_query_string_is_refused_with_400() -> None:
     app, _, _ = build()
     h, body, _ = signed()
     assert call(app, "/v1/echo?x=1", h, body).status_code == 400
 
 
-def test_replayed_nonce_is_refused_but_a_bad_signature_does_not_use_up_its_nonce() -> None:
+def test_fr403_replayed_nonce_is_refused_but_a_bad_signature_does_not_use_up_its_nonce() -> None:
     app, _, _ = build()
     n = nonce()
     bad, body, _ = signed(n=n, key=KEY_B)  # wrong key: bad signature
@@ -150,7 +152,7 @@ def test_replayed_nonce_is_refused_but_a_bad_signature_does_not_use_up_its_nonce
     assert call(app, "/v1/echo", good, body).status_code == 401  # now it is a replay
 
 
-def test_nonce_expires_after_120_seconds() -> None:
+def test_fr403_nonce_expires_after_120_seconds() -> None:
     app, clock, _ = build()
     n = nonce()
     assert call(app, "/v1/echo", *signed(n=n)[:2]).status_code == 200
@@ -158,13 +160,13 @@ def test_nonce_expires_after_120_seconds() -> None:
     assert call(app, "/v1/echo", *signed(ts=clock.t, n=n)[:2]).status_code == 200
 
 
-def test_malformed_nonce_is_refused() -> None:
+def test_fr403_malformed_nonce_is_refused() -> None:
     app, _, _ = build()
     for bad in ("short", "a" * 22 + "!!", signing._b64url(os.urandom(24))):
         assert call(app, "/v1/echo", *signed(n=bad)[:2]).status_code == 401
 
 
-def test_full_nonce_cache_fails_closed_with_a_signed_503_and_never_evicts_early() -> None:
+def test_fr403_full_nonce_cache_fails_closed_with_a_signed_503_and_never_evicts_early() -> None:
     app, _, _ = build(cache=2)
     first = signed()
     assert call(app, "/v1/echo", *first[:2]).status_code == 200
@@ -179,32 +181,32 @@ def test_full_nonce_cache_fails_closed_with_a_signed_503_and_never_evicts_early(
     assert call(app, "/v1/echo", *first[:2]).status_code == 401  # the first nonce is still held
 
 
-def test_oversized_body_is_refused_before_signature_checks() -> None:
+def test_fr403_oversized_body_is_refused_before_signature_checks() -> None:
     app, _, bodies = build(limits={"/v1/echo": 10})
     h, body, _ = signed(body=b"x" * 11)
     assert call(app, "/v1/echo", h, body).status_code == 413
     assert bodies == []
 
 
-def test_health_and_non_v1_paths_are_not_signed() -> None:
+def test_fr403_health_and_non_v1_paths_are_not_signed() -> None:
     app, _, _ = build()
     r = call(app, "/health", {}, b"", method="GET")
     assert r.status_code == 200 and "x-cp-signature" not in r.headers
 
 
-def test_no_configured_key_refuses_to_serve_v1() -> None:
+def test_fr403_no_configured_key_refuses_to_serve_v1() -> None:
     app, _, _ = build(keys={})
     assert call(app, "/v1/echo", *signed()[:2]).status_code == 503
 
 
-def test_two_active_key_ids_both_verify_and_response_uses_the_request_kid() -> None:
+def test_fr403_two_active_key_ids_both_verify_and_response_uses_the_request_kid() -> None:
     app, _, _ = build(keys={"old": KEY_A, "new": KEY_B})
     for kid, key in (("old", KEY_A), ("new", KEY_B)):
         r = call(app, "/v1/echo", *signed(kid=kid, key=key)[:2])
         assert r.status_code == 200 and r.headers["x-cp-key-id"] == kid
 
 
-def test_route_exception_gives_a_signed_500_with_no_detail() -> None:
+def test_fr403_route_exception_gives_a_signed_500_with_no_detail() -> None:
     app, _, _ = build()
     h, body, n = signed(path="/v1/boom")
     r = call(app, "/v1/boom", h, body)
@@ -215,7 +217,7 @@ def test_route_exception_gives_a_signed_500_with_no_detail() -> None:
     )
 
 
-def test_parse_keys_rules() -> None:
+def test_fr403_parse_keys_rules() -> None:
     good = base64.b64encode(KEY_A).decode()
     assert set(signing.parse_keys(f"a:{good},b:{good}")) == {"a", "b"}
     assert signing.parse_keys("") == {}
@@ -232,16 +234,16 @@ def test_parse_keys_rules() -> None:
         assert good not in str(ei.value)
 
 
-def test_nonce_cache_record_is_idempotent_and_len_counts_live_entries() -> None:
+def test_fr403_nonce_cache_record_is_idempotent_and_len_counts_live_entries() -> None:
     clock = Clock()
     cache = signing.NonceCache(1, clock)
-    assert cache.record("n1") and cache.record("n1") and len(cache) == 1
-    assert not cache.record("n2")
+    assert cache.record("n1") == "recorded" and cache.record("n1") == "duplicate"
+    assert len(cache) == 1 and cache.record("n2") == "full"
     clock.t += 121
-    assert cache.record("n2") and len(cache) == 1
+    assert cache.record("n2") == "recorded" and len(cache) == 1
 
 
-def test_non_http_scopes_pass_through_and_bad_content_length_is_413() -> None:
+def test_fr403_non_http_scopes_pass_through_and_bad_content_length_is_413() -> None:
     called: list[str] = []
 
     async def inner(scope: Any, receive: Any, send: Any) -> None:
@@ -252,10 +254,10 @@ def test_non_http_scopes_pass_through_and_bad_content_length_is_413() -> None:
     assert called == ["lifespan"]
     app, _, _ = build()
     h, body, _ = signed()
-    assert call(app, "/v1/echo", {**h, "Content-Length": "abc"}, body).status_code in (400, 413)
+    assert call(app, "/v1/echo", {**h, "Content-Length": "abc"}, body).status_code == 400
 
 
-def test_streamed_body_over_the_limit_is_413_even_without_a_content_length() -> None:
+def test_fr403_streamed_body_over_the_limit_is_413_even_without_a_content_length() -> None:
     app, _, bodies = build(limits={"/v1/echo": 10})
     sent: list[dict[str, Any]] = []
     chunks = [
@@ -284,4 +286,72 @@ def test_streamed_body_over_the_limit_is_413_even_without_a_content_length() -> 
 
     sent.clear()
     asyncio.run(app(scope, wrong_type, send))
-    assert sent[0]["status"] == 413
+    assert sent == []  # the client went away while sending the body: nothing to answer
+
+
+def test_fr403_non_ascii_or_missing_headers_give_unsigned_401_not_500() -> None:
+    app, _, bodies = build()
+    h, body, _ = signed()
+    cases = [
+        {**h, "X-CP-Signature": "é" * 43},
+        {**h, "X-CP-Timestamp": "²" * 10},
+        {**h, "X-CP-Nonce": "é" * 22},
+        {**h, "X-CP-Key-Id": "é"},
+        {k: v for k, v in h.items() if not k.startswith("X-CP")},
+    ]
+    for hdrs in cases:
+        raw = {k: v.encode("latin-1") for k, v in hdrs.items()}  # httpx refuses non-ASCII str
+        r = call(app, "/v1/echo", raw, body)  # type: ignore[arg-type]
+        assert r.status_code == 401 and r.json()["code"] == "WORKER_AUTH_FAILED"
+        assert "x-cp-signature" not in r.headers
+    assert bodies == []
+
+
+def test_fr403_signature_is_bound_to_path_and_method() -> None:
+    app, _, bodies = build()
+    h, body, _ = signed(path="/v1/echo")
+    assert call(app, "/v1/boom", h, body).status_code == 401
+    assert call(app, "/v1/echo", h, body, method="PUT").status_code == 401
+    assert bodies == []
+
+
+def test_fr403_timestamp_boundary_and_unsigned_400_for_query_and_bad_content_length() -> None:
+    app, _, _ = build()
+    assert call(app, "/v1/echo", *signed(ts=NOW + 60)[:2]).status_code == 200
+    h, body, _ = signed()
+    r = call(app, "/v1/echo?x=1", h, body)
+    assert r.status_code == 400 and r.json()["code"] == "VALIDATION_FAILED"
+    assert "x-cp-signature" not in r.headers
+    r = call(app, "/v1/echo", {**h, "Content-Length": "abc"}, body)
+    assert r.status_code == 400
+
+
+def test_fr403_everything_is_protected_except_the_explicit_unsigned_list() -> None:
+    app, _, _ = build()
+    # a path outside /v1 that is not on the list is signed-only (ADR 0014 4.2: all but /health)
+    assert call(app, "/new-route", {}, b"").status_code == 401
+    assert call(app, "/health", {}, b"", method="GET").status_code == 200
+    assert call(app, "/analyze/keystrokes", {}, b"").status_code != 401  # legacy token route
+    assert call(app, "/risk", {}, b"").status_code != 401
+
+
+def test_fr403_concurrent_duplicate_nonce_is_atomic_and_recorded_once() -> None:
+    cache = signing.NonceCache(10, Clock())
+    assert cache.record("n") == "recorded"
+    assert cache.record("n") == "duplicate"
+    full = signing.NonceCache(1, Clock())
+    assert full.record("a") == "recorded" and full.record("b") == "full"
+
+
+def test_fr403_full_cache_and_handler_error_leave_a_fixed_code_log_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    app, _, _ = build(cache=2)
+    call(app, "/v1/echo", *signed()[:2])
+    with caplog.at_level("ERROR"):
+        call(app, "/v1/boom", *signed(path="/v1/boom")[:2])
+        h, body, _ = signed()
+        assert call(app, "/v1/echo", h, body).status_code == 503
+    text = caplog.text
+    assert "NONCE_CACHE_FULL" in text and "HANDLER_ERROR" in text
+    assert h["X-CP-Signature"] not in text and "secret-detail" not in text

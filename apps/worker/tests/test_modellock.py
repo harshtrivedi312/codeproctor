@@ -44,13 +44,18 @@ def put(models: Path, name: str, data: bytes) -> None:
     f.write_bytes(data)
 
 
-def test_committed_lock_is_valid_pins_auraface_and_blocks_the_four_insightface_files() -> None:
+def test_fr403_committed_lock_is_valid_pins_auraface_and_blocks_the_four_insightface_files() -> (
+    None
+):
     loaded = load_lock(Path(__file__).resolve().parents[1] / "models.lock.json")
     by = {f.name: f for f in loaded.lock.files}
     assert by["auraface-v1/glintr100.onnx"].sha256 == GLINT_SHA
     assert by["auraface-v1/glintr100.onnx"].bytes == 260_694_151
     assert by["auraface-v1/glintr100.onnx"].status == "unverified"
     blocked = {n for n, f in by.items() if f.status == "blocked"}
+    assert by["silero-vad/silero_vad.onnx"].sha256 == (
+        "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
+    )
     assert blocked == {
         "auraface-v1/scrfd_10g_bnkps.onnx",
         "auraface-v1/2d106det.onnx",
@@ -60,7 +65,7 @@ def test_committed_lock_is_valid_pins_auraface_and_blocks_the_four_insightface_f
     assert len(loaded.digest12) == 12
 
 
-def test_all_listed_files_present_and_matching_is_ready(tmp_path: Path) -> None:
+def test_fr403_all_listed_files_present_and_matching_is_ready(tmp_path: Path) -> None:
     put(tmp_path / "m", "a/one.onnx", b"one")
     lock = load_lock(write_lock(tmp_path, [entry("a/one.onnx", b"one")]))
     chk = check_models(lock, tmp_path / "m")
@@ -68,7 +73,9 @@ def test_all_listed_files_present_and_matching_is_ready(tmp_path: Path) -> None:
     assert chk.lock_digest == lock.digest12
 
 
-def test_missing_approved_file_is_not_ready_but_does_not_refuse_startup(tmp_path: Path) -> None:
+def test_fr403_missing_approved_file_is_not_ready_but_does_not_refuse_startup(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "m").mkdir()
     lock = load_lock(write_lock(tmp_path, [entry("a/one.onnx", b"one")]))
     chk = check_models(lock, tmp_path / "m")
@@ -95,10 +102,10 @@ def test_f1_startup_refuses_unlisted_blocked_renamed_mismatched_and_symlinked_fi
     if setup == "unlisted":
         put(m, "sneaky.onnx", b"x")
     elif setup == "blocked_name":
-        files.append(entry("bad.onnx", None, "blocked"))
+        files.append(entry("bad.onnx", None, "blocked", component="NONE"))
         put(m, "bad.onnx", b"anything")
     elif setup == "blocked_hash_renamed":
-        files.append(entry("bad.onnx", b"insight", "blocked"))
+        files.append(entry("bad.onnx", b"insight", "blocked", component="NONE"))
         put(m, "renamed.onnx", b"insight")
     elif setup == "mismatch":
         put(m, "ok.onnx", b"tampered")
@@ -123,7 +130,9 @@ def test_f1_startup_refuses_unlisted_blocked_renamed_mismatched_and_symlinked_fi
         {"schema": 1, "files": [{**entry("a", b"x"), "status": "maybe"}]},
     ],
 )
-def test_invalid_lock_is_refused_without_detail(tmp_path: Path, bad: dict[str, object]) -> None:
+def test_fr403_invalid_lock_is_refused_without_detail(
+    tmp_path: Path, bad: dict[str, object]
+) -> None:
     p = tmp_path / "l.json"
     p.write_text(json.dumps(bad))
     with pytest.raises(ModelLockError) as ei:
@@ -133,7 +142,66 @@ def test_invalid_lock_is_refused_without_detail(tmp_path: Path, bad: dict[str, o
         load_lock(tmp_path / "missing.json")
 
 
-def test_digest_changes_with_the_file_bytes(tmp_path: Path) -> None:
+def test_fr403_digest_changes_with_the_file_bytes(tmp_path: Path) -> None:
     a = load_lock(write_lock(tmp_path, [entry("a", b"x")]))
     b = load_lock(write_lock(tmp_path, [entry("a", b"y")]))
     assert a.digest12 != b.digest12 and modellock.__doc__
+
+
+def test_fr403_dotfile_special_file_symlinked_dir_and_symlinked_models_dir_are_refused(
+    tmp_path: Path,
+) -> None:
+    import os
+
+    lock = load_lock(write_lock(tmp_path, [entry("ok.onnx", b"ok")]))
+    m = tmp_path / "m"
+    put(m, "ok.onnx", b"ok")
+    put(m, ".hidden.onnx", b"x")
+    with pytest.raises(ModelLockError) as ei:
+        check_models(lock, m)
+    assert ei.value.code == "MODEL_UNLISTED"
+    (m / ".hidden.onnx").unlink()
+    os.mkfifo(m / "pipe.onnx")
+    with pytest.raises(ModelLockError) as ei:
+        check_models(lock, m)
+    assert ei.value.code == "MODEL_SPECIAL_FILE"
+    (m / "pipe.onnx").unlink()
+    real = tmp_path / "real"
+    put(real, "x.onnx", b"y")
+    (m / "sub").symlink_to(real)
+    with pytest.raises(ModelLockError) as ei:
+        check_models(lock, m)
+    assert ei.value.code == "MODEL_SYMLINK"
+    (m / "sub").unlink()
+    link = tmp_path / "link"
+    link.symlink_to(m)
+    with pytest.raises(ModelLockError) as ei:
+        check_models(lock, link)
+    assert ei.value.code == "MODEL_SYMLINK"
+
+
+def test_fr403_wrong_size_is_refused_before_hashing(tmp_path: Path) -> None:
+    put(tmp_path / "m", "a.onnx", b"toolong!")
+    e = entry("a.onnx", b"short")
+    lock = load_lock(write_lock(tmp_path, [e]))
+    with pytest.raises(ModelLockError) as ei:
+        check_models(lock, tmp_path / "m")
+    assert ei.value.code == "MODEL_HASH_MISMATCH"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        [entry("a", b"x", "approved", licence="unverified")],
+        [entry("a", b"x", "approved", licence="not an spdx id")],
+        [entry("a", b"x", "unverified", licence="MIT")],
+        [entry("a", b"x", component="WEIRD")],
+        [entry("a", b"x", component="NONE")],
+        [entry("a", None, "blocked", component="FACE_EMBED")],
+        [entry("a", b"x"), entry("b", b"x")],
+        [entry("a", b"x"), entry("b", b"x", "blocked", component="NONE")],
+    ],
+)
+def test_fr403_lock_consistency_rules(tmp_path: Path, bad: list[dict[str, object]]) -> None:
+    with pytest.raises(ModelLockError):
+        load_lock(write_lock(tmp_path, bad))
