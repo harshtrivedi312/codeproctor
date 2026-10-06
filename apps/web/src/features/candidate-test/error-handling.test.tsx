@@ -1,3 +1,4 @@
+import { demoSource } from './demo-source';
 /**
  * Run and Finish error handling on the candidate test screen (FR-502, FR-503, FR-504, ADR 0002,
  * TC-040, TC-041, TC-045). Mocked API, with per-test handler overrides.
@@ -345,7 +346,9 @@ describe('TC-047 server clock re-sync (FR-505)', () => {
         HttpResponse.json({ serverNow: new Date(serverAtLoad).toISOString() }),
       ),
     );
-    const { result } = renderHook(() => useServerClock(), { wrapper });
+    const { result } = renderHook(() => useServerClock(() => demoSource.serverNow(), 'demo'), {
+      wrapper,
+    });
     await waitFor(() => expect(result.current.ready).toBe(true));
     const deadline = new Date(serverAtLoad + 10 * 60_000).toISOString();
     const before = result.current.remaining(deadline) ?? 0;
@@ -363,7 +366,9 @@ describe('TC-047 server clock re-sync (FR-505)', () => {
 
   it('TC-047 a periodic /v1/time re-fetch re-syncs the offset', async () => {
     const { client, wrapper } = clockWrapper();
-    const { result } = renderHook(() => useServerClock(), { wrapper });
+    const { result } = renderHook(() => useServerClock(() => demoSource.serverNow(), 'demo'), {
+      wrapper,
+    });
     await waitFor(() => expect(result.current.ready).toBe(true));
     const deadline = new Date(Date.now() + 10 * 60_000).toISOString();
     const before = result.current.remaining(deadline) ?? 0;
@@ -396,7 +401,9 @@ describe('TC-047 server clock re-sync (FR-505)', () => {
         return HttpResponse.json({ serverNow: new Date().toISOString() });
       }),
     );
-    const { result } = renderHook(() => useServerClock(), { wrapper });
+    const { result } = renderHook(() => useServerClock(() => demoSource.serverNow(), 'demo'), {
+      wrapper,
+    });
     await waitFor(() => expect(result.current.ready).toBe(true));
     const afterLoad = calls;
     const realNow = Date.now.bind(Date);

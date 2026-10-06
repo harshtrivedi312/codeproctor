@@ -49,7 +49,7 @@ Active agents are the files in `.claude/agents/`. The orchestrator prompt in age
 | 2 Core backend, staff web, SDK | Auth, RBAC, question bank, Judge0, tests and invitations, session state machine; staff screens on MSW mocks; proctor SDK | BE-01..BE-07 ∥ FE-01..FE-05 ∥ FE-06..FE-08 | M2: BE-07 merged, SDK merged |
 | 3 Candidate journey | Media, identity, events, run/grade, integrity worker, candidate flow and test screen | BE-09, BE-10, BE-11, BE-08, BE-12, FE-09, FE-10 | M3: candidate can complete a proctored test on seeded data; worker scores it |
 | 4 Review and reporting | Review API, live gateway, reports, webhooks; review workspace, live grid, dashboard; staging environment | BE-13, BE-14, FE-11, FE-12, FE-13, DEP-01 | M4: reviewer journey works on staging; mocks removed |
-| 5 Hardening and QA | Security review and fixes, load tuning, automated suite and CI gate, red team | BE-15A, BE-15B, QA-01B, QA-02 | M5: all 51 P1 TCs green or manual-signed; security review closed |
+| 5 Hardening and QA | Security review and fixes, load tuning, automated suite and CI gate, red team | BE-15A, BE-15B, QA-01B, QA-02 | M5: all 52 P1 TCs green or manual-signed; security review closed |
 | 6 Go-live readiness | Go-live checklist, pilot stack, threshold tuning and human decisions | DEP-02, DEP-03, INT-01, COMP-01, FAIR-01 (before the pilot exit review) | M6: checklist delivered; pilot stack built and verified with synthetic data; pilot entry blockers cleared (status.md B-05: owner-approved consent document and retention schedule, threshold tuning done, licence gate passing the two accepted models; for EU/UK candidates also the approved DPIA and processor transfer agreements). The owner is the approver (C-15). The pilot itself is human-run (BRD section 10) |
 | Later phase (not this build) | Electron lockdown client | FE-14 | Out of scope for this build (D-13, closes Q-41). Until it ships, the LOCKDOWN proctor profile must not be selectable (review A-30). |
 
@@ -326,7 +326,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 
 #### QA-01A: Test matrix and manual scripts
 - Owner: qa-engineer. Branch: `qa/test-matrix`. Depends on: none (docs only). Parallel with: everything in Phase 0 and 1.
-- Covers: all 72 TCs (TC-095..TC-099 added 2026-10-01).
+- Covers: all 73 TCs (TC-095..TC-099 added 2026-10-01; TC-100 added 2026-10-06).
 - Deliverables: /docs/test-matrix.md (TC ID, level, planned test file, owner task, status) using the owner tasks in /docs/requirements-trace.md; /docs/manual-tests.md with exact steps for hardware or people cases (TC-036, TC-056, TC-057, TC-058, TC-059, TC-060, TC-064, TC-063 offline check, TC-034).
 - Done when: every TC ID appears once in the matrix with a level and owner; no application code touched.
 
@@ -585,7 +585,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Owner: qa-engineer. Branch: `qa/automation-ci`. Depends on: BE-14, FE-13, DEP-01.
 - Covers: all TCs; NFR-04, NFR-06. TCs: fills every automatable gap; TC-092 re-run; TC-093 (PM-assigned, ZAP baseline on staging).
 - Deliverables: test-matrix statuses from real runs; missing P1 then P2 then P3 automated tests, each named with its TC ID; CI job that fails on any P1 failure and prints coverage per module; ZAP baseline result.
-- Done when: matrix shows a level, file and status for all 72 TCs; all 51 P1 TCs pass or have a signed manual result.
+- Done when: matrix shows a level, file and status for all 73 TCs; all 52 P1 TCs pass or have a signed manual result.
 
 #### QA-02: Red team of anti-cheating controls
 - Owner: qa-engineer. Branch: `qa/red-team`. Depends on: DEP-01, BE-15A, FE-13.

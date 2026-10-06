@@ -467,13 +467,13 @@ describe('Test templates (FR-301, FR-302, TC-020 part 1, TC-008)', () => {
   // ---- fixed question references -------------------------------------------------------------------
 
   describe('FR-301: fixed questions', () => {
-    it('FR-301: an unpublished version is 422, an archived question is 422, nothing is saved', async () => {
+    it('FR-301, DL-34: a draft version is the same 404 as a missing id; an archived question is 422; nothing is saved', async () => {
       const who = await make(UserRole.RECRUITER);
       const draft = await seedQuestion({ published: false });
       const archived = await seedQuestion({ archived: true });
       const before = await owner.test.count();
-      for (const { versionId } of [draft, archived]) {
-        const res = await http()
+      const send = (versionId: string): Promise<request.Response> =>
+        http()
           .post(`${API}/tests`)
           .set(who.auth)
           .send({
@@ -481,8 +481,17 @@ describe('Test templates (FR-301, FR-302, TC-020 part 1, TC-008)', () => {
             durationMinutes: 60,
             sections: [{ title: 'S', questions: [fixed(versionId)] }],
           });
-        expect(res.status).toBe(422);
-      }
+      const missing = await send('00000000-0000-4000-8000-000000000000');
+      const draftRes = await send(draft.versionId);
+      expect(missing.status).toBe(404);
+      expect(draftRes.status).toBe(404);
+      const strip = (b: Record<string, unknown>): Record<string, unknown> => {
+        return { ...b, traceId: undefined };
+      };
+      expect(strip(draftRes.body as Record<string, unknown>)).toEqual(
+        strip(missing.body as Record<string, unknown>),
+      );
+      expect((await send(archived.versionId)).status).toBe(422);
       expect(await owner.test.count()).toBe(before);
     });
 
@@ -733,7 +742,7 @@ describe('Test templates (FR-301, FR-302, TC-020 part 1, TC-008)', () => {
       expect((await owner.test.findUniqueOrThrow({ where: { id } })).profile).toBe('STANDARD');
     });
 
-    it('FR-301: a failed replacement (unsatisfiable rule, unpublished version) leaves the old sections', async () => {
+    it('FR-301: a failed replacement (unsatisfiable rule, draft version) leaves the old sections', async () => {
       const who = await make(UserRole.RECRUITER);
       const t = await create(who);
       const id = t.id as string;
@@ -754,7 +763,7 @@ describe('Test templates (FR-301, FR-302, TC-020 part 1, TC-008)', () => {
         .patch(`${API}/tests/${id}`)
         .set(who.auth)
         .send({ sections: [{ title: 'X', questions: [fixed(draft.versionId)] }] });
-      expect(unpublished.status).toBe(422);
+      expect(unpublished.status).toBe(404);
       const after = await owner.testSection.findMany({
         where: { testId: id },
         orderBy: { position: 'asc' },
@@ -909,6 +918,28 @@ describe('Test templates (FR-301, FR-302, TC-020 part 1, TC-008)', () => {
   // ---- list / get ----------------------------------------------------------------------------------
 
   describe('FR-301: list and get', () => {
+    it('FR-301: search treats % _ and backslash literally, not as wildcards', async () => {
+      const who = await make(UserRole.RECRUITER);
+      const tag = `lit${++seq}`;
+      await create(who, await body({ name: `${tag} plain` }));
+      await create(who, await body({ name: `${tag} 100%_done\\x` }));
+      const total = async (term: string): Promise<number> =>
+        (
+          (
+            await http()
+              .get(`${API}/tests`)
+              .query({ search: term, pageSize: 100 })
+              .set(who.auth)
+              .expect(200)
+          ).body as { total: number }
+        ).total;
+      expect(await total('%')).toBe(1);
+      expect(await total('_')).toBe(1);
+      expect(await total('\\')).toBe(1);
+      expect(await total(`${tag} 100%_done\\x`)).toBe(1);
+      expect(await total(`${tag}%`)).toBe(0);
+    });
+
     it('FR-301: pagination, filters and the used flag', async () => {
       const who = await make(UserRole.RECRUITER);
       const tag = `list${++seq}`;
