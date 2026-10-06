@@ -75,12 +75,14 @@ def img() -> intake.Image:
 
 
 def test_c11_one_face_gives_one_box_and_low_confidence_is_dropped() -> None:
-    assert len(locator.DetectorLocator(FakeDetector([face()]), CFG).locate(img())) == 1
-    assert locator.DetectorLocator(FakeDetector([face(confidence=0.1)]), CFG).locate(img()) == []
-    assert locator.DetectorLocator(FakeDetector([]), CFG).locate(img()) == []
-    assert (
-        len(locator.DetectorLocator(FakeDetector([face(confidence=None)]), CFG).locate(img())) == 1
-    )
+    card = np.zeros((500, 700, 3), dtype=np.uint8)
+    one = locator.DetectorLocator(FakeDetector([face(on_card())]), CFG)
+    assert len(one.locate(card)) == 1
+    low = locator.DetectorLocator(FakeDetector([face(on_card(), confidence=0.1)]), CFG)
+    assert low.locate(card) == []
+    assert locator.DetectorLocator(FakeDetector([]), CFG).locate(card) == []
+    none = locator.DetectorLocator(FakeDetector([face(on_card(), confidence=None)]), CFG)
+    assert len(none.locate(card)) == 1
 
 
 def test_c11_a_small_ghost_portrait_is_ignored_but_two_comparable_faces_refuse() -> None:
@@ -216,7 +218,7 @@ def test_c11_an_unexpected_error_in_the_cli_is_a_fixed_code_not_a_traceback(
         def locate(self, image: intake.Image) -> list[intake.Box]:
             raise ValueError("SECRET")
 
-    # ValueError escapes intake (it only maps IntakeError and OSError); the CLI must still be quiet
+    # intake maps an unexpected error to the fixed code UNEXPECTED; the CLI stays quiet too
     src = write_id(tmp_path)
     assert crop_id.run(src, tmp_path / "p.png", Weird()) == 2
     out = capsys.readouterr()
@@ -249,3 +251,22 @@ def test_c22_symlinks_and_git_trees_are_refused_for_the_landmarker(
     monkeypatch.setenv("FACE_LANDMARKER_MODEL_PATH", str(repo_models / "m.task"))
     with pytest.raises(SystemExit):
         crop_id._check_landmarker_location()  # noqa: SLF001
+
+
+def test_c11_a_failed_delete_is_reported_even_behind_an_unexpected_error_and_spares_other_crops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Weird:
+        def locate(self, image: intake.Image) -> list[intake.Box]:
+            raise ValueError("SECRET")
+
+    src = write_id(tmp_path)
+    earlier = tmp_path / "earlier-volunteer.png"
+    earlier.write_bytes(b"someone else's crop")
+    monkeypatch.setattr(intake, "_delete_original", lambda p: False)
+    with pytest.raises(intake.IntakeError) as ei:
+        intake.intake_id_photo(src, earlier, Weird())
+    assert ei.value.code == "DELETE_FAILED"
+    assert (
+        earlier.read_bytes() == b"someone else's crop"
+    )  # this call wrote nothing, so it removes nothing

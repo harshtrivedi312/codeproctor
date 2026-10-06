@@ -39,7 +39,7 @@ class FaceLocator(Protocol):
 
 class IntakeError(Exception):
     """Fixed code only: NO_FACE, MULTIPLE_FACES, UNREADABLE, WRITE_FAILED, DELETE_FAILED,
-    PATH_REFUSED, DETECTOR_FAILED."""
+    PATH_REFUSED, DETECTOR_FAILED, UNEXPECTED."""
 
     def __init__(self, code: str) -> None:
         super().__init__(code)
@@ -110,6 +110,7 @@ def intake_id_photo(
     ):
         raise IntakeError("PATH_REFUSED")
     error: IntakeError | None = None
+    wrote = False  # only this call's own crop may be removed if the original cannot be deleted
     try:
         image = _load(src)
         boxes = locator.locate(image)
@@ -128,6 +129,7 @@ def intake_id_photo(
                 os.fsync(fh.fileno())
             os.chmod(tmp, 0o600)
             os.replace(tmp, dest)
+            wrote = True
         except BaseException:
             tmp.unlink(missing_ok=True)  # never leave a crop behind
             raise
@@ -135,10 +137,13 @@ def intake_id_photo(
         error = exc
     except OSError:
         error = IntakeError("WRITE_FAILED")
+    except Exception:  # noqa: BLE001 - never lose a failed delete behind an unexpected error
+        error = IntakeError("UNEXPECTED")
     finally:
         deleted = _delete_original(src)
     if not deleted:
-        dest.unlink(missing_ok=True)
+        if wrote:
+            dest.unlink(missing_ok=True)
         raise IntakeError("DELETE_FAILED") from None
     if error is not None:
         raise error from None

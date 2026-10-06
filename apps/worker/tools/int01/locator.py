@@ -24,8 +24,8 @@ from worker.face.types import DetectedFace, FaceDetector
 # The box below is already the whole face, so the crop adds only a thin margin (intake's default
 # 0.35 is for a tight detector box and would double-count).
 LOCATOR_MARGIN = 0.05
-# A frontal face has eye-to-mouth distance of about 0.8 to 1.4 eye distances; outside this range
-# the landmarks are not a plausible upright face (tilt, a pattern, a hologram).
+# A frontal face has an eye-to-mouth distance of about 1.0 to 1.2 eye distances; 0.6 to 1.6 is
+# deliberate slack for head pose. Outside it the landmarks are not a plausible upright face.
 PLAUSIBLE_DROP_RATIO = (0.6, 1.6)
 # A portrait on an ID card is a small part of the image. A box over this share of the image is
 # not a portrait: refuse it rather than keep the whole card.

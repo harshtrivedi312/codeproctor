@@ -39,6 +39,8 @@ def run(src: Path, dest: Path, locator: FaceLocator) -> int:
         intake_id_photo(src, dest, locator, LOCATOR_MARGIN)
     except IntakeError as e:  # a fixed code: NO_FACE, MULTIPLE_FACES, UNREADABLE, ...
         print(f"not kept: {e.code}", file=sys.stderr)
+        if e.code == "DELETE_FAILED":
+            print("the original may remain: check the incoming folder", file=sys.stderr)
         return 2
     except Exception:  # noqa: BLE001 - last resort: never a traceback with paths or code lines
         print("not kept: UNEXPECTED", file=sys.stderr)
