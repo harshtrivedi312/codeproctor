@@ -18,13 +18,10 @@ import { TokenModule } from './common/auth/token.service';
 import { DatabaseModule } from './database/database.module';
 import { ExecutionModule } from './execution/execution.module';
 import { MailModule } from './mail/mail.module';
-<<<<<<< HEAD
 import { MediaModule } from './media/media.module';
 import { RetentionModule } from './retention/retention.module';
-=======
 import { ipBucket } from './client-errors/ip-bucket';
 import { ClientErrorsModule } from './client-errors/client-errors.module';
->>>>>>> backend-cand/be-07-session
 import { HealthModule } from './health/health.module';
 import { InfrastructureModule } from './infrastructure/infrastructure.module';
 
