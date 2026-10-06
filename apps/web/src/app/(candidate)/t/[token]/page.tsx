@@ -1,12 +1,12 @@
+import { CandidateFlow } from '@/features/candidate-flow/candidate-flow';
+
 export const metadata = { title: 'Your test' };
 
-export default function CandidateLanding() {
-  return (
-    <main id="main" className="mx-auto my-24 max-w-md px-4 text-center">
-      <h1 className="text-2xl font-semibold">Welcome</h1>
-      <p className="mt-2 text-muted-foreground">
-        Your test opens here once the invitation steps are built. Nothing is needed from you yet.
-      </p>
-    </main>
-  );
+/**
+ * FR-401 to FR-403 pre-test stepper. The token in the path is read once on the client and then
+ * removed from the address bar (see CandidateFlow); it is never logged here.
+ */
+export default async function CandidatePage({ params }: { params: Promise<{ token: string }> }) {
+  const { token } = await params;
+  return <CandidateFlow token={token} />;
 }
