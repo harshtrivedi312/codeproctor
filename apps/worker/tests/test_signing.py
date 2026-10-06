@@ -243,7 +243,7 @@ def test_fr403_nonce_cache_record_is_idempotent_and_len_counts_live_entries() ->
     assert cache.record("n2") == "recorded" and len(cache) == 1
 
 
-def test_fr403_non_http_scopes_pass_through_and_bad_content_length_is_413() -> None:
+def test_fr403_non_http_scopes_pass_through_and_bad_content_length_is_400() -> None:
     called: list[str] = []
 
     async def inner(scope: Any, receive: Any, send: Any) -> None:
@@ -386,3 +386,25 @@ def test_fr403_request_content_encoding_is_refused() -> None:
     h, body, _ = signed()
     assert call(app, "/v1/echo", {**h, "Content-Encoding": "gzip"}, body).status_code == 400
     assert bodies == []
+
+
+def test_fr403_docs_routes_need_a_signature_unless_local_dev_exempts_them() -> None:
+    app, _, _ = build()
+    assert call(app, "/openapi.json", {}, b"", method="GET").status_code == 401
+    inner = FastAPI()
+    mw = signing.SigningMiddleware(inner, {"k1": KEY_A}, docs_exempt=True)
+    assert call(mw, "/openapi.json", {}, b"", method="GET").status_code == 200
+
+
+def test_fr403_websocket_scopes_fail_closed() -> None:
+    app, _, _ = build()
+    sent: list[dict[str, Any]] = []
+
+    async def send(m: dict[str, Any]) -> None:
+        sent.append(m)
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "websocket.connect"}
+
+    asyncio.run(app({"type": "websocket", "path": "/v1/echo", "headers": []}, receive, send))
+    assert sent == [{"type": "websocket.close", "code": 1008}]

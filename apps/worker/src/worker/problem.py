@@ -68,7 +68,12 @@ def install_problem_handlers(app: FastAPI) -> None:
         if not request.url.path.startswith(V1_PREFIX):
             return await http_exception_handler(request, exc)
         codes = {404: "NOT_FOUND", 405: "METHOD_NOT_ALLOWED"}
-        return problem(exc.status_code, codes.get(exc.status_code, "HTTP_ERROR"), "Request refused")
+        return problem(
+            exc.status_code,
+            codes.get(exc.status_code, "HTTP_ERROR"),
+            "Request refused",
+            dict(exc.headers) if exc.headers else None,  # keeps Allow on a 405
+        )
 
     app.add_exception_handler(RequestValidationError, on_validation)  # type: ignore[arg-type]
     app.add_exception_handler(StarletteHTTPException, on_http)  # type: ignore[arg-type]

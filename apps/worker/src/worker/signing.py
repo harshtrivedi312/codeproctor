@@ -1,4 +1,4 @@
-"""HMAC request and response signing for /v1 routes (ADR 0014 4.2, 4.3).
+"""HMAC request and response signing for every route but the exempt list (ADR 0014 4.2, 4.3).
 
 Pure ASGI middleware. Checks, in the ADR's order: (0) no query string, (1) body size, (2) known key
 id, (3) timestamp within 60 s, (4) nonce not seen, (5) signature over the RAW body, (6) only then
@@ -38,11 +38,13 @@ MIN_KEY_BYTES: Final = 32
 MAX_KEYS: Final = 2
 DEFAULT_NONCE_CACHE_ENTRIES: Final = 20_000
 DEFAULT_BODY_LIMIT: Final = 16 * 1024
-_KID: Final = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+_KID: Final = re.compile(r"[A-Za-z0-9_-]{1,32}")
 _B64URL: Final = re.compile(r"[A-Za-z0-9_-]+")
 _DIGITS: Final = re.compile(r"[0-9]{1,12}")  # ASCII only: str.isdigit() accepts "²"
 # Paths that keep their own authentication or none (everything else needs a signature, 4.2).
-UNSIGNED_PATHS: Final = frozenset({"/health", "/risk", "/docs", "/redoc", "/openapi.json"})
+UNSIGNED_PATHS: Final = frozenset({"/health", "/risk"})
+# The docs routes are exempt only in local development (ADR 0014 4.2), by `docs_exempt=True`.
+DOCS_PATHS: Final = frozenset({"/docs", "/redoc", "/openapi.json"})
 UNSIGNED_PREFIXES: Final = ("/analyze/",)  # legacy X-Internal-Token routes until BE-12
 log = logging.getLogger(__name__)
 
@@ -62,7 +64,7 @@ def parse_keys(spec: str) -> dict[str, bytes]:
         return keys
     for part in spec.split(","):
         kid, sep, b64 = part.strip().partition(":")
-        if not sep or not _KID.match(kid) or kid in keys:
+        if not sep or not _KID.fullmatch(kid) or kid in keys:
             raise KeyConfigError("KEYS_MALFORMED")
         try:
             key = base64.b64decode(b64 + "=" * (-len(b64) % 4), validate=True)
@@ -97,7 +99,7 @@ def sign(key: bytes, message: bytes) -> str:
 
 
 class NonceCache:
-    """Seen nonces for 120 s. Never evicted early: when full, new requests are refused."""
+    """Seen nonces for 121 s. Never evicted early: when full, new requests are refused."""
 
     def __init__(self, max_entries: int, clock: Callable[[], float] = time.time) -> None:
         self._max = max_entries
@@ -155,16 +157,20 @@ class SigningMiddleware:
         clock: Callable[[], float] = time.time,
         unsigned_paths: frozenset[str] = UNSIGNED_PATHS,
         unsigned_prefixes: tuple[str, ...] = UNSIGNED_PREFIXES,
+        docs_exempt: bool = False,
     ) -> None:
         self.app = app
         self._keys = dict(keys)
         self._limits = dict(body_limits or {})
         self._clock = clock
         self._nonces = NonceCache(nonce_cache_entries, clock)
-        self._unsigned = unsigned_paths
+        self._unsigned = unsigned_paths | (DOCS_PATHS if docs_exempt else frozenset())
         self._unsigned_prefixes = unsigned_prefixes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "websocket":  # no websocket routes exist; fail closed if one is added
+            await send({"type": "websocket.close", "code": 1008})
+            return
         if scope["type"] != "http" or self._is_unsigned(scope["path"]):
             await self.app(scope, receive, send)
             return

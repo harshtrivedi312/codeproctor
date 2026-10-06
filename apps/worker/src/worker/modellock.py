@@ -19,8 +19,8 @@ from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-_HEX64: Final = re.compile(r"^[0-9a-f]{64}$")
-_SPDX: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+-]*$")
+_HEX64: Final = re.compile(r"[0-9a-f]{64}")
+_SPDX: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+-]*")
 COMPONENTS: Final = frozenset({"FACE_EMBED", "FACE_LANDMARK", "VAD", "NONE"})
 
 
@@ -49,17 +49,21 @@ class LockEntry(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> LockEntry:
-        if self.name.startswith("/") or ".." in Path(self.name).parts:
-            raise ValueError("name must be a relative path")
+        if (
+            self.name.startswith("/")
+            or ".." in Path(self.name).parts
+            or Path(self.name).as_posix() != self.name
+        ):
+            raise ValueError("name must be a normalised relative path")
         if self.status != "blocked" and (self.sha256 is None or self.bytes is None):
             raise ValueError("hash and size are required unless blocked")
-        if self.sha256 is not None and not _HEX64.match(self.sha256):
+        if self.sha256 is not None and not _HEX64.fullmatch(self.sha256):
             raise ValueError("sha256 must be 64 lowercase hex characters")
         if self.component not in COMPONENTS or (self.component == "NONE") != (
             self.status == "blocked"
         ):
             raise ValueError("component must be a known one; NONE only for blocked")
-        if self.status == "approved" and not _SPDX.match(self.licence):
+        if self.status == "approved" and not _SPDX.fullmatch(self.licence):
             raise ValueError("approved needs an SPDX licence id")
         if self.status == "approved" and self.licence.lower() == "unverified":
             raise ValueError("approved cannot be unverified")

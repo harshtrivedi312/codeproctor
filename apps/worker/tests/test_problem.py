@@ -60,3 +60,14 @@ def test_fr403_nested_caller_chosen_keys_and_404_405_never_echo_and_are_problem_
 
 def test_fr403_non_v1_routes_keep_the_default_422() -> None:
     assert post("/old", {"count": "x"}).status_code == 422
+
+
+def test_fr403_405_on_v1_keeps_the_allow_header() -> None:
+    async def go() -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=make()), base_url="http://w"
+        ) as c:
+            return await c.get("/v1/x")
+
+    r = asyncio.run(go())
+    assert r.status_code == 405 and "POST" in r.headers["allow"]
