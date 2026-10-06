@@ -14,8 +14,9 @@ import { ClientErrorDto } from './dto/client-error.dto';
 
 // Intentionally @Public() (C-32): candidates have no staff JWT and a crashed page may have no
 // session at all. It is not an auth bypass: it reads nothing, returns nothing, writes one scrubbed
-// log line, has its own strict per-IP throttle ('client-errors' in app.module.ts) and a 16 KB body
-// limit (bootstrap.ts).
+// log line, has its own strict per-IP and whole-instance throttles ('client-errors' and
+// 'client-errors-global' in app.module.ts) and a streaming 16 KB body limit with a read
+// deadline (client-error-body.middleware.ts).
 @ApiTags('client-errors')
 @Public()
 @Controller('client-errors')

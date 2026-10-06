@@ -123,6 +123,72 @@ describe('scrubClientText (NFR-04, C-32)', () => {
     );
   });
 
+  it('NFR-04: redacts object keys inside quotes, JSON, pairs, brackets and sentences', () => {
+    const key = 'orgs/42/sessions/s9/chunk-1.webm';
+    for (const input of [
+      `Upload failed for "${key}"`,
+      `{"key":"${key}"}`,
+      `key=${key}`,
+      `(${key})`,
+      `failed: ${key}.`,
+      `https://app/_next/static/x.js ${key}`,
+      `https://app/_next/${key}`,
+      `see 'foo/bar/chunk-1.webm'.`,
+      `"foo/bar/chunk-1.webm".`,
+    ]) {
+      const out = scrubClientText(input);
+      expect(out).not.toMatch(/chunk-1|sessions\/s9|orgs\/42/);
+    }
+  });
+
+  it('NFR-04: redacts whole quoted secret values, passphrases and unquoted values with symbols', () => {
+    for (const input of [
+      '{"password":"correct horse battery staple"}',
+      "{'password': 'correct horse battery staple'}",
+      "'password' => 'correct horse battery staple'",
+      '{\\"password\\":\\"correct horse battery staple\\"}',
+      'password=correct&horse',
+      'password=Tr0ub4dor&3',
+      '{"secret":"a b, c; d"}',
+    ]) {
+      expect(scrubClientText(input)).not.toMatch(/correct|horse|battery|staple|&3|Tr0ub|a b|c; d/);
+    }
+    expect(scrubClientText('{"password":"x y","after":"kept"}')).toContain('"after":"kept"');
+  });
+
+  it('NFR-04: redacts key, sig, pass and pw as the end of an identifier', () => {
+    for (const input of [
+      '{"hmacKey":"kX9aB3cD7eF1gH2iJ3kQAA=="}',
+      'privateKey: abc123',
+      'signing_key=abc123',
+      'sessionKey = abc123',
+      'hmacSig=abc123',
+      'userPass: abc123',
+      'dbpw=abc123',
+      'pwd=abc123',
+      'x-api-key: abc123',
+    ]) {
+      expect(scrubClientText(input)).not.toMatch(/kX9a|abc123/);
+    }
+    expect(scrubClientText('keyboard shortcut and key words')).toBe(
+      'keyboard shortcut and key words',
+    );
+  });
+
+  it('NFR-04: decodes %2B, %2F and %3D before the base64 pass', () => {
+    const out = scrubClientText('k=AbCdEfGhIjKlMn%2BpQrStUvWxYz012%2F4AbCdEfGhIjKl%3D');
+    expect(out).not.toMatch(/AbCdEf|pQrSt/);
+  });
+
+  it('NFR-04: redacts an upper and lower case base64 run that ends in =, even without digits', () => {
+    expect(scrubClientText('x AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGhIjKlMn+ y')).not.toMatch(/AbCdEf/);
+    expect(scrubClientText(`x ${'a'.repeat(43)}= y`)).toBe('x [REDACTED] y');
+  });
+
+  it('NFR-04: strips line separators and bidi overrides', () => {
+    expect(scrubClientText('a\u2028b\u202ec\u2066d')).toBe('a b c d');
+  });
+
   it('NFR-04: strips query strings and fragments from URLs in text', () => {
     const out = scrubClientText('at https://app.example.test/candidate/x?invite=abc&y=1#frag:10:5');
     expect(out).toBe('at https://app.example.test/candidate/x?[REDACTED]');
@@ -171,6 +237,13 @@ describe('scrubClientText (NFR-04, C-32)', () => {
       almostB64: `${'aB3'.repeat(10)}+`.repeat(3_000),
       slashes: '/'.repeat(100_000),
       mixed: 'a1B+/'.repeat(20_000),
+      xAmz: `x-amz-${'a'.repeat(100_000)}`,
+      quoteOpen: 'password="'.repeat(8_000),
+      quoteOpen2: '{"password":"'.repeat(3_000),
+      keySuffix: 'a-'.repeat(50_000) + 'key',
+      keySuffix2: 'key'.repeat(30_000),
+      orgs: 'orgs/'.repeat(20_000),
+      orgs2: `orgs/${'a'.repeat(99)}/sessions/`.repeat(300),
       authLines: 'authorization:'.repeat(7_000),
       ctrl: '\u001b['.repeat(50_000),
       unicode: 'é@ü.'.repeat(25_000),

@@ -36,6 +36,8 @@ export const envSchema = z
     CLIENT_ERROR_THROTTLE_LIMIT: positiveInt.default(10),
     // Whole-instance cap on those reports, whoever sends them (C-32).
     CLIENT_ERROR_GLOBAL_LIMIT: positiveInt.default(300),
+    // How long a client may take to send the (at most 16 KB) report body (C-32).
+    CLIENT_ERROR_BODY_TIMEOUT_MS: positiveInt.default(10_000),
     THROTTLE_TTL_MS: positiveInt.default(60_000),
     HEALTH_TIMEOUT_MS: positiveInt.default(2_000),
     // Number of reverse proxies in front of the API (0 locally, 1 behind Caddy). FU-BE-08.

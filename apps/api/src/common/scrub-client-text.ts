@@ -10,15 +10,6 @@ const REDACTED = '[REDACTED]';
 /** Input is cut to this many times the output bound before any pass runs. */
 const INPUT_FACTOR = 4;
 
-/** ADR 0013 section 5.7: `orgs/<id>/<area>/...`. The area is the object-store partition. */
-const KEY_AREAS: ReadonlySet<string> = new Set([
-  'sessions',
-  'consents',
-  'identity',
-  'reports',
-  'live',
-  'sealed',
-]);
 const MEDIA_EXTENSION = /\.(?:webm|mp4|mkv|ogg|wav|jpe?g|png|pdf|bin|enc)$/i;
 
 const LONG_TOKEN_MIN = 24;
@@ -26,19 +17,36 @@ const LOCAL_CHAR = /[\p{L}\p{N}._%+-]/u;
 const DOMAIN_CHAR = /[\p{L}\p{N}.-]/u;
 const TLD = /^(?:\p{L}{2,}|xn--[a-z0-9-]{2,})$/iu;
 
-// Only bounded quantifiers below: `\s{0,5}`, `[^\s&,;"'\\]{1,500}`, `[^\r\n]{1,2000}`.
+// Only bounded quantifiers below, or `[^\r\n]*` which is consumed once per line.
 // eslint-disable-next-line no-control-regex -- stripping control characters is the point
 const ANSI = /\u001b\[[0-9;?]{0,20}[ -/]{0,2}[@-~]/g;
-// eslint-disable-next-line no-control-regex -- stripping control characters is the point
-const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
-const AUTH_LINE = /\bauthorization(\\?["']?\s{0,5}[=:]\s{0,5})[^\r\n]{1,2000}/gi;
-const COOKIE_LINE = /\b((?:set-)?cookie)(\\?["']?\s{0,5}[=:]\s{0,5})[^\r\n]{1,2000}/gi;
+// Controls, line and paragraph separators and bidi overrides/isolates.
+const CONTROL =
+  // eslint-disable-next-line no-control-regex -- stripping control characters is the point
+  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+const AUTH_LINE = /\bauthorization(\\?["']?\s{0,5}[=:]\s{0,5})[^\r\n]*/gi;
+const COOKIE_LINE = /\b((?:set-)?cookie)(\\?["']?\s{0,5}[=:]\s{0,5})[^\r\n]*/gi;
 const SCHEME = /\b(Bearer|Basic)\s{1,5}[^\s,;"'\\]{1,2000}/gi;
+/** An object-store key inside any text: ADR 0013 section 5.7 `orgs/<id>/<area>/...`. */
+const OBJECT_KEY =
+  /(?<![A-Za-z0-9_-])orgs\/[^/\s"'`]{1,100}\/(?:sessions|consents|identity|reports|live|sealed)\/[^\s"'`),;]{0,500}/gi;
+// What follows a secret's name: an optional (escaped) closing quote, `=`, `:` or `=>`.
+const SEP = String.raw`\\?["']?\s{0,5}(?:=>|[=:])\s{0,5}`;
+// A secret's value: a double or single quoted string (whole, spaces included), else up to the
+// next whitespace, comma, semicolon or quote (so `Tr0ub4dor&3` is one value).
+const VALUE = String.raw`(?:\\?"(?:[^"\\\r\n]|\\[^"\r\n]){0,500}\\?"?|'(?:[^'\\\r\n]|\\.){0,500}'?|[^\s,;"'\\]{1,500})`;
 // Keyword as an identifier substring (otpCode, new_password, password_confirmation), then up to
-// 20 identifier characters, an optional (escaped) quote, `=` or `:` and the value.
-const KEY_VALUE =
-  /(password|passwd|secret|token|passcode|api_?key|signature|credential|x-amz-[a-z-]{1,40})([A-Za-z0-9_]{0,20}\\?["']?\s{0,5}[=:]\s{0,5}\\?["']?)[^\s&,;"'\\]{1,500}/gi;
-const WORD_KEY_VALUE = /\b(key|sig)(\\?["']?\s{0,5}[=:]\s{0,5}\\?["']?)[^\s&,;"'\\]{1,500}/gi;
+// 20 identifier characters, then the separator and the value.
+const KEY_VALUE = new RegExp(
+  String.raw`(password|passwd|pwd|secret|token|passcode|api_?key|signature|credential|x-amz-[a-z-]{1,40})([A-Za-z0-9_]{0,20}${SEP})${VALUE}`,
+  'gi',
+);
+// key, sig, pass and pw as the END of an identifier (hmacKey, signing_key, userPass), only with a
+// separator, so ordinary words such as "keyboard" are untouched.
+const SUFFIX_KEY_VALUE = new RegExp(
+  String.raw`(?<![A-Za-z0-9])([A-Za-z0-9]{0,30}[_-]?(?:key|sig|pass|pw))(${SEP})${VALUE}`,
+  'gi',
+);
 // 6 to 8 digits, with one optional space or dash between digits (482-913).
 const DIGITS = String.raw`(?<!\d)\d(?:[ -]?\d){5,7}(?!\d)`;
 const OTP_AFTER_WORD = new RegExp(
@@ -59,18 +67,12 @@ function queryStart(token: string): number {
   return q === -1 ? h : h === -1 ? q : Math.min(q, h);
 }
 
-function isObjectKey(base: string): boolean {
+const TRAILING_PUNCTUATION = /["'`).,;:\]}>]+$/;
+
+function isMediaFile(base: string): boolean {
+  // Next.js serves its own assets under /_next/; they are not candidate media.
   if (base.includes('_next/')) return false;
-  const segs = base.split('/');
-  for (let i = 0; i + 2 < segs.length; i += 1) {
-    if (
-      (segs[i] ?? '').toLowerCase() === 'orgs' &&
-      KEY_AREAS.has((segs[i + 2] ?? '').toLowerCase())
-    ) {
-      return true;
-    }
-  }
-  return MEDIA_EXTENSION.test(base);
+  return MEDIA_EXTENSION.test(base.replace(TRAILING_PUNCTUATION, ''));
 }
 
 function scrubWhitespaceToken(token: string): string {
@@ -85,12 +87,8 @@ function scrubWhitespaceToken(token: string): string {
   }
   const cut = queryStart(token);
   const base = cut === -1 ? token : token.slice(0, cut);
-  if (token.includes('/') && isObjectKey(base)) return '[REDACTED_KEY]';
+  if (token.includes('/') && isMediaFile(base)) return '[REDACTED_KEY]';
   return cut === -1 ? token : `${base}?${REDACTED}`;
-}
-
-function hasMixedClasses(s: string): boolean {
-  return /[A-Z]/.test(s) && /[a-z]/.test(s) && /\d/.test(s);
 }
 
 function scrubRun(run: string): string {
@@ -108,7 +106,9 @@ function scrubRun(run: string): string {
 
 /** Standard base64 (the HMAC proctor key, ADR 0013 section 4): split by + and / so the run pass misses it. */
 function scrubBase64(run: string): string {
-  const qualifies = (run.includes('+') || run.endsWith('=')) && hasMixedClasses(run);
+  const padded = run.endsWith('=');
+  const mixed = /[A-Z]/.test(run) && /[a-z]/.test(run);
+  const qualifies = (mixed && (padded || run.includes('+'))) || (padded && run.length % 4 === 0);
   return qualifies ? REDACTED : run;
 }
 
@@ -161,13 +161,19 @@ export function scrubClientText(input: string, maxLength = 8000): string {
   let s = input.slice(0, maxLength * INPUT_FACTOR);
   s = s.replace(ANSI, '').replace(CONTROL, ' ');
   // Encoded and fullwidth at-signs: otpauth labels carry `jane%40example.com`.
-  s = s.replace(/%40/gi, '@').replace(/\uff20/g, '@');
+  s = s
+    .replace(/%40/gi, '@')
+    .replace(/%2B/gi, '+')
+    .replace(/%2F/gi, '/')
+    .replace(/%3D/gi, '=')
+    .replace(/\uff20/g, '@');
+  s = s.replace(OBJECT_KEY, '[REDACTED_KEY]');
   s = s.replace(/\S+/g, scrubWhitespaceToken);
   s = s.replace(AUTH_LINE, (_m, sep: string) => `authorization${sep}${REDACTED}`);
   s = s.replace(COOKIE_LINE, (_m, k: string, sep: string) => `${k}${sep}${REDACTED}`);
   s = s.replace(SCHEME, (_m, scheme: string) => `${scheme} ${REDACTED}`);
   s = s.replace(KEY_VALUE, (_m, k: string, sep: string) => `${k}${sep}${REDACTED}`);
-  s = s.replace(WORD_KEY_VALUE, (_m, k: string, sep: string) => `${k}${sep}${REDACTED}`);
+  s = s.replace(SUFFIX_KEY_VALUE, (_m, k: string, sep: string) => `${k}${sep}${REDACTED}`);
   s = s.replace(OTP_AFTER_WORD, (_m, w: string, gap: string) => `${w}${gap}${REDACTED}`);
   s = s.replace(OTP_BEFORE_WORD, (_m, gap: string, w: string) => `${REDACTED}${gap}${w}`);
   s = scrubEmails(s);

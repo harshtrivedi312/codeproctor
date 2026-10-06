@@ -6,7 +6,7 @@ import cookieParser from 'cookie-parser';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
-import { clientErrorBody } from './client-errors/client-error-body.middleware';
+import { createClientErrorBody } from './client-errors/client-error-body.middleware';
 import type { Env } from './config/env';
 import { ProblemFilter } from './common/problem.filter';
 
@@ -38,7 +38,10 @@ export function configureApp(app: INestApplication): void {
   });
   // Public client-error route (C-32): streaming 16 KB cap, no inflation, parsed before the
   // global body parser (which then skips it).
-  app.use(`/${API_PREFIX}/client-errors`, clientErrorBody);
+  app.use(
+    `/${API_PREFIX}/client-errors`,
+    createClientErrorBody(config.get('CLIENT_ERROR_BODY_TIMEOUT_MS', { infer: true })),
+  );
   app.useGlobalFilters(new ProblemFilter());
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),

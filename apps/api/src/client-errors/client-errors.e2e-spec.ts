@@ -253,6 +253,64 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
     expect(JSON.stringify(res.body)).not.toContain('PLANTED-ECHO');
   });
 
+  it('C-32: a non-JSON body is 415 even when chunked, so the global form parser is never reached', async () => {
+    const form = Buffer.from(`message=${'a'.repeat(50_000)}`);
+    const res = await rawChunkedPost(app, '/api/v1/client-errors', [form], {
+      'content-type': 'application/x-www-form-urlencoded',
+    });
+    expect(res.status).toBe(415);
+    const small = await request(app.getHttpServer())
+      .post('/api/v1/client-errors')
+      .type('form')
+      .send({ message: 'cross-site form post' })
+      .expect(415);
+    expect(small.headers['content-type']).toMatch(/application\/problem\+json/);
+    expect(lines).toHaveLength(0);
+  });
+
+  it('C-32: a request with no body is 400 from validation', async () => {
+    await request(app.getHttpServer()).post('/api/v1/client-errors').expect(400);
+    expect(lines).toHaveLength(0);
+  });
+
+  it('C-32: an array body and a deeply nested body are 400, never 500', async () => {
+    await request(app.getHttpServer())
+      .post('/api/v1/client-errors')
+      .set('content-type', 'application/json')
+      .send('[{"message":"x"}]')
+      .expect(400);
+    const deep = `${'['.repeat(8000)}${']'.repeat(8000)}`;
+    const res = await request(app.getHttpServer())
+      .post('/api/v1/client-errors')
+      .set('content-type', 'application/json')
+      .send(deep)
+      .expect(400);
+    expect(res.headers['content-type']).toMatch(/application\/problem\+json/);
+  });
+
+  it('C-32: an aborted body does not break the server', async () => {
+    const server = app.getHttpServer() as unknown as Server;
+    if (server.address() === null) await new Promise<void>((resolve) => server.listen(0, resolve));
+    const { port } = server.address() as AddressInfo;
+    await new Promise<void>((resolve) => {
+      const req = httpRequest({
+        host: '127.0.0.1',
+        port,
+        path: '/api/v1/client-errors',
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+      });
+      req.on('error', () => resolve());
+      req.write('{"message":"abo');
+      setTimeout(() => req.destroy(), 50);
+    });
+    await request(app.getHttpServer())
+      .post('/api/v1/client-errors')
+      .send({ message: 'after abort' })
+      .expect(204);
+    expect(lines).toHaveLength(1);
+  });
+
   it('C-32: the mixed-case path hits the same body limit', async () => {
     await request(app.getHttpServer())
       .post('/API/V1/Client-Errors')
@@ -298,5 +356,32 @@ describe('POST /client-errors (C-32, NFR-04, FR-103)', () => {
       .post('/api/v1/client-errors')
       .send({ message: 'g6' })
       .expect(429);
+  });
+
+  it('C-32: a body that arrives too slowly is 408 (read deadline)', async () => {
+    await restart({ CLIENT_ERROR_BODY_TIMEOUT_MS: '300' });
+    const server = app.getHttpServer() as unknown as Server;
+    if (server.address() === null) await new Promise<void>((resolve) => server.listen(0, resolve));
+    const { port } = server.address() as AddressInfo;
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/api/v1/client-errors',
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+        },
+        (res) => {
+          resolve(res.statusCode ?? 0);
+          res.resume();
+          req.destroy();
+        },
+      );
+      req.on('error', (e) => (e.message.includes('socket hang up') ? undefined : reject(e)));
+      req.write('{"message":"slow');
+    });
+    expect(status).toBe(408);
+    delete process.env['CLIENT_ERROR_BODY_TIMEOUT_MS'];
   });
 });

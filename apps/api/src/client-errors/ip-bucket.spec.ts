@@ -4,6 +4,9 @@ describe('ipBucket (C-32)', () => {
   it('C-32: IPv4 and mapped IPv4 are kept as the IPv4', () => {
     expect(ipBucket('203.0.113.7')).toBe('203.0.113.7');
     expect(ipBucket('::ffff:203.0.113.7')).toBe('203.0.113.7');
+    expect(ipBucket('0:0:0:0:0:ffff:1.2.3.4')).toBe('1.2.3.4');
+    expect(ipBucket('::ffff:102:304')).toBe('1.2.3.4');
+    expect(ipBucket('0:0:0:0:0:ffff:102:304')).toBe('1.2.3.4');
   });
 
   it('C-32: IPv6 addresses in one /64 share a bucket, others do not', () => {
