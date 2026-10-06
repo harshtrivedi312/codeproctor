@@ -75,14 +75,21 @@ SCREEN_SHARE_RESUMED, IDENTITY_MANUAL_REVIEW, RESUME_OTP_FAILED). Bands: LOW 0-2
 HIGH 60-100 (`mediumMinScore`, `highMinScore`). Overrides: `severityPoints`, `capPerType`,
 `capOverrides`, `severityByType`, `weightByType`. TC-075: 2 HIGH + 3 MEDIUM = 64, HIGH.
 Routing (FR-805 as changed by owner decision C-28): a person reviews EVERY session, so `needs_review`
-is always true and nothing is auto-cleared. The band now orders the queue and picks the review path:
-`review_path` is `fast` (summary and one-click verdict; default for bands in the SYSTEM setting
-`RISK_FAST_REVIEW_BANDS`, default `LOW`) or `full`. A pending identity review or pending manual short-answer score forces `full`
-(decided, DL-18). `RISK_FAST_REVIEW_BANDS` (`ReviewPathConfig.from_env()`, DL-18) is a system setting, not an org setting: it holds only `LOW` or nothing (set but empty = everything full), unset means `LOW`, and any other value fails loudly. It cannot be set through org settings or the `/risk` request config. Holds force the `full` path (DL-18). Queue order
-(`order_review_queue`): HIGH, MEDIUM, LOW; higher score first; older submission first; session id as
-the final tie-break, so the order is total and deterministic. BE-13 owns the final review-queue order, including holds and oldest-first (DL-20); this helper has
-no holds tier, and `queue_rank` stays band-based. `reasons` always starts with `RISK_<band>`. The `/risk` route accepts `identity_review_pending` and `short_answer_pending` and
-returns `needs_review`, `review_path`, `queue_rank`, `review_reasons`.
+is always true and nothing is auto-cleared. The band orders the queue and picks the review path:
+`review_path` is `fast` (summary and one-click verdict) or `full`. A pending identity review or
+pending manual short-answer score forces `full` (DL-18).
+
+`RISK_FAST_REVIEW_BANDS` (`ReviewPathConfig.from_env()`, DL-18) lists the bands that get `fast`. It is
+a system setting, not an org setting: it holds only `LOW` or nothing (set but empty = everything
+full), unset means `LOW`, and any other value fails loudly, at worker startup. It cannot be set
+through org settings or the `/risk` request config.
+
+Queue order helper (`order_review_queue`): HIGH, MEDIUM, LOW; higher score first; older submission
+first; session id as the final tie-break, so the order is total and deterministic. BE-13 owns the
+final review-queue order, including holds and oldest-first (DL-20); this helper has no holds tier and
+`queue_rank` stays band-based. `reasons` always starts with `RISK_<band>`. The `/risk` route accepts
+`identity_review_pending` and `short_answer_pending` and returns `needs_review`, `review_path`,
+`queue_rank`, `review_reasons`.
 Severity is always taken from the type; a severity sent by a client is ignored.
 
 Accommodations (FR-305): `disabledEventTypes` lists event types that are never produced by the

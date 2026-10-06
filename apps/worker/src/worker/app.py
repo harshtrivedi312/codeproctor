@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import hmac
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from worker.config import IntegrityConfig
+from worker.config import IntegrityConfig, ReviewPathConfig
 from worker.events import (
     MAX_SOURCE_CODE_LENGTH,
     CodeLanguage,
@@ -33,7 +35,15 @@ from worker.similarity import (
     prepare_ai_context,
 )
 
-app = FastAPI(title="CodeProctor analysis worker")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Validate system config once at startup: a bad value stops the deploy, not the requests."""
+    ReviewPathConfig.from_env()  # RISK_FAST_REVIEW_BANDS
+    yield
+
+
+app = FastAPI(title="CodeProctor analysis worker", lifespan=lifespan)
 
 
 def require_internal_token(

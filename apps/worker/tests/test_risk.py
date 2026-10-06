@@ -17,6 +17,11 @@ from worker.risk import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_review_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RISK_FAST_REVIEW_BANDS", raising=False)
+
+
 def cfg(**risk: object) -> IntegrityConfig:
     return IntegrityConfig.model_validate({"risk": risk})
 
