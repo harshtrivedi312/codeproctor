@@ -149,6 +149,13 @@ ADR 0011 (owner decision C-21) answers 5 and 6 are now done on `POST /auth/2fa/d
 - The API `AuthUserDto` is not linked to the shared `SessionUser` type: `apps/api` cannot import `@codeproctor/shared` without a new workspace dependency, which this PR does not add (hub/architect decision needed).
 - Log redaction (PR #58): `LOG_REDACT` lives in `apps/api/src/common/log-redaction.ts`, is wired through `buildPinoHttpOptions` (`pino-http.config.ts`, unit-tested), and is bounded to three container levels; `code` is redacted only under body members so `err.code` survives. The e2e suite proves probe secrets never reach the captured request logs.
 
+### Contract changes from the candidate RouteAccess variant (Backend B, architecture hub, QA)
+
+- Architect finding F5 done: the route matrix now has a CANDIDATE variant. Candidate routes use `@Public()` (so the staff JwtAuthGuard lets them through) plus `@CandidateRoute(permission)` (`apps/api/src/common/auth/candidate-route.decorator.ts`; metadata only, the CandidateSessionGuard of BE-07 reads it) and a matrix entry `{ principal: 'CANDIDATE', permission }` with `permission` typed as the shared `Permission` (the `candidate_*` entries of PERMISSIONS). No `@Roles()` and no `@Audited()` on them (ADR 0013); the matrix may set `audited: true` to allow it.
+- `RouteAccess = 'public' | StaffAccess | CandidateAccess`, with guards `isPublic`, `isStaff`, `isCandidate` exported from `route-permissions.ts`. Code that read `access.roles` on a non-public entry must narrow with `isStaff` first.
+- `RegisteredRoute` gained `candidatePermission: string | null`. `matrixProblems` reports: a CANDIDATE entry that is not `@Public()`, has no marker or another permission, or carries `@Roles()` or `@Audited()`; a marker on a route the matrix lists as public or staff; a staff route with the marker. Staff results are unchanged. A how-to comment sits at the top of the matrix types in `route-permissions.ts`.
+- FU-BE-75 (typed staff parity, moving the matrix into shared) stays open for the next PR.
+
 ## Backend B (candidate) (D-51)
 
 IDs use the prefix FU-BEB-NN. Only blockers stop a merge (CLAUDE.md rule 2); security weaknesses are always blockers (rule 3).

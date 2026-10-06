@@ -1,7 +1,8 @@
-import { ROUTE_PERMISSIONS } from './route-permissions';
+import { ROUTE_PERMISSIONS, isCandidate, isPublic, isStaff } from './route-permissions';
 import { Controller, Get, Post } from '@nestjs/common';
 import type { ModulesContainer } from '@nestjs/core';
 import { Audited } from '../../audit/audited.decorator';
+import { CandidateRoute } from './candidate-route.decorator';
 import { Public, Roles } from './decorators';
 import { listRoutes, matrixProblems } from './route-registry';
 import type { RegisteredRoute } from './route-registry';
@@ -10,9 +11,10 @@ const everyRoute = (): RegisteredRoute[] =>
   Object.entries(ROUTE_PERMISSIONS).map(([key, access]) => ({
     key,
     handler: 'X.y',
-    isPublic: access === 'public',
-    roles: access === 'public' ? [] : access.roles,
-    audited: access !== 'public' && access.audited === true,
+    isPublic: isPublic(access) || isCandidate(access),
+    roles: isStaff(access) ? access.roles : [],
+    audited: !isPublic(access) && access.audited === true,
+    candidatePermission: isCandidate(access) ? access.permission : null,
   }));
 
 describe('route permission matrix (FR-103, TC-004)', () => {
@@ -29,6 +31,7 @@ describe('route permission matrix (FR-103, TC-004)', () => {
         isPublic: false,
         roles: ['AUTHOR' as const],
         audited: false,
+        candidatePermission: null,
       },
     ];
     expect(matrixProblems(routes)).toEqual([
@@ -48,6 +51,7 @@ describe('route permission matrix (FR-103, TC-004)', () => {
       isPublic: true,
       roles: ['SUPER_ADMIN'],
       audited: false,
+      candidatePermission: null,
     });
     const problems = matrixProblems(routes).join('\n');
     expect(problems).toContain(
@@ -61,6 +65,7 @@ describe('route permission matrix (FR-103, TC-004)', () => {
     expect(ROUTE_PERMISSIONS['GET /health']).toBe('public');
     for (const [key, access] of Object.entries(ROUTE_PERMISSIONS)) {
       if (key.includes('/admin/users')) {
+        expect(isStaff(access)).toBe(true);
         expect(access).toMatchObject({ roles: ['SUPER_ADMIN'], permission: 'user:manage' });
       }
     }
@@ -69,7 +74,7 @@ describe('route permission matrix (FR-103, TC-004)', () => {
 
 describe('matrix edge cases (FR-103, FR-105)', () => {
   it('FR-105: a candidate-data route that is not audited is reported', () => {
-    const real = Object.entries(ROUTE_PERMISSIONS).filter(([, a]) => a !== 'public')[0];
+    const real = Object.entries(ROUTE_PERMISSIONS).filter(([, a]) => isStaff(a))[0];
     const key = 'GET /review/sessions/:id';
     const saved = ROUTE_PERMISSIONS[key];
     (ROUTE_PERMISSIONS as Record<string, unknown>)[key] = {
@@ -79,7 +84,14 @@ describe('matrix edge cases (FR-103, FR-105)', () => {
     };
     try {
       const routes: RegisteredRoute[] = [
-        { key, handler: 'R.read', isPublic: false, roles: ['REVIEWER'], audited: false },
+        {
+          key,
+          handler: 'R.read',
+          isPublic: false,
+          roles: ['REVIEWER'],
+          audited: false,
+          candidatePermission: null,
+        },
       ];
       expect(real).toBeDefined();
       expect(matrixProblems(routes).join('\n')).toContain(
@@ -145,9 +157,10 @@ describe('route registry walk (FR-103, FR-105)', () => {
     const routes = Object.entries(ROUTE_PERMISSIONS).map(([key, access]) => ({
       key,
       handler: 'X.y',
-      isPublic: access === 'public',
-      roles: access === 'public' ? [] : access.roles,
-      audited: access !== 'public' && access.audited === true,
+      isPublic: isPublic(access) || isCandidate(access),
+      roles: isStaff(access) ? access.roles : [],
+      audited: !isPublic(access) && access.audited === true,
+      candidatePermission: isCandidate(access) ? access.permission : null,
     }));
     const flipped = routes.map((r) =>
       r.key === 'GET /admin/users' ? { ...r, audited: false } : r,
@@ -159,5 +172,116 @@ describe('route registry walk (FR-103, FR-105)', () => {
     expect(matrixProblems(extra).join('\n')).toContain(
       'POST /admin/users has @Audited() but the matrix does not say audited',
     );
+  });
+});
+
+describe('candidate route variant (FR-103, NFR-04, ADR 0010 section 6, ADR 0013)', () => {
+  const KEY = 'POST /candidate/sessions/:id/run';
+  const candidate = {
+    principal: 'CANDIDATE',
+    permission: 'candidate_answer:run',
+  } as const;
+  const base: RegisteredRoute = {
+    key: KEY,
+    handler: 'C.run',
+    isPublic: true,
+    roles: [],
+    audited: false,
+    candidatePermission: 'candidate_answer:run',
+  };
+  const withEntry = (entry: unknown, routes: RegisteredRoute[]): string[] => {
+    const matrix = ROUTE_PERMISSIONS as Record<string, unknown>;
+    matrix[KEY] = entry;
+    try {
+      // Only this route: the other matrix entries are not served by these synthetic routes.
+      return matrixProblems(routes).filter((p) => p.includes(KEY));
+    } finally {
+      delete matrix[KEY];
+    }
+  };
+
+  it('FR-103: the type guards tell public, staff and candidate access apart', () => {
+    expect([isPublic('public'), isStaff('public'), isCandidate('public')]).toEqual([
+      true,
+      false,
+      false,
+    ]);
+    expect([isPublic(candidate), isStaff(candidate), isCandidate(candidate)]).toEqual([
+      false,
+      false,
+      true,
+    ]);
+    const staff = { roles: ['AUTHOR'], permission: 'question:read' } as const;
+    expect([isPublic(staff), isStaff(staff), isCandidate(staff)]).toEqual([false, true, false]);
+  });
+
+  it('NFR-04: a CANDIDATE route that is @Public() and carries @CandidateRoute() has no problems', () => {
+    expect(withEntry(candidate, [base])).toEqual([]);
+  });
+
+  it('FR-103: a CANDIDATE route that is not @Public() is reported', () => {
+    const problems = withEntry(candidate, [{ ...base, isPublic: false }]);
+    expect(problems.join('\n')).toContain('is a CANDIDATE route in the matrix but not @Public()');
+  });
+
+  it('FR-103: a CANDIDATE route without the marker, or with another permission, is reported', () => {
+    expect(withEntry(candidate, [{ ...base, candidatePermission: null }]).join('\n')).toContain(
+      'has no @CandidateRoute()',
+    );
+    expect(
+      withEntry(candidate, [{ ...base, candidatePermission: 'candidate_answer:submit' }]).join(
+        '\n',
+      ),
+    ).toContain('@CandidateRoute() permission differs from the matrix');
+  });
+
+  it('FR-103: the marker on a route the matrix lists as public or staff is reported', () => {
+    expect(withEntry('public', [base]).join('\n')).toContain(
+      'carries @CandidateRoute() but the matrix does not list it as CANDIDATE',
+    );
+    const staff = { roles: ['AUTHOR'], permission: 'question:read' };
+    const problems = withEntry(staff, [{ ...base, isPublic: false, roles: ['AUTHOR'] }]).join('\n');
+    expect(problems).toContain('is a staff route (@Roles()) but carries @CandidateRoute()');
+  });
+
+  it('FR-103: a staff route (@Roles) never carries the candidate marker, even when the matrix says CANDIDATE', () => {
+    const problems = withEntry(candidate, [{ ...base, isPublic: false, roles: ['AUTHOR'] }]).join(
+      '\n',
+    );
+    expect(problems).toContain('is a CANDIDATE route but carries @Roles()');
+  });
+
+  it('NFR-04: @Audited() on a CANDIDATE route fails unless the matrix says audited (ADR 0013)', () => {
+    expect(withEntry(candidate, [{ ...base, audited: true }]).join('\n')).toContain(
+      'candidate routes write no audit rows (ADR 0013)',
+    );
+    expect(withEntry({ ...candidate, audited: true }, [{ ...base, audited: true }])).toEqual([]);
+    expect(withEntry({ ...candidate, audited: true }, [base]).join('\n')).toContain(
+      'is audited in the matrix but has no @Audited()',
+    );
+  });
+
+  it('FR-103: listRoutes reads @CandidateRoute from synthetic controllers, and a staff route has none', () => {
+    @Controller('candidate')
+    class CandidateController {
+      @Post('run')
+      @Public()
+      @CandidateRoute('candidate_answer:run')
+      run(): void {}
+
+      @Get('staff')
+      @Roles('AUTHOR')
+      staff(): void {}
+    }
+    const modules = {
+      values: () => [{ controllers: new Map([['c', { metatype: CandidateController }]]) }],
+    } as unknown as ModulesContainer;
+    const routes = listRoutes(modules);
+    expect(routes.find((r) => r.key === 'POST /candidate/run')).toMatchObject({
+      isPublic: true,
+      roles: [],
+      candidatePermission: 'candidate_answer:run',
+    });
+    expect(routes.find((r) => r.key === 'GET /candidate/staff')?.candidatePermission).toBeNull();
   });
 });

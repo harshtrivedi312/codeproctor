@@ -5,8 +5,9 @@ import { RequestMethod } from '@nestjs/common';
 import { ModulesContainer } from '@nestjs/core';
 import type { UserRole } from '../../generated/prisma/client';
 import { AUDITED } from '../../audit/audited.decorator';
+import { CANDIDATE_ROUTE } from './candidate-route.decorator';
 import { IS_PUBLIC, ROLES } from './decorators';
-import { ROUTE_PERMISSIONS } from './route-permissions';
+import { ROUTE_PERMISSIONS, isCandidate, isPublic } from './route-permissions';
 
 export interface RegisteredRoute {
   /** "METHOD /path", without the global prefix, e.g. "POST /auth/2fa/reset/:userId". */
@@ -16,6 +17,8 @@ export interface RegisteredRoute {
   roles: readonly UserRole[];
   /** The handler or its class carries @Audited. */
   audited: boolean;
+  /** Permission set by @CandidateRoute, or null when the route does not carry the marker. */
+  candidatePermission: string | null;
 }
 
 function join(...parts: string[]): string {
@@ -67,6 +70,7 @@ export function listRoutes(modules: ModulesContainer): RegisteredRoute[] {
               isPublic: pick<boolean>(IS_PUBLIC) === true,
               roles: pick<UserRole[]>(ROLES) ?? [],
               audited: pick<unknown>(AUDITED) !== undefined,
+              candidatePermission: pick<string>(CANDIDATE_ROUTE) ?? null,
             });
           }
         }
@@ -92,7 +96,36 @@ export function matrixProblems(routes: readonly RegisteredRoute[]): string[] {
       problems.push(`${route.key} (${route.handler}) is not in ROUTE_PERMISSIONS`);
     } else if (route.isPublic && route.roles.length > 0) {
       problems.push(`${route.key} (${route.handler}) carries both @Public() and @Roles()`);
-    } else if (entry === 'public') {
+    } else if (isCandidate(entry)) {
+      if (!route.isPublic) {
+        problems.push(
+          `${route.key} is a CANDIDATE route in the matrix but not @Public(), so the staff guard would refuse it`,
+        );
+      }
+      if (route.candidatePermission === null) {
+        problems.push(
+          `${route.key} is a CANDIDATE route in the matrix but has no @CandidateRoute()`,
+        );
+      } else if (route.candidatePermission !== entry.permission) {
+        problems.push(`${route.key} @CandidateRoute() permission differs from the matrix`);
+      }
+      if (route.roles.length > 0) {
+        problems.push(`${route.key} is a CANDIDATE route but carries @Roles()`);
+      }
+      if (route.audited && entry.audited !== true) {
+        problems.push(
+          `${route.key} is a CANDIDATE route with @Audited(); candidate routes write no audit rows (ADR 0013)`,
+        );
+      } else if (!route.audited && entry.audited === true) {
+        problems.push(`${route.key} is audited in the matrix but has no @Audited()`);
+      }
+    } else if (route.candidatePermission !== null) {
+      problems.push(
+        route.roles.length > 0
+          ? `${route.key} (${route.handler}) is a staff route (@Roles()) but carries @CandidateRoute()`
+          : `${route.key} (${route.handler}) carries @CandidateRoute() but the matrix does not list it as CANDIDATE`,
+      );
+    } else if (isPublic(entry)) {
       if (!route.isPublic) problems.push(`${route.key} is public in the matrix but not @Public()`);
     } else if (route.isPublic) {
       problems.push(`${route.key} is @Public() but the matrix lists roles for it`);
