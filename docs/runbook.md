@@ -121,7 +121,7 @@ NFR-03. Staging holds synthetic data only (Cloudflare R2, no real candidates). S
 live only in GitHub Actions secrets (environment `staging`) and on the staging server (D-38); no
 step below is run from a developer machine or an agent session.
 
-The steps run in this order. A person does steps 0, 1, 4 and 6 (they handle credentials); the deploy
+The steps run in this order. A person does steps 0, 1, 2, 4 and 6 and the quarterly drill in step 7 (they handle credentials); the deploy
 job does 3 and 5.
 
 ### 0. Lock the `staging` environment first (a person, before any secret exists)
@@ -129,7 +129,7 @@ job does 3 and 5.
 In GitHub, create the `staging` environment and allow deployments from the `main` branch only, with no
 required reviewers (they would stall the schedule). Only then create secrets. Until this is done, a
 branch pushed by any session could run a workflow that names the environment and read its secrets.
-Every workflow job that uses a staging secret also guards on `github.ref == 'refs/heads/main'`, as the
+Every workflow job that uses a staging secret must also guard on `github.ref == 'refs/heads/main'`, as the
 nightly backup does; the restriction on the environment is what stops a different workflow file.
 
 ### 1. The database and its owner role (a person, once)
@@ -167,7 +167,7 @@ inside the network; decide this before step 3 (DEP-01).
 ### 3. Apply the migrations (the deploy job)
 
 ```bash
-pnpm exec prisma migrate deploy      # with MIGRATION_DATABASE_URL from the secret
+pnpm exec prisma migrate deploy      # the secret STAGING_MIGRATION_DATABASE_URL, exported as MIGRATION_DATABASE_URL
 ```
 
 Only `migrate deploy`. Never `migrate dev`, `migrate reset` or `db push` against staging (ADR 0009). A
@@ -228,7 +228,7 @@ SELECT has_database_privilege('app_user', current_database(), 'TEMPORARY');    -
 The nightly workflow restores each new backup into a throwaway server and fails the job when the row
 counts differ (exit code 2) or anything else goes wrong (exit code 1). Treat a red run as an incident:
 until a restore works, there is no backup. Once a quarter, and before the pilot, also prove that an **older** backup restores: run `restore.sh
---backup <older dump file>` into a throwaway server (a person, with the staging store settings). The
+--backup <older dump file>` into a throwaway server (a person, on the staging server or in a manually dispatched workflow on `main`: never on a developer machine, because the R2 keys must stay off it). The
 nightly workflow only restores the newest backup and takes no input; a workflow input for this is a
 proposal for the hub (FU-DBB-24).
 For a real restore, follow "Restoring for real (an incident)" above; it runs as the migration owner role
