@@ -2,13 +2,13 @@
 //
 // Two facts decide whether and how the check runs: the waiver ("no identity check", ADR 0015 C-25)
 // and "face detectors off" (FACE in disabledDetectors, C-34), plus session facts that stop a job
-// before any image is read (ERASED, a pending erasure fence, RETENTION_FACE_DONE; ADR 0014 3.4).
+// before any image is read (ERASED, a pending erasure fence, the face-retention marker; ADR 0014 3.4).
 //
 // INTERIM (marked for the PR): the schema on this branch has no WAIVED status and no face-retention
 // marker yet (ADR 0015 migrations #100, ADR 0004 section 9 migrations #91, #120). So:
 //   - the waiver is read from `invitations.accommodations.identityCheckWaiver` (BE-06's input) and,
 //     once the status exists, from a WAIVED row (compared as a string so this file compiles today);
-//   - the erasure fence (candidate.erasure_requested_at / erased_at) is wired; RETENTION_FACE_DONE
+//   - the erasure fence (candidate.erasure_requested_at / erased_at) is wired; the face-retention marker
 //     reads as not done.
 // When CS-4 forbids candidate scope from reading `invitations` (ADR 0013 CS-4.4), the waiver moves to
 // `AccommodationsService.projection()`; only this class changes.
@@ -83,7 +83,7 @@ export class PrismaIdentityFacts extends IdentityFacts {
     const status = String(row.status);
     const candidate = row.invitation.candidate;
     // The erasure fence is on the candidate (ADR 0004 section 9.5): a request or a completed erasure
-    // stops every job before it presigns or reads an image. INTERIM: RETENTION_FACE_DONE (the face
+    // stops every job before it presigns or reads an image. INTERIM: the face-retention marker (the face
     // tier already run) has no column on this branch yet, so it reads as not done.
     return {
       status,
