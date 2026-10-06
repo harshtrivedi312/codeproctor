@@ -37,6 +37,7 @@ import {
   type TestDraft,
 } from './draft';
 import { PROFILE_EXPLANATION, PROFILE_LABEL, SECTION_RULES } from './labels';
+import { InviteButton } from '@/features/invitations/invite-button';
 import { QuestionPicker, pickRows, type PickRow } from './question-picker';
 import {
   TestChangedFailure,
@@ -287,6 +288,7 @@ export function TestBuilder({
         />
         <div className="flex flex-wrap items-center gap-2">
           {actions}
+          {detail ? <InviteButton testId={detail.id} disabled={isDirty && !readOnly} /> : null}
           {readOnly ? null : (
             <Button
               type="submit"

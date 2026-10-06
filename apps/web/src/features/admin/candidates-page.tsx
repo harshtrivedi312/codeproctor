@@ -6,6 +6,9 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/features/auth/auth-provider';
 import { RequireRole } from '@/features/auth/require-role';
+import { CandidateTimelineDialog } from '@/features/invitations/candidate-timeline-dialog';
+import { InviteDialog } from '@/features/invitations/invite-dialog';
+import { STATUS_LABEL, STATUS_TONE } from '@/features/invitations/status-timeline';
 import { can, rolesWith } from '@/features/staff/permissions';
 import type { Schemas } from '@/lib/api/client';
 import { ConfirmDialog } from './confirm-dialog';
@@ -50,8 +53,8 @@ function ErasureStatus({ candidate }: { candidate: Candidate }): React.JSX.Eleme
 }
 
 /**
- * Candidate list with the erasure action (NFR-05, D-19, TC-094). The full candidates page with
- * status timelines is Step 5 (FE-05); this step adds the list and the erase action.
+ * Candidates: invite, per-candidate status timeline (FR-305, ADR 0002) and the erasure action
+ * (NFR-05, D-19, TC-094). Invitations and timelines are WEB-ONLY mocks until BE-06b.
  */
 export function CandidatesPage(): React.JSX.Element {
   return (
@@ -67,6 +70,9 @@ function CandidatesContent(): React.JSX.Element {
   const erase = useRequestErasure();
   const [target, setTarget] = React.useState<Candidate | null>(null);
   const mayErase = can(role, 'candidate:erase');
+  const mayInvite = can(role, 'invitation:create');
+  const [timeline, setTimeline] = React.useState<Candidate | null>(null);
+  const [inviting, setInviting] = React.useState(false);
 
   const columns: Column<Candidate>[] = [
     {
@@ -82,6 +88,18 @@ function CandidatesContent(): React.JSX.Element {
       sortValue: (c) => c.lastSessionAt ?? null,
       searchValue: () => '',
       cell: (c) => formatDate(c.lastSessionAt),
+    },
+    {
+      id: 'status',
+      header: 'Latest invitation',
+      sortValue: (c) => c.latestStatus ?? '',
+      searchValue: (c) => (c.latestStatus ? STATUS_LABEL[c.latestStatus] : ''),
+      cell: (c) =>
+        c.latestStatus ? (
+          <Badge tone={STATUS_TONE[c.latestStatus]}>{STATUS_LABEL[c.latestStatus]}</Badge>
+        ) : (
+          <span className="text-muted-foreground">Not invited</span>
+        ),
     },
     {
       id: 'erasure',
@@ -100,30 +118,38 @@ function CandidatesContent(): React.JSX.Element {
       },
       cell: (c) => <ErasureStatus candidate={c} />,
     },
-    ...(mayErase
-      ? [
-          {
-            id: 'actions',
-            header: 'Actions',
-            cell: (c: Candidate) =>
-              c.erasure.state === 'none' ? (
-                <Button size="sm" variant="outline" onClick={() => setTarget(c)}>
-                  Erase data<span className="sr-only"> for {c.name}</span>
-                </Button>
-              ) : (
-                <span className="text-muted-foreground">—</span>
-              ),
-          } satisfies Column<Candidate>,
-        ]
-      : []),
+    {
+      id: 'actions',
+      header: 'Actions',
+      cell: (c: Candidate) => (
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            aria-label={`Timeline for ${c.name}`}
+            onClick={() => setTimeline(c)}
+          >
+            Timeline
+          </Button>
+          {mayErase && c.erasure.state === 'none' ? (
+            <Button size="sm" variant="outline" onClick={() => setTarget(c)}>
+              Erase data<span className="sr-only"> for {c.name}</span>
+            </Button>
+          ) : null}
+        </div>
+      ),
+    } satisfies Column<Candidate>,
   ];
 
   return (
     <>
-      <PageHeader
-        title="Candidates"
-        description="Candidates and their data erasure state. Invitations and status timelines arrive in Step 5."
-      />
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <PageHeader
+          title="Candidates"
+          description="Candidates, where each invitation stands, and their data erasure state."
+        />
+        {mayInvite ? <Button onClick={() => setInviting(true)}>Invite candidates</Button> : null}
+      </div>
       <DataTable
         caption="Candidates"
         searchLabel="Search candidates"
@@ -146,6 +172,8 @@ function CandidatesContent(): React.JSX.Element {
           hint: 'Candidates appear here after you invite them to a test.',
         }}
       />
+      {mayInvite ? <InviteDialog open={inviting} onOpenChange={setInviting} /> : null}
+      <CandidateTimelineDialog candidate={timeline} onClose={() => setTimeline(null)} />
       <ConfirmDialog
         open={target !== null}
         onOpenChange={(open) => {

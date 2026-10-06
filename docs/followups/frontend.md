@@ -548,3 +548,30 @@ Read from `apps/api/src/tests` (tests.controller.ts, tests.service.ts, dto/tests
 3. A pass score that has been set cannot be cleared (`null` is not accepted); the form says so.
 4. There is no delete, archive or copy of a test (TODO FU-BE-110 in the service).
 5. A fixed question is a published version of a non-archived question; a draft, an unknown id and another organisation's id are one 404 (DL-34), archived is 422. Section and question positions are numbered 1..n by the web; the API refuses gaps.
+
+### Phase 2: invitations, CSV, accommodations and status timelines (PROVISIONAL, WEB-ONLY mocks)
+
+None of this exists in the API yet. Every route, body, limit and error word below is the web's proposal, built from fsd FR-303..FR-305, ADR 0002 and ADR 0015. It is marked `[BE-06b]` (and `[ARC-02]` for the accommodations route) in `openapi/openapi.yaml`, `src/mocks/invitation-handlers.ts` and `src/features/invitations`. When BE-06b..d merge: replace the openapi paths with the real ones, delete `src/mocks/invitation-handlers.ts` and the candidate enricher in `admin-handlers.ts`, and keep the UI and tests.
+
+**Built (mock only):**
+
+- Invite dialog (`invite-dialog.tsx`), opened from a test page (test fixed) or the Candidates page (asks which test). Single candidate or CSV; window start and end (defaults now and now + 7 days); accommodations (extra time %, detectors to switch off, allowed assistive tools, notes); "No face match / no identity check" with a REQUIRED reason (OTHER also needs a note), an explanation, and the advice to check ID on a video call (ADR 0015, C-19). Refusing biometric processing locks FACE and GAZE off and says so.
+- CSV intake (`csv.ts`): read in the browser, never logged, stored or put in a URL; kept only in dialog state, dropped on close and on user change (the dialog body is keyed by the user id). Limits: 1 MB, 10,000 rows, email 254, name 200. BOM, CRLF/LF/CR, quotes and embedded newlines handled; invalid emails, empty cells and case-insensitive duplicates reported per row with messages that do not repeat cell content; formula-like cells (`= + - @`, tab, CR) are kept as data, shown as text, called out, and neutralised with a leading apostrophe in the downloadable error report. A bulk upload sends no accommodations and no waiver.
+- Bulk is sent in chunks of 200 rows (`BULK_CHUNK`); row errors are mapped back to CSV row numbers; a 429 stops the upload and says how many rows were not sent; the dialog never claims success it did not get.
+- Candidates page: latest-status column, a Timeline button per candidate, an "Invite candidates" button. The timeline follows ADR 0002 (invited, link opened, consent, ready, taking the test with a paused note, submitted, in review, completed, plus appeal, expired and declined endings). C-28: it shows the stage and times only, never a score, flag or verdict. ERASED is not shown.
+- PII: the timeline request carries the candidate id only and runs only while the dialog is open; the invite and CSV rows are never in query keys (the invite mutation has none); candidate invitations are cached under the candidate id and cleared with the rest of the cache on user or role change.
+
+**Questions for Backend A (BE-06b..d):**
+
+1. Paths and shapes: is `POST /v1/tests/{testId}/invitations` with `{candidate:{email,name,externalRef?}, windowStart, windowEnd, accommodations?}` right, and `POST .../invitations/bulk` with `{rows, windowStart, windowEnd}` returning `{created, errors:[{row,message}]}`? Is `GET /v1/admin/candidates/{id}/invitations` (stage plus `history:[{status,at}]`) what you will offer, and will `latestStatus` and `invitationCount` come on the candidate list?
+2. Limits: maximum rows per bulk request (the web assumes 200 and chunks), the hourly invitation limit and its scope (per user or organisation), whether a 429 carries `Retry-After`, and whether a bulk request is all-or-nothing on a 429 (the mock rejects the whole request).
+3. Duplicates: the mock answers 409 for a candidate with an open (non-terminal) invitation to the same test, and reports it per row in bulk. Is that the rule, and can an expired or declined candidate be invited again?
+4. Accommodations: ADR 0015 mentions an accommodations route with ETag and If-Match. Does BE-06 take them on the invitation body (as the web does) or on a separate route? Who may edit them after the invitation is created, and when does the identity waiver stop being allowed (after the session started)?
+5. Waiver: the web sends `identityCheckWaiver:{reasonCode, reasonNote?}` and also lists FACE and GAZE in `disabledDetectors` for REFUSED_BIOMETRIC_PROCESSING. Will the server add them itself? The error `422 REASON_NOT_ENABLED` for the global flag is the web's guess. Is the waiver allowed in bulk? (The web says no.)
+6. Limits the web proposes for accommodations: extra time 0 to 200 (whole number), 10 assistive tools of at most 80 characters, notes up to 1000, waiver note up to 500. Please confirm or give the real ones.
+7. Timeline: which session states will recruiters see, and are the history times the transition times? The web hides GRADED vs UNDER_REVIEW behind one "In review" step.
+8. Does an invitation email need the candidate's `externalRef`? It is accepted and passed through, nothing more.
+
+**Verified vs not:** verified against the mock only, by Vitest (CSV edge cases, schema rules, mock fidelity, dialog flows, timeline, axe) and Playwright (`e2e/invitations.spec.ts`). Nothing here has met the real API.
+
+**Found while testing:** the dialog's abort flag was set on cleanup and so stayed set after React strict mode's second setup, silently sending nothing from a CSV in development; fixed by resetting it on every setup.
