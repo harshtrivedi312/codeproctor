@@ -129,7 +129,7 @@ Decision: **unsigned, token-authenticated, advisory input, flagged as unsigned**
 | --- | --- |
 | Route | `POST /candidate/session/proctor-key`, no body |
 | Auth | Candidate token; epoch must equal `sessions.auth_epoch`; org scope through the session |
-| States | IN_PROGRESS, PAUSED; otherwise 409 `SESSION_NOT_ACTIVE` with extension `status` |
+| States | IN_PROGRESS, PAUSED; otherwise 409 `SESSION_NOT_ACTIVE` with extension `sessionStatus` |
 | 200 | `{ alg: "HMAC-SHA256", key: <base64, 32 bytes>, keyEpoch: int, counters: { eventSeqStart, keystrokeSeqStart, media: { SCREEN \| WEBCAM \| AUDIO: { nextSeq, nextSegment } } } }`, `Cache-Control: no-store` |
 | Errors | 401; 409 `KEY_ALREADY_ISSUED` (same epoch, already issued: the client re-runs the OTP resume); 409 `SESSION_NOT_ACTIVE`; 429 |
 | Limit | 5 per minute per session |
@@ -190,7 +190,7 @@ Decision: **unsigned, token-authenticated, advisory input, flagged as unsigned**
 | Route | `POST /candidate/session/heartbeat` every 10 s, unsigned |
 | Body (optional; the SDK fills it from a `getHealth()` provider wired to the recorder and the queues) | `{ capabilities?: CapabilityFlag[] (≤ 32, only when changed), recorder?: { streams: [{ stream, segment, lastSeq, bufferedChunks, bufferedBytes, droppedChunks, droppedBytes }] }, queue?: { pendingEventBatches, pendingKeystrokeBatches, rejectedBatches } }` |
 | 200 | `Cache-Control: no-store`. `{ serverTime, status: "IN_PROGRESS" \| "PAUSED", deadlineAt, sectionDeadlineAt \| null, pauseReasons: [] }`, plus optional `sessionToken` and `sessionTokenExpiresAt`, present only when the server renews the candidate token (backend.md Step 7; lifetime in ARC-03 part 2). The SDK passes them to the app through `onToken` and never stores them |
-| Errors | 401; 409 `SESSION_NOT_ACTIVE` with `status` (the SDK stops the heartbeat and fires an `ended` event instead of reporting "offline"); 429 |
+| Errors | 401; 409 `SESSION_NOT_ACTIVE` with `sessionStatus` (the SDK stops the heartbeat and fires an `ended` event instead of reporting "offline"); 429 |
 | Limit | 12 per minute per session |
 
 Server behaviour:
