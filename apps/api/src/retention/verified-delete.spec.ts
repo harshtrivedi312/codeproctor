@@ -6,7 +6,7 @@ import {
   versioningIsSafe,
   VersioningUnsafeError,
 } from './verified-delete';
-import { InMemoryObjectStore } from './testing/in-memory-object-store';
+import { InMemoryObjectStore } from '../test/retention/in-memory-object-store';
 
 const P = 'orgs/o1/sessions/s1/';
 const keep = (key: string): boolean => key.startsWith(`${P}${REPORTS_SUBPREFIX}`);

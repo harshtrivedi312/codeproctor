@@ -9,6 +9,7 @@ import { getSessionToken } from './session-store';
 import { testRoutePath } from './start-step';
 import {
   expectHeadingFocused,
+  fakeRoomDeps,
   fakeScrollBox,
   passOtp,
   recordRequests,
@@ -27,6 +28,11 @@ vi.mock('@/lib/mock-ready', () => ({
   mockingReady: Promise.resolve(),
   markMockingReady: () => undefined,
 }));
+
+vi.mock('next/dynamic', async () => {
+  const { editorStub } = await import('./test-helpers');
+  return { default: () => editorStub() };
+});
 
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
 
@@ -58,7 +64,9 @@ const identity = {
 
 function open(token: string, navigate: (path: string) => void = vi.fn()) {
   startAtStepper(token);
-  return renderWithQuery(<CandidateFlow overrides={{ checker, identity, navigate }} />);
+  return renderWithQuery(
+    <CandidateFlow overrides={{ checker, identity, room: fakeRoomDeps().deps, navigate }} />,
+  );
 }
 
 describe('stepper end to end (FR-401 to FR-403)', () => {
@@ -109,8 +117,22 @@ describe('stepper end to end (FR-401 to FR-403)', () => {
     await user.click(await screen.findByRole('button', { name: /send my photos/i }));
     await user.click(await screen.findByRole('button', { name: /continue/i }));
 
+    // Room scan (FR-404): candidate-paced steps, then upload. Not a STRICT test: no phone step.
+    await expectHeadingFocused(/show us your room/i);
+    await user.click(screen.getByRole('button', { name: /start the room scan/i }));
+    for (let i = 0; i < 4; i += 1) {
+      await user.click(await screen.findByRole('button', { name: /done, next/i }));
+    }
+    await user.click(await screen.findByRole('button', { name: /done, stop recording/i }));
+    await user.click(await screen.findByRole('button', { name: /send this recording/i }));
+    await user.click(await screen.findByRole('button', { name: /continue/i }));
+
+    // Practice (FR-406): optional, skipped by pressing continue.
+    await expectHeadingFocused(/try the editor first/i);
+    await user.click(await screen.findByRole('button', { name: /i am ready: continue/i }));
+
     await expectHeadingFocused(/you are ready to start/i);
-    expect(screen.getAllByText(/\(done\)/i)).toHaveLength(3);
+    expect(screen.getAllByText(/\(done\)/i)).toHaveLength(4);
     await user.click(screen.getByRole('button', { name: /start the test/i }));
     await waitFor(() => expect(navigate).toHaveBeenCalledWith(testRoutePath()));
 
@@ -120,6 +142,10 @@ describe('stepper end to end (FR-401 to FR-403)', () => {
     expect(order.indexOf('consent')).toBeGreaterThan(order.indexOf('start'));
     expect(order.indexOf('system-check')).toBeGreaterThan(order.indexOf('sign'));
     expect(order.indexOf('identity')).toBeGreaterThan(order.indexOf('system-check'));
+    const at = (part: string) => seen.findIndex((r) => r.url.includes(part));
+    expect(at('/media/presign')).toBeGreaterThan(at('/session/identity'));
+    expect(at('/media/confirm')).toBeGreaterThan(at('/media/presign'));
+    expect(at('/test/start')).toBeGreaterThan(at('/media/confirm'));
     expect(order.indexOf('start', order.indexOf('identity'))).toBeGreaterThan(
       order.indexOf('identity'),
     );
@@ -180,5 +206,26 @@ describe('stepper end to end (FR-401 to FR-403)', () => {
     await passOtp(user);
     await screen.findByRole('heading', { level: 1, name: /welcome back/i });
     expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('FR-404: a VERIFIED session resumes at the phone step, which skips itself outside STRICT, then the practice', async () => {
+    const user = userEvent.setup();
+    open(MOCK_TOKENS.verified);
+    await passOtp(user);
+    await expectHeadingFocused(/try the editor first/i);
+    const progress = screen.getByRole('navigation', { name: /progress/i });
+    expect(within(progress).queryByText(/phone camera/i)).not.toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: /i am ready: continue/i }));
+    await expectHeadingFocused(/you are ready to start/i);
+  });
+
+  it('FR-405: a STRICT session resuming after the room scan must connect the phone before practice', async () => {
+    const user = userEvent.setup();
+    open(MOCK_TOKENS.strictVerified);
+    await passOtp(user);
+    await expectHeadingFocused(/connect your phone as a side camera/i);
+    const progress = screen.getByRole('navigation', { name: /progress/i });
+    expect(within(progress).getByText(/phone camera/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^continue$/i })).not.toBeInTheDocument();
   });
 });

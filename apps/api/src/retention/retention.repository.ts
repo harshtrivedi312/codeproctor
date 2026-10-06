@@ -5,10 +5,18 @@
 // else runs in a plain `runInOrg(orgId)` through the org-scoped client: scalar columns only, no
 // nested writes, no `orgId` or scope-FK in an update (FU-DB-110), and no `sessions` row is ever
 // deleted or its status changed (ADR 0004 9.3; the fence is BE-07's SessionStateService).
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client.js';
+import { reduceAccommodations, reduceWaiverOnly, redactReasonNote } from './accommodations';
+import { resultsDue } from './clocks';
+import type { Json } from './accommodations';
 import { OrgContextService, PrismaService } from '../database';
-import { FACE_CAP_DAYS, MARKER_ENTITY_TYPE, RETENTION_MARKER_ACTIONS } from './retention.constants';
+import {
+  CANDIDATE_ERASURE_LOCK,
+  FACE_CAP_DAYS,
+  MARKER_ENTITY_TYPE,
+  RETENTION_MARKER_ACTIONS,
+} from './retention.constants';
 import type { RetentionTier } from './retention.constants';
 
 export interface DueSession {
@@ -81,6 +89,8 @@ const days = (n: Prisma.Sql): Prisma.Sql => Prisma.sql`(${n}) * interval '24 hou
 
 @Injectable()
 export class RetentionRepository {
+  private readonly log = new Logger(RetentionRepository.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly orgContext: OrgContextService,
@@ -140,12 +150,47 @@ export class RetentionRepository {
     );
   }
 
+  /**
+   * Results tier (R-10, C-26): one year after the anchor (OQ-20: or after submission). The same
+   * review and appeal holds as the media tier. R-10 does not wait for the face or media markers: its
+   * own whole-prefix verification covers them. `created_at` is at or before every clock, and a year
+   * is at least 365 days, so the scan bound cannot drop an eligible row.
+   */
+  findDueResults(
+    now: Date,
+    clock: 'anchor' | 'submitted',
+    limit: number,
+    after?: Cursor,
+  ): Promise<DueSession[]> {
+    // OQ-20 'submitted': a session that was never submitted (EXPIRED, DECLINED) falls back to its
+    // anchor, or its rows and its candidate would never be purged.
+    const start =
+      clock === 'submitted'
+        ? Prisma.sql`COALESCE(s.submitted_at, s.retention_anchor_at)`
+        : Prisma.sql`s.retention_anchor_at`;
+    return this.select(
+      Prisma.sql`
+        ${start} IS NOT NULL
+        AND s.status NOT IN (${Prisma.join(HELD_STATUSES)})
+        AND NOT EXISTS (
+          SELECT 1 FROM appeals ap JOIN session_reviews sr ON sr.id = ap.session_review_id
+          WHERE sr.session_id = s.id AND ap.status = 'OPEN')
+        AND ((${start} AT TIME ZONE 'UTC') + interval '1 year') AT TIME ZONE 'UTC' <= ${now}`,
+      'RESULTS',
+      now,
+      limit,
+      after,
+      365,
+    );
+  }
+
   private select(
     due: Prisma.Sql,
     tier: RetentionTier,
     now: Date,
     limit: number,
     after: Cursor | undefined,
+    minAgeDays: number = MIN_RETENTION_DAYS,
   ): Promise<DueSession[]> {
     // The marker action is a code constant, written as a literal so the planner can match the
     // partial index (a bind parameter cannot be proved to satisfy its predicate on a generic plan).
@@ -164,7 +209,7 @@ export class RetentionRepository {
                  to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAtCursor"
           FROM sessions s
           JOIN organizations o ON o.id = s.org_id
-          WHERE s.created_at <= ${now}::timestamptz - ${days(Prisma.sql`${MIN_RETENTION_DAYS}`)}
+          WHERE s.created_at <= ${now}::timestamptz - ${days(Prisma.sql`${minAgeDays}`)}
             AND ${due}
             AND NOT EXISTS (
               SELECT 1 FROM audit_logs m
@@ -203,20 +248,42 @@ export class RetentionRepository {
   }
 
   /**
-   * R-2, re-checked just before the media tier deletes (selection may be stale, or R-1 may have a
-   * bug): the anchor is set, the session is not UNDER_REVIEW or APPEALED, and no appeal is open.
+   * R-2, re-checked just before the media or results tier deletes (selection may be stale, or R-1
+   * may have a bug): the clock's start is set, the session is not UNDER_REVIEW or APPEALED, and no
+   * appeal is open. `clock` is the OQ-20 switch for the results tier; the media tier always uses the anchor.
    */
-  async mediaStillEligible(sessionId: string): Promise<boolean> {
+  async stillEligible(
+    sessionId: string,
+    clock: 'anchor' | 'submitted' = 'anchor',
+    results?: { now: Date },
+  ): Promise<boolean> {
     const session = await this.prisma.client.session.findUnique({
       where: { id: sessionId },
-      select: { status: true, retentionAnchorAt: true },
+      select: { status: true, retentionAnchorAt: true, submittedAt: true },
     });
-    if (session === null || session.retentionAnchorAt === null) return false;
+    if (session === null) return false;
+    const start =
+      clock === 'anchor'
+        ? session.retentionAnchorAt
+        : (session.submittedAt ?? session.retentionAnchorAt);
+    if (start === null) return false;
+    // R-10 only: the clock date itself, BEFORE anything is deleted (the whole prefix includes reports/,
+    // which nothing but R-10 may remove). An anchor cleared and set again after selection fails here.
+    if (results !== undefined) {
+      const dueAt = resultsDue(session.retentionAnchorAt, session.submittedAt, {
+        RETENTION_RESULTS_CLOCK: clock,
+      });
+      if (dueAt === null || dueAt > results.now) return false;
+    }
     if (HELD_STATUSES.includes(session.status)) return false;
     const open = await this.prisma.client.appeal.count({
       where: { status: 'OPEN', sessionReview: { sessionId } },
     });
     return open === 0;
+  }
+
+  mediaStillEligible(sessionId: string): Promise<boolean> {
+    return this.stillEligible(sessionId, 'anchor');
   }
 
   /**
@@ -229,7 +296,7 @@ export class RetentionRepository {
   async hasKeyOutside(
     root: string,
     sessionId: string,
-    tier: Extract<RetentionTier, 'FACE' | 'MEDIA'>,
+    tier: Extract<RetentionTier, 'FACE' | 'MEDIA' | 'RESULTS'>,
     evidenceAll: boolean,
   ): Promise<boolean> {
     const identityRoot = tier === 'FACE' ? `${root}identity/` : root;
@@ -253,11 +320,19 @@ export class RetentionRepository {
           ],
         },
       }),
-      tier === 'MEDIA'
+      tier !== 'FACE'
         ? this.prisma.client.mediaChunk.count({
             where: {
               sessionId,
               AND: [{ objectKey: { not: null } }, { NOT: { objectKey: { startsWith: root } } }],
+            },
+          })
+        : Promise.resolve(0),
+      tier === 'RESULTS'
+        ? this.prisma.client.session.count({
+            where: {
+              id: sessionId,
+              AND: [{ reportKey: { not: null } }, { NOT: { reportKey: { startsWith: root } } }],
             },
           })
         : Promise.resolve(0),
@@ -279,15 +354,17 @@ export class RetentionRepository {
     const { orgId, sessionId, evidenceAll, runId } = args;
     return this.prisma.client.$transaction(async (tx) => {
       if (!(await this.lockAndCheck(tx, 'FACE', sessionId))) return false;
-      await tx.identityCheck.updateMany({
-        where: { sessionId },
-        data: { idImageKey: null, selfieKey: null },
-      });
+      // One table order in every tier (proctor_events, batches, keystrokes, media, identity), so two
+      // replicas on different tiers of one session cannot deadlock on row locks.
       await tx.proctorEvent.updateMany({
         where: evidenceAll
           ? { sessionId, evidenceKey: { not: null } }
           : { sessionId, type: 'FACE_MISMATCH' },
         data: { evidenceKey: null },
+      });
+      await tx.identityCheck.updateMany({
+        where: { sessionId },
+        data: { idImageKey: null, selfieKey: null },
       });
       await tx.auditLog.create({ data: marker('FACE', orgId, sessionId, runId) });
       return true;
@@ -304,29 +381,300 @@ export class RetentionRepository {
     const { orgId, sessionId, now, runId } = args;
     return this.prisma.client.$transaction(async (tx) => {
       if (!(await this.lockAndCheck(tx, 'MEDIA', sessionId))) return false;
-      await tx.mediaChunk.updateMany({
-        where: { sessionId, objectKey: { not: null } },
-        data: { objectKey: null, deletedAt: now },
-      });
+      if (!(await this.holdsInTx(tx, sessionId, { tier: 'MEDIA' }))) return false;
       await tx.proctorEvent.updateMany({
         where: { sessionId, evidenceKey: { not: null } },
         data: { evidenceKey: null },
+      });
+      await tx.keystrokeBatch.deleteMany({ where: { sessionId } });
+      await tx.mediaChunk.updateMany({
+        where: { sessionId, objectKey: { not: null } },
+        data: { objectKey: null, deletedAt: now },
       });
       await tx.identityCheck.updateMany({
         where: { sessionId },
         data: { idImageKey: null, selfieKey: null },
       });
-      await tx.keystrokeBatch.deleteMany({ where: { sessionId } });
+      // ADR 0015 section 7: R-4 removes the waiver's reason note (health details), compare-and-set.
+      await this.casAccommodations(tx, sessionId, redactReasonNote);
       await tx.auditLog.create({ data: marker('MEDIA', orgId, sessionId, runId) });
       return true;
     });
   }
 
   /**
+   * The R-2 holds, read again INSIDE the completion transaction, under the per-session lock: the
+   * clock's start is set, the session is not UNDER_REVIEW or APPEALED, no appeal is open, and for
+   * R-10 the clock date has really passed (an anchor cleared and set again after selection must not
+   * make results go early). The objects are gone by now, but the rows (verdict, notes, the appeal
+   * itself) are not, and they are what a review or appeal protects.
+   */
+  private async holdsInTx(
+    tx: Tx,
+    sessionId: string,
+    check: { tier: 'MEDIA' } | { tier: 'RESULTS'; clock: 'anchor' | 'submitted'; now: Date },
+  ): Promise<boolean> {
+    const session = await tx.session.findUnique({
+      where: { id: sessionId },
+      select: { status: true, retentionAnchorAt: true, submittedAt: true },
+    });
+    if (session === null || HELD_STATUSES.includes(session.status)) return false;
+    if (session.retentionAnchorAt === null && check.tier === 'MEDIA') return false;
+    if (check.tier === 'RESULTS') {
+      const dueAt = resultsDue(session.retentionAnchorAt, session.submittedAt, {
+        RETENTION_RESULTS_CLOCK: check.clock,
+      });
+      if (dueAt === null || dueAt > check.now) return false;
+    }
+    const open = await tx.appeal.count({ where: { status: 'OPEN', sessionReview: { sessionId } } });
+    return open === 0;
+  }
+
+  /**
+   * Results tier (R-10, ADR 0004 9.4), after verified deletion of the whole session prefix: delete
+   * the event, batch, identity, media and keystroke rows, the submissions and the appeals; blank code
+   * and answers; null review notes and verdicts, scores, risk and the report key; clear device_info;
+   * reduce the accommodations (OQ-12: the whole value, or only the waiver when the switch is off); write
+   * the marker; and, when this was the candidate's last session with results, anonymise the candidate,
+   * all in ONE transaction (a crash can never leave results gone and the candidate still named). The
+   * `sessions` row, the reviews and `scored_by` / `scored_at` stay (a CHECK ties those to MANUAL scoring).
+   * Lock order (ADR 0004 9.4): the per-candidate lock first, then the per-session lock, then rows.
+   */
+  completeResults(args: {
+    orgId: string;
+    sessionId: string;
+    reduceAccommodationsOnRun: boolean;
+    clock: 'anchor' | 'submitted';
+    now: Date;
+    runId: string;
+  }): Promise<
+    { kind: 'done'; anonymised: boolean } | { kind: 'alreadyDone' } | { kind: 'notEligible' }
+  > {
+    const { orgId, sessionId, reduceAccommodationsOnRun, clock, now, runId } = args;
+    return this.prisma.client.$transaction(async (tx) => {
+      // A plain read takes no row lock, so the candidate lock below is still the first lock.
+      const owner = await tx.session.findUniqueOrThrow({
+        where: { id: sessionId },
+        select: { invitation: { select: { candidateId: true } } },
+      });
+      const candidateId = owner.invitation.candidateId;
+      await this.candidateLock(tx, candidateId);
+      if (!(await this.lockAndCheck(tx, 'RESULTS', sessionId))) return { kind: 'alreadyDone' };
+      if (!(await this.holdsInTx(tx, sessionId, { tier: 'RESULTS', clock, now })))
+        return { kind: 'notEligible' };
+      // Events cascade to their flag decisions.
+      await tx.proctorEvent.deleteMany({ where: { sessionId } });
+      await tx.proctorEventBatch.deleteMany({ where: { sessionId } });
+      await tx.keystrokeBatch.deleteMany({ where: { sessionId } });
+      await tx.mediaChunk.deleteMany({ where: { sessionId } });
+      await tx.identityCheck.deleteMany({ where: { sessionId } });
+      // `appeals` has no cascade from the review (its CHECK ties new_verdict to its status).
+      await tx.appeal.deleteMany({ where: { sessionReview: { sessionId } } });
+      await tx.sessionReview.updateMany({
+        where: { sessionId },
+        data: { notes: null, verdict: null },
+      });
+      await tx.submission.deleteMany({ where: { sessionQuestion: { sessionId } } });
+      await tx.sessionQuestion.updateMany({
+        where: { sessionId },
+        data: { finalCode: null, answer: Prisma.DbNull, scoringNote: null, score: null },
+      });
+      await tx.session.update({
+        where: { id: sessionId },
+        data: {
+          deviceInfo: {},
+          reportKey: null,
+          totalScore: null,
+          riskScore: null,
+          riskBand: null,
+        },
+        select: { id: true },
+      });
+      // The waiver always reduces to the fact of it (ADR 0015 section 7); OQ-12 decides about the rest.
+      await this.casAccommodations(
+        tx,
+        sessionId,
+        reduceAccommodationsOnRun ? reduceAccommodations : reduceWaiverOnly,
+      );
+      await tx.auditLog.create({ data: marker('RESULTS', orgId, sessionId, runId) });
+      const anonymised = await this.anonymiseInTx(tx, { orgId, candidateId, now, runId });
+      return { kind: 'done', anonymised };
+    });
+  }
+
+  /** The per-candidate lock R-10 and erasure both take: one candidate per transaction, before any row lock (ADR 0004 9.4). */
+  private async candidateLock(tx: Tx, candidateId: string): Promise<void> {
+    await this.orgContext.runRawSql(
+      'per-candidate erasure advisory lock (ADR 0004 9.4)',
+      () =>
+        tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${CANDIDATE_ERASURE_LOCK}), hashtext(${candidateId}))::text AS locked`,
+    );
+  }
+
+  /**
+   * Anonymises the candidate (ADR 0004 9.4 "Candidate row") once at least one of their sessions
+   * exists and every one has its RESULTS marker (the caller's own marker counts: same transaction).
+   * A pending erasure request is left to erasure, which also sends the notice (R-10 sends none).
+   * The caller holds the candidate lock. Writes one ids-only audit row.
+   */
+  private async anonymiseInTx(
+    tx: Tx,
+    args: { orgId: string; candidateId: string; now: Date; runId: string },
+  ): Promise<boolean> {
+    const { orgId, candidateId, now, runId } = args;
+    const candidate = await tx.candidate.findUnique({
+      where: { id: candidateId },
+      select: { erasedAt: true, erasureRequestedAt: true },
+    });
+    if (candidate === null || candidate.erasedAt !== null || candidate.erasureRequestedAt !== null)
+      return false;
+    const sessions = await tx.session.findMany({
+      where: { invitation: { candidateId } },
+      select: { id: true },
+    });
+    if (sessions.length === 0) return false;
+    // Distinct sessions, not marker rows: `audit_logs` has no unique index on markers, and a duplicate
+    // on one session must not stand in for another session's marker.
+    const marked = await tx.auditLog.findMany({
+      where: {
+        action: RETENTION_MARKER_ACTIONS.RESULTS,
+        entityType: MARKER_ENTITY_TYPE,
+        entityId: { in: sessions.map((x) => x.id) },
+      },
+      select: { entityId: true },
+      distinct: ['entityId'],
+    });
+    if (marked.length < sessions.length) return false;
+    await tx.candidate.update({
+      where: { id: candidateId },
+      data: {
+        email: `erased+${candidateId}@invalid`,
+        fullName: 'Erased',
+        externalRef: null,
+        erasedAt: now,
+      },
+      select: { id: true },
+    });
+    await tx.auditLog.create({
+      data: {
+        orgId,
+        actorId: null,
+        action: 'CANDIDATE_ANONYMISED',
+        entityType: 'candidate',
+        entityId: candidateId,
+        metadata: { runId },
+      },
+    });
+    return true;
+  }
+
+  /**
+   * A daily backstop for the case the atomic path cannot cover (a candidate whose last session got its
+   * marker before this code existed, or a session added to a candidate afterwards): candidates, not yet
+   * anonymised and with no pending erasure request, who have sessions that ALL carry a results marker.
+   * Selection only; each candidate is then anonymised in their own org scope.
+   */
+  findCandidatesToAnonymise(
+    limit: number,
+    afterId?: string,
+  ): Promise<{ candidateId: string; orgId: string; sessionId: string }[]> {
+    for (const literal of [RETENTION_MARKER_ACTIONS.RESULTS, MARKER_ENTITY_TYPE]) {
+      if (!SAFE_ACTION.test(literal.toUpperCase())) throw new Error('unsafe literal');
+    }
+    const action = Prisma.raw(`'${RETENTION_MARKER_ACTIONS.RESULTS}'`);
+    const entityType = Prisma.raw(`'${MARKER_ENTITY_TYPE}'`);
+    const after = afterId ? Prisma.sql`AND c.id > ${afterId}::uuid` : Prisma.empty;
+    return this.orgContext.runSystem('RETENTION_ERASURE', () =>
+      this.orgContext.runRawSql(
+        'candidate anonymisation backstop selection (ADR 0004 9.4)',
+        async () => {
+          return this.prisma.client.$queryRaw<
+            { candidateId: string; orgId: string; sessionId: string }[]
+          >(Prisma.sql`
+          SELECT c.id AS "candidateId", c.org_id AS "orgId",
+                 (SELECT s.id FROM invitations i JOIN sessions s ON s.invitation_id = i.id
+                   WHERE i.candidate_id = c.id ORDER BY s.created_at, s.id LIMIT 1) AS "sessionId"
+          FROM candidates c
+          WHERE c.erased_at IS NULL AND c.erasure_requested_at IS NULL
+            AND EXISTS (SELECT 1 FROM invitations i JOIN sessions s ON s.invitation_id = i.id WHERE i.candidate_id = c.id)
+            AND NOT EXISTS (
+              SELECT 1 FROM invitations i JOIN sessions s ON s.invitation_id = i.id
+              WHERE i.candidate_id = c.id
+                AND NOT EXISTS (
+                  SELECT 1 FROM audit_logs m
+                  WHERE m.action = ${action} AND m.entity_type = ${entityType}
+                    AND m.entity_id = s.id::text AND m.org_id = s.org_id))
+            ${after}
+          ORDER BY c.id
+          LIMIT ${limit}`);
+        },
+      ),
+    );
+  }
+
+  /** Anonymises one candidate in their own transaction (the backstop path). */
+  anonymiseCandidateIfDone(args: {
+    orgId: string;
+    candidateId: string;
+    now: Date;
+    runId: string;
+  }): Promise<boolean> {
+    return this.prisma.client.$transaction(async (tx) => {
+      await this.candidateLock(tx, args.candidateId);
+      return this.anonymiseInTx(tx, args);
+    });
+  }
+
+  /**
+   * Rewrites the session's invitation accommodations with `transform` as a compare-and-set: the
+   * write names the value it read, so a PATCH that changed it in between is never overwritten
+   * (ADR 0015 section 7 "Concurrency"). `equals` on a jsonb column is jsonb equality (key order and
+   * spacing do not matter). A lost race is logged (ids only), retried, then fails the transaction.
+   * An integer above 2^53 inside the value would not survive the JS round trip and would make this
+   * fail every day: accommodations hold small settings only. Public so a test can race it.
+   */
+  async casAccommodations(
+    tx: Tx,
+    sessionId: string,
+    transform: (
+      value: unknown,
+    ) => Record<string, Json> | null | Promise<Record<string, Json> | null>,
+  ): Promise<void> {
+    const session = await tx.session.findUnique({
+      where: { id: sessionId },
+      select: { invitationId: true },
+    });
+    if (session === null) return;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const invitation = await tx.invitation.findUnique({
+        where: { id: session.invitationId },
+        select: { accommodations: true },
+      });
+      if (invitation === null) return;
+      const next = await transform(invitation.accommodations);
+      if (next === null) return; // nothing to change: no write
+      const result = await tx.invitation.updateMany({
+        where: {
+          id: session.invitationId,
+          accommodations: { equals: invitation.accommodations as Prisma.InputJsonValue },
+        },
+        data: { accommodations: next },
+      });
+      if (result.count === 1) return;
+      // ADR 0015 section 6: an unlisted writer may exist. Ids only.
+      this.log.warn(
+        `retention accommodations changed under a compare-and-set for session ${sessionId}`,
+      );
+    }
+    throw new Error('accommodations changed while retention was rewriting them');
+  }
+
+  /**
    * Serialises two runs on one session and tier (a scheduler retry, two replicas): a transaction
    * advisory lock (ADR 0006 8.5), then the marker is looked for again inside the transaction.
-   * `audit_logs` is append-only, so a duplicate marker could never be removed. The R-2 hold check is
-   * not repeated here: by now the objects are deleted, so there is nothing left to protect. The
+   * `audit_logs` is append-only, so a duplicate marker could never be removed. The R-2 hold check
+   * is repeated right after, still under this lock (`holdsInTx`): the rows a review or appeal protects
+   * are still there. The
    * `::text` cast is there because Prisma cannot decode the `void` result of the lock call.
    */
   private async lockAndCheck(tx: Tx, tier: RetentionTier, sessionId: string): Promise<boolean> {

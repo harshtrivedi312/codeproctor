@@ -22,9 +22,10 @@ import {
   RetentionRepository,
   TERMINAL_TRANSITION_ACTIONS,
 } from './retention.repository';
+import { ConsentRetentionRepository } from './consent-retention.repository';
 import { SessionStatus as SessionStatusEnum } from '../generated/prisma/enums.js';
 import { RetentionService } from './retention.service';
-import { InMemoryObjectStore } from './testing/in-memory-object-store';
+import { InMemoryObjectStore } from '../test/retention/in-memory-object-store';
 
 const DAY = 86_400_000;
 const NOW = new Date('2026-10-05T12:00:00.000Z');
@@ -71,7 +72,13 @@ describe('RetentionService: face and media tiers (FR-704, NFR-05, TC-072)', () =
     const repo = new RetentionRepository(prisma, orgContext);
     return {
       repo,
-      service: new RetentionService(repo, store, legalHold, loadRetentionConfig(overrides)),
+      service: new RetentionService(
+        repo,
+        new ConsentRetentionRepository(prisma, orgContext),
+        store,
+        legalHold,
+        loadRetentionConfig(overrides),
+      ),
     };
   }
 
