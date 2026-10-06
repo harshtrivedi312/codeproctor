@@ -651,7 +651,7 @@ How the check runs:
 - **Sending the link (option (b), recommended).** Considered: (a) the CLI sends mail itself; (c) enqueue the cleartext with `removeOnComplete` and `removeOnFail` (the minimum, not recommended).
   - After commit, the CLI enqueues a `set-password` job.
     - Its payload carries only `orgId` and `userId`.
-    - Its `jobId` is `set-password:{userId}`, so concurrent re-issues collapse into one.
+    - Its `jobId` is `set-password_{userId}`, so concurrent re-issues collapse into one.
     - It sets `removeOnComplete` and `removeOnFail`.
     - It uses a small number of attempts, with backoff.
   - The processor runs inside `runInOrg(orgId)`. It rotates the token with one conditional update:
