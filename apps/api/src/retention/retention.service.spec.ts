@@ -304,12 +304,39 @@ describe('RetentionService: face and media tiers (FR-704, NFR-05, TC-072)', () =
         });
         const sessionId = sessionIdOf(A);
         await owner.identityCheck.deleteMany({ where: { sessionId } });
-        expect((await build().service.runDaily(NOW)).face.due).toBe(0); // expired 10 days ago, created 2000
+        expect((await build().service.runDaily(NOW)).face.due).toBe(0); // expired 10 days ago, created 1000
         await owner.session.update({
           where: { id: sessionId },
           data: { retentionAnchorAt: daysAgo(95) },
         });
         expect((await build().service.runDaily(NOW)).face.completed).toBe(1);
+      });
+
+      it('FR-704, TC-072: a capture wins over the anchor when both exist (the order of the fallbacks is pinned)', async () => {
+        // Capture 95 days ago, anchor 10 days ago: due (the capture decides).
+        await setup(A, { submittedDaysAgo: null, status: 'EXPIRED', anchorDaysAgo: 10 });
+        const sessionId = sessionIdOf(A);
+        await owner.identityCheck.updateMany({
+          where: { sessionId },
+          data: { createdAt: daysAgo(95) },
+        });
+        await owner.proctorEvent.updateMany({
+          where: { sessionId, type: 'FACE_MISMATCH' },
+          data: { occurredAt: daysAgo(95) },
+        });
+        expect((await build().service.runDaily(NOW)).face.completed).toBe(1);
+        // Capture 10 days ago, anchor 95 days ago: not due (the capture still decides).
+        await setup(B, { submittedDaysAgo: null, status: 'EXPIRED', anchorDaysAgo: 95 });
+        const other = sessionIdOf(B);
+        await owner.identityCheck.updateMany({
+          where: { sessionId: other },
+          data: { createdAt: daysAgo(10) },
+        });
+        await owner.proctorEvent.updateMany({
+          where: { sessionId: other, type: 'FACE_MISMATCH' },
+          data: { occurredAt: daysAgo(10) },
+        });
+        expect((await build().service.runDaily(NOW)).face.due).toBe(0);
       });
 
       it('nothing else: the creation time is the last fallback', async () => {
