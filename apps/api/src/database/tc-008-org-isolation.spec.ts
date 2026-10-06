@@ -11,6 +11,10 @@
 //     updateManyAndReturn, delete and deleteMany change nothing (B's rows are compared before and
 //     after). Positive controls prove A still reads and updates its own row, and that A and B
 //     between them see every row exactly once, so a filter that returns nothing cannot pass.
+//     Two models are special on delete: audit_logs is append-only for app_user, and Session rows
+//     are never deleted (ADR 0004 section 9.3): for both the database refuses delete and
+//     deleteMany, so those checks expect "permission denied" instead of P2025 or a count of 0, and
+//     Session's own-row control asserts that A cannot delete its own session either.
 //   - upsert (not generic): tried against B's row on three models only (Test, TestSection,
 //     TestCase), plus A's own row and the create branch on Test and Candidate.
 //   - Dedicated tests, on chosen models: create, createMany and createManyAndReturn, filters that
@@ -274,7 +278,11 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expect(await asA(() => d.count?.({}) as Promise<number>)).toBe(seenByA.length);
     });
 
-    it(`TC-008 org A cannot change or delete org B's ${model} row (update, updateMany, updateManyAndReturn, delete, deleteMany)`, async () => {
+    it(`${
+      model === 'Session'
+        ? "TC-008 org A cannot change org B's Session row, and Session rows are never deleted (ADR 0004 §9.3): delete and deleteMany are refused"
+        : `TC-008 org A cannot change or delete org B's ${model} row (update, updateMany, updateManyAndReturn, delete, deleteMany)`
+    }`, async () => {
       const d = scoped(model);
       const b = B.rows[model];
       const before = (await plain(model).findMany?.({ where: b.filter })) as unknown[];
@@ -296,6 +304,15 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         });
         expect(await d.updateMany?.({ where: b.filter, data: TOUCH[model] })).toEqual({ count: 0 });
         expect(await d.updateManyAndReturn?.({ where: b.filter, data: TOUCH[model] })).toEqual([]);
+        if (model === 'Session') {
+          // Session rows are never deleted (ADR 0004 section 9.3): app_user has no DELETE on
+          // sessions, so the database refuses both statements whatever the filter, before it looks
+          // for a row. Deleting a session would cascade to its consent row, which R-9 keeps for
+          // 3 years. The check after these attempts shows that B's row is still there.
+          await expect(d.delete?.({ where: b.unique })).rejects.toThrow(/permission denied/i);
+          await expect(d.deleteMany?.({ where: b.filter })).rejects.toThrow(/permission denied/i);
+          return;
+        }
         if (model === 'Organization') {
           // An org scope cannot delete an organization at all, its own or another (FU-DB-68):
           // refused before any query, so the answer is not P2025 or a count of 0.
@@ -314,7 +331,11 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
       expect(await plain(model).findMany?.({ where: b.filter })).toEqual(before);
     });
 
-    it(`TC-008 org A changes its own ${model} row`, async () => {
+    it(`${
+      model === 'Session'
+        ? 'TC-008 org A changes its own Session row, and cannot delete it either: Session rows are never deleted (ADR 0004 §9.3)'
+        : `TC-008 org A changes its own ${model} row`
+    }`, async () => {
       if (model === 'AuditLog') return; // append-only, see above
       const d = scoped(model);
       const a = A.rows[model];
@@ -325,6 +346,12 @@ describe('TC-008 cross-org access (NFR-04, FR-103)', () => {
         expect(await d.updateManyAndReturn?.({ where: a.filter, data: TOUCH[model] })).toHaveLength(
           1,
         );
+        if (model === 'Session') {
+          // The same-org control for delete is a refusal (see the cross-org test above).
+          await expect(d.delete?.({ where: a.unique })).rejects.toThrow(/permission denied/i);
+          await expect(d.deleteMany?.({ where: a.filter })).rejects.toThrow(/permission denied/i);
+          expect(await d.count?.({ where: a.filter })).toBe(1);
+        }
       });
     });
   });
