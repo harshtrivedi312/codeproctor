@@ -1,4 +1,11 @@
-import { STORES, chunkKey, padSeq, type Detector } from '@codeproctor/proctor-sdk';
+import {
+  ProctorSession,
+  RecordingPipeline,
+  STORES,
+  chunkKey,
+  padSeq,
+  type Detector,
+} from '@codeproctor/proctor-sdk';
 import { screen, waitFor, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import * as React from 'react';
@@ -312,7 +319,7 @@ const NOT_ACTIVE_BEAT = () =>
   );
 
 describe('a device granted late writes nothing after a purge or a finish (candidate media)', () => {
-  it('FR-701: a webcam granted after the purge leaves no chunk, no segment counter and no upload', async () => {
+  it('TC-070 FR-701: a webcam granted after the purge leaves no chunk, no segment counter and no upload', async () => {
     const devices = setupDevices({ deferred: true });
     await startedSession();
     const store = new MemoryStore();
@@ -336,7 +343,7 @@ describe('a device granted late writes nothing after a purge or a finish (candid
     expect(seen.slice(before).some((q) => /media\/(presign|confirm)/.test(q.url))).toBe(false);
   });
 
-  it('FR-701: a camera granted after finish() has ended leaves nothing on disk', async () => {
+  it('TC-070 FR-701: a camera granted after finish() has ended leaves nothing on disk', async () => {
     const devices = setupDevices({ deferred: true });
     await startedSession();
     const store = new MemoryStore();
@@ -376,7 +383,7 @@ describe('a device granted late writes nothing after a purge or a finish (candid
     expectPurged(store);
   });
 
-  it('FR-701: leaving the page (no purge) keeps the late chunk for the next load', async () => {
+  it('TC-070 FR-701: leaving the page (no purge) keeps the late chunk for the next load', async () => {
     const devices = setupDevices({ deferred: true });
     await startedSession();
     const store = new MemoryStore();
@@ -425,7 +432,66 @@ describe('finish leaves nothing from earlier loads, and nothing after it (candid
     expectPurged(store);
   });
 
-  it('FR-701: a stream granted while the devices are being released after the drain is dropped, never uploaded', async () => {
+  it('FR-505: both drains finish before the purge, even when the pipeline side fails early, and the lost-batch count is kept', async () => {
+    setupDevices();
+    await startedSession();
+    const order: string[] = [];
+    let releaseSession: () => void = () => undefined;
+    const store = new MemoryStore();
+    const realDelete = store.deletePrefix.bind(store);
+    store.deletePrefix = async (name, prefix) => {
+      // The controller's purge is the one that clears the segment counters; the SDK's own drains
+      // do not touch them.
+      if (name === STORES.meta) order.push('purge');
+      return realDelete(name, prefix);
+    };
+    // The fakes still run the real teardown (so nothing keeps beating after the test), but report
+    // a failure (pipeline) and a late end (session) to the controller.
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const realSessionFinish = ProctorSession.prototype.finish;
+    vi.spyOn(RecordingPipeline.prototype, 'finish').mockImplementation(function (
+      this: RecordingPipeline,
+    ) {
+      order.push('pipeline-rejected');
+      void this.stop();
+      return Promise.reject(new Error('recorder stop failed: https://secret.example/key'));
+    });
+    vi.spyOn(ProctorSession.prototype, 'finish').mockImplementation(function (
+      this: ProctorSession,
+    ) {
+      return new Promise((resolve) => {
+        releaseSession = () => {
+          void realSessionFinish.call(this, 0).then(() => {
+            // A drain that is still running writes buffered events when it ends.
+            void store.put(STORES.eventBatches, `${SID}:${padSeq(99)}`, { seq: 99 });
+            order.push('session-settled');
+            resolve({ lostBatches: 3 });
+          });
+        };
+      });
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const c = controllerFor(store);
+      await c.init();
+      const finishing = c.finish();
+      await wait(120); // the pipeline side has failed; the session side is still draining
+      expect(order).toEqual(['pipeline-rejected']);
+      releaseSession();
+      const result = await finishing;
+      expect(order.indexOf('purge')).toBeGreaterThan(order.indexOf('session-settled'));
+      expect(result.lostBatches).toBe(3);
+      expect(store.count(STORES.eventBatches)).toBe(0);
+      await wait(100);
+      expect(store.count(STORES.eventBatches)).toBe(0);
+      // The failure is reported by name only: no URL or key in the log.
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('secret.example');
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('TC-070 FR-701: a stream granted while the devices are being released after the drain is dropped, never uploaded', async () => {
     const devices = setupDevices({ deferUser: true });
     await startedSession();
     const store = new MemoryStore();
@@ -434,18 +500,20 @@ describe('finish leaves nothing from earlier loads, and nothing after it (candid
     await c.shareScreen();
     expect(await c.enterFullscreen()).toBe(true);
     // Leaving fullscreen takes a moment, so the answer lands after the drain, before finish() ends.
+    const exitFullscreen = vi.fn(async () => {
+      await wait(250);
+      setFullscreen(false);
+    });
     Object.defineProperty(document, 'exitFullscreen', {
       configurable: true,
-      value: vi.fn(async () => {
-        await wait(250);
-        setFullscreen(false);
-      }),
+      value: exitFullscreen,
     });
     const starting = c.startRecorders();
     await waitFor(() => expect(devices.getUserMedia).toHaveBeenCalledTimes(1));
     const seen = recordRequests();
     const finishing = c.finish();
-    await wait(120); // drained, now inside releaseDevices
+    // The drain is over and finish() is inside releaseDevices once it asks to leave fullscreen.
+    await waitFor(() => expect(exitFullscreen).toHaveBeenCalled());
     const before = seen.length;
     devices.grantUser();
     await Promise.all([finishing, starting]);
@@ -496,7 +564,7 @@ describe('the real final evidence survives a late device answer during finish (F
     expect(store.count(STORES.chunks)).toBe(0);
   });
 
-  it('FR-505 ADR 0013 5.5: a normal finish presigns and confirms the final screen, webcam and audio chunks', async () => {
+  it('TC-070 FR-505 ADR 0013 5.5: a normal finish presigns and confirms the final screen, webcam and audio chunks', async () => {
     const devices = setupDevices();
     const session = await startedSession();
     server.use(slowPresign());
@@ -529,7 +597,7 @@ describe('no device after the end (late grants)', () => {
     expect(FakeRecorderCount()).toBe(0);
   });
 
-  it('FR-701: a webcam granted after the test ended is stopped and no recorder is left running', async () => {
+  it('TC-070 FR-701: a webcam granted after the test ended is stopped and no recorder is left running', async () => {
     const devices = setupDevices({ deferred: true });
     await startedSession();
     const c = controllerFor(new MemoryStore());
@@ -847,7 +915,7 @@ describe('React mounting (S-1, S-13)', () => {
     expect(onSessionEnded).not.toHaveBeenCalled();
   });
 
-  it('FR-701: unmounting the real test releases the screen, the recorders and fullscreen', async () => {
+  it('TC-070 FR-701: unmounting the real test releases the screen, the recorders and fullscreen', async () => {
     const devices = setupDevices();
     await startedSession();
     const user = userEvent.setup();

@@ -507,15 +507,23 @@ export class ProctorController {
     await this.initPromise?.catch(() => undefined);
     const drain = this.o.finishDrainMs;
     let lost = 0;
-    try {
-      for (const s of MEDIA_STREAMS) await this.pipeline?.stopStream(s).catch(() => undefined);
-      const [sessionResult] = await Promise.all([
-        this.session.finish(drain),
-        this.pipeline?.finish(drain === undefined ? {} : { drainTimeoutMs: drain }),
-      ]);
-      lost = sessionResult.lostBatches;
-    } catch {
-      // release below
+    for (const s of MEDIA_STREAMS) await this.pipeline?.stopStream(s).catch(() => undefined);
+    // Both drains run to the end before anything is purged: a drain that is still running could
+    // otherwise write buffered events or chunks back after the purge. One failing does not hide
+    // the other's result (the event loss count is kept even if the pipeline side failed).
+    const [sessionResult, pipelineResult] = await Promise.allSettled([
+      this.session.finish(drain),
+      this.pipeline?.finish(drain === undefined ? {} : { drainTimeoutMs: drain }),
+    ]);
+    if (sessionResult.status === 'fulfilled') lost = sessionResult.value.lostBatches;
+    // Reported by name only: an error message could carry a URL or a key.
+    for (const r of [sessionResult, pipelineResult]) {
+      if (r.status === 'rejected') {
+        console.warn(
+          'Proctor finish step failed:',
+          r.reason instanceof Error ? r.reason.name : 'unknown',
+        );
+      }
     }
     // Whatever an earlier page load left (and anything the SDK could not delete, for example when
     // the key call was still in flight and no session or pipeline ever started) goes now.
