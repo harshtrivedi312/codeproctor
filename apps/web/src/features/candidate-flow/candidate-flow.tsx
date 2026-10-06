@@ -74,19 +74,26 @@ export function CandidateFlow({
     seedRef.current ??= getInvitationToken() ?? token ?? null;
     const t = seedRef.current;
     if (t !== null) captureInvitationToken(t);
+    // Checked after commit, not during render: on the soft navigation from /t/start#<token> the
+    // router rewrites the address bar in the same commit, after this component first renders. A
+    // fragment only matters when no token was handed over (a hand-typed or bookmarked
+    // /t/link#<token>): that is refused, never read.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setUrlCheck(t === null && hasUrlFragment() ? 'fragment' : 'ok');
     return () => {
       // Leaving the flow forgets everything held in memory.
       clearCandidateCredentials();
     };
   }, [token]);
 
-  // The entry routes hand the token over and navigate here without a fragment. A fragment on this
-  // route means something unexpected (an old link, a bookmark): do not read or trust it.
-  const fragmentPresent = inBrowser && hasUrlFragment();
+  // The entry routes hand the token over (in memory) and navigate here. A fragment with no token in
+  // memory means something unexpected (an old link, a bookmark): do not read or trust it.
+  const [urlCheck, setUrlCheck] = React.useState<'pending' | 'ok' | 'fragment'>('pending');
+  const fragmentPresent = urlCheck === 'fragment';
 
   const link = useQuery({
     queryKey: ['candidate', 'link'],
-    enabled: inBrowser && !fragmentPresent,
+    enabled: inBrowser && urlCheck === 'ok',
     gcTime: 0,
     staleTime: Number.POSITIVE_INFINITY,
     retry: false,
@@ -133,7 +140,7 @@ export function CandidateFlow({
     body = <TerminalScreen terminal={terminal} />;
   } else if (fragmentPresent) {
     body = <TerminalScreen terminal={{ reason: 'INVALID' }} />;
-  } else if (!inBrowser || link.isPending) {
+  } else if (!inBrowser || urlCheck === 'pending' || link.isPending) {
     body = (
       <p role="status" className="py-10 text-center">
         Opening your invitation...

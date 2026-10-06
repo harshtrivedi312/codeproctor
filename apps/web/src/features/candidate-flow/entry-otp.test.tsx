@@ -5,7 +5,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { MOCK_OTP, MOCK_RECRUITER_CONTACT, MOCK_TOKENS } from '@/mocks/candidate/handlers';
 import { candidateApi } from './api';
 import { CandidateFlow } from './candidate-flow';
-import { getInvitationToken, getSessionToken, SCRUBBED_PATH } from './session-store';
+import {
+  captureInvitationToken,
+  getInvitationToken,
+  getSessionToken,
+  SCRUBBED_PATH,
+} from './session-store';
 import {
   expectHeadingFocused,
   passOtp,
@@ -76,6 +81,22 @@ describe('invitation link and token handling (FR-303, FR-401, ADR 0003)', () => 
     ).toBeInTheDocument();
     expect(getInvitationToken()).toBeNull();
     expect(seen).toHaveLength(0);
+  });
+
+  it('FR-401: the soft navigation from /t/start#<token> (token in memory, URL rewritten after commit) reaches the welcome step', async () => {
+    const seen = recordRequests();
+    captureInvitationToken(MOCK_TOKENS.open);
+    window.history.replaceState(null, '', `/t/start#${MOCK_TOKENS.open}`);
+    renderWithQuery(<CandidateFlow />);
+    // Next's HistoryUpdater rewrites the address bar right after the first render.
+    window.history.replaceState(null, '', '/t/link');
+    expect(
+      await screen.findByRole('heading', {
+        level: 1,
+        name: /welcome to your proctored coding test/i,
+      }),
+    ).toBeInTheDocument();
+    expect(seen.some((r) => r.url.includes(MOCK_TOKENS.open))).toBe(false);
   });
 
   it('FR-401: a reload (token already gone from the URL) shows how to open the link again', async () => {
