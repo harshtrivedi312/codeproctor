@@ -160,6 +160,19 @@ function contentError(c: Content, type: Schemas['QuestionType']): string | null 
   return null;
 }
 
+/** The AI reference input fields only: whatever else the client sends is ignored. */
+function pickAiInput(b: Schemas['AiReferenceInput']): Schemas['AiReferenceInput'] {
+  return {
+    assistant: b.assistant,
+    modelLabel: b.modelLabel,
+    language: b.language,
+    solutionCode: b.solutionCode,
+    collectedAt: b.collectedAt,
+    ...(b.promptText !== undefined ? { promptText: b.promptText } : {}),
+    variantId: b.variantId ?? null,
+  };
+}
+
 function render(text: string, params: Record<string, unknown>): string {
   return text.replace(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g, (whole, name: string) =>
     Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : whole,
@@ -494,7 +507,7 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       }
       state.seq += 1;
       const row: AiReference = {
-        ...body,
+        ...pickAiInput(body),
         id: `ai-new-${state.seq}`,
         collectedByName: actor(r.role),
         supersededAt: null,
@@ -515,7 +528,7 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       state.seq += 1;
       old.supersededAt = new Date().toISOString();
       const row: AiReference = {
-        ...body,
+        ...pickAiInput(body),
         id: `ai-new-${state.seq}`,
         collectedByName: actor(r.role),
         supersededAt: null,

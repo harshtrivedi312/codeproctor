@@ -2,6 +2,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, type Schemas } from '@/lib/api/client';
 import { ApiFailure } from '@/features/admin/queries';
+import { getGeneration } from '@/lib/auth-session';
 
 /*
  * TanStack Query hooks for the question bank. Question data (statements, hidden tests, reference
@@ -103,7 +104,11 @@ export function useCreateQuestion() {
       if (!data) fail(response, error);
       return data;
     },
-    onSuccess: (data) => {
+    // An answer that arrives after the user or the role changed must not be written into the
+    // cache: it may hold the full view for someone who no longer may see it (FR-103).
+    onMutate: () => getGeneration(),
+    onSuccess: (data, _vars, startedIn) => {
+      if (startedIn !== getGeneration()) return;
       qc.setQueryData(questionKeys.detail(data.id), data);
       void qc.invalidateQueries({ queryKey: questionKeys.list });
     },
@@ -124,7 +129,9 @@ export function useSaveQuestion(id: string) {
       if (!data) fail(response, error);
       return data;
     },
-    onSuccess: (data) => {
+    onMutate: () => getGeneration(),
+    onSuccess: (data, _vars, startedIn) => {
+      if (startedIn !== getGeneration()) return;
       qc.setQueryData(questionKeys.detail(id), data);
       void qc.invalidateQueries({ queryKey: questionKeys.list });
       void qc.invalidateQueries({ queryKey: questionKeys.versions(id) });
@@ -167,7 +174,9 @@ export function usePublishQuestion(id: string) {
       if (!data) fail(response, error);
       return data;
     },
-    onSuccess: (data) => {
+    onMutate: () => getGeneration(),
+    onSuccess: (data, _vars, startedIn) => {
+      if (startedIn !== getGeneration()) return;
       qc.setQueryData(questionKeys.detail(id), data);
       void qc.invalidateQueries({ queryKey: questionKeys.list });
       void qc.invalidateQueries({ queryKey: questionKeys.versions(id) });

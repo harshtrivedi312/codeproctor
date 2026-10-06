@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Tabs, type TabDef } from '@/components/ui/tabs';
 import { ApiFailure } from '@/features/admin/queries';
 import type { Schemas } from '@/lib/api/client';
+import { getGeneration } from '@/lib/auth-session';
 import {
   draftSchema,
   emptyDraft,
@@ -267,8 +268,11 @@ export function QuestionEditor({
 
   /** Throws the edits away and loads what is saved now. Only after the author chose to. */
   async function reloadLatest(): Promise<void> {
+    const startedIn = getGeneration();
     try {
       const latest = await fetchQuestion(meta.questionId ?? '');
+      // The user or the role changed while this was in flight: what came back is not theirs to see.
+      if (startedIn !== getGeneration()) return;
       if (!isFullQuestion(latest)) throw new ApiFailure(403, '');
       qc.setQueryData(questionKeys.detail(latest.id), latest);
       form.reset(toDraft(latest.type, latest.current.tags, latest.current));
@@ -308,6 +312,7 @@ export function QuestionEditor({
     setValidating(true);
     try {
       const questionId = meta.questionId ?? '';
+      const generationAtStart = getGeneration();
       // The result only counts for the exact saved content it was started on (TC-012).
       const started = await startValidation.mutateAsync();
       const startedFor = updatedAtRef.current;
@@ -344,7 +349,10 @@ export function QuestionEditor({
         setReportFresh(true);
         // Keep the cache in step with what the editor shows, and the history's "validated" column.
         qc.setQueryData<QuestionView>(questionKeys.detail(questionId), (old) =>
-          old && isFullQuestion(old) && old.current.updatedAt === startedFor
+          generationAtStart === getGeneration() &&
+          old &&
+          isFullQuestion(old) &&
+          old.current.updatedAt === startedFor
             ? { ...old, current: { ...old.current, validatedAt, validationReport: report } }
             : old,
         );
