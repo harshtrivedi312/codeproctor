@@ -49,7 +49,7 @@ Environment variables, defaults in brackets. They map to the owner's open questi
 | `RETENTION_MEDIA_CAP_DAYS` [unset]          | OQ-18: set 90 for LEAST(`retention_days`, 90)        |
 | `RETENTION_EVIDENCE_IN_FACE_TIER` [true]    | OQ-19                                                |
 | `RETENTION_RESULTS_CLOCK` [anchor]          | OQ-20 (results slice)                                |
-| `RETENTION_CONSENT_THROUGH_ERASURE` [keep]  | C-17 (erasure slice)                                 |
+| `RETENTION_CONSENT_THROUGH_ERASURE` [keep]  | C-17: reserved; erasure never touches consents       |
 | `RETENTION_VERSIONING_CHECK` [enforce]      | skip only on staging (R2, synthetic data)            |
 | `RETENTION_BATCH_SIZE` [200]                | sessions per tier per run                            |
 
@@ -81,10 +81,10 @@ constant, a string literal or inside raw SQL). Add a legitimate writer to the al
    lock first) applies R-6: delete events, batches, keystrokes, media chunks and identity checks;
    blank submissions, answers, scoring notes, review notes and appeal text; clear device info and the
    report key; reduce accommodations. **Scores, verdicts and the session row stay** (R-10 anonymises them).
-4. `ERASURE_COMPLETED` once per request, only when every session is ERASED and verified clean.
+4. `ERASURE_COMPLETED` once per request, only when every session is ERASED, and a verified pass ran at or after fence + 60 s + the sweep margin (the fence time is recorded per session).
 5. The candidate row is anonymised at the first of: the worker's email-sent row, a recorded manual notice
    (`recordManualNotice`, audited), or day 28 of the deadline (request or last review/appeal close,
-   whichever is later). Day 25 with no notice raises one alert. The consent record is never touched.
+   whichever is later; it does not run while a hold is open). Day 25 with no notice raises one alert. The consent record is never touched.
 
 `RetentionModule.forRoot({ ..., erasure })` takes a module exporting the four ports; without it every
 erasure call is refused (fail closed).

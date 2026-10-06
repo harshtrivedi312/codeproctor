@@ -19,13 +19,15 @@ export const ERASURE_RESERVED_ACTIONS = {
   EMAIL_SENT: 'ERASURE_EMAIL_SENT',
   EMAIL_FAILED: 'ERASURE_EMAIL_FAILED',
   COMPLETED: 'ERASURE_COMPLETED',
+  /** A super admin recorded that the candidate was told by hand: gates anonymisation. */
+  NOTICE_RECORDED: 'ERASURE_NOTICE_RECORDED',
 } as const;
 
 /** Non-reserved audit actions of the erasure run (ids and the request id only). */
 export const ERASURE_AUDIT_ACTIONS = {
   SESSION_PURGED: 'ERASURE_SESSION_PURGED',
   DELAY_NOTIFIED: 'ERASURE_DELAY_NOTIFIED',
-  NOTICE_RECORDED: 'ERASURE_NOTICE_RECORDED',
+  FENCED: 'ERASURE_SESSION_FENCED',
   ALERT_RAISED: 'ERASURE_ALERT_RAISED',
   REQUESTED: 'ERASURE_REQUESTED',
 } as const;

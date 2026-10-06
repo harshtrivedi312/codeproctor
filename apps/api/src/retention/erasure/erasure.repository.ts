@@ -11,13 +11,11 @@ import { Prisma } from '../../generated/prisma/client.js';
 import { OrgContextService, PrismaService } from '../../database';
 import { reduceAccommodations, reduceWaiverOnly } from '../accommodations';
 import {
-  CANDIDATE_ERASURE_LOCK,
   ERASURE_AUDIT_ACTIONS,
   ERASURE_RESERVED_ACTIONS,
   SESSION_ENTITY_TYPE,
 } from '../retention.constants';
 import { RetentionRepository } from '../retention.repository';
-import type { Tx } from '../retention.repository';
 
 export interface RequestedErasure {
   readonly candidateId: string;
@@ -40,6 +38,11 @@ const holdSchema = z.object({
   erasure: z.object({ holdWhileReviewOrAppealOpen: z.boolean() }),
 });
 
+const safeAction = (action: string): Prisma.Sql => {
+  if (!/^[A-Z_]+$/.test(action)) throw new Error('unsafe audit action');
+  return Prisma.raw(`'${action}'`);
+};
+
 /** The request id (ADR 0004 9.5): the candidate and the epoch seconds of the request. Needs no DDL. */
 export const requestIdOf = (candidateId: string, requestedAt: Date): string =>
   `${candidateId}_${Math.floor(requestedAt.getTime() / 1000)}`;
@@ -57,11 +60,12 @@ export class ErasureRepository {
   }
 
   /**
-   * Candidates with an erasure request and no ERASURE_COMPLETED for THAT request (a candidate
-   * anonymised on day 28 is still listed: the object retries continue after anonymisation). Selection only.
+   * Candidates with an erasure request that are not yet anonymised, or whose request has no completion
+   * row. A completed request whose candidate is still named is listed: the notice, the day-25 alert and
+   * the day-28 anonymisation need later runs. Selection only.
    */
   findRequested(limit: number, afterId?: string): Promise<RequestedErasure[]> {
-    const completed = Prisma.raw(`'${ERASURE_RESERVED_ACTIONS.COMPLETED}'`);
+    const completed = safeAction(ERASURE_RESERVED_ACTIONS.COMPLETED);
     const after = afterId ? Prisma.sql`AND c.id > ${afterId}::uuid` : Prisma.empty;
     return this.orgContext.runSystem('RETENTION_ERASURE', () =>
       this.orgContext.runRawSql('erasure request selection (ADR 0004 9.5)', async () => {
@@ -69,10 +73,10 @@ export class ErasureRepository {
           SELECT c.id AS "candidateId", c.org_id AS "orgId"
           FROM candidates c
           WHERE c.erasure_requested_at IS NOT NULL
-            AND NOT EXISTS (
+            AND (c.erased_at IS NULL OR NOT EXISTS (
               SELECT 1 FROM audit_logs a
               WHERE a.action = ${completed} AND a.org_id = c.org_id
-                AND a.metadata->>'requestId' = c.id::text || '_' || floor(extract(epoch FROM c.erasure_requested_at))::bigint::text)
+                AND a.metadata->>'requestId' = c.id::text || '_' || floor(extract(epoch FROM c.erasure_requested_at))::bigint::text))
             ${after}
           ORDER BY c.id
           LIMIT ${limit}`);
@@ -85,11 +89,11 @@ export class ErasureRepository {
     orgId: string;
     candidateId: string;
     now: Date;
-    actorId: string | null;
+    actorId: string;
   }): Promise<Date | null> {
     const { orgId, candidateId, now, actorId } = args;
     return this.prisma.client.$transaction(async (tx) => {
-      await this.candidateLock(tx, candidateId);
+      await this.retentionRepo.candidateLock(tx, candidateId);
       const candidate = await tx.candidate.findUnique({
         where: { id: candidateId },
         select: { erasureRequestedAt: true },
@@ -188,29 +192,44 @@ export class ErasureRepository {
     return this.hasAudit(ERASURE_RESERVED_ACTIONS.EMAIL_SENT, requestId, candidateId);
   }
   async noticeRecorded(requestId: string, candidateId: string): Promise<boolean> {
-    return this.hasAudit(ERASURE_AUDIT_ACTIONS.NOTICE_RECORDED, requestId, candidateId);
+    return this.hasAudit(ERASURE_RESERVED_ACTIONS.NOTICE_RECORDED, requestId, candidateId);
   }
 
-  /** One-off ids-only audit rows (delay notified, alert raised): written once per request id and action. */
+  /** Has this once-only ids-only audit row (delay notified, alert raised) been written for the request and `since`? */
+  async onceDone(args: {
+    candidateId: string;
+    requestId: string;
+    action: string;
+    since?: string;
+  }): Promise<boolean> {
+    const { candidateId, requestId, action, since } = args;
+    const row = await this.prisma.client.auditLog.findFirst({
+      where: {
+        action,
+        entityId: candidateId,
+        AND: [
+          { metadata: { path: ['requestId'], equals: requestId } },
+          ...(since === undefined ? [] : [{ metadata: { path: ['since'], equals: since } }]),
+        ],
+      },
+      select: { id: true },
+    });
+    return row !== null;
+  }
+
+  /** Writes the once-only row, after the side effect it records succeeded (so a failure retries). */
   async writeOnce(args: {
     orgId: string;
     candidateId: string;
     requestId: string;
     action: string;
+    since?: string;
     actorId?: string | null;
-  }): Promise<boolean> {
-    const { orgId, candidateId, requestId, action, actorId = null } = args;
-    return this.prisma.client.$transaction(async (tx) => {
-      await this.candidateLock(tx, candidateId);
-      const existing = await tx.auditLog.findFirst({
-        where: {
-          action,
-          entityId: candidateId,
-          metadata: { path: ['requestId'], equals: requestId },
-        },
-        select: { id: true },
-      });
-      if (existing !== null) return false;
+  }): Promise<void> {
+    const { orgId, candidateId, requestId, action, since, actorId = null } = args;
+    await this.prisma.client.$transaction(async (tx) => {
+      await this.retentionRepo.candidateLock(tx, candidateId);
+      if (await this.onceDone({ candidateId, requestId, action, since })) return;
       await tx.auditLog.create({
         data: {
           orgId,
@@ -218,10 +237,59 @@ export class ErasureRepository {
           action,
           entityType: 'candidate',
           entityId: candidateId,
-          metadata: { requestId },
+          metadata: since === undefined ? { requestId } : { requestId, since },
         },
       });
-      return true;
+    });
+  }
+
+  /** A manual notice (SUPER_ADMIN), audited, once per request. */
+  async recordNotice(args: {
+    orgId: string;
+    candidateId: string;
+    requestId: string;
+    actorId: string;
+  }): Promise<void> {
+    await this.writeOnce({ ...args, action: ERASURE_RESERVED_ACTIONS.NOTICE_RECORDED });
+  }
+
+  /**
+   * The fence time of a session for this request, written once (metadata `fencedAt`). A session that
+   * was fenced elsewhere and has no row yet gets `now`, the latest possible time: completion only
+   * waits longer. Returns the stored time.
+   */
+  async fenceTime(args: {
+    orgId: string;
+    candidateId: string;
+    sessionId: string;
+    requestId: string;
+    now: Date;
+  }): Promise<Date> {
+    const { orgId, candidateId, sessionId, requestId, now } = args;
+    return this.prisma.client.$transaction(async (tx) => {
+      await this.retentionRepo.candidateLock(tx, candidateId);
+      const existing = await tx.auditLog.findFirst({
+        where: {
+          action: ERASURE_AUDIT_ACTIONS.FENCED,
+          entityId: sessionId,
+          entityType: SESSION_ENTITY_TYPE,
+        },
+        orderBy: { createdAt: 'asc' },
+        select: { metadata: true },
+      });
+      const stored = (existing?.metadata as { fencedAt?: unknown } | null)?.fencedAt;
+      if (typeof stored === 'string' && !Number.isNaN(Date.parse(stored))) return new Date(stored);
+      await tx.auditLog.create({
+        data: {
+          orgId,
+          actorId: null,
+          action: ERASURE_AUDIT_ACTIONS.FENCED,
+          entityType: SESSION_ENTITY_TYPE,
+          entityId: sessionId,
+          metadata: { requestId, fencedAt: now.toISOString() },
+        },
+      });
+      return now;
     });
   }
 
@@ -243,7 +311,7 @@ export class ErasureRepository {
   }): Promise<boolean> {
     const { orgId, candidateId, sessionId, requestId, reduceAll } = args;
     return this.prisma.client.$transaction(async (tx) => {
-      await this.candidateLock(tx, candidateId);
+      await this.retentionRepo.candidateLock(tx, candidateId);
       const session = await tx.session.findUnique({
         where: { id: sessionId },
         select: { status: true },
@@ -295,26 +363,43 @@ export class ErasureRepository {
   /** Nothing of the session's personal content remains in the rows (the check before ERASURE_COMPLETED). */
   async isPurged(sessionId: string): Promise<boolean> {
     const c = this.prisma.client;
-    const [events, batches, keystrokes, media, identity, code, answers, report] = await Promise.all(
-      [
-        c.proctorEvent.count({ where: { sessionId } }),
-        c.proctorEventBatch.count({ where: { sessionId } }),
-        c.keystrokeBatch.count({ where: { sessionId } }),
-        c.mediaChunk.count({ where: { sessionId } }),
-        c.identityCheck.count({ where: { sessionId } }),
-        c.submission.count({
-          where: {
-            sessionQuestion: { sessionId },
-            OR: [{ sourceCode: { not: '' } }, { NOT: { results: { equals: [] } } }],
-          },
-        }),
-        c.sessionQuestion.count({
-          where: { sessionId, OR: [{ finalCode: { not: null } }, { scoringNote: { not: null } }] },
-        }),
-        c.session.count({ where: { id: sessionId, reportKey: { not: null } } }),
-      ],
-    );
-    return events + batches + keystrokes + media + identity + code + answers + report === 0;
+    const counts = await Promise.all([
+      c.proctorEvent.count({ where: { sessionId } }),
+      c.proctorEventBatch.count({ where: { sessionId } }),
+      c.keystrokeBatch.count({ where: { sessionId } }),
+      c.mediaChunk.count({ where: { sessionId } }),
+      c.identityCheck.count({ where: { sessionId } }),
+      c.submission.count({
+        where: {
+          sessionQuestion: { sessionId },
+          OR: [{ sourceCode: { not: '' } }, { NOT: { results: { equals: [] } } }],
+        },
+      }),
+      c.sessionQuestion.count({
+        where: {
+          sessionId,
+          OR: [
+            { finalCode: { not: null } },
+            { scoringNote: { not: null } },
+            { NOT: { answer: { equals: Prisma.DbNull } } },
+          ],
+        },
+      }),
+      c.sessionReview.count({ where: { sessionId, notes: { not: null } } }),
+      c.appeal.count({
+        where: {
+          sessionReview: { sessionId },
+          OR: [{ reason: { not: 'Erased' } }, { resolutionNote: { not: null } }],
+        },
+      }),
+      c.session.count({
+        where: {
+          id: sessionId,
+          OR: [{ reportKey: { not: null } }, { NOT: { deviceInfo: { equals: {} } } }],
+        },
+      }),
+    ]);
+    return counts.every((n) => n === 0);
   }
 
   /**
@@ -329,7 +414,7 @@ export class ErasureRepository {
   }): Promise<boolean> {
     const { orgId, candidateId, requestId } = args;
     return this.prisma.client.$transaction(async (tx) => {
-      await this.candidateLock(tx, candidateId);
+      await this.retentionRepo.candidateLock(tx, candidateId);
       const existing = await tx.auditLog.findFirst({
         where: {
           action: ERASURE_RESERVED_ACTIONS.COMPLETED,
@@ -362,7 +447,7 @@ export class ErasureRepository {
   }): Promise<boolean> {
     const { orgId, candidateId, requestId, now } = args;
     return this.prisma.client.$transaction(async (tx) => {
-      await this.candidateLock(tx, candidateId);
+      await this.retentionRepo.candidateLock(tx, candidateId);
       const candidate = await tx.candidate.findUnique({
         where: { id: candidateId },
         select: { erasedAt: true },
@@ -390,14 +475,5 @@ export class ErasureRepository {
       });
       return true;
     });
-  }
-
-  /** The per-candidate lock: the first lock of every transaction here (ADR 0004 9.4). */
-  private async candidateLock(tx: Tx, candidateId: string): Promise<void> {
-    await this.orgContext.runRawSql(
-      'per-candidate erasure advisory lock (ADR 0004 9.4)',
-      () =>
-        tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${CANDIDATE_ERASURE_LOCK}), hashtext(${candidateId}::text))::text AS locked`,
-    );
   }
 }

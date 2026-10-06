@@ -29,20 +29,23 @@ export abstract class SessionFencePort {
 /** The delayed re-run of the prefix delete and the database steps (ADR 0004 9.5 step 7). */
 export abstract class ErasureSchedulerPort {
   /**
-   * A delayed job with a fixed id `erasure-rerun_{candidateId}_{epoch}` (underscores), payload ids
-   * only, that calls `ErasureService.run`. `runAt` is the fence time + 60 s + the storage sweep margin.
+   * A delayed job with a fixed id `erasure-rerun_{requestId}_{epoch seconds of fencedAt}`
+   * (underscores: one job per request and fence, so a fence after a hold closes is not dropped as a
+   * duplicate), payload ids only, that calls `ErasureService.run`. `runAt` is the fence time + 60 s +
+   * the storage sweep margin. The daily sweep retries if the job is lost.
    */
   abstract scheduleRerun(args: {
     orgId: string;
     candidateId: string;
     requestId: string;
+    fencedAt: Date;
     runAt: Date;
   }): Promise<void>;
 }
 
 /** The `erasure-completed` and `erasure-delayed` mail jobs (ids only; the worker owns the mail). */
 export abstract class ErasureNoticePort {
-  /** Job id `erasure-completed_{candidateId}_{epoch}`. The worker writes ERASURE_EMAIL_SENT or ERASURE_EMAIL_FAILED. */
+  /** Job id `erasure-completed_{requestId}`. Every run re-enqueues until the email-sent row exists, so the worker's own sent-check is what deduplicates (a removed job's id can be reused). The worker writes ERASURE_EMAIL_SENT or ERASURE_EMAIL_FAILED. */
   abstract enqueueCompleted(args: {
     orgId: string;
     candidateId: string;
