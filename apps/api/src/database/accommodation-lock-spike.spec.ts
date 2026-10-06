@@ -361,7 +361,7 @@ describe('lockForAccommodation spike (ADR 0015 section 8; FR-305)', () => {
       expect(await casWith(reordered as Prisma.InputJsonObject)).toBe(1);
       expect(await casWith(stripped)).toBe(0);
       // Numbers compare as numbers: 50 and 50.0 are the same jsonb value.
-      expect(await casWith({ ...value, extraTimePct: 50.0 } as Prisma.InputJsonObject)).toBe(1);
+      expect(await casWith({ ...value, extraTimePct: 50.0 })).toBe(1);
     });
 
     it('ADR 0015 section 6: the same-value write is a real UPDATE (xmin changes), so it also serialises against another writer of the invitation', async () => {
