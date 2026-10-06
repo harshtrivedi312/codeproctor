@@ -23,13 +23,14 @@ const ALLOWED: Record<string, string> = {
   'candidate/consent-pdf.renderer.ts': 'pure renderer of the typed legal name',
   'candidate/dto/candidate.dto.ts': 'request DTO carries the typed signedName',
   'candidate/session-jobs.service.ts': 'sweep re-queues signed consents that have no PDF yet',
-  // ADR 0013 CS-4.4 (#126). The CANDIDATE scope names the column to ALLOW the candidate to write its own
-  // consent (signing) and to REFUSE any read of it; neither reads the column, and neither can see
-  // another candidate's consent (the session filter). One reviewed place each.
+  // ADR 0013 CS-4.4 (#126, #185). The CANDIDATE scope names the column to ALLOW the candidate's one consents
+  // create under the ConsentService grant (the write allowlist) and to say that no read of it exists (the read
+  // allowlist hides it by leaving it out); neither reads the column, and neither can see another candidate's
+  // consent (the session filter). One reviewed place each.
   'database/session-scope-map.ts':
-    'names the column in the candidate write allowlist; never reads it',
+    'names the column in the consents create allowlist (grantedCreate); never reads it',
   'database/candidate-interim.ts':
-    'names the column in the read deny list (hides it from candidate reads); never reads it',
+    'names the column in a comment on the read allowlist (hidden by omission); never reads it',
 };
 
 function files(dir: string): string[] {

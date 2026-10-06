@@ -121,6 +121,26 @@ export const envSchema = z
       .enum(['true', 'false'])
       .default('false')
       .transform((v) => v === 'true'),
+    // Email (C-31): Amazon SES, or noop (drops mail) for local and test. Pilot and production
+    // require ses. No secrets here: credentials come from the AWS SDK default chain (instance
+    // role). SES_ENDPOINT is for tests only and is refused outside development and test.
+    EMAIL_PROVIDER: z.enum(['ses', 'noop']).default('noop'),
+    AWS_REGION: z
+      .string()
+      .regex(/^[a-z]{2}(-[a-z]+)+-\d+$/, 'must look like us-east-1')
+      .default('us-east-1'),
+    // Static AWS credentials are refused in pilot and production (instance role only). Declared
+    // here only so the guard below can see them; nothing reads their values.
+    AWS_ACCESS_KEY_ID: z.string().optional(),
+    AWS_SECRET_ACCESS_KEY: z.string().optional(),
+    AWS_SESSION_TOKEN: z.string().optional(),
+    // Profile and credential-file settings would also bypass the instance role.
+    AWS_PROFILE: z.string().optional(),
+    AWS_SHARED_CREDENTIALS_FILE: z.string().optional(),
+    AWS_CONFIG_FILE: z.string().optional(),
+    SES_FROM_ADDRESS: z.email().optional(),
+    SES_CONFIGURATION_SET: z.string().min(1).optional(),
+    SES_ENDPOINT: z.url().optional(),
   })
   .superRefine((env, ctx) => {
     const live = isLiveEnv(env);
@@ -165,6 +185,52 @@ export const envSchema = z
           message: 'is required in pilot and production, at least 32 characters',
         });
       }
+    }
+    if (live && env.EMAIL_PROVIDER !== 'ses') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['EMAIL_PROVIDER'],
+        message: 'must be ses in pilot and production',
+      });
+    }
+    if (live && env.AWS_REGION !== 'us-east-1') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['AWS_REGION'],
+        message: 'must be us-east-1 in pilot and production (C-31)',
+      });
+    }
+    if (live) {
+      for (const name of [
+        'AWS_ACCESS_KEY_ID',
+        'AWS_SECRET_ACCESS_KEY',
+        'AWS_SESSION_TOKEN',
+        'AWS_PROFILE',
+        'AWS_SHARED_CREDENTIALS_FILE',
+        'AWS_CONFIG_FILE',
+      ] as const) {
+        if (env[name] !== undefined && env[name] !== '') {
+          ctx.addIssue({
+            code: 'custom',
+            path: [name],
+            message: 'must not be set in pilot or production (use the instance role, C-31)',
+          });
+        }
+      }
+    }
+    if (env.EMAIL_PROVIDER === 'ses' && !env.SES_FROM_ADDRESS) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['SES_FROM_ADDRESS'],
+        message: 'is required when EMAIL_PROVIDER is ses',
+      });
+    }
+    if (env.SES_ENDPOINT && (live || env.APP_ENV === 'staging')) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['SES_ENDPOINT'],
+        message: 'is for tests only and must not be set in staging, pilot or production',
+      });
     }
     if (live && !env.WEB_ORIGIN.startsWith('https://')) {
       ctx.addIssue({

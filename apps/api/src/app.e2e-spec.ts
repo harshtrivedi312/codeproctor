@@ -177,6 +177,9 @@ describe('API foundation in production (NFR-04)', () => {
       OTP_PEPPER: 'y'.repeat(48),
       SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 9).toString('base64'),
       REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
+      // Pilot and production require SES (C-31); nothing is sent in this suite.
+      EMAIL_PROVIDER: 'ses',
+      SES_FROM_ADDRESS: 'no-reply@test.invalid',
     });
     app = await createApp();
   });

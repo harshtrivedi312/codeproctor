@@ -57,6 +57,8 @@ describe('NFR-04 environment validation', () => {
       OTP_PEPPER: 'p'.repeat(48),
       SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 3).toString('base64'),
       REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
+      EMAIL_PROVIDER: 'ses',
+      SES_FROM_ADDRESS: 'no-reply@example.com',
     };
     for (const APP_ENV of ['pilot', 'production']) {
       const base = { ...valid, ...live, APP_ENV };
@@ -121,6 +123,8 @@ describe('NFR-04 environment validation', () => {
       OTP_PEPPER: 'p'.repeat(48),
       REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
       SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 3).toString('base64'),
+      EMAIL_PROVIDER: 'ses',
+      SES_FROM_ADDRESS: 'no-reply@example.com',
     };
     expect(validateEnv(live).JUDGE0_URL).toBe('https://judge0.example.com');
     expect(() => validateEnv({ ...live, JUDGE0_URL: undefined })).toThrow(/JUDGE0_URL/);
@@ -201,6 +205,8 @@ describe('NFR-04 environment validation', () => {
       OTP_PEPPER: 'p'.repeat(48),
       REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
       SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 3).toString('base64'),
+      EMAIL_PROVIDER: 'ses',
+      SES_FROM_ADDRESS: 'no-reply@example.com',
     };
     for (const APP_ENV of ['pilot', 'production']) {
       expect(() => validateEnv({ ...live, APP_ENV, WEB_ORIGIN: 'http://app.example.com' })).toThrow(
@@ -211,5 +217,113 @@ describe('NFR-04 environment validation', () => {
       ).toBe('https://app.example.com');
     }
     expect(validateEnv(valid).WEB_ORIGIN).toBe('http://localhost:3000');
+  });
+  describe('C-31 email settings', () => {
+    const live = {
+      ...valid,
+      APP_ENV: 'pilot',
+      WEB_ORIGIN: 'https://app.example.com',
+      TRUST_PROXY_HOPS: '1',
+      JUDGE0_URL: 'https://judge0.example.com',
+      JUDGE0_AUTH_TOKEN: 't'.repeat(32),
+      JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
+      EMAIL_PROVIDER: 'ses',
+      SES_FROM_ADDRESS: 'no-reply@example.com',
+    };
+
+    it('C-31: defaults to noop and us-east-1 locally', () => {
+      const env = validateEnv(valid);
+      expect(env.EMAIL_PROVIDER).toBe('noop');
+      expect(env.AWS_REGION).toBe('us-east-1');
+      expect(env.SES_FROM_ADDRESS).toBeUndefined();
+    });
+
+    it('C-31: pilot and production require ses and name the variable', () => {
+      for (const APP_ENV of ['pilot', 'production']) {
+        expect(validateEnv({ ...live, APP_ENV }).EMAIL_PROVIDER).toBe('ses');
+        expect(() => validateEnv({ ...live, APP_ENV, EMAIL_PROVIDER: 'noop' })).toThrow(
+          /EMAIL_PROVIDER/,
+        );
+        expect(() => validateEnv({ ...live, APP_ENV, EMAIL_PROVIDER: undefined })).toThrow(
+          /EMAIL_PROVIDER/,
+        );
+      }
+      expect(() =>
+        validateEnv({
+          ...live,
+          APP_ENV: 'development',
+          NODE_ENV: 'production',
+          EMAIL_PROVIDER: 'noop',
+        }),
+      ).toThrow(/EMAIL_PROVIDER/);
+    });
+
+    it('C-31: ses needs a valid SES_FROM_ADDRESS', () => {
+      expect(() => validateEnv({ ...live, SES_FROM_ADDRESS: undefined })).toThrow(
+        /SES_FROM_ADDRESS/,
+      );
+      expect(() => validateEnv({ ...live, SES_FROM_ADDRESS: 'not-an-address' })).toThrow(
+        /SES_FROM_ADDRESS/,
+      );
+      expect(() =>
+        validateEnv({ ...valid, EMAIL_PROVIDER: 'ses', SES_FROM_ADDRESS: undefined }),
+      ).toThrow(/SES_FROM_ADDRESS/);
+    });
+
+    it('C-31: SES_ENDPOINT is refused in staging, pilot and production, allowed in development and test', () => {
+      const endpoint = 'http://127.0.0.1:4566';
+      for (const APP_ENV of ['staging', 'pilot', 'production']) {
+        expect(() => validateEnv({ ...live, APP_ENV, SES_ENDPOINT: endpoint })).toThrow(
+          /SES_ENDPOINT/,
+        );
+      }
+      expect(() =>
+        validateEnv({ ...valid, NODE_ENV: 'production', SES_ENDPOINT: endpoint }),
+      ).toThrow(/SES_ENDPOINT/);
+      for (const APP_ENV of ['development', 'test']) {
+        expect(validateEnv({ ...valid, APP_ENV, SES_ENDPOINT: endpoint }).SES_ENDPOINT).toBe(
+          endpoint,
+        );
+      }
+    });
+
+    it('C-31: static AWS credentials are refused in live environments, naming only the variable', () => {
+      for (const name of [
+        'AWS_ACCESS_KEY_ID',
+        'AWS_SECRET_ACCESS_KEY',
+        'AWS_SESSION_TOKEN',
+        'AWS_PROFILE',
+        'AWS_SHARED_CREDENTIALS_FILE',
+        'AWS_CONFIG_FILE',
+      ]) {
+        for (const APP_ENV of ['pilot', 'production']) {
+          let text = '';
+          try {
+            validateEnv({ ...live, APP_ENV, [name]: 'SUPERSECRETVALUE' });
+          } catch (e) {
+            text = String(e);
+          }
+          expect(text).toContain(name);
+          expect(text).not.toContain('SUPERSECRETVALUE');
+        }
+        // Developers may hold credentials locally.
+        expect(() => validateEnv({ ...valid, [name]: 'x' })).not.toThrow();
+      }
+    });
+
+    it('C-31: AWS_REGION must look like a region and is pinned to us-east-1 in live environments', () => {
+      for (const bad of ['us_east_1', 'US-EAST-1', 'useast1', 'us-east', '']) {
+        expect(() => validateEnv({ ...valid, AWS_REGION: bad })).toThrow(/AWS_REGION/);
+      }
+      expect(validateEnv({ ...valid, AWS_REGION: 'eu-west-1' }).AWS_REGION).toBe('eu-west-1');
+      for (const APP_ENV of ['pilot', 'production']) {
+        expect(() => validateEnv({ ...live, APP_ENV, AWS_REGION: 'eu-west-1' })).toThrow(
+          /AWS_REGION/,
+        );
+        expect(validateEnv({ ...live, APP_ENV, AWS_REGION: 'us-east-1' }).AWS_REGION).toBe(
+          'us-east-1',
+        );
+      }
+    });
   });
 });
