@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { unstable_getResponseFromNextConfig } from 'next/experimental/testing/server';
-import nextConfig from '../next.config';
+import { nextConfig } from '../next.config';
 
 type Rule = { source: string; headers: { key: string; value: string }[] };
 
