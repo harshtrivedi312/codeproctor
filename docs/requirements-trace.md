@@ -16,7 +16,7 @@ Status values: Not started, In progress, Done (merged), Verified (the TC passed 
 | Non-functional requirements (NFR-01..NFR-09) | 9 | fsd.md section 5 |
 | Requirements traced (BR + FR + NFR) | 82 | |
 | Test cases (TC) | 73 (52 P1, 17 P2, 4 P3) | counted from test-cases.md; matches its intro line (TC-095..TC-099 added 2026-10-01; TC-100 added 2026-10-06) |
-| TC types | 29 F, 19 I, 20 S, 2 P, 2 R, 1 A | |
+| TC types | 29 F, 18 I, 21 S, 2 P, 2 R, 1 A | |
 | FRs with no test case | 10 | FR-302, FR-406, FR-501, FR-702, FR-801, FR-1001, FR-1002, FR-1101, FR-1102, FR-1103 |
 | NFRs with no direct test case | 4 | NFR-03, NFR-07, NFR-08, NFR-09 (NFR-07 and NFR-08 have indirect coverage, see section 4) |
 | BRs with no test case through their FRs | 1 | BR-11 |
@@ -146,7 +146,7 @@ Requirement column is copied from test-cases.md. "Named" = the prompts name this
 | TC-098 (added 2026-10-01) | FR-107 | S | P1 | BE-02, FE-02 | Yes | Not started |
 | TC-010 | FR-201 | F | P1 | BE-04 | Yes | Not started |
 | TC-011 | FR-202 | S | P1 | BE-04 | Yes | Not started |
-| TC-100 (added 2026-10-06; staff and recruiter redaction, extends TC-011; DL-32, DL-34) | FR-202, FR-301 | I | P1 | BE-04 | Yes | Not started |
+| TC-100 (added 2026-10-06; staff and recruiter redaction, extends TC-011; DL-32, DL-34) | FR-202, FR-301 | S | P1 | BE-04, BE-06 | Yes | Not started |
 | TC-012 | FR-203 | F | P1 | BE-05, FE-04 | Yes | Not started |
 | TC-013 | FR-204 | F | P1 | BE-04 | Yes | Not started |
 | TC-014 | FR-205 | F | P3 | BE-04, BE-11 | Yes | Not started |
