@@ -43,13 +43,14 @@ export class SessionRepository {
 
 The org comes from the context, never from a parameter:
 
-| Where the code runs                       | Who sets the context                                                                           |
-| ----------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Staff HTTP route                          | `OrgContextInterceptor`, from `request.user` (BE-02's `JwtAuthGuard` sets an `AuthUser`)       |
-| Candidate route (token, then its session) | the candidate guard or interceptor calls `orgContext.runInOrg(session.orgId, ...)` (BE-07)     |
-| BullMQ job, Socket.IO event               | the processor or gateway calls `runInOrg(job's session org, ...)` or `runAsUser(...)` (BE-08+) |
-| Login, refresh, token lookups, cross-org  | `orgContext.runSystem(reason, ...)` with a reason from `SYSTEM_SCOPE_REASONS`, outside any org |
-| A reviewed raw SQL query                  | `orgContext.runRawSql('why', ...)`                                                             |
+| Where the code runs                       | Who sets the context                                                                                                                              |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Staff HTTP route                          | `OrgContextInterceptor`, from `request.user` (BE-02's `JwtAuthGuard` sets an `AuthUser`)                                                          |
+| Candidate route (token, then its session) | `CandidateSessionGuard` calls `orgContext.runAsCandidate(oid, sid, ...)` from the verified claims (BE-07; see "Candidate and session-job scopes") |
+| BullMQ session job                        | `SessionJobProcessor` calls `detachForSessionJob`, then `runAsSessionJob(orgId, sessionId, ...)` from the payload (BE-07, BE-08)                  |
+| BullMQ cross-session job, Socket.IO event | the processor or gateway calls `runInOrg(job's org, ...)` or `runAsUser(...)` (BE-08+)                                                            |
+| Login, refresh, token lookups, cross-org  | `orgContext.runSystem(reason, ...)` with a reason from `SYSTEM_SCOPE_REASONS`, outside any org                                                    |
+| A reviewed raw SQL query                  | `orgContext.runRawSql('why', ...)`                                                                                                                |
 
 `request.user` is BE-02's `AuthUser` (`common/auth/auth.types.ts`): `{ id, orgId, role, kind }`.
 The interceptor checks it (`kind` must be `access`, `id` and `orgId` must be uuids, `role` a known
@@ -206,6 +207,145 @@ extension never adds a query: it only rewrites arguments. `auth-bootstrap.spec.t
 identical to the plain client's, and in an org scope identical to the plain client with the filter
 written by hand.
 
+## Candidate and session-job scopes (ADR 0013 CS-4)
+
+> **Status.** ADR 0013 is **Proposed** and its CS-4 is "architect detail, owner to confirm". This is built
+> from the text on main, and where the text was ambiguous the stricter reading was built and recorded
+> (FU-DB-180 to FU-DB-189). This is **PR 1 of 3**: the two actors, the session filter, the CANDIDATE
+> model allowlist and relation vectors 1 to 5. Not built yet (PR 2 and 3): column allowlists, `omit`,
+> `withGrant` and the explicit-only columns (CS-4.4), the `submissions` RUN filter and the
+> `proctor_events` source filter, vector 6 (the fluent API), the FU-DB-67 call-site test.
+> CandidateSessionGuard and SessionJobProcessor are BE-07; `render-question` projections are CS-4.6.
+
+Org scoping does not stop one candidate from reading another candidate's session in the same org. A
+**session scope** is an org scope bound to **one session**, taken from the token or the job payload, and
+the entry function sets the actor, so a caller cannot forge it.
+
+### The public API (for BE-07)
+
+```ts
+orgContext.runAsCandidate<T>(orgId: string, sessionId: string, fn: () => T): Scoped<T>   // actor CANDIDATE
+orgContext.runAsSessionJob<T>(orgId: string, sessionId: string, fn: () => T): Scoped<T>  // actor SERVICE
+orgContext.detachForSessionJob<T>(fn: () => T): Scoped<T>                                // SessionJobProcessor ONLY
+setCandidateFacts(orgContext, { candidateId, invitationId, testId }): void               // CandidateSessionGuard ONLY
+orgContext.candidateFacts(): CandidateFacts | undefined                                  // read-only
+```
+
+- `runAsCandidate` is called by **CandidateSessionGuard only**, from the verified token claims
+  (`oid`, `sid`). `runAsSessionJob` is called by **SessionJobProcessor only**, from the job payload,
+  after `detachForSessionJob`. Both validate both ids as uuids and send no SQL.
+- **`detachForSessionJob` is for SessionJobProcessor only.** It asserts that the store is empty (no scope,
+  no `runRawSql` hatch, no grant) and runs `fn` in a fresh empty store; in any scope, any system scope
+  (`BACKGROUND_JOB` included) or open hatch it throws. A BullMQ worker is built at module init, outside
+  any scope, and each session job runs in its own worker callback: this is where the processor proves
+  that it did not inherit a scope. A candidate scope cannot leave itself.
+- **`setCandidateFacts` is for CandidateSessionGuard only.** It lives in `candidate-facts.ts`, which is
+  **not exported from `index.ts`**, and the service's own setter is a method keyed by an unregistered
+  symbol, so it is not part of the service's surface. It sets `candidateId`, `invitationId` and `testId`
+  once per CANDIDATE scope (frozen; a second call, a SERVICE scope or no scope throws). Until it is
+  called, a read of `candidates`, `invitations` or `tests` throws. FU-DB-67 pins its one caller.
+
+### Entering and nesting (CS-4.1; ADR 0006 section 8.4)
+
+| Current scope                             | `runAsCandidate`, `runAsSessionJob`           | `runInOrg(same org)`                                                 | `runAsUser`, `runSystem`, the other actor, another org, `detachForSessionJob` |
+| ----------------------------------------- | --------------------------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| none                                      | allowed                                       | allowed                                                              | `runAsUser`, `runSystem`, `detachForSessionJob`: allowed                      |
+| staff, plain org, any system scope, hatch | **throws**                                    | n/a                                                                  | n/a                                                                           |
+| a session scope (either actor)            | **throws**, the same ids included (FU-DB-180) | allowed; the session and the actor stay (the very same scope object) | **throw**                                                                     |
+
+A session scope only narrows: nothing inside it can drop or change the session. Entering from "no
+scope only" also means no `runRawSql` hatch can carry into it.
+
+### The session filter (CS-4.2), both actors
+
+Applied on top of the org filter, on every operation, so another candidate's session of the same org is
+not found:
+
+| Model (table)                                                                                                                        | Row filter                                                  |
+| ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| `Session` (`sessions`)                                                                                                               | `id = sid`                                                  |
+| `SessionQuestion`, `SessionSection`, `IdentityCheck`, `MediaChunk`, `ProctorEventBatch`, `ProctorEvent`, `KeystrokeBatch`, `Consent` | `session_id = sid`                                          |
+| `Submission` (`submissions`, no `session_id`)                                                                                        | `sessionQuestion: { sessionId }` (injected relation filter) |
+
+- **Filtered:** `findUnique`, `findUniqueOrThrow`, `findFirst`, `findFirstOrThrow`, `findMany`, `count`,
+  `aggregate`, `groupBy`, `update`, `updateMany`, `updateManyAndReturn`, `delete`, `deleteMany` and the
+  `where` of `upsert`. An unknown operation throws (as everywhere).
+- **Creates take the session from the context.** `sessionId` (or `id` on sessions) is stamped when
+  missing and a different value throws, in `create`, `createMany`, `createManyAndReturn` and the create
+  branch of `upsert`. Prisma's unchecked create types require `sessionId`, so typed code passes it
+  (take it from the context); the stamp is a safety net, as with `orgId`.
+- **Existence check.** A create of a `Submission` or a `KeystrokeBatch` with a `sessionQuestionId` first
+  runs **one** scoped primary-key query on `session_questions` (`id IN (...)`, under the org filter and
+  the session filter) and throws on a miss. It is one statement however many rows a `createMany` has
+  (measured: a `submission.create` is 2 statements, the `COUNT` and the `INSERT`; a `createMany` of 3
+  rows is 2; a create that needs no check is 1). It runs on the client's own connection, **outside a
+  caller's interactive `$transaction`**: a session question created earlier in the same, uncommitted
+  transaction is not visible to it, so the create fails closed (FU-DB-182).
+- **Session keys are immutable.** An `update`, `updateMany`, `updateManyAndReturn` or the update branch
+  of `upsert` that writes `session_id` or a `session_question_id` (`sessionId` and `id` of sessions
+  and session_questions, `sessionQuestionId` of submissions and keystroke batches) throws, whatever the
+  value (the `{ set }` form too; FU-DB-181).
+- **Raw SQL is refused** in any session scope, **even inside `runRawSql`** (ADR 0006 section 8.5).
+  Session jobs use the query API.
+- **A cursor is refused** on the session-path models in both actors (it ranks rows against a row named
+  by its own fields, which could be another session's), and for a CANDIDATE on every model.
+- **Nested relation writes** throw in both actors, as in every scope (ADR 0006 section 8.2).
+- **Models outside the table** (`tests`, `candidates`, `questions`, ...) get the org filter only.
+  `session_reviews` and `webhook_deliveries` carry a `session_id` but are not on the CS-4.2 list, so they
+  are org-only in SERVICE scope too (FU-DB-183; one test pins it).
+
+### SERVICE (`runAsSessionJob`): no allowlist, no column limits (CS-4.1)
+
+The org filter plus the session filter, nothing else: every model, every column, relations in `include`,
+`select`, `where` and `orderBy`. The session filter covers **top-level** queries; nested reads in SERVICE
+scope follow foreign keys without it and stay a rule (i) review item (ADR 0013 CS-4.1).
+
+### CANDIDATE (`runAsCandidate`): deny by default (CS-4.3, CS-4.5)
+
+A model that is not listed throws, for every operation, before any query. Read-only models refuse every
+write operation.
+
+| Model                         | Access                                      | Row filter, on top of the org filter                                                                                                                                                                            |
+| ----------------------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| the ten above                 | per CS-4.4 (**PR 2**; no column limits yet) | the session filter. **A candidate deletes nothing** (FU-DB-184)                                                                                                                                                 |
+| `Organization`                | read                                        | `id = orgId` (the org filter of the tenant root)                                                                                                                                                                |
+| `Candidate`                   | read                                        | `id = ctx.candidateId` (a candidate fact)                                                                                                                                                                       |
+| `Invitation`                  | read                                        | `id = ctx.invitationId` (a candidate fact)                                                                                                                                                                      |
+| `Test`                        | read                                        | `id = ctx.testId` (a candidate fact)                                                                                                                                                                            |
+| `TestSection`                 | read                                        | `sessionSections: { some: { sessionId } }` (injected)                                                                                                                                                           |
+| `Question`                    | read                                        | `versions: { some: { sessionQuestions: { some: { sessionId } } } }` (injected)                                                                                                                                  |
+| `ConsentText`, `TestQuestion` | **throw for now**                           | readable only under a grant (PR 2: `id IN grant.ids`); TODO in `session-scope-map.ts`                                                                                                                           |
+| every other model             | **throws**                                  | `User`, `RefreshToken`, `AuditLog`, `QuestionVersion`, `TestCase`, `QuestionVariant`, `VariantTestCase`, `AiReferenceSolution`, `SessionReview`, `FlagDecision`, `Appeal`, `WebhookEndpoint`, `WebhookDelivery` |
+
+A filter that needs a fact **throws while the fact is unset**. The facts exist after the guard has called
+`setCandidateFacts`; reading `invitations` to learn them cannot work in the scope, because that read
+needs `ctx.invitationId` first (FU-DB-185: the guard flow in ADR 0013 needs a decision).
+
+**Relation vectors 1 to 5 throw** in a CANDIDATE scope, on the caller's arguments, before the extension
+adds its own relation filters (so those never trip the check):
+
+| #   | Vector                                                                                                                                                  |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | a relation field in `include`                                                                                                                           |
+| 2   | a relation field in `select`                                                                                                                            |
+| 3   | a relation filter in `where` or `having` (`some`, `every`, `none`, `is`, `isNot`, or a plain relation object), at any depth under `AND`, `OR` and `NOT` |
+| 4   | a relation field in `orderBy`                                                                                                                           |
+| 5   | a relation `_count` in `select` or `include` (the row `_count` of `aggregate`, `groupBy` and `count` is not a relation count and stays)                 |
+| 6   | the fluent API: **not built, PR 3** (a skipped test names it)                                                                                           |
+
+Load each model with its own scoped call instead. A relation field is any field in the relation table
+of `org-scope-relations.ts`, whatever its value (`false`, `null` and `{}` too).
+
+### Tests
+
+`org-context-session.spec.ts` (actors, nesting, detach, facts; no database), `session-scope-args.spec.ts`
+(every model and operation on the rewritten arguments), `session-scope.extension.spec.ts` (the allowlist
+sweep over every model of the generated client and the vectors, through the real client, no database) and
+`cs4-session-isolation.spec.ts` (two candidates in one org and one in another, against Postgres 16 as
+`app_user`: cross-candidate reads and writes, SERVICE, creates, keys, raw SQL, statement counts).
+Removing the session filter, the allowlist or any one of the other rules above makes tests fail.
+FU-DB-67 will add the call-site test.
+
 ## Auth bootstrap recipe
 
 For BE-02's `AuthService` (login, forgot, reset, refresh, 2FA completion) and any other code that
@@ -270,6 +410,8 @@ looked at.
   `sessionReview.findUnique({ where: { id }, include: { reviewer: true } })` returns that user row,
   password hash included. Select only the fields you need, and never `include` a user.
   (`tc-008-org-isolation.spec.ts` pins this behaviour; it documents the limit and is not a fix.)
+  **In a CANDIDATE scope (ADR 0013 CS-4.5) vectors 1 to 5 throw**, and in a SERVICE scope they stay a
+  review item: see "Candidate and session-job scopes".
 - **(d) Rule (i) covers 25 foreign keys**, not only the staff references (`created_by`,
   `reviewer_id`, `assigned_to`, `collected_by`, `scored_by`, `reviewed_by`, `actor_id`) and
   `test_questions.question_version_id`. The list is `RULE_I_REFERENCES` in
@@ -516,6 +658,10 @@ which stays one statement, and be ready to retry on `P2002` elsewhere.
 | `org-scope-relations.ts`                       | Every foreign key classified (`FK_CLASSES`, `RULE_I_REFERENCES`), the first-hop column of each path model (`scopeHopColumn`) and the side of every relation that holds the key |
 | `org-scope.extension.ts`                       | The `$extends` query extension and `OrgScopedPrismaClient`                                                                                                                     |
 | `org-context.ts`, `org-context.interceptor.ts` | The AsyncLocalStorage context, its API, and the HTTP population point                                                                                                          |
+| `session-scope-map.ts`                         | CS-4.2 `SESSION_SCOPE` (the ten session-path models) and CS-4.3 `CANDIDATE_MODELS` (the allowlist, row filters)                                                                |
+| `session-scope-args.ts`                        | Pure argument rewriting for a session scope: allowlist gate, creates, session keys, the filters and the existence check's `where`                                              |
+| `candidate-relations.ts`                       | CS-4.5 relation vectors 1 to 5 refused in a CANDIDATE scope                                                                                                                    |
+| `candidate-facts.ts`                           | `setCandidateFacts`: **CandidateSessionGuard only**, not exported from `index.ts`                                                                                              |
 | `errors.ts`                                    | `OrgContextMissingError`, `OrgScopeViolationError`, `RawQueryNotAllowedError`                                                                                                  |
 | `error-scrub.ts`                               | Keeps argument values out of the Prisma errors that are logged (FU-DB-70)                                                                                                      |
 | `testing/`                                     | Test helpers (excluded from the build): throwaway migrated Postgres, fixtures, scope checks                                                                                    |
