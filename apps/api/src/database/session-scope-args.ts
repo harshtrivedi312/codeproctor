@@ -1,0 +1,541 @@
+// The pure part of the session scope (ADR 0013 section 5.10, CS-4.1 to CS-4.3 and CS-4.5): given a
+// model, an operation, its arguments and the scope's actor and session, return the arguments the
+// query must run with, and the session_questions ids a create must prove. No database and no
+// context here, so every model and operation can be unit tested. The Prisma extension
+// (org-scope.extension.ts) wraps this with the context lookup and the one existence check.
+//
+// Order of the checks, which matters:
+//   1. CANDIDATE only (candidateGate): the model is on the allowlist (deny by default), a model that
+//      is readable only under a grant is refused (grants are PR 2), no cursor, a candidate deletes
+//      nothing, a read-only model and a model with no candidate writes get no write, a model a
+//      candidate may not create gets no create and one it may not update gets no update; then the caller's arguments use no relation (vectors 1 to
+//      5, candidate-relations.ts), then the interim column control (candidate-interim.ts).
+//      The relation check runs on the caller's arguments, BEFORE any filter is added, so the relation
+//      filters the extension injects itself (the org path, `sessionQuestion: { sessionId }`,
+//      `sessionSections: { some }`) never trip it.
+//   2. Both actors: a create takes the session from the context (stamped when missing, refused when
+//      it names another), and an update may not write a session key. CANDIDATE also: the keys that
+//      feed other models' filters are immutable, a create and an update carry only the columns of
+//      the CS-4.4 write allowlist of the model (`id`, `orgId` and the timestamps never), a create
+//      carries the fixed values of CS-4.4 (`source = 'CLIENT'`).
+//   3. The org scope (applyOrgScope: org filter, orgId stamp and check, nested writes refused).
+//   4. The session filter (CS-4.2) and, for a CANDIDATE, the CS-4.4 row filter and the CS-4.3 row
+//      filter of the model are ANDed into `where`. Creates have no `where`.
+//
+// What this file does NOT do (ADR 0013 CS-4 PR 2): the CS-4.4 READ allowlists and `omit`, grants, the
+// submissions RUN filter. Until PR 2, candidate-interim.ts keeps the read columns closed on a list.
+import { OrgScopeViolationError } from './errors';
+import type { CandidateFacts, SessionBinding } from './org-context';
+import { andWhere, applyOrgScope } from './org-scope-args';
+import { ORG_SCOPE, orgFilter } from './org-scope-map';
+import type { ModelName, OrgScopeRule } from './org-scope-map';
+import { assertInterimColumns } from './candidate-interim';
+import { assertNoRelationVectors } from './candidate-relations';
+import {
+  CANDIDATE_OBJECT_KEYS,
+  candidateReadFilter,
+  candidateRuleFor,
+  isReadOperation,
+  NEVER_WRITTEN_BY_CANDIDATE,
+  sessionRuleFor,
+} from './session-scope-map';
+import type { CandidateModelRule, ObjectKeyRule, SessionModelRule } from './session-scope-map';
+
+/** The `session` kind of a CANDIDATE model rule: what a candidate may do on a session-path model. */
+type CandidateSessionRule = Extract<CandidateModelRule, { kind: 'session' }>;
+
+type PlainObject = Record<string, unknown>;
+
+export interface SessionScopeInput {
+  readonly model: ModelName;
+  readonly rule: OrgScopeRule;
+  readonly operation: string;
+  readonly args: unknown;
+  readonly orgId: string;
+  readonly session: SessionBinding;
+  /** The candidate facts of a CANDIDATE scope, when the guard has set them. */
+  readonly facts: CandidateFacts | undefined;
+}
+
+export interface SessionScopeResult {
+  /** The arguments the query runs with. */
+  readonly args: PlainObject;
+  /**
+   * The session_questions ids a create names (`sessionQuestionId` of submissions and keystroke
+   * batches). The extension runs ONE scoped primary-key existence check for them before the query,
+   * and throws on a miss (CS-4.2). Empty for every other operation.
+   */
+  readonly sessionQuestionIds: readonly string[];
+}
+
+function isPlainObject(value: unknown): value is PlainObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function violation(model: string, operation: string, what: string): OrgScopeViolationError {
+  return new OrgScopeViolationError(`${model}.${operation}: ${what}`);
+}
+
+const CREATE_OPERATIONS: readonly string[] = [
+  'create',
+  'createMany',
+  'createManyAndReturn',
+  'upsert',
+];
+const UPDATE_OPERATIONS: readonly string[] = [
+  'update',
+  'updateMany',
+  'updateManyAndReturn',
+  'upsert',
+];
+/** Creates carry no `where`, so no row filter is added to them. */
+const NO_WHERE: readonly string[] = ['create', 'createMany', 'createManyAndReturn'];
+
+interface CandidateGateResult {
+  /** The model's rule, when it is a session-path model. */
+  readonly sessionRule: CandidateSessionRule | undefined;
+  /** The CS-4.3 row filter of a model a candidate reads (none for session-path models). */
+  readonly readFilter: PlainObject | undefined;
+}
+
+/**
+ * CS-4.3, the model-level half of the CANDIDATE gate: deny by default, and a model that is readable
+ * only under a grant is refused until grants exist. It needs no arguments, so the extension runs it
+ * FIRST, before anything else, including the `unscoped` early return (a model that is global on
+ * purpose is still not reachable by a candidate unless the allowlist names it).
+ */
+export function assertCandidateModelAllowed(
+  model: string,
+  operation: string,
+): Exclude<CandidateModelRule, { kind: 'grant-only' }> {
+  const rule = candidateRuleFor(model);
+  if (rule === undefined) {
+    throw violation(
+      model,
+      operation,
+      'this model is not on the CANDIDATE allowlist (ADR 0013 CS-4.3, deny by default).',
+    );
+  }
+  if (rule.kind === 'grant-only') {
+    // TODO(ADR 0013 CS-4 PR 2): readable under the grant of `rule.grantSite` (`id IN grant.ids`).
+    // Grants do not exist in this PR, so the model is refused.
+    throw violation(
+      model,
+      operation,
+      `this model is readable only under a grant (${rule.grantSite}), and grants are not built yet ` +
+        '(ADR 0013 CS-4.3, PR 2).',
+    );
+  }
+  return rule;
+}
+
+/** CS-4.3: deny by default. See the header for the order of the checks. */
+function candidateGate(input: SessionScopeInput, args: PlainObject): CandidateGateResult {
+  const { model, operation, session, facts } = input;
+  const rule = assertCandidateModelAllowed(model, operation);
+  if (args.cursor !== undefined) {
+    throw violation(
+      model,
+      operation,
+      'a cursor is refused in a CANDIDATE scope: it ranks rows against a row named by its own ' +
+        'fields, which could be another candidate or another session.',
+    );
+  }
+  const isRead = isReadOperation(operation);
+  if (rule.kind === 'session' && (operation === 'delete' || operation === 'deleteMany')) {
+    // CS-4.4 lists no delete for any model; PR 2 defines the writes per column.
+    throw violation(
+      model,
+      operation,
+      'a candidate deletes nothing: no CS-4.4 row grants a delete (ADR 0013 CS-4.3, stricter ' +
+        'reading, FU-DB-184).',
+    );
+  }
+  if (!isRead && rule.kind === 'read') {
+    throw violation(
+      model,
+      operation,
+      'this model is read-only in a CANDIDATE scope (ADR 0013 CS-4.3); every write operation is refused.',
+    );
+  }
+  if (!isRead && rule.kind === 'session') {
+    // The write allowlist of CS-4.4 (session-scope-map.ts): which operations, then which columns.
+    if (rule.create === undefined && rule.update === undefined) {
+      throw violation(
+        model,
+        operation,
+        'a candidate writes nothing here: CS-4.4 grants no write on this model (its writers are ' +
+          'SERVICE jobs), so every write operation is refused.',
+      );
+    }
+    if (rule.create === undefined && CREATE_OPERATIONS.includes(operation)) {
+      // A planted row would widen the filters of other models (a session_question reaches `questions`
+      // through its question version) and is not a candidate action: CS-4.4 grants updates only.
+      throw violation(
+        model,
+        operation,
+        'a candidate cannot create this row: CS-4.4 grants updates only (ADR 0013 CS-4.4; rows are ' +
+          'created by the session job or the staff route).',
+      );
+    }
+    if (rule.update === undefined && UPDATE_OPERATIONS.includes(operation)) {
+      throw violation(
+        model,
+        operation,
+        'a candidate cannot update this row: CS-4.4 grants create only (ADR 0013 CS-4.4); a row ' +
+          'that was written is not rewritten by the candidate.',
+      );
+    }
+  }
+  // CS-4.5: the caller's arguments, before the extension adds its own relation filters.
+  assertNoRelationVectors(model, operation, args);
+  // Interim column safety, until the CS-4.4 allowlists of PR 2 replace it.
+  assertInterimColumns(model, operation, args);
+  return {
+    sessionRule: rule.kind === 'session' ? rule : undefined,
+    readFilter:
+      rule.kind === 'read'
+        ? candidateReadFilter(model, rule.filter, session.sessionId, facts)
+        : undefined,
+  };
+}
+
+/** A create row: the session comes from the context, and a row that names another is refused. */
+function stampSession(
+  model: string,
+  operation: string,
+  rule: SessionModelRule,
+  data: unknown,
+  sessionId: string,
+): unknown {
+  if (rule.createKey === undefined || !isPlainObject(data)) return data;
+  const named = data[rule.createKey];
+  if (named === undefined) return { ...data, [rule.createKey]: sessionId };
+  if (typeof named !== 'string' || named.toLowerCase() !== sessionId) {
+    throw violation(
+      model,
+      operation,
+      `${rule.createKey} in the data is not the session of this scope (ADR 0013 CS-4.2).`,
+    );
+  }
+  return data;
+}
+
+/** The session_questions id a create row names, if the model carries one. */
+function questionRefOf(
+  model: string,
+  operation: string,
+  rule: SessionModelRule,
+  data: unknown,
+): string | undefined {
+  if (rule.questionRef === undefined || !isPlainObject(data)) return undefined;
+  const id = data.sessionQuestionId;
+  if (id === undefined || id === null) return undefined;
+  if (typeof id !== 'string') {
+    throw violation(
+      model,
+      operation,
+      'sessionQuestionId must be a plain id; the scope checks it against the session.',
+    );
+  }
+  return id.toLowerCase();
+}
+
+/** An update may not write a session key, in any form (`{ set }` too), whatever the value. */
+function assertSessionKeysKept(
+  model: string,
+  operation: string,
+  keys: readonly string[],
+  data: unknown,
+): void {
+  if (!isPlainObject(data)) return;
+  for (const key of keys) {
+    if (data[key] !== undefined) {
+      throw violation(
+        model,
+        operation,
+        `${key} is a session key and cannot be written by an update (ADR 0013 CS-4.2): a row is ` +
+          'never moved to another session.',
+      );
+    }
+  }
+}
+
+/**
+ * The write allowlist of CS-4.4 for a CANDIDATE: a create or an update carries only the listed columns.
+ * Anything else throws, including `id`, `orgId` and the timestamps, which no candidate write names
+ * (NEVER_WRITTEN_BY_CANDIDATE: a create that names `id` is also a P2002 existence oracle). A key whose
+ * value is `undefined` is not a write. The message names the model, the column and the list, never a
+ * value.
+ */
+function assertWriteColumns(
+  model: string,
+  operation: string,
+  kind: 'create' | 'update',
+  allowed: readonly string[],
+  data: unknown,
+): void {
+  if (!isPlainObject(data)) return;
+  for (const [key, value] of Object.entries(data)) {
+    if (value === undefined) continue;
+    if (NEVER_WRITTEN_BY_CANDIDATE.includes(key)) {
+      throw violation(
+        model,
+        operation,
+        `${key} is never written by a candidate (the primary key, the org and the timestamps belong ` +
+          'to the server; ADR 0013 CS-4.4).',
+      );
+    }
+    if (!allowed.includes(key)) {
+      throw violation(
+        model,
+        operation,
+        `${key} cannot be written by a candidate ${kind} here: CS-4.4 lists ${allowed.join(', ')} ` +
+          '(interim write allowlist; ADR 0013 CS-4.4).',
+      );
+    }
+  }
+}
+
+/** A `..` or `.` segment, an empty segment (`//`), a backslash or a control character in an object key. */
+function hasUnsafePathPiece(key: string): boolean {
+  for (let i = 0; i < key.length; i++) {
+    const code = key.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f || code === 0x5c) return true;
+  }
+  return key.split('/').some((segment, index, all) => {
+    const edge = index === all.length - 1 && segment === '';
+    return (segment === '' && !edge) || segment === '.' || segment === '..';
+  });
+}
+
+/** `{ set: value }` is the update form of a scalar (a create takes the bare value). */
+function writtenValue(kind: 'create' | 'update', given: unknown): unknown {
+  return kind === 'update' && isPlainObject(given) && Object.hasOwn(given, 'set')
+    ? given.set
+    : given;
+}
+
+/**
+ * The values of the same write that the key's parts must equal (the rule's `binds`): what the write
+ * carries, and on a create the schema default of a column it leaves out. A column that an update does not
+ * carry is not bound (the key alone is checked). A value that is not a plain number or string (a
+ * `{ increment }`) is passed on as it is, and the rule refuses it.
+ */
+function boundValues(
+  rule: ObjectKeyRule,
+  kind: 'create' | 'update',
+  data: PlainObject,
+): PlainObject {
+  const bound: PlainObject = {};
+  for (const column of rule.binds) {
+    const given = writtenValue(kind, data[column]);
+    const value = given === undefined && kind === 'create' ? rule.defaults[column] : given;
+    if (value !== undefined) bound[column] = value;
+  }
+  return bound;
+}
+
+/**
+ * The object keys a candidate may write stay inside the session's own prefix (ADR 0013 section 5.7, ADR
+ * 0004 section 9.2): `orgs/{orgId}/sessions/{sessionId}/` with the scope's own, lower-cased ids, then the
+ * folder and shape fixed for the column (CANDIDATE_OBJECT_KEYS), with the parts of the key equal to the
+ * row's own `stream`, `segment`, `seq` and `attempt` when the same write carries them. Another session's prefix, another org's,
+ * a traversal (`..`, `//`, a leading `/`, a backslash, a control character) and any other shape are
+ * refused. `null` points nowhere and is accepted on a create only. The message names the model and the
+ * column, never the key.
+ */
+function assertObjectKeys(
+  model: ModelName,
+  operation: string,
+  kind: 'create' | 'update',
+  data: unknown,
+  orgId: string,
+  sessionId: string,
+): void {
+  const columns = CANDIDATE_OBJECT_KEYS[model];
+  if (columns === undefined || !isPlainObject(data)) return;
+  const prefix = `orgs/${orgId}/sessions/${sessionId}/`;
+  for (const [column, rule] of Object.entries(columns)) {
+    const given = data[column];
+    if (given === undefined) continue;
+    // A create takes the bare value, so an object there is refused.
+    const value = writtenValue(kind, given);
+    if (value === null && kind === 'create') continue;
+    const inside =
+      typeof value === 'string' &&
+      value.startsWith(prefix) &&
+      !hasUnsafePathPiece(value) &&
+      rule.accepts(value.slice(prefix.length), boundValues(rule, kind, data));
+    if (!inside) {
+      throw violation(
+        model,
+        operation,
+        `${column} must be an object key under this session's own prefix and in the folder of ` +
+          'ADR 0013 section 5.7 (no other session, no other org, no traversal).',
+      );
+    }
+  }
+}
+
+/** A candidate create may not carry the values the server alone writes (proctor_events `type`). */
+function assertNoRefusedValues(
+  model: string,
+  operation: string,
+  refused: Readonly<Record<string, readonly string[]>>,
+  data: unknown,
+): void {
+  if (!isPlainObject(data)) return;
+  for (const [column, values] of Object.entries(refused)) {
+    const given = data[column];
+    if (typeof given === 'string' && values.includes(given)) {
+      throw violation(
+        model,
+        operation,
+        `${column} names a value that only the server writes: a candidate create cannot carry it ` +
+          '(ADR 0013 CS-4.4: SERVER events come from SERVICE scope).',
+      );
+    }
+  }
+}
+
+/** A CANDIDATE create carries the fixed values of CS-4.4: stamped when missing, refused when different. */
+function fixCreate(model: string, operation: string, fixed: PlainObject, data: unknown): unknown {
+  if (!isPlainObject(data)) return data;
+  const out: PlainObject = { ...data };
+  for (const [key, value] of Object.entries(fixed)) {
+    if (out[key] === undefined) out[key] = value;
+    else if (out[key] !== value) {
+      throw violation(
+        model,
+        operation,
+        `${key} must be ${String(value)} in a candidate create (ADR 0013 CS-4.4).`,
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * Stamps the creates, collects the session_questions ids to prove, and checks the update keys.
+ * `candidate` is set for a CANDIDATE actor on a session-path model.
+ */
+function stageArgs(
+  model: ModelName,
+  operation: string,
+  rule: SessionModelRule,
+  candidate: CandidateSessionRule | undefined,
+  args: PlainObject,
+  orgId: string,
+  sessionId: string,
+): { args: PlainObject; sessionQuestionIds: string[] } {
+  const ids: string[] = [];
+  const stamp = (data: unknown): unknown => {
+    if (candidate?.create !== undefined) {
+      assertWriteColumns(model, operation, 'create', candidate.create, data);
+      assertObjectKeys(model, operation, 'create', data, orgId, sessionId);
+      if (candidate.createRefused !== undefined) {
+        assertNoRefusedValues(model, operation, candidate.createRefused, data);
+      }
+    }
+    const id = questionRefOf(model, operation, rule, data);
+    if (id !== undefined) ids.push(id);
+    const stamped = stampSession(model, operation, rule, data, sessionId);
+    return candidate?.createFixed === undefined
+      ? stamped
+      : fixCreate(model, operation, candidate.createFixed, stamped);
+  };
+
+  if (UPDATE_OPERATIONS.includes(operation)) {
+    const data = operation === 'upsert' ? args.update : args.data;
+    const keys = [...rule.immutable, ...(candidate?.immutable ?? [])];
+    assertSessionKeysKept(model, operation, keys, data);
+    if (candidate?.update !== undefined) {
+      assertWriteColumns(model, operation, 'update', candidate.update, data);
+      assertObjectKeys(model, operation, 'update', data, orgId, sessionId);
+    }
+  }
+  if (!CREATE_OPERATIONS.includes(operation)) {
+    return { args, sessionQuestionIds: ids };
+  }
+  switch (operation) {
+    case 'create':
+      return { args: { ...args, data: stamp(args.data) }, sessionQuestionIds: ids };
+    case 'createMany':
+    case 'createManyAndReturn': {
+      const { data } = args;
+      const stamped = Array.isArray(data) ? data.map((row: unknown) => stamp(row)) : stamp(data);
+      return { args: { ...args, data: stamped }, sessionQuestionIds: ids };
+    }
+    default: // upsert: only the create branch takes the session; the where is filtered below
+      return { args: { ...args, create: stamp(args.create) }, sessionQuestionIds: ids };
+  }
+}
+
+/**
+ * Arguments for a query in a session scope (CANDIDATE or SERVICE). See the header for the order.
+ * CS-4.1: SERVICE gets no allowlist and no column limit, only the org filter and the session filter.
+ */
+export function applySessionScope(input: SessionScopeInput): SessionScopeResult {
+  const { model, rule, operation, orgId, session } = input;
+  if (input.args !== undefined && input.args !== null && !isPlainObject(input.args)) {
+    throw violation(model, operation, 'was called with arguments that are not an object.');
+  }
+  const args: PlainObject = isPlainObject(input.args) ? input.args : {};
+
+  const sessionRule = sessionRuleFor(model);
+  const gate = session.actor === 'CANDIDATE' ? candidateGate(input, args) : undefined;
+
+  // A cursor ranks rows against the row its own fields name, and `where` is not applied to that
+  // lookup, so another session's row (same org) could be named. Path models refuse a cursor in the
+  // org scope already; sessions is a direct model, so it is refused here.
+  if (sessionRule !== undefined && args.cursor !== undefined) {
+    throw violation(
+      model,
+      operation,
+      'a cursor is refused in a session scope: the filter selects the one session, and a cursor ' +
+        "could rank it against another session's row.",
+    );
+  }
+
+  const staged =
+    sessionRule === undefined
+      ? { args, sessionQuestionIds: [] as string[] }
+      : stageArgs(model, operation, sessionRule, gate?.sessionRule, args, orgId, session.sessionId);
+
+  const scoped = applyOrgScope({ model, rule, operation, args: staged.args, orgId });
+
+  const filters: PlainObject[] = [];
+  if (sessionRule !== undefined) filters.push(sessionRule.filter(session.sessionId));
+  if (gate?.sessionRule?.rowFilter !== undefined) filters.push(gate.sessionRule.rowFilter);
+  if (gate?.readFilter !== undefined) filters.push(gate.readFilter);
+  // A candidate update reaches only the rows its model still lets it change (consents: not yet signed
+  // or declined); a read is not narrowed by it.
+  if (gate?.sessionRule?.updateFilter !== undefined && UPDATE_OPERATIONS.includes(operation)) {
+    filters.push(gate.sessionRule.updateFilter);
+  }
+  if (filters.length === 0 || NO_WHERE.includes(operation)) {
+    return { args: scoped, sessionQuestionIds: staged.sessionQuestionIds };
+  }
+  let where: unknown = scoped.where;
+  for (const filter of filters) where = andWhere(model, operation, where, filter);
+  return { args: { ...scoped, where }, sessionQuestionIds: staged.sessionQuestionIds };
+}
+
+/**
+ * The `where` of the one existence check a create needs (CS-4.2): the session_questions with these
+ * ids, under the org filter and the session filter. The extension counts them and throws unless
+ * every distinct id is found.
+ */
+export function sessionQuestionsWhere(
+  orgId: string,
+  sessionId: string,
+  ids: readonly string[],
+): PlainObject {
+  const sessionQuestions = sessionRuleFor('SessionQuestion');
+  const org = orgFilter(ORG_SCOPE.SessionQuestion, orgId);
+  if (sessionQuestions === undefined || org === undefined) {
+    throw new OrgScopeViolationError('SessionQuestion has no session or org rule.');
+  }
+  return { AND: [org, sessionQuestions.filter(sessionId), { id: { in: [...new Set(ids)] } }] };
+}
