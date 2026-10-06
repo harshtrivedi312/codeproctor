@@ -112,4 +112,14 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'POST /admin/users/:userId/invite': userManage,
   'PATCH /admin/users/:userId': userManage,
   'POST /admin/users/:userId/unlock': userManage,
+
+  // Candidate media (FR-701, FR-702; BE-09). Behind CandidateSessionGuard; no audit rows (ADR 0013).
+  'POST /candidate/session/media/presign': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_media:presign',
+  },
+  'POST /candidate/session/media/confirm': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_media:presign',
+  },
 };
