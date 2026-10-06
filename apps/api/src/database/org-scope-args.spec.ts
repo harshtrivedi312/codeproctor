@@ -334,6 +334,98 @@ describe('org scope arguments (NFR-04, FR-103)', () => {
     });
   });
 
+  describe("FU-DB-201: the caller's orgId is compared in lower case (scope ids are lower-cased on entry)", () => {
+    // Hex letters, so the upper-case spelling really differs from the lower-case one.
+    const LOW = 'abcdabcd-abcd-4bcd-8bcd-abcdabcdabcd';
+    const UP = LOW.toUpperCase();
+    const OTHER_LOW = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const OTHER_UP = OTHER_LOW.toUpperCase();
+    const inLow = (model: ModelName, operation: string, args: unknown): Args =>
+      scope(model, operation, args, LOW);
+
+    it('TC-008 the fixture ids differ by case, so these tests mean something', () => {
+      expect(UP).not.toBe(LOW);
+      expect(OTHER_UP).not.toBe(OTHER_LOW);
+    });
+
+    it("TC-008 a create that names the caller's org in upper case passes, and is written in the scope's spelling", () => {
+      expect(inLow('Test', 'create', { data: { name: 'T', orgId: UP } }).data).toEqual({
+        name: 'T',
+        orgId: LOW,
+      });
+      expect(inLow('Test', 'createMany', { data: [{ name: 'T', orgId: UP }] }).data).toEqual([
+        { name: 'T', orgId: LOW },
+      ]);
+      expect(
+        inLow('Test', 'upsert', { where: { id: 'x' }, create: { orgId: UP }, update: {} }).create,
+      ).toEqual({ orgId: LOW });
+      // Already in the scope's spelling: the very same object, nothing copied.
+      const data = { name: 'T', orgId: LOW };
+      expect(inLow('Test', 'create', { data }).data).toBe(data);
+    });
+
+    it('TC-008 another org in either case, and anything that is not a string, is still refused', () => {
+      for (const orgId of [OTHER_UP, OTHER_LOW, 7, null, { equals: LOW }, [LOW]]) {
+        expect(() => inLow('Test', 'create', { data: { orgId } })).toThrow(
+          /orgId in the data is not the caller's org/,
+        );
+      }
+    });
+
+    it.each(['update', 'updateMany', 'updateManyAndReturn'])(
+      "TC-008 %s: the caller's own org in upper case is harmless, another org in either case is refused",
+      (operation) => {
+        expect(() =>
+          inLow('Test', operation, { where: {}, data: { orgId: UP, name: 'x' } }),
+        ).not.toThrow();
+        expect(() =>
+          inLow('Test', operation, { where: {}, data: { orgId: { set: UP } } }),
+        ).not.toThrow();
+        for (const other of [OTHER_UP, OTHER_LOW]) {
+          expect(() => inLow('Test', operation, { where: {}, data: { orgId: other } })).toThrow(
+            /orgId cannot be changed to another org/,
+          );
+          expect(() =>
+            inLow('Test', operation, { where: {}, data: { orgId: { set: other } } }),
+          ).toThrow(/orgId cannot be changed to another org/);
+        }
+      },
+    );
+
+    it.each(['findMany', 'findFirst', 'count'])(
+      "TC-008 %s: a cursor that names the caller's org in upper case passes (also in a compound key), another org does not",
+      (operation) => {
+        expect(inLow('Test', operation, { cursor: { id: 'x', orgId: UP } }).cursor).toEqual({
+          id: 'x',
+          orgId: LOW,
+        });
+        expect(() =>
+          inLow('Test', operation, { cursor: { id_orgId: { id: 'x', orgId: UP } } }),
+        ).not.toThrow();
+        expect(() => inLow('Test', operation, { cursor: { id: 'x', orgId: OTHER_UP } })).toThrow(
+          /names another org's row/,
+        );
+        expect(() =>
+          inLow('Test', operation, { cursor: { id_orgId: { id: 'x', orgId: OTHER_UP } } }),
+        ).toThrow(/names another org's row/);
+      },
+    );
+
+    it("TC-008 the organization row: a cursor on the caller's own organization in upper case passes, another does not", () => {
+      expect(() => inLow('Organization', 'findMany', { cursor: { id: UP } })).not.toThrow();
+      expect(() => inLow('Organization', 'findMany', { cursor: { id: OTHER_UP } })).toThrow(
+        /not the caller's own organization/,
+      );
+    });
+
+    it('TC-008 a scope org handed over in upper case is compared in lower case as well', () => {
+      expect(scope('Test', 'create', { data: { orgId: LOW } }, UP).data).toEqual({ orgId: UP });
+      expect(() => scope('Test', 'create', { data: { orgId: OTHER_LOW } }, UP)).toThrow(
+        OrgScopeViolationError,
+      );
+    });
+  });
+
   describe('models scoped through a parent path', () => {
     it.each(['update', 'updateMany', 'updateManyAndReturn'])(
       'TC-008 %s in an org scope does not refuse a first-hop key: re-parenting there is rule (i), the limit README (b) documents (FU-DB-107)',
@@ -538,6 +630,7 @@ describe('system scope: a scalar orgId cannot move a row (ADR 0006 section 8; NF
         ['RefreshToken', 'replacedById'],
         ['VariantTestCase', 'testCaseId'],
         ['IdentityCheck', 'reviewedById'],
+        ['IdentityCheck', 'videoCheckById'],
       ];
       for (const [model, column] of others) {
         expect(() => system(model, operation, build({ [column]: 'x' }))).not.toThrow();

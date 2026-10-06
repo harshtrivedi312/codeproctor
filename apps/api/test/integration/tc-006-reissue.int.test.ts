@@ -28,6 +28,7 @@ import {
   ADMIN_USERS,
   BE03_READY,
   backendHasRoute,
+  isStaffEntry,
   loadBackendRegistry,
 } from '../support/be03-routes';
 
@@ -70,8 +71,8 @@ suite('TC-004 TC-006: invite re-issue route', () => {
 
   it('TC-004: the matrix entry is user:manage for SUPER_ADMIN only and carries no `audited` flag (the row is written in the service transaction)', () => {
     const entry = loadBackendRegistry().ROUTE_PERMISSIONS[KEY];
-    expect(entry).not.toBe('public');
-    if (entry === 'public' || entry === undefined) return;
+    expect(isStaffEntry(entry)).toBe(true);
+    if (!isStaffEntry(entry)) return;
     expect(entry.permission).toBe('user:manage');
     expect([...entry.roles]).toEqual(['SUPER_ADMIN']);
     expect(entry.audited).toBeUndefined();
@@ -251,27 +252,40 @@ suite('TC-004 TC-006: invite re-issue route', () => {
 });
 
 // Last on purpose: the Redis container is stopped for good (as in tc-003's outage test).
+// Since #175 the global throttle guard answers 503 "Service is temporarily unavailable." before
+// any handler when Redis is down, so this suite boots with the in-memory throttle store and skips
+// the JWT guard's own Redis freshness check (same wording as the handler), so the request reaches
+// the re-issue handler (UsersService.takeInviteSlot) and ITS fail-closed branch is what answers.
 suite('TC-004: invite re-issue with Redis down', () => {
   let h: Harness;
+  let spy: jest.SpyInstance | undefined;
   beforeAll(async () => {
-    h = await boot();
+    h = await boot({ memoryThrottle: true });
   });
   afterAll(async () => {
+    spy?.mockRestore();
     await h?.close();
   });
 
-  it('TC-004: the re-issue answers 503 (not 500), rotates nothing, sends no mail and writes no row', async () => {
+  it('TC-004: the re-issue answers the handler 503 (not 500), rotates nothing, sends no mail and writes no row', async () => {
     const admin = await actor(h, UserRole.SUPER_ADMIN);
     const target = await createUser(h, { password: null });
     const hashBefore = (await h.owner.user.findUniqueOrThrow({ where: { id: target.id } }))
       .setPasswordTokenHash;
     const before = (await h.owner.auditLog.findFirst({ orderBy: { id: 'desc' } }))?.id ?? 0n;
     const mailsBefore = h.mails.length;
+    spy = h.skipFreshnessCheck();
     await h.infra.redis.stop();
     const res = await call(h, 'POST', reissuePath(target.id), admin.token, {
       currentPassword: PASSWORD,
     }).timeout({ response: 30000, deadline: 40000 });
+    expect(spy).toHaveBeenCalled(); // the bypass took effect, so the handler is what answered
     expect(res.status).toBe(503);
+    expect(res.headers['content-type']).toContain('application/problem+json');
+    // The handler's own text; the throttler's 503 says "Service is temporarily unavailable."
+    expect((res.body as Body).detail).toBe('Verification is temporarily unavailable.');
+    expect(JSON.stringify(res.body)).not.toContain('Service is temporarily unavailable.');
+    expect(res.headers['set-cookie']).toBeUndefined();
     expect(
       (await h.owner.user.findUniqueOrThrow({ where: { id: target.id } })).setPasswordTokenHash,
     ).toBe(hashBefore);

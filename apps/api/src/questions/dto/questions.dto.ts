@@ -25,6 +25,10 @@ import {
 import { Difficulty, QuestionType } from '../../generated/prisma/enums';
 import { isStorableText } from '../text-rules';
 
+const REVISION_PATTERN = /^[0-9a-f]{64}$/;
+const REVISION_DOC =
+  'The `revision` of the version as the client loaded it; 409 when it no longer matches.';
+
 /** Like @IsOptional(), but only `undefined` skips validation: an explicit null is a 400 (never a change). */
 const Opt = (): PropertyDecorator => ValidateIf((_o: unknown, v: unknown) => v !== undefined);
 /** Rejects NUL bytes and lone surrogates, which Postgres cannot store (would be a 500). */
@@ -113,7 +117,22 @@ export class TestCaseFieldsDto {
   position?: number;
 }
 
+/** POST body of a test case: the slot fields plus the optional revision (FU-BE-106). */
+export class CreateTestCaseDto extends TestCaseFieldsDto {
+  @ApiPropertyOptional({ description: REVISION_DOC })
+  @Opt()
+  @IsString()
+  @Matches(REVISION_PATTERN)
+  expectedRevision?: string;
+}
+
 export class UpdateTestCaseDto {
+  @ApiPropertyOptional({ description: REVISION_DOC })
+  @Opt()
+  @IsString()
+  @Matches(REVISION_PATTERN)
+  expectedRevision?: string;
+
   @ApiPropertyOptional({ maxLength: MAX_TEST_IO_LENGTH })
   @Opt()
   @IsString()
@@ -243,8 +262,6 @@ export class CreateQuestionDto extends QuestionContentBase {
   @Type(() => TestCaseFieldsDto)
   testCases?: TestCaseFieldsDto[];
 }
-
-const REVISION_PATTERN = /^[0-9a-f]{64}$/;
 
 export class UpdateQuestionDto extends QuestionContentBase {
   @ApiPropertyOptional({
@@ -399,6 +416,45 @@ export class TestCaseDto {
   expectedOutput?: string;
 }
 
+type VariantParamValue = string | number | boolean;
+
+/** The revision of a version after a writer-only change (never in a recruiter-reachable body). */
+export class RevisionResultDto {
+  @ApiProperty({
+    description:
+      'The new revision of the version, computed inside the same transaction as the change (test cases and variants included); send it as expectedRevision. Writers only (question:update).',
+  })
+  revision!: string;
+}
+
+export class TestCaseMutationDto extends TestCaseDto {
+  @ApiProperty({
+    description: 'The new revision of the version, computed inside the same transaction.',
+  })
+  revision!: string;
+}
+
+export class VariantTestCaseOverrideDto {
+  @ApiProperty({ format: 'uuid' }) testCaseId!: string;
+  @ApiProperty({ description: 'Follows the slot of the base version.' }) isHidden!: boolean;
+  @ApiProperty() position!: number;
+  @ApiProperty() input!: string;
+  @ApiProperty() expectedOutput!: string;
+}
+
+export class VariantDto {
+  @ApiProperty({ format: 'uuid' }) id!: string;
+  @ApiProperty() isActive!: boolean;
+  @ApiProperty({ type: 'object', additionalProperties: true }) params!: Record<
+    string,
+    VariantParamValue
+  >;
+  @ApiProperty({ description: 'The statement rendered with params (kept for the author).' })
+  renderedStatement!: string;
+  @ApiProperty({ type: [VariantTestCaseOverrideDto] })
+  testCaseOverrides!: VariantTestCaseOverrideDto[];
+}
+
 export class QuestionVersionDto extends QuestionVersionRefDto {
   @ApiProperty() statementMd!: string;
   @ApiProperty({ type: [String] }) allowedLanguages!: string[];
@@ -417,6 +473,12 @@ export class QuestionVersionDto extends QuestionVersionRefDto {
   })
   revision?: string;
   @ApiProperty({ type: [TestCaseDto] }) testCases!: TestCaseDto[];
+  @ApiPropertyOptional({
+    type: [VariantDto],
+    description:
+      'Variants with their params and per-slot overrides (question:update only; absent for the staff read view, ADR 0007 V-5).',
+  })
+  variants?: VariantDto[];
 }
 
 export class QuestionDetailDto extends QuestionSummaryDto {
@@ -426,6 +488,14 @@ export class QuestionDetailDto extends QuestionSummaryDto {
     description: 'true when this PATCH created a new version because the latest was published.',
   })
   createdNewVersion!: boolean;
+}
+
+export class QuestionUpdateResultDto extends QuestionDetailDto {
+  @ApiProperty({
+    description:
+      'The revision of the version this edit left (the new version after a fork), computed inside the same transaction as the edit. Writers only.',
+  })
+  revision!: string;
 }
 
 export class CandidateQuestionPreviewDto {

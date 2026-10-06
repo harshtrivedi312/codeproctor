@@ -8,7 +8,7 @@ import { AuthProvider } from '@/features/auth/auth-provider';
 import { api } from '@/lib/api/client';
 import { refreshSession } from '@/lib/auth-session';
 import { MOCK_USERS, seedMockRefresh } from '@/mocks/auth-handlers';
-import { RECRUITER_QUESTION_FIELDS, redactQuestion } from '@/mocks/question-redaction';
+import { READ_DETAIL_FIELDS, READ_VERSION_FIELDS, toReadDetail } from '@/mocks/question-redaction';
 import { seedQuestions } from '@/mocks/question-seed';
 import { server } from '@/mocks/server';
 import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
@@ -41,16 +41,21 @@ const SENSITIVE_KEYS = [
   'canonical',
   'acceptedVariants',
   'validationReport',
-  'validatedAt',
+  'revision',
   'variants',
   'params',
   'overrides',
-  'testCases',
-  'isHidden',
   'aiReferencePolicy',
   'aiReferences',
-  'current',
 ];
+/** A hidden test case reaches a Recruiter as exactly these keys (QuestionDetailRedacted). */
+const STALE = '0'.repeat(64);
+const HIDDEN_ROW_KEYS = ['id', 'isHidden', 'position', 'weight'];
+
+interface ReadBody {
+  version: { testCases: Record<string, unknown>[] } & Record<string, unknown>;
+  versions: { version: number }[];
+}
 
 async function recruiterGet(
   path: string,
@@ -72,114 +77,280 @@ async function recruiterGet(
   return out!;
 }
 
-describe('Recruiter detail routes: 200 with an allowlisted view (DL-32)', () => {
-  it('FR-103 TC-004: a coding question comes back redacted, with no sensitive field in the payload', async () => {
+describe('Recruiter detail routes: 200 with an allowlisted view (DL-32, BE-04a)', () => {
+  it('FR-103 TC-004: a coding question comes back redacted, with exactly the allowlisted keys and no sensitive field', async () => {
     const { status, body, text } = await recruiterGet('/v1/questions/q-merge');
     expect(status).toBe(200);
     const keys = Object.keys(body as object);
-    expect(keys.every((k) => (RECRUITER_QUESTION_FIELDS as readonly string[]).includes(k))).toBe(
-      true,
-    );
-    for (const k of SENSITIVE_KEYS) expect(keys).not.toContain(k);
-    // Not even as text anywhere in the payload: no hidden case, reference code, or variant data.
+    expect(keys.sort()).toEqual([...READ_DETAIL_FIELDS].sort());
+    const version = (body as ReadBody).version;
+    expect(Object.keys(version).sort()).toEqual([...READ_VERSION_FIELDS].sort());
+    for (const k of SENSITIVE_KEYS) {
+      expect(keys).not.toContain(k);
+      expect(Object.keys(version)).not.toContain(k);
+    }
+    // Not even as text anywhere in the payload: no reference code, variant data or hidden input.
     for (const needle of [
-      '"mi-t3"',
-      '"mi-t4"',
-      'isHidden',
       'out.append',
       'referenceSolution',
       '"params"',
-      'Three intervals',
+      'renderedStatement',
+      'revision',
+      '5 9\\n1 3',
+      '1 4\\n5 9',
     ]) {
       expect(text).not.toContain(needle);
     }
-    const sample = (body as { sampleTestCases: { input: string; expectedOutput: string }[] })
-      .sampleTestCases;
-    expect(sample).toHaveLength(2); // only the visible cases
-    for (const c of sample) expect(Object.keys(c).sort()).toEqual(['expectedOutput', 'input']);
-    expect(text).not.toContain('5 9\\n1 3'); // the hidden case input
   });
 
-  it('FR-103 TC-004: a multiple-choice and a short-answer question leak no key and no accepted answer', async () => {
+  it('FR-103 TC-004 BE-04a: a hidden test case reaches a Recruiter as exactly {id, position, isHidden, weight}', async () => {
+    const { body } = await recruiterGet('/v1/questions/q-merge');
+    const cases = (body as ReadBody).version.testCases;
+    const hidden = cases.filter((c) => c.isHidden === true);
+    const visible = cases.filter((c) => c.isHidden === false);
+    expect(hidden.length).toBeGreaterThan(0);
+    expect(visible).toHaveLength(2);
+    for (const c of hidden) expect(Object.keys(c).sort()).toEqual(HIDDEN_ROW_KEYS);
+    for (const c of visible) {
+      expect(Object.keys(c).sort()).toEqual([...HIDDEN_ROW_KEYS, 'expectedOutput', 'input'].sort());
+    }
+  });
+
+  it('FR-103 TC-004: a multiple-choice question leaks no key and no accepted answer', async () => {
     const mcq = await recruiterGet('/v1/questions/q-bigo');
+    expect(mcq.status).toBe(200);
     for (const needle of ['correctOptionIds', 'answerSpec', '"o2"', 'O(log n)']) {
       expect(mcq.text).not.toContain(needle);
     }
-    const short = await recruiterGet('/v1/questions/q-http');
-    for (const needle of ['canonical', 'acceptedVariants', '201 created', 'http 201']) {
-      expect(short.text).not.toContain(needle);
-    }
   });
 
-  it('FR-103 TC-004: an older version is redacted the same way, and a missing one is 404', async () => {
-    const v1 = await recruiterGet('/v1/questions/q-merge/versions/1');
+  it('FR-103 TC-004 BE-04a: a draft or never-published question is 404 for a Recruiter, the same as a missing one', async () => {
+    const draft = await recruiterGet('/v1/questions/q-http'); // short answer, a draft only
+    const rotate = await recruiterGet('/v1/questions/q-rotate');
+    const missing = await recruiterGet('/v1/questions/q-nope');
+    expect(draft.status).toBe(404);
+    expect(rotate.status).toBe(404);
+    expect(missing.status).toBe(404);
+    expect(draft.body).toEqual(missing.body);
+    expect(draft.text).not.toContain('canonical');
+    expect(draft.text).not.toContain('201 created');
+  });
+
+  it('FR-103 TC-004 BE-04a: a Recruiter reads published versions only; a draft version is 404', async () => {
+    // An author edits the published q-merge: version 3 is now a draft (and 2 stays published).
+    const send = (method: string, path: string, role: string, body?: unknown) =>
+      fetch(`http://localhost:4000${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer mock-access-${role}-direct`,
+          'content-type': 'application/json',
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    const patched = await send('PATCH', '/v1/questions/q-merge', 'AUTHOR', {
+      title: 'Merge intervals, draft',
+    });
+    expect(patched.status).toBe(200);
+    const asRecruiter = async (path: string) => {
+      const res = await send('GET', path, 'RECRUITER');
+      const text = await res.text();
+      return { status: res.status, text, body: JSON.parse(text) as unknown };
+    };
+    const recruiterGet = asRecruiter;
+
+    const v1 = await recruiterGet('/v1/questions/q-merge?version=1');
     expect(v1.status).toBe(200);
-    expect(
-      Object.keys(v1.body as object).every((k) =>
-        (RECRUITER_QUESTION_FIELDS as readonly string[]).includes(k),
-      ),
-    ).toBe(true);
-    expect((await recruiterGet('/v1/questions/q-merge/versions/9')).status).toBe(404);
+    expect(Object.keys((v1.body as ReadBody).version).sort()).toEqual(
+      [...READ_VERSION_FIELDS].sort(),
+    );
+    expect((await recruiterGet('/v1/questions/q-merge?version=9')).status).toBe(404);
+    const draftVersion = await recruiterGet('/v1/questions/q-merge?version=3');
+    expect(draftVersion.status).toBe(404);
+    const latest = await recruiterGet('/v1/questions/q-merge');
+    expect((latest.body as ReadBody).version.title).toBe('Merge intervals'); // still the published one
+    expect(latest.text).not.toContain('Merge intervals, draft');
   });
 
-  it('FR-103 TC-004: every other question route stays closed to a Recruiter (403)', async () => {
+  it('FR-103 TC-004 BE-04a: a published but archived question stays readable for a Recruiter, but is not in their list', async () => {
+    const old = await recruiterGet('/v1/questions/q-old');
+    expect(old.status).toBe(200);
+    expect((old.body as { isArchived: boolean }).isArchived).toBe(true);
+    const list = await recruiterGet('/v1/questions?includeArchived=true');
+    const ids = (list.body as { items: { id: string }[] }).items.map((i) => i.id);
+    expect(ids).not.toContain('q-old');
+    expect(ids).not.toContain('q-rotate'); // a draft is not listed either
+    expect(ids).toContain('q-merge');
+    expect(list.text).not.toContain('referenceSolution');
+  });
+
+  it('FR-103 TC-004: every other question write route stays closed to a Recruiter (403)', async () => {
     renderAsStaff(<div />, MOCK_USERS.recruiter);
     await waitFor(async () => expect((await api.GET('/v1/questions')).response.status).toBe(200));
     const id = { params: { path: { questionId: 'q-merge' } } };
-    expect((await api.GET('/v1/questions/{questionId}/versions', id)).response.status).toBe(403);
-    expect((await api.GET('/v1/questions/{questionId}/ai-references', id)).response.status).toBe(
-      403,
-    );
+    const v2 = { params: { path: { questionId: 'q-merge', version: 2 } } };
+    expect(
+      (await api.GET('/v1/questions/{questionId}/versions/{version}/ai-references', v2)).response
+        .status,
+    ).toBe(403);
+    expect(
+      (
+        await api.POST('/v1/questions/{questionId}/versions/{version}/ai-references', {
+          ...v2,
+          body: { assistant: 'A', modelLabel: 'm', language: 'python', solutionCode: 'x' },
+        })
+      ).response.status,
+    ).toBe(403);
     expect((await api.POST('/v1/questions/{questionId}/validate', id)).response.status).toBe(403);
+    expect((await api.GET('/v1/questions/{questionId}/validation', id)).response.status).toBe(403);
     expect(
       (
         await api.POST('/v1/questions/{questionId}/publish', {
           ...id,
-          body: { expectedUpdatedAt: 'x' },
+          body: { expectedRevision: 'x' },
         })
       ).response.status,
     ).toBe(403);
+    expect(
+      (
+        await api.PATCH('/v1/questions/{questionId}', {
+          ...id,
+          body: { title: 'x' },
+        })
+      ).response.status,
+    ).toBe(403);
+    expect((await api.POST('/v1/questions/{questionId}/archive', id)).response.status).toBe(403);
   });
 
-  it('FR-103: an author still gets the full detail from the same route', async () => {
+  it('FR-103: an author still gets the full detail from the same route, with an opaque revision', async () => {
     renderAsStaff(<div />, MOCK_USERS.author);
     await waitFor(async () => {
       const { data } = await api.GET('/v1/questions/{questionId}', {
         params: { path: { questionId: 'q-merge' } },
       });
-      expect(data && 'current' in data).toBe(true);
+      expect(data && 'revision' in data.version).toBe(true);
+      expect((data as { version: { revision: string } }).version.revision).toMatch(
+        /^[0-9a-f]{64}$/,
+      );
     });
+  });
+
+  it('BE-04a: the revision changes on every content change and the PATCH echoes the new one', async () => {
+    renderAsStaff(<div />, MOCK_USERS.author);
+    await waitFor(async () => expect((await api.GET('/v1/questions')).response.status).toBe(200));
+    const path = { params: { path: { questionId: 'q-rotate' } } };
+    const r0 = full((await api.GET('/v1/questions/{questionId}', path)).data).version.revision;
+    const p1 = full(
+      (
+        await api.PATCH('/v1/questions/{questionId}', {
+          ...path,
+          body: { title: 'Rotate by k', expectedRevision: r0 },
+        })
+      ).data,
+    );
+    const r1 = p1.version.revision;
+    expect(r1).not.toBe(r0);
+    // A test case change moves it too.
+    const added = await api.POST('/v1/questions/{questionId}/versions/{version}/test-cases', {
+      params: { path: { questionId: 'q-rotate', version: p1.version.version } },
+      body: { input: '1', expectedOutput: '1', isHidden: true, weight: 1 },
+    });
+    expect(added.response.status).toBe(201);
+    const r2 = full((await api.GET('/v1/questions/{questionId}', path)).data).version.revision;
+    expect(r2).not.toBe(r1);
+    // The same content hashes the same: reading again does not move it.
+    expect(full((await api.GET('/v1/questions/{questionId}', path)).data).version.revision).toBe(
+      r2,
+    );
+  });
+
+  it('BE-04a: a stale expectedRevision is 409 on PATCH and on publish, without a machine code', async () => {
+    renderAsStaff(<div />, MOCK_USERS.author);
+    await waitFor(async () => expect((await api.GET('/v1/questions')).response.status).toBe(200));
+    const path = { params: { path: { questionId: 'q-mcq-draft' } } };
+    const patch = await api.PATCH('/v1/questions/{questionId}', {
+      ...path,
+      body: { title: 'Changed', expectedRevision: STALE },
+    });
+    expect(patch.response.status).toBe(409);
+    expect(patch.error).not.toHaveProperty('code');
+    const publish = await api.POST('/v1/questions/{questionId}/publish', {
+      ...path,
+      body: { expectedRevision: STALE },
+    });
+    expect(publish.response.status).toBe(409);
+    expect(publish.error).not.toHaveProperty('code');
+    // Nothing changed.
+    expect(full((await api.GET('/v1/questions/{questionId}', path)).data).version.title).not.toBe(
+      'Changed',
+    );
+  });
+
+  it('BE-04a FR-204: a PATCH on a published question forks the next draft: createdNewVersion true, the published one unchanged', async () => {
+    renderAsStaff(<div />, MOCK_USERS.author);
+    await waitFor(async () => expect((await api.GET('/v1/questions')).response.status).toBe(200));
+    const path = { params: { path: { questionId: 'q-bigo' } } };
+    const before = full((await api.GET('/v1/questions/{questionId}', path)).data);
+    expect(before.version.isPublished).toBe(true);
+    const forked = full(
+      (
+        await api.PATCH('/v1/questions/{questionId}', {
+          ...path,
+          body: { title: 'Big-O, take two', expectedRevision: before.version.revision },
+        })
+      ).data,
+    );
+    expect(forked.createdNewVersion).toBe(true);
+    expect(forked.version.version).toBe(before.version.version + 1);
+    expect(forked.version.isPublished).toBe(false);
+    expect(forked.version.validatedAt).toBeNull();
+    // A second edit changes the draft in place.
+    const again = full(
+      (
+        await api.PATCH('/v1/questions/{questionId}', {
+          ...path,
+          body: { title: 'Big-O, take three' },
+        })
+      ).data,
+    );
+    expect(again.createdNewVersion).toBe(false);
+    expect(again.version.version).toBe(forked.version.version);
+    const old = full(
+      (
+        await api.GET('/v1/questions/{questionId}', {
+          params: { ...path.params, query: { version: before.version.version } },
+        })
+      ).data,
+    );
+    expect(old.version.title).toBe(before.version.title);
+    expect(old.version.isPublished).toBe(true);
   });
 
   it('FR-103: the allowlist is the only door: a field added to the mock question never reaches the Recruiter', () => {
     const [q] = seedQuestions();
     const v = q!.versions[q!.versions.length - 1]!;
-    const withNew = {
-      ...q!,
-      newQuestionField: 'secret-q',
-      versions: q!.versions,
-    } as typeof q;
+    const withNew = { ...q!, newQuestionField: 'secret-q' } as typeof q;
     const versionWithNew = {
       ...v,
       newVersionField: 'secret-v',
       referenceSolutionV2: { python: 'secret code' },
+      revisionHint: 'secret-rev',
     } as typeof v;
-    const out = redactQuestion(withNew!, versionWithNew, 'PUBLISHED');
-    expect(
-      Object.keys(out).every((k) => (RECRUITER_QUESTION_FIELDS as readonly string[]).includes(k)),
-    ).toBe(true);
+    const out = toReadDetail(withNew!, versionWithNew, [versionWithNew]);
+    expect(Object.keys(out).sort()).toEqual([...READ_DETAIL_FIELDS].sort());
+    expect(Object.keys(out.version).sort()).toEqual([...READ_VERSION_FIELDS].sort());
     const text = JSON.stringify(out);
     for (const secret of [
       'secret-q',
       'secret-v',
       'secret code',
+      'secret-rev',
       'newQuestionField',
       'newVersionField',
     ]) {
       expect(text).not.toContain(secret);
     }
     // And a field that IS allowlisted is there: the list is the one place to change.
-    expect(out.title).toBe(v.title);
+    expect(out.version.title).toBe(v.title);
   });
 });
 
@@ -215,14 +386,14 @@ describe('Recruiter opening a question: a read-only summary (DL-32)', () => {
     for (const needle of [
       'out.append',
       '5 9',
-      'Three intervals',
-      'Four intervals',
-      'Rotate by',
+      'renderedStatement',
+      'testCaseOverrides',
+      'isActive',
       'Validation',
     ]) {
       expect(html).not.toContain(needle);
     }
-    expect(screen.queryByText(/Reference solution/i)).toBeInTheDocument(); // only inside the note
+    expect(screen.queryByText(/Reference solution/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/AI reference/i)).not.toBeInTheDocument();
   });
 
@@ -250,31 +421,77 @@ describe('Recruiter opening a question: a read-only summary (DL-32)', () => {
     expect(await axe(document.body)).toHaveNoViolations();
   });
 
-  it('FR-103: the summary component renders only what the DTO carries', () => {
+  it('FR-103 BE-04a: a published archived question still renders for a Recruiter', async () => {
+    await openAsRecruiter('q-old');
+    expect(screen.getByText('Archived')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
+  });
+
+  it('FR-103 BE-04a: a draft is "not available to you" for a Recruiter, with no hint it exists', async () => {
+    nav.pathname = '/admin/questions/q-rotate';
+    renderAsStaff(
+      <main>
+        <QuestionEditorRoute id="q-rotate" />
+      </main>,
+      MOCK_USERS.recruiter,
+    );
+    expect(await screen.findByText('This question is not available to you')).toBeInTheDocument();
+    expect(document.body.innerHTML).not.toContain('Rotate an array');
+    expect(screen.queryByTestId('summary-statement')).not.toBeInTheDocument();
+  });
+
+  it('FR-103: the summary component renders only what the DTO carries, and never counts hidden cases', () => {
+    const ref = {
+      id: 'x-v1',
+      version: 1,
+      isPublished: true,
+      title: 'T',
+      difficulty: 'EASY' as const,
+      validatedAt: null,
+      createdAt: '2026-01-01T00:00:00.000Z',
+    };
     render(
       <main>
         <QuestionSummary
           data={{
             id: 'x',
             slug: 'x',
-            title: 'T',
             type: 'CODING',
-            status: 'DRAFT',
-            difficulty: 'EASY',
             tags: [],
-            statementMd: 'S',
-            version: 1,
-            updatedAt: '2026-01-01T00:00:00.000Z',
-            starterCode: {},
-            limits: { cpuMs: 1000, wallMs: 2000, memoryKb: 65536 },
-            allowedLanguages: ['python'],
-            sampleTestCases: [{ input: 'in', expectedOutput: 'out' }],
+            isArchived: false,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            published: ref,
+            latest: ref,
+            versions: [ref],
+            createdNewVersion: false,
+            version: {
+              ...ref,
+              statementMd: 'S',
+              starterCode: {},
+              limits: { cpuMs: 1000, wallMs: 2000, memoryKb: 65536 },
+              allowedLanguages: ['python'],
+              testCases: [
+                {
+                  id: 'a',
+                  position: 0,
+                  isHidden: false,
+                  weight: 1,
+                  input: 'in',
+                  expectedOutput: 'out',
+                },
+                { id: 'b', position: 1, isHidden: true, weight: 3 },
+                { id: 'c', position: 2, isHidden: true, weight: 3 },
+              ],
+            },
           }}
         />
       </main>,
     );
     expect(screen.getByText('in')).toBeInTheDocument();
     expect(screen.getByText('out')).toBeInTheDocument();
+    const samples = screen.getByRole('table', { name: 'Visible sample test cases' });
+    expect(within(samples).getAllByRole('row')).toHaveLength(2); // header + the one visible case
+    expect(document.body.textContent).not.toMatch(/\b2 hidden|hidden (test )?cases?: ?\d/i);
   });
 });
 
@@ -339,7 +556,7 @@ describe('A role change clears what the old role could see (FR-103, TC-004)', ()
     await screen.findByTestId('summary-statement');
     expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
     const html = document.body.innerHTML;
-    for (const needle of ['out.append', 'mi-t3', '5 9', 'Three intervals']) {
+    for (const needle of ['out.append', '5 9', 'renderedStatement', 'revision']) {
       expect(html).not.toContain(needle);
     }
     for (const el of document.querySelectorAll('textarea, input')) {
@@ -348,9 +565,9 @@ describe('A role change clears what the old role could see (FR-103, TC-004)', ()
     const cached = cachedText(client);
     for (const needle of [
       'out.append',
-      'mi-t3',
+      '5 9',
       'referenceSolution',
-      'isHidden',
+      'revision',
       'correctOptionIds',
     ]) {
       expect(cached).not.toContain(needle);
@@ -406,7 +623,7 @@ describe('Work still in flight when the role changes never restores the full vie
     );
     return client;
   }
-  const demote = async () => {
+  const demote = async (landing: 'summary' | 'unavailable' = 'summary') => {
     server.use(
       http.post('*/v1/auth/refresh', () =>
         HttpResponse.json({
@@ -425,7 +642,8 @@ describe('Work still in flight when the role changes never restores the full vie
     await act(async () => {
       await refreshSession();
     });
-    await screen.findByTestId('summary-statement');
+    if (landing === 'summary') await screen.findByTestId('summary-statement');
+    else await screen.findByText('This question is not available to you');
   };
   const oldToken = (request: Request) =>
     (request.headers.get('authorization') ?? '').includes('AUTHOR');
@@ -441,7 +659,7 @@ describe('Work still in flight when the role changes never restores the full vie
   function expectStillRedacted(client: QueryClient): void {
     expect(screen.getByTestId('summary-statement')).toBeInTheDocument();
     expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
-    for (const needle of ['referenceSolution', 'isHidden', 'out.append', 'mi-t3']) {
+    for (const needle of ['referenceSolution', 'revision', 'out.append', '5 9']) {
       expect(cacheText(client)).not.toContain(needle);
       expect(document.body.innerHTML).not.toContain(needle);
     }
@@ -472,7 +690,7 @@ describe('Work still in flight when the role changes never restores the full vie
     const gate = new Promise<void>((resolve) => (release = resolve));
     let fullDetail: unknown = null;
     server.use(
-      http.post('*/v1/questions/q-publish-unavailable/publish', async ({ request }) => {
+      http.post('*/v1/questions/q-mcq-draft/publish', async ({ request }) => {
         if (oldToken(request)) {
           await gate;
           return HttpResponse.json(fullDetail as Record<string, unknown>);
@@ -480,7 +698,7 @@ describe('Work still in flight when the role changes never restores the full vie
         return undefined;
       }),
     );
-    const client = renderWithClient(MOCK_USERS.author, 'q-publish-unavailable');
+    const client = renderWithClient(MOCK_USERS.author, 'q-mcq-draft');
     await screen.findByRole('tablist', { name: 'Question sections' });
     fullDetail = client
       .getQueryCache()
@@ -489,11 +707,16 @@ describe('Work still in flight when the role changes never restores the full vie
     expect(JSON.stringify(fullDetail)).toContain('correctOptionIds');
     const u = userEvent.setup();
     await u.click(screen.getByRole('button', { name: 'Publish' }));
-    await demote();
+    // The question was never published, so the demoted Recruiter gets the same 404 as for any draft.
+    await demote('unavailable');
     release();
     await settle();
-    expectStillRedacted(client);
-    expect(cacheText(client)).not.toContain('correctOptionIds');
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+    expect(screen.getByText('This question is not available to you')).toBeInTheDocument();
+    for (const needle of ['correctOptionIds', 'answerSpec', 'referenceSolution', 'revision']) {
+      expect(cacheText(client)).not.toContain(needle);
+      expect(document.body.innerHTML).not.toContain(needle);
+    }
   });
 
   it('FR-103 TC-004: a "reload the latest version" fetched as Author that resolves LAST is dropped', async () => {
@@ -547,53 +770,80 @@ describe('Question titles link for every reader (FR-103)', () => {
   });
 });
 
-describe('The mock PATCH keeps to the editable content (TC-012)', () => {
-  it('TC-012: a PATCH that sets isPublished or a version leaves a draft a draft', async () => {
+describe('The mock PATCH and POST refuse fields no DTO declares (TC-012, BE-04a forbidNonWhitelisted)', () => {
+  it('TC-012: a PATCH that sets isPublished, version, validatedAt or revision is a 400 naming each field, and changes nothing', async () => {
     renderAsStaff(<div />, MOCK_USERS.author);
     await waitFor(async () => expect((await api.GET('/v1/questions')).response.status).toBe(200));
-    const got = await api.GET('/v1/questions/{questionId}', {
-      params: { path: { questionId: 'q-rotate' } },
-    });
-    const detail = full(got.data);
-    const saved = await api.PATCH('/v1/questions/{questionId}', {
-      params: { path: { questionId: 'q-rotate' } },
+    const path = { params: { path: { questionId: 'q-rotate' } } };
+    const before = full((await api.GET('/v1/questions/{questionId}', path)).data).version;
+    const refused = await api.PATCH('/v1/questions/{questionId}', {
+      ...path,
       body: {
-        ...detail.current,
+        title: 'Rotate, retitled',
         isPublished: true,
         version: 99,
         validatedAt: '2026-01-01T00:00:00.000Z',
-        expectedUpdatedAt: detail.current.updatedAt,
+        revision: 'forged',
+        validationReport: { passed: true },
       } as never,
     });
-    const after = full(saved.data).current;
+    expect(refused.response.status).toBe(400);
+    const errors = (refused.error as { errors: string[] }).errors;
+    for (const field of ['isPublished', 'version', 'validatedAt', 'revision', 'validationReport']) {
+      expect(errors).toContain(`property ${field} should not exist`);
+    }
+    const after = full((await api.GET('/v1/questions/{questionId}', path)).data).version;
+    expect(after.title).toBe(before.title);
+    expect(after.revision).toBe(before.revision);
+    expect(after.version).toBe(before.version);
     expect(after.isPublished).toBe(false);
-    expect(after.version).toBe(1);
-    // Whatever the client says about validation or the token itself, the server ignores it.
-    expect(after.validatedAt).toBeNull();
-    expect(after.updatedAt).not.toBe('forged');
   });
 
-  it('TC-012: a POST that sets isPublished or a version creates version 1 as a draft', async () => {
+  it('TC-012: a POST that sets isPublished or a version is a 400, and creates nothing', async () => {
     renderAsStaff(<div />, MOCK_USERS.author);
     await waitFor(async () => expect((await api.GET('/v1/questions')).response.status).toBe(200));
-    const got = await api.GET('/v1/questions/{questionId}', {
-      params: { path: { questionId: 'q-twosum' } },
-    });
-    const { current } = full(got.data);
+    const before = (await api.GET('/v1/questions')).data?.total;
     const created = await api.POST('/v1/questions', {
       body: {
-        ...current,
-        title: 'Forged',
         type: 'CODING',
+        title: 'Forged',
+        statementMd: 'S',
+        difficulty: 'EASY',
         isPublished: true,
         version: 5,
-        updatedAt: 'forged',
+        revision: 'forged',
       } as never,
     });
-    expect(created.response.status).toBe(201);
-    const after = full(created.data).current;
-    expect(after.isPublished).toBe(false);
-    expect(after.version).toBe(1);
-    expect(after.updatedAt).not.toBe('forged');
+    expect(created.response.status).toBe(400);
+    expect((created.error as { errors: string[] }).errors).toContain(
+      'property isPublished should not exist',
+    );
+    expect((await api.GET('/v1/questions')).data?.total).toBe(before);
+  });
+
+  it('TC-012: publish, test-case and variant bodies refuse unknown fields too, and a malformed revision is a 400 before any 409', async () => {
+    renderAsStaff(<div />, MOCK_USERS.author);
+    await waitFor(async () => expect((await api.GET('/v1/questions')).response.status).toBe(200));
+    const q = { params: { path: { questionId: 'q-mcq-draft' } } };
+    const publish = await api.POST('/v1/questions/{questionId}/publish', {
+      ...q,
+      body: { isPublished: true } as never,
+    });
+    expect(publish.response.status).toBe(400);
+    const patch = await api.PATCH('/v1/questions/{questionId}', {
+      ...q,
+      body: { title: 'x', expectedRevision: 'stale' },
+    });
+    expect(patch.response.status).toBe(400);
+    const tc = await api.POST('/v1/questions/{questionId}/versions/{version}/test-cases', {
+      params: { path: { questionId: 'q-rotate', version: 1 } },
+      body: { input: '1', expectedOutput: '1', isHidden: true, weight: 1, extra: 1 } as never,
+    });
+    expect(tc.response.status).toBe(400);
+    const variant = await api.POST('/v1/questions/{questionId}/versions/{version}/variants', {
+      params: { path: { questionId: 'q-rotate', version: 1 } },
+      body: { params: { size: 3, steps: 1 }, label: 'nope' } as never,
+    });
+    expect(variant.response.status).toBe(400);
   });
 });

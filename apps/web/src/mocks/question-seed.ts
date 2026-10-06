@@ -1,30 +1,116 @@
 import type { Schemas } from '@/lib/api/client';
+import { mockRevision } from './question-revision';
+import { renderTemplate } from './question-template';
+import type { ParamValue } from './question-template';
 
 /*
  * Seed data of the mock question bank (FE-04). Fake questions only. The reference solutions, hidden
  * tests and answer keys here stand for what the real API keeps away from candidates (TC-011).
  */
 
-export type Content = Schemas['QuestionContent'];
+type Language = Schemas['Language'];
 export type ValidationReport = Schemas['ValidationReport'];
+export type AnswerSpec = Schemas['AnswerSpec'];
 
-export interface MockVersion extends Content {
+export interface MockTestCase {
+  id: string;
+  position: number;
+  isHidden: boolean;
+  weight: number;
+  input: string;
+  expectedOutput: string;
+}
+
+/** A variant as the mock stores it; the DTO adds isHidden and position of each overridden slot. */
+export interface MockVariant {
+  id: string;
+  isActive: boolean;
+  params: Record<string, ParamValue>;
+  renderedStatement: string;
+  overrides: { testCaseId: string; input: string; expectedOutput: string }[];
+}
+
+/** The seed's own variant shape: it still has a label (the API has none) that only documents the data. */
+interface SeedVariant {
+  id: string;
+  label: string;
+  params: Record<string, ParamValue>;
+  active: boolean;
+  overrides: { testCaseId: string; input: string; expectedOutput: string }[];
+}
+
+/** One version as the mock stores it (the API's question_versions row plus its test cases). */
+export interface MockVersion {
+  id: string;
   version: number;
-  /** Opaque concurrency token: changes on every save of this version (DL-32, replaces the integer revision). */
-  updatedAt: string;
   isPublished: boolean;
+  title: string;
+  difficulty: Schemas['Difficulty'];
+  validatedAt: string | null;
   createdAt: string;
   createdByName: string;
-  validatedAt: string | null;
+  statementMd: string;
+  allowedLanguages: Language[];
+  limits: Schemas['Limits'];
+  starterCode: Record<string, string>;
+  referenceSolution: Record<string, string>;
+  answerSpec: AnswerSpec | null;
   validationReport: ValidationReport | null;
+  testCases: MockTestCase[];
+  variants: MockVariant[];
+  /** AI reference solutions belong to ONE version (BE-04c); a fork starts with none. */
+  aiRefs: Schemas['AiReference'][];
 }
 
 export interface MockQuestion {
   id: string;
   slug: string;
   type: Schemas['QuestionType'];
-  archived: boolean;
+  tags: string[];
+  isArchived: boolean;
+  createdAt: string;
   versions: MockVersion[];
+}
+
+/** The shape the seed data below is written in; `convert` turns it into the API shape. */
+interface SeedContent {
+  title: string;
+  statementMd: string;
+  difficulty: Schemas['Difficulty'];
+  tags: string[];
+  allowedLanguages: Language[];
+  limits: Schemas['Limits'];
+  starterCode: Record<string, string>;
+  referenceSolution: Record<string, string>;
+  testCases: {
+    id: string;
+    input: string;
+    expectedOutput: string;
+    isHidden: boolean;
+    weight: number;
+  }[];
+  variants: SeedVariant[];
+  answerSpec:
+    | ({ type: 'MCQ' } & Schemas['McqAnswerSpec'])
+    | ({ type: 'SHORT_ANSWER' } & Schemas['ShortAnswerSpec'])
+    | null;
+}
+type Content = SeedContent;
+interface SeedVersion extends SeedContent {
+  version: number;
+  isPublished: boolean;
+  createdAt: string;
+  createdByName: string;
+  validatedAt: string | null;
+  /** Only `passed` and the time matter: `convert` builds the real report for the content. */
+  validationReport: { passed: boolean; finishedAt: string } | null;
+}
+interface SeedQuestion {
+  id: string;
+  slug: string;
+  type: Schemas['QuestionType'];
+  archived: boolean;
+  versions: SeedVersion[];
   aiRefs: Schemas['AiReference'][];
 }
 
@@ -33,8 +119,8 @@ const daysAgo = (d: number) => new Date(NOW - d * 86_400_000).toISOString();
 
 const LIMITS = { cpuMs: 2000, wallMs: 5000, memoryKb: 262_144 };
 
-function passing(): ValidationReport {
-  return { passed: true, finishedAt: daysAgo(2), results: [] };
+function passing(): { passed: true; finishedAt: string } {
+  return { passed: true, finishedAt: daysAgo(2) };
 }
 
 export function seedQuestions(): MockQuestion[] {
@@ -274,13 +360,12 @@ prints
   const ver = (
     c: Content,
     version: number,
-    o: Partial<MockVersion> & { by?: string } = {},
-  ): MockVersion => ({
+    o: Partial<SeedVersion> & { by?: string } = {},
+  ): SeedVersion => ({
     ...structuredClone(c),
     version,
     isPublished: false,
     createdAt: daysAgo(30 - version),
-    updatedAt: daysAgo(30 - version),
     createdByName: o.by ?? 'Avery Author',
     validatedAt: null,
     validationReport: null,
@@ -303,11 +388,12 @@ prints
     promptText: 'Solve the question as stated. Return only code.',
     collectedAt: daysAgo(ageDays),
     variantId: null,
-    collectedByName: 'Avery Author',
+    collectedById: 'user-author',
     supersededAt: null,
+    createdAt: daysAgo(ageDays),
   });
 
-  return [
+  const legacy: SeedQuestion[] = [
     {
       id: 'q-merge',
       slug: 'merge-intervals',
@@ -393,18 +479,27 @@ prints
       aiRefs: [],
     },
     {
-      // Scenario for the editor's handling of a publish that fails closed (501, DL-32 point 4).
-      id: 'q-publish-unavailable',
-      slug: 'publish-unavailable',
+      // A complete multiple-choice draft: the real API publishes it (coding questions fail closed).
+      id: 'q-mcq-draft',
+      slug: 'hash-lookup-cost',
       type: 'MCQ',
       archived: false,
       versions: [
         ver(
           {
             ...bigO,
-            title: 'Publishing unavailable (scenario)',
-            statementMd:
-              'A validated draft whose publish call answers 501, to see the failure handling.',
+            answerSpec: {
+              type: 'MCQ',
+              multiple: false,
+              options: [
+                { id: 'o1', text: 'O(1)' },
+                { id: 'o2', text: 'O(log n)' },
+                { id: 'o3', text: 'O(n)' },
+              ],
+              correctOptionIds: ['o1'],
+            },
+            title: 'Cost of a hash lookup (draft)',
+            statementMd: 'What is the average-case time complexity of a lookup in a hash table?',
           },
           1,
           { validatedAt: daysAgo(1), validationReport: passing() },
@@ -431,4 +526,103 @@ prints
       aiRefs: [],
     },
   ];
+  return legacy.map(convert);
+}
+
+/** A passing report in the real shape: one result per active variant (or the base), one passing cell per language. */
+function passingReport(
+  v: {
+    allowedLanguages: Language[];
+    testCases: { id: string }[];
+    variants: MockVariant[];
+  },
+  revision: string,
+  finishedAt: string,
+): ValidationReport {
+  const active = v.variants.filter((x) => x.isActive).sort((a, b) => (a.id < b.id ? -1 : 1));
+  const targets: (string | null)[] = active.length > 0 ? active.map((x) => x.id) : [null];
+  return {
+    passed: true,
+    revision,
+    startedAt: finishedAt,
+    finishedAt,
+    perVariant: targets.map((variantId) => ({
+      variantId,
+      passed: true,
+      cells: v.allowedLanguages.map((language) => ({
+        language,
+        passed: true,
+        testsPassed: v.testCases.length,
+        testsTotal: v.testCases.length,
+      })),
+      failures: [],
+    })),
+  };
+}
+
+/** Seed shape to the API shape: positions, ids, an answer spec without `type`, a revision-bound report. */
+function convert(q: SeedQuestion): MockQuestion {
+  const last = q.versions[q.versions.length - 1]!;
+  const versions = q.versions.map((v): MockVersion => {
+    const base = {
+      id: `${q.id}-v${v.version}`,
+      version: v.version,
+      isPublished: v.isPublished,
+      title: v.title,
+      difficulty: v.difficulty,
+      validatedAt: v.validatedAt,
+      createdAt: v.createdAt,
+      createdByName: v.createdByName,
+      statementMd: v.statementMd,
+      allowedLanguages: v.allowedLanguages,
+      limits: v.limits,
+      starterCode: v.starterCode,
+      referenceSolution: v.referenceSolution,
+      answerSpec: ((): AnswerSpec | null => {
+        const a = v.answerSpec;
+        if (!a) return null;
+        if (a.type === 'MCQ') {
+          return { options: a.options, correctOptionIds: a.correctOptionIds, multiple: a.multiple };
+        }
+        return { canonical: a.canonical, acceptedVariants: a.acceptedVariants };
+      })(),
+      testCases: v.testCases.map((t, position) => ({ ...t, position })),
+      variants: v.variants.map((x): MockVariant => {
+        const rendered = renderTemplate(v.statementMd, x.params);
+        return {
+          id: x.id,
+          isActive: x.active,
+          params: x.params,
+          renderedStatement: rendered.ok ? rendered.text : v.statementMd,
+          overrides: x.overrides.map((o) => ({ ...o })),
+        };
+      }),
+    };
+    const revision = mockRevision({
+      ...base,
+      variants: base.variants.map((x) => ({ ...x })),
+    });
+    // Only coding questions are validated: the real API never records a run for the other types.
+    const coding = q.type === 'CODING';
+    const report: ValidationReport | null =
+      coding && v.validationReport
+        ? passingReport(base, revision, v.validationReport.finishedAt)
+        : null;
+    const isLast = v.version === last.version;
+    return {
+      ...base,
+      validatedAt: coding ? base.validatedAt : null,
+      validationReport: report,
+      aiRefs: isLast ? q.aiRefs : [],
+    };
+  });
+  return {
+    id: q.id,
+    slug: q.slug,
+    type: q.type,
+    tags: last.tags,
+    isArchived: q.archived,
+    createdAt: daysAgo(40),
+    versions,
+  };
 }

@@ -23,12 +23,13 @@
 //         metadata ONLY {method, route '/api/v1/admin/users/:userId/invite'}, NOT @Audited (no `audited`
 //         flag in the matrix). Listed ONLY when the backend's ROUTE_PERMISSIONS has the key (see below).
 //
-// BE-04 (slice 4a, question bank): 11 routes under /questions, listed below in the same table so the
+// BE-04 (question bank): 23 routes (4a: 11 under /questions, 4b: 7 variant routes, 4c: validate, validation status and 3 AI reference routes), listed below in the same table so the
 // generic 401, 403, cross-org 404, effect and audit tests drive them. The audit rows are written by
 // the service in the mutation's own transaction (NOT @Audited, so no `audited` flag in the matrix):
 // entity `question`, entity id the question, metadata of ids and changed field NAMES only (never
 // content), listed per route in `metadataKeys`. Reads are not audited (a question is not candidate
-// data). Question reads: SUPER_ADMIN, RECRUITER, AUTHOR; writes: SUPER_ADMIN, AUTHOR.
+// data). Question reads: SUPER_ADMIN, RECRUITER, AUTHOR; writes: SUPER_ADMIN, AUTHOR. The variant
+// list GET is question:update (author data); only the variant preview is question:read.
 //
 // BE-06 (slice 6a, test builder): 4 routes under /tests (GET list, POST, GET by id, PATCH) in the same
 // table. Permissions test:read, test:create, test:update; SUPER_ADMIN and RECRUITER only (AUTHOR and
@@ -40,7 +41,12 @@
 // Switches: the BE-03, BE-04 and BE-06 tests run by default (BE03_DEFAULT, BE04_DEFAULT, BE06_DEFAULT = true). The
 // review routes (BE-13) stay off until BE13_DEFAULT is flipped, or `BE13_READY=1` in the environment for a trial run. The BE-13
 // entries are still ASSUMED.
-import { hasPermission, PRINCIPALS, USER_ROLES } from '../../../../packages/shared/src/permissions';
+import {
+  hasPermission,
+  PERMISSIONS,
+  PRINCIPALS,
+  USER_ROLES,
+} from '../../../../packages/shared/src/permissions';
 import type { Permission, Principal } from '../../../../packages/shared/src/permissions';
 import { UserRole } from '../../src/generated/prisma/client';
 import { computeRevision } from '../../src/questions/revision';
@@ -82,23 +88,49 @@ export interface MatrixEntry {
   audited?: true;
   candidateData?: true;
 }
-export interface RegistryApi {
-  ROUTE_PERMISSIONS: Readonly<Record<string, 'public' | MatrixEntry>>;
-  listRoutes: (modules: unknown) => { key: string; handler: string }[];
-  matrixProblems: (routes: { key: string; handler: string }[]) => string[];
+/** A candidate-session route (FU-BE-91): no roles, never audited; the permission is candidate_*. */
+export interface CandidateMatrixEntry {
+  principal: 'CANDIDATE';
+  permission: string;
 }
+export type AnyMatrixEntry = 'public' | MatrixEntry | CandidateMatrixEntry;
+/** The route facts the registry exposes (RegisteredRoute in route-registry.ts), as far as QA reads them. */
+export interface ListedRoute {
+  key: string;
+  handler: string;
+  isPublic?: boolean;
+  roles?: readonly string[];
+  audited?: boolean;
+  candidatePermission?: string | null;
+}
+export interface RegistryApi {
+  ROUTE_PERMISSIONS: Readonly<Record<string, AnyMatrixEntry>>;
+  CANDIDATE_BOOTSTRAP_ROUTES?: readonly string[];
+  listRoutes: (modules: unknown) => ListedRoute[];
+  matrixProblems: (routes: ListedRoute[]) => string[];
+}
+// Order matters for readers: a candidate entry has `principal` and no `roles`, a staff entry has
+// `roles`; an entry with both is reported by candidateRegistryProblems as an extra key.
+export const isCandidateEntry = (e: AnyMatrixEntry | undefined): e is CandidateMatrixEntry =>
+  typeof e === 'object' && 'principal' in e;
+export const isStaffEntry = (e: AnyMatrixEntry | undefined): e is MatrixEntry =>
+  typeof e === 'object' && 'roles' in e;
 export function loadBackendRegistry(): RegistryApi {
-  const perms = jest.requireActual<Pick<RegistryApi, 'ROUTE_PERMISSIONS'>>(
-    '../../src/common/auth/route-permissions',
-  );
+  const perms = jest.requireActual<
+    Pick<RegistryApi, 'ROUTE_PERMISSIONS' | 'CANDIDATE_BOOTSTRAP_ROUTES'>
+  >('../../src/common/auth/route-permissions');
   const reg = jest.requireActual<Pick<RegistryApi, 'listRoutes' | 'matrixProblems'>>(
     '../../src/common/auth/route-registry',
   );
-  return { ROUTE_PERMISSIONS: perms.ROUTE_PERMISSIONS, ...reg };
+  return {
+    ROUTE_PERMISSIONS: perms.ROUTE_PERMISSIONS,
+    CANDIDATE_BOOTSTRAP_ROUTES: perms.CANDIDATE_BOOTSTRAP_ROUTES,
+    ...reg,
+  };
 }
 
 /**
- * Registry routes that QA covers in other files (tc-003: re-auth and 2FA routes). Every other
+ * Registry routes that QA covers in other files (tc-003: re-auth and 2FA routes; org settings: apps/api/src/org-settings/org-settings.e2e-spec.ts). Every other
  * non-public route in the registry must be in BE03_ROUTES, or the matrix test fails.
  */
 export const COVERED_ELSEWHERE: Readonly<Record<string, string>> = {
@@ -107,6 +139,9 @@ export const COVERED_ELSEWHERE: Readonly<Record<string, string>> = {
   'POST /auth/2fa/disable': 'apps/api/test/integration/tc-003.int.test.ts',
   'POST /auth/2fa/recovery-codes/regenerate': 'apps/api/test/integration/tc-003.int.test.ts',
   'POST /auth/2fa/reset/:userId': 'apps/api/test/integration/tc-003.int.test.ts',
+  // Org settings (FU-BE-133): role matrix, isolation, step-up (PATCH needs currentPassword) and audit in apps/api/src/org-settings/org-settings.e2e-spec.ts.
+  'GET /admin/org-settings': 'apps/api/src/org-settings/org-settings.e2e-spec.ts',
+  'PATCH /admin/org-settings': 'apps/api/src/org-settings/org-settings.e2e-spec.ts',
 };
 
 /** What a route needs before a call: a path with real ids and a body, built per call. */
@@ -126,7 +161,7 @@ export interface Target {
 export interface Be03Route {
   id: string;
   step: 'BE-03' | 'BE-04' | 'BE-06' | 'BE-13';
-  method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   /** Path template as the backend registry writes it (no query string), under /api/v1. */
   template: string;
   /** Distinguishes routes that share one method and template (PATCH role / deactivate / reactivate). */
@@ -328,6 +363,8 @@ const FIELD_NAMES = [
   'isHidden',
   'weight',
   'position',
+  'params',
+  'isActive',
 ];
 const isInt = (v: unknown): boolean => Number.isInteger(v) && (v as number) >= 1;
 const isUuid = (v: unknown): boolean => typeof v === 'string' && UUID_RE.test(v);
@@ -417,21 +454,35 @@ export async function questionFixture(
 }
 
 /**
- * Stands in for the validate job (BE-04 slice 4c, not built): records a passing validation of the
+ * Stands in for a PASSED validate run (BE-04 slice 4c): records a passing validation of the
  * CURRENT content of the latest version of a question, directly in the database, bound to the
  * revision the backend computes. Publish of a coding question needs it (FR-203, fails closed).
  */
 export async function markValidated(h: Harness, questionId: string): Promise<void> {
+  // These tests are about other rules than the AI reference gate (ADR 0005 AI-5, BE-04c): switch
+  // it off for the question's org so a publish needs only the validation result.
+  const { orgId } = await h.owner.question.findUniqueOrThrow({ where: { id: questionId } });
+  const org = await h.owner.organization.findUniqueOrThrow({ where: { id: orgId } });
+  const settings = (org.settings ?? {}) as Record<string, unknown>;
+  const aiReferences = (settings.aiReferences ?? {}) as Record<string, unknown>;
+  await h.owner.organization.update({
+    where: { id: orgId },
+    data: { settings: { ...settings, aiReferences: { ...aiReferences, minAssistants: 0 } } },
+  });
   const head = await h.owner.questionVersion.findFirstOrThrow({
     where: { questionId },
     orderBy: { version: 'desc' },
   });
   const cases = await h.owner.testCase.findMany({ where: { questionVersionId: head.id } });
+  const variants = await h.owner.questionVariant.findMany({
+    where: { questionVersionId: head.id },
+    include: { testCaseOverrides: true },
+  });
   await h.owner.questionVersion.update({
     where: { id: head.id },
     data: {
       validatedAt: new Date(),
-      validationReport: { passed: true, revision: computeRevision(head, cases) },
+      validationReport: { passed: true, revision: computeRevision(head, cases, variants) },
     },
   });
 }
@@ -458,6 +509,40 @@ const createBody = (slug: string): Record<string, unknown> => ({
 });
 
 const QUESTIONS = '/questions';
+const VARIANT_SECRET = 'QA-VARIANT-PARAM';
+const AI_SECRET = 'QA-AI-SOLUTION-SECRET';
+const AI_PROMPT = 'QA-AI-PROMPT-SECRET';
+const OVERRIDE_IN = 'QA-OVERRIDE-IN';
+const OVERRIDE_OUT = 'QA-OVERRIDE-OUT';
+
+/** A coding question (see questionFixture) with one active variant, optionally with an override on the hidden slot. */
+async function variantFixture(
+  h: Harness,
+  orgId: string,
+  opts: { published?: boolean; override?: boolean } = {},
+): Promise<QuestionFix & { variantId: string }> {
+  const f = await questionFixture(h, orgId, { published: opts.published ?? false });
+  const variant = await h.owner.questionVariant.create({
+    data: {
+      questionVersionId: f.versionIds[1] as string,
+      params: { secret: VARIANT_SECRET },
+      renderedStatement: 'Add two numbers.',
+    },
+  });
+  if (opts.override) {
+    await h.owner.variantTestCase.create({
+      data: {
+        variantId: variant.id,
+        testCaseId: f.hiddenId,
+        input: OVERRIDE_IN,
+        expectedOutput: OVERRIDE_OUT,
+      },
+    });
+  }
+  return { ...f, variantId: variant.id };
+}
+const variantCount = (h: Harness, versionId: string): Promise<number> =>
+  h.owner.questionVariant.count({ where: { questionVersionId: versionId } });
 // Content that must never reach an audit row: the fixture and request body values too.
 const qSecrets = [
   REF_SECRET,
@@ -467,6 +552,9 @@ const qSecrets = [
   'QA edited title',
   'QA created question',
   'Add two numbers.',
+  VARIANT_SECRET,
+  OVERRIDE_IN,
+  OVERRIDE_OUT,
 ];
 
 /** A question-route entry with the shared BE-04 defaults; each route overrides what differs. */
@@ -487,6 +575,17 @@ const BE04_ROUTES: Be03Route[] = [
     ok: [200],
     prepare: () =>
       Promise.resolve({ path: `${QUESTIONS}?page=1&pageSize=50`, secrets: [], unchanged: noop }),
+  }),
+  q04({
+    id: 'ai-policy-read',
+    method: 'GET',
+    template: `${QUESTIONS}/ai-policy`,
+    permission: 'ai_reference:read',
+    audit: null,
+    mutating: false,
+    ok: [200],
+    prepare: () =>
+      Promise.resolve({ path: `${QUESTIONS}/ai-policy`, secrets: [], unchanged: noop }),
   }),
   q04({
     id: 'questions-create',
@@ -719,7 +818,7 @@ const BE04_ROUTES: Be03Route[] = [
     metadataShape: { testCaseId: isUuid, version: isInt },
     mutating: true,
     takesBody: false,
-    ok: [204],
+    ok: [200],
     prepare: async (h, orgId) => {
       const f = await questionFixture(h, orgId);
       return {
@@ -727,6 +826,291 @@ const BE04_ROUTES: Be03Route[] = [
         entityId: f.id,
         secrets: qSecrets,
         unchanged: async () => (await h.owner.testCase.count({ where: { id: f.hiddenId } })) === 1,
+      };
+    },
+  }),
+  q04({
+    id: 'variants-list',
+    method: 'GET',
+    template: `${QUESTIONS}/:id/versions/:version/variants`,
+    permission: 'question:update',
+    audit: null,
+    mutating: false,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await variantFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/variants`,
+        entityId: f.id,
+        secrets: [],
+        unchanged: noop,
+      };
+    },
+  }),
+  q04({
+    id: 'variants-create',
+    method: 'POST',
+    template: `${QUESTIONS}/:id/versions/:version/variants`,
+    permission: 'question:update',
+    audit: { action: 'QUESTION_VARIANT_ADDED', entityType: 'question' },
+    metadataKeys: ['isActive', 'variantId', 'version'],
+    metadataShape: { isActive: isBool, variantId: isUuid, version: isInt },
+    mutating: true,
+    ok: [201],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      const versionId = f.versionIds[1] as string;
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/variants`,
+        body: { params: { secret: VARIANT_SECRET } },
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () => (await variantCount(h, versionId)) === 0,
+      };
+    },
+  }),
+  q04({
+    id: 'variants-preview',
+    method: 'GET',
+    template: `${QUESTIONS}/:id/versions/:version/variants/:variantId/preview`,
+    permission: 'question:read',
+    audit: null,
+    mutating: false,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await variantFixture(h, orgId, { published: true, override: true });
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/variants/${f.variantId}/preview`,
+        entityId: f.id,
+        secrets: [],
+        unchanged: noop,
+      };
+    },
+  }),
+  q04({
+    id: 'variants-update',
+    method: 'PATCH',
+    template: `${QUESTIONS}/:id/versions/:version/variants/:variantId`,
+    permission: 'question:update',
+    audit: { action: 'QUESTION_VARIANT_UPDATED', entityType: 'question' },
+    metadataKeys: ['fields', 'variantId', 'version'],
+    metadataShape: {
+      fields: (v) => isFieldList(v) && JSON.stringify(v) === '["params","isActive"]',
+      variantId: isUuid,
+      version: isInt,
+    },
+    mutating: true,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await variantFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/variants/${f.variantId}`,
+        body: { params: { secret: 'QA-VARIANT-CHANGED' }, isActive: false },
+        entityId: f.id,
+        secrets: [...qSecrets, 'QA-VARIANT-CHANGED'],
+        unchanged: async () =>
+          (await h.owner.questionVariant.findUniqueOrThrow({ where: { id: f.variantId } }))
+            .isActive === true,
+      };
+    },
+  }),
+  q04({
+    id: 'variants-remove',
+    method: 'DELETE',
+    template: `${QUESTIONS}/:id/versions/:version/variants/:variantId`,
+    permission: 'question:update',
+    audit: { action: 'QUESTION_VARIANT_REMOVED', entityType: 'question' },
+    metadataKeys: ['variantId', 'version'],
+    metadataShape: { variantId: isUuid, version: isInt },
+    mutating: true,
+    takesBody: false,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await variantFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/variants/${f.variantId}`,
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () =>
+          (await h.owner.questionVariant.count({ where: { id: f.variantId } })) === 1,
+      };
+    },
+  }),
+  q04({
+    id: 'variants-override-set',
+    method: 'PUT',
+    template: `${QUESTIONS}/:id/versions/:version/variants/:variantId/test-cases/:testCaseId`,
+    permission: 'question:update',
+    audit: { action: 'QUESTION_VARIANT_TEST_CASE_SET', entityType: 'question' },
+    metadataKeys: ['isHidden', 'testCaseId', 'variantId', 'version'],
+    metadataShape: { isHidden: isBool, testCaseId: isUuid, variantId: isUuid, version: isInt },
+    mutating: true,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await variantFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/variants/${f.variantId}/test-cases/${f.hiddenId}`,
+        body: { input: OVERRIDE_IN, expectedOutput: OVERRIDE_OUT },
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () =>
+          (await h.owner.variantTestCase.count({ where: { variantId: f.variantId } })) === 0,
+      };
+    },
+  }),
+  q04({
+    id: 'variants-override-remove',
+    method: 'DELETE',
+    template: `${QUESTIONS}/:id/versions/:version/variants/:variantId/test-cases/:testCaseId`,
+    permission: 'question:update',
+    audit: { action: 'QUESTION_VARIANT_TEST_CASE_REMOVED', entityType: 'question' },
+    metadataKeys: ['testCaseId', 'variantId', 'version'],
+    metadataShape: { testCaseId: isUuid, variantId: isUuid, version: isInt },
+    mutating: true,
+    takesBody: false,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await variantFixture(h, orgId, { override: true });
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/variants/${f.variantId}/test-cases/${f.hiddenId}`,
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () =>
+          (await h.owner.variantTestCase.count({ where: { variantId: f.variantId } })) === 1,
+      };
+    },
+  }),
+  q04({
+    id: 'questions-validate',
+    method: 'POST',
+    template: `${QUESTIONS}/:id/validate`,
+    permission: 'question:validate',
+    audit: { action: 'QUESTION_VALIDATION_STARTED', entityType: 'question' },
+    metadataKeys: ['variants', 'version'],
+    metadataShape: { variants: isInt, version: isInt },
+    mutating: true,
+    ok: [202],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/validate`,
+        body: {},
+        entityId: f.id,
+        secrets: qSecrets,
+        unchanged: async () =>
+          (await h.owner.auditLog.count({
+            where: { entityId: f.id, action: 'QUESTION_VALIDATION_STARTED' },
+          })) === 0,
+      };
+    },
+  }),
+  q04({
+    id: 'questions-validation-status',
+    method: 'GET',
+    template: `${QUESTIONS}/:id/validation`,
+    permission: 'question:validate',
+    audit: null,
+    mutating: false,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/validation`,
+        entityId: f.id,
+        secrets: [],
+        unchanged: noop,
+      };
+    },
+  }),
+  q04({
+    id: 'ai-references-list',
+    method: 'GET',
+    template: `${QUESTIONS}/:id/versions/:version/ai-references`,
+    permission: 'ai_reference:read',
+    audit: null,
+    mutating: false,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/ai-references`,
+        entityId: f.id,
+        secrets: [],
+        unchanged: noop,
+      };
+    },
+  }),
+  q04({
+    id: 'ai-references-create',
+    method: 'POST',
+    template: `${QUESTIONS}/:id/versions/:version/ai-references`,
+    permission: 'ai_reference:create',
+    audit: { action: 'AI_REFERENCE_CREATED', entityType: 'question' },
+    metadataKeys: ['aiReferenceId', 'language', 'variantId', 'version'],
+    metadataShape: {
+      aiReferenceId: isUuid,
+      language: (v) => v === 'python',
+      variantId: (v) => v === null,
+      version: isInt,
+    },
+    mutating: true,
+    ok: [201],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/ai-references`,
+        body: {
+          assistant: 'QA-ASSISTANT',
+          modelLabel: 'qa-model',
+          language: 'python',
+          solutionCode: AI_SECRET,
+          promptText: AI_PROMPT,
+        },
+        entityId: f.id,
+        secrets: [...qSecrets, AI_SECRET, AI_PROMPT, 'QA-ASSISTANT'],
+        unchanged: async () =>
+          (await h.owner.aiReferenceSolution.count({
+            where: { questionVersionId: f.versionIds[1] as string },
+          })) === 0,
+      };
+    },
+  }),
+  q04({
+    id: 'ai-references-supersede',
+    method: 'POST',
+    template: `${QUESTIONS}/:id/versions/:version/ai-references/:aiReferenceId/supersede`,
+    permission: 'ai_reference:supersede',
+    audit: { action: 'AI_REFERENCE_SUPERSEDED', entityType: 'question' },
+    metadataKeys: ['aiReferenceId', 'replacementId', 'version'],
+    metadataShape: { aiReferenceId: isUuid, replacementId: (v) => v === null, version: isInt },
+    mutating: true,
+    ok: [200],
+    prepare: async (h, orgId) => {
+      const f = await questionFixture(h, orgId);
+      const collector = await h.owner.user.findFirstOrThrow({
+        where: { orgId },
+        orderBy: { createdAt: 'asc' },
+      });
+      const row = await h.owner.aiReferenceSolution.create({
+        data: {
+          questionVersionId: f.versionIds[1] as string,
+          assistant: 'QA-ASSISTANT',
+          modelLabel: 'qa-model',
+          language: 'python',
+          solutionCode: AI_SECRET,
+          promptText: AI_PROMPT,
+          collectedAt: new Date(),
+          collectedById: collector.id,
+        },
+      });
+      return {
+        path: `${QUESTIONS}/${f.id}/versions/1/ai-references/${row.id}/supersede`,
+        body: {},
+        entityId: f.id,
+        secrets: [...qSecrets, AI_SECRET, AI_PROMPT, 'QA-ASSISTANT'],
+        unchanged: async () =>
+          (await h.owner.aiReferenceSolution.findUniqueOrThrow({ where: { id: row.id } }))
+            .supersededAt === null,
       };
     },
   }),
@@ -1192,6 +1576,114 @@ export function withReplacedId(path: string, id: string, replacement: string): s
   const [pathname = '', query] = path.split('?');
   const segments = pathname.split('/').map((seg) => (seg === id ? replacement : seg));
   return query === undefined ? segments.join('/') : `${segments.join('/')}?${query}`;
+}
+
+/**
+ * Candidate-session routes (BE-07, FR-106, FR-401; ADR 0013 5.10), for REGISTRY AGREEMENT ONLY
+ * (tc-004 "route registry"): they use candidate tokens, so the staff 401/403/404/audit loops
+ * (BE03_ROUTES) never see them. Each is included only when the backend's ROUTE_PERMISSIONS has the
+ * key, so this is green before and after BE-07 (#98) merges. `permission: 'public'` = a pre-JWT
+ * bootstrap route; otherwise the candidate_* permission the matrix must carry.
+ */
+export interface CandidateRoute {
+  key: string;
+  permission: 'public' | Permission;
+}
+const KNOWN_CANDIDATE_ROUTES: readonly CandidateRoute[] = [
+  { key: 'POST /candidate/session/link', permission: 'public' },
+  { key: 'POST /candidate/session/otp', permission: 'public' },
+  { key: 'POST /candidate/session/start', permission: 'public' },
+  { key: 'GET /candidate/session/consent', permission: 'candidate_consent:read' },
+  { key: 'POST /candidate/session/consent/sign', permission: 'candidate_consent:sign' },
+  { key: 'POST /candidate/session/consent/decline', permission: 'candidate_consent:decline' },
+  { key: 'GET /candidate/session', permission: 'candidate_session:read' },
+  { key: 'POST /candidate/session/test/start', permission: 'candidate_session:start' },
+  { key: 'POST /candidate/session/heartbeat', permission: 'candidate_session:heartbeat' },
+  { key: 'POST /candidate/session/proctor-key', permission: 'candidate_session:key' },
+  // BE-09 media (Backend B, PR #119): confirm reuses the presign permission.
+  { key: 'POST /candidate/session/media/presign', permission: 'candidate_media:presign' },
+  { key: 'POST /candidate/session/media/confirm', permission: 'candidate_media:presign' },
+  // BE-08b identity check (Integrity B, PR #129): the status read reuses the upload permission
+  // (shared has no candidate_identity:read yet). BE-08c POST .../identity/recheck is not built: not listed.
+  { key: 'POST /candidate/session/identity/presign', permission: 'candidate_identity:upload' },
+  { key: 'POST /candidate/session/identity', permission: 'candidate_identity:upload' },
+  { key: 'GET /candidate/session/identity', permission: 'candidate_identity:upload' },
+  // BE-11 answers and finish (Backend B, PR #187, gated): keys and permissions as registered on that branch.
+  { key: 'POST /candidate/answers/:questionId/run', permission: 'candidate_answer:run' },
+  { key: 'POST /candidate/answers/:questionId/submit', permission: 'candidate_answer:submit' },
+  { key: 'PUT /candidate/answers/:questionId/draft', permission: 'candidate_answer:draft' },
+  { key: 'POST /candidate/session/finish', permission: 'candidate_session:finish' },
+  { key: 'POST /candidate/session/section/finish', permission: 'candidate_section:finish' },
+];
+export const CANDIDATE_ROUTES: readonly CandidateRoute[] = KNOWN_CANDIDATE_ROUTES.filter((r) =>
+  backendHasRoute(r.key),
+);
+
+const STAFF_ROLE_NAMES: readonly string[] = USER_ROLES;
+export const isCandidatePath = (key: string): boolean => /^\S+ \/candidate(\/|$)/i.test(key);
+
+/**
+ * Pure registry check for the CANDIDATE route variant (FU-BE-91), so it can be unit tested with
+ * synthetic matrices (tc-004 always-run block) and run over the real matrix (registry test).
+ * `routes` is what the backend registry reports per key, `bootstrap` is CANDIDATE_BOOTSTRAP_ROUTES,
+ * `listed` is CANDIDATE_ROUTES. Returns one message per problem; [] means agreement.
+ */
+export function candidateRegistryProblems(input: {
+  matrix: Readonly<Record<string, AnyMatrixEntry>>;
+  routes: ReadonlyMap<string, ListedRoute>;
+  bootstrap: readonly string[];
+  listed: readonly CandidateRoute[];
+}): string[] {
+  const { matrix, routes, bootstrap, listed } = input;
+  const problems: string[] = [];
+  const known = new Set<string>(PERMISSIONS);
+  for (const [key, access] of Object.entries(matrix)) {
+    if (isCandidateEntry(access)) {
+      const extra = Object.keys(access).filter((k) => k !== 'principal' && k !== 'permission');
+      if (extra.length > 0)
+        problems.push(`${key}: CANDIDATE entry has extra keys ${extra.join(',')}`);
+      if (access.principal !== 'CANDIDATE') problems.push(`${key}: principal is not CANDIDATE`);
+      if (!access.permission.startsWith('candidate_') || !known.has(access.permission))
+        problems.push(`${key}: permission ${access.permission} is not a candidate_* permission`);
+      const r = routes.get(key);
+      if (r === undefined) problems.push(`${key}: not served by the backend`);
+      else {
+        if ((r.roles ?? []).length > 0) problems.push(`${key}: candidate route carries roles`);
+        if (r.audited === true) problems.push(`${key}: candidate route is @Audited`);
+        if (r.candidatePermission !== access.permission)
+          problems.push(`${key}: @CandidateRoute permission differs from the matrix`);
+      }
+    } else if (isStaffEntry(access)) {
+      if (access.permission.startsWith('candidate_'))
+        problems.push(`${key}: staff entry carries candidate permission ${access.permission}`);
+      const odd = access.roles.filter((x) => !STAFF_ROLE_NAMES.includes(x));
+      if (odd.length > 0)
+        problems.push(`${key}: staff entry lists non-staff roles ${odd.join(',')}`);
+      if ((routes.get(key)?.candidatePermission ?? null) !== null)
+        problems.push(`${key}: staff route carries @CandidateRoute`);
+    } else if (access === 'public' && isCandidatePath(key) && !bootstrap.includes(key)) {
+      problems.push(`${key}: /candidate/ route listed public but not a bootstrap route`);
+    }
+  }
+  for (const key of bootstrap) {
+    if (!isCandidatePath(key) || matrix[key] !== 'public')
+      problems.push(`${key}: bootstrap route must be a /candidate/ route listed public`);
+  }
+  for (const c of listed) {
+    const entry = matrix[c.key];
+    const ok =
+      c.permission === 'public'
+        ? entry === 'public' && bootstrap.includes(c.key)
+        : isCandidateEntry(entry) && entry.permission === c.permission;
+    if (!ok) problems.push(`${c.key}: QA list says ${c.permission}, matrix disagrees`);
+  }
+  const listedKeys = new Set(listed.map((c) => c.key));
+  for (const [key, access] of Object.entries(matrix)) {
+    const candidateKey = isCandidateEntry(access) || (isCandidatePath(key) && access === 'public');
+    if (candidateKey && !listedKeys.has(key))
+      problems.push(`${key}: candidate route not in CANDIDATE_ROUTES (be03-routes.ts)`);
+  }
+  return problems;
 }
 
 export const routesFor = (step: Be03Route['step']): Be03Route[] =>

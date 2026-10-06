@@ -7,6 +7,7 @@ import { assertNoNestedCursor, assertNoNestedWritesIn } from './org-scope-nested
 import { orgFilter } from './org-scope-map';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
 import { scopeHopColumn } from './org-scope-relations';
+import { ownArgs } from './plain-args';
 
 type PlainObject = Record<string, unknown>;
 
@@ -65,6 +66,16 @@ function isPlainObject(value: unknown): value is PlainObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * True when `value` names the org `orgId`, whatever the case of the uuid (FU-DB-201). Scope ids are
+ * lower-cased on entry (org-context.ts), but a value the caller writes (`data: { orgId }`, a cursor)
+ * is compared here, and Postgres treats `ABC...` and `abc...` as one uuid. Anything that is not a
+ * string is not an org id.
+ */
+function sameOrg(value: unknown, orgId: string): boolean {
+  return typeof value === 'string' && value.toLowerCase() === orgId.toLowerCase();
+}
+
 function asArgs(model: string, operation: string, args: unknown): PlainObject {
   if (args === undefined || args === null) return {};
   if (!isPlainObject(args)) {
@@ -72,11 +83,11 @@ function asArgs(model: string, operation: string, args: unknown): PlainObject {
       `${model}.${operation} was called with arguments that are not an object.`,
     );
   }
-  return args;
+  return ownArgs(args);
 }
 
 /** where AND filter. An existing AND (single or list) is kept, so the caller's filter still applies. */
-function andWhere(
+export function andWhere(
   model: string,
   operation: string,
   where: unknown,
@@ -122,10 +133,11 @@ function stampCreateData(
   if (!isPlainObject(data)) return data; // Prisma reports the malformed payload itself
   if (data.org !== undefined) throw orgRelation(model, operation); // refused earlier; fail closed
   if (data.orgId === undefined) return { ...data, orgId };
-  if (data.orgId !== orgId) {
+  if (!sameOrg(data.orgId, orgId)) {
     throw violation(model, operation, "orgId in the data is not the caller's org.");
   }
-  return data;
+  // The same org in another case is written in the scope's own spelling.
+  return data.orgId === orgId ? data : { ...data, orgId };
 }
 
 /** Update payload: a row cannot be moved to another org, and an organization keeps its id. */
@@ -144,7 +156,7 @@ function assertTenancyKept(
   if (data.org !== undefined) throw orgRelation(model, operation); // refused earlier; fail closed
   if (data.orgId === undefined) return;
   const value = isPlainObject(data.orgId) ? data.orgId.set : data.orgId;
-  if (value !== orgId) {
+  if (!sameOrg(value, orgId)) {
     throw violation(model, operation, 'orgId cannot be changed to another org.');
   }
 }
@@ -217,14 +229,15 @@ export function assertSystemScopeWrite(
   }
   assertNoNestedWritesIn(model, operation, args);
   if (!isPlainObject(args)) return;
+  const own = ownArgs(args);
   switch (operation) {
     case 'update':
     case 'updateMany':
     case 'updateManyAndReturn':
-      assertNoRowMove(model, operation, rule, args.data);
+      assertNoRowMove(model, operation, rule, own.data);
       break;
     case 'upsert':
-      assertNoRowMove(model, operation, rule, args.update);
+      assertNoRowMove(model, operation, rule, own.update);
       break;
     default:
       break; // creates may set orgId in system scope; reads and deletes carry no data
@@ -261,7 +274,7 @@ function scopeCursor(
       }
       return { ...cursor, orgId };
     case 'self':
-      if (cursor.id !== orgId) {
+      if (!sameOrg(cursor.id, orgId)) {
         throw violation(model, operation, "the cursor is not the caller's own organization.");
       }
       return cursor;
@@ -281,7 +294,7 @@ function scopeCursor(
 /** True when the cursor, or a compound key inside it, has an orgId that is not `orgId`. */
 function namesOtherOrg(cursor: PlainObject, orgId: string): boolean {
   return Object.entries(cursor).some(([key, value]) =>
-    key === 'orgId' ? value !== orgId : isPlainObject(value) && namesOtherOrg(value, orgId),
+    key === 'orgId' ? !sameOrg(value, orgId) : isPlainObject(value) && namesOtherOrg(value, orgId),
   );
 }
 
@@ -322,7 +335,7 @@ function namesOtherOrg(cursor: PlainObject, orgId: string): boolean {
  * (d) The foreign keys that rule (i) has to cover are many more than the staff references
  *     (`created_by`, `reviewer_id`, `assigned_to`, `collected_by`) and
  *     `test_questions.question_version_id`: RULE_I_REFERENCES (org-scope-relations.ts) lists the
- *     25 (12 staff, 13 cross-chain), among them the cross-chain ones
+ *     26 (13 staff, 13 cross-chain), among them the cross-chain ones
  *     (session_questions to test_questions, question_versions and variants; session_sections to
  *     test_sections; consents to consent_texts; keystroke_batches to session_questions).
  * (e) The raw SQL hatch (OrgContextService.runRawSql) stays open inside a scope started within

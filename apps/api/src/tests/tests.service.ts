@@ -27,6 +27,7 @@ import type { OrgScopedPrismaClient } from '../database/org-scope.extension';
 import { Prisma } from '../generated/prisma/client';
 import type { Test } from '../generated/prisma/client';
 import type { RequestContext } from '../common/request-context';
+import { candidateCap, unservedSlots } from './feasibility';
 import { parseRandomRule, ruleKey } from './random-rule';
 import type { RandomRule } from './random-rule';
 import { DEFAULT_POINTS, orderByPosition, planProblems } from './test-structure';
@@ -315,19 +316,24 @@ export class TestsService {
   /**
    * Fixed questions must be PUBLISHED versions of non-archived questions of this org: a version of
    * another org, and a draft (unpublished) version, are the same 404 as a missing one (DL-34: no
-   * existence oracle for drafts); a published version of an archived question is 422. A random rule must match, today, at least as many published questions of this org as
-   * there are slots with the same rule (a test never picks one question twice). Matching is the
-   * same as at test start: the question's current published version, not archived.
+   * existence oracle for drafts); a published version of an archived question is 422. The random
+   * rules must then be satisfiable together (see satisfiabilityProblems).
    */
   private async checkReferences(db: Db, sections: readonly ResolvedSection[]): Promise<void> {
     const slots = sections.flatMap((s, i) =>
       s.questions.map((q, j) => ({ ...q, at: `sections[${i}].questions[${j}]` })),
     );
     const versionIds = [...new Set(slots.flatMap((s) => (s.versionId ? [s.versionId] : [])))];
+    const fixedQuestionIds = new Set<string>();
     if (versionIds.length) {
       const found = await db.questionVersion.findMany({
         where: { id: { in: versionIds } },
-        select: { id: true, isPublished: true, question: { select: { isArchived: true } } },
+        select: {
+          id: true,
+          questionId: true,
+          isPublished: true,
+          question: { select: { isArchived: true } },
+        },
       });
       // A draft is the same 404 as a missing or other-org id: a caller without question:update
       // must not be able to tell that a draft exists (DL-34).
@@ -342,18 +348,97 @@ export class TestsService {
             .map((s) => `${s.at}: the question is archived`),
         });
       }
+      for (const v of found) fixedQuestionIds.add(v.questionId);
     }
-    const byKey = new Map<string, { rule: RandomRule; need: number; at: string }>();
-    for (const s of slots) {
-      if (!s.rule) continue;
-      const key = ruleKey(s.rule);
-      const seen = byKey.get(key);
-      if (seen) seen.need += 1;
-      else byKey.set(key, { rule: s.rule, need: 1, at: s.at });
-    }
+    const problems = await this.satisfiabilityProblems(
+      db,
+      slots.flatMap((s) => (s.rule ? [{ at: s.at, rule: s.rule }] : [])),
+      fixedQuestionIds,
+      slots.length - slots.filter((s) => s.rule).length,
+    );
+    if (problems.length) throw new UnprocessableEntityException({ message: problems });
+  }
+
+  /**
+   * Read-only: can every random slot of this saved test still get its own question? Same check as
+   * at save time, run against today's question bank (FU-BE-114). A test is checked once at save,
+   * but a question can be archived or replaced afterwards. The invitation step (BE-06c) MUST call
+   * this before it inserts an invitation, and refuse (409) when `satisfiable` is false. Test start
+   * (BE-07) still answers 409 RANDOM_RULE_UNSATISFIABLE for a bank that changed after the invitation.
+   * Org-scoped (another org's test is 404), no writes, no lock. Never read the test FOR UPDATE
+   * in the invitation step (FU-BE-114). Problems name slot positions only.
+   */
+  async checkTestSatisfiable(
+    testId: string,
+  ): Promise<{ satisfiable: boolean; problems: string[] }> {
+    const db = this.prisma.client;
+    const test = await db.test.findUnique({ where: { id: testId }, select: { id: true } });
+    if (!test) throw new NotFoundException(NOT_FOUND);
+    const sections = await db.testSection.findMany({
+      where: { testId },
+      orderBy: { position: 'asc' },
+    });
+    const questions = sections.length
+      ? await db.testQuestion.findMany({
+          where: { sectionId: { in: sections.map((s) => s.id) } },
+          orderBy: { position: 'asc' },
+        })
+      : [];
     const problems: string[] = [];
-    for (const { rule, need, at } of byKey.values()) {
-      const matches = await db.question.count({
+    const rules: { at: string; rule: RandomRule }[] = [];
+    const fixedVersionIds: string[] = [];
+    sections.forEach((s, i) => {
+      questions
+        .filter((q) => q.sectionId === s.id)
+        .forEach((q, j) => {
+          const at = `sections[${i}].questions[${j}]`;
+          if (q.questionVersionId !== null) {
+            fixedVersionIds.push(q.questionVersionId);
+            return;
+          }
+          const parsed = parseRandomRule(q.randomRule);
+          if (parsed.ok) rules.push({ at, rule: parsed.rule });
+          else problems.push(`${at}.randomRule is not understood`);
+        });
+    });
+    const versions = fixedVersionIds.length
+      ? await db.questionVersion.findMany({
+          where: { id: { in: [...new Set(fixedVersionIds)] } },
+          select: { questionId: true },
+        })
+      : [];
+    problems.push(
+      ...(await this.satisfiabilityProblems(
+        db,
+        rules,
+        new Set(versions.map((v) => v.questionId)),
+        fixedVersionIds.length,
+      )),
+    );
+    return { satisfiable: problems.length === 0, problems };
+  }
+
+  /**
+   * One problem line per random slot that cannot get its own question. A test never shows a
+   * question twice, a fixed slot takes its question, and a random slot never picks a question that
+   * a fixed slot uses (BE-07 takes fixed slots first). Candidates are the org's questions that are
+   * not archived, whose current version is published and matches the rule's difficulty, with every
+   * tag of the rule and the type: the same matching as test start. Distinct rules are read once
+   * each, at most candidateCap ids, and matched with feasibility.ts. Messages name positions only.
+   */
+  private async satisfiabilityProblems(
+    db: Db,
+    rules: readonly { at: string; rule: RandomRule }[],
+    fixedQuestionIds: ReadonlySet<string>,
+    fixedSlots: number,
+  ): Promise<string[]> {
+    if (rules.length === 0) return [];
+    const take = candidateCap(rules.length, fixedSlots);
+    const byKey = new Map<string, string[]>();
+    for (const { rule } of rules) {
+      const key = ruleKey(rule);
+      if (byKey.has(key)) continue;
+      const rows = await db.question.findMany({
         where: {
           isArchived: false,
           currentVersionId: { not: null },
@@ -366,14 +451,29 @@ export class TestsService {
             },
           },
         },
+        select: { id: true },
+        orderBy: { id: 'asc' },
+        take,
       });
-      if (matches < need) {
-        problems.push(
-          `${at}.randomRule matches ${matches} published question(s) in your organization; the test needs ${need} different ones`,
-        );
-      }
+      byKey.set(
+        key,
+        rows.map((r) => r.id),
+      );
     }
-    if (problems.length) throw new UnprocessableEntityException({ message: problems });
+    let unserved: number[];
+    try {
+      unserved = unservedSlots(
+        rules.map(({ rule }) => byKey.get(ruleKey(rule)) ?? []),
+        fixedQuestionIds,
+      );
+    } catch (e) {
+      if (!(e instanceof RangeError)) throw e;
+      return ['the test has more random slots than the limit allows'];
+    }
+    return unserved.map((i) => {
+      const matches = byKey.get(ruleKey(rules[i]?.rule ?? {}))?.length ?? 0;
+      return `${rules[i]?.at ?? ''}.randomRule matches ${matches} published question(s) in your organization; the test needs a different one for every random slot`;
+    });
   }
 
   private async writeSections(

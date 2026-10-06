@@ -23,11 +23,27 @@ void describe('permission matrix skeleton (FR-103)', () => {
     assert.equal(hasPermission('REVIEWER', 'live:pause'), true);
     assert.equal(hasPermission('SUPER_ADMIN', 'user:manage'), true);
   });
-  void it('FR-103: staff never hold candidate permissions and candidates hold no staff ones', () => {
+  void it('FR-103, TC-004: staff never hold candidate permissions and candidates hold no staff ones', () => {
     const candidate = new Set<Permission>(ROLE_PERMISSIONS.CANDIDATE);
     for (const role of ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'REVIEWER'] as const) {
       for (const p of ROLE_PERMISSIONS[role]) assert.equal(candidate.has(p), false, `${role} ${p}`);
     }
+    // Staff lists are built by subtracting CANDIDATE_PERMISSIONS: a candidate_* permission missing
+    // from that list would leak to SUPER_ADMIN, so check the prefix as well.
+    for (const role of ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'REVIEWER'] as const) {
+      for (const p of ROLE_PERMISSIONS[role])
+        assert.equal(p.startsWith('candidate_'), false, `${role} ${p}`);
+    }
+    assert.equal(hasPermission('SUPER_ADMIN', 'candidate_session:key'), false);
+    // Every candidate_* permission belongs to CANDIDATE: one that is in PERMISSIONS but missing from
+    // CANDIDATE_PERMISSIONS would fall to SUPER_ADMIN through the subtraction.
+    for (const p of PERMISSIONS) {
+      if (p.startsWith('candidate_')) assert.equal(hasPermission('CANDIDATE', p), true, p);
+    }
+    for (const p of ROLE_PERMISSIONS.CANDIDATE) assert.equal(p.startsWith('candidate_'), true, p);
+    assert.equal(hasPermission('CANDIDATE', 'candidate_answer:draft'), true);
+    assert.equal(hasPermission('SUPER_ADMIN', 'candidate_answer:draft'), false);
+    assert.equal(hasPermission('CANDIDATE', 'candidate_session:heartbeat'), true);
     assert.equal(hasPermission('CANDIDATE', 'review_session:read'), false);
     assert.equal(hasPermission('CANDIDATE', 'candidate_events:write'), true);
   });

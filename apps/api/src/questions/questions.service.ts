@@ -14,7 +14,9 @@
 // always question row, then version row.
 //
 // Mutations write their audit row in the same transaction. Audit metadata names ids and changed
-// fields only, never content. `full` (see staff-view.ts) is decided once in the controller.
+// fields only, never content. `full` (see staff-view.ts) is decided once in the controller; the
+// write paths that answer a revision (update, test cases) are writer-only and always use the full
+// view, so they take no `full` and a future role change cannot expose a revision.
 import {
   BadRequestException,
   ConflictException,
@@ -22,15 +24,29 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { PrismaService } from '../database/prisma.service';
-import type { OrgScopedPrismaClient } from '../database/org-scope.extension';
 import { Prisma } from '../generated/prisma/client';
-import type { Question, QuestionVersion } from '../generated/prisma/client';
+import type { Question } from '../generated/prisma/client';
 import type { RequestContext } from '../common/request-context';
 import { InvalidAnswerSpecError, toCandidateQuestion } from './candidate-view';
 import type { CandidateQuestionView } from './candidate-view';
 import { computeRevision } from './revision';
+import {
+  audit,
+  checkRevision,
+  currentRevision,
+  latestVersion,
+  loadVariants,
+  lockDraft,
+  lockWritable,
+  noHistory,
+  NOT_FOUND,
+  requireQuestion,
+} from './question-tx';
+import type { Actor, Db } from './question-tx';
+import { aiReferenceProblems, minAssistantsFromSettings } from './ai-reference-rules';
+import { renderVariant, variantPublishProblems } from './variant-rules';
 import { checkLimits, limitsToStored, publishProblems, shapeProblems } from './question-content';
 import type { Limits } from './question-content';
 import { MAX_TEST_CASES } from './dto/questions.dto';
@@ -40,8 +56,10 @@ import type {
   QuestionListDto,
   QuestionListQueryDto,
   QuestionSummaryDto,
-  TestCaseDto,
-  TestCaseFieldsDto,
+  CreateTestCaseDto,
+  QuestionUpdateResultDto,
+  TestCaseMutationDto,
+  RevisionResultDto,
   UpdateQuestionDto,
   UpdateTestCaseDto,
 } from './dto/questions.dto';
@@ -54,18 +72,10 @@ import {
 } from './staff-view';
 import type { VersionRefRow } from './staff-view';
 
-export interface Actor {
-  id: string;
-  orgId: string;
-}
-
 /** The most rows a list can skip: deep offsets are refused (400), as in the staff user list. */
 export const MAX_LIST_OFFSET = 10_000;
 
-type Db = Pick<OrgScopedPrismaClient, 'question' | 'questionVersion' | 'testCase' | 'auditLog'>;
-
-const NOT_FOUND = 'Question not found.';
-const noHistory = { validatedAt: null, validationReport: Prisma.DbNull } as const;
+export type { Actor };
 
 function slugFromTitle(title: string): string {
   const base = title
@@ -153,7 +163,7 @@ export class QuestionsService {
     full: boolean,
   ): Promise<CandidateQuestionView> {
     const db = this.prisma.client;
-    const question = await this.requireQuestion(db, id);
+    const question = await requireQuestion(db, id);
     const row =
       version !== undefined
         ? await db.questionVersion.findFirst({
@@ -164,7 +174,7 @@ export class QuestionsService {
               where: { id: question.currentVersionId, questionId: id },
             })
           : full
-            ? await this.latestVersion(db, id)
+            ? await latestVersion(db, id)
             : null;
     if (!row) throw new NotFoundException(NOT_FOUND);
     const testCases = await db.testCase.findMany({
@@ -247,7 +257,7 @@ export class QuestionsService {
               })),
             });
           }
-          await this.audit(tx, actor, 'QUESTION_CREATED', question.id, ctx, {
+          await audit(tx, actor, 'QUESTION_CREATED', question.id, ctx, {
             type,
             version: 1,
             testCases: cases.length,
@@ -276,8 +286,7 @@ export class QuestionsService {
     id: string,
     dto: UpdateQuestionDto,
     ctx: RequestContext,
-    full: boolean,
-  ): Promise<QuestionDetailDto> {
+  ): Promise<QuestionUpdateResultDto> {
     const { tags, expectedRevision, ...rest } = dto;
     const contentFields = (Object.keys(rest) as (keyof typeof rest)[]).filter(
       (k) => rest[k] !== undefined,
@@ -285,17 +294,25 @@ export class QuestionsService {
     if (tags === undefined && contentFields.length === 0) {
       throw new BadRequestException('Send at least one field to change.');
     }
-    let forked: boolean;
     try {
-      forked = await this.prisma.client.$transaction(async (tx) => {
-        const question = await this.lockWritable(tx, id);
-        const head = await this.latestVersion(tx, id);
+      return await this.prisma.client.$transaction(async (tx) => {
+        // The answer is read inside the transaction, after the change, under the question lock:
+        // `revision` is the revision of the version this edit left (the new one after a fork).
+        const done = async (forked: boolean): Promise<QuestionUpdateResultDto> => {
+          // Writers only: always the full view, so version.revision is present (never a flag).
+          const detail = await this.detail(tx, id, undefined, true, forked);
+          const revision = detail.version.revision;
+          if (revision === undefined) throw new Error('The full version view carries a revision');
+          return { ...detail, revision };
+        };
+        const question = await lockWritable(tx, id);
+        const head = await latestVersion(tx, id);
         if (!head) throw new NotFoundException(NOT_FOUND);
-        await this.checkRevision(tx, head, expectedRevision);
+        await checkRevision(tx, head, expectedRevision);
         if (tags !== undefined) await tx.question.update({ where: { id }, data: { tags } });
         if (contentFields.length === 0) {
-          await this.audit(tx, actor, 'QUESTION_UPDATED', id, ctx, { fields: ['tags'] });
-          return false;
+          await audit(tx, actor, 'QUESTION_UPDATED', id, ctx, { fields: ['tags'] });
+          return done(false);
         }
         const merged = {
           title: rest.title ?? head.title,
@@ -311,6 +328,21 @@ export class QuestionsService {
           ...shapeProblems(question.type, merged),
           ...(rest.limits ? checkLimits(rest.limits) : []),
         ];
+        // Variants (FR-203): the edited statement, starter code and reference solution must still
+        // render for every ACTIVE variant, so a draft never holds an unrenderable active variant.
+        const variants = question.type === 'CODING' ? await loadVariants(tx, head.id) : [];
+        const rendered = new Map<string, string>();
+        if (
+          rest.statementMd !== undefined ||
+          rest.starterCode !== undefined ||
+          rest.referenceSolution !== undefined
+        ) {
+          for (const x of variants.filter((v) => v.isActive)) {
+            const r = renderVariant(merged, x);
+            if (r.ok) rendered.set(x.id, r.content.statementMd);
+            else problems.push(...r.problems);
+          }
+        }
         if (problems.length) throw new BadRequestException(problems);
         const fields = [...contentFields, ...(tags !== undefined ? (['tags'] as const) : [])];
         const data = {
@@ -332,11 +364,17 @@ export class QuestionsService {
             data: { ...data, ...noHistory },
           });
           if (count !== 1) throw new ConflictException('The version was published meanwhile.');
-          await this.audit(tx, actor, 'QUESTION_UPDATED', id, ctx, {
+          for (const [variantId, renderedStatement] of rendered) {
+            await tx.questionVariant.updateMany({
+              where: { id: variantId, questionVersionId: head.id },
+              data: { renderedStatement },
+            });
+          }
+          await audit(tx, actor, 'QUESTION_UPDATED', id, ctx, {
             version: head.version,
             fields,
           });
-          return false;
+          return done(false);
         }
         const next = await tx.questionVersion.create({
           data: { questionId: id, version: head.version + 1, ...data },
@@ -345,9 +383,12 @@ export class QuestionsService {
           where: { questionVersionId: head.id },
           orderBy: [{ position: 'asc' }, { id: 'asc' }],
         });
+        // The copies get explicit ids so variant overrides can be re-pointed at the new slots.
+        const slotIds = new Map(cases.map((t) => [t.id, randomUUID()]));
         if (cases.length) {
           await tx.testCase.createMany({
             data: cases.map((t) => ({
+              id: slotIds.get(t.id),
               questionVersionId: next.id,
               input: t.input,
               expectedOutput: t.expectedOutput,
@@ -357,12 +398,35 @@ export class QuestionsService {
             })),
           });
         }
-        await this.audit(tx, actor, 'QUESTION_VERSION_CREATED', id, ctx, {
+        // Variants and their overrides are part of the content and are copied (FR-204).
+        const variantIds = new Map(variants.map((x) => [x.id, randomUUID()]));
+        if (variants.length) {
+          await tx.questionVariant.createMany({
+            data: variants.map((x) => ({
+              id: variantIds.get(x.id),
+              questionVersionId: next.id,
+              params: x.params as Prisma.InputJsonValue,
+              renderedStatement: rendered.get(x.id) ?? x.renderedStatement,
+              isActive: x.isActive,
+            })),
+          });
+          const overrides = variants.flatMap((x) =>
+            x.testCaseOverrides.flatMap((o) => {
+              const variantId = variantIds.get(x.id);
+              const testCaseId = slotIds.get(o.testCaseId);
+              return variantId && testCaseId
+                ? [{ variantId, testCaseId, input: o.input, expectedOutput: o.expectedOutput }]
+                : [];
+            }),
+          );
+          if (overrides.length) await tx.variantTestCase.createMany({ data: overrides });
+        }
+        await audit(tx, actor, 'QUESTION_VERSION_CREATED', id, ctx, {
           version: next.version,
           fromVersion: head.version,
           fields,
         });
-        return true;
+        return done(true);
       });
     } catch (e) {
       if (isUniqueViolation(e)) {
@@ -370,7 +434,6 @@ export class QuestionsService {
       }
       throw e;
     }
-    return this.detail(this.prisma.client, id, undefined, full, forked);
   }
 
   // ---- publish and archive --------------------------------------------------------------------
@@ -388,10 +451,10 @@ export class QuestionsService {
     expectedRevision?: string,
   ): Promise<QuestionDetailDto> {
     await this.prisma.client.$transaction(async (tx) => {
-      const question = await this.lockWritable(tx, id);
-      const head = await this.latestVersion(tx, id);
+      const question = await lockWritable(tx, id);
+      const head = await latestVersion(tx, id);
       if (!head) throw new NotFoundException(NOT_FOUND);
-      await this.checkRevision(tx, head, expectedRevision);
+      await checkRevision(tx, head, expectedRevision);
       if (head.isPublished) {
         throw new ConflictException('There is no draft to publish; edit the question first.');
       }
@@ -404,15 +467,49 @@ export class QuestionsService {
       const fresh = await tx.questionVersion.findUnique({ where: { id: head.id } });
       if (!fresh) throw new NotFoundException(NOT_FOUND);
       const cases = await tx.testCase.findMany({ where: { questionVersionId: fresh.id } });
+      const variants = await loadVariants(tx, fresh.id);
       const problems = publishProblems(
         question.type,
         fresh,
-        computeRevision(fresh, cases),
+        computeRevision(fresh, cases, variants),
         cases.map((t) => ({ isHidden: t.isHidden, weight: Number(t.weight) })),
       );
+      // Every active variant must render cleanly and every override must name a slot of this
+      // version (ADR 0007 V-2, V-6); the stored rendered statements are refreshed from the very
+      // content being published.
+      const vp = variantPublishProblems(fresh, new Set(cases.map((t) => t.id)), variants);
+      problems.push(...vp.problems);
+      if (question.type === 'CODING') {
+        // ADR 0005 AI-5: current AI reference rows from enough distinct assistants per language.
+        // Read after the question lock, and every AI write takes that lock, so the count is exact.
+        const org = await tx.organization.findUnique({
+          where: { id: actor.orgId },
+          select: { settings: true },
+        });
+        const rows = await tx.aiReferenceSolution.findMany({
+          where: { questionVersionId: fresh.id, supersededAt: null },
+          select: { language: true, assistant: true },
+        });
+        problems.push(
+          ...aiReferenceProblems(
+            fresh.allowedLanguages,
+            rows,
+            minAssistantsFromSettings(org?.settings),
+          ),
+        );
+      }
       if (problems.length) throw new UnprocessableEntityException({ message: problems });
+      for (const x of variants) {
+        const statement = vp.rendered.get(x.id);
+        if (statement !== undefined && statement !== x.renderedStatement) {
+          await tx.questionVariant.updateMany({
+            where: { id: x.id, questionVersionId: fresh.id },
+            data: { renderedStatement: statement },
+          });
+        }
+      }
       await tx.question.update({ where: { id }, data: { currentVersionId: fresh.id } });
-      await this.audit(tx, actor, 'QUESTION_PUBLISHED', id, ctx, { version: fresh.version });
+      await audit(tx, actor, 'QUESTION_PUBLISHED', id, ctx, { version: fresh.version });
     });
     return this.detail(this.prisma.client, id, undefined, full, false);
   }
@@ -430,20 +527,13 @@ export class QuestionsService {
         data: { isArchived: archived },
       });
       if (count === 1) {
-        await this.audit(
-          tx,
-          actor,
-          archived ? 'QUESTION_ARCHIVED' : 'QUESTION_UNARCHIVED',
-          id,
-          ctx,
-          {},
-        );
+        await audit(tx, actor, archived ? 'QUESTION_ARCHIVED' : 'QUESTION_UNARCHIVED', id, ctx, {});
         return;
       }
-      await this.requireQuestion(tx, id);
+      await requireQuestion(tx, id);
     });
     const db = this.prisma.client;
-    const question = await this.requireQuestion(db, id);
+    const question = await requireQuestion(db, id);
     const versions = await db.questionVersion.findMany({
       where: { questionId: id },
       select: VERSION_REF_SELECT,
@@ -460,12 +550,12 @@ export class QuestionsService {
     actor: Actor,
     id: string,
     version: number,
-    dto: TestCaseFieldsDto,
+    dto: CreateTestCaseDto,
     ctx: RequestContext,
-    full: boolean,
-  ): Promise<TestCaseDto> {
+  ): Promise<TestCaseMutationDto> {
     return this.prisma.client.$transaction(async (tx) => {
-      const v = await this.lockDraft(tx, id, version);
+      const v = await lockDraft(tx, id, version);
+      await checkRevision(tx, v, dto.expectedRevision);
       const count = await tx.testCase.count({ where: { questionVersionId: v.id } });
       if (count >= MAX_TEST_CASES) {
         throw new UnprocessableEntityException(
@@ -490,12 +580,12 @@ export class QuestionsService {
           position,
         },
       });
-      await this.audit(tx, actor, 'QUESTION_TEST_CASE_ADDED', id, ctx, {
+      await audit(tx, actor, 'QUESTION_TEST_CASE_ADDED', id, ctx, {
         version,
         testCaseId: created.id,
         isHidden: created.isHidden,
       });
-      return toTestCaseDto(created, full);
+      return { ...toTestCaseDto(created, true), revision: await currentRevision(tx, v.id) };
     });
   }
 
@@ -506,14 +596,14 @@ export class QuestionsService {
     testCaseId: string,
     dto: UpdateTestCaseDto,
     ctx: RequestContext,
-    full: boolean,
-  ): Promise<TestCaseDto> {
+  ): Promise<TestCaseMutationDto> {
     const fields = (Object.keys(dto) as (keyof UpdateTestCaseDto)[]).filter(
-      (k) => dto[k] !== undefined,
+      (k) => k !== 'expectedRevision' && dto[k] !== undefined,
     );
     if (fields.length === 0) throw new BadRequestException('Send at least one field to change.');
     return this.prisma.client.$transaction(async (tx) => {
-      const v = await this.lockDraft(tx, id, version);
+      const v = await lockDraft(tx, id, version);
+      await checkRevision(tx, v, dto.expectedRevision);
       const { count } = await tx.testCase.updateMany({
         where: { id: testCaseId, questionVersionId: v.id },
         data: {
@@ -529,12 +619,12 @@ export class QuestionsService {
         where: { id: testCaseId, questionVersionId: v.id },
       });
       if (!row) throw new NotFoundException('Test case not found.');
-      await this.audit(tx, actor, 'QUESTION_TEST_CASE_UPDATED', id, ctx, {
+      await audit(tx, actor, 'QUESTION_TEST_CASE_UPDATED', id, ctx, {
         version,
         testCaseId,
         fields,
       });
-      return toTestCaseDto(row, full);
+      return { ...toTestCaseDto(row, true), revision: await currentRevision(tx, v.id) };
     });
   }
 
@@ -543,85 +633,22 @@ export class QuestionsService {
     id: string,
     version: number,
     testCaseId: string,
+    expectedRevision: string | undefined,
     ctx: RequestContext,
-  ): Promise<void> {
-    await this.prisma.client.$transaction(async (tx) => {
-      const v = await this.lockDraft(tx, id, version);
+  ): Promise<RevisionResultDto> {
+    return this.prisma.client.$transaction(async (tx) => {
+      const v = await lockDraft(tx, id, version);
+      await checkRevision(tx, v, expectedRevision);
       const { count } = await tx.testCase.deleteMany({
         where: { id: testCaseId, questionVersionId: v.id },
       });
       if (count !== 1) throw new NotFoundException('Test case not found.');
-      await this.audit(tx, actor, 'QUESTION_TEST_CASE_REMOVED', id, ctx, { version, testCaseId });
+      await audit(tx, actor, 'QUESTION_TEST_CASE_REMOVED', id, ctx, { version, testCaseId });
+      return { revision: await currentRevision(tx, v.id) };
     });
   }
 
   // ---- helpers --------------------------------------------------------------------------------
-
-  private async requireQuestion(db: Db, id: string): Promise<Question> {
-    const q = await db.question.findUnique({ where: { id } });
-    if (!q) throw new NotFoundException(NOT_FOUND);
-    return q;
-  }
-
-  /**
-   * Locks the question row for a mutation (see the header) and returns it. A missing or
-   * other-org id is 404 and an archived question is 409; both take the same statements whether
-   * the id is another org's or missing.
-   */
-  private async lockWritable(db: Db, id: string): Promise<Question> {
-    const { count } = await db.question.updateMany({
-      where: { id, isArchived: false },
-      data: { isArchived: false },
-    });
-    const q = await this.requireQuestion(db, id);
-    if (count !== 1) throw new ConflictException('The question is archived.');
-    return q;
-  }
-
-  /** Optimistic concurrency: a client that loaded an older revision must reload (409, no code). */
-  private async checkRevision(
-    db: Db,
-    head: QuestionVersion,
-    expected: string | undefined,
-  ): Promise<void> {
-    if (expected === undefined) return;
-    const cases = await db.testCase.findMany({ where: { questionVersionId: head.id } });
-    if (computeRevision(head, cases) !== expected) {
-      throw new ConflictException(
-        'The question changed since you loaded it; reload it and apply your edit again.',
-      );
-    }
-  }
-
-  private latestVersion(db: Db, questionId: string): Promise<QuestionVersion | null> {
-    return db.questionVersion.findFirst({ where: { questionId }, orderBy: { version: 'desc' } });
-  }
-
-  /**
-   * The draft version a test case change targets, locked and with its validation result cleared
-   * (a changed test set invalidates the last validation run). A published version is immutable: 409.
-   */
-  private async lockDraft(db: Db, id: string, version: number): Promise<{ id: string }> {
-    const question = await this.lockWritable(db, id);
-    const v = await db.questionVersion.findFirst({
-      where: { questionId: id, version },
-      select: { id: true },
-    });
-    if (!v) throw new NotFoundException(NOT_FOUND);
-    if (question.type !== 'CODING') {
-      throw new UnprocessableEntityException('Only coding questions have test cases.');
-    }
-    const { count } = await db.questionVersion.updateMany({
-      where: { id: v.id, isPublished: false },
-      data: noHistory,
-    });
-    if (count !== 1) {
-      throw new ConflictException(
-        'A published version is immutable; edit the question to create a new version.',
-      );
-    }
-    return v;
-  }
 
   private summary(
     q: Question,
@@ -654,7 +681,7 @@ export class QuestionsService {
     full: boolean,
     createdNewVersion: boolean,
   ): Promise<QuestionDetailDto> {
-    const question = await this.requireQuestion(db, id);
+    const question = await requireQuestion(db, id);
     // Without question:update only published versions exist (latest = the latest published).
     const versions = await db.questionVersion.findMany({
       where: { questionId: id, ...(full ? {} : { isPublished: true }) },
@@ -671,32 +698,14 @@ export class QuestionsService {
       where: { questionVersionId: chosen.id },
       orderBy: [{ position: 'asc' }, { id: 'asc' }],
     });
+    // Variants (params, overrides) are loaded for the full view only: a recruiter never receives
+    // them, not even from the database (ADR 0007 V-5).
+    const variants = full ? await loadVariants(db, chosen.id) : [];
     return {
       ...this.summary(question, versions, latest),
       versions: [...versions].reverse().map(toVersionRef),
-      version: full ? toFullVersion(chosen, cases) : toStaffReadVersion(chosen, cases),
+      version: full ? toFullVersion(chosen, cases, variants) : toStaffReadVersion(chosen, cases),
       createdNewVersion,
     };
-  }
-
-  private async audit(
-    tx: Db,
-    actor: Actor,
-    action: string,
-    entityId: string,
-    ctx: RequestContext,
-    metadata: Prisma.InputJsonObject,
-  ): Promise<void> {
-    await tx.auditLog.create({
-      data: {
-        orgId: actor.orgId,
-        actorId: actor.id,
-        action,
-        entityType: 'question',
-        entityId,
-        ip: ctx.ip ?? null,
-        metadata,
-      },
-    });
   }
 }

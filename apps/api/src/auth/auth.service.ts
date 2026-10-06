@@ -10,6 +10,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  BeforeApplicationShutdown,
   OnApplicationShutdown,
   ServiceUnavailableException,
   UnauthorizedException,
@@ -39,7 +40,8 @@ import { errorName } from '../common/request-context';
 import { ACCESS_TTL_SECONDS } from '../common/auth/access-ttl';
 import { TokenService } from '../common/auth/token.service';
 import { TokenValidityService } from '../common/auth/token-validity.service';
-import { CodedForbiddenException, reauthFailed } from '../common/coded.exception';
+import { CodedForbiddenException, disableRefused, reauthFailed } from '../common/coded.exception';
+import { hitWindowCounter } from '../common/redis-counter';
 import { PasswordService } from './password.service';
 import { TotpService } from './totp.service';
 
@@ -91,8 +93,13 @@ function isRetryable(e: unknown): boolean {
   return e instanceof BadRequestException || e instanceof ServiceUnavailableException;
 }
 
+/** How long shutdown waits for deferred reset and lock mail. */
+const SHUTDOWN_SETTLE_MS = 5_000;
+/** Second, catch-all settle in onApplicationShutdown. */
+const SHUTDOWN_CATCH_ALL_MS = 1_000;
+
 @Injectable()
-export class AuthService implements OnApplicationShutdown {
+export class AuthService implements BeforeApplicationShutdown, OnApplicationShutdown {
   private readonly webOrigin: string;
   private readonly logger = new Logger(AuthService.name);
   /** Deferred forgot-password work still running; awaited by tests and at shutdown. */
@@ -293,21 +300,23 @@ export class AuthService implements OnApplicationShutdown {
    * on the same reserve, equal-work and lockout path as login. A wrong password and a locked
    * account get the same generic 403 REAUTH_FAILED, so the lock state is never revealed. The reservation is
    * given back on success: the TOTP step reserves its own. Returns the user row whose password
-   * hash was verified, so the caller can bind its final write to that hash.
+   * hash was verified, so the caller can bind its final write to that hash. `refuse` builds the
+   * refusal (default REAUTH_FAILED); /2fa/disable passes its own fixed detail (FU-BE-58).
    */
   private async requireCurrentPassword(
     userId: string,
     password: string,
     ctx: RequestContext,
+    refuse: () => CodedForbiddenException = reauthFailed,
   ): Promise<UserWithOrg> {
     const user = await this.loadActive(userId);
-    if (!user.passwordHash) return this.rejectWithSameWork(password, ctx, reauthFailed);
+    if (!user.passwordHash) return this.rejectWithSameWork(password, ctx, refuse);
     if ((await this.reserveAttempt(user, ctx)) !== 'granted') {
-      return this.burnAndFail(password, ctx, reauthFailed);
+      return this.burnAndFail(password, ctx, refuse);
     }
     if (!(await this.passwords.verify(user.passwordHash, password))) {
       await this.registerFailure(user, ctx);
-      throw reauthFailed();
+      throw refuse();
     }
     await this.refundAttempt(user);
     return user;
@@ -357,23 +366,35 @@ export class AuthService implements OnApplicationShutdown {
   }
 
   /** Forced enrollment at login: public (the challenge is the credential), so it starts in system scope. */
-  startEnrollment(userId: string): Promise<TotpEnrollmentDto> {
+  startEnrollment(userId: string, challengePwv: string): Promise<TotpEnrollmentDto> {
     return this.orgContext.runSystem('AUTH_BOOTSTRAP', async () => {
       const user = await this.loadActive(userId);
-      return this.asUser(user, () => this.beginEnrollment(user));
+      return this.asUser(user, () => this.beginEnrollment(user, challengePwv));
     });
   }
 
-  private async beginEnrollment(user: UserWithOrg): Promise<TotpEnrollmentDto> {
+  private async beginEnrollment(
+    user: UserWithOrg,
+    challengePwv: string,
+  ): Promise<TotpEnrollmentDto> {
+    this.requireChallengePassword(user, challengePwv);
     if (user.totpEnabled) throw new ConflictException('Two-factor authentication is already on.');
+    const startHash = user.passwordHash ?? '';
     const enrollment = await this.totp.createEnrollment(user.email);
-    // Conditional write: an enroll/confirm that committed after the read above must not have its
-    // live secret replaced while totpEnabled stays true.
+    // Conditional write (FU-BE-86): the account must still be active, on the password the challenge
+    // was issued under (the pwv was checked against the row read above, and the hash is bound
+    // here), and not enrolled. A reset or deactivation after that read, or an enroll/confirm that
+    // committed after it, changes nothing.
     const stored = await this.prisma.client.user.updateMany({
-      where: { id: user.id, totpEnabled: false },
+      where: { id: user.id, isActive: true, passwordHash: startHash, totpEnabled: false },
       data: { totpSecretEnc: enrollment.encrypted },
     });
     if (stored.count !== 1) {
+      // Same split as startSetup, with the refusal the challenge routes give (confirm uses it for
+      // the same race): a changed password or a deactivation voids the challenge (401); TOTP
+      // turned on meanwhile is a plain 409.
+      const now = await this.prisma.client.user.findUnique({ where: { id: user.id } });
+      if (!now?.isActive || now.passwordHash !== user.passwordHash) throw this.challengeExpired();
       throw new ConflictException('Two-factor authentication is already on.');
     }
     return {
@@ -604,7 +625,13 @@ export class AuthService implements OnApplicationShutdown {
    * (shared reserve and lockout, 403 REAUTH_FAILED), then 409 when 2FA is off, then the TOTP code
    * on its own reservation (same lockout, replay-protected; a wrong or replayed code is the same
    * 403 REAUTH_FAILED body as a wrong password; a Redis outage is a 503 with the reservation
-   * given back), and only then the role refusal. The 409 before the code check tells someone who
+   * given back), and only then the role refusal. Every refusal on this route (wrong password,
+   * wrong or replayed code, locked account, password changed meanwhile) carries one fixed detail,
+   * 'The password or code is incorrect.' (FU-BE-58), so nothing says which factor was wrong and
+   * the user is not sent to retype a correct password. A code that already signed the user in
+   * (same 30 s step) is a replay: wait for the next code. A code reservation refused after the
+   * password passed skips verifyTotp and registerFailure (only someone who already proved the
+   * password can reach it). The 409 before the code check tells someone who
    * already holds the password only that 2FA is off, which the signed-in user can see anyway.
    * Roles that must use 2FA are refused (FR-102). One transaction clears secret, flag and
    * recovery hashes (users row first), then revokes every refresh-token family of the user,
@@ -619,13 +646,13 @@ export class AuthService implements OnApplicationShutdown {
     totpCode: string,
     ctx: RequestContext,
   ): Promise<void> {
-    const user = await this.requireCurrentPassword(userId, password, ctx);
+    const user = await this.requireCurrentPassword(userId, password, ctx, disableRefused);
     if (!user.totpEnabled) throw new ConflictException('Two-factor authentication is not on.');
     const secret = user.totpSecretEnc;
-    if ((await this.reserveAttempt(user, ctx)) !== 'granted') throw reauthFailed();
+    if ((await this.reserveAttempt(user, ctx)) !== 'granted') throw disableRefused();
     if (!secret || !(await this.verifyTotp(user, secret, totpCode))) {
       await this.registerFailure(user, ctx);
-      throw reauthFailed();
+      throw disableRefused();
     }
     // Both factors passed: the reservation is not a failed guess.
     await this.refundAttempt(user).catch(() => undefined);
@@ -641,7 +668,7 @@ export class AuthService implements OnApplicationShutdown {
         },
         data: { totpEnabled: false, totpSecretEnc: null, recoveryCodeHashes: [] },
       });
-      if (updated.count !== 1) await this.explainRefusedChange(tx, user, true);
+      if (updated.count !== 1) await this.explainRefusedChange(tx, user, true, disableRefused);
       const revoked = await tx.refreshToken.updateMany({
         where: { userId: user.id, revokedAt: null },
         data: { revokedAt: new Date() },
@@ -673,9 +700,14 @@ export class AuthService implements OnApplicationShutdown {
   }
 
   /** Why a bound write matched nothing: password changed (403 REAUTH_FAILED), or the 2FA state moved (409). */
-  private async explainRefusedChange(tx: Db, user: User, fromDisable: boolean): Promise<never> {
+  private async explainRefusedChange(
+    tx: Db,
+    user: User,
+    fromDisable: boolean,
+    refuse: () => CodedForbiddenException = reauthFailed,
+  ): Promise<never> {
     const now = await tx.user.findUnique({ where: { id: user.id } });
-    if (now?.passwordHash !== user.passwordHash) throw reauthFailed();
+    if (now?.passwordHash !== user.passwordHash) throw refuse();
     // The enforced-role refusal only applies to disable; a regenerate race is a plain 409.
     if (fromDisable && now && TOTP_REQUIRED_ROLES.includes(now.role))
       throw this.twoFactorRequiredForRole();
@@ -906,7 +938,9 @@ export class AuthService implements OnApplicationShutdown {
 
     // Everything that depends on the account happens after this method has returned, so the
     // response is the same for a real, pending, deactivated or unknown account (FU-BE-31).
-    this.defer(() => this.orgContext.runSystem('AUTH_BOOTSTRAP', () => this.deliverReset(email)));
+    this.defer('password-reset', () =>
+      this.orgContext.runSystem('AUTH_BOOTSTRAP', () => this.deliverReset(email)),
+    );
   }
 
   /** Waits for deferred work (tests and graceful shutdown). */
@@ -914,18 +948,51 @@ export class AuthService implements OnApplicationShutdown {
     while (this.deferred.size > 0) await Promise.allSettled([...this.deferred]);
   }
 
-  async onApplicationShutdown(): Promise<void> {
-    await this.settleDeferred();
+  /**
+   * Nest 11 order: onModuleDestroy, beforeApplicationShutdown, dispose() (the HTTP server closes),
+   * onApplicationShutdown. This hook gives deferred reset and lock mail up to 5 s to reach the
+   * email queue, which is still accepting at this point. Bounded so a stuck query cannot stall
+   * shutdown until SIGKILL; the deferred work is only mail, so giving up loses at most a reset or
+   * lock email.
+   */
+  async beforeApplicationShutdown(): Promise<void> {
+    await this.settleDeferredBounded(SHUTDOWN_SETTLE_MS);
   }
 
-  private defer(work: () => Promise<void>): void {
+  /**
+   * Catch-all for work deferred after the hook above but before dispose() closed the server. Short
+   * bound. It is not guaranteed to run before the email queue stops (hook order between providers
+   * is not defined), so such a mail can still be dropped; the queue logs the count then.
+   */
+  async onApplicationShutdown(): Promise<void> {
+    await this.settleDeferredBounded(SHUTDOWN_CATCH_ALL_MS);
+  }
+
+  /** Like settleDeferred, but gives up after timeoutMs and logs a fixed line (no payload). */
+  async settleDeferredBounded(timeoutMs: number): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = await Promise.race([
+      this.settleDeferred().then(() => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(true), timeoutMs);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (timedOut) {
+      this.logger.warn(
+        `Shutdown gave up waiting for ${this.deferred.size} deferred tasks after ${timeoutMs} ms`,
+      );
+    }
+  }
+
+  private defer(label: string, work: () => Promise<void>): void {
     const task: Promise<void> = new Promise<void>((resolve) => {
       setImmediate(() => {
         Promise.resolve()
           .then(work)
           .catch((e: unknown) => {
             // Name only: the error may carry an address, a token or a query value.
-            this.logger.error(`Deferred password-reset work failed (${errorName(e)})`);
+            this.logger.error(`Deferred ${label} work failed (${errorName(e)})`);
           })
           .finally(resolve);
       });
@@ -949,6 +1016,8 @@ export class AuthService implements OnApplicationShutdown {
       }),
     );
     const url = `${this.webOrigin}/admin/reset-password#token=${token}`;
+    // If the enqueue fails this throws (caught and logged by defer). The new token hash stays and
+    // has overwritten any earlier valid reset link: the user must ask again. No security impact.
     await this.mail.sendPasswordReset(user.email, url);
   }
 
@@ -1154,7 +1223,7 @@ export class AuthService implements OnApplicationShutdown {
   private async recordLock(user: User, ctx: RequestContext): Promise<void> {
     await this.audit(user, 'AUTH_ACCOUNT_LOCKED', ctx, { minutes: LOCKOUT_MINUTES });
     const { orgId, email, fullName } = user;
-    this.defer(() => this.alertAdmins(orgId, email, fullName));
+    this.defer('lock-alert', () => this.alertAdmins(orgId, email, fullName));
   }
 
   private alertAdmins(orgId: string, email: string, name: string): Promise<void> {
@@ -1300,9 +1369,8 @@ export class AuthService implements OnApplicationShutdown {
   private async hit(key: string): Promise<number | null> {
     try {
       await ensureConnected(this.redis);
-      const count = await this.redis.incr(key);
-      if (count === 1) await this.redis.expire(key, FORGOT_WINDOW_SECONDS);
-      return count;
+      // One atomic script: the TTL is set with the first hit, and repaired if a key lost it (FU-BE-64).
+      return (await hitWindowCounter(this.redis, key, FORGOT_WINDOW_SECONDS)).count;
     } catch {
       return null;
     }

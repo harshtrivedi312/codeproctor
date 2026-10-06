@@ -26,9 +26,12 @@ export type CandidatePermission = Extract<Permission, `candidate_${string}`>;
  * Candidate routes the matrix may list as plain 'public': the pre-JWT bootstrap routes that run
  * without CandidateSessionGuard (ADR 0013 section 5.10: invitation-link resolve, OTP send, OTP
  * verify). Any other /candidate/ key listed 'public' is a matrix problem.
- * TODO(FU-BE-90): fill in the three real keys when BE-07 defines them; empty until then.
  */
-export const CANDIDATE_BOOTSTRAP_ROUTES: readonly string[] = [];
+export const CANDIDATE_BOOTSTRAP_ROUTES: readonly string[] = [
+  'POST /candidate/session/link',
+  'POST /candidate/session/otp',
+  'POST /candidate/session/start',
+];
 
 /** A candidate route (pseudo-role CANDIDATE): @Public() to the staff guard plus @CandidateRoute(). */
 export interface CandidateAccess {
@@ -65,7 +68,21 @@ const questionRead = {
 } as const;
 const questionCreate = { roles: ['SUPER_ADMIN', 'AUTHOR'], permission: 'question:create' } as const;
 const questionUpdate = { roles: ['SUPER_ADMIN', 'AUTHOR'], permission: 'question:update' } as const;
+const questionValidate = {
+  roles: ['SUPER_ADMIN', 'AUTHOR'],
+  permission: 'question:validate',
+} as const;
+const aiRefRead = { roles: ['SUPER_ADMIN', 'AUTHOR'], permission: 'ai_reference:read' } as const;
+const aiRefCreate = {
+  roles: ['SUPER_ADMIN', 'AUTHOR'],
+  permission: 'ai_reference:create',
+} as const;
+const aiRefSupersede = {
+  roles: ['SUPER_ADMIN', 'AUTHOR'],
+  permission: 'ai_reference:supersede',
+} as const;
 const userManage = { roles: SUPER_ADMIN, permission: 'user:manage' } as const;
+const orgSettingsManage = { roles: SUPER_ADMIN, permission: 'org_settings:manage' } as const;
 const RECRUITER_ADMIN: readonly UserRole[] = ['SUPER_ADMIN', 'RECRUITER'];
 
 export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
@@ -75,6 +92,37 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   // page may have no session. Safe because it returns 204 with no body, touches no database or
   // Redis, logs only scrubbed fields, and has its own strict throttle and a 16 KB body limit.
   'POST /client-errors': 'public',
+
+  // Candidate session (BE-07, FR-106, FR-401; ADR 0013 section 5.10). The three pre-token routes
+  // are plain public; the rest sit behind CandidateSessionGuard.
+  'POST /candidate/session/link': 'public',
+  'POST /candidate/session/otp': 'public',
+  'POST /candidate/session/start': 'public',
+  'GET /candidate/session/consent': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_consent:read',
+  },
+  'POST /candidate/session/consent/sign': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_consent:sign',
+  },
+  'POST /candidate/session/consent/decline': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_consent:decline',
+  },
+  'GET /candidate/session': { principal: 'CANDIDATE', permission: 'candidate_session:read' },
+  'POST /candidate/session/test/start': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:start',
+  },
+  'POST /candidate/session/heartbeat': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:heartbeat',
+  },
+  'POST /candidate/session/proctor-key': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:key',
+  },
 
   // Authentication (FR-101, FR-102, FR-104, FR-107). Public: the credential is in the body.
   'POST /auth/login': 'public',
@@ -100,6 +148,11 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'PATCH /admin/users/:userId': userManage,
   'POST /admin/users/:userId/unlock': userManage,
 
+  // Organization settings (FR-103, ADR 0010 org_settings:manage; SUPER_ADMIN only, own org only).
+  // The PATCH needs the admin's currentPassword (step-up) and writes its audit row (ORG_SETTINGS_UPDATED) in the same transaction as the update.
+  'GET /admin/org-settings': orgSettingsManage,
+  'PATCH /admin/org-settings': orgSettingsManage,
+
   // Test templates (FR-301, FR-302; ADR 0010 section 3): SUPER_ADMIN and RECRUITER. No copy or
   // archive route yet (no schema support). Writes audit in their own transaction (tests.service.ts).
   'GET /tests': { roles: RECRUITER_ADMIN, permission: 'test:read' },
@@ -110,6 +163,7 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   // AUTHOR (ADR 0010 section 3). Publish, archive and test cases are changes: question:update.
   'GET /questions': questionRead,
   'POST /questions': questionCreate,
+  'GET /questions/ai-policy': aiRefRead,
   'GET /questions/:id': questionRead,
   'GET /questions/:id/preview': questionRead,
   'PATCH /questions/:id': questionUpdate,
@@ -119,4 +173,21 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'POST /questions/:id/versions/:version/test-cases': questionUpdate,
   'PATCH /questions/:id/versions/:version/test-cases/:testCaseId': questionUpdate,
   'DELETE /questions/:id/versions/:version/test-cases/:testCaseId': questionUpdate,
+  // Variants (FR-203, BE-04 slice 4b). Params and overrides are author data: question:update. The
+  // variant preview is the candidate-shaped view: question:read.
+  'GET /questions/:id/versions/:version/variants': questionUpdate,
+  'POST /questions/:id/versions/:version/variants': questionUpdate,
+  'GET /questions/:id/versions/:version/variants/:variantId/preview': questionRead,
+  'PATCH /questions/:id/versions/:version/variants/:variantId': questionUpdate,
+  'DELETE /questions/:id/versions/:version/variants/:variantId': questionUpdate,
+  'PUT /questions/:id/versions/:version/variants/:variantId/test-cases/:testCaseId': questionUpdate,
+  'DELETE /questions/:id/versions/:version/variants/:variantId/test-cases/:testCaseId':
+    questionUpdate,
+  // Reference validation (FR-203, BE-04 slice 4c): the report is author data, so the status read
+  // needs question:validate too. AI reference solutions (ADR 0005 AI-1) are never for recruiters.
+  'POST /questions/:id/validate': questionValidate,
+  'GET /questions/:id/validation': questionValidate,
+  'GET /questions/:id/versions/:version/ai-references': aiRefRead,
+  'POST /questions/:id/versions/:version/ai-references': aiRefCreate,
+  'POST /questions/:id/versions/:version/ai-references/:aiReferenceId/supersede': aiRefSupersede,
 };

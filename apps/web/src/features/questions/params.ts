@@ -1,10 +1,15 @@
 /*
  * Variant parameters (ADR 0007): each variant carries its own explicit values, a JSON object of
- * name to scalar. There is no declared parameter schema (DL-32); the only cross-check is that
- * every `{{name}}` placeholder the question uses has a value in each variant.
+ * name to scalar (string, number or boolean, the API's rule since BE-04b). There is no declared
+ * parameter schema; the only cross-check is that every `{{name}}` placeholder the question uses has
+ * a value in each variant.
  */
 
 export type Params = Record<string, unknown>;
+export type ParamValue = string | number | boolean;
+
+export const MAX_PARAM_KEYS = 50;
+export const MAX_PARAM_VALUE_LENGTH = 1000;
 
 /** Parses the text of a variant's parameters editor. Only a JSON object is accepted. */
 export function parseParams(
@@ -29,17 +34,26 @@ export function parseParams(
   return { ok: true, value: parsed as Params };
 }
 
-const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const NAME = /^[A-Za-z_][A-Za-z0-9_]{0,39}$/;
 
-/** Every value must be a string or a finite number, and every name a valid placeholder name. */
+/** The API's rules (variant-template.ts paramsProblems), as hints to fix. */
 export function checkParams(value: Params): string[] {
   const errors: string[] = [];
-  for (const [key, v] of Object.entries(value)) {
-    if (!NAME.test(key)) {
-      errors.push(`"${key}" is not a valid name. Use letters, digits and underscores.`);
+  const entries = Object.entries(value);
+  if (entries.length > MAX_PARAM_KEYS) errors.push(`Use at most ${MAX_PARAM_KEYS} parameters.`);
+  for (const [key, v] of entries) {
+    if (!NAME.test(key) || key.startsWith('__') || key === 'constructor' || key === 'prototype') {
+      errors.push(
+        `"${key}" is not a valid name. Use 1 to 40 letters, digits and underscores, not starting with a digit or two underscores.`,
+      );
     }
-    const scalar = typeof v === 'string' || (typeof v === 'number' && Number.isFinite(v));
-    if (!scalar) errors.push(`"${key}" must be a string or a number.`);
+    if (typeof v === 'string') {
+      if (v.length > MAX_PARAM_VALUE_LENGTH) {
+        errors.push(`"${key}" is too long: at most ${MAX_PARAM_VALUE_LENGTH} characters.`);
+      }
+    } else if (!(typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v)))) {
+      errors.push(`"${key}" must be a string, a number or true or false.`);
+    }
   }
   return errors;
 }
