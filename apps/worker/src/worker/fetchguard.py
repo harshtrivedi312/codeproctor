@@ -12,6 +12,7 @@ from __future__ import annotations
 import calendar
 import http.client
 import re
+import socket
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -22,8 +23,9 @@ FACE_MAX_URL_LIFETIME: Final = 60
 ANALYSIS_MAX_URL_LIFETIME: Final = 300
 CLOCK_SKEW_SECONDS: Final = 60
 MAX_URL_LENGTH: Final = 2048
-# One object must arrive within this, however slowly the store sends (the API gives up at 15-20 s).
-FACE_FETCH_DEADLINE: Final = 8.0
+# Time allowed for one object (the API gives up at 15-20 s). Hard once the body starts; the TLS
+# handshake, header parsing and DNS are bounded per socket call only (FU-INB-24).
+FACE_FETCH_DEADLINE: Final = 5.5  # two downloads must fit the API's 15 s with room to compute
 _AMZ_DATE: Final = re.compile(r"[0-9]{8}T[0-9]{6}Z")
 _EXPIRES: Final = re.compile(r"[0-9]{1,7}")
 _HOST: Final = re.compile(r"[A-Za-z0-9.-]{1,253}")
@@ -112,9 +114,9 @@ def validate_url(
         if (o.scheme, o.port) != (scheme, port):
             continue
         if host == o.host and parts.path.startswith(f"/{cfg.bucket}/"):
-            names_bucket = True  # path style
+            names_bucket = len(parts.path) > len(cfg.bucket) + 2  # path style: a key must follow
         elif host == f"{cfg.bucket}.{o.host}":
-            names_bucket = True  # virtual-hosted style
+            names_bucket = parts.path not in ("", "/")  # virtual-hosted: a key must follow
     if not names_bucket or _odd_path(parts.path):
         raise FetchError("URL_REFUSED")
     pairs = parse_qsl(parts.query, keep_blank_values=True)
@@ -145,10 +147,12 @@ class _Response(Protocol):
     status: int
 
     def getheader(self, name: str) -> str | None: ...
-    def read(self, n: int) -> bytes: ...
+    def read1(self, n: int) -> bytes: ...
+    def close(self) -> None: ...
 
 
 class _Connection(Protocol):
+    def set_timeout(self, seconds: float) -> None: ...
     def request(self, method: str, target: str, headers: dict[str, str]) -> None: ...
     def getresponse(self) -> _Response: ...
     def close(self) -> None: ...
@@ -158,13 +162,28 @@ ConnectionFactory = Callable[[str, str, int, float], _Connection]
 
 
 class _HttpConnection:
-    """The real connection: stdlib http.client, no proxy, no redirect handling."""
+    """The real connection: stdlib http.client, no proxy, no redirect handling.
+
+    `http.client` hands the socket to the response once the server says it will close the
+    connection, so the socket is kept here: timeouts must reach it for the whole download.
+    """
 
     def __init__(self, scheme: str, host: str, port: int, timeout: float) -> None:
         cls = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
         self._conn = cls(host, port, timeout=timeout)
+        self._sock: socket.socket | None = None
+
+    def set_timeout(self, seconds: float) -> None:
+        self._conn.timeout = seconds
+        if self._sock is not None:
+            try:
+                self._sock.settimeout(seconds)
+            except OSError:
+                pass  # the response already read everything and closed the socket
 
     def request(self, method: str, target: str, headers: dict[str, str]) -> None:
+        self._conn.connect()
+        self._sock = self._conn.sock
         self._conn.request(method, target, headers=headers)
 
     def getresponse(self) -> _Response:
@@ -172,6 +191,8 @@ class _HttpConnection:
 
     def close(self) -> None:
         self._conn.close()
+        if self._sock is not None:
+            self._sock.close()  # the response may have taken ownership of the socket
 
 
 def _default_connection(scheme: str, host: str, port: int, timeout: float) -> _Connection:
@@ -194,9 +215,19 @@ def fetch(
     host, port, target = validate_url(url, cfg, max_lifetime, now)
     scheme = urlsplit(url).scheme
     deadline = monotonic() + total_timeout
-    conn = connection(scheme, host, port, timeout)
+
+    def remaining() -> float:
+        left = deadline - monotonic()
+        if left <= 0:  # a slow sender must not hold a worker slot past the deadline
+            raise FetchError("MEDIA_UNAVAILABLE")
+        return min(timeout, left)
+
+    conn = connection(scheme, host, port, min(timeout, total_timeout))
+    resp: _Response | None = None
     try:
+        conn.set_timeout(remaining())
         conn.request("GET", target, headers={"Accept-Encoding": "identity"})
+        conn.set_timeout(remaining())
         resp = conn.getresponse()
         if resp.status != 200:  # 3xx included: redirects are not followed
             raise FetchError("MEDIA_UNAVAILABLE")
@@ -207,9 +238,8 @@ def fetch(
         chunks: list[bytes] = []
         size = 0
         while True:
-            if monotonic() > deadline:  # a slow sender must not hold a worker slot
-                raise FetchError("MEDIA_UNAVAILABLE")
-            chunk = resp.read(64 * 1024)
+            conn.set_timeout(remaining())  # each recv gets only what is left of the deadline
+            chunk = resp.read1(64 * 1024)  # at most one recv, so the deadline is checked often
             if not chunk:
                 break
             size += len(chunk)
@@ -222,4 +252,6 @@ def fetch(
     except (OSError, http.client.HTTPException):
         raise FetchError("MEDIA_UNAVAILABLE") from None
     finally:
+        if resp is not None:
+            resp.close()
         conn.close()

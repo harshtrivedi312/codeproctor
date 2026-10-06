@@ -40,7 +40,9 @@ MODELS_DIR: Final = Path("~/.cache/codeproctor/models").expanduser()
 UNSCORED_GENUINE: Final = -1.0
 MAX_IMAGE_FILE_BYTES: Final = 10 * 1024 * 1024
 _COLUMNS: Final = {"subject", "kind", "reference", "probe"}
-_SUBJECT: Final = re.compile(r"[A-Za-z0-9-]{1,64}")  # no leading "=", "+", "@": spreadsheet-safe
+_SUBJECT: Final = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9-]{0,63}"
+)  # no leading = + @ -: spreadsheet-safe
 
 
 class ScoringError(Exception):
@@ -60,10 +62,10 @@ class ScoringSummary:
     scored: int
     genuine_unscored: int  # stored as -1.0 (they would go to manual review)
     impostor_unscored: int  # left out of the FMR
-    unreadable: int  # image files that could not be read at all (counted among the unscored)
+    unreadable: int  # pairs with an image file that could not be read: status `missing`
 
 
-Row = tuple[str, str, float | None, bool]  # subject, kind, score (None: none), unscored?
+Row = tuple[str, str, float | None, str]  # subject, kind, score (None: none), status
 
 
 def load_manifest(path: Path, *, allow_outside: bool = False) -> list[PairSpec]:
@@ -76,6 +78,8 @@ def load_manifest(path: Path, *, allow_outside: bool = False) -> list[PairSpec]:
         if set(reader.fieldnames or ()) != _COLUMNS:
             raise ScoringError("manifest columns must be exactly: subject,kind,reference,probe")
         for row in reader:
+            if any(row.get(c) is None for c in _COLUMNS):  # a short row
+                raise ScoringError("each row needs all four columns")
             subject = (row["subject"] or "").strip()
             if not _SUBJECT.fullmatch(subject) or row["kind"] not in ("genuine", "impostor"):
                 raise ScoringError(
@@ -93,9 +97,15 @@ def load_manifest(path: Path, *, allow_outside: bool = False) -> list[PairSpec]:
 
 
 def _read_image(path: Path) -> bytes:
-    if path.stat().st_size > MAX_IMAGE_FILE_BYTES:  # before reading a huge file into memory
+    """Plain files only, never following a link, never blocking on a FIFO, capped in size."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise OSError("not a regular file")
+        data = fh.read(MAX_IMAGE_FILE_BYTES + 1)  # a file that grows cannot get past the cap
+    if len(data) > MAX_IMAGE_FILE_BYTES:
         raise OSError("too large")
-    return path.read_bytes()
+    return data
 
 
 def score_pairs(
@@ -106,26 +116,29 @@ def score_pairs(
     for spec in specs:
         score: float | None = None
         try:
-            result = matcher.match(
-                _read_image(spec.reference),
-                _read_image(spec.probe),
-                liveness_confirmed=True,  # a client signal, not part of tuning (see the report)
-            )
-            if result.reason in (None, ReviewReason.BELOW_THRESHOLD):
-                score = result.score
-        except OSError:
-            unreadable += 1  # the message never carries the path
+            reference, probe = _read_image(spec.reference), _read_image(spec.probe)
+        except OSError:  # the message never carries the path
+            unreadable += 1
+            rows.append((spec.subject, spec.kind, None, "missing"))
+            continue
+        result = matcher.match(
+            reference,
+            probe,
+            liveness_confirmed=True,  # a client signal, not part of tuning (see the report)
+        )
+        if result.reason in (None, ReviewReason.BELOW_THRESHOLD):
+            score = result.score
         if spec.kind == "genuine":
             if score is None:
                 genuine_unscored += 1
             value = UNSCORED_GENUINE if score is None else score
-            rows.append((spec.subject, "genuine", value, score is None))
+            rows.append((spec.subject, "genuine", value, "unscored" if score is None else "scored"))
         elif score is None:
             impostor_unscored += 1
-            rows.append((spec.subject, "impostor", None, True))
+            rows.append((spec.subject, "impostor", None, "unscored"))
         else:
-            rows.append((spec.subject, "impostor", score, False))
-    scored = len(rows) - genuine_unscored - impostor_unscored
+            rows.append((spec.subject, "impostor", score, "scored"))
+    scored = len(rows) - genuine_unscored - impostor_unscored - unreadable
     return rows, ScoringSummary(scored, genuine_unscored, impostor_unscored, unreadable)
 
 
@@ -140,8 +153,9 @@ def write_scores(path: Path, rows: Sequence[Row]) -> None:
     except OSError:
         raise ScoringError("the scores file cannot be written") from None
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ScoringError("the scores file must be a plain file")
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:  # a hard link would change both
+            raise ScoringError("the scores file must be a plain file with one name")
         os.fchmod(fd, 0o600)
         os.ftruncate(fd, 0)
         fh = os.fdopen(fd, "w", newline="", encoding="utf-8")
@@ -151,9 +165,9 @@ def write_scores(path: Path, rows: Sequence[Row]) -> None:
     with fh:
         writer = csv.writer(fh)
         writer.writerow(["subject", "kind", "score", "status"])
-        for subject, kind, score, unscored in rows:
+        for subject, kind, score, status in rows:
             shown = "" if score is None else f"{score:.6f}"
-            writer.writerow([subject, kind, shown, "unscored" if unscored else "scored"])
+            writer.writerow([subject, kind, shown, status])
 
 
 def check_model_location(environ: Mapping[str, str] | None = None) -> None:
