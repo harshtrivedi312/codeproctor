@@ -94,8 +94,8 @@ for (const code of ['P2028', 'P2034']) {
 }
 
 describe('ProblemFilter database lock contention (DL-37, FU-BE-42, NFR-04)', () => {
-  let warn: jest.SpyInstance;
-  let error: jest.SpyInstance;
+  let warn: jest.SpyInstance<void, unknown[]>;
+  let error: jest.SpyInstance<void, unknown[]>;
   beforeEach(() => {
     warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);

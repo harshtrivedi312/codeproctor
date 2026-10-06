@@ -89,9 +89,10 @@ describe('lock contention through the app (DL-37, FU-BE-42)', () => {
           expect(res.status).toBe(503);
           expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
           expect(res.headers['content-type']).toContain('application/problem+json');
-          expect(res.body.detail).toBe('The service is busy; retry shortly.');
-          expect(res.body.code).toBeUndefined();
-          expect(JSON.stringify(res.body)).not.toMatch(/users|FOR UPDATE|55P03|lock_timeout/);
+          const body = res.body as Record<string, unknown>;
+          expect(body.detail).toBe('The service is busy; retry shortly.');
+          expect(body.code).toBeUndefined();
+          expect(JSON.stringify(body)).not.toMatch(/users|FOR UPDATE|55P03|lock_timeout/);
         },
         { timeout: 20000 },
       );
