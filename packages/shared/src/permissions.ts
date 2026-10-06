@@ -50,7 +50,7 @@ export const PERMISSIONS = [
   'candidate_keystrokes:write', // POST /candidate/session/keystrokes
   'candidate_answer:run', // POST /candidate/answers/:questionId/run
   'candidate_answer:submit', // POST /candidate/answers/:questionId/submit
-  'candidate_section:finish', // POST /candidate/session/section/finish (enqueue-only close of the open section; ADR 0013 5.11, ADR 0002 S-4, P-25)
+  'candidate_section:finish', // POST /candidate/session/section/finish with the section `position` in the body, which must be the open one (enqueue-only close; ADR 0013 5.11, ADR 0002 S-4, P-25)
   'candidate_answer:draft', // PUT /candidate/answers/:questionId/draft (code, MCQ and short-answer autosave; ADR 0013 5.11)
   'candidate_session:finish', // POST /candidate/session/finish
   'candidate_session:read', // GET /candidate/session (ADR 0013)
