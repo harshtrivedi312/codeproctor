@@ -21,13 +21,14 @@ export const ERASURE_RESERVED_ACTIONS = {
   COMPLETED: 'ERASURE_COMPLETED',
   /** A super admin recorded that the candidate was told by hand: gates anonymisation. */
   NOTICE_RECORDED: 'ERASURE_NOTICE_RECORDED',
+  /** The fence time of a session: completion waits for it plus the settle window. */
+  FENCED: 'ERASURE_SESSION_FENCED',
 } as const;
 
 /** Non-reserved audit actions of the erasure run (ids and the request id only). */
 export const ERASURE_AUDIT_ACTIONS = {
   SESSION_PURGED: 'ERASURE_SESSION_PURGED',
   DELAY_NOTIFIED: 'ERASURE_DELAY_NOTIFIED',
-  FENCED: 'ERASURE_SESSION_FENCED',
   ALERT_RAISED: 'ERASURE_ALERT_RAISED',
   REQUESTED: 'ERASURE_REQUESTED',
 } as const;

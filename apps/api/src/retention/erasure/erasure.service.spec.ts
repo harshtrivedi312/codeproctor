@@ -97,7 +97,7 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
     const alerts = new FakeAlert();
     const repo = new ErasureRepository(b.prisma, b.orgContext, b.repo);
     const svc = new ErasureService(repo, h.store, fence, scheduler, notices, alerts, b.config);
-    return { svc, fence, scheduler, notices, alerts };
+    return { svc, repo, fence, scheduler, notices, alerts };
   }
   const candidateOf = (t: typeof h.A): Promise<string> =>
     Promise.resolve((t.rows.Candidate.unique as { id: string }).id);
@@ -117,7 +117,7 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
     });
     // Completion waits for fence + 60 s + the sweep margin (a late upload must be caught first).
     expect(r.status).toBe('inProgress');
-    expect(scheduler.jobs).toHaveLength(1);
+    expect(scheduler.jobs.length).toBeGreaterThanOrEqual(1);
     expect(notices.completed).toBe(0);
     expect(await completedRows(cid)).toHaveLength(0);
     expect((await svc.run(h.A.orgId, cid, at(SETTLED))).status).toBe('completed');
@@ -343,11 +343,15 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
       where: { id: cid },
       data: { erasureRequestedAt: daysAgo(1) },
     });
-    const { svc } = service();
+    const { svc, repo } = service();
     await svc.runDue(NOW);
     const r = await svc.runDue(at(SETTLED));
     expect(r.failed).toBe(0);
     expect(await completedRows(cid)).toHaveLength(1);
+    // A completed and anonymised candidate is not listed again.
+    await h.owner.candidate.update({ where: { id: cid }, data: { erasedAt: NOW } });
+    const listed = await repo.findRequested(1000);
+    expect(listed.map((c) => c.candidateId)).not.toContain(cid);
     expect(requestIdOf(cid, daysAgo(1))).toContain(cid);
   });
   it('TC-094 #11 C-06: a late upload after the first run is deleted before completion; a lost re-run cannot complete early', async () => {
@@ -369,10 +373,12 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
     await setup(h.A, { submittedDaysAgo: 3, anchorDaysAgo: 3 });
     const cid = await candidateOf(h.A);
     const { svc, scheduler } = service();
+    const working = scheduler.scheduleRerun.bind(scheduler);
     scheduler.scheduleRerun = () => Promise.reject(new Error('queue down'));
     await expect(
       svc.requestErasure({ orgId: h.A.orgId, candidateId: cid, actorId: ACTOR(), now: NOW }),
     ).rejects.toThrow();
+    scheduler.scheduleRerun = working;
     expect((await svc.run(h.A.orgId, cid, at(30_000))).status).toBe('inProgress');
     expect((await svc.run(h.A.orgId, cid, at(SETTLED))).status).toBe('completed');
   });
@@ -468,5 +474,41 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
       svc.requestErasure({ orgId: h.A.orgId, candidateId: cid, actorId: ACTOR(), now: NOW }),
     ).rejects.toThrow(/not configured/);
     expect(h.store.keys.has(keys(h.A).media)).toBe(true);
+  });
+  it('TC-094 #17 C-06: a fence late in a long sweep is stamped with the real time, so completion still waits the settle window', async () => {
+    await setup(h.A, { submittedDaysAgo: 3, anchorDaysAgo: 3 });
+    const sid = sessionIdOf(h.A);
+    const cid = await candidateOf(h.A);
+    await h.owner.candidate.update({ where: { id: cid }, data: { erasureRequestedAt: NOW } });
+    const { svc, scheduler } = service();
+    let t = 0;
+    svc.clock = () => (t += 100_000);
+    await svc.runDue(NOW);
+    const row = await h.owner.auditLog.findFirstOrThrow({
+      where: { entityId: sid, action: 'ERASURE_SESSION_FENCED' },
+    });
+    const fencedAt = new Date((row.metadata as { fencedAt: string }).fencedAt);
+    expect(fencedAt.getTime()).toBeGreaterThanOrEqual(NOW.getTime() + 100_000);
+    expect(scheduler.jobs.map((d) => d.getTime())).toContain(fencedAt.getTime() + 90_000);
+  });
+
+  it('TC-094 #18 C-06: a prefix that never verifies still anonymises on day 28 and keeps being retried until it verifies', async () => {
+    await setup(h.A, { submittedDaysAgo: 3, anchorDaysAgo: 3 });
+    const cid = await candidateOf(h.A);
+    h.store.failDeleteFor.add(keys(h.A).media);
+    const { svc, repo } = service();
+    const listedIds = async () => (await repo.findRequested(1000)).map((c) => c.candidateId);
+    await svc.requestErasure({ orgId: h.A.orgId, candidateId: cid, actorId: ACTOR(), now: NOW });
+    await svc.runDue(at(28 * 86_400_000));
+    expect(
+      (await h.owner.candidate.findUniqueOrThrow({ where: { id: cid } })).erasedAt,
+    ).not.toBeNull();
+    await svc.runDue(at(29 * 86_400_000));
+    expect(await listedIds()).toContain(cid);
+    expect(await completedRows(cid)).toHaveLength(0);
+    h.store.failDeleteFor.clear();
+    await svc.runDue(at(30 * 86_400_000));
+    expect(await completedRows(cid)).toHaveLength(1);
+    expect(await listedIds()).not.toContain(cid);
   });
 });

@@ -16,6 +16,7 @@ import {
   SESSION_ENTITY_TYPE,
 } from '../retention.constants';
 import { RetentionRepository } from '../retention.repository';
+import type { Tx } from '../retention.repository';
 
 export interface RequestedErasure {
   readonly candidateId: string;
@@ -196,14 +197,12 @@ export class ErasureRepository {
   }
 
   /** Has this once-only ids-only audit row (delay notified, alert raised) been written for the request and `since`? */
-  async onceDone(args: {
-    candidateId: string;
-    requestId: string;
-    action: string;
-    since?: string;
-  }): Promise<boolean> {
+  async onceDone(
+    args: { candidateId: string; requestId: string; action: string; since?: string },
+    db: Pick<Tx, 'auditLog'> = this.prisma.client,
+  ): Promise<boolean> {
     const { candidateId, requestId, action, since } = args;
-    const row = await this.prisma.client.auditLog.findFirst({
+    const row = await db.auditLog.findFirst({
       where: {
         action,
         entityId: candidateId,
@@ -229,7 +228,7 @@ export class ErasureRepository {
     const { orgId, candidateId, requestId, action, since, actorId = null } = args;
     await this.prisma.client.$transaction(async (tx) => {
       await this.retentionRepo.candidateLock(tx, candidateId);
-      if (await this.onceDone({ candidateId, requestId, action, since })) return;
+      if (await this.onceDone({ candidateId, requestId, action, since }, tx)) return;
       await tx.auditLog.create({
         data: {
           orgId,
@@ -270,7 +269,7 @@ export class ErasureRepository {
       await this.retentionRepo.candidateLock(tx, candidateId);
       const existing = await tx.auditLog.findFirst({
         where: {
-          action: ERASURE_AUDIT_ACTIONS.FENCED,
+          action: ERASURE_RESERVED_ACTIONS.FENCED,
           entityId: sessionId,
           entityType: SESSION_ENTITY_TYPE,
         },
@@ -283,7 +282,7 @@ export class ErasureRepository {
         data: {
           orgId,
           actorId: null,
-          action: ERASURE_AUDIT_ACTIONS.FENCED,
+          action: ERASURE_RESERVED_ACTIONS.FENCED,
           entityType: SESSION_ENTITY_TYPE,
           entityId: sessionId,
           metadata: { requestId, fencedAt: now.toISOString() },

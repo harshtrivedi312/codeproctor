@@ -38,6 +38,8 @@ export interface ErasureRunResult {
 @Injectable()
 export class ErasureService {
   private readonly log = new Logger(ErasureService.name);
+  /** Wall clock in ms. Run times are `now` plus the time elapsed since the run (or sweep) began, so a fence late in a long sweep is not stamped early. Tests replace it. */
+  clock: () => number = () => Date.now();
 
   constructor(
     private readonly repo: ErasureRepository,
@@ -85,6 +87,7 @@ export class ErasureService {
 
   /** The daily sweep: every candidate with an open request, one run each; one failure never stops the rest. */
   async runDue(now: Date = new Date()): Promise<{ candidates: number; failed: number }> {
+    const sweepStart = this.clock();
     let candidates = 0;
     let failed = 0;
     let after: string | undefined;
@@ -94,7 +97,7 @@ export class ErasureService {
       for (const { orgId, candidateId } of page) {
         candidates += 1;
         try {
-          await this.run(orgId, candidateId, now);
+          await this.run(orgId, candidateId, new Date(now.getTime() + (this.clock() - sweepStart)));
         } catch (error) {
           failed += 1;
           const name = error instanceof Error ? error.name : 'unknown';
@@ -112,6 +115,8 @@ export class ErasureService {
     if (candidate === null) return { status: 'notFound' };
     if (candidate.erasureRequestedAt === null) return { status: 'notRequested' };
     const requestedAt = candidate.erasureRequestedAt;
+    const runStart = this.clock();
+    const current = (): Date => new Date(now.getTime() + (this.clock() - runStart));
     const requestId = requestIdOf(candidateId, requestedAt);
     const inOrg = <T>(fn: () => Promise<T>): Promise<T> => this.repo.inOrg(orgId, fn);
 
@@ -135,7 +140,7 @@ export class ErasureService {
       if (result === 'fenced') {
         // Record the fence time first: completion waits for it, even if the next call fails.
         const fencedAt = await inOrg(() =>
-          this.repo.fenceTime({ orgId, candidateId, sessionId: s.id, requestId, now }),
+          this.repo.fenceTime({ orgId, candidateId, sessionId: s.id, requestId, now: current() }),
         );
         await this.scheduler.scheduleRerun({
           orgId,
@@ -161,14 +166,30 @@ export class ErasureService {
     for (const s of fresh) {
       if (s.status !== 'ERASED') continue;
       const fencedAt = await inOrg(() =>
-        this.repo.fenceTime({ orgId, candidateId, sessionId: s.id, requestId, now }),
+        this.repo.fenceTime({ orgId, candidateId, sessionId: s.id, requestId, now: current() }),
       );
-      if (now.getTime() < fencedAt.getTime() + SETTLE_MS) settled = false;
+      if (current().getTime() < fencedAt.getTime() + SETTLE_MS) {
+        settled = false;
+        // Idempotent by request and fence time: a lost or failed first scheduling is repaired here.
+        await this.scheduler.scheduleRerun({
+          orgId,
+          candidateId,
+          requestId,
+          fencedAt,
+          runAt: new Date(fencedAt.getTime() + SETTLE_MS),
+        });
+      }
       const deleted = await deleteVerified(this.store, [sessionPrefix(orgId, s.id)]);
       if (!deleted.verified) {
         allClean = false;
         this.log.warn(`erasure prefix not verified for session ${s.id}`);
-        await this.alertUnverified({ orgId, candidateId, requestId, since: fencedAt, now });
+        await this.alertUnverified({
+          orgId,
+          candidateId,
+          requestId,
+          since: fencedAt,
+          now: current(),
+        });
         continue;
       }
       const purged = await inOrg(() =>
@@ -192,9 +213,6 @@ export class ErasureService {
     }
     const sent = await inOrg(() => this.repo.emailSent(requestId, candidateId));
     const noticed = await inOrg(() => this.repo.noticeRecorded(requestId, candidateId));
-    if (completed && !sent && !noticed && candidate.erasedAt === null) {
-      await this.notices.enqueueCompleted({ orgId, candidateId, requestId });
-    }
 
     // The C-06 deadline (day 25 alert, day 28 anonymisation) does not run while a hold is open: it
     // counts from the request or the close of the last review or appeal, whichever is later.
@@ -202,7 +220,7 @@ export class ErasureService {
     if (!heldAny) {
       const closed = await inOrg(() => this.repo.holdClosedAt(candidateId));
       const since = closed !== null && closed > requestedAt ? closed : requestedAt;
-      const ageDays = (now.getTime() - since.getTime()) / DAY_MS;
+      const ageDays = (current().getTime() - since.getTime()) / DAY_MS;
       if (!sent && !noticed && ageDays >= ERASURE_ALERT_DAY) {
         const key = {
           candidateId,
@@ -222,9 +240,13 @@ export class ErasureService {
       }
       if (!anonymised && (sent || noticed || ageDays >= ERASURE_ANONYMISE_DAY)) {
         anonymised = await inOrg(() =>
-          this.repo.anonymiseCandidate({ orgId, candidateId, requestId, now }),
+          this.repo.anonymiseCandidate({ orgId, candidateId, requestId, now: current() }),
         );
       }
+    }
+    // After the day-28 check: an already anonymised candidate gets no mail (ADR 0004 9.5 step 8).
+    if (completed && !sent && !noticed && !anonymised) {
+      await this.notices.enqueueCompleted({ orgId, candidateId, requestId });
     }
     if (completed) return { status: 'completed', requestId, anonymised };
     return { status: heldAny ? 'held' : 'inProgress', requestId, anonymised };
