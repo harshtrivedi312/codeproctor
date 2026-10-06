@@ -1,18 +1,18 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsInt, IsObject, Max, Min, ValidateIf, ValidateNested } from 'class-validator';
+import { MAX_MIN_ASSISTANTS } from '../../questions/ai-reference-rules';
 
 // The global ValidationPipe (whitelist + forbidNonWhitelisted) rejects unknown keys at every level.
 // IsOptional would also accept an explicit null, so absence is tested with ValidateIf instead:
 // only undefined skips a field, null reaches IsInt / IsObject and is refused.
-export const MIN_ASSISTANTS_MAX = 5;
 
 export class AiReferenceSettingsPatchDto {
-  @ApiPropertyOptional({ type: 'integer', minimum: 0, maximum: MIN_ASSISTANTS_MAX })
+  @ApiPropertyOptional({ type: 'integer', minimum: 0, maximum: MAX_MIN_ASSISTANTS })
   @ValidateIf((_o, v) => v !== undefined)
   @IsInt()
   @Min(0)
-  @Max(MIN_ASSISTANTS_MAX)
+  @Max(MAX_MIN_ASSISTANTS)
   minAssistants?: number;
 }
 
@@ -26,7 +26,7 @@ export class UpdateOrgSettingsDto {
 }
 
 export class AiReferenceSettingsViewDto {
-  @ApiProperty({ minimum: 0, maximum: 10, description: 'The effective value.' })
+  @ApiProperty({ minimum: 0, maximum: MAX_MIN_ASSISTANTS, description: 'The effective value.' })
   minAssistants!: number;
 
   @ApiProperty({ description: 'true when no valid value is stored and the default applies.' })

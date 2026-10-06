@@ -13,7 +13,7 @@ describe('FR-202 AI reference publish gate (ADR 0005 AI-5)', () => {
     expect(minAssistantsFromSettings(null)).toBe(2);
     expect(minAssistantsFromSettings({ aiReferences: { minAssistants: 0 } })).toBe(0);
     expect(minAssistantsFromSettings({ aiReferences: { minAssistants: 3 } })).toBe(3);
-    for (const bad of [-1, 1.5, '2', 11, null, {}]) {
+    for (const bad of [-1, 1.5, '2', 6, 10, 11, 1e21, '3', [], true, null, {}]) {
       expect(minAssistantsFromSettings({ aiReferences: { minAssistants: bad } })).toBe(2);
     }
   });

@@ -3,7 +3,8 @@ import { AI_REFERENCE_LANGUAGES } from '@codeproctor/shared';
 
 /** Default of `aiReferences.minAssistants` (ADR 0005 D-20). */
 export const DEFAULT_MIN_ASSISTANTS = 2;
-const MAX_MIN_ASSISTANTS = 5;
+/** Largest stored or accepted aiReferences.minAssistants (the PATCH bound and the reader bound). */
+export const MAX_MIN_ASSISTANTS = 5;
 
 /**
  * The stored organizations.settings.aiReferences.minAssistants when it is an integer from 0 to 5,

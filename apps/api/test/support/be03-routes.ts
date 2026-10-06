@@ -99,7 +99,7 @@ export function loadBackendRegistry(): RegistryApi {
 }
 
 /**
- * Registry routes that QA covers in other files (tc-003: re-auth and 2FA routes). Every other
+ * Registry routes that QA covers in other files (tc-003: re-auth and 2FA routes; org settings: apps/api/src/org-settings/org-settings.e2e-spec.ts). Every other
  * non-public route in the registry must be in BE03_ROUTES, or the matrix test fails.
  */
 export const COVERED_ELSEWHERE: Readonly<Record<string, string>> = {

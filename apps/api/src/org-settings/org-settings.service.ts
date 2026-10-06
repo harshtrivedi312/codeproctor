@@ -6,7 +6,9 @@
 // 409 SETTINGS_CONFLICT), and writes its audit row in the same transaction as the winning update.
 // No raw SQL (ADR 0006). A PATCH that changes nothing (the stored value already equals the sent one) returns
 // 200 with no write and no audit row. Malformed stored settings read as the default and a PATCH
-// repairs them by writing a valid structure.
+// repairs them by writing a valid structure. Known limit (FU-BE-134): an integer above 2^53 anywhere
+// in the stored settings does not round-trip through the JSON equality filter, so the compare-and-set
+// would never match and every PATCH would be 409 until the value is fixed by hand.
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { Prisma } from '../generated/prisma/client';

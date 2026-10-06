@@ -109,21 +109,28 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
         .expect(401);
     });
 
-    it('TC-004 a candidate-principal token is refused on GET and PATCH and nothing changes', async () => {
+    it('TC-004 a candidate-kind token, even with a SUPER_ADMIN role claim, is exactly 401 on GET and PATCH', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
       const n = ++seq;
-      // The staff guard accepts access tokens only; a candidate token (another kind, no role) is 401.
-      const candidate = tokens.sign({ sub: `cand-${n}`, org: orgA, kind: 'candidate' }, 900);
-      const auth = { Authorization: `Bearer ${candidate}` };
-      const statuses = [
-        (await http().get(URL).set(auth)).status,
-        (
-          await http()
-            .patch(URL)
-            .set(auth)
-            .send({ aiReferences: { minAssistants: 1 } })
-        ).status,
+      const forged: Record<string, string>[] = [
+        { sub: `cand-${n}`, org: orgA, kind: 'candidate' },
+        {
+          sub: admin.id,
+          org: orgA,
+          role: 'SUPER_ADMIN',
+          kind: 'candidate',
+          pwv: passwordVersion('x'),
+        },
       ];
-      for (const s of statuses) expect([401, 403]).toContain(s);
+      for (const claims of forged) {
+        const auth = { Authorization: `Bearer ${tokens.sign(claims, 900)}` };
+        await http().get(URL).set(auth).expect(401);
+        await http()
+          .patch(URL)
+          .set(auth)
+          .send({ aiReferences: { minAssistants: 1 } })
+          .expect(401);
+      }
       expect(await stored(orgA)).toEqual({});
       expect(await audits(orgA)).toHaveLength(0);
     });
@@ -224,6 +231,7 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
 
     it.each([
       ['empty body', {}],
+      ['top-level array', []],
       ['empty aiReferences', { aiReferences: {} }],
       ['aiReferences null', { aiReferences: null }],
       ['aiReferences string', { aiReferences: 'x' }],
@@ -346,6 +354,67 @@ describe('Org settings admin route (FR-103, TC-004, TC-008, ADR 0005 AI-5, ADR 0
       }
       expect(await stored(orgA)).toEqual({});
       expect(await audits(orgA)).toHaveLength(0);
+    });
+
+    it('AI-5 compare-and-set: a change to another key between the read and the write is kept by the retry, one audit row, correct from', async () => {
+      const admin = await make(UserRole.SUPER_ADMIN);
+      await setStored(orgA, { retention: { days: 1 }, aiReferences: { minAssistants: 3 } });
+      const { PrismaService } = jest.requireActual<typeof import('../database/prisma.service')>(
+        '../database/prisma.service',
+      );
+      const prisma = app.get(PrismaService);
+      const realTx = prisma.client.$transaction.bind(prisma.client) as (
+        fn: (tx: Record<string, unknown>) => Promise<unknown>,
+      ) => Promise<unknown>;
+      let raced = false;
+      const spy = jest.spyOn(prisma.client, '$transaction') as unknown as jest.SpyInstance;
+      spy.mockImplementation(((fn: (tx: Record<string, unknown>) => Promise<unknown>) =>
+        realTx((tx) => {
+          const org = tx['organization'] as {
+            findUnique: (a: unknown) => Promise<unknown>;
+          };
+          const wrapped = new Proxy(tx, {
+            get: (t, k) =>
+              k === 'organization'
+                ? new Proxy(org, {
+                    get: (o, m) =>
+                      m === 'findUnique'
+                        ? async (a: unknown): Promise<unknown> => {
+                            const read = await o.findUnique(a);
+                            if (!raced) {
+                              raced = true;
+                              await setStored(orgA, {
+                                retention: { days: 99 },
+                                aiReferences: { minAssistants: 3 },
+                              });
+                            }
+                            return read;
+                          }
+                        : (o as Record<string | symbol, unknown>)[m],
+                  })
+                : (t as Record<string | symbol, unknown>)[k],
+          });
+          return fn(wrapped);
+        })) as never);
+      try {
+        await http()
+          .patch(URL)
+          .set(admin.auth)
+          .send({ aiReferences: { minAssistants: 5 } })
+          .expect(200);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(raced).toBe(true);
+      expect(await stored(orgA)).toEqual({
+        retention: { days: 99 },
+        aiReferences: { minAssistants: 5 },
+      });
+      const rows = await audits(orgA);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.metadata).toEqual({
+        changes: [{ key: 'aiReferences.minAssistants', from: 3, to: 5 }],
+      });
     });
 
     it('AI-5 extra stored keys never reset the stored minAssistants (GET and the publish-gate reader)', async () => {
