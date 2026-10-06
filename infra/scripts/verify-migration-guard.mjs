@@ -17,6 +17,17 @@ function hasBase(cwd, headRef = 'HEAD') {
 /** The ref a CI pull-request checkout was made from (GitHub moves it when main moves). */
 const PR_MERGE_REF = /^refs\/pull\/\d+\/merge$/;
 
+/**
+ * The second parent (the pull-request head) of the checked-out commit, read from the raw object:
+ * `HEAD^2` fails in a shallow clone, whose parents are cut off. Null when HEAD is not a merge commit.
+ */
+function secondParent(cwd) {
+  const parents = git(cwd, ['cat-file', '-p', 'HEAD'])
+    .stdout.split('\n')
+    .filter((line) => line.startsWith('parent '));
+  return parents.length >= 2 ? parents[1].slice('parent '.length).trim() : null;
+}
+
 const scrub = (text) =>
   text
     .trim()
@@ -34,13 +45,16 @@ const MAIN = 'main:refs/remotes/origin/main';
  * that was checked out becomes unreachable, so fetching it by SHA is refused. Then the guard fetches
  * the current merge ref itself (`githubRef`, from GITHUB_REF) and compares that: it holds the same pull
  * request content on top of the new main. `headBySha: false` forces that path (a test knob).
- * @returns {{ ok: boolean, reason?: string, headRef?: string }}
+ * It only does so when the new merge commit has the same pull-request head as the checked-out one
+ * (same second parent): the guard must judge exactly the content CI tested. The base is then that
+ * merge commit's own first parent, the main it was merged onto. `headBySha` is a test knob.
+ * @returns {{ ok: boolean, reason?: string, headRef?: string, baseRef?: string }}
  */
 export function ensureBase(
   cwd,
   { steps = 6, deepen = 100, githubRef = process.env.GITHUB_REF, headBySha = true } = {},
 ) {
-  if (hasBase(cwd)) return { ok: true, headRef: 'HEAD' };
+  if (hasBase(cwd)) return { ok: true, headRef: 'HEAD', baseRef: 'origin/main' };
   const shallow = git(cwd, ['rev-parse', '--is-shallow-repository']).stdout.trim() === 'true';
   const first = git(cwd, [
     'fetch',
@@ -65,6 +79,8 @@ export function ensureBase(
     if (more.status === 0) continue;
     if (viaRef) break;
     if (typeof githubRef !== 'string' || !PR_MERGE_REF.test(githubRef)) break;
+    const wanted = secondParent(cwd);
+    if (wanted === null) break; // not a merge commit: another checkout shape, nothing to follow
     const fetched = git(cwd, [
       'fetch',
       '--no-tags',
@@ -73,12 +89,27 @@ export function ensureBase(
       `+${githubRef}:refs/remotes/pr-merge`,
     ]);
     if (fetched.status !== 0) break;
+    const got = git(cwd, [
+      'rev-parse',
+      '--verify',
+      '--quiet',
+      'refs/remotes/pr-merge^2',
+    ]).stdout.trim();
+    if (got !== wanted) {
+      return {
+        ok: false,
+        reason: 'the pull request head moved during the run: not comparing different content',
+      };
+    }
     headRef = 'refs/remotes/pr-merge';
     viaRef = true;
   }
   if (!hasBase(cwd, headRef))
-    return { ok: false, reason: 'origin/main and HEAD share no history within the fetched depth' };
-  return { ok: true, headRef };
+    return {
+      ok: false,
+      reason: `origin/main and ${headRef} share no history within the fetched depth`,
+    };
+  return { ok: true, headRef, baseRef: viaRef ? 'refs/remotes/pr-merge^1' : 'origin/main' };
 }
 
 /**
@@ -94,7 +125,7 @@ export function migrationChanges(cwd, options = {}) {
     '--name-status',
     '--no-renames',
     '-z',
-    `origin/main...${base.headRef ?? 'HEAD'}`,
+    `${base.baseRef ?? 'origin/main'}...${base.headRef ?? 'HEAD'}`,
     '--',
     'prisma/migrations',
   ]);
@@ -109,7 +140,11 @@ export function migrationChanges(cwd, options = {}) {
       const parts = path.split('/');
       const inExistingDir =
         parts.length < 4 ||
-        git(cwd, ['cat-file', '-e', `origin/main:${parts.slice(0, 3).join('/')}`]).status === 0;
+        git(cwd, [
+          'cat-file',
+          '-e',
+          `${base.baseRef ?? 'origin/main'}:${parts.slice(0, 3).join('/')}`,
+        ]).status === 0;
       if (!inExistingDir) continue;
     }
     changed.push(`${status}\t${path}`);

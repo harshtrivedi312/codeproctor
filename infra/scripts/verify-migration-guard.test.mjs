@@ -91,7 +91,11 @@ describe('DB-08 migration guard on a shallow checkout (FR-105)', () => {
     const clone = ciCheckout('adds', (r) =>
       write(r, 'prisma/migrations/20261003000001_more/migration.sql', 'CREATE TABLE b (id int);\n'),
     );
-    assert.deepEqual(ensureBase(clone), { ok: true, headRef: 'HEAD' });
+    assert.deepEqual(ensureBase(clone, { githubRef: undefined }), {
+      ok: true,
+      headRef: 'HEAD',
+      baseRef: 'origin/main',
+    });
     assert.deepEqual(migrationChanges(clone), { ok: true, changed: [] });
   });
 
@@ -224,12 +228,87 @@ describe('DB-08 migration guard on a shallow checkout (FR-105)', () => {
       return clone;
     };
     const options = { githubRef: 'refs/pull/77/merge', headBySha: false };
+    assert.deepEqual(
+      ensureBase(
+        build('movedpin', (r) =>
+          write(r, 'prisma/migrations/20261005000009_pin/migration.sql', 'SELECT 1;\n'),
+        ),
+        options,
+      ),
+      {
+        ok: true,
+        headRef: 'refs/remotes/pr-merge',
+        baseRef: 'refs/remotes/pr-merge^1',
+      },
+    );
     const good = build('movedgood', (r) =>
       write(r, 'prisma/migrations/20261005000001_x/migration.sql', 'SELECT 1;\n'),
     );
     assert.deepEqual(migrationChanges(good, options), { ok: true, changed: [] });
     const bad = build('movedbad', (r) => write(r, M1, 'CREATE TABLE a (id text);\n'));
     assert.deepEqual(migrationChanges(bad, options), { ok: true, changed: [`M\t${M1}`] });
+  });
+
+  it('FR-105: if the pull request head moved while the job ran, it does not compare different content', () => {
+    // Same setup as above, then the PR branch itself gets another commit and the merge ref is rebuilt with it.
+    git(origin, 'checkout', '-q', '-B', 'pushed', 'main');
+    write(origin, 'prisma/migrations/20261005000020_p/migration.sql', 'SELECT 1;\n');
+    git(origin, 'add', '-A');
+    git(origin, 'commit', '-q', '-m', 'pushed 1');
+    git(origin, 'checkout', '-q', '--detach', 'main');
+    git(origin, 'merge', '-q', '--no-ff', '-m', 'merge pushed 1', 'pushed');
+    git(origin, 'update-ref', 'refs/pull/88/merge', 'HEAD');
+    git(origin, 'checkout', '-q', 'main');
+    const clone = join(root, 'pr-moved-head');
+    mkdirSync(clone);
+    git(clone, 'init', '-q');
+    git(clone, 'remote', 'add', 'origin', `file://${origin}`);
+    git(
+      clone,
+      'fetch',
+      '-q',
+      '--no-tags',
+      '--depth=1',
+      'origin',
+      '+refs/pull/88/merge:refs/remotes/pull/88/merge',
+    );
+    git(clone, 'checkout', '-q', '--detach', 'refs/remotes/pull/88/merge');
+    // The author pushes again (an edit to an applied migration): the rebuilt merge ref has a new head.
+    git(origin, 'checkout', '-q', 'pushed');
+    write(origin, M1, 'CREATE TABLE a (id jsonb);\n');
+    git(origin, 'add', '-A');
+    git(origin, 'commit', '-q', '-m', 'pushed 2');
+    git(origin, 'checkout', '-q', '--detach', 'main');
+    git(origin, 'merge', '-q', '--no-ff', '-m', 'merge pushed 2', 'pushed');
+    git(origin, 'update-ref', 'refs/pull/88/merge', 'HEAD');
+    git(origin, 'checkout', '-q', 'main');
+    const result = migrationChanges(clone, { githubRef: 'refs/pull/88/merge', headBySha: false });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /pull request head moved/);
+  });
+
+  it('a GITHUB_REF that is not exactly refs/pull/N/merge is never fetched (crafted values)', () => {
+    let n = 0;
+    for (const bad of [
+      'refs/pull/1/merge\n',
+      '--upload-pack=x',
+      'refs/pull/1/merge:refs/heads/main',
+      'refs/pull/1a/merge',
+      'refs/pull/1/head',
+      'refs/heads/main',
+    ]) {
+      n += 1;
+      const clone = ciCheckout(`crafted${n}`, (r) => write(r, `c${n}.txt`, 'c'));
+      const result = ensureBase(clone, { githubRef: bad, headBySha: false });
+      assert.equal(result.ok, false, JSON.stringify(bad));
+      assert.equal(
+        spawnSync('git', ['rev-parse', '--verify', '--quiet', 'refs/remotes/pr-merge'], {
+          cwd: clone,
+        }).status,
+        1,
+        JSON.stringify(bad),
+      );
+    }
   });
 
   it('without a usable merge ref it reports, never passes, when the checked-out commit cannot be fetched', () => {
