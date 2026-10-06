@@ -353,7 +353,7 @@ describe('Re-issue a pending invite (DL-23, FR-103, FR-105, TC-004, TC-008)', ()
       // The slot is spent now; a refused re-issue (409) does not get one back either.
       await reissue(admin, live.id).expect(429);
       // Counted so far: 503 (refunded), 200, 429 (a refused hit counts). Room for one more.
-      Reflect.set(svc, 'inviteLimit', 4);
+      Reflect.set(svc, 'inviteLimit', 3);
       await reissue(admin, live.id).expect(409);
       await reissue(admin, live.id).expect(429);
     } finally {
