@@ -858,7 +858,7 @@ paths:
           description: Saved
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/QuestionDetail' }
+              schema: { $ref: '#/components/schemas/QuestionUpdateResult' }
         '400':
           description: Validation failed, or no field sent
           content:
@@ -980,7 +980,7 @@ paths:
           description: Created
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/TestCase' }
+              schema: { $ref: '#/components/schemas/TestCaseMutation' }
         '400':
           description: Validation failed
           content:
@@ -1029,7 +1029,7 @@ paths:
           description: Changed
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/TestCase' }
+              schema: { $ref: '#/components/schemas/TestCaseMutation' }
         '400':
           description: Validation failed, or no field sent
           content:
@@ -1054,8 +1054,11 @@ paths:
           in: query
           schema: { type: string, pattern: '^[0-9a-f]{64}$' }
       responses:
-        '204':
-          description: Removed
+        '200':
+          description: Removed. Answers the new revision of the version, computed in the same transaction.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RevisionResult' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: No such question, version or test case in your organization
@@ -1180,8 +1183,11 @@ paths:
           in: query
           schema: { type: string, pattern: '^[0-9a-f]{64}$' }
       responses:
-        '204':
-          description: Removed
+        '200':
+          description: Removed. Answers the new revision of the version, computed in the same transaction.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RevisionResult' }
         '400':
           description: Invalid expectedRevision
           content:
@@ -1257,7 +1263,7 @@ paths:
         schema: { type: string }
     put:
       operationId: setVariantOverride
-      summary: REAL. Override the input and expected output of one test slot for a variant (question:update). The slot must belong to the same version; its hidden flag and weight stay the slot's. Returns the override only, not a revision.
+      summary: REAL. Override the input and expected output of one test slot for a variant (question:update). The slot must belong to the same version; its hidden flag and weight stay the slot's. Answers the override and the new revision of the version, computed in the same transaction.
       requestBody:
         required: true
         content:
@@ -1268,7 +1274,7 @@ paths:
           description: The override
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/VariantOverride' }
+              schema: { $ref: '#/components/schemas/VariantOverrideMutation' }
         '400':
           description: Validation failed
           content:
@@ -1293,8 +1299,11 @@ paths:
           in: query
           schema: { type: string, pattern: '^[0-9a-f]{64}$' }
       responses:
-        '204':
-          description: Removed
+        '200':
+          description: Removed. Answers the new revision of the version, computed in the same transaction.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RevisionResult' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: No such question, version, variant or override in your organization
@@ -2024,6 +2033,28 @@ components:
               - { type: boolean }
         renderedStatement: { type: string }
         testCaseOverrides: { type: array, items: { $ref: '#/components/schemas/VariantOverride' } }
+    RevisionResult:
+      type: object
+      description: The revision of a version after a writer-only change (never in a recruiter-reachable body).
+      required: [revision]
+      properties:
+        revision:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: The new revision, computed inside the same transaction as the change; send it as expectedRevision.
+    TestCaseMutation:
+      allOf:
+        - $ref: '#/components/schemas/TestCase'
+        - $ref: '#/components/schemas/RevisionResult'
+    VariantOverrideMutation:
+      allOf:
+        - $ref: '#/components/schemas/VariantOverride'
+        - $ref: '#/components/schemas/RevisionResult'
+    QuestionUpdateResult:
+      description: The edited question plus the revision of the version the edit left (the new version after a fork).
+      allOf:
+        - $ref: '#/components/schemas/QuestionDetail'
+        - $ref: '#/components/schemas/RevisionResult'
     VariantList:
       type: object
       required: [items, revision]

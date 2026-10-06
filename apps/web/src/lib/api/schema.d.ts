@@ -663,7 +663,7 @@ export interface paths {
       cookie?: never;
     };
     get?: never;
-    /** REAL. Override the input and expected output of one test slot for a variant (question:update). The slot must belong to the same version; its hidden flag and weight stay the slot's. Returns the override only, not a revision. */
+    /** REAL. Override the input and expected output of one test slot for a variant (question:update). The slot must belong to the same version; its hidden flag and weight stay the slot's. Answers the override and the new revision of the version, computed in the same transaction. */
     put: operations['setVariantOverride'];
     post?: never;
     /** REAL. Remove an override; the slot's own input and output apply again (question:update). */
@@ -1097,6 +1097,17 @@ export interface components {
       renderedStatement: string;
       testCaseOverrides: components['schemas']['VariantOverride'][];
     };
+    /** @description The revision of a version after a writer-only change (never in a recruiter-reachable body). */
+    RevisionResult: {
+      /** @description The new revision, computed inside the same transaction as the change; send it as expectedRevision. */
+      revision: string;
+    };
+    TestCaseMutation: components['schemas']['TestCase'] & components['schemas']['RevisionResult'];
+    VariantOverrideMutation: components['schemas']['VariantOverride'] &
+      components['schemas']['RevisionResult'];
+    /** @description The edited question plus the revision of the version the edit left (the new version after a fork). */
+    QuestionUpdateResult: components['schemas']['QuestionDetail'] &
+      components['schemas']['RevisionResult'];
     VariantList: {
       items: components['schemas']['Variant'][];
       revision: string;
@@ -2579,7 +2590,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['QuestionDetail'];
+          'application/json': components['schemas']['QuestionUpdateResult'];
         };
       };
       /** @description Validation failed, or no field sent */
@@ -2752,7 +2763,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['TestCase'];
+          'application/json': components['schemas']['TestCaseMutation'];
         };
       };
       /** @description Validation failed */
@@ -2809,12 +2820,14 @@ export interface operations {
     };
     requestBody?: never;
     responses: {
-      /** @description Removed */
-      204: {
+      /** @description Removed. Answers the new revision of the version, computed in the same transaction. */
+      200: {
         headers: {
           [name: string]: unknown;
         };
-        content?: never;
+        content: {
+          'application/json': components['schemas']['RevisionResult'];
+        };
       };
       403: components['responses']['Forbidden'];
       /** @description No such question, version or test case in your organization */
@@ -2860,7 +2873,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['TestCase'];
+          'application/json': components['schemas']['TestCaseMutation'];
         };
       };
       /** @description Validation failed, or no field sent */
@@ -3005,12 +3018,14 @@ export interface operations {
     };
     requestBody?: never;
     responses: {
-      /** @description Removed */
-      204: {
+      /** @description Removed. Answers the new revision of the version, computed in the same transaction. */
+      200: {
         headers: {
           [name: string]: unknown;
         };
-        content?: never;
+        content: {
+          'application/json': components['schemas']['RevisionResult'];
+        };
       };
       /** @description Invalid expectedRevision */
       400: {
@@ -3165,7 +3180,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['VariantOverride'];
+          'application/json': components['schemas']['VariantOverrideMutation'];
         };
       };
       /** @description Validation failed */
@@ -3214,12 +3229,14 @@ export interface operations {
     };
     requestBody?: never;
     responses: {
-      /** @description Removed */
-      204: {
+      /** @description Removed. Answers the new revision of the version, computed in the same transaction. */
+      200: {
         headers: {
           [name: string]: unknown;
         };
-        content?: never;
+        content: {
+          'application/json': components['schemas']['RevisionResult'];
+        };
       };
       403: components['responses']['Forbidden'];
       /** @description No such question, version, variant or override in your organization */
