@@ -810,6 +810,63 @@ export interface paths {
     patch: operations['updateTest'];
     trace?: never;
   };
+  '/v1/tests/{testId}/invitations': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        testId: string;
+      };
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** WEB-ONLY [BE-06b]. Invite one candidate to a test (invitation:create). Creates the invitation and its session in status INVITED, and links or creates the candidate by email. */
+    post: operations['createInvitation'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/tests/{testId}/invitations/bulk': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        testId: string;
+      };
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** WEB-ONLY [BE-06b]. Invite several candidates (the CSV upload sends at most 200 rows per request). Rows that fail are reported by index and reason, the others are invited (TC-023). A waiver is never accepted here. */
+    post: operations['createInvitationsBulk'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/admin/candidates/{candidateId}/invitations': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        candidateId: string;
+      };
+      cookie?: never;
+    };
+    /** WEB-ONLY [BE-06b]. The invitations of one candidate with their session status and the time each status was reached (invitation:create). Status only, no scores, flags or verdicts. */
+    get: operations['listCandidateInvitations'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1341,6 +1398,105 @@ export interface components {
       pageSize: number;
       total: number;
     };
+    /**
+     * @description The session state machine of ADR 0002 (ERASED is not shown to recruiters).
+     * @enum {string}
+     */
+    SessionStatus:
+      | 'INVITED'
+      | 'OPENED'
+      | 'CONSENTED'
+      | 'VERIFIED'
+      | 'IN_PROGRESS'
+      | 'PAUSED'
+      | 'SUBMITTED'
+      | 'GRADED'
+      | 'UNDER_REVIEW'
+      | 'COMPLETED'
+      | 'EXPIRED'
+      | 'APPEALED'
+      | 'DECLINED';
+    /** @enum {string} */
+    IdentityWaiverReason: 'REFUSED_BIOMETRIC_PROCESSING' | 'CANNOT_COMPLETE_ID_CHECK' | 'OTHER';
+    /** @description ADR 0015, owner decisions C-02 and C-19. reasonCode is required; reasonNote (1 to 500 characters) is required and allowed only with OTHER. Never put health details in it. */
+    IdentityCheckWaiver: {
+      reasonCode: components['schemas']['IdentityWaiverReason'];
+      reasonNote?: string;
+    };
+    /** @description Per-candidate accommodations (FR-305, ADR 0015). Only on a single invitation. */
+    InvitationAccommodations: {
+      /** @description Scales the total and every section limit by the same percentage */
+      extraTimePct?: number;
+      disabledDetectors?: (
+        | 'FACE'
+        | 'GAZE'
+        | 'OBJECT'
+        | 'VOICE'
+        | 'MULTI_MONITOR'
+        | 'DEVTOOLS'
+        | 'VIRTUAL_CAMERA'
+        | 'EXTENSION'
+        | 'SIDE_CAMERA'
+      )[];
+      allowedAssistiveTools?: string[];
+      notes?: string;
+      identityCheckWaiver?: components['schemas']['IdentityCheckWaiver'];
+    };
+    InviteCandidate: {
+      email: string;
+      name: string;
+      externalRef?: string;
+    };
+    CreateInvitation: {
+      candidate: components['schemas']['InviteCandidate'];
+      /** Format: date-time */
+      windowStart: string;
+      /** Format: date-time */
+      windowEnd: string;
+      accommodations?: components['schemas']['InvitationAccommodations'];
+    };
+    InvitationResult: {
+      id: string;
+      testId: string;
+      candidateId: string;
+      status: components['schemas']['SessionStatus'];
+      /** Format: date-time */
+      windowStart: string;
+      /** Format: date-time */
+      windowEnd: string;
+    };
+    BulkInvitations: {
+      rows: components['schemas']['InviteCandidate'][];
+      /** Format: date-time */
+      windowStart: string;
+      /** Format: date-time */
+      windowEnd: string;
+    };
+    BulkInvitationResult: {
+      created: number;
+      /** @description By row index (1 is the first row of THIS request) and reason; no email is echoed */
+      errors: {
+        row: number;
+        message: string;
+      }[];
+    };
+    StatusStep: {
+      status: components['schemas']['SessionStatus'];
+      /** Format: date-time */
+      at: string;
+    };
+    CandidateInvitation: {
+      id: string;
+      testId: string;
+      testName: string;
+      status: components['schemas']['SessionStatus'];
+      /** Format: date-time */
+      windowStart: string;
+      /** Format: date-time */
+      windowEnd: string;
+      /** @description The statuses reached so far, oldest first */
+      history: components['schemas']['StatusStep'][];
+    };
     ApiError: {
       code: string;
       message: string;
@@ -1488,6 +1644,10 @@ export interface components {
       email: string;
       /** Format: date-time */
       lastSessionAt?: string | null;
+      /** @description WEB-ONLY [BE-06b] */
+      invitationCount?: number;
+      /** @description WEB-ONLY [BE-06b] status of the newest invitation */
+      latestStatus?: components['schemas']['SessionStatus'] | null;
       erasure: {
         /**
          * @description waiting = held while a review or appeal is open (D-19)
@@ -3844,6 +4004,175 @@ export interface operations {
       };
       /** @description A fixed version belongs to an archived question, or a random rule is unsatisfiable */
       422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  createInvitation: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        testId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['CreateInvitation'];
+      };
+    };
+    responses: {
+      /** @description Created */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['InvitationResult'];
+        };
+      };
+      /** @description Validation failed (email, name, window, accommodations; errors[] says which) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description No such test in your organisation */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description This candidate already has an open invitation to this test */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description The window ends in the past, or the waiver reason is not enabled (code REASON_NOT_ENABLED) */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Too many invitations this hour; Retry-After says when */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  createInvitationsBulk: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        testId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['BulkInvitations'];
+      };
+    };
+    responses: {
+      /** @description How many were invited and which rows were not */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['BulkInvitationResult'];
+        };
+      };
+      /** @description Validation failed (too many rows, window, an unknown field) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description No such test in your organisation */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description The window ends in the past */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Too many invitations this hour; nothing was invited; Retry-After says when */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  listCandidateInvitations: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        candidateId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Invitations, newest first */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: components['schemas']['CandidateInvitation'][];
+          };
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description No such candidate in your organisation */
+      404: {
         headers: {
           [name: string]: unknown;
         };

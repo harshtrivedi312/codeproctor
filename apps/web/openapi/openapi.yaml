@@ -1645,6 +1645,127 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+  # ---------------------------------------------------------------------------------------------
+  # Invitations and candidate status (FR-303, FR-304, FR-305). WEB-ONLY PLACEHOLDERS [BE-06b]: the
+  # API has no invitations module yet (BE-06a is the tests module only). Shapes come from fsd.md
+  # FR-302..305, ADR 0002 (state machine), ADR 0015 (waiver) and backend.md Step 6; paths, bodies,
+  # limits and error words are the web's proposal, listed in docs/followups/frontend.md. Roles:
+  # SUPER_ADMIN and RECRUITER (invitation:create). Nothing here carries a score, a flag or a
+  # verdict: recruiters see results only after the verdict (C-28).
+  # ---------------------------------------------------------------------------------------------
+  /v1/tests/{testId}/invitations:
+    parameters:
+      - name: testId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: createInvitation
+      summary: WEB-ONLY [BE-06b]. Invite one candidate to a test (invitation:create). Creates the invitation and its session in status INVITED, and links or creates the candidate by email.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateInvitation' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InvitationResult' }
+        '400':
+          description: Validation failed (email, name, window, accommodations; errors[] says which)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such test in your organisation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: This candidate already has an open invitation to this test
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: The window ends in the past, or the waiver reason is not enabled (code REASON_NOT_ENABLED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '429':
+          description: Too many invitations this hour; Retry-After says when
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /v1/tests/{testId}/invitations/bulk:
+    parameters:
+      - name: testId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: createInvitationsBulk
+      summary: WEB-ONLY [BE-06b]. Invite several candidates (the CSV upload sends at most 200 rows per request). Rows that fail are reported by index and reason, the others are invited (TC-023). A waiver is never accepted here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BulkInvitations' }
+      responses:
+        '200':
+          description: How many were invited and which rows were not
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BulkInvitationResult' }
+        '400':
+          description: Validation failed (too many rows, window, an unknown field)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such test in your organisation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: The window ends in the past
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '429':
+          description: Too many invitations this hour; nothing was invited; Retry-After says when
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /v1/admin/candidates/{candidateId}/invitations:
+    parameters:
+      - name: candidateId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: listCandidateInvitations
+      summary: WEB-ONLY [BE-06b]. The invitations of one candidate with their session status and the time each status was reached (invitation:create). Status only, no scores, flags or verdicts.
+      responses:
+        '200':
+          description: Invitations, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    { type: array, items: { $ref: '#/components/schemas/CandidateInvitation' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such candidate in your organisation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
 
 components:
   responses:
@@ -2506,6 +2627,150 @@ components:
         page: { type: integer }
         pageSize: { type: integer }
         total: { type: integer }
+    SessionStatus:
+      type: string
+      description: The session state machine of ADR 0002 (ERASED is not shown to recruiters).
+      enum:
+        [
+          INVITED,
+          OPENED,
+          CONSENTED,
+          VERIFIED,
+          IN_PROGRESS,
+          PAUSED,
+          SUBMITTED,
+          GRADED,
+          UNDER_REVIEW,
+          COMPLETED,
+          EXPIRED,
+          APPEALED,
+          DECLINED,
+        ]
+    IdentityWaiverReason:
+      type: string
+      enum: [REFUSED_BIOMETRIC_PROCESSING, CANNOT_COMPLETE_ID_CHECK, OTHER]
+    IdentityCheckWaiver:
+      type: object
+      additionalProperties: false
+      description: >-
+        ADR 0015, owner decisions C-02 and C-19. reasonCode is required; reasonNote (1 to 500
+        characters) is required and allowed only with OTHER. Never put health details in it.
+      required: [reasonCode]
+      properties:
+        reasonCode: { $ref: '#/components/schemas/IdentityWaiverReason' }
+        reasonNote: { type: string, minLength: 1, maxLength: 500 }
+    InvitationAccommodations:
+      type: object
+      additionalProperties: false
+      description: Per-candidate accommodations (FR-305, ADR 0015). Only on a single invitation.
+      properties:
+        extraTimePct:
+          {
+            type: integer,
+            minimum: 0,
+            maximum: 200,
+            description: Scales the total and every section limit by the same percentage,
+          }
+        disabledDetectors:
+          type: array
+          maxItems: 9
+          items:
+            {
+              type: string,
+              enum:
+                [
+                  FACE,
+                  GAZE,
+                  OBJECT,
+                  VOICE,
+                  MULTI_MONITOR,
+                  DEVTOOLS,
+                  VIRTUAL_CAMERA,
+                  EXTENSION,
+                  SIDE_CAMERA,
+                ],
+            }
+        allowedAssistiveTools:
+          { type: array, maxItems: 10, items: { type: string, minLength: 1, maxLength: 80 } }
+        notes: { type: string, maxLength: 1000 }
+        identityCheckWaiver: { $ref: '#/components/schemas/IdentityCheckWaiver' }
+    InviteCandidate:
+      type: object
+      additionalProperties: false
+      required: [email, name]
+      properties:
+        email: { type: string, maxLength: 254 }
+        name: { type: string, minLength: 1, maxLength: 200 }
+        externalRef: { type: string, maxLength: 200 }
+    CreateInvitation:
+      type: object
+      additionalProperties: false
+      required: [candidate, windowStart, windowEnd]
+      properties:
+        candidate: { $ref: '#/components/schemas/InviteCandidate' }
+        windowStart: { type: string, format: date-time }
+        windowEnd: { type: string, format: date-time }
+        accommodations: { $ref: '#/components/schemas/InvitationAccommodations' }
+    InvitationResult:
+      type: object
+      required: [id, testId, candidateId, status, windowStart, windowEnd]
+      properties:
+        id: { type: string }
+        testId: { type: string }
+        candidateId: { type: string }
+        status: { $ref: '#/components/schemas/SessionStatus' }
+        windowStart: { type: string, format: date-time }
+        windowEnd: { type: string, format: date-time }
+    BulkInvitations:
+      type: object
+      additionalProperties: false
+      required: [rows, windowStart, windowEnd]
+      properties:
+        rows:
+          {
+            type: array,
+            minItems: 1,
+            maxItems: 200,
+            items: { $ref: '#/components/schemas/InviteCandidate' },
+          }
+        windowStart: { type: string, format: date-time }
+        windowEnd: { type: string, format: date-time }
+    BulkInvitationResult:
+      type: object
+      required: [created, errors]
+      properties:
+        created: { type: integer }
+        errors:
+          type: array
+          description: By row index (1 is the first row of THIS request) and reason; no email is echoed
+          items:
+            type: object
+            required: [row, message]
+            properties:
+              row: { type: integer, minimum: 1 }
+              message: { type: string }
+    StatusStep:
+      type: object
+      required: [status, at]
+      properties:
+        status: { $ref: '#/components/schemas/SessionStatus' }
+        at: { type: string, format: date-time }
+    CandidateInvitation:
+      type: object
+      required: [id, testId, testName, status, windowStart, windowEnd, history]
+      properties:
+        id: { type: string }
+        testId: { type: string }
+        testName: { type: string }
+        status: { $ref: '#/components/schemas/SessionStatus' }
+        windowStart: { type: string, format: date-time }
+        windowEnd: { type: string, format: date-time }
+        history:
+          {
+            type: array,
+            description: 'The statuses reached so far, oldest first',
+            items: { $ref: '#/components/schemas/StatusStep' },
+          }
     ApiError:
       type: object
       required: [code, message]
@@ -2704,6 +2969,13 @@ components:
         name: { type: string }
         email: { type: string }
         lastSessionAt: { type: string, format: date-time, nullable: true }
+        invitationCount: { type: integer, description: 'WEB-ONLY [BE-06b]' }
+        latestStatus:
+          {
+            allOf: [{ $ref: '#/components/schemas/SessionStatus' }],
+            nullable: true,
+            description: 'WEB-ONLY [BE-06b] status of the newest invitation',
+          }
         erasure:
           type: object
           required: [state]
