@@ -132,7 +132,7 @@ export function hasPassingValidation(
 
 /**
  * Completeness rules for publishing (FR-201, FR-202, FR-205) and the validation gate for coding
- * questions. The AI reference gate comes with the AI reference endpoints (BE-04 slice 4c).
+ * questions. The AI reference gate (ADR 0005 AI-5) is ai-reference-rules.ts, applied by publish.
  */
 export function publishProblems(
   type: QuestionKind,
@@ -168,8 +168,8 @@ export function publishProblems(
   for (const k of Object.keys(starter)) {
     if (!allowed.includes(k)) problems.push(`starterCode.${k}: language is not allowed`);
   }
-  // Fail closed (FR-203, ADR 0007 V-3, TC-012): nothing sets validated_at until the validate job
-  // exists (slice 4c), so until then a coding question cannot be published.
+  // Fail closed (FR-203, ADR 0007 V-3, TC-012): only a passing run of the validate job
+  // (validation.service.ts) on this very revision opens the gate.
   if (!hasPassingValidation(v, currentRevision)) {
     problems.push('validation: a passing validation run of the current content is required');
   }

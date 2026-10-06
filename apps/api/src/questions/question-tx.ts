@@ -16,7 +16,14 @@ export interface Actor {
 
 export type Db = Pick<
   OrgScopedPrismaClient,
-  'question' | 'questionVersion' | 'testCase' | 'questionVariant' | 'variantTestCase' | 'auditLog'
+  | 'question'
+  | 'questionVersion'
+  | 'testCase'
+  | 'questionVariant'
+  | 'variantTestCase'
+  | 'aiReferenceSolution'
+  | 'organization'
+  | 'auditLog'
 >;
 
 export const NOT_FOUND = 'Question not found.';

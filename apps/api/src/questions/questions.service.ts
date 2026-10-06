@@ -42,6 +42,7 @@ import {
   requireQuestion,
 } from './question-tx';
 import type { Actor, Db } from './question-tx';
+import { aiReferenceProblems, minAssistantsFromSettings } from './ai-reference-rules';
 import { renderVariant, variantPublishProblems } from './variant-rules';
 import { checkLimits, limitsToStored, publishProblems, shapeProblems } from './question-content';
 import type { Limits } from './question-content';
@@ -467,6 +468,25 @@ export class QuestionsService {
       // content being published.
       const vp = variantPublishProblems(fresh, new Set(cases.map((t) => t.id)), variants);
       problems.push(...vp.problems);
+      if (question.type === 'CODING') {
+        // ADR 0005 AI-5: current AI reference rows from enough distinct assistants per language.
+        // Read after the question lock, and every AI write takes that lock, so the count is exact.
+        const org = await tx.organization.findUnique({
+          where: { id: actor.orgId },
+          select: { settings: true },
+        });
+        const rows = await tx.aiReferenceSolution.findMany({
+          where: { questionVersionId: fresh.id, supersededAt: null },
+          select: { language: true, assistant: true },
+        });
+        problems.push(
+          ...aiReferenceProblems(
+            fresh.allowedLanguages,
+            rows,
+            minAssistantsFromSettings(org?.settings),
+          ),
+        );
+      }
       if (problems.length) throw new UnprocessableEntityException({ message: problems });
       for (const x of variants) {
         const statement = vp.rendered.get(x.id);
