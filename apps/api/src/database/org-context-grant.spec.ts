@@ -129,6 +129,9 @@ describe('OrgContextService.withGrant (ADR 0013 CS-4.4; NFR-04, TC-008)', () => 
           // a column of the model that no site names
           { ...KEY, columns: ['invitationId'] },
           { ...KEY, columns: ['riskScore'] },
+          // the consent-PDF job's columns are no candidate site's
+          { model: 'Consent', columns: ['pdfKey'], ids: [SID] },
+          { model: 'Consent', columns: ['ageConfirmedAt', 'pdfGeneratedAt'], ids: [SID] },
           // a column of another model
           { ...KEY, columns: ['settings'] },
           // the columns of two sites join: one grant is one service
@@ -168,6 +171,21 @@ describe('OrgContextService.withGrant (ADR 0013 CS-4.4; NFR-04, TC-008)', () => 
           {
             model: 'Consent',
             columns: ['sessionId', 'consentTextId', 'signedName', 'signedAt', 'ip', 'userAgent'],
+            ids: [SID],
+          },
+          // The whole create site, with the C-30 age confirmation (D-55).
+          {
+            model: 'Consent',
+            columns: [
+              'sessionId',
+              'consentTextId',
+              'signedName',
+              'signedAt',
+              'declinedAt',
+              'ageConfirmedAt',
+              'ip',
+              'userAgent',
+            ],
             ids: [SID],
           },
         ]) {
