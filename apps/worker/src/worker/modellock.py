@@ -52,6 +52,7 @@ class LockEntry(BaseModel):
         if (
             self.name.startswith("/")
             or ".." in Path(self.name).parts
+            or not Path(self.name).parts  # "." or ""
             or Path(self.name).as_posix() != self.name
         ):
             raise ValueError("name must be a normalised relative path")
