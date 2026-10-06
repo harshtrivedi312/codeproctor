@@ -9,6 +9,7 @@ import { ThemeToggle } from '@/components/theme-toggle';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import type { Schemas } from '@/lib/api/client';
+import { TestLoadError } from './adr-source';
 import { demoSource } from './demo-source';
 import type { DraftBody, DraftResult, TestSource } from './source';
 import { cooldownRemainingMs, cooldownSeconds } from './cooldown';
@@ -33,7 +34,6 @@ import { useServerClock } from './use-clock';
  * constant and drops the dynamic import, and with it demo-controls.tsx, from a production build.
  * Do not move this check behind a helper or a variable.
  */
-const IS_DEMO = process.env.NEXT_PUBLIC_API_MOCKING === 'enabled';
 const DemoBanner =
   process.env.NEXT_PUBLIC_API_MOCKING === 'enabled'
     ? React.lazy(() => import('./demo-controls').then((m) => ({ default: m.DemoBanner })))
@@ -105,9 +105,17 @@ export function TestScreen({
     return (
       <div role="alert" className="mx-auto my-24 max-w-md text-center">
         <h1 className="text-lg font-semibold">We could not load your test</h1>
-        <p className="mt-2 text-sm text-muted-foreground">
-          Check your internet connection, then try again. Your time is not affected by this screen.
-        </p>
+        {session.error instanceof TestLoadError && session.error.reason === 'unsupported' ? (
+          <p className="mt-2 text-sm text-muted-foreground" data-testid="load-unsupported">
+            This test has a question type this page cannot show yet. Your time keeps running. Please
+            tell the person running the test, and do not close this page.
+          </p>
+        ) : (
+          <p className="mt-2 text-sm text-muted-foreground">
+            Check your internet connection, then try again. Your time keeps running while this
+            screen is not working; the server decides when time is up.
+          </p>
+        )}
         <Button className="mt-4" onClick={() => void session.refetch()}>
           Try again
         </Button>
@@ -200,7 +208,7 @@ function TestScreenInner({
   const [results, setResults] = React.useState<Record<string, Schemas['RunResult']>>({});
   const [runErrors, setRunErrors] = React.useState<Record<string, string>>({});
 
-  const clock = useServerClock(source.serverNow);
+  const clock = useServerClock(() => source.serverNow());
   const testLeft = clock.remaining(session.testDeadlineAt);
   const sectionLeft = clock.remaining(section.deadlineAt);
   const expired =
@@ -399,7 +407,7 @@ function TestScreenInner({
 
   return (
     <div className="flex h-dvh flex-col">
-      {DemoBanner && (
+      {source.isDemo && DemoBanner && (
         <React.Suspense fallback={null}>
           <DemoBanner />
         </React.Suspense>
@@ -630,7 +638,7 @@ function TestScreenInner({
           Finish section
         </Button>
         <span className="text-xs text-muted-foreground">Finishing a section is final.</span>
-        {DemoFooterControl && (
+        {source.isDemo && DemoFooterControl && (
           <React.Suspense fallback={null}>
             <DemoFooterControl dispatchLock={dispatchLock} />
           </React.Suspense>
@@ -640,6 +648,7 @@ function TestScreenInner({
       {lock.phase === 'gate' && (
         <StartGate
           fullscreenFailed={fsFailed}
+          timerRunning={!source.isDemo}
           onEnter={() =>
             void requestFullscreen().then((ok) => {
               if (ok) dispatchLock({ type: 'start', fullscreen: true });
@@ -647,6 +656,7 @@ function TestScreenInner({
             })
           }
           demoAction={
+            source.isDemo &&
             DemoContinueWithoutFullscreen && (
               <React.Suspense fallback={null}>
                 <DemoContinueWithoutFullscreen dispatchLock={dispatchLock} />
@@ -677,6 +687,7 @@ function TestScreenInner({
         busy={finishing}
         error={finishError}
         sectionTitle={section.title}
+        last={section.position === section.totalSections}
       />
 
       <Dialog open={resetOpen} onOpenChange={setResetOpen}>
