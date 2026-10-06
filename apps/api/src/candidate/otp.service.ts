@@ -125,21 +125,22 @@ end
 return 0
 `;
 
-// KEYS: 1 otp, 2 attempts, 3 cooldown, 4 spent marker, 5 pending. ARGV: 1 the hash that was
-// compared, 2 marker life in ms. Always releases the pending slot. Returns {1, remaining code life
-// ms, the wrong-guess count to restore (confirmed wrong + this guess, at most 4 so a restore can
-// never leave the link unusable), its remaining ms}: what the caller needs to put everything back if
-// a later write is busy (DL-37), or {0, 0, 0, 0} when another request spent the code first.
+// KEYS: 1 otp, 2 attempts, 3 spent marker, 4 pending. ARGV: 1 the hash that was compared, 2 marker
+// life in ms. Always releases the pending slot. Returns {1, remaining code life ms, the wrong-guess
+// count to restore (confirmed wrong + this guess, at most 4 so a restore can never leave the link
+// unusable), its remaining ms}: what the caller needs to put everything back if a later write is busy
+// (DL-37), or {0, 0, 0, 0} when another request spent the code first. It never touches the cooldown:
+// during a test the 30 s between comparisons (TC-097) holds across a spent code and its restore.
 const CONSUME = `
-local p = tonumber(redis.call('GET', KEYS[5])) or 0
-if p > 0 then redis.call('DECR', KEYS[5]) end
+local p = tonumber(redis.call('GET', KEYS[4])) or 0
+if p > 0 then redis.call('DECR', KEYS[4]) end
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   local otpLeft = redis.call('PTTL', KEYS[1])
   local wrong = tonumber(redis.call('GET', KEYS[2])) or 0
   local attemptsLeft = redis.call('PTTL', KEYS[2])
   if attemptsLeft <= 0 then attemptsLeft = 1800000 end
-  redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])
-  redis.call('SET', KEYS[4], ARGV[1], 'PX', ARGV[2])
+  redis.call('DEL', KEYS[1], KEYS[2])
+  redis.call('SET', KEYS[3], ARGV[1], 'PX', ARGV[2])
   return {1, otpLeft, math.min(wrong + 1, 4), attemptsLeft}
 end
 return {0, 0, 0, 0}
@@ -156,13 +157,14 @@ if tonumber(ARGV[2]) <= 0 then return 0 end
 if redis.call('PTTL', KEYS[4]) > 0 then return 0 end
 if not redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2], 'NX') then return 0 end
 if ARGV[5] == 'PRE_START' and tonumber(ARGV[3]) > 0 then
+  -- Wrong guesses confirmed since the consume (it deleted the counter) are ADDED to the restored
+  -- count, so nothing is forgiven; capped at 4 so the restore never leaves the link unusable.
   local cur = tonumber(redis.call('GET', KEYS[2])) or 0
-  if cur < tonumber(ARGV[3]) then
-    if cur > 0 then
-      redis.call('SET', KEYS[2], ARGV[3], 'KEEPTTL')
-    else
-      redis.call('SET', KEYS[2], ARGV[3], 'PX', math.max(tonumber(ARGV[4]), 1000))
-    end
+  local total = math.min(cur + tonumber(ARGV[3]), 4)
+  if cur > 0 then
+    redis.call('SET', KEYS[2], total, 'KEEPTTL')
+  else
+    redis.call('SET', KEYS[2], total, 'PX', math.max(tonumber(ARGV[4]), 1000))
   end
 end
 return 1
@@ -298,10 +300,9 @@ export class OtpService {
     if (matches) {
       const [spent, codeLeftMs, attempts, attemptsLeftMs] = (await this.redis.eval(
         CONSUME,
-        5,
+        4,
         keys[0],
         keys[1],
-        keys[3],
         OtpService.key('otp-spent', invitationId),
         keys[4],
         String(value),

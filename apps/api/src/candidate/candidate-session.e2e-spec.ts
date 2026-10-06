@@ -2956,18 +2956,63 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(await redis.exists(`otp:${inv2.invitationId}`)).toBe(0);
     });
 
-    it('DL-37: restore neither writes nor clears the cooldown: one set by another request meanwhile stays, and the code comes back (during a test a busy correct guess leaves no cooldown of its own, so the retry goes through at once)', async () => {
+    it('DL-37, TC-097: during a test the 30 s cooldown holds across a spent code and its restore (a busy correct guess is not followed by an immediate extra comparison); the retry waits out the remaining cooldown', async () => {
       const inv = await invite(liveSession());
       const code = await otpFor(inv);
       const ok = await otp.verify(inv.invitationId, code, 'LIVE');
       expect(ok.kind).toBe('ok');
-      expect(await redis.exists(`otp-cooldown:${inv.invitationId}`)).toBe(0);
-      await redis.set(`otp-cooldown:${inv.invitationId}`, '1', 'PX', 20_000);
+      // The consume keeps the cooldown this guess set.
+      const afterConsume = await redis.pttl(`otp-cooldown:${inv.invitationId}`);
+      expect(afterConsume).toBeGreaterThan(0);
+      expect(afterConsume).toBeLessThanOrEqual(30_000);
       expect(await otp.restore(inv.invitationId, ok as never, 'LIVE')).toBe(true);
       expect(await redis.exists(`otp:${inv.invitationId}`)).toBe(1);
-      const cooldown = await redis.pttl(`otp-cooldown:${inv.invitationId}`);
-      expect(cooldown).toBeGreaterThan(0);
-      expect(cooldown).toBeLessThanOrEqual(20_000);
+      // Restore leaves the cooldown as it is: no immediate second comparison, the answer says how long.
+      expect(await redis.pttl(`otp-cooldown:${inv.invitationId}`)).toBeGreaterThan(0);
+      const early = await otp.verify(inv.invitationId, code, 'LIVE');
+      expect(early.kind).toBe('cooldown');
+      expect(await redis.exists(`otp:${inv.invitationId}`)).toBe(1);
+      // When the 30 s are over (simulated) the retry goes through with the restored code.
+      await redis.del(`otp-cooldown:${inv.invitationId}`);
+      expect((await otp.verify(inv.invitationId, code, 'LIVE')).kind).toBe('ok');
+    });
+
+    it('DL-37, TC-007: wrong guesses confirmed between the consume and the restore are added, not forgiven: 2 confirmed + a busy correct guess + 2 in-flight wrong guesses restore to 4, never 3', async () => {
+      const inv = await invite();
+      const code = await otpFor(inv);
+      const wrong = code === '000000' ? '000001' : '000000';
+      for (let i = 0; i < 2; i++)
+        expect((await otp.verify(inv.invitationId, wrong, 'PRE_START')).kind).toBe('wrong');
+      // Hold the WRONG evals of two in-flight wrong guesses until the correct guess has consumed.
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const real = appRedis.eval.bind(appRedis) as (...a: unknown[]) => Promise<unknown>;
+      jest
+        .spyOn(appRedis, 'eval')
+        .mockImplementation((...args: unknown[]) =>
+          String(args[0]).includes("local n = redis.call('INCR', KEYS[2])")
+            ? gate.then(() => real(...args))
+            : real(...args),
+        );
+      const inFlight = [
+        otp.verify(inv.invitationId, wrong, 'PRE_START'),
+        otp.verify(inv.invitationId, wrong, 'PRE_START'),
+      ];
+      await new Promise((r) => setTimeout(r, 100));
+      const ok = await otp.verify(inv.invitationId, code, 'PRE_START');
+      expect(ok).toMatchObject({ kind: 'ok', attempts: 3 });
+      release();
+      await Promise.all(inFlight);
+      jest.restoreAllMocks();
+      // The counter restarted from nothing at the consume; the two in-flight wrong guesses made it 2.
+      expect(Number(await redis.get(`otp-attempts:${inv.invitationId}`))).toBe(2);
+      expect(await otp.restore(inv.invitationId, ok as never, 'PRE_START')).toBe(true);
+      expect(Number(await redis.get(`otp-attempts:${inv.invitationId}`))).toBe(4);
+      // One more wrong guess is the fifth confirmed one: the link blocks.
+      expect(await otp.verify(inv.invitationId, wrong, 'PRE_START')).toMatchObject({
+        kind: 'wrong',
+        blockedNow: true,
+      });
     });
 
     it('DL-37: an older code never returns after a newer one was issued or used, a second restore does nothing, and a blocked link gets nothing back', async () => {
