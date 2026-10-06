@@ -1,7 +1,11 @@
-/** Countdown helpers. The server clock is the source of truth (FR-505); the client only ticks. */
+/**
+ * Countdown helpers. The server clock is the source of truth (FR-505); the client only ticks.
+ * The helpers take any pair of client clocks: the screen passes performance.now() (monotonic) so
+ * moving the OS clock cannot change the countdown (TC-047), and re-reads the offset from the server.
+ */
 
 /**
- * Offset to add to Date.now() to get server time. Uses the midpoint of the request so network
+ * Offset to add to the client clock reading (performance.now() in the app) to get server time. Uses the midpoint of the request so network
  * latency does not skew the result.
  */
 export function computeClockOffset(
