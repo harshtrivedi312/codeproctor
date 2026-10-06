@@ -53,7 +53,7 @@ import { Prisma } from '../generated/prisma/client.js';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import { OrgContextMissingError, OrgScopeViolationError, RawQueryNotAllowedError } from './errors';
 import type { ScopeSource } from './org-context';
-import { applyOrgScope, assertSystemScopeWrite } from './org-scope-args';
+import { applyOrgScope, assertSystemScopeWrite, isScopedOperation } from './org-scope-args';
 import { scrubPrismaError } from './error-scrub';
 import { ORG_SCOPE } from './org-scope-map';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
@@ -97,14 +97,22 @@ export function orgScopeExtension(source: ScopeSource) {
             `${model} has no entry in ORG_SCOPE (apps/api/src/database/org-scope-map.ts).`,
           );
         }
+        // Deny by default in every scope, unscoped models included (FU-DB-160, ADR 0006 section 8.2):
+        // an operation outside SCOPED_OPERATIONS (findRaw and aggregateRaw exist on every delegate at
+        // runtime, even on PostgreSQL) never runs.
+        if (!isScopedOperation(operation)) {
+          throw new OrgScopeViolationError(
+            `${model}.${operation}: unknown operation. Add it to SCOPED_OPERATIONS and handle it.`,
+          );
+        }
         if (rule.kind === 'unscoped') return execute(query, args);
 
         const scope = store?.scope;
         if (scope === undefined) throw new OrgContextMissingError(`${model}.${operation}`);
         if (scope.kind === 'system') {
-          // System scope is unfiltered, but a nested relation write, an orgId in an update and a
-          // change of a path model's first-hop scope key are refused here too (a row is never
-          // moved to another org).
+          // System scope is unfiltered, but an unknown operation, a nested relation write, an orgId
+          // in an update and a change of a path model's first-hop scope key are refused here too
+          // (a row is never moved to another org).
           assertSystemScopeWrite(model as ModelName, rule, operation, args);
           return execute(query, args);
         }

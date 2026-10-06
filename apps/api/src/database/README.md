@@ -137,7 +137,7 @@ One hook, `query.$allOperations`, sees every model operation and every raw query
 | anything else                                                                                                   | refused (fail closed), and a compile-time check (`OPERATION_COVERAGE`) breaks `typecheck` when Prisma adds an operation                                                                          |
 
 With no context a query on any model throws `OrgContextMissingError`. In system scope it runs
-unfiltered, except that a nested relation write and an `orgId` in an update are still refused. The caller's own `where` (`OR`, `NOT`, an `orgId` naming another org) is kept and ANDed
+unfiltered, except that an unknown operation, a nested relation write and an `orgId` in an update are still refused. The caller's own `where` (`OR`, `NOT`, an `orgId` naming another org) is kept and ANDed
 with the org filter, so it can only narrow.
 
 ### Raw queries
@@ -160,9 +160,12 @@ to another org either. `runRawSql` needs an active scope: **scope first, then `r
 `runSystem`, `runAsUser` or `runInOrg`). Called with no scope it throws, so there is no other
 order. Treat every `runSystem` and `runRawSql` in a pull request as a review flag.
 
-System scope is unfiltered, but it refuses what would move a row to another org. Three rules hold in
-it:
+System scope is unfiltered, but it refuses what would move a row to another org, and anything it
+does not know. Four rules hold in it:
 
+- **Unknown operations are refused** (deny by default; ADR 0006 §8.2, FU-DB-160), as in an org scope: only the
+  operations in `SCOPED_OPERATIONS` run, so one that a future Prisma adds cannot run unfiltered
+  before it is reviewed. `OPERATION_COVERAGE` breaks `typecheck` when that happens.
 - **Nested relation writes are refused**, as in an org scope (see "Nested writes and nested cursors").
 - **`orgId` cannot be changed on update.** Any `orgId` key in the data of `update`, `updateMany`,
   `updateManyAndReturn` or the update branch of `upsert` is refused on a model with its own
