@@ -22,6 +22,7 @@
 // and the `submissions` RUN filter (CS-4.4). Until PR 2, candidate-interim.ts closes the read columns
 // on a list that is the complement of CS-4.4's read column. The fluent API (CS-4.5 vector 6) arrives as
 // a relation select and is refused by vector 2.
+import { MediaStream } from '../generated/prisma/enums.js';
 import { deepFreeze } from './deep-freeze';
 import type { CandidateFacts } from './org-context';
 import { OrgScopeViolationError } from './errors';
@@ -133,38 +134,112 @@ export const NEVER_WRITTEN_BY_CANDIDATE: readonly string[] = deepFreeze([
 ]);
 
 /**
+ * What an object-key rule reads of the write it checks: the values of the same row that the parts of the
+ * key must equal (`stream`, `segment` and `seq` of a media chunk, the `attempt` of an identity check).
+ * Only the columns the rule names in `binds` are present, unwrapped from `{ set }`.
+ */
+export type ObjectKeyBinding = Readonly<Record<string, unknown>>;
+
+/** One column's object-key rule (see CANDIDATE_OBJECT_KEYS). */
+export interface ObjectKeyRule {
+  /** The columns of the same write that the key's own parts must equal, when the write carries them. */
+  readonly binds: readonly string[];
+  /** What such a column is on a create that leaves it out: the schema default. */
+  readonly defaults: Readonly<Record<string, number>>;
+  /**
+   * True when `path` (the key after `orgs/{orgId}/sessions/{sessionId}/`) is in this column's folder, has
+   * its shape and agrees with `bound`. A function and not a RegExp on purpose: the patterns stay private
+   * to this module, because freezing a RegExp does not stop `RegExp.prototype.compile` from rewriting it.
+   */
+  readonly accepts: (path: string, bound: ObjectKeyBinding) => boolean;
+}
+
+// The patterns of ADR 0013 section 5.7. Module-private: nothing outside can reach one to `compile` it.
+// A ULID is 26 characters of Crockford base32 (no I, L, O or U).
+const ULID = '[0-9A-HJKMNP-TV-Z]{26}';
+// The stream is the MediaStream enum of the schema, not a free word.
+const MEDIA_KEY = new RegExp(
+  `^media/(${Object.values(MediaStream).join('|')})/(\\d{6})/(\\d{8})\\.webm$`,
+);
+// Only the sealed copies: id_image_key and selfie_key never point to the upload, which can be re-PUT
+// within its 60 s URL and is deleted once sealed (section 5.7). The attempt has no leading zero.
+const ID_IMAGE_KEY = new RegExp(`^identity/([1-9]\\d{0,2})/sealed/id-${ULID}\\.jpg$`);
+const SELFIE_KEY = new RegExp(`^identity/([1-9]\\d{0,2})/sealed/selfie-${ULID}\\.jpg$`);
+// An EVENT frame. The sealed re-check frame (evidence/sealed/) belongs to the server-written
+// FACE_MISMATCH row, never to a CLIENT event.
+const EVIDENCE_KEY = new RegExp(`^evidence/${ULID}\\.jpg$`);
+
+/** A part of the key equals the row's value, when the write carries one. */
+const sameText = (given: unknown, part: string | undefined): boolean =>
+  given === undefined || given === part;
+const sameInt = (given: unknown, part: string | undefined): boolean =>
+  given === undefined ||
+  (typeof given === 'number' && part !== undefined && given === Number(part));
+
+/**
  * The object keys a candidate write may carry (ADR 0013 section 5.7, ADR 0004 section 9.2): the key must
- * be `orgs/{orgId}/sessions/{sessionId}/` (the scope's own, lower-cased) followed by a path that matches
- * the pattern here, the folder section 5.7 fixes for that column. A key of another session, another org,
- * a traversal (`..`, `//`, a leading `/`) or a shape that is not the layout is refused, and the refusal
- * never echoes the key. `null` is accepted on a create only (it points nowhere). Every column a
- * candidate may write whose name ends in `Key` must be here: a spec checks.
+ * be `orgs/{orgId}/sessions/{sessionId}/` (the scope's own, lower-cased) followed by a path in the folder
+ * and shape section 5.7 fixes for that column, and the parts of the key (the stream, segment and seq of a
+ * media chunk, the attempt of an identity check) must equal the row's own values when the same write
+ * carries them (a create that leaves out `segment` or `attempt` gets the schema default). A key of
+ * another session, another org, a traversal (`..`, `//`, a leading `/`) or a shape that is not the layout
+ * is refused, and the refusal never echoes the key. `null` is accepted on a create only (it points
+ * nowhere). Every column a candidate may write whose name ends in `Key` must be here: a spec checks.
  */
 export const CANDIDATE_OBJECT_KEYS: Readonly<
-  Partial<Record<ModelName, Readonly<Record<string, RegExp>>>>
+  Partial<Record<ModelName, Readonly<Record<string, ObjectKeyRule>>>>
 > = deepFreeze({
   // media/{stream}/{segment:06d}/{seq:08d}.webm
-  MediaChunk: { objectKey: /^media\/[A-Za-z_]+\/\d{6}\/\d{8}\.webm$/ },
-  // identity/{attempt}/{id|selfie}-{ULID}.jpg, or the sealed copy identity/{attempt}/sealed/... the
-  // identity_checks columns point to (section 5.7: the server derives them from the issued names)
-  IdentityCheck: {
-    idImageKey: /^identity\/\d{1,3}\/(?:sealed\/)?id-[A-Za-z0-9]+\.jpg$/,
-    selfieKey: /^identity\/\d{1,3}\/(?:sealed\/)?selfie-[A-Za-z0-9]+\.jpg$/,
+  MediaChunk: {
+    objectKey: {
+      binds: ['stream', 'segment', 'seq'],
+      defaults: { segment: 0 },
+      accepts: (path, bound) => {
+        const m = MEDIA_KEY.exec(path);
+        return (
+          m !== null &&
+          sameText(bound.stream, m[1]) &&
+          sameInt(bound.segment, m[2]) &&
+          sameInt(bound.seq, m[3])
+        );
+      },
+    },
   },
-  // evidence/{ULID}.jpg: an EVENT frame. The sealed re-check frame (evidence/sealed/) belongs to the
-  // server-written FACE_MISMATCH row, never to a CLIENT event.
-  ProctorEvent: { evidenceKey: /^evidence\/[A-Za-z0-9]+\.jpg$/ },
+  // identity/{attempt}/sealed/{id|selfie}-{ULID}.jpg
+  IdentityCheck: {
+    idImageKey: {
+      binds: ['attempt'],
+      defaults: { attempt: 1 },
+      accepts: (path, bound) => {
+        const m = ID_IMAGE_KEY.exec(path);
+        return m !== null && sameInt(bound.attempt, m[1]);
+      },
+    },
+    selfieKey: {
+      binds: ['attempt'],
+      defaults: { attempt: 1 },
+      accepts: (path, bound) => {
+        const m = SELFIE_KEY.exec(path);
+        return m !== null && sameInt(bound.attempt, m[1]);
+      },
+    },
+  },
+  // evidence/{ULID}.jpg
+  ProctorEvent: {
+    evidenceKey: { binds: [], defaults: {}, accepts: (path) => EVIDENCE_KEY.test(path) },
+  },
 });
 
 /**
  * Event types a candidate create may not carry (CS-4.4: SERVER events come only from SERVICE scope, and
- * a CLIENT row must be one the browser can send). The list is every type in EVENT_TYPES that is not in
- * CLIENT_EVENT_TYPES of packages/shared (the server-written ones, ADR 0010), plus FACE_MISMATCH, which
- * ADR 0013 section 5.6 makes a server re-check (it leaves CLIENT_EVENT_TYPES when the SDK ships). A spec
- * compares it with packages/shared, so a new event type fails until it is classified. #126 nit 4.
+ * a CLIENT row must be one the browser can send): exactly the EVENT_TYPES of packages/shared that are not
+ * in CLIENT_EVENT_TYPES (the server-written ones, ADR 0010), 12 of them. `FACE_MISMATCH` is not here: it
+ * is still in CLIENT_EVENT_TYPES, and ADR 0013 section 5.6 says the server accepts it from older clients
+ * until ADR 0010 is amended. Such a row is stamped `source = 'CLIENT'`, so the candidate read filter and
+ * the review treat it as client-reported (FU-DB-197). A spec compares the list with packages/shared, so a
+ * new event type fails until it is classified. #126 nit 4.
  */
 export const SERVER_ONLY_EVENT_TYPES: readonly string[] = deepFreeze([
-  'FACE_MISMATCH',
   'DISCONNECTED',
   'RECONNECTED',
   'PASTE_BURST',

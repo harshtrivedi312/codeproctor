@@ -39,7 +39,7 @@ import {
   NEVER_WRITTEN_BY_CANDIDATE,
   sessionRuleFor,
 } from './session-scope-map';
-import type { CandidateModelRule, SessionModelRule } from './session-scope-map';
+import type { CandidateModelRule, ObjectKeyRule, SessionModelRule } from './session-scope-map';
 
 /** The `session` kind of a CANDIDATE model rule: what a candidate may do on a session-path model. */
 type CandidateSessionRule = Extract<CandidateModelRule, { kind: 'session' }>;
@@ -309,10 +309,38 @@ function hasUnsafePathPiece(key: string): boolean {
   });
 }
 
+/** `{ set: value }` is the update form of a scalar (a create takes the bare value). */
+function writtenValue(kind: 'create' | 'update', given: unknown): unknown {
+  return kind === 'update' && isPlainObject(given) && Object.hasOwn(given, 'set')
+    ? given.set
+    : given;
+}
+
+/**
+ * The values of the same write that the key's parts must equal (the rule's `binds`): what the write
+ * carries, and on a create the schema default of a column it leaves out. A column that an update does not
+ * carry is not bound (the key alone is checked). A value that is not a plain number or string (a
+ * `{ increment }`) is passed on as it is, and the rule refuses it.
+ */
+function boundValues(
+  rule: ObjectKeyRule,
+  kind: 'create' | 'update',
+  data: PlainObject,
+): PlainObject {
+  const bound: PlainObject = {};
+  for (const column of rule.binds) {
+    const given = writtenValue(kind, data[column]);
+    const value = given === undefined && kind === 'create' ? rule.defaults[column] : given;
+    if (value !== undefined) bound[column] = value;
+  }
+  return bound;
+}
+
 /**
  * The object keys a candidate may write stay inside the session's own prefix (ADR 0013 section 5.7, ADR
  * 0004 section 9.2): `orgs/{orgId}/sessions/{sessionId}/` with the scope's own, lower-cased ids, then the
- * folder and shape fixed for the column (CANDIDATE_OBJECT_KEYS). Another session's prefix, another org's,
+ * folder and shape fixed for the column (CANDIDATE_OBJECT_KEYS), with the parts of the key equal to the
+ * row's own `stream`, `segment`, `seq` and `attempt` when the same write carries them. Another session's prefix, another org's,
  * a traversal (`..`, `//`, a leading `/`, a backslash, a control character) and any other shape are
  * refused. `null` points nowhere and is accepted on a create only. The message names the model and the
  * column, never the key.
@@ -328,18 +356,17 @@ function assertObjectKeys(
   const columns = CANDIDATE_OBJECT_KEYS[model];
   if (columns === undefined || !isPlainObject(data)) return;
   const prefix = `orgs/${orgId}/sessions/${sessionId}/`;
-  for (const [column, shape] of Object.entries(columns)) {
+  for (const [column, rule] of Object.entries(columns)) {
     const given = data[column];
     if (given === undefined) continue;
-    // `{ set: value }` is the update form (a create takes the bare value, so an object there is refused).
-    const value =
-      kind === 'update' && isPlainObject(given) && Object.hasOwn(given, 'set') ? given.set : given;
+    // A create takes the bare value, so an object there is refused.
+    const value = writtenValue(kind, given);
     if (value === null && kind === 'create') continue;
     const inside =
       typeof value === 'string' &&
       value.startsWith(prefix) &&
       !hasUnsafePathPiece(value) &&
-      shape.test(value.slice(prefix.length));
+      rule.accepts(value.slice(prefix.length), boundValues(rule, kind, data));
     if (!inside) {
       throw violation(
         model,

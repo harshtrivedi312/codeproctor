@@ -22,7 +22,11 @@
 // named here. candidate-interim.spec.ts holds the CS-4.4 read column and fails for a column that is none of
 // the three, so a new column breaks the build until it is classified. The keys that are not hidden are
 // `id`, `orgId`, `sessionId`, `sessionQuestionId` and, on the two section tables, `testId` and `sectionId`:
-// the ids of the candidate's own org, session and test, which the scope fixes anyway. Columns CS-4.4 opens
+// the ids of the candidate's own org, session and test, which the scope fixes anyway. ONE EXCEPTION:
+// `keystroke_batches.id` is hidden (a global identity counter: reading it tells a candidate how many
+// batches every candidate of the platform has inserted), and a candidate reads that model by `seq`.
+// (`media_chunks.id` and `proctor_events.id` are the same kind of counter and are readable, FU-DB-196.)
+// Columns CS-4.4 opens
 // only under a grant (`sessions.invitationId`, `hmacKeyEnc`, `deviceInfo`, `session_questions.
 // testQuestionId`, `media_chunks.objectKey`, the two `settings`, `invitations.accommodations`) and the
 // RUN-row columns of submissions (`results`, `passed`, `total`) are hidden until PR 2 builds the grants

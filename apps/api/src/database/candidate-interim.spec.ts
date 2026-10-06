@@ -4,7 +4,9 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { CLIENT_EVENT_TYPES, EVENT_TYPES } from '@codeproctor/shared';
+import { MediaStream } from '../generated/prisma/enums.js';
 import { createPrismaClient } from './create-prisma-client';
+import { deepFreeze } from './deep-freeze';
 import {
   CANDIDATE_INTERIM_DENY,
   COMPOUND_UNIQUES,
@@ -84,11 +86,13 @@ const asService = (model: ModelName, operation: string, args: unknown) =>
 
 /** An object key of the scope's own session, in the folder ADR 0013 section 5.7 fixes for the column. */
 const OWN_PREFIX = `orgs/${ORG}/sessions/${SID}/`;
+/** A ULID: 26 characters of Crockford base32 (no I, L, O, U). */
+const ULID = '01J9ZQ3K5M7N8P0R2S4T6V8X0Z';
 const VALID_KEYS: Record<string, string> = {
-  objectKey: `${OWN_PREFIX}media/SCREEN/000001/00000001.webm`,
-  idImageKey: `${OWN_PREFIX}identity/1/sealed/id-01HZZZZZZZZZZZZZZZZZZZZZZZ.jpg`,
-  selfieKey: `${OWN_PREFIX}identity/1/sealed/selfie-01HZZZZZZZZZZZZZZZZZZZZZZZ.jpg`,
-  evidenceKey: `${OWN_PREFIX}evidence/01HZZZZZZZZZZZZZZZZZZZZZZZ.jpg`,
+  objectKey: `${OWN_PREFIX}media/SCREEN/000000/00000001.webm`,
+  idImageKey: `${OWN_PREFIX}identity/1/sealed/id-${ULID}.jpg`,
+  selfieKey: `${OWN_PREFIX}identity/1/sealed/selfie-${ULID}.jpg`,
+  evidenceKey: `${OWN_PREFIX}evidence/${ULID}.jpg`,
 };
 
 const UPDATES = ['update', 'updateMany', 'updateManyAndReturn'] as const;
@@ -813,7 +817,11 @@ describe('S3: the WRITE allowlist of CS-4.4, exhaustive over the columns of ever
         ? 'CLIENT'
         : column === 'sessionQuestionId'
           ? OTHER
-          : (VALID_KEYS[column] ?? 1);
+          : column === 'stream'
+            ? 'SCREEN' // the media key of VALID_KEYS names SCREEN, segment 0 (the default), seq 1
+            : column === 'segment'
+              ? 0
+              : (VALID_KEYS[column] ?? 1);
 
   it('TC-008 the lists in CANDIDATE_MODELS are exactly the CS-4.4 write column', () => {
     expect(SESSION_RULES.map(([model]) => model).sort()).toEqual(Object.keys(CS44_WRITE).sort());
@@ -1436,10 +1444,10 @@ describe('B2: object keys stay inside the session prefix (ADR 0013 section 5.7; 
   const OTHER_SESSION = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2';
   const OTHER_ORG = '22222222-2222-4222-8222-222222222222';
   const KEY_COLUMNS: Array<[ModelName, string, string]> = [
-    ['MediaChunk', 'objectKey', 'media/SCREEN/000001/00000001.webm'],
-    ['IdentityCheck', 'idImageKey', 'identity/1/sealed/id-01HZZZZZZZZZZZZZZZZZZZZZZZ.jpg'],
-    ['IdentityCheck', 'selfieKey', 'identity/2/selfie-01HZZZZZZZZZZZZZZZZZZZZZZZ.jpg'],
-    ['ProctorEvent', 'evidenceKey', 'evidence/01HZZZZZZZZZZZZZZZZZZZZZZZ.jpg'],
+    ['MediaChunk', 'objectKey', 'media/SCREEN/000000/00000001.webm'],
+    ['IdentityCheck', 'idImageKey', `identity/1/sealed/id-${ULID}.jpg`],
+    ['IdentityCheck', 'selfieKey', `identity/1/sealed/selfie-${ULID}.jpg`],
+    ['ProctorEvent', 'evidenceKey', `evidence/${ULID}.jpg`],
   ];
   const own = (rest: string): string => `${OWN_PREFIX}${rest}`;
   const createWith = (model: ModelName, column: string, value: unknown) =>
@@ -1458,7 +1466,7 @@ describe('B2: object keys stay inside the session prefix (ADR 0013 section 5.7; 
   );
 
   it('TC-008 media_chunks.objectKey passes on an update too, as a bare value and as { set }', () => {
-    const rest = 'media/SCREEN/000001/00000001.webm';
+    const rest = 'media/SCREEN/000000/00000001.webm';
     for (const value of [own(rest), { set: own(rest) }]) {
       for (const operation of UPDATES) {
         expect(() =>
@@ -1523,35 +1531,31 @@ describe('B2: object keys stay inside the session prefix (ADR 0013 section 5.7; 
   );
 
   it('TC-008 the folder of section 5.7 is enforced: a media key is not an identity key, and evidence has no sealed folder', () => {
-    const media = own('media/SCREEN/000001/00000001.webm');
-    const identity = own('identity/1/sealed/id-01HZZZZZZZZZZZZZZZZZZZZZZZ.jpg');
-    const evidence = own('evidence/01HZZZZZZZZZZZZZZZZZZZZZZZ.jpg');
+    const media = own('media/SCREEN/000000/00000001.webm');
+    const identity = own(`identity/1/sealed/id-${ULID}.jpg`);
+    const evidence = own(`evidence/${ULID}.jpg`);
     expect(() => createWith('MediaChunk', 'objectKey', identity)).toThrow(refusedKey);
     expect(() => createWith('MediaChunk', 'objectKey', evidence)).toThrow(refusedKey);
     expect(() => createWith('MediaChunk', 'objectKey', own('media/SCREEN/1/1.webm'))).toThrow(
       refusedKey,
     );
     expect(() =>
-      createWith('MediaChunk', 'objectKey', own('media/SCREEN/000001/00000001.html')),
+      createWith('MediaChunk', 'objectKey', own('media/SCREEN/000000/00000001.html')),
     ).toThrow(refusedKey);
     expect(() => createWith('IdentityCheck', 'idImageKey', media)).toThrow(refusedKey);
     expect(() => createWith('IdentityCheck', 'idImageKey', evidence)).toThrow(refusedKey);
     // The id image is not the selfie, and the other way round.
     expect(() =>
-      createWith('IdentityCheck', 'idImageKey', own('identity/1/selfie-01HZZZ.jpg')),
+      createWith('IdentityCheck', 'idImageKey', own(`identity/1/sealed/selfie-${ULID}.jpg`)),
     ).toThrow(refusedKey);
-    expect(() => createWith('IdentityCheck', 'selfieKey', own('identity/1/id-01HZZZ.jpg'))).toThrow(
-      refusedKey,
-    );
+    expect(() =>
+      createWith('IdentityCheck', 'selfieKey', own(`identity/1/sealed/id-${ULID}.jpg`)),
+    ).toThrow(refusedKey);
     expect(() => createWith('ProctorEvent', 'evidenceKey', media)).toThrow(refusedKey);
     expect(() => createWith('ProctorEvent', 'evidenceKey', identity)).toThrow(refusedKey);
     // The sealed re-check frame belongs to the server-written FACE_MISMATCH row.
     expect(() =>
-      createWith(
-        'ProctorEvent',
-        'evidenceKey',
-        own('evidence/sealed/01HZZZZZZZZZZZZZZZZZZZZZZZ.jpg'),
-      ),
+      createWith('ProctorEvent', 'evidenceKey', own(`evidence/sealed/${ULID}.jpg`)),
     ).toThrow(refusedKey);
     expect(() => createWith('ProctorEvent', 'evidenceKey', own('evidence/x.png'))).toThrow(
       refusedKey,
@@ -1574,8 +1578,8 @@ describe('B2: object keys stay inside the session prefix (ADR 0013 section 5.7; 
   });
 
   it('TC-008 the upsert checks both branches', () => {
-    const good = own('media/SCREEN/000001/00000001.webm');
-    const bad = `orgs/${ORG}/sessions/${OTHER}/media/SCREEN/000001/00000001.webm`;
+    const good = own('media/SCREEN/000000/00000001.webm');
+    const bad = `orgs/${ORG}/sessions/${OTHER}/media/SCREEN/000000/00000001.webm`;
     expect(() =>
       asCandidate('MediaChunk', 'upsert', writeArgs('upsert', { objectKey: good })),
     ).not.toThrow();
@@ -1597,7 +1601,7 @@ describe('B2: object keys stay inside the session prefix (ADR 0013 section 5.7; 
 
   it('TC-008 the refusal names the model and the column, never the key', () => {
     let message = '';
-    const secret = `orgs/${ORG}/sessions/${OTHER}/media/SCREEN/000001/00000001.webm`;
+    const secret = `orgs/${ORG}/sessions/${OTHER}/media/SCREEN/000000/00000001.webm`;
     try {
       createWith('MediaChunk', 'objectKey', secret);
     } catch (error) {
@@ -1633,6 +1637,267 @@ describe('B2: object keys stay inside the session prefix (ADR 0013 section 5.7; 
       'MediaChunk.objectKey',
       'ProctorEvent.evidenceKey',
     ]);
+  });
+});
+
+describe('B2 round 4: sealed identity keys, Crockford ULIDs, the MediaStream enum, keys bound to their row (ADR 0013 section 5.7; NFR-04, TC-008)', () => {
+  const own = (rest: string): string => `${OWN_PREFIX}${rest}`;
+  const refusedKey = /must be an object key under this session's own prefix/;
+  const create = (model: ModelName, row: Record<string, unknown>, operation = 'create') =>
+    asCandidate(model, operation, writeArgs(operation, row));
+  const media = (stream: string, segment: number, seq: number): string =>
+    own(`media/${stream}/${String(segment).padStart(6, '0')}/${String(seq).padStart(8, '0')}.webm`);
+  const identity = (attempt: number | string, word: 'id' | 'selfie'): string =>
+    own(`identity/${attempt}/sealed/${word}-${ULID}.jpg`);
+
+  it.each([
+    ['idImageKey', 'id'],
+    ['selfieKey', 'selfie'],
+  ] as const)(
+    'TC-008 IdentityCheck.%s: the unsealed upload key is refused on every create, the sealed copy passes',
+    (column, word) => {
+      // ADR 0013 section 5.7: the columns point to the sealed copy only. The upload key can be re-PUT
+      // within its 60 s URL and is deleted once sealed.
+      const upload = own(`identity/1/${word}-${ULID}.jpg`);
+      for (const operation of CREATES) {
+        expect(() => create('IdentityCheck', { [column]: upload }, operation)).toThrow(refusedKey);
+        expect(() =>
+          create('IdentityCheck', { [column]: identity(1, word) }, operation),
+        ).not.toThrow();
+      }
+      // The sealed folder is for the sealed copy: not the evidence one, not a deeper folder.
+      for (const key of [
+        own(`identity/1/sealed/sealed/${word}-${ULID}.jpg`),
+        own(`identity/sealed/1/${word}-${ULID}.jpg`),
+        own(`evidence/sealed/${ULID}.jpg`),
+        own(`identity/1/sealed/${word}-${ULID}.png`),
+        own(`identity/1/sealed/${word}-${ULID}.jpg.bak`),
+      ]) {
+        expect(() => create('IdentityCheck', { [column]: key })).toThrow(refusedKey);
+      }
+    },
+  );
+
+  it('TC-008 the attempt in an identity key has no leading zero and at most three digits', () => {
+    for (const attempt of ['0', '00', '01', '1000', 'x', '-1', '1.5']) {
+      expect(() =>
+        create('IdentityCheck', { attempt: 1, idImageKey: identity(attempt, 'id') }),
+      ).toThrow(refusedKey);
+    }
+    for (const attempt of [1, 9, 10, 999]) {
+      expect(() =>
+        create('IdentityCheck', { attempt, idImageKey: identity(attempt, 'id') }),
+      ).not.toThrow();
+    }
+  });
+
+  it.each([
+    ['IdentityCheck', 'idImageKey', (u: string) => identity(1, 'id').replace(ULID, u)],
+    ['IdentityCheck', 'selfieKey', (u: string) => identity(1, 'selfie').replace(ULID, u)],
+    ['ProctorEvent', 'evidenceKey', (u: string) => own(`evidence/${u}.jpg`)],
+  ] as const)(
+    'TC-008 %s.%s: the name is a ULID of 26 Crockford base32 characters',
+    (model, column, keyOf) => {
+      expect(() => create(model, { [column]: keyOf(ULID) })).not.toThrow();
+      const refused = [
+        '01HZZZ', // a short name is not a ULID
+        ULID.slice(0, 25),
+        `${ULID}0`,
+        ULID.toLowerCase(), // Crockford base32 as ULIDs write it is upper case
+        `I${ULID.slice(1)}`, // I, L, O and U are not in the alphabet
+        `L${ULID.slice(1)}`,
+        `O${ULID.slice(1)}`,
+        `U${ULID.slice(1)}`,
+        `${ULID.slice(0, 25)}_`,
+        `${ULID.slice(0, 25)}-`,
+        `${ULID.slice(0, 12)}.${ULID.slice(13)}`,
+        '',
+      ];
+      for (const name of refused) {
+        expect(() => create(model, { [column]: keyOf(name) })).toThrow(refusedKey);
+      }
+    },
+  );
+
+  it('TC-008 the stream of a media key is the MediaStream enum of the schema, and nothing else', () => {
+    expect([...Object.values(MediaStream)].sort()).toEqual(
+      ['AUDIO', 'ROOM_SCAN', 'SCREEN', 'SIDE_CAMERA', 'WEBCAM'].sort(),
+    );
+    for (const stream of Object.values(MediaStream)) {
+      expect(() =>
+        create('MediaChunk', { stream, seq: 1, objectKey: media(stream, 0, 1) }),
+      ).not.toThrow();
+    }
+    for (const stream of [
+      'FOO',
+      'screen',
+      'Screen',
+      'SCREEN ',
+      'SCREEN2',
+      'SCREEN_',
+      'A_B',
+      'ROOM-SCAN',
+      '',
+    ]) {
+      expect(() => create('MediaChunk', { objectKey: media(stream, 0, 1) })).toThrow(refusedKey);
+    }
+  });
+
+  describe('a media key agrees with the stream, segment and seq of its own row', () => {
+    const key = media('WEBCAM', 7, 42);
+
+    it('TC-008 a create that carries them: all three must match', () => {
+      expect(() =>
+        create('MediaChunk', { stream: 'WEBCAM', segment: 7, seq: 42, objectKey: key }),
+      ).not.toThrow();
+      for (const wrong of [
+        { stream: 'SCREEN', segment: 7, seq: 42 },
+        { stream: 'WEBCAM', segment: 6, seq: 42 },
+        { stream: 'WEBCAM', segment: 7, seq: 41 },
+        { stream: 'WEBCAM', segment: 7, seq: 4200 },
+        { stream: 'WEBCAM', segment: 7, seq: '42' }, // a string is not the number the key names
+        { stream: 'WEBCAM', segment: 7, seq: { increment: 1 } },
+        { stream: 1, segment: 7, seq: 42 },
+        { stream: 'WEBCAM', segment: 7.5, seq: 42 },
+      ]) {
+        for (const operation of CREATES) {
+          expect(() => create('MediaChunk', { ...wrong, objectKey: key }, operation)).toThrow(
+            refusedKey,
+          );
+        }
+      }
+    });
+
+    it('TC-008 createMany: one row that does not match refuses the batch', () => {
+      expect(() =>
+        asCandidate('MediaChunk', 'createMany', {
+          data: [
+            { stream: 'WEBCAM', segment: 7, seq: 42, objectKey: key },
+            { stream: 'WEBCAM', segment: 7, seq: 43, objectKey: key },
+          ],
+        }),
+      ).toThrow(refusedKey);
+    });
+
+    it('TC-008 a create that leaves out `segment` gets the schema default 0', () => {
+      expect(() =>
+        create('MediaChunk', { stream: 'WEBCAM', seq: 42, objectKey: media('WEBCAM', 0, 42) }),
+      ).not.toThrow();
+      expect(() => create('MediaChunk', { stream: 'WEBCAM', seq: 42, objectKey: key })).toThrow(
+        refusedKey,
+      );
+      // A part of the row that the write does not carry (the stream, which Prisma requires) is not bound.
+      expect(() => create('MediaChunk', { seq: 42, segment: 7, objectKey: key })).not.toThrow();
+    });
+
+    it.each(['update', 'updateMany', 'updateManyAndReturn'] as const)(
+      'TC-008 %s: the values the same write carries are bound, the others are not',
+      (operation) => {
+        const update = (data: Record<string, unknown>) =>
+          asCandidate('MediaChunk', operation, writeArgs(operation, data));
+        expect(() => update({ objectKey: key })).not.toThrow(); // nothing to bind against
+        expect(() =>
+          update({ objectKey: key, stream: 'WEBCAM', segment: 7, seq: 42 }),
+        ).not.toThrow();
+        expect(() => update({ objectKey: key, seq: { set: 42 } })).not.toThrow();
+        expect(() => update({ objectKey: { set: key }, seq: 42 })).not.toThrow();
+        for (const wrong of [
+          { stream: 'SCREEN' },
+          { segment: 8 },
+          { seq: 43 },
+          { seq: { set: 43 } },
+          { seq: { increment: 1 } }, // the row's seq after the update is not known
+          { segment: { decrement: 1 } },
+        ]) {
+          expect(() => update({ objectKey: key, ...wrong })).toThrow(refusedKey);
+        }
+        // A column that an update leaves out is not defaulted: that is the row's own, unchanged.
+        expect(() => update({ objectKey: key, stream: 'WEBCAM' })).not.toThrow();
+      },
+    );
+
+    it('TC-008 the upsert binds each branch to its own data', () => {
+      const good = { stream: 'WEBCAM', segment: 7, seq: 42, objectKey: key };
+      expect(() =>
+        asCandidate('MediaChunk', 'upsert', writeArgs('upsert', good, { objectKey: key, seq: 42 })),
+      ).not.toThrow();
+      expect(() =>
+        asCandidate('MediaChunk', 'upsert', writeArgs('upsert', good, { objectKey: key, seq: 43 })),
+      ).toThrow(refusedKey);
+      expect(() =>
+        asCandidate(
+          'MediaChunk',
+          'upsert',
+          writeArgs('upsert', { ...good, seq: 43 }, { objectKey: key }),
+        ),
+      ).toThrow(refusedKey);
+    });
+
+    it('TC-008 the job is not bound: a SERVICE scope writes a key that does not match its row', () => {
+      expect(() =>
+        asService(
+          'MediaChunk',
+          'create',
+          writeArgs('create', { stream: 'SCREEN', seq: 1, objectKey: key }),
+        ),
+      ).not.toThrow();
+    });
+  });
+
+  describe('an identity key agrees with the attempt of its own row', () => {
+    it.each(['idImageKey', 'selfieKey'] as const)(
+      'TC-008 %s: the attempt of the key is the attempt of the row',
+      (column) => {
+        const word = column === 'idImageKey' ? 'id' : 'selfie';
+        expect(() =>
+          create('IdentityCheck', { attempt: 2, [column]: identity(2, word) }),
+        ).not.toThrow();
+        for (const attempt of [1, 3, '2', { increment: 1 }]) {
+          expect(() => create('IdentityCheck', { attempt, [column]: identity(2, word) })).toThrow(
+            refusedKey,
+          );
+        }
+        // `attempt` left out is the schema default, 1.
+        expect(() => create('IdentityCheck', { [column]: identity(1, word) })).not.toThrow();
+        expect(() => create('IdentityCheck', { [column]: identity(2, word) })).toThrow(refusedKey);
+      },
+    );
+
+    it('TC-008 both keys of one create are bound to the same attempt', () => {
+      expect(() =>
+        create('IdentityCheck', {
+          attempt: 2,
+          idImageKey: identity(2, 'id'),
+          selfieKey: identity(2, 'selfie'),
+        }),
+      ).not.toThrow();
+      expect(() =>
+        create('IdentityCheck', {
+          attempt: 2,
+          idImageKey: identity(2, 'id'),
+          selfieKey: identity(1, 'selfie'),
+        }),
+      ).toThrow(refusedKey);
+    });
+
+    it('TC-008 the job is not bound', () => {
+      expect(() =>
+        asService('IdentityCheck', 'create', writeArgs('create', { attempt: 2, idImageKey: 'x' })),
+      ).not.toThrow();
+    });
+  });
+
+  it('TC-008 the rules are predicates over private patterns: the table holds no RegExp to compile()', () => {
+    const rules = Object.entries(CANDIDATE_OBJECT_KEYS).flatMap(([model, columns]) =>
+      Object.entries(columns ?? {}).map(([column, rule]) => ({ model, column, rule })),
+    );
+    expect(rules).toHaveLength(4);
+    for (const { rule } of rules) {
+      expect(typeof rule.accepts).toBe('function');
+      expect(Object.values(rule).some((v) => v instanceof RegExp)).toBe(false);
+    }
+    expect(Object.isFrozen(CANDIDATE_OBJECT_KEYS.MediaChunk?.objectKey)).toBe(true);
+    expect(Object.isFrozen(CANDIDATE_OBJECT_KEYS.MediaChunk?.objectKey?.binds)).toBe(true);
   });
 });
 
@@ -1694,14 +1959,41 @@ describe('B3: consents are written once (FR-401, C-17; NFR-04, TC-008)', () => {
 describe('nit 4: a candidate create cannot carry an event type only the server writes (#126)', () => {
   const event = (type: unknown) => ({ type, severity: 'LOW', occurredAt: new Date() });
 
-  it('TC-008 the list is every type the browser may not send, and FACE_MISMATCH (a server re-check, ADR 0013 section 5.6)', () => {
+  it('TC-008 the list is exactly EVENT_TYPES minus CLIENT_EVENT_TYPES of packages/shared: 12 types', () => {
     const notClient = EVENT_TYPES.filter(
       (type) => !(CLIENT_EVENT_TYPES as readonly string[]).includes(type),
     );
-    expect([...SERVER_ONLY_EVENT_TYPES].sort()).toEqual([...notClient, 'FACE_MISMATCH'].sort());
-    for (const type of ['FACE_MISMATCH', 'IDENTITY_MANUAL_REVIEW', 'RESUME_OTP_FAILED']) {
+    expect([...SERVER_ONLY_EVENT_TYPES].sort()).toEqual([...notClient].sort());
+    expect(SERVER_ONLY_EVENT_TYPES).toHaveLength(12);
+    for (const type of ['IDENTITY_MANUAL_REVIEW', 'RESUME_OTP_FAILED']) {
       expect(SERVER_ONLY_EVENT_TYPES).toContain(type);
     }
+  });
+
+  it('TC-008 FACE_MISMATCH is still a type the browser may send (ADR 0013 section 5.6: accepted from older clients until ADR 0010 is amended), stamped CLIENT', () => {
+    expect(SERVER_ONLY_EVENT_TYPES).not.toContain('FACE_MISMATCH');
+    expect(CLIENT_EVENT_TYPES as readonly string[]).toContain('FACE_MISMATCH');
+    for (const operation of CREATES) {
+      const { args } = asCandidate(
+        'ProctorEvent',
+        operation,
+        writeArgs(operation, event('FACE_MISMATCH')),
+      );
+      const rows = (Array.isArray(args.data) ? args.data : [args.data]) as Array<{
+        type: string;
+        source: string;
+      }>;
+      expect(rows.map((row) => ({ type: row.type, source: row.source }))).toEqual([
+        { type: 'FACE_MISMATCH', source: 'CLIENT' },
+      ]);
+    }
+    // A candidate cannot send it as a SERVER row.
+    expect(() =>
+      asCandidate('ProctorEvent', 'create', {
+        data: { ...event('FACE_MISMATCH'), source: 'SERVER' },
+        select: { id: true },
+      }),
+    ).toThrow(/source must be CLIENT/);
   });
 
   it('TC-008 each server-only type is refused on every create, and every type the browser may send passes', () => {
@@ -1727,7 +2019,7 @@ describe('nit 4: a candidate create cannot carry an event type only the server w
         asService('ProctorEvent', 'create', writeArgs('create', event(type))),
       ).not.toThrow();
     }
-    for (const type of CLIENT_EVENT_TYPES.filter((t) => t !== 'FACE_MISMATCH')) {
+    for (const type of CLIENT_EVENT_TYPES) {
       expect(() =>
         asCandidate('ProctorEvent', 'create', writeArgs('create', event(type))),
       ).not.toThrow();
@@ -1748,7 +2040,7 @@ describe('nit 4: a candidate create cannot carry an event type only the server w
 
 describe('nit 3: the scope tables are frozen at runtime (#126)', () => {
   const frozenDeep = (value: unknown, path: string, bad: string[]): void => {
-    if (typeof value !== 'object' || value === null || value instanceof RegExp) return;
+    if (typeof value !== 'object' || value === null) return;
     if (!Object.isFrozen(value)) bad.push(path);
     for (const key of Reflect.ownKeys(value)) {
       frozenDeep((value as Record<PropertyKey, unknown>)[key], `${path}.${String(key)}`, bad);
@@ -1769,6 +2061,38 @@ describe('nit 3: the scope tables are frozen at runtime (#126)', () => {
     const bad: string[] = [];
     frozenDeep(table, name, bad);
     expect(bad).toEqual([]);
+  });
+
+  it('TC-008 no table holds a RegExp, because freezing one does not stop RegExp.prototype.compile', () => {
+    const found: string[] = [];
+    const walk = (value: unknown, path: string): void => {
+      if (value instanceof RegExp) found.push(path);
+      if (typeof value !== 'object' || value === null) return;
+      for (const key of Reflect.ownKeys(value)) {
+        walk((value as Record<PropertyKey, unknown>)[key], `${path}.${String(key)}`);
+      }
+    };
+    for (const [name, table] of Object.entries({
+      SESSION_SCOPE,
+      CANDIDATE_MODELS,
+      CANDIDATE_INTERIM_DENY,
+      COMPOUND_UNIQUES,
+      NEVER_WRITTEN_BY_CANDIDATE,
+      CANDIDATE_OBJECT_KEYS,
+      SERVER_ONLY_EVENT_TYPES,
+      READ_OPERATIONS,
+      ROW_RETURNING_OPERATIONS,
+    })) {
+      walk(table, name);
+    }
+    expect(found).toEqual([]);
+    // Why: a frozen RegExp is rewritten by compile() before it throws on the frozen lastIndex.
+    const frozen = Object.freeze(/a/);
+    expect(() => frozen.compile('b')).toThrow(TypeError);
+    expect(frozen.source).toBe('b');
+    // So deepFreeze refuses one, and a table cannot be given one by mistake.
+    expect(() => deepFreeze({ pattern: /x/ })).toThrow(/RegExp/);
+    expect(() => deepFreeze([[/x/]])).toThrow(/RegExp/);
   });
 
   it('TC-008 a write to a table throws, and the tables are as they were', () => {

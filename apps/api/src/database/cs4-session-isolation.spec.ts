@@ -41,6 +41,8 @@ import type {
 
 type Delegate = Record<string, (args?: unknown) => Promise<unknown>>;
 type Row = Record<string, unknown>;
+/** A ULID: 26 characters of Crockford base32 (no I, L, O, U). */
+const ULID = '01J9ZQ3K5M7N8P0R2S4T6V8X0Z';
 
 const CHAIN_MODELS: readonly ChainModel[] = [
   'Organization',
@@ -1183,8 +1185,8 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
           data: {
             sessionId: A.sessionId,
             attempt: 2,
-            idImageKey: `orgs/${A.orgId}/sessions/${A.sessionId}/identity/2/sealed/id-01HZZZ.jpg`,
-            selfieKey: `orgs/${A.orgId}/sessions/${A.sessionId}/identity/2/sealed/selfie-01HZZZ.jpg`,
+            idImageKey: `orgs/${A.orgId}/sessions/${A.sessionId}/identity/2/sealed/id-${ULID}.jpg`,
+            selfieKey: `orgs/${A.orgId}/sessions/${A.sessionId}/identity/2/sealed/selfie-${ULID}.jpg`,
             livenessPassed: true,
           },
           select: { id: true, attempt: true, status: true },
@@ -2011,8 +2013,8 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
           `${prefixOf(A)}media/../../${B.sessionId}/media/SCREEN/000000/00000050.webm`,
           `${prefixOf(A)}media/SCREEN//000000/00000050.webm`,
           `/${media(A, 50)}`,
-          `${prefixOf(A)}evidence/01HZZZ.jpg`,
-          `orgs/${A.orgId}/consents/${A.sessionId}/01HZZZ.pdf`,
+          `${prefixOf(A)}evidence/${ULID}.jpg`,
+          `orgs/${A.orgId}/consents/${A.sessionId}/${ULID}.pdf`,
         ]) {
           await expect(
             client.mediaChunk.create({
@@ -2081,7 +2083,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
             data: {
               sessionId: A.sessionId,
               attempt: 2,
-              idImageKey: `${prefixOf(B)}identity/2/sealed/id-01HZZZ.jpg`,
+              idImageKey: `${prefixOf(B)}identity/2/sealed/id-${ULID}.jpg`,
             },
             ...ID,
           }),
@@ -2091,7 +2093,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
             data: {
               sessionId: A.sessionId,
               attempt: 2,
-              selfieKey: `${prefixOf(O)}identity/2/sealed/selfie-01HZZZ.jpg`,
+              selfieKey: `${prefixOf(O)}identity/2/sealed/selfie-${ULID}.jpg`,
             },
             ...ID,
           }),
@@ -2102,7 +2104,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
               type: 'TAB_SWITCH',
               severity: 'LOW',
               occurredAt: WHEN,
-              evidenceKey: `${prefixOf(B)}evidence/01HZZZ.jpg`,
+              evidenceKey: `${prefixOf(B)}evidence/${ULID}.jpg`,
             } as never,
             ...ID,
           }),
@@ -2114,8 +2116,8 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
           data: {
             sessionId: A.sessionId,
             attempt: 2,
-            idImageKey: `${prefixOf(A)}identity/2/sealed/id-01HZZZ.jpg`,
-            selfieKey: `${prefixOf(A)}identity/2/sealed/selfie-01HZZZ.jpg`,
+            idImageKey: `${prefixOf(A)}identity/2/sealed/id-${ULID}.jpg`,
+            selfieKey: `${prefixOf(A)}identity/2/sealed/selfie-${ULID}.jpg`,
           },
           ...ID,
         }),
@@ -2127,12 +2129,133 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
             type: 'TAB_SWITCH',
             severity: 'LOW',
             occurredAt: WHEN,
-            evidenceKey: `${prefixOf(A)}evidence/01HZZZ.jpg`,
+            evidenceKey: `${prefixOf(A)}evidence/${ULID}.jpg`,
           } as never,
           ...ID,
         }),
       );
       await owner.proctorEvent.delete({ where: { id: event.id } });
+    });
+
+    it("TC-008 only the sealed copy is a key of an identity check; the key's own parts must be the row's (stream, segment, seq, attempt); a ULID is Crockford base32; nothing is written", async () => {
+      const before = await snapshot();
+      await db.statements.reset();
+      await asCandidate(A, async () => {
+        for (const [column, word] of [
+          ['idImageKey', 'id'],
+          ['selfieKey', 'selfie'],
+        ] as const) {
+          // the unsealed upload key can be re-PUT within its 60 s URL and is deleted once sealed
+          await expect(
+            client.identityCheck.create({
+              data: {
+                sessionId: A.sessionId,
+                attempt: 2,
+                [column]: `${prefixOf(A)}identity/2/${word}-${ULID}.jpg`,
+              },
+              ...ID,
+            }),
+          ).rejects.toThrow(new RegExp(`${column} must be an object key`));
+          // the attempt of the key is the attempt of the row
+          await expect(
+            client.identityCheck.create({
+              data: {
+                sessionId: A.sessionId,
+                attempt: 3,
+                [column]: `${prefixOf(A)}identity/2/sealed/${word}-${ULID}.jpg`,
+              },
+              ...ID,
+            }),
+          ).rejects.toThrow(new RegExp(`${column} must be an object key`));
+          // a ULID has 26 characters of Crockford base32
+          for (const name of ['01HZZZ', ULID.toLowerCase(), `I${ULID.slice(1)}`, `${ULID}0`]) {
+            await expect(
+              client.identityCheck.create({
+                data: {
+                  sessionId: A.sessionId,
+                  attempt: 2,
+                  [column]: `${prefixOf(A)}identity/2/sealed/${word}-${name}.jpg`,
+                },
+                ...ID,
+              }),
+            ).rejects.toThrow(new RegExp(`${column} must be an object key`));
+          }
+        }
+        // the stream is the MediaStream enum, and the key's stream, segment and seq are the row's
+        const row = { sessionId: A.sessionId, startedAt: WHEN, durationMs: 1 };
+        for (const wrong of [
+          { stream: 'WEBCAM', seq: 50 },
+          { stream: 'SCREEN', seq: 51 },
+          { stream: 'SCREEN', seq: 50, segment: 1 },
+          { stream: 'screen', seq: 50 },
+        ]) {
+          await expect(
+            client.mediaChunk.create({
+              data: { ...row, ...wrong, objectKey: media(A, 50) } as never,
+              ...ID,
+            }),
+          ).rejects.toThrow(/objectKey must be an object key/);
+        }
+        await expect(
+          client.mediaChunk.create({
+            data: {
+              ...row,
+              stream: 'SCREEN',
+              seq: 50,
+              objectKey: `${prefixOf(A)}media/NOT_A_STREAM/000000/00000050.webm`,
+            } as never,
+            ...ID,
+          }),
+        ).rejects.toThrow(/objectKey must be an object key/);
+      });
+      expect(await statementCount()).toBe(0);
+      expect(await snapshot()).toEqual(before);
+
+      // An update that carries the row's own values is bound to them; one that does not is not.
+      const chunk = await asCandidate(A, () =>
+        client.mediaChunk.create({
+          data: {
+            sessionId: A.sessionId,
+            stream: 'SCREEN',
+            seq: 50,
+            startedAt: WHEN,
+            durationMs: 1,
+            objectKey: media(A, 50),
+          },
+          ...ID,
+        }),
+      );
+      try {
+        await asCandidate(A, async () => {
+          await expect(
+            client.mediaChunk.update({
+              where: { id: chunk.id },
+              data: { objectKey: media(A, 51), seq: 50 },
+              ...ID,
+            }),
+          ).rejects.toThrow(/objectKey must be an object key/);
+          await expect(
+            client.mediaChunk.update({
+              where: { id: chunk.id },
+              data: { objectKey: media(A, 50), seq: { increment: 1 } },
+              ...ID,
+            }),
+          ).rejects.toThrow(/objectKey must be an object key/);
+          const same = await client.mediaChunk.update({
+            where: { id: chunk.id },
+            data: { objectKey: media(A, 50), seq: 50 },
+            ...ID,
+          });
+          expect(same.id).toBe(chunk.id);
+        });
+        const stored = await owner.mediaChunk.findUniqueOrThrow({ where: { id: chunk.id } });
+        expect({ objectKey: stored.objectKey, seq: stored.seq }).toEqual({
+          objectKey: media(A, 50),
+          seq: 50,
+        });
+      } finally {
+        await owner.mediaChunk.delete({ where: { id: chunk.id } });
+      }
     });
 
     it("TC-008 the job writes any key (the rule is the candidate's)", async () => {
@@ -2244,12 +2367,7 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
     it('TC-008 a candidate create of a server-only event type is refused with no statement, and a browser type is stored as CLIENT', async () => {
       await db.statements.reset();
       await asCandidate(A, async () => {
-        for (const type of [
-          'FACE_MISMATCH',
-          'IDENTITY_MANUAL_REVIEW',
-          'RESUME_OTP_FAILED',
-          'DISCONNECTED',
-        ]) {
+        for (const type of ['IDENTITY_MANUAL_REVIEW', 'RESUME_OTP_FAILED', 'DISCONNECTED']) {
           await expect(
             client.proctorEvent.create({
               data: { type, severity: 'HIGH', occurredAt: WHEN } as never,
@@ -2271,6 +2389,60 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
         source: 'CLIENT',
       });
       await owner.proctorEvent.delete({ where: { id: created.id } });
+    });
+
+    it('TC-008 FACE_MISMATCH from an older client is accepted and stored as a CLIENT row (ADR 0013 section 5.6): the candidate reads it, a SERVER one stays hidden', async () => {
+      const server = await owner.proctorEvent.create({
+        data: {
+          sessionId: A.sessionId,
+          type: 'FACE_MISMATCH',
+          severity: 'MEDIUM',
+          source: 'SERVER',
+          occurredAt: WHEN,
+        },
+      });
+      const sent = await asCandidate(A, () =>
+        client.proctorEvent.create({
+          data: {
+            type: 'FACE_MISMATCH',
+            severity: 'MEDIUM',
+            occurredAt: WHEN,
+            payload: { similarity: 0.1 },
+          } as never,
+          ...ID,
+        }),
+      );
+      try {
+        const stored = await owner.proctorEvent.findUniqueOrThrow({ where: { id: sent.id } });
+        expect({ type: stored.type, source: stored.source }).toEqual({
+          type: 'FACE_MISMATCH',
+          source: 'CLIENT',
+        });
+        const seen = await asCandidate(A, () =>
+          client.proctorEvent.findMany({
+            where: { type: 'FACE_MISMATCH' },
+            select: { id: true },
+          }),
+        );
+        expect(seen.map((row) => row.id)).toEqual([sent.id]);
+        // It cannot be sent as a SERVER row.
+        await asCandidate(A, async () => {
+          await expect(
+            client.proctorEvent.create({
+              data: {
+                type: 'FACE_MISMATCH',
+                severity: 'MEDIUM',
+                occurredAt: WHEN,
+                source: 'SERVER',
+              } as never,
+              ...ID,
+            }),
+          ).rejects.toThrow(/source must be CLIENT/);
+        });
+      } finally {
+        await owner.proctorEvent.delete({ where: { id: sent.id } });
+        await owner.proctorEvent.delete({ where: { id: server.id } });
+      }
     });
 
     it('TC-008 keystroke_batches.id is not readable (an insert-volume leak): a candidate reads its batches by seq, the job sees the id', async () => {
