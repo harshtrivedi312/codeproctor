@@ -27,7 +27,10 @@ export class InferenceClient {
   private ready: ((r: ReadyMessage | null) => void) | null = null;
   /** Called once if the worker dies after `ready` (error event or repeated frame timeouts). */
   onDead: (() => void) | null = null;
-  private consecutiveTimeouts = 0;
+  private consecutiveStrikes = 0;
+  /** Id of a frame that timed out but whose worker may still be computing it. */
+  private lateId: number | null = null;
+  private lateTimer: ReturnType<typeof setTimeout> | null = null;
   skippedFrames = 0;
   busyMs = 0;
   frames = 0;
@@ -40,6 +43,11 @@ export class InferenceClient {
     /** A frame the worker never answers is abandoned after this long (default 10 s). */
     private readonly frameTimeoutMs = 10_000,
   ) {}
+
+  /** One strike per timeout or per error event; three in a row mean the worker is not usable. */
+  private strike(): void {
+    if (++this.consecutiveStrikes >= 3) this.die();
+  }
 
   private die(): void {
     if (!this.worker) return;
@@ -70,8 +78,9 @@ export class InferenceClient {
           this.ready(null);
           return;
         }
-        // Dead worker after ready: do not keep it, a frame would wait forever.
-        this.die();
+        // An `error` event also fires for an uncaught exception in a handler while the worker lives
+        // on, so it is one strike (like a timeout), not an immediate death.
+        this.strike();
       };
       this.worker.postMessage({ type: 'init', ...msg });
     });
@@ -85,8 +94,14 @@ export class InferenceClient {
     }
     this.busyMs += m.busyMs;
     this.frames++;
+    if (this.lateId === m.id) {
+      // The worker finished the frame we gave up on: it is free again.
+      this.lateId = null;
+      if (this.lateTimer) clearTimeout(this.lateTimer);
+      this.lateTimer = null;
+    }
     if (this.inFlight?.id === m.id) {
-      this.consecutiveTimeouts = 0;
+      this.consecutiveStrikes = 0;
       this.inFlight.resolve(m);
       this.inFlight = null;
     }
@@ -94,7 +109,8 @@ export class InferenceClient {
 
   /** Send a frame. Returns null when skipped (worker busy) or failed. Takes ownership of the bitmap. */
   analyze(bitmap: ImageBitmap, tasks: InferenceTask[]): Promise<ResultMessage | null> {
-    if (!this.worker || this.inFlight) {
+    // Busy: a frame in flight, or one that timed out but is still running in the worker.
+    if (!this.worker || this.inFlight || this.lateId !== null) {
       this.skippedFrames++;
       bitmap.close();
       return Promise.resolve(null);
@@ -105,7 +121,13 @@ export class InferenceClient {
         if (this.inFlight?.id !== id) return;
         this.inFlight = null;
         resolve(null);
-        if (++this.consecutiveTimeouts >= 3) this.die();
+        // Keep back-pressure: the worker may still be busy with this frame. If it never answers
+        // within another timeout it is considered dead.
+        this.lateId = id;
+        this.lateTimer = setTimeout(() => {
+          if (this.lateId === id) this.die();
+        }, this.frameTimeoutMs);
+        this.strike();
       }, this.frameTimeoutMs);
       this.inFlight = {
         id,
@@ -124,6 +146,9 @@ export class InferenceClient {
   }
 
   terminate(): void {
+    if (this.lateTimer) clearTimeout(this.lateTimer);
+    this.lateTimer = null;
+    this.lateId = null;
     // An init still waiting for `ready` settles at once instead of hanging until its timeout.
     const pendingReady = this.ready;
     this.ready = null;

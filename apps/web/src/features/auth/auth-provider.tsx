@@ -11,6 +11,8 @@ import {
   getSessionUserId,
   REQUEST_TIMEOUT_MS,
   handleSignInElsewhere,
+  invalidateRefreshes,
+  isSignOutMarkerSet,
   isSignOutPending,
   SESSION_EPOCH_KEY,
   SIGN_OUT_MARKER_KEY,
@@ -57,6 +59,12 @@ interface AuthContextValue {
    * cross-tab broadcast (other tabs sign out) and cleared last.
    */
   signOutRevoked: () => Promise<void>;
+  /**
+   * The server just set this user's refresh cookie but the session is not published yet (forced
+   * enrollment: the recovery codes are still on screen). Clears the sign-out marker and tells
+   * other tabs now, so no tab retries a logout with the new cookie. Does not sign in.
+   */
+  announceSession: (userId: string) => void;
   setPending: (pending: PendingChallenge | null) => void;
   /** Called after a successful login, 2FA verify or enrollment. */
   signIn: (session: AuthSession) => void;
@@ -75,6 +83,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
   const [signedOutByUser, setSignedOutByUser] = React.useState(false);
   const [signOutUnconfirmed, setSignOutUnconfirmed] = React.useState(false);
   const [loginPath, setLoginPath] = React.useState(LOGIN_PATH);
+  // This tab's own logout attempts: a call in flight, and the generation of a failed answer.
+  // Used instead of the shared marker, which another tab clears before announcing its sign-in.
+  const logoutOutstanding = React.useRef(0);
+  const unconfirmedGen = React.useRef<number | null>(null);
 
   /**
    * Asks the server to end the session. Success, or 401 (there is no valid session left, so
@@ -82,6 +94,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
    */
   const confirmLogout = React.useCallback(async () => {
     const startedIn = getGeneration();
+    logoutOutstanding.current += 1;
     const call = (async (): Promise<boolean> => {
       try {
         const { response } = await api.POST('/v1/auth/logout', {
@@ -94,11 +107,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     })();
     trackLogout(call);
     const ok = await call;
+    logoutOutstanding.current -= 1;
     // A new sign-in happened meanwhile: this answer is about the old session; ignore it.
     if (startedIn !== getGeneration()) return;
     if (ok) confirmSignedOut();
+    // Remember which generation the failed answer belongs to, so Retry can tell it went stale.
+    unconfirmedGen.current = ok ? null : startedIn;
     setSignOutUnconfirmed(!ok);
   }, []);
+
+  /**
+   * Retry after a failed logout. Only sends when nothing changed since the failure: if another
+   * sign-in was announced (generation bumped) or the marker is gone, the shared cookie may belong
+   * to someone else now, so just hide the button.
+   */
+  const retrySignOut = React.useCallback(async () => {
+    if (unconfirmedGen.current !== getGeneration() || !isSignOutMarkerSet()) {
+      unconfirmedGen.current = null;
+      setSignOutUnconfirmed(false);
+      return;
+    }
+    await confirmLogout();
+  }, [confirmLogout]);
 
   React.useEffect(() => {
     let lastUserId: string | null = null;
@@ -140,11 +170,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
         signedOutElsewhere();
       } else if (event.key === SIGN_OUT_MARKER_KEY && event.newValue === null) {
         // Another tab confirmed the sign-out (or signed in): nothing left to retry here.
+        unconfirmedGen.current = null;
         setSignOutUnconfirmed(false);
       } else if (event.key === SESSION_EPOCH_KEY && getSessionUserId()) {
         // Another tab signed in. Compare user ids locally: no network call, so a burst of
         // refreshes from every tab cannot look like token reuse (TC-005).
         handleSignInElsewhere(event.newValue);
+      } else if (
+        event.key === SESSION_EPOCH_KEY &&
+        (logoutOutstanding.current > 0 || unconfirmedGen.current !== null || isSignOutPending())
+      ) {
+        // Another tab has signed in (the shared cookie is now theirs) while this tab still has a
+        // sign-out outstanding: its logout call in flight, a failed answer awaiting Retry, or a
+        // pending marker. Supersede it: a late answer must not show "could not confirm" and
+        // Retry must not revoke the new session (TC-005).
+        // (The in-memory signing-out flag stays true after this on purpose: no refresh here.)
+        invalidateRefreshes();
+        unconfirmedGen.current = null;
+        setSignOutUnconfirmed(false);
       }
     };
     window.addEventListener('storage', onStorage);
@@ -173,21 +216,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
   const signOut = React.useCallback(async () => {
     setSignedOutByUser(true);
     setLoginPath(LOGIN_PATH);
-    // Waits for a refresh already running, then blocks new ones until the next sign-in.
-    await beginSignOut();
+    // Blocks new refreshes at once and forgets the session at once: a refresh already running
+    // may take seconds, and until it settles the old token must not be used. Logout works from
+    // the httpOnly cookie alone, so a slow logout sends no staff request with the old token and a
+    // late 401 cannot start a refresh.
+    const settled = beginSignOut();
+    publishSession(null);
+    await settled;
     try {
-      await confirmLogout();
-    } finally {
-      // Whatever the server said, this browser forgets the session. If the server did not confirm,
-      // the pending marker stays set so a reload does not restore it (FR-104).
-      // Forget the session first: no window with a token set while queries are being cancelled.
-      publishSession(null);
+      // The session listener also cancels and clears on the user change; this is explicit so the
+      // cache is empty even if the user id did not change.
       await queryClient.cancelQueries();
       queryClient.clear();
       setPending(null);
+    } catch {
+      // Nothing to do: the logout call below must still run.
+    }
+    try {
+      await confirmLogout();
+    } finally {
+      // Whatever the server said, this browser has forgotten the session. If the server did not
+      // confirm, the pending marker stays set so a reload does not restore it (FR-104).
       router.replace('/admin/login');
     }
   }, [router, confirmLogout, queryClient]);
+
+  const announceSession = React.useCallback((userId: string) => {
+    unconfirmedGen.current = null;
+    setSignOutUnconfirmed(false);
+    beginSession(userId);
+  }, []);
 
   const signOutRevoked = React.useCallback(async () => {
     setSignedOutByUser(true);
@@ -216,9 +274,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       pending,
       signedOutByUser,
       signOutUnconfirmed,
-      retrySignOut: confirmLogout,
+      retrySignOut,
       loginPath,
       signOutRevoked,
+      announceSession,
       setPending,
       signIn,
       signOut,
@@ -229,9 +288,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       pending,
       signedOutByUser,
       signOutUnconfirmed,
-      confirmLogout,
+      retrySignOut,
       loginPath,
       signOutRevoked,
+      announceSession,
       signIn,
       signOut,
     ],

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { SYSTEM_SCOPE_REASONS } from './org-context';
 import { ORG_SCOPE, UNSCOPED_MODELS, orgFilter } from './org-scope-map';
-import type { OrgScopeRule } from './org-scope-map';
+import type { ModelName, OrgScopeRule } from './org-scope-map';
 import { readGeneratedModels, readModelMetas, readSchemaModels } from './testing/data-model';
 import type { ModelMeta } from './testing/data-model';
 import { findScopeProblems } from './testing/scope-checks';
@@ -31,6 +31,59 @@ describe('org scope map (NFR-04, FR-103)', () => {
         Object.keys(schema[name] ?? {}).sort(),
       );
     }
+  });
+
+  it('TC-008 every model has exactly the scope path ADR 0006 and the README name (pinned, FU-DB-84)', () => {
+    // The completeness check accepts any chain that ends at a model with org_id and passes none, so
+    // a longer wrong chain (for example through a different parent) would pass it. This table is
+    // the second copy: a change to a path has to change both, which is the review point.
+    const EXPECTED: Record<ModelName, string> = {
+      Organization: 'id',
+      User: 'orgId',
+      Question: 'orgId',
+      Test: 'orgId',
+      Candidate: 'orgId',
+      Invitation: 'orgId',
+      Session: 'orgId',
+      AuditLog: 'orgId',
+      ConsentText: 'orgId',
+      WebhookEndpoint: 'orgId',
+      RefreshToken: 'user.orgId',
+      QuestionVersion: 'question.orgId',
+      TestCase: 'questionVersion.question.orgId',
+      QuestionVariant: 'questionVersion.question.orgId',
+      VariantTestCase: 'variant.questionVersion.question.orgId',
+      AiReferenceSolution: 'questionVersion.question.orgId',
+      TestSection: 'test.orgId',
+      TestQuestion: 'section.test.orgId',
+      SessionSection: 'session.orgId',
+      SessionQuestion: 'session.orgId',
+      Submission: 'sessionQuestion.session.orgId',
+      Consent: 'session.orgId',
+      IdentityCheck: 'session.orgId',
+      MediaChunk: 'session.orgId',
+      ProctorEventBatch: 'session.orgId',
+      ProctorEvent: 'session.orgId',
+      KeystrokeBatch: 'session.orgId',
+      SessionReview: 'session.orgId',
+      FlagDecision: 'event.session.orgId',
+      Appeal: 'sessionReview.session.orgId',
+      WebhookDelivery: 'endpoint.orgId',
+    };
+    const actual = Object.fromEntries(
+      Object.entries(ORG_SCOPE).map(([model, rule]) => [
+        model,
+        rule.kind === 'path'
+          ? [...rule.path, 'orgId'].join('.')
+          : rule.kind === 'self'
+            ? 'id'
+            : rule.kind === 'direct'
+              ? 'orgId'
+              : `unscoped: ${rule.reason}`,
+      ]),
+    );
+    expect(actual).toEqual(EXPECTED);
+    expect(Object.keys(EXPECTED)).toHaveLength(31);
   });
 
   it('TC-008 the nine models with an org_id column are exactly the direct entries (ADR 0006 section 5)', async () => {
@@ -183,6 +236,37 @@ describe('org scope completeness check can fail (NFR-04)', () => {
     expect(withBadHops({ isOptional: true })).toEqual([expect.stringContaining('is optional')]);
     expect(withBadHops({ holdsForeignKey: false })).toEqual([
       expect.stringContaining('does not hold the foreign key'),
+    ]);
+  });
+
+  it('TC-008 fails for a path hop into User other than the composition parent RefreshToken.user (FU-DB-69)', () => {
+    // A staff reference (created_by, reviewer_id, ...) is rule (i), never a scope path, even though
+    // User has org_id and the path would end there.
+    const withUser: Record<string, ModelMeta> = {
+      ...models,
+      User: { name: 'User', fields: [field('id'), orgId] },
+      RefreshToken: { name: 'RefreshToken', fields: [relation('user', 'User')] },
+      Note: { name: 'Note', fields: [relation('createdBy', 'User')] },
+    };
+    const base = {
+      User: { kind: 'direct' } as const,
+      Widget: { kind: 'unscoped', reason: 'Global.' } as const,
+    };
+    const only = (extra: Record<string, OrgScopeRule>) =>
+      findScopeProblems({ ...rules({}), ...base, ...extra }, withUser);
+    expect(
+      only({
+        RefreshToken: { kind: 'path', path: ['user'] },
+        Note: { kind: 'unscoped', reason: 'x' },
+      }),
+    ).toEqual([]);
+    expect(
+      only({
+        RefreshToken: { kind: 'unscoped', reason: 'x' },
+        Note: { kind: 'path', path: ['createdBy'] },
+      }),
+    ).toEqual([
+      expect.stringContaining('Note.createdBy hops into User; only RefreshToken.user may'),
     ]);
   });
 

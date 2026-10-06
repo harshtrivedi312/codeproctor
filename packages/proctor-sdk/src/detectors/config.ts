@@ -1,3 +1,12 @@
+/**
+ * Owner decision C-08: the identity re-check is one JPEG, 640 px wide, every 2 minutes, kept by the
+ * server only on a mismatch. The capture only scales DOWN (`scaledSize`), so a webcam narrower than
+ * 640 px yields a narrower frame; the recorder asks the camera for 640x360, so this is the normal
+ * width. Evidence snapshots for HIGH events use the same width.
+ */
+export const IDENTITY_FRAME_WIDTH_PX = 640;
+export const IDENTITY_RECHECK_INTERVAL_MS = 120_000;
+
 /** Thresholds and cadences for the in-browser AI detectors (FR-606, FR-607). All configurable. */
 export interface AiDetectorConfig {
   /** Webcam frame analysis cadence (FR-606: every 1 s). */
@@ -26,7 +35,7 @@ export interface AiDetectorConfig {
   minSpeechMs: number;
   /** Identity re-check cadence (FR-606: periodic re-check against selfie). */
   identityIntervalMs: number;
-  /** Ignore the matcher's `matched=false` below this similarity gap, to limit false alarms. */
+  /** Max width of snapshot and re-check JPEGs (C-08: 640 px); images are never scaled up. */
   snapshotMaxWidth: number;
   snapshotQuality: number;
   /** Wait at most this long for evidence upload before sending the event without it. */
@@ -50,8 +59,8 @@ export const DEFAULT_AI_CONFIG: Readonly<AiDetectorConfig> = {
   objectHits: 2,
   objectWindow: 3,
   minSpeechMs: 800,
-  identityIntervalMs: 120_000,
-  snapshotMaxWidth: 640,
+  identityIntervalMs: IDENTITY_RECHECK_INTERVAL_MS,
+  snapshotMaxWidth: IDENTITY_FRAME_WIDTH_PX,
   snapshotQuality: 0.7,
   evidenceTimeoutMs: 3000,
 };

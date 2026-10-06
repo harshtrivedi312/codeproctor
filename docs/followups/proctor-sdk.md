@@ -91,7 +91,7 @@ Should-fix
 
 Nits
 
-- `config.ts`: stale doc comment on `snapshotMaxWidth`.
+- (DONE) `config.ts`: stale doc comment on `snapshotMaxWidth`.
 - `vision-monitor.ts`: unreachable `SPEECH_DETECTED` case in `emitRuleEvent`; remove.
 - `rules.ts`: object confidence falls back to the threshold on a window miss; carry the max score seen instead.
 - `evidence.ts`: snapshots follow default severities, so org overrides are ignored; make the type list configurable.
@@ -249,3 +249,37 @@ Nits
 - `pipeline.recordScreen` can call `begin('SCREEN')` after `pipeline.stop()` if stop lands during `applyConstraints` or `nextSegment` (`mount.ts` screen-share handler): check `stopped` after `recordScreen` and call `pipeline.stopStream('SCREEN')`.
 - `api/state/route.ts` GET still creates sessions via `sessionState(id)`; use `existingSession` and return an empty summary.
 - `withSession` returns 413 before 401; check auth first.
+
+## Identity re-check constants (owner decision C-08; PR fe/sdk-identity-constants)
+Done: `IDENTITY_FRAME_WIDTH_PX = 640` and `IDENTITY_RECHECK_INTERVAL_MS = 120_000` are named constants and the defaults (`snapshotMaxWidth`, `identityIntervalMs`); tests assert width, size scaling and one re-check per 120 s. Gaps: the capture only scales down, so a webcam narrower than 640 px gives a narrower frame (the recorder asks for 640x360, so this is the normal width); a real-browser capture was not measured here; the ADR 0013 limit is 1 re-check per 60 s and the `/dev/proctor` demo uses 61 s so it shows one soon. The FACE/identity coupling (C-25) is unchanged and waits for ADRs 0013 and 0015.
+- There is no TC for the identity re-check (QA to add one for the 640 px / 120 s behaviour). `snapshotMaxWidth` also sizes HIGH-event evidence snapshots; if the config ever becomes per-org, add a separate `identityFrameWidthPx`.
+## Should-fix round (PR fe/sdk-should-fix)
+Done (with tests): S2 `EventQueue.finish()` no longer calls `retryNow()` every 50 ms (at most once a second, so about one request per second in a 5xx outage), waits for an in-flight send at the deadline before counting `lostBatches`, never re-arms a retry after it returned, and `ProctorSession.finish()` raises `finish-pending` (stay online) and `finish-lost` capability signals; S3 EventQueue survives IndexedDB failures (open failure and write failure fall back to memory, the flush chain is never rejected, capability `event-storage`); S4 an `error` event after ready is one strike (three terminate), and after a frame timeout back-pressure stays until the worker answers late, declared dead if it never does within another timeout; S5 `attachStream` only retries when the monitor was down for a missing stream, not after model failures; S6 UploadQueue probes IndexedDB again every 30 s while degraded and leaves memory-only mode (`recording-storage` goes back to SUPPORTED; a write failure is UNVERIFIABLE, an open failure UNSUPPORTED); SF3 `attachStream` bounds `video.play()`; SF4 `VoiceMonitor.attachStream` calls are serialised and the speech rules (held-back speech) survive a swap; SF5 a hanging `stop()` after a start timeout is bounded to 5 s; N2 `reportStartTimeout` does not re-emit for reported tasks; N3 device-loss `stopStream` failure no longer hides the signal; N6 a stopped `VoiceMonitor` can be started again; `memoryBytes()` is a running counter; unreachable SPEECH_DETECTED case removed.
+
+Still open (not in this PR): proctor-key route, per-epoch key, models.lock.json and SHA pinning, C-25 accommodation split (held for ADR 0013 and 0015); `makeRoom` can exceed the 200 MB cap by in-flight chunks; reject non-https presigned URLs; object confidence carries the threshold on a window miss; evidence snapshot types configurable; a HIGH event waiting for its evidence upload is dropped if the session stops meanwhile; identity re-check coupling note; N4, N5, N7; `VoiceMonitor` `handle.start()` is not under the init timeout; `sweep.ts` assumes session ids contain no `:`; keystroke queue purge (no keystroke queue exists yet); the demo does not call `attachStream`/`onDeviceLost`.
+
+## PR #70 review round (fe/sdk-should-fix)
+Fixed here: B1 (the event sequence counter is written on every cut even while degraded, backed up in localStorage, recovery probe like the upload queue; an unreadable counter with no backup seeds the sequence above any plausible earlier value, seconds since 2026-01-01, and raises an `event-seq` capability, so the sequence gets holes; two reuse paths remain, see S-D below), B2 (one live VAD: start and attach run through one queue, generation and token guards, stale callbacks ignored), S5 (`down` state: FAILED on every failure path, reset in `stop()`), S7 (FATAL drops the memory counter), S8 (SF5 test waits for the detector's start with real ticks and uses configurable 50 ms bounds), S9 (`vi.useRealTimers()` after each test). Not fixable before #64 merges: S6 (keep `reported`/`failures` clears at the top of `run()` and in `stop()` and reset `down` there once #64 is in main; merge order #64 then #70).
+
+Filed (not fixed)
+- S1 `EventQueue.finish()` initial flush is unbounded because the fetch transport has no timeout: bound with `Promise.race` against the deadline while keeping the in-flight-sign guarantee, and test the settle loop.
+- S2 the "normal backoff" comment in `finish()` is inaccurate: `retryNow()` resets `attempt` to 0 and 429 `Retry-After` is ignored.
+- S3 the in-memory event outbox has no size cap: add a cap, a `droppedBatches` counter in `stats()` and a flag.
+- S4 the session-level flags `event-storage`, `event-seq`, `finish-pending`, `finish-lost` bypass `getCapabilities()`: route through the `ctx.setCapability` path; ADR 0013 names the flag `idb: UNSUPPORTED`; `finish-pending` should also count `pendingEvents`.
+- S10 vacuous assertions in `vision-monitor.test.ts` (held-back speech case, a `toBeDefined`, and the "attachStream retries only" test's trailing checks).
+- Nits: JSDoc on `degrade()` belongs on `start()`; `upload-queue.ts` "Called once" wording; the recovery flag says SUPPORTED while memory-only chunks remain; `inference-client` `onDead` doc; `enqueue`/`flush` after `finish()` still persist; a bounded voice `destroy()` and mid-segment speech lost on a stream swap; `session.ts` a `stop()` that hangs more than 5 s leaves a late-starting detector alive.
+
+## PR #70 review round 2 (fe/sdk-should-fix)
+Fixed: S-A (stale callbacks asserted to report nothing, the live set exactly one event, stop() flushes nothing extra), S-B (an abandoned voice `begin()` returns quietly from the failure handler and a throwing `destroy()` is contained; test: rejecting createVad then stop and restart emits no DETECTOR_UNAVAILABLE), S-C (seed floor 10 000 000 plus seconds since 2026-01-01, clamped below 2^31, so a device clock before 2026 is still high), S-E (backup is `{ seq, seenAt }`, other sessions' entries older than `staleAfterMs` are swept on start), S-F (the finish test waits for `sendBatch` instead of sleeping), N1 (only safe integers in [0, 2^31) are accepted as a stored counter or backup), N2 (comment says every reused seq is rejected, ADR 0013: dropped and counted rejected).
+
+Should-fix (tied to ADR 0013 counters)
+- S-D "never reused" overstated: two reuse paths stay unflagged until ADR 0013 counters exist. (1) Every counter write failed in the previous page load while IndexedDB reads work on reload: the sequence restarts at 0. (2) Resuming on a new device always restarts at 0 (FR-106, D-21): fixed by `proctor-key` `counters.eventSeqStart`, `max(local, server)`. Raised from nit to should-fix.
+- S-E exception to confirm with the hub: the sequence backup uses `localStorage` (`codeproctor:eventseq:<sessionId>`, a pseudonymous id and an integer, no candidate data).
+
+Nits (filed)
+- N3 `signHex` failure is swallowed in `cutAll` with no `droppedBatches` count.
+- N4 `VoiceMonitor`: a hung `destroy()` or `handle.start()` now also blocks a later `start()` (it shares the queue); `start()` with no stream does not destroy an existing handle or bump the token.
+- N5 the `over = {}` parameter in `should-fix.test.ts` should be `Partial<EventQueueOptions>`.
+- N6 `UploadQueue` `memory.set` on an existing key double-counts bytes.
+- N7 `EventQueue.finished` is never reset in `start()`: document the queue as single-use.
+- N8 a vacuous `expect(worker).toBeDefined()` in the attach test.

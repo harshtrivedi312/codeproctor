@@ -1,0 +1,321 @@
+/* global __VU, __ENV */
+// One simulated candidate: the real client cadence of the proctoring SDK (docs/status.md R-02,
+// ADR 0013 section 5):
+//   heartbeat        every 10 s   POST /candidate/session/heartbeat      (unsigned)
+//   event batch      every  5 s   POST /candidate/session/events         (signed, X-Signature)
+//   keystroke batch  every  2 s   POST /candidate/session/keystrokes     (signed)
+//   media chunk      every 10 s per stream (SCREEN, WEBCAM, AUDIO):
+//                                 POST /candidate/session/media/presign, PUT to object storage,
+//                                 POST /candidate/session/media/confirm
+//   code run         once a minute (optional)  POST /candidate/answers/:questionId/run
+// That is about 1.4 requests per second per candidate (280 per second at 200 candidates).
+//
+// Nothing here logs a token, a key, a signature, a presigned URL or a request body. Failures are
+// counted by endpoint and status code only. Presigned URLs are kept out of k6 metrics by the
+// systemTags list in each script (SYSTEM_TAGS in config.js has no 'url'); k6's own stderr warnings can
+// still print a URL, see the README section on logs.
+import http from 'k6/http';
+import crypto from 'k6/crypto';
+import encoding from 'k6/encoding';
+import { check, sleep } from 'k6';
+import { Counter, Rate, Trend } from 'k6/metrics';
+import { API_BASE, SESSIONS, intEnv } from './config.js';
+import { canonicalJson } from './canonical.js';
+
+export const apiDuration = new Trend('api_duration', true); // every API call except runs and storage PUTs
+export const failures = new Counter('cp_failures'); // tagged by endpoint and status
+export const setupFailures = new Counter('cp_setup_failures');
+export const duplicates = new Counter('cp_duplicate_batches'); // 200 with duplicate:true (a replayed seq)
+export const storageFailures = new Counter('cp_storage_failures'); // PUTs that were not 2xx or 412
+export const lateSlots = new Rate('cp_late_slots'); // share of scheduled slots that ran late and were skipped ahead
+
+const STREAMS = ['SCREEN', 'WEBCAM', 'AUDIO'];
+const CHUNK_MS = 10_000;
+const VIDEO_BYTES = intEnv('CHUNK_BYTES_VIDEO', 262144); // real chunks are larger; see README
+const AUDIO_BYTES = intEnv('CHUNK_BYTES_AUDIO', 65536);
+const RUN_EVERY_MS = intEnv('RUN_EVERY_MS', 60_000); // 0 turns candidate code runs off
+const RUN_CODE = __ENV.RUN_CODE || 'print(1)\n';
+
+const payloads = {
+  video: new Uint8Array(VIDEO_BYTES).buffer, // zero bytes: synthetic, not a playable WebM
+  audio: new Uint8Array(AUDIO_BYTES).buffer,
+};
+
+// State of this virtual user. k6 keeps module-level variables per VU across iterations.
+let state = null;
+
+function init() {
+  const entry = SESSIONS[(__VU - 1) % SESSIONS.length];
+  const now = Date.now();
+  state = {
+    entry,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${entry.token}` },
+    key: null,
+    eventSeq: 0,
+    keystrokeSeq: 0,
+    editorOffset: 0,
+    media: {},
+    due: {},
+    ready: false,
+    runWindows: [], // [start, end] of recent inline code runs, to excuse the slots they delay
+    dead: false,
+  };
+  STREAMS.forEach((s, i) => {
+    state.media[s] = { seq: 0, segment: 0 };
+    // Spread the three streams over the 10 s chunk interval, as separate recorders do.
+    state.due['media:' + s] = now + 1000 + i * 3300;
+  });
+  state.due.run = RUN_EVERY_MS > 0 ? now + Math.random() * RUN_EVERY_MS : Infinity;
+  state.due.heartbeat = now + Math.random() * 10_000; // spread the VUs
+  state.due.events = now + Math.random() * 5_000;
+  state.due.keystrokes = now + Math.random() * 2_000;
+}
+
+function api(path, body, endpoint, extraHeaders) {
+  const headers = Object.assign({}, state.headers, extraHeaders || {});
+  const params = { headers, tags: { kind: 'api', endpoint, name: endpoint } };
+  const res = http.post(`${API_BASE}${path}`, body, params);
+  if (endpoint !== 'run') {
+    apiDuration.add(res.timings.duration, { endpoint });
+  }
+  if (res.status < 200 || res.status >= 300) {
+    failures.add(1, { endpoint, status: String(res.status) });
+  }
+  return res;
+}
+
+function sign(body) {
+  return crypto.hmac('sha256', state.key, body, 'hex');
+}
+
+function fetchKey() {
+  if (state.entry.keyB64) {
+    state.key = encoding.b64decode(state.entry.keyB64, 'std');
+    applyCounters(state.entry.counters);
+    return true;
+  }
+  const res = api('/candidate/session/proctor-key', null, 'proctor_key');
+  if (res.status !== 200) {
+    // 409 KEY_ALREADY_ISSUED means this session's key for this epoch was fetched in an earlier
+    // run. Seed fresh sessions for every run (README).
+    setupFailures.add(1, { status: String(res.status) });
+    return false;
+  }
+  const json = res.json();
+  state.key = encoding.b64decode(json.key, 'std');
+  applyCounters(json.counters);
+  return true;
+}
+
+function applyCounters(c) {
+  if (!c) {
+    return;
+  }
+  state.eventSeq = c.eventSeqStart || 0;
+  state.keystrokeSeq = c.keystrokeSeqStart || 0;
+  if (c.media) {
+    STREAMS.forEach((s) => {
+      if (c.media[s]) {
+        state.media[s] = { seq: c.media[s].nextSeq || 0, segment: c.media[s].nextSegment || 0 };
+      }
+    });
+  }
+}
+
+function heartbeat() {
+  const res = api('/candidate/session/heartbeat', '{}', 'heartbeat');
+  check(res, { 'heartbeat 200': (r) => r.status === 200 }, { endpoint: 'heartbeat' });
+}
+
+function eventBatch() {
+  // RIGHT_CLICK is LOW severity with an empty payload: it adds a flag-free row without pausing the
+  // session or moving the risk band much. Two events per batch, one batch every 5 s.
+  const t = new Date().toISOString();
+  const body = canonicalJson({
+    seq: state.eventSeq,
+    events: [
+      { type: 'RIGHT_CLICK', occurredAt: t, payload: {} },
+      { type: 'RIGHT_CLICK', occurredAt: t, payload: {} },
+    ],
+  });
+  const res = api('/candidate/session/events', body, 'events', { 'X-Signature': sign(body) });
+  // Any 200 means the server has this seq (stored now, or already stored): move on, or one
+  // duplicate would make every later batch a duplicate too. Duplicates are counted on their own.
+  if (check(res, { 'events 200': (r) => r.status === 200 }, { endpoint: 'events' })) {
+    state.eventSeq += 1;
+    if (res.json('duplicate') === true) {
+      duplicates.add(1, { endpoint: 'events' });
+    }
+  }
+}
+
+function keystrokeBatch() {
+  // About ten editor events per 2 s batch (a fast typist). t is the offset from startedAt, so each
+  // batch is stamped with its own start and the offsets stay small and non-decreasing.
+  const events = [];
+  for (let i = 0; i < 10; i++) {
+    events.push({
+      kind: 'EDIT',
+      t: i * 150,
+      offset: state.editorOffset,
+      deleteLength: 0,
+      text: 'x',
+    });
+    state.editorOffset += 1;
+  }
+  const body = canonicalJson({
+    seq: state.keystrokeSeq,
+    sessionQuestionId: state.entry.sessionQuestionId,
+    startedAt: new Date().toISOString(),
+    events,
+  });
+  const res = api('/candidate/session/keystrokes', body, 'keystrokes', {
+    'X-Signature': sign(body),
+  });
+  if (check(res, { 'keystrokes 200': (r) => r.status === 200 }, { endpoint: 'keystrokes' })) {
+    state.keystrokeSeq += 1;
+    if (res.json('duplicate') === true) {
+      duplicates.add(1, { endpoint: 'keystrokes' });
+    }
+  }
+}
+
+// Optional: STORAGE_ALLOWED_HOSTS (comma separated exact host names) restricts where chunks may be
+// PUT, so a wrong or hostile presign answer cannot send synthetic data elsewhere.
+const STORAGE_HOSTS = (__ENV.STORAGE_ALLOWED_HOSTS || '')
+  .toLowerCase()
+  .split(',')
+  .map((h) => h.trim())
+  .filter((h) => h !== '');
+function storageHostAllowed(url) {
+  if (STORAGE_HOSTS.length === 0) {
+    return true;
+  }
+  const m = /^https:\/\/([a-z0-9.-]+)(:\d{1,5})?\//i.exec(String(url));
+  return m !== null && STORAGE_HOSTS.includes(m[1].toLowerCase());
+}
+
+function mediaChunk(stream) {
+  const m = state.media[stream];
+  const isAudio = stream === 'AUDIO';
+  const bytes = isAudio ? AUDIO_BYTES : VIDEO_BYTES;
+  const contentType = isAudio ? 'audio/webm' : 'video/webm';
+  const presignBody = JSON.stringify({
+    stream,
+    segment: m.segment,
+    seq: m.seq,
+    bytes,
+    contentType,
+    startedAt: new Date(Date.now() - CHUNK_MS).toISOString(),
+    durationMs: CHUNK_MS,
+  });
+  const presign = api('/candidate/session/media/presign', presignBody, 'presign');
+  if (!check(presign, { 'presign 200': (r) => r.status === 200 }, { endpoint: 'presign' })) {
+    return;
+  }
+  const grant = presign.json();
+  if (!grant.alreadyUploaded) {
+    // Straight to object storage (R2 on staging). Not an API call: tagged kind:storage and left out
+    // of the 300 ms threshold (NFR-01 covers the API). The URL is never logged, and it is not a
+    // metric tag (SYSTEM_TAGS in config.js has no 'url'). 412 means "already stored" (If-None-Match, ADR 0013
+    // 5.5), so it is an expected status; only other non-2xx answers count as failed requests.
+    if (!storageHostAllowed(grant.url)) {
+      // The URL is not logged; only the fact is counted.
+      storageFailures.add(1, { status: 'blocked' });
+      return;
+    }
+    const put = http.put(grant.url, isAudio ? payloads.audio : payloads.video, {
+      headers: grant.headers || { 'Content-Type': contentType },
+      redirects: 0, // never follow a redirect with a presigned URL
+      tags: { kind: 'storage', endpoint: 'media_put', name: 'media_put' },
+      responseCallback: http.expectedStatuses({ min: 200, max: 299 }, 412),
+    });
+    // Storage failures are judged on their own (http_req_failed{kind:storage}, cp_storage_failures),
+    // not by cp_failures or checks, which are strict and about the API only. Without a stored
+    // chunk there is nothing to confirm.
+    if (!((put.status >= 200 && put.status < 300) || put.status === 412)) {
+      storageFailures.add(1, { status: String(put.status) });
+      return;
+    }
+  }
+  const confirm = api(
+    '/candidate/session/media/confirm',
+    JSON.stringify({ stream, segment: m.segment, seq: m.seq }),
+    'confirm',
+  );
+  if (check(confirm, { 'confirm 200': (r) => r.status === 200 }, { endpoint: 'confirm' })) {
+    m.seq += 1;
+  }
+}
+
+// Code runs happen inline in the tick (the k6 VU is blocked while Judge0 answers, up to 5 s at p95,
+// NFR-01). A real client does not block its other timers on a run, so a slot that was delayed by
+// a run of this same candidate is excused: it is not counted as late and is not skipped, it runs
+// as soon as the run returns (a short catch-up, as a browser's timers would).
+function codeRun() {
+  const t0 = Date.now();
+  const res = api(
+    `/candidate/answers/${state.entry.questionId}/run`,
+    JSON.stringify({ language: 'python', code: RUN_CODE }),
+    'run',
+  );
+  check(res, { 'run 200': (r) => r.status === 200 }, { endpoint: 'run' });
+  state.runWindows.push([t0, Date.now()]);
+  if (state.runWindows.length > 3) {
+    state.runWindows.shift();
+  }
+}
+
+// Milliseconds of [from, to] that lie inside one of this candidate's recent runs.
+function excusedMs(from, to) {
+  let total = 0;
+  for (const [a, b] of state.runWindows) {
+    total += Math.max(0, Math.min(to, b) - Math.max(from, a));
+  }
+  return total;
+}
+
+const SCHEDULE = [
+  { name: 'keystrokes', every: 2_000, fn: keystrokeBatch },
+  { name: 'events', every: 5_000, fn: eventBatch },
+  { name: 'heartbeat', every: 10_000, fn: heartbeat },
+  ...STREAMS.map((s) => ({ name: 'media:' + s, every: CHUNK_MS, fn: () => mediaChunk(s) })),
+  { name: 'run', every: RUN_EVERY_MS || Infinity, fn: codeRun },
+];
+
+// One k6 iteration = run whatever is due, then sleep until the next thing is due (at most 1 s, so
+// a ramp-down never waits long).
+export function candidateTick() {
+  if (state === null) {
+    init();
+  }
+  if (state.dead) {
+    sleep(5);
+    return;
+  }
+  if (!state.ready) {
+    state.ready = fetchKey();
+    if (!state.ready) {
+      state.dead = true;
+      return;
+    }
+  }
+  for (const item of SCHEDULE) {
+    const now = Date.now(); // per item: an earlier item may have taken a while
+    const due = state.due[item.name];
+    if (due <= now) {
+      item.fn();
+      // Fixed-rate schedule: advance from the previous due time, so a slow response does not
+      // lower the offered load. Time lost to this candidate's own code runs is excused. If we
+      // fell far behind for another reason, skip ahead (do not burst) and count the slot as late.
+      const lateBy = now - due - excusedMs(due, now);
+      const late = lateBy > item.every / 2;
+      if (item.name !== 'run') {
+        lateSlots.add(late);
+      }
+      state.due[item.name] = late ? now + item.every / 2 : due + item.every;
+    }
+  }
+  const next = Math.min(...SCHEDULE.map((s) => state.due[s.name]));
+  sleep(Math.min(1, Math.max(0.05, (next - Date.now()) / 1000)));
+}

@@ -1,79 +1,97 @@
-/* global __ENV, __VU, __ITER */
-// TC-090 (NFR-02): 200 simulated candidates send events, heartbeats and code runs.
-// Expected: API p95 under 300 ms and no errors.
+/* global __ENV */
+// TC-090 (NFR-02, NFR-01, P1): 200 simulated candidates at the real client cadence.
+// Expected (docs/test-cases.md): API p95 under 300 ms and no errors. NFR-01 excludes code execution
+// from the 300 ms figure, so code runs are held to TC-091's 5 s instead.
 //
-// Usage: k6 run -e API_URL=https://staging.example.com packages/qa/k6/tc-090-load.js
-// Needs a staging API with seeded candidate sessions (token list in CANDIDATE_TOKENS, comma
-// separated, one per virtual user; reused round-robin if fewer). Never run against production.
-// PLACEHOLDER PATHS: the endpoint paths below are guesses, not taken from a published contract
-// (the FSD section 4 does not define them all). Replace them with the real paths from the API
-// contract when BE-10 and BE-11 merge. The thresholds are the TC-090 criteria and stay as they are.
-import http from 'k6/http';
-import { check, sleep } from 'k6';
+// Offered load per candidate (docs/status.md R-02, ADR 0013 section 5):
+//   presign + storage PUT + confirm per 10 s chunk x 3 streams, an event batch every 5 s,
+//   a keystroke batch every 2 s, a heartbeat every 10 s, one code run a minute.
+//   About 1.4 API requests per second per candidate, about 280 per second at 200 candidates.
+//
+// Run it against staging only, with synthetic data (README). Configuration comes from environment
+// variables; nothing secret is in this file.
+//   k6 run -e API_BASE_URL=https://<staging-host>/api/v1 -e ALLOWED_HOSTS=<staging-host> \
+//     -e SESSIONS_FILE=/absolute/path/sessions.json \
+//     packages/qa/k6/tc-090-load.js
+import { assertSafeTarget, requireSessions, intEnv, SYSTEM_TAGS } from './lib/config.js';
+import { candidateTick } from './lib/candidate.js';
 
-const API = __ENV.API_URL || 'http://localhost:4000';
-const TOKENS = (__ENV.CANDIDATE_TOKENS || 'load-token').split(',');
+const VUS = intEnv('VUS', 200);
+const RAMP = __ENV.RAMP_UP || '2m';
+const HOLD = __ENV.HOLD || '10m';
+const DOWN = __ENV.RAMP_DOWN || '1m';
+
+// Seconds in a k6 duration such as 90s, 2m or 1h (one unit only; enough for these variables).
+function seconds(text) {
+  const m = /^(\d+)(s|m|h)$/.exec(text);
+  if (!m) {
+    throw new Error(`Duration "${text}" must look like 30s, 2m or 1h.`);
+  }
+  return Number(m[1]) * { s: 1, m: 60, h: 3600 }[m[2]];
+}
+
+// Proof of offered load: if the generator or the API falls behind, the achieved request rate drops
+// below what the cadence requires and the run must fail rather than pass on a lighter load. The
+// expected average rate over the whole run weights the ramps at half (VUs rise and fall linearly).
+const R = seconds(RAMP);
+const H = seconds(HOLD);
+const D = seconds(DOWN);
+if (VUS < 1) {
+  throw new Error('VUS must be at least 1.');
+}
+if (R + H + D <= 0) {
+  throw new Error('RAMP_UP + HOLD + RAMP_DOWN must be longer than zero.');
+}
+const EXPECTED_RATE = (1.4 * VUS * (R / 2 + H + D / 2)) / (R + H + D);
 
 export const options = {
+  // Keep 'url' out of every metric sample: storage PUT URLs are presigned (see lib/candidate.js).
+  systemTags: SYSTEM_TAGS,
   scenarios: {
     candidates: {
       executor: 'ramping-vus',
       startVUs: 0,
       stages: [
-        { duration: '2m', target: 200 },
-        { duration: '10m', target: 200 },
-        { duration: '1m', target: 0 },
+        { duration: RAMP, target: VUS },
+        { duration: HOLD, target: VUS },
+        { duration: DOWN, target: 0 },
       ],
+      gracefulRampDown: '30s',
     },
   },
   thresholds: {
-    // TC-090 / NFR-02: API p95 under 300 ms for the ordinary API calls (heartbeat, events).
-    // Code runs wait for Judge0 and are judged by TC-091 (p95 under 5 s), so they are tagged
-    // endpoint:run and excluded here. No errors at all: a 429 on a run counts as an error, which is
-    // why each candidate sends at most one run a minute (the FR-502 limit is one per 5 s).
-    'http_req_duration{endpoint:heartbeat}': ['p(95)<300'],
-    'http_req_duration{endpoint:events}': ['p(95)<300'],
+    // Headline: every API call except code runs and storage PUTs (NFR-01).
+    api_duration: ['p(95)<300'],
+    'api_duration{endpoint:heartbeat}': ['p(95)<300'],
+    'api_duration{endpoint:events}': ['p(95)<300'],
+    'api_duration{endpoint:keystrokes}': ['p(95)<300'],
+    'api_duration{endpoint:presign}': ['p(95)<300'],
+    'api_duration{endpoint:confirm}': ['p(95)<300'],
+    // Code runs wait for Judge0: TC-091 / NFR-01, p95 under 5 s.
     'http_req_duration{endpoint:run}': ['p(95)<5000'],
-    http_req_failed: ['rate==0'],
+    // "No errors": any non-2xx API answer counts, a 429 included (the limits in ADR 0013 are sized
+    // above this cadence). Storage PUTs are judged separately below.
+    'http_req_failed{kind:api}': ['rate==0'],
+    'http_req_failed{kind:storage}': ['rate<0.001'],
+    // Storage PUTs: 2xx and 412 are expected; other failures are judged here, not in cp_failures.
+    cp_storage_failures: ['count<=' + Math.ceil(0.001 * VUS * 0.3 * (R / 2 + H + D / 2))],
+    // A replayed seq (duplicate:true) is a finding even though the script moves on.
+    cp_duplicate_batches: ['count==0'],
+    // Offered load: slots that ran more than half an interval late are counted and skipped ahead.
+    cp_late_slots: ['rate<0.01'],
+    'http_reqs{kind:api}': ['count>0', 'rate>=' + (0.9 * EXPECTED_RATE).toFixed(1)],
+    cp_failures: ['count==0'],
+    cp_setup_failures: ['count==0'],
     checks: ['rate==1'],
   },
+  summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
 };
 
+export function setup() {
+  assertSafeTarget(); // also runs at init (lib/config.js)
+  requireSessions(VUS);
+}
+
 export default function () {
-  const token = TOKENS[(__VU - 1) % TOKENS.length];
-  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
-
-  // One iteration is 5 s. Heartbeat every 10 s (FR-609): every second iteration.
-  if (__ITER % 2 === 0) {
-    const hb = http.post(`${API}/v1/sessions/current/heartbeat`, '{}', {
-      headers,
-      tags: { endpoint: 'heartbeat' },
-    });
-    check(hb, { 'heartbeat 2xx': (r) => r.status >= 200 && r.status < 300 });
-  }
-
-  // An event batch every 5 s with a few events (FR-801). The signature is a placeholder; the
-  // load environment must run with signature checks relaxed or with a k6 signer (see followups).
-  const batch = {
-    sequence: __ITER,
-    events: [{ type: 'FOCUS_LOST', occurredAt: new Date().toISOString(), durationMs: 800 }],
-  };
-  const ev = http.post(`${API}/v1/sessions/current/events`, JSON.stringify(batch), {
-    headers,
-    tags: { endpoint: 'events' },
-  });
-  check(ev, { 'events 2xx': (r) => r.status >= 200 && r.status < 300 });
-
-  // About one run per minute per candidate: every 12th iteration (FR-502 allows one per 5 s).
-  if (__ITER % 12 === 0) {
-    const run = http.post(
-      `${API}/v1/candidate/questions/current/run`,
-      JSON.stringify({ language: 'python', code: 'print(1)' }),
-      { headers, tags: { endpoint: 'run' } },
-    );
-    check(run, {
-      'run 200 or 202': (r) => r.status === 200 || r.status === 202,
-    });
-  }
-  sleep(5);
+  candidateTick();
 }
