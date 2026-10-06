@@ -1,4 +1,4 @@
-// guardLive and lockForAccommodation (ADR 0013 section 5.7, ADR 0015 section 6, ADR 0006 section 8.5)
+// guardLive, lockForAccommodation and lockAnySession (ADR 0013 section 5.7, ADR 0015 section 6, ADR 0006 section 8.5)
 // against a real Postgres 16 started by Testcontainers, with the real migrations applied by
 // `prisma migrate deploy`. The code under test connects as app_user through the real client factory and
 // the org-scope extension, so the real grants and the real scope filters are in force; fixtures and
@@ -34,7 +34,7 @@ import {
 } from './errors';
 import { OrgContextService } from './org-context';
 import { createOrgScopedClient } from './org-scope.extension';
-import { guardLive, lockForAccommodation } from './session-locks';
+import { guardLive, lockAnySession, lockForAccommodation } from './session-locks';
 import type { SessionLockTx } from './session-locks';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import { SessionStatus } from '../generated/prisma/enums.js';
@@ -60,12 +60,18 @@ const POLL_DEADLINE_MS = 8000;
 const TX_OPTIONS = { maxWait: 10_000, timeout: 30_000 } as const;
 
 type LockFunction = (tx: SessionLockTx, sessionId: string) => Promise<unknown>;
+/** The two that work in ANY status, ERASED included (they share one implementation). */
+const ANY_STATUS_LOCKS: ReadonlyArray<readonly [string, LockFunction]> = [
+  ['lockForAccommodation', lockForAccommodation],
+  ['lockAnySession', lockAnySession],
+];
 const LOCKS: ReadonlyArray<readonly [string, LockFunction]> = [
   ['guardLive', guardLive],
   ['lockForAccommodation', lockForAccommodation],
+  ['lockAnySession', lockAnySession],
 ];
 
-describe('guardLive and lockForAccommodation against Postgres (FR-704, NFR-04, TC-008)', () => {
+describe('guardLive, lockForAccommodation and lockAnySession against Postgres (FR-704, NFR-04, TC-008)', () => {
   let db: MigratedDatabase;
   let owner: PrismaClient;
   let base: PrismaClient;
@@ -279,31 +285,32 @@ describe('guardLive and lockForAccommodation against Postgres (FR-704, NFR-04, T
   });
 
   // ================================================================================================
-  describe('lockForAccommodation: the happy path in every scope that may call it', () => {
-    it('TC-008 returns the status it read under the lock, for every status, and leaves it unchanged (STAFF scope)', async () => {
-      const chain = await freshChain('acc');
-      for (const status of ORDINARY) {
-        await setStatus(chain.sessionId, status);
-        const result = await asStaff(chain.orgId, () =>
-          lockIn<string>(lockForAccommodation, chain.sessionId),
-        );
-        expect({ status, result }).toEqual({ status, result: status });
-        expect(await statusOf(chain.sessionId)).toBe(status);
-      }
-    });
+  describe.each(ANY_STATUS_LOCKS)(
+    '%s: the happy path in every scope that may call it',
+    (_name, lock) => {
+      it('TC-008 returns the status it read under the lock, for every status, and leaves it unchanged (STAFF scope)', async () => {
+        const chain = await freshChain('acc');
+        for (const status of ORDINARY) {
+          await setStatus(chain.sessionId, status);
+          const result = await asStaff(chain.orgId, () => lockIn<string>(lock, chain.sessionId));
+          expect({ status, result }).toEqual({ status, result: status });
+          expect(await statusOf(chain.sessionId)).toBe(status);
+        }
+      });
 
-    it('TC-008 works in a SERVICE session scope (the retention and erasure jobs) and a plain org scope', async () => {
-      const chain = await freshChain('acc2');
-      await setStatus(chain.sessionId, 'COMPLETED');
-      expect(
-        await asService(chain, () => lockIn<string>(lockForAccommodation, chain.sessionId)),
-      ).toBe('COMPLETED');
-      expect(
-        await asOrg(chain.orgId, () => lockIn<string>(lockForAccommodation, chain.sessionId)),
-      ).toBe('COMPLETED');
-      expect(await statusOf(chain.sessionId)).toBe('COMPLETED');
-    });
-  });
+      it('TC-008 works in a SERVICE session scope (the jobs) and a plain org scope', async () => {
+        const chain = await freshChain('acc2');
+        await setStatus(chain.sessionId, 'COMPLETED');
+        expect(await asService(chain, () => lockIn<string>(lock, chain.sessionId))).toBe(
+          'COMPLETED',
+        );
+        expect(await asOrg(chain.orgId, () => lockIn<string>(lock, chain.sessionId))).toBe(
+          'COMPLETED',
+        );
+        expect(await statusOf(chain.sessionId)).toBe('COMPLETED');
+      });
+    },
+  );
 
   // ================================================================================================
   describe.each(LOCKS)('%s: a session that is not in this scope', (_name, lock) => {
@@ -402,6 +409,51 @@ describe('guardLive and lockForAccommodation against Postgres (FR-704, NFR-04, T
   });
 
   // ================================================================================================
+  describe.each(LOCKS)('%s: grants (ADR 0013 CS-4.4, CS-4 PR 2): FU-DB-232', (_name, lock) => {
+    /** What SessionStateService.transition() enters in a CANDIDATE scope: the status columns, this session. */
+    const stateGrant = (chain: SessionChain) => ({
+      model: 'Session',
+      columns: ['status', 'pauseReasons', 'submittedAt'],
+      ids: [chain.sessionId],
+    });
+
+    it('TC-008 SERVICE, STAFF and org scope need no grant for the same-value status write, and an active grant changes nothing', async () => {
+      const chain = await freshChain('grant1');
+      for (const run of [
+        (fn: () => Promise<unknown>) => asService(chain, fn),
+        (fn: () => Promise<unknown>) => asStaff(chain.orgId, fn),
+        (fn: () => Promise<unknown>) => asOrg(chain.orgId, fn),
+      ]) {
+        const plain = await run(() => lockIn<string>(lock, chain.sessionId));
+        const granted = await run(() =>
+          orgContext.withGrant(stateGrant(chain), () => lockIn<string>(lock, chain.sessionId)),
+        );
+        expect(granted).toBe(plain);
+      }
+      expect(await statusOf(chain.sessionId)).toBe('INVITED');
+    });
+
+    it('TC-008 in a CANDIDATE scope the write is allowed only under an active SessionStateService grant, which transition() enters: a wrapper must never call the lock there', async () => {
+      const chain = await freshChain('grant2');
+      // No grant: refused (the tests above). With the grant transition() holds: the same-value write goes through.
+      const result = await asCandidate(chain, () =>
+        orgContext.withGrant(stateGrant(chain), () => lockIn<string>(lock, chain.sessionId)),
+      );
+      expect(result).toBe(lock === guardLive ? 'LIVE' : 'INVITED');
+      // A grant for another session does not unlock this one: the grant adds `id IN ids` to the read, so the
+      // session is not found, and nothing is written.
+      const other = await freshChain('grant3');
+      const xmin = await xminOf(chain.sessionId);
+      await expect(
+        asCandidate(chain, () =>
+          orgContext.withGrant(stateGrant(other), () => lockIn(lock, chain.sessionId)),
+        ),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      expect(await xminOf(chain.sessionId)).toBe(xmin);
+    });
+  });
+
+  // ================================================================================================
   describe.each(LOCKS)('%s: the client itself is not a transaction client', (_name, lock) => {
     it('TC-008 is refused before any statement: outside a transaction the lock would be released at once', async () => {
       const chain = await freshChain('notx');
@@ -444,31 +496,34 @@ describe('guardLive and lockForAccommodation against Postgres (FR-704, NFR-04, T
       }
     });
 
-    it('TC-008 ADR 0015 section 8 spike: lockForAccommodation under Prisma 7 sends exactly 1 SELECT and 1 UPDATE, and the UPDATE touches `status` only', async () => {
-      const chain = await freshChain('count-a');
-      await db.statements.reset();
-      await asStaff(chain.orgId, () => lockIn(lockForAccommodation, chain.sessionId));
-      const c = await counts();
-      expect({ select: c.select, update: c.update, insert: c.insert }).toEqual({
-        select: 1,
-        update: 1,
-        insert: 0,
-      });
-      expect(onlyBeginAndCommit(c.other)).toBe(true);
-      // One UPDATE of one column: `status` is the only column in the SET list (`sessions` has no
-      // updated_at), and it has no RETURNING. Prisma casts the enum parameters, so the text is not `= $1`.
-      expect(c.updateTexts).toHaveLength(1);
-      const text = c.updateTexts[0] as string;
-      expect(text).toMatch(
-        /^UPDATE "public"\."sessions" SET "status" = CAST\(\$1::text AS "public"\."session_status"\) WHERE /,
-      );
-      expect(text).not.toMatch(/RETURNING/i);
-      // The where is the compare-and-set: the row, the status that was read, and the org from the scope.
-      expect(text).toMatch(
-        /"sessions"\."id" = \$2 AND "public"\."sessions"\."status" = CAST\(\$3::text /,
-      );
-      expect(text).toContain('"org_id" = $4');
-    });
+    it.each(ANY_STATUS_LOCKS)(
+      'TC-008 ADR 0015 section 8 spike: %s under Prisma 7 sends exactly 1 SELECT and 1 UPDATE, and the UPDATE touches `status` only',
+      async (_name, lock) => {
+        const chain = await freshChain('count-a');
+        await db.statements.reset();
+        await asStaff(chain.orgId, () => lockIn(lock, chain.sessionId));
+        const c = await counts();
+        expect({ select: c.select, update: c.update, insert: c.insert }).toEqual({
+          select: 1,
+          update: 1,
+          insert: 0,
+        });
+        expect(onlyBeginAndCommit(c.other)).toBe(true);
+        // One UPDATE of one column: `status` is the only column in the SET list (`sessions` has no
+        // updated_at), and it has no RETURNING. Prisma casts the enum parameters, so the text is not `= $1`.
+        expect(c.updateTexts).toHaveLength(1);
+        const text = c.updateTexts[0] as string;
+        expect(text).toMatch(
+          /^UPDATE "public"\."sessions" SET "status" = CAST\(\$1::text AS "public"\."session_status"\) WHERE /,
+        );
+        expect(text).not.toMatch(/RETURNING/i);
+        // The where is the compare-and-set: the row, the status that was read, and the org from the scope.
+        expect(text).toMatch(
+          /"sessions"\."id" = \$2 AND "public"\."sessions"\."status" = CAST\(\$3::text /,
+        );
+        expect(text).toContain('"org_id" = $4');
+      },
+    );
 
     it('TC-008 a lost compare-and-set adds exactly one re-read and one more UPDATE: 2 SELECT and 2 UPDATE', async () => {
       const chain = await freshChain('count-r');
@@ -744,7 +799,7 @@ describe('guardLive and lockForAccommodation against Postgres (FR-704, NFR-04, T
           (e: unknown) => e,
         );
         expect(error).toBeInstanceOf(
-          name === 'guardLive' ? SessionLockRetryError : AccommodationLockedError,
+          name === 'lockForAccommodation' ? AccommodationLockedError : SessionLockRetryError,
         );
         // 1 read + 3 re-reads... the hook's own writes use the probe (owner) connection, not counted here.
         const c = await counts();
@@ -811,15 +866,13 @@ describe('guardLive and lockForAccommodation against Postgres (FR-704, NFR-04, T
       },
     );
 
-    itWithErased(
-      `TC-008 lockForAccommodation locks an ERASED session and returns ERASED (the reduction must run on it)${ENUM_HAS_ERASED ? '' : SKIP_NOTE}`,
-      async () => {
+    itWithErased.each(ANY_STATUS_LOCKS)(
+      `TC-008 %s locks an ERASED session and returns ERASED (the reduction and the erasure-compatible jobs must run on it)${ENUM_HAS_ERASED ? '' : SKIP_NOTE}`,
+      async (_name, lock) => {
         const chain = await freshChain('erased2');
         await setErased(chain.sessionId);
         const xmin = await xminOf(chain.sessionId);
-        expect(
-          await asService(chain, () => lockIn<string>(lockForAccommodation, chain.sessionId)),
-        ).toBe('ERASED');
+        expect(await asService(chain, () => lockIn<string>(lock, chain.sessionId))).toBe('ERASED');
         expect(await xminOf(chain.sessionId)).not.toBe(xmin); // it did take the row lock
         expect(await statusOf(chain.sessionId)).toBe('ERASED');
       },

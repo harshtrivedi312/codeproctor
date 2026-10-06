@@ -5,7 +5,7 @@
 // database, so the behaviour is equivalent. Its twin session-locks-enum-erased.spec.ts covers the other
 // mode. Fake transaction, no database. FR-704, NFR-04, TC-008.
 import { SessionStatus } from '../generated/prisma/enums.js';
-import { guardLive, lockForAccommodation } from './session-locks';
+import { guardLive, lockAnySession, lockForAccommodation } from './session-locks';
 import type { SessionLockTx, SessionLockWhere } from './session-locks';
 
 jest.mock('../generated/prisma/enums.js', () => {
@@ -69,9 +69,12 @@ describe('guardLive with an enum that has no ERASED (the real export, ADR 0013 s
     expect(wheres.map((w) => w.status)).toEqual(['OPENED', 'CONSENTED']);
   });
 
-  it('TC-008 lockForAccommodation has the same where as guardLive here', async () => {
+  it.each([
+    ['lockForAccommodation', lockForAccommodation],
+    ['lockAnySession', lockAnySession],
+  ] as const)('TC-008 %s has the same where as guardLive here', async (_name, lock) => {
     const { tx, wheres } = fakeTx(['COMPLETED'], [1]);
-    await expect(lockForAccommodation(tx, SID)).resolves.toBe('COMPLETED');
+    await expect(lock(tx, SID)).resolves.toBe('COMPLETED');
     expect(wheres).toEqual([{ id: SID, status: 'COMPLETED' }]);
   });
 });

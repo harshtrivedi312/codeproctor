@@ -19,7 +19,8 @@ per-file allowlist in the spec (not folders). **A re-export (`export ... from`) 
 package or identifier is refused even in an allowlisted file**, because it hands the thing to every
 importer of that file. A new legitimate user is added to the allowlist in the same pull request,
 which is the review point. A sixth rule guards not the org scope but **who may take the per-session
-write lock**: `database/session-locks` (see "Session write locks" below), with an empty allowlist.
+write lock**: `database/session-locks` (see "Session write locks" below), with an empty allowlist: only
+SessionStateService may be added.
 
 Developer notes:
 
@@ -660,28 +661,36 @@ the RUN filter or any one of the other rules above makes tests fail. FU-DB-67 wi
 
 ## Session write locks (ADR 0013 section 5.7, ADR 0006 section 8.5, ADR 0015 section 6)
 
-Two functions in `session-locks.ts` take the **per-session row lock** that serialises a writer against the
-erasure fence (ADR 0004 section 9) and against the accommodation writers. They go through the model API, so
-there is no raw SQL and no FU-DB-67 raw call site. **They are not exported from `index.ts`**, on purpose.
+Three functions in `session-locks.ts` take the **per-session row lock** that serialises a writer against the
+erasure fence (ADR 0004 section 9) and against the accommodation writers. They are the **lock core**:
+`SessionStateService.guardLive`, `SessionStateService.lockForAccommodation` and the `withAnySession` lock are
+thin wrappers over them, which Backend B builds (the hub's ruling, ADR PR #205). They go through the model API,
+so there is no raw SQL and no FU-DB-67 raw call site. **They are not exported from `index.ts`**, on purpose.
 
 ```ts
 guardLive(tx: SessionLockTx, sessionId: string): Promise<'LIVE' | 'ERASED'>
 lockForAccommodation(tx: SessionLockTx, sessionId: string): Promise<SessionStatus>
+lockAnySession(tx: SessionLockTx, sessionId: string): Promise<SessionStatus>
 ```
 
 `SessionLockTx` is the two calls they use, `tx.session.findUnique` and `tx.session.updateMany`; the
 interactive transaction client of `prisma.client.$transaction(async (tx) => ...)` fits (checked by the
 type-check of `session-locks-postgres.spec.ts`).
 
-**Call-site rule (FU-DB-67).** The import guard has a rule for `database/session-locks` with an **empty
-allowlist**. Nothing outside the spec files may import it yet, and nothing in `database/` either; a re-export
-from `index.ts` is refused. Backend B adds, in the same pull request that first uses them: the
-`SessionJobProcessor` wrapper file (`withLiveSession` calls `guardLive` and runs the writer only on `'LIVE'`;
-`withAnySession`, for the erasure-compatible jobs, needs a lock that does not stop on ERASED: see FU-DB-231 for
-which primitive it calls) and `SessionStateService` (the staff proctor-resume calls `guardLive`;
-`AccommodationsService` calls `lockForAccommodation`). Database B adds the retention and erasure jobs that call
-`lockForAccommodation`. That entry in `allowed` is the review point. The errors are exported from `index.ts` (`SessionNotFoundError`,
-`SessionLockRetryError`, `AccommodationLockedError`), so a caller can map them without importing the module.
+**Call-site rule (FU-DB-67): only SessionStateService.** Two tests pin it, both with an **empty** list outside
+the defining file:
+
+- the import guard (`import-guard.spec.ts`, rule `database/session-locks`, `allowed: []`): no file may import
+  the module, nothing in `database/` either, and a re-export from `index.ts` is refused;
+- the call-site test (`call-sites.spec.ts`, `CALL_SITES`): `guardLive`, `lockForAccommodation` and
+  `lockAnySession` are in `GUARDED_NAMES`, and the only file that may use them is `database/session-locks.ts`
+  itself.
+
+Backend B adds **exactly its SessionStateService file** to both lists in its PR, and nothing else. Not
+`SessionJobProcessor` (`withLiveSession` and `withAnySession` call the SessionStateService wrappers) and not
+the retention and erasure jobs (they too go through SessionStateService). That entry is the review point. The
+errors are exported from `index.ts` (`SessionNotFoundError`, `SessionLockRetryError`,
+`AccommodationLockedError`), so a caller can map them without importing the module.
 
 **How the lock works.** Read `status` in the caller's scope; then
 `session.updateMany({ where: { id, status: <read>, NOT: { status: 'ERASED' } }, data: { status: <read> } })`.
@@ -693,14 +702,17 @@ with `pgrowlocks`): it excludes another `UPDATE sessions` and the fence, and it 
 `FOR KEY SHARE` that a child-table insert (`proctor_events`, `media_chunks`, `identity_checks`) takes, in
 either direction. `status: <read>` is in the `where`, so the same-value write can never revert a status
 that committed in between: if one did, 0 rows change, the status is re-read and the lock is tried again,
-**at most 3 tries in total** (the re-read after the last lost try only decides ERASED or not).
+**at most 3 tries in total** (the re-read after the last lost try only decides ERASED or not; accepted as built
+by the hub).
 
-| Call                   | Returns                                                                                                                                                                              | Throws                                                                                                                            |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| `guardLive`            | `'LIVE'` when 1 row is updated (the lock is held). `'ERASED'` when the status read, or the re-read after 0 rows, is ERASED: nothing was written and the caller writes nothing either | `SessionNotFoundError` (no such session in this scope: drop the job); `SessionLockRetryError` (3 lost tries: the job's own retry) |
-| `lockForAccommodation` | the status it read under the lock, **any** status, ERASED included                                                                                                                   | `SessionNotFoundError` (the route answers 404); `AccommodationLockedError` (3 lost tries: 409 `ACCOMMODATION_LOCKED`)             |
+| Call                   | Returns                                                                                                                                                                                              | Throws                                                                                                                                         |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `guardLive`            | `'LIVE'` when 1 row is updated (the lock is held). `'ERASED'` when the status read, or the re-read after 0 rows, is ERASED: nothing was written and the caller writes nothing either                 | `SessionNotFoundError` (no such session in this scope: drop the job); `SessionLockRetryError` (3 lost tries: the job's own retry)              |
+| `lockForAccommodation` | the status it read under the lock, **any** status, ERASED included                                                                                                                                   | `SessionNotFoundError` (the route answers 404); `AccommodationLockedError` (3 lost tries: 409 `ACCOMMODATION_LOCKED`)                          |
+| `lockAnySession`       | the same as `lockForAccommodation`, for the erasure-compatible **jobs** (`withAnySession`: ingest close and key destruction, the sweeps, `evidence-expire`, the erasure re-run, the consent-PDF job) | `SessionNotFoundError` (drop the job); `SessionLockRetryError` (3 lost tries: the job is retried by BullMQ, so not the 409 error of the route) |
 
-The errors are plain `Error`s with fixed messages and **no value in them**, never the session id.
+`lockForAccommodation` and `lockAnySession` share one implementation and differ only in the error of the lost
+compare-and-set. The errors are plain `Error`s with fixed messages and **no value in them**, never the session id.
 
 **Where it works.** Call it as the **first statement of an interactive transaction at READ COMMITTED** (a
 higher isolation level turns the compare-and-set into serialization errors) and keep the transaction short:
@@ -709,20 +721,27 @@ the lock is held until it commits, and nothing may do I/O inside it (ADR 0013 5.
 - **Pass the `tx` of the interactive transaction, never `prisma.client`.** On the client itself the read and
   the write would commit one by one and the lock would be gone at once, with the caller believing it holds
   it. `SessionLockTx` types `$connect` and `$disconnect` as `never` (Prisma removes them from a transaction
-  client), so `guardLive(prisma.client, id)` does not compile, and both functions throw an
+  client), so `guardLive(prisma.client, id)` does not compile, and all three throw an
   `OrgScopeViolationError` at run time if they see either (a test checks both). `$transaction` cannot be the
   discriminator: Prisma 7 leaves it on the transaction client.
 - SERVICE session scope (`detachForSessionJob`, then `runAsSessionJob`), STAFF scope (`runAsUser`, the
   proctor-resume route) and plain org scope (`runInOrg`): the extension filters the read and the write by
   org (and by session, in a session scope), so another org's session, another session of the same org
   (in a session scope) and an unknown id all give `SessionNotFoundError`, and no UPDATE is sent.
+- **No grant is needed there** (FU-DB-232, checked after CS-4 PR 2). The status column grants of ADR 0013
+  CS-4.4 limit a CANDIDATE scope only; in SERVICE, STAFF and org scope the same-value write needs none, and an
+  active SessionStateService grant changes nothing (tested).
 - **CANDIDATE scope fails closed.** The read of `status` is allowed there, but the same-value write is refused
   by the write allowlist (`Session.updateMany: status cannot be written by a candidate update`), before any SQL.
-  Candidate paths use `SessionStateService.transition()` (CS-4.4a), never these.
+  The one thing that unlocks that column is an active SessionStateService grant for the session, which
+  `SessionStateService.transition()` enters (CS-4.4a): so **a wrapper must never call these inside a grant or
+  in a CANDIDATE scope**. Candidate paths use `transition()`.
 - **Do not call them in system scope** (`runSystem`): it has no org filter, so they would lock any session of
   any org. The call-site rule above is what keeps that from happening.
 - Lock timeouts are not set here. SERVICE session jobs use a pool whose `pg` options set `lock_timeout` and
-  `statement_timeout` (ADR 0013 5.7), because `SET LOCAL` is raw SQL and refused in session scopes.
+  `statement_timeout` (ADR 0013 5.7), because `SET LOCAL` is raw SQL and refused in session scopes. A wait
+  that ends in SQLSTATE 55P03 or a deadlock (40P01) propagates as a Prisma error and stays with the caller:
+  `SessionJobProcessor` maps it to a BullMQ retry, a staff route retries once and then answers 409.
 
 **ERASED detection.** `session_status` gains `ERASED` only with ADR 0004 section 9 (PR #91). Until that
 migration is on main the generated enum has no such member, and no row can be ERASED. `session-locks.ts`
@@ -735,15 +754,15 @@ reads it from the generated enum once, at load: `Object.hasOwn(SessionStatus, 'E
 
 The typing stays sound with no `any` and no assertion on the enum: the member is taken from the enum object, so
 it is a `SessionStatus` whenever it exists. `guardLiveWith(tx, sessionId, erased)` is the same function with the
-member passed in, for the tests. `lockForAccommodation` never depends on ERASED.
+member passed in, for the tests. `lockForAccommodation` and `lockAnySession` never depend on ERASED.
 
 **Tests.** `session-locks.spec.ts` (fake transaction: the exact arguments, the retry count, both ERASED modes
-through `guardLiveWith`), `session-locks-enum-erased.spec.ts` and `session-locks-enum-absent.spec.ts` (the real
-`guardLive` export with the generated enum replaced by one with and without ERASED), and
-`session-locks-postgres.spec.ts` (Postgres 16 as `app_user`: scopes, cross-org, CANDIDATE fail-closed,
-statement counts, two connections for the lock semantics, a forced and a real race, and the ERASED cases that
-are skipped, with the reason in their name, until #91 lands). The import-guard cases are in
-`import-guard.spec.ts`.
+through `guardLiveWith`, the two any-status locks side by side), `session-locks-enum-erased.spec.ts` and
+`session-locks-enum-absent.spec.ts` (the real `guardLive` export with the generated enum replaced by one with
+and without ERASED), and `session-locks-postgres.spec.ts` (Postgres 16 as `app_user`: scopes, grants,
+cross-org, CANDIDATE fail-closed, statement counts, two connections for the lock semantics, a forced and a real
+race, and the ERASED cases that are skipped, with the reason in their name, until #91 lands). The import-guard
+and call-site cases are in `import-guard.spec.ts` and `call-sites.spec.ts`.
 
 ## Auth bootstrap recipe
 
@@ -1066,7 +1085,7 @@ which stays one statement, and be ready to retry on `P2002` elsewhere.
 | `plain-args.ts`                                | `assertPlainArgs` (the hook refuses arguments Prisma and the checks would read differently), `ownValue` and `ownArgs` (own-key reads), `isFieldRef`                                                                                                                                                            |
 | `candidate-interim.ts`                         | `CANDIDATE_READ` (CS-4.4's read column per model: readable, key, explicit-only, RUN-only), `omit`, the RUN filter, `COMPOUND_UNIQUES`, the field-reference refusal. Not interim any more: the name stays because `retention/consent-access.spec.ts` pins the path (FU-DB-211)                                  |
 | `errors.ts`                                    | `OrgContextMissingError`, `OrgScopeViolationError`, `RawQueryNotAllowedError`, and the session-lock outcomes `SessionNotFoundError`, `SessionLockRetryError`, `AccommodationLockedError`                                                                                                                       |
-| `session-locks.ts`                             | `guardLive` and `lockForAccommodation`, the per-session write locks: **not exported from `index.ts`**, importers pinned by the import guard (FU-DB-67; empty allowlist)                                                                                                                                        |
+| `session-locks.ts`                             | `guardLive`, `lockForAccommodation` and `lockAnySession`, the lock core: **not exported from `index.ts`**, importers pinned by the import guard and `CALL_SITES` (FU-DB-67; SessionStateService only)                                                                                                          |
 | `error-scrub.ts`                               | Keeps argument values out of the Prisma errors that are logged (FU-DB-70)                                                                                                                                                                                                                                      |
 | `testing/`                                     | Test helpers (excluded from the build): throwaway migrated Postgres, fixtures, scope checks                                                                                                                                                                                                                    |
 

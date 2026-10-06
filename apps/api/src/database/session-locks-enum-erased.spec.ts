@@ -5,7 +5,7 @@
 // (`Object.hasOwn(SessionStatus, 'ERASED')`) is wired in. Its twin session-locks-enum-absent.spec.ts does
 // the same for an enum without ERASED, so neither depends on when #91 lands. Fake transaction, no
 // database. FR-704, NFR-04, TC-008.
-import { guardLive, lockForAccommodation } from './session-locks';
+import { guardLive, lockAnySession, lockForAccommodation } from './session-locks';
 import type { SessionLockTx, SessionLockWhere } from './session-locks';
 import type { SessionStatus } from '../generated/prisma/enums.js';
 
@@ -64,10 +64,16 @@ describe('guardLive with an enum that has ERASED (the real export, ADR 0013 sect
     expect(wheres).toHaveLength(1);
   });
 
-  it('TC-008 lockForAccommodation is not affected: it locks an ERASED session, with no exclusion in the where', async () => {
-    const { tx, wheres } = fakeTx([ERASED], [1]);
-    await expect(lockForAccommodation(tx, SID)).resolves.toBe('ERASED');
-    expect(wheres).toEqual([{ id: SID, status: ERASED }]);
-    expect(Object.hasOwn(wheres[0] ?? {}, 'NOT')).toBe(false);
-  });
+  it.each([
+    ['lockForAccommodation', lockForAccommodation],
+    ['lockAnySession', lockAnySession],
+  ] as const)(
+    'TC-008 %s is not affected: it locks an ERASED session, with no exclusion in the where',
+    async (_name, lock) => {
+      const { tx, wheres } = fakeTx([ERASED], [1]);
+      await expect(lock(tx, SID)).resolves.toBe('ERASED');
+      expect(wheres).toEqual([{ id: SID, status: ERASED }]);
+      expect(Object.hasOwn(wheres[0] ?? {}, 'NOT')).toBe(false);
+    },
+  );
 });

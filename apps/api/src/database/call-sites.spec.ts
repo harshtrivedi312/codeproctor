@@ -4,6 +4,8 @@
 //   - `claimCandidateFactsSetter` (the claim-once closure of the candidate-facts setter),
 //   - `setCandidateFacts` (CandidateSessionGuard only),
 //   - `detachForSessionJob` (the SessionJobProcessor base class only),
+//   - `guardLive`, `lockForAccommodation` and `lockAnySession` (the per-session write locks of
+//     database/session-locks.ts: defined there, and wrapped by SessionStateService only),
 // to an explicit per-file allowlist (CALL_SITES below). It reads every non-test file under apps/api/src
 // (*.spec.ts, *.e2e-spec.ts and their .js forms, src/test, src/database/testing and src/generated are not
 // scanned), with the extensions .ts, .mts, .cts, .js, .mjs and .cjs, and FAILS on any other file extension it
@@ -12,7 +14,8 @@
 // in prose is not one (testing/call-site-guard.ts says how, and why it is fail-safe).
 //
 // TODAY the list holds the database folder's own definitions and nothing else: BE-07's guard,
-// SessionJobProcessor and the grant-site services are NOT allowed yet. A new call site must be added to
+// SessionJobProcessor, SessionStateService (the wrappers of the three locks) and the grant-site services are
+// NOT allowed yet. A new call site must be added to
 // CALL_SITES in the same PR, which is the review point; for `withGrant` the entry names the CS-4.4 grant
 // site(s) the file holds, one `GRANT_SITES` name per site.
 //
@@ -43,7 +46,8 @@ const SRC = resolve(__dirname, '..');
  * `sites` naming the GRANT_SITES it holds, in the PR that builds it:
  *   'candidate/candidate-scope.ts':   { names: ['setCandidateFacts'], why: 'CandidateScope: the guard path and every asCandidate step (DL-31)' },
  *   'jobs/session-job.processor.ts':                 { names: ['detachForSessionJob'], why: 'SessionJobProcessor base class' },
- *   'candidate/session-state.service.ts':            { names: ['withGrant'], sites: ['SessionStateService'], why: '…' },
+ *   'candidate/session-state.service.ts':            { names: ['withGrant', 'guardLive', 'lockForAccommodation', 'lockAnySession'], sites: ['SessionStateService'], why: '…' },
+ * (SessionStateService is the ONLY file that may use the three locks outside database/: its methods wrap them.)
  */
 export const CALL_SITES: CallSiteList = {
   'database/org-context.ts': {
@@ -133,16 +137,19 @@ describe('call-site guard: the private entries of the database layer (FU-DB-67 s
     }
   });
 
-  it('TC-008 the four names are the ones CS-4.4 and ADR 0006 section 8.5 call private', () => {
+  it('TC-008 the names are the ones CS-4.4 and ADR 0006 section 8.5 call private, and the three session locks', () => {
     expect([...GUARDED_NAMES]).toEqual([
       'withGrant',
       'claimCandidateFactsSetter',
       'setCandidateFacts',
       'detachForSessionJob',
+      'guardLive',
+      'lockForAccommodation',
+      'lockAnySession',
     ]);
   });
 
-  it('TC-008 only the listed files use withGrant, claimCandidateFactsSetter, setCandidateFacts or detachForSessionJob', () => {
+  it('TC-008 only the listed files use withGrant, claimCandidateFactsSetter, setCandidateFacts, detachForSessionJob, guardLive, lockForAccommodation or lockAnySession', () => {
     expect(findCallSiteViolations(files, CALL_SITES)).toEqual([]);
   });
 
@@ -155,7 +162,21 @@ describe('call-site guard: the private entries of the database layer (FU-DB-67 s
       'candidate/candidate-scope.ts',
       'database/candidate-facts.ts',
       'database/org-context.ts',
+      'database/session-locks.ts',
     ]);
+    // The only file that may use the three locks is the one that defines them.
+    expect(CALL_SITES['database/session-locks.ts']?.names).toEqual([
+      'guardLive',
+      'lockForAccommodation',
+      'lockAnySession',
+    ]);
+    for (const [path, entry] of Object.entries(CALL_SITES)) {
+      if (path !== 'database/session-locks.ts') {
+        expect(entry.names).not.toContain('guardLive');
+        expect(entry.names).not.toContain('lockForAccommodation');
+        expect(entry.names).not.toContain('lockAnySession');
+      }
+    }
     // The grant sites are not allowed anywhere yet: no entry names one.
     expect(Object.values(CALL_SITES).some((entry) => entry.sites !== undefined)).toBe(false);
   });
@@ -191,6 +212,15 @@ describe('call-site guard: the private entries of the database layer (FU-DB-67 s
         expect({ path, site, real: real.has(site) }).toEqual({ path, site, real: true });
       }
     }
+  });
+
+  it('TC-008 the three session locks are used in database/session-locks.ts only, in no other database file either', () => {
+    const using = files
+      .filter(
+        (f) => usesOf(f.text, ['guardLive', 'lockForAccommodation', 'lockAnySession']).length > 0,
+      )
+      .map((f) => f.path);
+    expect(using).toEqual(['database/session-locks.ts']);
   });
 
   it('TC-008 the candidate-facts module is imported only by the database module (side effect) and, with BE-07, the guard', () => {
@@ -241,9 +271,40 @@ describe('call-site guard patterns (NFR-04, TC-008)', () => {
     for (const text of forms) {
       expect({ text, found: violations(text) }).toEqual({ text, found: ['x/other.ts: withGrant'] });
     }
-    for (const name of ['claimCandidateFactsSetter', 'setCandidateFacts', 'detachForSessionJob']) {
+    for (const name of [
+      'claimCandidateFactsSetter',
+      'setCandidateFacts',
+      'detachForSessionJob',
+      'guardLive',
+      'lockForAccommodation',
+      'lockAnySession',
+    ]) {
       expect(violations(`${name}(x);`)).toEqual([`x/other.ts: ${name}`]);
     }
+  });
+
+  it('TC-008 every form of USE of the session locks is found: a call, a method definition of the wrapper, an import, a destructuring, a bracket access, a re-export', () => {
+    for (const name of ['guardLive', 'lockForAccommodation', 'lockAnySession']) {
+      for (const text of [
+        `await ${name}(tx, sid);`,
+        `async ${name}(tx: Tx, sid: string) { return 1; }`,
+        `await this.locks.${name}(tx, sid);`,
+        `import { ${name} } from '../database/session-locks';`,
+        `const { ${name} } = locks;`,
+        `locks['${name}'](tx, sid);`,
+        `const f = locks.${name}.bind(locks);`,
+      ]) {
+        expect({ text, found: violations(text) }).toEqual({ text, found: [`x/other.ts: ${name}`] });
+      }
+      expect(violations(`export { ${name} } from './x';`, 'a/keys.service.ts')).toEqual([
+        'a/keys.service.ts: re-exports ' + name,
+      ]);
+      // A mention is not a use, and neither is a longer name such as guardLiveWith or lockAnySessionLater.
+      expect(violations(`// ${name}(tx, sid) is the lock`)).toEqual([]);
+      expect(violations(`const m = '${name} takes the row lock';`)).toEqual([]);
+      expect(violations(`${name}Later(tx);`)).toEqual([]);
+    }
+    expect(violations('guardLiveWith(tx, sid, erased);')).toEqual([]);
   });
 
   it('TC-008 a MENTION is not a use: a line comment, a block comment, a JSDoc with a link, prose in a string, a longer identifier', () => {

@@ -1,13 +1,23 @@
-// The two per-session write locks (ADR 0013 section 5.7, ADR 0006 section 8.5, ADR 0015 section 6).
+// The per-session write locks (ADR 0013 section 5.7, ADR 0006 section 8.5, ADR 0015 section 6): the LOCK
+// CORE. `SessionStateService.guardLive`, `.lockForAccommodation` and the job entry `withAnySession` are thin
+// wrappers over the three functions here, which Backend B builds (BE-07; the hub's ruling in ADR PR #205).
 //
 //   guardLive(tx, sessionId)              SERVICE writers and the staff proctor-resume. Takes the row
 //                                         lock of the session and says whether it is still LIVE or has
 //                                         been ERASED (the erasure fence, ADR 0004 section 9). When it
-//                                         says ERASED the caller writes nothing.
+//                                         says ERASED the caller writes nothing. Retry error:
+//                                         SessionLockRetryError.
 //   lockForAccommodation(tx, sessionId)   The accommodation writers (the PATCH, redact-note, the
 //                                         video-check PUT, and the reductions of erasure, R-10 and
 //                                         R-4). The same lock in ANY status, ERASED included, and it
-//                                         returns the status it read under the lock.
+//                                         returns the status it read under the lock. Retry error:
+//                                         AccommodationLockedError (409 ACCOMMODATION_LOCKED).
+//   lockAnySession(tx, sessionId)         The erasure-compatible JOBS (ingest close and key
+//                                         destruction, the sweeps, evidence-expire, the erasure re-run,
+//                                         the consent-PDF job): the same lock in ANY status, ERASED
+//                                         included, no ERASED stop. Only SessionJobProcessor's
+//                                         `withAnySession` uses it, through SessionStateService. Retry
+//                                         error: SessionLockRetryError (a job: its own retry runs it).
 //
 // Both go through the model API, so there is no raw SQL and no FU-DB-67 raw call site: a read of
 // `status`, then `sessions.updateMany` that writes the status to the value just read. Writing the same
@@ -20,14 +30,15 @@
 // fence that commits just after the read would not be seen.
 //
 // WHO MAY CALL THEM. This module is NOT exported from index.ts, on purpose. The import guard
-// (import-guard.spec.ts, rule `database/session-locks`, FU-DB-67) lists the only files outside
-// `database/` that may import it, and the list is empty until Backend B adds `SessionJobProcessor`
-// (`withLiveSession` and `withAnySession`) and `SessionStateService` in the same pull request. That
-// entry is the review point. Candidate scopes never call these: they use
-// `SessionStateService.transition()` (ADR 0013 CS-4.4a). In a CANDIDATE scope both functions fail
-// closed anyway, because the write allowlist of a candidate refuses `sessions.status`.
+// (import-guard.spec.ts, rule `database/session-locks`, FU-DB-67) allows exactly one importer outside
+// `database/`: the SessionStateService file, which Backend B adds in its PR and which exposes the wrappers.
+// Not SessionJobProcessor and not the retention jobs: they go through SessionStateService. The call-site
+// test (call-sites.spec.ts, CALL_SITES) pins the three names the same way. That entry is the review point.
+// Candidate scopes never call these: they use `SessionStateService.transition()` (ADR 0013 CS-4.4a). In a
+// CANDIDATE scope all three fail closed, because the write allowlist of a candidate refuses
+// `sessions.status`, unless an active SessionStateService grant unlocks it (see the README).
 //
-// SCOPES. Both work in a SERVICE session scope (`runAsSessionJob`, after `detachForSessionJob`), a
+// SCOPES. All three work in a SERVICE session scope (`runAsSessionJob`, after `detachForSessionJob`), a
 // STAFF scope (`runAsUser`) and a plain org scope (`runInOrg`): the extension adds the org filter (and
 // in a session scope the session filter) to the read and the write, so another org's session is simply
 // not found. Call them as the FIRST statement of an interactive transaction, at READ COMMITTED (a
@@ -196,6 +207,18 @@ export function guardLive(tx: SessionLockTx, sessionId: string): Promise<GuardLi
 }
 
 /**
+ * The lock in ANY status, ERASED included, for the two functions below: the status read under the lock, or
+ * undefined when the three tries were lost. Nothing is excluded, so the 'erased' outcome cannot occur.
+ */
+async function lockAnyStatus(
+  tx: SessionLockTx,
+  sessionId: string,
+): Promise<SessionStatus | undefined> {
+  const result = await lockSession(tx, sessionId, undefined);
+  return result.outcome === 'locked' ? result.status : undefined;
+}
+
+/**
  * The per-session lock of the accommodation writers (ADR 0015 section 6, ADR 0006 section 8.5): the same
  * lock as guardLive, in ANY status, ERASED included, because the reduction of an erased session's
  * accommodations must run. The first row lock of the transaction (lock order: the ADR 0004 advisory
@@ -212,9 +235,26 @@ export async function lockForAccommodation(
   tx: SessionLockTx,
   sessionId: string,
 ): Promise<SessionStatus> {
-  const result = await lockSession(tx, sessionId, undefined);
-  // Nothing is excluded here, so 'erased' cannot be returned; it is handled with 'exhausted' only to
-  // keep the union closed.
-  if (result.outcome === 'locked') return result.status;
-  throw new AccommodationLockedError();
+  const status = await lockAnyStatus(tx, sessionId);
+  if (status === undefined) throw new AccommodationLockedError();
+  return status;
+}
+
+/**
+ * The per-session lock of the erasure-compatible JOBS (ADR 0013 section 5.7 `withAnySession`, ADR 0006
+ * section 8.5): ingest close and key destruction, both sweep passes, `evidence-expire`, the erasure re-run
+ * and the consent-PDF job must still run on an ERASED session, so this is guardLive without the ERASED
+ * stop. The same implementation as lockForAccommodation (any status, ERASED included, the status read
+ * under the lock is returned), with the job's own retry error: a job is retried by BullMQ, it is not a 409.
+ * Only SessionJobProcessor's `withAnySession` uses it, through SessionStateService.
+ *
+ * @returns the status the session had when it was locked.
+ * @throws SessionNotFoundError   no such session in this scope (another org, unknown id): drop the job.
+ * @throws SessionLockRetryError  the status changed under it three times in a row: the job's own retry
+ *   handles it.
+ */
+export async function lockAnySession(tx: SessionLockTx, sessionId: string): Promise<SessionStatus> {
+  const status = await lockAnyStatus(tx, sessionId);
+  if (status === undefined) throw new SessionLockRetryError();
+  return status;
 }

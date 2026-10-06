@@ -30,6 +30,12 @@ export const GUARDED_NAMES = [
   'claimCandidateFactsSetter',
   'setCandidateFacts',
   'detachForSessionJob',
+  // The per-session write locks (database/session-locks.ts, ADR 0013 section 5.7, ADR 0015 section 6): the
+  // lock core. Only SessionStateService wraps them (hub ruling, ADR PR #205), so its file is the one entry
+  // outside the defining file; the import guard pins the importers of the module the same way.
+  'guardLive',
+  'lockForAccommodation',
+  'lockAnySession',
 ] as const;
 export type GuardedName = (typeof GUARDED_NAMES)[number];
 

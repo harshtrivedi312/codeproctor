@@ -21,6 +21,7 @@ import {
   erasedStatusOf,
   guardLive,
   guardLiveWith,
+  lockAnySession,
   lockForAccommodation,
 } from './session-locks';
 import type { SessionLockTx, SessionLockWhere } from './session-locks';
@@ -267,103 +268,140 @@ describe('guardLive (ADR 0013 section 5.7): the lock call, FR-704, NFR-04, TC-00
   });
 });
 
-describe('lockForAccommodation (ADR 0015 section 6): the lock call, FR-704, NFR-04, TC-008', () => {
-  it('TC-008 reads the status, writes the same status once with status in the where, and returns it', async () => {
-    const { tx, calls } = fakeTx(steady('COMPLETED'));
-    await expect(lockForAccommodation(tx, SID)).resolves.toBe('COMPLETED');
-    expect(shape(calls)).toBe('RU');
-    expect(reads(calls)[0]).toEqual({
-      op: 'findUnique',
-      args: { where: { id: SID }, select: { status: true } },
+/**
+ * The two locks that work in ANY status, ERASED included, share one implementation and differ in the error
+ * of the lost compare-and-set: lockForAccommodation (a route: 409 ACCOMMODATION_LOCKED, ADR 0015 section 6) and
+ * lockAnySession (a job: BullMQ retries it, ADR 0013 section 5.7 `withAnySession`).
+ */
+const ANY_STATUS_LOCKS = [
+  ['lockForAccommodation', lockForAccommodation, AccommodationLockedError],
+  ['lockAnySession', lockAnySession, SessionLockRetryError],
+] as const;
+
+describe.each(ANY_STATUS_LOCKS)(
+  '%s (ADR 0015 section 6, ADR 0013 section 5.7): the lock call, FR-704, NFR-04, TC-008',
+  (_name, lock, LostError) => {
+    it('TC-008 reads the status, writes the same status once with status in the where, and returns it', async () => {
+      const { tx, calls } = fakeTx(steady('COMPLETED'));
+      await expect(lock(tx, SID)).resolves.toBe('COMPLETED');
+      expect(shape(calls)).toBe('RU');
+      expect(reads(calls)[0]).toEqual({
+        op: 'findUnique',
+        args: { where: { id: SID }, select: { status: true } },
+      });
+      expect(updates(calls)[0]?.args).toEqual({
+        where: { id: SID, status: 'COMPLETED' },
+        data: { status: 'COMPLETED' },
+      });
     });
-    expect(updates(calls)[0]?.args).toEqual({
-      where: { id: SID, status: 'COMPLETED' },
-      data: { status: 'COMPLETED' },
+
+    it('TC-008 locks a session in ANY status and returns it, with no ERASED exclusion at all', async () => {
+      for (const status of [...Object.values(SessionStatus), FAKE_ERASED]) {
+        const { tx, calls } = fakeTx(steady(status));
+        await expect(lock(tx, SID)).resolves.toBe(status);
+        const [update] = updates(calls);
+        expect(update?.args.where).toEqual({ id: SID, status });
+        expect(Object.hasOwn(update?.args.where ?? {}, 'NOT')).toBe(false);
+        expect(update?.args.data).toEqual({ status });
+      }
     });
-  });
 
-  it('TC-008 locks a session in ANY status and returns it, with no ERASED exclusion at all', async () => {
-    for (const status of [...Object.values(SessionStatus), FAKE_ERASED]) {
-      const { tx, calls } = fakeTx(steady(status));
-      await expect(lockForAccommodation(tx, SID)).resolves.toBe(status);
-      const [update] = updates(calls);
-      expect(update?.args.where).toEqual({ id: SID, status });
-      expect(Object.hasOwn(update?.args.where ?? {}, 'NOT')).toBe(false);
-      expect(update?.args.data).toEqual({ status });
-    }
-  });
+    it('TC-008 an ERASED session is locked and its status returned, so the reduction on it can run', async () => {
+      const { tx, calls } = fakeTx(steady(FAKE_ERASED));
+      await expect(lock(tx, SID)).resolves.toBe('ERASED');
+      expect(updates(calls)).toHaveLength(1);
+    });
 
-  it('TC-008 an ERASED session is locked and its status returned, so the reduction on it can run', async () => {
-    const { tx, calls } = fakeTx(steady(FAKE_ERASED));
-    await expect(lockForAccommodation(tx, SID)).resolves.toBe('ERASED');
-    expect(updates(calls)).toHaveLength(1);
-  });
+    it('TC-008 no row throws SessionNotFoundError (the route answers 404, the job is dropped) and sends no update', async () => {
+      const { tx, calls } = fakeTx({ read: () => null, update: () => 1 });
+      await expect(lock(tx, SID)).rejects.toBeInstanceOf(SessionNotFoundError);
+      expect(shape(calls)).toBe('R');
+    });
 
-  it('TC-008 no row throws SessionNotFoundError (the route answers 404) and sends no update', async () => {
-    const { tx, calls } = fakeTx({ read: () => null, update: () => 1 });
-    await expect(lockForAccommodation(tx, SID)).rejects.toBeInstanceOf(SessionNotFoundError);
-    expect(shape(calls)).toBe('R');
-  });
+    it('TC-008 0 rows, then a re-read: retries on the new status and returns what it read under the lock', async () => {
+      const { tx, calls } = fakeTx(moving(['VERIFIED', 'IN_PROGRESS'], 1));
+      await expect(lock(tx, SID)).resolves.toBe('IN_PROGRESS');
+      expect(shape(calls)).toBe('RURU');
+      expect(updates(calls).map((c) => c.args.where.status)).toEqual(['VERIFIED', 'IN_PROGRESS']);
+    });
 
-  it('TC-008 0 rows, then a re-read: retries on the new status and returns what it read under the lock', async () => {
-    const { tx, calls } = fakeTx(moving(['VERIFIED', 'IN_PROGRESS'], 1));
-    await expect(lockForAccommodation(tx, SID)).resolves.toBe('IN_PROGRESS');
-    expect(shape(calls)).toBe('RURU');
-    expect(updates(calls).map((c) => c.args.where.status)).toEqual(['VERIFIED', 'IN_PROGRESS']);
-  });
+    it('TC-008 a re-read of ERASED is locked like any status: it never stops on ERASED', async () => {
+      const { tx, calls } = fakeTx(moving(['IN_PROGRESS', FAKE_ERASED], 1));
+      await expect(lock(tx, SID)).resolves.toBe('ERASED');
+      expect(shape(calls)).toBe('RURU');
+      expect(updates(calls)[1]?.args.where).toEqual({ id: SID, status: FAKE_ERASED });
+    });
 
-  it('TC-008 a re-read of ERASED is locked like any status: lockForAccommodation never stops on ERASED', async () => {
-    const { tx, calls } = fakeTx(moving(['IN_PROGRESS', FAKE_ERASED], 1));
-    await expect(lockForAccommodation(tx, SID)).resolves.toBe('ERASED');
-    expect(shape(calls)).toBe('RURU');
-    expect(updates(calls)[1]?.args.where).toEqual({ id: SID, status: FAKE_ERASED });
-  });
+    it('TC-008 three lost tries throw their own retry error (409 ACCOMMODATION_LOCKED for the route, a BullMQ retry for the job), never more than 3 updates', async () => {
+      const { tx, calls } = fakeTx(moving(['OPENED', 'CONSENTED', 'VERIFIED', 'IN_PROGRESS']));
+      await expect(lock(tx, SID)).rejects.toBeInstanceOf(LostError);
+      expect(updates(calls)).toHaveLength(MAX_LOCK_ATTEMPTS);
+    });
 
-  it('TC-008 three lost tries throw AccommodationLockedError (409 ACCOMMODATION_LOCKED), never more than 3 updates', async () => {
-    const { tx, calls } = fakeTx(moving(['OPENED', 'CONSENTED', 'VERIFIED', 'IN_PROGRESS']));
-    await expect(lockForAccommodation(tx, SID)).rejects.toBeInstanceOf(AccommodationLockedError);
-    expect(updates(calls)).toHaveLength(MAX_LOCK_ATTEMPTS);
-  });
+    it('TC-008 a row that vanishes between the tries throws SessionNotFoundError', async () => {
+      const { tx } = fakeTx({ read: (n) => (n === 0 ? 'OPENED' : null), update: () => 0 });
+      await expect(lock(tx, SID)).rejects.toBeInstanceOf(SessionNotFoundError);
+    });
 
-  it('TC-008 a row that vanishes between the tries throws SessionNotFoundError', async () => {
-    const { tx } = fakeTx({ read: (n) => (n === 0 ? 'OPENED' : null), update: () => 0 });
-    await expect(lockForAccommodation(tx, SID)).rejects.toBeInstanceOf(SessionNotFoundError);
-  });
-
-  it('TC-008 an error from the database is not retried and is not swallowed', async () => {
-    const boom = new Error('deadlock detected');
-    let attempts = 0;
-    const tx: SessionLockTx = {
-      session: {
-        findUnique: () => Promise.resolve({ status: 'OPENED' }),
-        updateMany: () => {
-          attempts += 1;
-          return Promise.reject(boom);
+    it('TC-008 an error from the database is not retried and is not swallowed', async () => {
+      const boom = new Error('deadlock detected');
+      let attempts = 0;
+      const tx: SessionLockTx = {
+        session: {
+          findUnique: () => Promise.resolve({ status: 'OPENED' }),
+          updateMany: () => {
+            attempts += 1;
+            return Promise.reject(boom);
+          },
         },
-      },
-    };
-    await expect(lockForAccommodation(tx, SID)).rejects.toBe(boom);
-    expect(attempts).toBe(1);
+      };
+      await expect(lock(tx, SID)).rejects.toBe(boom);
+      expect(attempts).toBe(1);
+    });
+
+    it('TC-008 the errors carry no value: never the session id', async () => {
+      for (const make of [
+        () => lock(fakeTx({ read: () => null, update: () => 1 }).tx, SID),
+        () => lock(fakeTx(moving(['OPENED', 'CONSENTED', 'VERIFIED', 'IN_PROGRESS'])).tx, SID),
+      ]) {
+        const error = await make().then(
+          () => undefined,
+          (e: unknown) => e,
+        );
+        expect(error).toBeInstanceOf(Error);
+        expect(JSON.stringify(error)).not.toContain(SID);
+        expect((error as Error).message).not.toContain(SID);
+        expect((error as Error).stack ?? '').not.toContain(SID);
+        expect(error).not.toBeInstanceOf(OrgScopeError);
+      }
+    });
+  },
+);
+
+describe('each lock throws the retry error of its caller (ADR 0013 section 5.7, ADR 0015 section 6)', () => {
+  const lost = () => fakeTx(moving(['OPENED', 'CONSENTED', 'VERIFIED', 'IN_PROGRESS'])).tx;
+
+  it('TC-008 lockAnySession fails a job with SessionLockRetryError, never a 409 error; lockForAccommodation the reverse', async () => {
+    const job = await lockAnySession(lost(), SID).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(job).toBeInstanceOf(SessionLockRetryError);
+    expect(job).not.toBeInstanceOf(AccommodationLockedError);
+    const route = await lockForAccommodation(lost(), SID).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(route).toBeInstanceOf(AccommodationLockedError);
+    expect(route).not.toBeInstanceOf(SessionLockRetryError);
   });
 
-  it('TC-008 the errors carry no value: never the session id', async () => {
-    for (const make of [
-      () => lockForAccommodation(fakeTx({ read: () => null, update: () => 1 }).tx, SID),
-      () =>
-        lockForAccommodation(
-          fakeTx(moving(['OPENED', 'CONSENTED', 'VERIFIED', 'IN_PROGRESS'])).tx,
-          SID,
-        ),
-    ]) {
-      const error = await make().then(
-        () => undefined,
-        (e: unknown) => e,
-      );
-      expect(error).toBeInstanceOf(Error);
-      expect(JSON.stringify(error)).not.toContain(SID);
-      expect((error as Error).message).not.toContain(SID);
-      expect((error as Error).stack ?? '').not.toContain(SID);
-      expect(error).not.toBeInstanceOf(OrgScopeError);
+  it('TC-008 the two any-status locks send the same statements for the same session: one implementation', async () => {
+    for (const status of [...Object.values(SessionStatus), FAKE_ERASED]) {
+      const a = fakeTx(moving([status, 'OPENED'], 1));
+      const b = fakeTx(moving([status, 'OPENED'], 1));
+      expect(await lockForAccommodation(a.tx, SID)).toBe(await lockAnySession(b.tx, SID));
+      expect(a.calls).toEqual(b.calls);
     }
   });
 });
@@ -407,13 +445,15 @@ describe('the lock needs a transaction client, not the client itself (ADR 0013 s
   );
 
   it.each(['$connect', '$disconnect'] as const)(
-    'TC-008 lockForAccommodation refuses an object with %s before any statement',
+    'TC-008 lockForAccommodation and lockAnySession refuse an object with %s before any statement',
     async (connection) => {
       const { client, calls } = clientItself(connection);
       // @ts-expect-error the client has $connect or $disconnect, so it is not a SessionLockTx
       await expect(lockForAccommodation(client, SID)).rejects.toBeInstanceOf(
         OrgScopeViolationError,
       );
+      // @ts-expect-error the same for the job lock
+      await expect(lockAnySession(client, SID)).rejects.toBeInstanceOf(OrgScopeViolationError);
       expect(calls).toEqual([]);
     },
   );

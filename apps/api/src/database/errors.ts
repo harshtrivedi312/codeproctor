@@ -41,8 +41,8 @@ export class RawQueryNotAllowedError extends OrgScopeError {
   }
 }
 
-// The three outcomes of the session write locks (session-locks.ts: guardLive and lockForAccommodation,
-// ADR 0013 section 5.7, ADR 0015 section 6). Unlike the scoping errors above they are not a bug in
+// The three outcomes of the session write locks (session-locks.ts: guardLive, lockForAccommodation and
+// lockAnySession, ADR 0013 section 5.7, ADR 0015 section 6). Unlike the scoping errors above they are not a bug in
 // the calling code: each is an expected outcome that the caller maps. They are plain Errors and not
 // OrgScopeErrors, so a handler for scoping bugs does not catch them. Their messages carry no value,
 // never the session id.
@@ -60,8 +60,8 @@ export class SessionNotFoundError extends Error {
 }
 
 /**
- * guardLive lost its compare-and-set three times in a row: the status kept changing between the
- * read and the lock. The job fails and its own retry (BullMQ) runs it again.
+ * guardLive or lockAnySession lost its compare-and-set three times in a row: the status kept changing
+ * between the read and the lock. The job fails and its own retry (BullMQ) runs it again.
  */
 export class SessionLockRetryError extends Error {
   constructor() {

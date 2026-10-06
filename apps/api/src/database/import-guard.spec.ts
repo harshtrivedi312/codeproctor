@@ -8,8 +8,9 @@
 // New business modules inject PrismaService from database/prisma.service.ts instead.
 //
 // A sixth rule is not about the org scope but about WHO may take the per-session write lock:
-//   - database/session-locks: guardLive and lockForAccommodation (ADR 0013 section 5.7, FU-DB-67). The
-//     allowlist is empty until Backend B and Database B add their files with their first use.
+//   - database/session-locks: guardLive, lockForAccommodation and lockAnySession (ADR 0013 section 5.7,
+//     FU-DB-67). Only SessionStateService may import it (the others are wrappers' callers), so the allowlist
+//     is empty until Backend B adds exactly that one file.
 //
 // It reads every non-test file under apps/api/src and matches `from '…'`, `require('…')` and
 // `import('…')`, with or without the `.js` extension, against an explicit per-file allowlist. A
@@ -57,14 +58,14 @@ export const RULES: readonly GuardRule[] = [
     name: 'database/session-locks',
     module: 'database/session-locks',
     why:
-      'guardLive and lockForAccommodation take the per-session write lock (ADR 0013 section 5.7, ADR 0006 ' +
-      'section 8.5, ADR 0015 section 6; FU-DB-67). Only named files may import them. Backend B adds, in the ' +
-      'same pull request that first uses them, the SessionJobProcessor wrapper file (withLiveSession and ' +
-      'withAnySession) and SessionStateService (the staff proctor-resume; lockForAccommodation for ' +
-      'AccommodationsService), and Database B adds the retention and erasure jobs that call ' +
-      'lockForAccommodation. That entry in `allowed` is the review point. Candidate paths use ' +
-      'SessionStateService.transition(), never these.',
-    allowed: [], // nobody outside database/ yet: Backend B and Database B add their files with their first use
+      'guardLive, lockForAccommodation and lockAnySession are the lock core (ADR 0013 section 5.7, ADR ' +
+      '0006 section 8.5, ADR 0015 section 6; FU-DB-67). SessionStateService.guardLive, ' +
+      '.lockForAccommodation and the job entry withAnySession are thin wrappers over them (hub ruling, ' +
+      'ADR PR #205), so ONLY SessionStateService may import this module: Backend B adds exactly its ' +
+      'SessionStateService file to `allowed` in its PR, and nothing else. Not SessionJobProcessor and not ' +
+      'the retention and erasure jobs: they call the SessionStateService wrappers. That entry in ' +
+      '`allowed` is the review point. Candidate paths use SessionStateService.transition(), never these.',
+    allowed: [], // nobody outside database/ yet: Backend B adds exactly its SessionStateService file, nothing else
   },
   {
     name: 'PG_POOL',
@@ -444,21 +445,41 @@ describe('import guard: the session write locks have no importer yet (FU-DB-67, 
     locks = ruleNamed('database/session-locks');
   });
 
-  it('TC-008 the rule exists, names the module, and its allowlist is empty until Backend B adds its files', () => {
+  it('TC-008 the rule exists, names the module, and its allowlist is empty until Backend B adds its SessionStateService file', () => {
     expect(locks.module).toBe('database/session-locks');
     expect(locks.allowed).toEqual([]);
-    // The reason is the review point: it says who adds what, in which pull request.
-    expect(locks.why).toContain('SessionJobProcessor');
-    expect(locks.why).toContain('withLiveSession');
-    expect(locks.why).toContain('withAnySession');
-    expect(locks.why).toContain('SessionStateService');
-    expect(locks.why).toContain('lockForAccommodation');
+    // The reason is the review point: it says who adds what, in which pull request, and who must not.
+    expect(locks.why).toContain('ONLY SessionStateService may import this module');
+    expect(locks.why).toContain('exactly its SessionStateService file');
+    expect(locks.why).toContain('Not SessionJobProcessor');
+    expect(locks.why).toContain('retention and erasure jobs');
+    expect(locks.why).toContain('lockAnySession');
+    expect(locks.why).toContain('#205');
     expect(locks.why).toContain('review point');
+  });
+
+  it('TC-008 only the SessionStateService file may be added: SessionJobProcessor and the retention jobs still fail beside it', () => {
+    const allowed: GuardRule = { ...locks, allowed: ['candidate/session-state.service.ts'] };
+    const importLocks = "import { guardLive } from '../database/session-locks';";
+    expect(
+      findViolations([stray('candidate/session-state.service.ts', importLocks)], allowed),
+    ).toEqual([]);
+    for (const path of [
+      'jobs/session-job.processor.ts',
+      'retention/retention.service.ts',
+      'accommodations/accommodations.service.ts',
+      'candidate/other.service.ts',
+    ]) {
+      expect(findViolations([stray(path, importLocks)], allowed)).toEqual([path]);
+    }
   });
 
   it('TC-008 an importer of database/session-locks outside database/ fails, in every import form', () => {
     for (const [path, text] of [
-      ['jobs/session-job.processor.ts', "import { guardLive } from '../database/session-locks';"],
+      [
+        'jobs/session-job.processor.ts',
+        "import { lockAnySession } from '../database/session-locks';",
+      ],
       [
         'jobs/session-job.processor.ts',
         'import { guardLive } from "../database/session-locks.js";',
