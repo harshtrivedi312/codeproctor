@@ -45,7 +45,14 @@ describe('assertWritable (DL-17, ADR 0002 P-2)', () => {
   });
 
   it('FR-505: a session that is not running answers 409 SESSION_NOT_ACTIVE with its status', () => {
-    for (const status of ['INVITED', 'OPENED', 'CONSENTED', 'VERIFIED', 'SUBMITTED', 'DECLINED'] as const) {
+    for (const status of [
+      'INVITED',
+      'OPENED',
+      'CONSENTED',
+      'VERIFIED',
+      'SUBMITTED',
+      'DECLINED',
+    ] as const) {
       const e = refusal(status, []);
       expect(e?.code).toBe('SESSION_NOT_ACTIVE');
       expect(e?.extensions.sessionStatus).toBe(status);
@@ -55,7 +62,9 @@ describe('assertWritable (DL-17, ADR 0002 P-2)', () => {
   it('DL-17: the guard form refuses without a candidate context and applies the same rule', () => {
     const guard = new SessionWritableGuard();
     const ctx = (candidate: unknown): ExecutionContext =>
-      ({ switchToHttp: () => ({ getRequest: () => ({ candidate }) }) }) as unknown as ExecutionContext;
+      ({
+        switchToHttp: () => ({ getRequest: () => ({ candidate }) }),
+      }) as unknown as ExecutionContext;
     expect(() => guard.canActivate(ctx(undefined))).toThrow(UnauthorizedException);
     expect(guard.canActivate(ctx({ status: 'IN_PROGRESS', pauseReasons: [] }))).toBe(true);
     expect(() =>

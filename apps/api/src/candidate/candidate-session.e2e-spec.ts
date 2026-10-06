@@ -46,7 +46,11 @@ class FakeMail extends CandidateMailPort {
   }
 }
 
-async function eventually<T>(read: () => Promise<T>, done: (v: T) => boolean, ms = 15_000): Promise<T> {
+async function eventually<T>(
+  read: () => Promise<T>,
+  done: (v: T) => boolean,
+  ms = 15_000,
+): Promise<T> {
   const deadline = Date.now() + ms;
   for (;;) {
     const value = await read();
@@ -100,8 +104,10 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     const { AppModule } = jest.requireActual<typeof import('../app.module')>('../app.module');
     const { Test } = jest.requireActual<typeof import('@nestjs/testing')>('@nestjs/testing');
     const { configureApp } = jest.requireActual<typeof import('../bootstrap')>('../bootstrap');
-    const mailToken = jest.requireActual<typeof import('./candidate-mail.port')>('./candidate-mail.port');
-    const storageToken = jest.requireActual<typeof import('./object-storage.port')>('./object-storage.port');
+    const mailToken =
+      jest.requireActual<typeof import('./candidate-mail.port')>('./candidate-mail.port');
+    const storageToken =
+      jest.requireActual<typeof import('./object-storage.port')>('./object-storage.port');
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(mailToken.CandidateMailPort)
       .useValue(mail)
@@ -119,16 +125,26 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       logged.push(String(chunk));
       return true;
     });
-    [db, redisBox] = await Promise.all([startMigratedDatabase(), new RedisContainer('redis:8.8').start()]);
+    [db, redisBox] = await Promise.all([
+      startMigratedDatabase(),
+      new RedisContainer('redis:8.8').start(),
+    ]);
     owner = createPrismaClient(db.ownerUrl);
     redis = new Redis(redisBox.getConnectionUrl());
-    tenant = await createTenant(owner, 'main', { settings: { consentDeclineContact: 'hr@acme.example' } });
+    tenant = await createTenant(owner, 'main', {
+      settings: { consentDeclineContact: 'hr@acme.example' },
+    });
     other = await createTenant(owner, 'other');
     unapproved = await createTenant(owner, 'draft', { legalApproved: false });
     app = await buildApp();
-    const { CandidateTokenService: T } = jest.requireActual<typeof import('./candidate-token.service')>('./candidate-token.service');
-    const { SessionKeyService: K } = jest.requireActual<typeof import('../session/session-key.service')>('../session/session-key.service');
-    const { SessionJobsService: J } = jest.requireActual<typeof import('./session-jobs.service')>('./session-jobs.service');
+    const { CandidateTokenService: T } = jest.requireActual<
+      typeof import('./candidate-token.service')
+    >('./candidate-token.service');
+    const { SessionKeyService: K } = jest.requireActual<
+      typeof import('../session/session-key.service')
+    >('../session/session-key.service');
+    const { SessionJobsService: J } =
+      jest.requireActual<typeof import('./session-jobs.service')>('./session-jobs.service');
     tokens = app.get(T);
     keys = app.get(K);
     jobs = app.get(J);
@@ -147,14 +163,24 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
   // ---------- helpers ----------
 
   const server = (): App => app.getHttpServer();
-  const post = (path: string, body?: object): request.Test => request(server()).post(`${API}${path}`).send(body ?? {});
-  const authed = (method: 'get' | 'post', path: string, token: string, body?: object): request.Test => {
+  const post = (path: string, body?: object): request.Test =>
+    request(server())
+      .post(`${API}${path}`)
+      .send(body ?? {});
+  const authed = (
+    method: 'get' | 'post',
+    path: string,
+    token: string,
+    body?: object,
+  ): request.Test => {
     const req = request(server())[method](`${API}${path}`).set('Authorization', `Bearer ${token}`);
     return method === 'post' ? req.send(body ?? {}) : req;
   };
   const sessionRow = (id: string) => owner.session.findUniqueOrThrow({ where: { id } });
-  const invite = (options: InvitationOptions = {}, t: Tenant = tenant): Promise<InvitationFixture> =>
-    createInvitation(owner, t, options);
+  const invite = (
+    options: InvitationOptions = {},
+    t: Tenant = tenant,
+  ): Promise<InvitationFixture> => createInvitation(owner, t, options);
 
   async function otpFor(inv: InvitationFixture): Promise<string> {
     await redis.del(`otp-send:${inv.invitationId}`);
@@ -192,10 +218,16 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const inv = await invite();
       const before = mail.otps.length;
       const res = await post('/link', { invitationToken: inv.token }).expect(200);
-      expect(res.body).toMatchObject({ state: 'OTP_REQUIRED', orgName: 'Org main', declineContact: null });
+      expect(res.body).toMatchObject({
+        state: 'OTP_REQUIRED',
+        orgName: 'Org main',
+        declineContact: null,
+      });
       expect(res.headers['cache-control']).toBe('no-store');
       expect(mail.otps.length).toBe(before);
-      const unknown = await post('/link', { invitationToken: randomBytes(32).toString('base64url') });
+      const unknown = await post('/link', {
+        invitationToken: randomBytes(32).toString('base64url'),
+      });
       expect(unknown.status).toBe(404);
       await post('/link', { invitationToken: 'short' }).expect(400);
       await post('/link', {}).expect(400);
@@ -233,15 +265,27 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const code = await otpFor(inv);
       const res = await post('/start', { invitationToken: inv.token, otp: code }).expect(200);
       expect(res.headers['cache-control']).toBe('no-store');
-      const body = res.body as { sessionToken: string; sessionTokenExpiresAt: string; status: string; serverTime: string };
+      const body = res.body as {
+        sessionToken: string;
+        sessionTokenExpiresAt: string;
+        status: string;
+        serverTime: string;
+      };
       expect(body.status).toBe('OPENED');
       const claims = jwt.decode(body.sessionToken) as Record<string, unknown>;
-      expect(claims).toMatchObject({ typ: 'candidate', sid: inv.sessionId, oid: tenant.orgId, epoch: 1 });
+      expect(claims).toMatchObject({
+        typ: 'candidate',
+        sid: inv.sessionId,
+        oid: tenant.orgId,
+        epoch: 1,
+      });
       const row = await sessionRow(inv.sessionId);
       expect(row.status).toBe('OPENED');
       expect(row.authEpoch).toBe(1);
       // L-1: the link is not used up by signing in; used_at is set only when the test starts.
-      const invitation = await owner.invitation.findUniqueOrThrow({ where: { id: inv.invitationId } });
+      const invitation = await owner.invitation.findUniqueOrThrow({
+        where: { id: inv.invitationId },
+      });
       expect(invitation.usedAt).toBeNull();
       const state = await authed('get', '', body.sessionToken).expect(200);
       expect(state.body).toMatchObject({ status: 'OPENED', pauseReasons: [] });
@@ -301,7 +345,9 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(notice.to).toBe(tenant.staffEmail);
       expect(notice.candidateEmail).toBe(inv.candidateEmail);
       expect(notice.blockedMinutes).toBe(30);
-      const audit = await owner.auditLog.findMany({ where: { action: 'CANDIDATE_OTP_LOCKED', entityId: inv.sessionId } });
+      const audit = await owner.auditLog.findMany({
+        where: { action: 'CANDIDATE_OTP_LOCKED', entityId: inv.sessionId },
+      });
       expect(audit).toHaveLength(1);
       expect(audit[0]?.actorId).toBeNull();
       // The block reaches the link page and the OTP route; no new code is sent.
@@ -319,13 +365,17 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const code = await otpFor(inv);
       const before = mail.lockouts.length;
       const results = await Promise.all(
-        Array.from({ length: 20 }, () => post('/start', { invitationToken: inv.token, otp: wrongCode(code) })),
+        Array.from({ length: 20 }, () =>
+          post('/start', { invitationToken: inv.token, otp: wrongCode(code) }),
+        ),
       );
       expect(results.filter((r) => r.status === 400).length).toBeLessThanOrEqual(5);
       expect(results.filter((r) => r.status === 429).length).toBeGreaterThanOrEqual(15);
       expect(results.filter((r) => r.status === 200)).toHaveLength(0);
       expect(mail.lockouts.length).toBe(before + 1);
-      const audit = await owner.auditLog.count({ where: { action: 'CANDIDATE_OTP_LOCKED', entityId: inv.sessionId } });
+      const audit = await owner.auditLog.count({
+        where: { action: 'CANDIDATE_OTP_LOCKED', entityId: inv.sessionId },
+      });
       expect(audit).toBe(1);
       // Even the correct code is now refused.
       const right = await post('/start', { invitationToken: inv.token, otp: code });
@@ -335,7 +385,8 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     it('TC-007: a new code does not reset the wrong-guess counter', async () => {
       const inv = await invite();
       let code = await otpFor(inv);
-      for (let i = 0; i < 3; i++) await post('/start', { invitationToken: inv.token, otp: wrongCode(code) }).expect(400);
+      for (let i = 0; i < 3; i++)
+        await post('/start', { invitationToken: inv.token, otp: wrongCode(code) }).expect(400);
       code = await otpFor(inv);
       await post('/start', { invitationToken: inv.token, otp: wrongCode(code) }).expect(400);
       await post('/start', { invitationToken: inv.token, otp: wrongCode(code) }).expect(400);
@@ -370,17 +421,31 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       }
       expect(await redis.exists(`otp-block:${inv.invitationId}`)).toBe(0);
       expect(await redis.exists(`otp-attempts:${inv.invitationId}`)).toBe(0);
-      const events = await owner.proctorEvent.findMany({ where: { sessionId: inv.sessionId, type: 'RESUME_OTP_FAILED' } });
+      const events = await owner.proctorEvent.findMany({
+        where: { sessionId: inv.sessionId, type: 'RESUME_OTP_FAILED' },
+      });
       expect(events).toHaveLength(6);
       for (const e of events) {
         expect(e).toMatchObject({ severity: 'MEDIUM', source: 'SERVER', payload: {} });
         expect(JSON.stringify(e.payload)).not.toContain(code);
       }
-      await eventually(() => Promise.resolve(alerts.length), (n) => n >= 6, 5000);
+      await eventually(
+        () => Promise.resolve(alerts.length),
+        (n) => n >= 6,
+        5000,
+      );
       expect(alerts).toHaveLength(6);
-      expect(JSON.parse(alerts[0] as string)).toMatchObject({ type: 'RESUME_OTP_FAILED', sessionId: inv.sessionId, severity: 'MEDIUM' });
+      expect(JSON.parse(alerts[0] as string)).toMatchObject({
+        type: 'RESUME_OTP_FAILED',
+        sessionId: inv.sessionId,
+        severity: 'MEDIUM',
+      });
       expect(alerts.join('')).not.toContain(code);
-      expect(await owner.auditLog.count({ where: { action: 'CANDIDATE_OTP_LOCKED', entityId: inv.sessionId } })).toBe(0);
+      expect(
+        await owner.auditLog.count({
+          where: { action: 'CANDIDATE_OTP_LOCKED', entityId: inv.sessionId },
+        }),
+      ).toBe(0);
       expect(mail.lockouts.filter((l) => l.candidateEmail === inv.candidateEmail)).toHaveLength(0);
 
       // The correct code then resumes the same session; the server clock kept running.
@@ -407,7 +472,13 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     });
 
     it('TC-021: after SUBMITTED the link shows "already used": no OTP is sent and no session is created', async () => {
-      for (const status of ['SUBMITTED', 'GRADED', 'UNDER_REVIEW', 'COMPLETED', 'APPEALED'] as SessionStatus[]) {
+      for (const status of [
+        'SUBMITTED',
+        'GRADED',
+        'UNDER_REVIEW',
+        'COMPLETED',
+        'APPEALED',
+      ] as SessionStatus[]) {
         const inv = await invite({ status });
         const sent = mail.otps.length;
         const link = await post('/link', { invitationToken: inv.token }).expect(200);
@@ -425,7 +496,10 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     });
 
     it('TC-022: after window_end an unstarted link is EXPIRED, the status is stored, and no OTP is sent', async () => {
-      const inv = await invite({ windowEnd: new Date(Date.now() - 60_000), windowStart: new Date(Date.now() - 86_400_000) });
+      const inv = await invite({
+        windowEnd: new Date(Date.now() - 60_000),
+        windowStart: new Date(Date.now() - 86_400_000),
+      });
       const sent = mail.otps.length;
       const link = await post('/link', { invitationToken: inv.token }).expect(200);
       expect(link.body).toMatchObject({ state: 'EXPIRED' });
@@ -440,21 +514,30 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     });
 
     it('FR-303, ADR 0002 L-4: window_end does not apply once the test has started', async () => {
-      const inv = await invite({ ...liveSession(), windowEnd: new Date(Date.now() - 3_600_000), windowStart: new Date(Date.now() - 86_400_000) });
+      const inv = await invite({
+        ...liveSession(),
+        windowEnd: new Date(Date.now() - 3_600_000),
+        windowStart: new Date(Date.now() - 86_400_000),
+      });
       const link = await post('/link', { invitationToken: inv.token }).expect(200);
       expect(link.body).toMatchObject({ state: 'OTP_REQUIRED' });
       expect((await sessionRow(inv.sessionId)).status).toBe('IN_PROGRESS');
     });
 
     it('FR-303: before window_start the link answers NOT_YET_OPEN and sends nothing', async () => {
-      const inv = await invite({ windowStart: new Date(Date.now() + 3_600_000), windowEnd: new Date(Date.now() + 86_400_000) });
+      const inv = await invite({
+        windowStart: new Date(Date.now() + 3_600_000),
+        windowEnd: new Date(Date.now() + 86_400_000),
+      });
       const sent = mail.otps.length;
       const link = await post('/link', { invitationToken: inv.token }).expect(200);
       expect(link.body).toMatchObject({ state: 'NOT_YET_OPEN' });
       expect((link.body as { retryAfterSeconds: number }).retryAfterSeconds).toBeGreaterThan(3000);
       await post('/otp', { invitationToken: inv.token }).expect(200);
       expect(mail.otps.length).toBe(sent);
-      expect((await post('/start', { invitationToken: inv.token, otp: '123456' })).status).toBe(409);
+      expect((await post('/start', { invitationToken: inv.token, otp: '123456' })).status).toBe(
+        409,
+      );
     });
 
     it('FR-401, TC-096: a declined link shows the declined page with the org contact and starts nothing', async () => {
@@ -476,13 +559,29 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     it('NFR-04: no token, a malformed token and a staff-secret token are 401 on every guarded route', async () => {
       const inv = await invite(liveSession());
       const staffSecret = process.env.JWT_ACCESS_SECRET as string;
-      const staffLike = jwt.sign({ sub: randomUUID(), org: tenant.orgId, role: 'RECRUITER', kind: 'access' }, staffSecret, { expiresIn: 300 });
-      const forged = jwt.sign({ typ: 'candidate', sid: inv.sessionId, oid: tenant.orgId, epoch: 1 }, staffSecret, {
-        algorithm: 'HS256', expiresIn: 300, issuer: 'codeproctor-api', audience: 'codeproctor-candidate',
-      });
+      const staffLike = jwt.sign(
+        { sub: randomUUID(), org: tenant.orgId, role: 'RECRUITER', kind: 'access' },
+        staffSecret,
+        { expiresIn: 300 },
+      );
+      const forged = jwt.sign(
+        { typ: 'candidate', sid: inv.sessionId, oid: tenant.orgId, epoch: 1 },
+        staffSecret,
+        {
+          algorithm: 'HS256',
+          expiresIn: 300,
+          issuer: 'codeproctor-api',
+          audience: 'codeproctor-candidate',
+        },
+      );
       const routes: Array<['get' | 'post', string]> = [
-        ['get', ''], ['get', '/consent'], ['post', '/consent/sign'], ['post', '/consent/decline'],
-        ['post', '/test/start'], ['post', '/heartbeat'], ['post', '/proctor-key'],
+        ['get', ''],
+        ['get', '/consent'],
+        ['post', '/consent/sign'],
+        ['post', '/consent/decline'],
+        ['post', '/test/start'],
+        ['post', '/heartbeat'],
+        ['post', '/proctor-key'],
       ];
       for (const [method, path] of routes) {
         const none = await request(server())[method](`${API}${path}`).send({});
@@ -506,14 +605,20 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         `/api/v1/auth/2fa/reset/${randomUUID()}`,
       ];
       for (const path of staffRoutes) {
-        const res = await request(server()).post(path).set('Authorization', `Bearer ${token}`).send({ currentPassword: 'x' });
+        const res = await request(server())
+          .post(path)
+          .set('Authorization', `Bearer ${token}`)
+          .send({ currentPassword: 'x' });
         expect(res.status).toBe(401);
       }
     });
 
     it('FR-609: an expired token is 401 TOKEN_EXPIRED', async () => {
       const inv = await invite(liveSession());
-      const old = tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch: 1 }, new Date(Date.now() - 3_600_000));
+      const old = tokens.sign(
+        { sid: inv.sessionId, oid: tenant.orgId, epoch: 1 },
+        new Date(Date.now() - 3_600_000),
+      );
       const res = await authed('get', '', old.token);
       expect(res.status).toBe(401);
       expect(res.body).toMatchObject({ code: 'TOKEN_EXPIRED' });
@@ -524,7 +629,10 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const theirs = await invite(liveSession(), other);
       const theirBeat = (await sessionRow(theirs.sessionId)).lastHeartbeat?.getTime();
       // A well-signed token pairing my org with their session, and their org with my session.
-      for (const [sid, oid] of [[theirs.sessionId, tenant.orgId], [mine.sessionId, other.orgId]] as const) {
+      for (const [sid, oid] of [
+        [theirs.sessionId, tenant.orgId],
+        [mine.sessionId, other.orgId],
+      ] as const) {
         const t = tokens.sign({ sid, oid, epoch: 1 });
         const res = await authed('get', '', t.token);
         expect(res.status).toBe(401);
@@ -559,10 +667,21 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
   // ---------- consent (FR-401) ----------
 
   describe('consent document (FR-401, D-17, C-07, C-30, TC-030, TC-095, TC-096)', () => {
-    const sign = (token: string, over: object = {}, headers: Record<string, string> = {}): request.Test => {
-      let req = request(server()).post(`${API}/consent/sign`).set('Authorization', `Bearer ${token}`);
+    const sign = (
+      token: string,
+      over: object = {},
+      headers: Record<string, string> = {},
+    ): request.Test => {
+      let req = request(server())
+        .post(`${API}/consent/sign`)
+        .set('Authorization', `Bearer ${token}`);
       for (const [k, v] of Object.entries(headers)) req = req.set(k, v);
-      return req.send({ consentTextId: tenant.consentTextId, signedName: 'Ada Lovelace', confirmedAge18: true, ...over });
+      return req.send({
+        consentTextId: tenant.consentTextId,
+        signedName: 'Ada Lovelace',
+        confirmedAge18: true,
+        ...over,
+      });
     };
 
     it('TC-030: before the document is signed nothing can start: no key, heartbeat, test start, events, media or identity rows', async () => {
@@ -586,12 +705,18 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect((await sessionRow(inv.sessionId)).status).toBe('OPENED');
     });
 
-    it('FR-401: GET consent returns the org\'s current text and version, uncached', async () => {
+    it("FR-401: GET consent returns the org's current text and version, uncached", async () => {
       const inv = await invite({ status: 'OPENED' });
       const token = tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch: 0 }).token;
       const res = await authed('get', '/consent', token).expect(200);
       expect(res.headers['cache-control']).toBe('no-store');
-      expect(res.body).toMatchObject({ consentTextId: tenant.consentTextId, version: 'v1-main', legalApproved: true, signed: false, signedAt: null });
+      expect(res.body).toMatchObject({
+        consentTextId: tenant.consentTextId,
+        version: 'v1-main',
+        legalApproved: true,
+        signed: false,
+        signedAt: null,
+      });
       expect((res.body as { bodyMd: string }).bodyMd).toContain('We record your screen');
     });
 
@@ -599,13 +724,19 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const inv = await invite({ status: 'OPENED' });
       const token = tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch: 0 }).token;
       const before = Date.now();
-      const res = await sign(token, { signedName: '  Ada   Lovelace ' }, { 'User-Agent': 'TestBrowser/1.0', 'X-Forwarded-For': '203.0.113.9' }).expect(200);
+      const res = await sign(
+        token,
+        { signedName: '  Ada   Lovelace ' },
+        { 'User-Agent': 'TestBrowser/1.0', 'X-Forwarded-For': '203.0.113.9' },
+      ).expect(200);
       const after = Date.now();
       expect(res.body).toMatchObject({ status: 'CONSENTED' });
       const signedAtResponse = Date.parse((res.body as { signedAt: string }).signedAt);
       expect(signedAtResponse).toBeGreaterThanOrEqual(before - 1000);
       expect(signedAtResponse).toBeLessThanOrEqual(after + 1000);
-      const consent = await owner.consent.findUniqueOrThrow({ where: { sessionId: inv.sessionId } });
+      const consent = await owner.consent.findUniqueOrThrow({
+        where: { sessionId: inv.sessionId },
+      });
       expect(consent.consentTextId).toBe(tenant.consentTextId);
       expect(consent.signedName).toBe('Ada Lovelace');
       expect(consent.signedAt?.getTime()).toBe(signedAtResponse);
@@ -619,7 +750,9 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         () => owner.consent.findUniqueOrThrow({ where: { sessionId: inv.sessionId } }),
         (c) => c.pdfKey !== null && c.copyEmailedAt !== null,
       );
-      expect(done.pdfKey).toMatch(new RegExp(`^orgs/${tenant.orgId}/consents/${inv.sessionId}/[0-9A-Z]{26}\\.pdf$`));
+      expect(done.pdfKey).toMatch(
+        new RegExp(`^orgs/${tenant.orgId}/consents/${inv.sessionId}/[0-9A-Z]{26}\\.pdf$`),
+      );
       expect(done.pdfKey).not.toContain('/sessions/');
       expect(done.pdfGeneratedAt).not.toBeNull();
       const stored = storage.objects.get(done.pdfKey as string);
@@ -631,8 +764,13 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(copy?.documentVersion).toBe('v1-main');
       expect(copy?.filename).toBe('consent-v1-main.pdf');
       // The 18+ confirmation is in the audit row (no consents column yet); the name is not.
-      const audit = await owner.auditLog.findFirstOrThrow({ where: { action: 'CANDIDATE_CONSENT_SIGNED', entityId: inv.sessionId } });
-      expect(audit.metadata).toMatchObject({ ageConfirmed18: true, consentTextId: tenant.consentTextId });
+      const audit = await owner.auditLog.findFirstOrThrow({
+        where: { action: 'CANDIDATE_CONSENT_SIGNED', entityId: inv.sessionId },
+      });
+      expect(audit.metadata).toMatchObject({
+        ageConfirmed18: true,
+        consentTextId: tenant.consentTextId,
+      });
       expect(JSON.stringify(audit.metadata)).not.toContain('Lovelace');
     });
 
@@ -686,14 +824,20 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         expect(r.body).toMatchObject({ code: 'ALREADY_SIGNED' });
       }
       expect(await owner.consent.count({ where: { sessionId: inv.sessionId } })).toBe(1);
-      expect(await owner.auditLog.count({ where: { action: 'CANDIDATE_CONSENT_SIGNED', entityId: inv.sessionId } })).toBe(1);
+      expect(
+        await owner.auditLog.count({
+          where: { action: 'CANDIDATE_CONSENT_SIGNED', entityId: inv.sessionId },
+        }),
+      ).toBe(1);
       const signed = await authed('get', '/consent', token).expect(200);
       expect(signed.body).toMatchObject({ signed: true });
     });
 
     it('TC-095: every session needs its own signature, also for the same candidate', async () => {
       const first = await invite({ status: 'OPENED', email: 'repeat@example.test' });
-      const second = await invite({ status: 'OPENED', email: 'repeat@example.test' }).catch(() => null);
+      const second = await invite({ status: 'OPENED', email: 'repeat@example.test' }).catch(
+        () => null,
+      );
       // One candidate row per (org, email) is unique, so the second invitation reuses nothing here:
       // use a second session for another invitation of a fresh candidate and prove independence.
       const t1 = tokens.sign({ sid: first.sessionId, oid: tenant.orgId, epoch: 0 }).token;
@@ -704,7 +848,11 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(view.body).toMatchObject({ signed: false });
       expect((await sessionRow(other2.sessionId)).status).toBe('OPENED');
       await sign(t2).expect(200);
-      expect(await owner.consent.count({ where: { sessionId: { in: [first.sessionId, other2.sessionId] } } })).toBe(2);
+      expect(
+        await owner.consent.count({
+          where: { sessionId: { in: [first.sessionId, other2.sessionId] } },
+        }),
+      ).toBe(2);
     });
 
     it('TC-096: declining sets declined_at, DECLINED and the retention anchor, records nothing and shows the contact', async () => {
@@ -716,12 +864,16 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(row.status).toBe('DECLINED');
       expect(row.retentionAnchorAt).not.toBeNull();
       expect(row.hmacKeyEnc).toBeNull();
-      const consent = await owner.consent.findUniqueOrThrow({ where: { sessionId: inv.sessionId } });
+      const consent = await owner.consent.findUniqueOrThrow({
+        where: { sessionId: inv.sessionId },
+      });
       expect(consent.declinedAt).not.toBeNull();
       expect(consent.signedAt).toBeNull();
       expect(consent.signedName).toBeNull();
       expect(consent.pdfKey).toBeNull();
-      expect(await owner.invitation.findUniqueOrThrow({ where: { id: inv.invitationId } })).toMatchObject({ usedAt: null });
+      expect(
+        await owner.invitation.findUniqueOrThrow({ where: { id: inv.invitationId } }),
+      ).toMatchObject({ usedAt: null });
       // No device access, no recording: every later step refuses, and nothing was written.
       for (const path of ['/test/start', '/proctor-key', '/heartbeat'] as const) {
         expect((await authed('post', path, token)).status).toBe(409);
@@ -732,7 +884,9 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       // Reopening the link shows the declined page and starts nothing.
       const link = await post('/link', { invitationToken: inv.token }).expect(200);
       expect(link.body).toMatchObject({ state: 'DECLINED', declineContact: 'hr@acme.example' });
-      expect((await post('/start', { invitationToken: inv.token, otp: '123456' })).status).toBe(409);
+      expect((await post('/start', { invitationToken: inv.token, otp: '123456' })).status).toBe(
+        409,
+      );
       expect(mail.copies.find((c) => c.to === inv.candidateEmail)).toBeUndefined();
       await new Promise((r) => setTimeout(r, 300));
       expect(storage.objects.size).toBeGreaterThan(0);
@@ -751,10 +905,15 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
 
     it('TC-096: an org without a consent text can still decline (no consents row is kept)', async () => {
       const bare = await createTenant(owner, 'bare');
-      await owner.organization.update({ where: { id: bare.orgId }, data: { currentConsentTextId: null } });
+      await owner.organization.update({
+        where: { id: bare.orgId },
+        data: { currentConsentTextId: null },
+      });
       const inv = await invite({ status: 'OPENED' }, bare);
       const token = tokens.sign({ sid: inv.sessionId, oid: bare.orgId, epoch: 0 }).token;
-      await authed('get', '/consent', token).expect(409).expect((r) => expect(r.body).toMatchObject({ code: 'CONSENT_NOT_CONFIGURED' }));
+      await authed('get', '/consent', token)
+        .expect(409)
+        .expect((r) => expect(r.body).toMatchObject({ code: 'CONSENT_NOT_CONFIGURED' }));
       await authed('post', '/consent/decline', token).expect(200);
       expect((await sessionRow(inv.sessionId)).status).toBe('DECLINED');
     });
@@ -764,11 +923,19 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const legalServer = legalApp.getHttpServer();
       const inv = await invite({ status: 'OPENED' }, unapproved);
       const token = tokens.sign({ sid: inv.sessionId, oid: unapproved.orgId, epoch: 0 }).token;
-      const get = await request(legalServer).get(`${API}/consent`).set('Authorization', `Bearer ${token}`);
+      const get = await request(legalServer)
+        .get(`${API}/consent`)
+        .set('Authorization', `Bearer ${token}`);
       expect(get.status).toBe(409);
       expect(get.body).toMatchObject({ code: 'CONSENT_NOT_APPROVED' });
-      const res = await request(legalServer).post(`${API}/consent/sign`).set('Authorization', `Bearer ${token}`)
-        .send({ consentTextId: unapproved.consentTextId, signedName: 'Ada Lovelace', confirmedAge18: true });
+      const res = await request(legalServer)
+        .post(`${API}/consent/sign`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          consentTextId: unapproved.consentTextId,
+          signedName: 'Ada Lovelace',
+          confirmedAge18: true,
+        });
       expect(res.status).toBe(409);
       expect(res.body).toMatchObject({ code: 'CONSENT_NOT_APPROVED' });
       expect((await sessionRow(inv.sessionId)).status).toBe('OPENED');
@@ -776,8 +943,15 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       // An approved text is served by the same app; the placeholder is served when the flag is off.
       const ok = await invite({ status: 'OPENED' });
       const okToken = tokens.sign({ sid: ok.sessionId, oid: tenant.orgId, epoch: 0 }).token;
-      await request(legalServer).get(`${API}/consent`).set('Authorization', `Bearer ${okToken}`).expect(200);
-      const open = await authed('get', '/consent', tokens.sign({ sid: inv.sessionId, oid: unapproved.orgId, epoch: 0 }).token).expect(200);
+      await request(legalServer)
+        .get(`${API}/consent`)
+        .set('Authorization', `Bearer ${okToken}`)
+        .expect(200);
+      const open = await authed(
+        'get',
+        '/consent',
+        tokens.sign({ sid: inv.sessionId, oid: unapproved.orgId, epoch: 0 }).token,
+      ).expect(200);
       expect(open.body).toMatchObject({ legalApproved: false });
     });
 
@@ -788,7 +962,11 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       await sign(token).expect(200);
       expect((await sessionRow(inv.sessionId)).status).toBe('CONSENTED');
       // The first attempt failed; the queue retries with backoff, and the sweep re-queues too.
-      await eventually(() => Promise.resolve(storage.failNextPut), (failed) => !failed, 5000);
+      await eventually(
+        () => Promise.resolve(storage.failNextPut),
+        (failed) => !failed,
+        5000,
+      );
       const swept = await jobs.sweepConsentPdfs(new Date(Date.now() + 120_000));
       expect(swept).toBeGreaterThanOrEqual(1);
       const done = await eventually(
@@ -829,24 +1007,40 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(body.deadlineAt).toBe(row.deadlineAt?.toISOString());
       expect(Math.abs(Date.parse(body.serverTime) - Date.now())).toBeLessThan(5000);
       // The state route reports the same stored deadline, whatever the client believes.
-      const state = await authed('get', '', tokenFor(inv)).set('Date', new Date(Date.now() + 7_200_000).toUTCString()).expect(200);
+      const state = await authed('get', '', tokenFor(inv))
+        .set('Date', new Date(Date.now() + 7_200_000).toUTCString())
+        .expect(200);
       expect((state.body as { deadlineAt: string }).deadlineAt).toBe(row.deadlineAt?.toISOString());
       // A body field cannot move the clock either.
-      expect((await authed('post', '/heartbeat', tokenFor(inv), { deadlineAt: new Date().toISOString(), serverTime: '2020-01-01T00:00:00Z' })).status).toBe(400);
+      expect(
+        (
+          await authed('post', '/heartbeat', tokenFor(inv), {
+            deadlineAt: new Date().toISOString(),
+            serverTime: '2020-01-01T00:00:00Z',
+          })
+        ).status,
+      ).toBe(400);
     });
 
     it('TC-024, FR-305: +50% extra time turns 60 minutes into 90 and the 20-minute section into 30', async () => {
-      const inv = await invite(verified({ accommodations: { extraTimePct: 50, notes: 'private note' } }));
+      const inv = await invite(
+        verified({ accommodations: { extraTimePct: 50, notes: 'private note' } }),
+      );
       const res = await authed('post', '/test/start', tokenFor(inv)).expect(200);
       const row = await sessionRow(inv.sessionId);
       expect((row.deadlineAt?.getTime() ?? 0) - (row.startedAt?.getTime() ?? 0)).toBe(90 * 60_000);
-      const sections = await owner.sessionSection.findMany({ where: { sessionId: inv.sessionId }, orderBy: { position: 'asc' } });
+      const sections = await owner.sessionSection.findMany({
+        where: { sessionId: inv.sessionId },
+        orderBy: { position: 'asc' },
+      });
       expect(sections).toHaveLength(2);
       expect(Number(sections[0]?.timeLimitMs)).toBe(30 * 60_000);
       expect(sections[1]?.timeLimitMs).toBeNull();
       // S-2: section 1 is open with its own deadline; section 2 waits.
       expect(sections[0]?.startedAt).not.toBeNull();
-      expect((sections[0]?.deadlineAt?.getTime() ?? 0) - (sections[0]?.startedAt?.getTime() ?? 0)).toBe(30 * 60_000);
+      expect(
+        (sections[0]?.deadlineAt?.getTime() ?? 0) - (sections[0]?.startedAt?.getTime() ?? 0),
+      ).toBe(30 * 60_000);
       expect(sections[1]?.startedAt).toBeNull();
       expect(sections[1]?.deadlineAt).toBeNull();
       expect(JSON.stringify(res.body)).not.toContain('private note');
@@ -854,25 +1048,37 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
 
     it('ADR 0002 S-4: a section never outlives the session, and a malformed accommodation means none', async () => {
       const tight = await createTenant(owner, 'tight');
-      await owner.testSection.update({ where: { id: tight.test.sectionIds[0] }, data: { timeLimitMin: 90 } });
+      await owner.testSection.update({
+        where: { id: tight.test.sectionIds[0] },
+        data: { timeLimitMin: 90 },
+      });
       const inv = await invite(verified(), tight);
       await authed('post', '/test/start', tokenFor(inv, tight)).expect(200);
       const row = await sessionRow(inv.sessionId);
-      const first = await owner.sessionSection.findFirstOrThrow({ where: { sessionId: inv.sessionId, position: 1 } });
+      const first = await owner.sessionSection.findFirstOrThrow({
+        where: { sessionId: inv.sessionId, position: 1 },
+      });
       expect(first.deadlineAt?.getTime()).toBe(row.deadlineAt?.getTime());
       const bad = await invite(verified({ accommodations: { extraTimePct: 'lots' } }));
       await authed('post', '/test/start', tokenFor(bad)).expect(200);
       const badRow = await sessionRow(bad.sessionId);
-      expect((badRow.deadlineAt?.getTime() ?? 0) - (badRow.startedAt?.getTime() ?? 0)).toBe(60 * 60_000);
+      expect((badRow.deadlineAt?.getTime() ?? 0) - (badRow.startedAt?.getTime() ?? 0)).toBe(
+        60 * 60_000,
+      );
     });
 
     it('ADR 0002 L-1, S-2: used_at is set, questions are assigned (fixed, random rule, one variant), the key is stored wrapped', async () => {
       const inv = await invite(verified());
       const res = await authed('post', '/test/start', tokenFor(inv)).expect(200);
       expect(res.headers['cache-control']).toBe('no-store');
-      const invitation = await owner.invitation.findUniqueOrThrow({ where: { id: inv.invitationId } });
+      const invitation = await owner.invitation.findUniqueOrThrow({
+        where: { id: inv.invitationId },
+      });
       expect(invitation.usedAt).not.toBeNull();
-      const questions = await owner.sessionQuestion.findMany({ where: { sessionId: inv.sessionId }, orderBy: { position: 'asc' } });
+      const questions = await owner.sessionQuestion.findMany({
+        where: { sessionId: inv.sessionId },
+        orderBy: { position: 'asc' },
+      });
       expect(questions).toHaveLength(3);
       expect(questions.map((q) => q.position)).toEqual([1, 2, 3]);
       expect(questions.map((q) => q.testQuestionId)).toEqual([...tenant.test.testQuestionIds]);
@@ -887,24 +1093,49 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(keys.unwrap(row.hmacKeyEnc as string, inv.sessionId)).toHaveLength(32);
       // The response is an outline only: no key, no variant params, no statement, no solution.
       const text = JSON.stringify(res.body);
-      for (const marker of ['VARIANT-PARAMS-MARKER', 'REFERENCE-SOLUTION-MARKER', 'Hidden statement', 'hmac', 'params', 'variant', 'referenceSolution']) {
+      for (const marker of [
+        'VARIANT-PARAMS-MARKER',
+        'REFERENCE-SOLUTION-MARKER',
+        'Hidden statement',
+        'hmac',
+        'params',
+        'variant',
+        'referenceSolution',
+      ]) {
         expect(text).not.toContain(marker);
       }
-      const sections = (res.body as { sections: Array<{ title: string; questions: Array<{ sessionQuestionId: string }> }> }).sections;
+      const sections = (
+        res.body as {
+          sections: Array<{ title: string; questions: Array<{ sessionQuestionId: string }> }>;
+        }
+      ).sections;
       expect(sections.map((s) => s.title)).toEqual(['Section one', 'Section two']);
-      expect(sections[0]?.questions.map((q) => q.sessionQuestionId)).toEqual([questions[0]?.id, questions[1]?.id]);
+      expect(sections[0]?.questions.map((q) => q.sessionQuestionId)).toEqual([
+        questions[0]?.id,
+        questions[1]?.id,
+      ]);
     });
 
     it('FR-203: random picks never repeat a question inside one session', async () => {
       const dup = await createTenant(owner, 'dup');
       // Two random slots over a pool of three questions.
       await owner.testQuestion.create({
-        data: { sectionId: dup.test.sectionIds[1], randomRule: { tags: ['arrays'] }, points: 10, position: 2 },
+        data: {
+          sectionId: dup.test.sectionIds[1],
+          randomRule: { tags: ['arrays'] },
+          points: 10,
+          position: 2,
+        },
       });
       for (let i = 0; i < 6; i++) {
         const inv = await invite(verified(), dup);
         await authed('post', '/test/start', tokenFor(inv, dup)).expect(200);
-        const picked = await owner.sessionQuestion.findMany({ where: { sessionId: inv.sessionId, testQuestionId: { in: [dup.test.testQuestionIds[1]] } } });
+        const picked = await owner.sessionQuestion.findMany({
+          where: {
+            sessionId: inv.sessionId,
+            testQuestionId: { in: [dup.test.testQuestionIds[1]] },
+          },
+        });
         const all = await owner.sessionQuestion.findMany({ where: { sessionId: inv.sessionId } });
         const versions = all.map((q) => q.questionVersionId);
         expect(new Set(versions).size).toBe(versions.length);
@@ -914,7 +1145,10 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
 
     it('FR-203: a random rule nothing matches fails the start cleanly and leaves the session VERIFIED', async () => {
       const t = await createTenant(owner, 'norule');
-      await owner.testQuestion.update({ where: { id: t.test.testQuestionIds[1] }, data: { randomRule: { tags: ['no-such-tag'] } } });
+      await owner.testQuestion.update({
+        where: { id: t.test.testQuestionIds[1] },
+        data: { randomRule: { tags: ['no-such-tag'] } },
+      });
       const inv = await invite(verified(), t);
       const res = await authed('post', '/test/start', tokenFor(inv, t));
       expect(res.status).toBe(409);
@@ -924,8 +1158,13 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(row.hmacKeyEnc).toBeNull();
       expect(await owner.sessionQuestion.count({ where: { sessionId: inv.sessionId } })).toBe(0);
       expect(await owner.sessionSection.count({ where: { sessionId: inv.sessionId } })).toBe(0);
-      expect((await owner.invitation.findUniqueOrThrow({ where: { id: inv.invitationId } })).usedAt).toBeNull();
-      await owner.testQuestion.update({ where: { id: t.test.testQuestionIds[1] }, data: { randomRule: { tags: ['arrays'], bogus: 1 } } });
+      expect(
+        (await owner.invitation.findUniqueOrThrow({ where: { id: inv.invitationId } })).usedAt,
+      ).toBeNull();
+      await owner.testQuestion.update({
+        where: { id: t.test.testQuestionIds[1] },
+        data: { randomRule: { tags: ['arrays'], bogus: 1 } },
+      });
       const again = await authed('post', '/test/start', tokenFor(inv, t));
       expect(again.status).toBe(409);
     });
@@ -933,21 +1172,31 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     it('FR-505: starting twice, or twice at once, builds one set of rows and answers the running session', async () => {
       const inv = await invite(verified());
       const token = tokenFor(inv);
-      const results = await Promise.all(Array.from({ length: 4 }, () => authed('post', '/test/start', token)));
+      const results = await Promise.all(
+        Array.from({ length: 4 }, () => authed('post', '/test/start', token)),
+      );
       for (const r of results) expect(r.status).toBe(200);
       expect(await owner.sessionSection.count({ where: { sessionId: inv.sessionId } })).toBe(2);
       expect(await owner.sessionQuestion.count({ where: { sessionId: inv.sessionId } })).toBe(3);
       const deadlines = new Set(results.map((r) => (r.body as { deadlineAt: string }).deadlineAt));
       expect(deadlines.size).toBe(1);
       const again = await authed('post', '/test/start', token).expect(200);
-      expect((again.body as { startedAt: string }).startedAt).toBe((await sessionRow(inv.sessionId)).startedAt?.toISOString());
+      expect((again.body as { startedAt: string }).startedAt).toBe(
+        (await sessionRow(inv.sessionId)).startedAt?.toISOString(),
+      );
       expect(await owner.sessionQuestion.count({ where: { sessionId: inv.sessionId } })).toBe(3);
     });
 
     it('FR-605, ADR 0013 section 3: the start needs a fresh, passed system check (409 SYSTEM_CHECK_BLOCKED)', async () => {
       const cases: InvitationOptions['accommodations'][] = [
         {},
-        { systemCheck: { passed: false, blocking: ['MULTI_MONITOR'], checkedAt: new Date().toISOString() } },
+        {
+          systemCheck: {
+            passed: false,
+            blocking: ['MULTI_MONITOR'],
+            checkedAt: new Date().toISOString(),
+          },
+        },
         passedSystemCheck(new Date(Date.now() - 16 * 60_000)),
         { systemCheck: { passed: true } },
         { systemCheck: 'ok' },
@@ -961,7 +1210,13 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         expect(row.status).toBe('VERIFIED');
         expect(row.hmacKeyEnc).toBeNull();
       }
-      const fresh = await invite({ status: 'VERIFIED', session: { authEpoch: 1, deviceInfo: passedSystemCheck(new Date(Date.now() - 14 * 60_000)) } });
+      const fresh = await invite({
+        status: 'VERIFIED',
+        session: {
+          authEpoch: 1,
+          deviceInfo: passedSystemCheck(new Date(Date.now() - 14 * 60_000)),
+        },
+      });
       await authed('post', '/test/start', tokenFor(fresh)).expect(200);
     });
 
@@ -983,7 +1238,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect((await sessionRow(inv.sessionId)).status).toBe('EXPIRED');
     });
 
-    it('TC-008: another org\'s test cannot be started through a forged token pairing', async () => {
+    it("TC-008: another org's test cannot be started through a forged token pairing", async () => {
       const theirs = await invite(verified(), other);
       const res = await authed('post', '/test/start', tokenFor(theirs, tenant));
       expect(res.status).toBe(401);
@@ -994,25 +1249,47 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
   // ---------- proctor key (ADR 0013 sections 2 and 4) ----------
 
   describe('proctor key route (ADR 0013 sections 2 and 4, FR-801)', () => {
-    async function runningSession(over: InvitationOptions['session'] = {}): Promise<{ inv: InvitationFixture; master: Buffer }> {
+    async function runningSession(
+      over: InvitationOptions['session'] = {},
+    ): Promise<{ inv: InvitationFixture; master: Buffer }> {
       const inv = await invite(liveSession(over));
       const wrapped = keys.generateWrapped(inv.sessionId);
       await owner.session.update({ where: { id: inv.sessionId }, data: { hmacKeyEnc: wrapped } });
       return { inv, master: keys.unwrap(wrapped, inv.sessionId) };
     }
-    const tokenAt = (inv: InvitationFixture, epoch: number): string => tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch }).token;
+    const tokenAt = (inv: InvitationFixture, epoch: number): string =>
+      tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch }).token;
 
     it('FR-801: returns K_e for the token epoch once, with no-store, and the key matches the derivation', async () => {
       const { inv, master } = await runningSession();
       const res = await authed('post', '/proctor-key', tokenAt(inv, 1)).expect(200);
       expect(res.headers['cache-control']).toBe('no-store');
-      const body = res.body as { alg: string; key: string; keyEpoch: number; counters: { eventSeqStart: number; keystrokeSeqStart: number; media: Record<string, { nextSeq: number; nextSegment: number }> } };
+      const body = res.body as {
+        alg: string;
+        key: string;
+        keyEpoch: number;
+        counters: {
+          eventSeqStart: number;
+          keystrokeSeqStart: number;
+          media: Record<string, { nextSeq: number; nextSegment: number }>;
+        };
+      };
       expect(body.alg).toBe('HMAC-SHA256');
       expect(body.keyEpoch).toBe(1);
       expect(Buffer.from(body.key, 'base64')).toHaveLength(32);
-      expect(Buffer.from(body.key, 'base64').equals(keys.deriveBatchKey(master, inv.sessionId, 1))).toBe(true);
+      expect(
+        Buffer.from(body.key, 'base64').equals(keys.deriveBatchKey(master, inv.sessionId, 1)),
+      ).toBe(true);
       expect(body.key).not.toBe(master.toString('base64'));
-      expect(body.counters).toEqual({ eventSeqStart: 0, keystrokeSeqStart: 0, media: { SCREEN: { nextSeq: 0, nextSegment: 0 }, WEBCAM: { nextSeq: 0, nextSegment: 0 }, AUDIO: { nextSeq: 0, nextSegment: 0 } } });
+      expect(body.counters).toEqual({
+        eventSeqStart: 0,
+        keystrokeSeqStart: 0,
+        media: {
+          SCREEN: { nextSeq: 0, nextSegment: 0 },
+          WEBCAM: { nextSeq: 0, nextSegment: 0 },
+          AUDIO: { nextSeq: 0, nextSegment: 0 },
+        },
+      });
       const ttl = await redis.ttl(`pkey:${inv.sessionId}:1`);
       expect(ttl).toBeGreaterThan(50 * 60);
     });
@@ -1030,9 +1307,12 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const { inv } = await runningSession();
       const token = tokenAt(inv, 1);
       // The per-session limit is 5 per minute, so the rest of the burst is a 429; at most one is 200.
-      const results = await Promise.all(Array.from({ length: 10 }, () => authed('post', '/proctor-key', token)));
+      const results = await Promise.all(
+        Array.from({ length: 10 }, () => authed('post', '/proctor-key', token)),
+      );
       expect(results.filter((r) => r.status === 200)).toHaveLength(1);
-      for (const r of results.filter((x) => x.status !== 200)) expect([409, 429]).toContain(r.status);
+      for (const r of results.filter((x) => x.status !== 200))
+        expect([409, 429]).toContain(r.status);
       expect(results.filter((r) => r.status === 429).length).toBeGreaterThanOrEqual(5);
     });
 
@@ -1045,7 +1325,11 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const k2 = await authed('post', '/proctor-key', t2).expect(200);
       expect((k2.body as { keyEpoch: number }).keyEpoch).toBe(3);
       expect((k2.body as { key: string }).key).not.toBe((k1.body as { key: string }).key);
-      expect(Buffer.from((k2.body as { key: string }).key, 'base64').equals(keys.deriveBatchKey(master, inv.sessionId, 3))).toBe(true);
+      expect(
+        Buffer.from((k2.body as { key: string }).key, 'base64').equals(
+          keys.deriveBatchKey(master, inv.sessionId, 3),
+        ),
+      ).toBe(true);
       // The first device is taken over and cannot refetch its epoch's key.
       const stale = await authed('post', '/proctor-key', t1);
       expect(stale.status).toBe(401);
@@ -1064,34 +1348,84 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     it('FR-801: counters continue after the stored maximum so a new device does not collide with stored batches', async () => {
       const { inv } = await runningSession();
       await owner.proctorEventBatch.createMany({
-        data: [0, 1, 7].map((seq) => ({ sessionId: inv.sessionId, seq, signature: Buffer.alloc(32, seq), eventCount: 1 })),
+        data: [0, 1, 7].map((seq) => ({
+          sessionId: inv.sessionId,
+          seq,
+          signature: Buffer.alloc(32, seq),
+          eventCount: 1,
+        })),
       });
-      await owner.keystrokeBatch.create({ data: { sessionId: inv.sessionId, seq: 4, signature: Buffer.alloc(32), startedAt: new Date(), events: [] } });
+      await owner.keystrokeBatch.create({
+        data: {
+          sessionId: inv.sessionId,
+          seq: 4,
+          signature: Buffer.alloc(32),
+          startedAt: new Date(),
+          events: [],
+        },
+      });
       await owner.mediaChunk.createMany({
         data: [
-          { sessionId: inv.sessionId, stream: 'SCREEN', segment: 0, seq: 0, startedAt: new Date(), durationMs: 10_000 },
-          { sessionId: inv.sessionId, stream: 'SCREEN', segment: 1, seq: 5, startedAt: new Date(), durationMs: 10_000 },
-          { sessionId: inv.sessionId, stream: 'AUDIO', segment: 0, seq: 2, startedAt: new Date(), durationMs: 10_000 },
+          {
+            sessionId: inv.sessionId,
+            stream: 'SCREEN',
+            segment: 0,
+            seq: 0,
+            startedAt: new Date(),
+            durationMs: 10_000,
+          },
+          {
+            sessionId: inv.sessionId,
+            stream: 'SCREEN',
+            segment: 1,
+            seq: 5,
+            startedAt: new Date(),
+            durationMs: 10_000,
+          },
+          {
+            sessionId: inv.sessionId,
+            stream: 'AUDIO',
+            segment: 0,
+            seq: 2,
+            startedAt: new Date(),
+            durationMs: 10_000,
+          },
         ],
       });
       const res = await authed('post', '/proctor-key', tokenAt(inv, 1)).expect(200);
       expect((res.body as { counters: unknown }).counters).toEqual({
         eventSeqStart: 8,
         keystrokeSeqStart: 5,
-        media: { SCREEN: { nextSeq: 6, nextSegment: 2 }, WEBCAM: { nextSeq: 0, nextSegment: 0 }, AUDIO: { nextSeq: 3, nextSegment: 1 } },
+        media: {
+          SCREEN: { nextSeq: 6, nextSegment: 2 },
+          WEBCAM: { nextSeq: 0, nextSegment: 0 },
+          AUDIO: { nextSeq: 3, nextSegment: 1 },
+        },
       });
     });
 
     it('ADR 0013 section 4: outside IN_PROGRESS and PAUSED the route answers 409 SESSION_NOT_ACTIVE with the session status', async () => {
-      for (const status of ['CONSENTED', 'VERIFIED', 'SUBMITTED', 'DECLINED', 'EXPIRED'] as SessionStatus[]) {
+      for (const status of [
+        'CONSENTED',
+        'VERIFIED',
+        'SUBMITTED',
+        'DECLINED',
+        'EXPIRED',
+      ] as SessionStatus[]) {
         const inv = await invite({ status, session: { authEpoch: 1 } });
         const res = await authed('post', '/proctor-key', tokenAt(inv, 1));
         expect(res.status).toBe(409);
         expect(res.body).toMatchObject({ code: 'SESSION_NOT_ACTIVE', sessionStatus: status });
       }
       // PAUSED is allowed.
-      const paused = await invite({ ...liveSession({ pauseReasons: ['SCREEN_SHARE_STOPPED'] }), status: 'PAUSED' });
-      await owner.session.update({ where: { id: paused.sessionId }, data: { hmacKeyEnc: keys.generateWrapped(paused.sessionId) } });
+      const paused = await invite({
+        ...liveSession({ pauseReasons: ['SCREEN_SHARE_STOPPED'] }),
+        status: 'PAUSED',
+      });
+      await owner.session.update({
+        where: { id: paused.sessionId },
+        data: { hmacKeyEnc: keys.generateWrapped(paused.sessionId) },
+      });
       await authed('post', '/proctor-key', tokenAt(paused, 1)).expect(200);
     });
 
@@ -1108,7 +1442,8 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const token = tokenAt(inv, 1);
       await redis.del(`rl:proctor-key:${inv.sessionId}`);
       const statuses: number[] = [];
-      for (let i = 0; i < 7; i++) statuses.push((await authed('post', '/proctor-key', token)).status);
+      for (let i = 0; i < 7; i++)
+        statuses.push((await authed('post', '/proctor-key', token)).status);
       expect(statuses.slice(0, 5).filter((s) => s === 200)).toHaveLength(1);
       expect(statuses.slice(5)).toEqual([429, 429]);
       const limited = await authed('post', '/proctor-key', token);
@@ -1120,7 +1455,8 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
   // ---------- heartbeat and watchdog (FR-609) ----------
 
   describe('heartbeat and the DISCONNECTED watchdog (FR-609, ADR 0013 section 5.3)', () => {
-    const tokenAt = (inv: InvitationFixture, epoch = 1): string => tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch }).token;
+    const tokenAt = (inv: InvitationFixture, epoch = 1): string =>
+      tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch }).token;
 
     it('FR-609: a beat sets last_heartbeat and returns the server clock, status, deadlines and pause reasons', async () => {
       const inv = await invite(liveSession({ lastHeartbeat: new Date(Date.now() - 30_000) }));
@@ -1130,7 +1466,11 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const row = await sessionRow(inv.sessionId);
       expect(row.lastHeartbeat?.getTime()).toBeGreaterThan(before);
       expect(Math.abs((row.lastHeartbeat?.getTime() ?? 0) - Date.now())).toBeLessThan(5000);
-      expect(res.body).toMatchObject({ status: 'IN_PROGRESS', pauseReasons: [], sectionDeadlineAt: null });
+      expect(res.body).toMatchObject({
+        status: 'IN_PROGRESS',
+        pauseReasons: [],
+        sectionDeadlineAt: null,
+      });
       expect((res.body as { deadlineAt: string }).deadlineAt).toBe(row.deadlineAt?.toISOString());
       expect(res.body).not.toHaveProperty('sessionToken');
     });
@@ -1138,7 +1478,11 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     it('FR-609: a heartbeat does not change the session status (DISCONNECTED is an event, not a status)', async () => {
       const inv = await invite(liveSession({ lastHeartbeat: new Date(Date.now() - 5 * 60_000) }));
       await jobs.discoverDisconnected();
-      await eventually(() => owner.proctorEvent.count({ where: { sessionId: inv.sessionId, type: 'DISCONNECTED' } }), (n) => n >= 1);
+      await eventually(
+        () =>
+          owner.proctorEvent.count({ where: { sessionId: inv.sessionId, type: 'DISCONNECTED' } }),
+        (n) => n >= 1,
+      );
       expect((await sessionRow(inv.sessionId)).status).toBe('IN_PROGRESS');
       await authed('post', '/heartbeat', tokenAt(inv)).expect(200);
       expect((await sessionRow(inv.sessionId)).status).toBe('IN_PROGRESS');
@@ -1148,12 +1492,27 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const inv = await invite(liveSession({ pauseReasons: [] }));
       const open = new Date(Date.now() - 5 * 60_000);
       await owner.sessionSection.create({
-        data: { sessionId: inv.sessionId, sectionId: tenant.test.sectionIds[0], position: 1, timeLimitMs: 1_200_000n, startedAt: open, deadlineAt: new Date(open.getTime() + 1_200_000) },
+        data: {
+          sessionId: inv.sessionId,
+          sectionId: tenant.test.sectionIds[0],
+          position: 1,
+          timeLimitMs: 1_200_000n,
+          startedAt: open,
+          deadlineAt: new Date(open.getTime() + 1_200_000),
+        },
       });
       const res = await authed('post', '/heartbeat', tokenAt(inv)).expect(200);
-      expect((res.body as { sectionDeadlineAt: string }).sectionDeadlineAt).toBe(new Date(open.getTime() + 1_200_000).toISOString());
-      const paused = await invite({ ...liveSession({ pauseReasons: ['PROCTOR'] }), status: 'PAUSED' });
-      await owner.session.update({ where: { id: paused.sessionId }, data: { proctorPausedAt: new Date(Date.now() - 4 * 60_000) } });
+      expect((res.body as { sectionDeadlineAt: string }).sectionDeadlineAt).toBe(
+        new Date(open.getTime() + 1_200_000).toISOString(),
+      );
+      const paused = await invite({
+        ...liveSession({ pauseReasons: ['PROCTOR'] }),
+        status: 'PAUSED',
+      });
+      await owner.session.update({
+        where: { id: paused.sessionId },
+        data: { proctorPausedAt: new Date(Date.now() - 4 * 60_000) },
+      });
       const stored = (await sessionRow(paused.sessionId)).deadlineAt?.getTime() ?? 0;
       const beat = await authed('post', '/heartbeat', tokenAt(paused)).expect(200);
       const reported = Date.parse((beat.body as { deadlineAt: string }).deadlineAt);
@@ -1169,13 +1528,16 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(res.body).toMatchObject({ code: 'SESSION_NOT_ACTIVE', sessionStatus: 'CONSENTED' });
       expect((await sessionRow(inv.sessionId)).lastHeartbeat).toBeNull();
       const submitted = await invite({ status: 'SUBMITTED', session: { authEpoch: 1 } });
-      expect((await authed('post', '/heartbeat', tokenAt(submitted))).body).toMatchObject({ sessionStatus: 'SUBMITTED' });
+      expect((await authed('post', '/heartbeat', tokenAt(submitted))).body).toMatchObject({
+        sessionStatus: 'SUBMITTED',
+      });
     });
 
     it('FR-609: the limit is 12 beats per minute per session (429 RATE_LIMITED with Retry-After)', async () => {
       const inv = await invite(liveSession());
       const token = tokenAt(inv);
-      for (let i = 0; i < 12; i++) expect((await authed('post', '/heartbeat', token)).status).toBe(200);
+      for (let i = 0; i < 12; i++)
+        expect((await authed('post', '/heartbeat', token)).status).toBe(200);
       const res = await authed('post', '/heartbeat', token);
       expect(res.status).toBe(429);
       expect(res.body).toMatchObject({ code: 'RATE_LIMITED' });
@@ -1188,12 +1550,21 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     it('FR-609, FR-104 shape: the token is renewed once half of its life is gone, for the same session and epoch', async () => {
       const inv = await invite(liveSession());
       // Issued 10 minutes ago with a 15 minute life: 5 minutes left.
-      const old = tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch: 1 }, new Date(Date.now() - 10 * 60_000));
+      const old = tokens.sign(
+        { sid: inv.sessionId, oid: tenant.orgId, epoch: 1 },
+        new Date(Date.now() - 10 * 60_000),
+      );
       const res = await authed('post', '/heartbeat', old.token).expect(200);
       const body = res.body as { sessionToken?: string; sessionTokenExpiresAt?: string };
       expect(body.sessionToken).toBeDefined();
-      expect(Date.parse(body.sessionTokenExpiresAt as string)).toBeGreaterThan(old.expiresAt.getTime());
-      expect(jwt.decode(body.sessionToken as string)).toMatchObject({ sid: inv.sessionId, oid: tenant.orgId, epoch: 1 });
+      expect(Date.parse(body.sessionTokenExpiresAt as string)).toBeGreaterThan(
+        old.expiresAt.getTime(),
+      );
+      expect(jwt.decode(body.sessionToken as string)).toMatchObject({
+        sid: inv.sessionId,
+        oid: tenant.orgId,
+        epoch: 1,
+      });
       await authed('get', '', body.sessionToken as string).expect(200);
       // A token with its whole life left is not renewed.
       const young = await invite(liveSession());
@@ -1205,13 +1576,29 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     it('FR-609: more than 60 s of silence logs one DISCONNECTED event; a recent beat logs none', async () => {
       const silent = await invite(liveSession({ lastHeartbeat: new Date(Date.now() - 90_000) }));
       const quiet = await invite(liveSession({ lastHeartbeat: new Date(Date.now() - 20_000) }));
-      const paused = await invite({ ...liveSession({ lastHeartbeat: new Date(Date.now() - 120_000), pauseReasons: ['FULLSCREEN_EXIT'] }), status: 'PAUSED' });
-      const submitted = await invite({ status: 'SUBMITTED', session: { lastHeartbeat: new Date(Date.now() - 600_000), authEpoch: 1 } });
+      const paused = await invite({
+        ...liveSession({
+          lastHeartbeat: new Date(Date.now() - 120_000),
+          pauseReasons: ['FULLSCREEN_EXIT'],
+        }),
+        status: 'PAUSED',
+      });
+      const submitted = await invite({
+        status: 'SUBMITTED',
+        session: { lastHeartbeat: new Date(Date.now() - 600_000), authEpoch: 1 },
+      });
       const found = await jobs.discoverDisconnected();
       expect(found).toBeGreaterThanOrEqual(2);
-      const count = (id: string) => owner.proctorEvent.count({ where: { sessionId: id, type: 'DISCONNECTED' } });
-      await eventually(() => count(silent.sessionId), (n) => n >= 1);
-      await eventually(() => count(paused.sessionId), (n) => n >= 1);
+      const count = (id: string) =>
+        owner.proctorEvent.count({ where: { sessionId: id, type: 'DISCONNECTED' } });
+      await eventually(
+        () => count(silent.sessionId),
+        (n) => n >= 1,
+      );
+      await eventually(
+        () => count(paused.sessionId),
+        (n) => n >= 1,
+      );
       // A second discovery (and a duplicate job) writes no second event for the same silence.
       await jobs.discoverDisconnected();
       await jobs.logDisconnected(tenant.orgId, silent.sessionId);
@@ -1220,7 +1607,9 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(await count(paused.sessionId)).toBe(1);
       expect(await count(quiet.sessionId)).toBe(0);
       expect(await count(submitted.sessionId)).toBe(0);
-      const event = await owner.proctorEvent.findFirstOrThrow({ where: { sessionId: silent.sessionId, type: 'DISCONNECTED' } });
+      const event = await owner.proctorEvent.findFirstOrThrow({
+        where: { sessionId: silent.sessionId, type: 'DISCONNECTED' },
+      });
       expect(event).toMatchObject({ severity: 'LOW', source: 'SERVER', batchSeq: null });
       expect((event.payload as { lastHeartbeatAt: string }).lastHeartbeatAt).toBeDefined();
       expect((await sessionRow(silent.sessionId)).status).toBe('IN_PROGRESS');
@@ -1231,46 +1620,87 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const inv = await invite(liveSession({ lastHeartbeat: new Date(Date.now() - 95_000) }));
       const deadline = (await sessionRow(inv.sessionId)).deadlineAt?.getTime();
       await jobs.discoverDisconnected();
-      await eventually(() => owner.proctorEvent.count({ where: { sessionId: inv.sessionId, type: 'DISCONNECTED' } }), (n) => n === 1);
+      await eventually(
+        () =>
+          owner.proctorEvent.count({ where: { sessionId: inv.sessionId, type: 'DISCONNECTED' } }),
+        (n) => n === 1,
+      );
       expect(await redis.exists(`disc:${inv.sessionId}`)).toBe(1);
       await authed('post', '/heartbeat', tokenAt(inv)).expect(200);
       expect(await redis.exists(`disc:${inv.sessionId}`)).toBe(0);
-      const reconnected = await eventually(() => owner.proctorEvent.count({ where: { sessionId: inv.sessionId, type: 'RECONNECTED' } }), (n) => n >= 1);
+      const reconnected = await eventually(
+        () =>
+          owner.proctorEvent.count({ where: { sessionId: inv.sessionId, type: 'RECONNECTED' } }),
+        (n) => n >= 1,
+      );
       expect(reconnected).toBe(1);
       // Another beat does not log a second RECONNECTED, and the deadline never moved.
       await authed('post', '/heartbeat', tokenAt(inv)).expect(200);
       await new Promise((r) => setTimeout(r, 500));
-      expect(await owner.proctorEvent.count({ where: { sessionId: inv.sessionId, type: 'RECONNECTED' } })).toBe(1);
+      expect(
+        await owner.proctorEvent.count({
+          where: { sessionId: inv.sessionId, type: 'RECONNECTED' },
+        }),
+      ).toBe(1);
       expect((await sessionRow(inv.sessionId)).deadlineAt?.getTime()).toBe(deadline);
     });
 
     it('FR-609: the repeatable discovery job is registered with the queue', async () => {
       const { Queue } = jest.requireActual<typeof import('bullmq')>('bullmq');
-      const queue = new Queue('session-jobs', { connection: { host: redisBox.getHost(), port: redisBox.getPort() } });
-      const schedulers = await eventually(() => queue.getJobSchedulers(), (s) => s.length >= 2);
-      expect(schedulers.map((s) => s.key).sort()).toEqual(['consent-pdf-sweep', 'discover-disconnected']);
+      const queue = new Queue('session-jobs', {
+        connection: { host: redisBox.getHost(), port: redisBox.getPort() },
+      });
+      const schedulers = await eventually(
+        () => queue.getJobSchedulers(),
+        (s) => s.length >= 2,
+      );
+      expect(schedulers.map((s) => s.key).sort()).toEqual([
+        'consent-pdf-sweep',
+        'discover-disconnected',
+      ]);
       expect(schedulers.find((s) => s.key === 'discover-disconnected')?.every).toBe(15_000);
       await queue.close();
     });
   });
 
   it('ADR 0012: the generated OpenAPI document lists every candidate route; guarded ones carry bearer auth, the three pre-token ones do not', () => {
-    const { SwaggerModule, DocumentBuilder } = jest.requireActual<typeof import('@nestjs/swagger')>('@nestjs/swagger');
-    const doc = SwaggerModule.createDocument(app, new DocumentBuilder().setTitle('t').setVersion('1').addBearerAuth().build());
+    const { SwaggerModule, DocumentBuilder } =
+      jest.requireActual<typeof import('@nestjs/swagger')>('@nestjs/swagger');
+    const doc = SwaggerModule.createDocument(
+      app,
+      new DocumentBuilder().setTitle('t').setVersion('1').addBearerAuth().build(),
+    );
     const prefix = '/api/v1/candidate/session';
     const expected: Array<[string, string, boolean]> = [
-      ['post', '/link', false], ['post', '/otp', false], ['post', '/start', false],
-      ['get', '', true], ['get', '/consent', true], ['post', '/consent/sign', true], ['post', '/consent/decline', true],
-      ['post', '/test/start', true], ['post', '/heartbeat', true], ['post', '/proctor-key', true],
+      ['post', '/link', false],
+      ['post', '/otp', false],
+      ['post', '/start', false],
+      ['get', '', true],
+      ['get', '/consent', true],
+      ['post', '/consent/sign', true],
+      ['post', '/consent/decline', true],
+      ['post', '/test/start', true],
+      ['post', '/heartbeat', true],
+      ['post', '/proctor-key', true],
     ];
     for (const [method, path, guarded] of expected) {
-      const operation = (doc.paths[`${prefix}${path}`] as Record<string, { security?: unknown[]; summary?: string; responses: object }> | undefined)?.[method];
+      const operation = (
+        doc.paths[`${prefix}${path}`] as
+          Record<string, { security?: unknown[]; summary?: string; responses: object }> | undefined
+      )?.[method];
       expect(operation?.summary).toBeTruthy();
       expect(Object.keys(operation?.responses ?? {}).length).toBeGreaterThan(0);
       expect((operation?.security ?? []).length > 0).toBe(guarded);
     }
     const schemas = Object.keys(doc.components?.schemas ?? {});
-    for (const name of ['StartSessionDto', 'SignConsentDto', 'SessionTokenDto', 'ProctorKeyDto', 'HeartbeatResultDto', 'TestStartedDto']) {
+    for (const name of [
+      'StartSessionDto',
+      'SignConsentDto',
+      'SessionTokenDto',
+      'ProctorKeyDto',
+      'HeartbeatResultDto',
+      'TestStartedDto',
+    ]) {
       expect(schemas).toContain(name);
     }
     const text = JSON.stringify(doc.paths);
@@ -1287,17 +1717,34 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     await redis.del(`otp-cooldown:${inv.invitationId}`);
     const ok = await post('/start', { invitationToken: inv.token, otp: code }).expect(200);
     const sessionToken = (ok.body as { sessionToken: string }).sessionToken;
-    await owner.session.update({ where: { id: inv.sessionId }, data: { hmacKeyEnc: keys.generateWrapped(inv.sessionId) } });
+    await owner.session.update({
+      where: { id: inv.sessionId },
+      data: { hmacKeyEnc: keys.generateWrapped(inv.sessionId) },
+    });
     const key = await authed('post', '/proctor-key', sessionToken).expect(200);
     await authed('post', '/heartbeat', sessionToken).expect(200);
     const fresh = await invite({ status: 'OPENED' });
     const ft = tokens.sign({ sid: fresh.sessionId, oid: tenant.orgId, epoch: 0 }).token;
-    await request(server()).post(`${API}/consent/sign`).set('Authorization', `Bearer ${ft}`)
-      .send({ consentTextId: tenant.consentTextId, signedName: 'Zebediah Quarrel', confirmedAge18: true }).expect(200);
+    await request(server())
+      .post(`${API}/consent/sign`)
+      .set('Authorization', `Bearer ${ft}`)
+      .send({
+        consentTextId: tenant.consentTextId,
+        signedName: 'Zebediah Quarrel',
+        confirmedAge18: true,
+      })
+      .expect(200);
     await post('/link', { invitationToken: inv.token }).expect(200);
     const text = logged.join('');
     expect(text.length).toBeGreaterThan(0);
-    for (const secret of [code, inv.token, sessionToken, (key.body as { key: string }).key, 'Zebediah', ft]) {
+    for (const secret of [
+      code,
+      inv.token,
+      sessionToken,
+      (key.body as { key: string }).key,
+      'Zebediah',
+      ft,
+    ]) {
       expect(text).not.toContain(secret);
     }
   });

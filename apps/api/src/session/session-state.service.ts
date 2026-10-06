@@ -74,7 +74,8 @@ export class SessionStateService {
       : [request.from as SessionStatus];
     if (froms.length === 0) throw new Error('transition needs at least one from-state');
     for (const from of froms) {
-      if (!isAllowedTransition(from, request.to)) throw new IllegalTransitionError(from, request.to);
+      if (!isAllowedTransition(from, request.to))
+        throw new IllegalTransitionError(from, request.to);
     }
     const db = request.db ?? this.prisma.client;
     const now = request.now ?? new Date();

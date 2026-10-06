@@ -92,14 +92,22 @@ export class ConsentService {
     });
     const textId = existing?.consentTextId ?? (await this.currentTextId(ctx.orgId));
     if (textId === null) {
-      throw coded(HttpStatus.CONFLICT, 'No consent document is configured.', 'CONSENT_NOT_CONFIGURED');
+      throw coded(
+        HttpStatus.CONFLICT,
+        'No consent document is configured.',
+        'CONSENT_NOT_CONFIGURED',
+      );
     }
     const text = await this.prisma.client.consentText.findUnique({
       where: { id: textId },
       select: { id: true, version: true, bodyMd: true, legalApprovedAt: true },
     });
     if (text === null) {
-      throw coded(HttpStatus.CONFLICT, 'No consent document is configured.', 'CONSENT_NOT_CONFIGURED');
+      throw coded(
+        HttpStatus.CONFLICT,
+        'No consent document is configured.',
+        'CONSENT_NOT_CONFIGURED',
+      );
     }
     const approved = text.legalApprovedAt !== null;
     // A text already signed was served under the same rule; only an unsigned view is gated.
@@ -150,7 +158,11 @@ export class ConsentService {
   ): Promise<{ status: 'CONSENTED'; signedAt: Date }> {
     const currentId = await this.currentTextId(ctx.orgId);
     if (currentId === null) {
-      throw coded(HttpStatus.CONFLICT, 'No consent document is configured.', 'CONSENT_NOT_CONFIGURED');
+      throw coded(
+        HttpStatus.CONFLICT,
+        'No consent document is configured.',
+        'CONSENT_NOT_CONFIGURED',
+      );
     }
     if (consentTextId !== currentId) {
       throw coded(
@@ -164,7 +176,11 @@ export class ConsentService {
       select: { id: true, legalApprovedAt: true },
     });
     if (text === null) {
-      throw coded(HttpStatus.CONFLICT, 'No consent document is configured.', 'CONSENT_NOT_CONFIGURED');
+      throw coded(
+        HttpStatus.CONFLICT,
+        'No consent document is configured.',
+        'CONSENT_NOT_CONFIGURED',
+      );
     }
     if (this.requireApproval() && text.legalApprovedAt === null) {
       throw coded(

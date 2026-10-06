@@ -200,7 +200,8 @@ export class TestStartService {
           where: { id: ctx.sessionId },
           select: { status: true },
         });
-        if (again !== null && LIVE_STATUSES.includes(again.status)) return this.view(ctx.sessionId, now);
+        if (again !== null && LIVE_STATUSES.includes(again.status))
+          return this.view(ctx.sessionId, now);
       }
       throw e;
     }
@@ -368,7 +369,11 @@ export class TestStartService {
         deadlineAt: s.deadlineAt,
         questions: questions
           .filter((q) => sectionOfTq.get(q.testQuestionId) === s.sectionId)
-          .map((q) => ({ sessionQuestionId: q.id, position: q.position, points: q.points.toString() })),
+          .map((q) => ({
+            sessionQuestionId: q.id,
+            position: q.position,
+            points: q.points.toString(),
+          })),
       })),
     };
   }

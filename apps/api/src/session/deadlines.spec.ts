@@ -1,8 +1,4 @@
-import {
-  effectiveSectionDeadline,
-  effectiveSessionDeadline,
-  proctorPauseCapMs,
-} from './deadlines';
+import { effectiveSectionDeadline, effectiveSessionDeadline, proctorPauseCapMs } from './deadlines';
 import type { DeadlineSession } from './deadlines';
 
 const T0 = new Date('2026-10-05T10:00:00.000Z');
@@ -64,9 +60,9 @@ describe('Server deadlines (FR-505, TC-047, ADR 0002 P-2..P-4)', () => {
     // 5 minutes of the pause fall after the section opened at minute 20.
     expect(effectiveSectionDeadline(section, s, at(25), CAP)).toEqual(at(55));
     // A section that opened before the pause gets the whole pause.
-    expect(effectiveSectionDeadline({ startedAt: at(0), deadlineAt: at(50) }, s, at(25), CAP)).toEqual(
-      at(65),
-    );
+    expect(
+      effectiveSectionDeadline({ startedAt: at(0), deadlineAt: at(50) }, s, at(25), CAP),
+    ).toEqual(at(65));
   });
 
   it('ADR 0007 section 6: the cap defaults to 30 minutes and ignores junk', () => {

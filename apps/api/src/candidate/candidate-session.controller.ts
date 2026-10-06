@@ -88,7 +88,9 @@ export class CandidateSessionController {
       'Server time, IP and user agent are recorded. OPENED to CONSENTED. A job then renders the signed PDF and emails a copy.',
   })
   @ApiOkResponse({ type: ConsentSignedDto })
-  @ApiConflictResponse({ description: 'ALREADY_SIGNED, CONSENT_TEXT_CHANGED, CONSENT_NOT_APPROVED' })
+  @ApiConflictResponse({
+    description: 'ALREADY_SIGNED, CONSENT_TEXT_CHANGED, CONSENT_NOT_APPROVED',
+  })
   async sign(
     @Candidate() ctx: CandidateContext,
     @Body() dto: SignConsentDto,
@@ -127,7 +129,10 @@ export class CandidateSessionController {
       'Server sets started_at and deadline_at (accommodations applied), assigns questions and variants, opens section 1, sets invitations.used_at and creates the proctor key. Idempotent. The key is fetched with POST proctor-key.',
   })
   @ApiOkResponse({ type: TestStartedDto })
-  @ApiConflictResponse({ description: 'SYSTEM_CHECK_BLOCKED, LINK_EXPIRED, SESSION_STATE_CONFLICT, RANDOM_RULE_UNSATISFIABLE' })
+  @ApiConflictResponse({
+    description:
+      'SYSTEM_CHECK_BLOCKED, LINK_EXPIRED, SESSION_STATE_CONFLICT, RANDOM_RULE_UNSATISFIABLE',
+  })
   async startTest(@Candidate() ctx: CandidateContext): Promise<TestStartedDto> {
     await this.limiter.hit('test-start', ctx.sessionId, 6, 60);
     const view = await this.testStart.start(ctx);

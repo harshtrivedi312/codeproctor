@@ -10,10 +10,14 @@ export abstract class ObjectStoragePort {
 
 export class UnconfiguredObjectStorage extends ObjectStoragePort {
   putObject(): Promise<never> {
-    return Promise.reject(new Error('Object storage is not configured (BE-09 binds StorageService).'));
+    return Promise.reject(
+      new Error('Object storage is not configured (BE-09 binds StorageService).'),
+    );
   }
 
   deleteObject(): Promise<never> {
-    return Promise.reject(new Error('Object storage is not configured (BE-09 binds StorageService).'));
+    return Promise.reject(
+      new Error('Object storage is not configured (BE-09 binds StorageService).'),
+    );
   }
 }

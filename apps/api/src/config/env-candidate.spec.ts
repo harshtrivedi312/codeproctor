@@ -28,13 +28,15 @@ describe('Candidate session environment (BE-07, ADR 0003, ADR 0007 section 6, AD
     expect(() =>
       validateEnv({ ...valid, ...candidate, JWT_CANDIDATE_SECRET: valid.JWT_ACCESS_SECRET }),
     ).toThrow(/JWT_CANDIDATE_SECRET/);
-    expect(validateEnv({ ...valid, ...candidate }).JWT_CANDIDATE_SECRET).toBe(candidate.JWT_CANDIDATE_SECRET);
+    expect(validateEnv({ ...valid, ...candidate }).JWT_CANDIDATE_SECRET).toBe(
+      candidate.JWT_CANDIDATE_SECRET,
+    );
   });
 
   it('NFR-04: placeholder candidate secrets are refused without echoing them', () => {
-    expect(() => validateEnv({ ...valid, ...candidate, JWT_CANDIDATE_SECRET: 'change-me' })).toThrow(
-      /JWT_CANDIDATE_SECRET/,
-    );
+    expect(() =>
+      validateEnv({ ...valid, ...candidate, JWT_CANDIDATE_SECRET: 'change-me' }),
+    ).toThrow(/JWT_CANDIDATE_SECRET/);
     try {
       validateEnv({ ...valid, ...candidate, OTP_PEPPER: 'short-secret' });
       fail('expected throw');
@@ -52,22 +54,36 @@ describe('Candidate session environment (BE-07, ADR 0003, ADR 0007 section 6, AD
       JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
     };
     for (const APP_ENV of ['pilot', 'production']) {
-      expect(() => validateEnv({ ...valid, ...judge0, APP_ENV, REQUIRE_LEGAL_APPROVED_CONSENT: 'true' })).toThrow(
-        /JWT_CANDIDATE_SECRET/,
-      );
+      expect(() =>
+        validateEnv({ ...valid, ...judge0, APP_ENV, REQUIRE_LEGAL_APPROVED_CONSENT: 'true' }),
+      ).toThrow(/JWT_CANDIDATE_SECRET/);
       expect(() => validateEnv({ ...valid, ...judge0, ...candidate, APP_ENV })).toThrow(
         /REQUIRE_LEGAL_APPROVED_CONSENT/,
       );
       expect(
-        validateEnv({ ...valid, ...judge0, ...candidate, APP_ENV, REQUIRE_LEGAL_APPROVED_CONSENT: 'true' }).APP_ENV,
+        validateEnv({
+          ...valid,
+          ...judge0,
+          ...candidate,
+          APP_ENV,
+          REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
+        }).APP_ENV,
       ).toBe(APP_ENV);
     }
   });
 
   it('FR-609: the token lifetime and the ingest grace are bounded', () => {
-    expect(() => validateEnv({ ...valid, CANDIDATE_TOKEN_TTL_SECONDS: '10' })).toThrow(/CANDIDATE_TOKEN_TTL_SECONDS/);
-    expect(() => validateEnv({ ...valid, CANDIDATE_TOKEN_TTL_SECONDS: '999999' })).toThrow(/CANDIDATE_TOKEN_TTL_SECONDS/);
-    expect(() => validateEnv({ ...valid, SESSION_KEY_ENC_ACTIVE_KID: 'bad kid' })).toThrow(/SESSION_KEY_ENC_ACTIVE_KID/);
-    expect(validateEnv({ ...valid, CANDIDATE_TOKEN_TTL_SECONDS: '600' }).CANDIDATE_TOKEN_TTL_SECONDS).toBe(600);
+    expect(() => validateEnv({ ...valid, CANDIDATE_TOKEN_TTL_SECONDS: '10' })).toThrow(
+      /CANDIDATE_TOKEN_TTL_SECONDS/,
+    );
+    expect(() => validateEnv({ ...valid, CANDIDATE_TOKEN_TTL_SECONDS: '999999' })).toThrow(
+      /CANDIDATE_TOKEN_TTL_SECONDS/,
+    );
+    expect(() => validateEnv({ ...valid, SESSION_KEY_ENC_ACTIVE_KID: 'bad kid' })).toThrow(
+      /SESSION_KEY_ENC_ACTIVE_KID/,
+    );
+    expect(
+      validateEnv({ ...valid, CANDIDATE_TOKEN_TTL_SECONDS: '600' }).CANDIDATE_TOKEN_TTL_SECONDS,
+    ).toBe(600);
   });
 });

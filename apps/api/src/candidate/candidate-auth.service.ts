@@ -31,12 +31,7 @@ import {
 import type { OtpPhase } from './otp.service';
 
 export type LinkState =
-  | 'OTP_REQUIRED'
-  | 'ALREADY_USED'
-  | 'EXPIRED'
-  | 'DECLINED'
-  | 'BLOCKED'
-  | 'NOT_YET_OPEN';
+  'OTP_REQUIRED' | 'ALREADY_USED' | 'EXPIRED' | 'DECLINED' | 'BLOCKED' | 'NOT_YET_OPEN';
 
 export interface LinkView {
   readonly state: LinkState;
@@ -202,7 +197,9 @@ export class CandidateAuthService {
       return {
         ...base,
         state: 'NOT_YET_OPEN',
-        retryAfterSeconds: Math.ceil((link.invitation.windowStart.getTime() - now.getTime()) / 1000),
+        retryAfterSeconds: Math.ceil(
+          (link.invitation.windowStart.getTime() - now.getTime()) / 1000,
+        ),
       };
     }
     const blocked = await this.otp.blockedSeconds(link.invitation.id);

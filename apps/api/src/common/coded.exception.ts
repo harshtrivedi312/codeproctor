@@ -1,10 +1,7 @@
 import { ForbiddenException, HttpException } from '@nestjs/common';
 
 /** Machine-readable codes the problem filter copies into the RFC 7807 body as `code`. */
-export const PROBLEM_CODES = [
-  'REAUTH_FAILED',
-  'TWO_FACTOR_REQUIRED_FOR_ROLE',
-] as const;
+export const PROBLEM_CODES = ['REAUTH_FAILED', 'TWO_FACTOR_REQUIRED_FOR_ROLE'] as const;
 
 /**
  * Codes of the candidate session routes (BE-07, ADR 0013 section 5.1 and 5.10). Clients branch on

@@ -36,7 +36,10 @@ export function toBlocks(md: string): Block[] {
     if (heading) {
       flush();
       const level = (heading[1] ?? '#').length;
-      blocks.push({ kind: level === 1 ? 'h1' : level === 2 ? 'h2' : 'h3', text: clean(heading[2] ?? '') });
+      blocks.push({
+        kind: level === 1 ? 'h1' : level === 2 ? 'h2' : 'h3',
+        text: clean(heading[2] ?? ''),
+      });
     } else if (line === '') {
       flush();
     } else if (/^[-*]\s+/.test(line)) {
@@ -51,7 +54,10 @@ export function toBlocks(md: string): Block[] {
 }
 
 function clean(text: string): string {
-  return text.replace(/\*\*(.+?)\*\*/g, '$1').replace(/[*_`]/g, '').replace(/\[(.+?)\]\(.+?\)/g, '$1');
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/[*_`]/g, '')
+    .replace(/\[(.+?)\]\(.+?\)/g, '$1');
 }
 
 export function renderConsentPdf(input: ConsentPdfInput): Promise<Buffer> {

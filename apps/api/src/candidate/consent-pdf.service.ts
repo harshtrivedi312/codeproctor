@@ -51,7 +51,10 @@ export class ConsentPdfService {
           where: { id: consent.consentTextId },
           select: { version: true, bodyMd: true, legalApprovedAt: true },
         }),
-        this.prisma.client.organization.findUnique({ where: { id: orgId }, select: { name: true } }),
+        this.prisma.client.organization.findUnique({
+          where: { id: orgId },
+          select: { name: true },
+        }),
         this.prisma.client.session.findUnique({
           where: { id: sessionId },
           select: { invitationId: true },

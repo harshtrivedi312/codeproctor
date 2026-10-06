@@ -4,7 +4,8 @@ import { renderConsentPdf, toBlocks } from './consent-pdf.renderer';
 const base = {
   orgName: 'Acme Hiring',
   documentVersion: '2026-10-v1',
-  bodyMd: '# Consent\n\nWe record **screen**, webcam and microphone.\n\n- Retention 90 days\n- Appeals in 7 days\n',
+  bodyMd:
+    '# Consent\n\nWe record **screen**, webcam and microphone.\n\n- Retention 90 days\n- Appeals in 7 days\n',
   legalApproved: true,
   signedName: 'Ada Lovelace',
   signedAt: new Date('2026-10-05T12:34:56.000Z'),
@@ -40,6 +41,8 @@ describe('Signed consent PDF (FR-401, C-07, C-30, TC-095)', () => {
       { kind: 'p', text: '• Appeals in 7 days' },
     ]);
     expect(toBlocks('')).toEqual([]);
-    expect(toBlocks('[link](http://x.test) and `code`')).toEqual([{ kind: 'p', text: 'link and code' }]);
+    expect(toBlocks('[link](http://x.test) and `code`')).toEqual([
+      { kind: 'p', text: 'link and code' },
+    ]);
   });
 });

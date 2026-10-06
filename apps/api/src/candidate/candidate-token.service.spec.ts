@@ -50,23 +50,33 @@ describe('Candidate JWT (ADR 0013 section 5.10, CS-1)', () => {
 
   it('FR-106, NFR-04: a staff token (staff secret, staff claims) is refused as a candidate token', () => {
     const staff = new TokenService(config({ JWT_ACCESS_SECRET: STAFF_SECRET }));
-    const token = staff.sign({ sub: randomUUID(), org: randomUUID(), role: 'RECRUITER', kind: 'access' }, 300);
+    const token = staff.sign(
+      { sub: randomUUID(), org: randomUUID(), role: 'RECRUITER', kind: 'access' },
+      300,
+    );
     expect(reason(token)).toBe('invalid');
   });
 
   it('NFR-04: the staff secret cannot sign a candidate token even with candidate claims', () => {
-    const forged = jwt.sign(
-      { typ: 'candidate', ...claims() },
-      STAFF_SECRET,
-      { algorithm: 'HS256', expiresIn: 300, issuer: CANDIDATE_ISSUER, audience: CANDIDATE_AUDIENCE },
-    );
+    const forged = jwt.sign({ typ: 'candidate', ...claims() }, STAFF_SECRET, {
+      algorithm: 'HS256',
+      expiresIn: 300,
+      issuer: CANDIDATE_ISSUER,
+      audience: CANDIDATE_AUDIENCE,
+    });
     expect(reason(forged)).toBe('invalid');
   });
 
   it('NFR-04: alg none, other algorithms, wrong issuer, wrong audience and wrong typ are refused', () => {
     const c = claims();
     const none = `${Buffer.from('{"alg":"none","typ":"JWT"}').toString('base64url')}.${Buffer.from(
-      JSON.stringify({ typ: 'candidate', ...c, iss: CANDIDATE_ISSUER, aud: CANDIDATE_AUDIENCE, exp: 9999999999 }),
+      JSON.stringify({
+        typ: 'candidate',
+        ...c,
+        iss: CANDIDATE_ISSUER,
+        aud: CANDIDATE_AUDIENCE,
+        exp: 9999999999,
+      }),
     ).toString('base64url')}.`;
     expect(reason(none)).toBe('invalid');
     const hs512 = jwt.sign({ typ: 'candidate', ...c }, CANDIDATE_SECRET, {
@@ -78,9 +88,22 @@ describe('Candidate JWT (ADR 0013 section 5.10, CS-1)', () => {
     expect(reason(hs512)).toBe('invalid');
     const sign = (payload: object, options: jwt.SignOptions): string =>
       jwt.sign(payload, CANDIDATE_SECRET, { algorithm: 'HS256', expiresIn: 300, ...options });
-    expect(reason(sign({ typ: 'candidate', ...c }, { issuer: 'someone', audience: CANDIDATE_AUDIENCE }))).toBe('invalid');
-    expect(reason(sign({ typ: 'candidate', ...c }, { issuer: CANDIDATE_ISSUER, audience: 'codeproctor-staff' }))).toBe('invalid');
-    expect(reason(sign({ typ: 'staff', ...c }, { issuer: CANDIDATE_ISSUER, audience: CANDIDATE_AUDIENCE }))).toBe('invalid');
+    expect(
+      reason(sign({ typ: 'candidate', ...c }, { issuer: 'someone', audience: CANDIDATE_AUDIENCE })),
+    ).toBe('invalid');
+    expect(
+      reason(
+        sign(
+          { typ: 'candidate', ...c },
+          { issuer: CANDIDATE_ISSUER, audience: 'codeproctor-staff' },
+        ),
+      ),
+    ).toBe('invalid');
+    expect(
+      reason(
+        sign({ typ: 'staff', ...c }, { issuer: CANDIDATE_ISSUER, audience: CANDIDATE_AUDIENCE }),
+      ),
+    ).toBe('invalid');
   });
 
   it('NFR-04: missing or malformed claims are refused', () => {
@@ -89,7 +112,9 @@ describe('Candidate JWT (ADR 0013 section 5.10, CS-1)', () => {
       jwt.sign(payload, CANDIDATE_SECRET, { algorithm: 'HS256', expiresIn: 300, ...base });
     const c = claims();
     expect(reason(sign({ typ: 'candidate', oid: c.oid, epoch: 1 }))).toBe('invalid');
-    expect(reason(sign({ typ: 'candidate', sid: 'not-a-uuid', oid: c.oid, epoch: 1 }))).toBe('invalid');
+    expect(reason(sign({ typ: 'candidate', sid: 'not-a-uuid', oid: c.oid, epoch: 1 }))).toBe(
+      'invalid',
+    );
     expect(reason(sign({ typ: 'candidate', sid: c.sid, oid: c.oid }))).toBe('invalid');
     expect(reason(sign({ typ: 'candidate', sid: c.sid, oid: c.oid, epoch: -1 }))).toBe('invalid');
     expect(reason(sign({ typ: 'candidate', sid: c.sid, oid: c.oid, epoch: '1' }))).toBe('invalid');

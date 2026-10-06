@@ -52,7 +52,12 @@ export class CandidateTokenService {
     const token = jwt.sign(
       { typ: 'candidate', sid: claims.sid, oid: claims.oid, epoch: claims.epoch, iat },
       this.secret(),
-      { algorithm: 'HS256', expiresIn: ttl, issuer: CANDIDATE_ISSUER, audience: CANDIDATE_AUDIENCE },
+      {
+        algorithm: 'HS256',
+        expiresIn: ttl,
+        issuer: CANDIDATE_ISSUER,
+        audience: CANDIDATE_AUDIENCE,
+      },
     );
     return { token, expiresAt: new Date((iat + ttl) * 1000) };
   }

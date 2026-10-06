@@ -5,9 +5,14 @@ import type { SessionStatus } from '../generated/prisma/enums.js';
 /** The requested transition is not in the table: a programming error or a forged request. */
 export class IllegalTransitionError extends CodedHttpException {
   constructor(from: SessionStatus, to: SessionStatus) {
-    super(HttpStatus.CONFLICT, `A session cannot move from ${from} to ${to}.`, 'ILLEGAL_TRANSITION', {
-      sessionStatus: from,
-    });
+    super(
+      HttpStatus.CONFLICT,
+      `A session cannot move from ${from} to ${to}.`,
+      'ILLEGAL_TRANSITION',
+      {
+        sessionStatus: from,
+      },
+    );
   }
 }
 

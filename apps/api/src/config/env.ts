@@ -142,7 +142,10 @@ export const envSchema = z
         }
       }
     }
-    if (env.JWT_CANDIDATE_SECRET !== undefined && env.JWT_CANDIDATE_SECRET === env.JWT_ACCESS_SECRET) {
+    if (
+      env.JWT_CANDIDATE_SECRET !== undefined &&
+      env.JWT_CANDIDATE_SECRET === env.JWT_ACCESS_SECRET
+    ) {
       ctx.addIssue({
         code: 'custom',
         path: ['JWT_CANDIDATE_SECRET'],

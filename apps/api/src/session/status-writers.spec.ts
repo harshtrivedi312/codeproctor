@@ -69,7 +69,8 @@ export function findStatusWrites(source: string): string[] {
       }
     }
     // data shorthand, e.g. update({ where, data })
-    if (/\bdata\b\s*[,}]/.test(call) && !/\bdata\s*:/.test(call)) found.push(`${match[0].trim()} ... data (shorthand)`);
+    if (/\bdata\b\s*[,}]/.test(call) && !/\bdata\s*:/.test(call))
+      found.push(`${match[0].trim()} ... data (shorthand)`);
   }
   if (RAW_STATUS_WRITE.test(source)) found.push('raw SQL that writes sessions.status');
   return found;
@@ -89,7 +90,9 @@ function sources(dir: string): Array<{ path: string; text: string }> {
     const full = join(dir, name);
     if (statSync(full).isDirectory()) return sources(full);
     const path = relative(SRC, full).split(sep).join('/');
-    return path.endsWith('.ts') && !isTestFile(path) ? [{ path, text: readFileSync(full, 'utf8') }] : [];
+    return path.endsWith('.ts') && !isTestFile(path)
+      ? [{ path, text: readFileSync(full, 'utf8') }]
+      : [];
   });
 }
 
@@ -110,11 +113,11 @@ describe('Only SessionStateService writes sessions.status (FR-106, ADR 0013 CS-4
   it('FR-106: the scanner catches the shapes of a status write', () => {
     const bad = [
       "await prisma.client.session.update({ where: { id }, data: { status: 'GRADED' } });",
-      "await tx.session.updateMany({ where: { id }, data: { startedAt: now, status } });",
+      'await tx.session.updateMany({ where: { id }, data: { startedAt: now, status } });',
       "await db.session.create({ data: { orgId, invitationId, status: 'INVITED' } });",
       "await this.prisma.client.session.upsert({ where, update: { status: 'X' }, create: {} });",
       'await prisma.$executeRaw`UPDATE sessions SET status = ${s} WHERE id = ${id}`;',
-      "const data = {}; await prisma.client.session.update({ where: { id }, data });",
+      'const data = {}; await prisma.client.session.update({ where: { id }, data });',
     ];
     for (const code of bad) expect(findStatusWrites(code).length).toBeGreaterThan(0);
   });

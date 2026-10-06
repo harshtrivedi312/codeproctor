@@ -49,7 +49,9 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
   }
   const read = (id: string) => owner.session.findUniqueOrThrow({ where: { id } });
 
-  const EDGES = SESSION_STATUSES.flatMap((from) => TRANSITIONS[from].map((to) => [from, to] as const));
+  const EDGES = SESSION_STATUSES.flatMap((from) =>
+    TRANSITIONS[from].map((to) => [from, to] as const),
+  );
 
   it.each(EDGES)('FR-106: %s to %s is applied', async (from, to) => {
     const id = await sessionIn(from);
@@ -60,7 +62,9 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
     // Timestamps (ADR 0002, ADR 0004 R-1): the table decides them, never the caller.
     const anchored = ['COMPLETED', 'EXPIRED', 'DECLINED'].includes(to) && from !== 'APPEALED';
     expect(row.retentionAnchorAt?.toISOString() ?? null).toBe(anchored ? now.toISOString() : null);
-    expect(row.submittedAt?.toISOString() ?? null).toBe(to === 'SUBMITTED' ? now.toISOString() : null);
+    expect(row.submittedAt?.toISOString() ?? null).toBe(
+      to === 'SUBMITTED' ? now.toISOString() : null,
+    );
   });
 
   it('FR-106: every forbidden pair is rejected before any write and leaves the session untouched', async () => {
@@ -98,7 +102,7 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     const losers = results.filter((r) => r.status === 'rejected');
     expect(losers).toHaveLength(11);
-    for (const l of losers) expect((l).reason).toBeInstanceOf(SessionStateConflictError);
+    for (const l of losers) expect(l.reason).toBeInstanceOf(SessionStateConflictError);
     expect((await read(id)).status).toBe('CONSENTED');
   });
 

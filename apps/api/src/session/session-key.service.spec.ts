@@ -56,7 +56,9 @@ describe('Per-session HMAC key (ADR 0013 section 2, FR-801)', () => {
     const parts = stored.split(':');
     const body = Buffer.from(parts[3] as string, 'base64');
     body[0] = (body[0] as number) ^ 1;
-    expect(() => keys.unwrap([...parts.slice(0, 3), body.toString('base64')].join(':'), sid)).toThrow();
+    expect(() =>
+      keys.unwrap([...parts.slice(0, 3), body.toString('base64')].join(':'), sid),
+    ).toThrow();
     expect(() =>
       keys.unwrap([...parts.slice(0, 3), body.subarray(0, 40).toString('base64')].join(':'), sid),
     ).toThrow();

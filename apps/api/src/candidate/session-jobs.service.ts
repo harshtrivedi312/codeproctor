@@ -37,7 +37,11 @@ const SHUTDOWN_WAIT_MS = 3_000;
 
 const uuid = z.guid();
 const consentPdfData = z.object({ sessionId: uuid, orgId: uuid });
-const disconnectedData = z.object({ sessionId: uuid, orgId: uuid, lastHeartbeatMs: z.number().int() });
+const disconnectedData = z.object({
+  sessionId: uuid,
+  orgId: uuid,
+  lastHeartbeatMs: z.number().int(),
+});
 const serverEventData = z.object({
   sessionId: uuid,
   orgId: uuid,
@@ -86,7 +90,9 @@ export class SessionJobsService implements OnModuleInit, OnApplicationShutdown {
     this.worker.on('error', () => this.logger.warn('Session worker connection error'));
     this.worker.on('failed', (job) => {
       // Name and id only: the data is ids, but the rule is the same for every candidate job.
-      this.logger.warn(`Job ${job?.name ?? '?'} failed (attempt ${String(job?.attemptsMade ?? 0)})`);
+      this.logger.warn(
+        `Job ${job?.name ?? '?'} failed (attempt ${String(job?.attemptsMade ?? 0)})`,
+      );
     });
     this.scheduleRepeatables();
   }
@@ -120,7 +126,10 @@ export class SessionJobsService implements OnModuleInit, OnApplicationShutdown {
     if (this.retry) clearTimeout(this.retry);
     // A graceful close waits for Redis. With Redis down (the /health outage test) it would wait
     // for ever and hold the whole shutdown, so each close is bounded and then forced.
-    const bounded = async (close: Promise<void> | undefined, force: () => Promise<void>): Promise<void> => {
+    const bounded = async (
+      close: Promise<void> | undefined,
+      force: () => Promise<void>,
+    ): Promise<void> => {
       if (close === undefined) return;
       let timer: NodeJS.Timeout | undefined;
       const timeout = new Promise<'timeout'>((resolve) => {
@@ -256,7 +265,11 @@ export class SessionJobsService implements OnModuleInit, OnApplicationShutdown {
    * marker, set with NX, makes this once per silence: the next heartbeat removes it and queues
    * RECONNECTED. A DISCONNECTED is an event with severity LOW; the session status is unchanged.
    */
-  async logDisconnected(orgId: string, sessionId: string, now: Date = new Date()): Promise<boolean> {
+  async logDisconnected(
+    orgId: string,
+    sessionId: string,
+    now: Date = new Date(),
+  ): Promise<boolean> {
     return this.orgContext.runInOrg(orgId, async () => {
       const session = await this.prisma.client.session.findUnique({
         where: { id: sessionId },

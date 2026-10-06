@@ -29,7 +29,10 @@ export class StartSessionDto extends LinkDto {
 }
 
 export class SignConsentDto {
-  @ApiProperty({ format: 'uuid', description: 'The consent document the page showed (GET consent)' })
+  @ApiProperty({
+    format: 'uuid',
+    description: 'The consent document the page showed (GET consent)',
+  })
   @IsUUID()
   consentTextId!: string;
 
@@ -65,10 +68,15 @@ export class HeartbeatDto {
 // ---- responses ----
 
 export class LinkViewDto {
-  @ApiProperty({ enum: ['OTP_REQUIRED', 'ALREADY_USED', 'EXPIRED', 'DECLINED', 'BLOCKED', 'NOT_YET_OPEN'] })
+  @ApiProperty({
+    enum: ['OTP_REQUIRED', 'ALREADY_USED', 'EXPIRED', 'DECLINED', 'BLOCKED', 'NOT_YET_OPEN'],
+  })
   state!: string;
   @ApiProperty() orgName!: string;
-  @ApiProperty({ nullable: true, description: 'DECLINED only: contact for alternatives or accommodations' })
+  @ApiProperty({
+    nullable: true,
+    description: 'DECLINED only: contact for alternatives or accommodations',
+  })
   declineContact!: string | null;
   @ApiProperty({ nullable: true, description: 'BLOCKED or NOT_YET_OPEN: seconds to wait' })
   retryAfterSeconds!: number | null;
@@ -77,7 +85,17 @@ export class LinkViewDto {
 }
 
 export class OtpSentDto {
-  @ApiProperty({ enum: ['OTP_SENT', 'OTP_REQUIRED', 'ALREADY_USED', 'EXPIRED', 'DECLINED', 'BLOCKED', 'NOT_YET_OPEN'] })
+  @ApiProperty({
+    enum: [
+      'OTP_SENT',
+      'OTP_REQUIRED',
+      'ALREADY_USED',
+      'EXPIRED',
+      'DECLINED',
+      'BLOCKED',
+      'NOT_YET_OPEN',
+    ],
+  })
   state!: string;
   @ApiProperty({ nullable: true, example: 'a***@example.com' }) maskedEmail!: string | null;
   @ApiProperty({ example: 600 }) expiresInSeconds!: number;
@@ -86,10 +104,13 @@ export class OtpSentDto {
 }
 
 export class SessionTokenDto {
-  @ApiProperty({ description: 'Candidate session JWT; keep it in memory. Renewed by the heartbeat.' })
+  @ApiProperty({
+    description: 'Candidate session JWT; keep it in memory. Renewed by the heartbeat.',
+  })
   sessionToken!: string;
   @ApiProperty({ format: 'date-time' }) sessionTokenExpiresAt!: string;
-  @ApiProperty({ enum: ['OPENED', 'CONSENTED', 'VERIFIED', 'IN_PROGRESS', 'PAUSED'] }) status!: string;
+  @ApiProperty({ enum: ['OPENED', 'CONSENTED', 'VERIFIED', 'IN_PROGRESS', 'PAUSED'] })
+  status!: string;
   @ApiProperty({ format: 'date-time' }) serverTime!: string;
 }
 
@@ -97,14 +118,16 @@ export class ConsentDocumentDto {
   @ApiProperty({ format: 'uuid' }) consentTextId!: string;
   @ApiProperty() version!: string;
   @ApiProperty({ description: 'Markdown. Render as text; never as HTML.' }) bodyMd!: string;
-  @ApiProperty({ description: 'False for a placeholder text (not for real candidates)' }) legalApproved!: boolean;
+  @ApiProperty({ description: 'False for a placeholder text (not for real candidates)' })
+  legalApproved!: boolean;
   @ApiProperty() signed!: boolean;
   @ApiProperty({ nullable: true, format: 'date-time' }) signedAt!: string | null;
 }
 
 export class ConsentSignedDto {
   @ApiProperty({ enum: ['CONSENTED'] }) status!: string;
-  @ApiProperty({ format: 'date-time', description: 'Server time of the signature' }) signedAt!: string;
+  @ApiProperty({ format: 'date-time', description: 'Server time of the signature' })
+  signedAt!: string;
 }
 
 export class ConsentDeclinedDto {
@@ -136,7 +159,10 @@ class StartedQuestionDto {
 class StartedSectionDto {
   @ApiProperty() position!: number;
   @ApiProperty() title!: string;
-  @ApiProperty({ nullable: true, description: 'After accommodations; null = shares the session time' })
+  @ApiProperty({
+    nullable: true,
+    description: 'After accommodations; null = shares the session time',
+  })
   timeLimitMs!: number | null;
   @ApiProperty({ nullable: true, format: 'date-time' }) startedAt!: string | null;
   @ApiProperty({ nullable: true, format: 'date-time' }) deadlineAt!: string | null;
@@ -147,7 +173,10 @@ export class TestStartedDto {
   @ApiProperty({ enum: ['IN_PROGRESS', 'PAUSED'] }) status!: string;
   @ApiProperty({ format: 'date-time' }) serverTime!: string;
   @ApiProperty({ format: 'date-time' }) startedAt!: string;
-  @ApiProperty({ format: 'date-time', description: 'Server deadline; the client clock never decides' })
+  @ApiProperty({
+    format: 'date-time',
+    description: 'Server deadline; the client clock never decides',
+  })
   deadlineAt!: string;
   @ApiProperty({ type: [StartedSectionDto] }) sections!: StartedSectionDto[];
 }
@@ -171,7 +200,8 @@ class CountersDto {
 
 export class ProctorKeyDto {
   @ApiProperty({ enum: ['HMAC-SHA256'] }) alg!: string;
-  @ApiProperty({ description: 'Base64, 32 bytes. Returned once per auth epoch; never log it.' }) key!: string;
+  @ApiProperty({ description: 'Base64, 32 bytes. Returned once per auth epoch; never log it.' })
+  key!: string;
   @ApiProperty() keyEpoch!: number;
   @ApiProperty({ type: CountersDto }) counters!: CountersDto;
 }

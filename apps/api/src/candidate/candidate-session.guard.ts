@@ -51,7 +51,14 @@ export class CandidateSessionGuard implements CanActivate {
     const session = await this.orgContext.runInOrg(claims.oid, () =>
       this.prisma.client.session.findUnique({
         where: { id: claims.sid },
-        select: { id: true, orgId: true, invitationId: true, status: true, authEpoch: true, pauseReasons: true },
+        select: {
+          id: true,
+          orgId: true,
+          invitationId: true,
+          status: true,
+          authEpoch: true,
+          pauseReasons: true,
+        },
       }),
     );
     if (session === null) unauthorized();

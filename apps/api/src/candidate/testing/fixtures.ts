@@ -44,7 +44,9 @@ export interface InvitationOptions {
     readonly deadlineAt?: Date;
     readonly lastHeartbeat?: Date;
     readonly authEpoch?: number;
-    readonly pauseReasons?: Array<'FULLSCREEN_EXIT' | 'SCREEN_SHARE_STOPPED' | 'SIDE_CAMERA_LOST' | 'PROCTOR'>;
+    readonly pauseReasons?: Array<
+      'FULLSCREEN_EXIT' | 'SCREEN_SHARE_STOPPED' | 'SIDE_CAMERA_LOST' | 'PROCTOR'
+    >;
     readonly hmacKeyEnc?: string;
     readonly deviceInfo?: Prisma.InputJsonObject;
   };

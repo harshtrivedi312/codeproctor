@@ -11,7 +11,11 @@ import { CandidateSessionGuard } from './candidate-session.guard';
 
 const SRC = resolve(__dirname, '..');
 /** Routes that run before a session token exists (link resolve, OTP send, OTP verify). */
-const PRE_TOKEN = new Set(['POST candidate/session/link', 'POST candidate/session/otp', 'POST candidate/session/start']);
+const PRE_TOKEN = new Set([
+  'POST candidate/session/link',
+  'POST candidate/session/otp',
+  'POST candidate/session/start',
+]);
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'ALL', 'OPTIONS', 'HEAD'];
 
 function controllerFiles(dir: string): string[] {
@@ -38,7 +42,8 @@ function routesOf(): Route[] {
       if (base === undefined) continue;
       const prefix = Array.isArray(base) ? (base[0] ?? '') : base;
       if (!`/${prefix}`.startsWith('/candidate')) continue;
-      const classGuards = (Reflect.getMetadata(GUARDS_METADATA, value) as unknown[] | undefined) ?? [];
+      const classGuards =
+        (Reflect.getMetadata(GUARDS_METADATA, value) as unknown[] | undefined) ?? [];
       const classPublic = Reflect.getMetadata(IS_PUBLIC, value) === true;
       for (const name of Object.getOwnPropertyNames(value.prototype as object)) {
         const handler = (value.prototype as Record<string, unknown>)[name];
@@ -70,7 +75,9 @@ describe('Candidate routes are guarded (ADR 0013 section 5.10, FR-106, NFR-04)',
   });
 
   it('NFR-04: every /candidate route except the three pre-token ones uses CandidateSessionGuard', () => {
-    const unguarded = routes.filter((r) => !r.guarded && !PRE_TOKEN.has(r.label)).map((r) => r.label);
+    const unguarded = routes
+      .filter((r) => !r.guarded && !PRE_TOKEN.has(r.label))
+      .map((r) => r.label);
     expect(unguarded).toEqual([]);
   });
 

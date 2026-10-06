@@ -17,7 +17,13 @@ import { Public } from '../common/auth/decorators';
 import { CandidateAuthService } from './candidate-auth.service';
 import type { LinkView } from './candidate-auth.service';
 import { OTP_TTL_SECONDS } from './otp.service';
-import { LinkDto, LinkViewDto, OtpSentDto, SessionTokenDto, StartSessionDto } from './dto/candidate.dto';
+import {
+  LinkDto,
+  LinkViewDto,
+  OtpSentDto,
+  SessionTokenDto,
+  StartSessionDto,
+} from './dto/candidate.dto';
 
 const NO_STORE = 'no-store';
 
@@ -43,11 +49,14 @@ export class CandidateAuthController {
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)
   @ApiOperation({
-    summary: 'What an invitation link shows: open, already used, expired, declined, blocked (L-3, L-4)',
+    summary:
+      'What an invitation link shows: open, already used, expired, declined, blocked (L-3, L-4)',
     description: 'Sends nothing. A used link never sends an OTP (TC-021).',
   })
   @ApiOkResponse({ type: LinkViewDto })
-  @ApiNotFoundResponse({ description: 'Unknown token (code INVALID_LINK is not set: one generic 404)' })
+  @ApiNotFoundResponse({
+    description: 'Unknown token (code INVALID_LINK is not set: one generic 404)',
+  })
   async link(@Body() dto: LinkDto): Promise<LinkViewDto> {
     return linkDto(await this.auth.resolveLink(dto.invitationToken));
   }
@@ -84,7 +93,9 @@ export class CandidateAuthController {
   })
   @ApiOkResponse({ type: SessionTokenDto })
   @ApiBadRequestResponse({ description: 'OTP_INVALID or OTP_NOT_REQUESTED' })
-  @ApiConflictResponse({ description: 'LINK_ALREADY_USED, LINK_EXPIRED, LINK_DECLINED, WINDOW_NOT_OPEN' })
+  @ApiConflictResponse({
+    description: 'LINK_ALREADY_USED, LINK_EXPIRED, LINK_DECLINED, WINDOW_NOT_OPEN',
+  })
   @ApiTooManyRequestsResponse({ description: 'LINK_BLOCKED or OTP_COOLDOWN, with Retry-After' })
   async start(@Body() dto: StartSessionDto, @Req() req: Request): Promise<SessionTokenDto> {
     const now = new Date();
