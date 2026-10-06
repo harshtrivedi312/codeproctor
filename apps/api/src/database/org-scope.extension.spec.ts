@@ -1,6 +1,7 @@
 // The extension's behaviour that is decided before any SQL is sent: no org context, raw SQL, and
 // payloads for another org. The client points at a closed port and never connects, so this runs
 // without Docker. The queries that do reach Postgres are in tc-008-org-isolation.spec.ts.
+import { Prisma } from '../generated/prisma/client.js';
 import { createPrismaClient } from './create-prisma-client';
 import { OrgContextMissingError, OrgScopeViolationError, RawQueryNotAllowedError } from './errors';
 import { OrgContextService } from './org-context';
@@ -8,6 +9,7 @@ import { createOrgScopedClient } from './org-scope.extension';
 import { SCOPED_OPERATIONS } from './org-scope-args';
 import { ORG_SCOPE } from './org-scope-map';
 import type { ModelName } from './org-scope-map';
+import { scopeHopColumn } from './org-scope-relations';
 
 const ORG_A = '11111111-1111-4111-8111-111111111111';
 const ORG_B = '22222222-2222-4222-8222-222222222222';
@@ -51,6 +53,84 @@ describe('org scope extension without a database (NFR-04, FR-103)', () => {
       await orgContext.runInOrg(ORG_A, () => Promise.resolve());
       expect(orgContext.current()).toBeUndefined();
       await expect(client.session.findMany()).rejects.toBeInstanceOf(OrgContextMissingError);
+    });
+  });
+
+  describe('a relation key inside a createMany row (FU-DB-106)', () => {
+    // The nested-write guard does not walk createMany rows (they are flat, and ingest paths pay
+    // nothing). It relies on Prisma itself refusing a relation in a row, and this pins that: if a
+    // Prisma release accepted one, `connect` through createMany would bypass deny-by-default.
+    const rows = [
+      [
+        'a relation connect',
+        { testId: ORG_A, title: 't', position: 1, test: { connect: { id: ORG_B } } },
+      ],
+      [
+        'a relation create',
+        { testId: ORG_A, title: 't', position: 1, test: { create: { name: 'n' } } },
+      ],
+      [
+        'a back relation',
+        { testId: ORG_A, title: 't', position: 1, questions: { create: [{ position: 0 }] } },
+      ],
+    ] as const;
+
+    it.each(rows)(
+      'TC-008 createMany with %s in a row is rejected by Prisma validation',
+      async (_name, row) => {
+        for (const operation of ['createMany', 'createManyAndReturn'] as const) {
+          const run = (): Promise<unknown> =>
+            (client.testSection[operation] as (args: unknown) => Promise<unknown>)({ data: [row] });
+          await expect(orgContext.runInOrg(ORG_A, run)).rejects.toBeInstanceOf(
+            Prisma.PrismaClientValidationError,
+          );
+          await expect(orgContext.runSystem('BACKGROUND_JOB', run)).rejects.toBeInstanceOf(
+            Prisma.PrismaClientValidationError,
+          );
+        }
+      },
+    );
+
+    it('TC-008 the same holds on a model with its own org_id, for the single-object form too', async () => {
+      const row = { name: 't', durationMinutes: 30, org: { connect: { id: ORG_B } } };
+      for (const data of [[row], row]) {
+        const run = (): Promise<unknown> =>
+          (client.test.createMany as (args: unknown) => Promise<unknown>)({ data });
+        // The extension refuses the org relation itself before Prisma sees it (deny by default).
+        await expect(orgContext.runInOrg(ORG_A, run)).rejects.toThrow(
+          /the org relation cannot be written; set the scalar orgId/,
+        );
+      }
+    });
+  });
+
+  describe('orgId on a create (FU-DB-100)', () => {
+    it('TC-008 the unchecked create types require orgId, so typed code passes it (a type-level pin)', () => {
+      // Never called: this only has to compile. If Prisma made orgId optional, the directive below
+      // would fail the type check, and the README's "pass orgId explicitly" would need a new look.
+      const typeOnly = (): void => {
+        void client.invitation.create({
+          // @ts-expect-error orgId is a required scalar of the unchecked create input
+          data: {
+            testId: ORG_A,
+            candidateId: ORG_B,
+            tokenHash: 'h',
+            windowStart: new Date(),
+            windowEnd: new Date(),
+          },
+        });
+        void client.invitation.create({
+          data: {
+            orgId: ORG_A,
+            testId: ORG_A,
+            candidateId: ORG_B,
+            tokenHash: 'h',
+            windowStart: new Date(),
+            windowEnd: new Date(),
+          },
+        });
+      };
+      expect(typeof typeOnly).toBe('function');
     });
   });
 
@@ -193,6 +273,51 @@ describe('org scope extension without a database (NFR-04, FR-103)', () => {
         );
         await expect(run()).rejects.toBeInstanceOf(OrgContextMissingError);
       }
+    });
+  });
+
+  describe("system scope: a path model's first-hop scope key in an update is refused (before any SQL, FU-DB-107)", () => {
+    const PARENT = '55555555-5555-4555-8555-555555555555';
+    const PATH = (Object.keys(ORG_SCOPE) as ModelName[]).filter(
+      (model) => ORG_SCOPE[model].kind === 'path',
+    );
+    const UPDATES: Array<[string, (data: Record<string, unknown>) => Record<string, unknown>]> = [
+      ['update', (data) => ({ where: { id: PARENT }, data })],
+      ['updateMany', (data) => ({ data })],
+      ['updateManyAndReturn', (data) => ({ data })],
+      ['upsert', (data) => ({ where: { id: PARENT }, create: {}, update: data })],
+    ];
+
+    it('TC-008 all 21 path models are covered', () => {
+      expect(PATH).toHaveLength(21);
+    });
+
+    // The client points at a closed port: a call that is not refused by the extension would fail
+    // with a connection error instead, so OrgScopeViolationError proves no query was sent.
+    it.each(PATH)(
+      'TC-008 %s: update, updateMany, updateManyAndReturn and upsert are refused',
+      async (model) => {
+        const column = scopeHopColumn(model) as string;
+        for (const [operation, build] of UPDATES) {
+          await expect(
+            orgContext.runSystem('BACKGROUND_JOB', () =>
+              delegate(model)[operation]?.(build({ [column]: PARENT })),
+            ),
+          ).rejects.toThrow(new RegExp(`${model}\\.${operation}: ${column} cannot be written`));
+          // The { set } form too.
+          await expect(
+            orgContext.runSystem('AUTH_BOOTSTRAP', () =>
+              delegate(model)[operation]?.(build({ [column]: { set: PARENT } })),
+            ),
+          ).rejects.toBeInstanceOf(OrgScopeViolationError);
+        }
+      },
+    );
+
+    it('TC-008 with no scope nothing changes: OrgContextMissingError, not a violation', async () => {
+      await expect(
+        client.testSection.update({ where: { id: PARENT }, data: { testId: PARENT } }),
+      ).rejects.toBeInstanceOf(OrgContextMissingError);
     });
   });
 

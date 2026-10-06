@@ -91,7 +91,7 @@ Should-fix
 
 Nits
 
-- `config.ts`: stale doc comment on `snapshotMaxWidth`.
+- (DONE) `config.ts`: stale doc comment on `snapshotMaxWidth`.
 - `vision-monitor.ts`: unreachable `SPEECH_DETECTED` case in `emitRuleEvent`; remove.
 - `rules.ts`: object confidence falls back to the threshold on a window miss; carry the max score seen instead.
 - `evidence.ts`: snapshots follow default severities, so org overrides are ignored; make the type list configurable.
@@ -165,14 +165,17 @@ Nits
 Observation (confirmed): the fired flush-timer callback in `event-queue.ts` never resets `flushTimer`. An event enqueued while a flush is on the chain (after the timer fired, before `cutAll()` ran) gets no new timer and joins the earlier batch, so 3 pastes can produce 2 batches instead of 3. No event is lost or delivered out of order (proved in PR #47); only the batch count differs. Decision for the Delivery Lead or hub: should a late event open a new 5 s window (reset `flushTimer = null` when the timer fires, and start a timer after a cut if events remain), or is joining the earlier batch acceptable? Not changed in PR #47 on purpose.
 
 ## Round 3 review items for PR #43 (filed, not fixed)
+
 Fixed in this round: SF1 (an abandoned vision start only touches its own client; `InferenceClient.terminate()` settles a pending init at once; test: start times out, same instance restarted in a new session, new run intact), SF2 (last-seen test now checks the written time), N1 (finish() comments and test name say the counter is kept).
 
 Should-fix
+
 - SF3 `VisionMonitor.attachStream` on a running monitor calls `video.play()` unbounded (start bounds it to 5 s).
 - SF4 `VoiceMonitor.attachStream`: concurrent calls can overlap, a VAD created by an abandoned call can leak, and held-back speech rules are replaced by the new `SpeechRules` (speech held by the cooldown is lost on a stream swap).
 - SF5 `d.stop()` after a detector start timeout is unbounded; a detector whose `stop()` hangs blocks `ProctorSession.start`.
 
 Nits
+
 - N2 `reportStartTimeout` re-emits DETECTOR_UNAVAILABLE for tasks that were already reported.
 - N3 missing `.catch` on the `stopStream().then(...)` chain in `pipeline.ts` device loss.
 - N4 single-entry `describe.each` in `stop-inflight.test.ts` style tests; use a plain `describe`.
@@ -182,20 +185,26 @@ Nits
 - N8 (from the earlier list) kept under "Remaining review items".
 
 Owner decisions to respect (C-25, C-32)
+
 - C-25: "face detectors off" is its own accommodation setting, separate from "no identity check". Today the SDK has one `FACE` detector id (`PROCTOR_DETECTORS`) and `VisionMonitor` only starts the identity re-check when the `face` task is enabled, so disabling FACE also disables the re-check. Gap: the accommodation model needs a separate flag (and `IdentityScheduler` needs its own enable switch) before this is correct; and with the ADR 0013 server-side re-check, the server (409 `DETECTOR_DISABLED`) must follow the same separation. Not changed yet.
 - C-32: no Sentry or third-party error tracker in the SDK. The SDK currently reports nothing outside the event pipeline. If it ever reports errors it must go through the app's error reporter to our API, scrubbed (no URLs, keys, tokens, object names).
 
 ## Round 4 review items for PR #43 (filed, not fixed; docs only)
+
 Should-fix
-- SF-A The SF1 test (`vision-monitor.test.ts`, "an abandoned first run cannot tear down a later run") does not reach the race. Run 1's late code now finishes inside `s1.start()` because `stop()` settles the init, so only the `video.play()` wait can resume an old run after a new one has started. Rewrite: abandon run 1 during a test-controlled `play()`, start session 2, release run 1's play, then assert worker B is not terminated, tasks are still 3 and `tick()` samples. Also `workerA.terminated` would be true without the `terminate()` change, so its comment overclaims.
+
+- SF-A (DONE in PR fe/sdk-sfc) The SF1 test (`vision-monitor.test.ts`, "an abandoned first run cannot tear down a later run") does not reach the race. Run 1's late code now finishes inside `s1.start()` because `stop()` settles the init, so only the `video.play()` wait can resume an old run after a new one has started. Rewrite: abandon run 1 during a test-controlled `play()`, start session 2, release run 1's play, then assert worker B is not terminated, tasks are still 3 and `tick()` samples. Also `workerA.terminated` would be true without the `terminate()` change, so its comment overclaims.
 - SF-B `review-fixes.test.ts` (last-seen test): the name says add/confirm but confirm is not asserted (the throttle skips the T+4 min confirm write; the T+6 min system time is set twice). Make `put` wait on a controlled promise and assert last-seen near T+6 min, or drop "confirm" from the name and delete both T+6 lines.
-- SF-C (silent-pass class, FR-606, TC-070; do soon) `vision-monitor.ts`: `this.reported` is not cleared by `stop()`. After `reportStartTimeout` in session 1, a reused instance whose session-2 `startInner` throws skips every task in `reported` and emits no DETECTOR_UNAVAILABLE. Clear `reported` and `failures` in `stop()` or at the start of `run()`.
+- SF-C (DONE in PR fe/sdk-sfc; `reported` and `failures` are cleared in `stop()` and at the start of `run()`) (silent-pass class, FR-606; no TC covers DETECTOR_UNAVAILABLE; do soon) `vision-monitor.ts`: `this.reported` is not cleared by `stop()`. After `reportStartTimeout` in session 1, a reused instance whose session-2 `startInner` throws skips every task in `reported` and emits no DETECTOR_UNAVAILABLE. Clear `reported` and `failures` in `stop()` or at the start of `run()`.
 
 Nits
+
 - `review-fixes.test.ts` comment says the fake clock keeps ticking; it is frozen (the drift comes from elsewhere, so check before keeping the tolerance).
 - `vision-monitor.test.ts`: `.every(...)` passes on an empty array; also assert the `vision-` capability flags exist.
 - (Fixed in this commit) the PR #23 numbered list was merged into one line, and the "Round 3" heading lacked a blank line.
+
 ## /dev/proctor demo page (apps/web)
+
 - Root `eslint.config.mjs` does not ignore `apps/web/public/dev-proctor-models/**`. After a human downloads the models there, `pnpm --filter @codeproctor/web lint` lints about 170 MB of vendored files (11k errors). CI is unaffected (the dir is gitignored and absent). Hub: add `'apps/web/public/dev-proctor-models/**'` to `globalIgnores`.
 - Production CSP has no `'wasm-unsafe-eval'`, so MediaPipe, ONNX and TF.js wasm will not compile in a production build. The dev server works because dev adds `'unsafe-eval'`. Needed before any real candidate run; also `worker-src`/`connect-src` for the real object-storage origin.
 - The global `Permissions-Policy` sets `microphone=()`, which blocks the voice detector everywhere. The demo gets a dev-only per-path override in `next.config.ts`; the real candidate test route needs `microphone=(self)`.
@@ -203,21 +212,22 @@ Nits
 - `fetch-models.mjs` now also downloads COCO-SSD lite_mobilenet_v2 (still no SHA-256 pinning).
 
 ### Review follow-ups for PR #35 (code-reviewer, not blockers)
+
 Fixed in the PR: COCO manifest path traversal check (`scripts/safe-path.mjs`, tested), usage comment path, `next.config.test.ts` for the Permissions-Policy override. No model binary was ever committed on the branch (`git log --stat origin/main..HEAD -- apps/web/public` is empty).
 
-Should-fix
-4. DONE: mock server memory bounds (sessions 20, chunks and batches per session 5000, issued evidence names 1000, heartbeat health JSON size-limited, `/state` gap scan capped at 50 with a total count), and chunk `segment`, `seq`, `bytes` and `durationMs` are validated. Body limits are enforced on Content-Length before reading (events 256 KiB, keystrokes 2 MiB, media PUT 16 MiB, evidence PUT 1 MiB, other JSON 16 KiB).
-5. DONE: the evidence PUT requires a name that was presigned, and the media PUT no longer creates session state from an unauthenticated URL.
-6. DONE: `mount.ts` `stop()` cancels an in-progress async start (flag checked after each await; a late camera or microphone is released; the screen-share picker answer after stop is released).
+Should-fix 4. DONE: mock server memory bounds (sessions 20, chunks and batches per session 5000, issued evidence names 1000, heartbeat health JSON size-limited, `/state` gap scan capped at 50 with a total count), and chunk `segment`, `seq`, `bytes` and `durationMs` are validated. Body limits are enforced on Content-Length before reading (events 256 KiB, keystrokes 2 MiB, media PUT 16 MiB, evidence PUT 1 MiB, other JSON 16 KiB). 5. DONE: the evidence PUT requires a name that was presigned, and the media PUT no longer creates session state from an unauthenticated URL. 6. DONE: `mount.ts` `stop()` cancels an in-progress async start (flag checked after each await; a late camera or microphone is released; the screen-share picker answer after stop is released).
 
 Nits
+
 - DONE: missing dev token is 401 (comment and code agree); stricter full-key regex for the PUT route; capability list in `mount.ts` uses `textContent`; test names carry FR/TC/NFR ids; content-type check is `/^application\/json(\s*;|$)/i`.
 - Open: `identity/recheck` does not validate `capturedAt` as ISO 8601 (any string is accepted); the evidence PUT does not check Content-Type, size against the presigned `bytes` or repeat count (a name can be PUT many times); the evidence key is derived with `path.indexOf('evidence/')` slicing, replace with the capture group of the key regex.
 - Open: the `/dev/proctor` chunk still compiles into production bundles (the route 404s at runtime). Consider a prebuild guard that fails the build if `public/dev-proctor-models` exists, and excluding the route from production builds.
 - Open: root `eslint.config.mjs` `globalIgnores` for `apps/web/public/dev-proctor-models/**` was added by main (#37); nothing left here.
 
 ## /dev/proctor mocks aligned with ADR 0013 (Proposed, PR #39), provisional
+
 The mock handlers and the demo's injected adapters (`packages/proctor-sdk/src/demo/mount.ts`) follow the wire tables of ADR 0013 sections 2 to 5. SDK core is unchanged. Deferred SDK changes, to do only after the owner accepts ADR 0013:
+
 - `POST /candidate/session/proctor-key` flow: per-epoch key, non-extractable `CryptoKey` in IndexedDB, re-sign the outbox on a new epoch or `KEY_EPOCH_STALE`, counters seeded from the response. The mock still uses one demo key and base64 in the bundle.
 - RFC 7807 `code` mapping in `createFetchTransport` and `createFetchMediaApi` (today they map by status only; 409 and 422 mean different things by code). The demo's media adapter reads `code` itself.
 - Heartbeat body from SDK core (recorder and queue health) plus 409 `SESSION_NOT_ACTIVE` handling. The demo wraps the transport; per-stream `segment` and `lastSeq` are not exposed by `RecorderHealth`, so the demo sends 0 for them.
@@ -227,12 +237,49 @@ The mock handlers and the demo's injected adapters (`packages/proctor-sdk/src/de
 - Not modelled in the mock: key epochs, SESSION_NOT_ACTIVE, rate limits other than identity (1 per 60 s), org prefixes (fixed `demo`).
 
 ## Review round 2 for PR #35 (code-reviewer, not blockers; docs only)
+
 Should-fix
+
 - SF1 `api/_lib/handler.ts` `tooLarge`: a chunked upload without Content-Length passes (`Number(null)` is 0) and is fully buffered by `arrayBuffer()` or `json()`. Add a `readCapped(req, max)` helper that reads `req.body` with a reader and answers 413 once the limit is passed.
 - SF2 `api/media/put/[...key]/route.ts` reads the body before checking the chunk was presigned. Do the lookup first and answer 403 without reading.
 
 Nits
+
 - `mount.test.ts`: add cases for stop() during a delayed `recordAudio` `getUserMedia` (microphone released) and stop() while the screen-share picker is open (late tracks stopped). Note that the existing "no microphone request" assertion would pass even without the stopped checks; `cam.stop` is the real catch.
 - `pipeline.recordScreen` can call `begin('SCREEN')` after `pipeline.stop()` if stop lands during `applyConstraints` or `nextSegment` (`mount.ts` screen-share handler): check `stopped` after `recordScreen` and call `pipeline.stopStream('SCREEN')`.
 - `api/state/route.ts` GET still creates sessions via `sessionState(id)`; use `existingSession` and return an empty summary.
 - `withSession` returns 413 before 401; check auth first.
+
+## Identity re-check constants (owner decision C-08; PR fe/sdk-identity-constants)
+Done: `IDENTITY_FRAME_WIDTH_PX = 640` and `IDENTITY_RECHECK_INTERVAL_MS = 120_000` are named constants and the defaults (`snapshotMaxWidth`, `identityIntervalMs`); tests assert width, size scaling and one re-check per 120 s. Gaps: the capture only scales down, so a webcam narrower than 640 px gives a narrower frame (the recorder asks for 640x360, so this is the normal width); a real-browser capture was not measured here; the ADR 0013 limit is 1 re-check per 60 s and the `/dev/proctor` demo uses 61 s so it shows one soon. The FACE/identity coupling (C-25) is unchanged and waits for ADRs 0013 and 0015.
+- There is no TC for the identity re-check (QA to add one for the 640 px / 120 s behaviour). `snapshotMaxWidth` also sizes HIGH-event evidence snapshots; if the config ever becomes per-org, add a separate `identityFrameWidthPx`.
+## Should-fix round (PR fe/sdk-should-fix)
+Done (with tests): S2 `EventQueue.finish()` no longer calls `retryNow()` every 50 ms (at most once a second, so about one request per second in a 5xx outage), waits for an in-flight send at the deadline before counting `lostBatches`, never re-arms a retry after it returned, and `ProctorSession.finish()` raises `finish-pending` (stay online) and `finish-lost` capability signals; S3 EventQueue survives IndexedDB failures (open failure and write failure fall back to memory, the flush chain is never rejected, capability `event-storage`); S4 an `error` event after ready is one strike (three terminate), and after a frame timeout back-pressure stays until the worker answers late, declared dead if it never does within another timeout; S5 `attachStream` only retries when the monitor was down for a missing stream, not after model failures; S6 UploadQueue probes IndexedDB again every 30 s while degraded and leaves memory-only mode (`recording-storage` goes back to SUPPORTED; a write failure is UNVERIFIABLE, an open failure UNSUPPORTED); SF3 `attachStream` bounds `video.play()`; SF4 `VoiceMonitor.attachStream` calls are serialised and the speech rules (held-back speech) survive a swap; SF5 a hanging `stop()` after a start timeout is bounded to 5 s; N2 `reportStartTimeout` does not re-emit for reported tasks; N3 device-loss `stopStream` failure no longer hides the signal; N6 a stopped `VoiceMonitor` can be started again; `memoryBytes()` is a running counter; unreachable SPEECH_DETECTED case removed.
+
+Still open (not in this PR): proctor-key route, per-epoch key, models.lock.json and SHA pinning, C-25 accommodation split (held for ADR 0013 and 0015); `makeRoom` can exceed the 200 MB cap by in-flight chunks; reject non-https presigned URLs; object confidence carries the threshold on a window miss; evidence snapshot types configurable; a HIGH event waiting for its evidence upload is dropped if the session stops meanwhile; identity re-check coupling note; N4, N5, N7; `VoiceMonitor` `handle.start()` is not under the init timeout; `sweep.ts` assumes session ids contain no `:`; keystroke queue purge (no keystroke queue exists yet); the demo does not call `attachStream`/`onDeviceLost`.
+
+## PR #70 review round (fe/sdk-should-fix)
+Fixed here: B1 (the event sequence counter is written on every cut even while degraded, backed up in localStorage, recovery probe like the upload queue; an unreadable counter with no backup seeds the sequence above any plausible earlier value, seconds since 2026-01-01, and raises an `event-seq` capability, so the sequence gets holes; two reuse paths remain, see S-D below), B2 (one live VAD: start and attach run through one queue, generation and token guards, stale callbacks ignored), S5 (`down` state: FAILED on every failure path, reset in `stop()`), S7 (FATAL drops the memory counter), S8 (SF5 test waits for the detector's start with real ticks and uses configurable 50 ms bounds), S9 (`vi.useRealTimers()` after each test). Not fixable before #64 merges: S6 (keep `reported`/`failures` clears at the top of `run()` and in `stop()` and reset `down` there once #64 is in main; merge order #64 then #70).
+
+Filed (not fixed)
+- S1 `EventQueue.finish()` initial flush is unbounded because the fetch transport has no timeout: bound with `Promise.race` against the deadline while keeping the in-flight-sign guarantee, and test the settle loop.
+- S2 the "normal backoff" comment in `finish()` is inaccurate: `retryNow()` resets `attempt` to 0 and 429 `Retry-After` is ignored.
+- S3 the in-memory event outbox has no size cap: add a cap, a `droppedBatches` counter in `stats()` and a flag.
+- S4 the session-level flags `event-storage`, `event-seq`, `finish-pending`, `finish-lost` bypass `getCapabilities()`: route through the `ctx.setCapability` path; ADR 0013 names the flag `idb: UNSUPPORTED`; `finish-pending` should also count `pendingEvents`.
+- S10 vacuous assertions in `vision-monitor.test.ts` (held-back speech case, a `toBeDefined`, and the "attachStream retries only" test's trailing checks).
+- Nits: JSDoc on `degrade()` belongs on `start()`; `upload-queue.ts` "Called once" wording; the recovery flag says SUPPORTED while memory-only chunks remain; `inference-client` `onDead` doc; `enqueue`/`flush` after `finish()` still persist; a bounded voice `destroy()` and mid-segment speech lost on a stream swap; `session.ts` a `stop()` that hangs more than 5 s leaves a late-starting detector alive.
+
+## PR #70 review round 2 (fe/sdk-should-fix)
+Fixed: S-A (stale callbacks asserted to report nothing, the live set exactly one event, stop() flushes nothing extra), S-B (an abandoned voice `begin()` returns quietly from the failure handler and a throwing `destroy()` is contained; test: rejecting createVad then stop and restart emits no DETECTOR_UNAVAILABLE), S-C (seed floor 10 000 000 plus seconds since 2026-01-01, clamped below 2^31, so a device clock before 2026 is still high), S-E (backup is `{ seq, seenAt }`, other sessions' entries older than `staleAfterMs` are swept on start), S-F (the finish test waits for `sendBatch` instead of sleeping), N1 (only safe integers in [0, 2^31) are accepted as a stored counter or backup), N2 (comment says every reused seq is rejected, ADR 0013: dropped and counted rejected).
+
+Should-fix (tied to ADR 0013 counters)
+- S-D "never reused" overstated: two reuse paths stay unflagged until ADR 0013 counters exist. (1) Every counter write failed in the previous page load while IndexedDB reads work on reload: the sequence restarts at 0. (2) Resuming on a new device always restarts at 0 (FR-106, D-21): fixed by `proctor-key` `counters.eventSeqStart`, `max(local, server)`. Raised from nit to should-fix.
+- S-E exception to confirm with the hub: the sequence backup uses `localStorage` (`codeproctor:eventseq:<sessionId>`, a pseudonymous id and an integer, no candidate data).
+
+Nits (filed)
+- N3 `signHex` failure is swallowed in `cutAll` with no `droppedBatches` count.
+- N4 `VoiceMonitor`: a hung `destroy()` or `handle.start()` now also blocks a later `start()` (it shares the queue); `start()` with no stream does not destroy an existing handle or bump the token.
+- N5 the `over = {}` parameter in `should-fix.test.ts` should be `Partial<EventQueueOptions>`.
+- N6 `UploadQueue` `memory.set` on an existing key double-counts bytes.
+- N7 `EventQueue.finished` is never reset in `start()`: document the queue as single-use.
+- N8 a vacuous `expect(worker).toBeDefined()` in the attach test.

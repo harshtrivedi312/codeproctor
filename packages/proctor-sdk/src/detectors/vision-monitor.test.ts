@@ -4,6 +4,7 @@ import { ProctorSession } from '../core/session';
 import { TEST_KEY_B64 } from '../test/helpers';
 import { fakeContext } from '../test/helpers';
 import { NO_FACE_SEQUENCE, PHONE_STRONG, secondsOf } from './__fixtures__/samples';
+import { IDENTITY_RECHECK_INTERVAL_MS } from './config';
 import { uploadEvidence, needsEvidence, type EvidenceApi } from './evidence';
 import { IdentityScheduler } from './identity';
 import { InferenceClient, type WorkerLike } from './inference-client';
@@ -326,7 +327,7 @@ describe('identity re-check (FR-606, ADR 0004)', () => {
     ];
     let calls = 0;
     const s = new IdentityScheduler(
-      120_000,
+      IDENTITY_RECHECK_INTERVAL_MS,
       () => Promise.resolve(new Blob(['f'])),
       () => {
         calls++;
@@ -350,7 +351,7 @@ describe('identity re-check (FR-606, ADR 0004)', () => {
       captureSnapshot: () => Promise.resolve(new Blob(['f'])),
     });
     await m.start(h.ctx);
-    await vi.advanceTimersByTimeAsync(120_000);
+    await vi.advanceTimersByTimeAsync(IDENTITY_RECHECK_INTERVAL_MS);
     expect(h.events.find((e) => e.type === 'FACE_MISMATCH')?.payload).toEqual({ similarity: 0.2 });
     m.stop();
     vi.useRealTimers();
@@ -443,10 +444,14 @@ describe('review fixes: late stream, failure reporting, dead worker (FR-606)', (
     expect(m.getStats().tasks).toEqual([]);
   });
 
-  it('FR-606: a worker that errors after ready is terminated and RUNTIME_ERROR is emitted', async () => {
+  it('FR-606: one error event after ready is only a strike; three terminate the worker and emit RUNTIME_ERROR', async () => {
     const h = fakeContext();
     const { m, worker } = setup();
     await m.start(h.ctx);
+    worker.onerror?.({});
+    expect(worker.terminated).toBe(false); // an uncaught handler exception does not kill a worker
+    expect(m.getStats().tasks).toHaveLength(3);
+    worker.onerror?.({});
     worker.onerror?.({});
     expect(worker.terminated).toBe(true);
     expect(
@@ -565,7 +570,10 @@ describe('review fixes: voice (FR-607, TC-061)', () => {
   });
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 describe('review blockers: abandoned start, bounded play, stream swap (FR-606, FR-607)', () => {
   it('FR-606: a vision start that completes after the session timeout is stopped, silent and leaks nothing', async () => {
@@ -663,21 +671,29 @@ describe('review blockers: abandoned start, bounded play, stream swap (FR-606, F
     expect(destroys).toEqual([1, 2]);
   });
 
-  it('FR-606: an abandoned first run cannot tear down a later run of the same instance (generation guard, own client only)', async () => {
+  it('FR-606: an old run resuming from video.play() after a new run started cannot tear that run down', async () => {
     const workerA = new FakeWorker();
-    workerA.postMessage = () => undefined; // run 1: models never load, init never answered
     const workerB = new FakeWorker();
     const workers = [workerA, workerB];
+    let releasePlay!: () => void;
+    const video1 = {
+      ...fakeVideo(),
+      play: () =>
+        new Promise<void>((r) => {
+          releasePlay = r;
+        }),
+    };
+    const video2 = fakeVideo();
+    const videos = [video1, video2];
     const vision = new VisionMonitor({
       getWebcamStream: () => stream,
       createWorker: () => workers.shift() as FakeWorker,
       modelBaseUrl: '/models/proctor',
       grabFrame: () => Promise.resolve(bitmap()),
-      createVideo: fakeVideo,
-      initTimeoutMs: 60_000,
+      createVideo: () => videos.shift() as HTMLVideoElement,
       autoStart: false,
     });
-    const cfg = (id: string) => ({
+    const cfg = (id: string, startTimeout: number) => ({
       sessionId: id,
       hmacKeyBase64: TEST_KEY_B64,
       root: document.createElement('div'),
@@ -687,26 +703,367 @@ describe('review blockers: abandoned start, bounded play, stream swap (FR-606, F
         heartbeat: () => Promise.resolve(true),
       },
       detectors: [vision],
-      detectorStartTimeoutMs: 30,
+      detectorStartTimeoutMs: startTimeout,
     });
     const s1 = new ProctorSession();
-    await s1.start(cfg('run1')); // times out, vision is stopped
-    expect(workerA.terminated).toBe(true); // terminate() settled the pending init at once
+    // (workerA.terminated is not asserted: the session's stop() of the abandoned run already
+    // terminates it, so it would be true with or without the generation guard.)
+    await s1.start(cfg('run1', 30)); // run 1 sits in video.play(); the session abandons it
     const s2 = new ProctorSession();
-    const caps: string[] = [];
-    s2.on('capability', (c) => caps.push(`${c.id}:${c.status}`));
-    const s2cfg = cfg('run2');
-    s2cfg.detectorStartTimeoutMs = 5000;
-    await s2.start(s2cfg); // same instance, new session, worker B loads
-    await new Promise((r) => setTimeout(r, 20)); // run 1's init has long settled
+    await s2.start(cfg('run2', 5000)); // same instance, new session, worker B and video 2
     expect(vision.getStats().tasks.sort()).toEqual(['face', 'gaze', 'objects']);
+    releasePlay(); // run 1's play() finally resolves, after run 2 started
+    await new Promise((r) => setTimeout(r, 20));
+    expect(video1.srcObject).toBeNull(); // run 1 released only its own video
+    expect(video2.srcObject).toBe(stream); // run 2's video is intact
     expect(workerB.terminated).toBe(false);
-    expect(caps.filter((c) => c.startsWith('vision-')).every((c) => c.endsWith('SUPPORTED'))).toBe(
-      true,
-    );
+    expect(vision.getStats().tasks.sort()).toEqual(['face', 'gaze', 'objects']);
     await vision.tick(); // run 2 can still sample
     expect(workerB.frames.length).toBeGreaterThan(0);
     await s2.stop();
     await s1.stop();
+  });
+
+  it('FR-606: a reused instance whose second start fails reports DETECTOR_UNAVAILABLE for every task, not a silent pass', async () => {
+    const workerA = new FakeWorker();
+    workerA.postMessage = () => undefined; // run 1: init never answered, session times out
+    const workerB = new FakeWorker();
+    const workers = [workerA, workerB];
+    let calls = 0;
+    const vision = new VisionMonitor({
+      getWebcamStream: () => stream,
+      createWorker: () => workers.shift() as FakeWorker,
+      modelBaseUrl: '/models/proctor',
+      grabFrame: () => Promise.resolve(bitmap()),
+      createVideo: () => {
+        calls++;
+        throw new Error('no video'); // run 2 fails after the models loaded
+      },
+      initTimeoutMs: 60_000,
+      autoStart: false,
+    });
+    const cfg = (id: string, startTimeout: number) => ({
+      sessionId: id,
+      hmacKeyBase64: TEST_KEY_B64,
+      root: document.createElement('div'),
+      consent: { recordedAt: '2026-01-01T00:00:00Z' },
+      transport: {
+        sendBatch: () => Promise.resolve('OK' as const),
+        heartbeat: () => Promise.resolve(true),
+      },
+      detectors: [vision],
+      detectorStartTimeoutMs: startTimeout,
+    });
+    const s1 = new ProctorSession();
+    await s1.start(cfg('sfc1', 30));
+    const s2 = new ProctorSession();
+    const events: string[] = [];
+    const caps: string[] = [];
+    s2.on('event', (e) =>
+      events.push(`${e.type}:${(e.payload as { detector?: string }).detector ?? ''}`),
+    );
+    s2.on('capability', (c) => caps.push(`${c.id}:${c.status}`));
+    await s2.start(cfg('sfc2', 5000));
+    expect(calls).toBe(1);
+    expect(events.sort()).toEqual([
+      'DETECTOR_UNAVAILABLE:FACE',
+      'DETECTOR_UNAVAILABLE:GAZE',
+      'DETECTOR_UNAVAILABLE:OBJECT',
+    ]);
+    // SUPPORTED flags set before the failure are reset to UNSUPPORTED
+    for (const t of ['face', 'gaze', 'objects']) {
+      expect(caps.filter((c) => c.startsWith(`vision-${t}:`)).at(-1)).toBe(
+        `vision-${t}:UNSUPPORTED`,
+      );
+    }
+    await s2.stop();
+    await s1.stop();
+  });
+});
+
+describe('should-fix round (FR-606, FR-607)', () => {
+  it('FR-606: after a frame timeout the worker keeps back-pressure until it answers late, then is free again', async () => {
+    vi.useFakeTimers();
+    const w = new FakeWorker();
+    const frames: number[] = [];
+    const orig = w.postMessage.bind(w);
+    w.postMessage = (msg) => {
+      if (msg.type === 'init') orig(msg);
+      else frames.push(msg.id);
+    };
+    const c = new InferenceClient(() => w, 30_000, 1000);
+    const init = c.init({
+      tasks: ['face'],
+      urls: { faceDetector: '', faceLandmarker: '', mediapipeWasm: '', cocoSsd: '' },
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    await init;
+    const p1 = c.analyze(bitmap(), ['face']);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await p1).toBeNull(); // timed out
+    expect(await c.analyze(bitmap(), ['face'])).toBeNull(); // still busy: skipped, not posted
+    expect(frames).toHaveLength(1);
+    w.onmessage?.({
+      data: { type: 'result', id: frames[0] as number, busyMs: 5 },
+    } as MessageEvent<FromWorker>);
+    const p2 = c.analyze(bitmap(), ['face']); // the worker answered late: free again
+    expect(frames).toHaveLength(2);
+    w.onmessage?.({
+      data: { type: 'result', id: frames[1] as number, busyMs: 5 },
+    } as MessageEvent<FromWorker>);
+    expect(await p2).not.toBeNull();
+    vi.useRealTimers();
+  });
+
+  it('FR-606: if the worker never answers the frame it timed out on, it is declared dead after another timeout', async () => {
+    vi.useFakeTimers();
+    const w = new FakeWorker();
+    const orig = w.postMessage.bind(w);
+    w.postMessage = (msg) => {
+      if (msg.type === 'init') orig(msg);
+    };
+    const c = new InferenceClient(() => w, 30_000, 1000);
+    const init = c.init({
+      tasks: ['face'],
+      urls: { faceDetector: '', faceLandmarker: '', mediapipeWasm: '', cocoSsd: '' },
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    await init;
+    const dead = vi.fn();
+    c.onDead = dead;
+    const p = c.analyze(bitmap(), ['face']);
+    await vi.advanceTimersByTimeAsync(1000);
+    await p;
+    expect(dead).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(dead).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it('FR-606: attachStream retries only when the monitor was down for lack of a stream, not after a model failure', async () => {
+    const h = fakeContext();
+    const { m, worker, createWorker } = setup({ getWebcamStream: () => null }, { objects: false });
+    await m.start(h.ctx);
+    expect(createWorker).not.toHaveBeenCalled(); // no stream: nothing loaded yet
+    const before = h.events.length;
+    await m.attachStream(stream); // the missing stream arrived: load now
+    expect(createWorker).toHaveBeenCalledTimes(1);
+    const afterLoad = h.events.length;
+    expect(afterLoad).toBeGreaterThan(before); // OBJECT model failed: reported once
+    m.stop();
+    // second monitor: models fail to load, a later stream swap must not re-run and re-emit
+    const h2 = fakeContext();
+    const s2 = setup({}, { face: false, gaze: false, objects: false });
+    await s2.m.start(h2.ctx);
+    const reported = h2.events.length;
+    await s2.m.attachStream(stream);
+    expect(h2.events).toHaveLength(reported);
+    expect(s2.createWorker).toHaveBeenCalledTimes(1);
+    expect(worker).toBeDefined();
+  });
+
+  it('FR-606: attachStream on a running monitor does not hang when play() never resolves', async () => {
+    vi.useFakeTimers();
+    const h = fakeContext();
+    const video = {
+      ...fakeVideo(),
+      play: () => new Promise<void>(() => undefined),
+    };
+    const { m } = setup({ createVideo: () => video });
+    const started = m.start(h.ctx);
+    await vi.advanceTimersByTimeAsync(5000);
+    await started;
+    const swap = m.attachStream({} as MediaStream);
+    await vi.advanceTimersByTimeAsync(5000);
+    await swap; // resolved: the swap is bounded
+    m.stop();
+    vi.useRealTimers();
+  });
+
+  it('FR-606: reportStartTimeout does not re-emit for tasks that were already reported', () => {
+    const h = fakeContext();
+    const { m } = setup();
+    // first report all three, then a second report must stay silent
+    m.reportStartTimeout(h.ctx);
+    const n = h.events.length;
+    expect(n).toBe(3);
+    m.reportStartTimeout(h.ctx);
+    expect(h.events).toHaveLength(n);
+  });
+
+  it('FR-607: VoiceMonitor attachStream calls are serialised, keep held-back speech, and the monitor can restart after stop()', async () => {
+    const h = fakeContext();
+    const order: string[] = [];
+    let cb!: VadCallbacks;
+    const m = new VoiceMonitor({
+      getStream: () => stream,
+      createVad: async (_s, c) => {
+        cb = c;
+        order.push('create');
+        await new Promise((r) => setTimeout(r, 5));
+        return {
+          start: vi.fn(),
+          destroy: () => {
+            order.push('destroy');
+          },
+        };
+      },
+    });
+    await m.start(h.ctx);
+    const a = m.attachStream({} as MediaStream);
+    const b = m.attachStream({} as MediaStream);
+    await Promise.all([a, b]);
+    // never two live VADs: each create is preceded by the destroy of the previous one
+    expect(order).toEqual(['create', 'destroy', 'create', 'destroy', 'create']);
+    expect(cb).toBeDefined();
+    await m.stop();
+    await m.start(h.ctx); // restart on the same instance
+    expect(order.at(-1)).toBe('create');
+    await m.stop();
+  });
+});
+
+describe('voice: exactly one live VAD (B2, FR-607)', () => {
+  function vadRig(delayMs = 0) {
+    let live = 0;
+    let maxLive = 0;
+    const callbacks: VadCallbacks[] = [];
+    const createVad = async (_s: MediaStream, c: VadCallbacks) => {
+      callbacks.push(c);
+      if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+      live++;
+      maxLive = Math.max(maxLive, live);
+      return {
+        start: vi.fn(),
+        destroy: () => {
+          live--;
+        },
+      };
+    };
+    return { createVad, live: () => live, maxLive: () => maxLive, callbacks };
+  }
+
+  it('FR-607: attachStream during a slow start ends with exactly one live handle', async () => {
+    const h = fakeContext();
+    const r = vadRig(30);
+    const m = new VoiceMonitor({ getStream: () => stream, createVad: r.createVad });
+    const starting = m.start(h.ctx);
+    const attaching = m.attachStream({} as MediaStream); // arrives while the first VAD is loading
+    await Promise.all([starting, attaching]);
+    expect(r.live()).toBe(1);
+    expect(r.maxLive()).toBe(1);
+    await m.stop();
+    expect(r.live()).toBe(0);
+  });
+
+  it('FR-607: stop() then start() with an attach queued before the stop leaves one live handle and no duplicate SPEECH_DETECTED', async () => {
+    const h = fakeContext();
+    let t = 1_000_000;
+    const r = vadRig(20);
+    const m = new VoiceMonitor({ getStream: () => stream, createVad: r.createVad, now: () => t });
+    const first = m.start(h.ctx);
+    const staleAttach = m.attachStream({} as MediaStream); // queued under the old generation
+    await m.stop();
+    const second = m.start(h.ctx);
+    await Promise.all([first, staleAttach, second]);
+    expect(r.live()).toBe(1);
+    const speech = () => h.events.filter((e) => e.type === 'SPEECH_DETECTED');
+    const live = r.callbacks.at(-1) as VadCallbacks;
+    const stale = r.callbacks.slice(0, -1);
+    expect(stale.length).toBeGreaterThan(0);
+    // callbacks of every older VAD are ignored: a full segment on them reports nothing
+    for (const cb of stale) {
+      cb.onSpeechStart();
+      t += 2000;
+      cb.onSpeechEnd();
+    }
+    expect(speech()).toHaveLength(0);
+    // the live VAD reports exactly one event for its segment
+    live.onSpeechStart();
+    t += 2000;
+    live.onSpeechEnd();
+    expect(speech()).toHaveLength(1);
+    await m.stop();
+    expect(speech()).toHaveLength(1); // stop() flushes nothing extra
+  });
+
+  it('FR-607: start() on a running monitor replaces the VAD instead of adding a second one', async () => {
+    const h = fakeContext();
+    const r = vadRig();
+    const m = new VoiceMonitor({ getStream: () => stream, createVad: r.createVad });
+    await m.start(h.ctx);
+    await m.start(h.ctx);
+    expect(r.live()).toBe(1);
+    await m.stop();
+  });
+});
+
+describe('vision: down state (S5, FR-606)', () => {
+  it('FR-606: NO_STREAM then attach that fails to load: a further attach does not re-run or re-emit', async () => {
+    const h = fakeContext();
+    let current: MediaStream | null = null;
+    const { m, createWorker } = setup(
+      { getWebcamStream: () => current },
+      { face: false, gaze: false, objects: false },
+    );
+    await m.start(h.ctx); // no stream: PERMISSION_DENIED x3, down for lack of a stream
+    expect(createWorker).not.toHaveBeenCalled();
+    await m.attachStream(stream); // loads, every model fails: now down for FAILED
+    expect(createWorker).toHaveBeenCalledTimes(1);
+    const emitted = h.events.length;
+    await m.attachStream(stream);
+    expect(createWorker).toHaveBeenCalledTimes(1);
+    expect(h.events).toHaveLength(emitted);
+    current = null;
+    m.stop();
+  });
+});
+
+describe('voice: an abandoned begin reports nothing (S-B, FR-607)', () => {
+  it('FR-607: a createVad that rejects after stop() and restart emits no DETECTOR_UNAVAILABLE and keeps the newer SUPPORTED flag', async () => {
+    const h = fakeContext();
+    let rejectFirst!: (e: Error) => void;
+    let calls = 0;
+    const m = new VoiceMonitor({
+      getStream: () => stream,
+      createVad: () => {
+        calls++;
+        if (calls === 1) {
+          return new Promise((_r, rej) => {
+            rejectFirst = rej;
+          });
+        }
+        return Promise.resolve({ start: vi.fn(), destroy: vi.fn() });
+      },
+    });
+    const first = m.start(h.ctx); // hangs in createVad
+    await new Promise((r) => setTimeout(r, 5));
+    await m.stop();
+    const second = m.start(h.ctx); // queued behind the first
+    rejectFirst(new Error('model 404')); // the abandoned begin fails late
+    await Promise.all([first, second]);
+    expect(h.events.filter((e) => e.type === 'DETECTOR_UNAVAILABLE')).toHaveLength(0);
+    expect(h.capabilities.at(-1)).toMatchObject({ id: 'voice', status: 'SUPPORTED' });
+    await m.stop();
+  });
+
+  it('FR-607: a throwing destroy() of an abandoned VAD does not fall into the load-failure handling', async () => {
+    const h = fakeContext();
+    const m = new VoiceMonitor({
+      getStream: () => stream,
+      createVad: async () => {
+        await new Promise((r) => setTimeout(r, 10));
+        return {
+          start: vi.fn(),
+          destroy: () => {
+            throw new Error('destroy failed');
+          },
+        };
+      },
+    });
+    const starting = m.start(h.ctx);
+    await m.stop();
+    await starting;
+    expect(h.events.filter((e) => e.type === 'DETECTOR_UNAVAILABLE')).toHaveLength(0);
   });
 });

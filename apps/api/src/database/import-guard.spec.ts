@@ -1,16 +1,25 @@
-// One guard that keeps three things out of new code (architect condition Q9, review S4). Each of
-// them reaches Postgres without the org scope:
+// One guard that keeps five things out of new code (architect condition Q9, review S4, FU-DB-91).
+// Each of them reaches Postgres without the org scope:
 //   - database/prisma.module: BE-02's interim unscoped Prisma client, for auth only (FU-DB-58);
 //   - database/create-prisma-client: building a client of your own;
-//   - PG_POOL: BE-01's raw pg Pool token.
+//   - PG_POOL: BE-01's raw pg Pool token;
+//   - the `pg` package: a raw connection or pool of your own;
+//   - the `@prisma/adapter-pg` package: building a driver adapter, hence a client, of your own.
 // New business modules inject PrismaService from database/prisma.service.ts instead.
 //
 // It reads every non-test file under apps/api/src and matches `from '…'`, `require('…')` and
-// `import('…')`, with or without the `.js` extension, against an explicit per-file allowlist.
-// Tests are not scanned: *.spec.ts, *.e2e-spec.ts, src/test and src/database/testing.
+// `import('…')`, with or without the `.js` extension, against an explicit per-file allowlist. A
+// re-export (`export … from`) of a guarded module, package or identifier is refused even in an
+// allowlisted file. Tests are not scanned: *.spec.ts, *.e2e-spec.ts, src/test and
+// src/database/testing.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
-import { findViolations, resolveSpecifier, specifiersOf } from './testing/import-guard';
+import {
+  findViolations,
+  reexportsOf,
+  resolveSpecifier,
+  specifiersOf,
+} from './testing/import-guard';
 import type { GuardRule, SourceFile } from './testing/import-guard';
 
 const SRC = resolve(__dirname, '..');
@@ -35,12 +44,30 @@ export const RULES: readonly GuardRule[] = [
     allowed: ['database/prisma.module.ts', 'database/prisma.service.ts'],
   },
   {
+    name: 'pg',
+    package: 'pg',
+    why: 'A raw pg connection or pool has no org scope. Use PrismaService, or runRawSql for a reviewed raw query.',
+    allowed: ['infrastructure/infrastructure.module.ts', 'health/health.service.ts'],
+  },
+  {
+    name: '@prisma/adapter-pg',
+    package: '@prisma/adapter-pg',
+    why: 'A driver adapter of your own builds a client of your own. Only the client factory may.',
+    allowed: ['database/create-prisma-client.ts'],
+  },
+  {
     name: 'PG_POOL',
     identifier: 'PG_POOL',
     why: "BE-01's raw pg Pool has no org scope. Use PrismaService, or runRawSql for a reviewed raw query.",
     allowed: ['infrastructure/infrastructure.module.ts', 'health/health.service.ts'],
   },
 ];
+
+const ruleNamed = (name: string): GuardRule => {
+  const found = RULES.find((rule) => rule.name === name);
+  if (found === undefined) throw new Error(`no rule named ${name}`);
+  return found;
+};
 
 function isTestFile(path: string): boolean {
   return (
@@ -138,56 +165,56 @@ describe('import guard patterns (NFR-04)', () => {
     const stray = (path: string, text: string): SourceFile => ({ path, text });
     const strays: Array<[GuardRule, SourceFile]> = [
       [
-        RULES[0] as GuardRule,
+        ruleNamed('database/prisma.module'),
         stray(
           'billing/billing.service.ts',
           "import { PrismaService } from '../database/prisma.module';",
         ),
       ],
       [
-        RULES[0] as GuardRule,
+        ruleNamed('database/prisma.module'),
         stray('billing/a.ts', 'import { P } from "../database/prisma.module.js";'),
       ],
       [
-        RULES[0] as GuardRule,
+        ruleNamed('database/prisma.module'),
         stray('billing/b.ts', "const { P } = require('../database/prisma.module');"),
       ],
       [
-        RULES[0] as GuardRule,
+        ruleNamed('database/prisma.module'),
         stray('billing/c.ts', "const m = await import('../database/prisma.module.js');"),
       ],
       [
-        RULES[1] as GuardRule,
+        ruleNamed('database/create-prisma-client'),
         stray(
           'billing/d.ts',
           "import { createPrismaClient } from '../database/create-prisma-client';",
         ),
       ],
       [
-        RULES[1] as GuardRule,
+        ruleNamed('database/create-prisma-client'),
         stray('database/e.ts', "import { createPrismaClient } from './create-prisma-client.js';"),
       ],
       [
-        RULES[1] as GuardRule,
+        ruleNamed('database/create-prisma-client'),
         stray('billing/f.ts', "const f = require('../database/create-prisma-client');"),
       ],
       [
-        RULES[1] as GuardRule,
+        ruleNamed('database/create-prisma-client'),
         stray('billing/g.ts', "const m = await import('../database/create-prisma-client.js');"),
       ],
       [
-        RULES[2] as GuardRule,
+        ruleNamed('PG_POOL'),
         stray('billing/h.ts', "import { PG_POOL } from '../infrastructure/infrastructure.module';"),
       ],
       [
-        RULES[2] as GuardRule,
+        ruleNamed('PG_POOL'),
         stray(
           'billing/i.ts',
           "const { PG_POOL } = require('../infrastructure/infrastructure.module');",
         ),
       ],
       [
-        RULES[2] as GuardRule,
+        ruleNamed('PG_POOL'),
         stray(
           'billing/j.ts',
           "const t = (await import('../infrastructure/infrastructure.module')).PG_POOL;",
@@ -203,7 +230,7 @@ describe('import guard patterns (NFR-04)', () => {
   });
 
   it('TC-008 the guard accepts the allowlisted files and unrelated imports', () => {
-    const rule = RULES[0] as GuardRule;
+    const rule = ruleNamed('database/prisma.module');
     const allowed: SourceFile = {
       path: 'auth/auth.service.ts',
       text: "import { PrismaService } from '../database/prisma.module';",
@@ -219,5 +246,179 @@ describe('import guard patterns (NFR-04)', () => {
       text: "import { PrismaService } from '../database/prisma.module';",
     };
     expect(findViolations([sibling], rule)).toEqual(['auth/other.service.ts']);
+  });
+});
+
+describe('import guard: bare packages and re-exports (NFR-04, FU-DB-91)', () => {
+  const stray = (path: string, text: string): SourceFile => ({ path, text });
+  const pg = ruleNamed('pg');
+  const adapter = ruleNamed('@prisma/adapter-pg');
+
+  it('TC-008 pg is allowed only in the infrastructure module and the health service', () => {
+    expect(pg.allowed).toEqual([
+      'infrastructure/infrastructure.module.ts',
+      'health/health.service.ts',
+    ]);
+    expect(adapter.allowed).toEqual(['database/create-prisma-client.ts']);
+  });
+
+  it('TC-008 the guard fails on a stray pg or @prisma/adapter-pg import, in every import form', () => {
+    for (const [rule, text] of [
+      [pg, "import { Pool } from 'pg';"],
+      [pg, 'import { Pool } from "pg";'],
+      [pg, "import pg from 'pg';"],
+      [pg, "import type { Pool } from 'pg';"],
+      [pg, "const { Client } = require('pg');"],
+      [pg, "const { Client } = await import('pg');"],
+      [pg, "import { Client } from 'pg/lib/client';"],
+      [pg, "const pool = new (require('pg').Pool)();"],
+      [adapter, "import { PrismaPg } from '@prisma/adapter-pg';"],
+      [adapter, "const { PrismaPg } = require('@prisma/adapter-pg');"],
+      [adapter, "const m = await import('@prisma/adapter-pg');"],
+    ] as const) {
+      expect({
+        rule: rule.name,
+        text,
+        found: findViolations([stray('billing/db.ts', text)], rule),
+      }).toEqual({
+        rule: rule.name,
+        text,
+        found: ['billing/db.ts'],
+      });
+    }
+  });
+
+  it('TC-008 only the guarded package matches: pg-pool, pg-connection-string, a relative ./pg and other adapters do not', () => {
+    for (const text of [
+      "import Pool from 'pg-pool';",
+      "import { parse } from 'pg-connection-string';",
+      "import { x } from './pg';",
+      "import { x } from '../pg/helpers';",
+      "import { PrismaMariaDb } from '@prisma/adapter-mariadb';",
+      "import type { PrismaClient } from '@prisma/client';",
+      "const note = 'we do not import pg here';",
+    ]) {
+      expect({ text, found: findViolations([stray('billing/db.ts', text)], pg) }).toEqual({
+        text,
+        found: [],
+      });
+    }
+    expect(
+      findViolations(
+        [stray('billing/db.ts', "import { PrismaMariaDb } from '@prisma/adapter-mariadb';")],
+        adapter,
+      ),
+    ).toEqual([]);
+  });
+
+  it('TC-008 an allowlisted file may import its package, and the allowlist is per file', () => {
+    expect(
+      findViolations([stray('health/health.service.ts', "import { Pool } from 'pg';")], pg),
+    ).toEqual([]);
+    expect(
+      findViolations(
+        [
+          stray(
+            'database/create-prisma-client.ts',
+            "import { PrismaPg } from '@prisma/adapter-pg';",
+          ),
+        ],
+        adapter,
+      ),
+    ).toEqual([]);
+    // Another file next to an allowed one, and the factory's neighbour, are still refused.
+    expect(
+      findViolations([stray('health/other.service.ts', "import { Pool } from 'pg';")], pg),
+    ).toEqual(['health/other.service.ts']);
+    expect(
+      findViolations(
+        [stray('database/prisma.service.ts', "import { PrismaPg } from '@prisma/adapter-pg';")],
+        adapter,
+      ),
+    ).toEqual(['database/prisma.service.ts']);
+  });
+
+  it('TC-008 reexportsOf finds every export-from form', () => {
+    const source = [
+      "export * from 'pg';",
+      "export * as pgModule from 'pg';",
+      "export { Pool } from 'pg';",
+      'export { Pool as P, Client } from "pg";',
+      "export type { PoolConfig } from 'pg';",
+      "export {\n  PG_POOL,\n} from '../infrastructure/infrastructure.module';",
+      "export { x } from './not-guarded';",
+      "const exported = 'export { Pool } from pg';",
+      'export const PG = 1;',
+    ].join('\n');
+    expect(reexportsOf(source).map((r) => r.specifier)).toEqual([
+      'pg',
+      'pg',
+      'pg',
+      'pg',
+      'pg',
+      '../infrastructure/infrastructure.module',
+      './not-guarded',
+    ]);
+  });
+
+  it('TC-008 a re-export of a guarded package, module or identifier is refused even in an allowlisted file', () => {
+    // The allowlisted files hand the guarded thing to every importer of them.
+    expect(
+      findViolations([stray('health/health.service.ts', "export { Pool } from 'pg';")], pg),
+    ).toEqual(['health/health.service.ts']);
+    expect(
+      findViolations([stray('infrastructure/infrastructure.module.ts', "export * from 'pg';")], pg),
+    ).toEqual(['infrastructure/infrastructure.module.ts']);
+    expect(
+      findViolations(
+        [
+          stray(
+            'database/create-prisma-client.ts',
+            "export { PrismaPg } from '@prisma/adapter-pg';",
+          ),
+        ],
+        adapter,
+      ),
+    ).toEqual(['database/create-prisma-client.ts']);
+    expect(
+      findViolations(
+        [stray('database/prisma.module.ts', "export { PrismaService } from './prisma.module';")],
+        ruleNamed('database/prisma.module'),
+      ),
+    ).toEqual(['database/prisma.module.ts']);
+    expect(
+      findViolations(
+        [
+          stray(
+            'database/prisma.service.ts',
+            "export { createPrismaClient } from './create-prisma-client.js';",
+          ),
+        ],
+        ruleNamed('database/create-prisma-client'),
+      ),
+    ).toEqual(['database/prisma.service.ts']);
+    expect(
+      findViolations(
+        [
+          stray(
+            'infrastructure/infrastructure.module.ts',
+            "export { PG_POOL } from './elsewhere';",
+          ),
+        ],
+        ruleNamed('PG_POOL'),
+      ),
+    ).toEqual(['infrastructure/infrastructure.module.ts']);
+    // A re-export of something unguarded is fine, and a plain export in an allowed file too.
+    expect(
+      findViolations(
+        [
+          stray(
+            'health/health.service.ts',
+            "export { helper } from './helper';\nexport const PG = 1;",
+          ),
+        ],
+        pg,
+      ),
+    ).toEqual([]);
   });
 });

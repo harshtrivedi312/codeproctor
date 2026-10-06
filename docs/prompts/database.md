@@ -75,8 +75,8 @@ Verify: `pnpm db:seed` twice without errors; counts per table printed.
 
 ```text
 In apps/api create a PrismaService (NestJS) that builds its client with the factory from Step 2 (`@prisma/adapter-pg`, DATABASE_URL as app_user; ADR 0009), and a Prisma client extension (`$extends`; Prisma 7 removed `$use` middleware) that automatically adds `org_id` filtering for tables that have it, and throws if a query on an org-scoped model runs without an org context.
-For every model without org_id, declare a scope path to its nearest ancestor that has one (for example ProctorEvent -> session.orgId, TestCase -> questionVersion.question.orgId) and let the extension add that relation filter (ADR 0006). Add a test that fails if any model has neither org_id nor a scope path.
-Add a request-scoped OrgContext populated from the authenticated user.
+For every model without org_id, declare a scope path along its composition parent chain (ADR 0006 section 8.7) to an ancestor that has one (for example ProctorEvent -> session.orgId, TestCase -> questionVersion.question.orgId) and let the extension add that relation filter (ADR 0006). Add a test that fails if any model has neither org_id nor a scope path.
+Add an OrgContext per unit of work on AsyncLocalStorage, not a Nest REQUEST-scoped provider, populated from the authenticated user (ADR 0001 C-1, amended 2026-10-05; ADR 0006 section 8).
 Write unit tests proving that a user from org A cannot read org B rows through any repository method (reference TC-008).
 Verify: tests pass.
 ```

@@ -5,11 +5,11 @@
 // database settings.
 import type { INestApplication } from '@nestjs/common';
 import { hash } from '@node-rs/argon2';
-import { authenticator } from 'otplib';
 import { randomBytes } from 'node:crypto';
+import { authenticator } from 'otplib';
+import { Client } from 'pg';
 import request from 'supertest';
 import type { App } from 'supertest/types';
-import { Client } from 'pg';
 import { encryptSecret, sha256Hex } from '../../src/auth/crypto.util';
 import { createPrismaClient } from '../../src/database/create-prisma-client';
 import { PrismaClient, UserRole } from '../../src/generated/prisma/client';
@@ -143,6 +143,8 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     app = moduleRef.createNestApplication<INestApplication<App>>();
     configureApp(app);
     await app.init();
+    // Listen once on a free port so supertest reuses it instead of listen(0)/close per request.
+    await app.listen(0, '127.0.0.1');
     const authService = app.get(AuthService);
     settle = () => authService.settleDeferred();
   } catch (error) {
@@ -230,6 +232,32 @@ export async function signIn(
   return { Authorization: `Bearer ${(res.body as Body).session.accessToken}` };
 }
 
+/** Signs in (with TOTP when a secret is given) and also returns the refresh cookie. */
+export async function signInKeepingCookie(
+  h: Harness,
+  email: string,
+  secret?: string,
+): Promise<{ auth: { Authorization: string }; cookie: string }> {
+  const first = await login(h, email).expect(200);
+  if (!secret) {
+    return {
+      auth: { Authorization: `Bearer ${(first.body as Body).session.accessToken}` },
+      cookie: refreshCookie(first),
+    };
+  }
+  const done = await request(h.app.getHttpServer())
+    .post(`${API}/auth/2fa/verify`)
+    .send({
+      challengeToken: (first.body as Body).challengeToken,
+      code: authenticator.generate(secret),
+    })
+    .expect(200);
+  return {
+    auth: { Authorization: `Bearer ${(done.body as Body).accessToken}` },
+    cookie: refreshCookie(done),
+  };
+}
+
 /** Completes a 2FA login with a TOTP code and returns the Authorization header. */
 export async function signInWithTotp(
   h: Harness,
@@ -244,8 +272,30 @@ export async function signInWithTotp(
     .expect(200);
   // /2fa/verify answers with the session itself.
   return {
-    Authorization: `Bearer ${(done.body as unknown as { accessToken: string }).accessToken}`,
+    Authorization: `Bearer ${(done.body as Body).accessToken}`,
   };
+}
+
+/**
+ * The session user of a successful auth response. The contract puts it under `session` for login
+ * and enroll/confirm ('nested') and at the top level for 2fa/verify and refresh ('flat').
+ */
+export function sessionUser(body: unknown, shape: 'nested' | 'flat'): Record<string, unknown> {
+  const b = body as { session?: { user?: unknown }; user?: unknown };
+  const user = shape === 'nested' ? b.session?.user : b.user;
+  if (shape === 'nested' && b.user !== undefined)
+    throw new Error('nested body has a top-level user');
+  if (typeof user !== 'object' || user === null) {
+    throw new Error(`no ${shape} session user in the body`);
+  }
+  if (shape === 'flat' && b.session !== undefined) throw new Error('flat body also has a session');
+  return user as Record<string, unknown>;
+}
+
+/** FR-102: the caller's own 2FA state is on session users only, never on challenge or error bodies. */
+export function expectNoTotpEnabled(res: request.Response): void {
+  expect(res.text).not.toMatch(/totp_?enabled|twoFactorEnabled/i);
+  expect(JSON.stringify(res.body)).not.toMatch(/totp_?enabled|twoFactorEnabled/i);
 }
 
 /** Loose view of the JSON bodies; each test reads only the fields it expects. */
@@ -254,12 +304,13 @@ export interface Body {
   detail: string;
   title: string;
   challengeToken: string;
-  accessToken: string;
+  accessToken?: string;
   session: { accessToken: string; user: { email: string; role: string } };
   manualKey: string;
   otpauthUri: string;
   qrDataUrl: string;
   recoveryCodes: string[];
+  user?: { email: string; role: string; totpEnabled: boolean };
   [key: string]: unknown;
 }
 

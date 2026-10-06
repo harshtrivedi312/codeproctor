@@ -1,0 +1,5 @@
+# Seeded session files hold bearer tokens and HMAC keys. They never belong in git.
+sessions*.json
+.local/
+results/
+*.summary.json

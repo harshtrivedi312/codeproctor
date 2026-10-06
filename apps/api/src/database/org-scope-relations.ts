@@ -234,6 +234,22 @@ for (const key of FK_CLASSES) {
   });
 }
 
+const SCOPE_HOP_COLUMNS = new Map<ModelName, string>();
+for (const key of FK_CLASSES) {
+  // The column of a first-hop key is its relation field plus `Id` (`test` -> `testId`). The
+  // completeness test checks that against the schema, so a key named differently breaks the build.
+  if (key.fkClass === 'SCOPE_HOP') SCOPE_HOP_COLUMNS.set(key.model, `${key.field}Id`);
+}
+
+/**
+ * The scalar column that holds the first hop of a path model's scope path (`testId` of TestSection,
+ * `sessionId` of ProctorEvent, `userId` of RefreshToken), or `undefined` for a model without one.
+ * System scope refuses to change it in an update (FU-DB-107).
+ */
+export function scopeHopColumn(model: ModelName): string | undefined {
+  return SCOPE_HOP_COLUMNS.get(model);
+}
+
 /** The relation field `field` of `model`, or `undefined` when it is a scalar, Json or list column. */
 export function relationOf(model: ModelName, field: string): RelationSide | undefined {
   return SIDES.get(`${model}.${field}`);

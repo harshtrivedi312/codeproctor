@@ -30,6 +30,7 @@ export function LoginForm(): React.JSX.Element {
   const next = safeNextPath(params.get('next'));
   const { signIn, setPending, status, signOutUnconfirmed, retrySignOut } = useAuth();
   const [banner, setBanner] = React.useState<Banner>(null);
+  const [retrying, setRetrying] = React.useState(false);
 
   const {
     register,
@@ -110,8 +111,11 @@ export function LoginForm(): React.JSX.Element {
             variant="outline"
             size="sm"
             className="mt-2"
-            disabled={isSubmitting}
-            onClick={() => void retrySignOut()}
+            disabled={isSubmitting || retrying}
+            onClick={() => {
+              setRetrying(true);
+              void retrySignOut().finally(() => setRetrying(false));
+            }}
           >
             Retry sign-out
           </Button>
