@@ -533,6 +533,8 @@ describe('the candidate facts (ADR 0013 CS-4.4 "Candidate facts"; NFR-04, TC-008
         'runInOrg',
         'runRawSql',
         'runSystem',
+        // ADR 0013 CS-4 PR 2: the grant entry. A new member is a reviewed change (FU-DB-189).
+        'withGrant',
       ].sort(),
     );
     expect(Object.getPrototypeOf(OrgContextService.prototype)).toBe(Object.prototype);

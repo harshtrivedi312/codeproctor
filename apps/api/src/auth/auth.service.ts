@@ -10,6 +10,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  BeforeApplicationShutdown,
   OnApplicationShutdown,
   ServiceUnavailableException,
   UnauthorizedException,
@@ -93,7 +94,7 @@ function isRetryable(e: unknown): boolean {
 }
 
 @Injectable()
-export class AuthService implements OnApplicationShutdown {
+export class AuthService implements BeforeApplicationShutdown, OnApplicationShutdown {
   private readonly webOrigin: string;
   private readonly logger = new Logger(AuthService.name);
   /** Deferred forgot-password work still running; awaited by tests and at shutdown. */
@@ -932,7 +933,9 @@ export class AuthService implements OnApplicationShutdown {
 
     // Everything that depends on the account happens after this method has returned, so the
     // response is the same for a real, pending, deactivated or unknown account (FU-BE-31).
-    this.defer(() => this.orgContext.runSystem('AUTH_BOOTSTRAP', () => this.deliverReset(email)));
+    this.defer('password-reset', () =>
+      this.orgContext.runSystem('AUTH_BOOTSTRAP', () => this.deliverReset(email)),
+    );
   }
 
   /** Waits for deferred work (tests and graceful shutdown). */
@@ -940,18 +943,26 @@ export class AuthService implements OnApplicationShutdown {
     while (this.deferred.size > 0) await Promise.allSettled([...this.deferred]);
   }
 
+  /**
+   * Nest runs this before any onApplicationShutdown, so deferred reset and lock mail reaches the
+   * email queue while it still accepts (the queue stops in its own onApplicationShutdown).
+   */
+  async beforeApplicationShutdown(): Promise<void> {
+    await this.settleDeferred();
+  }
+
   async onApplicationShutdown(): Promise<void> {
     await this.settleDeferred();
   }
 
-  private defer(work: () => Promise<void>): void {
+  private defer(label: string, work: () => Promise<void>): void {
     const task: Promise<void> = new Promise<void>((resolve) => {
       setImmediate(() => {
         Promise.resolve()
           .then(work)
           .catch((e: unknown) => {
             // Name only: the error may carry an address, a token or a query value.
-            this.logger.error(`Deferred password-reset work failed (${errorName(e)})`);
+            this.logger.error(`Deferred ${label} work failed (${errorName(e)})`);
           })
           .finally(resolve);
       });
@@ -975,6 +986,8 @@ export class AuthService implements OnApplicationShutdown {
       }),
     );
     const url = `${this.webOrigin}/admin/reset-password#token=${token}`;
+    // If the enqueue fails this throws (caught and logged by defer). The new token hash stays and
+    // has overwritten any earlier valid reset link: the user must ask again. No security impact.
     await this.mail.sendPasswordReset(user.email, url);
   }
 
@@ -1180,7 +1193,7 @@ export class AuthService implements OnApplicationShutdown {
   private async recordLock(user: User, ctx: RequestContext): Promise<void> {
     await this.audit(user, 'AUTH_ACCOUNT_LOCKED', ctx, { minutes: LOCKOUT_MINUTES });
     const { orgId, email, fullName } = user;
-    this.defer(() => this.alertAdmins(orgId, email, fullName));
+    this.defer('lock-alert', () => this.alertAdmins(orgId, email, fullName));
   }
 
   private alertAdmins(orgId: string, email: string, name: string): Promise<void> {

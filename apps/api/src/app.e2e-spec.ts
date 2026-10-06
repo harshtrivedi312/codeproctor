@@ -171,6 +171,9 @@ describe('API foundation in production (NFR-04)', () => {
       JUDGE0_URL: 'https://judge0.test.invalid',
       JUDGE0_AUTH_TOKEN: 'a'.repeat(32),
       JUDGE0_AUTHZ_TOKEN: 'b'.repeat(32),
+      // Pilot and production require SES (C-31); nothing is sent in this suite.
+      EMAIL_PROVIDER: 'ses',
+      SES_FROM_ADDRESS: 'no-reply@test.invalid',
     });
     app = await createApp();
   });

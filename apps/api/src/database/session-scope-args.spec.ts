@@ -8,9 +8,9 @@ import { applyOrgScope, SCOPED_OPERATIONS } from './org-scope-args';
 import { ORG_SCOPE, orgFilter } from './org-scope-map';
 import type { ModelName } from './org-scope-map';
 import { FK_CLASSES } from './org-scope-relations';
-import { ROW_RETURNING_OPERATIONS } from './candidate-interim';
 import { applySessionScope, sessionQuestionsWhere } from './session-scope-args';
 import { CANDIDATE_MODELS, READ_OPERATIONS, SESSION_SCOPE } from './session-scope-map';
+import type { GrantView } from './session-scope-map';
 import { readModelMetas } from './testing/data-model';
 
 const ORG = '11111111-1111-4111-8111-111111111111';
@@ -31,15 +31,24 @@ const WRITE_OPERATIONS = SCOPED_OPERATIONS.filter((op) => !READ_OPERATIONS.inclu
 const UPDATES = ['update', 'updateMany', 'updateManyAndReturn'] as const;
 
 /**
- * keystroke_batches.id is a global identity counter that a candidate may not read (#126 nit 1), so a
- * candidate call on that model names `seq` where the generic tests of the other models name `id`.
+ * The column a candidate names where the generic tests of the other models name `id`: keystroke_batches.id
+ * is a global identity counter that a candidate may not read (#126 nit 1), and session_sections and
+ * proctor_event_batches have no `id` column at all.
  */
+const ID_KEY: Partial<Record<ModelName, string>> = {
+  KeystrokeBatch: 'seq',
+  ProctorEventBatch: 'seq',
+  SessionSection: 'sectionId',
+};
+const idKeyOf = (model: ModelName): string => ID_KEY[model] ?? 'id';
+
 function keyed(model: ModelName, args: unknown): unknown {
-  if (model !== 'KeystrokeBatch' || typeof args !== 'object' || args === null) return args;
+  const key = ID_KEY[model];
+  if (key === undefined || typeof args !== 'object' || args === null) return args;
   const given = args as Record<string, unknown>;
   const rename = (value: unknown): unknown =>
     typeof value === 'object' && value !== null && !Array.isArray(value) && 'id' in value
-      ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k === 'id' ? 'seq' : k, v]))
+      ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k === 'id' ? key : k, v]))
       : value;
   return {
     ...given,
@@ -56,23 +65,11 @@ function apply(
   /** `null`: the guard has not set the facts yet. */
   facts: CandidateFacts | null = FACTS,
 ) {
-  // A CANDIDATE call that returns rows names its select (candidate-interim.ts). These tests are about
-  // the other rules, so a call that carries neither `select` nor `include` gets `{ id: true }`. The
-  // tests of the select rule itself call applySessionScope directly (candidate-interim.spec.ts).
-  const given = (args ?? {}) as Record<string, unknown>;
-  const withSelect =
-    actor === 'CANDIDATE' &&
-    ROW_RETURNING_OPERATIONS.includes(operation) &&
-    given.select === undefined &&
-    given.include === undefined &&
-    (args === undefined || (typeof args === 'object' && args !== null && !Array.isArray(args)))
-      ? { ...given, select: { id: true } }
-      : args;
   return applySessionScope({
     model,
     rule: ORG_SCOPE[model],
     operation,
-    args: actor === 'CANDIDATE' ? keyed(model, withSelect) : withSelect,
+    args: actor === 'CANDIDATE' ? keyed(model, args) : args,
     orgId: ORG,
     session: { actor, sessionId: SID },
     facts: facts ?? undefined,
@@ -238,8 +235,8 @@ describe('CS-4.2 the session filter, both actors (NFR-04, TC-008)', () => {
     it.each(SESSION_MODELS)(
       'TC-008 %s: every read operation gets the session filter AND the org filter, and keeps the caller where',
       (model) => {
-        // keystroke_batches.id is not readable by a candidate, so it names seq (see keyed()).
-        const idKey = actor === 'CANDIDATE' && model === 'KeystrokeBatch' ? 'seq' : 'id';
+        // A candidate names the column of the model that is readable in place of `id` (see ID_KEY).
+        const idKey = actor === 'CANDIDATE' ? idKeyOf(model) : 'id';
         for (const operation of READ_OPERATIONS) {
           const { args } = apply(actor, model, operation, { where: { id: 'caller' } });
           const rule = ORG_SCOPE[model];
@@ -251,7 +248,11 @@ describe('CS-4.2 the session filter, both actors (NFR-04, TC-008)', () => {
             where: {
               OR: [{ [idKey]: 'x' }],
               NOT: { [idKey]: 'y' },
-              ...(model === 'Session' ? {} : { sessionId: OTHER_SID }),
+              ...(model === 'Session'
+                ? {}
+                : model === 'Submission'
+                  ? { sessionQuestionId: OTHER_SQ }
+                  : { sessionId: OTHER_SID }),
             },
           }).args;
           expectFilter(wide, expectedFilter[model]);
@@ -678,12 +679,30 @@ describe('CS-4.3 the CANDIDATE allowlist, deny by default (NFR-04, TC-008)', () 
   });
 
   it.each(grantOnly)(
-    'TC-008 %s is readable only under a grant, and grants are PR 2: every operation throws for now',
+    'TC-008 %s is readable only under a grant of its own: with none, with a grant of another model or with a create grant, every operation throws',
     (model) => {
+      const other: GrantView = {
+        model: model === 'ConsentText' ? 'TestQuestion' : 'ConsentText',
+        columns: ['id'],
+        ids: [OTHER_SQ],
+        mode: 'rows',
+      };
+      const create: GrantView = { model, columns: ['id'], ids: [OTHER_SQ], mode: 'create' };
       for (const operation of SCOPED_OPERATIONS) {
-        expect(() => apply('CANDIDATE', model, operation, { where: { id: 'x' } })).toThrow(
-          /readable only under a grant/,
-        );
+        for (const grant of [undefined, other, create]) {
+          expect(() =>
+            applySessionScope({
+              model,
+              rule: ORG_SCOPE[model],
+              operation,
+              args: { where: { id: 'x' } },
+              orgId: ORG,
+              session: { actor: 'CANDIDATE', sessionId: SID },
+              facts: FACTS,
+              grant,
+            }),
+          ).toThrow(/readable only under a grant/);
+        }
       }
     },
   );
@@ -786,14 +805,44 @@ describe('CS-4.3 the row filters of the models a candidate reads (NFR-04, TC-008
     },
   );
 
+  // ADR 0013 CS-4.4 "Candidate facts": until the guard has set them, EVERY candidate query on ANY model
+  // throws (PR 1 threw only for the three models whose filters use a fact).
   it.each(['Organization', 'TestSection', 'Question', ...SESSION_MODELS] as const)(
-    'TC-008 %s: needs no candidate fact',
+    'TC-008 %s: throws while the candidate facts are unset, for every operation a candidate may attempt',
     (model) => {
-      for (const operation of READ_OPERATIONS) {
-        expect(() => apply('CANDIDATE', model, operation, {}, null)).not.toThrow();
+      for (const operation of opsFor('CANDIDATE', model, SCOPED_OPERATIONS)) {
+        expect(() =>
+          apply('CANDIDATE', model, operation, { where: { id: 'x' }, data: {} }, null),
+        ).toThrow(/candidate facts are not set/);
       }
     },
   );
+
+  it.each(['ConsentText', 'TestQuestion'] as const)(
+    'TC-008 %s: under its grant it still throws while the candidate facts are unset',
+    (model) => {
+      const grant: GrantView = { model, columns: ['id'], ids: [OTHER_SQ], mode: 'rows' };
+      expect(() =>
+        applySessionScope({
+          model,
+          rule: ORG_SCOPE[model],
+          operation: 'findMany',
+          args: { select: { id: true } },
+          orgId: ORG,
+          session: { actor: 'CANDIDATE', sessionId: SID },
+          facts: undefined,
+          grant,
+        }),
+      ).toThrow(/candidate facts are not set/);
+    },
+  );
+
+  it('TC-008 SERVICE needs no facts, and a model off the allowlist reports the allowlist first', () => {
+    expect(() => apply('SERVICE', 'Session', 'findMany', {}, null)).not.toThrow();
+    expect(() => apply('CANDIDATE', 'User', 'findMany', {}, null)).toThrow(
+      /not on the CANDIDATE allowlist/,
+    );
+  });
 
   it('TC-008 the facts and the session are the whole filter: a caller that names another id only narrows', () => {
     const { args } = apply('CANDIDATE', 'Candidate', 'findMany', {

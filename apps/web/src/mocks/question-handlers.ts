@@ -114,6 +114,46 @@ function fresh(): State {
     scenario: { executor: 'ok', aiMinAssistants: null, aiRefreshDays: null },
   };
 }
+/**
+ * What the tests module needs to know about the question bank (FR-301): which versions are
+ * published and whether their question is archived, and which questions a random rule can pick
+ * (not archived, with a published current version). Read-only views for the test mocks.
+ */
+export function questionCatalogue(): {
+  version: (
+    versionId: string,
+  ) => { isPublished: boolean; isArchived: boolean; title: string; difficulty: string } | null;
+  pickable: () => {
+    type: Schemas['QuestionType'];
+    tags: string[];
+    difficulty: Schemas['Difficulty'];
+  }[];
+} {
+  return {
+    version: (versionId) => {
+      for (const q of state.questions) {
+        const v = q.versions.find((x) => x.id === versionId);
+        if (v) {
+          return {
+            isPublished: v.isPublished,
+            isArchived: q.isArchived,
+            title: v.title,
+            difficulty: v.difficulty,
+          };
+        }
+      }
+      return null;
+    },
+    pickable: () =>
+      state.questions.flatMap((q) => {
+        const published = [...q.versions].reverse().find((v) => v.isPublished);
+        return !q.isArchived && published
+          ? [{ type: q.type, tags: [...q.tags], difficulty: published.difficulty }]
+          : [];
+      }),
+  };
+}
+
 export function resetMockQuestionState(): void {
   state = fresh();
 }
