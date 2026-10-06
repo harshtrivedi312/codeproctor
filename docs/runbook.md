@@ -201,7 +201,7 @@ SELECT (SELECT count(*) FROM pg_database WHERE datdba = r.oid)
   FROM pg_roles r WHERE r.rolname = 'app_user';                                 -- 0 (owns nothing)
 SELECT has_table_privilege('app_user', 'audit_logs', 'UPDATE');                -- f
 SELECT has_table_privilege('app_user', '_prisma_migrations', 'SELECT');        -- f
-SELECT has_database_privilege('app_user', current_database(), 'TEMPORARY');    -- f once the TEMP migration (FU-DBB-18) is applied
+SELECT has_database_privilege('app_user', current_database(), 'TEMPORARY');    -- f (the app_user_no_temp migration)
 ```
 
 ### 6. Backups on (a person creates the secrets once; then the workflow does the rest)
@@ -240,3 +240,79 @@ and re-applies erasures.
 - Staging runs no seed data from the repository's `db:seed` (it is local-only by design, ADR 0009).
   Synthetic staging data comes from the QA fixtures (QA-A track); the database track provides none.
 - Whether runners can reach the database, and who runs the deploy job, are DEP-01 decisions.
+
+## Provisioning a pilot organization (ADR 0006 section 8.9)
+
+Owner: Database B (ops) track. Files: `infra/scripts/provision-org.mjs`, `provision-org-core.mjs` (and `provision-org-driver.mjs`, test only);
+tests `infra/scripts/provision-org.test.mjs`. Only the owner runs this, on the pilot host (over SSH from a
+GitHub Actions job, or on a self-hosted runner inside the pilot network), never from a developer machine
+or an agent session (ADR 0009, D-38). A GitHub-hosted runner never connects straight to the pilot database.
+
+What it does: creates the organization and its first SUPER_ADMIN (no password) and one `audit_logs` row
+in one transaction, then queues a `set-password` job that emails the admin a one-time link (72 hours,
+single use). The link is built by the job, never by this script: no link or token is ever printed,
+logged, written to a file or put in a queue payload.
+
+### Inputs
+
+A JSON file on the pilot host, never command-line values, environment variables or `workflow_dispatch`
+inputs (the email is personal data, and masking does not hide inputs in run metadata). The file is a
+regular file (not a link), mode 600, at most 64 KiB, outside the repository checkout; create it with
+`umask 077`. Never write or print it in a workflow step whose output is logged, and never pass its
+content in an SSH command line or heredoc that a log would show.
+
+```json
+{
+  "orgName": "Example Corp",
+  "retentionDays": 90,
+  "adminEmail": "admin@example.com",
+  "adminName": "A. Admin",
+  "expectedDatabase": "<the pilot database name>"
+}
+```
+
+`retentionDays` is optional (default 90; 7 to 730). `expectedDatabase` is required: the script compares
+it with `current_database()` and refuses to write if `DATABASE_URL` points anywhere else (a staging
+`app_user` URL would otherwise pass, and real admin data must never land in staging). `reissue` takes only
+`orgName`, `adminEmail` and `expectedDatabase`.
+Environment: `DATABASE_URL` (the `app_user` URL; the script refuses any other role, and a superuser or
+`BYPASSRLS` role, and has no `MIGRATION_DATABASE_URL` fallback) and `REDIS_URL`, plus `GITHUB_RUN_ID` if
+set (recorded in the audit row). Nothing else is read; start it with a clean environment
+(`env -i PATH=... DATABASE_URL=... REDIS_URL=... node ...`) because `NODE_OPTIONS` and `NODE_PATH` change
+how modules load.
+
+### Run
+
+```bash
+node --import tsx infra/scripts/provision-org.mjs create  --file /secure/path/org.json
+node --import tsx infra/scripts/provision-org.mjs reissue --file /secure/path/org.json
+```
+
+Confirm before `create` that `DATABASE_URL` **and** `REDIS_URL` are the pilot's: with the wrong Redis the
+job runs in the wrong API, changes nothing, and the exit code is still 0.
+
+`create` prints `org=<id> user=<id>` and nothing else. Exit code 0: done. Exit code 1: bad input,
+configuration or a failure (an error that names a field, never a value; the message says whether anything
+was created; Redis is checked after the database checks and before any write, so an unreachable Redis creates nothing). Exit code 2: the org and
+admin exist but the job could not be queued: run `reissue` with the same file. `reissue` works only for
+an active SUPER_ADMIN of the named org who has no password yet. It writes a `SET_PASSWORD_REISSUED` audit
+row and queues the job; if queuing fails it also writes `SET_PASSWORD_REISSUE_FAILED`. A new link replaces
+the old one (only the last email's link works), but if an earlier job for the same user is still waiting,
+delayed or running, BullMQ drops the new one (same job id) and nothing new is sent: wait for it to finish
+and run `reissue` again.
+
+### Recovery from a wrong email
+
+`create` does not refuse an organization name that already exists, and the admin was mailed a link at the
+address in the file. If that address was wrong, the owner (not this script) disables that admin and
+removes or renames the org; then run `create` again with the right address. Do not delete rows from
+`audit_logs` (it is append-only).
+
+### Before the first run
+
+- The API's `set-password` job processor (BE-06) must be deployed, and `bullmq` must be installed in
+  `apps/api`; until then the script stops before it creates anything.
+- Run `pnpm db:generate` once on the host (the script loads the Prisma client from `apps/api`).
+- After a successful `create` (exit 0), delete the input file; keep it only until a `reissue` you still
+  need has succeeded. Shred it if it was written from a secret.
+- Check `audit_logs` for one `ORG_PROVISIONED` row (ids only, no email) and that the admin got the email.

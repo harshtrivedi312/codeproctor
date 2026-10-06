@@ -3,6 +3,8 @@ import { apiBaseUrl } from '@/lib/env';
 import type { Schemas } from '@/lib/api/client';
 import { createAdminHandlers } from './admin-handlers';
 import { createAuthHandlers } from './auth-handlers';
+import { createCandidateHandlers } from './candidate/handlers';
+import { createQuestionHandlers } from './question-handlers';
 import { mockSession } from './data';
 
 export interface MockOptions {
@@ -13,6 +15,11 @@ export interface MockOptions {
   /** Simulated latency of staff administration calls. */
   adminLatencyMs: number;
 }
+
+/** The mocked server clock runs this far ahead of the browser, so the offset logic is visible. */
+export const MOCK_SERVER_CLOCK_AHEAD_MS = 90_000;
+/** One "server now" for every mocked response that carries a server time (/v1/time, savedAt...). */
+export const mockServerNow = (): Date => new Date(Date.now() + MOCK_SERVER_CLOCK_AHEAD_MS);
 
 const DEFAULTS: MockOptions = { runLatencyMs: 2500, saveLatencyMs: 300, adminLatencyMs: 300 };
 
@@ -71,16 +78,18 @@ export function createHandlers(options: Partial<MockOptions> = {}) {
   return [
     ...createAuthHandlers(),
     ...createAdminHandlers({ latencyMs: opts.adminLatencyMs }),
+    ...createQuestionHandlers({ latencyMs: opts.adminLatencyMs }),
+    // The candidate flow (FE-09, FE-09b): provisional mocks owned by Frontend B in ./candidate.
+    ...createCandidateHandlers(),
     http.get(`${base}/v1/health`, () => HttpResponse.json({ status: 'ok' as const })),
 
-    // The mocked clock runs 90 seconds ahead of the browser, so the offset logic is visible.
     http.get(`${base}/v1/time`, () =>
-      HttpResponse.json({ serverNow: new Date(Date.now() + 90_000).toISOString() }),
+      HttpResponse.json({ serverNow: mockServerNow().toISOString() }),
     ),
 
     http.get(`${base}/v1/candidate/session`, () => {
       const { testDurationMs, sectionDurationMs, ...rest } = mockSession;
-      const serverStart = startedAt + 90_000;
+      const serverStart = startedAt + MOCK_SERVER_CLOCK_AHEAD_MS;
       const body: Schemas['CandidateSession'] = {
         ...rest,
         testDeadlineAt: new Date(serverStart + testDurationMs).toISOString(),
@@ -94,7 +103,7 @@ export function createHandlers(options: Partial<MockOptions> = {}) {
 
     http.put(`${base}/v1/candidate/questions/:questionId/draft`, async () => {
       await delay(opts.saveLatencyMs);
-      return HttpResponse.json({ savedAt: new Date().toISOString() });
+      return HttpResponse.json({ savedAt: mockServerNow().toISOString() });
     }),
 
     http.post(`${base}/v1/candidate/questions/:questionId/run`, async ({ request, params }) => {
@@ -114,7 +123,7 @@ export function createHandlers(options: Partial<MockOptions> = {}) {
 
     http.post(`${base}/v1/candidate/sections/:sectionId/finish`, async () => {
       await delay(opts.saveLatencyMs);
-      return HttpResponse.json({ finishedAt: new Date().toISOString(), nextSectionId: null });
+      return HttpResponse.json({ finishedAt: mockServerNow().toISOString(), nextSectionId: null });
     }),
   ];
 }

@@ -465,18 +465,24 @@ describe('DB-08 app_user role (ADR 0006 sections 7 and 8.8, FR-105, D-35)', { sk
     denied('CREATE TABLE public.sneaky (id int)');
   });
 
-  it(
-    'ADR 0006 8.8 says app_user has no TEMP on the database; PUBLIC grants it by default (FU-DBB-18)',
-    {
-      todo: 'FU-DBB-18: cannot pass until a migration revokes TEMP from PUBLIC, or the ADR is corrected',
-    },
-    () => {
-      assert.equal(
-        asOwner("SELECT has_database_privilege('app_user', current_database(), 'TEMP')"),
-        'f',
-      );
-    },
-  );
+  it('ADR 0006 8.8: app_user has no TEMP and no CREATE on the database (the app_user_no_temp migration)', () => {
+    assert.equal(
+      asOwner("SELECT has_database_privilege('app_user', current_database(), 'TEMP')"),
+      'f',
+    );
+    assert.equal(
+      asOwner("SELECT has_database_privilege('app_user', current_database(), 'CREATE')"),
+      'f',
+    );
+    // PUBLIC no longer holds TEMPORARY either, so no other role gets it by default.
+    assert.equal(
+      asOwner(
+        "SELECT count(*) FROM aclexplode((SELECT coalesce(datacl, acldefault('d', datdba)) FROM pg_database WHERE datname = current_database())) a WHERE a.grantee = 0 AND a.privilege_type = 'TEMPORARY'",
+      ),
+      '0',
+    );
+    denied('CREATE TEMP TABLE sneaky (id int)');
+  });
 
   it('app_user holds exactly SELECT, INSERT, UPDATE, DELETE on each table, and SELECT, INSERT on audit_logs', () => {
     const grants = new Map(
