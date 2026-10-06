@@ -1,7 +1,7 @@
 import { InProcessEmailQueue } from './in-process-email-queue';
 import type { QueueLogger } from './in-process-email-queue';
 import { MailProcessor } from './mail-processor';
-import { MailError, MailTransport, ObjectReader } from './mail-transport';
+import { MAX_ATTACHMENT_BYTES, MailError, MailTransport, ObjectReader } from './mail-transport';
 import type { OutgoingMail } from './mail-transport';
 import { QueuedMailPort } from './queued-mail.port';
 
@@ -58,6 +58,13 @@ async function sendAll(port: QueuedMailPort): Promise<void> {
   await port.sendConsentCopy(TO, { pdfKey: KEY });
 }
 
+/** Every field of the queue, with Map contents spread so held jobs would show up. */
+function heldState(q: InProcessEmailQueue): string {
+  return JSON.stringify(
+    Object.entries(q).map(([k, v]) => [k, v instanceof Map ? [...v.values()] : v]),
+  );
+}
+
 function expectClean(haystack: string): void {
   for (const p of PLANTED) expect(haystack).not.toContain(p);
 }
@@ -80,7 +87,7 @@ describe('C-31 planted secrets stay out of logs, errors and records', () => {
     expect(r.lines.length).toBe(3);
     expectClean(r.lines.join('\n') + r.out.join(''));
     expect(r.queue.size()).toBe(0);
-    expectClean(JSON.stringify(Object.entries(r.queue)));
+    expectClean(heldState(r.queue));
   });
 
   it('C-31: final failure (transport error carrying every secret) leaks nothing and keeps no record', async () => {
@@ -97,7 +104,7 @@ describe('C-31 planted secrets stay out of logs, errors and records', () => {
     expect(r.lines.some((l) => l.includes('dropped after 2 attempts'))).toBe(true);
     expectClean(r.lines.join('\n') + r.out.join(''));
     expect(r.queue.size()).toBe(0);
-    expectClean(JSON.stringify(Object.entries(r.queue)));
+    expectClean(heldState(r.queue));
   });
 
   it('C-31: a failing attachment read is scrubbed to a fixed error without the key', async () => {
@@ -120,5 +127,73 @@ describe('C-31 planted secrets stay out of logs, errors and records', () => {
     expect(await full.sendOtp(TO, { otp: OTP, minutes: 10 })).toBe('failed');
     const broken = new QueuedMailPort({ enqueue: () => Promise.reject(new Error(TO)) });
     expect(await broken.sendOtp(TO, { otp: OTP, minutes: 10 })).toBe('failed');
+  });
+
+  it('FU-BE-89: the void methods throw a fixed MailError when the queue refuses', async () => {
+    const full = new QueuedMailPort({ enqueue: () => Promise.resolve('rejected') });
+    for (const call of [
+      () => full.sendPasswordReset(TO, URL),
+      () => full.sendStaffInvite(TO, URL),
+      () => full.sendStaffAccountLocked(TO, { email: TO, name: 'n', minutes: 1 }),
+    ]) {
+      let caught: unknown;
+      try {
+        await call();
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(MailError);
+      expectClean(String(caught) + JSON.stringify(caught));
+    }
+  });
+
+  it('D-17: consent-copy without a key is refused by the port and fails in the processor', async () => {
+    const enqueued: unknown[] = [];
+    const port = new QueuedMailPort({
+      enqueue: (j) => (enqueued.push(j), Promise.resolve('accepted')),
+    });
+    expect(await port.sendConsentCopy(TO, { pdfKey: '' })).toBe('failed');
+    expect(enqueued).toHaveLength(0);
+    const sent: OutgoingMail[] = [];
+    const processor = new MailProcessor(
+      { send: (m) => (sent.push(m), Promise.resolve()) },
+      new FakeReader(),
+    );
+    await expect(
+      processor.handle({ template: 'consent-copy', to: TO, params: { pdfKey: '' } }),
+    ).rejects.toMatchObject({ message: 'attachment key missing', permanent: true });
+    expect(sent).toHaveLength(0);
+  });
+
+  it('D-17: an oversized or empty attachment is refused with a fixed permanent error', async () => {
+    const sent: OutgoingMail[] = [];
+    const t: MailTransport = { send: (m) => (sent.push(m), Promise.resolve()) };
+    const big = new MailProcessor(t, {
+      read: () => Promise.resolve(Buffer.alloc(MAX_ATTACHMENT_BYTES + 1)),
+    });
+    await expect(
+      big.handle({ template: 'consent-copy', to: TO, params: { pdfKey: KEY } }),
+    ).rejects.toMatchObject({ message: 'attachment too large', permanent: true });
+    const empty = new MailProcessor(t, { read: () => Promise.resolve(Buffer.alloc(0)) });
+    await expect(
+      empty.handle({ template: 'consent-copy', to: TO, params: { pdfKey: KEY } }),
+    ).rejects.toMatchObject({ message: 'attachment empty' });
+    const exact = new MailProcessor(t, {
+      read: () => Promise.resolve(Buffer.alloc(MAX_ATTACHMENT_BYTES, 1)),
+    });
+    await exact.handle({ template: 'consent-copy', to: TO, params: { pdfKey: KEY } });
+    expect(sent).toHaveLength(1);
+  });
+
+  it('C-31: the reader is asked for at most the attachment cap', async () => {
+    let asked = 0;
+    const p = new MailProcessor(
+      { send: () => Promise.resolve() },
+      {
+        read: (_k: string, max: number) => ((asked = max), Promise.resolve(Buffer.from('%PDF'))),
+      },
+    );
+    await p.handle({ template: 'consent-copy', to: TO, params: { pdfKey: KEY } });
+    expect(asked).toBe(MAX_ATTACHMENT_BYTES);
   });
 });

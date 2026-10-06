@@ -272,14 +272,36 @@ describe('NFR-04 environment validation', () => {
       }
     });
 
-    it('C-31: there is no static AWS key setting in the schema', () => {
-      const env = validateEnv({
-        ...valid,
-        AWS_ACCESS_KEY_ID: 'AKIAFAKE',
-        AWS_SECRET_ACCESS_KEY: 'fake',
-      }) as Record<string, unknown>;
-      expect(env['AWS_ACCESS_KEY_ID']).toBeUndefined();
-      expect(env['AWS_SECRET_ACCESS_KEY']).toBeUndefined();
+    it('C-31: static AWS credentials are refused in live environments, naming only the variable', () => {
+      for (const name of ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN']) {
+        for (const APP_ENV of ['pilot', 'production']) {
+          let text = '';
+          try {
+            validateEnv({ ...live, APP_ENV, [name]: 'SUPERSECRETVALUE' });
+          } catch (e) {
+            text = String(e);
+          }
+          expect(text).toContain(name);
+          expect(text).not.toContain('SUPERSECRETVALUE');
+        }
+        // Developers may hold credentials locally.
+        expect(() => validateEnv({ ...valid, [name]: 'x' })).not.toThrow();
+      }
+    });
+
+    it('C-31: AWS_REGION must look like a region and is pinned to us-east-1 in live environments', () => {
+      for (const bad of ['us_east_1', 'US-EAST-1', 'useast1', 'us-east', '']) {
+        expect(() => validateEnv({ ...valid, AWS_REGION: bad })).toThrow(/AWS_REGION/);
+      }
+      expect(validateEnv({ ...valid, AWS_REGION: 'eu-west-1' }).AWS_REGION).toBe('eu-west-1');
+      for (const APP_ENV of ['pilot', 'production']) {
+        expect(() => validateEnv({ ...live, APP_ENV, AWS_REGION: 'eu-west-1' })).toThrow(
+          /AWS_REGION/,
+        );
+        expect(validateEnv({ ...live, APP_ENV, AWS_REGION: 'us-east-1' }).AWS_REGION).toBe(
+          'us-east-1',
+        );
+      }
     });
   });
 });

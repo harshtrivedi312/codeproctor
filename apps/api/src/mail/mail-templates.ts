@@ -3,6 +3,8 @@
 // subject is a fixed string (never a URL, token or user text); each mail has a plain-text part;
 // candidate mails carry no recruiter free text (only links, codes and dates).
 
+import { MailError } from './mail-transport';
+
 export interface TemplateParams {
   'password-reset': { resetUrl: string };
   'staff-invite': { inviteUrl: string };
@@ -36,7 +38,8 @@ export function stripHeader(value: string): string {
   let out = '';
   for (const ch of value) {
     const c = ch.codePointAt(0) ?? 0;
-    out += c < 0x20 || c === 0x7f ? ' ' : ch;
+    // C0 and C1 controls (includes U+0085), DEL, and the Unicode line and paragraph separators.
+    out += c < 0x20 || (c >= 0x7f && c <= 0x9f) || c === 0x2028 || c === 0x2029 ? ' ' : ch;
   }
   return out.replace(/ {2,}/g, ' ').trim();
 }
@@ -84,7 +87,28 @@ function make(
   return { subject: stripHeader(subject), ...layout(heading, paragraphs, link) };
 }
 
-export function renderMail(job: EmailJob): RenderedMail {
+/** Only https links (http too when allowHttp, outside live environments); never javascript: etc. */
+function assertSafeLink(raw: string, allowHttp: boolean): void {
+  let protocol = '';
+  try {
+    protocol = new URL(raw).protocol;
+  } catch {
+    protocol = '';
+  }
+  if (protocol !== 'https:' && !(allowHttp && protocol === 'http:')) {
+    throw new MailError('unsafe link', 'none', true);
+  }
+}
+
+export interface RenderOptions {
+  /** Accept http: links. Set outside pilot and production only. */
+  allowHttp?: boolean;
+}
+
+export function renderMail(job: EmailJob, opts: RenderOptions = {}): RenderedMail {
+  const allowHttp = opts.allowHttp ?? false;
+  if ('resetUrl' in job.params) assertSafeLink(job.params.resetUrl, allowHttp);
+  if ('inviteUrl' in job.params) assertSafeLink(job.params.inviteUrl, allowHttp);
   switch (job.template) {
     case 'password-reset':
       return make(

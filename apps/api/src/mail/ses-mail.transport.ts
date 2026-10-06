@@ -14,9 +14,25 @@ export interface SesTransportOptions {
   configurationSet?: string;
   /** Tests only; refused at boot outside local and test. */
   endpoint?: string;
+  /** Socket connect timeout. Default 5 s. */
+  connectionTimeoutMs?: number;
+  /** Whole-request timeout. Default 10 s, so a hanging SES cannot hold a queue slot. */
+  requestTimeoutMs?: number;
 }
 
+/** SES errors that a retry cannot fix. */
+const PERMANENT_SES_ERRORS = new Set([
+  'MessageRejected',
+  'BadRequestException',
+  'AccountSuspendedException',
+  'MailFromDomainNotVerifiedException',
+  'NotFoundException',
+]);
+
 const SIMPLE_ADDRESS = /^[^\s<>@",;]+@[^\s<>@",;]+$/;
+const PRINTABLE_ASCII = /^[!-~]+$/;
+const isValidRecipient = (to: string): boolean =>
+  to.length <= 254 && PRINTABLE_ASCII.test(to) && SIMPLE_ADDRESS.test(to);
 
 export class SesMailTransport extends MailTransport {
   private readonly client: SESv2Client;
@@ -26,14 +42,22 @@ export class SesMailTransport extends MailTransport {
     super();
     this.client = new SESv2Client({
       region: opts.region,
+      // The queue owns retries; the SDK must not add its own.
+      maxAttempts: 1,
+      requestHandler: {
+        connectionTimeout: opts.connectionTimeoutMs ?? 5_000,
+        requestTimeout: opts.requestTimeoutMs ?? 10_000,
+        // Without this the SDK only warns on a request timeout and keeps waiting.
+        throwOnRequestTimeout: true,
+      },
       ...(opts.endpoint ? { endpoint: opts.endpoint } : {}),
     });
-    const name = stripHeader(opts.fromName ?? 'CodeProctor').replace(/["<>]/g, '');
+    const name = stripHeader(opts.fromName ?? 'CodeProctor').replace(/["<>\\]/g, '');
     this.from = `"${name}" <${stripHeader(opts.fromAddress)}>`;
   }
 
   async send(mail: OutgoingMail): Promise<void> {
-    if (!SIMPLE_ADDRESS.test(mail.to)) throw new MailError('invalid recipient');
+    if (!isValidRecipient(mail.to)) throw new MailError('invalid recipient', 'none', true);
     const subject = stripHeader(mail.subject);
     try {
       const content = mail.attachment
@@ -75,9 +99,15 @@ export class SesMailTransport extends MailTransport {
             ? { ConfigurationSetName: this.opts.configurationSet }
             : {}),
         }),
+        // Hard ceiling for the whole call (the handler timeout is per socket).
+        { abortSignal: AbortSignal.timeout((this.opts.requestTimeoutMs ?? 10_000) + 2_000) },
       );
     } catch (e) {
-      throw scrub(e, 'mail transport failed');
+      throw scrub(
+        e,
+        'mail transport failed',
+        e instanceof Error && PERMANENT_SES_ERRORS.has(e.name),
+      );
     }
   }
 }

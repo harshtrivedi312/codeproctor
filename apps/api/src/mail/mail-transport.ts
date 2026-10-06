@@ -17,7 +17,11 @@ export abstract class MailTransport {
  * S3-compatible storage port exists on main yet; the module that adds one implements this.
  */
 export abstract class ObjectReader {
-  abstract read(key: string): Promise<Buffer>;
+  /**
+   * Returns the object bytes. Implementations MUST refuse (throw) an object larger than maxBytes
+   * without buffering it whole; the processor passes MAX_ATTACHMENT_BYTES and checks again.
+   */
+  abstract read(key: string, maxBytes: number): Promise<Buffer>;
 }
 
 export class UnconfiguredObjectReader extends ObjectReader {
@@ -34,6 +38,8 @@ export class MailError extends Error {
   constructor(
     message: string,
     readonly causeName: string = 'none',
+    /** A retry cannot help (bad recipient, rejected by SES, missing or oversized attachment). */
+    readonly permanent: boolean = false,
   ) {
     super(message);
     this.name = 'MailError';
@@ -41,6 +47,9 @@ export class MailError extends Error {
 }
 
 /** Wraps anything caught in the mail path into a MailError that holds no payload. */
-export function scrub(e: unknown, message: string): MailError {
-  return new MailError(message, e instanceof Error ? e.name : 'unknown');
+export function scrub(e: unknown, message: string, permanent = false): MailError {
+  return new MailError(message, e instanceof Error ? e.name : 'unknown', permanent);
 }
+
+/** Hard cap on an attached file. */
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;

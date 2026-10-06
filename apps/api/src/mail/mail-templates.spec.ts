@@ -117,4 +117,36 @@ describe('FR-303 / C-31 mail templates', () => {
     const m = renderMail(pick('results'));
     expect(m.text).not.toMatch(/score|verdict|pass|fail/i);
   });
+
+  it('C-31: only https links are accepted (http only when allowed); javascript: and data: never', () => {
+    const withUrl = (inviteUrl: string): EmailJob => ({
+      template: 'staff-invite',
+      to: 'a@example.com',
+      params: { inviteUrl },
+    });
+    expect(() => renderMail(withUrl('https://app.example.com/x'))).not.toThrow();
+    expect(() => renderMail(withUrl('http://localhost:3000/x'))).toThrow('unsafe link');
+    expect(() => renderMail(withUrl('http://localhost:3000/x'), { allowHttp: true })).not.toThrow();
+    for (const bad of [
+      'javascript:alert(1)',
+      'data:text/html,x',
+      'JaVaScRiPt:x',
+      '//evil.com',
+      'not a url',
+      '',
+    ]) {
+      expect(() => renderMail(withUrl(bad), { allowHttp: true })).toThrow('unsafe link');
+    }
+    expect(() =>
+      renderMail({
+        template: 'password-reset',
+        to: 'a@example.com',
+        params: { resetUrl: 'javascript:1' },
+      }),
+    ).toThrow('unsafe link');
+  });
+
+  it('C-31: stripHeader removes C1 controls, U+0085, U+2028 and U+2029', () => {
+    expect(stripHeader('a\u0085b\u2028c\u2029d\u0080e\u009ff\u007fg')).toBe('a b c d e f g');
+  });
 });

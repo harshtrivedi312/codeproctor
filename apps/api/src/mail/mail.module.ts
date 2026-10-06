@@ -5,6 +5,7 @@
 // until then.
 import { Global, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { isLiveEnv } from '../config/env';
 import type { Env } from '../config/env';
 import { EmailQueuePort } from './email-queue.port';
 import { InProcessEmailQueue } from './in-process-email-queue';
@@ -45,7 +46,14 @@ const sesOnly = (config: ConfigService<Env, true>): boolean =>
         reader: ObjectReader,
       ): EmailQueuePort | null =>
         sesOnly(config) && transport
-          ? new InProcessEmailQueue(new MailProcessor(transport, reader).handle)
+          ? new InProcessEmailQueue(
+              new MailProcessor(transport, reader, {
+                allowHttp: !isLiveEnv({
+                  APP_ENV: config.get('APP_ENV', { infer: true }),
+                  NODE_ENV: config.get('NODE_ENV', { infer: true }),
+                }),
+              }).handle,
+            )
           : null,
     },
     {

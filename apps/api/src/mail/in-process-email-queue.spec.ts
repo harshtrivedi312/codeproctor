@@ -17,16 +17,21 @@ function capture(): { logger: QueueLogger; lines: string[] } {
 
 describe('FU-BE-21 in-process email queue', () => {
   it('FU-BE-89: enqueue reports accepted, and rejected when full or stopped', async () => {
+    const cap = capture();
     const q = new InProcessEmailQueue(() => new Promise<void>(() => undefined), {
       capacity: 2,
       concurrency: 1,
-      logger: capture().logger,
+      logger: cap.logger,
     });
     expect(await q.enqueue(job(1))).toBe('accepted');
     expect(await q.enqueue(job(2))).toBe('accepted');
     expect(await q.enqueue(job(3))).toBe('rejected');
+    expect(cap.lines).toContain('mail enqueue rejected template=otp reason=full');
     q.onModuleDestroy();
+    expect(cap.lines.some((l) => l.includes('dropped 1 waiting jobs'))).toBe(true);
     expect(await q.enqueue(job(4))).toBe('rejected');
+    expect(cap.lines).toContain('mail enqueue rejected template=otp reason=stopped');
+    expect(cap.lines.join('\n')).not.toContain('example.com');
   });
 
   it('FU-BE-21: a completed job is removed (queue empty after the run)', async () => {
@@ -78,7 +83,11 @@ describe('FU-BE-21 in-process email queue', () => {
     await q.idle();
     expect(calls).toBe(3);
     expect(q.size()).toBe(0);
-    expect(JSON.stringify(Object.values(q))).not.toContain('u7@example.com');
+    expect(
+      JSON.stringify(
+        Object.values(q).map((v: unknown) => (v instanceof Map ? [...v.values()] : v)),
+      ),
+    ).not.toContain('u7@example.com');
     expect(lines.some((l) => l.includes('dropped after 3 attempts'))).toBe(true);
   });
 
@@ -97,6 +106,38 @@ describe('FU-BE-21 in-process email queue', () => {
     for (let i = 0; i < 8; i++) await q.enqueue(job(i));
     await q.idle();
     expect(max).toBe(2);
+    expect(q.size()).toBe(0);
+  });
+
+  it('FU-BE-21: a permanent failure is dropped at once, without retries', async () => {
+    let calls = 0;
+    const q = new InProcessEmailQueue(
+      () => {
+        calls++;
+        return Promise.reject(new MailError('invalid recipient', 'none', true));
+      },
+      { maxAttempts: 5, baseBackoffMs: 1, logger: capture().logger },
+    );
+    await q.enqueue(job());
+    await q.idle();
+    expect(calls).toBe(1);
+    expect(q.size()).toBe(0);
+  });
+
+  it('FU-BE-21: no retry is scheduled after the queue is stopped', async () => {
+    let calls = 0;
+    const q = new InProcessEmailQueue(
+      () => {
+        calls++;
+        q.onModuleDestroy();
+        return Promise.reject(new MailError('x'));
+      },
+      { baseBackoffMs: 1, logger: capture().logger },
+    );
+    await q.enqueue(job());
+    await q.idle();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls).toBe(1);
     expect(q.size()).toBe(0);
   });
 });

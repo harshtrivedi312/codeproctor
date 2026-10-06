@@ -12,10 +12,16 @@ import type {
   ReminderMail,
 } from './mail.port';
 import type { EmailJob } from './mail-templates';
+import { MailError } from './mail-transport';
 
 export class QueuedMailPort extends MailPort {
   constructor(private readonly queue: EmailQueuePort) {
     super();
+  }
+
+  /** The original void methods surface a failed enqueue so callers' catch blocks log it. */
+  private mustQueue(outcome: MailOutcome): void {
+    if (outcome === 'failed') throw new MailError('mail not queued');
   }
 
   private async put(job: EmailJob): Promise<MailOutcome> {
@@ -27,20 +33,22 @@ export class QueuedMailPort extends MailPort {
   }
 
   async sendPasswordReset(to: string, resetUrl: string): Promise<void> {
-    await this.put({ template: 'password-reset', to, params: { resetUrl } });
+    this.mustQueue(await this.put({ template: 'password-reset', to, params: { resetUrl } }));
   }
   async sendStaffInvite(to: string, inviteUrl: string): Promise<void> {
-    await this.put({ template: 'staff-invite', to, params: { inviteUrl } });
+    this.mustQueue(await this.put({ template: 'staff-invite', to, params: { inviteUrl } }));
   }
   async sendStaffAccountLocked(
     to: string,
     locked: { email: string; name: string; minutes: number },
   ): Promise<void> {
-    await this.put({
-      template: 'staff-account-locked',
-      to,
-      params: { lockedEmail: locked.email, lockedName: locked.name, minutes: locked.minutes },
-    });
+    this.mustQueue(
+      await this.put({
+        template: 'staff-account-locked',
+        to,
+        params: { lockedEmail: locked.email, lockedName: locked.name, minutes: locked.minutes },
+      }),
+    );
   }
   sendInvitation(to: string, m: InvitationMail): Promise<MailOutcome> {
     return this.put({
@@ -74,6 +82,8 @@ export class QueuedMailPort extends MailPort {
     });
   }
   sendConsentCopy(to: string, m: ConsentCopyMail): Promise<MailOutcome> {
+    // Never queue "the consent you signed is attached" without a key to attach.
+    if (!m.pdfKey) return Promise.resolve('failed');
     return this.put({ template: 'consent-copy', to, params: { pdfKey: m.pdfKey } });
   }
   sendErasureDelayed(to: string, m: ErasureDelayedMail): Promise<MailOutcome> {

@@ -65,7 +65,12 @@ export class InProcessEmailQueue extends EmailQueuePort implements OnModuleDestr
   }
 
   enqueue(job: EmailJob): Promise<EnqueueOutcome> {
-    if (this.stopped || this.size() >= this.capacity) return Promise.resolve('rejected');
+    if (this.stopped || this.size() >= this.capacity) {
+      this.logger.warn(
+        `mail enqueue rejected template=${job.template} reason=${this.stopped ? 'stopped' : 'full'}`,
+      );
+      return Promise.resolve('rejected');
+    }
     this.ready.push({ id: randomUUID(), job, attempt: 0 });
     this.pump();
     return Promise.resolve('accepted');
@@ -79,6 +84,8 @@ export class InProcessEmailQueue extends EmailQueuePort implements OnModuleDestr
 
   onModuleDestroy(): void {
     this.stopped = true;
+    const dropped = this.ready.length + this.retrying.size;
+    if (dropped > 0) this.logger.warn(`mail queue stopped, dropped ${dropped} waiting jobs`);
     for (const t of this.timers.values()) clearTimeout(t);
     this.timers.clear();
     this.retrying.clear();
@@ -102,11 +109,12 @@ export class InProcessEmailQueue extends EmailQueuePort implements OnModuleDestr
       this.logger.log(`mail job ${entry.id} template=${entry.job.template} sent`);
     } catch (e) {
       const errName = e instanceof MailError ? `${e.name}/${e.causeName}` : 'unknown';
-      if (entry.attempt >= this.maxAttempts) {
+      const permanent = e instanceof MailError && e.permanent;
+      if (permanent || entry.attempt >= this.maxAttempts) {
         this.logger.error(
-          `mail job ${entry.id} template=${entry.job.template} dropped after ${entry.attempt} attempts error=${errName}`,
+          `mail job ${entry.id} template=${entry.job.template} dropped after ${entry.attempt} attempts${permanent ? ' (permanent)' : ''} error=${errName}`,
         );
-      } else {
+      } else if (!this.stopped) {
         this.logger.warn(
           `mail job ${entry.id} template=${entry.job.template} attempt ${entry.attempt} failed error=${errName}`,
         );
@@ -120,6 +128,7 @@ export class InProcessEmailQueue extends EmailQueuePort implements OnModuleDestr
   }
 
   private scheduleRetry(entry: Entry): void {
+    if (this.stopped) return;
     const delay = Math.min(this.baseBackoffMs * 2 ** (entry.attempt - 1), this.maxBackoffMs);
     this.retrying.set(entry.id, entry);
     const timer = setTimeout(() => {

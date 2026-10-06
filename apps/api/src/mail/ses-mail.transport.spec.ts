@@ -1,7 +1,9 @@
 import { createServer } from 'node:http';
 import type { IncomingHttpHeaders, Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { MailError } from './mail-transport';
+import { InProcessEmailQueue } from './in-process-email-queue';
+import { MailProcessor } from './mail-processor';
+import { MailError, UnconfiguredObjectReader } from './mail-transport';
 import { SesMailTransport } from './ses-mail.transport';
 
 interface Captured {
@@ -16,6 +18,7 @@ describe('C-31 SesMailTransport against a local stub (never real AWS)', () => {
   let endpoint: string;
   let seen: Captured[];
   let status = 200;
+  let hang = false;
   const saved: Record<string, string | undefined> = {};
 
   beforeAll(async () => {
@@ -30,6 +33,10 @@ describe('C-31 SesMailTransport against a local stub (never real AWS)', () => {
       const chunks: Buffer[] = [];
       req.on('data', (c: Buffer) => chunks.push(c));
       req.on('end', () => {
+        if (hang) {
+          hang = false;
+          return; // never answer
+        }
         seen.push({
           url: req.url ?? '',
           method: req.method ?? '',
@@ -53,11 +60,13 @@ describe('C-31 SesMailTransport against a local stub (never real AWS)', () => {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
+    server.closeAllConnections();
     await new Promise<void>((r) => server.close(() => r()));
   });
   beforeEach(() => {
     seen = [];
     status = 200;
+    hang = false;
   });
 
   const make = (extra: object = {}): SesMailTransport =>
@@ -154,5 +163,53 @@ describe('C-31 SesMailTransport against a local stub (never real AWS)', () => {
     expect(text).not.toContain('victim@example.com');
     expect(text).not.toContain('TOKENBODY');
     expect((caught as Error & { cause?: unknown }).cause).toBeUndefined();
+  });
+
+  it('C-31: a SES that never answers fails within the timeout and frees the queue slot', async () => {
+    const transport = make({ requestTimeoutMs: 300, connectionTimeoutMs: 300 });
+    const processor = new MailProcessor(transport, new UnconfiguredObjectReader());
+    const logs: string[] = [];
+    const push = (m: string): void => void logs.push(m);
+    const queue = new InProcessEmailQueue(processor.handle, {
+      concurrency: 1,
+      maxAttempts: 1,
+      logger: { log: push, warn: push, error: push },
+    });
+    hang = true; // the first request is swallowed
+    const started = Date.now();
+    await queue.enqueue({
+      template: 'otp',
+      to: 'a@example.com',
+      params: { otp: '123456', minutes: 10 },
+    });
+    await queue.enqueue({
+      template: 'otp',
+      to: 'b@example.com',
+      params: { otp: '654321', minutes: 10 },
+    });
+    await queue.idle();
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(queue.size()).toBe(0);
+    // The second job got the freed slot and reached the stub once.
+    expect(seen).toHaveLength(1);
+    expect(logs.some((l) => l.includes('dropped after 1 attempts'))).toBe(true);
+    expect(logs.join('\n')).not.toMatch(/example\.com|123456|654321/);
+  });
+
+  it('C-31: the SDK does not retry on its own (one request per send)', async () => {
+    status = 500;
+    await expect(
+      make().send({ to: 'a@example.com', subject: 's', html: 'h', text: 't' }),
+    ).rejects.toBeInstanceOf(MailError);
+    expect(seen).toHaveLength(1);
+  });
+
+  it('C-31: a recipient longer than 254 characters or non-ASCII is refused', async () => {
+    for (const to of [`${'a'.repeat(250)}@example.com`, 'jos\u00e9@example.com']) {
+      await expect(make().send({ to, subject: 's', html: 'h', text: 't' })).rejects.toMatchObject({
+        permanent: true,
+      });
+    }
+    expect(seen).toHaveLength(0);
   });
 });
