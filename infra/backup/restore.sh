@@ -119,11 +119,11 @@ psql_admin -c "REVOKE TEMPORARY ON DATABASE \"$target\" FROM PUBLIC" > /dev/null
 gzip -dc "$WORK/$backup" | pg_restore --no-owner --exit-on-error --dbname "$target" ||
   die "pg_restore failed. Database $target was left in place for inspection."
 
-# 3b. The role must end up without TEMPORARY (ADR 0006 8.8). Checked as well as set, because a
+# 3b. The role must end up without TEMPORARY or CREATE (ADR 0006 8.8). Checked as well as set, because a
 #     restore into a server where app_user is granted it directly or through a role would still pass.
-temp_ok=$(psql_admin -c "SELECT NOT has_database_privilege('app_user', '$target', 'TEMPORARY')") ||
+temp_ok=$(psql_admin -c "SELECT NOT has_database_privilege('app_user', '$target', 'TEMPORARY') AND NOT has_database_privilege('app_user', '$target', 'CREATE')") ||
   die "could not check the TEMPORARY privilege on database $target. Do not use it."
-[ "$temp_ok" = "t" ] || die "app_user still has TEMPORARY on database $target. Do not use it."
+[ "$temp_ok" = "t" ] || die "app_user still has TEMPORARY or CREATE on database $target. Do not use it."
 
 # 4. Compare row counts with the counts taken at backup time, BEFORE erasures are re-applied.
 psql --no-psqlrc -X -q -At -v ON_ERROR_STOP=1 -d "$target" > "$WORK/actual-counts.tsv" <<'SQL'
