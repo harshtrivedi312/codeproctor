@@ -3,6 +3,8 @@ import { useQuery } from '@tanstack/react-query';
 import * as React from 'react';
 import { ConsentStep } from '@/features/consent/consent-step';
 import type { IdentityDeps } from '@/features/identity/capture';
+import { createAdrSource } from '@/features/candidate-test/adr-source';
+import { TestScreen } from '@/features/candidate-test/test-screen';
 import { PhoneStep } from '@/features/candidate-phone/phone-step';
 import { PracticeStep } from '@/features/candidate-practice/practice-step';
 import { resetRoomSeq } from '@/features/candidate-room/room-capture';
@@ -46,7 +48,6 @@ export interface FlowOverrides {
   identity?: Partial<IdentityDeps>;
   room?: Partial<RoomScanDeps>;
   phonePollMs?: number;
-  navigate?: (path: string) => void;
 }
 
 export function CandidateFlow({
@@ -63,6 +64,7 @@ export function CandidateFlow({
   const [sent, setSent] = React.useState<CodeSentInfo | null>(null);
   const [resuming, setResuming] = React.useState(false);
   const [phoneRequired, setPhoneRequired] = React.useState(false);
+  const [inTest, setInTest] = React.useState(false);
   const [urlCheck, setUrlCheck] = React.useState<'pending' | 'ok' | 'fragment'>('pending');
 
   // Where the token comes from: memory (handed over by the entry routes), then a test seam. Held in
@@ -124,6 +126,11 @@ export function CandidateFlow({
     clearCandidateCredentials();
     setTerminal({ reason: 'SESSION_ENDED' });
   }, []);
+
+  const testSource = React.useMemo(
+    () => createAdrSource({ onSessionEnded: endSession }),
+    [endSession],
+  );
 
   const finishWith = React.useCallback((t: Terminal) => {
     clearCandidateCredentials();
@@ -246,7 +253,7 @@ export function CandidateFlow({
         body = (
           <StartStep
             resuming={resuming}
-            {...(overrides?.navigate ? { navigate: overrides.navigate } : {})}
+            onStarted={() => setInTest(true)}
             onSessionEnded={endSession}
           />
         );
@@ -254,6 +261,15 @@ export function CandidateFlow({
     }
   } else {
     body = <TerminalScreen terminal={{ reason: 'UNAVAILABLE' }} />;
+  }
+
+  // The test itself: same document, token in memory, no stepper chrome (see start-step.tsx).
+  if (inTest && !terminal) {
+    return (
+      <main id="main">
+        <TestScreen source={testSource} onSubmitted={clearCandidateCredentials} />
+      </main>
+    );
   }
 
   return (
