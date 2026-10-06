@@ -83,12 +83,13 @@ describe('invitation link and token handling (FR-303, FR-401, ADR 0003)', () => 
     expect(seen).toHaveLength(0);
   });
 
-  it('FR-401: the soft navigation from /t/start#<token> (token in memory, URL rewritten after commit) reaches the welcome step', async () => {
+  it('FR-401: with the token already in memory (as after the /t/start#<token> hand-off) the stepper reaches the welcome step', async () => {
     const seen = recordRequests();
     captureInvitationToken(MOCK_TOKENS.open);
     window.history.replaceState(null, '', `/t/start#${MOCK_TOKENS.open}`);
     renderWithQuery(<CandidateFlow />);
-    // Next's HistoryUpdater rewrites the address bar right after the first render.
+    // Only the address-bar change is simulated here. This does not reproduce Next's render and
+    // HistoryUpdater timing; that is checked in a real browser (FU-FEB-23).
     window.history.replaceState(null, '', '/t/link');
     expect(
       await screen.findByRole('heading', {

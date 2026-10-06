@@ -37,6 +37,7 @@ const DONE_ITEMS = [
   'You signed the consent document',
   'Your computer passed the system check',
   'Your identity photos were received',
+  'Your room scan was received',
 ];
 
 export function StartStep({

@@ -1,4 +1,14 @@
-export const STEP_IDS = ['welcome', 'verify', 'consent', 'check', 'identity', 'start'] as const;
+export const STEP_IDS = [
+  'welcome',
+  'verify',
+  'consent',
+  'check',
+  'identity',
+  'room',
+  'phone',
+  'practice',
+  'start',
+] as const;
 export type StepId = (typeof STEP_IDS)[number];
 
 export const STEP_LABELS: Record<StepId, string> = {
@@ -7,6 +17,9 @@ export const STEP_LABELS: Record<StepId, string> = {
   consent: 'Consent',
   check: 'System check',
   identity: 'Identity',
+  room: 'Room scan',
+  phone: 'Phone camera',
+  practice: 'Practice',
   start: 'Start',
 };
 
@@ -20,6 +33,9 @@ export function stepForStatus(
     case 'CONSENTED':
       return 'check';
     case 'VERIFIED':
+      // The server only gets here after the room scan. The phone step skips itself when the test
+      // needs no side camera, and checks the pairing when it does.
+      return 'phone';
     case 'IN_PROGRESS':
     case 'PAUSED':
       return 'start';

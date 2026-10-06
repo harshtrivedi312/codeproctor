@@ -3,6 +3,11 @@ import { useQuery } from '@tanstack/react-query';
 import * as React from 'react';
 import { ConsentStep } from '@/features/consent/consent-step';
 import type { IdentityDeps } from '@/features/identity/capture';
+import { PhoneStep } from '@/features/candidate-phone/phone-step';
+import { PracticeStep } from '@/features/candidate-practice/practice-step';
+import { resetRoomSeq } from '@/features/candidate-room/room-capture';
+import { RoomScanStep } from '@/features/candidate-room/room-scan-step';
+import type { RoomScanDeps } from '@/features/candidate-room/room-capture';
 import { IdentityStep } from '@/features/identity/identity-step';
 import type { SystemChecker } from '@/features/precheck/checks';
 import { SystemCheckStep } from '@/features/precheck/system-check-step';
@@ -29,16 +34,18 @@ import type { LinkView, SessionTokenResponse } from './wire';
  * route /t/link.
  *
  * Credentials: links shaped /t/<token> or /t/start#<token> open a thin entry page (token-handoff.tsx)
- * that moves the token into memory and replaces the route with /t/link. This component only takes
- * the token from memory. It never reads a fragment: if /t/link is loaded with one anyway, it shows
- * an error asking for the email link again instead of trusting any clean-up. The token is sent only
- * in POST bodies; the session token lives in memory only. A reload loses both: the candidate opens
- * the link again and enters a new code, which is what resuming means (ADR 0002). Progress is the
- * server's session status, so a candidate resumes at the right step.
+ * that moves the token into memory and calls router.replace('/t/link'). This component takes the
+ * token from memory only and never reads a fragment: if /t/link is loaded with one and no token was
+ * handed over, it shows an error asking for the email link again. The token is sent only in POST
+ * bodies and the session token lives in memory only. A reload loses both: the candidate opens the
+ * link again and enters a new code (ADR 0002). Progress is the server's session status. That the
+ * address bar and history hold no token is checked in a real browser (FU-FEB-23), not here.
  */
 export interface FlowOverrides {
   checker?: SystemChecker;
   identity?: Partial<IdentityDeps>;
+  room?: Partial<RoomScanDeps>;
+  phonePollMs?: number;
   navigate?: (path: string) => void;
 }
 
@@ -55,6 +62,7 @@ export function CandidateFlow({
   const [step, setStep] = React.useState<StepId>('welcome');
   const [sent, setSent] = React.useState<CodeSentInfo | null>(null);
   const [resuming, setResuming] = React.useState(false);
+  const [phoneRequired, setPhoneRequired] = React.useState(false);
   const [urlCheck, setUrlCheck] = React.useState<'pending' | 'ok' | 'fragment'>('pending');
 
   // Where the token comes from: memory (handed over by the entry routes), then a test seam. Held in
@@ -83,6 +91,7 @@ export function CandidateFlow({
     return () => {
       // Leaving the flow forgets everything held in memory.
       clearCandidateCredentials();
+      resetRoomSeq();
     };
   }, [token]);
 
@@ -210,10 +219,28 @@ export function CandidateFlow({
         body = (
           <IdentityStep
             deps={overrides?.identity}
-            onDone={goTo('start')}
+            onDone={goTo('room')}
             onSessionEnded={endSession}
           />
         );
+        break;
+      case 'room':
+        body = (
+          <RoomScanStep deps={overrides?.room} onDone={goTo('phone')} onSessionEnded={endSession} />
+        );
+        break;
+      case 'phone':
+        body = (
+          <PhoneStep
+            {...(overrides?.phonePollMs ? { pollMs: overrides.phonePollMs } : {})}
+            onRequiredKnown={setPhoneRequired}
+            onDone={goTo('practice')}
+            onSessionEnded={endSession}
+          />
+        );
+        break;
+      case 'practice':
+        body = <PracticeStep onDone={goTo('start')} onSessionEnded={endSession} />;
         break;
       case 'start':
         body = (
@@ -239,7 +266,9 @@ export function CandidateFlow({
           </p>
         ) : null}
       </header>
-      {!terminal && linkView?.state === 'OTP_REQUIRED' ? <Stepper current={step} /> : null}
+      {!terminal && linkView?.state === 'OTP_REQUIRED' ? (
+        <Stepper current={step} hidden={phoneRequired ? [] : ['phone']} />
+      ) : null}
       {body}
     </main>
   );

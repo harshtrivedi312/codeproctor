@@ -8,6 +8,13 @@ import {
   consentSignedSchema,
   identityReceivedSchema,
   linkViewSchema,
+  mediaConfirmSchema,
+  mediaPresignSchema,
+  practiceQuestionSchema,
+  practiceRunSchema,
+  sideCameraLinkSchema,
+  sideCameraPairSchema,
+  sideCameraStatusSchema,
   otpSentSchema,
   presignSchema,
   sessionTokenSchema,
@@ -130,6 +137,32 @@ export const candidateApi = {
     selfieName: string;
     liveness: { prompts: string[]; completed: boolean };
   }) => request(identityReceivedSchema, '/identity', { body, authed: true }),
+
+  /** ADR 0013 section 5.5. Room scan: stream ROOM_SCAN, state CONSENTED. */
+  presignMedia: (body: {
+    stream: 'ROOM_SCAN';
+    segment: number;
+    seq: number;
+    bytes: number;
+    contentType: 'video/webm';
+    startedAt: string;
+    durationMs: number;
+  }) => request(mediaPresignSchema, '/media/presign', { body, authed: true }),
+  confirmMedia: (body: { stream: 'ROOM_SCAN'; segment: number; seq: number }) =>
+    request(mediaConfirmSchema, '/media/confirm', { body, authed: true }),
+
+  /** PROVISIONAL routes (ARC-03 part 2). */
+  getSideCamera: () =>
+    request(sideCameraStatusSchema, '/side-camera', { method: 'GET', authed: true }),
+  createSideCameraLink: () => request(sideCameraLinkSchema, '/side-camera/link', { authed: true }),
+  /** Phone side: unauthenticated by session, the link token is the credential. */
+  pairSideCamera: (linkToken: string) =>
+    request(sideCameraPairSchema, '/side-camera/pair', { body: { linkToken }, authed: false }),
+
+  /** PROVISIONAL routes (FR-406). Nothing is stored. */
+  getPractice: () => request(practiceQuestionSchema, '/practice', { method: 'GET', authed: true }),
+  runPractice: (body: { language: string; code: string }) =>
+    request(practiceRunSchema, '/practice/run', { body, authed: true }),
 
   startTest: () => request(testStartedSchema, '/test/start', { authed: true }),
 };
