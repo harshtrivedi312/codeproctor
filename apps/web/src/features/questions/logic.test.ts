@@ -13,7 +13,7 @@ import { checkParams, missingPlaceholders, parseParams } from './params';
 import { hasUnsupportedSyntax, placeholdersOf, renderTemplate } from './template';
 
 const NOW = new Date('2026-10-05T00:00:00Z');
-const policy = { refreshDays: 90, minAssistants: 2 };
+const policy = { minAssistants: 2, isDefault: true, refreshIntervalDays: null };
 const ref = (
   language: Schemas['Language'],
   assistant: string,
@@ -101,12 +101,14 @@ describe('AI reference gate (D-20, ADR 0005 AI-4, AI-5)', () => {
     expect(aiGate(['java'], [], { ...policy, minAssistants: 0 })[0]?.ok).toBe(true);
   });
   it('AI-4: refresh is due only when the newest row is older than refreshDays', () => {
-    expect(aiRefreshDue([], policy, NOW)).toBe(false);
-    expect(aiRefreshDue([ref('python', 'A', '2026-07-05T00:00:00Z')], policy, NOW)).toBe(true);
+    expect(aiRefreshDue([], 90, NOW)).toBe(false);
+    expect(aiRefreshDue([ref('python', 'A', '2026-07-05T00:00:00Z')], 90, NOW)).toBe(true);
+    // The API sends null until it implements the interval: never due, the web invents none.
+    expect(aiRefreshDue([ref('python', 'A', '2020-01-01T00:00:00Z')], null, NOW)).toBe(false);
     expect(
       aiRefreshDue(
         [ref('python', 'A', '2026-06-01T00:00:00Z'), ref('java', 'B', '2026-09-20T00:00:00Z')],
-        policy,
+        90,
         NOW,
       ),
     ).toBe(false);
@@ -123,8 +125,21 @@ describe('AI reference gate (D-20, ADR 0005 AI-4, AI-5)', () => {
       dirty: false,
       validationPassed: true,
       aiGates: ok,
+      tests: { count: 2, hasVisible: true, hasHidden: true, weightsOk: true },
     };
     expect(canPublish(base)).toBe(true);
+    // The server's test rules (S5): at least one visible, one hidden, every weight above 0.
+    expect(canPublish({ ...base, tests: { ...base.tests, hasVisible: false } })).toBe(false);
+    expect(canPublish({ ...base, tests: { ...base.tests, hasHidden: false } })).toBe(false);
+    expect(canPublish({ ...base, tests: { ...base.tests, weightsOk: false } })).toBe(false);
+    expect(
+      canPublish({
+        ...base,
+        tests: { count: 0, hasVisible: false, hasHidden: false, weightsOk: true },
+      }),
+    ).toBe(false);
+    // An unknown policy closes the AI gate.
+    expect(aiGate(['python'], [], null)[0]?.ok).toBe(false);
     expect(canPublish({ ...base, dirty: true })).toBe(false);
     expect(canPublish({ ...base, validationPassed: false })).toBe(false);
     expect(canPublish({ ...base, aiGates: aiGate(['python'], [], policy) })).toBe(false);

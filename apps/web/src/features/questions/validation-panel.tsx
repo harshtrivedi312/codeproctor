@@ -5,10 +5,9 @@ import type { Schemas } from '@/lib/api/client';
 import { LANGUAGE_LABELS } from './draft';
 
 type Report = Schemas['ValidationReport'];
-type Verdict = Schemas['ValidationVerdict'];
 type Failure = Schemas['ValidationFailure'];
 
-const VERDICT_LABEL: Record<Verdict, string> = {
+const VERDICT_LABEL: Record<string, string> = {
   FAILED: 'Wrong answer',
   COMPILE_ERROR: 'Compile error',
   TIME_LIMIT: 'Time limit exceeded',
@@ -153,7 +152,9 @@ export function ValidationPanel({
                             {f.position === null ? 'All' : `Test ${f.position + 1}`}
                           </td>
                           <td className="px-3 py-1.5">
-                            <Badge tone="error">{VERDICT_LABEL[f.verdict]}</Badge>
+                            <Badge tone="error">
+                              {VERDICT_LABEL[f.verdict] ?? 'Could not be run'}
+                            </Badge>
                           </td>
                           <td className="px-3 py-1.5 text-muted-foreground">{detailOf(f)}</td>
                         </tr>

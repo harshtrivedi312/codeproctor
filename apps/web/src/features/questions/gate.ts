@@ -3,17 +3,8 @@ import type { Schemas } from '@/lib/api/client';
 
 export type AiReference = Schemas['AiReference'];
 
-/**
- * What the AI gate assumes. The API does NOT expose the organisation's policy to Authors (org
- * settings are SUPER_ADMIN only): `minAssistants` is the API's own default (2, D-20) and is only a
- * hint, because the API's 422 on publish is the truth; `refreshDays` exists only in the web (the
- * "refresh due" badge is advisory). Both are defaults, not settings.
- */
-export interface AiPolicy {
-  refreshDays: number;
-  minAssistants: number;
-}
-export const DEFAULT_AI_POLICY: AiPolicy = { refreshDays: 90, minAssistants: 2 };
+/** The organisation's policy as `GET /questions/ai-policy` answers it. */
+export type AiPolicy = Schemas['AiPolicy'];
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -36,7 +27,8 @@ function key(assistant: string): string {
 export function aiGate(
   allowedLanguages: readonly CodeLanguage[],
   refs: readonly AiReference[],
-  policy: AiPolicy,
+  /** null while the policy is unknown (loading or unavailable): the gate fails closed. */
+  policy: Pick<AiPolicy, 'minAssistants'> | null,
 ): LanguageGate[] {
   return allowedLanguages
     .filter((language) => AI_REFERENCE_LANGUAGES.includes(language))
@@ -51,8 +43,8 @@ export function aiGate(
       return {
         language,
         assistants,
-        required: policy.minAssistants,
-        ok: assistants.length >= policy.minAssistants,
+        required: policy?.minAssistants ?? 0,
+        ok: policy !== null && assistants.length >= policy.minAssistants,
       };
     });
 }
@@ -61,11 +53,19 @@ export function aiGatePassed(gates: readonly LanguageGate[]): boolean {
   return gates.every((g) => g.ok);
 }
 
-/** ADR 0005 AI-4: "refresh due" when the newest row is older than `refreshDays`. No rows, no badge. */
-export function aiRefreshDue(refs: readonly AiReference[], policy: AiPolicy, now: Date): boolean {
-  if (refs.length === 0) return false;
+/**
+ * ADR 0005 AI-4: "refresh due" when the newest row is older than the policy's refresh interval.
+ * The API sends `refreshIntervalDays: null` until it implements the setting; then there is no
+ * badge (the web does not invent an interval). No rows, no badge.
+ */
+export function aiRefreshDue(
+  refs: readonly AiReference[],
+  refreshIntervalDays: number | null,
+  now: Date,
+): boolean {
+  if (refreshIntervalDays === null || refs.length === 0) return false;
   const newest = Math.max(...refs.map((r) => new Date(r.collectedAt).getTime()));
-  return now.getTime() - newest > policy.refreshDays * DAY_MS;
+  return now.getTime() - newest > refreshIntervalDays * DAY_MS;
 }
 
 export interface PublishInput {
@@ -74,10 +74,12 @@ export interface PublishInput {
   dirty: boolean;
   validationPassed: boolean;
   aiGates: readonly LanguageGate[];
+  /** What the server checks on the tests (coding only); omitted for the other types. */
+  tests?: { count: number; hasVisible: boolean; hasHidden: boolean; weightsOk: boolean };
 }
 
 export interface PublishCheck {
-  id: 'saved' | 'validated' | 'ai';
+  id: 'saved' | 'tests' | 'validated' | 'ai';
   label: string;
   ok: boolean;
   hint: string;
@@ -96,7 +98,14 @@ export function publishChecks(input: PublishInput): PublishCheck[] {
   // Only coding questions are validated (TC-012); the API publishes a complete multiple-choice or
   // short-answer question without a validation run.
   if (input.type === 'CODING') {
+    const t = input.tests ?? { count: 0, hasVisible: false, hasHidden: false, weightsOk: true };
     checks.push(
+      {
+        id: 'tests',
+        label: 'At least one visible and one hidden test, every weight above 0',
+        ok: t.count > 0 && t.hasVisible && t.hasHidden && t.weightsOk,
+        hint: 'Candidates see the visible tests as samples and are graded on all of them: add at least one of each on the Test cases tab.',
+      },
       {
         id: 'validated',
         label: 'Validation passed on every variant and test',
