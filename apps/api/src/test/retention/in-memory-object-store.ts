@@ -1,8 +1,8 @@
 // An in-memory object store for the retention tests, with the failure modes the verification must
 // survive: pagination, a delete that reports errors, an object that comes back after deletion, and
 // a listing that throws. Test only.
-import type { DeleteResult, ListPage, VersioningState } from '../object-store.port';
-import { ObjectStorePort } from '../object-store.port';
+import type { DeleteResult, ListPage, VersioningState } from '../../retention/object-store.port';
+import { ObjectStorePort } from '../../retention/object-store.port';
 
 export class InMemoryObjectStore extends ObjectStorePort {
   readonly keys = new Set<string>();

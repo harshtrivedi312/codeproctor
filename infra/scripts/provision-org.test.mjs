@@ -465,7 +465,7 @@ describe('provision-org against a real database (ADR 0006 8.9, FR-105)', { skip 
     );
   });
 
-  it('the CLI refuses owner credentials, and without BullMQ it creates nothing', () => {
+  it('the CLI refuses owner credentials, and with no BullMQ or no Redis it creates nothing', () => {
     const path = file('cli.json', {
       orgName: 'Cli Org',
       adminName: 'C',
@@ -484,7 +484,18 @@ describe('provision-org against a real database (ADR 0006 8.9, FR-105)', { skip 
       REDIS_URL: 'redis://127.0.0.1:1',
     });
     assert.equal(asApp.status, 1);
-    assert.match(asApp.stderr, /bullmq is not installed in apps\/api/);
+    // Either state stops the CLI before it writes anything: bullmq is not installed in apps/api (until
+    // BE-07 adds it), or it is, and Redis is unreachable (the CLI checks Redis before any write).
+    let hasBullmq = true;
+    try {
+      createRequire(join(REPO_ROOT, 'apps/api/package.json')).resolve('bullmq');
+    } catch {
+      hasBullmq = false;
+    }
+    assert.match(
+      asApp.stderr,
+      hasBullmq ? /cannot reach Redis/ : /bullmq is not installed in apps\/api/,
+    );
     assert.equal(q('SELECT count(*) FROM organizations'), orgs);
     for (const r of [asOwner, asApp]) {
       assert.ok(

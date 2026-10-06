@@ -66,7 +66,8 @@ export function resultsDue(
   submittedAt: Date | null,
   config: Pick<RetentionConfig, 'RETENTION_RESULTS_CLOCK'>,
 ): Date | null {
-  const start = config.RETENTION_RESULTS_CLOCK === 'submitted' ? submittedAt : anchor;
+  // A session that was never submitted (EXPIRED, DECLINED) falls back to its anchor, or it would never be purged.
+  const start = config.RETENTION_RESULTS_CLOCK === 'submitted' ? (submittedAt ?? anchor) : anchor;
   return start === null ? null : addYears(start, RESULTS_YEARS);
 }
 
