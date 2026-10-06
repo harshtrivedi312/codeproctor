@@ -25,6 +25,10 @@ import {
 import { Difficulty, QuestionType } from '../../generated/prisma/enums';
 import { isStorableText } from '../text-rules';
 
+const REVISION_PATTERN = /^[0-9a-f]{64}$/;
+const REVISION_DOC =
+  'The `revision` of the version as the client loaded it; 409 when it no longer matches.';
+
 /** Like @IsOptional(), but only `undefined` skips validation: an explicit null is a 400 (never a change). */
 const Opt = (): PropertyDecorator => ValidateIf((_o: unknown, v: unknown) => v !== undefined);
 /** Rejects NUL bytes and lone surrogates, which Postgres cannot store (would be a 500). */
@@ -113,7 +117,22 @@ export class TestCaseFieldsDto {
   position?: number;
 }
 
+/** POST body of a test case: the slot fields plus the optional revision (FU-BE-106). */
+export class CreateTestCaseDto extends TestCaseFieldsDto {
+  @ApiPropertyOptional({ description: REVISION_DOC })
+  @Opt()
+  @IsString()
+  @Matches(REVISION_PATTERN)
+  expectedRevision?: string;
+}
+
 export class UpdateTestCaseDto {
+  @ApiPropertyOptional({ description: REVISION_DOC })
+  @Opt()
+  @IsString()
+  @Matches(REVISION_PATTERN)
+  expectedRevision?: string;
+
   @ApiPropertyOptional({ maxLength: MAX_TEST_IO_LENGTH })
   @Opt()
   @IsString()
@@ -243,8 +262,6 @@ export class CreateQuestionDto extends QuestionContentBase {
   @Type(() => TestCaseFieldsDto)
   testCases?: TestCaseFieldsDto[];
 }
-
-const REVISION_PATTERN = /^[0-9a-f]{64}$/;
 
 export class UpdateQuestionDto extends QuestionContentBase {
   @ApiPropertyOptional({

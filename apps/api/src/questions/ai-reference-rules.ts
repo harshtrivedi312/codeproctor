@@ -8,7 +8,8 @@ export const MAX_MIN_ASSISTANTS = 5;
 
 /**
  * The stored organizations.settings.aiReferences.minAssistants when it is an integer from 0 to 5,
- * else undefined (missing or malformed).
+ * else undefined (missing or malformed). The ONE reader: GET /admin/org-settings, the publish gate
+ * and GET /questions/ai-policy all go through it.
  */
 export function storedMinAssistants(settings: unknown): number | undefined {
   const refs =
@@ -30,6 +31,15 @@ export function storedMinAssistants(settings: unknown): number | undefined {
  */
 export function minAssistantsFromSettings(settings: unknown): number {
   return storedMinAssistants(settings) ?? DEFAULT_MIN_ASSISTANTS;
+}
+
+/** Same value plus whether it is the fallback (no valid setting stored). */
+export function aiPolicyFromSettings(settings: unknown): {
+  minAssistants: number;
+  isDefault: boolean;
+} {
+  const v = storedMinAssistants(settings);
+  return { minAssistants: v ?? DEFAULT_MIN_ASSISTANTS, isDefault: v === undefined };
 }
 
 export function normalizeAssistant(name: string): string {

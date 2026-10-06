@@ -17,10 +17,12 @@
 // params, no hidden cases, no reference solution, no answer_spec (candidate-view.ts).
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
 import { Prisma } from '../generated/prisma/client';
 import type { QuestionVersion } from '../generated/prisma/client';
@@ -51,10 +53,15 @@ import type { VariantDto, VariantTestCaseOverrideDto } from './dto/questions.dto
 
 const VARIANT_NOT_FOUND = 'Variant not found.';
 const SLOT_NOT_FOUND = 'Test case not found.';
+const VARIANT_HAS_AI_DETAIL =
+  'The variant has AI reference rows, which are never deleted; set it inactive instead.';
 
 @Injectable()
 export class VariantsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly orgContext: OrgContextService,
+  ) {}
 
   // ---- read -----------------------------------------------------------------------------------
 
@@ -190,6 +197,19 @@ export class VariantsService {
     await this.prisma.client.$transaction(async (tx) => {
       const v = await lockDraft(tx, id, version, 'variants');
       await checkRevision(tx, v, expectedRevision);
+      // ADR 0005 AI-1: AI reference rows are append-only and variant_id cascades on delete, so a
+      // variant that any row (current or superseded) points to is never deleted (permanent 409;
+      // retire it with isActive=false instead). The variant row is locked FOR UPDATE before the
+      // rows are counted: an AI insert holds FOR KEY SHARE on its variant through the FK, so a
+      // writer that is still uncommitted makes this wait, and one that committed is counted.
+      if (!(await this.lockVariantRow(tx, actor.orgId, v.id, variantId))) {
+        throw new NotFoundException(VARIANT_NOT_FOUND);
+      }
+      const aiRows = await tx.aiReferenceSolution.count({ where: { variantId } });
+      if (aiRows > 0) {
+        // TODO(code): VARIANT_HAS_AI_REFERENCES once CodedConflictException is on main
+        throw new ConflictException(VARIANT_HAS_AI_DETAIL);
+      }
       // Overrides go with it (ON DELETE CASCADE).
       const { count } = await tx.questionVariant.deleteMany({
         where: { id: variantId, questionVersionId: v.id },
@@ -197,6 +217,27 @@ export class VariantsService {
       if (count !== 1) throw new NotFoundException(VARIANT_NOT_FOUND);
       await audit(tx, actor, 'QUESTION_VARIANT_REMOVED', id, ctx, { version, variantId });
     });
+  }
+
+  /** True when the variant exists in this version and org and is now row-locked. */
+  private async lockVariantRow(
+    tx: Pick<PrismaService['client'], '$queryRaw'>,
+    orgId: string,
+    versionId: string,
+    variantId: string,
+  ): Promise<boolean> {
+    const rows = await this.orgContext.runRawSql(
+      'Lock one question_variants row FOR UPDATE before counting its AI rows; the model API has no row lock. Filtered by variant, version and org through the version and question joins.',
+      () =>
+        tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+          SELECT v.id FROM question_variants v
+          JOIN question_versions qv ON qv.id = v.question_version_id
+          JOIN questions q ON q.id = qv.question_id
+          WHERE v.id = ${variantId}::uuid AND v.question_version_id = ${versionId}::uuid
+            AND q.org_id = ${orgId}::uuid
+          FOR UPDATE OF v`),
+    );
+    return rows.length === 1;
   }
 
   // ---- per-slot overrides (V-1, V-6) ----------------------------------------------------------
