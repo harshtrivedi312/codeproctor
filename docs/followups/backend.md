@@ -211,6 +211,48 @@ ADR 0011 (owner decision C-21) answers 5 and 6 are now done on `POST /auth/2fa/d
 - For DEP: each report is one structured pino line on stdout with `event: "client_error"`, `reportedLevel` (`error` logs at error, `warn` at warn), `traceId` (the `x-request-id`), the scrubbed `message`, `stack`, `name`, `url`, `component`, `route`, `release` and `userAgent` (200 characters). No IP, headers or raw body are logged. It writes no audit row and touches neither the database nor Redis.
 - QA: the route is listed `'public'` in `ROUTE_PERMISSIONS` (`POST /client-errors`); `apps/api/test/support/be03-routes.ts` is not edited by this change.
 
+## Pilot triage (Backend A, 2026-10-06)
+
+Triage of the open FU-BE rows for the Delivery Lead's pilot plan. Tier 1 is deliberately narrow: items that bite once real users or candidate data are on the system. Security weaknesses in authentication, authorization, session handling, cryptography or candidate-data access are always tier 1 (CLAUDE.md rule 3). Produced by a read-only pass over this file and `apps/api` (grep checks: no `bullmq` dependency, no `CandidateSessionGuard` class, no Redis throttler storage); FU-BEB rows were not triaged. Rows already marked done are not repeated.
+
+### Tier 1: must fix before pilot
+
+| FU                  | Summary                                                                                                               | Owner / dependency                                    |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| FU-BE-90, FU-BE-91  | Bind `CandidateSessionGuard` into `CandidateRoute` (candidate routes are unauthenticated otherwise); QA matrix accepts CANDIDATE | Backend A + Backend B (BE-07); before the first candidate route |
+| FU-BE-97, FU-BE-1   | `TRUST_PROXY_HOPS` defaults to 0 behind Caddy (one shared throttle bucket); throttler uses the in-memory store              | Backend A + DEP-01                                    |
+| FU-BE-98, FU-BE-104 | No read deadline on body parsers (slowloris); the 1 MB JSON limit applies to public routes before the throttler       | Backend A + Caddy; one PR                             |
+| FU-BE-21, 89, 79    | Real mail (BullMQ + SES) for reset and invite; failed invite mail is silent; lock-alert flood to SUPER_ADMINs         | Backend A (BE-06b, after #98); BullMQ dependency      |
+| FU-BE-72            | Per-IP or progressive lockout (a known email can be kept locked); P-03 says before production                         | Backend A + hub                                       |
+| FU-BE-14, FU-BE-87  | Unhandled errors logged as full Error objects; `scrubPrismaError` does not follow `error.cause`                       | Backend A + Database A (`database/error-scrub.ts`)    |
+| FU-BE-64, 58        | Rate counter INCR then EXPIRE can leave a key without TTL; wrong 2FA code on disable reports a password error        | Backend A                                             |
+| FU-BE-99            | CloudWatch Logs data-protection policy at ingest (backstop for the heuristic scrubber)                                | DEP / owner (AWS)                                     |
+| FU-BE-125, 128, 122 | Validate job is in-process (BullMQ swap), no per-org concurrency cap or cancellation, unbounded variant override data | Backend A + hub (BullMQ approval); after mail PR      |
+| FU-BE-114, 116, 101 | Random-rule satisfiability is per exact rule at save time only; verify the publish gate end to end                    | Backend A (BE-06b); BE-07 start is Backend B          |
+| FU-BE-70            | The api image must ship `packages/shared/dist` (or `pnpm deploy --prod`) or it breaks at boot                         | DEP / hub, before the first api image                 |
+| FU-BE-111, FU-BE-3  | `openapi:export`/`openapi:check` (ADR 0012 step 1); BigInt/Decimal JSON serializer and contract decision            | Backend A + hub                                       |
+
+### Tier 2: should fix soon
+
+FU-BE-12, 95, 13 (request-id and 404 echo hardening, one PR with FU-BE-98/104); FU-BE-42 (lock waits and deadlocks surface as 500, map to 503); FU-BE-62, 56 (weak Redis-wait and disable-race tests); FU-BE-67 (200-char cap on `users.full_name` and `organizations.name`); FU-BE-28, 115 (flaky TC-098, TC-002); FU-BE-2, 15 (open handles, drop `--forceExit`); FU-BE-18 (candidate throttle too tight for heartbeats, with BE-10); FU-BE-107, 105, 106, 123, 119, 131 (question bank payload size, revision and test gaps); FU-BE-109, 126, 118, 124, 102, 103, 112, 75, 80, 22, 77 (hub decisions and schema questions; FU-BE-77 is low-severity and security-adjacent); FU-BE-91, 121 (QA and web contract); FU-BE-24 (move forgot-password constants to env).
+
+### Tier 3: nice to have
+
+FU-BE-5, 6, 7, 11, 16, 17, 81, 96, 23, 25, 37, 38, 85, 43, 78, 60, 61, 63, 68, 69, 71, 86, 76, 88, 92, 93, 94, 110, 108, 113, 117, 120, 127, 132, 134. FU-BE-47 looks implemented (Redis `commandTimeout` from `HEALTH_TIMEOUT_MS`); only the test gaps in FU-BE-62 remain. FU-BE-100 is folded into FU-BE-98.
+
+### Suggested order and batching
+
+1. FU-BE-90 and 91 with Backend B (BE-07), before the first candidate route.
+2. PR A, config and throttle: FU-BE-97 and FU-BE-1.
+3. PR B, HTTP hardening: FU-BE-98, 104, 12, 95, 13, 11.
+4. PR C, logging scrub: FU-BE-14 and 87 (coordinate with Database A).
+5. PR D, auth hardening: FU-BE-64, 58, 28.
+6. PR E, mail: FU-BE-21, 89, 79 (BullMQ and SES; needs #98 and the hub's dependency approval).
+7. PR F, validate job on BullMQ: FU-BE-125, 128, 122 (builds on PR E).
+8. PR G: FU-BE-114, 116, 101.
+9. PR H with the hub: FU-BE-111 and 3.
+10. FU-BE-72 (Backend A, then hub); FU-BE-70 and 99 are deploy and infrastructure (owner for anything in AWS).
+
 ## Backend B (candidate) (D-51)
 
 IDs use the prefix FU-BEB-NN. Only blockers stop a merge (CLAUDE.md rule 2); security weaknesses are always blockers (rule 3).
