@@ -481,8 +481,8 @@ def main():
     for (n, token, exp) in trust_cases():
         got = trust_decision(doc, token)
         rows.append((n, "sts:AssumeRoleWithWebIdentity", exp, got, got == exp, "trust policy", ",".join(sorted(token))))
-    rows.append(("Trust: valid claims from a different OIDC provider", "sts:AssumeRoleWithWebIdentity", "DENY", trust_decision(doc, good, "arn:aws:iam::111111111111:oidc-provider/evil.example"), True, "trust policy", "sub,aud"))
-    rows[-1] = rows[-1][:3] + (trust_decision(doc, good, "arn:aws:iam::111111111111:oidc-provider/evil.example"),) + (trust_decision(doc, good, "arn:aws:iam::111111111111:oidc-provider/evil.example") == "DENY",) + rows[-1][5:]
+    got = trust_decision(doc, good, "arn:aws:iam::111111111111:oidc-provider/evil.example")
+    rows.append(("Trust: valid claims from a different OIDC provider", "sts:AssumeRoleWithWebIdentity", "DENY", got, got == "DENY", "trust policy", "sub,aud"))
     doc_ex = res_ex["PilotDeployRole"]["Properties"]["AssumeRolePolicyDocument"]
     got = trust_decision(doc_ex, good, OIDC_ARN)
     rows.append(("Trust: valid claims, existing provider ARN path", "sts:AssumeRoleWithWebIdentity", "ALLOW", got, got == "ALLOW", "trust policy", "sub,aud"))

@@ -4,7 +4,7 @@ Infrastructure code only. **No credentials, keys, tokens or account ids are in t
 agent session ever touches AWS.** The owner uploads the templates to their own AWS account and approves
 every apply. Nothing here runs in CI.
 
-This follows ADR 0017 (Proposed, approved in review; read at head b61b58e) sections 3, 5, 6, 7 and 8 and the
+This follows ADR 0017 (Proposed, approved in review; now on main, merged as 10f97fd) sections 3, 5, 6, 7 and 8 and the
 owner decisions C-49 to C-55 (PR #238; they replace the older C-43a wording). Where this README and the ADR
 differ, the ADR wins; the differences are listed in "Open items".
 
@@ -35,6 +35,18 @@ type them as parameters, the roles are made by you in the later template, with p
 role (`Judge0RoleName`) and the restore role (`RestoreRoleName`). The Judge0 host must use a different role than
 the main host.
 
+**Every role in the later owner templates must be named `codeproctor-pilot-*`** (probe, backstop, DNS-reset,
+the three scheduler roles, instance, Judge0 and restore roles): the bucket and key policies match on that
+prefix. Limits the owner's templates must keep (ADR 0017 sections 3 and 4.1): the instance role's
+`iam:PassRole` is scoped to the three scheduler role ARNs only, it holds no `lambda:*`, and its
+`cloudwatch:PutMetricData` is limited to its own namespace `codeproctor-pilot-instance`. With `UseEcr=true` the
+owner also creates the ECR repositories `codeproctor-pilot-*` with **tag immutability on**, and the main and
+Judge0 roles get the ECR pull plus `s3:ListBucket` and `s3:GetObject` on their own releases prefix only. Do
+not apply any of these stacks through a CloudFormation service role named `codeproctor-*` (it would hit the
+`codeproctor-*` denies). `PilotInstanceSsmPolicy` stays in the OIDC stack under the path
+`/codeproctor-guardrails/` (the owner attaches it to the instance roles by ARN): the path keeps it out of the
+`codeproctor-pilot-*` patterns, and CI has no IAM at all, so it cannot change it.
+
 ## PR 1: what the stack creates
 
 | Resource          | Name                                                                | Purpose                                                                                                                                                                                                                                                                                 |
@@ -45,7 +57,7 @@ the main host.
 | Managed policy    | `codeproctor-pilot-instance-ssm`                                    | SSM agent registration plus the Session Manager channels only (`ssm:UpdateInstanceInformation`, `ssmmessages:*Channel`). Not attached by this stack; the owner attaches it to the instance roles. `ec2messages` is left out because Run Command is not used (verify at the first start) |
 
 Parameters: `GitHubOwner`, `GitHubRepo` (no defaults), `ExistingOidcProviderArn`, `UseEcr` (owner decision:
-`true` = ECR push, `false` = a registry that needs no AWS permission), `AssessHostedZoneId` (leave empty).
+`true` = ECR push, `false` = a registry that needs no AWS permission), `AssessHostedZoneId` (leave empty until step 3.6).
 
 ### What the CI role can and cannot do
 
@@ -70,7 +82,8 @@ gate that protects this role. Before the first deploy:
   branches and tags** = Selected, `main` only (and `main` protected), **administrators cannot bypass**.
 - Agent sessions use a **fine-grained token with no Actions, Deployments or Environments write and no push to
   `main`**, so an agent cannot start or approve a deploy.
-- Approval is by the owner with MFA.
+- Approval is by the owner with MFA. The release gate is set up by the owner, never by an agent: either a
+  separate machine account that is the only release approver, or a fine-grained token as above.
 - A pilot environment whose only reviewer is the owner is a workflow change that goes through the hub.
 - A stricter option is a custom `sub` claim template that includes `ref`, with a matching trust policy. Not
   done here.
@@ -80,22 +93,22 @@ gate that protects this role. Before the first deploy:
 1. **Before any apply (once per account, console):** turn on **account-level S3 Block Public Access** (all
    four), create an **IAM Access Analyzer** (external access, us-east-1) and a **CloudTrail trail** (the
    EventBridge alerts of the later templates need it). Request **SES production access** early.
-2. **GitHub:** create the `pilot` environment and the settings above. Add the environment variables
-   `AWS_ROLE_ARN` (from the stack Outputs) and `AWS_REGION=us-east-1`. Role ARNs are not secrets and no access
-   keys exist. Check the existing OIDC provider (IAM, Identity providers): if
-   `token.actions.githubusercontent.com` exists, copy its ARN (it must be in this account and list
-   `sts.amazonaws.com` as an audience).
-3. **Apply in this order**, each as a CloudFormation stack in us-east-1:
+2. **Apply in this order** (the numbers below are sub-steps 3.1, 3.2, ...), each as a CloudFormation stack in us-east-1:
    1. `github-oidc-roles.yaml`, stack name `codeproctor-github-oidc`, parameters `GitHubOwner=<owner>`,
       `GitHubRepo=<repo>`, `ExistingOidcProviderArn` (empty or the ARN), `UseEcr`, `AssessHostedZoneId` empty.
       Tick `CAPABILITY_NAMED_IAM`.
-   2. `pilot-data-buckets.yaml`, stack name `codeproctor-pilot-data`: key, media, backup and releases buckets
+   2. **GitHub:** create the `pilot` environment and the settings above. Add the environment variables
+      `AWS_ROLE_ARN` (from the first stack's Outputs) and `AWS_REGION=us-east-1`. Role ARNs are not secrets and
+      no access keys exist. (Before step 3.1, check the existing OIDC provider: if
+      `token.actions.githubusercontent.com` exists, copy its ARN; it must be in this account and list
+      `sts.amazonaws.com` as an audience.)
+   3. `pilot-data-buckets.yaml`, stack name `codeproctor-pilot-data`: key, media, backup and releases buckets
       and the backup expiry role. Tick `CAPABILITY_NAMED_IAM`. Parameters: `AppOrigin`, the three role names,
       the alarm values. Leave `AlarmTopicArn` empty until the topic exists.
-   3. The hosted-zone template (later), then add the NS delegation in the main zone **by hand**.
-   4. The instance, roles and scheduler template (later). Then update the topic ARN in the data stack.
-   5. Only then set `AssessHostedZoneId` by a stack update of `codeproctor-github-oidc`.
-4. **Verify** with your own credentials (AWS CLI v2, a named or SSO profile):
+   4. The hosted-zone template (later), then add the NS delegation in the main zone **by hand**.
+   5. The instance, roles and scheduler template (later). Then update `AlarmTopicArn` in the data stack: **this is an owner precondition before the first candidate** (the alarms do nothing without it).
+   6. Only then set `AssessHostedZoneId`, by a stack update of `codeproctor-github-oidc` only. Leave it empty on the data stack (empty is strictly tighter; if you set it there too, update both).
+3. **Verify** with your own credentials (AWS CLI v2, a named or SSO profile):
 
    ```sh
    infra/aws/tests/simulate-principal-policy.sh --account-id <12 digits> --profile <profile> [--assess-zone-id <id>]
@@ -105,7 +118,7 @@ gate that protects this role. Before the first deploy:
    `codeproctor-pilot-*` role is tagged `Environment=pilot` or `Environment=owner`. Set a CloudTrail or Access
    Analyzer alert on `UpdateAssumeRolePolicy` and `CreateRole` for `codeproctor-pilot-*`.
 
-5. Update: Update stack and read the change set. Rollback: a failed update rolls back by itself. Delete: the
+4. Update: Update stack and read the change set. Rollback: a failed update rolls back by itself. Delete: the
    data buckets and the key have `Retain` and survive a stack delete (without lifecycle and policy); to remove
    one, first remove its bucket policy.
 
@@ -153,13 +166,18 @@ access instance-role-only.
   which lifecycle owns. It also carries the Route 53 deny for every zone but the assess zone
   (`AssessHostedZoneId`). The function, its daily schedule and the code are a later owner template (database
   track). The same function prunes the erasure-list entries (the instance cannot delete).
-- **Expiry role trust (not verified, may fail closed).** The trust names the Lambda service with
-  `aws:SourceAccount` and `aws:SourceArn`. Lambda probably does not populate those keys when it assumes an
-  execution role, so the condition may fail closed (the function cannot be created and backups never
-  expire). If so, **the fallback is to remove the condition** (not to keep only `aws:SourceAccount`, which
-  fails the same way). The real guard is then: **no `codeproctor-*` role may hold `iam:PassRole` on the expiry
-  role, or `lambda:CreateFunction`, `UpdateFunctionCode` or `UpdateFunctionConfiguration`.** CI already denies
-  `iam:*` and `lambda:*`; this is a requirement on the owner's later templates.
+- **Expiry role trust (decided).** The trust names the Lambda service only, **with no `aws:SourceArn` or
+  `aws:SourceAccount` condition**: Lambda probably does not populate those keys when it assumes an execution
+  role (the ADR has no `aws:SourceArn` here either), and with them the function could not be created. The
+  guard is instead: **no `codeproctor-*` role may hold `iam:PassRole` on the expiry role, or
+  `lambda:CreateFunction`, `UpdateFunctionCode` or `UpdateFunctionConfiguration`.** CI already denies `iam:*`
+  and `lambda:*`; this is a requirement on the owner's later templates. Whether the first function creation
+  works is a verification note (FU-QA-13).
+- **Write confinement (backup bucket).** The bucket policy denies the instance role `s3:PutObject*` on every key
+  except `db/dump/latest.dump`, `db/wal/*`, `db/erasure-list/*` and `db/erasure-completed/*`. Without it, a dump
+  put under any other key (a mis-set `BACKUP_MODE=timestamped`, or a compromised host) would never expire: a
+  current version never expires, the expiry role is denied under `db/dump/`, and outside those prefixes
+  nothing deletes anything.
 - **Alarms** (CloudWatch; they notify `AlarmTopicArn`, the owner's SNS email and SMS topic; with no topic the
   alarms exist without an action). **The threat is a compromised main instance, so the instance is not the
   producer of any alarmed metric.** The owner-applied expiry Lambda is the only producer of every metric in
@@ -175,9 +193,12 @@ access instance-role-only.
   | `codeproctor-pilot-backup-base-backup-count`     | `FullBaseBackupCountChange`, the ABSOLUTE change (expiry Lambda)            | More than `MaxFullBaseBackupCountChange` (2) in a day, up or down  |
   | `codeproctor-pilot-backup-uploader-silent-2d`    | `BackupSuccess` in namespace `codeproctor-pilot-instance` (the uploader)    | Secondary signal only: no success reported for 2 days              |
 
-  **Requirement for the owner's instance template:** the instance role's `cloudwatch:PutMetricData` carries
-  the condition `cloudwatch:namespace` = `codeproctor-pilot-instance`, so the instance cannot inflate any
-  alarmed metric. The Lambda is a dependency outside this template (database track): until it exists the
+  **Requirement for the owner's templates:** **no role other than `codeproctor-pilot-backup-expiry` may
+  `PutMetricData` into `codeproctor-pilot`** (the main, Judge0 and restore roles too): their
+  `cloudwatch:PutMetricData` carries `cloudwatch:namespace` = `codeproctor-pilot-instance`, so none can inflate
+  an alarmed metric. The metrics are published **with no dimensions** (the alarms have none: with dimensions
+  the `notBreaching` anomaly alarms would never see data and would fail silent). All Lambda-fed alarms use a
+  period of 1 day, matching the daily producer schedule (a test checks it). The Lambda is a dependency outside this template (database track): until it exists the
   freshness and age alarms sit in ALARM (missing data breaches), so the first email is expected. The
   anomaly alarms' design is not verified.
 
@@ -209,7 +230,7 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ```
 
 `test_isolation.py` runs 154 cases and 16 structural checks on the CI role, the Route 53 guard and the trust
-policy (a DENY expectation means an explicit deny, so removing a guard statement fails cases) (owner `example-owner`, repo `example-repo`, account `111111111111`). `test_data_buckets.py` runs 153 cases and 44 structural checks on the buckets, the key, the expiry role, the alarms, a model of the backup
+policy (a DENY expectation means an explicit deny, so removing a guard statement fails cases) (owner `example-owner`, repo `example-repo`, account `111111111111`). `test_data_buckets.py` runs 160 cases and 46 structural checks on the buckets, the key, the expiry role, the alarms, a model of the backup
 lifecycle, and the proof (with the real CI policies) that CI can only put the two manifests. A case can expect
 "no explicit deny" or "implicit deny" when the real allow is a policy the test does not model. Each case row
 lists the context keys supplied by hand. TC IDs are for QA to allocate (`docs/test-cases.md` has no DEP
@@ -249,8 +270,8 @@ presigned URLs; whether `ec2messages` is needed.
 
 ## Open items
 
-- **Hub:** amend ADR 0017 wording where it differs (see FU-QA-20): 12 days (not 13 or 14) for the lock, the
-  7 day against 2 day freshness alarm, 28 against 30 days for the second alarm.
+- **Hub:** the only open wording difference is 28 days (ADR) against 30 days (Delivery Lead) for the second
+  alarm; 12 days is the lock and the freshness alarm is 2 days (FU-QA-20).
 - **Database track:** `infra/backup/backup.sh` and `erasure-list.sh prune` do not match section 5.3 (FU-QA-18,
   FU-QA-19); `docs/runbook.md` and FU-DBB-06 still recommend `AES256`.
 - **Owner:** `UseEcr`; whether lifecycle may delete the last dump (it cannot: current versions never expire);

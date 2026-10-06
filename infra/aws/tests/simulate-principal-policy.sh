@@ -42,7 +42,7 @@ check() {
   for kv in "$@"; do
     entries+=("ContextKeyName=${kv%%=*},ContextKeyValues=${kv#*=},ContextKeyType=string")
   done
-  args=(iam simulate-principal-policy --profile "$PROFILE" --region "$REGION" --policy-source-arn "$DEPLOY"
+  args=(iam simulate-principal-policy --profile "$PROFILE" --region "$REGION" --policy-source-arn "${SOURCE:-$DEPLOY}"
         --action-names "$action" --resource-arns "$resource" --query 'EvaluationResults[0].EvalDecision' --output text)
   if [ ${#entries[@]} -gt 0 ]; then args+=(--context-entries "${entries[@]}"); fi
   errfile="$(mktemp)"
@@ -109,6 +109,22 @@ check explicit "Route 53: another hosted zone" route53:ChangeResourceRecordSets 
 check explicit "Route 53: create hosted zone" route53:CreateHostedZone "*"
 if [ -n "$ZONE_ID" ]; then
   check implicit "Route 53: assess zone ${ZONE_ID} is implicitly denied (no allow, not an explicit deny)" route53:ChangeResourceRecordSets "arn:aws:route53:::hostedzone/${ZONE_ID}"
+fi
+
+echo "Backup expiry role (the owner-applied expiry function's role)"
+EXPIRY="arn:aws:iam::${ACCOUNT}:role/codeproctor-pilot-backup-expiry"
+if aws iam get-role --profile "$PROFILE" --role-name codeproctor-pilot-backup-expiry >/dev/null 2>&1; then
+  SOURCE="$EXPIRY"
+  check allowed  "Expiry: DeleteObjectVersion on db/wal/x" s3:DeleteObjectVersion "${BACKUP}/db/wal/x" "$AC"
+  check allowed  "Expiry: DeleteObject on db/erasure-list/x" s3:DeleteObject "${BACKUP}/db/erasure-list/x" "$AC"
+  check implicit "Expiry: DeleteObject on db/dump/latest.dump (no allow; the bucket policy also denies it)" s3:DeleteObject "${BACKUP}/db/dump/latest.dump" "$AC"
+  check implicit "Expiry: DeleteObject on an unlisted prefix" s3:DeleteObject "${BACKUP}/db/other/x" "$AC"
+  check explicit "Expiry: Route 53 change in another hosted zone" route53:ChangeResourceRecordSets "arn:aws:route53:::hostedzone/Z0OTHERZONE0000"
+  check implicit "Expiry: PutMetricData into the instance namespace" cloudwatch:PutMetricData "*" "cloudwatch:namespace=codeproctor-pilot-instance"
+  check allowed  "Expiry: PutMetricData into the alarmed namespace" cloudwatch:PutMetricData "*" "cloudwatch:namespace=codeproctor-pilot"
+  SOURCE=""
+else
+  echo "Expiry role not found: its checks are skipped"
 fi
 
 echo "Live bucket settings"

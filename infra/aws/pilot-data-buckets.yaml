@@ -21,7 +21,7 @@ Description: >-
 # Backups (ADR 0017 section 5.3, C-55): the backup bucket has VERSIONING ON (media and releases stay
 # unversioned). The instance role has NO s3:DeleteObject and NO s3:DeleteObjectVersion on it, so a
 # compromised host's delete or overwrite stays recoverable as a noncurrent version.
-#   - Dumps (ADR 0017 5.3 at b61b58e, DL-43): one fixed key db/dump/latest.dump. Lifecycle:
+#   - Dumps (ADR 0017 5.3, main at 10f97fd, DL-43): one fixed key db/dump/latest.dump. Lifecycle:
 #     NewerNoncurrentVersions 2 and NoncurrentDays 1, no current-version expiration, so the current
 #     version plus the 2 newest noncurrent ones (the newest 3 dumps) are kept at any age. A dump outside
 #     the newest 3 goes at the later of (its creation + 12 days, the Object Lock) and (its replacement
@@ -47,8 +47,11 @@ Description: >-
 #     and OldestKeptBackupAgeDays (namespace codeproctor-pilot), all computed from ListObjectVersions on
 #     db/dump/ and db/wal/ (Size, LastModified). The uploader's BackupSuccess goes to a DIFFERENT namespace
 #     (codeproctor-pilot-instance) and is a secondary signal only. REQUIREMENT for the owner's instance
-#     template: the instance role's cloudwatch:PutMetricData must carry the condition
-#     cloudwatch:namespace = codeproctor-pilot-instance, so it cannot inflate any alarmed metric. The
+#     template: NO role other than codeproctor-pilot-backup-expiry may PutMetricData into the namespace
+#     codeproctor-pilot (the main, Judge0 and restore roles too): their cloudwatch:PutMetricData must carry
+#     cloudwatch:namespace = codeproctor-pilot-instance, so none can inflate an alarmed metric. Metrics are
+#     published WITH NO DIMENSIONS (the alarms have none: with dimensions the notBreaching anomaly alarms
+#     would never see data and fail silent). The
 #     Lambda is a dependency outside this template (code owned by the database track).
 #   - Base backups and WAL (db/wal/, pgBackRest or WAL-G repository, full base backups only): NO age
 #     lifecycle rule. An owner-applied expiry function, with its own role (codeproctor-pilot-backup-expiry,
@@ -60,8 +63,12 @@ Description: >-
 #   - 30 day cap: nothing is kept past 30 days without the owner's decision. Alarms: no new backup for
 #     2 days (Lambda-side metric), and a kept backup reaching 28 days (metrics below).
 #   - ADR 0004 9.2 (versioning off or noncurrent expired within 1 day) was written for the media bucket,
-#     whose RetentionService fails closed on it; it does not read the backup bucket. It does conflict with
-#     the letter of ADR 0017 section 5.1 (versioning off) for this bucket, which section 5.3 resolves.
+#     whose RetentionService fails closed on it; it does not read the backup bucket. ADR 0017 5.1 now
+#     says versioning ON for the backup bucket (C-55), so there is no conflict.
+#   - WRITE CONFINEMENT: the backup bucket policy denies the instance role s3:PutObject* on every key but
+#     db/dump/latest.dump, db/wal/*, db/erasure-list/* and db/erasure-completed/*. A dump under another
+#     key would never expire (a current version never expires and the expiry role is denied under
+#     db/dump/), and nothing deletes outside those prefixes.
 #   - db/erasure-list/ and db/erasure-completed/ never age-expire. The instance role cannot delete there
 #     either (the ADR gives it no delete on the backups bucket), so erasure-list.sh prune cannot run on the
 #     instance: flagged for the database track.
@@ -70,6 +77,8 @@ Description: >-
 # =============================================================================================
 
 Metadata:
+  CodeProctor:
+    ExpiryFunctionScheduleDays: 1
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
@@ -115,12 +124,12 @@ Parameters:
     Type: Number
     Default: 3
     MinValue: 1.5
-    Description: Anomaly alarm. A new dump whose size differs from the previous one by more than this factor (either way) pages the owner. Needs the uploader to publish DumpSizeChangeFactor
+    Description: Anomaly alarm. A new dump whose size differs from the previous one by more than this factor (either way) pages the owner. Published by the expiry Lambda (namespace codeproctor-pilot, no dimensions)
   MaxDumpVersionsPerDay:
     Type: Number
-    Default: 3
+    Default: 6
     MinValue: 1
-    Description: Anomaly alarm. More new dump versions in a day than the schedule allows (nightly, shutdown, pre-migration) pages the owner. Needs a producer to publish DumpVersionsPerDay
+    Description: Anomaly alarm. More new dump versions in a day than the schedule allows pages the owner. Dumps are taken at every shutdown and before a migration, so a busy day with several slots has several; 6 is a stated allowance, derive it from the booked slots if they exceed it. Published by the expiry Lambda (namespace codeproctor-pilot, no dimensions)
   MaxFullBaseBackupCountChange:
     Type: Number
     Default: 2
@@ -147,7 +156,9 @@ Conditions:
   HasAlarmTopic: !Not [!Equals [!Ref AlarmTopicArn, '']]
 
 Resources:
-  # One customer-managed key for the media and backup buckets (ADR 0017 5.2). Tags Environment=pilot and Purpose=data and the alias match what the CI role's denies expect. Use: the main instance role (through S3) and the restore role (decrypt through S3). The Judge0 role and CI get nothing.
+  # One customer-managed key for the media and backup buckets (ADR 0017 5.2). Tags Environment=pilot
+  # and Purpose=data and the alias match what the CI role's denies expect. Use: the main instance
+  # role (through S3) and the restore role (decrypt through S3). The Judge0 role and CI get nothing.
   PilotDataKey:
     Type: 'AWS::KMS::Key'
     DeletionPolicy: 'Retain'
@@ -254,7 +265,10 @@ Resources:
     Properties:
       AliasName: 'alias/codeproctor-pilot-data'
       TargetKeyId: !Ref PilotDataKey
-  # Media: recordings, room scans, ID images, selfies, evidence, report PDFs and consent PDFs under orgs/<org>/... (ADR 0013 5.7). RetentionService deletes on the real clocks. Only face images (tagged RetentionClass=face, also evidence/sealed/ frames) have an age backstop: 88 days (C-27, C-35).
+  # Media: recordings, room scans, ID images, selfies, evidence, report PDFs and consent PDFs under
+  # orgs/<org>/... (ADR 0013 5.7). RetentionService deletes on the real clocks. Only face images
+  # (tagged RetentionClass=face, also evidence/sealed/ frames) have an age backstop: 88 days (C-27,
+  # C-35).
   MediaBucket:
     Type: 'AWS::S3::Bucket'
     DeletionPolicy: 'Retain'
@@ -410,7 +424,11 @@ Resources:
                 aws:PrincipalArn:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
-  # Backups (ADR 0017 5.3, C-55): versioning ON for this bucket only. Dumps: fixed key db/dump/latest.dump, noncurrent versions expire after 1 day but the newest 3 noncurrent versions are kept, no current-version expiration. db/wal/ (full base backups and WAL): NO age rule; the owner-applied expiry function deletes by the 12 day plus newest-3-full-backups rule. db/erasure-list/ and db/erasure-completed/ never age-expire.
+  # Backups (ADR 0017 5.3, C-55): versioning ON for this bucket only. Dumps: fixed key
+  # db/dump/latest.dump, noncurrent versions expire after 1 day but the newest 3 noncurrent versions
+  # are kept, no current-version expiration. db/wal/ (full base backups and WAL): NO age rule; the
+  # owner-applied expiry function deletes by the 12 day plus newest-3-full-backups rule. db/erasure-
+  # list/ and db/erasure-completed/ never age-expire.
   BackupBucket:
     Type: 'AWS::S3::Bucket'
     DeletionPolicy: 'Retain'
@@ -583,6 +601,20 @@ Resources:
                 aws:PrincipalArn:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+          - Sid: 'DenyInstanceRoleWritesOutsideKnownKeys'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:PutObject*'
+              - 's3:AbortMultipartUpload'
+            NotResource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/dump/latest.dump'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/wal/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/erasure-list/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/erasure-completed/*'
+            Condition:
+              ArnEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
           - Sid: 'DenyExpiryRoleOnDumps'
             Effect: 'Deny'
             Principal: '*'
@@ -622,7 +654,10 @@ Resources:
                 aws:PrincipalArn:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
-  # Releases: the signed release manifests (ADR 0017 section 6), one prefix per instance: main/ and judge0/. No candidate data, so SSE-S3. CI writes both prefixes only; the main role reads main/, the Judge0 role reads judge0/. No lifecycle: the objects are tiny and the owner prunes old manifests (the ADR's keep-last-10 is not expressible in lifecycle without versioning).
+  # Releases: the signed release manifests (ADR 0017 section 6), one prefix per instance: main/ and
+  # judge0/. No candidate data, so SSE-S3. CI writes both prefixes only; the main role reads main/,
+  # the Judge0 role reads judge0/. No lifecycle: the objects are tiny and the owner prunes old
+  # manifests (the ADR's keep-last-10 is not expressible in lifecycle without versioning).
   ReleasesBucket:
     Type: 'AWS::S3::Bucket'
     DeletionPolicy: 'Retain'
@@ -769,7 +804,18 @@ Resources:
                 aws:PrincipalArn:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
-  # Expiry role for the owner-applied expiry function (never on the instance, trust limited to the Lambda service for that one function by aws:SourceArn: see below). It holds NO s3:BypassGovernanceRetention (the bucket policy denies it to every codeproctor-* role); with the 12 day Object Lock it deletes only what is past the lock. It can list the backups bucket and delete ONLY under db/wal/, db/erasure-list/ and db/erasure-completed/ (the bucket policy denies it everything else, and any delete under db/dump/). TRUST: Lambda probably does not populate aws:SourceArn or aws:SourceAccount when it assumes an execution role, so the condition below may fail closed (the function cannot be created and backups never expire). If so, the fallback is to REMOVE the condition. The real guard is then: no codeproctor-* role may hold iam:PassRole on this role or lambda:CreateFunction, UpdateFunctionCode or UpdateFunctionConfiguration (CI already denies iam:* and lambda:*; this is a requirement on the owner templates). The function and its daily schedule come in a later owner template (code owned by the database track, ADR 0017 section 7).
+  # Expiry role for the owner-applied expiry function (never on the instance). It holds NO
+  # s3:BypassGovernanceRetention (the bucket policy denies it to every codeproctor-* role); with the
+  # 12 day Object Lock it deletes only what is past the lock. It can list the backups bucket and
+  # delete ONLY under db/wal/, db/erasure-list/ and db/erasure-completed/ (the bucket policy denies
+  # it everything else, and any delete under db/dump/). TRUST: the Lambda service only, with NO
+  # aws:SourceArn or aws:SourceAccount condition (Lambda probably does not populate them for an
+  # execution role, and the ADR has no aws:SourceArn here). The guard is instead: no codeproctor-*
+  # role may hold iam:PassRole on this role or lambda:CreateFunction, UpdateFunctionCode or
+  # UpdateFunctionConfiguration (CI already denies iam:* and lambda:*; this is a requirement on the
+  # owner templates). It has no KMS and no GetObject, so it cannot read backup metadata files: see
+  # the follow-ups. The function and its daily schedule come in a later owner template (code owned
+  # by the database track, ADR 0017 section 7).
   BackupExpiryRole:
     Type: 'AWS::IAM::Role'
     Properties:
@@ -783,11 +829,6 @@ Resources:
             Principal:
               Service: 'lambda.amazonaws.com'
             Action: 'sts:AssumeRole'
-            Condition:
-              StringEquals:
-                aws:SourceAccount: !Sub '${AWS::AccountId}'
-              ArnLike:
-                aws:SourceArn: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:codeproctor-pilot-backup-expiry'
       Policies:
         - PolicyName: 'backup-expiry'
           PolicyDocument:
@@ -820,7 +861,7 @@ Resources:
                   - 'logs:CreateLogStream'
                   - 'logs:PutLogEvents'
                 Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/codeproctor-pilot-backup-expiry:*'
-              - Sid: 'AgeMetric'
+              - Sid: 'AlarmedMetrics'
                 Effect: 'Allow'
                 Action: 'cloudwatch:PutMetricData'
                 Resource: '*'
@@ -832,16 +873,23 @@ Resources:
           Value: 'pilot'
         - Key: 'ManagedBy'
           Value: 'codeproctor-pilot-data-buckets'
-  # Backup alarms (C-55, ADR 0017 5.3). Every alarmed metric (namespace codeproctor-pilot) is produced ONLY by the owner-applied expiry Lambda, from ListObjectVersions (Size, LastModified), because the threat is a compromised main instance that could keep publishing normal values. The instance's own BackupSuccess uses another namespace (codeproctor-pilot-instance) and is a secondary signal only. The producer is a dependency outside this template (database track). Until it exists the freshness and age alarms sit in ALARM (missing data breaches), so the first email is expected. ADR 0017 section 14 item 2 says a 7 day freshness alarm; C-55 says 2 days: 2 is used.
+  # Backup alarms (C-55, ADR 0017 5.3). Every alarmed metric (namespace codeproctor-pilot) is
+  # produced ONLY by the owner-applied expiry Lambda, from ListObjectVersions (Size, LastModified),
+  # because the threat is a compromised main instance that could keep publishing normal values. The
+  # instance's own BackupSuccess uses another namespace (codeproctor-pilot-instance) and is a
+  # secondary signal only. The producer is a dependency outside this template (database track).
+  # Until it exists the freshness and age alarms sit in ALARM (missing data breaches), so the first
+  # email is expected. ADR 0017 section 14 item 2 says a 7 day freshness alarm; C-55 says 2 days: 2
+  # is used.
   BackupFreshnessAlarm:
     Type: 'AWS::CloudWatch::Alarm'
     Properties:
       AlarmName: 'codeproctor-pilot-backup-stale-2d'
-      AlarmDescription: 'The newest dump is older than 2 days (Lambda-side metric)'
+      AlarmDescription: 'The newest dump is older than 2 days (Lambda-side metric, published once a day by the expiry function, no dimensions)'
       Namespace: 'codeproctor-pilot'
       MetricName: 'NewestDumpAgeHours'
       Statistic: 'Maximum'
-      Period: 3600
+      Period: 86400
       EvaluationPeriods: 1
       Threshold: 48
       ComparisonOperator: 'GreaterThanThreshold'

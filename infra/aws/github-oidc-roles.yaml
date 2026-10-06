@@ -101,7 +101,8 @@ Conditions:
   UseEcrPush: !Equals [!Ref UseEcr, 'true']
 
 Resources:
-  # OIDC identity provider. IAM no longer validates the thumbprint for GitHub (it uses its trusted root CA library), so ThumbprintList is omitted.
+  # OIDC identity provider. IAM no longer validates the thumbprint for GitHub (it uses its trusted
+  # root CA library), so ThumbprintList is omitted.
   GitHubOidcProvider:
     Type: 'AWS::IAM::OIDCProvider'
     Condition: 'CreateOidcProvider'
@@ -114,7 +115,8 @@ Resources:
           Value: 'pilot'
         - Key: 'ManagedBy'
           Value: 'codeproctor-github-oidc'
-  # Deploy role: assumable only from the GitHub environment pilot. The sub claim of an environment job carries no ref: branch and reviewer rules are GitHub-side (README).
+  # Deploy role: assumable only from the GitHub environment pilot. The sub claim of an environment
+  # job carries no ref: branch and reviewer rules are GitHub-side (README).
   PilotDeployRole:
     Type: 'AWS::IAM::Role'
     Properties:
@@ -151,7 +153,8 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          # The only S3 permission: write the two signed release manifests (ADR 0017 section 7). No read, no list, no delete.
+          # The only S3 permission: write the two signed release manifests (ADR 0017 section 7).
+          # No read, no list, no delete.
           - Sid: 'ReleaseManifestsPut'
             Effect: 'Allow'
             Action: 's3:PutObject'
@@ -200,7 +203,11 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          # No role may hold any permission on any hosted zone except the assess zone (AssessHostedZoneId; empty means none). Account-wide actions (ListHostedZones, CreateHostedZone, route53domains) and every action on any other zone are denied whether or not the main zone is in this account (OQ-22). On the assess zone the per-zone actions are only implicitly denied (no allow exists).
+          # No role may hold any permission on any hosted zone except the assess zone
+          # (AssessHostedZoneId; empty means none). Account-wide actions (ListHostedZones,
+          # CreateHostedZone, route53domains) and every action on any other zone are denied
+          # whether or not the main zone is in this account (OQ-22). On the assess zone the per-
+          # zone actions are only implicitly denied (no allow exists).
           - Sid: 'DenyRoute53OutsideAssessZone'
             Effect: 'Deny'
             Action:
@@ -208,7 +215,8 @@ Resources:
               - 'route53domains:*'
             NotResource:
               - !Sub 'arn:${AWS::Partition}:route53:::hostedzone/${AssessHostedZoneId}'
-            # Tag value guards: nothing may be tagged with an Environment value other than pilot, and nothing tagged otherwise may be touched.
+            # Tag value guards: nothing may be tagged with an Environment value other than pilot,
+            # and nothing tagged otherwise may be touched.
           - Sid: 'DenyForeignEnvironmentTagOnRequest'
             Effect: 'Deny'
             Action: '*'
@@ -227,7 +235,8 @@ Resources:
                 aws:ResourceTag/Environment: 'false'
               StringNotEquals:
                 aws:ResourceTag/Environment: 'pilot'
-            # Object access is denied everywhere except the two release manifest prefixes, which the carve-out leaves to the one Allow above.
+            # Object access is denied everywhere except the two release manifest prefixes, which the
+            # carve-out leaves to the one Allow above.
           - Sid: 'DenyObjectDataPlane'
             Effect: 'Deny'
             Action:
@@ -291,7 +300,8 @@ Resources:
               - 's3:PutAnalyticsConfiguration'
               - 's3:PutMetricsConfiguration'
             Resource: '*'
-          # Everything below is not part of CI's job (ADR 0017 section 7: never data buckets, KMS, instances, instance roles, iam, ec2, scheduler).
+          # Everything below is not part of CI's job (ADR 0017 section 7: never data buckets, KMS,
+          # instances, instance roles, iam, ec2, scheduler).
           - Sid: 'DenyInfrastructureAndData'
             Effect: 'Deny'
             Action:
@@ -362,7 +372,11 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          # Customer-managed policy for the instance roles (ADR 0017 section 3): agent registration and the Session Manager channels only. No AWS managed policy. ec2messages is left out because Run Command is not used; verify at the first start that registration works without it. The owner attaches this to the instance roles in the instance template (not CI).
+          # Customer-managed policy for the instance roles (ADR 0017 section 3): agent
+          # registration and the Session Manager channels only. No AWS managed policy. ec2messages
+          # is left out because Run Command is not used; verify at the first start that
+          # registration works without it. The owner attaches this to the instance roles in the
+          # instance template (not CI).
           - Sid: 'SsmAgentRegistrationAndSessionChannels'
             Effect: 'Allow'
             Action:

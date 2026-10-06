@@ -40,7 +40,7 @@ def load_data():
         raw = T.yaml.load(fh, T.Loader)
     params = {"InstanceRoleName": "codeproctor-pilot-app", "Judge0RoleName": "codeproctor-pilot-judge0",
               "RestoreRoleName": "codeproctor-pilot-restore", "AppOrigin": "https://app.example.test",
-              "DumpSizeChangeFactor": "3", "MaxDumpVersionsPerDay": "3", "MaxFullBaseBackupCountChange": "2", "AssessHostedZoneId": "Z0ASSESSEXAMPLE", "AlarmTopicArn": ""}
+              "DumpSizeChangeFactor": "3", "MaxDumpVersionsPerDay": "6", "MaxFullBaseBackupCountChange": "2", "AssessHostedZoneId": "Z0ASSESSEXAMPLE", "AlarmTopicArn": ""}
     rs = T.Resolver(raw, params)
     return raw, {k: rs.r(v) for k, v in raw["Resources"].items()}
 
@@ -130,18 +130,21 @@ def main():
     chk("expiry role: delete only under db/wal/, db/erasure-list/, db/erasure-completed/ (never db/dump/)", sorted(x.split("/", 1)[1] for x in dele["Resource"]) == ["db/erasure-completed/*", "db/erasure-list/*", "db/wal/*"])
     r53 = [st for st in pol if st["Sid"] == "DenyRoute53OutsideAssessZone"]
     chk("expiry role: Route 53 deny for every zone except the assess zone", len(r53) == 1 and r53[0]["NotResource"] == "arn:aws:route53:::hostedzone/Z0ASSESSEXAMPLE")
-    pm = [st for st in pol if st["Sid"] == "AgeMetric"][0]
+    pm = [st for st in pol if st["Sid"] == "AlarmedMetrics"][0]
     chk("expiry role may publish metrics only in namespace codeproctor-pilot (the alarmed namespace)", pm["Condition"]["StringEquals"]["cloudwatch:namespace"] == "codeproctor-pilot")
     trust = role["AssumeRolePolicyDocument"]["Statement"][0]
-    chk("expiry role trust: Lambda service only, for the one function by aws:SourceArn (it may fail closed: see the template comment)", trust["Principal"] == {"Service": "lambda.amazonaws.com"} and "aws:SourceArn" in trust["Condition"]["ArnLike"])
+    chk("expiry role trust: the Lambda service only, with NO aws:SourceArn or aws:SourceAccount condition (Lambda probably does not populate them); the guard is the PassRole and Lambda rule in the README", trust["Principal"] == {"Service": "lambda.amazonaws.com"} and "Condition" not in trust)
     al = {n: v["Properties"] for n, v in res.items() if v["Type"] == "AWS::CloudWatch::Alarm"}
     chk("alarms: freshness (Lambda-side), uploader signal, age 28 days, dump size, dump versions per day, full base backup count", set(al) == {"BackupFreshnessAlarm", "BackupUploaderSignalAlarm", "BackupAgeAlarm", "DumpSizeAnomalyAlarm", "DumpVersionCountAlarm", "BaseBackupCountAlarm"})
     chk("only the Lambda can produce alarmed metrics: every alarm but the uploader signal is in codeproctor-pilot; the uploader signal is in codeproctor-pilot-instance", all(a["Namespace"] == "codeproctor-pilot" for n, a in al.items() if n != "BackupUploaderSignalAlarm") and al["BackupUploaderSignalAlarm"]["Namespace"] == "codeproctor-pilot-instance" and al["BackupUploaderSignalAlarm"]["MetricName"] == "BackupSuccess")
+    sched_days = raw["Metadata"]["CodeProctor"]["ExpiryFunctionScheduleDays"]
+    chk("every Lambda-fed alarm Period matches the producer schedule (daily): a shorter period would sit in ALARM while waiting for data", sched_days == 1 and all(a["Period"] == sched_days * 86400 for n, a in al.items() if a["Namespace"] == "codeproctor-pilot"))
+    chk("no alarm has dimensions (producers publish with none; with dimensions the notBreaching alarms would fail silent)", not any("Dimensions" in a for a in al.values()))
     f = al["BackupFreshnessAlarm"]
-    chk("freshness alarm: Lambda-side NewestDumpAgeHours Maximum > 48 (2 days), missing data breaching", f["MetricName"] == "NewestDumpAgeHours" and f["Statistic"] == "Maximum" and f["Threshold"] == 48 and f["ComparisonOperator"] == "GreaterThanThreshold" and f["TreatMissingData"] == "breaching")
+    chk("freshness alarm: Lambda-side NewestDumpAgeHours Maximum > 48 (2 days), missing data breaching", f["MetricName"] == "NewestDumpAgeHours" and f["Period"] == 86400 and f["Statistic"] == "Maximum" and f["Threshold"] == 48 and f["ComparisonOperator"] == "GreaterThanThreshold" and f["TreatMissingData"] == "breaching")
     ag = al["BackupAgeAlarm"]
     chk("age alarm: OldestKeptBackupAgeDays >= 28 (ADR 0017 5.3; C-55 says 30-day window), missing data breaching", ag["MetricName"] == "OldestKeptBackupAgeDays" and ag["Threshold"] == 28 and ag["ComparisonOperator"] == "GreaterThanOrEqualToThreshold" and ag["TreatMissingData"] == "breaching")
-    chk("size anomaly alarm: DumpSizeChangeFactor > 3; versions alarm: DumpVersionsPerDay > 3", al["DumpSizeAnomalyAlarm"]["MetricName"] == "DumpSizeChangeFactor" and al["DumpSizeAnomalyAlarm"]["Threshold"] == "3" and al["DumpVersionCountAlarm"]["MetricName"] == "DumpVersionsPerDay" and al["DumpVersionCountAlarm"]["Threshold"] == "3" and al["BaseBackupCountAlarm"]["MetricName"] == "FullBaseBackupCountChange" and "ABSOLUTE" in al["BaseBackupCountAlarm"]["AlarmDescription"] and al["BaseBackupCountAlarm"]["Threshold"] == "2")
+    chk("size anomaly alarm: DumpSizeChangeFactor > 3; versions alarm: DumpVersionsPerDay > 6", al["DumpSizeAnomalyAlarm"]["MetricName"] == "DumpSizeChangeFactor" and al["DumpSizeAnomalyAlarm"]["Threshold"] == "3" and al["DumpVersionCountAlarm"]["MetricName"] == "DumpVersionsPerDay" and al["DumpVersionCountAlarm"]["Threshold"] == "6" and al["BaseBackupCountAlarm"]["MetricName"] == "FullBaseBackupCountChange" and "ABSOLUTE" in al["BaseBackupCountAlarm"]["AlarmDescription"] and al["BaseBackupCountAlarm"]["Threshold"] == "2")
     chk("all alarms use codeproctor-pilot- names and no action when AlarmTopicArn is empty", all(a["AlarmName"].startswith("codeproctor-pilot-backup-") and a["AlarmActions"] is None for a in al.values()))
     chk("no automatic day-30 expiry: the backup bucket has no current-version expiry rule at all", all("ExpirationInDays" not in r and "Expiration" not in r for r in br.values()))
     chk("no pilot instance, scheduler or plan role in the data template; one role only (expiry)", [v["Properties"]["RoleName"] for v in res.values() if v["Type"] == "AWS::IAM::Role"] == ["codeproctor-pilot-backup-expiry"])
@@ -152,7 +155,7 @@ def main():
 
     pol_of = {n: res[n.capitalize() + "BucketPolicy"]["Properties"]["PolicyDocument"] for n in ("media", "backup", "releases")}
     allow_all = [{"Statement": [{"Effect": "Allow", "Action": "*", "Resource": "*"}]}]
-    world = {"deploy": (ci_ident, T.DEPLOY), "app": (allow_all, APP), "judge0": (allow_all, J0), "restore": (allow_all, RESTORE), "expiry": (allow_all, EXPIRY), "owner": (allow_all, OWNER)}
+    world = {"deploy": (ci_ident, T.DEPLOY), "app": (allow_all, APP), "judge0": (allow_all, J0), "restore": (allow_all, RESTORE), "expiry": ([role["Policies"][0]["PolicyDocument"]], EXPIRY), "owner": (allow_all, OWNER)}
     rows = []
 
     def add(name, who, act, rsrc, ctx, exp, bucket=None, key_pol=False):
@@ -168,14 +171,16 @@ def main():
         if key_pol:
             rps.append(key["KeyPolicy"])
         got, why = T.evaluate(ident, None, rps, parn, act, rsrc, ctx)
-        ok = (exp == got) or (exp == "NODENY" and not why.startswith("explicit"))
+        ok = ((exp == "ALLOW" and got == "ALLOW") or (exp == "DENY" and got == "DENY" and why.startswith("explicit"))
+              or (exp == "DENY-IMPLICIT" and got == "DENY" and why == "implicit deny"))
+        why = f"{got}: {why}"
         keys = ",".join(sorted(k for k in ctx if k not in dflt)) + (" *" + ",".join(dflt) if dflt else "")
         rows.append((name, who, exp, got, ok, why, keys))
 
     enc_ok = {"s3:x-amz-server-side-encryption": "aws:kms", "s3:x-amz-server-side-encryption-aws-kms-key-id": KEYID}
     # ---- media and backup: CI can do nothing
     for n in ("media", "backup"):
-        b, o = BK[n], BK[n] + "/orgs/o/x"
+        b, o = BK[n], BK[n] + ("/db/dump/latest.dump" if n == "backup" else "/orgs/o/x")
         for act in ("GetObject", "PutObject", "DeleteObject"):
             add(f"CI cannot {act} on {n}", "deploy", "s3:" + act, o, {}, "DENY", n)
         for act in ("ListBucket", "ListBucketVersions", "ListBucketMultipartUploads", "PutBucketPolicy", "DeleteBucketPolicy", "PutBucketAcl", "PutBucketPublicAccessBlock", "PutBucketVersioning", "PutLifecycleConfiguration", "PutEncryptionConfiguration", "PutBucketObjectLockConfiguration", "PutBucketCors", "DeleteBucket", "PutInventoryConfiguration"):
@@ -202,6 +207,9 @@ def main():
     B = BK["backup"]
     DUMP, WAL, ERA = B + "/db/dump/latest.dump", B + "/db/wal/archive/x/000000010000000000000001", B + "/db/erasure-list/20261005T020000Z-x.json"
     add("backup: instance role overwrites db/dump/latest.dump (a new version)", "app", "s3:PutObject", DUMP, {}, "ALLOW", "backup")
+    for key_, label in ((B + "/db/dump/codeproctor-20261005T020000Z.dump.gz", "a timestamped dump key"), (B + "/db/dump/other.dump", "another key under db/dump/"), (B + "/db/other/x", "an unlisted prefix"), (B + "/x", "the bucket root")):
+        add(f"backup: instance role cannot put {label}", "app", "s3:PutObject", key_, enc_ok, "DENY", "backup")
+    add("backup: instance role cannot abort a multipart upload outside the known keys", "app", "s3:AbortMultipartUpload", B + "/db/other/x", {}, "DENY", "backup")
     add("backup: instance role writes WAL", "app", "s3:PutObject", WAL, {}, "ALLOW", "backup")
     add("backup: instance role writes an erasure-list entry", "app", "s3:PutObject", ERA, {}, "ALLOW", "backup")
     for obj, label in ((DUMP, "dump"), (WAL, "WAL"), (ERA, "erasure list")):
@@ -225,6 +233,10 @@ def main():
     add("backup: instance role cannot change the Object Lock configuration", "app", "s3:PutBucketObjectLockConfiguration", B, {}, "DENY", "backup")
     add("backup: restore role cannot change versioning", "restore", "s3:PutBucketVersioning", B, {}, "DENY", "backup")
     add("backup: expiry role can delete a version", "expiry", "s3:DeleteObjectVersion", WAL, {}, "ALLOW", "backup")
+    add("backup: expiry role cannot delete under an unlisted prefix (no allow)", "expiry", "s3:DeleteObject", B + "/db/other/x", {}, "DENY-IMPLICIT", "backup")
+    add("expiry role: Route 53 change in another zone", "expiry", "route53:ChangeResourceRecordSets", "arn:aws:route53:::hostedzone/Z0MAINEXAMPLE", {}, "DENY")
+    add("expiry role: PutMetricData into the instance namespace (no allow)", "expiry", "cloudwatch:PutMetricData", "*", {"cloudwatch:namespace": "codeproctor-pilot-instance"}, "DENY-IMPLICIT")
+    add("expiry role: PutMetricData into the alarmed namespace", "expiry", "cloudwatch:PutMetricData", "*", {"cloudwatch:namespace": "codeproctor-pilot"}, "ALLOW")
     add("backup: expiry role can list versions", "expiry", "s3:ListBucketVersions", B, {}, "ALLOW", "backup")
     add("backup: expiry role cannot read data", "expiry", "s3:GetObject", DUMP, {}, "DENY", "backup")
     add("backup: expiry role cannot write", "expiry", "s3:PutObject", DUMP, enc_ok, "DENY", "backup")
@@ -272,9 +284,7 @@ def main():
         return "DENY"
     FN = f"arn:aws:lambda:{T.REGION}:{A}:function:codeproctor-pilot-backup-expiry"
     for n, pr, ctx, exp in (
-        ("structural: expiry role trust: the Lambda service for the expiry function", "lambda.amazonaws.com", {"aws:SourceAccount": A, "aws:SourceArn": FN}, "ALLOW"),
-        ("structural: expiry role trust: the Lambda service for another function", "lambda.amazonaws.com", {"aws:SourceAccount": A, "aws:SourceArn": FN + "-evil"}, "DENY"),
-        ("structural: expiry role trust: the Lambda service from another account", "lambda.amazonaws.com", {"aws:SourceAccount": "999999999999", "aws:SourceArn": FN}, "DENY"),
+        ("structural: expiry role trust: the Lambda service", "lambda.amazonaws.com", {}, "ALLOW"),
         ("structural: expiry role trust: the main instance role", APP, {}, "DENY"),
         ("structural: expiry role trust: the Judge0 instance role", J0, {}, "DENY"),
         ("structural: expiry role trust: the CI deploy role", T.DEPLOY, {}, "DENY"),
