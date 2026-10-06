@@ -174,11 +174,11 @@ SSM SendCommand and key pairs are denied today. Two ways remain.
 
 - **Why.** Judge0 runs untrusted candidate code in privileged containers (TB-4, ADR 0016). A sandbox escape on a shared host reaches the database, the secrets, every recording the role can read and the schedule role. C-45 keeps ADR 0016's dedicated host (its option B).
 - **What C-45 requires, and how it is met.**
-  - No app secrets on the Judge0 instance: it has no instance role and only its own Judge0 tokens (section 6).
+  - No app secrets on the Judge0 instance: its minimal role (section 3) reads only its own Judge0 secrets, and it holds no app secret and no data-store credential.
   - No network access to Postgres, Redis or the media buckets: its security group allows inbound only the TLS port that `judge0-tls` publishes (ADR 0016 section 3; port 2358 itself is never published) from the main instance's security group, and outbound only to what ADR 0016 section 3 allows (patching through its allowlist or a rebuilt image); no rule or route to the main instance's other ports, and no S3 gateway endpoint on this instance's route table that is open to the data buckets.
   - Neither instance can reach the other beyond that one path: the main instance's security group allows no inbound from the Judge0 instance.
 - **Start and stop with the main instance.** The same schedules start and stop both (4.1, 4.3); the Judge0 host stops itself when the main host stops pinging it (4.2).
-- **Instance metadata.** The Judge0 instance has no role, so IMDS offers no credentials; its hop limit is 1 and a rule in `DOCKER-USER` drops traffic from the Judge0 networks to 169.254.169.254, tested in section 15.
+- **Instance metadata.** The Judge0 instance's role is minimal (section 3), and sandboxed code must never use it: its hop limit is 1 and a rule in `DOCKER-USER` drops traffic from the Judge0 networks to 169.254.169.254, tested in section 15.
 - **Instance type.** A small x86 type that runs the sandbox (the cgroup and privileged requirements of ADR 0016). The type is sized by the spike and is **Not verified**; the cost is in section 10.
 - **ADR 0016 changes.** Its recommended dedicated host stands; the pilot's single-host sizing (8 vCPU / 16 GiB) is replaced by the small instance until the spike shows otherwise; the co-located fallback is not used in the pilot; staging runs Judge0 in the local stack (section 12).
 
