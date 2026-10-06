@@ -61,7 +61,7 @@ type JobStatus = Exclude<ValidationStatus, 'NONE'>;
 interface Job {
   readonly jobId: string;
   readonly orgId: string;
-  /** The author who started the run: the actor of the finish audit row (a system write). */
+  /** The author who started the run: `initiatedBy` in the finish audit row (its actor is null). */
   readonly starterId: string;
   /** The STARTED audit row of this run (a string: audit ids are bigints). */
   readonly startedAuditId: string;
@@ -77,6 +77,8 @@ interface Job {
 /** Longest a run may take before it is a failed run (fail closed). */
 export const DEFAULT_VALIDATION_TIMEOUT_MS = 10 * 60_000;
 const MAX_FINISHED_JOBS = 500;
+/** Hex characters of the content revision kept in the finish audit row. */
+export const AUDIT_REVISION_PREFIX = 12;
 
 @Injectable()
 export class ValidationService {
@@ -286,7 +288,7 @@ export class ValidationService {
               startedAuditId: job.startedAuditId,
               version: job.version,
               outcome: status,
-              revision: job.revision.slice(0, 12),
+              revision: job.revision.slice(0, AUDIT_REVISION_PREFIX),
             },
           },
         });
