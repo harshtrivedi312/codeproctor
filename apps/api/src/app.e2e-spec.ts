@@ -259,6 +259,25 @@ describe('Throttle client identity and path matching (NFR-04)', () => {
     }
   });
 
+  it('FU-BE-08: with TRUST_PROXY_HOPS=1 and a client-supplied chain the bucket follows the rightmost address', async () => {
+    const app = await appWith('1');
+    try {
+      const server = app.getHttpServer();
+      for (const spoofed of ['1.2.3.4', '5.6.7.8', '9.9.9.9']) {
+        await request(server)
+          .post('/api/v1/auth/ping')
+          .set('X-Forwarded-For', `${spoofed}, 198.51.100.7`)
+          .expect(201);
+      }
+      await request(server)
+        .post('/api/v1/auth/ping')
+        .set('X-Forwarded-For', '1.2.3.4, 198.51.100.7')
+        .expect(429);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('FU-BE-09: mixed-case /AUTH paths are throttled as auth, not as other', async () => {
     const app = await appWith('0');
     try {
@@ -283,11 +302,20 @@ describe('Shared Redis throttle store (FU-BE-1, NFR-04)', () => {
     await infra?.stop();
   });
 
-  const useEnv = (): void =>
+  // Every test starts from empty buckets, so the tests do not depend on each other's order.
+  const useEnv = async (): Promise<void> => {
     applyEnv(infra, { THROTTLE_AUTH_LIMIT: '4', THROTTLE_DEFAULT_LIMIT: '1000' });
+    const { Redis } = await import('ioredis');
+    const redis = new Redis(infra.redis.getConnectionUrl());
+    try {
+      await redis.flushall();
+    } finally {
+      redis.disconnect();
+    }
+  };
 
   it('FU-BE-1: two API instances on one Redis share one limit', async () => {
-    useEnv();
+    await useEnv();
     const a = await createApp();
     const b = await createApp();
     try {
@@ -304,8 +332,15 @@ describe('Shared Redis throttle store (FU-BE-1, NFR-04)', () => {
   });
 
   it('FU-BE-1: a restarted instance keeps the counter (limit survives a restart)', async () => {
-    // The previous test used this client's bucket; a new app on the same Redis is still limited.
-    useEnv();
+    await useEnv();
+    const first = await createApp();
+    try {
+      for (let i = 0; i < 4; i++)
+        await request(first.getHttpServer()).post('/api/v1/auth/ping').expect(201);
+    } finally {
+      await first.close();
+    }
+    // A new app on the same Redis is still limited.
     const restarted = await createApp();
     try {
       await request(restarted.getHttpServer()).post('/api/v1/auth/ping').expect(429);
@@ -315,6 +350,16 @@ describe('Shared Redis throttle store (FU-BE-1, NFR-04)', () => {
   });
 
   it('FU-BE-1: no throttle key in Redis contains the client address', async () => {
+    await useEnv();
+    const keyApp = await createApp();
+    try {
+      await request(keyApp.getHttpServer())
+        .post('/api/v1/auth/ping')
+        .set('X-Forwarded-For', '203.0.113.9')
+        .expect(201);
+    } finally {
+      await keyApp.close();
+    }
     const { Redis } = await import('ioredis');
     const redis = new Redis(infra.redis.getConnectionUrl());
     try {
@@ -329,7 +374,7 @@ describe('Shared Redis throttle store (FU-BE-1, NFR-04)', () => {
   });
 
   it('FU-BE-1: with Redis down a throttled route answers 503 (fail closed) and /health still answers', async () => {
-    useEnv();
+    await useEnv();
     const app = await createApp();
     try {
       await infra.redis.stop();

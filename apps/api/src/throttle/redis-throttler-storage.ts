@@ -4,10 +4,15 @@
 // never leave a counter without a TTL (the failure mode of FU-BE-64) and parallel hits across
 // instances count exactly. No extra dependency: it speaks the ioredis client the API already has.
 //
+// Fixed window: a client can land up to 2x the limit across a window boundary, unlike the in-memory
+// sliding log. That is acceptable because the per-account lockout is the real defense for the
+// 2FA and password routes; this throttle is a volume brake.
+//
 // Key names are `throttle:{throttler}:{sha256(key)}`, so IPs and emails never appear in Redis.
 // Redis down: increment() rejects with ThrottleBackendUnavailableError; the guard turns that into
 // 503 for throttled routes (fail closed, like the other Redis-dependent routes) and /health is
 // @SkipThrottle(), so the probe still reports the outage.
+import { Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import type { ThrottlerStorage } from '@nestjs/throttler';
 import type { Redis } from 'ioredis';
@@ -63,6 +68,19 @@ end
 return {hits, left, 0, 0}
 `;
 
+const SCRIPT_SHA = createHash('sha1').update(THROTTLE_SCRIPT).digest('hex');
+const WARN_EVERY_MS = 60_000;
+const logger = new Logger('ThrottleStore');
+let lastWarn = 0;
+
+// Fixed text only, at most once a minute: never the key, the address or the driver error.
+function warnUnavailable(): void {
+  const now = Date.now();
+  if (now - lastWarn < WARN_EVERY_MS) return;
+  lastWarn = now;
+  logger.warn('Throttle store is unavailable; throttled routes answer 503');
+}
+
 const toSeconds = (ms: number): number => Math.max(0, Math.ceil(ms / 1000));
 
 export class RedisThrottlerStorage implements ThrottlerStorage {
@@ -85,19 +103,22 @@ export class RedisThrottlerStorage implements ThrottlerStorage {
     let reply: unknown;
     try {
       await ensureConnected(this.redis);
-      reply = await this.redis.eval(
-        THROTTLE_SCRIPT,
-        2,
-        hitKey,
-        blockKey,
-        Math.ceil(ttl),
-        limit,
-        Math.max(0, Math.ceil(blockDuration)),
-      );
+      const args = [hitKey, blockKey, Math.ceil(ttl), limit, Math.max(0, Math.ceil(blockDuration))];
+      try {
+        // EVALSHA keeps the request small; a server that has not cached the script gets it once.
+        reply = await this.redis.evalsha(SCRIPT_SHA, 2, ...args);
+      } catch (e) {
+        if (!(e instanceof Error) || !e.message.includes('NOSCRIPT')) throw e;
+        reply = await this.redis.eval(THROTTLE_SCRIPT, 2, ...args);
+      }
     } catch {
+      warnUnavailable();
       throw new ThrottleBackendUnavailableError();
     }
-    if (!Array.isArray(reply) || reply.length !== 4) throw new ThrottleBackendUnavailableError();
+    if (!Array.isArray(reply) || reply.length !== 4) {
+      warnUnavailable();
+      throw new ThrottleBackendUnavailableError();
+    }
     const [totalHits = 0, ttlMs = 0, blocked = 0, blockMs = 0] = reply.map(Number);
     return {
       totalHits,

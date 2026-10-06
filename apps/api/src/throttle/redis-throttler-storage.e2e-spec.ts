@@ -82,6 +82,13 @@ describe('RedisThrottlerStorage (FU-BE-1, NFR-04)', () => {
     expect(results.filter((r) => r.isBlocked)).toHaveLength(20);
   });
 
+  it('FU-BE-1: after SCRIPT FLUSH the next hit reloads the script (EVALSHA falls back to EVAL)', async () => {
+    const key = fresh();
+    await storage.increment(key, 60_000, 5, 0, 'auth');
+    await redis.script('FLUSH');
+    expect((await storage.increment(key, 60_000, 5, 0, 'auth')).totalHits).toBe(2);
+  });
+
   it('FU-BE-1: throttler names and keys do not share counters', async () => {
     const key = fresh();
     await storage.increment(key, 60_000, 5, 0, 'auth');

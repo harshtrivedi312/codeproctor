@@ -62,14 +62,17 @@ describe('NFR-04 environment validation', () => {
     expect(() =>
       validateEnv({ ...valid, ...live, NODE_ENV: 'production', TRUST_PROXY_HOPS: '0' }),
     ).toThrow(/TRUST_PROXY_HOPS/);
-    try {
-      validateEnv({ ...valid, ...live, APP_ENV: 'pilot', TRUST_PROXY_HOPS: '0' });
-      fail('expected throw');
-    } catch (e) {
-      const text = String(e);
-      expect(text).not.toContain(valid.JWT_ACCESS_SECRET);
-      expect(text).not.toContain(valid.DATABASE_URL);
-    }
+    let text = '';
+    expect(() => {
+      try {
+        validateEnv({ ...valid, ...live, APP_ENV: 'pilot', TRUST_PROXY_HOPS: '0' });
+      } catch (e) {
+        text = String(e);
+        throw e;
+      }
+    }).toThrow(/TRUST_PROXY_HOPS/);
+    expect(text).not.toContain(valid.JWT_ACCESS_SECRET);
+    expect(text).not.toContain(valid.DATABASE_URL);
   });
 
   it('FU-BE-97: local, development and test keep TRUST_PROXY_HOPS at 0; staging is not enforced (like the other pilot/production guards)', () => {
