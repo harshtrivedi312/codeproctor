@@ -578,6 +578,9 @@ export class RetentionRepository {
     limit: number,
     afterId?: string,
   ): Promise<{ candidateId: string; orgId: string; sessionId: string }[]> {
+    for (const literal of [RETENTION_MARKER_ACTIONS.RESULTS, MARKER_ENTITY_TYPE]) {
+      if (!SAFE_ACTION.test(literal.toUpperCase())) throw new Error('unsafe literal');
+    }
     const action = Prisma.raw(`'${RETENTION_MARKER_ACTIONS.RESULTS}'`);
     const entityType = Prisma.raw(`'${MARKER_ENTITY_TYPE}'`);
     const after = afterId ? Prisma.sql`AND c.id > ${afterId}::uuid` : Prisma.empty;

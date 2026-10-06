@@ -315,7 +315,10 @@ export class RetentionService {
       const found = await this.repo.findCandidatesToAnonymise(limit, afterId);
       for (const { candidateId, orgId, sessionId } of found) {
         try {
-          if (this.config.RETENTION_LEGAL_HOLD && (await this.isHeld(orgId, sessionId))) {
+          if (
+            this.config.RETENTION_LEGAL_HOLD &&
+            (await this.repo.inOrg(orgId, () => this.isHeld(orgId, sessionId)))
+          ) {
             count(orgId, 'candidatesRetryLater');
             continue;
           }
@@ -331,6 +334,7 @@ export class RetentionService {
           this.log.warn(
             `retention candidate anonymisation failed (${typeof code === 'string' ? code : 'error'})`,
           );
+          count(orgId, 'candidatesRetryLater');
         }
       }
       const last = found.at(-1);
