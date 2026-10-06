@@ -12,6 +12,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { REPO_ROOT } from './test-support.mjs';
+import { migrationChanges } from './verify-migration-guard.mjs';
 import { parseReferenceDdl, predicateKey, udtName } from './verify-schema-doc.mjs';
 import {
   applyMigrations,
@@ -64,39 +65,15 @@ describe('DB-08 migrations are forward-only (FR-105)', () => {
     }
   });
 
-  it('an applied migration is never edited or removed (compared with origin/main)', (t) => {
-    const ref = spawnSync('git', ['rev-parse', '--verify', '--quiet', 'origin/main'], {
-      cwd: REPO_ROOT,
-    });
-    if (ref.status !== 0) {
-      // In CI a missing base means a shallow checkout (needs fetch-depth: 0): that must not pass silently.
-      assert.ok(
-        !required,
-        'origin/main is not available: fetch it (fetch-depth: 0) so this guard can run',
-      );
-      return t.skip('origin/main is not available in this checkout');
+  it('an applied migration is never edited or removed (compared with origin/main, fetched when missing)', (t) => {
+    const result = migrationChanges(REPO_ROOT);
+    if (!result.ok) {
+      // A base that cannot be fetched must not pass silently where the flag demands it.
+      assert.ok(!required, `cannot compare with origin/main: ${result.reason}`);
+      return t.skip(`cannot compare with origin/main: ${result.reason}`);
     }
-    const diff = spawnSync(
-      'git',
-      ['diff', '--name-status', '--no-renames', 'origin/main...HEAD', '--', 'prisma/migrations'],
-      { cwd: REPO_ROOT, encoding: 'utf8' },
-    );
-    assert.equal(diff.status, 0, `git diff failed: ${diff.stderr}`);
-    const changed = diff.stdout
-      .trim()
-      .split('\n')
-      .filter((l) => {
-        if (l === '') return false;
-        if (!l.startsWith('A\t')) return true;
-        // A new file is fine only inside a NEW migration directory.
-        const dir = l.split('\t')[1].split('/').slice(0, 3).join('/');
-        return (
-          spawnSync('git', ['cat-file', '-e', `origin/main:${dir}`], { cwd: REPO_ROOT }).status ===
-          0
-        );
-      });
     assert.deepEqual(
-      changed,
+      result.changed,
       [],
       'migrations that exist on main may only be added to, never changed',
     );
