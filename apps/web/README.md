@@ -135,8 +135,12 @@ validation report; TC-011, DL-32), a draft or never-published question is a plai
 question is not available to you"), a published but archived question is still readable, and every
 write route is 403. Writers get an opaque `revision` (a content digest) and send it back as
 `expectedRevision` on save and publish (409 when stale); editing a published question forks the next
-draft (`createdNewVersion`). Routes the API does not serve yet (variants, prefill, validate job, AI
-references) are web-only placeholders, listed in `docs/followups/frontend.md` ("BE-04a sync").
+draft (`createdNewVersion`), copying test cases and variants with new ids. Variants follow the real
+BE-04b routes (`/versions/{n}/variants`, per-slot overrides, candidate-shaped preview): a variant has
+params, an active flag and a rendered statement but no name, so the editor calls them "Variant 1",
+"Variant 2" by list position. Routes the API does not serve yet (prefill, validate job, AI
+references) are web-only placeholders, listed in `docs/followups/frontend.md` ("BE-04a sync",
+"BE-04b sync").
 
 | Route                    | What it is                                                                       |
 | ------------------------ | -------------------------------------------------------------------------------- |
@@ -219,8 +223,8 @@ overrides, "Prefill from reference solution" that only proposes values until you
 AI reference solutions (add, supersede, refresh-due badge, publish requirement), Limits. Multiple
 choice and short-answer questions have Statement and Answer.
 
-Mock questions to try: **Merge intervals** (published, 2 versions, variants, refresh due),
-**Rotate an array** (draft; its variant "Rotate by 3" fails validation, TC-012: fix the expected
+Mock questions to try: **Merge intervals** (published, 2 versions, 2 variants, refresh due),
+**Rotate an array** (draft; its "Variant 2" fails validation, TC-012: fix the expected
 output of slot 2, Save, Validate, add two AI solutions for Python), **Running average** (validated
 draft, one AI assistant per language), **Cost of binary search** (MCQ, published), **Cost of a hash
 lookup (draft)** (a complete MCQ draft: the real API publishes it, so Publish works), **Status code
