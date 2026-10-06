@@ -32,7 +32,12 @@ export async function hitWindowCounter(
     throw new Error('Unexpected counter reply');
   }
   const [count, ttlSeconds] = reply.map(Number);
-  if (count === undefined || ttlSeconds === undefined || !Number.isFinite(count)) {
+  if (
+    count === undefined ||
+    ttlSeconds === undefined ||
+    !Number.isFinite(count) ||
+    !Number.isFinite(ttlSeconds)
+  ) {
     throw new Error('Unexpected counter reply');
   }
   return { count, ttlSeconds };

@@ -623,7 +623,9 @@ export class AuthService implements OnApplicationShutdown {
    * wrong or replayed code, locked account, password changed meanwhile) carries one fixed detail,
    * 'The password or code is incorrect.' (FU-BE-58), so nothing says which factor was wrong and
    * the user is not sent to retype a correct password. A code that already signed the user in
-   * (same 30 s step) is a replay: wait for the next code. The 409 before the code check tells someone who
+   * (same 30 s step) is a replay: wait for the next code. A code reservation refused after the
+   * password passed skips verifyTotp and registerFailure (only someone who already proved the
+   * password can reach it). The 409 before the code check tells someone who
    * already holds the password only that 2FA is off, which the signed-in user can see anyway.
    * Roles that must use 2FA are refused (FR-102). One transaction clears secret, flag and
    * recovery hashes (users row first), then revokes every refresh-token family of the user,
