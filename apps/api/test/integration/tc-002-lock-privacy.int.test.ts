@@ -2,7 +2,7 @@
 // to a SUPER_ADMIN of the same org on GET /admin/users. It must not appear in any login, refresh, 2FA,
 // setup, re-auth, logout or password response, for any user, locked or not, and not to
 // non-SUPER_ADMINs. The auth-response table runs now against the existing routes; the
-// /admin/users cases are staged "[BE-03 pending]" behind BE03_READY.
+// /admin/users cases run against the BE-03 routes.
 import request from 'supertest';
 import { authenticator } from 'otplib';
 import { UserRole } from '../../src/generated/prisma/client';
@@ -152,105 +152,100 @@ describe('TC-002 (FR-101, FU-BE-22): lock state is not exposed by auth responses
   });
 });
 
-(BE03_READY ? describe : describe.skip)(
-  'TC-002 [BE-03 pending]: GET /admin/users and the lock events list',
-  () => {
-    let h: Harness;
-    beforeAll(async () => {
-      h = await boot();
-    });
-    afterAll(async () => {
-      await h?.close();
-    });
+(BE03_READY ? describe : describe.skip)('TC-002: GET /admin/users and the lock events list', () => {
+  let h: Harness;
+  beforeAll(async () => {
+    h = await boot();
+  });
+  afterAll(async () => {
+    await h?.close();
+  });
 
-    interface Row {
-      id: string;
-      locked?: boolean;
-      lockedUntil?: string | null;
-    }
-    const lockOut = async (email: string): Promise<void> => {
-      for (let i = 0; i < 5; i++) await login(h, email, `bad-${i}`).expect(401);
-    };
+  interface Row {
+    id: string;
+    locked?: boolean;
+    lockedUntil?: string | null;
+  }
+  const lockOut = async (email: string): Promise<void> => {
+    for (let i = 0; i < 5; i++) await login(h, email, `bad-${i}`).expect(401);
+  };
 
-    it('TC-002 [BE-03 pending]: GET /admin/users shows locked and lockedUntil to a SUPER_ADMIN of the org only', async () => {
-      const admin = await actor(h, UserRole.SUPER_ADMIN);
-      const u = await createUser(h);
-      await lockOut(u.email);
-      const res = await call(h, 'GET', `${ADMIN_USERS}?page=1&pageSize=100`, admin.token).expect(
-        200,
-      );
-      const rows = (res.body as { items: Row[] }).items;
-      const row = rows.find((r) => r.id === u.id);
-      expect(row?.locked).toBe(true);
-      expect(new Date(row?.lockedUntil ?? 0).getTime()).toBeGreaterThan(Date.now());
-      expect(rows.find((r) => r.id === admin.id)?.locked).toBe(false);
-    });
+  it('TC-002: GET /admin/users shows locked and lockedUntil to a SUPER_ADMIN of the org only', async () => {
+    const admin = await actor(h, UserRole.SUPER_ADMIN);
+    const u = await createUser(h);
+    await lockOut(u.email);
+    const res = await call(h, 'GET', `${ADMIN_USERS}?page=1&pageSize=100`, admin.token).expect(200);
+    const rows = (res.body as { items: Row[] }).items;
+    const row = rows.find((r) => r.id === u.id);
+    expect(row?.locked).toBe(true);
+    expect(new Date(row?.lockedUntil ?? 0).getTime()).toBeGreaterThan(Date.now());
+    expect(rows.find((r) => r.id === admin.id)?.locked).toBe(false);
+  });
 
-    it.each([UserRole.RECRUITER, UserRole.AUTHOR, UserRole.REVIEWER])(
-      'TC-002 [BE-03 pending]: a %s gets 403 on both admin lists and never sees lock fields anywhere',
-      async (role) => {
-        const who = await actor(h, role);
-        for (const path of [ADMIN_USERS, lockEventsPath]) {
-          const res = await call(h, 'GET', path, who.token).expect(403);
-          expect(lockKeysIn(res.body)).toEqual([]);
-        }
-      },
-    );
-
-    it('TC-002 [BE-03 pending]: a SUPER_ADMIN of another org gets 404 on unlock (account stays locked) and sees nothing of the user in its own lists', async () => {
-      const orgB = (await h.owner.organization.create({ data: { name: 'QA Org B lock' } })).id;
-      const adminB = await actor(h, UserRole.SUPER_ADMIN, orgB);
-      const u = await createUser(h);
-      await lockOut(u.email);
-      const before = await h.owner.user.findUniqueOrThrow({ where: { id: u.id } });
-      await call(h, 'POST', `${ADMIN_USERS}/${u.id}/unlock`, adminB.token, {
-        currentPassword: PASSWORD,
-      }).expect(404);
-      const after = await h.owner.user.findUniqueOrThrow({ where: { id: u.id } });
-      expect([after.failedLogins, after.lockedUntil]).toEqual([
-        before.failedLogins,
-        before.lockedUntil,
-      ]);
-      expect(after.lockedUntil).not.toBeNull();
+  it.each([UserRole.RECRUITER, UserRole.AUTHOR, UserRole.REVIEWER])(
+    'TC-002: a %s gets 403 on both admin lists and never sees lock fields anywhere',
+    async (role) => {
+      const who = await actor(h, role);
       for (const path of [ADMIN_USERS, lockEventsPath]) {
-        const list = await call(h, 'GET', path, adminB.token).expect(200);
-        expect(JSON.stringify(list.body)).not.toContain(u.id);
-        expect(JSON.stringify(list.body)).not.toContain(u.email);
+        const res = await call(h, 'GET', path, who.token).expect(403);
+        expect(lockKeysIn(res.body)).toEqual([]);
       }
-    });
+    },
+  );
 
-    it('TC-002 [BE-03 pending]: GET /admin/users/lock-events lists one event per lock, newest first, with the contracted fields, for SUPER_ADMIN only and scoped to the org', async () => {
-      const admin = await actor(h, UserRole.SUPER_ADMIN);
-      const first = await createUser(h);
-      const second = await createUser(h);
-      await lockOut(first.email);
-      await lockOut(second.email);
-      await login(h, second.email).expect(401); // more attempts while locked add no event
-      const res = await call(h, 'GET', `${lockEventsPath}?page=1&pageSize=100`, admin.token).expect(
-        200,
-      );
-      const body = res.body as {
-        items: { id: string; userId: string; email: string; name: string; lockedAt: string }[];
-        page: number;
-        pageSize: number;
-        total: number;
-      };
-      expect(Object.keys(body).sort()).toEqual(['items', 'page', 'pageSize', 'total']);
-      const mine = body.items.filter((i) => [first.id, second.id].includes(i.userId));
-      expect(mine.map((i) => i.userId)).toEqual([second.id, first.id]); // newest first, one each
-      for (const item of mine) {
-        expect(Object.keys(item).sort()).toEqual(['email', 'id', 'lockedAt', 'name', 'userId']);
-        expect(typeof item.id).toBe('string');
-        expect(Math.abs(Date.now() - new Date(item.lockedAt).getTime())).toBeLessThan(60_000);
-      }
-      expect(mine[0]?.email).toBe(second.email);
-      expect(lockKeysIn(res.body)).toEqual([]);
-      const paged = (
-        await call(h, 'GET', `${lockEventsPath}?page=1&pageSize=1`, admin.token).expect(200)
-      ).body as typeof body;
-      expect(paged.items).toHaveLength(1);
-      expect(paged.total).toBeGreaterThanOrEqual(2);
-      await call(h, 'GET', `${lockEventsPath}?pageSize=101`, admin.token).expect(400);
-    });
-  },
-);
+  it('TC-002: a SUPER_ADMIN of another org gets 404 on unlock (account stays locked) and sees nothing of the user in its own lists', async () => {
+    const orgB = (await h.owner.organization.create({ data: { name: 'QA Org B lock' } })).id;
+    const adminB = await actor(h, UserRole.SUPER_ADMIN, orgB);
+    const u = await createUser(h);
+    await lockOut(u.email);
+    const before = await h.owner.user.findUniqueOrThrow({ where: { id: u.id } });
+    await call(h, 'POST', `${ADMIN_USERS}/${u.id}/unlock`, adminB.token, {
+      currentPassword: PASSWORD,
+    }).expect(404);
+    const after = await h.owner.user.findUniqueOrThrow({ where: { id: u.id } });
+    expect([after.failedLogins, after.lockedUntil]).toEqual([
+      before.failedLogins,
+      before.lockedUntil,
+    ]);
+    expect(after.lockedUntil).not.toBeNull();
+    for (const path of [ADMIN_USERS, lockEventsPath]) {
+      const list = await call(h, 'GET', path, adminB.token).expect(200);
+      expect(JSON.stringify(list.body)).not.toContain(u.id);
+      expect(JSON.stringify(list.body)).not.toContain(u.email);
+    }
+  });
+
+  it('TC-002: GET /admin/users/lock-events lists one event per lock, newest first, with the contracted fields, for SUPER_ADMIN only and scoped to the org', async () => {
+    const admin = await actor(h, UserRole.SUPER_ADMIN);
+    const first = await createUser(h);
+    const second = await createUser(h);
+    await lockOut(first.email);
+    await lockOut(second.email);
+    await login(h, second.email).expect(401); // more attempts while locked add no event
+    const res = await call(h, 'GET', `${lockEventsPath}?page=1&pageSize=100`, admin.token).expect(
+      200,
+    );
+    const body = res.body as {
+      items: { id: string; userId: string; email: string; name: string; lockedAt: string }[];
+      page: number;
+      pageSize: number;
+      total: number;
+    };
+    expect(Object.keys(body).sort()).toEqual(['items', 'page', 'pageSize', 'total']);
+    const mine = body.items.filter((i) => [first.id, second.id].includes(i.userId));
+    expect(mine.map((i) => i.userId)).toEqual([second.id, first.id]); // newest first, one each
+    for (const item of mine) {
+      expect(Object.keys(item).sort()).toEqual(['email', 'id', 'lockedAt', 'name', 'userId']);
+      expect(typeof item.id).toBe('string');
+      expect(Math.abs(Date.now() - new Date(item.lockedAt).getTime())).toBeLessThan(60_000);
+    }
+    expect(mine[0]?.email).toBe(second.email);
+    expect(lockKeysIn(res.body)).toEqual([]);
+    const paged = (
+      await call(h, 'GET', `${lockEventsPath}?page=1&pageSize=1`, admin.token).expect(200)
+    ).body as typeof body;
+    expect(paged.items).toHaveLength(1);
+    expect(paged.total).toBeGreaterThanOrEqual(2);
+    await call(h, 'GET', `${lockEventsPath}?pageSize=101`, admin.token).expect(400);
+  });
+});
