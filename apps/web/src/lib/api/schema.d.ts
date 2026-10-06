@@ -1414,7 +1414,7 @@ export interface components {
       total: number;
     };
     /**
-     * @description The session state machine of ADR 0002 (ERASED is not shown to recruiters).
+     * @description The session state machine of ADR 0002 with ERASED (D-54, ADR 0004 section 9): the candidate's data was erased after an erasure request. Terminal; set only by the erasure fence.
      * @enum {string}
      */
     SessionStatus:
@@ -1430,7 +1430,8 @@ export interface components {
       | 'COMPLETED'
       | 'EXPIRED'
       | 'APPEALED'
-      | 'DECLINED';
+      | 'DECLINED'
+      | 'ERASED';
     /** @enum {string} */
     IdentityWaiverReason: 'REFUSED_BIOMETRIC_PROCESSING' | 'CANNOT_COMPLETE_ID_CHECK' | 'OTHER';
     /** @description ADR 0015, owner decisions C-02 and C-19. reasonCode is required; reasonNote (1 to 500 characters) is required and allowed only with OTHER. Never put health details in it. */

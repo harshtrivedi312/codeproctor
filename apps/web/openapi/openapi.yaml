@@ -2671,7 +2671,9 @@ components:
         total: { type: integer }
     SessionStatus:
       type: string
-      description: The session state machine of ADR 0002 (ERASED is not shown to recruiters).
+      description: >-
+        The session state machine of ADR 0002 with ERASED (D-54, ADR 0004 section 9): the
+        candidate's data was erased after an erasure request. Terminal; set only by the erasure fence.
       enum:
         [
           INVITED,
@@ -2687,6 +2689,7 @@ components:
           EXPIRED,
           APPEALED,
           DECLINED,
+          ERASED,
         ]
     IdentityWaiverReason:
       type: string
