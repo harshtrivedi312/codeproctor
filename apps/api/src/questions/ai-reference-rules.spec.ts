@@ -1,7 +1,7 @@
+import { DEFAULT_MIN_ASSISTANTS } from '@codeproctor/shared';
 import {
   aiPolicyFromSettings,
   aiReferenceProblems,
-  DEFAULT_MIN_ASSISTANTS,
   minAssistantsFromSettings,
 } from './ai-reference-rules';
 

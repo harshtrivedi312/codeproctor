@@ -15,7 +15,8 @@ import { PrismaService } from '../database/prisma.service';
 import { Prisma, UserRole } from '../generated/prisma/client';
 import { CodedConflictException, reauthFailed } from '../common/coded.exception';
 import type { RequestContext } from '../common/request-context';
-import { DEFAULT_MIN_ASSISTANTS, storedMinAssistants } from '../questions/ai-reference-rules';
+import { DEFAULT_MIN_ASSISTANTS } from '@codeproctor/shared';
+import { storedMinAssistants } from '../questions/ai-reference-rules';
 import type { OrgSettingsDto, UpdateOrgSettingsDto } from './dto/org-settings.dto';
 
 const MAX_ATTEMPTS = 3;

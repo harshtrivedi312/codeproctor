@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { MAX_MIN_ASSISTANTS } from '../ai-reference-rules';
+import { MAX_MIN_ASSISTANTS } from '@codeproctor/shared';
 
 /** The org's AI reference policy, read-only for authors (ADR 0005 AI-4, AI-5). */
 export class AiPolicyDto {
