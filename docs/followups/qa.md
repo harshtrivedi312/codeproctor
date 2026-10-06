@@ -495,10 +495,50 @@ None confirmed. Every assertion in the three acceptance files and the 123 table-
 5. fsd.md section 4 lists `/tests` for role "Recruiter"; ADR 0010 (and the code) also give SUPER_ADMIN test:read, test:create, test:update. Docs row should say "Recruiter, Super admin" (hub, docs).
 6. Concurrency: one test races PATCH against an invitation insert (the backend locks the test row FOR UPDATE). It asserts the final state is one of the two consistent outcomes; a single run cannot prove the lock. The backend's own e2e spec holds the deterministic version.
 
-## 17. QA-09 (2026-10-06): QUESTION_VALIDATION_FINISHED audit coverage (branch qa/be04c-followup on backend/step-4c-followup @a8eb564; no PR, co-landed with backend PR #156)
+## 17. QA-09 (2026-10-06): QUESTION_VALIDATION_FINISHED audit coverage (merged with backend PR #156, main @8d02635; branch qa/be04c-followup was co-landed, no separate PR)
 
 - Convention (hub decision, ADR 0001 C-3 "jobs write rows with a null actor"): a QUESTION_VALIDATION_FINISHED row has `actor_id` NULL and `ip` NULL, metadata exactly `{system: true, initiatedBy: <starter user id>, startedAuditId: <id of the STARTED row>, version, outcome, revision (12 hex)}`. TC-006's "actor, entity, IP" applies to request-driven rows only. No open question remains on `ip`.
 - Harness: the validate job runs against a harness port that rejects, so the outcome is ERROR on any machine (no JUDGE0_URL dependence); `h.setValidationPort(p)` swaps it per test (a deferred promise holds a job open). `ValidationService` is resolved once in `boot()`; `h.settleValidation()` / `settleValidation(h)` race `whenIdle()` against 30 s and fail with `SettleValidationTimeout`; `close()` is idempotent, waits for jobs and closes everything in try/finally. Called after every successful validate call in tc-004-rbac and tc-006-audit.
 - tc-006-audit, `questions-validate`: the exactly-one check counts only STARTED; a separate test asserts the FINISHED row against the convention above (startedAuditId resolves to exactly the STARTED row of the same question, actor and org; outcome ERROR; revision equals the 202 body's `revision.slice(0, 12)`; version equals the 202 body's; no secrets); refused 401/403/404 write neither row after settle; a held job whose question is archived mid-run writes no FINISHED row (STARTED stays).
 - Also: a fully passing stubbed run writes FINISHED outcome PASSED with the same job-row shape and sets `validatedAt`; `startedAuditId` is asserted to be a string equal to `String(startedRow.id)`. `h.resetValidationPort()` restores the default stub (`NO_EXECUTION_PORT`, defined once in harness.ts).
 - With the backend's actor-null change merged (#156 @4532618) the FINISHED test passes; full API run 0 failures.
+
+## 18. QA-08A (2026-10-06): outage tests that really reach the handler, shared throttle counters (branch qa/step-8, on main @6331019)
+
+### 18.1 Why
+Since #175 the global throttle guard keeps its counters in Redis and answers 503 "Service is temporarily unavailable." BEFORE any handler when Redis is down. The old outage tests (tc-003 `/2fa/verify` and `/2fa/disable`, tc-006-reissue) matched the substring "temporarily unavailable" and so would have stayed green if a handler regressed to fail-open. They now assert the handler's own text ("Verification is temporarily unavailable.", also for the re-issue, `UsersService.takeInviteSlot`) and the effects.
+
+### 18.2 Harness (apps/api/test/support/harness.ts, test-only)
+- `boot({ memoryThrottle: true })`: overrides the throttler storage with the in-memory `ThrottlerStorageService` (same pattern as auth-coldstart.e2e-spec.ts). Used only in the stop-Redis tests.
+- `h.skipFreshnessCheck()`: finding from the mutation work. `JwtAuthGuard` calls `TokenValidityService.isFresh()`, which also needs Redis and throws the SAME "Verification is temporarily unavailable." for every protected route. So even with the memory throttle, `/2fa/disable` and the re-issue never reached their handlers with Redis stopped. This spies `isFresh` to true (that one check only) so the handler's own branch is what answers. Backend FYI: that is a third fail-closed layer whose message is indistinguishable from the handler's; if the owner ever wants the layers distinguishable, a different detail text per layer would let tests tell them apart without a spy.
+- `boot({ join: h })`: boots a SECOND API instance against the infra, database and organization of an existing harness (shared Redis counters). `h.stopApp()` closes only that app (an API restart; infra stays). Closing a joined harness closes only its app.
+- Flush: each `boot()` starts its OWN Redis container (`startInfra()`), so throttle counters could never leak between test files or suites even before this change. `boot()` now also runs FLUSHALL on a separate client right after the container starts (before the app, so the app's client stays cold for tc-003-coldstart); it is defensive. fr-301-test-builder-throttle (429 at call 101) was already order-independent for that reason.
+
+### 18.3 Tests
+- tc-003.int.test.ts: the outage describe is now its own file-level describe, booted with `memoryThrottle`, last in the file; fixtures are made, then Redis is stopped, then four tests: `/2fa/disable` (handler 503, 2FA still on, secret unchanged, failedLogins unchanged, refresh token not revoked, no AUTH_2FA_DISABLED row), `/2fa/verify` (no cookie, no accessToken, no session, no refresh row, failedLogins unchanged), `/2fa/enroll/confirm` (new: 2FA stays off, recovery hashes unchanged, no session), and no audit row from any of them.
+- tc-006-reissue.int.test.ts: outage suite boots with `memoryThrottle` and `skipFreshnessCheck`; asserts problem+json, handler text, no cookie, token hash unchanged, no mail, no audit row.
+- nfr-04-throttle-redis.int.test.ts (new; no TC id covers throttling, tests carry NFR-04 and FU-BE-1): two apps on one Redis (GET limit hit on A is 429 on B; login limit hit on A, B answers 429 even with correct credentials), key shape `throttle:{name}:{64 hex}` with a TTL and no address, email or token in any key, counters survive an app restart (third instance), and the ONE throttler-level test: with Redis down a public route (`POST /auth/login`) answers 503 problem+json "Service is temporarily unavailable." with no Redis, driver or address detail.
+- Deviation from the task text: `GET /health` with Redis down does not answer 200. It is not throttled (@SkipThrottle) but reports the outage itself, 503 problem+json with detail naming redis (NFR-09, app.e2e-spec.ts). The test asserts exactly that and that the throttler body is absent.
+- Note on keys: Nest's `ThrottlerGuard` derives the tracker key per handler (class, handler, throttler name, tracker), and the store hashes that with SHA-256; the test therefore checks the key SHAPE, not a hash it computes itself.
+
+### 18.4 Mutation check (done locally, mutations reverted, not committed)
+| Mutation (src, reverted) | Test that went RED |
+| --- | --- |
+| `UsersService.takeInviteSlot` catch sets `count = 0` (fail-open) | tc-006-reissue: the re-issue answers the handler 503 |
+| `TotpService.verify` catch returns true AND `AuthService.withChallengeUse` catch sets `claimed = 'OK'` | tc-003 `/2fa/verify` and `/2fa/enroll/confirm` outage tests (and the audit-row test) |
+| `TotpService.verify` catch returns true AND `TokenValidityService.invalidateIssuedTokens` swallows the error | tc-003 `/2fa/disable` outage test (2FA really switched off) and the audit-row test |
+| `TotpService.verify` catch returns true ALONE | NO test red: `/2fa/disable` still fails closed because the Redis marker write inside its transaction throws (503, rolled back). `/2fa/verify` and `/enroll/confirm` still fail closed at `withChallengeUse`. Both routes have two fail-closed layers, so a single regression of one layer is correctly invisible; the test fails only when both layers regress. |
+| `AuthService.withChallengeUse` catch sets `claimed = 'OK'` ALONE | NO test red (second layer, `TotpService.verify`, still answers 503). Same reasoning. |
+
+### 18.5 TRUST_PROXY_HOPS boot guard (FU-BE-97)
+Not duplicated. `apps/api/src/config/env.spec.ts` already covers it: pilot and production refuse missing and 0 (and NODE_ENV production), 1 and 2 pass, the error names only TRUST_PROXY_HOPS and contains neither the JWT secret nor the database URL, local, development, test and staging default to 0 and boot, `-1` is refused. `apps/api/src/app.e2e-spec.ts` boots a production app with hops 1. Coverage is backend-owned and verified. Small unasserted corners (not defects; the zod schema is `int().min(0).max(10)` so they are refused by construction): non-integer values such as `1.5` or `abc`, and values above 10. Suggestion for the backend owner, low priority.
+
+### 18.6 Small carried items done
+- tc-003-coldstart: title and header reworded (login is now the first Redis use; five parallel first uses of a cold client all succeed).
+- tc-006-audit PASSED test: asserts the exact sorted pair [FINISHED, STARTED] before using the STARTED row, and `await settleValidation(h).catch(() => undefined)` before `resetValidationPort()`.
+- Section 17 header now names the merge (#156, main @8d02635) instead of a branch SHA.
+
+Full API integration run after the change: 23 suites passed, 716 tests passed, 40 skipped (staged BE-13), 3 todo, 0 failures. Lint, API test typecheck, prettier and the QA package tests (46) are green.
+
+### 18.7 Defects
+None found in application code. Observation for the backend owner: the identical wording across the JWT guard, the handlers and the transaction marker makes outage regressions hard to localise (see 18.2).
