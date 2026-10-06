@@ -58,6 +58,8 @@ export interface MockVersion {
   validationReport: ValidationReport | null;
   testCases: MockTestCase[];
   variants: MockVariant[];
+  /** AI reference solutions belong to ONE version (BE-04c); a fork starts with none. */
+  aiRefs: Schemas['AiReference'][];
 }
 
 export interface MockQuestion {
@@ -68,8 +70,6 @@ export interface MockQuestion {
   isArchived: boolean;
   createdAt: string;
   versions: MockVersion[];
-  /** WEB-ONLY placeholder [BE-04c]. */
-  aiRefs: Schemas['AiReference'][];
 }
 
 /** The shape the seed data below is written in; `convert` turns it into the API shape. */
@@ -102,7 +102,8 @@ interface SeedVersion extends SeedContent {
   createdAt: string;
   createdByName: string;
   validatedAt: string | null;
-  validationReport: { passed: boolean; finishedAt: string; results: [] } | null;
+  /** Only `passed` and the time matter: `convert` builds the real report for the content. */
+  validationReport: { passed: boolean; finishedAt: string } | null;
 }
 interface SeedQuestion {
   id: string;
@@ -118,8 +119,8 @@ const daysAgo = (d: number) => new Date(NOW - d * 86_400_000).toISOString();
 
 const LIMITS = { cpuMs: 2000, wallMs: 5000, memoryKb: 262_144 };
 
-function passing(): { passed: true; finishedAt: string; results: [] } {
-  return { passed: true, finishedAt: daysAgo(2), results: [] };
+function passing(): { passed: true; finishedAt: string } {
+  return { passed: true, finishedAt: daysAgo(2) };
 }
 
 export function seedQuestions(): MockQuestion[] {
@@ -387,8 +388,9 @@ prints
     promptText: 'Solve the question as stated. Return only code.',
     collectedAt: daysAgo(ageDays),
     variantId: null,
-    collectedByName: 'Avery Author',
+    collectedById: 'user-author',
     supersededAt: null,
+    createdAt: daysAgo(ageDays),
   });
 
   const legacy: SeedQuestion[] = [
@@ -527,6 +529,37 @@ prints
   return legacy.map(convert);
 }
 
+/** A passing report in the real shape: one result per active variant (or the base), one passing cell per language. */
+function passingReport(
+  v: {
+    allowedLanguages: Language[];
+    testCases: { id: string }[];
+    variants: MockVariant[];
+  },
+  revision: string,
+  finishedAt: string,
+): ValidationReport {
+  const active = v.variants.filter((x) => x.isActive).sort((a, b) => (a.id < b.id ? -1 : 1));
+  const targets: (string | null)[] = active.length > 0 ? active.map((x) => x.id) : [null];
+  return {
+    passed: true,
+    revision,
+    startedAt: finishedAt,
+    finishedAt,
+    perVariant: targets.map((variantId) => ({
+      variantId,
+      passed: true,
+      cells: v.allowedLanguages.map((language) => ({
+        language,
+        passed: true,
+        testsPassed: v.testCases.length,
+        testsTotal: v.testCases.length,
+      })),
+      failures: [],
+    })),
+  };
+}
+
 /** Seed shape to the API shape: positions, ids, an answer spec without `type`, a revision-bound report. */
 function convert(q: SeedQuestion): MockQuestion {
   const last = q.versions[q.versions.length - 1]!;
@@ -565,13 +598,23 @@ function convert(q: SeedQuestion): MockQuestion {
         };
       }),
     };
-    const report = v.validationReport
-      ? {
-          ...v.validationReport,
-          revision: mockRevision({ ...base, variants: base.variants.map((x) => ({ ...x })) }),
-        }
-      : null;
-    return { ...base, validationReport: report };
+    const revision = mockRevision({
+      ...base,
+      variants: base.variants.map((x) => ({ ...x })),
+    });
+    // Only coding questions are validated: the real API never records a run for the other types.
+    const coding = q.type === 'CODING';
+    const report: ValidationReport | null =
+      coding && v.validationReport
+        ? passingReport(base, revision, v.validationReport.finishedAt)
+        : null;
+    const isLast = v.version === last.version;
+    return {
+      ...base,
+      validatedAt: coding ? base.validatedAt : null,
+      validationReport: report,
+      aiRefs: isLast ? q.aiRefs : [],
+    };
   });
   return {
     id: q.id,
@@ -581,6 +624,5 @@ function convert(q: SeedQuestion): MockQuestion {
     isArchived: q.archived,
     createdAt: daysAgo(40),
     versions,
-    aiRefs: q.aiRefs,
   };
 }
