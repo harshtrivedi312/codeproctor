@@ -444,4 +444,135 @@ describe('TC-011 (FR-202): hidden tests, reference solutions and answer keys are
       expectNoneOf(res, [...HIDDEN_MARKERS, ...ANSWER_MARKERS]);
     }
   });
+
+  it('TC-011 FR-201 FR-301 DL-34: a recruiter list, with every filter the endpoint has, pagination, order and totals, never shows, counts or leaks a draft-only question; author and admin see it', async () => {
+    const t = Date.now().toString(36);
+    const common = `dl34-all-${t}`;
+    const draftTag = `dl34-draft-${t}`;
+    const draftTitle = `DL34 DRAFT ONLY ${t}`;
+    const v2Title = `DL34 MIX V2 DRAFT ${t}`;
+    const draftOnly = idOf(
+      await createQuestion(
+        h,
+        s.author,
+        codingBody({ title: draftTitle, difficulty: 'HARD', tags: [common, draftTag] }),
+      ),
+    );
+    const pub = idOf(
+      await createQuestion(
+        h,
+        s.author,
+        codingBody({ title: `DL34 PUB ${t}`, difficulty: 'MEDIUM', tags: [common] }),
+      ),
+    );
+    await publishQuestion(h, s.author, pub);
+    const mix = idOf(
+      await createQuestion(
+        h,
+        s.author,
+        codingBody({ title: `DL34 MIX V1 ${t}`, difficulty: 'EASY', tags: [common] }),
+      ),
+    );
+    await publishQuestion(h, s.author, mix);
+    await call(h, 'PATCH', `/questions/${mix}`, s.author.token, {
+      title: v2Title,
+      difficulty: 'HARD',
+    }).expect(200);
+
+    const secrets = [draftTitle, draftTag, draftOnly, v2Title];
+    type ListBody = {
+      items: {
+        id: string;
+        published: { title: string } | null;
+        latest: { title: string; version: number };
+      }[];
+      total: number;
+      page: number;
+      pageSize: number;
+    };
+    const list = async (
+      who: { token: string },
+      qs: string,
+    ): Promise<{ res: request.Response; body: ListBody }> => {
+      const res = await call(h, 'GET', `/questions?pageSize=100&${qs}`, who.token);
+      expect([qs, res.status]).toEqual([qs, 200]);
+      return { res, body: res.body as ListBody };
+    };
+    const ids = (b: ListBody): string[] => b.items.map((i) => i.id);
+
+    const filters = [
+      `tag=${common}`,
+      `tag=${draftTag}`,
+      `tag=${common}&difficulty=HARD`,
+      `tag=${common}&difficulty=EASY`,
+      `tag=${common}&difficulty=MEDIUM`,
+      `tag=${common}&type=CODING`,
+      `tag=${draftTag}&type=CODING`,
+      `tag=${common}&includeArchived=true`,
+      `tag=${draftTag}&includeArchived=true`,
+    ];
+    for (const qs of filters) {
+      const { res, body } = await list(s.recruiter, qs);
+      expect([qs, ids(body).includes(draftOnly)]).toEqual([qs, false]);
+      expectNoneOf(res, secrets);
+      // total counts only what is shown: no draft-only question inflates it.
+      expect([qs, body.total]).toEqual([qs, body.items.length]);
+      // No search or facet fields exist: the body is exactly the page envelope.
+      expect(Object.keys(res.body as Json).sort()).toEqual(['items', 'page', 'pageSize', 'total']);
+    }
+    // Recruiter: draft tag finds nothing; HARD finds nothing (the only HARD versions are drafts).
+    expect((await list(s.recruiter, `tag=${draftTag}`)).body.total).toBe(0);
+    expect((await list(s.recruiter, `tag=${common}&difficulty=HARD`)).body.total).toBe(0);
+    const all = await list(s.recruiter, `tag=${common}`);
+    expect(all.body.total).toBe(2);
+    expect(ids(all.body)).toEqual([mix, pub]); // newest question first (createdAt desc), no draft-only in between
+    const mixItem = all.body.items.find((i) => i.id === mix);
+    expect(mixItem?.published?.title).toBe(`DL34 MIX V1 ${t}`);
+    expect(mixItem?.latest).toMatchObject({ version: 1, title: `DL34 MIX V1 ${t}` }); // v1 fields, not the draft
+    expect(ids((await list(s.recruiter, `tag=${common}&difficulty=EASY`)).body)).toEqual([mix]);
+    // Pagination: totals and pages never include the draft-only question.
+    const seen: string[] = [];
+    for (const page of [1, 2, 3]) {
+      const { res, body } = await list(
+        s.recruiter,
+        `tag=${common}&pageSize=1&page=${page}`.replace('pageSize=100&', ''),
+      );
+      expect([page, body.total]).toEqual([page, 2]);
+      expectNoneOf(res, secrets);
+      seen.push(...ids(body));
+    }
+    expect(seen).toEqual([mix, pub]);
+    // A search or status parameter the endpoint does not have must not become a way to find a draft.
+    for (const qs of [
+      `q=${encodeURIComponent(draftTitle)}`,
+      `search=${encodeURIComponent(draftTitle)}`,
+      `status=draft&tag=${common}`,
+    ]) {
+      const res = await call(h, 'GET', `/questions?${qs}`, s.recruiter.token);
+      expect([qs, [200, 400].includes(res.status)]).toEqual([qs, true]);
+      expectNoneOf(res, secrets);
+    }
+    // Positive control, same filters: author and admin see the draft-only question and the draft title.
+    for (const who of [s.author, s.admin]) {
+      const a = await list(who, `tag=${common}`);
+      expect(a.body.total).toBe(3);
+      expect(ids(a.body)).toEqual([mix, pub, draftOnly]);
+      expect(a.body.items.find((i) => i.id === mix)?.latest).toMatchObject({
+        version: 2,
+        title: v2Title,
+      });
+      expect(ids((await list(who, `tag=${draftTag}`)).body)).toEqual([draftOnly]);
+      expect(ids((await list(who, `tag=${common}&difficulty=HARD`)).body)).toContain(draftOnly);
+    }
+    // Archiving the draft-only question does not make it visible to a recruiter either.
+    await call(h, 'POST', `/questions/${draftOnly}/archive`, s.author.token).expect(200);
+    for (const qs of [
+      `tag=${draftTag}&includeArchived=true`,
+      `tag=${common}&includeArchived=true`,
+    ]) {
+      const { res, body } = await list(s.recruiter, qs);
+      expect(ids(body)).not.toContain(draftOnly);
+      expectNoneOf(res, secrets);
+    }
+  });
 });

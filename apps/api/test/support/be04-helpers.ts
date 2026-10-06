@@ -4,7 +4,7 @@
 import type request from 'supertest';
 import { UserRole } from '../../src/generated/prisma/client';
 import { actor, Actor, call } from './be03-helpers';
-import { HIDDEN_IN, HIDDEN_OUT, REF_SECRET } from './be03-routes';
+import { HIDDEN_IN, HIDDEN_OUT, markValidated, REF_SECRET } from './be03-routes';
 import { Harness } from './harness';
 
 export type Json = Record<string, unknown>;
@@ -17,7 +17,7 @@ export const MCQ_KEY_ID = 'QAKEY';
 export const SHORT_CANONICAL = 'QA-SHORT-CANONICAL-ANSWER';
 export const SHORT_VARIANT = 'QA-SHORT-ACCEPTED-VARIANT';
 
-export { HIDDEN_IN, HIDDEN_OUT, REF_SECRET };
+export { HIDDEN_IN, HIDDEN_OUT, markValidated, REF_SECRET };
 
 /** A complete coding question: two samples, two hidden tests, python and javascript. */
 export function codingBody(over: Json = {}): Json {
@@ -101,7 +101,10 @@ export async function createQuestion(
   return res.body as Json;
 }
 
+/** Publishes the latest draft. A coding draft first gets a recorded passing validation (see markValidated). */
 export async function publishQuestion(h: Harness, who: Actor, id: string): Promise<Json> {
+  const q = await h.owner.question.findUniqueOrThrow({ where: { id } });
+  if (q.type === 'CODING') await markValidated(h, id);
   const res = await call(h, 'POST', `/questions/${id}/publish`, who.token);
   expect([res.status, res.body]).toEqual([200, expect.anything()]);
   return res.body as Json;

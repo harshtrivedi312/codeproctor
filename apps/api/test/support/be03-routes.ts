@@ -36,6 +36,7 @@
 import { hasPermission, PRINCIPALS, USER_ROLES } from '../../../../packages/shared/src/permissions';
 import type { Permission, Principal } from '../../../../packages/shared/src/permissions';
 import { UserRole } from '../../src/generated/prisma/client';
+import { computeRevision } from '../../src/questions/revision';
 import { Harness, PASSWORD } from './harness';
 
 // BE-03 is merged (PR #84): the BE-03 tests run on every PR. BE-13 stays staged.
@@ -405,6 +406,26 @@ export async function questionFixture(
   return { id: q.id, title, versionIds: { 1: v.id }, sampleId, hiddenId };
 }
 
+/**
+ * Stands in for the validate job (BE-04 slice 4c, not built): records a passing validation of the
+ * CURRENT content of the latest version of a question, directly in the database, bound to the
+ * revision the backend computes. Publish of a coding question needs it (FR-203, fails closed).
+ */
+export async function markValidated(h: Harness, questionId: string): Promise<void> {
+  const head = await h.owner.questionVersion.findFirstOrThrow({
+    where: { questionId },
+    orderBy: { version: 'desc' },
+  });
+  const cases = await h.owner.testCase.findMany({ where: { questionVersionId: head.id } });
+  await h.owner.questionVersion.update({
+    where: { id: head.id },
+    data: {
+      validatedAt: new Date(),
+      validationReport: { passed: true, revision: computeRevision(head, cases) },
+    },
+  });
+}
+
 const questionRow = (h: Harness, id: string) =>
   h.owner.question.findUniqueOrThrow({ where: { id } });
 const versionCount = (h: Harness, id: string): Promise<number> =>
@@ -573,6 +594,7 @@ const BE04_ROUTES: Be03Route[] = [
     ok: [200],
     prepare: async (h, orgId) => {
       const f = await questionFixture(h, orgId);
+      await markValidated(h, f.id);
       return {
         path: `${QUESTIONS}/${f.id}/publish`,
         entityId: f.id,

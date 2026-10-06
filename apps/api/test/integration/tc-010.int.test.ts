@@ -12,6 +12,7 @@ import {
   idOf,
   Json,
   mcqBody,
+  publishQuestion,
   REF_SECRET,
   SAMPLE_IN,
   SAMPLE_OUT,
@@ -163,7 +164,7 @@ describe('TC-010 (FR-201, FR-202): create a coding question gives a draft versio
     // Backend A decision: roles without question:update see published versions only.
     const rec = await call(h, 'GET', filter, s.recruiter.token).expect(200);
     expect((rec.body as { items: unknown[]; total: number }).items).toEqual([]);
-    await call(h, 'POST', `/questions/${id}/publish`, s.author.token).expect(200);
+    await publishQuestion(h, s.author, id);
     const after = await call(h, 'GET', filter, s.recruiter.token).expect(200);
     expect((after.body as { items: { id: string }[] }).items.map((i) => i.id)).toEqual([id]);
     const none = await call(
@@ -296,9 +297,15 @@ describe('TC-010 (FR-201, FR-202): create a coding question gives a draft versio
     });
     expect(still.isPublished).toBe(false);
     const good = await createQuestion(h, s.author);
-    const pub = await call(h, 'POST', `/questions/${idOf(good)}/publish`, s.author.token).expect(
-      200,
+    // Fails closed (FR-203, ADR 0007 V-3): a complete coding draft with no passing validation of
+    // this content is still 422. The validate job (slice 4c) is not built; markValidated stands in.
+    const gated = await call(h, 'POST', `/questions/${idOf(good)}/publish`, s.author.token).expect(
+      422,
     );
-    expect(pub.body).toMatchObject({ published: { version: 1, isPublished: true } });
+    expect((gated.body as { errors: string[] }).errors).toEqual([
+      'validation: a passing validation run of the current content is required',
+    ]);
+    const pub = await publishQuestion(h, s.author, idOf(good));
+    expect(pub).toMatchObject({ published: { version: 1, isPublished: true } });
   });
 });
