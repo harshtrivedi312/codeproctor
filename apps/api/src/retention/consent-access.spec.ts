@@ -14,6 +14,14 @@ const ALLOWED: Record<string, string> = {
   'retention/consent-retention.repository.ts': 'the one repository, with a fixed select',
   'test/retention/retention-harness.ts': 'test helper: sets up fixtures with the owner role',
   'test/retention/consent-access-scan.ts': 'the scanner names what it looks for',
+  // BE-07 candidate consent flow (FR-106, C-07): the candidate signs or declines their own
+  // consent in their own session scope, and the signed PDF is rendered from what they typed.
+  // Nothing here lists or reads other candidates' consents. Added in the PR that builds it.
+  'candidate/consent.service.ts': 'sign and decline of the session own consent (C-07)',
+  'candidate/consent-pdf.service.ts': 'renders the signed PDF for the session own consent',
+  'candidate/consent-pdf.renderer.ts': 'pure renderer of the typed legal name',
+  'candidate/dto/candidate.dto.ts': 'request DTO carries the typed signedName',
+  'candidate/session-jobs.service.ts': 'sweep re-queues signed consents that have no PDF yet',
 };
 
 function files(dir: string): string[] {
