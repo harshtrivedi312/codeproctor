@@ -100,6 +100,13 @@ counts=$(tr '\t' '=' < "$WORK/counts.tsv" | paste -sd, -)
 printf '%s' "$counts" | grep -q '^[a-z0-9_=,]*$' || die "unexpected characters in the row counts."
 
 # 4. Upload to the one fixed key (a new object version on a versioned bucket) and confirm it.
+if [ "$BACKUP_MODE" = versioned ]; then
+  # Before overwriting anything: an existing object without a version id means the bucket is not
+  # versioned, and this upload would replace the only backup ("null" is fine: it is an object from
+  # before versioning was switched on). A missing object (first backup) is fine too.
+  prev=$(s3api head-object --bucket "$BUCKET" --key "$key" --query VersionId --output text 2> /dev/null || true)
+  case "$prev" in None) die "the bucket does not return a version id for the existing $key: it is not versioned. Nothing was uploaded." ;; esac
+fi
 set --
 [ -z "${BACKUP_SSE:-}" ] || set -- --sse "$BACKUP_SSE"
 s3cp "$file" "s3://$BUCKET/$key" --metadata "{\"sha256\":\"$sum\",\"dumped-at\":\"$stamp\",\"counts\":\"$counts\"}" "$@"

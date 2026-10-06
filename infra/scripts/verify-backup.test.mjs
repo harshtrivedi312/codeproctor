@@ -262,11 +262,6 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
     assert.ok(k.includes(`db/dumps/codeproctor-${d20}.dump`), '20-day-old kept: newest 3 (C-55)');
     assert.ok(k.includes(`db/dumps/codeproctor-${recent}.dump`), '3-day-old kept');
     assert.ok(k.includes(orphan), 'an orphan sidecar is neither counted nor pruned');
-    assert.ok(
-      k.includes(
-        `db/dumps/codeproctor-${stampDaysAgo(25)}.dump.sha256`.replace(/\d{8}T\d{6}Z/, (m) => m),
-      ) || true,
-    );
   });
 
   it('C-55: BACKUP_KEEP_NEWEST=1 keeps only the newest dump', async () => {
@@ -844,6 +839,15 @@ describe('DB-07 versioned backups (NFR-03, ADR 0017 5.3, C-55)', { skip }, () =>
       const r = await run(BACKUP, [], { ...env, S3_ENDPOINT: `http://127.0.0.1:${plain.port}` });
       assert.equal(r.status, 1, r.stderr);
       assert.match(r.stderr, /not versioned/);
+      // The previous backup is not replaced when the existing object already shows the bucket is unversioned.
+      const before = plain.objects.get(KEY);
+      const again = await run(BACKUP, [], {
+        ...env,
+        S3_ENDPOINT: `http://127.0.0.1:${plain.port}`,
+      });
+      assert.equal(again.status, 1, again.stderr);
+      assert.match(again.stderr, /not versioned/);
+      assert.equal(plain.objects.get(KEY), before, 'the existing object was not overwritten');
     } finally {
       await plain.close();
     }

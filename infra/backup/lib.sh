@@ -55,6 +55,7 @@ init_s3() {
   #                itself keeps the newest 3 and prunes the rest after 14 days.
   BACKUP_MODE=${BACKUP_MODE:-versioned}
   case "$BACKUP_MODE" in versioned | timestamped) ;; *) die "BACKUP_MODE must be versioned or timestamped." ;; esac
+  export BACKUP_MODE
   # shellcheck disable=SC2034
   DUMP_KEY="${PREFIX}dump/latest.dump"
   # shellcheck disable=SC2034
