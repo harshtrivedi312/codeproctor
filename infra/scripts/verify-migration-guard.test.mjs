@@ -40,6 +40,8 @@ describe('DB-08 migration guard on a shallow checkout (FR-105)', () => {
   const M1 = 'prisma/migrations/20261002000001_init/migration.sql';
 
   before(() => {
+    // Hermetic: a CI run's real GITHUB_REF must not leak into these tests.
+    delete process.env.GITHUB_REF;
     root = mkdtempSync(join(tmpdir(), 'guard-'));
     origin = join(root, 'origin');
     mkdirSync(origin);
@@ -285,6 +287,18 @@ describe('DB-08 migration guard on a shallow checkout (FR-105)', () => {
     const result = migrationChanges(clone, { githubRef: 'refs/pull/88/merge', headBySha: false });
     assert.equal(result.ok, false);
     assert.match(result.reason, /pull request head moved/);
+  });
+
+  it('a valid merge ref with a checked-out commit that is not a merge commit is not followed (fails closed)', () => {
+    const clone = ciCheckout('nomerge', (r) => write(r, 'nm.txt', 'x'));
+    const result = ensureBase(clone, { githubRef: 'refs/pull/1/merge', headBySha: false });
+    assert.equal(result.ok, false);
+    assert.equal(
+      spawnSync('git', ['rev-parse', '--verify', '--quiet', 'refs/remotes/pr-merge'], {
+        cwd: clone,
+      }).status,
+      1,
+    );
   });
 
   it('a GITHUB_REF that is not exactly refs/pull/N/merge is never fetched (crafted values)', () => {

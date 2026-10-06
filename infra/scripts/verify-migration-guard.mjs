@@ -135,8 +135,8 @@ export function migrationChanges(cwd, options = {}) {
   for (let i = 0; i + 1 < tokens.length; i += 2) {
     const [status, path] = [tokens[i], tokens[i + 1]];
     if (status === 'A') {
-      // A new file is fine only inside a NEW migration directory. The check is against the tip of
-      // origin/main, which is stricter than the merge base: a name main already uses is refused.
+      // A new file is fine only inside a NEW migration directory. The check is against the base ref
+      // (origin/main, or the new merge commit's first parent), which is stricter than the merge base: a name main already uses is refused.
       const parts = path.split('/');
       const inExistingDir =
         parts.length < 4 ||
