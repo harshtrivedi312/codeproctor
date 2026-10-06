@@ -732,6 +732,341 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ApiError' }
+  # ---------------------------------------------------------------------------------------------
+  # Question bank (FR-201..FR-205, FE-04). PLACEHOLDER contract, tagged [ARC-02] in
+  # docs/followups/frontend.md: the hub pins the real one. Author-only for detail endpoints.
+  # ---------------------------------------------------------------------------------------------
+  /v1/questions:
+    get:
+      operationId: listQuestions
+      summary: Questions of the organisation (list view). Needs question:read.
+      responses:
+        '200':
+          description: Questions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/QuestionSummary' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      operationId: createQuestion
+      summary: Create a question as draft version 1 (TC-010). Needs question:create.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/QuestionCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QuestionDetail' }
+        '400':
+          description: Invalid content
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/questions/{questionId}:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getQuestion
+      summary: The current version with its tests, variants, reference solutions and answer key. Author only, never sent to candidates (TC-011).
+      responses:
+        '200':
+          description: Question
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QuestionDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+    patch:
+      operationId: updateQuestion
+      summary: Save the content. A published version is immutable, so this creates the next draft version (FR-204). Needs the revision the editor started from; 409 stale_version when someone saved since.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/QuestionUpdate' }
+      responses:
+        '200':
+          description: Saved; the returned version is the one that was edited or created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QuestionDetail' }
+        '400':
+          description: Invalid content
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '409':
+          description: stale_version, the question was saved by someone else since the editor loaded it
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+  /v1/questions/{questionId}/versions:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: listQuestionVersions
+      summary: Version history (FR-204)
+      responses:
+        '200':
+          description: Versions, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/QuestionVersionSummary' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+  /v1/questions/{questionId}/versions/{version}:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+      - name: version
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+    get:
+      operationId: getQuestionVersion
+      summary: One version, read-only (published versions never change)
+      responses:
+        '200':
+          description: Version
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QuestionDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+  /v1/questions/{questionId}/validate:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: validateQuestion
+      summary: Start a validation job of the saved version (reference solution on every slot of every active variant, ADR 0007 V-3)
+      responses:
+        '202':
+          description: Job accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationJobRef' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+  /v1/questions/{questionId}/prefill:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: prefillVariantOutputs
+      summary: Run the reference solution on a variant's inputs and PROPOSE expected outputs (ADR 0007). Nothing is stored; the author must accept the proposals.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PrefillRequest' }
+      responses:
+        '200':
+          description: One proposal per slot
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PrefillResponse' }
+        '400':
+          description: Invalid
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/questions/{questionId}/validation/{jobId}:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+      - name: jobId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getValidationJob
+      summary: Poll a validation job
+      responses:
+        '200':
+          description: Job state; the report is present when done
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationJob' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+  /v1/questions/{questionId}/publish:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: publishQuestion
+      summary: Publish the current draft version. Refused (409) without a passing validation of the saved content (TC-012), without the AI reference solutions of the publish gate (ADR 0005 AI-5), or when the revision is not the current one (stale_version).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PublishRequest' }
+      responses:
+        '200':
+          description: Published
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QuestionDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '409':
+          description: validation_required, ai_references_missing, or stale_version
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+  /v1/questions/{questionId}/ai-references:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: listAiReferences
+      summary: AI reference solutions of the current version, including superseded rows (D-20). Similarity only, never grading.
+      responses:
+        '200':
+          description: Rows
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/AiReference' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+    post:
+      operationId: addAiReference
+      summary: Add a solution collected from an AI assistant (audited as ai_reference.create)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AiReferenceInput' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AiReference' }
+        '400':
+          description: Invalid
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+  /v1/questions/{questionId}/ai-references/{referenceId}/supersede:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+      - name: referenceId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: supersedeAiReference
+      summary: Replace a row with a newer one; the old row keeps existing with supersededAt set (append-only, ADR 0005 AI-1)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AiReferenceInput' }
+      responses:
+        '201':
+          description: The new row
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AiReference' }
+        '400':
+          description: Invalid
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+
 components:
   responses:
     Forbidden:
@@ -784,6 +1119,310 @@ components:
           }
         session: { $ref: '#/components/schemas/AuthSession' }
         challengeToken: { type: string }
+    QuestionType:
+      type: string
+      enum: [CODING, MCQ, SHORT_ANSWER]
+    Difficulty:
+      type: string
+      enum: [EASY, MEDIUM, HARD]
+    QuestionStatus:
+      type: string
+      enum: [DRAFT, PUBLISHED, ARCHIVED]
+    QuestionSummary:
+      type: object
+      required: [id, slug, title, type, difficulty, tags, status, version, updatedAt]
+      properties:
+        id: { type: string }
+        slug: { type: string }
+        title: { type: string }
+        type: { $ref: '#/components/schemas/QuestionType' }
+        difficulty: { $ref: '#/components/schemas/Difficulty' }
+        tags: { type: array, items: { type: string } }
+        status: { $ref: '#/components/schemas/QuestionStatus' }
+        version: { type: integer, description: Latest version number }
+        updatedAt: { type: string, format: date-time }
+    ParamType:
+      type: string
+      enum: [string, number, boolean, array]
+    ParamDef:
+      type: object
+      required: [name, type]
+      properties:
+        name: { type: string, pattern: '^[A-Za-z_][A-Za-z0-9_]*$' }
+        type: { $ref: '#/components/schemas/ParamType' }
+    Limits:
+      type: object
+      required: [cpuMs, wallMs, memoryKb]
+      properties:
+        cpuMs: { type: integer, minimum: 100, maximum: 60000 }
+        wallMs: { type: integer, minimum: 100, maximum: 120000 }
+        memoryKb: { type: integer, minimum: 16384, maximum: 2097152 }
+    TestCase:
+      type: object
+      required: [id, input, expectedOutput, isHidden, weight]
+      properties:
+        id: { type: string, description: Client-generated for new rows }
+        input: { type: string }
+        expectedOutput: { type: string }
+        isHidden: { type: boolean }
+        weight: { type: number, minimum: 0, exclusiveMinimum: true, maximum: 1000 }
+    VariantOverride:
+      type: object
+      required: [testCaseId, input, expectedOutput]
+      properties:
+        testCaseId: { type: string }
+        input: { type: string }
+        expectedOutput: { type: string }
+    Variant:
+      type: object
+      required: [id, label, params, active, overrides]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        params: { type: object, additionalProperties: true }
+        active: { type: boolean }
+        overrides: { type: array, items: { $ref: '#/components/schemas/VariantOverride' } }
+    McqOption:
+      type: object
+      required: [id, text]
+      properties:
+        id: { type: string }
+        text: { type: string }
+    McqAnswerSpec:
+      type: object
+      required: [type, options, correctOptionIds, multiple]
+      properties:
+        type: { type: string, enum: [MCQ] }
+        options: { type: array, items: { $ref: '#/components/schemas/McqOption' } }
+        correctOptionIds: { type: array, items: { type: string } }
+        multiple: { type: boolean }
+    ShortAnswerSpec:
+      type: object
+      required: [type, canonical, acceptedVariants]
+      properties:
+        type: { type: string, enum: [SHORT_ANSWER] }
+        canonical: { type: string }
+        acceptedVariants: { type: array, items: { type: string } }
+    AnswerSpec:
+      oneOf:
+        - $ref: '#/components/schemas/McqAnswerSpec'
+        - $ref: '#/components/schemas/ShortAnswerSpec'
+    QuestionContent:
+      type: object
+      required:
+        [
+          title,
+          statementMd,
+          difficulty,
+          tags,
+          allowedLanguages,
+          limits,
+          starterCode,
+          referenceSolution,
+          paramSchema,
+          testCases,
+          variants,
+          answerSpec,
+        ]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        statementMd:
+          {
+            type: string,
+            maxLength: 50000,
+            description: Markdown,
+            no raw HTML; may contain Mustache placeholders,
+          }
+        difficulty: { $ref: '#/components/schemas/Difficulty' }
+        tags: { type: array, items: { type: string } }
+        allowedLanguages: { type: array, items: { $ref: '#/components/schemas/Language' } }
+        limits: { $ref: '#/components/schemas/Limits' }
+        starterCode: { type: object, additionalProperties: { type: string } }
+        referenceSolution: { type: object, additionalProperties: { type: string } }
+        paramSchema: { type: array, items: { $ref: '#/components/schemas/ParamDef' } }
+        testCases: { type: array, items: { $ref: '#/components/schemas/TestCase' } }
+        variants: { type: array, items: { $ref: '#/components/schemas/Variant' } }
+        answerSpec:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/AnswerSpec'
+    QuestionUpdate:
+      allOf:
+        - $ref: '#/components/schemas/QuestionContent'
+        - type: object
+          required: [expectedRevision]
+          properties:
+            expectedRevision: { type: integer, minimum: 1 }
+    PublishRequest:
+      type: object
+      required: [expectedRevision]
+      properties:
+        expectedRevision:
+          {
+            type: integer,
+            minimum: 1,
+            description: The revision that was validated; 409 stale_version if the question was saved since,
+          }
+    QuestionCreate:
+      allOf:
+        - $ref: '#/components/schemas/QuestionContent'
+        - type: object
+          required: [type]
+          properties:
+            type: { $ref: '#/components/schemas/QuestionType' }
+    ValidationOutcome:
+      type: string
+      enum: [pass, wrong_answer, runtime_error, compile_error, limit_exceeded]
+    ValidationResult:
+      type: object
+      required: [variantId, variantLabel, testCaseId, position, language, outcome]
+      properties:
+        variantId: { type: string, nullable: true, description: Null for the base statement }
+        variantLabel: { type: string }
+        testCaseId: { type: string }
+        position: { type: integer, minimum: 1 }
+        language: { $ref: '#/components/schemas/Language' }
+        outcome: { $ref: '#/components/schemas/ValidationOutcome' }
+        message: { type: string }
+    ValidationReport:
+      type: object
+      required: [passed, finishedAt, results]
+      properties:
+        passed: { type: boolean }
+        finishedAt: { type: string, format: date-time }
+        results: { type: array, items: { $ref: '#/components/schemas/ValidationResult' } }
+    ValidationJobRef:
+      type: object
+      required: [jobId, revision]
+      properties:
+        jobId: { type: string }
+        revision: { type: integer, minimum: 1, description: The content revision the job validates }
+    ValidationJob:
+      type: object
+      required: [jobId, revision, status]
+      properties:
+        jobId: { type: string }
+        revision:
+          {
+            type: integer,
+            minimum: 1,
+            description: The content revision the job validated; a report for an older revision must never be shown as current,
+          }
+        status: { type: string, enum: [queued, running, done, failed] }
+        report: { $ref: '#/components/schemas/ValidationReport' }
+        error: { type: string }
+    AiReferencePolicy:
+      type: object
+      required: [refreshDays, minAssistants]
+      description: Org settings aiReferences.* (ADR 0005 AI-4, AI-5), read-only here because Authors cannot read org settings
+      properties:
+        refreshDays: { type: integer, minimum: 1 }
+        minAssistants: { type: integer, minimum: 0 }
+    QuestionVersion:
+      allOf:
+        - $ref: '#/components/schemas/QuestionContent'
+        - type: object
+          required: [version, revision, isPublished, createdAt, validatedAt, validationReport]
+          properties:
+            version: { type: integer, minimum: 1 }
+            revision:
+              {
+                type: integer,
+                minimum: 1,
+                description: Content revision of the question,
+                monotonic and bumped by every save (also when a save creates the next version). Used for optimistic concurrency and to tie a validation to the exact content.,
+              }
+            isPublished: { type: boolean }
+            createdAt: { type: string, format: date-time }
+            validatedAt:
+              { type: string, format: date-time, nullable: true, description: Cleared by any save }
+            validationReport:
+              nullable: true
+              allOf:
+                - $ref: '#/components/schemas/ValidationReport'
+    QuestionDetail:
+      type: object
+      required: [id, slug, type, status, latestVersion, aiReferencePolicy, current]
+      properties:
+        id: { type: string }
+        slug: { type: string }
+        type: { $ref: '#/components/schemas/QuestionType' }
+        status: { $ref: '#/components/schemas/QuestionStatus' }
+        latestVersion: { type: integer, minimum: 1 }
+        aiReferencePolicy: { $ref: '#/components/schemas/AiReferencePolicy' }
+        current: { $ref: '#/components/schemas/QuestionVersion' }
+    QuestionVersionSummary:
+      type: object
+      required: [version, isPublished, createdAt, createdByName, validatedAt]
+      properties:
+        version: { type: integer }
+        isPublished: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        createdByName: { type: string }
+        validatedAt: { type: string, format: date-time, nullable: true }
+    AiReferenceInput:
+      type: object
+      required: [assistant, modelLabel, language, solutionCode, collectedAt]
+      properties:
+        assistant: { type: string, minLength: 1, maxLength: 80 }
+        modelLabel: { type: string, minLength: 1, maxLength: 80 }
+        language: { $ref: '#/components/schemas/Language' }
+        solutionCode: { type: string, minLength: 1, maxLength: 100000 }
+        promptText: { type: string, maxLength: 20000 }
+        collectedAt: { type: string, format: date-time }
+        variantId: { type: string, nullable: true, description: Null means the base statement }
+    AiReference:
+      allOf:
+        - $ref: '#/components/schemas/AiReferenceInput'
+        - type: object
+          required: [id, collectedByName, supersededAt]
+          properties:
+            id: { type: string }
+            collectedByName: { type: string }
+            supersededAt: { type: string, format: date-time, nullable: true }
+    PrefillRequest:
+      type: object
+      required: [language, params, referenceSolution, slots]
+      properties:
+        language: { $ref: '#/components/schemas/Language' }
+        params: { type: object, additionalProperties: true }
+        referenceSolution:
+          {
+            type: string,
+            maxLength: 100000,
+            description: The template as edited (may be unsaved); the API renders it with params,
+          }
+        slots:
+          type: array
+          items:
+            type: object
+            required: [testCaseId, input]
+            properties:
+              testCaseId: { type: string }
+              input:
+                {
+                  type: string,
+                  description: The input that applies to this variant,
+                  override or default,
+                }
+    PrefillResponse:
+      type: object
+      required: [proposals]
+      properties:
+        proposals:
+          type: array
+          items:
+            type: object
+            required: [testCaseId]
+            properties:
+              testCaseId: { type: string }
+              expectedOutput: { type: string }
+              error:
+                {
+                  type: string,
+                  description: Why no output could be produced (runtime error,
+                  limit),
+                }
     ApiError:
       type: object
       required: [code, message]

@@ -432,6 +432,200 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v1/questions': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Questions of the organisation (list view). Needs question:read. */
+    get: operations['listQuestions'];
+    put?: never;
+    /** Create a question as draft version 1 (TC-010). Needs question:create. */
+    post: operations['createQuestion'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/questions/{questionId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+      };
+      cookie?: never;
+    };
+    /** The current version with its tests, variants, reference solutions and answer key. Author only, never sent to candidates (TC-011). */
+    get: operations['getQuestion'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Save the content. A published version is immutable, so this creates the next draft version (FR-204). Needs the revision the editor started from; 409 stale_version when someone saved since. */
+    patch: operations['updateQuestion'];
+    trace?: never;
+  };
+  '/v1/questions/{questionId}/versions': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+      };
+      cookie?: never;
+    };
+    /** Version history (FR-204) */
+    get: operations['listQuestionVersions'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/questions/{questionId}/versions/{version}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+        version: number;
+      };
+      cookie?: never;
+    };
+    /** One version, read-only (published versions never change) */
+    get: operations['getQuestionVersion'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/questions/{questionId}/validate': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+      };
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Start a validation job of the saved version (reference solution on every slot of every active variant, ADR 0007 V-3) */
+    post: operations['validateQuestion'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/questions/{questionId}/prefill': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+      };
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Run the reference solution on a variant's inputs and PROPOSE expected outputs (ADR 0007). Nothing is stored; the author must accept the proposals. */
+    post: operations['prefillVariantOutputs'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/questions/{questionId}/validation/{jobId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+        jobId: string;
+      };
+      cookie?: never;
+    };
+    /** Poll a validation job */
+    get: operations['getValidationJob'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/questions/{questionId}/publish': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+      };
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Publish the current draft version. Refused (409) without a passing validation of the saved content (TC-012), without the AI reference solutions of the publish gate (ADR 0005 AI-5), or when the revision is not the current one (stale_version). */
+    post: operations['publishQuestion'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/questions/{questionId}/ai-references': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+      };
+      cookie?: never;
+    };
+    /** AI reference solutions of the current version, including superseded rows (D-20). Similarity only, never grading. */
+    get: operations['listAiReferences'];
+    put?: never;
+    /** Add a solution collected from an AI assistant (audited as ai_reference.create) */
+    post: operations['addAiReference'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/questions/{questionId}/ai-references/{referenceId}/supersede': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+        referenceId: string;
+      };
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Replace a row with a newer one; the old row keeps existing with supersededAt set (append-only, ADR 0005 AI-1) */
+    post: operations['supersedeAiReference'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -458,6 +652,213 @@ export interface components {
       status: 'authenticated' | 'two_factor_required' | 'two_factor_enrollment_required';
       session?: components['schemas']['AuthSession'];
       challengeToken?: string;
+    };
+    /** @enum {string} */
+    QuestionType: 'CODING' | 'MCQ' | 'SHORT_ANSWER';
+    /** @enum {string} */
+    Difficulty: 'EASY' | 'MEDIUM' | 'HARD';
+    /** @enum {string} */
+    QuestionStatus: 'DRAFT' | 'PUBLISHED' | 'ARCHIVED';
+    QuestionSummary: {
+      id: string;
+      slug: string;
+      title: string;
+      type: components['schemas']['QuestionType'];
+      difficulty: components['schemas']['Difficulty'];
+      tags: string[];
+      status: components['schemas']['QuestionStatus'];
+      /** @description Latest version number */
+      version: number;
+      /** Format: date-time */
+      updatedAt: string;
+    };
+    /** @enum {string} */
+    ParamType: 'string' | 'number' | 'boolean' | 'array';
+    ParamDef: {
+      name: string;
+      type: components['schemas']['ParamType'];
+    };
+    Limits: {
+      cpuMs: number;
+      wallMs: number;
+      memoryKb: number;
+    };
+    TestCase: {
+      /** @description Client-generated for new rows */
+      id: string;
+      input: string;
+      expectedOutput: string;
+      isHidden: boolean;
+      weight: number;
+    };
+    VariantOverride: {
+      testCaseId: string;
+      input: string;
+      expectedOutput: string;
+    };
+    Variant: {
+      id: string;
+      label: string;
+      params: {
+        [key: string]: unknown;
+      };
+      active: boolean;
+      overrides: components['schemas']['VariantOverride'][];
+    };
+    McqOption: {
+      id: string;
+      text: string;
+    };
+    McqAnswerSpec: {
+      /** @enum {string} */
+      type: 'MCQ';
+      options: components['schemas']['McqOption'][];
+      correctOptionIds: string[];
+      multiple: boolean;
+    };
+    ShortAnswerSpec: {
+      /** @enum {string} */
+      type: 'SHORT_ANSWER';
+      canonical: string;
+      acceptedVariants: string[];
+    };
+    AnswerSpec: components['schemas']['McqAnswerSpec'] | components['schemas']['ShortAnswerSpec'];
+    QuestionContent: {
+      title: string;
+      /** @description Markdown */
+      statementMd: string;
+      difficulty: components['schemas']['Difficulty'];
+      tags: string[];
+      allowedLanguages: components['schemas']['Language'][];
+      limits: components['schemas']['Limits'];
+      starterCode: {
+        [key: string]: string;
+      };
+      referenceSolution: {
+        [key: string]: string;
+      };
+      paramSchema: components['schemas']['ParamDef'][];
+      testCases: components['schemas']['TestCase'][];
+      variants: components['schemas']['Variant'][];
+      answerSpec: components['schemas']['AnswerSpec'] | null;
+    };
+    QuestionUpdate: components['schemas']['QuestionContent'] & {
+      expectedRevision: number;
+    };
+    PublishRequest: {
+      /** @description The revision that was validated; 409 stale_version if the question was saved since */
+      expectedRevision: number;
+    };
+    QuestionCreate: components['schemas']['QuestionContent'] & {
+      type: components['schemas']['QuestionType'];
+    };
+    /** @enum {string} */
+    ValidationOutcome:
+      'pass' | 'wrong_answer' | 'runtime_error' | 'compile_error' | 'limit_exceeded';
+    ValidationResult: {
+      /** @description Null for the base statement */
+      variantId: string | null;
+      variantLabel: string;
+      testCaseId: string;
+      position: number;
+      language: components['schemas']['Language'];
+      outcome: components['schemas']['ValidationOutcome'];
+      message?: string;
+    };
+    ValidationReport: {
+      passed: boolean;
+      /** Format: date-time */
+      finishedAt: string;
+      results: components['schemas']['ValidationResult'][];
+    };
+    ValidationJobRef: {
+      jobId: string;
+      /** @description The content revision the job validates */
+      revision: number;
+    };
+    ValidationJob: {
+      jobId: string;
+      /** @description The content revision the job validated; a report for an older revision must never be shown as current */
+      revision: number;
+      /** @enum {string} */
+      status: 'queued' | 'running' | 'done' | 'failed';
+      report?: components['schemas']['ValidationReport'];
+      error?: string;
+    };
+    /** @description Org settings aiReferences.* (ADR 0005 AI-4, AI-5), read-only here because Authors cannot read org settings */
+    AiReferencePolicy: {
+      refreshDays: number;
+      minAssistants: number;
+    };
+    QuestionVersion: components['schemas']['QuestionContent'] & {
+      version: number;
+      /** @description Content revision of the question */
+      revision: number;
+      isPublished: boolean;
+      /** Format: date-time */
+      createdAt: string;
+      /**
+       * Format: date-time
+       * @description Cleared by any save
+       */
+      validatedAt: string | null;
+      validationReport: components['schemas']['ValidationReport'] | null;
+    };
+    QuestionDetail: {
+      id: string;
+      slug: string;
+      type: components['schemas']['QuestionType'];
+      status: components['schemas']['QuestionStatus'];
+      latestVersion: number;
+      aiReferencePolicy: components['schemas']['AiReferencePolicy'];
+      current: components['schemas']['QuestionVersion'];
+    };
+    QuestionVersionSummary: {
+      version: number;
+      isPublished: boolean;
+      /** Format: date-time */
+      createdAt: string;
+      createdByName: string;
+      /** Format: date-time */
+      validatedAt: string | null;
+    };
+    AiReferenceInput: {
+      assistant: string;
+      modelLabel: string;
+      language: components['schemas']['Language'];
+      solutionCode: string;
+      promptText?: string;
+      /** Format: date-time */
+      collectedAt: string;
+      /** @description Null means the base statement */
+      variantId?: string | null;
+    };
+    AiReference: components['schemas']['AiReferenceInput'] & {
+      id: string;
+      collectedByName: string;
+      /** Format: date-time */
+      supersededAt: string | null;
+    };
+    PrefillRequest: {
+      language: components['schemas']['Language'];
+      params: {
+        [key: string]: unknown;
+      };
+      /** @description The template as edited (may be unsaved); the API renders it with params */
+      referenceSolution: string;
+      slots: {
+        testCaseId: string;
+        /** @description The input that applies to this variant */
+        input: string;
+      }[];
+    };
+    PrefillResponse: {
+      proposals: {
+        testCaseId: string;
+        expectedOutput?: string;
+        /** @description Why no output could be produced (runtime error */
+        error?: string;
+      }[];
     };
     ApiError: {
       code: string;
@@ -1655,6 +2056,487 @@ export interface operations {
       };
       403: components['responses']['Forbidden'];
       /** @description No such candidate in this organisation */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+    };
+  };
+  listQuestions: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Questions */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: components['schemas']['QuestionSummary'][];
+          };
+        };
+      };
+      403: components['responses']['Forbidden'];
+    };
+  };
+  createQuestion: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['QuestionCreate'];
+      };
+    };
+    responses: {
+      /** @description Created */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['QuestionDetail'];
+        };
+      };
+      /** @description Invalid content */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+    };
+  };
+  getQuestion: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Question */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['QuestionDetail'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+    };
+  };
+  updateQuestion: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['QuestionUpdate'];
+      };
+    };
+    responses: {
+      /** @description Saved; the returned version is the one that was edited or created */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['QuestionDetail'];
+        };
+      };
+      /** @description Invalid content */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+      /** @description stale_version, the question was saved by someone else since the editor loaded it */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+    };
+  };
+  listQuestionVersions: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Versions, newest first */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: components['schemas']['QuestionVersionSummary'][];
+          };
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+    };
+  };
+  getQuestionVersion: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+        version: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Version */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['QuestionDetail'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+    };
+  };
+  validateQuestion: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Job accepted */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationJobRef'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+    };
+  };
+  prefillVariantOutputs: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['PrefillRequest'];
+      };
+    };
+    responses: {
+      /** @description One proposal per slot */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['PrefillResponse'];
+        };
+      };
+      /** @description Invalid */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+    };
+  };
+  getValidationJob: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+        jobId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Job state; the report is present when done */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationJob'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+    };
+  };
+  publishQuestion: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['PublishRequest'];
+      };
+    };
+    responses: {
+      /** @description Published */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['QuestionDetail'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+      /** @description validation_required, ai_references_missing, or stale_version */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+    };
+  };
+  listAiReferences: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Rows */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: components['schemas']['AiReference'][];
+          };
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+    };
+  };
+  addAiReference: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['AiReferenceInput'];
+      };
+    };
+    responses: {
+      /** @description Created */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['AiReference'];
+        };
+      };
+      /** @description Invalid */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+    };
+  };
+  supersedeAiReference: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+        referenceId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['AiReferenceInput'];
+      };
+    };
+    responses: {
+      /** @description The new row */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['AiReference'];
+        };
+      };
+      /** @description Invalid */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description Not found */
       404: {
         headers: {
           [name: string]: unknown;
