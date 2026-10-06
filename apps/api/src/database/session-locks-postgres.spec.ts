@@ -105,6 +105,12 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
     orgContext.runAsUser({ orgId, userId: T.userId, role: 'RECRUITER' }, fn);
   const asOrg = <R>(orgId: string, fn: () => Promise<R>): Promise<R> =>
     orgContext.runInOrg(orgId, fn);
+  /**
+   * The scope a lock passes in (the merged ADR 0006 section 8.5): lockForAccommodation in STAFF, guardLive and
+   * lockAnySession in SERVICE (guardLive passes in STAFF too, which has its own tests).
+   */
+  const asHome = <R>(lock: LockFunction, chain: SessionChain, fn: () => Promise<R>): Promise<R> =>
+    lock === lockForAccommodation ? asStaff(chain.orgId, fn) : asService(chain, fn);
   const asCandidate = <R>(chain: SessionChain, fn: () => Promise<R>): Promise<R> =>
     orgContext.runAsCandidate(chain.orgId, chain.sessionId, async () => {
       setCandidateFacts(orgContext, {
@@ -215,7 +221,7 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
     const held = new Promise<void>((resolve) => {
       taken = resolve;
     });
-    const result = asService(chain, () =>
+    const result = asHome(lock, chain, () =>
       client.$transaction(async (tx) => {
         const outcome = await lock(tx, chain.sessionId);
         taken();
@@ -283,29 +289,17 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
   });
 
   // ================================================================================================
-  describe.each(ANY_STATUS_LOCKS)(
-    '%s: the happy path in every scope that may call it',
-    (_name, lock) => {
-      it('TC-008 returns the status it read under the lock, for every status, and leaves it unchanged (STAFF scope)', async () => {
-        const chain = await freshChain('acc');
-        for (const status of ORDINARY) {
-          await setStatus(chain.sessionId, status);
-          const result = await asStaff(chain.orgId, () => lockIn<string>(lock, chain.sessionId));
-          expect({ status, result }).toEqual({ status, result: status });
-          expect(await statusOf(chain.sessionId)).toBe(status);
-        }
-      });
-
-      it('TC-008 works in a SERVICE session scope (the jobs)', async () => {
-        const chain = await freshChain('acc2');
-        await setStatus(chain.sessionId, 'COMPLETED');
-        expect(await asService(chain, () => lockIn<string>(lock, chain.sessionId))).toBe(
-          'COMPLETED',
-        );
-        expect(await statusOf(chain.sessionId)).toBe('COMPLETED');
-      });
-    },
-  );
+  describe.each(ANY_STATUS_LOCKS)('%s: the happy path in the scope it passes in', (_name, lock) => {
+    it('TC-008 returns the status it read under the lock, for every status, and leaves it unchanged', async () => {
+      const chain = await freshChain('acc');
+      for (const status of ORDINARY) {
+        await setStatus(chain.sessionId, status);
+        const result = await asHome(lock, chain, () => lockIn<string>(lock, chain.sessionId));
+        expect({ status, result }).toEqual({ status, result: status });
+        expect(await statusOf(chain.sessionId)).toBe(status);
+      }
+    });
+  });
 
   // ================================================================================================
   describe.each(LOCKS)('%s: a session that is not in this scope', (_name, lock) => {
@@ -314,7 +308,8 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
       const statusBefore = await statusOf(O.sessionId);
       // lockForAccommodation also runs in a plain org job scope (hub ruling): another org's session reads
       // no row there either, so it never locks a row of another org.
-      const runs = lock === lockForAccommodation ? [asStaff, asOrg] : [asStaff];
+      const runs: Array<<R>(orgId: string, fn: () => Promise<R>) => Promise<R>> =
+        lock === lockForAccommodation ? [asStaff, asOrg] : lock === guardLive ? [asStaff] : [];
       for (const run of runs) {
         await db.statements.reset();
         await expect(run(T.orgId, () => lockIn(lock, O.sessionId))).rejects.toBeInstanceOf(
@@ -324,20 +319,23 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
         expect(c.update).toBe(0);
         expect(c.select).toBe(1);
       }
+      // lockAnySession has no STAFF or org scope: its other-org case is the SERVICE one below.
       expect(await xminOf(O.sessionId)).toBe(before);
       expect(await statusOf(O.sessionId)).toBe(statusBefore);
     });
 
     it('TC-008 an unknown id throws SessionNotFoundError and sends no UPDATE', async () => {
+      const chain = await freshChain('unknown');
       await db.statements.reset();
-      await expect(asStaff(T.orgId, () => lockIn(lock, randomUUID()))).rejects.toBeInstanceOf(
+      await expect(asHome(lock, chain, () => lockIn(lock, randomUUID()))).rejects.toBeInstanceOf(
         SessionNotFoundError,
       );
       const c = await counts();
       expect({ select: c.select, update: c.update }).toEqual({ select: 1, update: 0 });
     });
 
-    it("TC-008 in a SERVICE session scope another session's id (same org, or another org) is not found either", async () => {
+    it("TC-008 in a SERVICE session scope another session's id (same org, or another org) is not found either (guardLive and lockAnySession)", async () => {
+      if (lock === lockForAccommodation) return; // refused in a SERVICE scope: its tests are the scope tests below
       const mine = await freshChain('scope-mine');
       const other = await freshChain('scope-other');
       const before = { other: await xminOf(other.sessionId), org2: await xminOf(O.sessionId) };
@@ -353,14 +351,15 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
     });
 
     it('TC-008 the error message carries no id', async () => {
-      const error = await asStaff(T.orgId, () => lockIn(lock, O.sessionId)).then(
+      const mine = await freshChain('msg');
+      const error = await asHome(lock, mine, () => lockIn(lock, O.sessionId)).then(
         () => undefined,
         (e: unknown) => e,
       );
       expect(error).toBeInstanceOf(SessionNotFoundError);
       const text = `${(error as Error).message} ${(error as Error).stack ?? ''}`;
       expect(text).not.toContain(O.sessionId);
-      expect(text).not.toContain(T.orgId);
+      expect(text).not.toContain(mine.orgId);
     });
 
     it('TC-008 no scope at all is refused by the lock itself, before any statement', async () => {
@@ -449,7 +448,27 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
   );
 
   // ================================================================================================
-  describe('the plain org scope (runInOrg): only lockForAccommodation passes (hub ruling, ADR 0015 section 6(b))', () => {
+  describe('the scopes each lock passes in (the merged ADR 0006 section 8.5): the others are refused before any statement', () => {
+    /** Runs `run`, expects an OrgScopeViolationError that matches `pattern`, and that nothing was sent or written. */
+    async function expectRefusedHere(
+      chain: SessionChain,
+      pattern: RegExp,
+      run: () => Promise<unknown>,
+    ): Promise<void> {
+      const xmin = await xminOf(chain.sessionId);
+      await db.statements.reset();
+      const error = await run().then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(error).toBeInstanceOf(OrgScopeViolationError);
+      expect((error as Error).message).toMatch(pattern);
+      expect(`${(error as Error).message}`).not.toContain(chain.sessionId);
+      const c = await counts();
+      expect({ select: c.select, update: c.update }).toEqual({ select: 0, update: 0 });
+      expect(await xminOf(chain.sessionId)).toBe(xmin);
+    }
+
     it.each([
       ['guardLive', guardLive],
       ['lockAnySession', lockAnySession],
@@ -457,20 +476,33 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
       'TC-008 %s is refused in a plain runInOrg before any statement',
       async (_name, lock) => {
         const chain = await freshChain('plain');
-        const xmin = await xminOf(chain.sessionId);
-        await db.statements.reset();
-        const error = await asOrg(chain.orgId, () => lockIn(lock, chain.sessionId)).then(
-          () => undefined,
-          (e: unknown) => e,
+        await expectRefusedHere(chain, /plain org scope/, () =>
+          asOrg(chain.orgId, () => lockIn(lock, chain.sessionId)),
         );
-        expect(error).toBeInstanceOf(OrgScopeViolationError);
-        expect((error as Error).message).toMatch(/plain org scope/);
-        expect(`${(error as Error).message}`).not.toContain(chain.sessionId);
-        const c = await counts();
-        expect({ select: c.select, update: c.update }).toEqual({ select: 0, update: 0 });
-        expect(await xminOf(chain.sessionId)).toBe(xmin);
       },
     );
+
+    it('TC-008 lockAnySession is refused in a STAFF scope: it is a job lock (SERVICE only), withAnySession is a job entry', async () => {
+      const chain = await freshChain('anystaff');
+      await expectRefusedHere(chain, /refused in a STAFF scope/, () =>
+        asStaff(chain.orgId, () => lockIn(lockAnySession, chain.sessionId)),
+      );
+    });
+
+    it('TC-008 lockForAccommodation is refused in a SERVICE session scope: R-4 has no SERVICE caller and none may be added', async () => {
+      const chain = await freshChain('accservice');
+      await expectRefusedHere(chain, /refused in a SERVICE scope/, () =>
+        asService(chain, () => lockIn(lockForAccommodation, chain.sessionId)),
+      );
+    });
+
+    it('TC-008 guardLive passes in SERVICE and in STAFF (the proctor-resume method)', async () => {
+      const chain = await freshChain('guardboth');
+      expect(await asService(chain, () => lockIn<string>(guardLive, chain.sessionId))).toBe('LIVE');
+      expect(await asStaff(chain.orgId, () => lockIn<string>(guardLive, chain.sessionId))).toBe(
+        'LIVE',
+      );
+    });
 
     it('TC-008 lockForAccommodation passes in a plain runInOrg, in any status, and leaves the status unchanged', async () => {
       const chain = await freshChain('plain2');
@@ -555,12 +587,12 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
       ids: [chain.sessionId],
     });
 
-    it('TC-008 SERVICE and STAFF scope need no grant for the same-value status write, and an active grant changes nothing', async () => {
+    it('TC-008 the scopes a lock passes in need no grant for the same-value status write, and an active grant changes nothing', async () => {
       const chain = await freshChain('grant1');
-      for (const run of [
-        (fn: () => Promise<unknown>) => asService(chain, fn),
-        (fn: () => Promise<unknown>) => asStaff(chain.orgId, fn),
-      ]) {
+      const runs: Array<(fn: () => Promise<unknown>) => Promise<unknown>> = [];
+      if (lock !== lockForAccommodation) runs.push((fn) => asService(chain, fn)); // SERVICE: not for lockForAccommodation
+      if (lock !== lockAnySession) runs.push((fn) => asStaff(chain.orgId, fn)); // STAFF: not for lockAnySession
+      for (const run of runs) {
         const plain = await run(() => lockIn<string>(lock, chain.sessionId));
         const granted = await run(() =>
           orgContext.withGrant(stateGrant(chain), () => lockIn<string>(lock, chain.sessionId)),
@@ -578,7 +610,7 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
       const xmin = await xminOf(chain.sessionId);
       await db.statements.reset();
       await expect(
-        asService(chain, () =>
+        asHome(lock, chain, () =>
           // @ts-expect-error the client has $connect, so it is not a SessionLockTx: this does not compile
           lock(client, chain.sessionId),
         ),
@@ -617,7 +649,7 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
       async (_name, lock) => {
         const chain = await freshChain('count-a');
         await db.statements.reset();
-        await asStaff(chain.orgId, () => lockIn(lock, chain.sessionId));
+        await asHome(lock, chain, () => lockIn(lock, chain.sessionId));
         const c = await counts();
         expect({ select: c.select, update: c.update, insert: c.insert }).toEqual({
           select: 1,
@@ -784,7 +816,7 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
             });
             try {
               const outcome = await Promise.race([
-                asService(chain, () => lockIn<string>(lock, chain.sessionId)),
+                asHome(lock, chain, () => lockIn<string>(lock, chain.sessionId)),
                 stillWaiting,
               ]);
               expect(outcome).not.toBe('STILL WAITING');
@@ -840,7 +872,7 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
         let second: Promise<string> | undefined;
         let secondDone = false;
         try {
-          second = asService(chain, () => lockIn<string>(lock, chain.sessionId)).then((r) => {
+          second = asHome(lock, chain, () => lockIn<string>(lock, chain.sessionId)).then((r) => {
             secondDone = true;
             return r;
           });
@@ -863,7 +895,7 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
       it('TC-008 the compare-and-set loses (0 rows), the re-read sees the new status, and the lock is taken on THAT status: never reverted', async () => {
         const chain = await freshChain('retry1');
         await setStatus(chain.sessionId, 'INVITED');
-        const result = await asService(chain, () =>
+        const result = await asHome(lock, chain, () =>
           client.$transaction(
             (tx) =>
               lock(
@@ -883,7 +915,7 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
       it('TC-008 two changes in a row are still handled: the third try wins', async () => {
         const chain = await freshChain('retry2');
         const steps = ['OPENED', 'CONSENTED'];
-        const result = await asStaff(chain.orgId, () =>
+        const result = await asHome(lock, chain, () =>
           client.$transaction(
             (tx) =>
               lock(
@@ -904,7 +936,7 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
         const chain = await freshChain('retry3');
         const steps = ['OPENED', 'CONSENTED', 'VERIFIED'];
         await db.statements.reset();
-        const error = await asService(chain, () =>
+        const error = await asHome(lock, chain, () =>
           client.$transaction(
             (tx) =>
               lock(
@@ -948,7 +980,7 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
             [chain.sessionId],
           );
           await db.statements.reset();
-          pending = asService(chain, () => lockIn(lock, chain.sessionId));
+          pending = asHome(lock, chain, () => lockIn(lock, chain.sessionId));
           // The read does not block (MVCC), the UPDATE does: it waits on the racer's row lock.
           await waitUntilBlocked('UPDATE "public"."sessions"');
           await racer.query('COMMIT');
@@ -994,7 +1026,9 @@ describe('guardLive, lockForAccommodation and lockAnySession against Postgres (F
         const chain = await freshChain('erased2');
         await setErased(chain.sessionId);
         const xmin = await xminOf(chain.sessionId);
-        expect(await asService(chain, () => lockIn<string>(lock, chain.sessionId))).toBe('ERASED');
+        expect(await asHome(lock, chain, () => lockIn<string>(lock, chain.sessionId))).toBe(
+          'ERASED',
+        );
         expect(await xminOf(chain.sessionId)).not.toBe(xmin); // it did take the row lock
         expect(await statusOf(chain.sessionId)).toBe('ERASED');
       },

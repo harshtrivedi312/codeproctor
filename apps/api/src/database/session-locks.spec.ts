@@ -35,6 +35,7 @@ import {
   SID,
   fakeTx,
   inService,
+  inStaff,
   moving,
   reads,
   shape,
@@ -88,14 +89,15 @@ describe('guardLive with the REAL generated enum (ADR 0013 section 5.7): FR-704,
  * lockAnySession (a job: BullMQ retries it, ADR 0013 section 5.7 `withAnySession`).
  */
 const ANY_STATUS_LOCKS = [
-  ['lockForAccommodation', lockForAccommodation, AccommodationLockedError],
-  ['lockAnySession', lockAnySession, SessionLockRetryError],
+  // Each in the scope it passes in (ADR 0006 section 8.5): lockForAccommodation in STAFF, lockAnySession in SERVICE.
+  ['lockForAccommodation', lockForAccommodation, AccommodationLockedError, inStaff],
+  ['lockAnySession', lockAnySession, SessionLockRetryError, inService],
 ] as const;
 
 describe.each(ANY_STATUS_LOCKS)(
   '%s (ADR 0015 section 6, ADR 0013 section 5.7): the lock call, FR-704, NFR-04, TC-008',
-  (_name, lock, LostError) => {
-    const run = (tx: SessionLockTx) => inService(() => lock(tx, SID));
+  (_name, lock, LostError, inScope) => {
+    const run = (tx: SessionLockTx) => inScope(() => lock(tx, SID));
 
     it('TC-008 reads the status, writes the same status once with status in the where, and returns it', async () => {
       const { tx, calls } = fakeTx(steady('COMPLETED'));
@@ -204,7 +206,7 @@ describe('each lock throws the retry error of its caller (ADR 0013 section 5.7, 
     );
     expect(job).toBeInstanceOf(SessionLockRetryError);
     expect(job).not.toBeInstanceOf(AccommodationLockedError);
-    const route = await inService(() => lockForAccommodation(lost(), SID)).then(
+    const route = await inStaff(() => lockForAccommodation(lost(), SID)).then(
       () => undefined,
       (e: unknown) => e,
     );
@@ -216,7 +218,7 @@ describe('each lock throws the retry error of its caller (ADR 0013 section 5.7, 
     for (const status of [...Object.values(SessionStatus), FAKE_ERASED]) {
       const a = fakeTx(moving([status, 'OPENED'], 1));
       const b = fakeTx(moving([status, 'OPENED'], 1));
-      expect(await inService(() => lockForAccommodation(a.tx, SID))).toBe(
+      expect(await inStaff(() => lockForAccommodation(a.tx, SID))).toBe(
         await inService(() => lockAnySession(b.tx, SID)),
       );
       expect(a.calls).toEqual(b.calls);
@@ -224,15 +226,17 @@ describe('each lock throws the retry error of its caller (ADR 0013 section 5.7, 
   });
 });
 
-describe('the locks pass only in SERVICE and STAFF scopes (the hub rulings, S5 of the review of #208): NFR-04, TC-008', () => {
+describe('each lock passes only in its own scopes (the merged ADR 0006 section 8.5, FU-DB-240): NFR-04, TC-008', () => {
   const orgContext = new OrgContextService();
+  /**
+   * What each lock passes in, written out BY HAND from the merged ADR 0006 section 8.5 (not read from the policy table):
+   * guardLive SERVICE and STAFF; lockAnySession SERVICE only; lockForAccommodation STAFF and the plain org job scope.
+   */
   const LOCKS = [
-    ['guardLive', guardLive],
-    ['lockForAccommodation', lockForAccommodation],
-    ['lockAnySession', lockAnySession],
+    ['guardLive', guardLive, { service: true, staff: true, plainOrg: false }],
+    ['lockForAccommodation', lockForAccommodation, { service: false, staff: true, plainOrg: true }],
+    ['lockAnySession', lockAnySession, { service: true, staff: false, plainOrg: false }],
   ] as const;
-  /** guardLive and lockAnySession keep the strict allowlist; lockForAccommodation alone passes in a plain org scope. */
-  const STRICT = LOCKS.filter(([name]) => name !== 'lockForAccommodation');
   const stateGrant = {
     model: 'Session',
     columns: ['status', 'pauseReasons', 'submittedAt'],
@@ -253,7 +257,7 @@ describe('the locks pass only in SERVICE and STAFF scopes (the hub rulings, S5 o
     return error as Error;
   };
 
-  describe.each(LOCKS)('%s', (_name, lock) => {
+  describe.each(LOCKS)('%s', (_name, lock, allowed) => {
     it('TC-008 is refused in system scope, whatever the reason: no org filter, so no statement is sent', async () => {
       for (const reason of Object.keys(SYSTEM_SCOPE_REASONS) as SystemScopeReason[]) {
         const { tx, calls } = fakeTx(steady('OPENED'));
@@ -288,24 +292,11 @@ describe('the locks pass only in SERVICE and STAFF scopes (the hub rulings, S5 o
       expect(calls).toEqual([]);
     });
 
-    it('TC-008 is refused with no scope at all: the lock needs a SERVICE or STAFF scope, and sends nothing', async () => {
+    it('TC-008 is refused with no scope at all, and sends nothing', async () => {
       const { tx, calls } = fakeTx(steady('OPENED'));
       const error = await refusal(() => lock(tx, SID));
       expect(error.message).toMatch(/no scope at all/);
       expect(calls).toEqual([]);
-    });
-
-    it('TC-008 works in a SERVICE session scope and in a STAFF scope, also under the SessionStateService grant', async () => {
-      for (const run of [
-        () => orgContext.runAsSessionJob(ORG, SID, () => lock(fakeTx(steady('OPENED')).tx, SID)),
-        () => orgContext.runAsUser(user, () => lock(fakeTx(steady('OPENED')).tx, SID)),
-        () =>
-          orgContext.runAsUser(user, () =>
-            orgContext.withGrant(stateGrant, () => lock(fakeTx(steady('OPENED')).tx, SID)),
-          ),
-      ]) {
-        await expect(run()).resolves.toBeDefined();
-      }
     });
 
     it('TC-008 the scope is refused before the client-itself check', async () => {
@@ -321,55 +312,92 @@ describe('the locks pass only in SERVICE and STAFF scopes (the hub rulings, S5 o
       );
       expect(error.message).toMatch(/CANDIDATE scope/);
     });
+
+    it(`TC-008 a SERVICE scope (runAsSessionJob) is ${allowed.service ? 'allowed' : 'REFUSED'}`, async () => {
+      const { tx, calls } = fakeTx(steady('OPENED'));
+      const run = () => orgContext.runAsSessionJob(ORG, SID, () => lock(tx, SID));
+      if (allowed.service) {
+        await expect(run()).resolves.toBeDefined();
+        expect(shape(calls)).toBe('RU');
+      } else {
+        const error = await refusal(run);
+        expect(error.message).toMatch(/refused in a SERVICE scope/);
+        expect(calls).toEqual([]);
+      }
+    });
+
+    it(`TC-008 a STAFF scope (runAsUser), also under the SessionStateService grant, is ${allowed.staff ? 'allowed' : 'REFUSED'}`, async () => {
+      for (const grant of [false, true]) {
+        const { tx, calls } = fakeTx(steady('OPENED'));
+        const run = () =>
+          orgContext.runAsUser(user, () =>
+            grant ? orgContext.withGrant(stateGrant, () => lock(tx, SID)) : lock(tx, SID),
+          );
+        if (allowed.staff) {
+          await expect(run()).resolves.toBeDefined();
+          expect(shape(calls)).toBe('RU');
+        } else {
+          const error = await refusal(run);
+          expect(error.message).toMatch(/refused in a STAFF scope/);
+          expect(calls).toEqual([]);
+        }
+      }
+    });
+
+    it(`TC-008 a plain org scope (runInOrg: no user, no session, not system), also under a grant, is ${allowed.plainOrg ? 'allowed' : 'REFUSED'}`, async () => {
+      for (const grant of [false, true]) {
+        const { tx, calls } = fakeTx(steady('OPENED'));
+        const run = () =>
+          orgContext.runInOrg(ORG, () =>
+            grant ? orgContext.withGrant(stateGrant, () => lock(tx, SID)) : lock(tx, SID),
+          );
+        if (allowed.plainOrg) {
+          await expect(run()).resolves.toBeDefined();
+          expect(shape(calls)).toBe('RU');
+        } else {
+          const error = await refusal(run);
+          expect(error.message).toMatch(/plain org scope/);
+          expect(calls).toEqual([]);
+        }
+      }
+    });
   });
 
-  describe.each(STRICT)(
-    '%s: the plain org scope (hub ruling: only lockForAccommodation passes there)',
-    (_name, lock) => {
-      it("TC-008 is refused in a plain runInOrg with no actor, for example the candidate guard's pre-read scope: no statement is sent", async () => {
-        const { tx, calls } = fakeTx(steady('OPENED'));
-        const error = await refusal(() => orgContext.runInOrg(ORG, () => lock(tx, SID)));
-        expect(error.message).toMatch(/plain org scope/);
-        expect(calls).toEqual([]);
-      });
-
-      it('TC-008 is refused in a plain runInOrg under a grant as well', async () => {
-        const { tx, calls } = fakeTx(steady('OPENED'));
-        await refusal(() =>
-          orgContext.runInOrg(ORG, () => orgContext.withGrant(stateGrant, () => lock(tx, SID))),
-        );
-        expect(calls).toEqual([]);
-      });
-    },
-  );
-
-  describe('lockForAccommodation, and only it, passes in a plain runInOrg (Database B retention jobs; ADR 0015 section 6(b))', () => {
-    it('TC-008 passes in a plain runInOrg: an org scope with no user, no session, not system', async () => {
+  describe('lockForAccommodation in a plain runInOrg (Database B retention site; ADR 0015 section 6(b))', () => {
+    it('TC-008 passes in an org scope with no user, no session, not system, in any status: ERASED is locked too, with the same same-value write', async () => {
       const { tx, calls } = fakeTx(steady('COMPLETED'));
       await expect(orgContext.runInOrg(ORG, () => lockForAccommodation(tx, SID))).resolves.toBe(
         'COMPLETED',
       );
       expect(shape(calls)).toBe('RU');
-      // The same-value write and the any-status semantics are unchanged: ERASED is locked too.
       const erased = fakeTx(steady(FAKE_ERASED));
       await expect(
         orgContext.runInOrg(ORG, () => lockForAccommodation(erased.tx, SID)),
       ).resolves.toBe('ERASED');
     });
 
-    it('TC-008 is still refused in a CANDIDATE scope and in system scope, and with no scope: the exception is the plain org scope only', async () => {
+    it('TC-008 a SERVICE caller of lockForAccommodation does not exist (R-4 has no SERVICE caller): it is refused, like CANDIDATE and system', async () => {
       const { tx, calls } = fakeTx(steady('OPENED'));
-      await refusal(() => orgContext.runAsCandidate(ORG, SID, () => lockForAccommodation(tx, SID)));
       await refusal(() =>
-        orgContext.runAsCandidate(ORG, SID, () =>
-          orgContext.runInOrg(ORG, () => lockForAccommodation(tx, SID)),
-        ),
+        orgContext.runAsSessionJob(ORG, SID, () => lockForAccommodation(tx, SID)),
       );
+      await refusal(() => orgContext.runAsCandidate(ORG, SID, () => lockForAccommodation(tx, SID)));
       await refusal(() =>
         orgContext.runSystem('RETENTION_ERASURE', () => lockForAccommodation(tx, SID)),
       );
-      await refusal(() => lockForAccommodation(tx, SID));
       expect(calls).toEqual([]);
+    });
+  });
+
+  describe('lockAnySession is for jobs only (SERVICE): a STAFF caller does not exist, withAnySession is a job entry', () => {
+    it('TC-008 a STAFF scope and a plain org scope are refused, SERVICE passes', async () => {
+      const { tx, calls } = fakeTx(steady('OPENED'));
+      await refusal(() => orgContext.runAsUser(user, () => lockAnySession(tx, SID)));
+      await refusal(() => orgContext.runInOrg(ORG, () => lockAnySession(tx, SID)));
+      expect(calls).toEqual([]);
+      await expect(
+        orgContext.runAsSessionJob(ORG, SID, () => lockAnySession(tx, SID)),
+      ).resolves.toBe('OPENED');
     });
   });
 });
@@ -416,7 +444,7 @@ describe('the lock needs a transaction client, not the client itself (ADR 0013 s
       const { client, calls } = clientItself(connection);
       await expect(
         // @ts-expect-error the client has $connect or $disconnect, so it is not a SessionLockTx
-        inService(() => lockForAccommodation(client, SID)),
+        inStaff(() => lockForAccommodation(client, SID)),
       ).rejects.toBeInstanceOf(OrgScopeViolationError);
       await expect(
         // @ts-expect-error the same for the job lock

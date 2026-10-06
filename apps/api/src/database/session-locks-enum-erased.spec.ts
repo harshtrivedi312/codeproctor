@@ -8,7 +8,15 @@
 import { SessionStatus } from '../generated/prisma/enums.js';
 import { guardLive, lockAnySession, lockForAccommodation } from './session-locks';
 import { defineGuardLiveCases } from './testing/guard-live-cases';
-import { FAKE_ERASED, SID, fakeTx, inService, steady, updates } from './testing/session-lock-fakes';
+import {
+  FAKE_ERASED,
+  SID,
+  fakeTx,
+  inService,
+  inStaff,
+  steady,
+  updates,
+} from './testing/session-lock-fakes';
 
 jest.mock('../generated/prisma/enums.js', () => {
   const actual = jest.requireActual<typeof import('../generated/prisma/enums.js')>(
@@ -27,14 +35,15 @@ describe('the mocked enum has ERASED (the premise of this spec)', () => {
 defineGuardLiveCases(guardLive, 'present');
 
 describe('the any-status locks with an enum that has ERASED: NFR-05, TC-094', () => {
+  // Each any-status lock in the scope it passes in: lockForAccommodation in STAFF, lockAnySession in SERVICE.
   it.each([
-    ['lockForAccommodation', lockForAccommodation],
-    ['lockAnySession', lockAnySession],
+    ['lockForAccommodation', lockForAccommodation, inStaff],
+    ['lockAnySession', lockAnySession, inService],
   ] as const)(
     'NFR-05 TC-094 %s is not affected: it locks an ERASED session, with no exclusion in the where',
-    async (_name, lock) => {
+    async (_name, lock, inScope) => {
       const { tx, calls } = fakeTx(steady(FAKE_ERASED));
-      await expect(inService(() => lock(tx, SID))).resolves.toBe('ERASED');
+      await expect(inScope(() => lock(tx, SID))).resolves.toBe('ERASED');
       const [update] = updates(calls);
       expect(update?.args.where).toEqual({ id: SID, status: FAKE_ERASED });
       expect(Object.hasOwn(update?.args.where ?? {}, 'NOT')).toBe(false);

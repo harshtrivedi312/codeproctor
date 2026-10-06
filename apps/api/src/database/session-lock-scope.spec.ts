@@ -1,9 +1,10 @@
-// The actor allowlist of the session locks (session-lock-scope.ts), on synthetic scope values: no database, no
-// context. The scopes that no public entry can build (a kind that does not exist today, an unknown actor) are
-// built by hand here, which is the point of a pure function. The same rules through the real locks and the
-// real OrgContextService are in session-locks.spec.ts. NFR-04, TC-008.
+// The per-lock actor allowlists of the session locks (session-lock-scope.ts), on synthetic scope values: no database,
+// no context. The scopes that no public entry can build (a kind that does not exist today, an unknown actor) are
+// built by hand here, which is the point of a pure function. The expected matrix below is written out BY HAND from the
+// merged ADR 0006 section 8.5 (#211, #213), not read from LOCK_SCOPE_POLICY, so a change of the table fails here.
+// The same rules through the real locks and the real OrgContextService are in session-locks.spec.ts. NFR-04, TC-008.
 import type { OrgScope } from './org-context';
-import { lockScopeRefusal } from './session-lock-scope';
+import { LOCK_SCOPE_POLICY, lockScopeRefusal } from './session-lock-scope';
 
 const ORG = '55555555-5555-4555-8555-555555555555';
 const SID = '66666666-6666-4666-8666-666666666666';
@@ -31,61 +32,107 @@ const futureActor = {
 } as unknown as OrgScope;
 const noKind = {} as unknown as OrgScope;
 
-describe('lockScopeRefusal: the strict allowlist (guardLive, lockAnySession): NFR-04, TC-008', () => {
-  it('TC-008 SERVICE and STAFF pass', () => {
-    expect(lockScopeRefusal(service)).toBeUndefined();
-    expect(lockScopeRefusal(staff)).toBeUndefined();
-  });
+type LockName = keyof typeof LOCK_SCOPE_POLICY;
 
-  it.each([
-    ['a CANDIDATE scope', candidate, /CANDIDATE scope/],
-    ['system scope', system, /system scope/],
-    ['a plain org scope with no actor (runInOrg)', plainOrg, /plain org scope/],
-    ['no scope at all', undefined, /no scope at all/],
-    ['a scope kind that does not exist today', futureKind, /this kind of scope/],
-    ['a scope without a kind', noKind, /this kind of scope/],
-    ['an actor that does not exist today', futureActor, /this actor/],
-  ] as const)(
-    'TC-008 %s is refused, with a message that names no value',
-    (_what, scope, pattern) => {
-      const message = lockScopeRefusal(scope);
-      expect(message).toMatch(pattern);
-      expect(message).not.toContain(ORG);
-      expect(message).not.toContain(SID);
-      expect(message).not.toContain('RECRUITER');
-    },
-  );
+/** What each lock passes in, by hand from ADR 0006 section 8.5: true = allowed, false = refused. */
+const MATRIX: Record<LockName, Array<[string, OrgScope | undefined, boolean]>> = {
+  guardLive: [
+    ['SERVICE', service, true],
+    ['STAFF', staff, true],
+    ['plain org', plainOrg, false],
+    ['CANDIDATE', candidate, false],
+    ['system', system, false],
+    ['no scope', undefined, false],
+    ['unknown kind', futureKind, false],
+    ['no kind', noKind, false],
+    ['unknown actor', futureActor, false],
+  ],
+  lockAnySession: [
+    ['SERVICE', service, true],
+    ['STAFF', staff, false],
+    ['plain org', plainOrg, false],
+    ['CANDIDATE', candidate, false],
+    ['system', system, false],
+    ['no scope', undefined, false],
+    ['unknown kind', futureKind, false],
+    ['no kind', noKind, false],
+    ['unknown actor', futureActor, false],
+  ],
+  lockForAccommodation: [
+    ['SERVICE', service, false],
+    ['STAFF', staff, true],
+    ['plain org', plainOrg, true],
+    ['CANDIDATE', candidate, false],
+    ['system', system, false],
+    ['no scope', undefined, false],
+    ['unknown kind', futureKind, false],
+    ['no kind', noKind, false],
+    ['unknown actor', futureActor, false],
+  ],
+};
+
+describe.each(Object.keys(MATRIX) as LockName[])(
+  'lockScopeRefusal for %s: the merged ADR 0006 section 8.5 (NFR-04, TC-008)',
+  (lock) => {
+    it.each(MATRIX[lock])('TC-008 %s', (_what, scope, allowed) => {
+      const message = lockScopeRefusal(scope, LOCK_SCOPE_POLICY[lock]);
+      expect(message === undefined).toBe(allowed);
+      if (message !== undefined) {
+        // A refusal names no value.
+        expect(message).not.toContain(ORG);
+        expect(message).not.toContain(SID);
+        expect(message).not.toContain('RECRUITER');
+      }
+    });
+  },
+);
+
+describe('lockScopeRefusal: the messages say what is refused and what is allowed (NFR-04, TC-008)', () => {
+  it('TC-008 each refusal names its case, and the allowed scopes of THAT lock', () => {
+    const g = LOCK_SCOPE_POLICY.guardLive;
+    const a = LOCK_SCOPE_POLICY.lockAnySession;
+    const c = LOCK_SCOPE_POLICY.lockForAccommodation;
+    expect(lockScopeRefusal(candidate, g)).toMatch(/CANDIDATE scope/);
+    expect(lockScopeRefusal(system, g)).toMatch(/system scope/i);
+    expect(lockScopeRefusal(undefined, g)).toMatch(/no scope at all/);
+    expect(lockScopeRefusal(futureKind, g)).toMatch(/this kind of scope/);
+    expect(lockScopeRefusal(futureActor, g)).toMatch(/this actor/);
+    expect(lockScopeRefusal(plainOrg, g)).toMatch(/plain org scope/);
+    expect(lockScopeRefusal(plainOrg, g)).toMatch(/SERVICE.*or.*STAFF/);
+    expect(lockScopeRefusal(staff, a)).toMatch(/refused in a STAFF scope: only a SERVICE scope/);
+    expect(lockScopeRefusal(service, c)).toMatch(
+      /refused in a SERVICE scope: only a STAFF scope.* or a plain org job scope/,
+    );
+  });
 
   it('TC-008 an unknown kind or actor is refused even though it carries a user or an org, and a staff user inside a session scope follows the actor', () => {
-    expect(
-      lockScopeRefusal({ kind: 'platform', orgId: ORG, user: USER } as unknown as OrgScope),
-    ).toBeDefined();
-    expect(
-      lockScopeRefusal({
-        kind: 'org',
-        orgId: ORG,
-        user: USER,
-        session: { actor: 'CANDIDATE', sessionId: SID },
-      }),
-    ).toMatch(/CANDIDATE/);
+    for (const lock of Object.keys(LOCK_SCOPE_POLICY) as LockName[]) {
+      const policy = LOCK_SCOPE_POLICY[lock];
+      expect(
+        lockScopeRefusal(
+          { kind: 'platform', orgId: ORG, user: USER } as unknown as OrgScope,
+          policy,
+        ),
+      ).toBeDefined();
+      expect(
+        lockScopeRefusal(
+          {
+            kind: 'org',
+            orgId: ORG,
+            user: USER,
+            session: { actor: 'CANDIDATE', sessionId: SID },
+          },
+          policy,
+        ),
+      ).toMatch(/CANDIDATE/);
+    }
   });
-});
 
-describe('lockScopeRefusal with allowPlainOrg (lockForAccommodation only): NFR-04, TC-008', () => {
-  it('TC-008 a plain org scope passes, and SERVICE and STAFF still do', () => {
-    expect(lockScopeRefusal(plainOrg, true)).toBeUndefined();
-    expect(lockScopeRefusal(service, true)).toBeUndefined();
-    expect(lockScopeRefusal(staff, true)).toBeUndefined();
-  });
-
-  it.each([
-    ['a CANDIDATE scope', candidate],
-    ['system scope', system],
-    ['no scope at all', undefined],
-    ['a scope kind that does not exist today', futureKind],
-    ['a scope without a kind', noKind],
-    ['an actor that does not exist today', futureActor],
-  ] as const)('TC-008 %s is still refused', (_what, scope) => {
-    expect(lockScopeRefusal(scope, true)).toBeDefined();
+  it('TC-008 the policy table is the one of the merged ADR: exactly these three locks, exactly these scopes', () => {
+    expect(LOCK_SCOPE_POLICY).toEqual({
+      guardLive: { service: true, staff: true, plainOrg: false },
+      lockAnySession: { service: true, staff: false, plainOrg: false },
+      lockForAccommodation: { service: false, staff: true, plainOrg: true },
+    });
   });
 });

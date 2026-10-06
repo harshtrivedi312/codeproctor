@@ -762,18 +762,22 @@ them**, never the session id.
 
 Call them as the **first statement of an interactive transaction at READ COMMITTED** (a higher isolation level
 turns the compare-and-set into serialization errors) and keep the transaction short: the lock is held until it
-commits, and nothing may do I/O inside it (ADR 0013 5.7). They pass **only** in:
+commits, and nothing may do I/O inside it (ADR 0013 5.7). Each lock has **its own allowlist**, built to the merged ADR 0006 section 8.5 (#211, #213), the
+narrower and fail-closed reading (FU-DB-240); a lock passes **only** in the scopes marked `yes`:
 
 | Scope                                                               | `guardLive` | `lockAnySession` | `lockForAccommodation` |
 | ------------------------------------------------------------------- | ----------- | ---------------- | ---------------------- |
-| SERVICE session scope (`detachForSessionJob`, `runAsSessionJob`)    | yes         | yes              | yes                    |
-| STAFF scope (`runAsUser`), also under the SessionStateService grant | yes         | yes              | yes                    |
-| plain org job scope (`runInOrg`: no user, no session, not system)   | **refused** | **refused**      | **yes** (hub ruling)   |
+| SERVICE session scope (`detachForSessionJob`, `runAsSessionJob`)    | yes         | yes              | **refused**            |
+| STAFF scope (`runAsUser`), also under the SessionStateService grant | yes         | **refused**      | yes                    |
+| plain org job scope (`runInOrg`: no user, no session, not system)   | **refused** | **refused**      | yes                    |
 | CANDIDATE scope, with or without a grant                            | refused     | refused          | refused                |
 | system scope (`runSystem`)                                          | refused     | refused          | refused                |
 | no scope at all, or any scope kind or actor that does not exist yet | refused     | refused          | refused                |
 
-A refusal is an `OrgScopeViolationError` before any statement, with a message that names no value. The extension
+`lockAnySession` is a **job** lock (SERVICE only: `withAnySession` is a job entry), so STAFF is refused.
+`lockForAccommodation` is refused in SERVICE: **R-4 has no SERVICE caller and none may be added** (it runs in the plain
+org job scope at `RetentionRepository.casAccommodations`). `guardLive` keeps SERVICE (`withLiveSession`) and STAFF
+(`proctorResume`). A refusal is an `OrgScopeViolationError` before any statement, with a message that names no value. The extension
 adds the org filter (and in a session scope the session filter) to the read and the write, so another org's
 session, another session of the same org (in a session scope) and an unknown id all give `SessionNotFoundError`
 and no UPDATE.

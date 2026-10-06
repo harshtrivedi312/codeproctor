@@ -66,8 +66,10 @@ export const RULES: readonly GuardRule[] = [
       'method SessionStateService.proctorResume only; lockAnySession from SessionJobProcessor.withAnySession ' +
       'only; lockForAccommodation from the STAFF accommodation routes (PATCH, redact-note, video-check PUT) ' +
       'through SessionStateService and from RetentionRepository.casAccommodations in a plain runInOrg ' +
-      '(erasure, R-4 and R-10) only. The core itself refuses at run time a CANDIDATE scope and system scope ' +
-      '(all three locks) and a plain runInOrg (guardLive and lockAnySession); a STAFF or SERVICE call under the ' +
+      "(erasure, R-4 and R-10) only. The core itself refuses at run time everything outside each lock's own " +
+      'allowlist (the merged ADR 0006 section 8.5): guardLive passes in SERVICE and STAFF, lockAnySession in ' +
+      'SERVICE only, lockForAccommodation in STAFF and a plain runInOrg (not SERVICE: R-4 has no SERVICE caller), ' +
+      'and all three refuse a CANDIDATE scope and system scope; a STAFF or SERVICE call under the ' +
       'SessionStateService grant is fine (ADR 0015 section 6, ADR 0013 section 5.7). That entry in `allowed` is ' +
       'the review point.',
     allowed: [], // nobody outside database/ yet: Backend B adds exactly its SessionStateService file, nothing else
@@ -463,6 +465,8 @@ describe('import guard: the session write locks have no importer yet (FU-DB-67, 
     expect(locks.why).toContain('RetentionRepository.casAccommodations');
     expect(locks.why).toContain('PATCH, redact-note, video-check PUT');
     expect(locks.why).toContain('plain runInOrg');
+    expect(locks.why).toContain('lockAnySession in SERVICE only');
+    expect(locks.why).toContain('R-4 has no SERVICE caller');
     expect(locks.why).toContain('CANDIDATE scope and system scope');
     expect(locks.why).toContain('under the SessionStateService grant is fine');
     expect(locks.why).toContain('#205');

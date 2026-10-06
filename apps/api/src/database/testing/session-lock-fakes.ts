@@ -18,6 +18,13 @@ const orgContext = new OrgContextService();
 export const inService = <T>(fn: () => Promise<T>): Promise<T> =>
   orgContext.runAsSessionJob(ORG, SID, fn);
 
+/** Runs `fn` in a STAFF scope (`runAsUser`): the scope lockForAccommodation (and guardLive's proctor-resume) pass in. */
+export const inStaff = <T>(fn: () => Promise<T>): Promise<T> =>
+  orgContext.runAsUser({ orgId: ORG, userId: SID, role: 'RECRUITER' }, fn);
+
+/** A scope runner: inService or inStaff. */
+export type InScope = <T>(fn: () => Promise<T>) => Promise<T>;
+
 /** Stands in for `SessionStatus.ERASED` while the generated enum lacks it. Valid after #91 too. */
 export const FAKE_ERASED = 'ERASED' as string as SessionStatus;
 

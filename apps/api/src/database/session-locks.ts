@@ -44,16 +44,16 @@
 //                         R-4 runs there too: it has no SERVICE caller.
 // A file outside `database/` may not export any of the three names, nor an alias of one.
 //
-// SCOPES, an allowlist of actors (the hub's rulings, session-lock-scope.ts). All three work in a SERVICE
-// session scope (`runAsSessionJob`, after `detachForSessionJob`) and a STAFF scope (`runAsUser`, also under
-// the SessionStateService grant); `lockForAccommodation`, and ONLY it, also works in a plain org job scope
-// (`runInOrg`: Database B's retention jobs). The extension adds the org filter (and in a session scope the
-// session filter) to the read and the write, so another org's session is simply not found. They REFUSE, at
-// run time and before any statement, with an OrgScopeViolationError that names no value: a CANDIDATE scope
-// (with or without a grant: `SessionStateService.transition()`'s own compare-and-set UPDATE is the first
-// `sessions` lock of a candidate transaction, ADR 0013 CS-4.4a) and system scope, for all three; a plain
-// `runInOrg` with no actor, for guardLive and lockAnySession; no scope at all; and any scope kind that does
-// not exist today.
+// SCOPES, one allowlist of actors PER LOCK (session-lock-scope.ts, the merged ADR 0006 section 8.5, FU-DB-240):
+//   guardLive             SERVICE (`runAsSessionJob`) and STAFF (`runAsUser`, also under the SessionStateService grant);
+//   lockAnySession        SERVICE only;
+//   lockForAccommodation  STAFF and the plain org job scope (`runInOrg`: RetentionRepository.casAccommodations);
+//                         SERVICE is refused, R-4 has no SERVICE caller.
+// The extension adds the org filter (and in a session scope the session filter) to the read and the write, so
+// another org's session is simply not found. Every other scope is REFUSED, at run time and before any
+// statement, with an OrgScopeViolationError that names no value: a CANDIDATE scope (with or without a grant:
+// `SessionStateService.transition()`'s own compare-and-set UPDATE is the first `sessions` lock of a candidate
+// transaction, ADR 0013 CS-4.4a), system scope, no scope at all, and any scope kind that does not exist today.
 // Call them as the FIRST statement of an interactive transaction, at READ COMMITTED (a higher isolation
 // level turns the compare-and-set into serialization errors), and keep the transaction short: the lock
 // is held until it commits.
@@ -75,7 +75,8 @@ import {
   SessionNotFoundError,
 } from './errors';
 import { OrgContextService } from './org-context';
-import { lockScopeRefusal } from './session-lock-scope';
+import { LOCK_SCOPE_POLICY, lockScopeRefusal } from './session-lock-scope';
+import type { LockScopePolicy } from './session-lock-scope';
 
 /** What guardLive says: the session is still live (the lock is held), or it was erased (nothing written). */
 export type GuardLiveResult = 'LIVE' | 'ERASED';
@@ -150,12 +151,12 @@ type LockOutcome =
 const scopeReader = new OrgContextService();
 
 /**
- * Refuses every scope except SERVICE and STAFF (and a plain org job scope for lockForAccommodation only),
- * before any statement (the hub's rulings, session-lock-scope.ts has the list and the reasons). The message
- * names no value.
+ * Refuses every scope outside this lock's own allowlist (`policy`: guardLive SERVICE and STAFF, lockAnySession
+ * SERVICE only, lockForAccommodation STAFF and the plain org job scope), before any statement (the merged ADR 0006
+ * section 8.5; session-lock-scope.ts has the list and the reasons). The message names no value.
  */
-function assertScopeMayLock(allowPlainOrg: boolean): void {
-  const refusal = lockScopeRefusal(scopeReader.current()?.scope, allowPlainOrg);
+function assertScopeMayLock(policy: LockScopePolicy): void {
+  const refusal = lockScopeRefusal(scopeReader.current()?.scope, policy);
   if (refusal !== undefined) throw new OrgScopeViolationError(refusal);
 }
 
@@ -196,9 +197,9 @@ async function lockSession(
   tx: SessionLockTx,
   sessionId: string,
   stopOnErased: boolean,
-  allowPlainOrg: boolean,
+  policy: LockScopePolicy,
 ): Promise<LockOutcome> {
-  assertScopeMayLock(allowPlainOrg);
+  assertScopeMayLock(policy);
   assertTransactionClient(tx);
   let status = await readStatus(tx, sessionId);
   for (let attempt = 1; attempt <= MAX_LOCK_ATTEMPTS; attempt += 1) {
@@ -227,10 +228,11 @@ async function lockSession(
  * @throws SessionNotFoundError   no such session in this scope (another org, unknown id): drop the job.
  * @throws SessionLockRetryError  the status changed under it three times in a row: the job's own retry
  *   handles it.
- * @throws OrgScopeViolationError system scope, a CANDIDATE scope, or the client itself as `tx`.
+ * @throws OrgScopeViolationError a scope this lock does not pass in (CANDIDATE, system, none, SERVICE or STAFF as its
+ *   allowlist says), or the client itself as `tx`.
  */
 export async function guardLive(tx: SessionLockTx, sessionId: string): Promise<GuardLiveResult> {
-  const result = await lockSession(tx, sessionId, true, false);
+  const result = await lockSession(tx, sessionId, true, LOCK_SCOPE_POLICY.guardLive);
   if (result.outcome === 'locked') return 'LIVE';
   if (result.outcome === 'erased') return 'ERASED';
   throw new SessionLockRetryError();
@@ -244,9 +246,9 @@ export async function guardLive(tx: SessionLockTx, sessionId: string): Promise<G
 async function lockAnyStatus(
   tx: SessionLockTx,
   sessionId: string,
-  allowPlainOrg: boolean,
+  policy: LockScopePolicy,
 ): Promise<SessionStatus | undefined> {
-  const result = await lockSession(tx, sessionId, false, allowPlainOrg);
+  const result = await lockSession(tx, sessionId, false, policy);
   return result.outcome === 'locked' ? result.status : undefined;
 }
 
@@ -264,14 +266,15 @@ async function lockAnyStatus(
  * @throws SessionNotFoundError      no such session in this scope: the route answers 404.
  * @throws AccommodationLockedError  the status changed under it three times in a row: 409
  *   ACCOMMODATION_LOCKED, or a BullMQ retry for a job.
- * @throws OrgScopeViolationError    system scope, a CANDIDATE scope, or the client itself as `tx`.
+ * @throws OrgScopeViolationError    a scope this lock does not pass in (CANDIDATE, system, none, SERVICE), or the
+ *   client itself as `tx`.
  */
 export async function lockForAccommodation(
   tx: SessionLockTx,
   sessionId: string,
 ): Promise<SessionStatus> {
-  // The only lock that also passes in a plain org job scope (the retention jobs, runInOrg).
-  const status = await lockAnyStatus(tx, sessionId, true);
+  // STAFF and the plain org job scope (the retention site), never SERVICE (ADR 0006 8.5).
+  const status = await lockAnyStatus(tx, sessionId, LOCK_SCOPE_POLICY.lockForAccommodation);
   if (status === undefined) throw new AccommodationLockedError();
   return status;
 }
@@ -288,10 +291,12 @@ export async function lockForAccommodation(
  * @throws SessionNotFoundError   no such session in this scope (another org, unknown id): drop the job.
  * @throws SessionLockRetryError  the status changed under it three times in a row: the job's own retry
  *   handles it.
- * @throws OrgScopeViolationError system scope, a CANDIDATE scope, or the client itself as `tx`.
+ * @throws OrgScopeViolationError a scope this lock does not pass in (CANDIDATE, system, none, SERVICE or STAFF as its
+ *   allowlist says), or the client itself as `tx`.
  */
 export async function lockAnySession(tx: SessionLockTx, sessionId: string): Promise<SessionStatus> {
-  const status = await lockAnyStatus(tx, sessionId, false);
+  // SERVICE only (ADR 0006 8.5): STAFF and the plain org scope are refused.
+  const status = await lockAnyStatus(tx, sessionId, LOCK_SCOPE_POLICY.lockAnySession);
   if (status === undefined) throw new SessionLockRetryError();
   return status;
 }

@@ -16,6 +16,7 @@ import {
   SID,
   fakeTx,
   inService,
+  inStaff,
   moving,
   shape,
   steady,
@@ -57,24 +58,25 @@ describe('a stale client: the enum has no ERASED but the row reads ERASED (N1, N
     expect(Object.hasOwn(updates(calls)[0]?.args.where ?? {}, 'NOT')).toBe(false);
   });
 
+  // Each any-status lock in the scope it passes in: lockForAccommodation in STAFF, lockAnySession in SERVICE.
   it.each([
-    ['lockForAccommodation', lockForAccommodation],
-    ['lockAnySession', lockAnySession],
+    ['lockForAccommodation', lockForAccommodation, inStaff],
+    ['lockAnySession', lockAnySession, inService],
   ] as const)(
     'NFR-05 TC-094 %s still locks a row that reads ERASED: the reduction and the erasure-compatible jobs must run on it',
-    async (_name, lock) => {
+    async (_name, lock, inScope) => {
       const { tx, calls } = fakeTx(steady(FAKE_ERASED));
-      await expect(inService(() => lock(tx, SID))).resolves.toBe('ERASED');
+      await expect(inScope(() => lock(tx, SID))).resolves.toBe('ERASED');
       expect(updates(calls)[0]?.args.where).toEqual({ id: SID, status: FAKE_ERASED });
     },
   );
 
   it.each([
-    ['lockForAccommodation', lockForAccommodation],
-    ['lockAnySession', lockAnySession],
-  ] as const)('TC-008 %s has the same where as guardLive here', async (_name, lock) => {
+    ['lockForAccommodation', lockForAccommodation, inStaff],
+    ['lockAnySession', lockAnySession, inService],
+  ] as const)('TC-008 %s has the same where as guardLive here', async (_name, lock, inScope) => {
     const { tx, calls } = fakeTx(steady('COMPLETED'));
-    await expect(inService(() => lock(tx, SID))).resolves.toBe('COMPLETED');
+    await expect(inScope(() => lock(tx, SID))).resolves.toBe('COMPLETED');
     expect(updates(calls)[0]?.args.where).toEqual({ id: SID, status: 'COMPLETED' });
   });
 });
