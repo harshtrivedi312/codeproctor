@@ -163,6 +163,8 @@ describe('API foundation in production (NFR-04)', () => {
     applyEnv(infra, {
       NODE_ENV: 'production',
       APP_ENV: 'production',
+      // Behind Caddy in production (FU-BE-97).
+      TRUST_PROXY_HOPS: '1',
       // Pilot and production require the code runner settings (FR-503); synthetic values.
       JUDGE0_URL: 'https://judge0.test.invalid',
       JUDGE0_AUTH_TOKEN: 'a'.repeat(32),
@@ -197,6 +199,14 @@ describe('Throttle client identity and path matching (NFR-04)', () => {
       THROTTLE_AUTH_LIMIT: '3',
       TRUST_PROXY_HOPS: hops,
     });
+    // Counters now live in Redis and outlive an app (FU-BE-1): each test starts from empty buckets.
+    const { Redis } = await import('ioredis');
+    const redis = new Redis(infra.redis.getConnectionUrl());
+    try {
+      await redis.flushall();
+    } finally {
+      redis.disconnect();
+    }
     return createApp();
   }
 
@@ -257,6 +267,76 @@ describe('Throttle client identity and path matching (NFR-04)', () => {
       await request(server).post('/api/v1/Auth/ping').expect(201);
       await request(server).post('/api/v1/aUTH/ping').expect(201);
       await request(server).post('/api/v1/AUTH/ping').expect(429);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe('Shared Redis throttle store (FU-BE-1, NFR-04)', () => {
+  let infra: TestInfra;
+
+  beforeAll(async () => {
+    infra = await startInfra();
+  });
+  afterAll(async () => {
+    await infra?.stop();
+  });
+
+  const useEnv = (): void =>
+    applyEnv(infra, { THROTTLE_AUTH_LIMIT: '4', THROTTLE_DEFAULT_LIMIT: '1000' });
+
+  it('FU-BE-1: two API instances on one Redis share one limit', async () => {
+    useEnv();
+    const a = await createApp();
+    const b = await createApp();
+    try {
+      await request(a.getHttpServer()).post('/api/v1/auth/ping').expect(201);
+      await request(b.getHttpServer()).post('/api/v1/auth/ping').expect(201);
+      await request(a.getHttpServer()).post('/api/v1/auth/ping').expect(201);
+      await request(b.getHttpServer()).post('/api/v1/auth/ping').expect(201);
+      await request(a.getHttpServer()).post('/api/v1/auth/ping').expect(429);
+      await request(b.getHttpServer()).post('/api/v1/auth/ping').expect(429);
+    } finally {
+      await a.close();
+      await b.close();
+    }
+  });
+
+  it('FU-BE-1: a restarted instance keeps the counter (limit survives a restart)', async () => {
+    // The previous test used this client's bucket; a new app on the same Redis is still limited.
+    useEnv();
+    const restarted = await createApp();
+    try {
+      await request(restarted.getHttpServer()).post('/api/v1/auth/ping').expect(429);
+    } finally {
+      await restarted.close();
+    }
+  });
+
+  it('FU-BE-1: no throttle key in Redis contains the client address', async () => {
+    const { Redis } = await import('ioredis');
+    const redis = new Redis(infra.redis.getConnectionUrl());
+    try {
+      const keys = await redis.keys('throttle:*');
+      expect(keys.length).toBeGreaterThan(0);
+      for (const key of keys) {
+        expect(key).toMatch(/^throttle:[a-z-]+:[0-9a-f]{64}(:block)?$/);
+      }
+    } finally {
+      redis.disconnect();
+    }
+  });
+
+  it('FU-BE-1: with Redis down a throttled route answers 503 (fail closed) and /health still answers', async () => {
+    useEnv();
+    const app = await createApp();
+    try {
+      await infra.redis.stop();
+      const res = await request(app.getHttpServer()).post('/api/v1/auth/ping').expect(503);
+      expect(res.headers['content-type']).toMatch(/application\/problem\+json/);
+      expect(JSON.stringify(res.body)).not.toMatch(/ECONN|redis|127\.0\.0\.1/i);
+      await request(app.getHttpServer()).get('/api/v1/health').expect(503);
     } finally {
       await app.close();
     }

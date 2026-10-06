@@ -46,6 +46,41 @@ describe('NFR-04 environment validation', () => {
     expect(() => validateEnv({ ...valid, TRUST_PROXY_HOPS: '-1' })).toThrow(/TRUST_PROXY_HOPS/);
   });
 
+  it('FU-BE-97: pilot and production refuse TRUST_PROXY_HOPS of 0 or missing, and name only the variable', () => {
+    const live = {
+      JUDGE0_URL: 'https://judge0.example.com',
+      JUDGE0_AUTH_TOKEN: 't'.repeat(32),
+      JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
+    };
+    for (const APP_ENV of ['pilot', 'production']) {
+      const base = { ...valid, ...live, APP_ENV };
+      expect(() => validateEnv(base)).toThrow(/TRUST_PROXY_HOPS/);
+      expect(() => validateEnv({ ...base, TRUST_PROXY_HOPS: '0' })).toThrow(/TRUST_PROXY_HOPS/);
+      expect(validateEnv({ ...base, TRUST_PROXY_HOPS: '1' }).TRUST_PROXY_HOPS).toBe(1);
+      expect(validateEnv({ ...base, TRUST_PROXY_HOPS: '2' }).TRUST_PROXY_HOPS).toBe(2);
+    }
+    expect(() =>
+      validateEnv({ ...valid, ...live, NODE_ENV: 'production', TRUST_PROXY_HOPS: '0' }),
+    ).toThrow(/TRUST_PROXY_HOPS/);
+    try {
+      validateEnv({ ...valid, ...live, APP_ENV: 'pilot', TRUST_PROXY_HOPS: '0' });
+      fail('expected throw');
+    } catch (e) {
+      const text = String(e);
+      expect(text).not.toContain(valid.JWT_ACCESS_SECRET);
+      expect(text).not.toContain(valid.DATABASE_URL);
+    }
+  });
+
+  it('FU-BE-97: local, development and test keep TRUST_PROXY_HOPS at 0; staging is not enforced (like the other pilot/production guards)', () => {
+    for (const APP_ENV of ['development', 'test', 'staging']) {
+      expect(validateEnv({ ...valid, APP_ENV }).TRUST_PROXY_HOPS).toBe(0);
+    }
+    expect(
+      validateEnv({ ...valid, NODE_ENV: 'test', TRUST_PROXY_HOPS: '0' }).TRUST_PROXY_HOPS,
+    ).toBe(0);
+  });
+
   it('FU-BE-10: API docs are off by default and refused in pilot and production', () => {
     expect(validateEnv(valid).ENABLE_API_DOCS).toBe(false);
     expect(
@@ -67,6 +102,7 @@ describe('NFR-04 environment validation', () => {
     const live = {
       ...valid,
       APP_ENV: 'pilot',
+      TRUST_PROXY_HOPS: '1',
       JUDGE0_URL: 'https://judge0.example.com',
       JUDGE0_AUTH_TOKEN: token,
       JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),

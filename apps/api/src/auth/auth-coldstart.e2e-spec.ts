@@ -99,9 +99,12 @@ describe('2FA verify right after a cold start (FR-102, TC-003, NFR-03, NFR-04, Q
 
   it('NFR-04: with Redis unreachable a 2FA verify fails closed with 503 within the health timeout, no session, no failed-login count', async () => {
     const [email] = await createTotpUsers('down', 1);
-    applyEnv(infra, { THROTTLE_AUTH_LIMIT: '10000', REDIS_URL: 'redis://127.0.0.1:1' });
+    // The challenge is signed with the test secrets, so get it from an app that still has Redis
+    // (login is throttled in Redis since FU-BE-1), then point a fresh app at a dead Redis.
     await bootFreshApp();
     const challengeToken = await challengeFor(email ?? '');
+    process.env.REDIS_URL = 'redis://127.0.0.1:1';
+    await bootFreshApp();
     const started = Date.now();
     const res = await request(app.getHttpServer())
       .post(`${API}/2fa/verify`)
