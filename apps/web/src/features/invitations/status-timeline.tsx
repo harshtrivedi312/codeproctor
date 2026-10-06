@@ -159,7 +159,7 @@ export function timelineSteps(status: Status, history: readonly Step[]): Timelin
       at,
       ...(state === 'current' && status === 'PAUSED'
         ? {
-            note: 'Paused: the test stopped while something is sorted out. The clock rules are in the session record.',
+            note: 'Paused: the test is stopped for now and will carry on or end.',
           }
         : {}),
     });

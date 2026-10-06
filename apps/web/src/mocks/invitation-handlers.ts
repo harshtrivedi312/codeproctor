@@ -59,7 +59,6 @@ const DETECTORS = [
   'DEVTOOLS',
   'VIRTUAL_CAMERA',
   'EXTENSION',
-  'SIDE_CAMERA',
 ];
 const REASONS = ['REFUSED_BIOMETRIC_PROCESSING', 'CANNOT_COMPLETE_ID_CHECK', 'OTHER'];
 
@@ -111,7 +110,7 @@ function seed(): State {
   return {
     seq: 1,
     usedThisHour: 0,
-    scenario: { biometricRefusalEnabled: true, limitPerHour: 1000 },
+    scenario: { biometricRefusalEnabled: false, limitPerHour: 1000 },
     invitations: ids.slice(0, statuses.length).map((candidateId, i) => ({
       id: `inv-${i + 1}`,
       testId: 'test-backend',

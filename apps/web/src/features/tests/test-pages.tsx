@@ -21,7 +21,8 @@ function Loading(): React.JSX.Element {
 }
 
 function LoadError({ error }: { error: unknown }): React.JSX.Element {
-  const gone = error instanceof ApiFailure && error.status === 404;
+  // 400 is a malformed id in the address (for example a hand-edited ?from=).
+  const gone = error instanceof ApiFailure && (error.status === 404 || error.status === 400);
   return (
     <Alert
       tone="error"

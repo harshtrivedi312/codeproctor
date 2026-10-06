@@ -1386,7 +1386,7 @@ export interface components {
       createdAt: string;
       sectionCount: number;
       questionCount: number;
-      /** @description The test has an invitation or a session */
+      /** @description The test has an invitation or a session, so it can no longer be edited. */
       used: boolean;
     };
     TestDetail: components['schemas']['TestSummary'] & {
@@ -1436,7 +1436,6 @@ export interface components {
         | 'DEVTOOLS'
         | 'VIRTUAL_CAMERA'
         | 'EXTENSION'
-        | 'SIDE_CAMERA'
       )[];
       allowedAssistiveTools?: string[];
       notes?: string;

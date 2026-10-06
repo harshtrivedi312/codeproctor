@@ -1,12 +1,17 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { http, HttpResponse } from 'msw';
+import * as React from 'react';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { axe } from 'vitest-axe';
+import { useAuth } from '@/features/auth/auth-provider';
 import { CandidatesPage } from '@/features/admin/candidates-page';
+import { apiBaseUrl } from '@/lib/env';
 import { MOCK_USERS } from '@/mocks/auth-handlers';
 import { mockInvitationCount, setInvitationScenario } from '@/mocks/invitation-handlers';
 import { server } from '@/mocks/server';
 import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
+import { nav } from '@/test/nav-mock';
 import { InviteButton } from './invite-button';
 
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
@@ -19,11 +24,14 @@ afterEach(() => {
 afterAll(() => server.close());
 beforeEach(() => resetAuthTestState());
 
-async function openDialog(user: { email: string } = MOCK_USERS.recruiter) {
+async function openDialog(
+  user: { email: string } = MOCK_USERS.recruiter,
+  refusalReasonOffered = false,
+) {
   renderAsStaff(
     <main>
       <h1>Test</h1>
-      <InviteButton testId="test-backend" />
+      <InviteButton testId="test-backend" refusalReasonOffered={refusalReasonOffered} />
     </main>,
     user,
   );
@@ -92,8 +100,8 @@ describe('FR-303 TC-023: invite one candidate', () => {
 });
 
 describe('ADR 0015 C-19: accommodations and the identity waiver', () => {
-  async function withWaiver() {
-    const ctx = await openDialog();
+  async function withWaiver(refusalOffered = false) {
+    const ctx = await openDialog(MOCK_USERS.recruiter, refusalOffered);
     await ctx.u.type(within(ctx.dialog).getByLabelText('Candidate name'), 'Wen Waiver');
     await ctx.u.type(within(ctx.dialog).getByLabelText('Candidate email'), 'wen@example.test');
     await ctx.u.click(within(ctx.dialog).getByLabelText('No face match / no identity check'));
@@ -108,6 +116,13 @@ describe('ADR 0015 C-19: accommodations and the identity waiver', () => {
     expect(
       within(dialog).getByText(/Check the candidate’s ID on a video call/),
     ).toBeInTheDocument();
+  });
+
+  it('ADR 0015 section 7: the biometric-refusal reason is not selectable by default', async () => {
+    const { dialog } = await withWaiver();
+    const option = within(dialog).getByRole('option', { name: /refuses biometric processing/ });
+    expect(option).toBeDisabled();
+    expect(option).toHaveTextContent('not available yet in this build');
   });
 
   it('will not send without a reason, and asks for a note with OTHER', async () => {
@@ -132,7 +147,7 @@ describe('ADR 0015 C-19: accommodations and the identity waiver', () => {
   });
 
   it('refusing biometric processing locks the face and gaze detectors off', async () => {
-    const { u, dialog } = await withWaiver();
+    const { u, dialog } = await withWaiver(true);
     await u.selectOptions(
       within(dialog).getByLabelText(/Why is the identity check waived/),
       'REFUSED_BIOMETRIC_PROCESSING',
@@ -145,14 +160,14 @@ describe('ADR 0015 C-19: accommodations and the identity waiver', () => {
 
   it('REASON_NOT_ENABLED: shows a plain message and keeps the dialog open', async () => {
     setInvitationScenario({ biometricRefusalEnabled: false });
-    const { u, dialog } = await withWaiver();
+    const { u, dialog } = await withWaiver(true);
     await u.selectOptions(
       within(dialog).getByLabelText(/Why is the identity check waived/),
       'REFUSED_BIOMETRIC_PROCESSING',
     );
     await u.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
     expect(await within(dialog).findByRole('alert')).toHaveTextContent(
-      /not switched on for your organisation/,
+      /not available yet in this build/,
     );
   });
 
@@ -259,7 +274,7 @@ describe('FR-304 TC-023: invite from a CSV', () => {
   });
 });
 
-describe('FR-305 ADR 0002 C-28: the candidates page', () => {
+describe('FR-303 ADR 0002 C-28: the candidates page', () => {
   it('lists the latest status and opens a per-candidate timeline with no scores', async () => {
     renderAsStaff(<CandidatesPage />, MOCK_USERS.recruiter);
     const u = userEvent.setup();
@@ -299,5 +314,150 @@ describe('FR-305 ADR 0002 C-28: the candidates page', () => {
     expect(await screen.findByRole('button', { name: 'Invite candidates' })).toBeInTheDocument();
     await screen.findByText('Ada Lovelace');
     expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe('FR-304: upload robustness', () => {
+  const manyRows = (n: number) =>
+    'email,name\n' + Array.from({ length: n }, (_, i) => `q${i}@example.test,Q ${i}`).join('\n');
+
+  it('FR-304: sends in React strict mode too (regression: the abort flag stayed set)', async () => {
+    const urls = posts();
+    nav.pathname = '/admin/tests';
+    renderAsStaff(
+      <React.StrictMode>
+        <main>
+          <InviteButton testId="test-backend" />
+        </main>
+      </React.StrictMode>,
+      MOCK_USERS.recruiter,
+    );
+    const u = userEvent.setup();
+    await u.click(await screen.findByRole('button', { name: 'Invite candidates' }));
+    const dialog = await screen.findByRole('dialog');
+    await u.click(within(dialog).getByLabelText('Several, from a CSV file'));
+    await u.upload(within(dialog).getByLabelText('CSV file'), csvFile(manyRows(3)));
+    await u.click(await within(dialog).findByRole('button', { name: 'Invite 3 candidates' }));
+    expect(await within(dialog).findByTestId('bulk-result')).toHaveTextContent(
+      '3 invitations created',
+    );
+    expect(urls).toHaveLength(1);
+  });
+
+  async function uploadMany(n: number) {
+    const ctx = await openDialog();
+    await ctx.u.click(within(ctx.dialog).getByLabelText('Several, from a CSV file'));
+    await ctx.u.upload(within(ctx.dialog).getByLabelText('CSV file'), csvFile(manyRows(n)));
+    await ctx.u.click(
+      await within(ctx.dialog).findByRole('button', { name: `Invite ${n} candidates` }),
+    );
+    return ctx;
+  }
+  const failSecondChunk = (status: number | 'network') => {
+    let calls = 0;
+    server.use(
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations/bulk`, () => {
+        calls += 1;
+        if (calls === 1) return undefined;
+        return status === 'network'
+          ? HttpResponse.error()
+          : HttpResponse.json({ status, title: 'x', detail: 'x' }, { status });
+      }),
+    );
+  };
+
+  it('a failure after the first chunk says how many were created, not "nothing was sent"', async () => {
+    failSecondChunk(401);
+    const { dialog } = await uploadMany(250);
+    const text = (await within(dialog).findByTestId('bulk-result')).textContent ?? '';
+    expect(text).toMatch(/The upload stopped after 200 invitations/);
+    expect(text).toMatch(/Your session ended/);
+    expect(text).toMatch(/Check the candidates list/);
+    expect(text).not.toMatch(/nothing was sent/i);
+  });
+
+  it('a lost connection says the request in flight may have been sent', async () => {
+    failSecondChunk('network');
+    const { dialog } = await uploadMany(250);
+    const text = (await within(dialog).findByTestId('bulk-result')).textContent ?? '';
+    expect(text).toMatch(/50 rows of those may have been sent/);
+  });
+
+  it('after the hourly limit, the rows not sent can be downloaded and a new file chosen', async () => {
+    setInvitationScenario({ limitPerHour: 200 });
+    const urlSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:x');
+    const blobs: Blob[] = [];
+    urlSpy.mockImplementation((b) => {
+      blobs.push(b as Blob);
+      return 'blob:x';
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    const { u, dialog } = await uploadMany(250);
+    const text = (await within(dialog).findByTestId('bulk-result')).textContent ?? '';
+    expect(text).toMatch(/50 rows were not sent/);
+    expect(within(dialog).getByRole('button', { name: /^Invite 250/ })).toBeDisabled();
+    await u.click(within(dialog).getByRole('button', { name: 'Download the rows not sent' }));
+    const csv = await blobs.at(-1)?.text();
+    expect(csv?.split('\r\n')).toHaveLength(51);
+    expect(csv).toContain('q200@example.test');
+    expect(csv).not.toContain('q199@example.test');
+    // Choosing a file again clears the result and sends again.
+    await u.upload(within(dialog).getByLabelText('CSV file'), csvFile(manyRows(2)));
+    expect(
+      await within(dialog).findByRole('button', { name: 'Invite 2 candidates' }),
+    ).toBeEnabled();
+    vi.restoreAllMocks();
+  });
+
+  it('a bulk upload refreshes the candidate list behind the dialog', async () => {
+    const gets: string[] = [];
+    renderAsStaff(<CandidatesPage />, MOCK_USERS.recruiter);
+    const u = userEvent.setup();
+    await screen.findByText('Ada Lovelace');
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'GET') gets.push(new URL(request.url).pathname);
+    });
+    await u.click(screen.getByRole('button', { name: 'Invite candidates' }));
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() =>
+      expect(
+        within(dialog).getByRole('option', { name: 'Random arrays round' }),
+      ).toBeInTheDocument(),
+    );
+    await u.selectOptions(within(dialog).getByLabelText('Test'), 'test-random');
+    await u.click(within(dialog).getByLabelText('Several, from a CSV file'));
+    await u.upload(within(dialog).getByLabelText('CSV file'), csvFile(manyRows(2)));
+    await u.click(await within(dialog).findByRole('button', { name: 'Invite 2 candidates' }));
+    await within(dialog).findByTestId('bulk-result');
+    await waitFor(() => expect(gets).toContain('/v1/admin/candidates'));
+  });
+
+  it('signing out empties an open dialog: the parsed rows do not stay', async () => {
+    function SignOut() {
+      const { signOutRevoked } = useAuth();
+      return (
+        <button type="button" onClick={() => void signOutRevoked()}>
+          Force sign out
+        </button>
+      );
+    }
+    renderAsStaff(
+      <main>
+        <SignOut />
+        <InviteButton testId="test-backend" />
+      </main>,
+      MOCK_USERS.recruiter,
+    );
+    const u = userEvent.setup();
+    await u.click(await screen.findByRole('button', { name: 'Invite candidates' }));
+    const dialog = await screen.findByRole('dialog');
+    await u.click(within(dialog).getByLabelText('Several, from a CSV file'));
+    await u.upload(
+      within(dialog).getByLabelText('CSV file'),
+      csvFile('email,name\r\nsecret.person@example.test,Secret\r\n'),
+    );
+    await within(dialog).findByTestId('csv-summary');
+    fireEvent.click(screen.getByText('Force sign out'));
+    await waitFor(() => expect(document.body).not.toHaveTextContent('secret.person'));
   });
 });

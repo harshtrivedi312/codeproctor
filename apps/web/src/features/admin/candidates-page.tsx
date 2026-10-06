@@ -53,7 +53,7 @@ function ErasureStatus({ candidate }: { candidate: Candidate }): React.JSX.Eleme
 }
 
 /**
- * Candidates: invite, per-candidate status timeline (FR-305, ADR 0002) and the erasure action
+ * Candidates: invite, per-candidate status timeline (FR-303, ADR 0002) and the erasure action
  * (NFR-05, D-19, TC-094). Invitations and timelines are WEB-ONLY mocks until BE-06b.
  */
 export function CandidatesPage(): React.JSX.Element {

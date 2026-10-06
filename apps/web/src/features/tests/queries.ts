@@ -28,7 +28,8 @@ function fail(response: Response, error: unknown): never {
   throw new ApiFailure(response.status, text(body.detail) || text(body.message), '', errors);
 }
 
-const MAX_PAGES = 20;
+// A safety stop far above any real organisation (20,000 tests), never reached in practice.
+const MAX_PAGES = 200;
 
 /** Every page of the list (the table filters and pages on the client). */
 export function useTests() {

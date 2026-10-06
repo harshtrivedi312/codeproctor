@@ -1,6 +1,7 @@
 'use client';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Download, Upload } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
 import * as React from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import { toast } from 'sonner';
@@ -18,13 +19,22 @@ import {
   FATAL_MESSAGE,
   MAX_CSV_BYTES,
   errorReportCsv,
+  unsentRowsCsv,
   looksLikeFormula,
   parseInviteCsv,
   type CsvParse,
 } from './csv';
-import { InviteFailure, inviteInChunks, useInvite, type BulkOutcome } from './queries';
+import { getGeneration } from '@/lib/auth-session';
+import {
+  InviteFailure,
+  invalidateAfterInvite,
+  inviteInChunks,
+  useInvite,
+  type BulkOutcome,
+} from './queries';
 import {
   ACCOMMODATION_DETECTORS,
+  BIOMETRIC_REFUSAL_OFFERED,
   DETECTOR_LABEL,
   MAX_EXTRA_TIME_PCT,
   MAX_NOTES,
@@ -68,25 +78,34 @@ export interface InviteDialogProps {
   onOpenChange: (open: boolean) => void;
   /** The test is fixed (opened from a test page); without it the dialog asks which test. */
   testId?: string;
+  /** Offer the "refuses biometric processing" reason (ADR 0015 section 7; off until the consent variant ships). */
+  refusalReasonOffered?: boolean;
 }
 
 /**
  * Invite one candidate, or many from a CSV (FR-303, FR-304, FR-305, TC-023, TC-024). WEB-ONLY and
  * provisional [BE-06b]. Candidate data lives in this component's state only: it is dropped when the
- * dialog closes and when another person signs in (the body is keyed by the user id).
+ * dialog closes and when another person signs in (the body is keyed by the user id and role).
  */
 export function InviteDialog(props: InviteDialogProps): React.JSX.Element {
-  const { user } = useAuth();
+  const { user, role } = useAuth();
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
       <DialogContent className="max-h-[calc(100vh-2rem)] max-w-3xl overflow-y-auto">
-        {props.open ? <InviteBody key={user?.id ?? 'none'} {...props} /> : null}
+        {props.open ? (
+          <InviteBody key={`${user?.id ?? 'none'}:${role ?? 'none'}`} {...props} />
+        ) : null}
       </DialogContent>
     </Dialog>
   );
 }
 
-function InviteBody({ onOpenChange, testId }: InviteDialogProps): React.JSX.Element {
+function InviteBody({
+  onOpenChange,
+  testId,
+  refusalReasonOffered = BIOMETRIC_REFUSAL_OFFERED,
+}: InviteDialogProps): React.JSX.Element {
+  const qc = useQueryClient();
   const tests = useTests();
   const invite = useInvite();
   const schema = React.useMemo(
@@ -103,7 +122,6 @@ function InviteBody({ onOpenChange, testId }: InviteDialogProps): React.JSX.Elem
   const waiver = useWatch({ control: form.control, name: 'waiver' });
   const reason = useWatch({ control: form.control, name: 'waiverReason' });
   const detectors = useWatch({ control: form.control, name: 'disabledDetectors' });
-  const chosenTest = useWatch({ control: form.control, name: 'testId' });
   const faceLocked = waiver && reason === 'REFUSED_BIOMETRIC_PROCESSING';
 
   const [csv, setCsv] = React.useState<{ fileName: string; parse: CsvParse } | null>(null);
@@ -133,7 +151,7 @@ function InviteBody({ onOpenChange, testId }: InviteDialogProps): React.JSX.Elem
       if (e.status === 409)
         return 'This candidate already has an open invitation to this test. Wait until it is used or expires, or invite them to another test.';
       if (e.status === 422 && e.code === 'REASON_NOT_ENABLED') {
-        return 'This waiver reason is not switched on for your organisation yet. Choose another reason, or ask a Super Admin.';
+        return 'This reason is not available yet in this build. Choose another reason.';
       }
       if (e.status === 422) return 'The window has already closed. Choose a later end.';
       if (e.status === 429) {
@@ -193,16 +211,16 @@ function InviteBody({ onOpenChange, testId }: InviteDialogProps): React.JSX.Elem
       return;
     }
     setProgress(0);
+    const startedIn = getGeneration();
     const result = await inviteInChunks(test, csv.parse.valid, window, setProgress, stop.current);
     setProgress(null);
     setOutcome(result);
-    if (result.created > 0) {
-      void invite.reset();
-    }
+    // Whatever was created, the candidate list and the test (now in use) are stale.
+    if (result.created > 0 || result.uncertain > 0) invalidateAfterInvite(qc, test, startedIn);
   }
 
   const problems = csv?.parse.problems ?? [];
-  const tooMany = (csv?.parse.valid.length ?? 0) > 0;
+  const hasValidRows = (csv?.parse.valid.length ?? 0) > 0;
 
   function downloadProblems(): void {
     const rows = [
@@ -220,15 +238,28 @@ function InviteBody({ onOpenChange, testId }: InviteDialogProps): React.JSX.Elem
     a.href = url;
     a.download = 'rows-not-invited.csv';
     a.click();
-    URL.revokeObjectURL(url);
+    // Revoke later: some browsers start the download after the click handler returns.
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  }
+
+  function downloadUnsent(): void {
+    const blob = new Blob([unsentRowsCsv(outcome?.unsentRows ?? [])], {
+      type: 'text/csv;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'rows-not-sent.csv';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
   }
 
   return (
     <>
       <DialogTitle>Invite candidates</DialogTitle>
       <DialogDescription>
-        Each candidate gets an email with a personal link that works once, inside the window you
-        choose.
+        Each candidate gets an email with a personal link. It opens the test until they start it,
+        inside the window you choose.
       </DialogDescription>
       <form
         onSubmit={(e) => {
@@ -499,11 +530,16 @@ function InviteBody({ onOpenChange, testId }: InviteDialogProps): React.JSX.Elem
                     {(aria) => (
                       <Select {...aria} className="w-full" {...form.register('waiverReason')}>
                         <option value="">Choose a reason</option>
-                        {WAIVER_REASONS.map((r) => (
-                          <option key={r} value={r}>
-                            {WAIVER_REASON_LABEL[r]}
-                          </option>
-                        ))}
+                        {WAIVER_REASONS.map((r) => {
+                          const unavailable =
+                            r === 'REFUSED_BIOMETRIC_PROCESSING' && !refusalReasonOffered;
+                          return (
+                            <option key={r} value={r} disabled={unavailable}>
+                              {WAIVER_REASON_LABEL[r]}
+                              {unavailable ? ' (not available yet in this build)' : ''}
+                            </option>
+                          );
+                        })}
                       </Select>
                     )}
                   </Field>
@@ -552,28 +588,18 @@ function InviteBody({ onOpenChange, testId }: InviteDialogProps): React.JSX.Elem
             role="status"
             title="Upload finished"
           >
-            <span data-testid="bulk-result">
-              {outcome.created} invitation{outcome.created === 1 ? '' : 's'} created
-              {outcome.errors.length + problems.length > 0
-                ? `, ${outcome.errors.length + problems.length} row${outcome.errors.length + problems.length === 1 ? '' : 's'} not invited`
-                : ''}
-              .
-            </span>{' '}
-            {outcome.notSent > 0 && outcome.failed === null
-              ? `You reached the hourly limit: ${outcome.notSent} row${outcome.notSent === 1 ? ' was' : 's were'} not sent. ${
-                  outcome.retryAfterSeconds
-                    ? `Try again in about ${Math.ceil(outcome.retryAfterSeconds / 60)} minutes`
-                    : 'Try again later'
-                } with the rows that are left; the invitations already sent stay valid.`
-              : null}
-            {outcome.failed
-              ? `The upload stopped: ${describe(outcome.failed)} ${outcome.notSent} row(s) were not sent.`
-              : null}
+            <span data-testid="bulk-result">{uploadSummary(outcome, problems.length)}</span>
           </Alert>
         ) : null}
 
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
+            {mode === 'many' && (outcome?.unsentRows.length ?? 0) > 0 ? (
+              <Button type="button" variant="outline" size="sm" onClick={downloadUnsent}>
+                <Download className="size-4" aria-hidden="true" />
+                Download the rows not sent
+              </Button>
+            ) : null}
             {mode === 'many' && (problems.length > 0 || (outcome?.errors.length ?? 0) > 0) ? (
               <Button type="button" variant="outline" size="sm" onClick={downloadProblems}>
                 <Download className="size-4" aria-hidden="true" />
@@ -590,20 +616,16 @@ function InviteBody({ onOpenChange, testId }: InviteDialogProps): React.JSX.Elem
               disabled={
                 isSubmitting ||
                 progress !== null ||
-                (mode === 'many' && outcome !== null && outcome.created > 0) ||
-                (testId === undefined && chosenTest === '' && false)
+                // After an upload, choose a file again (it clears the result) before sending more.
+                (mode === 'many' && outcome !== null)
               }
             >
-              <Upload
-                className="size-4"
-                aria-hidden="true"
-                style={{ display: mode === 'many' ? undefined : 'none' }}
-              />
+              {mode === 'many' ? <Upload className="size-4" aria-hidden="true" /> : null}
               {progress !== null || isSubmitting
                 ? 'Sending…'
                 : mode === 'one'
                   ? 'Send invitation'
-                  : tooMany
+                  : hasValidRows
                     ? `Invite ${csv?.parse.valid.length ?? 0} candidate${(csv?.parse.valid.length ?? 0) === 1 ? '' : 's'}`
                     : 'Invite'}
             </Button>
@@ -627,4 +649,37 @@ function Cell({ value }: { value: string }): React.JSX.Element {
       ) : null}
     </span>
   );
+}
+
+const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
+
+/** Why an upload stopped, in words that do not claim nothing was sent. */
+function stopCause(e: InviteFailure): string {
+  if (e.status === 401) return 'Your session ended.';
+  if (e.status === 403) return 'Your role cannot send invitations.';
+  if (e.status === 404) return 'The test no longer exists.';
+  if (e.status === 422) return 'The window has already closed.';
+  if (e.status === 400)
+    return [e.message, ...e.errors].filter(Boolean).join(' ') || 'The server did not accept a row.';
+  if (e.status >= 500 || e.status === 0) return 'The connection or the server failed.';
+  return 'The server refused the request.';
+}
+
+/** The plain-words result of a CSV upload: what was created, what was not, and what to do next. */
+export function uploadSummary(o: BulkOutcome, fileProblems: number): string {
+  const skipped = o.errors.length + fileProblems;
+  const made = `${plural(o.created, 'invitation', 'invitations')} created`;
+  const rest = skipped > 0 ? `, ${plural(skipped, 'row', 'rows')} not invited` : '';
+  if (o.failed) {
+    const may =
+      o.uncertain > 0 ? `; ${plural(o.uncertain, 'row', 'rows')} of those may have been sent` : '';
+    return `The upload stopped after ${plural(o.created, 'invitation', 'invitations')}${rest}. ${stopCause(o.failed)} ${plural(o.notSent, 'row was', 'rows were')} not confirmed${may}. Check the candidates list before trying again; people already invited are reported as already invited.`;
+  }
+  if (o.notSent > 0) {
+    const wait = o.retryAfterSeconds
+      ? `in about ${Math.ceil(o.retryAfterSeconds / 60)} minutes`
+      : 'later';
+    return `${made}${rest}. You reached the hourly limit: ${plural(o.notSent, 'row was', 'rows were')} not sent. Download the rows not sent, then choose that file again ${wait}. The invitations already sent stay valid.`;
+  }
+  return `${made}${rest}.`;
 }

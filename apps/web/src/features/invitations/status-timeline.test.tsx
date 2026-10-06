@@ -7,7 +7,7 @@ const at = (n: number) => new Date(Date.UTC(2026, 5, 1, n)).toISOString();
 const hist = (...s: string[]) => s.map((status, i) => ({ status, at: at(i) })) as never;
 const states = (items: ReturnType<typeof timelineSteps>) => items.map((i) => `${i.key}:${i.state}`);
 
-describe('FR-305 ADR 0002: the status timeline', () => {
+describe('FR-303 ADR 0002: the status timeline', () => {
   it('INVITED: the first step is current, the rest are ahead', () => {
     const s = states(timelineSteps('INVITED', hist('INVITED')));
     expect(s[0]).toBe('INVITED:current');

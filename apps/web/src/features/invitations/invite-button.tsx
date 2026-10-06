@@ -9,9 +9,11 @@ import { InviteDialog } from './invite-dialog';
 export function InviteButton({
   testId,
   disabled,
+  refusalReasonOffered,
 }: {
   testId: string;
   disabled?: boolean;
+  refusalReasonOffered?: boolean;
 }): React.JSX.Element | null {
   const { role } = useAuth();
   const [open, setOpen] = React.useState(false);
@@ -27,7 +29,12 @@ export function InviteButton({
       >
         Invite candidates
       </Button>
-      <InviteDialog open={open} onOpenChange={setOpen} testId={testId} />
+      <InviteDialog
+        open={open}
+        onOpenChange={setOpen}
+        testId={testId}
+        {...(refusalReasonOffered === undefined ? {} : { refusalReasonOffered })}
+      />
     </>
   );
 }

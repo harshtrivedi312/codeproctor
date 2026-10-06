@@ -2607,11 +2607,9 @@ components:
         sectionCount: { type: integer }
         questionCount: { type: integer }
         used:
-          {
-            type: boolean,
-            description: The test has an invitation or a session,
-            so it can no longer be edited,
-          }
+          type: boolean
+          description: >-
+            The test has an invitation or a session, so it can no longer be edited.
     TestDetail:
       allOf:
         - $ref: '#/components/schemas/TestSummary'
@@ -2673,22 +2671,11 @@ components:
           }
         disabledDetectors:
           type: array
-          maxItems: 9
+          maxItems: 8
           items:
             {
               type: string,
-              enum:
-                [
-                  FACE,
-                  GAZE,
-                  OBJECT,
-                  VOICE,
-                  MULTI_MONITOR,
-                  DEVTOOLS,
-                  VIRTUAL_CAMERA,
-                  EXTENSION,
-                  SIDE_CAMERA,
-                ],
+              enum: [FACE, GAZE, OBJECT, VOICE, MULTI_MONITOR, DEVTOOLS, VIRTUAL_CAMERA, EXTENSION],
             }
         allowedAssistiveTools:
           { type: array, maxItems: 10, items: { type: string, minLength: 1, maxLength: 80 } }

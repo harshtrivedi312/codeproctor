@@ -1,5 +1,5 @@
 'use client';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { ApiFailure } from '@/features/admin/queries';
 import { testKeys } from '@/features/tests/queries';
 import { api, type Schemas } from '@/lib/api/client';
@@ -49,6 +49,9 @@ function failFrom(response: Response, error: unknown): never {
 export function useInvite() {
   const qc = useQueryClient();
   return useMutation({
+    // The variables hold a name, an email and accommodations (a waiver note is health-adjacent):
+    // do not keep them in the cache after the call.
+    gcTime: 0,
     mutationFn: async (vars: { testId: string; body: Schemas['CreateInvitation'] }) => {
       const { data, error, response } = await api.POST('/v1/tests/{testId}/invitations', {
         params: { path: { testId: vars.testId } },
@@ -59,12 +62,17 @@ export function useInvite() {
     },
     onMutate: () => getGeneration(),
     onSuccess: (_data, vars, startedIn) => {
-      if (startedIn !== getGeneration()) return;
-      void qc.invalidateQueries({ queryKey: ['admin', 'candidates'] });
-      void qc.invalidateQueries({ queryKey: testKeys.list });
-      void qc.invalidateQueries({ queryKey: testKeys.detail(vars.testId) });
+      invalidateAfterInvite(qc, vars.testId, startedIn);
     },
   });
+}
+
+/** The candidate list, the tests list and the test (it is now "in use") are stale after an invite. */
+export function invalidateAfterInvite(qc: QueryClient, testId: string, startedIn: number): void {
+  if (startedIn !== getGeneration()) return;
+  void qc.invalidateQueries({ queryKey: ['admin', 'candidates'] });
+  void qc.invalidateQueries({ queryKey: testKeys.list });
+  void qc.invalidateQueries({ queryKey: testKeys.detail(testId) });
 }
 
 export interface BulkOutcome {
@@ -74,6 +82,10 @@ export interface BulkOutcome {
   errors: { row: number; message: string }[];
   /** Rows not sent because the hourly limit stopped the upload. */
   notSent: number;
+  /** The rows from the first unsent chunk on, in file order, so they can be downloaded and sent again. */
+  unsentRows: CsvRowInput[];
+  /** Of `notSent`: rows in a request whose answer never arrived, so they may have been invited. */
+  uncertain: number;
   /** Seconds the server asked to wait, when it stopped us. */
   retryAfterSeconds: number | null;
   /** The upload stopped on a failure other than the limit. */
@@ -97,12 +109,15 @@ export async function inviteInChunks(
     created: 0,
     errors: [],
     notSent: 0,
+    unsentRows: [],
+    uncertain: 0,
     retryAfterSeconds: null,
     failed: null,
   };
   for (let at = 0; at < rows.length; at += BULK_CHUNK) {
     if (signal?.aborted || startedIn !== getGeneration()) {
       out.notSent = rows.length - at;
+      out.unsentRows = rows.slice(at);
       return out;
     }
     const chunk = rows.slice(at, at + BULK_CHUNK);
@@ -128,11 +143,17 @@ export async function inviteInChunks(
       onProgress?.(Math.min(at + chunk.length, rows.length));
     } catch (e) {
       out.notSent = rows.length - at;
+      out.unsentRows = rows.slice(at);
       if (e instanceof InviteFailure) {
         if (e.status === 429) out.retryAfterSeconds = e.retryAfterSeconds;
-        else out.failed = e;
+        else {
+          out.failed = e;
+          if (e.status >= 500) out.uncertain = chunk.length;
+        }
       } else {
+        // No answer: the request in flight may or may not have been applied.
         out.failed = new InviteFailure(0, '', '', [], null);
+        out.uncertain = chunk.length;
       }
       return out;
     }

@@ -13,7 +13,7 @@ export const PROFILE_EXPLANATION: Record<
   STANDARD: {
     summary: 'The candidate works in the browser on their own computer.',
     records:
-      "Records the candidate's screen, webcam and microphone, their typing in the code editor, and browser events such as leaving full screen, switching tabs or pasting. A person reviews every flagged session.",
+      "Records the candidate's screen, webcam and microphone, their typing in the code editor, and browser events such as leaving full screen, switching tabs or pasting. A person reviews every session.",
   },
   STRICT: {
     summary: 'Everything in Standard, plus a second camera.',

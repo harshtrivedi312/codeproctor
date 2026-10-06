@@ -262,7 +262,7 @@ describe('Invitations mock: bulk (FR-304, TC-023)', () => {
   });
 });
 
-describe('Invitations mock: candidate timeline (FR-305, C-28)', () => {
+describe('Invitations mock: candidate timeline (FR-303, ADR 0002, C-28)', () => {
   it('returns the stage and its history, and never a score, flag or verdict', async () => {
     const r = await call<{ items: { status: string; history: { status: string }[] }[] }>(
       'RECRUITER',

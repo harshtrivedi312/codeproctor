@@ -53,7 +53,11 @@ const csvCell = (cell: string): string => {
 };
 
 /** Splits CSV text into records: BOM stripped, CRLF, LF and CR accepted, quotes and embedded newlines handled. */
-export function readRecords(text: string): { records: string[][]; unterminated: boolean } {
+export function readRecords(
+  text: string,
+  /** Stop after this many records (a file with more is refused anyway: do not split the rest). */
+  maxRecords = Number.POSITIVE_INFINITY,
+): { records: string[][]; unterminated: boolean } {
   const src = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   const records: string[][] = [];
   let record: string[] = [];
@@ -72,7 +76,7 @@ export function readRecords(text: string): { records: string[][]; unterminated: 
     if (!(record.length === 1 && record[0] === '')) records.push(record);
     record = [];
   };
-  while (i < src.length) {
+  while (i < src.length && records.length <= maxRecords) {
     const ch = src[i] as string;
     if (inQuotes) {
       if (ch === '"') {
@@ -95,6 +99,7 @@ export function readRecords(text: string): { records: string[][]; unterminated: 
     else cell += ch;
     i += 1;
   }
+  if (records.length > maxRecords) return { records, unterminated: false };
   if (inQuotes) return { records, unterminated: true };
   if (cell !== '' || record.length > 0 || wasQuoted) endRecord();
   return { records, unterminated: false };
@@ -126,7 +131,8 @@ export function parseInviteCsv(text: string): CsvParse {
     formulaLike: [],
   });
   if (new TextEncoder().encode(text).length > MAX_CSV_BYTES) return none('too-large');
-  const { records, unterminated } = readRecords(text);
+  // The header plus one record over the limit is enough to know the file is too long.
+  const { records, unterminated } = readRecords(text, MAX_CSV_ROWS + 2);
   if (unterminated) return none('unterminated-quote');
   if (records.length === 0) return none('empty');
   const header = records[0] as string[];
@@ -188,3 +194,10 @@ export function errorReportCsv(problems: readonly CsvProblem[]): string {
 
 export const EXAMPLE_CSV =
   'email,name\r\nada@example.test,Ada Lovelace\r\ngrace@example.test,Grace Hopper\r\n';
+
+/** Rows that were not sent, as a CSV in the same layout the upload takes. Formula-like cells are neutralised. */
+export function unsentRowsCsv(rows: readonly CsvRowInput[]): string {
+  return [['email', 'name', 'external_ref'], ...rows.map((r) => [r.email, r.name, r.externalRef])]
+    .map((r) => r.map(csvCell).join(','))
+    .join('\r\n');
+}

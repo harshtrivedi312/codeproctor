@@ -112,12 +112,19 @@ export function TestBuilder({
         : null,
     [questions.data, rows],
   );
-  const schema = React.useMemo(() => testDraftSchema(pickable), [pickable]);
   const initial = React.useMemo(
     () => (detail ? fromDetail(detail) : (template ?? emptyDraft())),
     // The builder mounts once per test: later server data must not overwrite edits.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
+  );
+  // Once a pass score is set (loaded or saved here) the API cannot clear it.
+  const [passScoreHad, setPassScoreHad] = React.useState(
+    detail?.passScore !== null && detail?.passScore !== undefined,
+  );
+  const schema = React.useMemo(
+    () => testDraftSchema(pickable, mode === 'edit' && passScoreHad),
+    [pickable, mode, passScoreHad],
   );
   const form = useForm<TestDraft>({
     defaultValues: initial,
@@ -130,7 +137,6 @@ export function TestBuilder({
   const [sections, setSections] = useSections(form);
   const durationMinutes = useWatch({ control: form.control, name: 'durationMinutes' });
   const profile = useWatch({ control: form.control, name: 'profile' });
-  const passScoreHad = detail?.passScore !== null && detail?.passScore !== undefined;
 
   const [problem, setProblem] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState<string | null>(null);
@@ -161,7 +167,9 @@ export function TestBuilder({
         );
       }
       if (error.status === 404) {
-        return 'A question you picked is no longer available (it may have been unpublished or archived). Remove it and pick it again.';
+        return /question/i.test(error.message)
+          ? 'A question you picked is no longer available (it may have been unpublished or archived). Remove it and pick it again.'
+          : 'This test is no longer available. It may have been removed. Go back to the tests list and check.';
       }
       if (error.status === 403)
         return 'Your role cannot do this. Ask a Super Admin if you think this is a mistake.';
@@ -182,8 +190,9 @@ export function TestBuilder({
         return;
       }
       if (!loaded.current) throw new ApiFailure(404, '');
-      const saved = await save.mutateAsync({ loaded: loaded.current, body: toBody(values) });
+      const saved = await save.mutateAsync({ loaded: loaded.current, body: toBody(values, true) });
       loaded.current = saved;
+      setPassScoreHad(saved.passScore !== null);
       form.reset(fromDetail(saved));
       setConflict(false);
       setNotice('Saved.');

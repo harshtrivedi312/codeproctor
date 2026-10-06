@@ -183,3 +183,10 @@ export function toAccommodations(v: InviteFormValues): Schemas['InvitationAccomm
 }
 
 export { MAX_EXTERNAL_REF };
+
+/**
+ * ADR 0015 section 7: REFUSED_BIOMETRIC_PROCESSING cannot be chosen until a consent variant ships;
+ * the server gate is the flag `accommodations.biometricRefusalReason` (deploy configuration, off by
+ * default, 422 REASON_NOT_ENABLED). The web hides the choice the same way until a build turns it on.
+ */
+export const BIOMETRIC_REFUSAL_OFFERED = process.env.NEXT_PUBLIC_BIOMETRIC_REFUSAL_REASON === 'on';

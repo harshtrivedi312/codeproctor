@@ -6,6 +6,7 @@ import { axe } from 'vitest-axe';
 import { apiBaseUrl } from '@/lib/env';
 import { MOCK_USERS } from '@/mocks/auth-handlers';
 import { server } from '@/mocks/server';
+import { markTestInvited } from '@/mocks/test-handlers';
 import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav, router } from '@/test/nav-mock';
 import { NewTestRoute, TestRoute } from './test-pages';
@@ -421,5 +422,83 @@ describe('Test builder: edit and view (FR-301, ADR 0002 S-6)', () => {
     openBuilder('/admin/tests/test-backend', <TestRoute id="test-backend" />);
     await screen.findByText('This test is in use');
     expect(await axe(document.body)).toHaveNoViolations();
+  });
+});
+
+describe('Test builder: edits the API would otherwise ignore (FR-301)', () => {
+  it('FR-301: clearing the description sends "" and the page shows it empty after the save', async () => {
+    const patches: Record<string, unknown>[] = [];
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'PATCH')
+        patches.push((await request.clone().json()) as Record<string, unknown>);
+    });
+    const u = openBuilder('/admin/tests/test-random', <TestRoute id="test-random" />);
+    const description = await screen.findByLabelText(/Description/);
+    expect(description).toHaveValue('Two different medium array questions drawn at random.');
+    await u.clear(description);
+    await u.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText('Saved.')).toBeInTheDocument();
+    expect(patches[0]).toMatchObject({ description: '' });
+    expect(screen.getByLabelText(/Description/)).toHaveValue('');
+    expect(
+      (await call<{ description: string | null }>('GET', '/v1/tests/test-random')).body.description,
+    ).toBe('');
+  });
+
+  it('FR-301: a pass score that is set cannot be cleared: an error, never a silent "Saved."', async () => {
+    const patches: unknown[] = [];
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'PATCH') patches.push(await request.clone().json());
+    });
+    const u = openBuilder('/admin/tests/test-random', <TestRoute id="test-random" />);
+    const pass = await screen.findByLabelText(/Pass score/);
+    expect(pass).toHaveValue(100);
+    await u.clear(pass);
+    await u.click(screen.getByRole('button', { name: 'Save' }));
+    expect(
+      await screen.findByText('A pass score cannot be removed. Enter a value.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Saved.')).not.toBeInTheDocument();
+    expect(patches).toEqual([]);
+  });
+
+  it('FR-301: a test with no pass score still saves with the field empty', async () => {
+    const u = openBuilder('/admin/tests/test-frontend', <TestRoute id="test-frontend" />);
+    const description = await screen.findByLabelText(/Description/);
+    await u.type(description, 'Now described');
+    await u.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText('Saved.')).toBeInTheDocument();
+  });
+
+  it('ADR 0002 S-6: the re-read before PATCH finds the test used, so nothing is saved and the page says why', async () => {
+    const patches: unknown[] = [];
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'PATCH') patches.push(1);
+    });
+    const u = openBuilder('/admin/tests/test-frontend', <TestRoute id="test-frontend" />);
+    const name = await screen.findByLabelText('Name');
+    await u.type(name, ' v2');
+    markTestInvited('test-frontend');
+    await u.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText(/Someone invited candidates to this test/)).toBeInTheDocument();
+    expect(patches).toEqual([]);
+    expect(screen.queryByText('Saved.')).not.toBeInTheDocument();
+  });
+
+  it('FR-301: a 404 on save for a removed test is not blamed on a question', async () => {
+    const u = openBuilder('/admin/tests/test-frontend', <TestRoute id="test-frontend" />);
+    const name = await screen.findByLabelText('Name');
+    await u.type(name, ' v2');
+    server.use(
+      http.get(`${base}/test-frontend`, () =>
+        HttpResponse.json(
+          { status: 404, title: 'Not Found', detail: 'Test not found.' },
+          { status: 404 },
+        ),
+      ),
+    );
+    await u.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText(/This test is no longer available/)).toBeInTheDocument();
+    expect(screen.queryByText(/A question you picked/)).not.toBeInTheDocument();
   });
 });

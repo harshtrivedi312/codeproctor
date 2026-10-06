@@ -179,7 +179,11 @@ const sectionSchema = z.object({
 });
 
 /** Builds the schema for a given set of pickable questions (random rules must be satisfiable). */
-export function testDraftSchema(pickable: readonly PickableQuestion[] | null) {
+export function testDraftSchema(
+  pickable: readonly PickableQuestion[] | null,
+  /** Editing a test that has a pass score: the API cannot clear it, so an empty field is an error. */
+  passScoreSet = false,
+) {
   return z
     .object({
       name: z
@@ -255,6 +259,9 @@ export function testDraftSchema(pickable: readonly PickableQuestion[] | null) {
         );
       }
       const ps = d.passScore.trim();
+      if (ps === '' && passScoreSet) {
+        issue(['passScore'], 'A pass score cannot be removed. Enter a value.');
+      }
       if (ps !== '') {
         const n = Number(ps);
         const total = totalPoints(d.sections);
@@ -296,12 +303,18 @@ export function testDraftSchema(pickable: readonly PickableQuestion[] | null) {
     });
 }
 
-/** The request body of a create or an edit, from a draft that passed `testDraftSchema`. */
-export function toBody(d: TestDraft): Schemas['CreateTest'] {
+/**
+ * The request body of a create or an edit, from a draft that passed `testDraftSchema`. On an edit
+ * the description is always sent: PATCH treats a missing field as unchanged, so leaving it out
+ * would make a cleared description come back.
+ */
+export function toBody(d: TestDraft, edit = false): Schemas['CreateTest'] {
   const ps = d.passScore.trim();
   return {
     name: d.name.trim(),
-    ...(d.description.trim() !== '' ? { description: d.description } : {}),
+    ...(edit || d.description.trim() !== ''
+      ? { description: d.description.trim() === '' ? '' : d.description }
+      : {}),
     durationMinutes: d.durationMinutes,
     profile: d.profile,
     ...(ps !== '' ? { passScore: Number(ps) } : {}),

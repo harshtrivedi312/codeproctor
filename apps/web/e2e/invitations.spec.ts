@@ -61,7 +61,7 @@ test.describe('FR-303 FR-304 FR-305 invitations', () => {
     await expect(dialog.getByTestId('bulk-result')).toContainText('1 invitation created');
   });
 
-  test('FR-305 ADR 0002: the candidates page shows each status and a timeline', async ({
+  test('FR-303 ADR 0002: the candidates page shows each status and a timeline', async ({
     page,
   }) => {
     await signInAt(page, '/admin/candidates');
