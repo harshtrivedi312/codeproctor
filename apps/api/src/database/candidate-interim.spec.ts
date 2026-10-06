@@ -376,6 +376,11 @@ const CS44: Record<string, Cs44Read> = {
       'reviewedById',
       'reviewedAt',
       'reviewNote',
+      // ADR 0015 section 4 (the video ID check on a WAIVED row): CS-4.4 lists id, attempt, status and
+      // created_at as readable, so the three columns are hidden from a candidate.
+      'videoCheckDone',
+      'videoCheckById',
+      'videoCheckAt',
     ],
   },
   MediaChunk: {
@@ -565,6 +570,9 @@ describe('S3: the CS-4.4 READ allowlist (NFR-04, TC-008)', () => {
         'reviewNote',
         'idImageKey',
         'selfieKey',
+        'videoCheckDone',
+        'videoCheckById',
+        'videoCheckAt',
       ],
       Test: ['passScore'],
       Submission: ['score', 'sourceCode'],
@@ -1400,6 +1408,9 @@ describe('S3: the WRITE allowlist of CS-4.4, exhaustive over the columns of ever
     ['IdentityCheck', 'status'],
     ['IdentityCheck', 'manualDecision'],
     ['IdentityCheck', 'reviewNote'],
+    ['IdentityCheck', 'videoCheckDone'],
+    ['IdentityCheck', 'videoCheckById'],
+    ['IdentityCheck', 'videoCheckAt'],
     ['Consent', 'consentTextId'],
     ['Consent', 'pdfKey'],
     ['Consent', 'pdfGeneratedAt'],
@@ -1423,6 +1434,117 @@ describe('S3: the WRITE allowlist of CS-4.4, exhaustive over the columns of ever
       }
     },
   );
+
+  describe('ADR 0015 (waived identity check) in a CANDIDATE scope: CS-4.4 gives the candidate no part of WAIVED or the video check', () => {
+    // CS-4.4 grants identity_checks create only, for attempt, id_image_key, selfie_key and
+    // liveness_passed, and reads id, attempt, status and created_at. `status` is not writable, so a
+    // candidate can never create a WAIVED row (the accommodations path, a staff scope, writes it), and
+    // the three video_check_* columns of ADR 0015 section 4 are neither readable nor writable.
+    const VIDEO_CHECK = ['videoCheckDone', 'videoCheckById', 'videoCheckAt'] as const;
+
+    it.each([
+      ['a bare status', { status: 'WAIVED' }],
+      ['the first attempt, as a waived row looks', { attempt: 1, status: 'WAIVED' }],
+      ['a second attempt', { attempt: 2, status: 'WAIVED' }],
+      ['a set object', { attempt: 1, status: { set: 'WAIVED' } }],
+      ['with a video check', { attempt: 1, status: 'WAIVED', videoCheckDone: true }],
+      [
+        'with the allowed columns beside it',
+        { attempt: 1, livenessPassed: true, status: 'WAIVED' },
+      ],
+    ] as const)(
+      'TC-008 FR-305 ADR 0015 4: IdentityCheck status = WAIVED is refused on every write operation (%s)',
+      (_label, row) => {
+        for (const operation of WRITES) {
+          expect(() =>
+            asCandidate(
+              'IdentityCheck',
+              operation,
+              operation === 'upsert'
+                ? writeArgs(operation, row, row)
+                : writeArgs(operation, { ...row }),
+            ),
+          ).toThrow(OrgScopeViolationError);
+        }
+        // On a create the refusal names the column, not the model: `status` is the one that is not listed.
+        for (const operation of CREATES) {
+          expect(() =>
+            asCandidate('IdentityCheck', operation, writeArgs(operation, { ...row })),
+          ).toThrow(/status cannot be written by a candidate create here|videoCheckDone cannot be/);
+        }
+      },
+    );
+
+    it('TC-008 FR-305 ADR 0015 4: a WAIVED row hidden in the second row of a createMany is refused too, and nothing is stamped', () => {
+      for (const operation of ['createMany', 'createManyAndReturn'] as const) {
+        expect(() =>
+          asCandidate('IdentityCheck', operation, {
+            data: [
+              { attempt: 1, livenessPassed: true },
+              { attempt: 2, status: 'WAIVED' },
+            ],
+            ...(operation === 'createManyAndReturn' ? { select: { id: true } } : {}),
+          }),
+        ).toThrow(/status cannot be written by a candidate create here/);
+      }
+    });
+
+    it('TC-008 FR-305 ADR 0015 4: the create a candidate may send (CS-4.4: attempt, id_image_key, selfie_key, liveness_passed) still passes, so the refusals above are about the columns', () => {
+      for (const operation of CREATES) {
+        expect(() =>
+          asCandidate(
+            'IdentityCheck',
+            operation,
+            writeArgs(operation, {
+              attempt: 1,
+              idImageKey: `${OWN_PREFIX}identity/1/sealed/id-${ULID}.jpg`,
+              selfieKey: `${OWN_PREFIX}identity/1/sealed/selfie-${ULID}.jpg`,
+              livenessPassed: true,
+            }),
+          ),
+        ).not.toThrow();
+      }
+    });
+
+    it.each(VIDEO_CHECK)(
+      'TC-008 FR-305 ADR 0015 4: IdentityCheck.%s is hidden: not in the read allowlist, and refused in select, where, orderBy, groupBy and an aggregate',
+      (column) => {
+        expect(hiddenColumnsOf('IdentityCheck')).toContain(column);
+        expect(CANDIDATE_READ.IdentityCheck?.read).not.toContain(column);
+        const filter = { [column]: column === 'videoCheckDone' ? true : null };
+        for (const operation of ['findMany', 'findFirst', 'findFirstOrThrow', 'count']) {
+          expect(() =>
+            asCandidate('IdentityCheck', operation, { select: { [column]: true } }),
+          ).toThrow(OrgScopeViolationError);
+          expect(() => asCandidate('IdentityCheck', operation, { where: filter })).toThrow(
+            OrgScopeViolationError,
+          );
+        }
+        expect(() =>
+          asCandidate('IdentityCheck', 'findMany', { orderBy: { [column]: 'asc' } }),
+        ).toThrow(OrgScopeViolationError);
+        expect(() =>
+          asCandidate('IdentityCheck', 'groupBy', { by: [column], _count: true }),
+        ).toThrow(OrgScopeViolationError);
+        expect(() =>
+          asCandidate('IdentityCheck', 'aggregate', { _count: { [column]: true } }),
+        ).toThrow(OrgScopeViolationError);
+        // The one non-hidden shape stays open: the default select omits the column, it does not throw.
+        expect(() => asCandidate('IdentityCheck', 'findMany', {})).not.toThrow();
+      },
+    );
+
+    it('TC-008 FR-305 ADR 0015 4: the readable columns are still exactly id, attempt, status and created_at, so a candidate reads WAIVED as a status and nothing else of the row', () => {
+      expect([...(CANDIDATE_READ.IdentityCheck?.read ?? [])].sort()).toEqual(
+        ['attempt', 'createdAt', 'id', 'status'].sort(),
+      );
+      for (const column of ['id', 'attempt', 'status', 'createdAt']) {
+        expect(() =>
+          asCandidate('IdentityCheck', 'findMany', { select: { [column]: true } }),
+        ).not.toThrow();
+      }
+    });
+  });
 
   it('TC-008 id, orgId and the timestamps are never written, on a create or an update, and a create naming an id is no longer an existence oracle (nit 7)', () => {
     for (const [model, rule] of SESSION_RULES) {
