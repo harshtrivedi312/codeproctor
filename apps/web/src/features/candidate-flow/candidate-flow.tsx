@@ -2,7 +2,9 @@
 import { useQuery } from '@tanstack/react-query';
 import * as React from 'react';
 import { ConsentStep } from '@/features/consent/consent-step';
+import type { IdentityDeps } from '@/features/identity/capture';
 import { IdentityStep } from '@/features/identity/identity-step';
+import type { SystemChecker } from '@/features/precheck/checks';
 import { SystemCheckStep } from '@/features/precheck/system-check-step';
 import { candidateApi } from './api';
 import { OtpStep } from './otp-step';
@@ -31,7 +33,20 @@ import type { LinkView, SessionTokenResponse } from './wire';
  * both: the candidate opens the link again and enters a new code, which is what resuming means
  * (ADR 0002). Progress is the server's session status, so a candidate resumes at the right step.
  */
-export function CandidateFlow({ token }: { token: string }): React.JSX.Element {
+export interface FlowOverrides {
+  checker?: SystemChecker;
+  identity?: Partial<IdentityDeps>;
+  navigate?: (path: string) => void;
+}
+
+export function CandidateFlow({
+  token,
+  overrides,
+}: {
+  token: string;
+  /** Test seam: real browsers never pass this. */
+  overrides?: FlowOverrides;
+}): React.JSX.Element {
   const [terminal, setTerminal] = React.useState<Terminal | null>(null);
   const [step, setStep] = React.useState<StepId>('welcome');
   const [sent, setSent] = React.useState<CodeSentInfo | null>(null);
@@ -160,13 +175,31 @@ export function CandidateFlow({ token }: { token: string }): React.JSX.Element {
         );
         break;
       case 'check':
-        body = <SystemCheckStep onPassed={goTo('identity')} onSessionEnded={endSession} />;
+        body = (
+          <SystemCheckStep
+            checker={overrides?.checker}
+            onPassed={goTo('identity')}
+            onSessionEnded={endSession}
+          />
+        );
         break;
       case 'identity':
-        body = <IdentityStep onDone={goTo('start')} onSessionEnded={endSession} />;
+        body = (
+          <IdentityStep
+            deps={overrides?.identity}
+            onDone={goTo('start')}
+            onSessionEnded={endSession}
+          />
+        );
         break;
       case 'start':
-        body = <StartStep resuming={resuming} onSessionEnded={endSession} />;
+        body = (
+          <StartStep
+            resuming={resuming}
+            {...(overrides?.navigate ? { navigate: overrides.navigate } : {})}
+            onSessionEnded={endSession}
+          />
+        );
         break;
     }
   } else {

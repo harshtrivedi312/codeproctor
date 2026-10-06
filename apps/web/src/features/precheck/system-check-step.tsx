@@ -363,7 +363,11 @@ export function SystemCheckStep({
                 disabled={disabled}
                 onClick={() => void run(row.id)}
               >
-                {state.phase === 'running' ? 'Checking...' : outcome ? 'Try again' : row.button}
+                {state.phase === 'running'
+                  ? 'Checking...'
+                  : outcome
+                    ? `${row.button} again`
+                    : row.button}
               </Button>
             </li>
           );

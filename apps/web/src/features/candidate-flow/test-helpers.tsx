@@ -22,7 +22,7 @@ export const server = setupServer(
 );
 
 export function useCandidateServer(): void {
-  beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+  beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
   beforeEach(() => {
     resetMockCandidateState();
     clearCandidateCredentials();
@@ -78,8 +78,8 @@ export function fakeScrollBox(el: HTMLElement, scrollHeight = 2000, clientHeight
 }
 
 export async function expectHeadingFocused(name: RegExp): Promise<void> {
-  const heading = await screen.findByRole('heading', { level: 1, name });
-  await waitFor(() => expect(heading).toHaveFocus());
+  // Query again on every try: the heading may be replaced while a step finishes loading.
+  await waitFor(() => expect(screen.getByRole('heading', { level: 1, name })).toHaveFocus());
 }
 
 /** No camera, microphone or screen request may happen: used for TC-030 and TC-096. */

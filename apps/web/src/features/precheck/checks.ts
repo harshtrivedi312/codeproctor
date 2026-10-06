@@ -198,13 +198,13 @@ export class BrowserSystemChecker implements SystemChecker {
         return {
           status: 'failed',
           message: 'Camera access was blocked.',
-          help: 'Click the camera or lock icon in the address bar, set Camera to "Allow", then press "Try again". If your computer blocks the camera, check its privacy settings.',
+          help: 'Click the camera or lock icon in the address bar, set Camera to "Allow", then try again. If your computer blocks the camera, check its privacy settings.',
         };
       }
       return {
         status: 'failed',
         message: isMissing(error) ? 'No camera was found.' : 'The camera could not start.',
-        help: 'Plug in or turn on your webcam and close other apps that use it (video calls, for example), then press "Try again".',
+        help: 'Plug in or turn on your webcam and close other apps that use it (video calls, for example), then try again.',
       };
     }
   }
@@ -228,13 +228,13 @@ export class BrowserSystemChecker implements SystemChecker {
         return {
           status: 'failed',
           message: 'Microphone access was blocked.',
-          help: 'Click the lock icon in the address bar, set Microphone to "Allow", then press "Try again".',
+          help: 'Click the lock icon in the address bar, set Microphone to "Allow", then try again.',
         };
       }
       return {
         status: 'failed',
         message: isMissing(error) ? 'No microphone was found.' : 'The microphone could not start.',
-        help: 'Plug in or unmute your microphone and close other apps that use it, then press "Try again".',
+        help: 'Plug in or unmute your microphone and close other apps that use it, then try again.',
       };
     }
     const win = this.env.window as Window & { AudioContext?: typeof AudioContext };
@@ -302,7 +302,7 @@ export class BrowserSystemChecker implements SystemChecker {
         kind: 'OTHER',
         status: 'failed',
         message: 'You shared a window or a tab, not your entire screen.',
-        help: 'Press "Try again" and, in the sharing window, choose the "Entire Screen" tab and pick your screen. A window or a browser tab is not enough.',
+        help: 'Try again and, in the sharing window, choose the "Entire Screen" tab and pick your screen. A window or a browser tab is not enough.',
       };
     } catch (error) {
       return {
@@ -311,7 +311,7 @@ export class BrowserSystemChecker implements SystemChecker {
         message: isDenied(error)
           ? 'Screen sharing was cancelled or blocked.'
           : 'Screen sharing could not start.',
-        help: 'Press "Try again", choose "Entire Screen" and press "Share". On a Mac, also allow your browser under System Settings, Privacy and Security, Screen Recording, then restart the browser.',
+        help: 'Try again, choose "Entire Screen" and press "Share". On a Mac, also allow your browser under System Settings, Privacy and Security, Screen Recording, then restart the browser.',
       };
     } finally {
       stopStream(stream);
@@ -336,7 +336,7 @@ export class BrowserSystemChecker implements SystemChecker {
       return {
         status: 'failed',
         message: 'Full-screen mode was blocked.',
-        help: 'Press "Try again" and allow full screen if your browser asks. Close other windows that may take over the screen.',
+        help: 'Try again and allow full screen if your browser asks. Close other windows that may take over the screen.',
       };
     }
   }
@@ -352,7 +352,7 @@ export class BrowserSystemChecker implements SystemChecker {
         rttMs: 0,
         status: 'failed',
         message: 'We could not reach the test service.',
-        help: 'Check your internet connection (try another website), turn off a VPN if you use one, then press "Try again".',
+        help: 'Check your internet connection (try another website), turn off a VPN if you use one, then try again.',
       };
     }
     const downlinkKbps = Math.round((conn?.downlink ?? 0) * 1000);
@@ -381,7 +381,7 @@ export class BrowserSystemChecker implements SystemChecker {
           result,
           status: 'failed',
           message: 'More than one screen is connected.',
-          help: 'Unplug or turn off extra monitors (or set the display to "Show only on 1"), then press "Try again". Only one screen may be used during the test.',
+          help: 'Unplug or turn off extra monitors (or set the display to "Show only on 1"), then try again. Only one screen may be used during the test.',
         };
       default:
         return {
