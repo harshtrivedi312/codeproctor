@@ -12,10 +12,12 @@ import { loadRetentionConfig } from './retention.config';
 import { ConsentRetentionRepository } from './consent-retention.repository';
 import {
   ErasureAlertPort,
+  ErasureListPort,
   ErasureNoticePort,
   ErasureSchedulerPort,
   SessionFencePort,
   UnconfiguredErasureAlert,
+  UnconfiguredErasureList,
   UnconfiguredErasureNotice,
   UnconfiguredErasureScheduler,
   UnconfiguredSessionFence,
@@ -30,7 +32,7 @@ export interface RetentionModuleOptions {
   readonly objectStore: NonNullable<ModuleMetadata['imports']>[number];
   /** Optional: a module that exports LegalHoldPort (OQ-10). The default holds nothing. */
   readonly legalHold?: NonNullable<ModuleMetadata['imports']>[number];
-  /** Optional: a module that exports SessionFencePort, ErasureSchedulerPort, ErasureNoticePort and ErasureAlertPort. Without it every erasure call is refused (fail closed). */
+  /** Optional: a module that exports SessionFencePort, ErasureSchedulerPort, ErasureNoticePort, ErasureAlertPort and ErasureListPort. Without it every erasure call is refused (fail closed). */
   readonly erasure?: NonNullable<ModuleMetadata['imports']>[number];
 }
 
@@ -66,6 +68,7 @@ export class RetentionModule {
               { provide: ErasureSchedulerPort, useClass: UnconfiguredErasureScheduler },
               { provide: ErasureNoticePort, useClass: UnconfiguredErasureNotice },
               { provide: ErasureAlertPort, useClass: UnconfiguredErasureAlert },
+              { provide: ErasureListPort, useClass: UnconfiguredErasureList },
             ]),
       ],
       exports: [RetentionService, ErasureService],

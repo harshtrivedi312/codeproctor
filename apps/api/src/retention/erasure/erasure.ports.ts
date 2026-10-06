@@ -71,6 +71,19 @@ export abstract class ErasureAlertPort {
   }): Promise<void>;
 }
 
+/**
+ * The erasure list that survives a restore (ADR 0004 9.7, FU-DBB-02; `infra/backup/erasure-list.sh`):
+ * an object `<prefix>erasure-list/<stamp>-<candidateId>.json` kept outside the dumps, re-applied after
+ * a restore. Both calls are idempotent (the adapter must not write a second entry for a candidate that
+ * has one) and carry the candidate id only. A failure throws, so the run stops before it erases.
+ */
+export abstract class ErasureListPort {
+  /** Before the first fence of the request: without it a restore brings the candidate back. */
+  abstract append(args: { orgId: string; candidateId: string }): Promise<void>;
+  /** After the completion row exists and the candidate is anonymised: lets the entry be pruned. */
+  abstract complete(args: { orgId: string; candidateId: string }): Promise<void>;
+}
+
 /** Each refuses every call until the real module binds it: nothing can erase half-wired. */
 @Injectable()
 export class UnconfiguredSessionFence extends SessionFencePort {
@@ -97,5 +110,14 @@ export class UnconfiguredErasureNotice extends ErasureNoticePort {
 export class UnconfiguredErasureAlert extends ErasureAlertPort {
   raise(): Promise<void> {
     return Promise.reject(new Error('erasure alert is not configured'));
+  }
+}
+@Injectable()
+export class UnconfiguredErasureList extends ErasureListPort {
+  append(): Promise<void> {
+    return Promise.reject(new Error('erasure list is not configured'));
+  }
+  complete(): Promise<void> {
+    return Promise.reject(new Error('erasure list is not configured'));
   }
 }

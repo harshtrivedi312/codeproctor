@@ -20,6 +20,7 @@ import { RETENTION_CONFIG } from '../retention.service';
 import { deleteVerified } from '../verified-delete';
 import {
   ErasureAlertPort,
+  ErasureListPort,
   ErasureNoticePort,
   ErasureSchedulerPort,
   SessionFencePort,
@@ -48,6 +49,7 @@ export class ErasureService {
     private readonly scheduler: ErasureSchedulerPort,
     private readonly notices: ErasureNoticePort,
     private readonly alerts: ErasureAlertPort,
+    private readonly list: ErasureListPort,
     @Inject(RETENTION_CONFIG) private readonly config: RetentionConfig,
   ) {}
 
@@ -123,7 +125,13 @@ export class ErasureService {
     const hold = await inOrg(() => this.repo.holdEnabled(orgId));
     const sessions = await inOrg(() => this.repo.sessionsOf(candidateId));
 
+    // Before anything is fenced or deleted: a restore must not bring this candidate back (FU-DBB-02).
+    if (!(await inOrg(() => this.repo.isCompleted(requestId, candidateId)))) {
+      await this.list.append({ orgId, candidateId });
+    }
+
     let heldAny = false;
+    let fencedNow = false;
     for (const s of sessions) {
       if (s.status === 'ERASED') continue;
       const wouldHold =
@@ -138,6 +146,7 @@ export class ErasureService {
         continue;
       }
       if (result === 'fenced') {
+        fencedNow = true;
         // Record the fence time first: completion waits for it, even if the next call fails.
         const fencedAt = await inOrg(() =>
           this.repo.fenceTime({ orgId, candidateId, sessionId: s.id, requestId, now: current() }),
@@ -165,7 +174,10 @@ export class ErasureService {
     const wasCompleted = await inOrg(() => this.repo.isCompleted(requestId, candidateId));
     let allClean = fresh.every((s) => s.status === 'ERASED');
     let settled = true;
-    for (const s of wasCompleted ? [] : fresh) {
+    // Skip only when nothing was fenced now and every session is already ERASED (a session that shows
+    // up live after completion is still fenced AND purged).
+    const skipPurge = wasCompleted && !fencedNow && fresh.every((s) => s.status === 'ERASED');
+    for (const s of skipPurge ? [] : fresh) {
       if (s.status !== 'ERASED') continue;
       const fencedAt = await inOrg(() =>
         this.repo.fenceTime({ orgId, candidateId, sessionId: s.id, requestId, now: current() }),
@@ -208,7 +220,7 @@ export class ErasureService {
 
     // The completion row waits for a verified pass at or after fence + 60 s + the sweep margin, so a
     // late upload is caught by the same pass that completes (ADR 0004 9.5 steps 5, 7, 8).
-    let completed = await inOrg(() => this.repo.isCompleted(requestId, candidateId));
+    let completed = wasCompleted;
     if (!completed && allClean && settled) {
       await inOrg(() => this.repo.recordCompleted({ orgId, candidateId, requestId }));
       completed = true;
@@ -246,6 +258,7 @@ export class ErasureService {
         );
       }
     }
+    if (completed && anonymised) await this.list.complete({ orgId, candidateId });
     // After the day-28 check: an already anonymised candidate gets no mail (ADR 0004 9.5 step 8).
     if (completed && !sent && !noticed && !anonymised) {
       await this.notices.enqueueCompleted({ orgId, candidateId, requestId });

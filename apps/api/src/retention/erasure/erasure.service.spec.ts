@@ -5,6 +5,7 @@ import { SessionStatus } from '../../generated/prisma/enums.js';
 import { RETENTION_MARKER_ACTIONS, sessionPrefix } from '../retention.constants';
 import {
   UnconfiguredErasureAlert,
+  UnconfiguredErasureList,
   UnconfiguredErasureNotice,
   UnconfiguredErasureScheduler,
   UnconfiguredSessionFence,
@@ -13,6 +14,7 @@ import { ErasureRepository, requestIdOf } from './erasure.repository';
 import { ErasureService } from './erasure.service';
 import {
   ErasureAlertPort,
+  ErasureListPort,
   ErasureNoticePort,
   ErasureSchedulerPort,
   SessionFencePort,
@@ -82,6 +84,21 @@ class FakeAlert extends ErasureAlertPort {
   }
 }
 
+class FakeList extends ErasureListPort {
+  appended: string[] = [];
+  completed: string[] = [];
+  fail = false;
+  append(a: { candidateId: string }): Promise<void> {
+    if (this.fail) return Promise.reject(new Error('list down'));
+    this.appended.push(a.candidateId);
+    return Promise.resolve();
+  }
+  complete(a: { candidateId: string }): Promise<void> {
+    this.completed.push(a.candidateId);
+    return Promise.resolve();
+  }
+}
+
 describe('erasure on request (FR-704, C-06, C-17)', () => {
   const { h, build, setup, keys, sessionIdOf } = useRetentionDatabase();
 
@@ -95,9 +112,19 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
     const scheduler = new FakeScheduler();
     const notices = new FakeNotice();
     const alerts = new FakeAlert();
+    const list = new FakeList();
     const repo = new ErasureRepository(b.prisma, b.orgContext, b.repo);
-    const svc = new ErasureService(repo, h.store, fence, scheduler, notices, alerts, b.config);
-    return { svc, repo, fence, scheduler, notices, alerts };
+    const svc = new ErasureService(
+      repo,
+      h.store,
+      fence,
+      scheduler,
+      notices,
+      alerts,
+      list,
+      b.config,
+    );
+    return { svc, repo, fence, scheduler, notices, alerts, list };
   }
   const candidateOf = (t: typeof h.A): Promise<string> =>
     Promise.resolve((t.rows.Candidate.unique as { id: string }).id);
@@ -468,6 +495,7 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
       new UnconfiguredErasureScheduler(),
       new UnconfiguredErasureNotice(),
       new UnconfiguredErasureAlert(),
+      new UnconfiguredErasureList(),
       b.config,
     );
     await expect(
@@ -512,5 +540,49 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
     expect(notices.completed).toBe(mails); // anonymised first: no completion mail
     expect(await completedRows(cid)).toHaveLength(1);
     expect(await listedIds()).not.toContain(cid);
+  });
+  it('TC-094 #19 C-06: the erasure list gets the candidate before anything is fenced, and is completed after anonymisation; a list failure erases nothing', async () => {
+    await setup(h.A, { submittedDaysAgo: 3, anchorDaysAgo: 3 });
+    const cid = await candidateOf(h.A);
+    const { svc, list, fence } = service();
+    list.fail = true;
+    await expect(
+      svc.requestErasure({ orgId: h.A.orgId, candidateId: cid, actorId: ACTOR(), now: NOW }),
+    ).rejects.toThrow();
+    expect(fence.calls).toHaveLength(0);
+    expect(h.store.keys.has(keys(h.A).media)).toBe(true);
+    list.fail = false;
+    await svc.run(h.A.orgId, cid, NOW);
+    expect(list.appended).toContain(cid);
+    expect(list.completed).toEqual([]);
+    await svc.run(h.A.orgId, cid, at(SETTLED));
+    await svc.recordManualNotice({
+      orgId: h.A.orgId,
+      candidateId: cid,
+      actorId: ACTOR(),
+      now: at(SETTLED),
+    });
+    expect(list.completed).toContain(cid);
+  });
+  it('TC-094 #20: after completion a later run does not touch the store; a live session that appears afterwards is fenced and purged', async () => {
+    await setup(h.A, { submittedDaysAgo: 3, anchorDaysAgo: 3 });
+    const sid = sessionIdOf(h.A);
+    const cid = await candidateOf(h.A);
+    const { svc } = service();
+    await svc.requestErasure({ orgId: h.A.orgId, candidateId: cid, actorId: ACTOR(), now: NOW });
+    await svc.run(h.A.orgId, cid, at(SETTLED));
+    const rows = () =>
+      h.owner.auditLog.count({
+        where: { entityId: sid, action: { startsWith: 'ERASURE_SESSION' } },
+      });
+    const before = await rows();
+    h.store.failList = true;
+    expect((await svc.run(h.A.orgId, cid, at(10 * 86_400_000))).status).toBe('completed');
+    expect(await rows()).toBe(before);
+    h.store.failList = false;
+    await h.owner.session.update({ where: { id: sid }, data: { status: 'COMPLETED' } });
+    h.store.put(keys(h.A).media);
+    await svc.run(h.A.orgId, cid, at(11 * 86_400_000));
+    expect(h.store.keys.has(keys(h.A).media)).toBe(false);
   });
 });
