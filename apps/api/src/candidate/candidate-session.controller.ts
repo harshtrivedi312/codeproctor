@@ -10,6 +10,7 @@ import {
   ApiTooManyRequestsResponse,
 } from '@nestjs/swagger';
 import type { Request } from 'express';
+import { CandidateRoute } from '../common/auth/candidate-route.decorator';
 import { Candidate, CandidateScoped } from './candidate.decorators';
 import type { CandidateContext } from './candidate.types';
 import { CandidateSessionService } from './candidate-session.service';
@@ -55,6 +56,7 @@ export class CandidateSessionController {
     private readonly limiter: SessionRateLimiter,
   ) {}
 
+  // TODO(hub PR #113): @CandidateRoute('candidate_session:read') once the permission exists in shared.
   @Get()
   @Header('Cache-Control', NO_STORE)
   @ApiOperation({ summary: 'Session state with the server clock (a reload, FR-505)' })
@@ -65,6 +67,7 @@ export class CandidateSessionController {
   }
 
   @Get('consent')
+  @CandidateRoute('candidate_consent:read')
   @Header('Cache-Control', NO_STORE)
   @ApiOperation({
     summary: "The org's current consent document for this session (FR-401, D-17)",
@@ -80,6 +83,7 @@ export class CandidateSessionController {
   }
 
   @Post('consent/sign')
+  @CandidateRoute('candidate_consent:sign')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)
   @ApiOperation({
@@ -105,6 +109,7 @@ export class CandidateSessionController {
   }
 
   @Post('consent/decline')
+  @CandidateRoute('candidate_consent:decline')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)
   @ApiOperation({
@@ -120,6 +125,7 @@ export class CandidateSessionController {
     return this.consent.decline(ctx, { ip: req.ip, userAgent: req.headers['user-agent'] });
   }
 
+  // TODO(hub PR #113): @CandidateRoute('candidate_session:start').
   @Post('test/start')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)
@@ -150,6 +156,7 @@ export class CandidateSessionController {
     };
   }
 
+  // TODO(hub PR #113): @CandidateRoute('candidate_session:heartbeat').
   @Post('heartbeat')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)
@@ -178,6 +185,7 @@ export class CandidateSessionController {
     };
   }
 
+  // TODO(hub PR #113): @CandidateRoute('candidate_session:key').
   @Post('proctor-key')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)

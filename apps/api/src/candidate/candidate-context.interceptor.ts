@@ -9,21 +9,19 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
-import { OrgContextService } from '../database/org-context';
+import { CandidateScope } from './candidate-scope';
 import type { CandidateRequest } from './candidate.types';
 
 @Injectable()
 export class CandidateContextInterceptor implements NestInterceptor {
-  constructor(private readonly orgContext: OrgContextService) {}
+  constructor(private readonly scope: CandidateScope) {}
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     if (context.getType() !== 'http') return next.handle();
     const candidate = context.switchToHttp().getRequest<CandidateRequest>().candidate;
     if (candidate === undefined) throw new UnauthorizedException('Authentication required.');
     return new Observable<unknown>((subscriber) => {
-      const subscription = this.orgContext.runInOrg(candidate.orgId, () =>
-        next.handle().subscribe(subscriber),
-      );
+      const subscription = this.scope.enter(candidate, () => next.handle().subscribe(subscriber));
       return () => subscription.unsubscribe();
     });
   }

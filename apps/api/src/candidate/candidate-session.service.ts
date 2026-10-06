@@ -1,7 +1,7 @@
 // Session reads and the heartbeat (FR-609, ADR 0013 section 5.3) and the proctor key route
 // (ADR 0013 sections 2 and 4). Time is the server's: deadlines come from the database and the API
 // clock, never from the client (FR-505, TC-047).
-import { HttpStatus, Inject, Injectable } from '@nestjs/common';
+import { HttpStatus, Inject, Injectable, Logger } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 import { ConfigService } from '@nestjs/config';
 import { CodedHttpException } from '../common/coded.exception';
@@ -57,6 +57,8 @@ export interface ProctorKeyView {
 
 @Injectable()
 export class CandidateSessionService {
+  private readonly logger = new Logger(CandidateSessionService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly keys: SessionKeyService,
@@ -133,9 +135,18 @@ export class CandidateSessionService {
     });
     await ensureConnected(this.redis);
     // The marker is set by the watchdog when it logs DISCONNECTED; the first beat removes it.
-    const wasDisconnected = await this.redis.del(`disc:${ctx.sessionId}`);
-    if (wasDisconnected > 0) {
-      await this.jobs.enqueueServerEvent(ctx.sessionId, ctx.orgId, 'RECONNECTED', now);
+    // Queue RECONNECTED first and remove the marker after: if the queue is down the marker stays
+    // and the next beat tries again, so the event is never lost (the job id carries the episode, so
+    // a repeat is not written twice).
+    const marker = `disc:${ctx.sessionId}`;
+    const episode = await this.redis.get(marker);
+    if (episode !== null) {
+      try {
+        await this.jobs.enqueueServerEvent(ctx.sessionId, ctx.orgId, 'RECONNECTED', now, episode);
+        await this.redis.del(marker);
+      } catch {
+        this.logger.warn('RECONNECTED was not queued; the next beat retries');
+      }
     }
     await this.storeRecorderSnapshot(ctx.sessionId, body);
 

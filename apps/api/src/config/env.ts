@@ -165,5 +165,16 @@ export function validateEnv(raw: Record<string, unknown>): Env {
       .join('; ');
     throw new Error(`Invalid environment: ${problems}`);
   }
-  return result.data;
+  // The wrapping key is named by the active kid (SESSION_KEY_ENC_KEY_<kid>), so the schema cannot
+  // list it. Pilot and production must not start without a valid one: without it every test start
+  // would fail at the candidate's first click (ADR 0013 section 2). Names only, never values.
+  const env = result.data;
+  if (env.APP_ENV === 'pilot' || env.APP_ENV === 'production' || env.NODE_ENV === 'production') {
+    const name = `SESSION_KEY_ENC_KEY_${env.SESSION_KEY_ENC_ACTIVE_KID}`;
+    const value = raw[name];
+    if (typeof value !== 'string' || !aesKey.safeParse(value).success) {
+      throw new Error(`Invalid environment: ${name}: must be 32 bytes, base64 encoded`);
+    }
+  }
+  return env;
 }

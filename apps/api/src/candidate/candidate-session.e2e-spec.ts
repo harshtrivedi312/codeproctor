@@ -7,7 +7,9 @@ import { INestApplication } from '@nestjs/common';
 import { RedisContainer, StartedRedisContainer } from '@testcontainers/redis';
 import { Redis } from 'ioredis';
 import jwt from 'jsonwebtoken';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { sha256Hex } from '../auth/crypto.util';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { createPrismaClient } from '../database/create-prisma-client';
@@ -19,6 +21,9 @@ import type { SessionKeyService } from '../session/session-key.service';
 import type { CandidateTokenService } from './candidate-token.service';
 import { CandidateMailPort } from './candidate-mail.port';
 import type { ConsentCopyMail, OtpLockoutMail, OtpMail } from './candidate-mail.port';
+import type { OrgContextService } from '../database/org-context';
+import type { PrismaService } from '../database/prisma.service';
+import type { OtpService } from './otp.service';
 import type { SessionJobsService } from './session-jobs.service';
 import { createInvitation, createTenant, passedSystemCheck } from './testing/fixtures';
 import type { InvitationFixture, InvitationOptions, Tenant } from './testing/fixtures';
@@ -27,12 +32,15 @@ import { InMemoryObjectStorage } from './testing/in-memory-storage';
 const API = '/api/v1/candidate/session';
 const ENC_KEY = randomBytes(32).toString('base64');
 const CANDIDATE_SECRET = randomBytes(32).toString('base64');
+const WRAP_KEY = randomBytes(32).toString('base64');
 
 class FakeMail extends CandidateMailPort {
   readonly otps: Array<OtpMail & { to: string }> = [];
   readonly lockouts: Array<OtpLockoutMail & { to: string }> = [];
   readonly copies: Array<ConsentCopyMail & { to: string }> = [];
+  failing = false;
   sendOtp(to: string, mail: OtpMail): Promise<void> {
+    if (this.failing) return Promise.reject(new Error('mail down'));
     this.otps.push({ ...mail, to });
     return Promise.resolve();
   }
@@ -41,6 +49,7 @@ class FakeMail extends CandidateMailPort {
     return Promise.resolve();
   }
   sendConsentCopy(to: string, mail: ConsentCopyMail): Promise<void> {
+    if (this.failing) return Promise.reject(new Error('mail down'));
     this.copies.push({ ...mail, to });
     return Promise.resolve();
   }
@@ -69,6 +78,9 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
   let tokens: CandidateTokenService;
   let keys: SessionKeyService;
   let jobs: SessionJobsService;
+  let otp: OtpService;
+  let prisma: PrismaService;
+  let orgContext: OrgContextService;
   let tenant: Tenant;
   let other: Tenant;
   let unapproved: Tenant;
@@ -92,7 +104,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       JWT_CANDIDATE_SECRET: CANDIDATE_SECRET,
       OTP_PEPPER: randomBytes(32).toString('base64'),
       SESSION_KEY_ENC_ACTIVE_KID: 'k1',
-      SESSION_KEY_ENC_KEY_k1: randomBytes(32).toString('base64'),
+      SESSION_KEY_ENC_KEY_k1: WRAP_KEY,
       CANDIDATE_TOKEN_TTL_SECONDS: '900',
       THROTTLE_DEFAULT_LIMIT: '100000',
       THROTTLE_AUTH_LIMIT: '100000',
@@ -148,6 +160,16 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     tokens = app.get(T);
     keys = app.get(K);
     jobs = app.get(J);
+    const { OtpService: O } = jest.requireActual<typeof import('./otp.service')>('./otp.service');
+    otp = app.get(O);
+    prisma = app.get(
+      jest.requireActual<typeof import('../database/prisma.service')>('../database/prisma.service')
+        .PrismaService,
+    );
+    orgContext = app.get(
+      jest.requireActual<typeof import('../database/org-context')>('../database/org-context')
+        .OrgContextService,
+    );
   }, 240_000);
 
   afterAll(async () => {
@@ -329,10 +351,15 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const inv = await invite();
       const code = await otpFor(inv);
       const lockoutsBefore = mail.lockouts.length;
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 4; i++) {
         const r = await post('/start', { invitationToken: inv.token, otp: wrongCode(code) });
         expect(r.status).toBe(400);
       }
+      // The 5th wrong guess is answered as a block at once, not as one more typo.
+      const fifth = await post('/start', { invitationToken: inv.token, otp: wrongCode(code) });
+      expect(fifth.status).toBe(429);
+      expect(fifth.body).toMatchObject({ code: 'LINK_BLOCKED', retryAfterSeconds: 1800 });
+      expect(Number(fifth.headers['retry-after'])).toBe(1800);
       const blocked = await post('/start', { invitationToken: inv.token, otp: code });
       expect(blocked.status).toBe(429);
       expect(blocked.body).toMatchObject({ code: 'LINK_BLOCKED' });
@@ -389,7 +416,8 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         await post('/start', { invitationToken: inv.token, otp: wrongCode(code) }).expect(400);
       code = await otpFor(inv);
       await post('/start', { invitationToken: inv.token, otp: wrongCode(code) }).expect(400);
-      await post('/start', { invitationToken: inv.token, otp: wrongCode(code) }).expect(400);
+      // 3 + 1 + this one = the 5th wrong guess in all, so it blocks.
+      await post('/start', { invitationToken: inv.token, otp: wrongCode(code) }).expect(429);
       const blocked = await post('/start', { invitationToken: inv.token, otp: code });
       expect(blocked.status).toBe(429);
     });
@@ -1705,6 +1733,519 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     }
     const text = JSON.stringify(doc.paths);
     expect(text).not.toContain('params');
+  });
+
+  // ---------- review fixes ----------
+
+  describe('review fixes (BE-07 review)', () => {
+    const tokenFor = (inv: InvitationFixture, t: Tenant = tenant, epoch = 1): string =>
+      tokens.sign({ sid: inv.sessionId, oid: t.orgId, epoch }).token;
+
+    it('FR-106: when the email cannot be sent, no OTP_SENT is reported, no code is kept and a retry is allowed at once', async () => {
+      const inv = await invite();
+      mail.failing = true;
+      const sentBefore = mail.otps.length;
+      const res = await post('/otp', { invitationToken: inv.token });
+      mail.failing = false;
+      expect(res.status).toBe(503);
+      expect(res.body).toMatchObject({ code: 'MAIL_UNAVAILABLE' });
+      expect(JSON.stringify(res.body)).not.toContain('OTP_SENT');
+      expect(mail.otps.length).toBe(sentBefore);
+      expect(await redis.exists(`otp:${inv.invitationId}`)).toBe(0);
+      // No cooldown was left behind: the retry goes through immediately.
+      const again = await post('/otp', { invitationToken: inv.token }).expect(200);
+      expect(again.body).toMatchObject({ state: 'OTP_SENT' });
+    });
+
+    it('FR-401: with no mail provider the consent job never stamps copy_emailed_at; it does once mail works', async () => {
+      const inv = await invite({ status: 'OPENED' });
+      mail.failing = true;
+      await request(server())
+        .post(`${API}/consent/sign`)
+        .set('Authorization', `Bearer ${tokenFor(inv, tenant, 0)}`)
+        .send({
+          consentTextId: tenant.consentTextId,
+          signedName: 'Ada Lovelace',
+          confirmedAge18: true,
+        })
+        .expect(200);
+      const stored = await eventually(
+        () => owner.consent.findUniqueOrThrow({ where: { sessionId: inv.sessionId } }),
+        (c) => c.pdfKey !== null,
+      );
+      expect(stored.pdfKey).not.toBeNull();
+      await new Promise((r) => setTimeout(r, 800));
+      expect(
+        (await owner.consent.findUniqueOrThrow({ where: { sessionId: inv.sessionId } }))
+          .copyEmailedAt,
+      ).toBeNull();
+      expect(mail.copies.find((c) => c.to === inv.candidateEmail)).toBeUndefined();
+      mail.failing = false;
+      const done = await eventually(
+        () => owner.consent.findUniqueOrThrow({ where: { sessionId: inv.sessionId } }),
+        (c) => c.copyEmailedAt !== null,
+        40_000,
+      );
+      expect(done.copyEmailedAt).not.toBeNull();
+      expect(mail.copies.filter((c) => c.to === inv.candidateEmail)).toHaveLength(1);
+    });
+
+    it('FR-203: a random rule never picks a question that a fixed slot (even a later one) already holds', async () => {
+      const t = await createTenant(owner, 'rbf');
+      // The random slot comes BEFORE the fixed one, and the fixed question matches the rule too.
+      await owner.testQuestion.update({
+        where: { id: t.test.testQuestionIds[1] },
+        data: { position: 0 },
+      });
+      const fixedQuestion = await owner.questionVersion.findUniqueOrThrow({
+        where: { id: t.test.fixedVersionIds[0] },
+      });
+      await owner.question.update({
+        where: { id: fixedQuestion.questionId },
+        data: { tags: ['arrays', 'core'] },
+      });
+      // A second published version of the fixed question: "its question across versions".
+      const v2 = await owner.questionVersion.create({
+        data: {
+          questionId: fixedQuestion.questionId,
+          version: 2,
+          title: 'v2',
+          statementMd: 'x',
+          difficulty: 'EASY',
+          allowedLanguages: ['python'],
+          isPublished: true,
+        },
+      });
+      await owner.question.update({
+        where: { id: fixedQuestion.questionId },
+        data: { currentVersionId: v2.id },
+      });
+      for (let i = 0; i < 12; i++) {
+        const inv = await invite(
+          { status: 'VERIFIED', session: { authEpoch: 1, deviceInfo: passedSystemCheck() } },
+          t,
+        );
+        await authed('post', '/test/start', tokenFor(inv, t)).expect(200);
+        const rows = await owner.sessionQuestion.findMany({
+          where: { sessionId: inv.sessionId },
+          include: { questionVersion: true },
+        });
+        const questionIds = rows.map((r) => r.questionVersion.questionId);
+        expect(new Set(questionIds).size).toBe(questionIds.length);
+        expect(new Set(rows.map((r) => r.questionVersionId)).size).toBe(rows.length);
+      }
+    });
+
+    it('FR-305: a malformed or over-cap extraTimePct is ignored with a warning that names ids only', async () => {
+      for (const extraTimePct of [500, 'lots', -10]) {
+        const inv = await invite({
+          status: 'VERIFIED',
+          accommodations: { extraTimePct, notes: 'PRIVATE-HEALTH-NOTE' },
+          session: { authEpoch: 1, deviceInfo: passedSystemCheck() },
+        });
+        await authed('post', '/test/start', tokenFor(inv)).expect(200);
+        const row = await sessionRow(inv.sessionId);
+        expect((row.deadlineAt?.getTime() ?? 0) - (row.startedAt?.getTime() ?? 0)).toBe(
+          60 * 60_000,
+        );
+        expect(logged.join('')).toContain(
+          `Ignored a malformed extraTimePct for session ${inv.sessionId} (invitation ${inv.invitationId})`,
+        );
+      }
+      expect(logged.join('')).not.toContain('PRIVATE-HEALTH-NOTE');
+      // 300 is the cap BE-06 allows: accepted, no warning for it.
+      const ok = await invite({
+        status: 'VERIFIED',
+        accommodations: { extraTimePct: 300 },
+        session: { authEpoch: 1, deviceInfo: passedSystemCheck() },
+      });
+      await authed('post', '/test/start', tokenFor(ok)).expect(200);
+      const row = await sessionRow(ok.sessionId);
+      expect((row.deadlineAt?.getTime() ?? 0) - (row.startedAt?.getTime() ?? 0)).toBe(240 * 60_000);
+      expect(logged.join('')).not.toContain(`session ${ok.sessionId} (invitation`);
+    });
+
+    it('NFR-04: a missing wrapping key at start is 503 CANDIDATE_PORTAL_UNCONFIGURED and the session stays VERIFIED', async () => {
+      const inv = await invite({
+        status: 'VERIFIED',
+        session: { authEpoch: 1, deviceInfo: passedSystemCheck() },
+      });
+      const saved = process.env.SESSION_KEY_ENC_KEY_k1;
+      delete process.env.SESSION_KEY_ENC_KEY_k1;
+      try {
+        const res = await authed('post', '/test/start', tokenFor(inv));
+        expect(res.status).toBe(503);
+        expect(res.body).toMatchObject({ code: 'CANDIDATE_PORTAL_UNCONFIGURED' });
+      } finally {
+        process.env.SESSION_KEY_ENC_KEY_k1 = saved;
+      }
+      expect((await sessionRow(inv.sessionId)).status).toBe('VERIFIED');
+      await authed('post', '/test/start', tokenFor(inv)).expect(200);
+    });
+
+    it('ADR 0002 L-3, L-4: if the session ended while the code was being checked, /start refuses and issues no token', async () => {
+      for (const [fromStatus, endStatus, code] of [
+        ['INVITED', 'SUBMITTED', 'LINK_ALREADY_USED'],
+        ['IN_PROGRESS', 'SUBMITTED', 'LINK_ALREADY_USED'],
+        ['INVITED', 'EXPIRED', 'LINK_EXPIRED'],
+        ['OPENED', 'DECLINED', 'LINK_DECLINED'],
+      ] as Array<[SessionStatus, SessionStatus, string]>) {
+        const inv = await invite(
+          fromStatus === 'IN_PROGRESS' ? liveSession() : { status: fromStatus },
+        );
+        const epoch = (await sessionRow(inv.sessionId)).authEpoch;
+        const spy = jest.spyOn(otp, 'verify').mockImplementationOnce(async () => {
+          await owner.session.update({ where: { id: inv.sessionId }, data: { status: endStatus } });
+          return { kind: 'ok' };
+        });
+        const res = await post('/start', { invitationToken: inv.token, otp: '123456' });
+        spy.mockRestore();
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({ code });
+        expect(res.body).not.toHaveProperty('sessionToken');
+        const row = await sessionRow(inv.sessionId);
+        expect(row.status).toBe(endStatus);
+        expect(row.authEpoch).toBe(epoch);
+      }
+    });
+
+    it('FR-609: if RECONNECTED cannot be queued the marker stays and the next beat retries; it is queued once', async () => {
+      const inv = await invite(liveSession({ lastHeartbeat: new Date(Date.now() - 95_000) }));
+      await jobs.discoverDisconnected();
+      await eventually(
+        () =>
+          owner.proctorEvent.count({ where: { sessionId: inv.sessionId, type: 'DISCONNECTED' } }),
+        (n) => n === 1,
+      );
+      const spy = jest
+        .spyOn(jobs, 'enqueueServerEvent')
+        .mockRejectedValueOnce(new Error('queue down'));
+      await authed('post', '/heartbeat', tokenFor(inv)).expect(200);
+      spy.mockRestore();
+      expect(await redis.exists(`disc:${inv.sessionId}`)).toBe(1);
+      expect(
+        await owner.proctorEvent.count({
+          where: { sessionId: inv.sessionId, type: 'RECONNECTED' },
+        }),
+      ).toBe(0);
+      await authed('post', '/heartbeat', tokenFor(inv)).expect(200);
+      expect(await redis.exists(`disc:${inv.sessionId}`)).toBe(0);
+      await eventually(
+        () =>
+          owner.proctorEvent.count({ where: { sessionId: inv.sessionId, type: 'RECONNECTED' } }),
+        (n) => n >= 1,
+      );
+      await new Promise((r) => setTimeout(r, 400));
+      expect(
+        await owner.proctorEvent.count({
+          where: { sessionId: inv.sessionId, type: 'RECONNECTED' },
+        }),
+      ).toBe(1);
+    });
+
+    it('FR-401: the consent sweep stops re-queuing a consent signed more than 3 days ago', async () => {
+      const { Queue } = jest.requireActual<typeof import('bullmq')>('bullmq');
+      const queue = new Queue('session-jobs', {
+        connection: { host: redisBox.getHost(), port: redisBox.getPort() },
+      });
+      const old = await invite({ status: 'CONSENTED' });
+      const recent = await invite({ status: 'CONSENTED' });
+      for (const [inv, daysAgo] of [
+        [old, 5],
+        [recent, 1],
+      ] as Array<[InvitationFixture, number]>) {
+        await owner.consent.create({
+          data: {
+            sessionId: inv.sessionId,
+            consentTextId: tenant.consentTextId,
+            signedName: 'Ada Lovelace',
+            signedAt: new Date(Date.now() - daysAgo * 86_400_000),
+          },
+        });
+      }
+      await jobs.sweepConsentPdfs();
+      expect(await queue.getJob(`consent-pdf_${old.sessionId}`)).toBeUndefined();
+      const queued = await eventually(
+        () => owner.consent.findUniqueOrThrow({ where: { sessionId: recent.sessionId } }),
+        (c) => c.pdfKey !== null,
+      );
+      expect(queued.pdfKey).not.toBeNull();
+      expect(
+        (await owner.consent.findUniqueOrThrow({ where: { sessionId: old.sessionId } })).pdfKey,
+      ).toBeNull();
+      await queue.close();
+    });
+  });
+
+  // ---------- ADR 0013 CS-4 interim: every query is filtered by the token's session or org ----------
+
+  describe('ADR 0013 CS-4 interim: queries are scoped by the token, never by a client id', () => {
+    interface Call {
+      readonly model: string;
+      readonly op: string;
+      readonly json: string;
+      readonly scope: string;
+    }
+
+    /** Wraps prisma.client so every model call made by a request (not a job) is recorded. */
+    async function record(run: () => Promise<void>): Promise<Call[]> {
+      const inJob = new AsyncLocalStorage<boolean>();
+      const calls: Call[] = [];
+      const realProcess = jobs.process.bind(jobs);
+      const processSpy = jest
+        .spyOn(jobs, 'process')
+        .mockImplementation((job) => inJob.run(true, () => realProcess(job)));
+      const real = prisma.client;
+      type Fn = (...a: unknown[]) => unknown;
+      const delegate = (model: string, target: object): object =>
+        new Proxy(target, {
+          get(t, op: string) {
+            const fn: unknown = Reflect.get(t, op);
+            if (typeof fn !== 'function') return fn;
+            return (...a: unknown[]) => {
+              if (inJob.getStore() !== true) {
+                const scope = orgContext.current()?.scope;
+                calls.push({
+                  model,
+                  op,
+                  json: JSON.stringify(a[0] ?? null, (_k, v: unknown) =>
+                    typeof v === 'bigint' ? v.toString() : v,
+                  ),
+                  scope: scope?.kind === 'system' ? `system:${scope.reason}` : 'org',
+                });
+              }
+              return (fn as Fn).apply(t, a);
+            };
+          },
+        });
+      const wrap = (client: object): object =>
+        new Proxy(client, {
+          get(t, prop: string | symbol) {
+            const v: unknown = Reflect.get(t, prop);
+            if (prop === '$transaction') {
+              return (fn: (tx: object) => unknown, ...rest: unknown[]) =>
+                (v as Fn).call(t, (tx: object) => fn(wrap(tx)), ...rest);
+            }
+            if (
+              typeof prop === 'string' &&
+              !prop.startsWith('$') &&
+              typeof v === 'object' &&
+              v !== null
+            ) {
+              return delegate(prop, v);
+            }
+            return typeof v === 'function' ? (v as Fn).bind(t) : v;
+          },
+        });
+      Object.defineProperty(prisma, 'client', {
+        value: wrap(real),
+        configurable: true,
+        writable: true,
+      });
+      try {
+        await run();
+      } finally {
+        Object.defineProperty(prisma, 'client', {
+          value: real,
+          configurable: true,
+          writable: true,
+        });
+        processSpy.mockRestore();
+      }
+      return calls.filter((c) => c.scope !== 'system:BACKGROUND_JOB');
+    }
+
+    it('CS-4 interim, CS-1/CS-2/CS-3: every query of every candidate route carries the token session, invitation or org, and never an id of another session', async () => {
+      // Second candidates (same org and another org) with data in every table the routes touch.
+      const bSame = await invite(liveSession());
+      const bOther = await invite(liveSession(), other);
+      await owner.session.update({
+        where: { id: bSame.sessionId },
+        data: { hmacKeyEnc: keys.generateWrapped(bSame.sessionId) },
+      });
+      await owner.proctorEvent.create({
+        data: {
+          sessionId: bSame.sessionId,
+          type: 'DISCONNECTED',
+          severity: 'LOW',
+          source: 'SERVER',
+          occurredAt: new Date(),
+          payload: { lastHeartbeatAt: new Date().toISOString() },
+        },
+      });
+      const bOpened = await invite({ status: 'OPENED', session: { authEpoch: 1 } });
+      const forbidden = [
+        bSame.sessionId,
+        bSame.invitationId,
+        bSame.candidateId,
+        bSame.token,
+        bOther.sessionId,
+        bOther.invitationId,
+        bOther.candidateId,
+        other.orgId,
+        other.consentTextId,
+        bOpened.sessionId,
+        bOpened.invitationId,
+      ];
+
+      // The caller's sessions: one per phase of the flow.
+      const preToken = await invite();
+      const opened = await invite({ status: 'OPENED', session: { authEpoch: 1 } });
+      const declining = await invite({ status: 'OPENED', session: { authEpoch: 1 } });
+      const verified = await invite({
+        status: 'VERIFIED',
+        session: { authEpoch: 1, deviceInfo: passedSystemCheck() },
+      });
+      const live = await invite(liveSession());
+      await owner.session.update({
+        where: { id: live.sessionId },
+        data: { hmacKeyEnc: keys.generateWrapped(live.sessionId) },
+      });
+      const mine = [preToken, opened, declining, verified, live];
+      const hdr = (inv: InvitationFixture) => tokenFor(inv);
+      function tokenFor(inv: InvitationFixture): string {
+        return tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch: 1 }).token;
+      }
+      const snapshot = async () => ({
+        sessions: await owner.session.findMany({
+          where: { id: { in: [bSame.sessionId, bOther.sessionId, bOpened.sessionId] } },
+          orderBy: { id: 'asc' },
+        }),
+        events: await owner.proctorEvent.count({
+          where: { sessionId: { in: [bSame.sessionId, bOther.sessionId, bOpened.sessionId] } },
+        }),
+        consents: await owner.consent.count({
+          where: { sessionId: { in: [bSame.sessionId, bOther.sessionId, bOpened.sessionId] } },
+        }),
+        questions: await owner.sessionQuestion.count({
+          where: { sessionId: { in: [bSame.sessionId, bOther.sessionId, bOpened.sessionId] } },
+        }),
+      });
+      const before = await snapshot();
+
+      const calls = await record(async () => {
+        // Pre-token routes, with a wrong guess and the right code.
+        await post('/link', { invitationToken: preToken.token }).expect(200);
+        const code = await otpFor(preToken);
+        await post('/start', { invitationToken: preToken.token, otp: wrongCode(code) }).expect(400);
+        await post('/start', { invitationToken: preToken.token, otp: code }).expect(200);
+        // Guarded routes, every one, with other sessions' ids in the body wherever a body exists.
+        await authed('get', '', hdr(opened)).expect(200);
+        await authed('get', '/consent', hdr(opened)).expect(200);
+        await authed('post', '/consent/sign', hdr(opened), {
+          consentTextId: other.consentTextId,
+          signedName: 'Ada Lovelace',
+          confirmedAge18: true,
+        }).expect(409);
+        await authed('post', '/consent/sign', hdr(opened), {
+          consentTextId: tenant.consentTextId,
+          signedName: 'Ada Lovelace',
+          confirmedAge18: true,
+          sessionId: bSame.sessionId,
+        }).expect(400);
+        await authed('post', '/consent/sign', hdr(opened), {
+          consentTextId: tenant.consentTextId,
+          signedName: 'Ada Lovelace',
+          confirmedAge18: true,
+        }).expect(200);
+        await authed('post', '/consent/decline', hdr(declining)).expect(200);
+        await authed('post', '/test/start', hdr(verified), { sessionId: bSame.sessionId }).expect(
+          200,
+        );
+        await authed('post', '/heartbeat', hdr(live), { sessionId: bSame.sessionId }).expect(400);
+        await authed('post', '/heartbeat', hdr(live)).expect(200);
+        await authed('post', '/proctor-key', hdr(live), { sessionId: bSame.sessionId }).expect(200);
+        // A token naming another session's id with this org (and the reverse) reads nothing of it.
+        await authed(
+          'get',
+          '',
+          tokens.sign({ sid: bOther.sessionId, oid: tenant.orgId, epoch: 1 }).token,
+        ).expect(401);
+        await authed(
+          'get',
+          '',
+          tokens.sign({ sid: bSame.sessionId, oid: other.orgId, epoch: 1 }).token,
+        ).expect(401);
+      });
+
+      expect(calls.length).toBeGreaterThan(30);
+      const all = calls.map((c) => `${c.model}.${c.op} ${c.json}`);
+      // 1. No query names any id or token of the other sessions or of the other org, anywhere.
+      //    The two 401 probes above carry the foreign ids in the TOKEN and are expected to
+      //    query the session by that id inside the token's own org only: they are the one allowed
+      //    place a foreign id appears, so they are filtered out by their org scope check below.
+      const probeSessionIds = new Set([bOther.sessionId, bSame.sessionId]);
+      const probeCalls = calls.filter(
+        (c) =>
+          c.model === 'session' &&
+          c.op === 'findUnique' &&
+          [...probeSessionIds].some((id) => c.json.includes(id)),
+      );
+      expect(probeCalls).toHaveLength(2);
+      const rest = calls.filter((c) => !probeCalls.includes(c));
+      for (const c of rest) {
+        for (const id of forbidden) expect(`${c.model}.${c.op} ${c.json}`).not.toContain(id);
+      }
+      // 2. Each model has the predicate the token gives it.
+      const sessionScoped = [
+        'session',
+        'consent',
+        'sessionSection',
+        'sessionQuestion',
+        'proctorEvent',
+        'proctorEventBatch',
+        'keystrokeBatch',
+        'mediaChunk',
+        'identityCheck',
+      ];
+      const mineSessions = mine.map((m) => m.sessionId);
+      const mineInvitations = mine.map((m) => m.invitationId);
+      const mineCandidates = mine.map((m) => m.candidateId);
+      const mine1 = (c: Call, ids: string[]): boolean => ids.some((id) => c.json.includes(id));
+      const sectionIds = [...tenant.test.sectionIds];
+      const contentIds = [...tenant.test.fixedVersionIds, ...tenant.test.randomPoolVersionIds];
+      for (const c of rest) {
+        const label = `${c.model}.${c.op} ${c.json}`;
+        if (c.model === 'invitation' && c.json.includes('tokenHash')) {
+          // The one lookup that starts from a secret: by its SHA-256, in the bootstrap scope.
+          expect(c.scope).toBe('system:AUTH_BOOTSTRAP');
+          expect(c.json).toContain(sha256Hex(preToken.token));
+          continue;
+        }
+        if (sessionScoped.includes(c.model)) {
+          expect([c.model, mine1(c, [...mineSessions, ...mineInvitations])]).toEqual([
+            c.model,
+            true,
+          ]);
+        } else if (c.model === 'invitation')
+          expect([label, mine1(c, mineInvitations)]).toEqual([label, true]);
+        else if (c.model === 'candidate')
+          expect([label, mine1(c, mineCandidates)]).toEqual([label, true]);
+        else if (c.model === 'test')
+          expect([label, c.json.includes(tenant.test.id)]).toEqual([label, true]);
+        else if (c.model === 'organization')
+          expect([label, c.json.includes(tenant.orgId)]).toEqual([label, true]);
+        else if (c.model === 'auditLog')
+          expect([label, c.json.includes(tenant.orgId)]).toEqual([label, true]);
+        else if (c.model === 'consentText')
+          expect([label, c.json.includes(tenant.consentTextId)]).toEqual([label, true]);
+        else if (c.model === 'user')
+          expect([label, c.json.includes(tenant.staffUserId)]).toEqual([label, true]);
+        else if (c.model === 'testSection' || c.model === 'testQuestion')
+          expect([
+            label,
+            mine1(c, [tenant.test.id, ...sectionIds, ...tenant.test.testQuestionIds]),
+          ]).toEqual([label, true]);
+        else if (c.model === 'questionVersion' || c.model === 'questionVariant')
+          expect([label, mine1(c, contentIds)]).toEqual([label, true]);
+        else if (c.model === 'question')
+          expect([label, c.json.includes('isArchived')]).toEqual([label, true]); // random-rule scan, org scope by the extension
+        else throw new Error(`unreviewed model in a candidate route: ${label}`);
+        expect(all.length).toBeGreaterThan(0);
+      }
+      // 3. Nothing of the other sessions was read or written.
+      expect(await snapshot()).toEqual(before);
+    });
   });
 
   // ---------- log hygiene (NFR-04, ADR 0003, ADR 0013 section 5.1) ----------

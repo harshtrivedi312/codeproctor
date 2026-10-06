@@ -15,8 +15,8 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { CodedHttpException } from '../common/coded.exception';
-import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
+import { CandidateScope } from './candidate-scope';
 import { CandidateTokenError, CandidateTokenService } from './candidate-token.service';
 import type { CandidateRequest } from './candidate.types';
 
@@ -30,7 +30,7 @@ export class CandidateSessionGuard implements CanActivate {
   constructor(
     private readonly tokens: CandidateTokenService,
     private readonly prisma: PrismaService,
-    private readonly orgContext: OrgContextService,
+    private readonly scope: CandidateScope,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -48,7 +48,7 @@ export class CandidateSessionGuard implements CanActivate {
     }
 
     // The org comes from the verified claims; the scoped client then adds `org_id = oid` itself.
-    const session = await this.orgContext.runInOrg(claims.oid, () =>
+    const session = await this.scope.enter({ orgId: claims.oid, sessionId: claims.sid }, () =>
       this.prisma.client.session.findUnique({
         where: { id: claims.sid },
         select: {

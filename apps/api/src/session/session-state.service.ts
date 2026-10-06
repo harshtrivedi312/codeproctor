@@ -53,11 +53,11 @@ export class SessionStateService {
    * the invitation's transaction; it is the only place a session row is born.
    */
   async createInvited(
-    input: { orgId: string; invitationId: string },
+    ids: { orgId: string; invitationId: string },
     db: SessionDb = this.prisma.client,
   ): Promise<{ id: string }> {
     const row = await db.session.create({
-      data: { orgId: input.orgId, invitationId: input.invitationId, status: 'INVITED' },
+      data: { orgId: ids.orgId, invitationId: ids.invitationId, status: 'INVITED' },
       select: { id: true },
     });
     return row;
@@ -68,25 +68,24 @@ export class SessionStateService {
    * ILLEGAL_TRANSITION) for an edge that is not in the table, and SessionStateConflictError (409
    * SESSION_STATE_CONFLICT) when the session was not in `from` at the moment of the update.
    */
-  async transition(request: TransitionRequest): Promise<void> {
-    const froms = Array.isArray(request.from)
-      ? (request.from as readonly SessionStatus[])
-      : [request.from as SessionStatus];
+  async transition(change: TransitionRequest): Promise<void> {
+    const froms = Array.isArray(change.from)
+      ? (change.from as readonly SessionStatus[])
+      : [change.from as SessionStatus];
     if (froms.length === 0) throw new Error('transition needs at least one from-state');
     for (const from of froms) {
-      if (!isAllowedTransition(from, request.to))
-        throw new IllegalTransitionError(from, request.to);
+      if (!isAllowedTransition(from, change.to)) throw new IllegalTransitionError(from, change.to);
     }
-    const db = request.db ?? this.prisma.client;
-    const now = request.now ?? new Date();
-    const patch = request.patch ?? {};
-    const anchors = stampsRetentionAnchor(request.to) && !froms.includes('APPEALED');
+    const db = change.db ?? this.prisma.client;
+    const now = change.now ?? new Date();
+    const patch = change.patch ?? {};
+    const anchors = stampsRetentionAnchor(change.to) && !froms.includes('APPEALED');
 
     const updated = await db.session.updateMany({
-      where: { id: request.sessionId, status: { in: [...froms] } },
+      where: { id: change.sessionId, status: { in: [...froms] } },
       data: {
-        status: request.to,
-        ...(stampsSubmittedAt(request.to) ? { submittedAt: now } : {}),
+        status: change.to,
+        ...(stampsSubmittedAt(change.to) ? { submittedAt: now } : {}),
         ...(anchors ? { retentionAnchorAt: now } : {}),
         ...(patch.startedAt !== undefined ? { startedAt: patch.startedAt } : {}),
         ...(patch.deadlineAt !== undefined ? { deadlineAt: patch.deadlineAt } : {}),
@@ -98,7 +97,7 @@ export class SessionStateService {
     });
     if (updated.count === 1) return;
     const current = await db.session.findUnique({
-      where: { id: request.sessionId },
+      where: { id: change.sessionId },
       select: { status: true },
     });
     throw new SessionStateConflictError(current?.status ?? null);

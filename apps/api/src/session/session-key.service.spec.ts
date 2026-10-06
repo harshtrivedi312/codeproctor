@@ -3,6 +3,12 @@ import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import type { Env } from '../config/env';
 import { SessionKeyConfigError, SessionKeyService } from './session-key.service';
 
+// Records the buffers randomBytes hands out (a pass-through), so the zeroing can be observed.
+jest.mock('node:crypto', () => {
+  const actual = jest.requireActual<typeof import('node:crypto')>('node:crypto');
+  return { ...actual, randomBytes: jest.fn(actual.randomBytes) };
+});
+
 const K1 = randomBytes(32).toString('base64');
 const K2 = randomBytes(32).toString('base64');
 
@@ -108,5 +114,17 @@ describe('Per-session HMAC key (ADR 0013 section 2, FR-801)', () => {
     const master = randomBytes(32);
     const stored = keys.wrap(master, sid, 'k1');
     expect(keys.batchKeyFor(stored, sid, 3).equals(keys.deriveBatchKey(master, sid, 3))).toBe(true);
+  });
+
+  it('NFR-04: the plain master key is zeroed after it is wrapped', () => {
+    const keys = service('k1');
+    const mocked = randomBytes as unknown as jest.Mock<Buffer, [number]>;
+    mocked.mockClear();
+    keys.generateWrapped(randomUUID());
+    const masters = mocked.mock.results
+      .map((r, i) => ({ size: mocked.mock.calls[i]?.[0], value: r.value as Buffer }))
+      .filter((r) => r.size === 32);
+    expect(masters).toHaveLength(1);
+    expect(masters[0]?.value.every((byte) => byte === 0)).toBe(true);
   });
 });

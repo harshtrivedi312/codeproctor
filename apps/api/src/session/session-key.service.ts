@@ -47,7 +47,12 @@ export class SessionKeyService {
   generateWrapped(sessionId: string): string {
     const id = canonicalSessionId(sessionId);
     const kid = this.config.get('SESSION_KEY_ENC_ACTIVE_KID', { infer: true });
-    return this.wrap(randomBytes(KEY_BYTES), id, kid);
+    const master = randomBytes(KEY_BYTES);
+    try {
+      return this.wrap(master, id, kid);
+    } finally {
+      master.fill(0);
+    }
   }
 
   wrap(master: Buffer, sessionId: string, kid: string): string {

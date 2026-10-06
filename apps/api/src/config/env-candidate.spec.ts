@@ -8,6 +8,11 @@ const valid = {
   COOKIE_SECRET: 'b'.repeat(40),
   ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64'),
 };
+const judge0 = {
+  JUDGE0_URL: 'https://judge0.example.com',
+  JUDGE0_AUTH_TOKEN: 't'.repeat(32),
+  JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
+};
 const candidate = {
   JWT_CANDIDATE_SECRET: 'c'.repeat(40),
   OTP_PEPPER: 'd'.repeat(40),
@@ -47,12 +52,6 @@ describe('Candidate session environment (BE-07, ADR 0003, ADR 0007 section 6, AD
   });
 
   it('NFR-04: pilot and production require the candidate secrets and Legal-approved consent', () => {
-    // The code runner settings (FR-503) are required in these environments too.
-    const judge0 = {
-      JUDGE0_URL: 'https://judge0.example.com',
-      JUDGE0_AUTH_TOKEN: 't'.repeat(32),
-      JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
-    };
     for (const APP_ENV of ['pilot', 'production']) {
       expect(() =>
         validateEnv({ ...valid, ...judge0, APP_ENV, REQUIRE_LEGAL_APPROVED_CONSENT: 'true' }),
@@ -67,9 +66,45 @@ describe('Candidate session environment (BE-07, ADR 0003, ADR 0007 section 6, AD
           ...candidate,
           APP_ENV,
           REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
+          SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 4).toString('base64'),
         }).APP_ENV,
       ).toBe(APP_ENV);
     }
+  });
+
+  it('NFR-04: pilot and production refuse to start without a valid wrapping key for the active kid', () => {
+    const live = {
+      ...valid,
+      ...candidate,
+      ...judge0,
+      APP_ENV: 'pilot',
+      REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
+    };
+    const key = Buffer.alloc(32, 5).toString('base64');
+    expect(() => validateEnv(live)).toThrow(/SESSION_KEY_ENC_KEY_k1/);
+    expect(() => validateEnv({ ...live, SESSION_KEY_ENC_KEY_k1: 'c2hvcnQ=' })).toThrow(
+      /SESSION_KEY_ENC_KEY_k1/,
+    );
+    expect(() =>
+      validateEnv({ ...live, SESSION_KEY_ENC_ACTIVE_KID: 'k2', SESSION_KEY_ENC_KEY_k1: key }),
+    ).toThrow(/SESSION_KEY_ENC_KEY_k2/);
+    try {
+      validateEnv({ ...live, SESSION_KEY_ENC_KEY_k1: 'not-the-key-just-some-text' });
+      fail('expected throw');
+    } catch (e) {
+      expect(String(e)).not.toContain('not-the-key-just-some-text');
+    }
+    expect(validateEnv({ ...live, SESSION_KEY_ENC_KEY_k1: key }).APP_ENV).toBe('pilot');
+    expect(
+      validateEnv({
+        ...live,
+        APP_ENV: 'production',
+        SESSION_KEY_ENC_ACTIVE_KID: 'k2',
+        SESSION_KEY_ENC_KEY_k2: key,
+      }).APP_ENV,
+    ).toBe('production');
+    // Development and test do not need it at start.
+    expect(validateEnv(valid).APP_ENV).toBe('development');
   });
 
   it('FR-609: the token lifetime and the ingest grace are bounded', () => {

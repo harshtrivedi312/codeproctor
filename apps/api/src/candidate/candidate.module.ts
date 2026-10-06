@@ -4,6 +4,7 @@ import { CandidateAuthController } from './candidate-auth.controller';
 import { CandidateAuthService } from './candidate-auth.service';
 import { CandidateContextInterceptor } from './candidate-context.interceptor';
 import { CandidateMailPort, UnboundCandidateMailPort } from './candidate-mail.port';
+import { CandidateScope } from './candidate-scope';
 import { CandidateSessionController } from './candidate-session.controller';
 import { CandidateSessionGuard } from './candidate-session.guard';
 import { CandidateSessionService } from './candidate-session.service';
@@ -23,6 +24,7 @@ import { TestStartService } from './test-start.service';
   controllers: [CandidateAuthController, CandidateSessionController],
   providers: [
     CandidateTokenService,
+    CandidateScope,
     CandidateSessionGuard,
     CandidateContextInterceptor,
     CandidateAuthService,

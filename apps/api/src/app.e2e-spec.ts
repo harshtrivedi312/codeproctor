@@ -170,6 +170,7 @@ describe('API foundation in production (NFR-04)', () => {
       JUDGE0_AUTHZ_TOKEN: 'b'.repeat(32),
       JWT_CANDIDATE_SECRET: 'x'.repeat(48),
       OTP_PEPPER: 'y'.repeat(48),
+      SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 9).toString('base64'),
       REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
     });
     app = await createApp();

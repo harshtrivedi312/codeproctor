@@ -152,6 +152,15 @@ export class OtpService {
     return { kind: 'issued', code };
   }
 
+  /** Drops a code that could not be emailed and clears the send cooldown, so a retry is allowed. */
+  async discard(invitationId: string): Promise<void> {
+    await ensureConnected(this.redis);
+    await this.redis.del(
+      OtpService.key('otp', invitationId),
+      OtpService.key('otp-send', invitationId),
+    );
+  }
+
   /** Seconds the link stays blocked before the test starts, or 0. */
   async blockedSeconds(invitationId: string): Promise<number> {
     await ensureConnected(this.redis);

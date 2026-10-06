@@ -237,11 +237,23 @@ export class CandidateAuthService {
           { retryAfterSeconds: issued.retryAfterSeconds },
         );
       }
-      await this.mail.sendOtp(link.candidate.email, {
-        code: issued.code,
-        testName: link.testName,
-        expiresInMinutes: OTP_TTL_SECONDS / 60,
-      });
+      try {
+        await this.mail.sendOtp(link.candidate.email, {
+          code: issued.code,
+          testName: link.testName,
+          expiresInMinutes: OTP_TTL_SECONDS / 60,
+        });
+      } catch {
+        // Never report OTP_SENT for a message that was not sent. The code is dropped and the
+        // send cooldown cleared so the candidate can ask again at once.
+        await this.otp.discard(link.invitation.id);
+        this.logger.error('Candidate OTP email failed');
+        throw coded(
+          HttpStatus.SERVICE_UNAVAILABLE,
+          'The code could not be sent. Try again shortly.',
+          'MAIL_UNAVAILABLE',
+        );
+      }
       return { view, sent: true, maskedEmail: maskEmail(link.candidate.email) };
     });
   }
@@ -289,6 +301,15 @@ export class CandidateAuthService {
         case 'wrong':
           if (result.blockedNow) await this.onBlocked(link, info, now);
           if (live) await this.onResumeFailure(link, now);
+          // TC-007: the guess that blocks the link is answered as blocked, not as one more typo.
+          if (result.blockedNow) {
+            throw coded(
+              HttpStatus.TOO_MANY_REQUESTS,
+              'This link is blocked for 30 minutes after too many wrong codes.',
+              'LINK_BLOCKED',
+              { retryAfterSeconds: OTP_BLOCK_SECONDS },
+            );
+          }
           throw coded(HttpStatus.BAD_REQUEST, 'That code is not correct.', 'OTP_INVALID', {
             retryAfterSeconds: live ? OTP_COOLDOWN_SECONDS : null,
           });
@@ -296,8 +317,18 @@ export class CandidateAuthService {
           break;
       }
 
-      // The code is spent. Raise the epoch first: it ends every older token at once.
+      // The code is spent. Read the status again: it may have moved since the first read (the test
+      // was submitted, expired or declined on another device), and no token is issued for that.
       const sessionId = link.session.id;
+      const fresh = await this.prisma.client.session.findUnique({
+        where: { id: sessionId },
+        select: { status: true },
+      });
+      if (fresh === null) return invalidLink();
+      this.refuseUnlessOpen(
+        await this.stateOf({ ...link, session: { id: sessionId, status: fresh.status } }, now),
+      );
+      // Raise the epoch first: it ends every older token at once.
       const updated = await this.prisma.client.session.update({
         where: { id: sessionId },
         data: { authEpoch: { increment: 1 } },

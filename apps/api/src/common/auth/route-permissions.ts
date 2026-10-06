@@ -26,9 +26,12 @@ export type CandidatePermission = Extract<Permission, `candidate_${string}`>;
  * Candidate routes the matrix may list as plain 'public': the pre-JWT bootstrap routes that run
  * without CandidateSessionGuard (ADR 0013 section 5.10: invitation-link resolve, OTP send, OTP
  * verify). Any other /candidate/ key listed 'public' is a matrix problem.
- * TODO(FU-BE-90): fill in the three real keys when BE-07 defines them; empty until then.
  */
-export const CANDIDATE_BOOTSTRAP_ROUTES: readonly string[] = [];
+export const CANDIDATE_BOOTSTRAP_ROUTES: readonly string[] = [
+  'POST /candidate/session/link',
+  'POST /candidate/session/otp',
+  'POST /candidate/session/start',
+];
 
 /** A candidate route (pseudo-role CANDIDATE): @Public() to the staff guard plus @CandidateRoute(). */
 export interface CandidateAccess {
@@ -64,6 +67,27 @@ const userManage = { roles: SUPER_ADMIN, permission: 'user:manage' } as const;
 export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   // Operations
   'GET /health': 'public',
+
+  // Candidate session (BE-07, FR-106, FR-401; ADR 0013 section 5.10). The three pre-token routes
+  // are plain public; the rest sit behind CandidateSessionGuard.
+  'POST /candidate/session/link': 'public',
+  'POST /candidate/session/otp': 'public',
+  'POST /candidate/session/start': 'public',
+  'GET /candidate/session/consent': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_consent:read',
+  },
+  'POST /candidate/session/consent/sign': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_consent:sign',
+  },
+  'POST /candidate/session/consent/decline': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_consent:decline',
+  },
+  // TODO(BE-07, hub PR #113): GET /candidate/session, POST /candidate/session/test/start,
+  // /heartbeat and /proctor-key need candidate_session:read, :start, :heartbeat and :key in
+  // packages/shared. Add the four entries here and @CandidateRoute(...) on the handlers then.
 
   // Authentication (FR-101, FR-102, FR-104, FR-107). Public: the credential is in the body.
   'POST /auth/login': 'public',

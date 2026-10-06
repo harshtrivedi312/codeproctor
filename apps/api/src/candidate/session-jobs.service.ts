@@ -31,6 +31,8 @@ export const DISCONNECT_AFTER_MS = 60_000;
 const DISCOVERY_EVERY_MS = 15_000;
 const CONSENT_SWEEP_EVERY_MS = 300_000;
 const SWEEP_MIN_AGE_MS = 60_000;
+/** The sweep stops re-queuing a consent after 3 days: a PDF that failed that long needs a person. */
+export const SWEEP_MAX_AGE_MS = 3 * 86_400_000;
 const DISCOVERY_BATCH = 500;
 const DISCONNECT_MARKER_TTL_SECONDS = 86_400;
 const SHUTDOWN_WAIT_MS = 3_000;
@@ -176,15 +178,17 @@ export class SessionJobsService implements OnModuleInit, OnApplicationShutdown {
     orgId: string,
     type: 'RECONNECTED',
     at: Date,
+    episode: string,
   ): Promise<void> {
     await this.requireQueue().add(
       'server-event',
       { sessionId, orgId, type, atMs: at.getTime() },
       {
-        jobId: `server-event_${sessionId}_${type}_${String(at.getTime())}`,
+        jobId: `server-event_${sessionId}_${type}_${episode.replace(/[^0-9A-Za-z]/g, '')}`,
         attempts: 3,
         backoff: { type: 'exponential', delay: 2_000 },
-        removeOnComplete: true,
+        // Kept for an hour so a repeated beat in the same silence cannot queue a second one.
+        removeOnComplete: { age: 3_600 },
         removeOnFail: true,
       },
     );
@@ -335,7 +339,7 @@ export class SessionJobsService implements OnModuleInit, OnApplicationShutdown {
     const pending = await this.orgContext.runSystem('BACKGROUND_JOB', () =>
       this.prisma.client.consent.findMany({
         where: {
-          signedAt: { not: null, lt: cutoff },
+          signedAt: { gt: new Date(now.getTime() - SWEEP_MAX_AGE_MS), lt: cutoff },
           OR: [{ pdfKey: null }, { copyEmailedAt: null }],
         },
         select: { sessionId: true, session: { select: { orgId: true } } },

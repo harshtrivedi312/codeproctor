@@ -1,7 +1,7 @@
 // Outbound candidate email behind a port. Backend A owns the mail module and its provider (BE-06,
-// templates otp, otp-lockout and consent-copy); until it binds these methods the default drops the
-// message and says so in the log, with no content. Implementations must never log the code, the
-// URL or the PDF (ADR 0003 section 6).
+// templates otp, otp-lockout and consent-copy); until it binds these methods the default fails. Implementations must never log the code, the
+// URL or the PDF (ADR 0003 section 6). A port that cannot send must say so: the unbound default
+// rejects, so no caller records "sent" (OTP_SENT, copy_emailed_at) for a message nobody got.
 import { Logger } from '@nestjs/common';
 
 export interface OtpMail {
@@ -33,23 +33,31 @@ export abstract class CandidateMailPort {
   abstract sendConsentCopy(to: string, mail: ConsentCopyMail): Promise<void>;
 }
 
+export class MailNotBoundError extends Error {
+  constructor(template: string) {
+    super(`No email provider is bound for candidate mail (template ${template})`);
+  }
+}
+
 export class UnboundCandidateMailPort extends CandidateMailPort {
   private readonly logger = new Logger(UnboundCandidateMailPort.name);
 
-  private drop(template: string): Promise<void> {
-    this.logger.warn(`No email provider is bound for candidate mail; template ${template} dropped`);
-    return Promise.resolve();
+  private fail(template: string): Promise<never> {
+    this.logger.warn(
+      `No email provider is bound for candidate mail; template ${template} not sent`,
+    );
+    return Promise.reject(new MailNotBoundError(template));
   }
 
   sendOtp(): Promise<void> {
-    return this.drop('otp');
+    return this.fail('otp');
   }
 
   sendOtpLockout(): Promise<void> {
-    return this.drop('otp-lockout');
+    return this.fail('otp-lockout');
   }
 
   sendConsentCopy(): Promise<void> {
-    return this.drop('consent-copy');
+    return this.fail('consent-copy');
   }
 }

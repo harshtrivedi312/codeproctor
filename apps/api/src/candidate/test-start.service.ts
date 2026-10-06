@@ -8,15 +8,15 @@
 //   - session_sections (one per test section, the first opened) and session_questions (fixed
 //     questions as authored, random rules resolved, one active variant picked per question).
 // Variant parameters, hidden cases and answer keys never appear in the response.
-import { HttpStatus, Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { randomInt } from 'node:crypto';
 import { z } from 'zod';
 import { CodedHttpException } from '../common/coded.exception';
 import type { CandidateProblemCode } from '../common/coded.exception';
 import { PrismaService } from '../database/prisma.service';
 import { Difficulty, QuestionType } from '../generated/prisma/enums.js';
-import { extraTimePct, scaledMs } from '../session/accommodations';
-import { SessionKeyService } from '../session/session-key.service';
+import { readExtraTime, scaledMs } from '../session/accommodations';
+import { SessionKeyConfigError, SessionKeyService } from '../session/session-key.service';
 import { SessionStateConflictError } from '../session/session-state.errors';
 import { SessionStateService } from '../session/session-state.service';
 import { LIVE_STATUSES, PRE_START_STATUSES } from '../session/session-transitions';
@@ -81,6 +81,8 @@ interface PlannedQuestion {
 
 @Injectable()
 export class TestStartService {
+  private readonly logger = new Logger(TestStartService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly states: SessionStateService,
@@ -140,10 +142,26 @@ export class TestStartService {
       },
     });
 
-    const extra = extraTimePct(invitation.accommodations);
+    const { pct: extra, ignored } = readExtraTime(invitation.accommodations);
+    if (ignored) {
+      // Ids only: the accommodation text itself may be health-adjacent and is never logged.
+      this.logger.warn(
+        `Ignored a malformed extraTimePct for session ${ctx.sessionId} (invitation ${invitation.id})`,
+      );
+    }
     const deadlineAt = new Date(now.getTime() + scaledMs(test.durationMinutes, extra));
     const planned = await this.plan(sections, testQuestions);
-    const wrappedKey = this.keys.generateWrapped(ctx.sessionId);
+    let wrappedKey: string;
+    try {
+      wrappedKey = this.keys.generateWrapped(ctx.sessionId);
+    } catch (e) {
+      if (!(e instanceof SessionKeyConfigError)) throw e;
+      throw coded(
+        HttpStatus.SERVICE_UNAVAILABLE,
+        'The candidate portal is not configured.',
+        'CANDIDATE_PORTAL_UNCONFIGURED',
+      );
+    }
 
     try {
       await this.prisma.client.$transaction(async (tx) => {
@@ -244,26 +262,32 @@ export class TestStartService {
     );
     const usedQuestionIds = new Set<string>();
     const usedVersionIds = new Set<string>();
+    // Fixed slots first: every fixed question (whatever the slot order) is taken before any random
+    // rule is resolved, so a random pick can never repeat a fixed question or another version of it.
+    const fixed = new Map<string, string>();
+    for (const tq of ordered) {
+      if (tq.questionVersionId === null) continue;
+      // A fixed version must exist in this org (the scoped client finds only this org's rows).
+      const found = await this.prisma.client.questionVersion.findUnique({
+        where: { id: tq.questionVersionId },
+        select: { id: true, questionId: true },
+      });
+      if (found === null) {
+        throw coded(
+          HttpStatus.CONFLICT,
+          'A question of this test is not available.',
+          'RANDOM_RULE_UNSATISFIABLE',
+        );
+      }
+      usedQuestionIds.add(found.questionId);
+      usedVersionIds.add(found.id);
+      fixed.set(tq.id, found.id);
+    }
     const out: PlannedQuestion[] = [];
     for (const tq of ordered) {
-      let versionId = tq.questionVersionId;
-      if (versionId === null) {
-        versionId = await this.resolveRandom(tq.randomRule, usedQuestionIds, usedVersionIds);
-      } else {
-        // A fixed version must exist in this org (the scoped client finds only this org's rows).
-        const found = await this.prisma.client.questionVersion.findUnique({
-          where: { id: versionId },
-          select: { id: true, questionId: true },
-        });
-        if (found === null) {
-          throw coded(
-            HttpStatus.CONFLICT,
-            'A question of this test is not available.',
-            'RANDOM_RULE_UNSATISFIABLE',
-          );
-        }
-        usedQuestionIds.add(found.questionId);
-      }
+      const versionId =
+        fixed.get(tq.id) ??
+        (await this.resolveRandom(tq.randomRule, usedQuestionIds, usedVersionIds));
       usedVersionIds.add(versionId);
       const variants = await this.prisma.client.questionVariant.findMany({
         where: { questionVersionId: versionId, isActive: true },

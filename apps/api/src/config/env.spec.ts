@@ -74,6 +74,7 @@ describe('NFR-04 environment validation', () => {
       JWT_CANDIDATE_SECRET: 'c'.repeat(48),
       OTP_PEPPER: 'p'.repeat(48),
       REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
+      SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 3).toString('base64'),
     };
     expect(validateEnv(live).JUDGE0_URL).toBe('https://judge0.example.com');
     expect(() => validateEnv({ ...live, JUDGE0_URL: undefined })).toThrow(/JUDGE0_URL/);
