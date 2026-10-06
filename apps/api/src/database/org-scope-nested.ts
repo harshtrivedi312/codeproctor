@@ -44,6 +44,7 @@
 import { OrgScopeViolationError } from './errors';
 import type { ModelName } from './org-scope-map';
 import { relationOf } from './org-scope-relations';
+import { ownValue } from './plain-args';
 
 type PlainObject = Record<string, unknown>;
 
@@ -135,11 +136,11 @@ export function assertNoNestedWritesIn(
     case 'update':
     case 'updateMany':
     case 'updateManyAndReturn':
-      assertNoNestedWrites(model, operation, args.data, allowlist);
+      assertNoNestedWrites(model, operation, ownValue(args, 'data'), allowlist);
       break;
     case 'upsert':
-      assertNoNestedWrites(model, operation, args.create, allowlist);
-      assertNoNestedWrites(model, operation, args.update, allowlist);
+      assertNoNestedWrites(model, operation, ownValue(args, 'create'), allowlist);
+      assertNoNestedWrites(model, operation, ownValue(args, 'update'), allowlist);
       break;
     default:
       break; // reads and deletes carry no data; createMany rows are flat and never walked
@@ -160,7 +161,7 @@ export function assertNoNestedCursor(model: ModelName, operation: string, args: 
 
 function walkSelection(walk: Walk, model: ModelName, args: PlainObject, depth: number): void {
   for (const key of ['select', 'include'] as const) {
-    const selection = args[key];
+    const selection = ownValue(args, key);
     if (!isPlainObject(selection)) continue;
     for (const [field, value] of Object.entries(selection)) {
       if (!isPlainObject(value)) continue; // `true`: a scalar or a whole relation, no arguments

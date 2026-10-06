@@ -1600,13 +1600,27 @@ const KNOWN_CANDIDATE_ROUTES: readonly CandidateRoute[] = [
   { key: 'POST /candidate/session/test/start', permission: 'candidate_session:start' },
   { key: 'POST /candidate/session/heartbeat', permission: 'candidate_session:heartbeat' },
   { key: 'POST /candidate/session/proctor-key', permission: 'candidate_session:key' },
+  // BE-09 media (Backend B, PR #119): confirm reuses the presign permission.
+  { key: 'POST /candidate/session/media/presign', permission: 'candidate_media:presign' },
+  { key: 'POST /candidate/session/media/confirm', permission: 'candidate_media:presign' },
+  // BE-08b identity check (Integrity B, PR #129): the status read reuses the upload permission
+  // (shared has no candidate_identity:read yet). BE-08c POST .../identity/recheck is not built: not listed.
+  { key: 'POST /candidate/session/identity/presign', permission: 'candidate_identity:upload' },
+  { key: 'POST /candidate/session/identity', permission: 'candidate_identity:upload' },
+  { key: 'GET /candidate/session/identity', permission: 'candidate_identity:upload' },
+  // BE-11 answers and finish (Backend B, PR #187, gated): keys and permissions as registered on that branch.
+  { key: 'POST /candidate/answers/:questionId/run', permission: 'candidate_answer:run' },
+  { key: 'POST /candidate/answers/:questionId/submit', permission: 'candidate_answer:submit' },
+  { key: 'PUT /candidate/answers/:questionId/draft', permission: 'candidate_answer:draft' },
+  { key: 'POST /candidate/session/finish', permission: 'candidate_session:finish' },
+  { key: 'POST /candidate/session/section/finish', permission: 'candidate_section:finish' },
 ];
 export const CANDIDATE_ROUTES: readonly CandidateRoute[] = KNOWN_CANDIDATE_ROUTES.filter((r) =>
   backendHasRoute(r.key),
 );
 
 const STAFF_ROLE_NAMES: readonly string[] = USER_ROLES;
-const isCandidatePath = (key: string): boolean => /^\S+ \/candidate(\/|$)/i.test(key);
+export const isCandidatePath = (key: string): boolean => /^\S+ \/candidate(\/|$)/i.test(key);
 
 /**
  * Pure registry check for the CANDIDATE route variant (FU-BE-91), so it can be unit tested with
