@@ -108,6 +108,9 @@ export const COVERED_ELSEWHERE: Readonly<Record<string, string>> = {
   'POST /auth/2fa/disable': 'apps/api/test/integration/tc-003.int.test.ts',
   'POST /auth/2fa/recovery-codes/regenerate': 'apps/api/test/integration/tc-003.int.test.ts',
   'POST /auth/2fa/reset/:userId': 'apps/api/test/integration/tc-003.int.test.ts',
+  // Org settings (FU-BE-133): role matrix, isolation and audit in apps/api/src/org-settings/org-settings.e2e-spec.ts.
+  'GET /admin/org-settings': 'apps/api/src/org-settings/org-settings.e2e-spec.ts',
+  'PATCH /admin/org-settings': 'apps/api/src/org-settings/org-settings.e2e-spec.ts',
 };
 
 /** What a route needs before a call: a path with real ids and a body, built per call. */
