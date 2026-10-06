@@ -2,7 +2,11 @@ import { defineConfig, devices } from '@playwright/test';
 
 /**
  * End-to-end and axe checks. By default the config serves the production build of apps/web with
- * mocked data (the build must have been made with NEXT_PUBLIC_API_MOCKING=enabled). Set
+ * mocked data. The build must be made with
+ *   NEXT_PUBLIC_API_MOCKING=enabled ALLOW_MOCKING_IN_PRODUCTION_BUILD=staging-only pnpm --filter @codeproctor/web build
+ * (once PR #94 lands the build refuses mocks without the second variable; its value is a label, not
+ * a secret; use it for staging and test builds only, never for an image that is deployed). The guard
+ * runs at build time only, so the `next start` below needs just NEXT_PUBLIC_API_MOCKING. Set
  * E2E_BASE_URL to run against a deployed environment instead (staging).
  */
 const externalBaseUrl = process.env.E2E_BASE_URL;
