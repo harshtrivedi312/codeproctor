@@ -23,8 +23,13 @@ export const ERASURE_RESERVED_ACTIONS = {
 
 export type RetentionTier = keyof typeof RETENTION_MARKER_ACTIONS;
 
-/** The audit row a marker is. `entity_id` is the session id as text (ADR 0004 9.2 partial index). */
-export const MARKER_ENTITY_TYPE = 'session';
+/** Audit rows about a session carry this entity type; `entity_id` is the session id as text. */
+export const SESSION_ENTITY_TYPE = 'session';
+/** The audit row a marker is (ADR 0004 9.2 partial index). */
+export const MARKER_ENTITY_TYPE = SESSION_ENTITY_TYPE;
+
+/** The two-int advisory lock namespace R-10 and erasure both take, one candidate per transaction (ADR 0004 9.4). */
+export const CANDIDATE_ERASURE_LOCK = 'codeproctor/candidate-erasure';
 
 /** Face images are never kept more than this long from the face clock (C-27, C-35). */
 export const FACE_CAP_DAYS = 90;
