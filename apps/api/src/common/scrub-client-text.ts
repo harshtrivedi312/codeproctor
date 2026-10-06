@@ -13,6 +13,8 @@ const INPUT_FACTOR = 4;
 const MEDIA_EXTENSION = /\.(?:webm|mp4|mkv|ogg|wav|jpe?g|png|pdf|bin|enc)$/i;
 
 const LONG_TOKEN_MIN = 24;
+/** Session, invitation and trace ids are useful in a log and are not secrets. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LOCAL_CHAR = /[\p{L}\p{N}._%+-]/u;
 const DOMAIN_CHAR = /[\p{L}\p{N}.-]/u;
 const TLD = /^(?:\p{L}{2,}|xn--[a-z0-9-]{2,})$/iu;
@@ -32,21 +34,30 @@ const OBJECT_KEY =
   /(?<![A-Za-z0-9_-])orgs\/[^/\s"'`]{1,100}\/(?:sessions|consents|identity|reports|live|sealed)\/[^\s"'`),;]{0,500}/gi;
 // What follows a secret's name: an optional (escaped) closing quote, `=`, `:` or `=>`.
 const SEP = String.raw`\\?["']?\s{0,5}(?:=>|[=:])\s{0,5}`;
-// A secret's value: a double or single quoted string (whole, spaces included), else up to the
-// next whitespace, comma, semicolon or quote (so `Tr0ub4dor&3` is one value).
-const VALUE = String.raw`(?:\\?"(?:[^"\\\r\n]|\\[^"\r\n]){0,500}\\?"?|'(?:[^'\\\r\n]|\\.){0,500}'?|[^\s,;"'\\]{1,500})`;
+// A secret's value, by how it OPENS (the first characters are disjoint, so the regex is linear):
+//  - `"`  plain JSON string: a backslash escapes any one character, so `\"` is content;
+//  - `\"` a string inside stringified JSON: ends at the first bare `\"`; `\\\"` (a doubly escaped
+//    quote) and `\x` are content;
+//  - `'`, `\'` and a backtick: quoted to the matching quote;
+//  - otherwise up to whitespace, comma, semicolon or quote (so `Tr0ub4dor&3` is one value).
+// Quoted values keep their spaces (a passphrase) and each has a 500 character bound.
+const VALUE = String.raw`(?:"(?:[^"\\\r\n]|\\.){0,500}"?|\\"(?:[^"\\\r\n]|\\\\\\"|\\[^"\r\n]){0,500}(?:\\")?|\\?'(?:[^'\\\r\n]|\\.){0,500}\\?'?|\`[^\`\r\n]{0,500}\`?|[^\s,;"'\`\\]{1,500})`;
 // Keyword as an identifier substring (otpCode, new_password, password_confirmation), then up to
 // 20 identifier characters, then the separator and the value.
 const KEY_VALUE = new RegExp(
-  String.raw`(password|passwd|pwd|secret|token|passcode|api_?key|signature|credential|x-amz-[a-z-]{1,40})([A-Za-z0-9_]{0,20}${SEP})${VALUE}`,
+  String.raw`(password|passwd|pwd|secret|token|passcode|api_?key|signature|credential|x-amz-[a-z]{1,20}(?:-[a-z]{1,20}){0,2})([A-Za-z0-9_]{0,20}${SEP})${VALUE}`,
   'gi',
 );
-// key, sig, pass and pw as the END of an identifier (hmacKey, signing_key, userPass), only with a
-// separator, so ordinary words such as "keyboard" are untouched.
-const SUFFIX_KEY_VALUE = new RegExp(
-  String.raw`(?<![A-Za-z0-9])([A-Za-z0-9]{0,30}[_-]?(?:key|sig|pass|pw))(${SEP})${VALUE}`,
+// key, sig, pass and pw anywhere before a separator (hmacKey, candidatesMediaUploadEncryptionKey,
+// signing_key, userPass); the separator is required, so "keyboard" is untouched.
+const SUFFIX_KEY_VALUE = new RegExp(String.raw`(key|sig|pass|pw)(${SEP})${VALUE}`, 'gi');
+// A digit array after an otp-like name: {"otp":["4","8","2","9","1","3"]}.
+const OTP_ARRAY = new RegExp(
+  String.raw`(otp|code|pin|passcode)(\\?["']?\s{0,5}[=:]\s{0,5})\[[\d\s,"'\\]{0,100}\]`,
   'gi',
 );
+// `scheme://user:password@host`: the userinfo of a connection string or URL.
+const USERINFO = /\b([a-z][a-z0-9+.-]{1,20}):\/\/[^\s/@:]{1,100}:[^\s/@]{1,200}@/gi;
 // 6 to 8 digits, with one optional space or dash between digits (482-913).
 const DIGITS = String.raw`(?<!\d)\d(?:[ -]?\d){5,7}(?!\d)`;
 const OTP_AFTER_WORD = new RegExp(
@@ -67,12 +78,21 @@ function queryStart(token: string): number {
   return q === -1 ? h : h === -1 ? q : Math.min(q, h);
 }
 
-const TRAILING_PUNCTUATION = /["'`).,;:\]}>]+$/;
+const TRAILING_PUNCTUATION: ReadonlySet<number> = new Set(
+  [...`"'\`).,;:]}>`].map((c) => c.charCodeAt(0)),
+);
+
+/** Trims trailing quotes and punctuation by hand (a `[class]+$` regex is quadratic). */
+function trimTrailingPunctuation(s: string): string {
+  let end = s.length;
+  while (end > 0 && TRAILING_PUNCTUATION.has(s.charCodeAt(end - 1))) end -= 1;
+  return s.slice(0, end);
+}
 
 function isMediaFile(base: string): boolean {
   // Next.js serves its own assets under /_next/; they are not candidate media.
   if (base.includes('_next/')) return false;
-  return MEDIA_EXTENSION.test(base.replace(TRAILING_PUNCTUATION, ''));
+  return MEDIA_EXTENSION.test(trimTrailingPunctuation(base));
 }
 
 function scrubWhitespaceToken(token: string): string {
@@ -101,7 +121,7 @@ function scrubRun(run: string): string {
     return REDACTED;
   }
   // A long opaque token (also covers hex of 32 or more) in any dot-separated part.
-  return parts.some((p) => p.length >= LONG_TOKEN_MIN) ? REDACTED : run;
+  return parts.some((p) => p.length >= LONG_TOKEN_MIN && !UUID.test(p)) ? REDACTED : run;
 }
 
 /** Standard base64 (the HMAC proctor key, ADR 0013 section 4): split by + and / so the run pass misses it. */
@@ -168,12 +188,14 @@ export function scrubClientText(input: string, maxLength = 8000): string {
     .replace(/%3D/gi, '=')
     .replace(/\uff20/g, '@');
   s = s.replace(OBJECT_KEY, '[REDACTED_KEY]');
+  s = s.replace(USERINFO, (_m, scheme: string) => `${scheme}://${REDACTED}@`);
   s = s.replace(/\S+/g, scrubWhitespaceToken);
   s = s.replace(AUTH_LINE, (_m, sep: string) => `authorization${sep}${REDACTED}`);
   s = s.replace(COOKIE_LINE, (_m, k: string, sep: string) => `${k}${sep}${REDACTED}`);
   s = s.replace(SCHEME, (_m, scheme: string) => `${scheme} ${REDACTED}`);
   s = s.replace(KEY_VALUE, (_m, k: string, sep: string) => `${k}${sep}${REDACTED}`);
   s = s.replace(SUFFIX_KEY_VALUE, (_m, k: string, sep: string) => `${k}${sep}${REDACTED}`);
+  s = s.replace(OTP_ARRAY, (_m, k: string, sep: string) => `${k}${sep}${REDACTED}`);
   s = s.replace(OTP_AFTER_WORD, (_m, w: string, gap: string) => `${w}${gap}${REDACTED}`);
   s = s.replace(OTP_BEFORE_WORD, (_m, gap: string, w: string) => `${REDACTED}${gap}${w}`);
   s = scrubEmails(s);

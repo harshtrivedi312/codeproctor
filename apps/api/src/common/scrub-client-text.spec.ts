@@ -189,6 +189,34 @@ describe('scrubClientText (NFR-04, C-32)', () => {
     expect(scrubClientText('a\u2028b\u202ec\u2066d')).toBe('a b c d');
   });
 
+  it('NFR-04: redacts the whole value when a quoted secret contains an escaped quote', () => {
+    const cases: [string, RegExp][] = [
+      ['{"password":"ab\\"cd ef"}', /cd|ef/],
+      ['{"password":"\\"abc def"}', /abc|def/],
+      ['{"privateKey":"x\\"y z"}', /y z|x/],
+      ['{\\"password\\":\\"a\\\\\\"b c\\"}', /b c|a\\\\/],
+      ["{\\'password\\': \\'x y\\'}", /x y/],
+      ['password: `x y`', /x y/],
+      ['candidatesMediaUploadEncryptionKey=abc123', /abc123/],
+      ['{"otp":["4","8","2","9","1","3"]}', /"4"|"3"/],
+      ['postgres://app:hun!ter@db.example.com/x', /hun|app:/],
+      ['wss://u:pw@host:1', /u:pw/],
+    ];
+    for (const [input, leak] of cases) {
+      expect(`${input} => ${scrubClientText(input)}`).not.toMatch(
+        new RegExp(`=> .*(?:${leak.source})`),
+      );
+    }
+    expect(scrubClientText('{"password":"ab\\"cd ef","after":"kept"}')).toContain('"after":"kept"');
+  });
+
+  it('NFR-04: keeps a standard UUID (session and trace ids) but not other long ids', () => {
+    const uuid = '123e4567-e89b-12d3-a456-426614174000';
+    expect(scrubClientText(`session ${uuid} failed`)).toBe(`session ${uuid} failed`);
+    expect(scrubClientText(`token=${uuid}`)).not.toContain(uuid);
+    expect(scrubClientText(`id x${uuid}`)).not.toContain(uuid);
+  });
+
   it('NFR-04: strips query strings and fragments from URLs in text', () => {
     const out = scrubClientText('at https://app.example.test/candidate/x?invite=abc&y=1#frag:10:5');
     expect(out).toBe('at https://app.example.test/candidate/x?[REDACTED]');
@@ -269,5 +297,72 @@ describe('scrubClientText (NFR-04, C-32)', () => {
       expect(ms).toBeLessThan(100);
     }
     process.stdout.write(`scrub timings: ${timings.join(' ')}\n`);
+  });
+});
+
+// The scrubber runs on a public route, so every pass must stay linear. This table feeds each
+// field's bound with runs of every special character in the shapes that have bitten before
+// (`[class]+$`, nested quantifiers, repeated near-matches) and checks both an absolute bound and
+// that doubling the input does not much more than double the time.
+describe('scrubClientText worst cases (NFR-04, C-32)', () => {
+  const fields: [string, number, (s: string) => string][] = [
+    ['message', 1000, (s) => scrubClientText(s, 1000)],
+    ['stack', 8000, (s) => scrubClientText(s, 8000)],
+    ['url', 2000, (s) => scrubClientUrl(s, 500)],
+    ['component', 200, (s) => scrubClientText(s, 200)],
+    ['release', 100, (s) => scrubClientText(s, 100)],
+    ['userAgent', 200, (s) => scrubClientText(s, 200)],
+  ];
+  const chars = [
+    ...'.,;:)([]}{><"\'`\\/@=&?#%-_+!*~|^$ \t\n0123456789aAéü＠',
+    '%40',
+    '%2B',
+    '\u001b[',
+  ];
+  const shapes: [string, (c: string, n: number) => string][] = [
+    ['c*n+a', (c, n) => `${c.repeat(n)}a`],
+    ['a+c*n+a', (c, n) => `a${c.repeat(n)}a`],
+    ['/+c*n+x', (c, n) => `/${c.repeat(n)}x`],
+    ['@+c*n+x', (c, n) => `@${c.repeat(n)}x`],
+    ['=+c*n+x', (c, n) => `=${c.repeat(n)}x`],
+    ['key=+c*n', (c, n) => `key=${c.repeat(n)}`],
+    ['password"+c*n', (c, n) => `password"${c.repeat(n)}`],
+    ['orgs/+c*n', (c, n) => `orgs/${c.repeat(n)}`],
+    ['x-amz-+c*n', (c, n) => `x-amz-${c.repeat(n)}`],
+    ['otp+c*n+digits', (c, n) => `otp${c.repeat(n)}123456`],
+    ['scheme://u:+c*n', (c, n) => `https://u:${c.repeat(n)}`],
+    ['pairs', (c, n) => `${c}a`.repeat(Math.ceil(n / 2))],
+  ];
+
+  function time(fn: (s: string) => string, input: string): number {
+    const start = performance.now();
+    fn(input);
+    return performance.now() - start;
+  }
+
+  it('NFR-04: every field, character and shape is under 100 ms and grows linearly', () => {
+    let slowest = { ms: 0, label: '' };
+    const failures: string[] = [];
+    for (const [field, max, fn] of fields) {
+      fn('warm up'.repeat(100));
+      for (const [shape, build] of shapes) {
+        for (const c of chars) {
+          const small = build(c, Math.floor(max * 1.5));
+          const large = build(c, max * 3);
+          const ts = time(fn, small);
+          const tl = time(fn, large);
+          const label = `${field} ${shape} c=${JSON.stringify(c)}`;
+          if (tl > slowest.ms) slowest = { ms: tl, label };
+          if (tl >= 100) failures.push(`${label} took ${tl.toFixed(1)} ms`);
+          if (tl >= 10 && tl / Math.max(ts, 0.5) > 3.3) {
+            failures.push(
+              `${label} grew ${(tl / ts).toFixed(1)}x for 2x input (${tl.toFixed(1)} ms)`,
+            );
+          }
+        }
+      }
+    }
+    process.stdout.write(`scrub fuzz slowest: ${slowest.label} ${slowest.ms.toFixed(1)} ms\n`);
+    expect(failures).toEqual([]);
   });
 });

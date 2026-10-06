@@ -104,6 +104,7 @@ export function createClientErrorBody(timeoutMs: number): RequestHandler {
       problem(req, res, 408, 'Request Timeout', 'The report body arrived too slowly.');
       res.once('finish', () => req.destroy());
     }, timeoutMs);
+    timer.unref();
     const stop = (): void => {
       done = true;
       clearTimeout(timer);
