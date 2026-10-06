@@ -566,7 +566,9 @@ describe('Test templates (FR-301, FR-302, TC-020 part 1, TC-008)', () => {
       for (const rule of [{ tags: ['no-such-tag'] }, { tags: ['graphs'], difficulty: 'EASY' }]) {
         const res = await http().post(`${API}/tests`).set(who.auth).send(withRule(rule));
         expect(res.status).toBe(422);
-        expect(JSON.stringify(res.body)).toMatch(/matches 0 published question/);
+        expect(JSON.stringify(res.body)).toMatch(
+          /sections\[0\]\.questions\[0\]\.randomRule matches/,
+        );
       }
       expect(await owner.test.count()).toBe(before);
     });
@@ -628,9 +630,101 @@ describe('Test templates (FR-301, FR-302, TC-020 part 1, TC-008)', () => {
       });
       const res = await http().post(`${API}/tests`).set(who.auth).send(two());
       expect(res.status).toBe(422);
-      expect(JSON.stringify(res.body)).toMatch(/needs 2 different/);
+      expect(JSON.stringify(res.body)).toMatch(/sections\[0\]\.questions\[1\]\.randomRule matches/);
       await seedQuestion({ tags: [tag] });
       await http().post(`${API}/tests`).set(who.auth).send(two()).expect(201);
+    });
+
+    it('TC-020, FU-BE-116: overlapping rules that pass one by one but need 3 different questions are 422', async () => {
+      const who = await make(UserRole.RECRUITER);
+      const a = `ov-a-${++seq}`;
+      const b = `ov-b-${seq}`;
+      await seedQuestion({ tags: [a, b] });
+      await seedQuestion({ tags: [a] });
+      const three = (): Json => ({
+        name: 'Overlap',
+        durationMinutes: 60,
+        sections: [
+          {
+            title: 'S',
+            questions: [
+              { randomRule: { tags: [a] } },
+              { randomRule: { tags: [a] } },
+              { randomRule: { tags: [a, b] } },
+            ],
+          },
+        ],
+      });
+      const before = await owner.test.count();
+      const res = await http().post(`${API}/tests`).set(who.auth).send(three());
+      expect(res.status).toBe(422);
+      expect(JSON.stringify(res.body)).toMatch(/randomRule matches/);
+      expect(await owner.test.count()).toBe(before);
+      await seedQuestion({ tags: [a] });
+      await http().post(`${API}/tests`).set(who.auth).send(three()).expect(201);
+    });
+
+    it('TC-020, FU-BE-116: a fixed question is not available to a random slot of the same test', async () => {
+      const who = await make(UserRole.RECRUITER);
+      const tag = `fx-${++seq}`;
+      const one = await seedQuestion({ tags: [tag] });
+      const mixed = (): Json => ({
+        name: 'Mixed',
+        durationMinutes: 60,
+        sections: [
+          { title: 'S', questions: [fixed(one.versionId), { randomRule: { tags: [tag] } }] },
+        ],
+      });
+      const res = await http().post(`${API}/tests`).set(who.auth).send(mixed());
+      expect(res.status).toBe(422);
+      expect(JSON.stringify(res.body)).toMatch(/sections\[0\]\.questions\[1\]\.randomRule/);
+      await seedQuestion({ tags: [tag] });
+      await http().post(`${API}/tests`).set(who.auth).send(mixed()).expect(201);
+    });
+  });
+
+  // ---- later changes: checkTestSatisfiable (FU-BE-114) -----------------------------------------
+
+  describe('TC-020, FU-BE-114: checkTestSatisfiable re-checks a saved test, read-only and org-scoped', () => {
+    it('TC-020: a test that was satisfiable at save turns unsatisfiable after an archive, with no writes', async () => {
+      const who = await make(UserRole.RECRUITER);
+      const tag = `late-${++seq}`;
+      const q1 = await seedQuestion({ tags: [tag] });
+      await seedQuestion({ tags: [tag] });
+      const t = await create(who, {
+        name: 'Later',
+        durationMinutes: 60,
+        sections: [
+          {
+            title: 'S',
+            questions: [{ randomRule: { tags: [tag] } }, { randomRule: { tags: [tag] } }],
+          },
+        ],
+      });
+      const id = t.id as string;
+      const { TestsService: Svc } =
+        jest.requireActual<typeof import('./tests.service')>('./tests.service');
+      const service = app.get(Svc);
+      const { OrgContextService: Ctx } =
+        jest.requireActual<typeof import('../database/org-context')>('../database/org-context');
+      const inOrg = <T>(orgId: string, fn: () => Promise<T>): Promise<T> =>
+        app.get(Ctx).runInOrg(orgId, fn);
+      const audits = await owner.auditLog.count();
+      expect(await inOrg(orgA, () => service.checkTestSatisfiable(id))).toEqual({
+        satisfiable: true,
+        problems: [],
+      });
+      await owner.question.update({ where: { id: q1.questionId }, data: { isArchived: true } });
+      const after = await inOrg(orgA, () => service.checkTestSatisfiable(id));
+      expect(after.satisfiable).toBe(false);
+      expect(after.problems).toHaveLength(1);
+      expect(after.problems[0]).toMatch(
+        /^sections\[0\]\.questions\[\d\]\.randomRule matches \d+ published/,
+      );
+      expect(await owner.auditLog.count()).toBe(audits);
+      await expect(inOrg(orgB, () => service.checkTestSatisfiable(id))).rejects.toThrow(
+        /Test not found/,
+      );
     });
   });
 
