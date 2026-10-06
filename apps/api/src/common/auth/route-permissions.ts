@@ -66,6 +66,7 @@ const questionRead = {
 const questionCreate = { roles: ['SUPER_ADMIN', 'AUTHOR'], permission: 'question:create' } as const;
 const questionUpdate = { roles: ['SUPER_ADMIN', 'AUTHOR'], permission: 'question:update' } as const;
 const userManage = { roles: SUPER_ADMIN, permission: 'user:manage' } as const;
+const RECRUITER_ADMIN: readonly UserRole[] = ['SUPER_ADMIN', 'RECRUITER'];
 
 export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   // Operations
@@ -99,6 +100,12 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'PATCH /admin/users/:userId': userManage,
   'POST /admin/users/:userId/unlock': userManage,
 
+  // Test templates (FR-301, FR-302; ADR 0010 section 3): SUPER_ADMIN and RECRUITER. No copy or
+  // archive route yet (no schema support). Writes audit in their own transaction (tests.service.ts).
+  'GET /tests': { roles: RECRUITER_ADMIN, permission: 'test:read' },
+  'POST /tests': { roles: RECRUITER_ADMIN, permission: 'test:create' },
+  'GET /tests/:id': { roles: RECRUITER_ADMIN, permission: 'test:read' },
+  'PATCH /tests/:id': { roles: RECRUITER_ADMIN, permission: 'test:update' },
   // Question bank (FR-201..FR-205). Reads: SUPER_ADMIN, RECRUITER, AUTHOR; writes: SUPER_ADMIN,
   // AUTHOR (ADR 0010 section 3). Publish, archive and test cases are changes: question:update.
   'GET /questions': questionRead,

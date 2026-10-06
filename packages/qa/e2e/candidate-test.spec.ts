@@ -48,9 +48,19 @@ test.describe('candidate test screen (mocked)', () => {
   test('TC-092 running test screen has no WCAG 2.1 AA violations', async ({ page }) => {
     await startWithoutFullscreen(page);
     await expect(page.getByTestId('editor-region')).toBeVisible();
+    // Monaco applies its dark theme after the editor region is visible. Axe run earlier saw the
+    // light-theme colours and reported color-contrast on the textarea and `.view-line .mtk1`
+    // (flaky, 2 of 5 runs). Wait for the real theme, then two animation frames; the check itself
+    // is unchanged.
+    await expect(page.locator('.monaco-editor.vs-dark .view-lines')).toBeVisible();
+    // A string expression: this package has no DOM types, so a callback would not type-check.
+    await page.evaluate(
+      'new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))',
+    );
     const results = await new AxeBuilder({ page })
       .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
       .analyze();
-    expect(results.violations).toEqual([]);
+    // Ids only, so a failure names the rule instead of dumping the page.
+    expect(results.violations.map((v) => v.id)).toEqual([]);
   });
 });
