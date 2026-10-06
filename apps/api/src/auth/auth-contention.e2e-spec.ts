@@ -66,7 +66,7 @@ describe('Login under row-lock contention (DL-37, FR-101, FU-BE-187)', () => {
   });
 
   it('DL-37, FR-101: a wrong-password login for an existing account whose row is locked, and one for an unknown account, answer the same 401 and neither is 503', async () => {
-    const login = (e: string): Promise<request.Response> =>
+    const login = (e: string): request.Test =>
       request(app.getHttpServer())
         .post(LOGIN)
         .send({ email: e, password: 'not-the-password-at-all-1' });
