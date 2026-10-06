@@ -1,0 +1,282 @@
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { apiBaseUrl } from '@/lib/env';
+import { setInvitationScenario } from '@/mocks/invitation-handlers';
+import { server } from '@/mocks/server';
+import { resetAuthTestState } from '@/test/auth-test-utils';
+
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
+beforeEach(() => resetAuthTestState());
+
+interface Reply<T = Record<string, unknown>> {
+  status: number;
+  body: T;
+  headers: Headers;
+}
+async function call<T = Record<string, unknown>>(
+  role: string,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<Reply<T>> {
+  const res = await fetch(`${apiBaseUrl}${path}`, {
+    method,
+    headers: {
+      ...(role === 'NONE' ? {} : { authorization: `Bearer mock-access-${role}-direct` }),
+      'content-type': 'application/json',
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await res.text();
+  return { status: res.status, body: (text ? JSON.parse(text) : {}) as T, headers: res.headers };
+}
+
+const day = 86_400_000;
+const win = (endDays = 7) => ({
+  windowStart: new Date(Date.now() - 1000).toISOString(),
+  windowEnd: new Date(Date.now() + endDays * day).toISOString(),
+});
+const one = (extra: object = {}) => ({
+  candidate: { email: 'new.person@example.test', name: 'New Person' },
+  ...win(),
+  ...extra,
+});
+const errorsOf = (r: Reply): string[] => (r.body as { errors?: string[] }).errors ?? [];
+const path = '/v1/tests/test-backend/invitations';
+
+describe('Invitations mock [BE-06b, WEB-ONLY]: access (FR-103, FR-303)', () => {
+  it('FR-103 TC-004: recruiters and super admins invite; authors and reviewers get 403; no token is 401', async () => {
+    expect((await call('RECRUITER', 'POST', path, one())).status).toBe(201);
+    expect(
+      (
+        await call(
+          'SUPER_ADMIN',
+          'POST',
+          path,
+          one({ candidate: { email: 'b@example.test', name: 'B' } }),
+        )
+      ).status,
+    ).toBe(201);
+    for (const role of ['AUTHOR', 'REVIEWER']) {
+      expect((await call(role, 'POST', path, one())).status).toBe(403);
+      expect((await call(role, 'GET', '/v1/admin/candidates/cand-1/invitations')).status).toBe(403);
+    }
+    expect((await call('NONE', 'POST', path, one())).status).toBe(401);
+  });
+});
+
+describe('Invitations mock: single invitation, in the order the API checks (FR-303)', () => {
+  it('TC-023: creates an INVITED invitation and the candidate list shows it', async () => {
+    const r = await call<{ id: string; status: string; candidateId: string }>(
+      'RECRUITER',
+      'POST',
+      path,
+      one(),
+    );
+    expect(r.status).toBe(201);
+    expect(r.body.status).toBe('INVITED');
+    const list = await call<{
+      items: { id: string; latestStatus: string | null; invitationCount: number }[];
+    }>('SUPER_ADMIN', 'GET', '/v1/admin/candidates');
+    const mine = list.body.items.find((c) => c.id === r.body.candidateId);
+    expect(mine).toMatchObject({ latestStatus: 'INVITED', invitationCount: 1 });
+  });
+
+  it('400 comes first: unknown fields, bad email, window order, accommodations', async () => {
+    const bad = await call('RECRUITER', 'POST', '/v1/tests/does-not-exist/invitations', {
+      candidate: { email: 'x', name: '' },
+      windowStart: win().windowEnd,
+      windowEnd: win().windowStart,
+      extra: 1,
+    });
+    expect(bad.status).toBe(400);
+    expect(bad.body).toMatchObject({ detail: 'Request validation failed' });
+    const text = errorsOf(bad).join(' | ');
+    expect(text).toMatch(/property extra should not exist/);
+    expect(text).toMatch(/candidate.email must be an email/);
+    expect(text).toMatch(/windowEnd must be after windowStart/);
+    // The email the caller sent is not echoed back.
+    expect(JSON.stringify(bad.body)).not.toContain('"x"');
+  });
+
+  it('404 for an unknown test and 422 for a window that has closed', async () => {
+    expect((await call('RECRUITER', 'POST', '/v1/tests/nope/invitations', one())).status).toBe(404);
+    const closed = await call('RECRUITER', 'POST', path, {
+      candidate: { email: 'late@example.test', name: 'Late' },
+      windowStart: new Date(Date.now() - 2 * day).toISOString(),
+      windowEnd: new Date(Date.now() - day).toISOString(),
+    });
+    expect(closed.status).toBe(422);
+  });
+
+  it('409 when the candidate already has an open invitation to the test', async () => {
+    const r = await call('RECRUITER', 'POST', path, {
+      candidate: { email: 'tim.berners.lee@candidates.example.test', name: 'Tim' },
+      ...win(),
+    });
+    expect(r.status).toBe(409);
+  });
+
+  it('a candidate whose earlier invitation ended can be invited again', async () => {
+    // Frances Allen's seeded invitation is EXPIRED.
+    const r = await call('RECRUITER', 'POST', path, {
+      candidate: { email: 'frances.allen@candidates.example.test', name: 'Frances Allen' },
+      ...win(),
+    });
+    expect(r.status).toBe(201);
+  });
+});
+
+describe('Invitations mock: accommodations and the identity waiver (ADR 0015, C-19)', () => {
+  const waiver = (w: object) => one({ accommodations: { identityCheckWaiver: w } });
+  it('C-19: a waiver needs a valid reason code; OTHER needs a note; a note is only for OTHER', async () => {
+    const none = await call('RECRUITER', 'POST', path, waiver({}));
+    expect(none.status).toBe(400);
+    expect(errorsOf(none).join(' ')).toMatch(/reasonCode must be one of/);
+    const other = await call('RECRUITER', 'POST', path, waiver({ reasonCode: 'OTHER' }));
+    expect(errorsOf(other).join(' ')).toMatch(/reasonNote is required for OTHER/);
+    const extra = await call(
+      'RECRUITER',
+      'POST',
+      path,
+      waiver({ reasonCode: 'CANNOT_COMPLETE_ID_CHECK', reasonNote: 'x' }),
+    );
+    expect(errorsOf(extra).join(' ')).toMatch(/allowed only with OTHER/);
+    expect(
+      (
+        await call(
+          'RECRUITER',
+          'POST',
+          path,
+          waiver({ reasonCode: 'OTHER', reasonNote: 'Court order' }),
+        )
+      ).status,
+    ).toBe(201);
+  });
+
+  it('checks the accommodation limits', async () => {
+    const r = await call(
+      'RECRUITER',
+      'POST',
+      path,
+      one({
+        accommodations: {
+          extraTimePct: 250,
+          disabledDetectors: ['FACE', 'FACE', 'NOPE'],
+          allowedAssistiveTools: Array.from({ length: 11 }, () => 't'),
+          notes: 'n'.repeat(1001),
+        },
+      }),
+    );
+    expect(r.status).toBe(400);
+    expect(errorsOf(r)).toHaveLength(4);
+  });
+
+  it('REASON_NOT_ENABLED: 422 with a code when the biometric-refusal reason is switched off', async () => {
+    setInvitationScenario({ biometricRefusalEnabled: false });
+    const r = await call(
+      'RECRUITER',
+      'POST',
+      path,
+      waiver({ reasonCode: 'REFUSED_BIOMETRIC_PROCESSING' }),
+    );
+    expect(r.status).toBe(422);
+    expect(r.body).toMatchObject({ code: 'REASON_NOT_ENABLED' });
+    expect(
+      (await call('RECRUITER', 'POST', path, waiver({ reasonCode: 'CANNOT_COMPLETE_ID_CHECK' })))
+        .status,
+    ).toBe(201);
+  });
+});
+
+describe('Invitations mock: rate limit (429)', () => {
+  it('answers 429 with Retry-After once the hourly limit is used', async () => {
+    setInvitationScenario({ limitPerHour: 1 });
+    expect((await call('RECRUITER', 'POST', path, one())).status).toBe(201);
+    const r = await call(
+      'RECRUITER',
+      'POST',
+      path,
+      one({ candidate: { email: 'second@example.test', name: 'Second' } }),
+    );
+    expect(r.status).toBe(429);
+    expect(Number(r.headers.get('retry-after'))).toBeGreaterThan(0);
+  });
+});
+
+describe('Invitations mock: bulk (FR-304, TC-023)', () => {
+  const rows = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ email: `bulk${i}@example.test`, name: `Bulk ${i}` }));
+  it('creates valid rows and reports per-row errors by index without echoing emails', async () => {
+    const r = await call<{ created: number; errors: { row: number; message: string }[] }>(
+      'RECRUITER',
+      'POST',
+      `${path}/bulk`,
+      {
+        ...win(),
+        rows: [
+          ...rows(2),
+          { email: 'bulk0@example.test', name: 'Again' },
+          { email: 'tim.berners.lee@candidates.example.test', name: 'Tim' },
+        ],
+      },
+    );
+    expect(r.status).toBe(200);
+    expect(r.body.created).toBe(2);
+    expect(r.body.errors.map((e) => e.row)).toEqual([3, 4]);
+    expect(JSON.stringify(r.body)).not.toContain('@');
+  });
+
+  it('is limited to 200 rows per request and rejects bad rows with 400', async () => {
+    expect(
+      (await call('RECRUITER', 'POST', `${path}/bulk`, { ...win(), rows: rows(201) })).status,
+    ).toBe(400);
+    expect((await call('RECRUITER', 'POST', `${path}/bulk`, { ...win(), rows: [] })).status).toBe(
+      400,
+    );
+    expect(
+      (
+        await call('RECRUITER', 'POST', `${path}/bulk`, {
+          ...win(),
+          rows: [{ email: 'x', name: 'y' }],
+        })
+      ).status,
+    ).toBe(400);
+  });
+
+  it('a bulk upload cannot carry accommodations', async () => {
+    const r = await call('RECRUITER', 'POST', `${path}/bulk`, {
+      ...win(),
+      rows: rows(1),
+      accommodations: { extraTimePct: 10 },
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it('429 rejects the whole request and creates nothing', async () => {
+    setInvitationScenario({ limitPerHour: 5 });
+    const r = await call('RECRUITER', 'POST', `${path}/bulk`, { ...win(), rows: rows(6) });
+    expect(r.status).toBe(429);
+    expect(r.headers.get('retry-after')).toBeTruthy();
+  });
+});
+
+describe('Invitations mock: candidate timeline (FR-303, ADR 0002, C-28)', () => {
+  it('returns the stage and its history, and never a score, flag or verdict', async () => {
+    const r = await call<{ items: { status: string; history: { status: string }[] }[] }>(
+      'RECRUITER',
+      'GET',
+      '/v1/admin/candidates/cand-1/invitations',
+    );
+    expect(r.status).toBe(200);
+    expect(r.body.items[0]?.status).toBe('COMPLETED');
+    expect(JSON.stringify(r.body)).not.toMatch(/score|flag|verdict|integrity/i);
+  });
+
+  it('404 for an unknown candidate', async () => {
+    expect((await call('RECRUITER', 'GET', '/v1/admin/candidates/nobody/invitations')).status).toBe(
+      404,
+    );
+  });
+});

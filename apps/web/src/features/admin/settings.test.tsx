@@ -439,14 +439,16 @@ describe('Candidate erasure (NFR-05, D-19, TC-094)', () => {
     const row = rowOf('Grace Hopper');
     expect(await within(row).findByText('Waiting for appeal')).toBeInTheDocument();
     expect(row).toHaveTextContent('runs as soon as the appeal closes');
-    expect(within(row).queryByRole('button')).not.toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: /Erase data/ })).not.toBeInTheDocument();
   });
 
   it('D-19: a request that is already waiting shows the waiting state and no erase button', async () => {
     renderAsStaff(<CandidatesPage />, MOCK_USERS.admin);
     await findRow('Barbara Liskov');
     expect(within(rowOf('Barbara Liskov')).getByText('Waiting for appeal')).toBeInTheDocument();
-    expect(within(rowOf('Barbara Liskov')).queryByRole('button')).not.toBeInTheDocument();
+    expect(
+      within(rowOf('Barbara Liskov')).queryByRole('button', { name: /Erase data/ }),
+    ).not.toBeInTheDocument();
     expect(within(rowOf('Edsger Dijkstra')).getByText('Erased')).toBeInTheDocument();
   });
 
@@ -469,7 +471,7 @@ describe('Candidate erasure (NFR-05, D-19, TC-094)', () => {
     renderAsStaff(<CandidatesPage />, MOCK_USERS.recruiter);
     await findRow('Ada Lovelace');
     expect(screen.queryByRole('button', { name: /Erase data/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole('columnheader', { name: 'Actions' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /Timeline for/ }).length).toBeGreaterThan(0);
   });
 
   it('FR-103: a reviewer cannot open the candidates page', async () => {

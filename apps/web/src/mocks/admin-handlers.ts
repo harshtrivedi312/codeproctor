@@ -182,6 +182,33 @@ function seed(): AdminState {
 
 let state: AdminState = seed();
 
+/** The invitations mock adds what a candidate row shows about their invitations (WEB-ONLY, BE-06b). */
+type CandidateEnricher = (id: string) => Partial<CandidateSummary>;
+let enrich: CandidateEnricher = () => ({});
+export function setCandidateEnricher(fn: CandidateEnricher): void {
+  enrich = fn;
+}
+/** Finds a candidate by email (case-insensitive) or creates one, like an invitation does. */
+export function ensureMockCandidate(email: string, name: string): { id: string; created: boolean } {
+  const found = state.candidates.find((c) => c.email.toLowerCase() === email.toLowerCase());
+  if (found) return { id: found.id, created: false };
+  const id = `cand-${state.candidates.length + 1}-new`;
+  state.candidates.push({
+    id,
+    name,
+    email,
+    lastSessionAt: null,
+    openFlow: null,
+    erasure: { state: 'none', requestedAt: null, waitingFor: null },
+  });
+  return { id, created: true };
+}
+export const mockCandidateIdByEmail = (email: string): string | null =>
+  state.candidates.find((c) => c.email.toLowerCase() === email.toLowerCase())?.id ?? null;
+export const mockCandidateExists = (id: string): boolean =>
+  state.candidates.some((c) => c.id === id);
+export const mockCandidateIds = (): string[] => state.candidates.map((c) => c.id);
+
 /** Resets the in-memory mock (tests call this before each test). */
 export function resetMockAdminState(options: { legalApprovalRequired?: boolean } = {}): void {
   state = seed();
@@ -355,7 +382,9 @@ export function createAdminHandlers(options: { latencyMs: number }) {
       await wait();
       return (
         guard(request, ['SUPER_ADMIN', 'RECRUITER']) ??
-        HttpResponse.json({ items: state.candidates.map(publicCandidate) })
+        HttpResponse.json({
+          items: state.candidates.map((c) => ({ ...publicCandidate(c), ...enrich(c.id) })),
+        })
       );
     }),
 
