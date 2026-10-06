@@ -12,6 +12,7 @@ import type { Schemas } from '@/lib/api/client';
 import { TestLoadError } from './adr-source';
 import { demoSource } from './demo-source';
 import type { DraftBody, DraftResult, TestSource } from './source';
+import type { ProctorBridge } from './proctor/bridge';
 import { cooldownRemainingMs, cooldownSeconds } from './cooldown';
 import { LANGUAGE_LABELS } from './keywords';
 import {
@@ -23,7 +24,14 @@ import {
 } from './lock-state';
 import { Markdown } from './markdown';
 import { OutputPanel } from './output-panel';
-import { FinishSectionDialog, FullscreenLockOverlay, StartGate } from './overlays';
+import {
+  FinishSectionDialog,
+  FullscreenLockOverlay,
+  ProctorGate,
+  ProctorPausedOverlay,
+  ScreenShareLostOverlay,
+  StartGate,
+} from './overlays';
 import { formatClock, timerWarning } from './timer';
 import { useAutosave } from './use-autosave';
 import { useServerClock } from './use-clock';
@@ -78,9 +86,15 @@ interface FinishedSection {
 
 export function TestScreen({
   source = demoSource,
+  proctor,
+  registerClockSync,
   onSubmitted,
 }: {
   source?: TestSource;
+  /** The proctoring wiring (real flow only). Without it the screen is the demo. */
+  proctor?: ProctorBridge;
+  /** Hands the clock's re-sync function to the owner, so a heartbeat can correct the countdown. */
+  registerClockSync?: (sync: (serverNowIso: string, start: number, end: number) => void) => void;
   /** Called once when the test is submitted (the last section was finished). */
   onSubmitted?: () => void;
 } = {}): React.JSX.Element {
@@ -143,6 +157,8 @@ export function TestScreen({
       <TestScreenInner
         key={current.section.id}
         source={source}
+        proctor={proctor}
+        registerClockSync={registerClockSync}
         session={current}
         lock={lock}
         dispatchLock={dispatchLock}
@@ -177,6 +193,8 @@ export function TestScreen({
 
 function TestScreenInner({
   source,
+  proctor,
+  registerClockSync,
   session,
   lock,
   dispatchLock,
@@ -184,6 +202,9 @@ function TestScreenInner({
   onFinished,
 }: {
   source: TestSource;
+  proctor: ProctorBridge | undefined;
+  registerClockSync:
+    ((sync: (iso: string, start: number, end: number) => void) => void) | undefined;
   session: Schemas['CandidateSession'];
   lock: LockState;
   dispatchLock: React.Dispatch<LockEvent>;
@@ -209,15 +230,39 @@ function TestScreenInner({
   const [runErrors, setRunErrors] = React.useState<Record<string, string>>({});
 
   const clock = useServerClock(() => source.serverNow());
-  const testLeft = clock.remaining(session.testDeadlineAt);
-  const sectionLeft = clock.remaining(section.deadlineAt);
+  const syncClock = clock.syncFromServer;
+  React.useEffect(() => registerClockSync?.(syncClock), [registerClockSync, syncClock]);
+
+  // A proctor pause stops the clock (ADR 0002 P-2, P-3): show the time frozen at the pause. The
+  // server adds the pause to the deadlines on resume and the heartbeat brings them here.
+  const proctorPaused = proctor?.state.pauseReasons.includes('PROCTOR') ?? false;
+  const rawTestLeft = clock.remaining(session.testDeadlineAt);
+  const rawSectionLeft = clock.remaining(section.deadlineAt);
+  const [frozen, setFrozen] = React.useState<{
+    test: number | null;
+    section: number | null;
+  } | null>(null);
+  React.useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFrozen(proctorPaused ? { test: rawTestLeft, section: rawSectionLeft } : null);
+    // Only when the pause starts or ends: the frozen values must not follow the ticking clock.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proctorPaused]);
+  const testLeft = frozen ? frozen.test : rawTestLeft;
+  const sectionLeft = frozen ? frozen.section : rawSectionLeft;
   const expired =
     (testLeft !== null && testLeft <= 0) || (sectionLeft !== null && sectionLeft <= 0);
 
   const question = questions.find((q) => q.id === activeId) ?? questions[0];
   const language: CodeLanguage =
     (question && languages[question.id]) ?? question?.languages?.[0] ?? 'python';
-  const readOnly = isEditorReadOnly(lock, expired) || finished || clock.unavailable;
+  // The editor is also off while the screen share is lost or a proctor paused the test (ADR 0002 P-2).
+  const proctorLocked =
+    proctor !== undefined &&
+    lock.phase === 'running' &&
+    (proctor.state.locks.screenShare || proctorPaused);
+  const readOnly =
+    isEditorReadOnly(lock, expired) || finished || clock.unavailable || proctorLocked;
 
   // Autosave every 10 s (FR-504). Compared by identity: any edit creates a new Drafts object.
   const lastSaved = React.useRef<Drafts>({ code: {}, mcq: {} });
@@ -279,6 +324,55 @@ function TestScreenInner({
       return false;
     }
   };
+
+  // Proctoring gate state (real flow): two clicks, share the screen, then enter fullscreen.
+  const [gateFailure, setGateFailure] = React.useState<string | null>(null);
+  const [gateBusy, setGateBusy] = React.useState(false);
+  const shareFailureText = (reason: string): string =>
+    reason === 'WRONG_SURFACE'
+      ? 'You shared a window or a tab. Press the button again and choose "Entire Screen".'
+      : reason === 'UNSUPPORTED'
+        ? 'This browser cannot share the screen. Open the link in the latest Chrome or Edge.'
+        : 'Screen sharing was cancelled or blocked. Press the button again, choose "Entire Screen" and press Share.';
+  const shareScreen = async (): Promise<void> => {
+    if (!proctor || gateBusy) return;
+    setGateBusy(true);
+    setGateFailure(null);
+    const result = await proctor.shareScreen();
+    if (!result.ok) setGateFailure(shareFailureText(result.reason));
+    setGateBusy(false);
+  };
+  const enterFromGate = async (): Promise<void> => {
+    if (!proctor || gateBusy) return;
+    setGateBusy(true);
+    setGateFailure(null);
+    const ok = await proctor.enterFullscreen();
+    if (ok) {
+      await proctor.startRecorders();
+      dispatchLock({ type: 'start', fullscreen: true });
+    } else {
+      setGateFailure(
+        'Your browser did not allow fullscreen. Press the button again, or check that fullscreen is not blocked for this site.',
+      );
+    }
+    setGateBusy(false);
+  };
+
+  // A blocked paste, drop or shortcut was logged by the proctoring monitors: tell the candidate.
+  const notice = proctor?.state.notice ?? null;
+  const clearNotice = proctor?.clearNotice;
+  React.useEffect(() => {
+    if (!notice) return;
+    toast.message(
+      notice.kind === 'paste' || notice.kind === 'copy'
+        ? 'Copy and paste are turned off during this test. Please type your answer.'
+        : notice.kind === 'drop'
+          ? 'Dropping text is turned off during this test. Please type your answer.'
+          : 'That key combination is turned off during this test.',
+      { id: 'blocked' },
+    );
+    clearNotice?.();
+  }, [notice, clearNotice]);
 
   if (!question) return <p className="p-8">This section has no questions.</p>;
 
@@ -448,6 +542,29 @@ function TestScreenInner({
           </button>
           . Your time is not affected.
         </div>
+      )}
+
+      {proctor && !proctor.state.online && (
+        <p
+          role="status"
+          className="bg-warning-soft px-4 py-2 text-sm text-warning"
+          data-testid="offline-banner"
+        >
+          We cannot reach the server right now. Keep this page open: your answers and recordings are
+          kept and sent again when the connection is back. The server decides when time is up.
+        </p>
+      )}
+
+      {proctor && proctor.state.unavailable.length > 0 && (
+        <p
+          role="status"
+          className="bg-warning-soft px-4 py-2 text-sm text-warning"
+          data-testid="devices-banner"
+        >
+          Some of your recording could not start ({proctor.state.unavailable.join(', ')}). The test
+          goes on, and a reviewer will see this. If it is a camera or microphone, check its
+          permission in your browser.
+        </p>
       )}
 
       {expired && (
@@ -633,7 +750,7 @@ function TestScreenInner({
             setFinishError(null);
             setFinishOpen(true);
           }}
-          disabled={finished}
+          disabled={finished || proctorPaused}
         >
           Finish section
         </Button>
@@ -645,7 +762,17 @@ function TestScreenInner({
         )}
       </footer>
 
-      {lock.phase === 'gate' && (
+      {lock.phase === 'gate' && proctor && (
+        <ProctorGate
+          ready={proctor.state.phase === 'running'}
+          shared={proctor.state.shared}
+          failure={gateFailure}
+          busy={gateBusy}
+          onShare={() => void shareScreen()}
+          onEnter={() => void enterFromGate()}
+        />
+      )}
+      {lock.phase === 'gate' && !proctor && (
         <StartGate
           fullscreenFailed={fsFailed}
           timerRunning={!source.isDemo}
@@ -665,20 +792,26 @@ function TestScreenInner({
           }
         />
       )}
-      {lock.phase === 'running' && lock.locked && (
-        <FullscreenLockOverlay
-          warnings={lock.warnings}
-          onReenter={() =>
-            void requestFullscreen().then((ok) => {
-              if (ok || lock.simulated) dispatchLock({ type: 'fullscreen-restored' });
-              else
-                toast.error(
-                  'Fullscreen did not start. Click the button again, or allow fullscreen for this site.',
-                );
-            })
-          }
-        />
+      {lock.phase === 'running' && proctor && proctorPaused && <ProctorPausedOverlay />}
+      {lock.phase === 'running' && proctor && !proctorPaused && proctor.state.locks.screenShare && (
+        <ScreenShareLostOverlay failed={gateFailure} onShare={() => void shareScreen()} />
       )}
+      {lock.phase === 'running' &&
+        lock.locked &&
+        !(proctor && (proctorPaused || proctor.state.locks.screenShare)) && (
+          <FullscreenLockOverlay
+            warnings={lock.warnings}
+            onReenter={() =>
+              void requestFullscreen().then((ok) => {
+                if (ok || lock.simulated) dispatchLock({ type: 'fullscreen-restored' });
+                else
+                  toast.error(
+                    'Fullscreen did not start. Click the button again, or allow fullscreen for this site.',
+                  );
+              })
+            }
+          />
+        )}
 
       <FinishSectionDialog
         open={finishOpen}

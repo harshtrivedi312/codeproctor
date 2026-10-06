@@ -4,7 +4,7 @@ import * as React from 'react';
 import { ConsentStep } from '@/features/consent/consent-step';
 import type { IdentityDeps } from '@/features/identity/capture';
 import { createAdrSource } from '@/features/candidate-test/adr-source';
-import { TestScreen } from '@/features/candidate-test/test-screen';
+import { ProctoredTest } from '@/features/candidate-test/proctored-test';
 import { PhoneStep } from '@/features/candidate-phone/phone-step';
 import { PracticeStep } from '@/features/candidate-practice/practice-step';
 import { resetRoomSeq } from '@/features/candidate-room/room-capture';
@@ -267,7 +267,11 @@ export function CandidateFlow({
   if (inTest && !terminal) {
     return (
       <main id="main">
-        <TestScreen source={testSource} onSubmitted={clearCandidateCredentials} />
+        <ProctoredTest
+          source={testSource}
+          onSubmitted={clearCandidateCredentials}
+          onSessionEnded={endSession}
+        />
       </main>
     );
   }

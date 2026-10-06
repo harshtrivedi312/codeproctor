@@ -23,6 +23,11 @@ export interface TestRunState {
   drafts: Map<string, unknown>;
   draftCalls: number;
   runCalls: number;
+  /** The HMAC key was issued (ADR 0013 section 4: once per epoch). */
+  keyIssued: boolean;
+  /** Signed event batches accepted, in order. */
+  batches: { seq: number; signature: string; events: { type: string }[] }[];
+  heartbeats: number;
 }
 
 const states = new WeakMap<object, TestRunState>();
@@ -40,6 +45,9 @@ export function testState(session: object): TestRunState {
       drafts: new Map(),
       draftCalls: 0,
       runCalls: 0,
+      keyIssued: false,
+      batches: [],
+      heartbeats: 0,
     };
     states.set(session, s);
   }
@@ -54,6 +62,18 @@ export function startMockTest(session: object, now = Date.now()): TestRunState {
     s.sectionStarts.set(1, now);
   }
   return s;
+}
+
+/** The mock's HMAC key (32 bytes, base64). Fake: it only exists to check signatures in tests. */
+export const MOCK_HMAC_KEY_B64 = btoa('k'.repeat(32));
+
+async function hmacHex(message: string): Promise<string> {
+  const raw = Uint8Array.from(atob(MOCK_HMAC_KEY_B64), (c) => c.charCodeAt(0));
+  const key = await crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, [
+    'sign',
+  ]);
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 const iso = (ms: number): string => new Date(ms).toISOString();
@@ -133,6 +153,60 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
         sectionDeadlineAt: sectionStart === null ? null : iso(sectionStart + MOCK_SECTION_MS),
         pauseReasons: s.pauseReasons,
       });
+    }),
+
+    http.post(`${cand}/session/proctor-key`, ({ request }) => {
+      const r = live(request);
+      if (isResponse(r)) return r;
+      // ADR 0013 section 4: the key is issued once per epoch.
+      if (r.s.keyIssued) return problem(409, 'KEY_ALREADY_ISSUED');
+      r.s.keyIssued = true;
+      return HttpResponse.json(
+        {
+          alg: 'HMAC-SHA256',
+          key: MOCK_HMAC_KEY_B64,
+          keyEpoch: 1,
+          counters: { eventSeqStart: 0, keystrokeSeqStart: 0 },
+        },
+        { headers: { 'Cache-Control': 'no-store' } },
+      );
+    }),
+
+    http.post(`${cand}/session/events`, async ({ request }) => {
+      const session = bearer(request);
+      if (!session) return problem(401, 'UNAUTHENTICATED');
+      const s = testState(session);
+      if (!s.started || s.submitted) return problem(409, 'SESSION_NOT_ACTIVE');
+      const signature = request.headers.get('X-Signature') ?? '';
+      if (!/^[0-9a-f]{64}$/.test(signature)) return problem(400, 'VALIDATION_FAILED');
+      const raw = await request.text();
+      // The server verifies the received bytes (ADR 0013 section 2).
+      if ((await hmacHex(raw)) !== signature) return problem(403, 'SIGNATURE_INVALID');
+      const body = JSON.parse(raw) as { seq: number; events: { type: string }[] };
+      if (s.batches.some((b) => b.seq === body.seq)) {
+        return HttpResponse.json({ seq: body.seq, duplicate: true });
+      }
+      s.batches.push({ seq: body.seq, signature, events: body.events });
+      return HttpResponse.json({ seq: body.seq, duplicate: false });
+    }),
+
+    http.post(`${cand}/session/heartbeat`, ({ request }) => {
+      const r = live(request);
+      if (isResponse(r)) return r;
+      r.s.heartbeats += 1;
+      const open = openPosition(r.s);
+      const sectionStart = r.s.sectionStarts.get(open) ?? r.s.startedAt;
+      return HttpResponse.json(
+        {
+          serverTime: iso(Date.now()),
+          status: r.s.pauseReasons.length > 0 ? 'PAUSED' : 'IN_PROGRESS',
+          startedAt: iso(r.s.startedAt),
+          deadlineAt: iso(r.s.startedAt + MOCK_TEST_MS),
+          sectionDeadlineAt: iso(sectionStart + MOCK_SECTION_MS),
+          pauseReasons: r.s.pauseReasons,
+        },
+        { headers: { 'Cache-Control': 'no-store' } },
+      );
     }),
 
     http.get(`${cand}/session/test`, ({ request }) => {

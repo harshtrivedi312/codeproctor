@@ -155,3 +155,13 @@ export function fakeRoomDeps(upload: 'ok' | 'exists' | 'failed' = 'ok') {
     },
   };
 }
+
+/**
+ * Browser storage written by this app must hold nothing. The proctor SDK keeps one counter per
+ * session in localStorage (`codeproctor:eventseq:*`, the next event batch number: no token, key or
+ * answer; FU-FEB-45), which is the only entry allowed.
+ */
+export function storedKeys(): string[] {
+  const local = Object.keys(localStorage).filter((k) => !k.startsWith('codeproctor:eventseq:'));
+  return [...local, ...Object.keys(sessionStorage)];
+}
