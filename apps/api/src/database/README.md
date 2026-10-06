@@ -480,7 +480,7 @@ and when a column of the schema is none of the five (a new column breaks the bui
   the aggregates, walked to a depth of 64) with a foreign prototype, an own `__proto__` or an inherited key; and
   a `data` row (each row of a `createMany`) and one level below a column with an own `__proto__` or an inherited
   key. Json contents are not walked, so an ingest path pays O(columns). Dates, byte arrays, Decimals, the Json
-  null sentinels and field references are values, not structure; a class instance with no enumerable inherited
+  null sentinels and field references are values, not structure. **So is the operand of a Json filter** (re-review of #185, S1): on a Json column (`JSON_COLUMNS`, the schema's twelve, compared with the generated client by a spec) the operand of `equals`, `not`, `in`, `notIn`, `array_*` and `string_*` is a stored document, which may be nested past the limit or hold an own `__proto__`, and Prisma never reads it as structure; the compare-and-set of retention, the org settings and the device-info fence passes it. The `where` and `having` of a call are walked model by model (AND, OR, NOT and relation filters follow the model), the filter object itself, a `path` and everything else are still walked, and a `where` nested in a `select` or `include` is walked whole. (Prisma 7.10 drops an own `__proto__` key from such an operand, so a compare-and-set against a document that raw SQL stored with one matches nothing: FU-DB-222.) A class instance with no enumerable inherited
   key (a DTO) passes as a `data` row. The checks themselves read `select`, `omit`, `where`, `data` and the rest
   through `ownValue` and an own-key copy of the args, so a key that is not the caller's own is never seen.
 
@@ -558,10 +558,16 @@ orgContext.withGrant<T>(
 `model` is the **Prisma model name** (`Session`, `MediaChunk`, `Consent`; not `sessions`), `columns` are Prisma
 field names (`hmacKeyEnc`, `legalApprovedAt`), `ids` are primary keys. **Private to the grant sites below**:
 `call-sites.spec.ts` pins them (a slice of FU-DB-67, FU-DB-189): it scans every non-test file under
-`apps/api/src` for `withGrant`, `claimCandidateFactsSetter`, `setCandidateFacts` and `detachForSessionJob`, and a
-file that is not on its per-file list fails. **Today the list holds the database folder only**: BE-07's guard,
-`SessionJobProcessor` and the grant-site services are added to `CALL_SITES` in the PR that builds them, one entry
-per file, with the CS-4.4 grant site(s) it holds. It is a method of `OrgContextService`, so a service calls it
+`apps/api/src` (`.ts`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`; any other extension fails the scan) for a USE of
+`withGrant`, `claimCandidateFactsSetter`, `setCandidateFacts` and `detachForSessionJob` (a call, a definition, a
+member access, a bracket access, an exact string, or the name inside braces; a mention in a comment or in prose is
+not a use), and a file that is not on its per-file list fails. **Today the list holds the two database files that
+define them**: BE-07's guard, `SessionJobProcessor` and the grant-site services are added to `CALL_SITES` in the PR
+that builds them, one entry per file, with the CS-4.4 grant site(s) it holds. **The guard pins files, not grants**:
+PR 3 adds an AST check (each `withGrant(` takes an object literal whose `model` and `columns` match the file's
+declared `sites`, and no function forwards a parameter as the request), and no BE-07 grant site merges before
+it exists (a hard gate, FU-DB-189 and FU-DB-190); until then a run-time name, a unicode escape, `require` and
+`moduleRef` are known misses. It is a method of `OrgContextService`, so a service calls it
 with the service it already has:
 
 ```ts
