@@ -127,24 +127,24 @@ workflows and other environments cannot assume the role (tested).
 
 ## Explicit denies and escalation paths
 
-| Path                                                                                        | How it is closed                                                                                                                                       |
-| ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Reconfigure a data bucket (policy, ACL, public access, ownership, versioning, lifecycle)    | Not allowed, and denied for every bucket                                                                                                               |
-| Create a KMS key with a chosen policy, or change a key policy                               | `CreateKey` and `PutKeyPolicy` denied (IAM cannot inspect a caller-supplied policy)                                                                    |
-| Re-tag a key `Purpose=tfstate` to unlock state decryption, or strip the tag                 | Explicit deny on `TagResource`, `UntagResource`, `CreateKey` touching `Purpose`; all key tagging denied                                                |
-| Change a secret's resource policy                                                           | `PutResourcePolicy`, `DeleteResourcePolicy` denied                                                                                                     |
-| Create a role without limits                                                                | `CreateRole` only with the pilot boundary or the scheduler boundary, prefix `codeproctor-pilot-*`, tag `Environment=pilot`; explicit deny otherwise    |
-| Use a role from outside the instance                                                        | Every boundary allow requires `ec2:SourceInstanceARN`: a role assumed from elsewhere gets nothing                                                      |
-| Edit an owner-made, untagged `codeproctor-pilot-*` role                                     | `UpdateAssumeRolePolicy`, `DeleteRole`, tagging, `PassRole` and instance-profile changes need `aws:ResourceTag/Environment=pilot` on the role          |
-| Remove or swap the boundary, or edit it                                                     | `Put/DeleteRolePermissionsBoundary` denied; boundary policies are under the guardrails path with explicit `iam:*` denies                               |
-| Attach AdministratorAccess or any AWS managed policy                                        | `AttachRolePolicy` only with `iam:PolicyARN` like `policy/codeproctor-pilot-*`, on bounded roles                                                       |
-| Attach the boundary or deploy policies as ordinary policies                                 | Explicit deny on those policy ARNs                                                                                                                     |
-| Change the deploy role, its policies or its trust                                           | Explicit `iam:*` deny, path ARN and bare name                                                                                                          |
-| IAM users, access keys, login profiles, groups, service credentials, SAML or OIDC providers | Not allowed; explicit deny by wildcard                                                                                                                 |
-| Pass a powerful role to a code-running service                                              | `PassRole` only to `ec2` and `scheduler`, on tagged `codeproctor-pilot-*` roles; Lambda, ECS, CloudFormation, CodeBuild, Glue, SageMaker, Batch denied |
-| Service-linked roles, `sts:AssumeRole`                                                      | Denied                                                                                                                                                 |
-| Re-tag a resource into or out of scope                                                      | Any request or resource with another `Environment` value is denied; the EC2 `Environment` tag cannot be removed or rewritten                           |
-| Cost blow-out                                                                               | Explicit deny on RDS, ELB, NAT, peering, transit gateway, VPN, key pairs, other instance types, large or non-gp3 volumes                               |
+| Path                                                                                        | How it is closed                                                                                                                                                                                                                                                     |
+| ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Reconfigure a data bucket (policy, ACL, public access, ownership, versioning, lifecycle)    | Not allowed, and denied for every bucket                                                                                                                                                                                                                             |
+| Create a KMS key with a chosen policy, or change a key policy                               | `CreateKey` and `PutKeyPolicy` denied (IAM cannot inspect a caller-supplied policy)                                                                                                                                                                                  |
+| Re-tag a key `Purpose=tfstate` to unlock state decryption, or strip the tag                 | Explicit deny on `TagResource`, `UntagResource`, `CreateKey` touching `Purpose`; all key tagging denied                                                                                                                                                              |
+| Change a secret's resource policy                                                           | `PutResourcePolicy`, `DeleteResourcePolicy` denied                                                                                                                                                                                                                   |
+| Create a role without limits                                                                | `CreateRole` only with the pilot boundary or the scheduler boundary, prefix `codeproctor-pilot-*`, tag `Environment=pilot`; explicit deny otherwise                                                                                                                  |
+| Use a boundary role from outside an instance                                                | Every S3, Secrets, SES, SSM and Logs allow in the boundary requires `ec2:SourceInstanceARN`: a role assumed by a person or a service gets none of them. This is a speed bump, not a lock: stolen instance credentials still work from anywhere (see trade-off below) |
+| Edit an owner-made, untagged `codeproctor-pilot-*` role                                     | `UpdateAssumeRolePolicy`, `DeleteRole`, tagging, `PassRole` and instance-profile changes need `aws:ResourceTag/Environment=pilot` on the role                                                                                                                        |
+| Remove or swap the boundary, or edit it                                                     | `Put/DeleteRolePermissionsBoundary` denied; boundary policies are under the guardrails path with explicit `iam:*` denies                                                                                                                                             |
+| Attach AdministratorAccess or any AWS managed policy                                        | `AttachRolePolicy` only with `iam:PolicyARN` like `policy/codeproctor-pilot-*`, on bounded roles                                                                                                                                                                     |
+| Attach the boundary or deploy policies as ordinary policies                                 | Explicit deny on those policy ARNs                                                                                                                                                                                                                                   |
+| Change the deploy role, its policies or its trust                                           | Explicit `iam:*` deny, path ARN and bare name                                                                                                                                                                                                                        |
+| IAM users, access keys, login profiles, groups, service credentials, SAML or OIDC providers | Not allowed; explicit deny by wildcard                                                                                                                                                                                                                               |
+| Pass a powerful role to a code-running service                                              | `PassRole` only to `ec2` and `scheduler`, on tagged `codeproctor-pilot-*` roles; Lambda, ECS, CloudFormation, CodeBuild, Glue, SageMaker, Batch denied                                                                                                               |
+| Service-linked roles, `sts:AssumeRole`                                                      | Denied                                                                                                                                                                                                                                                               |
+| Re-tag a resource into or out of scope                                                      | Any request or resource with another `Environment` value is denied; the EC2 `Environment` tag cannot be removed or rewritten                                                                                                                                         |
+| Cost blow-out                                                                               | Explicit deny on RDS, ELB, NAT, peering, transit gateway, VPN, key pairs, other instance types, large or non-gp3 volumes                                                                                                                                             |
 
 ### Scheduler role and `iam:PassRole`
 
@@ -171,8 +171,7 @@ because RDS is not used.
   account, not from the pilot's own data. Required reviewers are the control.
 - **Account-wide metadata reads.** `ec2:Describe*`, `ssm:DescribeParameters`, `scheduler:List*`,
   `cloudwatch:DescribeAlarms`, `kms:ListAliases` cannot be filtered by IAM.
-- **`s3:ListBucket`** is used to read bucket configuration and also lists object keys. Candidate media
-  keys are listed, never read.
+- **Listing.** CI has `s3:ListBucket` on the optional state bucket only. It cannot list the data buckets, so candidate media keys are not visible to it. Bucket configuration is read with `GetBucket*` and the `Get*Configuration` actions.
 
 ## Optional: Terraform state (`CreateStateBucket`, default false)
 
@@ -200,10 +199,10 @@ denial of service on applies, never data loss). Mitigations: secrets are created
 are not in Terraform state; branch protection and required review of workflow changes; fork pull
 requests do not receive OIDC tokens by default. The owner has not decided. Recommendation: off.
 
-## Cost notes (decisions for PR 4)
+## Cost notes
 
-- An Elastic IP costs about 3.65 USD per month. The compute design uses DNS updates instead; any
-  Elastic IP is a PR 4 decision.
+- No Elastic IP (C-48): `AllocateAddress`, `AssociateAddress` and the related actions are denied to
+  CI. DNS is updated on boot instead (compute template, later).
 - Stopped instances still bill for their EBS volumes. Costs are written in PR 4, not here.
 
 ## Offline test and its limits
@@ -214,7 +213,7 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 .venv/bin/python infra/aws/tests/test_data_buckets.py
 ```
 
-`test_isolation.py` runs 288 cases (all pass) and 20 structural checks; `test_data_buckets.py` runs 134 cases and 45 structural checks. It parses the template, resolves intrinsic functions (owner `example-owner`, repo
+`test_isolation.py` runs 309 cases (all pass) and 20 structural checks; `test_data_buckets.py` runs 126 cases and 33 structural checks. It parses the template, resolves intrinsic functions (owner `example-owner`, repo
 `example-repo`, account `111111111111`), and evaluates each case with explicit-deny-wins semantics,
 boundary intersection, bucket and key policies and the trust conditions. Each case table row lists the
 context keys supplied by hand. It exits non-zero on any mismatch. TC IDs for these cases are for QA to
@@ -232,9 +231,31 @@ one. cfn-lint was run offline with no findings (a dev tool, not a repository dep
 - `ec2:RunInstances` needs tag specifications on the instance, volume and network interface, plus
   subnets and security groups tagged `Environment=pilot`. Encrypted volumes use the `aws/ebs` key.
 - Presigned URLs: the boundary requires `ec2:SourceInstanceARN`, so URLs must be signed by code running
-  with the instance role. Check at first deploy that upload and playback URLs still work.
+  with the instance role. Check at first deploy that upload and playback URLs still work, including a
+  browser upload through the CORS rule (PUT with `Content-Type` and `If-None-Match`, `ETag` exposed).
+- `iam:TagRole` and `ses:TagResource` at creation (CreateRole and CreateEmailIdentity with tags).
+- `RetentionService` startup: `GetBucketVersioning` and `GetLifecycleConfiguration` from the instance role
+  on the media bucket.
 - KMS tag conditions can lag a few seconds after tagging.
 - Policy size: each managed policy stays under 6144 characters (checked by the test).
+
+## Trade-offs recorded for ADR 0017
+
+- `ec2:SourceInstanceARN` stops a role assumed elsewhere but not stolen instance credentials, which work
+  from anywhere. `aws:EC2InstanceSourceVPC` would tighten that but would break browser presigned URLs
+  (the browser is outside the VPC). Deliberate trade-off, to be revisited in ADR 0017.
+- The bucket policies deny other `codeproctor-*` roles. They do **not** make access instance-role-only:
+  an account administrator can still read through their own IAM permissions.
+- `ec2:Describe*` exposes instance user data. Never put secrets in user data.
+- Owner-made `codeproctor-pilot-*` roles must be tagged `Environment=owner` (any value but `pilot`) so
+  that CI cannot adopt them by tagging; an untagged one could be adopted. The instance role must be
+  created with path `/` and exactly the name `InstanceRoleName`; the Judge0 host must use a different
+  `codeproctor-pilot-*` role. A CloudFormation service role named `codeproctor-*` would hit the key-policy
+  denies.
+- SES: the configuration set the API uses (`SES_CONFIGURATION_SET`) must be named `codeproctor-pilot-*`
+  or the boundary does not allow sending with it.
+- The owner decisions C-43a and C-44 to C-48 are recorded in PR #232; they are not yet in
+  `docs/compliance/decisions.md` on this branch.
 
 ## Open items for the Delivery Lead
 
@@ -244,51 +265,57 @@ one. cfn-lint was run offline with no findings (a dev tool, not a repository dep
 ## PR 1b: owner-applied data stores (`pilot-data-buckets.yaml`)
 
 Apply **after** PR 1 (the deploy role's denies, which protect these resources, come from PR 1). Stack
-name `codeproctor-pilot-data`, region us-east-1, parameters below, no IAM capability needed. CI never
-applies it.
+name `codeproctor-pilot-data`, region us-east-1. CI never applies it. Layout decided in DL-40: one media
+bucket with the ADR 0013 section 5.7 prefixes, plus a backup bucket.
 
-| Resource          | Name                                                                     | Holds                                                                                                  | Backstop expiry (source)                                                                                                                                        |
-| ----------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Bucket            | `codeproctor-pilot-media-<account id>`                                   | Recordings, room scans, ID images, selfies, evidence (keys under `orgs/<org>/sessions/`, ADR 0013 5.7) | `MediaExpiryDays` = 90 (C-04, C-27; retention schedule)                                                                                                         |
-| Bucket            | `codeproctor-pilot-results-<account id>`                                 | Report PDFs                                                                                            | `ResultsExpiryDays` = 365 (C-26, ADR 0004 R-10)                                                                                                                 |
-| Bucket            | `codeproctor-pilot-consent-<account id>`                                 | Signed consent PDFs (`orgs/<org>/consents/`)                                                           | `ConsentExpiryDays` = 1095 (C-04, C-17, ADR 0004 R-9)                                                                                                           |
-| Bucket            | `codeproctor-pilot-backup-<account id>`                                  | Nightly dumps (`db/dumps/`, written by `infra/backup/backup.sh`) and WAL (`db/wal/`)                   | `BackupRetentionDays` = 14 (retention schedule); `WalRetentionDays` = 14 (**flagged**: the schedule does not name WAL; conservative default equal to the dumps) |
-| KMS key and alias | `alias/codeproctor-pilot-data`, tags `Environment=pilot`, `Purpose=data` | One customer-managed key for all four buckets, rotation on, Bucket Keys on                             | none                                                                                                                                                            |
+| Resource          | Name                                                                     | Holds                                                                                                  | Lifecycle (source)                                                                                                                                   |
+| ----------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Bucket            | `codeproctor-pilot-media-<account id>` (`S3_MEDIA_BUCKET`)               | Recordings, room scans, ID images, selfies, evidence, report PDFs, consent PDFs under `orgs/<org>/...` | Abort incomplete multipart after 7 days. Objects tagged `RetentionClass=face` expire after **90 days** (C-27, C-35). **Nothing else expires by age** |
+| Bucket            | `codeproctor-pilot-backup-<account id>` (`S3_BACKUP_BUCKET`)             | `db/dumps/` (from `infra/backup/backup.sh`), `db/wal/`, `db/erasure-list/`                             | `db/dumps/` **13 days** (`BackupRetentionDays`, max 14); `db/wal/` `WalRetentionDays` (default 13); **`db/erasure-list/` never expires**             |
+| KMS key and alias | `alias/codeproctor-pilot-data`, tags `Environment=pilot`, `Purpose=data` | One customer-managed key for both buckets, rotation on, Bucket Keys on                                 | none                                                                                                                                                 |
 
 Every bucket: Block Public Access (all four), ownership enforced, TLS-only policy, default SSE-KMS with
-the one key, abort-incomplete-multipart after 7 days, `Retain` on delete, no versioning.
+the one key, `Retain` on delete, no versioning.
 
+- **Retention.** RetentionService owns every data-class clock (C-04, C-26, C-35, the 3-year consent
+  clock). The only age rule on the media bucket is the face-image backstop. It filters on the tag
+  `RetentionClass=face`, so the API must tag those objects: `x-amz-tagging` on the identity presign and
+  `TaggingDirective` on the sealing CopyObject (follow-up FU-QA-15 in `docs/followups/qa.md`; until it
+  lands, the rule matches nothing and RetentionService alone enforces the cap).
+- **Backups.** 13 days, not 14: S3 rounds expiry up to the next midnight UTC and deletes
+  asynchronously, so 13 keeps the objects inside the published 14 days. `infra/backup/backup.sh` keeps its
+  newest-dump guard and is unchanged. Lifecycle does not know about that guard: if backups stop, the
+  last dump will expire. **Require a backup-freshness alarm** (CloudWatch alarm on the age of the newest
+  `db/dumps/` object or on a missing nightly success metric, to the owner). Owner question: may
+  lifecycle delete the last remaining dump? It is a one-line change (a 14 day minimum retained count is
+  not expressible in lifecycle; the alarm is the control).
+- **WAL (C-49).** WAL archiving to S3 needs a physical base backup, an ARC-05 and database item the hub is
+  handling. PR 1b only provides the storage and its expiry. Keep `WalRetentionDays` equal to the dump
+  retention.
 - **No versioning, by design.** ADR 0004 9.2 makes RetentionService fail closed if versioning was ever
-  on without a one-day noncurrent expiry, and noncurrent versions would break the 14 day backup rule.
-- **The key.** The owner administers it through IAM (root delegation). The key policy lets only the
-  instance role (`InstanceRoleName`, default `codeproctor-pilot-app`) use it, for `Decrypt`,
-  `GenerateDataKey*` and `DescribeKey` through S3. Every other `codeproctor-*` role is denied use and
-  administration, so CI cannot touch it. The tag `Purpose=data` and the alias match the PR 1 denies.
-  The instance role need not exist yet (the key policy matches it by ARN condition, not as a named principal).
-- **Bucket policies** deny object access to every `codeproctor-*` role except the instance role, and
-  deny bucket configuration changes to every `codeproctor-*` role. You (the owner) are not one of them.
-  The deploy role of PR 1 can still read configuration and list keys.
-- **Lifecycle is a backstop.** RetentionService deletes on the real clocks (anchor plus
-  `retention_days`, the face clock, review and appeal holds). Expiry by object age cannot see holds or an
-  organisation's setting above 90 days.
-
-### Blocker for the lifecycle rules: the API uses one media bucket today
-
-`.env.example` has `S3_MEDIA_BUCKET` (media, IDs, report PDFs and consent PDFs together under
-`orgs/<org>/...`) and `S3_BACKUP_BUCKET`. S3 lifecycle prefixes are literal, so media, results and
-consent can only be expired separately in separate buckets. Until the API writes reports and consent
-PDFs to their own buckets (a Backend and architect change, not in this PR), keep
-`SeparateBucketsInUse=false`: the media, results and consent expiry rules are created **disabled** and
-nothing is deleted early. Set it to `true` afterwards. With `false` the backup bucket rules (14 days)
-still apply, because that bucket already exists in the API configuration. Also flagged: with holds,
-a report can be needed after 365 days from its creation; consider `ResultsExpiryDays` of 400 or more.
+  on without a one-day noncurrent expiry, and noncurrent versions would break the backup rule.
+- **The key.** The owner administers it through IAM. Only the instance role (`InstanceRoleName`, default
+  `codeproctor-pilot-app`) may use it, for `Decrypt`, `GenerateDataKey*` and `DescribeKey` through S3.
+  Other `codeproctor-*` roles are denied use and administration, so CI cannot touch it. The tag and alias
+  match the PR 1 denies. The instance role need not exist yet (the key policy matches it by ARN
+  condition, not as a named principal).
+- **Bucket policies** deny other `codeproctor-*` roles object access, listing (`ListBucket`,
+  `ListBucketVersions`, `ListBucketMultipartUploads`) and every configuration change; they deny
+  `PutObject` with any algorithm other than `aws:kms` or any KMS key other than the data key (a request
+  that names no key uses the bucket default). CI cannot list candidate object keys. See "Trade-offs".
+- **Uploads from the API.** `BACKUP_SSE` must stay empty or be `aws:kms` on pilot (`AES256` is denied).
+  The instance role also reads versioning and lifecycle (RetentionService startup check).
+- **CORS** on the media bucket (parameter `AppOrigin`, the web origin, same value as
+  `NEXT_PUBLIC_UPLOAD_ORIGINS`): `PUT`, `GET`, `HEAD`; headers `Content-Type` and `If-None-Match`;
+  `ETag` exposed. CI cannot add CORS later, so get the origin right.
+- **A deleted stack** leaves the `Retain` buckets and the key behind with no lifecycle rules and no
+  bucket policy: re-create the stack (it will fail on the existing names) or restore the settings by hand.
 
 ### Owner steps for PR 1b
 
 Apply order: (1) account-level S3 Block Public Access on and IAM Access Analyzer (step 8 above),
-(2) PR 1 stack `codeproctor-github-oidc`, (3) PR 1b stack `codeproctor-pilot-data` with
-`InstanceRoleName` matching the instance role you will create, `SeparateBucketsInUse` = `false`, the
-other values as listed. Copy the bucket names from the Outputs into the pilot environment
-configuration (`S3_MEDIA_BUCKET`, `S3_BACKUP_BUCKET`). Verify with
-`simulate-principal-policy.sh` and the two offline tests. Presigned URLs: verify at first deploy that
-upload and playback still work with the bucket policy (they are signed by the instance role).
+(2) PR 1 stack `codeproctor-github-oidc`, (3) PR 1b stack `codeproctor-pilot-data` with `AppOrigin`,
+`InstanceRoleName` matching the instance role you will create (path `/`, exact name), and the default
+retention values. Put the bucket names from the Outputs into the pilot configuration (`S3_MEDIA_BUCKET`,
+`S3_BACKUP_BUCKET`). Create the backup-freshness alarm. Verify with `simulate-principal-policy.sh` and the
+two offline tests.

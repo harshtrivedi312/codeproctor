@@ -22,20 +22,20 @@ import test_isolation as T  # noqa: E402
 
 DATA_TEMPLATE = os.path.join(HERE, "..", "pilot-data-buckets.yaml")
 A = T.ACCT
-BUCKETS = {n: f"arn:aws:s3:::codeproctor-pilot-{n}-{A}" for n in ("media", "results", "consent", "backup")}
+BUCKETS = {n: f"arn:aws:s3:::codeproctor-pilot-{n}-{A}" for n in ("media", "backup")}
 KEYARN = f"arn:aws:kms:{T.REGION}:{A}:key/data-key-id"
+KEYARN_VALUE = "getatt:PilotDataKey.Arn"  # the resolver returns this placeholder for the key ARN
 ALIAS = f"arn:aws:kms:{T.REGION}:{A}:alias/codeproctor-pilot-data"
 APP = f"arn:aws:iam::{A}:role/codeproctor-pilot-app"
 KT = {"aws:ResourceTag/Environment": "pilot", "aws:ResourceTag/Purpose": "data"}
 VIA_S3 = {"kms:ViaService": f"s3.{T.REGION}.amazonaws.com"}
 
 
-def load_data(separate="false", **over):
+def load_data(**over):
     with open(DATA_TEMPLATE) as fh:
         raw = T.yaml.load(fh, T.Loader)
-    params = {"InstanceRoleName": "codeproctor-pilot-app", "SeparateBucketsInUse": separate,
-              "MediaExpiryDays": 90, "ResultsExpiryDays": 365, "ConsentExpiryDays": 1095,
-              "BackupRetentionDays": 14, "WalRetentionDays": 14}
+    params = {"InstanceRoleName": "codeproctor-pilot-app", "AppOrigin": "https://app.example.test",
+              "BackupRetentionDays": 13, "WalRetentionDays": 13}
     params.update(over)
     rs = T.Resolver(raw, params)
     return raw, {k: rs.r(v) for k, v in raw["Resources"].items()}
@@ -46,8 +46,7 @@ def rules_of(res, name):
 
 
 def main():
-    raw, res = load_data("false")
-    _, res_on = load_data("true")
+    raw, res = load_data()
     _, res1 = T.load("true", "true")
     pols, by_role, boundary, sched, _bp, _kp = T.build(res1)
     checks = []
@@ -57,7 +56,7 @@ def main():
 
     text = open(DATA_TEMPLATE).read()
     chk("no 12-digit account id or access key in template", not re.search(r"(?<![\w{])\d{12}(?![\w}])", text) and not re.search(r"AKIA[0-9A-Z]{16}", text))
-    for n, lg in (("media", "MediaBucket"), ("results", "ResultsBucket"), ("consent", "ConsentBucket"), ("backup", "BackupBucket")):
+    for n, lg in (("media", "MediaBucket"), ("backup", "BackupBucket")):
         p = res[lg]["Properties"]
         chk(f"{n}: name is codeproctor-pilot-{n}-<account id>", p["BucketName"] == f"codeproctor-pilot-{n}-{A}")
         chk(f"{n}: all four Block Public Access flags", all(p["PublicAccessBlockConfiguration"].values()) and len(p["PublicAccessBlockConfiguration"]) == 4)
@@ -67,21 +66,28 @@ def main():
         chk(f"{n}: Retain on delete and replace", res[lg]["DeletionPolicy"] == "Retain" and res[lg]["UpdateReplacePolicy"] == "Retain")
         chk(f"{n}: abort incomplete multipart enabled", rules_of(res, lg)["abort-incomplete-multipart"]["Status"] == "Enabled")
         chk(f"{n}: tagged Environment=pilot", {"Key": "Environment", "Value": "pilot"} in p["Tags"])
-        sids = {s["Sid"] for s in res[lg.replace("Bucket", "BucketPolicy")]["Properties"]["PolicyDocument"]["Statement"]}
-        chk(f"{n}: bucket policy denies insecure transport", "DenyInsecureTransport" in sids)
-    chk("media expiry 90 days, disabled until separate buckets are in use", rules_of(res, "MediaBucket")["expire-media"]["ExpirationInDays"] == 90 and rules_of(res, "MediaBucket")["expire-media"]["Status"] == "Disabled")
-    chk("media expiry enabled when SeparateBucketsInUse=true", rules_of(res_on, "MediaBucket")["expire-media"]["Status"] == "Enabled")
-    chk("results expiry 365 days (R-10)", rules_of(res_on, "ResultsBucket")["expire-results"]["ExpirationInDays"] == 365 and rules_of(res, "ResultsBucket")["expire-results"]["Status"] == "Disabled")
-    chk("consent expiry 1095 days (R-9)", rules_of(res_on, "ConsentBucket")["expire-consent"]["ExpirationInDays"] == 1095 and rules_of(res_on, "ConsentBucket")["expire-consent"]["Status"] == "Enabled")
+        sids = {st["Sid"] for st in res[lg.replace("Bucket", "BucketPolicy")]["Properties"]["PolicyDocument"]["Statement"]}
+        chk(f"{n}: bucket policy denies insecure transport, other KMS keys and listing", {"DenyInsecureTransport", "DenyOtherKmsKey", "DenyListingExceptInstanceRole"} <= sids)
+    chk("exactly two buckets (one media bucket, one backup bucket; DL-40)", sum(1 for v in res.values() if v["Type"] == "AWS::S3::Bucket") == 2)
+    chk("no results, consent or SeparateBucketsInUse parameters", not {"ResultsExpiryDays", "ConsentExpiryDays", "MediaExpiryDays", "SeparateBucketsInUse"} & set(raw["Parameters"]))
+    mr = rules_of(res, "MediaBucket")
+    chk("media: only age rule is the tag-filtered 90 day face image expiry", [i for i in mr if i != "abort-incomplete-multipart"] == ["expire-face-images-90-days"] and mr["expire-face-images-90-days"]["ExpirationInDays"] == 90 and mr["expire-face-images-90-days"]["TagFilters"] == [{"Key": "RetentionClass", "Value": "face"}] and "Prefix" not in mr["expire-face-images-90-days"])
     bk = rules_of(res, "BackupBucket")
-    chk("backups: dumps 14 days under db/dumps/ (backup.sh layout), always enabled", bk["expire-dumps"]["ExpirationInDays"] == 14 and bk["expire-dumps"]["Prefix"] == "db/dumps/" and bk["expire-dumps"]["Status"] == "Enabled")
-    chk("backups: WAL 14 days under db/wal/ (flagged parameter)", bk["expire-wal"]["ExpirationInDays"] == 14 and bk["expire-wal"]["Prefix"] == "db/wal/")
+    chk("backups: dumps 13 days under db/dumps/ (backup.sh layout)", bk["expire-dumps"]["ExpirationInDays"] == 13 and bk["expire-dumps"]["Prefix"] == "db/dumps/")
+    chk("backups: WAL under db/wal/ with its own parameter, default equal to dumps", bk["expire-wal"]["Prefix"] == "db/wal/" and raw["Parameters"]["WalRetentionDays"]["Default"] == raw["Parameters"]["BackupRetentionDays"]["Default"] == 13)
+    chk("backups: retention parameters capped at 14 days", raw["Parameters"]["BackupRetentionDays"]["MaxValue"] == 14 and raw["Parameters"]["WalRetentionDays"]["MaxValue"] == 14)
+    prefixes = [r.get("Prefix", "") for r in bk.values() if "ExpirationInDays" in r]
+    chk("backups: db/erasure-list/ is not covered by any expiry rule", sorted(prefixes) == ["db/dumps/", "db/wal/"] and not any("db/erasure-list/".startswith(x) for x in prefixes))
+    cors = res["MediaBucket"]["Properties"]["CorsConfiguration"]["CorsRules"][0]
+    chk("media CORS: PUT, GET, HEAD from AppOrigin, headers Content-Type and If-None-Match, exposes ETag", cors["AllowedMethods"] == ["PUT", "GET", "HEAD"] and cors["AllowedOrigins"] == ["https://app.example.test"] and cors["AllowedHeaders"] == ["Content-Type", "If-None-Match"] and cors["ExposedHeaders"] == ["ETag"])
+    chk("AppOrigin has no default", "Default" not in raw["Parameters"]["AppOrigin"])
+    chk("backup bucket has no CORS", "CorsConfiguration" not in res["BackupBucket"]["Properties"])
     key = res["PilotDataKey"]["Properties"]
     tags = {t["Key"]: t["Value"] for t in key["Tags"]}
     chk("key: rotation on, tagged Environment=pilot and Purpose=data (what the PR 1 denies expect)", key["EnableKeyRotation"] is True and tags == {"Environment": "pilot", "ManagedBy": "codeproctor-pilot-data-buckets", "Purpose": "data"})
     chk("key alias is alias/codeproctor-pilot-data", res["PilotDataKeyAlias"]["Properties"]["AliasName"] == "alias/codeproctor-pilot-data")
     chk("key policy gives the instance role only Decrypt, GenerateDataKey and DescribeKey", all(set(a.lower() for a in s["Action"]) <= {"kms:decrypt", "kms:generatedatakey*", "kms:describekey"} for s in key["KeyPolicy"]["Statement"] if s["Sid"] == "InstanceRoleUseThroughS3"))
-    chk("all four buckets use the one key", all(res[b]["Properties"]["BucketEncryption"]["ServerSideEncryptionConfiguration"][0]["ServerSideEncryptionByDefault"]["KMSMasterKeyID"] == "getatt:PilotDataKey.Arn" for b in ("MediaBucket", "ResultsBucket", "ConsentBucket", "BackupBucket")))
+    chk("both buckets use the one key", all(res[b]["Properties"]["BucketEncryption"]["ServerSideEncryptionConfiguration"][0]["ServerSideEncryptionByDefault"]["KMSMasterKeyID"] == "getatt:PilotDataKey.Arn" for b in ("MediaBucket", "BackupBucket")))
     chk("only one KMS key in the template", sum(1 for v in res.values() if v["Type"] == "AWS::KMS::Key") == 1)
     chk("no DataKeyType parameter (CMK is mandatory)", "DataKeyType" not in raw["Parameters"])
 
@@ -90,6 +96,7 @@ def main():
         "deploy": (by_role["PilotDeployRole"], None, T.DEPLOY),
         "ci-admin": (allow_all, None, f"arn:aws:iam::{A}:role/codeproctor-guardrails/codeproctor-pilot-deploy"),
         "scheduler": (allow_all, sched, T.SCHED),
+        "plan": (allow_all, None, T.PLAN),
         "app": (allow_all, boundary, APP),
         "owner": (allow_all, None, T.OWNER),
     }
@@ -117,13 +124,26 @@ def main():
             add(f"CI cannot {act} on {n} bucket", "deploy", "s3:" + act, b, {}, "DENY", n)
         for act in ("GetObject", "PutObject", "DeleteObject"):
             add(f"CI cannot {act} on {n} bucket", "deploy", "s3:" + act, o, {}, "DENY", n)
-        for act in ("GetBucketPolicy", "GetLifecycleConfiguration", "GetEncryptionConfiguration", "ListBucket"):
+        for act in ("GetBucketPolicy", "GetLifecycleConfiguration", "GetEncryptionConfiguration", "GetBucketVersioning"):
             add(f"CI can still {act} on {n} bucket (read-only)", "deploy", "s3:" + act, b, {}, "ALLOW", n)
+        for act in ("ListBucket", "ListBucketVersions", "ListBucketMultipartUploads"):
+            add(f"CI cannot {act} on {n} bucket (candidate keys)", "deploy", "s3:" + act, b, {}, "DENY", n)
+            add(f"another codeproctor role with admin identity cannot {act} on {n} bucket", "ci-admin", "s3:" + act, b, {}, "DENY", n)
+            add(f"scheduler role cannot {act} on {n} bucket", "scheduler", "s3:" + act, b, T.SRC, "DENY", n)
+            add(f"instance role {act} on {n} bucket (only ListBucket is in the boundary)", "app", "s3:" + act, b, T.SRC, "ALLOW" if act == "ListBucket" else "DENY", n)
+        for act in ("GetBucketVersioning", "GetLifecycleConfiguration"):
+            add(f"instance role can {act} on {n} bucket (RetentionService)", "app", "s3:" + act, b, T.SRC, "ALLOW", n)
+        for act in ("PutInventoryConfiguration", "PutAnalyticsConfiguration", "PutBucketCors", "CreateAccessPoint", "PutAccessPointPolicy"):
+            add(f"CI cannot {act} on {n} bucket", "deploy", "s3:" + act, b, {}, "DENY", n)
+        add(f"instance role writes {n} object, SSE-KMS with the data key", "app", "s3:PutObject", o, {**T.SRC, "s3:x-amz-server-side-encryption": "aws:kms", "s3:x-amz-server-side-encryption-aws-kms-key-id": KEYARN_VALUE}, "ALLOW", n)
+        add(f"instance role writes {n} object, SSE-KMS with aws/s3 key", "app", "s3:PutObject", o, {**T.SRC, "s3:x-amz-server-side-encryption": "aws:kms", "s3:x-amz-server-side-encryption-aws-kms-key-id": "arn:aws:kms:us-east-1:111111111111:key/aws-s3-default"}, "DENY", n)
+        add(f"instance role writes {n} object with no encryption header (bucket default applies)", "app", "s3:PutObject", o, T.SRC, "ALLOW", n)
+        add(f"plan role (if created) cannot read {n} objects", "plan", "s3:GetObject", o, {}, "DENY", n)
         add(f"another codeproctor role with admin identity cannot read {n} objects", "ci-admin", "s3:GetObject", o, {}, "DENY", n)
         add(f"another codeproctor role with admin identity cannot change {n} bucket policy", "ci-admin", "s3:PutBucketPolicy", b, {}, "DENY", n)
         add(f"scheduler role cannot read {n} objects", "scheduler", "s3:GetObject", o, T.SRC, "DENY", n)
         add(f"instance role reads {n} object with source instance", "app", "s3:GetObject", o, T.SRC, "ALLOW", n)
-        add(f"instance role writes {n} object (SSE-KMS)", "app", "s3:PutObject", o, {**T.SRC, "s3:x-amz-server-side-encryption": "aws:kms"}, "ALLOW", n)
+        add(f"instance role writes {n} object (SSE-KMS header only)", "app", "s3:PutObject", o, {**T.SRC, "s3:x-amz-server-side-encryption": "aws:kms"}, "ALLOW", n)
         add(f"instance role writes {n} object with AES256", "app", "s3:PutObject", o, {**T.SRC, "s3:x-amz-server-side-encryption": "AES256"}, "DENY", n)
         add(f"instance role reads {n} object over plain HTTP", "app", "s3:GetObject", o, {**T.SRC, "aws:SecureTransport": "false"}, "DENY", n)
         add(f"instance role reads {n} object without source instance", "app", "s3:GetObject", o, {}, "DENY", n)
@@ -143,7 +163,7 @@ def main():
     add("instance role decrypts through S3", "app", "kms:Decrypt", KEYARN, {**KT, **VIA_S3, **T.SRC}, "ALLOW", key_pol=True)
     add("instance role generates a data key through S3", "app", "kms:GenerateDataKey", KEYARN, {**KT, **VIA_S3, **T.SRC}, "ALLOW", key_pol=True)
     add("instance role cannot decrypt outside S3", "app", "kms:Decrypt", KEYARN, {**KT, **T.SRC}, "DENY", key_pol=True)
-    add("instance role cannot decrypt without source instance", "app", "kms:Decrypt", KEYARN, {**KT, **VIA_S3}, "DENY", key_pol=True)
+    add("instance role decrypts through S3 without source instance (the S3 allows carry that requirement)", "app", "kms:Decrypt", KEYARN, {**KT, **VIA_S3}, "ALLOW", key_pol=True)
     add("instance role cannot change the key policy", "app", "kms:PutKeyPolicy", KEYARN, {**KT, **T.SRC}, "DENY", key_pol=True)
     add("owner administers the key", "owner", "kms:PutKeyPolicy", KEYARN, KT, "ALLOW", key_pol=True)
 

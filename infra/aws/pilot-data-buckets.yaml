@@ -10,21 +10,22 @@ Description: >-
 #   policy, Block Public Access, lifecycle, encryption, versioning and the KMS key are changed
 #   only by the owner through this stack (the deploy role explicitly denies those actions).
 #
-# Retention values (docs/compliance/retention-schedule.md v0.3 and ADR 0004 section 9):
-#   media and face images  90 days  (C-04, C-27: face images never more than 90 days; recordings
-#                                    default 90, organisations may set 7..730)
-#   results and reports    1 year   (C-26, R-10)
-#   signed consent         3 years  (C-04, C-17, R-9)
-#   database backups       14 days  (retention schedule, "Backups")
-#   WAL                    14 days  (parameter; not in the schedule: matched to the backups)
+# Layout (DL-40): ONE media bucket (S3_MEDIA_BUCKET, ADR 0013 section 5.7 prefixes) and one backup
+# bucket, both encrypted with one customer-managed key.
 #
-# Lifecycle is a BACKSTOP. RetentionService in the API deletes objects on the real clocks (anchor
-# plus retention_days, face clock, held reviews and appeals). Expiry by object age cannot see
-# holds or per-organisation settings.
+# Retention: RetentionService owns EVERY data-class clock (C-04, C-26, C-35, 3 year consent). The
+# only age-based rules here are backstops that cannot be wrong:
+#   media bucket   objects tagged RetentionClass=face expire 90 days after creation (C-27, C-35: face
+#                  images are capped at 90 days from capture whatever any hold says). Nothing else
+#                  expires by age. The API must tag them (follow-up in docs/followups/qa.md).
+#   backup bucket  db/dumps/ 13 days (14 days is the schedule; S3 rounds expiry up to the next
+#                  midnight UTC and deletes asynchronously, so 13 keeps objects inside 14 days)
+#                  db/wal/ WalRetentionDays, default equal to the dumps (needs a physical base backup:
+#                  ARC-05, not provided here; this template only provides the storage)
+#                  db/erasure-list/ NEVER expires (the erasure list must outlive the dumps it re-applies to)
 #
 # Versioning is NOT enabled on any bucket: ADR 0004 section 9.2 requires RetentionService to fail
-# closed when versioning has ever been on without a noncurrent-version expiry of 1 day, and the
-# 14 day backup rule would be exceeded by noncurrent versions.
+# closed when versioning has ever been on without a noncurrent-version expiry of 1 day.
 # =============================================================================================
 
 Metadata:
@@ -35,12 +36,12 @@ Metadata:
         Parameters:
           - InstanceRoleName
       - Label:
-          default: Lifecycle
+          default: Browser access
         Parameters:
-          - SeparateBucketsInUse
-          - MediaExpiryDays
-          - ResultsExpiryDays
-          - ConsentExpiryDays
+          - AppOrigin
+      - Label:
+          default: Backup lifecycle
+        Parameters:
           - BackupRetentionDays
           - WalRetentionDays
 
@@ -49,51 +50,29 @@ Parameters:
     Type: String
     Default: codeproctor-pilot-app
     AllowedPattern: ^codeproctor-pilot-[a-z0-9-]{1,40}$
-    Description: Name of the EC2 instance role (created later) that may use the key and the buckets
-  SeparateBucketsInUse:
+    Description: Name of the app host's instance role. It must be created with path / and exactly this name, otherwise it is locked out of its own data. The Judge0 host must use a different codeproctor-pilot-* role
+  AppOrigin:
     Type: String
-    Default: 'false'
-    AllowedValues: ['false', 'true']
-    Description: Set to true ONLY when the API writes reports and consent PDFs to the results and consent buckets (today one S3_MEDIA_BUCKET holds everything). When false, the media, results and consent expiry rules stay disabled so nothing is deleted early
-  MediaExpiryDays:
-    Type: Number
-    Default: 90
-    MinValue: 7
-    MaxValue: 730
-    Description: Backstop expiry of media and face images (90 days; face images never more than 90, recordings 7 to 730 by organisation setting)
-  ResultsExpiryDays:
-    Type: Number
-    Default: 365
-    MinValue: 30
-    MaxValue: 1095
-    Description: Backstop expiry of results and report PDFs (1 year, R-10). A review or appeal hold can extend the real clock, so consider a margin
-  ConsentExpiryDays:
-    Type: Number
-    Default: 1095
-    MinValue: 365
-    MaxValue: 1825
-    Description: Backstop expiry of signed consent PDFs (3 years, R-9)
+    AllowedPattern: ^https://[A-Za-z0-9.-]+(:[0-9]{2,5})?$
+    Description: Web origin that uploads and plays media in the browser (the same value as NEXT_PUBLIC_UPLOAD_ORIGINS). No default. Used for CORS on the media bucket, which CI cannot change later
   BackupRetentionDays:
     Type: Number
-    Default: 14
+    Default: 13
     MinValue: 7
-    MaxValue: 30
-    Description: Database dump retention (14 days, retention schedule). Longer keeps deleted data longer than the published schedule
+    MaxValue: 14
+    Description: Database dump expiry. The schedule says 14 days; 13 is the default because S3 rounds expiry to the next midnight UTC and deletes asynchronously
   WalRetentionDays:
     Type: Number
-    Default: 14
+    Default: 13
     MinValue: 7
-    MaxValue: 30
-    Description: WAL archive retention. FLAGGED - the schedule does not name WAL. Conservative default equal to the dumps; WAL older than the oldest kept dump is useless
+    MaxValue: 14
+    Description: WAL archive expiry under db/wal/ (C-49). Keep equal to the dump retention. WAL needs a physical base backup (ARC-05) that this template does not provide
 
 Rules:
   RegionMustBeUsEast1:
     Assertions:
       - Assert: !Equals [!Ref 'AWS::Region', us-east-1]
         AssertDescription: This stack must be created in us-east-1 (C-03)
-
-Conditions:
-  ExpireSeparateBuckets: !Equals [!Ref SeparateBucketsInUse, 'true']
 
 Resources:
   # One customer-managed key for all four buckets. Tags Environment=pilot and Purpose=data and the alias match what the deploy role's denies expect: CI can neither use nor change it.
@@ -102,7 +81,7 @@ Resources:
     DeletionPolicy: 'Retain'
     UpdateReplacePolicy: 'Retain'
     Properties:
-      Description: 'codeproctor pilot data key (media, results, consent, backups)'
+      Description: 'codeproctor pilot data key (media and backups)'
       EnableKeyRotation: true
       PendingWindowInDays: 30
       KeyPolicy:
@@ -184,7 +163,7 @@ Resources:
     Properties:
       AliasName: 'alias/codeproctor-pilot-data'
       TargetKeyId: !Ref PilotDataKey
-  # Media: recordings, room scans, ID images, selfies, evidence (ADR 0013 5.7 keys under orgs/<org>/sessions/). 90 days.
+  # Media: recordings, room scans, ID images, selfies, evidence, report PDFs and consent PDFs under orgs/<org>/... (ADR 0013 5.7). RetentionService deletes on the real clocks. Only face images (tagged RetentionClass=face) have an age backstop: 90 days (C-27, C-35).
   MediaBucket:
     Type: 'AWS::S3::Bucket'
     DeletionPolicy: 'Retain'
@@ -211,9 +190,12 @@ Resources:
             Status: 'Enabled'
             AbortIncompleteMultipartUpload:
               DaysAfterInitiation: 7
-          - Id: 'expire-media'
-            Status: !If [ExpireSeparateBuckets, Enabled, Disabled]
-            ExpirationInDays: !Ref MediaExpiryDays
+          - Id: 'expire-face-images-90-days'
+            Status: 'Enabled'
+            TagFilters:
+              - Key: 'RetentionClass'
+                Value: 'face'
+            ExpirationInDays: 90
       Tags:
         - Key: 'Environment'
           Value: 'pilot'
@@ -221,6 +203,21 @@ Resources:
           Value: 'codeproctor-pilot-data-buckets'
         - Key: 'Purpose'
           Value: 'media'
+      CorsConfiguration:
+        CorsRules:
+          - Id: 'browser-upload-and-playback'
+            AllowedOrigins:
+              - !Ref AppOrigin
+            AllowedMethods:
+              - 'PUT'
+              - 'GET'
+              - 'HEAD'
+            AllowedHeaders:
+              - 'Content-Type'
+              - 'If-None-Match'
+            ExposedHeaders:
+              - 'ETag'
+            MaxAge: 3600
   MediaBucketPolicy:
     Type: 'AWS::S3::BucketPolicy'
     Properties:
@@ -244,8 +241,20 @@ Resources:
             Action: 's3:PutObject'
             Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-media-${AWS::AccountId}/*'
             Condition:
-              StringNotEqualsIfExists:
+              'Null':
+                s3:x-amz-server-side-encryption: 'false'
+              StringNotEquals:
                 s3:x-amz-server-side-encryption: 'aws:kms'
+          - Sid: 'DenyOtherKmsKey'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-media-${AWS::AccountId}/*'
+            Condition:
+              'Null':
+                s3:x-amz-server-side-encryption-aws-kms-key-id: 'false'
+              StringNotEquals:
+                s3:x-amz-server-side-encryption-aws-kms-key-id: !GetAtt PilotDataKey.Arn
           - Sid: 'DenyObjectAccessExceptInstanceRole'
             Effect: 'Deny'
             Principal: '*'
@@ -263,99 +272,19 @@ Resources:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
               ArnNotEquals:
                 aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
-          - Sid: 'DenyConfigChangeFromCodeproctorRoles'
+          - Sid: 'DenyListingExceptInstanceRole'
             Effect: 'Deny'
             Principal: '*'
             Action:
-              - 's3:PutBucket*'
-              - 's3:DeleteBucket*'
-              - 's3:PutEncryptionConfiguration'
-              - 's3:PutLifecycleConfiguration'
-              - 's3:PutReplicationConfiguration'
-              - 's3:PutAccelerateConfiguration'
+              - 's3:ListBucket'
+              - 's3:ListBucketVersions'
+              - 's3:ListBucketMultipartUploads'
             Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-media-${AWS::AccountId}'
             Condition:
               ArnLike:
                 aws:PrincipalArn:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
-  # Results: report PDFs. 1 year.
-  ResultsBucket:
-    Type: 'AWS::S3::Bucket'
-    DeletionPolicy: 'Retain'
-    UpdateReplacePolicy: 'Retain'
-    Properties:
-      BucketName: !Sub 'codeproctor-pilot-results-${AWS::AccountId}'
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - BucketKeyEnabled: true
-            ServerSideEncryptionByDefault:
-              SSEAlgorithm: 'aws:kms'
-              KMSMasterKeyID: !GetAtt PilotDataKey.Arn
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      OwnershipControls:
-        Rules:
-          - ObjectOwnership: 'BucketOwnerEnforced'
-      LifecycleConfiguration:
-        Rules:
-          - Id: 'abort-incomplete-multipart'
-            Status: 'Enabled'
-            AbortIncompleteMultipartUpload:
-              DaysAfterInitiation: 7
-          - Id: 'expire-results'
-            Status: !If [ExpireSeparateBuckets, Enabled, Disabled]
-            ExpirationInDays: !Ref ResultsExpiryDays
-      Tags:
-        - Key: 'Environment'
-          Value: 'pilot'
-        - Key: 'ManagedBy'
-          Value: 'codeproctor-pilot-data-buckets'
-        - Key: 'Purpose'
-          Value: 'results'
-  ResultsBucketPolicy:
-    Type: 'AWS::S3::BucketPolicy'
-    Properties:
-      Bucket: !Ref ResultsBucket
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: 'DenyInsecureTransport'
-            Effect: 'Deny'
-            Principal: '*'
-            Action: 's3:*'
-            Resource:
-              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-results-${AWS::AccountId}'
-              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-results-${AWS::AccountId}/*'
-            Condition:
-              Bool:
-                aws:SecureTransport: 'false'
-          - Sid: 'DenyOtherEncryptionAlgorithm'
-            Effect: 'Deny'
-            Principal: '*'
-            Action: 's3:PutObject'
-            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-results-${AWS::AccountId}/*'
-            Condition:
-              StringNotEqualsIfExists:
-                s3:x-amz-server-side-encryption: 'aws:kms'
-          - Sid: 'DenyObjectAccessExceptInstanceRole'
-            Effect: 'Deny'
-            Principal: '*'
-            Action:
-              - 's3:GetObject*'
-              - 's3:PutObject*'
-              - 's3:DeleteObject*'
-              - 's3:RestoreObject'
-              - 's3:AbortMultipartUpload'
-            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-results-${AWS::AccountId}/*'
-            Condition:
-              ArnLike:
-                aws:PrincipalArn:
-                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
-                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
               ArnNotEquals:
                 aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
           - Sid: 'DenyConfigChangeFromCodeproctorRoles'
@@ -368,108 +297,16 @@ Resources:
               - 's3:PutLifecycleConfiguration'
               - 's3:PutReplicationConfiguration'
               - 's3:PutAccelerateConfiguration'
-            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-results-${AWS::AccountId}'
+              - 's3:PutInventoryConfiguration'
+              - 's3:PutAnalyticsConfiguration'
+              - 's3:PutMetricsConfiguration'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-media-${AWS::AccountId}'
             Condition:
               ArnLike:
                 aws:PrincipalArn:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
-  # Consent: signed consent PDFs (orgs/<org>/consents/). 3 years.
-  ConsentBucket:
-    Type: 'AWS::S3::Bucket'
-    DeletionPolicy: 'Retain'
-    UpdateReplacePolicy: 'Retain'
-    Properties:
-      BucketName: !Sub 'codeproctor-pilot-consent-${AWS::AccountId}'
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - BucketKeyEnabled: true
-            ServerSideEncryptionByDefault:
-              SSEAlgorithm: 'aws:kms'
-              KMSMasterKeyID: !GetAtt PilotDataKey.Arn
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      OwnershipControls:
-        Rules:
-          - ObjectOwnership: 'BucketOwnerEnforced'
-      LifecycleConfiguration:
-        Rules:
-          - Id: 'abort-incomplete-multipart'
-            Status: 'Enabled'
-            AbortIncompleteMultipartUpload:
-              DaysAfterInitiation: 7
-          - Id: 'expire-consent'
-            Status: !If [ExpireSeparateBuckets, Enabled, Disabled]
-            ExpirationInDays: !Ref ConsentExpiryDays
-      Tags:
-        - Key: 'Environment'
-          Value: 'pilot'
-        - Key: 'ManagedBy'
-          Value: 'codeproctor-pilot-data-buckets'
-        - Key: 'Purpose'
-          Value: 'consent'
-  ConsentBucketPolicy:
-    Type: 'AWS::S3::BucketPolicy'
-    Properties:
-      Bucket: !Ref ConsentBucket
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: 'DenyInsecureTransport'
-            Effect: 'Deny'
-            Principal: '*'
-            Action: 's3:*'
-            Resource:
-              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-consent-${AWS::AccountId}'
-              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-consent-${AWS::AccountId}/*'
-            Condition:
-              Bool:
-                aws:SecureTransport: 'false'
-          - Sid: 'DenyOtherEncryptionAlgorithm'
-            Effect: 'Deny'
-            Principal: '*'
-            Action: 's3:PutObject'
-            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-consent-${AWS::AccountId}/*'
-            Condition:
-              StringNotEqualsIfExists:
-                s3:x-amz-server-side-encryption: 'aws:kms'
-          - Sid: 'DenyObjectAccessExceptInstanceRole'
-            Effect: 'Deny'
-            Principal: '*'
-            Action:
-              - 's3:GetObject*'
-              - 's3:PutObject*'
-              - 's3:DeleteObject*'
-              - 's3:RestoreObject'
-              - 's3:AbortMultipartUpload'
-            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-consent-${AWS::AccountId}/*'
-            Condition:
-              ArnLike:
-                aws:PrincipalArn:
-                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
-                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
-              ArnNotEquals:
-                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
-          - Sid: 'DenyConfigChangeFromCodeproctorRoles'
-            Effect: 'Deny'
-            Principal: '*'
-            Action:
-              - 's3:PutBucket*'
-              - 's3:DeleteBucket*'
-              - 's3:PutEncryptionConfiguration'
-              - 's3:PutLifecycleConfiguration'
-              - 's3:PutReplicationConfiguration'
-              - 's3:PutAccelerateConfiguration'
-            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-consent-${AWS::AccountId}'
-            Condition:
-              ArnLike:
-                aws:PrincipalArn:
-                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
-                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
-  # Backups: nightly dumps (infra/backup/backup.sh, prefix db/dumps/) and WAL archive (prefix db/wal/).
+  # Backups: nightly dumps (infra/backup/backup.sh, db/dumps/), WAL (db/wal/, storage only) and the erasure list (db/erasure-list/, never expires). backup.sh keeps its newest-dump guard: do not rely on lifecycle to keep the last dump (see README).
   BackupBucket:
     Type: 'AWS::S3::Bucket'
     DeletionPolicy: 'Retain'
@@ -534,8 +371,20 @@ Resources:
             Action: 's3:PutObject'
             Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/*'
             Condition:
-              StringNotEqualsIfExists:
+              'Null':
+                s3:x-amz-server-side-encryption: 'false'
+              StringNotEquals:
                 s3:x-amz-server-side-encryption: 'aws:kms'
+          - Sid: 'DenyOtherKmsKey'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/*'
+            Condition:
+              'Null':
+                s3:x-amz-server-side-encryption-aws-kms-key-id: 'false'
+              StringNotEquals:
+                s3:x-amz-server-side-encryption-aws-kms-key-id: !GetAtt PilotDataKey.Arn
           - Sid: 'DenyObjectAccessExceptInstanceRole'
             Effect: 'Deny'
             Principal: '*'
@@ -553,6 +402,21 @@ Resources:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
               ArnNotEquals:
                 aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
+          - Sid: 'DenyListingExceptInstanceRole'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:ListBucket'
+              - 's3:ListBucketVersions'
+              - 's3:ListBucketMultipartUploads'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+              ArnNotEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
           - Sid: 'DenyConfigChangeFromCodeproctorRoles'
             Effect: 'Deny'
             Principal: '*'
@@ -563,6 +427,9 @@ Resources:
               - 's3:PutLifecycleConfiguration'
               - 's3:PutReplicationConfiguration'
               - 's3:PutAccelerateConfiguration'
+              - 's3:PutInventoryConfiguration'
+              - 's3:PutAnalyticsConfiguration'
+              - 's3:PutMetricsConfiguration'
             Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}'
             Condition:
               ArnLike:
@@ -574,12 +441,6 @@ Outputs:
   MediaBucketName:
     Description: 'S3_MEDIA_BUCKET'
     Value: !Ref MediaBucket
-  ResultsBucketName:
-    Description: 'Results bucket (needs an API change to be used)'
-    Value: !Ref ResultsBucket
-  ConsentBucketName:
-    Description: 'Consent bucket (needs an API change to be used)'
-    Value: !Ref ConsentBucket
   BackupBucketName:
     Description: 'S3_BACKUP_BUCKET'
     Value: !Ref BackupBucket
