@@ -378,7 +378,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 #### DB-08: Database verification
 - Owner: db-engineer. Branch: `db/step-8`. Depends on: DB-03 (prompt order: DB-04..DB-07).
 - Covers: FR-105, NFR-05. TCs: none in test-cases.md (supports TC-002 audit, TC-072).
-- Deliverables: Jest + Testcontainers suite: migrations apply to a fresh container with `prisma migrate deploy`, never `migrate reset` or `db push` (ADR 0009); every table, enum and index exists; CHECK constraints reject bad data (duration_minutes 1, window_end before window_start, risk_score 101); cascade deletes as documented; audit_logs append-only for `app_user`. If not already done, split apps/api into `tsconfig.json` (no emit; src, test and config files) and `tsconfig.build.json` (see DB-05).
+- Deliverables (as built in #88: node:test with labelled throwaway `docker run` postgres:16 containers instead of Jest + Testcontainers, pending the owner's P-12 on CLAUDE.md rule 14): a suite where migrations apply to a fresh container with `prisma migrate deploy`, never `migrate reset` or `db push` (ADR 0009); every table, enum and index exists; CHECK constraints reject bad data (duration_minutes 1, window_end before window_start, risk_score 101); cascade deletes as documented; audit_logs append-only for `app_user`. If not already done, split apps/api into `tsconfig.json` (no emit; src, test and config files) and `tsconfig.build.json` (see DB-05).
 - Done when: `pnpm test:db` passes locally and in CI. Merging DB-08 closes milestone M1.
 
 ### Phase 2: core backend (backend-engineer lane)
