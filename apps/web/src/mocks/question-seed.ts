@@ -1,5 +1,7 @@
 import type { Schemas } from '@/lib/api/client';
 import { mockRevision } from './question-revision';
+import { renderTemplate } from './question-template';
+import type { ParamValue } from './question-template';
 
 /*
  * Seed data of the mock question bank (FE-04). Fake questions only. The reference solutions, hidden
@@ -7,7 +9,6 @@ import { mockRevision } from './question-revision';
  */
 
 type Language = Schemas['Language'];
-type Variant = Schemas['Variant'];
 export type ValidationReport = Schemas['ValidationReport'];
 export type AnswerSpec = Schemas['AnswerSpec'];
 
@@ -18,6 +19,24 @@ export interface MockTestCase {
   weight: number;
   input: string;
   expectedOutput: string;
+}
+
+/** A variant as the mock stores it; the DTO adds isHidden and position of each overridden slot. */
+export interface MockVariant {
+  id: string;
+  isActive: boolean;
+  params: Record<string, ParamValue>;
+  renderedStatement: string;
+  overrides: { testCaseId: string; input: string; expectedOutput: string }[];
+}
+
+/** The seed's own variant shape: it still has a label (the API has none) that only documents the data. */
+interface SeedVariant {
+  id: string;
+  label: string;
+  params: Record<string, ParamValue>;
+  active: boolean;
+  overrides: { testCaseId: string; input: string; expectedOutput: string }[];
 }
 
 /** One version as the mock stores it (the API's question_versions row plus its test cases). */
@@ -38,8 +57,7 @@ export interface MockVersion {
   answerSpec: AnswerSpec | null;
   validationReport: ValidationReport | null;
   testCases: MockTestCase[];
-  /** WEB-ONLY placeholder [BE-04b]: the API has no variants yet. */
-  variants: Variant[];
+  variants: MockVariant[];
 }
 
 export interface MockQuestion {
@@ -71,7 +89,7 @@ interface SeedContent {
     isHidden: boolean;
     weight: number;
   }[];
-  variants: Variant[];
+  variants: SeedVariant[];
   answerSpec:
     | ({ type: 'MCQ' } & Schemas['McqAnswerSpec'])
     | ({ type: 'SHORT_ANSWER' } & Schemas['ShortAnswerSpec'])
@@ -536,10 +554,22 @@ function convert(q: SeedQuestion): MockQuestion {
         return { canonical: a.canonical, acceptedVariants: a.acceptedVariants };
       })(),
       testCases: v.testCases.map((t, position) => ({ ...t, position })),
-      variants: v.variants,
+      variants: v.variants.map((x): MockVariant => {
+        const rendered = renderTemplate(v.statementMd, x.params);
+        return {
+          id: x.id,
+          isActive: x.active,
+          params: x.params,
+          renderedStatement: rendered.ok ? rendered.text : v.statementMd,
+          overrides: x.overrides.map((o) => ({ ...o })),
+        };
+      }),
     };
     const report = v.validationReport
-      ? { ...v.validationReport, revision: mockRevision(base) }
+      ? {
+          ...v.validationReport,
+          revision: mockRevision({ ...base, variants: base.variants.map((x) => ({ ...x })) }),
+        }
       : null;
     return { ...base, validationReport: report };
   });

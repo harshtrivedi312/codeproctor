@@ -3,12 +3,14 @@ import { delay, http, HttpResponse } from 'msw';
 import type { Schemas } from '@/lib/api/client';
 import { apiBaseUrl } from '@/lib/env';
 import { mockRoleFromToken } from './auth-handlers';
+import { paramsProblems, renderContent, type ParamValue } from './question-template';
 import {
   revisionOf,
   toFullDetail,
   toReadDetail,
   toSummary,
   toTestCase,
+  toVariantDto,
   visibleVersions,
 } from './question-redaction';
 import {
@@ -16,12 +18,13 @@ import {
   type AnswerSpec,
   type MockQuestion,
   type MockTestCase,
+  type MockVariant,
   type MockVersion,
 } from './question-seed';
 
 /*
- * Mock question bank API (FE-04, FR-201..FR-205), shaped EXACTLY like the real BE-04a (PR #146,
- * apps/api/src/questions): routes, DTOs, who may call what, and the error rules. In memory: it
+ * Mock question bank API (FE-04, FR-201..FR-205), shaped EXACTLY like the real BE-04a and BE-04b
+ * (apps/api/src/questions): routes, DTOs, who may call what, and the error rules. In memory: it
  * survives navigation, not a page reload.
  *
  *  - Readers (question:read): list and detail. A caller without question:update gets published
@@ -32,11 +35,18 @@ import {
  *  - Writers (question:update): PATCH, publish, archive, test-case routes. PATCH takes optional
  *    fields (no test cases), edits a draft in place or forks the next draft of a published version.
  *    `revision` is an opaque content digest; a stale expectedRevision is 409.
+ *  - Variants (BE-04b, question:update except the candidate-shaped preview): list, create, change,
+ *    remove and per-slot override routes under /versions/:version/variants. A variant has params,
+ *    isActive and a rendered statement, NO label; every ACTIVE variant must render (the mock
+ *    renderer in question-template.ts), a content PATCH re-checks that, a fork copies variants with
+ *    new ids and re-points overrides at the new slots, and the revision covers variants.
+ *  - Every request body is checked like the real ValidationPipe (forbidNonWhitelisted): a field no
+ *    DTO declares is a 400.
  *  - Errors are RFC 7807 bodies. 409 and 422 carry detail and errors[] only, no code.
  *  - Publish: a CODING question fails closed with 422 (no validate job in the real API yet, slice
  *    BE-04c). The mock scenario `validationJob` lets the web-only placeholder job unlock it.
  *
- * WEB-ONLY placeholders (no counterpart in the API yet): variants [BE-04b], prefill [BE-04b/c], the
+ * WEB-ONLY placeholders (no counterpart in the API yet): prefill (BE-04b did not add it), the
  * validate job [BE-04c] and AI reference solutions [BE-04c]. The fake executor fails a test slot
  * whose expected output is blank or starts with "TODO" (the seed "Rotate an array" shows TC-012).
  */
@@ -103,7 +113,8 @@ const problem = (status: number, detail: string, errors?: string[]) =>
       type: 'about:blank',
       title: TITLES[status] ?? 'Error',
       status,
-      detail,
+      // Like the real filter: an array message becomes errors[] under a fixed detail.
+      detail: errors ? 'Request validation failed' : detail,
       instance: '/mock',
       traceId: 'mock-trace',
       ...(errors ? { errors } : {}),
@@ -118,6 +129,65 @@ function allowed(request: Request, permission: Permission): Role | Response {
 }
 
 const latest = (q: MockQuestion): MockVersion => q.versions[q.versions.length - 1]!;
+
+/** The API's ValidationPipe has forbidNonWhitelisted: a body field no DTO declares is a 400. */
+function unknownFields(body: Record<string, unknown>, allowed: readonly string[]): string[] {
+  return Object.keys(body)
+    .filter((k) => !allowed.includes(k))
+    .map((k) => `property ${k} should not exist`);
+}
+const CREATE_FIELDS = [
+  'type',
+  'slug',
+  'title',
+  'statementMd',
+  'difficulty',
+  'tags',
+  'allowedLanguages',
+  'limits',
+  'starterCode',
+  'referenceSolution',
+  'answerSpec',
+  'testCases',
+] as const;
+const UPDATE_FIELDS = [
+  'title',
+  'statementMd',
+  'difficulty',
+  'tags',
+  'allowedLanguages',
+  'limits',
+  'starterCode',
+  'referenceSolution',
+  'answerSpec',
+  'expectedRevision',
+] as const;
+const MAX_VARIANTS = 50;
+const REVISION = /^[0-9a-f]{64}$/;
+const revisionProblems = (v: unknown): string[] =>
+  v === undefined || (typeof v === 'string' && REVISION.test(v))
+    ? []
+    : ['expectedRevision must match /^[0-9a-f]{64}$/ regular expression'];
+
+/** Every ACTIVE variant must render against the content (renderVariant), or the problems say why. */
+function renderProblems(
+  content: {
+    statementMd: string;
+    starterCode: Record<string, string>;
+    referenceSolution: Record<string, string>;
+  },
+  variants: readonly MockVariant[],
+): { problems: string[]; rendered: Map<string, string> } {
+  const problems: string[] = [];
+  const rendered = new Map<string, string>();
+  for (const x of variants) {
+    if (!x.isActive) continue;
+    const r = renderContent(content, x.params);
+    if (r.ok) rendered.set(x.id, r.content.statementMd);
+    else problems.push(...r.errors.map((e) => `variants[${x.id}].${e}`));
+  }
+  return { problems, rendered };
+}
 
 /** Server-side shape rules (question-content.ts, answer-spec.ts in the API); a draft may be incomplete. */
 const OPTION_ID = /^[A-Za-z0-9_-]{1,32}$/;
@@ -245,6 +315,8 @@ function publishProblems(q: MockQuestion, v: MockVersion): string[] {
     const gap = aiGateMissing(q, v);
     if (gap) out.push(`aiReferences: ${gap}`);
   }
+  // Every active variant renders cleanly (ADR 0007 V-2); an override on a foreign slot cannot exist here.
+  out.push(...renderProblems(v, v.variants).problems);
   if (v.testCases.length === 0) out.push('testCases: at least one');
   if (!v.testCases.some((t) => !t.isHidden))
     out.push('testCases: at least one sample (not hidden)');
@@ -304,9 +376,11 @@ function runValidation(q: MockQuestion, v: MockVersion): Report {
       label: 'Base statement',
       overrides: [] as Schemas['VariantOverride'][],
     },
-    ...v.variants
-      .filter((x) => x.active)
-      .map((x) => ({ id: x.id, label: x.label, overrides: x.overrides })),
+    ...[...v.variants]
+      .sort((a, b) => (a.id < b.id ? -1 : 1))
+      .flatMap((x, i) =>
+        x.isActive ? [{ id: x.id, label: `Variant ${i + 1}`, overrides: x.overrides }] : [],
+      ),
   ];
   for (const language of languages) {
     for (const slot of slots) {
@@ -363,7 +437,13 @@ interface TestCaseBody {
   position?: unknown;
 }
 function testCaseProblems(b: TestCaseBody, requireIo: boolean): string[] {
-  const out: string[] = [];
+  const out: string[] = unknownFields(b as Record<string, unknown>, [
+    'input',
+    'expectedOutput',
+    'isHidden',
+    'weight',
+    'position',
+  ]);
   for (const k of ['input', 'expectedOutput'] as const) {
     const v = b[k];
     if (v === undefined) {
@@ -423,6 +503,40 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
   const archivedCheck = (q: MockQuestion): Response | null =>
     q.isArchived ? problem(409, 'The question is archived.') : null;
 
+  /**
+   * lockDraft + checkRevision of the real variant routes, in the real order: 403/404 question,
+   * 409 archived, 404 version, 422 not coding, 409 published, 409 stale revision.
+   */
+  async function draftOf(
+    request: Request,
+    id: string,
+    version: number,
+    expectedRevision: unknown,
+  ): Promise<{ r: { role: Role; q: MockQuestion }; v: MockVersion } | Response> {
+    const r = await writer(request, id);
+    if (r instanceof Response) return r;
+    const closed = archivedCheck(r.q);
+    if (closed) return closed;
+    const v = r.q.versions.find((x) => x.version === version);
+    if (!v) return problem(404, NOT_FOUND);
+    if (r.q.type !== 'CODING') return problem(422, 'Only coding questions have variants.');
+    if (v.isPublished) {
+      return problem(
+        409,
+        'A published version is immutable; edit the question to create a new version.',
+      );
+    }
+    if (typeof expectedRevision === 'string' && expectedRevision !== revisionOf(v)) {
+      return problem(
+        409,
+        'The question changed since you loaded it; reload it and apply your edit again.',
+      );
+    }
+    return { r, v };
+  }
+  const byId = (a: { id: string }, b: { id: string }): number =>
+    a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+
   return [
     http.get(base, async ({ request }) => {
       await wait();
@@ -468,7 +582,7 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       const title = typeof b.title === 'string' ? b.title.trim() : '';
       const statementMd = typeof b.statementMd === 'string' ? b.statementMd : '';
       const difficulty = b.difficulty as Schemas['Difficulty'] | undefined;
-      const problems: string[] = [];
+      const problems: string[] = unknownFields(b, CREATE_FIELDS);
       if (!['CODING', 'MCQ', 'SHORT_ANSWER'].includes(type)) problems.push('type: invalid');
       if (title.length < 1 || title.length > 200) problems.push('title: 1 to 200 characters');
       if (statementMd.length < 1 || statementMd.length > 50_000)
@@ -583,6 +697,12 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
         'answerSpec',
       ] as const;
       const touched = fields.filter((k) => b[k] !== undefined);
+      // DTO validation comes first, as in the real pipe: unknown fields and a malformed revision.
+      const dtoProblems = [
+        ...unknownFields(b, UPDATE_FIELDS),
+        ...revisionProblems(b.expectedRevision),
+      ];
+      if (dtoProblems.length > 0) return problem(400, 'Validation failed', dtoProblems);
       if (b.tags === undefined && touched.length === 0) {
         return problem(400, 'Send at least one field to change.');
       }
@@ -608,6 +728,19 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
         ...shapeProblems(r.q.type, merged),
         ...(b.limits ? limitsProblems(merged.limits) : []),
       ];
+      // Variants (FR-203): an edited statement, starter code or reference solution must still
+      // render for every ACTIVE variant, so a draft never holds an unrenderable active variant.
+      const rendered = new Map<string, string>();
+      if (
+        r.q.type === 'CODING' &&
+        (b.statementMd !== undefined ||
+          b.starterCode !== undefined ||
+          b.referenceSolution !== undefined)
+      ) {
+        const rp = renderProblems(merged, head.variants);
+        problems.push(...rp.problems);
+        for (const [id, text] of rp.rendered) rendered.set(id, text);
+      }
       if (merged.title.length < 1 || merged.title.length > 200)
         problems.push('title: 1 to 200 characters');
       if (merged.statementMd.length < 1) problems.push('statementMd: required');
@@ -625,11 +758,16 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       if (touched.length > 0) {
         if (!head.isPublished) {
           Object.assign(head, merged, { limits: { ...merged.limits } });
+          for (const x of head.variants) {
+            const text = rendered.get(x.id);
+            if (text !== undefined) x.renderedStatement = text;
+          }
           clearValidation(head);
         } else {
           // A published version never changes: the edit becomes the next draft (FR-204).
           createdNewVersion = true;
           const number = head.version + 1;
+          const slotIds = new Map(head.testCases.map((t) => [t.id, newId('tc')]));
           r.q.versions.push({
             ...merged,
             id: `${r.q.id}-v${number}`,
@@ -639,9 +777,20 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
             validationReport: null,
             createdAt: new Date().toISOString(),
             createdByName: actor(r.role),
-            // The test cases are copied to the new draft with new ids; the variants too.
-            testCases: head.testCases.map((t) => ({ ...t, id: newId('tc') })),
-            variants: structuredClone(head.variants),
+            // The test cases are copied with NEW ids; the variants too (a copy of every variant,
+            // new id), and their overrides are re-pointed at the new slots, as the API does. The
+            // new variant ids keep the old order only because the mock derives them from the old.
+            testCases: head.testCases.map((t) => ({ ...t, id: slotIds.get(t.id)! })),
+            variants: head.variants.map((x) => ({
+              id: `${x.id}-f${number}`,
+              isActive: x.isActive,
+              params: { ...x.params },
+              renderedStatement: rendered.get(x.id) ?? x.renderedStatement,
+              overrides: x.overrides.flatMap((o) => {
+                const testCaseId = slotIds.get(o.testCaseId);
+                return testCaseId ? [{ ...o, testCaseId }] : [];
+              }),
+            })),
           });
         }
       }
@@ -652,7 +801,12 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
     http.post(`${base}/:id/publish`, async ({ request, params }) => {
       const r = await writer(request, String(params.id));
       if (r instanceof Response) return r;
-      const b = (await request.json().catch(() => ({}))) as { expectedRevision?: string };
+      const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+      const dtoProblems = [
+        ...unknownFields(b, ['expectedRevision']),
+        ...revisionProblems(b.expectedRevision),
+      ];
+      if (dtoProblems.length > 0) return problem(400, 'Validation failed', dtoProblems);
       const closed = archivedCheck(r.q);
       if (closed) return closed;
       const head = latest(r.q);
@@ -663,6 +817,11 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
         return problem(409, 'There is no draft to publish; edit the question first.');
       const problems = publishProblems(r.q, head);
       if (problems.length > 0) return problem(422, 'The draft cannot be published yet.', problems);
+      // The stored rendered statements are refreshed from the very content being published.
+      for (const x of head.variants) {
+        const text = renderProblems(head, [x]).rendered.get(x.id);
+        if (text !== undefined) x.renderedStatement = text;
+      }
       head.isPublished = true;
       return HttpResponse.json(toFullDetail(r.q, head, visibleVersions(r.q, true), false));
     }),
@@ -753,43 +912,250 @@ export function createQuestionHandlers(options: { latencyMs: number }) {
       return new HttpResponse(null, { status: 204 });
     }),
 
-    // ---- WEB-ONLY placeholders: no counterpart in the API yet ---------------------------------
-    // Variants [BE-04b].
-    http.get(`${base}/:id/variants`, async ({ request, params }) => {
+    // ---- variants (REAL, BE-04b) ---------------------------------------------------------------
+    http.get(`${base}/:id/versions/:version/variants`, async ({ request, params }) => {
       const r = await writer(request, String(params.id));
       if (r instanceof Response) return r;
-      const wanted = new URL(request.url).searchParams.get('version');
-      const v =
-        wanted === null ? latest(r.q) : r.q.versions.find((x) => x.version === Number(wanted));
-      return v
-        ? HttpResponse.json({ variants: structuredClone(v.variants) })
-        : problem(404, NOT_FOUND);
-    }),
-    http.put(`${base}/:id/variants`, async ({ request, params }) => {
-      const r = await writer(request, String(params.id));
-      if (r instanceof Response) return r;
-      const v = latest(r.q);
-      if (v.isPublished) return problem(409, 'The version is published and cannot change.');
-      const closed = archivedCheck(r.q);
-      if (closed) return closed;
-      const b = (await request.json().catch(() => ({}))) as { variants?: Schemas['Variant'][] };
-      if (!Array.isArray(b.variants))
-        return problem(400, 'Validation failed', ['variants: required']);
-      v.variants = b.variants.map((x) => ({
-        id: x.id,
-        label: x.label,
-        params: x.params,
-        active: x.active,
-        overrides: x.overrides.map((o) => ({
-          testCaseId: o.testCaseId,
-          input: o.input,
-          expectedOutput: o.expectedOutput,
-        })),
-      }));
-      clearValidation(v);
-      return HttpResponse.json({ variants: structuredClone(v.variants) });
+      const v = r.q.versions.find((x) => x.version === Number(params.version));
+      if (!v) return problem(404, NOT_FOUND);
+      return HttpResponse.json({
+        items: [...v.variants].sort(byId).map((x) => toVariantDto(x, v.testCases)),
+        revision: revisionOf(v),
+      });
     }),
 
+    http.post(`${base}/:id/versions/:version/variants`, async ({ request, params }) => {
+      const gate = allowed(request, 'question:update');
+      if (gate instanceof Response) return gate;
+      const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+      const dto = [
+        ...unknownFields(b, ['params', 'isActive', 'expectedRevision']),
+        ...(b.params === undefined
+          ? ['params must be an object']
+          : paramsProblems(b.params).map((p) => `params: ${p}`)),
+        ...(b.isActive !== undefined && typeof b.isActive !== 'boolean'
+          ? ['isActive must be a boolean value']
+          : []),
+        ...revisionProblems(b.expectedRevision),
+      ];
+      if (dto.length > 0) return problem(400, 'Validation failed', dto);
+      const d = await draftOf(
+        request,
+        String(params.id),
+        Number(params.version),
+        b.expectedRevision,
+      );
+      if (d instanceof Response) return d;
+      if (d.v.variants.length >= MAX_VARIANTS)
+        return problem(422, `A version has at most ${MAX_VARIANTS} variants.`);
+      const isActive = b.isActive === undefined ? true : b.isActive === true;
+      const id = newId('var');
+      const variant: MockVariant = {
+        id,
+        isActive,
+        params: { ...(b.params as Record<string, ParamValue>) },
+        renderedStatement: '',
+        overrides: [],
+      };
+      if (isActive) {
+        const rp = renderProblems(d.v, [{ ...variant, id: 'new' }]);
+        if (rp.problems.length > 0) return problem(400, 'Validation failed', rp.problems);
+        variant.renderedStatement = rp.rendered.get('new') ?? '';
+      }
+      d.v.variants.push(variant);
+      clearValidation(d.v);
+      return HttpResponse.json(
+        { variant: toVariantDto(variant, d.v.testCases), revision: revisionOf(d.v) },
+        { status: 201 },
+      );
+    }),
+
+    http.get(
+      `${base}/:id/versions/:version/variants/:variantId/preview`,
+      async ({ request, params }) => {
+        const r = await reader(request, String(params.id));
+        if (r instanceof Response) return r;
+        const v = r.q.versions.find(
+          (x) => x.version === Number(params.version) && (r.full || x.isPublished),
+        );
+        if (!v) return problem(404, NOT_FOUND);
+        const x = v.variants.find(
+          (y) => y.id === String(params.variantId) && (r.full || y.isActive),
+        );
+        if (!x) return problem(404, 'Variant not found.');
+        const rendered = renderContent(v, x.params);
+        if (!rendered.ok) {
+          return r.full
+            ? problem(422, 'This variant cannot be shown.', rendered.errors)
+            : problem(422, 'This variant cannot be shown.');
+        }
+        const merged = v.testCases.map((t) => {
+          const o = x.overrides.find((y) => y.testCaseId === t.id);
+          return {
+            isHidden: t.isHidden,
+            position: t.position,
+            input: o ? o.input : t.input,
+            expectedOutput: o ? o.expectedOutput : t.expectedOutput,
+          };
+        });
+        const languages = v.allowedLanguages.filter((l) =>
+          ['python', 'javascript', 'java'].includes(l),
+        );
+        // Built field by field, like the real candidate view: no params, hidden cases, reference or key.
+        return HttpResponse.json({
+          type: r.q.type,
+          title: v.title,
+          statementMd: rendered.content.statementMd,
+          languages,
+          limits: { ...v.limits },
+          starterCode: Object.fromEntries(
+            languages.flatMap((l) =>
+              rendered.content.starterCode[l] !== undefined
+                ? [[l, rendered.content.starterCode[l]]]
+                : [],
+            ),
+          ),
+          samples: merged
+            .filter((m) => !m.isHidden)
+            .sort((a, c) => a.position - c.position)
+            .map((m) => ({ input: m.input, expectedOutput: m.expectedOutput })),
+        });
+      },
+    ),
+
+    http.patch(`${base}/:id/versions/:version/variants/:variantId`, async ({ request, params }) => {
+      const gate = allowed(request, 'question:update');
+      if (gate instanceof Response) return gate;
+      const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+      const dto = [
+        ...unknownFields(b, ['params', 'isActive', 'expectedRevision']),
+        ...(b.params === undefined ? [] : paramsProblems(b.params).map((p) => `params: ${p}`)),
+        ...(b.isActive !== undefined && typeof b.isActive !== 'boolean'
+          ? ['isActive must be a boolean value']
+          : []),
+        ...revisionProblems(b.expectedRevision),
+      ];
+      if (dto.length > 0) return problem(400, 'Validation failed', dto);
+      if (b.params === undefined && b.isActive === undefined)
+        return problem(400, 'Send at least one field to change.');
+      const d = await draftOf(
+        request,
+        String(params.id),
+        Number(params.version),
+        b.expectedRevision,
+      );
+      if (d instanceof Response) return d;
+      const x = d.v.variants.find((y) => y.id === String(params.variantId));
+      if (!x) return problem(404, 'Variant not found.');
+      const next: MockVariant = {
+        ...x,
+        params: b.params === undefined ? x.params : { ...(b.params as Record<string, ParamValue>) },
+        isActive: b.isActive === undefined ? x.isActive : b.isActive === true,
+      };
+      if (next.isActive) {
+        const rp = renderProblems(d.v, [next]);
+        if (rp.problems.length > 0) return problem(400, 'Validation failed', rp.problems);
+        next.renderedStatement = rp.rendered.get(next.id) ?? next.renderedStatement;
+      }
+      Object.assign(x, next);
+      clearValidation(d.v);
+      return HttpResponse.json({
+        variant: toVariantDto(x, d.v.testCases),
+        revision: revisionOf(d.v),
+      });
+    }),
+
+    http.delete(
+      `${base}/:id/versions/:version/variants/:variantId`,
+      async ({ request, params }) => {
+        const gate = allowed(request, 'question:update');
+        if (gate instanceof Response) return gate;
+        const expected = new URL(request.url).searchParams.get('expectedRevision') ?? undefined;
+        const dto = revisionProblems(expected);
+        if (dto.length > 0) return problem(400, 'Validation failed', dto);
+        const d = await draftOf(request, String(params.id), Number(params.version), expected);
+        if (d instanceof Response) return d;
+        if (!d.v.variants.some((y) => y.id === String(params.variantId)))
+          return problem(404, 'Variant not found.');
+        d.v.variants = d.v.variants.filter((y) => y.id !== String(params.variantId));
+        clearValidation(d.v);
+        return new HttpResponse(null, { status: 204 });
+      },
+    ),
+
+    http.put(
+      `${base}/:id/versions/:version/variants/:variantId/test-cases/:testCaseId`,
+      async ({ request, params }) => {
+        const gate = allowed(request, 'question:update');
+        if (gate instanceof Response) return gate;
+        const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+        const dto = [
+          ...unknownFields(b, ['input', 'expectedOutput', 'expectedRevision']),
+          ...(['input', 'expectedOutput'] as const).flatMap((k) => {
+            const val = b[k];
+            return typeof val === 'string' && val.length <= 100_000
+              ? []
+              : [`${k} must be a string of at most 100000 characters`];
+          }),
+          ...revisionProblems(b.expectedRevision),
+        ];
+        if (dto.length > 0) return problem(400, 'Validation failed', dto);
+        const d = await draftOf(
+          request,
+          String(params.id),
+          Number(params.version),
+          b.expectedRevision,
+        );
+        if (d instanceof Response) return d;
+        const x = d.v.variants.find((y) => y.id === String(params.variantId));
+        if (!x) return problem(404, 'Variant not found.');
+        const slot = d.v.testCases.find((t) => t.id === String(params.testCaseId));
+        if (!slot) return problem(404, 'Test case not found.');
+        const existing = x.overrides.find((o) => o.testCaseId === slot.id);
+        if (existing) {
+          existing.input = String(b.input);
+          existing.expectedOutput = String(b.expectedOutput);
+        } else {
+          x.overrides.push({
+            testCaseId: slot.id,
+            input: String(b.input),
+            expectedOutput: String(b.expectedOutput),
+          });
+        }
+        clearValidation(d.v);
+        // The override only, not a revision (the client reads the revision back).
+        return HttpResponse.json({
+          testCaseId: slot.id,
+          isHidden: slot.isHidden,
+          position: slot.position,
+          input: String(b.input),
+          expectedOutput: String(b.expectedOutput),
+        });
+      },
+    ),
+
+    http.delete(
+      `${base}/:id/versions/:version/variants/:variantId/test-cases/:testCaseId`,
+      async ({ request, params }) => {
+        const gate = allowed(request, 'question:update');
+        if (gate instanceof Response) return gate;
+        const expected = new URL(request.url).searchParams.get('expectedRevision') ?? undefined;
+        const dto = revisionProblems(expected);
+        if (dto.length > 0) return problem(400, 'Validation failed', dto);
+        const d = await draftOf(request, String(params.id), Number(params.version), expected);
+        if (d instanceof Response) return d;
+        const x = d.v.variants.find((y) => y.id === String(params.variantId));
+        if (!x) return problem(404, 'Variant not found.');
+        if (!x.overrides.some((o) => o.testCaseId === String(params.testCaseId)))
+          return problem(404, 'Override not found.');
+        x.overrides = x.overrides.filter((o) => o.testCaseId !== String(params.testCaseId));
+        clearValidation(d.v);
+        return new HttpResponse(null, { status: 204 });
+      },
+    ),
+
+    // ---- WEB-ONLY placeholders: no counterpart in the API yet ---------------------------------
+    // Prefill: BE-04b did not add a prefill route (ADR 0007 helper); the UI keeps it as a proposal.
     http.post(`${base}/:id/prefill`, async ({ request, params }) => {
       const r = await writer(request, String(params.id));
       if (r instanceof Response) return r;
