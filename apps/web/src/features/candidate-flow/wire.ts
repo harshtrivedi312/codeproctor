@@ -1,3 +1,4 @@
+import { codeLanguageSchema } from '@codeproctor/shared';
 import { z } from 'zod';
 import { mockingEnabled } from '@/lib/env';
 
@@ -147,4 +148,69 @@ export type IdentityReceived = z.infer<typeof identityReceivedSchema>;
 export const testStartedSchema = z.object({
   status: z.enum(['IN_PROGRESS', 'PAUSED']),
   serverTime: z.string(),
+});
+
+/** ADR 0013 section 5.5: presign and confirm for recorded media. Room scan is stream ROOM_SCAN. */
+const httpsOrMock = (u: string): boolean =>
+  u.startsWith('https://') || (mockingEnabled && u.startsWith('http://'));
+
+export const mediaPresignSchema = z.union([
+  z.object({ alreadyUploaded: z.literal(true) }),
+  z.object({
+    url: z.string().url().refine(httpsOrMock, { message: 'Upload URL must be https' }),
+    method: z.literal('PUT'),
+    headers: z.record(z.string(), z.string()),
+    expiresAt: z.string(),
+  }),
+]);
+export type MediaPresign = z.infer<typeof mediaPresignSchema>;
+
+export const mediaConfirmSchema = z.object({ uploaded: z.literal(true), sizeBytes: z.number() });
+
+/**
+ * PROVISIONAL (ARC-03 part 2, STRICT side-camera device auth is not decided). Whether this session
+ * needs a phone side camera, and whether one is paired.
+ */
+export const sideCameraStatusSchema = z.object({ required: z.boolean(), connected: z.boolean() });
+export type SideCameraStatus = z.infer<typeof sideCameraStatusSchema>;
+
+/** PROVISIONAL: a short-lived single-use link token for the phone page. Never logged or stored. */
+export const sideCameraLinkSchema = z.object({
+  linkToken: z.string().min(20),
+  expiresAt: z.string(),
+});
+
+/** PROVISIONAL: the phone presents the link token (no candidate session token on the phone). */
+export const sideCameraPairSchema = z.object({ paired: z.literal(true) });
+
+/**
+ * PROVISIONAL (FR-406): the practice question. Served from fixed content, never from the test, and
+ * nothing the candidate does with it is stored, timed or graded.
+ */
+export const practiceQuestionSchema = z.object({
+  title: z.string(),
+  statementMarkdown: z.string(),
+  languages: z.array(codeLanguageSchema).min(1),
+  starterCode: z.record(z.string(), z.string()),
+  sampleTests: z.array(
+    z.object({ id: z.string(), name: z.string(), input: z.string(), expectedOutput: z.string() }),
+  ),
+});
+export type PracticeQuestion = z.infer<typeof practiceQuestionSchema>;
+
+export const practiceRunSchema = z.object({
+  outcome: z.enum(['completed', 'compile_error', 'runtime_error', 'time_limit_exceeded']),
+  tests: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      status: z.enum(['passed', 'failed']),
+      input: z.string().optional(),
+      expectedOutput: z.string().optional(),
+      actualOutput: z.string().optional(),
+      durationMs: z.number().optional(),
+    }),
+  ),
+  stdout: z.string(),
+  stderr: z.string(),
 });

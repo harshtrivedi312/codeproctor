@@ -37,11 +37,19 @@ export const MOCK_TOKENS = {
   cooldown: 'mock-cooldown-invitation-token-0012',
   /** Already CONSENTED: resumes at the system check. */
   consented: 'mock-consented-invitation-token-0013',
+  /** STRICT profile: a phone side camera is required. */
+  strict: 'mock-strict-invitation-token-0014',
+  /** Already VERIFIED (room scan done): resumes at the phone and practice steps. */
+  verified: 'mock-verified-invitation-token-0015',
+  /** STRICT and already VERIFIED: the phone must be paired before the test. */
+  strictVerified: 'mock-strictverified-invite-token-0016',
 } as const;
 
 export const MOCK_OTP = '123456';
 export const MOCK_EXPIRED_OTP = '000000';
 export const MOCK_RECRUITER_CONTACT = 'Jordan Lee, recruiting@acme-hiring.test';
+/** The phone link token the mock issues; the phone page pairs with it. */
+export const MOCK_PHONE_LINK_TOKEN = 'mock-phone-link-token-aaaaaaaaaaaa';
 export const MOCK_CONSENT_ID = '3f0e2a7c-6a52-4d5b-9a53-7e9b6a1c2d10';
 
 /** An approved-looking text with no placeholders. Long enough to need scrolling. */
@@ -74,6 +82,8 @@ interface SessionRecord {
   status: SessionStatus | 'DECLINED';
   identityAttempts: number;
   uploads: number;
+  roomScans: number;
+  sideCameraPaired: boolean;
 }
 
 interface LinkRecord {
@@ -83,12 +93,15 @@ interface LinkRecord {
 }
 
 const sessions = new Map<string, SessionRecord>();
+/** Phone link tokens are single use and belong to the session that asked for them. */
+const phoneLinks = new Map<string, SessionRecord>();
 const links = new Map<string, LinkRecord>();
 let counter = 0;
 
 /** Tests call this between cases. */
 export function resetMockCandidateState(): void {
   sessions.clear();
+  phoneLinks.clear();
   links.clear();
   counter = 0;
 }
@@ -208,8 +221,21 @@ export function createCandidateHandlers() {
       counter += 1;
       const sessionToken = `mock-session-token-${counter}`;
       const status: SessionStatus =
-        scenario === 'resume' ? 'IN_PROGRESS' : scenario === 'consented' ? 'CONSENTED' : 'OPENED';
-      sessions.set(sessionToken, { scenario, status, identityAttempts: 0, uploads: 0 });
+        scenario === 'resume'
+          ? 'IN_PROGRESS'
+          : scenario === 'verified' || scenario === 'strictVerified'
+            ? 'VERIFIED'
+            : scenario === 'consented'
+              ? 'CONSENTED'
+              : 'OPENED';
+      sessions.set(sessionToken, {
+        scenario,
+        status,
+        identityAttempts: 0,
+        uploads: 0,
+        roomScans: 0,
+        sideCameraPaired: false,
+      });
       return HttpResponse.json({
         sessionToken,
         sessionTokenExpiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
@@ -306,6 +332,109 @@ export function createCandidateHandlers() {
         status: 'RECEIVED',
         attempt: Math.min(2, s.identityAttempts),
         retrySuggested: s.scenario === 'lowConfidence' && s.identityAttempts === 1,
+      });
+    }),
+
+    http.post(`${base}/media/presign`, async ({ request }) => {
+      const s = bearer(request);
+      if (!s) return problem(401, 'UNAUTHENTICATED');
+      const body = (await request.json()) as {
+        stream?: string;
+        bytes?: number;
+        durationMs?: number;
+      };
+      if (body.stream !== 'ROOM_SCAN') return problem(400, 'VALIDATION_FAILED');
+      if (
+        !body.bytes ||
+        body.bytes > 16 * 1024 * 1024 ||
+        !body.durationMs ||
+        body.durationMs > 60_000
+      ) {
+        return problem(400, 'VALIDATION_FAILED');
+      }
+      s.uploads += 1;
+      return HttpResponse.json({
+        url: `${apiBaseUrl}/mock-upload/room-${s.uploads}`,
+        method: 'PUT',
+        headers: { 'Content-Type': 'video/webm' },
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
+    }),
+
+    http.post(`${base}/media/confirm`, ({ request }) => {
+      const s = bearer(request);
+      if (!s) return problem(401, 'UNAUTHENTICATED');
+      s.roomScans += 1;
+      return HttpResponse.json({ uploaded: true, sizeBytes: 1024 });
+    }),
+
+    http.get(`${base}/side-camera`, ({ request }) => {
+      const s = bearer(request);
+      if (!s) return problem(401, 'UNAUTHENTICATED');
+      return HttpResponse.json({
+        required: s.scenario === 'strict' || s.scenario === 'strictVerified',
+        connected: s.sideCameraPaired,
+      });
+    }),
+
+    http.post(`${base}/side-camera/link`, ({ request }) => {
+      const s = bearer(request);
+      if (!s) return problem(401, 'UNAUTHENTICATED');
+      const linkToken = `${MOCK_PHONE_LINK_TOKEN.slice(0, 24)}${phoneLinks.size + 1}`.padEnd(
+        32,
+        'x',
+      );
+      phoneLinks.set(linkToken, s);
+      return HttpResponse.json({
+        linkToken,
+        expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+      });
+    }),
+
+    http.post(`${base}/side-camera/pair`, async ({ request }) => {
+      const { linkToken } = (await request.json()) as { linkToken?: string };
+      const owner = linkToken ? phoneLinks.get(linkToken) : undefined;
+      if (!owner || !linkToken) return problem(404, 'LINK_INVALID');
+      phoneLinks.delete(linkToken); // single use
+      owner.sideCameraPaired = true;
+      return HttpResponse.json({ paired: true });
+    }),
+
+    http.get(`${base}/practice`, ({ request }) => {
+      const s = bearer(request);
+      if (!s) return problem(401, 'UNAUTHENTICATED');
+      return HttpResponse.json({
+        title: 'Practice: add two numbers',
+        statementMarkdown:
+          'Read two integers `a` and `b` from the input, one per line, and print their sum.\n\nThis question is for practice only.',
+        languages: ['python', 'javascript'],
+        starterCode: {
+          python: 'a = int(input())\nb = int(input())\n',
+          javascript: '// read a and b\n',
+        },
+        sampleTests: [{ id: 'p1', name: 'Small numbers', input: '1\n2', expectedOutput: '3' }],
+      });
+    }),
+
+    http.post(`${base}/practice/run`, async ({ request }) => {
+      const s = bearer(request);
+      if (!s) return problem(401, 'UNAUTHENTICATED');
+      const body = (await request.json()) as { code?: string };
+      const passes = /print|console\.log/.test(body.code ?? '') && /\+/.test(body.code ?? '');
+      return HttpResponse.json({
+        outcome: 'completed',
+        tests: [
+          {
+            id: 'p1',
+            name: 'Small numbers',
+            status: passes ? 'passed' : 'failed',
+            input: '1\n2',
+            expectedOutput: '3',
+            actualOutput: passes ? '3' : '',
+          },
+        ],
+        stdout: '',
+        stderr: '',
       });
     }),
 
