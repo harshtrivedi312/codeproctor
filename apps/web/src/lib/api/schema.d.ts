@@ -528,6 +528,25 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v1/questions/{questionId}/prefill': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+      };
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Run the reference solution on a variant's inputs and PROPOSE expected outputs (ADR 0007). Nothing is stored; the author must accept the proposals. */
+    post: operations['prefillVariantOutputs'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/v1/questions/{questionId}/validation/{jobId}': {
     parameters: {
       query?: never;
@@ -691,21 +710,15 @@ export interface components {
       text: string;
     };
     McqAnswerSpec: {
-      /**
-       * @description discriminator enum property added by openapi-typescript
-       * @enum {string}
-       */
-      type: 'McqAnswerSpec';
+      /** @enum {string} */
+      type: 'MCQ';
       options: components['schemas']['McqOption'][];
       correctOptionIds: string[];
       multiple: boolean;
     };
     ShortAnswerSpec: {
-      /**
-       * @description discriminator enum property added by openapi-typescript
-       * @enum {string}
-       */
-      type: 'ShortAnswerSpec';
+      /** @enum {string} */
+      type: 'SHORT_ANSWER';
       canonical: string;
       acceptedVariants: string[];
     };
@@ -727,7 +740,7 @@ export interface components {
       paramSchema: components['schemas']['ParamDef'][];
       testCases: components['schemas']['TestCase'][];
       variants: components['schemas']['Variant'][];
-      answerSpec: Omit<components['schemas']['AnswerSpec'], 'type'> | null;
+      answerSpec: components['schemas']['AnswerSpec'] | null;
     };
     QuestionCreate: components['schemas']['QuestionContent'] & {
       type: components['schemas']['QuestionType'];
@@ -812,6 +825,27 @@ export interface components {
       collectedByName: string;
       /** Format: date-time */
       supersededAt: string | null;
+    };
+    PrefillRequest: {
+      language: components['schemas']['Language'];
+      params: {
+        [key: string]: unknown;
+      };
+      /** @description The template as edited (may be unsaved); the API renders it with params */
+      referenceSolution: string;
+      slots: {
+        testCaseId: string;
+        /** @description The input that applies to this variant */
+        input: string;
+      }[];
+    };
+    PrefillResponse: {
+      proposals: {
+        testCaseId: string;
+        expectedOutput?: string;
+        /** @description Why no output could be produced (runtime error */
+        error?: string;
+      }[];
     };
     ApiError: {
       code: string;
@@ -2250,6 +2284,42 @@ export interface operations {
           'application/json': components['schemas']['ApiError'];
         };
       };
+    };
+  };
+  prefillVariantOutputs: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        questionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['PrefillRequest'];
+      };
+    };
+    responses: {
+      /** @description One proposal per slot */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['PrefillResponse'];
+        };
+      };
+      /** @description Invalid */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ApiError'];
+        };
+      };
+      403: components['responses']['Forbidden'];
     };
   };
   getValidationJob: {

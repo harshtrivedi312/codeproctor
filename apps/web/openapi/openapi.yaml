@@ -892,6 +892,32 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ApiError' }
+  /v1/questions/{questionId}/prefill:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: prefillVariantOutputs
+      summary: Run the reference solution on a variant's inputs and PROPOSE expected outputs (ADR 0007). Nothing is stored; the author must accept the proposals.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PrefillRequest' }
+      responses:
+        '200':
+          description: One proposal per slot
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PrefillResponse' }
+        '400':
+          description: Invalid
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
   /v1/questions/{questionId}/validation/{jobId}:
     parameters:
       - name: questionId
@@ -1171,8 +1197,6 @@ components:
       oneOf:
         - $ref: '#/components/schemas/McqAnswerSpec'
         - $ref: '#/components/schemas/ShortAnswerSpec'
-      discriminator:
-        propertyName: type
     QuestionContent:
       type: object
       required:
@@ -1312,6 +1336,49 @@ components:
             id: { type: string }
             collectedByName: { type: string }
             supersededAt: { type: string, format: date-time, nullable: true }
+    PrefillRequest:
+      type: object
+      required: [language, params, referenceSolution, slots]
+      properties:
+        language: { $ref: '#/components/schemas/Language' }
+        params: { type: object, additionalProperties: true }
+        referenceSolution:
+          {
+            type: string,
+            maxLength: 100000,
+            description: The template as edited (may be unsaved); the API renders it with params,
+          }
+        slots:
+          type: array
+          items:
+            type: object
+            required: [testCaseId, input]
+            properties:
+              testCaseId: { type: string }
+              input:
+                {
+                  type: string,
+                  description: The input that applies to this variant,
+                  override or default,
+                }
+    PrefillResponse:
+      type: object
+      required: [proposals]
+      properties:
+        proposals:
+          type: array
+          items:
+            type: object
+            required: [testCaseId]
+            properties:
+              testCaseId: { type: string }
+              expectedOutput: { type: string }
+              error:
+                {
+                  type: string,
+                  description: Why no output could be produced (runtime error,
+                  limit),
+                }
     ApiError:
       type: object
       required: [code, message]
