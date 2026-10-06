@@ -201,7 +201,7 @@ SELECT (SELECT count(*) FROM pg_database WHERE datdba = r.oid)
   FROM pg_roles r WHERE r.rolname = 'app_user';                                 -- 0 (owns nothing)
 SELECT has_table_privilege('app_user', 'audit_logs', 'UPDATE');                -- f
 SELECT has_table_privilege('app_user', '_prisma_migrations', 'SELECT');        -- f
-SELECT has_database_privilege('app_user', current_database(), 'TEMPORARY');    -- f once the TEMP migration (FU-DBB-18) is applied
+SELECT has_database_privilege('app_user', current_database(), 'TEMPORARY');    -- f (the app_user_no_temp migration)
 ```
 
 ### 6. Backups on (a person creates the secrets once; then the workflow does the rest)
