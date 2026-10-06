@@ -241,7 +241,7 @@ It fails with a clear message if `app_user` is missing. `DATABASE_URL` connects 
 
 ## 11. Deltas after the freeze (2026-10-06)
 
-The target of section 1 stays the freeze of 2026-10-01. These forward-only deltas were decided afterwards. Each has its own ADR or owner decision, and each is in `docs/database.md`. The migrations are Database A's (PRs #91 and #100; `app_user_no_temp` is on main). The D-55 column `consents.age_confirmed_at` is added here when its migration lands.
+The target of section 1 stays the freeze of 2026-10-01. These forward-only deltas were decided afterwards. Each has its own ADR or owner decision, and each is in `docs/database.md`. The migrations are Database A's (PR #91 and `app_user_no_temp` are on main; PR #100 is open). The D-55 column `consents.age_confirmed_at` is added here when its migration lands.
 
 | Delta | Source | Change |
 | --- | --- | --- |
