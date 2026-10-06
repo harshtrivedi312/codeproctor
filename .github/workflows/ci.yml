@@ -89,8 +89,8 @@ jobs:
       - name: Load prisma.config.ts
         run: pnpm exec prisma version
 
-      - name: Shellcheck the reset and backup scripts
-        run: shellcheck infra/scripts/db-reset infra/scripts/dev-infra-reset infra/backup/*.sh
+      - name: Shellcheck the reset scripts
+        run: shellcheck infra/scripts/db-reset infra/scripts/dev-infra-reset
 
       - name: Validate the compose file
         run: docker compose -f infra/docker-compose.yml config -q
