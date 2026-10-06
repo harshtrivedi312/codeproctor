@@ -384,16 +384,19 @@ describe('scrubClientText worst cases (NFR-04, C-32)', () => {
           let ts = best(fn, small, 3);
           let tl = best(fn, large, 3);
           // A suspicious ratio is measured again with more runs before it counts as a failure.
-          if (tl >= 10 && tl / Math.max(ts, 0.5) > 3.3) {
+          // Not worth it once the case fails the absolute cap anyway, nor once several cases have
+          // failed (a real regression then ends quickly with a readable list).
+          const ratio = (): number => tl / Math.max(ts, 0.5);
+          if (tl >= 10 && tl < 100 && ratio() > 3.3 && failures.length < 5) {
             ts = best(fn, small, 11);
             tl = best(fn, large, 11);
           }
           const label = `${field} ${shape} c=${JSON.stringify(c)}`;
           if (tl > slowest.ms) slowest = { ms: tl, label };
           if (tl >= 100) failures.push(`${label} took ${tl.toFixed(1)} ms`);
-          if (tl >= 10 && tl / Math.max(ts, 0.5) > 3.3) {
+          if (tl >= 10 && ratio() > 3.3) {
             failures.push(
-              `${label} grew ${(tl / ts).toFixed(1)}x for 2x input (${tl.toFixed(1)} ms)`,
+              `${label} grew ${ratio().toFixed(1)}x for 2x input (${tl.toFixed(1)} ms)`,
             );
           }
         }
