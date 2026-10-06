@@ -76,7 +76,7 @@ function asArgs(model: string, operation: string, args: unknown): PlainObject {
 }
 
 /** where AND filter. An existing AND (single or list) is kept, so the caller's filter still applies. */
-function andWhere(
+export function andWhere(
   model: string,
   operation: string,
   where: unknown,
