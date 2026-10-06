@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Proposed** 2026-10-05. Acceptance is pending the owner: C-23 (docs/compliance/decisions.md, PR #44) accepts it with the Delivery Lead's recommended answers. **Depends on:** PR #41 (ADR 0006 section 8), PR #44 (C-10, C-17, C-25, C-33, C-34, C-35 in docs/compliance/decisions.md) and PR #48 (ADR 0004 R-9, consent clock) once the hub reports a clean security review. Items marked **(architect detail, owner to confirm)** are not owner decisions; section 9 lists the questions. |
+| Status | **Accepted 2026-10-06 (D-54):** the owner accepted it in the Delivery Lead's session (the Delivery Lead records the decision in docs/status.md); it was Proposed on 2026-10-05 (C-23, docs/compliance/decisions.md, PR #44). The BE-07 interim exception of section 5.10 is **approved under P-24** (time-boxed, ending before the pilot). **Depends on:** PR #41 (ADR 0006 section 8), PR #44 (C-10, C-17, C-25, C-33, C-34, C-35 in docs/compliance/decisions.md) and PR #48 (ADR 0004 R-9, consent clock) once the hub reports a clean security review. Items marked **(architect detail, owner to confirm)** are not owner decisions; section 9 lists the questions. |
 | Author | architecture hub |
 | Decides | OI-3 (key lifecycle, canonical JSON, threat model), OI-9 (key layout, segment reassembly rules), the key half of OI-10, the ARC-03 items ADR 0010 "Leaves to", and every "Open for the architecture hub" item in docs/followups/proctor-sdk.md |
 | Serves | FR-403, FR-601, FR-604, FR-605, FR-606, FR-607, FR-609, FR-610, FR-701, FR-702, FR-704, FR-801; NFR-01, NFR-02, NFR-04, NFR-05, NFR-08; TC-008, TC-050, TC-056, TC-058, TC-059, TC-063, TC-065, TC-070, TC-072 |
@@ -699,9 +699,9 @@ All of it comes from one projection:
 
   In addition, a staff token on `/candidate/*` returns 401, and a candidate token on staff routes returns 401.
 
-#### Interim exception for BE-07 (P-24, pending the owner; NOT accepted)
+#### Interim exception for BE-07 (P-24, approved 2026-10-06, D-54; time-boxed, ends before the pilot)
 
-BE-07 (#98) diverges from CS-4 as follows. This records what the owner is asked to approve in `docs/status.md` P-24; the owner decides, and a code-reviewer or architect review does not accept it.
+BE-07 (#98) diverges from CS-4 as follows. This records what the owner approved in `docs/status.md` P-24 on 2026-10-06 (D-54): a time-boxed exception, ending when BE-07 conforms and in any case before the pilot (B-05). If a divergence below is not removed by then, it is not covered by this approval.
 
 1. **Org-scope reads and writes (`asOrg`) beyond the guard's DL-31 pre-read:** status transitions, the HMAC key, `device_info`, consent texts, test content (question versions and test cases), audit rows and row creates. In org scope there is no CS-4.2 session filter, no CS-4.3 model allowlist and no CS-4.4 column allowlist, so if a service slips, other candidates' rows in the same org and `invitations.accommodations` are reachable.
 2. **Candidate scope is entered once per service step, not once in the guard.** `runAsCandidate` and `setCandidateFacts` are called from one file, `apps/api/src/candidate/candidate-scope.ts`, as the first statement of each scope: a new FU-DB-67 call site, in place of the guard file, which contradicts CS-4.1 and CS-4.4 ("only `CandidateSessionGuard`") for the duration of the exception. The facts come only from the guard's verified pre-read, never from the request.
@@ -712,7 +712,7 @@ BE-07 (#98) diverges from CS-4 as follows. This records what the owner is asked 
 
 **Time box:** the exception ends only when BE-07 conforms (scope entered only in the guard, a start-session SERVICE job, the CS-4.4a and item 9 grants), tracked by FU-BEB-15, FU-BEB-66 and one follow-up per divergence. CS-4 PRs 2 and 3 landing is not enough on its own. Hard limit: before the pilot (B-05).
 
-**Gate B-3 covers every client-supplied selector.** While services run in org scope (1), a slip in resolving any id the client sends has no session filter behind it. FU-BEB-15 and FU-BEB-66 therefore close before any BE-09, BE-10 or BE-11 route that takes a client-supplied selector merges, and the gate counts **all** of them: `:questionId`, `sessionQuestionId`, the section `position` of `section/finish`, evidence names, and media (stream, seq). The routes built on #98 resolve each of them only inside CANDIDATE scope under the CS-2 and CS-4.2 filters, or they wait for the gate. If the owner declines P-24, BE-07 does not merge until the four divergences are removed.
+**Gate B-3 covers every client-supplied selector.** While services run in org scope (1), a slip in resolving any id the client sends has no session filter behind it. FU-BEB-15 and FU-BEB-66 therefore close before any BE-09, BE-10 or BE-11 route that takes a client-supplied selector merges, and the gate counts **all** of them: `:questionId`, `sessionQuestionId`, the section `position` of `section/finish`, evidence names, and media (stream, seq). The routes built on #98 resolve each of them only inside CANDIDATE scope under the CS-2 and CS-4.2 filters, or they wait for the gate. The approval does not extend beyond the time box above.
 
 ### 5.11 Submit and grading (keeps ADR 0007 §5)
 
