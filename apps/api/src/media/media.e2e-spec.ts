@@ -548,14 +548,132 @@ describe('Candidate media presign and confirm (FR-701, FR-702, FR-703, TC-070, T
   });
 
   it('FR-702: the per-stream presign cap (ceil(duration / 10 s) x 1.5 + 50) answers 429 PRESIGN_QUOTA_EXCEEDED', async () => {
-    const c = await session(); // 60 minutes: 360 x 1.5 + 50 = 590
-    await redis.set(`presigns:${c.sessionId}:SCREEN`, '590');
+    const c = await session(); // 60 minutes + 300 s grace: 390 x 1.5 + 50 = 636
+    await redis.set(`presigns:${c.sessionId}:SCREEN`, '636');
     const res = await post('/presign', c.token, body({ seq: 0 }));
     expect(res.status).toBe(429);
     expect(res.body).toMatchObject({ code: 'PRESIGN_QUOTA_EXCEEDED' });
     expect(await rows(c.sessionId)).toHaveLength(0); // refused before any row or URL
     // Another stream is unaffected.
     await post('/presign', c.token, body({ stream: 'WEBCAM', seq: 0 })).expect(200);
+  });
+
+  // ---------- races, quota and failure paths (review) ----------
+
+  it('FR-701: concurrent presigns of one chunk leave one row; a racing other segment is SEQ_CONFLICT', async () => {
+    const c = await session();
+    const same = await Promise.all(
+      Array.from({ length: 6 }, () => post('/presign', c.token, body({ seq: 20, segment: 0 }))),
+    );
+    expect(same.map((r) => r.status)).toEqual([200, 200, 200, 200, 200, 200]);
+    expect(await rows(c.sessionId)).toHaveLength(1);
+
+    const mixed = await Promise.all(
+      [0, 1, 0, 1].map((segment) => post('/presign', c.token, body({ seq: 21, segment }))),
+    );
+    const statuses = mixed.map((r) => r.status);
+    expect(statuses.filter((x) => x === 200).length).toBeGreaterThanOrEqual(1);
+    expect(statuses.every((x) => x === 200 || x === 409)).toBe(true);
+    const row = (await rows(c.sessionId)).filter((r) => r.seq === 21);
+    expect(row).toHaveLength(1);
+    for (const r of mixed.filter((x) => x.status === 409)) {
+      expect(r.body).toMatchObject({ code: 'SEQ_CONFLICT' });
+    }
+  });
+
+  it('FR-701: stream and content type must agree (AUDIO is audio/webm, the others video/webm)', async () => {
+    const c = await session();
+    await post('/presign', c.token, body({ stream: 'AUDIO', contentType: 'video/webm' })).expect(
+      400,
+    );
+    await post('/presign', c.token, body({ stream: 'WEBCAM', contentType: 'audio/webm' })).expect(
+      400,
+    );
+    expect(await rows(c.sessionId)).toHaveLength(0);
+  });
+
+  it('FR-702: the ROOM_SCAN cap has a floor of 140 presigns before the deadline exists', async () => {
+    const c = await session({ status: 'CONSENTED', session: {} });
+    await redis.set(`presigns:${c.sessionId}:ROOM_SCAN`, '139');
+    await post('/presign', c.token, body({ stream: 'ROOM_SCAN', seq: 0 })).expect(200);
+    const res = await post('/presign', c.token, body({ stream: 'ROOM_SCAN', seq: 1 }));
+    expect(res.status).toBe(429);
+    expect(res.body).toMatchObject({ code: 'PRESIGN_QUOTA_EXCEEDED' });
+  });
+
+  it('FR-702: a long running proctor pause widens the cap (effective deadline and ingest grace)', async () => {
+    const opts = (paused: boolean): InvitationOptions =>
+      paused
+        ? {
+            status: 'PAUSED',
+            session: {
+              startedAt: new Date(Date.now() - 5 * 60_000),
+              deadlineAt: new Date(Date.now() + 5 * 60_000),
+              pauseReasons: ['PROCTOR'],
+            },
+          }
+        : {
+            session: {
+              startedAt: new Date(Date.now() - 5 * 60_000),
+              deadlineAt: new Date(Date.now() + 5 * 60_000),
+            },
+          };
+    const paused = await session(opts(true));
+    await owner.session.update({
+      where: { id: paused.sessionId },
+      data: { proctorPausedAt: new Date(Date.now() - 25 * 60_000) },
+    });
+    const plain = await session(opts(false));
+    // 10 minutes plus 300 s grace: cap 185. With a 25-minute running credit: 35 min + grace: cap 410.
+    await redis.set(`presigns:${paused.sessionId}:SCREEN`, '300');
+    await redis.set(`presigns:${plain.sessionId}:SCREEN`, '300');
+    await post('/presign', paused.token, body({ seq: 0 })).expect(200);
+    const res = await post('/presign', plain.token, body({ seq: 0 }));
+    expect(res.status).toBe(429);
+  });
+
+  it('FR-702: a retried presign counts against the quota', async () => {
+    const c = await session();
+    await post('/presign', c.token, body({ seq: 5 })).expect(200);
+    await post('/presign', c.token, body({ seq: 5 })).expect(200);
+    expect(await redis.get(`presigns:${c.sessionId}:SCREEN`)).toBe('2');
+    expect(await redis.ttl(`presigns:${c.sessionId}:SCREEN`)).toBeGreaterThan(0);
+  });
+
+  it('FR-701: confirm still succeeds when Redis fails to keep the ETag', async () => {
+    const c = await session();
+    await upload(c, { seq: 0 });
+    const client = app.get<Redis>(
+      jest.requireActual<typeof import('../infrastructure/infrastructure.module')>(
+        '../infrastructure/infrastructure.module',
+      ).REDIS_CLIENT,
+    );
+    const spy = jest.spyOn(client, 'hset').mockRejectedValue(new Error('redis down'));
+    try {
+      const res = await post('/confirm', c.token, { stream: 'SCREEN', segment: 0, seq: 0 });
+      expect(res.status).toBe(200);
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await rows(c.sessionId))[0]?.uploadedAt).not.toBeNull();
+    expect(await redis.hget(`etag:${c.sessionId}`, 'SCREEN:0')).toBeNull();
+  });
+
+  it('FR-701: a signer failure after the row write is 503 STORAGE_UNAVAILABLE, the pending row stays and a retry works', async () => {
+    const c = await session();
+    storage.failPresign = true;
+    try {
+      const res = await post('/presign', c.token, body({ seq: 0 }));
+      expect(res.status).toBe(503);
+      expect(res.body).toMatchObject({ code: 'STORAGE_UNAVAILABLE' });
+      expect(JSON.stringify(res.body)).not.toContain('orgs/');
+      expect(JSON.stringify(res.body)).not.toContain('signer down');
+    } finally {
+      storage.failPresign = false;
+    }
+    expect((await rows(c.sessionId))[0]?.uploadedAt).toBeNull();
+    await post('/presign', c.token, body({ seq: 0 })).expect(200);
+    expect(await rows(c.sessionId)).toHaveLength(1);
   });
 
   // ---------- playback (FR-703, TC-071) ----------

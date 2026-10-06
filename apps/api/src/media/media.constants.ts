@@ -15,8 +15,11 @@ export const MAX_SEQ = 99_999_999;
 export const MAX_CHUNK_DURATION_MS = 60_000;
 const MIB = 1024 * 1024;
 
+/** Largest chunk of any stream (video); AUDIO is capped lower by maxChunkBytes. */
+export const MAX_CHUNK_BYTES = 16 * MIB;
+
 export function maxChunkBytes(stream: MediaStream): number {
-  return stream === 'AUDIO' ? 4 * MIB : 16 * MIB;
+  return stream === 'AUDIO' ? 4 * MIB : MAX_CHUNK_BYTES;
 }
 
 /** 60 per minute per stream, for presign and for confirm (ADR 0013 section 5.5). */
@@ -29,3 +32,8 @@ export function presignCap(durationSeconds: number): number {
 
 /** The pre-start floor for ROOM_SCAN, which runs before any deadline exists. */
 export const MIN_CAP_DURATION_SECONDS = 600;
+
+/** AUDIO is audio/webm; every other stream is video/webm (ADR 0013 section 5.5). */
+export function contentTypeFor(stream: MediaStream): MediaContentType {
+  return stream === 'AUDIO' ? 'audio/webm' : 'video/webm';
+}

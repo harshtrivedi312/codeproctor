@@ -20,12 +20,13 @@ import { sessionNotActive } from '../session/session-write-gate';
 import type { CandidateContext } from '../candidate/candidate.types';
 import type { Env } from '../config/env';
 import { PrismaService } from '../database/prisma.service';
-import type { MediaStream, SessionStatus } from '../generated/prisma/enums.js';
+import type { MediaStream, PauseReason, SessionStatus } from '../generated/prisma/enums.js';
 import { REDIS_CLIENT } from '../infrastructure/infrastructure.module';
 import { ensureConnected } from '../infrastructure/redis-ready';
+import { effectiveSessionDeadline, proctorPauseCapMs } from '../session/deadlines';
 import {
+  contentTypeFor,
   maxChunkBytes,
-  MEDIA_CONTENT_TYPES,
   MIN_CAP_DURATION_SECONDS,
   presignCap,
 } from './media.constants';
@@ -85,9 +86,9 @@ export class MediaService {
     this.assertState(session, req.stream, now);
 
     const bytesMax = maxChunkBytes(req.stream);
-    if (req.bytes < 1 || req.bytes > bytesMax || !MEDIA_CONTENT_TYPES.includes(req.contentType)) {
+    if (req.bytes < 1 || req.bytes > bytesMax || req.contentType !== contentTypeFor(req.stream)) {
       // The DTO already refuses these; this keeps the rule beside the signing call.
-      throw new BadRequestException('The chunk size or type is not allowed.');
+      throw new BadRequestException('The chunk size or type is not allowed for this stream.');
     }
     const startedAt = clamp(req.startedAt, session.startedAt ?? session.createdAt, now);
     const scope = { orgId: ctx.orgId, sessionId: ctx.sessionId };
@@ -103,7 +104,7 @@ export class MediaService {
       }
     }
 
-    await this.consumePresignQuota(ctx, req.stream, session);
+    await this.consumePresignQuota(ctx, req.stream, session, now);
 
     if (existing === null) {
       try {
@@ -125,6 +126,7 @@ export class MediaService {
         if (!isUniqueViolation(e)) throw e;
         // Two presigns raced for the same chunk: the other one won; judge it as a retry.
         const winner = await this.findRow(ctx.sessionId, req.stream, req.seq);
+        this.log('presign', ctx, req, 'race');
         if (winner === null || winner.segment !== req.segment) throw seqConflict();
         if (winner.uploadedAt !== null) return { alreadyUploaded: true };
         await this.updatePending(ctx, req, startedAt, key);
@@ -184,9 +186,7 @@ export class MediaService {
       );
     }
     const declared = row.sizeBytes === null ? null : Number(row.sizeBytes);
-    const typeOk =
-      head.contentType !== null &&
-      (MEDIA_CONTENT_TYPES as readonly string[]).includes(head.contentType);
+    const typeOk = head.contentType === contentTypeFor(ref.stream);
     const sizeOk =
       declared !== null &&
       head.sizeBytes === declared &&
@@ -235,6 +235,9 @@ export class MediaService {
         submittedAt: true,
         startedAt: true,
         deadlineAt: true,
+        pausedMs: true,
+        proctorPausedAt: true,
+        pauseReasons: true,
         createdAt: true,
       },
     });
@@ -288,21 +291,37 @@ export class MediaService {
     });
   }
 
-  /** At most ceil(duration / 10 s) x 1.5 + 50 presigns per stream and session (ADR 0013 5.5). */
+  /**
+   * At most ceil(duration / 10 s) x 1.5 + 50 presigns per stream and session (ADR 0013 5.5).
+   * The duration runs to the effective deadline (a credited or running proctor pause included) plus
+   * the ingest grace, so a long pause or the grace upload tail never starves a legitimate backlog.
+   * INCR and EXPIRE are one MULTI, so a crash cannot leave a counter without an expiry.
+   */
   private async consumePresignQuota(
     ctx: CandidateContext,
     stream: MediaStream,
     session: SessionFacts,
+    now: Date,
   ): Promise<void> {
-    const span =
-      session.startedAt !== null && session.deadlineAt !== null
-        ? (session.deadlineAt.getTime() - session.startedAt.getTime()) / 1000
-        : 0;
-    const cap = presignCap(Math.max(span, MIN_CAP_DURATION_SECONDS));
+    let spanSeconds = 0;
+    if (session.startedAt !== null && session.deadlineAt !== null) {
+      let capMs = 0;
+      if (session.pauseReasons.includes('PROCTOR')) {
+        const org = await this.prisma.client.organization.findUnique({
+          where: { id: ctx.orgId },
+          select: { settings: true },
+        });
+        capMs = proctorPauseCapMs(org?.settings);
+      }
+      const deadline = effectiveSessionDeadline(session, now, capMs) ?? session.deadlineAt;
+      spanSeconds = (deadline.getTime() - session.startedAt.getTime()) / 1000;
+    }
+    const grace = this.config.get('PROCTOR_INGEST_GRACE_SECONDS', { infer: true });
+    const cap = presignCap(Math.max(spanSeconds + grace, MIN_CAP_DURATION_SECONDS));
     await ensureConnected(this.redis);
     const key = `presigns:${ctx.sessionId}:${stream}`;
-    const used = await this.redis.incr(key);
-    if (used === 1) await this.redis.expire(key, COUNTER_TTL_SECONDS);
+    const results = await this.redis.multi().incr(key).expire(key, COUNTER_TTL_SECONDS).exec();
+    const used = Number(results?.[0]?.[1] ?? 0);
     if (used > cap) {
       throw new CodedHttpException(
         HttpStatus.TOO_MANY_REQUESTS,
@@ -367,6 +386,9 @@ interface SessionFacts {
   readonly submittedAt: Date | null;
   readonly startedAt: Date | null;
   readonly deadlineAt: Date | null;
+  readonly pausedMs: bigint;
+  readonly proctorPausedAt: Date | null;
+  readonly pauseReasons: readonly PauseReason[];
   readonly createdAt: Date;
 }
 

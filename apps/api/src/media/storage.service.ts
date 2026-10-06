@@ -24,6 +24,7 @@ import { ObjectStoragePort } from '../candidate/object-storage.port';
 import {
   assertKeyInSession,
   isSealedKey,
+  sessionPrefix,
   ObjectKeyScopeError,
   parseObjectKey,
 } from './storage-keys';
@@ -233,6 +234,7 @@ export class StorageService extends ObjectStoragePort {
 
   /** HEAD: the object's size, type and ETag, or null when it does not exist. */
   async head(key: string): Promise<ObjectHead | null> {
+    assertKnownKey(key);
     try {
       const out = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
       return {
@@ -248,11 +250,18 @@ export class StorageService extends ObjectStoragePort {
 
   /** Deletes one object. Deleting a missing key is not an error (S3 semantics). */
   async delete(key: string): Promise<void> {
+    assertKnownKey(key);
     await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
   }
 
   /** DeleteObjects in batches of 1000. `errors` counts per-key failures (retention checks it). */
   async deleteMany(keys: readonly string[]): Promise<DeleteResult> {
+    keys.forEach(assertKnownKey);
+    return this.removeKeys(keys);
+  }
+
+  /** Deletes keys without the layout check: only for keys just listed under a validated prefix. */
+  private async removeKeys(keys: readonly string[]): Promise<DeleteResult> {
     let deleted = 0;
     let errors = 0;
     for (let i = 0; i < keys.length; i += DELETE_BATCH) {
@@ -272,7 +281,18 @@ export class StorageService extends ObjectStoragePort {
 
   /** CopyObject inside the bucket: the sealed copy of an ID image or re-check frame (BE-08, BE-10). */
   async copy(sourceKey: string, destinationKey: string): Promise<void> {
-    if (parseObjectKey(sourceKey) === null || parseObjectKey(destinationKey) === null) {
+    // Same session, and the destination is always a sealed/ copy (ADR 0013 section 5.6).
+    const from = parseObjectKey(sourceKey);
+    const to = parseObjectKey(destinationKey);
+    if (
+      from === null ||
+      to === null ||
+      from.orgId !== to.orgId ||
+      from.sessionId !== to.sessionId ||
+      !to.sealed ||
+      from.sealed ||
+      !sourceKey.startsWith(sessionPrefix(from))
+    ) {
       throw new ObjectKeyScopeError();
     }
     await this.client.send(
@@ -313,7 +333,7 @@ export class StorageService extends ObjectStoragePort {
    */
   async deletePrefix(prefix: string): Promise<PrefixDeleteResult> {
     const found = await this.list(prefix);
-    const result = await this.deleteMany(found.map((o) => o.key));
+    const result = await this.removeKeys(found.map((o) => o.key));
     const remaining = (await this.list(prefix)).length;
     return { ...result, remaining };
   }
@@ -321,7 +341,7 @@ export class StorageService extends ObjectStoragePort {
   // ObjectStoragePort (the consent PDF job and tests): small bounded server-side writes.
 
   async putObject(key: string, body: Buffer, contentType: string): Promise<void> {
-    if (parseObjectKey(key) === null) throw new ObjectKeyScopeError();
+    assertKnownKey(key);
     await this.client.send(
       new PutObjectCommand({
         Bucket: this.bucket,
@@ -337,9 +357,17 @@ export class StorageService extends ObjectStoragePort {
   }
 }
 
-/** A prefix delete only runs for `orgs/{uuid}/...` ending in `/`: never the bucket root. */
+function assertKnownKey(key: string): void {
+  if (parseObjectKey(key) === null) throw new ObjectKeyScopeError();
+}
+
+const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+/** The session prefix, the consent prefix, and the named retention tier directories (ADR 0013 5.7). */
+const DELETABLE_PREFIX = new RegExp(
+  `^orgs/${UUID}/(?:consents/${UUID}/|sessions/${UUID}/(?:(?:media|identity|evidence|evidence/sealed|reports|live)/)?)$`,
+);
+
+/** A prefix delete or list runs only for those: never the bucket root, an org, or all sessions. */
 function assertDeletablePrefix(prefix: string): void {
-  if (!/^orgs\/[0-9a-f-]{36}\/[A-Za-z0-9_/.-]*\/$/.test(prefix) || prefix.includes('..')) {
-    throw new ObjectKeyScopeError();
-  }
+  if (!DELETABLE_PREFIX.test(prefix)) throw new ObjectKeyScopeError();
 }

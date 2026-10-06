@@ -1,6 +1,7 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 import { IsIn, IsInt, IsISO8601, Max, Min } from 'class-validator';
 import {
+  MAX_CHUNK_BYTES,
   MAX_CHUNK_DURATION_MS,
   MAX_SEGMENT,
   MAX_SEQ,
@@ -8,8 +9,6 @@ import {
   MEDIA_STREAMS,
 } from '../media.constants';
 import type { CandidateMediaStream, MediaContentType } from '../media.constants';
-
-const MAX_BYTES = 16 * 1024 * 1024;
 
 export class ChunkRefDto {
   @ApiProperty({
@@ -37,10 +36,10 @@ export class ChunkRefDto {
 }
 
 export class MediaPresignDto extends ChunkRefDto {
-  @ApiProperty({ minimum: 1, maximum: MAX_BYTES, description: '16 MiB; AUDIO 4 MiB' })
+  @ApiProperty({ minimum: 1, maximum: MAX_CHUNK_BYTES, description: '16 MiB; AUDIO 4 MiB' })
   @IsInt()
   @Min(1)
-  @Max(MAX_BYTES)
+  @Max(MAX_CHUNK_BYTES)
   bytes!: number;
 
   @ApiProperty({
@@ -85,7 +84,7 @@ export class AlreadyUploadedDto {
 
 export class MediaConfirmedDto {
   @ApiProperty({ enum: [true] }) uploaded!: true;
-  @ApiPropertyOptional() sizeBytes!: number;
+  @ApiProperty() sizeBytes!: number;
 }
 
 // ---- staff playback (FR-703) ----

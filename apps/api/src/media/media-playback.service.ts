@@ -8,6 +8,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import type { MediaStream } from '../generated/prisma/enums.js';
+import { contentTypeFor } from './media.constants';
 import { GET_URL_TTL_SECONDS, StorageService } from './storage.service';
 
 export interface PlaylistChunk {
@@ -32,6 +33,8 @@ export interface MediaPlaylist {
   readonly expiresAt: Date;
   readonly streams: PlaylistStream[];
 }
+
+const SIGN_CONCURRENCY = 20;
 
 @Injectable()
 export class MediaPlaybackService {
@@ -67,32 +70,41 @@ export class MediaPlaybackService {
       },
     });
 
-    const streams: PlaylistStream[] = [];
-    for (const row of rows) {
-      if (row.objectKey === null) continue;
-      const signed = await this.storage.presignGet({
-        key: row.objectKey,
-        contentType: row.stream === 'AUDIO' ? 'audio/webm' : 'video/webm',
-        now,
-      });
-      let stream = streams.find((s) => s.stream === row.stream);
-      if (stream === undefined) {
-        stream = { stream: row.stream, segments: [] };
-        streams.push(stream);
-      }
-      let segment = stream.segments.find((s) => s.segment === row.segment);
-      if (segment === undefined) {
-        segment = { segment: row.segment, chunks: [] };
-        stream.segments.push(segment);
-      }
-      segment.chunks.push({
+    // Sign with bounded concurrency (a 90-minute session has about 1,600 chunks per stream).
+    const keyed = rows.filter((r): r is typeof r & { objectKey: string } => r.objectKey !== null);
+    const urls: string[] = new Array<string>(keyed.length);
+    for (let i = 0; i < keyed.length; i += SIGN_CONCURRENCY) {
+      await Promise.all(
+        keyed.slice(i, i + SIGN_CONCURRENCY).map(async (row, n) => {
+          const signed = await this.storage.presignGet({
+            key: row.objectKey,
+            contentType: contentTypeFor(row.stream),
+            now,
+          });
+          urls[i + n] = signed.url;
+        }),
+      );
+    }
+
+    // Rows are already in (stream, segment, seq) order; Maps keep that insertion order.
+    const grouped = new Map<MediaStream, Map<number, PlaylistChunk[]>>();
+    keyed.forEach((row, i) => {
+      const segments = grouped.get(row.stream) ?? new Map<number, PlaylistChunk[]>();
+      grouped.set(row.stream, segments);
+      const chunks = segments.get(row.segment) ?? [];
+      segments.set(row.segment, chunks);
+      chunks.push({
         seq: row.seq,
         startedAt: row.startedAt,
         durationMs: row.durationMs,
         sizeBytes: Number(row.sizeBytes ?? 0n),
-        url: signed.url,
+        url: urls[i] as string,
       });
-    }
+    });
+    const streams: PlaylistStream[] = [...grouped].map(([stream, segments]) => ({
+      stream,
+      segments: [...segments].map(([segment, chunks]) => ({ segment, chunks })),
+    }));
     return { expiresAt: new Date(now.getTime() + GET_URL_TTL_SECONDS * 1000), streams };
   }
 }

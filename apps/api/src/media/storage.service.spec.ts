@@ -1,13 +1,19 @@
 // StorageService against the real AWS SDK presigner with dummy credentials (no network) and a
 // stubbed `send` for the commands that would call the store. FR-701, FR-703, FR-704; TC-070,
-// TC-071, TC-072; ADR 0013 sections 5.5 and 5.7.
+// TC-071, FR-704 storage primitives; ADR 0013 sections 5.5 and 5.7.
 import {
   DeleteObjectsCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
   S3Client,
 } from '@aws-sdk/client-s3';
-import { evidenceSealedKey, mediaChunkKey, reportPdfKey, sessionPrefix } from './storage-keys';
+import {
+  evidenceKey,
+  evidenceSealedKey,
+  mediaChunkKey,
+  reportPdfKey,
+  sessionPrefix,
+} from './storage-keys';
 import { GET_URL_TTL_SECONDS, PUT_URL_TTL_SECONDS, StorageService } from './storage.service';
 import type { StorageSettings } from './storage.service';
 
@@ -112,7 +118,9 @@ describe('StorageService presigned PUT (FR-701, ADR 0013 section 5.5)', () => {
   it('NFR-04: with no settings every call refuses with StorageUnconfiguredError, never a crash', async () => {
     const storage = new StorageService(null);
     expect(storage.configured).toBe(false);
-    await expect(storage.head('x')).rejects.toMatchObject({ name: 'StorageUnconfiguredError' });
+    await expect(storage.head(mediaChunkKey(scope, 'SCREEN', 0, 0))).rejects.toMatchObject({
+      name: 'StorageUnconfiguredError',
+    });
     await expect(
       storage.presignPut({
         scope,
@@ -167,33 +175,32 @@ describe('StorageService presigned GET (FR-703, TC-071, ADR 0013 section 5.7)', 
   });
 });
 
-describe('StorageService HEAD, delete and prefix operations (FR-704, TC-072)', () => {
+describe('StorageService HEAD, delete and prefix operations (FR-704 storage primitives; TC-072 stays open until the sweep and retention job exist, FU-BEB-43)', () => {
+  const KEY = mediaChunkKey(scope, 'SCREEN', 0, 0);
+
   it('FR-701: head returns size, type and ETag, and null for a missing object', async () => {
     const storage = new StorageService(settings);
     const send = sendOf(storage);
     send.mockResolvedValueOnce({ ContentLength: 5, ContentType: 'video/webm', ETag: '"abc"' });
-    await expect(storage.head('k')).resolves.toEqual({
+    await expect(storage.head(KEY)).resolves.toEqual({
       sizeBytes: 5,
       contentType: 'video/webm',
       etag: '"abc"',
     });
     expect(callOf(send, 0)).toBeInstanceOf(HeadObjectCommand);
     send.mockRejectedValueOnce(Object.assign(new Error('x'), { name: 'NotFound' }));
-    await expect(storage.head('k')).resolves.toBeNull();
+    await expect(storage.head(KEY)).resolves.toBeNull();
     send.mockRejectedValueOnce(Object.assign(new Error('denied'), { name: 'AccessDenied' }));
-    await expect(storage.head('k')).rejects.toThrow('denied');
+    await expect(storage.head(KEY)).rejects.toThrow('denied');
   });
 
-  it('TC-072: deleteMany batches by 1000 and counts per-key errors', async () => {
+  it('FR-704: deleteMany batches by 1000 and counts per-key errors', async () => {
     const storage = new StorageService(settings);
     const send = sendOf(storage);
     send
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ Errors: [{ Key: 'a', Code: 'InternalError' }] });
-    const keys = Array.from(
-      { length: 1001 },
-      (_, i) => `orgs/${ORG}/sessions/${SID}/live/${String(i)}`,
-    );
+    const keys = Array.from({ length: 1001 }, (_, i) => mediaChunkKey(scope, 'SCREEN', 0, i));
     const result = await storage.deleteMany(keys);
     expect(result).toEqual({ deleted: 1000, errors: 1 });
     expect(send.mock.calls).toHaveLength(2);
@@ -201,7 +208,7 @@ describe('StorageService HEAD, delete and prefix operations (FR-704, TC-072)', (
     expect(first.input.Delete?.Objects).toHaveLength(1000);
   });
 
-  it('TC-072: list follows every page; deletePrefix lists again and reports what remains', async () => {
+  it('FR-704: list follows every page; deletePrefix lists again and reports what remains', async () => {
     const storage = new StorageService(settings);
     const send = sendOf(storage);
     const prefix = sessionPrefix(scope);
@@ -220,11 +227,75 @@ describe('StorageService HEAD, delete and prefix operations (FR-704, TC-072)', (
     expect(second.input.ContinuationToken).toBe('t1');
   });
 
-  it('TC-072: a prefix that is not orgs/{uuid}/... ending in a slash is refused (never the bucket root)', async () => {
+  it('FR-704: only the session prefix, the consent prefix and named tier directories can be listed or deleted', async () => {
     const storage = new StorageService(settings);
     sendOf(storage);
-    for (const p of ['', '/', 'orgs/', `orgs/${ORG}`, 'orgs/x/y/', `orgs/${ORG}/../`]) {
+    const refused = [
+      '',
+      '/',
+      'orgs/',
+      `orgs/${ORG}`,
+      `orgs/${ORG}/`,
+      `orgs/${ORG}/sessions/`,
+      `orgs/${ORG}/consents/`,
+      'orgs/x/y/',
+      `orgs/${ORG}/../`,
+      `orgs/${ORG}/sessions/${SID}`,
+      `orgs/${ORG}/sessions/${SID}/media/screen/`,
+      `orgs/${ORG}/sessions/${SID}/../`,
+      `orgs/${ORG}/sessions/${SID}/unknown/`,
+    ];
+    for (const p of refused) {
       await expect(storage.deletePrefix(p)).rejects.toThrow('not inside the session scope');
+      await expect(storage.list(p)).rejects.toThrow('not inside the session scope');
     }
+    const send = sendOf(storage);
+    send.mockResolvedValue({});
+    for (const p of [
+      sessionPrefix(scope),
+      `orgs/${ORG}/consents/${SID}/`,
+      `${sessionPrefix(scope)}identity/`,
+      `${sessionPrefix(scope)}evidence/sealed/`,
+      `${sessionPrefix(scope)}media/`,
+      `${sessionPrefix(scope)}reports/`,
+    ]) {
+      await expect(storage.list(p)).resolves.toEqual([]);
+    }
+  });
+
+  it('FR-704: head, delete and deleteMany refuse keys of an unknown layout', async () => {
+    const storage = new StorageService(settings);
+    const send = sendOf(storage);
+    await expect(storage.head('orgs/x/y')).rejects.toThrow('not inside the session scope');
+    await expect(storage.delete('anything')).rejects.toThrow('not inside the session scope');
+    await expect(storage.deleteMany([KEY, 'anything'])).rejects.toThrow(
+      'not inside the session scope',
+    );
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('FR-606: copy stays inside one session and always writes a sealed/ destination', async () => {
+    const storage = new StorageService(settings);
+    const send = sendOf(storage);
+    send.mockResolvedValue({});
+    const src = evidenceKey(scope, ULID);
+    await storage.copy(src, evidenceSealedKey(scope, ULID));
+    expect(send).toHaveBeenCalledTimes(1);
+    const other = { orgId: ORG, sessionId: OTHER_SID };
+    for (const dst of [
+      evidenceKey(scope, ULID), // not sealed
+      evidenceSealedKey(other, ULID), // another session
+      evidenceSealedKey({ orgId: '44444444-4444-4444-8444-444444444444', sessionId: SID }, ULID),
+    ]) {
+      await expect(storage.copy(src, dst)).rejects.toThrow('not inside the session scope');
+    }
+    // A source in another session, or already sealed, is refused too.
+    await expect(
+      storage.copy(evidenceKey(other, ULID), evidenceSealedKey(scope, ULID)),
+    ).rejects.toThrow();
+    await expect(
+      storage.copy(evidenceSealedKey(scope, ULID), evidenceSealedKey(scope, ULID)),
+    ).rejects.toThrow();
+    expect(send).toHaveBeenCalledTimes(1);
   });
 });

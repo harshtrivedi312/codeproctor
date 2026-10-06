@@ -1,4 +1,3 @@
-import { consentPdfKey } from '../candidate/consent-pdf.service';
 import {
   assertKeyInSession,
   consentPdfObjectKey,
@@ -48,9 +47,8 @@ describe('Object key layout (FR-701, ADR 0013 section 5.7, TC-070)', () => {
     expect(evidenceSealedKey(scope, ULID)).toBe(`${p}evidence/sealed/${ULID}.jpg`);
     expect(reportPdfKey(scope, ULID)).toBe(`${p}reports/${ULID}.pdf`);
     expect(liveThumbnailKey(scope, ULID)).toBe(`${p}live/${ULID}.jpg`);
-    // The consent PDF sits outside the session prefix (own 3-year clock) and matches BE-07's key.
+    // The consent PDF sits outside the session prefix (own 3-year clock, ADR 0013 section 5.7).
     expect(consentPdfObjectKey(scope, ULID)).toBe(`orgs/${ORG}/consents/${SID}/${ULID}.pdf`);
-    expect(consentPdfObjectKey(scope, ULID)).toBe(consentPdfKey(ORG, SID, ULID));
     expect(consentPdfObjectKey(scope, ULID).startsWith(sessionPrefix(scope))).toBe(false);
   });
 

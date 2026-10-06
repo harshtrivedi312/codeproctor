@@ -71,6 +71,28 @@ describe('Object storage environment (BE-09, ADR 0001 section 2.1, FR-701)', () 
     ).toThrow(/S3_ENDPOINT/);
   });
 
+  it('NFR-04: pilot and production accept only an unset or *.amazonaws.com endpoint, never R2', () => {
+    for (const APP_ENV of ['pilot', 'production']) {
+      for (const bad of [
+        'https://acct.r2.cloudflarestorage.com',
+        'https://amazonaws.com.evil.example',
+        'http://s3.eu-west-2.amazonaws.com',
+      ]) {
+        expect(() => validateEnv({ ...deployed, ...s3, APP_ENV, S3_ENDPOINT: bad })).toThrow(
+          /S3_ENDPOINT/,
+        );
+      }
+      expect(
+        validateEnv({
+          ...deployed,
+          ...s3,
+          APP_ENV,
+          S3_ENDPOINT: 'https://s3.eu-west-2.amazonaws.com',
+        }).S3_ENDPOINT,
+      ).toBe('https://s3.eu-west-2.amazonaws.com');
+    }
+  });
+
   it('NFR-04: a bad bucket name is refused and the secret value is never echoed', () => {
     try {
       validateEnv({ ...valid, ...s3, S3_MEDIA_BUCKET: 'Bad_Bucket!' });

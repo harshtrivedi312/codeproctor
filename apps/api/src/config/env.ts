@@ -186,8 +186,14 @@ export const envSchema = z
       }
       if (env.S3_ENDPOINT !== undefined) {
         const url = new URL(env.S3_ENDPOINT);
-        if (url.protocol !== 'https:') {
-          ctx.addIssue({ code: 'custom', path: ['S3_ENDPOINT'], message: 'must use https' });
+        // Pilot and production use AWS S3 (ADR 0001 section 2.1): an R2 or other endpoint there
+        // would send candidate media to a store the pilot has no agreement with.
+        if (url.protocol !== 'https:' || !url.hostname.endsWith('.amazonaws.com')) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['S3_ENDPOINT'],
+            message: 'must be unset or an https *.amazonaws.com endpoint in pilot and production',
+          });
         }
       }
     }

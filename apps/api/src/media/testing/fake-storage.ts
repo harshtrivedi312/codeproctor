@@ -27,6 +27,7 @@ export class FakeStorage extends StorageService {
   readonly presigned: PresignPutOptions[] = [];
   readonly gets: PresignGetOptions[] = [];
   failHead = false;
+  failPresign = false;
   private etagCounter = 0;
 
   /** Flip to false to simulate a deployment without storage settings. */
@@ -43,6 +44,7 @@ export class FakeStorage extends StorageService {
   }
 
   override presignPut(options: PresignPutOptions): Promise<PresignedPut> {
+    if (this.failPresign) return Promise.reject(new Error(`signer down for ${options.key}`));
     assertKeyInSession(options.scope, options.key);
     if (isSealedKey(options.key)) return Promise.reject(new ObjectKeyScopeError());
     this.presigned.push(options);
