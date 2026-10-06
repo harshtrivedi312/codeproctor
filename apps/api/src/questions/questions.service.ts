@@ -14,7 +14,9 @@
 // always question row, then version row.
 //
 // Mutations write their audit row in the same transaction. Audit metadata names ids and changed
-// fields only, never content. `full` (see staff-view.ts) is decided once in the controller.
+// fields only, never content. `full` (see staff-view.ts) is decided once in the controller; the
+// write paths that answer a revision (update, test cases) are writer-only and always use the full
+// view, so they take no `full` and a future role change cannot expose a revision.
 import {
   BadRequestException,
   ConflictException,
@@ -33,6 +35,7 @@ import { computeRevision } from './revision';
 import {
   audit,
   checkRevision,
+  currentRevision,
   latestVersion,
   loadVariants,
   lockDraft,
@@ -53,8 +56,10 @@ import type {
   QuestionListDto,
   QuestionListQueryDto,
   QuestionSummaryDto,
-  TestCaseDto,
   CreateTestCaseDto,
+  QuestionUpdateResultDto,
+  TestCaseMutationDto,
+  RevisionResultDto,
   UpdateQuestionDto,
   UpdateTestCaseDto,
 } from './dto/questions.dto';
@@ -281,8 +286,7 @@ export class QuestionsService {
     id: string,
     dto: UpdateQuestionDto,
     ctx: RequestContext,
-    full: boolean,
-  ): Promise<QuestionDetailDto> {
+  ): Promise<QuestionUpdateResultDto> {
     const { tags, expectedRevision, ...rest } = dto;
     const contentFields = (Object.keys(rest) as (keyof typeof rest)[]).filter(
       (k) => rest[k] !== undefined,
@@ -290,9 +294,17 @@ export class QuestionsService {
     if (tags === undefined && contentFields.length === 0) {
       throw new BadRequestException('Send at least one field to change.');
     }
-    let forked: boolean;
     try {
-      forked = await this.prisma.client.$transaction(async (tx) => {
+      return await this.prisma.client.$transaction(async (tx) => {
+        // The answer is read inside the transaction, after the change, under the question lock:
+        // `revision` is the revision of the version this edit left (the new one after a fork).
+        const done = async (forked: boolean): Promise<QuestionUpdateResultDto> => {
+          // Writers only: always the full view, so version.revision is present (never a flag).
+          const detail = await this.detail(tx, id, undefined, true, forked);
+          const revision = detail.version.revision;
+          if (revision === undefined) throw new Error('The full version view carries a revision');
+          return { ...detail, revision };
+        };
         const question = await lockWritable(tx, id);
         const head = await latestVersion(tx, id);
         if (!head) throw new NotFoundException(NOT_FOUND);
@@ -300,7 +312,7 @@ export class QuestionsService {
         if (tags !== undefined) await tx.question.update({ where: { id }, data: { tags } });
         if (contentFields.length === 0) {
           await audit(tx, actor, 'QUESTION_UPDATED', id, ctx, { fields: ['tags'] });
-          return false;
+          return done(false);
         }
         const merged = {
           title: rest.title ?? head.title,
@@ -362,7 +374,7 @@ export class QuestionsService {
             version: head.version,
             fields,
           });
-          return false;
+          return done(false);
         }
         const next = await tx.questionVersion.create({
           data: { questionId: id, version: head.version + 1, ...data },
@@ -414,7 +426,7 @@ export class QuestionsService {
           fromVersion: head.version,
           fields,
         });
-        return true;
+        return done(true);
       });
     } catch (e) {
       if (isUniqueViolation(e)) {
@@ -422,7 +434,6 @@ export class QuestionsService {
       }
       throw e;
     }
-    return this.detail(this.prisma.client, id, undefined, full, forked);
   }
 
   // ---- publish and archive --------------------------------------------------------------------
@@ -541,8 +552,7 @@ export class QuestionsService {
     version: number,
     dto: CreateTestCaseDto,
     ctx: RequestContext,
-    full: boolean,
-  ): Promise<TestCaseDto> {
+  ): Promise<TestCaseMutationDto> {
     return this.prisma.client.$transaction(async (tx) => {
       const v = await lockDraft(tx, id, version);
       await checkRevision(tx, v, dto.expectedRevision);
@@ -575,7 +585,7 @@ export class QuestionsService {
         testCaseId: created.id,
         isHidden: created.isHidden,
       });
-      return toTestCaseDto(created, full);
+      return { ...toTestCaseDto(created, true), revision: await currentRevision(tx, v.id) };
     });
   }
 
@@ -586,8 +596,7 @@ export class QuestionsService {
     testCaseId: string,
     dto: UpdateTestCaseDto,
     ctx: RequestContext,
-    full: boolean,
-  ): Promise<TestCaseDto> {
+  ): Promise<TestCaseMutationDto> {
     const fields = (Object.keys(dto) as (keyof UpdateTestCaseDto)[]).filter(
       (k) => k !== 'expectedRevision' && dto[k] !== undefined,
     );
@@ -615,7 +624,7 @@ export class QuestionsService {
         testCaseId,
         fields,
       });
-      return toTestCaseDto(row, full);
+      return { ...toTestCaseDto(row, true), revision: await currentRevision(tx, v.id) };
     });
   }
 
@@ -626,8 +635,8 @@ export class QuestionsService {
     testCaseId: string,
     expectedRevision: string | undefined,
     ctx: RequestContext,
-  ): Promise<void> {
-    await this.prisma.client.$transaction(async (tx) => {
+  ): Promise<RevisionResultDto> {
+    return this.prisma.client.$transaction(async (tx) => {
       const v = await lockDraft(tx, id, version);
       await checkRevision(tx, v, expectedRevision);
       const { count } = await tx.testCase.deleteMany({
@@ -635,6 +644,7 @@ export class QuestionsService {
       });
       if (count !== 1) throw new NotFoundException('Test case not found.');
       await audit(tx, actor, 'QUESTION_TEST_CASE_REMOVED', id, ctx, { version, testCaseId });
+      return { revision: await currentRevision(tx, v.id) };
     });
   }
 

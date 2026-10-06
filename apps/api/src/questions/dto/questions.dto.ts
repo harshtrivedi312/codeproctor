@@ -418,6 +418,22 @@ export class TestCaseDto {
 
 type VariantParamValue = string | number | boolean;
 
+/** The revision of a version after a writer-only change (never in a recruiter-reachable body). */
+export class RevisionResultDto {
+  @ApiProperty({
+    description:
+      'The new revision of the version, computed inside the same transaction as the change (test cases and variants included); send it as expectedRevision. Writers only (question:update).',
+  })
+  revision!: string;
+}
+
+export class TestCaseMutationDto extends TestCaseDto {
+  @ApiProperty({
+    description: 'The new revision of the version, computed inside the same transaction.',
+  })
+  revision!: string;
+}
+
 export class VariantTestCaseOverrideDto {
   @ApiProperty({ format: 'uuid' }) testCaseId!: string;
   @ApiProperty({ description: 'Follows the slot of the base version.' }) isHidden!: boolean;
@@ -472,6 +488,14 @@ export class QuestionDetailDto extends QuestionSummaryDto {
     description: 'true when this PATCH created a new version because the latest was published.',
   })
   createdNewVersion!: boolean;
+}
+
+export class QuestionUpdateResultDto extends QuestionDetailDto {
+  @ApiProperty({
+    description:
+      'The revision of the version this edit left (the new version after a fork), computed inside the same transaction as the edit. Writers only.',
+  })
+  revision!: string;
 }
 
 export class CandidateQuestionPreviewDto {
