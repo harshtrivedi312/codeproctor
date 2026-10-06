@@ -162,6 +162,13 @@ describe('TC-012 validate job: the stored report', () => {
       failures: [],
     };
     expect(buildReport(built, zero, meta).passed).toBe(false);
+    // A port that ran fewer tests than the variant has slots must not pass, even if all of them passed.
+    const fewer: PortResult = {
+      passed: true,
+      cells: allPass.cells.map((c) => ({ ...c, testsPassed: 1, testsTotal: 1 })),
+      failures: [],
+    };
+    expect(buildReport(built, fewer, meta).passed).toBe(false);
   });
 
   it('FR-203: an execution error report is never passed and has no per-variant rows', () => {

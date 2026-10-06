@@ -155,7 +155,12 @@ export function buildReport(
       });
     const covered = request.languages.every((l) =>
       cells.some(
-        (c) => c.language === l && c.passed && c.testsTotal > 0 && c.testsPassed === c.testsTotal,
+        (c) =>
+          c.language === l &&
+          c.passed &&
+          c.testsTotal === v.tests.length &&
+          c.testsTotal > 0 &&
+          c.testsPassed === c.testsTotal,
       ),
     );
     return { variantId: v.variantId, passed: covered && failures.length === 0, cells, failures };
