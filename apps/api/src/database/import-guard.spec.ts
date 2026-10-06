@@ -438,7 +438,11 @@ describe('import guard: bare packages and re-exports (NFR-04, FU-DB-91)', () => 
 
 describe('import guard: the session write locks have no importer yet (FU-DB-67, FR-704, NFR-04)', () => {
   const stray = (path: string, text: string): SourceFile => ({ path, text });
-  const locks = ruleNamed('database/session-locks');
+  // Looked up before each test, not when the suite loads: a removed rule then fails these tests by name.
+  let locks: GuardRule;
+  beforeEach(() => {
+    locks = ruleNamed('database/session-locks');
+  });
 
   it('TC-008 the rule exists, names the module, and its allowlist is empty until Backend B adds its files', () => {
     expect(locks.module).toBe('database/session-locks');
