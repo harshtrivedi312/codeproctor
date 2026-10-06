@@ -733,34 +733,52 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ApiError' }
   # ---------------------------------------------------------------------------------------------
-  # Question bank (FR-201..FR-205, FE-04). PLACEHOLDER contract, tagged [ARC-02] in
-  # docs/followups/frontend.md: the hub pins the real one. Author-only for detail endpoints.
+  # Question bank (FR-201..FR-205, FE-04). Routes marked REAL mirror BE-04a (PR #146,
+  # apps/api/src/questions). Routes marked WEB-ONLY have no counterpart in the API yet: they are web
+  # placeholders for BE-04b (variants, prefill) and BE-04c (validate job, AI reference solutions)
+  # and are listed in docs/followups/frontend.md. Readers: SUPER_ADMIN, RECRUITER, AUTHOR. Writers:
+  # SUPER_ADMIN, AUTHOR. 404 is identical for missing, cross-org and (for readers without
+  # question:update) unpublished questions. 409 and 422 carry detail and errors[] only, no code.
   # ---------------------------------------------------------------------------------------------
   /v1/questions:
     get:
       operationId: listQuestions
-      summary: Questions of the organisation (list view). Needs question:read.
+      summary: REAL. List questions (question:read). Readers without question:update see published versions only and never archived questions.
+      parameters:
+        - {
+            name: page,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 100000, default: 1 },
+          }
+        - {
+            name: pageSize,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 100, default: 20 },
+          }
+        - { name: tag, in: query, schema: { type: string } }
+        - { name: difficulty, in: query, schema: { $ref: '#/components/schemas/Difficulty' } }
+        - { name: type, in: query, schema: { $ref: '#/components/schemas/QuestionType' } }
+        - { name: includeArchived, in: query, schema: { type: boolean, default: false } }
       responses:
         '200':
-          description: Questions
+          description: One page of questions
           content:
             application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items: { $ref: '#/components/schemas/QuestionSummary' }
+              schema: { $ref: '#/components/schemas/QuestionList' }
+        '400':
+          description: Invalid filter, or a page that is too deep
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
         '403': { $ref: '#/components/responses/Forbidden' }
     post:
       operationId: createQuestion
-      summary: Create a question as draft version 1 (TC-010). Needs question:create.
+      summary: REAL. Create a question with draft version 1 (question:create).
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/QuestionCreate' }
+            schema: { $ref: '#/components/schemas/CreateQuestion' }
       responses:
         '201':
           description: Created
@@ -768,11 +786,16 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/QuestionDetail' }
         '400':
-          description: Invalid content
+          description: Validation failed (errors[] lists each problem)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: The slug is taken in this organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
   /v1/questions/{questionId}:
     parameters:
       - name: questionId
@@ -781,7 +804,15 @@ paths:
         schema: { type: string }
     get:
       operationId: getQuestion
-      summary: The current version. Callers with question:update get the full QuestionDetail (tests, variants, reference solutions, answer key); every other reader (Recruiter) gets the allowlisted QuestionDetailRedacted (DL-32). Never sent to candidates (TC-011).
+      summary: >-
+        REAL. One question with one version (the latest by default, `version` selects another). Callers
+        with question:update get the full QuestionDetail. Every other reader (Recruiter) gets
+        QuestionDetailRedacted: published versions only (a draft, a never-published, a missing and
+        another organization's question are the identical 404), no revision, reference solution,
+        answer key or validation report, and hidden test cases as id, position, isHidden and weight
+        only. A published but archived question is still readable.
+      parameters:
+        - { name: version, in: query, schema: { type: integer, minimum: 1, maximum: 1000000 } }
       responses:
         '200':
           description: Question
@@ -793,26 +824,274 @@ paths:
                   - $ref: '#/components/schemas/QuestionDetailRedacted'
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
-          description: Not found
+          description: No such question or version for this caller
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
     patch:
       operationId: updateQuestion
-      summary: Save the content. A published version is immutable, so this creates the next draft version (FR-204). Needs expectedUpdatedAt (the version's updatedAt the editor loaded); 409 when it changed since.
+      summary: >-
+        REAL. Change fields of the question (question:update). Every field is optional but at least
+        one is needed. A draft is edited in place; if the latest version is published this creates
+        the next version as a draft (createdNewVersion true). Test cases are NOT part of this body:
+        use the test-case routes. expectedRevision (the revision as loaded) makes a concurrent
+        change a 409.
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/QuestionUpdate' }
+            schema: { $ref: '#/components/schemas/UpdateQuestion' }
       responses:
         '200':
-          description: Saved; the returned version is the one that was edited or created
+          description: Saved
           content:
             application/json:
               schema: { $ref: '#/components/schemas/QuestionDetail' }
         '400':
-          description: Invalid content
+          description: Validation failed, or no field sent
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such question in your organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: The question is archived, or it changed since it was loaded (expectedRevision); detail only, no code
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /v1/questions/{questionId}/publish:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: publishQuestion
+      summary: >-
+        REAL. Publish the latest draft (question:update). 422 with errors[] while the draft is
+        incomplete; for a CODING question also until a passing validation of the current revision
+        exists (slice BE-04c), so coding questions cannot be published yet. 409 when there is no
+        draft, the question is archived, or expectedRevision no longer matches.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PublishRequest' }
+      responses:
+        '200':
+          description: Published
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QuestionDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such question in your organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: No draft to publish, the question is archived, or expectedRevision no longer matches
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: The draft is incomplete or not validated; errors[] says what
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /v1/questions/{questionId}/archive:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: archiveQuestion
+      summary: REAL. Soft-archive a question (question:update); hidden from lists, never deleted.
+      responses:
+        '200':
+          description: Archived
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QuestionSummary' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such question in your organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /v1/questions/{questionId}/unarchive:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: unarchiveQuestion
+      summary: REAL. Restore an archived question (question:update).
+      responses:
+        '200':
+          description: Restored
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QuestionSummary' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such question in your organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /v1/questions/{questionId}/versions/{version}/test-cases:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+      - name: version
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+    post:
+      operationId: addTestCase
+      summary: REAL. Add a test case to a draft version of a coding question (question:update).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TestCaseInput' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestCase' }
+        '400':
+          description: Validation failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such question or version in your organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: The version is published (immutable), or the question is archived
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: Not a coding question, or too many test cases
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /v1/questions/{questionId}/versions/{version}/test-cases/{testCaseId}:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+      - name: version
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+      - name: testCaseId
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      operationId: updateTestCase
+      summary: REAL. Change a test case of a draft version (question:update).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TestCasePatch' }
+      responses:
+        '200':
+          description: Changed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestCase' }
+        '400':
+          description: Validation failed, or no field sent
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such question, version or test case in your organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: The version is published (immutable), or the question is archived
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    delete:
+      operationId: removeTestCase
+      summary: REAL. Remove a test case from a draft version (question:update).
+      responses:
+        '204':
+          description: Removed
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such question, version or test case in your organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: The version is published (immutable), or the question is archived
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  # ---- WEB-ONLY placeholders: the API has no such route yet -------------------------------------
+  /v1/questions/{questionId}/variants:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+      - name: version
+        in: query
+        schema: { type: integer, minimum: 1 }
+    get:
+      operationId: getVariants
+      summary: WEB-ONLY placeholder [BE-04b] (ADR 0007, explicit params per variant). Variants of a version, question:update only.
+      responses:
+        '200':
+          description: Variants
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VariantList' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    put:
+      operationId: putVariants
+      summary: WEB-ONLY placeholder [BE-04b]. Replace the variants of the latest draft version.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/VariantList' }
+      responses:
+        '200':
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VariantList' }
+        '400':
+          description: Invalid
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -823,83 +1102,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: The question changed since the editor loaded it (detail and errors[] only, no code)
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Problem' }
-  /v1/questions/{questionId}/versions:
-    parameters:
-      - name: questionId
-        in: path
-        required: true
-        schema: { type: string }
-    get:
-      operationId: listQuestionVersions
-      summary: Version history (FR-204)
-      responses:
-        '200':
-          description: Versions, newest first
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items: { $ref: '#/components/schemas/QuestionVersionSummary' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404':
-          description: Not found
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Problem' }
-  /v1/questions/{questionId}/versions/{version}:
-    parameters:
-      - name: questionId
-        in: path
-        required: true
-        schema: { type: string }
-      - name: version
-        in: path
-        required: true
-        schema: { type: integer, minimum: 1 }
-    get:
-      operationId: getQuestionVersion
-      summary: One version, read-only (published versions never change)
-      responses:
-        '200':
-          description: Version
-          content:
-            application/json:
-              schema:
-                oneOf:
-                  - $ref: '#/components/schemas/QuestionDetail'
-                  - $ref: '#/components/schemas/QuestionDetailRedacted'
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404':
-          description: Not found
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Problem' }
-  /v1/questions/{questionId}/validate:
-    parameters:
-      - name: questionId
-        in: path
-        required: true
-        schema: { type: string }
-    post:
-      operationId: validateQuestion
-      summary: Start a validation job of the saved version (reference solution on every slot of every active variant, ADR 0007 V-3)
-      responses:
-        '202':
-          description: Job accepted
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ValidationJobRef' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404':
-          description: Not found
+          description: The version is published (immutable), or the question is archived
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -911,7 +1114,7 @@ paths:
         schema: { type: string }
     post:
       operationId: prefillVariantOutputs
-      summary: Run the reference solution on a variant's inputs and PROPOSE expected outputs (ADR 0007). Nothing is stored; the author must accept the proposals.
+      summary: WEB-ONLY placeholder [BE-04b/c]. Run the reference solution on a variant's inputs and PROPOSE expected outputs (ADR 0007). Nothing is stored; the author must accept the proposals.
       requestBody:
         required: true
         content:
@@ -929,6 +1132,27 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/questions/{questionId}/validate:
+    parameters:
+      - name: questionId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: validateQuestion
+      summary: WEB-ONLY placeholder [BE-04c] (permission question:validate). Start a validation job of the current content; the job binds to the revision it validated and stores it in the validation report.
+      responses:
+        '202':
+          description: Job accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationJobRef' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
   /v1/questions/{questionId}/validation/{jobId}:
     parameters:
       - name: questionId
@@ -941,7 +1165,7 @@ paths:
         schema: { type: string }
     get:
       operationId: getValidationJob
-      summary: Poll a validation job
+      summary: WEB-ONLY placeholder [BE-04c]. Poll a validation job.
       responses:
         '200':
           description: Job state; the report is present when done
@@ -954,47 +1178,6 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
-  /v1/questions/{questionId}/publish:
-    parameters:
-      - name: questionId
-        in: path
-        required: true
-        schema: { type: string }
-    post:
-      operationId: publishQuestion
-      summary: Publish the current draft version. Refused with 422 (detail and errors[] only) without a passing validation of the saved content (TC-012) or without the AI reference solutions of the publish gate (ADR 0005 AI-5), and with 409 when updatedAt is not the current one. Fails closed until BE-04c (422, or 501-style).
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/PublishRequest' }
-      responses:
-        '200':
-          description: Published
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/QuestionDetail' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404':
-          description: Not found
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Problem' }
-        '422':
-          description: The gate is not met (no passing validation, missing AI reference solutions); detail and errors[] only
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Problem' }
-        '501':
-          description: Publishing is not available yet (until BE-04c)
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Problem' }
-        '409':
-          description: The version changed since it was validated (expectedUpdatedAt)
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Problem' }
   /v1/questions/{questionId}/ai-references:
     parameters:
       - name: questionId
@@ -1003,19 +1186,13 @@ paths:
         schema: { type: string }
     get:
       operationId: listAiReferences
-      summary: AI reference solutions of the current version, including superseded rows (D-20). Similarity only, never grading.
+      summary: WEB-ONLY placeholder [BE-04c] (ADR 0005, D-20). AI reference solutions of the question with the publish policy (Authors cannot read org settings). Similarity only, never grading.
       responses:
         '200':
-          description: Rows
+          description: Rows (including superseded ones) and the policy
           content:
             application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items: { $ref: '#/components/schemas/AiReference' }
+              schema: { $ref: '#/components/schemas/AiReferenceList' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: Not found
@@ -1024,7 +1201,7 @@ paths:
               schema: { $ref: '#/components/schemas/Problem' }
     post:
       operationId: addAiReference
-      summary: Add a solution collected from an AI assistant (audited as ai_reference.create)
+      summary: WEB-ONLY placeholder [BE-04c]. Add a solution collected from an AI assistant (audited as ai_reference.create).
       requestBody:
         required: true
         content:
@@ -1059,7 +1236,7 @@ paths:
         schema: { type: string }
     post:
       operationId: supersedeAiReference
-      summary: Replace a row with a newer one; the old row keeps existing with supersededAt set (append-only, ADR 0005 AI-1)
+      summary: WEB-ONLY placeholder [BE-04c]. Replace a row with a newer one; the old row keeps existing with supersededAt set (append-only, ADR 0005 AI-1).
       requestBody:
         required: true
         content:
@@ -1141,146 +1318,121 @@ components:
     Difficulty:
       type: string
       enum: [EASY, MEDIUM, HARD]
-    QuestionStatus:
-      type: string
-      enum: [DRAFT, PUBLISHED, ARCHIVED]
-    QuestionSummary:
-      type: object
-      required: [id, slug, title, type, difficulty, tags, status, version, updatedAt]
-      properties:
-        id: { type: string }
-        slug: { type: string }
-        title: { type: string }
-        type: { $ref: '#/components/schemas/QuestionType' }
-        difficulty: { $ref: '#/components/schemas/Difficulty' }
-        tags: { type: array, items: { type: string } }
-        status: { $ref: '#/components/schemas/QuestionStatus' }
-        version: { type: integer, description: Latest version number }
-        updatedAt: { type: string, format: date-time }
     Limits:
       type: object
       required: [cpuMs, wallMs, memoryKb]
       properties:
-        cpuMs: { type: integer, minimum: 100, maximum: 60000 }
-        wallMs: { type: integer, minimum: 100, maximum: 120000 }
-        memoryKb: { type: integer, minimum: 16384, maximum: 2097152 }
+        cpuMs: { type: integer, minimum: 100, maximum: 10000 }
+        wallMs: { type: integer, minimum: 100, maximum: 20000, description: Not below cpuMs }
+        memoryKb: { type: integer, minimum: 16384, maximum: 524288 }
     TestCase:
       type: object
-      required: [id, input, expectedOutput, isHidden, weight]
-      properties:
-        id: { type: string, description: Client-generated for new rows }
-        input: { type: string }
-        expectedOutput: { type: string }
-        isHidden: { type: boolean }
-        weight: { type: number, minimum: 0, exclusiveMinimum: true, maximum: 1000 }
-    VariantOverride:
-      type: object
-      required: [testCaseId, input, expectedOutput]
-      properties:
-        testCaseId: { type: string }
-        input: { type: string }
-        expectedOutput: { type: string }
-    Variant:
-      type: object
-      required: [id, label, params, active, overrides]
+      description: >-
+        A test slot. For a reader without question:update a HIDDEN case carries only id, position,
+        isHidden and weight: the input and expectedOutput keys are absent, not null.
+      required: [id, position, isHidden, weight]
       properties:
         id: { type: string }
-        label: { type: string }
-        params:
-          type: object
-          description: Explicit values per placeholder (ADR 0007), no parameter schema
-          additionalProperties:
-            oneOf:
-              - { type: string }
-              - { type: number }
-        active: { type: boolean }
-        overrides: { type: array, items: { $ref: '#/components/schemas/VariantOverride' } }
+        position: { type: integer, minimum: 0 }
+        isHidden: { type: boolean }
+        weight: { type: number }
+        input: { type: string }
+        expectedOutput: { type: string }
+    TestCaseInput:
+      type: object
+      required: [input, expectedOutput]
+      properties:
+        input: { type: string, maxLength: 100000 }
+        expectedOutput: { type: string, maxLength: 100000 }
+        isHidden: { type: boolean, default: true }
+        weight:
+          {
+            type: number,
+            minimum: 0.01,
+            maximum: 9999.99,
+            default: 1,
+            description: At most 2 decimals,
+          }
+        position:
+          { type: integer, minimum: 0, maximum: 10000, description: Default after the last slot }
+    TestCasePatch:
+      type: object
+      properties:
+        input: { type: string, maxLength: 100000 }
+        expectedOutput: { type: string, maxLength: 100000 }
+        isHidden: { type: boolean }
+        weight: { type: number, minimum: 0.01, maximum: 9999.99 }
+        position: { type: integer, minimum: 0, maximum: 10000 }
     McqOption:
       type: object
       required: [id, text]
       properties:
-        id: { type: string }
-        text: { type: string }
+        id: { type: string, pattern: '^[A-Za-z0-9_-]{1,32}$' }
+        text: { type: string, minLength: 1, maxLength: 1000 }
     McqAnswerSpec:
       type: object
-      required: [type, options, correctOptionIds, multiple]
+      description: MCQ answer spec (the question type says which shape applies). 2 to 10 options.
+      required: [options, correctOptionIds, multiple]
       properties:
-        type: { type: string, enum: [MCQ] }
-        options: { type: array, items: { $ref: '#/components/schemas/McqOption' } }
-        correctOptionIds: { type: array, items: { type: string } }
+        options:
+          {
+            type: array,
+            minItems: 2,
+            maxItems: 10,
+            items: { $ref: '#/components/schemas/McqOption' },
+          }
+        correctOptionIds: { type: array, minItems: 1, maxItems: 10, items: { type: string } }
         multiple: { type: boolean }
     ShortAnswerSpec:
       type: object
-      required: [type, canonical, acceptedVariants]
+      description: SHORT_ANSWER answer spec (D-23).
+      required: [canonical, acceptedVariants]
       properties:
-        type: { type: string, enum: [SHORT_ANSWER] }
-        canonical: { type: string }
-        acceptedVariants: { type: array, items: { type: string } }
+        canonical: { type: string, minLength: 1, maxLength: 500 }
+        acceptedVariants:
+          { type: array, maxItems: 20, items: { type: string, minLength: 1, maxLength: 500 } }
     AnswerSpec:
       oneOf:
         - $ref: '#/components/schemas/McqAnswerSpec'
         - $ref: '#/components/schemas/ShortAnswerSpec'
-    QuestionContent:
+    QuestionVersionRef:
       type: object
-      required:
-        [
-          title,
-          statementMd,
-          difficulty,
-          tags,
-          allowedLanguages,
-          limits,
-          starterCode,
-          referenceSolution,
-          testCases,
-          variants,
-          answerSpec,
-        ]
+      required: [id, version, isPublished, title, difficulty, validatedAt, createdAt]
       properties:
-        title: { type: string, minLength: 1, maxLength: 200 }
-        statementMd:
-          {
-            type: string,
-            maxLength: 50000,
-            description: 'Markdown, no raw HTML; may contain Mustache placeholders',
-          }
+        id: { type: string }
+        version: { type: integer, minimum: 1 }
+        isPublished: { type: boolean }
+        title: { type: string }
         difficulty: { $ref: '#/components/schemas/Difficulty' }
-        tags: { type: array, items: { type: string } }
-        allowedLanguages: { type: array, items: { $ref: '#/components/schemas/Language' } }
-        limits: { $ref: '#/components/schemas/Limits' }
-        starterCode: { type: object, additionalProperties: { type: string } }
-        referenceSolution: { type: object, additionalProperties: { type: string } }
-        testCases: { type: array, items: { $ref: '#/components/schemas/TestCase' } }
-        variants: { type: array, items: { $ref: '#/components/schemas/Variant' } }
-        answerSpec:
-          nullable: true
-          allOf:
-            - $ref: '#/components/schemas/AnswerSpec'
-    QuestionUpdate:
-      allOf:
-        - $ref: '#/components/schemas/QuestionContent'
-        - type: object
-          required: [expectedUpdatedAt]
-          properties:
-            expectedUpdatedAt:
-              type: string
-              format: date-time
-              description: 'The updatedAt of the version the editor loaded (opaque); 409 if it changed since'
-    PublishRequest:
+        validatedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+    QuestionSummary:
       type: object
-      required: [expectedUpdatedAt]
+      required: [id, slug, type, tags, isArchived, createdAt, published, latest]
       properties:
-        expectedUpdatedAt:
-          type: string
-          format: date-time
-          description: 'The updatedAt of the version that was validated; 409 if it changed since'
-    QuestionCreate:
-      allOf:
-        - $ref: '#/components/schemas/QuestionContent'
-        - type: object
-          required: [type]
-          properties:
-            type: { $ref: '#/components/schemas/QuestionType' }
+        id: { type: string }
+        slug: { type: string }
+        type: { $ref: '#/components/schemas/QuestionType' }
+        tags: { type: array, items: { type: string } }
+        isArchived: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        published:
+          nullable: true
+          description: The published version tests use; null until the first publish
+          allOf:
+            - $ref: '#/components/schemas/QuestionVersionRef'
+        latest:
+          description: Highest version number (maybe a draft); for a reader without question:update the highest PUBLISHED version
+          allOf:
+            - $ref: '#/components/schemas/QuestionVersionRef'
+    QuestionList:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/QuestionSummary' } }
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer }
     ValidationOutcome:
       type: string
       enum: [pass, wrong_answer, runtime_error, compile_error, limit_exceeded]
@@ -1291,123 +1443,207 @@ components:
         variantId: { type: string, nullable: true, description: Null for the base statement }
         variantLabel: { type: string }
         testCaseId: { type: string }
-        position: { type: integer, minimum: 1 }
+        position: { type: integer, minimum: 0 }
         language: { $ref: '#/components/schemas/Language' }
         outcome: { $ref: '#/components/schemas/ValidationOutcome' }
         message: { type: string }
     ValidationReport:
       type: object
-      required: [passed, finishedAt, results]
+      description: >-
+        Stored in the version's validationReport. The API defines `passed` and `revision` (the
+        content revision the run validated; publish ignores a report of another revision). The other
+        members are a WEB-ONLY placeholder [BE-04c].
+      required: [passed, revision]
+      additionalProperties: true
       properties:
         passed: { type: boolean }
+        revision: { type: string }
         finishedAt: { type: string, format: date-time }
         results: { type: array, items: { $ref: '#/components/schemas/ValidationResult' } }
     ValidationJobRef:
       type: object
-      required: [jobId, validatedForUpdatedAt]
+      required: [jobId, revision]
       properties:
         jobId: { type: string }
-        validatedForUpdatedAt:
-          type: string
-          format: date-time
-          description: 'The updatedAt of the content the job validates'
+        revision: { type: string, description: The content revision the job validates }
     ValidationJob:
       type: object
-      required: [jobId, validatedForUpdatedAt, status]
+      required: [jobId, revision, status]
       properties:
         jobId: { type: string }
-        validatedForUpdatedAt:
-          type: string
-          format: date-time
-          description: 'The updatedAt of the content the job validated; a report for older content must never be shown as current'
+        revision:
+          {
+            type: string,
+            description: The content revision the job validated; a report for another revision must never be shown as current,
+          }
         status: { type: string, enum: [queued, running, done, failed] }
         report: { $ref: '#/components/schemas/ValidationReport' }
         error: { type: string }
-    AiReferencePolicy:
-      type: object
-      required: [refreshDays, minAssistants]
-      description: Org settings aiReferences.* (ADR 0005 AI-4, AI-5), read-only here because Authors cannot read org settings
-      properties:
-        refreshDays: { type: integer, minimum: 1 }
-        minAssistants: { type: integer, minimum: 0 }
     QuestionVersion:
+      description: The full version a caller with question:update gets
       allOf:
-        - $ref: '#/components/schemas/QuestionContent'
+        - $ref: '#/components/schemas/QuestionVersionRef'
         - type: object
-          required: [version, updatedAt, isPublished, createdAt, validatedAt, validationReport]
+          required:
+            [
+              statementMd,
+              allowedLanguages,
+              limits,
+              starterCode,
+              referenceSolution,
+              answerSpec,
+              validationReport,
+              revision,
+              testCases,
+            ]
           properties:
-            version: { type: integer, minimum: 1 }
-            updatedAt:
-              type: string
-              format: date-time
-              description: 'Changes on every save of this version; used as the opaque concurrency token and to tie a validation to the exact content'
-            isPublished: { type: boolean }
-            createdAt: { type: string, format: date-time }
-            validatedAt:
-              { type: string, format: date-time, nullable: true, description: Cleared by any save }
+            statementMd: { type: string, maxLength: 50000 }
+            allowedLanguages: { type: array, items: { $ref: '#/components/schemas/Language' } }
+            limits: { $ref: '#/components/schemas/Limits' }
+            starterCode: { type: object, additionalProperties: { type: string } }
+            referenceSolution: { type: object, additionalProperties: { type: string } }
+            answerSpec:
+              nullable: true
+              allOf:
+                - $ref: '#/components/schemas/AnswerSpec'
             validationReport:
               nullable: true
               allOf:
                 - $ref: '#/components/schemas/ValidationReport'
-    QuestionDetail:
-      type: object
-      required: [id, slug, type, status, latestVersion, aiReferencePolicy, current]
-      properties:
-        id: { type: string }
-        slug: { type: string }
-        type: { $ref: '#/components/schemas/QuestionType' }
-        status: { $ref: '#/components/schemas/QuestionStatus' }
-        latestVersion: { type: integer, minimum: 1 }
-        aiReferencePolicy: { $ref: '#/components/schemas/AiReferencePolicy' }
-        current: { $ref: '#/components/schemas/QuestionVersion' }
-    QuestionDetailRedacted:
+            revision:
+              type: string
+              pattern: '^[0-9a-f]{64}$'
+              description: >-
+                Opaque SHA-256 of the version content and test cases (question:update only). Send it
+                back as expectedRevision; it changes with every content or test-case change.
+            testCases: { type: array, items: { $ref: '#/components/schemas/TestCase' } }
+    QuestionVersionRead:
       type: object
       additionalProperties: false
       description: >-
-        What a caller without question:update (a Recruiter) gets from the detail routes: an allowlist,
-        never a denylist. PROVISIONAL list pending BE-04a. No reference solution, answer key,
-        validation report, variant parameters, AI reference solutions or hidden tests.
+        What a reader without question:update gets of a version: an allowlist. No revision,
+        referenceSolution, answerSpec or validationReport, and hidden test cases without input and
+        expectedOutput.
+      required:
+        [
+          id,
+          version,
+          isPublished,
+          title,
+          difficulty,
+          validatedAt,
+          createdAt,
+          statementMd,
+          allowedLanguages,
+          limits,
+          starterCode,
+          testCases,
+        ]
+      properties:
+        id: { type: string }
+        version: { type: integer, minimum: 1 }
+        isPublished: { type: boolean }
+        title: { type: string }
+        difficulty: { $ref: '#/components/schemas/Difficulty' }
+        validatedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        statementMd: { type: string }
+        allowedLanguages: { type: array, items: { $ref: '#/components/schemas/Language' } }
+        limits: { $ref: '#/components/schemas/Limits' }
+        starterCode: { type: object, additionalProperties: { type: string } }
+        testCases: { type: array, items: { $ref: '#/components/schemas/TestCase' } }
+    QuestionDetail:
+      description: A question with one full version (question:update)
+      allOf:
+        - $ref: '#/components/schemas/QuestionSummary'
+        - type: object
+          required: [versions, version, createdNewVersion]
+          properties:
+            versions:
+              {
+                type: array,
+                items: { $ref: '#/components/schemas/QuestionVersionRef' },
+                description: Oldest first,
+              }
+            version: { $ref: '#/components/schemas/QuestionVersion' }
+            createdNewVersion:
+              type: boolean
+              description: true when this PATCH created a new version because the latest was published
+    QuestionDetailRedacted:
+      type: object
+      additionalProperties: false
+      description: The detail a reader without question:update gets (an allowlist, DL-32, BE-04a staff-view.ts)
       required:
         [
           id,
           slug,
-          title,
           type,
-          status,
-          difficulty,
           tags,
-          statementMd,
+          isArchived,
+          createdAt,
+          published,
+          latest,
+          versions,
           version,
-          updatedAt,
-          starterCode,
-          limits,
-          allowedLanguages,
-          sampleTestCases,
+          createdNewVersion,
         ]
       properties:
         id: { type: string }
         slug: { type: string }
-        title: { type: string }
         type: { $ref: '#/components/schemas/QuestionType' }
-        status: { $ref: '#/components/schemas/QuestionStatus' }
-        difficulty: { $ref: '#/components/schemas/Difficulty' }
         tags: { type: array, items: { type: string } }
-        statementMd: { type: string }
-        version: { type: integer, minimum: 1 }
-        updatedAt: { type: string, format: date-time }
-        starterCode: { type: object, additionalProperties: { type: string } }
-        limits: { $ref: '#/components/schemas/Limits' }
+        isArchived: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        published:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/QuestionVersionRef'
+        latest:
+          allOf:
+            - $ref: '#/components/schemas/QuestionVersionRef'
+        versions: { type: array, items: { $ref: '#/components/schemas/QuestionVersionRef' } }
+        version: { $ref: '#/components/schemas/QuestionVersionRead' }
+        createdNewVersion: { type: boolean }
+    CreateQuestion:
+      type: object
+      required: [title, statementMd, difficulty]
+      properties:
+        type: { $ref: '#/components/schemas/QuestionType' }
+        slug:
+          {
+            type: string,
+            maxLength: 80,
+            description: Unique per organization; generated from the title when omitted,
+          }
+        title: { type: string, minLength: 1, maxLength: 200 }
+        statementMd: { type: string, minLength: 1, maxLength: 50000 }
+        difficulty: { $ref: '#/components/schemas/Difficulty' }
+        tags: { type: array, maxItems: 20, items: { type: string } }
         allowedLanguages: { type: array, items: { $ref: '#/components/schemas/Language' } }
-        sampleTestCases:
-          type: array
-          description: Visible (non-hidden) cases only
-          items:
-            type: object
-            additionalProperties: false
-            required: [input, expectedOutput]
-            properties:
-              input: { type: string }
-              expectedOutput: { type: string }
+        limits: { $ref: '#/components/schemas/Limits' }
+        starterCode: { type: object, additionalProperties: { type: string } }
+        referenceSolution: { type: object, additionalProperties: { type: string } }
+        answerSpec: { $ref: '#/components/schemas/AnswerSpec' }
+        testCases:
+          { type: array, maxItems: 100, items: { $ref: '#/components/schemas/TestCaseInput' } }
+    UpdateQuestion:
+      type: object
+      description: Every field is optional, at least one is needed. Test cases have their own routes.
+      properties:
+        expectedRevision: { type: string, pattern: '^[0-9a-f]{64}$' }
+        title: { type: string, minLength: 1, maxLength: 200 }
+        statementMd: { type: string, minLength: 1, maxLength: 50000 }
+        difficulty: { $ref: '#/components/schemas/Difficulty' }
+        tags: { type: array, maxItems: 20, items: { type: string } }
+        allowedLanguages: { type: array, items: { $ref: '#/components/schemas/Language' } }
+        limits: { $ref: '#/components/schemas/Limits' }
+        starterCode: { type: object, additionalProperties: { type: string } }
+        referenceSolution: { type: object, additionalProperties: { type: string } }
+        answerSpec: { $ref: '#/components/schemas/AnswerSpec' }
+    PublishRequest:
+      type: object
+      properties:
+        expectedRevision: { type: string, pattern: '^[0-9a-f]{64}$' }
     Problem:
       type: object
       description: >-
@@ -1422,15 +1658,40 @@ components:
         instance: { type: string }
         traceId: { type: string }
         errors: { type: array, items: { type: string } }
-    QuestionVersionSummary:
+    VariantOverride:
       type: object
-      required: [version, isPublished, createdAt, createdByName, validatedAt]
+      required: [testCaseId, input, expectedOutput]
       properties:
-        version: { type: integer }
-        isPublished: { type: boolean }
-        createdAt: { type: string, format: date-time }
-        createdByName: { type: string }
-        validatedAt: { type: string, format: date-time, nullable: true }
+        testCaseId: { type: string }
+        input: { type: string }
+        expectedOutput: { type: string }
+    Variant:
+      type: object
+      description: WEB-ONLY placeholder [BE-04b]. Explicit params per variant (ADR 0007), no parameter schema.
+      required: [id, label, params, active, overrides]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        params:
+          type: object
+          additionalProperties:
+            oneOf:
+              - { type: string }
+              - { type: number }
+        active: { type: boolean }
+        overrides: { type: array, items: { $ref: '#/components/schemas/VariantOverride' } }
+    VariantList:
+      type: object
+      required: [variants]
+      properties:
+        variants: { type: array, items: { $ref: '#/components/schemas/Variant' } }
+    AiReferencePolicy:
+      type: object
+      required: [refreshDays, minAssistants]
+      description: Org settings aiReferences.* (ADR 0005 AI-4, AI-5), read-only here because Authors cannot read org settings
+      properties:
+        refreshDays: { type: integer, minimum: 1 }
+        minAssistants: { type: integer, minimum: 0 }
     AiReferenceInput:
       type: object
       required: [assistant, modelLabel, language, solutionCode, collectedAt]
@@ -1451,6 +1712,12 @@ components:
             id: { type: string }
             collectedByName: { type: string }
             supersededAt: { type: string, format: date-time, nullable: true }
+    AiReferenceList:
+      type: object
+      required: [items, policy]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/AiReference' } }
+        policy: { $ref: '#/components/schemas/AiReferencePolicy' }
     PrefillRequest:
       type: object
       required: [language, params, referenceSolution, slots]
