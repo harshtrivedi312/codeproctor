@@ -48,7 +48,10 @@ const READ_DENIED: Readonly<Partial<Record<ModelName, readonly string[]>>> = {
   ],
   Organization: ['settings'],
   Test: ['settings'],
-  Submission: ['score'],
+  // `results`, `passed` and `total` hold the hidden-test outcome of a SUBMIT row (TC-011). CS-4.4 lets a
+  // candidate read them on RUN rows only, which is a row filter that PR 2 builds; until then they are
+  // closed (FU-DB-195).
+  Submission: ['score', 'results', 'passed', 'total'],
   SessionQuestion: ['score', 'scoringNote'],
 };
 

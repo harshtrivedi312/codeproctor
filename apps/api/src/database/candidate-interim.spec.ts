@@ -196,7 +196,7 @@ describe('S3: the interim column control, CANDIDATE_INTERIM_DENY (NFR-04, TC-008
       ],
       Organization: ['settings'],
       Test: ['settings'],
-      Submission: ['score'],
+      Submission: ['score', 'results', 'passed', 'total'],
       SessionQuestion: ['score', 'scoringNote'],
     });
     expect(Object.fromEntries(writeOnlyColumns.map(([m, c]) => [`${m}.${c}`, true]))).toEqual({

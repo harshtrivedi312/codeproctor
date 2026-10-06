@@ -954,6 +954,49 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       }
     });
 
+    it('TC-008 the hidden-test outcome of a SUBMIT row is neither readable nor countable (the CS-4.4 oracle), until the RUN filter of PR 2', async () => {
+      const submit = await owner.submission.create({
+        data: {
+          sessionQuestionId: A.sessionQuestionId,
+          kind: 'SUBMIT',
+          language: 'cs4-hidden',
+          sourceCode: 'x',
+          results: [{ testCaseId: 'hidden-1', passed: false }],
+          passed: 2,
+          total: 5,
+          score: 40,
+        },
+      });
+      try {
+        await asCandidate(A, async () => {
+          const d = scoped('Submission');
+          for (const column of ['results', 'passed', 'total', 'score']) {
+            await expect(d.findMany?.({ select: { id: true, [column]: true } })).rejects.toThrow(
+              new RegExp(`the column ${column} is not available to a candidate`),
+            );
+          }
+          // `count({ where: { kind: 'SUBMIT', passed: N } })` is the oracle CS-4.4 closes.
+          await expect(d.count?.({ where: { kind: 'SUBMIT', passed: 2 } })).rejects.toThrow(
+            /the column passed is not available/,
+          );
+          await expect(d.aggregate?.({ _sum: { passed: true, total: true } })).rejects.toThrow(
+            /is not available to a candidate/,
+          );
+          await expect(d.findMany?.({ ...ID, orderBy: { passed: 'desc' } })).rejects.toThrow(
+            /the column passed is not available/,
+          );
+          // What a candidate may know about its own submissions: that they exist, and their kind.
+          const rows = (await d.findMany?.({
+            where: { kind: 'SUBMIT' },
+            select: { id: true, kind: true, language: true },
+          })) as Row[];
+          expect(rows).toEqual([{ id: submit.id, kind: 'SUBMIT', language: 'cs4-hidden' }]);
+        });
+      } finally {
+        await owner.submission.delete({ where: { id: submit.id } });
+      }
+    });
+
     it.each([
       ['Session', 'status', { status: 'SUBMITTED' }],
       ['Session', 'authEpoch', { authEpoch: 9 }],
@@ -971,6 +1014,9 @@ describe('ADR 0013 CS-4: candidate and session-job scopes against Postgres (NFR-
       ['SessionQuestion', 'score', { score: 100 }],
       ['SessionQuestion', 'scoringNote', { scoringNote: 'x' }],
       ['Submission', 'score', { score: 100 }],
+      ['Submission', 'results', { results: [] }],
+      ['Submission', 'passed', { passed: 3 }],
+      ['Submission', 'total', { total: 3 }],
       ['IdentityCheck', 'status', { status: 'PASSED' }],
       ['IdentityCheck', 'manualDecision', { manualDecision: 'APPROVED' }],
       ['IdentityCheck', 'reviewReason', { reviewReason: 'FACE_MISMATCH' }],
