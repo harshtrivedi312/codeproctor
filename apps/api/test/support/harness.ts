@@ -50,13 +50,15 @@ export interface Harness {
    * machine, whatever JUDGE0_URL says). A test may pass a deferred promise to hold the job open.
    */
   setValidationPort(port: ReferenceValidationPort): void;
+  /** Puts the default (never executes, outcome ERROR) back. */
+  resetValidationPort(): void;
   close(): Promise<void>;
 }
 
 const SETTLE_VALIDATION_MS = 30_000;
 
 /** The harness never executes code: a validate run fails closed with outcome ERROR. */
-const NO_EXECUTION_PORT: ReferenceValidationPort = {
+export const NO_EXECUTION_PORT: ReferenceValidationPort = {
   validate: () => Promise.reject(new Error('harness: no code execution')),
 };
 
@@ -230,6 +232,9 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     settleValidation: () => settleValidationJobs(),
     setValidationPort: (p) => {
       port = p;
+    },
+    resetValidationPort: () => {
+      port = NO_EXECUTION_PORT;
     },
     close: () => (closing ??= closeAll()),
   };

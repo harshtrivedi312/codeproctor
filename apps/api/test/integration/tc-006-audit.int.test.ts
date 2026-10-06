@@ -222,8 +222,10 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
             expect(meta.initiatedBy).toBe(who.id);
             // startedAuditId resolves to exactly the STARTED row of this question and version.
             const target = await h.owner.auditLog.findMany({
-              where: { id: BigInt(meta.startedAuditId as string | number) },
+              where: { id: BigInt(meta.startedAuditId as string) },
             });
+            expect(typeof meta.startedAuditId).toBe('string');
+            expect(meta.startedAuditId).toBe(String(started.id));
             expect(target).toHaveLength(1);
             expect(target[0]?.id).toBe(started.id);
             expect([
@@ -239,6 +241,62 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
             expect(meta.version).toBe(started202.version);
             expect(row.createdAt.getTime()).toBeGreaterThanOrEqual(started.createdAt.getTime());
             expectNoSecrets(row, [...t.secrets, who.token]);
+          });
+
+          it(`TC-006 FR-203: ${label} with a fully passing run writes FINISHED outcome PASSED (same job-row shape) and sets validatedAt on the version`, async () => {
+            const who = await as(roleFor(route));
+            const t = await route.prepare(h, h.orgId);
+            // One passing cell per variant and language, every slot passed, no failure.
+            h.setValidationPort({
+              validate: (r) =>
+                Promise.resolve({
+                  passed: true,
+                  failures: [],
+                  cells: r.variants.flatMap((v) =>
+                    r.languages.map((language) => ({
+                      variantId: v.variantId,
+                      language,
+                      passed: true,
+                      testsPassed: v.tests.length,
+                      testsTotal: v.tests.length,
+                    })),
+                  ),
+                }),
+            });
+            try {
+              const before = await lastId();
+              const res = await call(h, route.method, t.path, who.token, t.body);
+              expect(route.ok).toContain(res.status);
+              await settleValidation(h);
+              const body = res.body as { version: number; revision: string };
+              const rows = await since(before);
+              const started = rows.find(
+                (r) => r.action === 'QUESTION_VALIDATION_STARTED',
+              ) as AuditLog;
+              const finished = rows.filter((r) => r.action === 'QUESTION_VALIDATION_FINISHED');
+              expect(finished).toHaveLength(1);
+              const row = finished[0] as AuditLog;
+              expect([row.actorId, row.ip, row.entityId, row.orgId]).toEqual([
+                null,
+                null,
+                t.entityId,
+                h.orgId,
+              ]);
+              expect(row.metadata).toEqual({
+                system: true,
+                initiatedBy: who.id,
+                startedAuditId: String(started.id),
+                version: body.version,
+                outcome: 'PASSED',
+                revision: body.revision.slice(0, 12),
+              });
+              const version = await h.owner.questionVersion.findFirstOrThrow({
+                where: { questionId: t.entityId as string, version: body.version },
+              });
+              expect(version.validatedAt).not.toBeNull();
+            } finally {
+              h.resetValidationPort();
+            }
           });
 
           it(`TC-006 FR-203: ${label} writes no FINISHED row when the question is archived while the job runs (STARTED stays)`, async () => {
@@ -269,9 +327,8 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
               ]);
             } finally {
               release();
-              h.setValidationPort({
-                validate: () => Promise.reject(new Error('harness: no code execution')),
-              });
+              await settleValidation(h).catch(() => undefined);
+              h.resetValidationPort();
             }
           });
 
