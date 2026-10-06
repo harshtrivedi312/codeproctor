@@ -39,14 +39,17 @@ class FaceLocator(Protocol):
 
 class IntakeError(Exception):
     """Fixed code only: NO_FACE, MULTIPLE_FACES, UNREADABLE, WRITE_FAILED, DELETE_FAILED,
-    PATH_REFUSED."""
+    PATH_REFUSED, DETECTOR_FAILED."""
 
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
 
 
-def crop_portrait(image: Image, box: Box, margin: float = 0.35) -> Image:
+DEFAULT_MARGIN = 0.35  # for a tight detector box; a full-face box needs far less (see locator)
+
+
+def crop_portrait(image: Image, box: Box, margin: float = DEFAULT_MARGIN) -> Image:
     """Crop the face box plus a margin (fraction of box size), clamped to the image."""
     h, w = image.shape[:2]
     mx = int((box.x1 - box.x0) * margin)
@@ -87,7 +90,9 @@ def _delete_original(path: Path) -> bool:
     return not path.exists()
 
 
-def intake_id_photo(src: Path, dest: Path, locator: FaceLocator) -> Path:
+def intake_id_photo(
+    src: Path, dest: Path, locator: FaceLocator, margin: float = DEFAULT_MARGIN
+) -> Path:
     """Write the portrait crop to `dest` (PNG, mode 0600) and delete `src`. Returns `dest`.
 
     `src` is deleted on success and on every failure after the paths are accepted. If it cannot
@@ -112,7 +117,7 @@ def intake_id_photo(src: Path, dest: Path, locator: FaceLocator) -> Path:
             raise IntakeError("NO_FACE")
         if len(boxes) > 1:
             raise IntakeError("MULTIPLE_FACES")
-        crop = crop_portrait(image, boxes[0])
+        crop = crop_portrait(image, boxes[0], margin)
         dest.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(dir=dest.parent, suffix=".tmp")
         tmp = Path(tmp_name)

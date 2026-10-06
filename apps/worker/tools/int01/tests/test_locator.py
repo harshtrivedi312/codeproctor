@@ -35,14 +35,24 @@ def scaled(factor: float, dx: float = 0.0) -> np.ndarray:
 
 
 def test_c11_box_contains_the_landmarks_and_stays_inside_the_image() -> None:
-    box = locator.landmarks_to_box(face(), SHAPE)
+    big = (700, 500, 3)
+    box = locator.landmarks_to_box(face(on_card()), big)
     assert box is not None
-    for x, y in LANDMARKS:
+    for x, y in on_card():
         assert box.x0 <= x <= box.x1 and box.y0 <= y <= box.y1
-    assert 0 <= box.x0 < box.x1 <= 224 and 0 <= box.y0 < box.y1 <= 224
+    assert 0 <= box.x0 < box.x1 <= 700 and 0 <= box.y0 < box.y1 <= 500
     # near an edge the box is clamped, never negative or past the image
-    edge = locator.landmarks_to_box(face(scaled(1.0, dx=-70)), SHAPE)
-    assert edge is not None and edge.x0 == 0 and edge.x1 <= 224
+    edge = locator.landmarks_to_box(face(on_card(scaled(1.0, dx=-400))), big)
+    assert edge is not None and edge.x0 == 0 and edge.x1 <= 700
+
+
+def test_c11_implausible_proportions_and_oversized_boxes_give_no_box() -> None:
+    wide = np.array([[0, 100], [220, 100], [110, 120], [60, 130], [160, 130]], dtype=np.float32)
+    assert locator.landmarks_to_box(DetectedFace(wide, 0.99), SHAPE) is None  # drop/eye = 0.14
+    long = np.array([[90, 10], [130, 10], [110, 100], [95, 200], [125, 200]], dtype=np.float32)
+    assert locator.landmarks_to_box(DetectedFace(long, 0.99), SHAPE) is None  # drop/eye = 4.75
+    # a plausible face that fills the image is not a portrait on a card: refuse it
+    assert locator.landmarks_to_box(face(), (230, 190, 3)) is None
 
 
 @pytest.mark.parametrize(
@@ -73,11 +83,13 @@ def test_c11_one_face_gives_one_box_and_low_confidence_is_dropped() -> None:
     )
 
 
-def test_c11_a_small_ghost_portrait_is_ignored_but_two_comparable_faces_stay_two() -> None:
+def test_c11_a_small_ghost_portrait_is_ignored_but_two_comparable_faces_refuse() -> None:
     ghost = face(scaled(0.3, dx=60))
     assert len(locator.DetectorLocator(FakeDetector([face(), ghost]), CFG).locate(img())) == 1
     second = face(scaled(0.9, dx=-40))
-    assert len(locator.DetectorLocator(FakeDetector([face(), second]), CFG).locate(img())) == 2
+    with pytest.raises(intake.IntakeError) as ei:
+        locator.DetectorLocator(FakeDetector([face(), second]), CFG).locate(img())
+    assert ei.value.code == "MULTIPLE_FACES"
 
 
 def write_id(folder: Path, name: str = "id.png") -> Path:
@@ -91,26 +103,49 @@ def write_id(folder: Path, name: str = "id.png") -> Path:
     return p
 
 
+def upside_down() -> np.ndarray:
+    """Comparable size but mouth above eyes: too odd to box, still a second face."""
+    flipped = LANDMARKS.copy()
+    flipped[:, 1] = 224 - flipped[:, 1]
+    return np.asarray(flipped + np.array([40.0, 120.0], dtype=np.float32), dtype=np.float32)
+
+
 def on_card(landmarks: np.ndarray | None = None) -> np.ndarray:
     base = LANDMARKS if landmarks is None else landmarks
     return np.asarray(base + np.array([330.0, 120.0], dtype=np.float32), dtype=np.float32)
 
 
-def test_c11_intake_with_the_detector_locator_keeps_only_the_portrait_and_deletes_the_original(
+def test_c11_the_kept_png_is_the_face_box_plus_a_thin_margin_and_stays_inside_the_pasted_tile(
     tmp_path: Path,
 ) -> None:
     src = write_id(tmp_path)
+    card = np.asarray(PILImage.open(src).convert("RGB"), dtype=np.uint8).copy()
     dest = tmp_path / "out" / "portrait.png"
-    loc = locator.DetectorLocator(FakeDetector([face(on_card())]), CFG)
-    intake.intake_id_photo(src, dest, loc)
+    lm = on_card()
+    loc = locator.DetectorLocator(FakeDetector([face(lm)]), CFG)
+    intake.intake_id_photo(src, dest, loc, locator.LOCATOR_MARGIN)
     assert not src.exists() and dest.exists()
-    with PILImage.open(dest) as im:
-        assert im.width < 350 and im.height < 400  # the card is 700 x 500: the portrait only
+    kept = np.asarray(PILImage.open(dest).convert("RGB"), dtype=np.uint8)
+    box = locator.landmarks_to_box(face(lm), card.shape)
+    assert box is not None
+    expected = intake.crop_portrait(card, box, locator.LOCATOR_MARGIN)
+    assert kept.shape == expected.shape and np.array_equal(kept, expected)
+    # the pasted 224 px tile spans x 330..554, y 120..344: the crop may not run past it by more
+    # than a few pixels, so none of the grey card around it (where printed text would sit) is kept
+    h, w = kept.shape[:2]
+    assert w <= 224 + 8 and h <= 224 + 8
+    grey = np.all(kept == 180, axis=2)
+    assert grey.mean() < 0.15  # almost nothing but the face tile
 
 
 @pytest.mark.parametrize(
     ("faces", "code"),
-    [([], "NO_FACE"), ([face(on_card()), face(on_card(scaled(0.9, dx=-40)))], "MULTIPLE_FACES")],
+    [
+        ([], "NO_FACE"),
+        ([face(on_card()), face(on_card(scaled(0.9, dx=-40)))], "MULTIPLE_FACES"),
+        # a comparable second face with odd landmarks still refuses (the matcher would too)
+        ([face(on_card()), face(upside_down())], "MULTIPLE_FACES"),
+    ],
 )
 def test_c11_failures_still_delete_the_original_and_write_nothing(
     tmp_path: Path, faces: list[DetectedFace], code: str
@@ -155,3 +190,62 @@ def test_c22_crop_cli_refuses_a_landmarker_outside_the_cache_folder(
         "FACE_LANDMARKER_MODEL_PATH", str(tmp_path / "models" / "face_landmarker.task")
     )
     crop_id._check_landmarker_location()  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    "error", [RuntimeError("SECRET-detail"), MemoryError(), OSError("SECRET-path"), IndexError()]
+)
+def test_c11_any_detector_failure_is_a_fixed_code_and_the_original_is_still_deleted(
+    tmp_path: Path, error: Exception, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def boom(_img: object) -> list[DetectedFace]:
+        raise error
+
+    src = write_id(tmp_path)
+    dest = tmp_path / "p.png"
+    code = crop_id.run(src, dest, locator.DetectorLocator(FakeDetector(boom), CFG))
+    out = capsys.readouterr()
+    assert code == 2 and "DETECTOR_FAILED" in out.err and "SECRET" not in out.err + out.out
+    assert not src.exists() and not dest.exists()
+
+
+def test_c11_an_unexpected_error_in_the_cli_is_a_fixed_code_not_a_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Weird:
+        def locate(self, image: intake.Image) -> list[intake.Box]:
+            raise ValueError("SECRET")
+
+    # ValueError escapes intake (it only maps IntakeError and OSError); the CLI must still be quiet
+    src = write_id(tmp_path)
+    assert crop_id.run(src, tmp_path / "p.png", Weird()) == 2
+    out = capsys.readouterr()
+    assert "UNEXPECTED" in out.err and "SECRET" not in out.err + out.out and not src.exists()
+
+
+def test_c22_symlinks_and_git_trees_are_refused_for_the_landmarker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models = tmp_path / "models"
+    models.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "m.task").write_bytes(b"x")
+    (models / "link.task").symlink_to(outside / "m.task")  # inside the folder, points outside
+    monkeypatch.setattr(crop_id, "MODELS_DIR", models)
+    monkeypatch.setenv("FACE_LANDMARKER_MODEL_PATH", str(models / "link.task"))
+    with pytest.raises(SystemExit):
+        crop_id._check_landmarker_location()  # noqa: SLF001
+    folder_link = tmp_path / "models-link"
+    folder_link.symlink_to(models)
+    monkeypatch.setattr(crop_id, "MODELS_DIR", folder_link)
+    monkeypatch.setenv("FACE_LANDMARKER_MODEL_PATH", str(folder_link / "x.task"))
+    with pytest.raises(SystemExit):
+        crop_id._check_landmarker_location()  # noqa: SLF001
+    repo_models = tmp_path / "repo" / "models"
+    (tmp_path / "repo" / ".git").mkdir(parents=True)
+    repo_models.mkdir()
+    monkeypatch.setattr(crop_id, "MODELS_DIR", repo_models)
+    monkeypatch.setenv("FACE_LANDMARKER_MODEL_PATH", str(repo_models / "m.task"))
+    with pytest.raises(SystemExit):
+        crop_id._check_landmarker_location()  # noqa: SLF001
