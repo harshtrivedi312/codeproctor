@@ -484,7 +484,7 @@ describe('DB-08 app_user role (ADR 0006 sections 7 and 8.8, FR-105, D-35)', { sk
     denied('CREATE TEMP TABLE sneaky (id int)');
   });
 
-  it('app_user holds exactly SELECT, INSERT, UPDATE, DELETE on each table, and SELECT, INSERT on audit_logs', () => {
+  it('app_user holds exactly SELECT, INSERT, UPDATE, DELETE on each table, SELECT, INSERT, UPDATE on sessions, and SELECT, INSERT on audit_logs', () => {
     const grants = new Map(
       asOwner(
         "SELECT c.relname || '|' || string_agg(a.privilege_type, ',' ORDER BY a.privilege_type) FROM pg_class c, aclexplode(c.relacl) a WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p') AND a.grantee = 'app_user'::regrole GROUP BY c.relname",
@@ -500,7 +500,12 @@ describe('DB-08 app_user role (ADR 0006 sections 7 and 8.8, FR-105, D-35)', { sk
     for (const t of tables) {
       assert.equal(
         grants.get(t),
-        t === 'audit_logs' ? 'INSERT,SELECT' : 'DELETE,INSERT,SELECT,UPDATE',
+        t === 'audit_logs'
+          ? 'INSERT,SELECT'
+          : t === 'sessions'
+            ? // ADR 0004 9.3: no session row is ever deleted; retention and erasure only blank columns.
+              'INSERT,SELECT,UPDATE'
+            : 'DELETE,INSERT,SELECT,UPDATE',
         t,
       );
     }
@@ -513,6 +518,11 @@ describe('DB-08 app_user role (ADR 0006 sections 7 and 8.8, FR-105, D-35)', { sk
     denied('ALTER TABLE candidates ADD COLUMN x int');
     denied('TRUNCATE candidates CASCADE');
     denied('CREATE INDEX ON candidates (full_name)');
+  });
+
+  it('ADR 0004 9.3: app_user can neither DELETE nor TRUNCATE sessions (a session row is never removed)', () => {
+    denied('DELETE FROM sessions');
+    denied('TRUNCATE sessions CASCADE');
   });
 
   it('TC-002, ADR 0006: audit_logs is append-only for app_user (INSERT yes; UPDATE, DELETE, TRUNCATE no)', () => {
