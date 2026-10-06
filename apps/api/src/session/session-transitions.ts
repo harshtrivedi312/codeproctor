@@ -25,6 +25,10 @@ export const TRANSITIONS: Readonly<Record<SessionStatus, readonly SessionStatus[
   APPEALED: ['COMPLETED'],
   EXPIRED: [],
   DECLINED: [],
+  // Terminal, no exit (ADR 0004 section 9, ADR 0013 section 5.7). Nothing here moves a session INTO
+  // ERASED: the erasure fence does (SessionStateService.closeIngest, a later step), which keeps or
+  // sets the retention anchor itself. No appeal, review or resume can follow.
+  ERASED: [],
 };
 
 export function isAllowedTransition(from: SessionStatus, to: SessionStatus): boolean {
@@ -47,13 +51,15 @@ export const PRE_START_STATUSES: readonly SessionStatus[] = [
 /** The states in which the test is running (heartbeat, key, question and draft writes). */
 export const LIVE_STATUSES: readonly SessionStatus[] = ['IN_PROGRESS', 'PAUSED'];
 
-/** SUBMITTED or later: the link shows "Already used" (ADR 0002 L-3, TC-021). */
+/** SUBMITTED or later, ERASED included: the link shows "Already used" (ADR 0002 L-3, TC-021). */
 export const USED_STATUSES: readonly SessionStatus[] = [
   'SUBMITTED',
   'GRADED',
   'UNDER_REVIEW',
   'COMPLETED',
   'APPEALED',
+  // An erased session is a used link too: no OTP, no new session (ADR 0002 L-3).
+  'ERASED',
 ];
 
 /** Statuses whose entry stamps `retention_anchor_at` (ADR 0004 R-1, ADR 0002 section 9). */

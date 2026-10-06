@@ -518,6 +518,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         'UNDER_REVIEW',
         'COMPLETED',
         'APPEALED',
+        'ERASED',
       ] as SessionStatus[]) {
         const inv = await invite({ status });
         const sent = mail.otps.length;
@@ -2046,7 +2047,13 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     });
 
     it('Q17: review and outcome statuses read SUBMITTED on the state route, in problem bodies and in the start response; EXPIRED and DECLINED are shown as they are', async () => {
-      for (const status of ['GRADED', 'UNDER_REVIEW', 'COMPLETED', 'APPEALED'] as SessionStatus[]) {
+      for (const status of [
+        'GRADED',
+        'UNDER_REVIEW',
+        'COMPLETED',
+        'APPEALED',
+        'ERASED',
+      ] as SessionStatus[]) {
         const inv = await invite({ status, session: { authEpoch: 1 } });
         const token = tokenFor(inv);
         const state = await authed('get', '', token).expect(200);
@@ -2062,7 +2069,7 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
           sessionStatus: 'SUBMITTED',
         });
         expect(JSON.stringify([state.body, beat.body, key.body, start.body])).not.toMatch(
-          /GRADED|UNDER_REVIEW|COMPLETED|APPEALED/,
+          /GRADED|UNDER_REVIEW|COMPLETED|APPEALED|ERASED/,
         );
       }
       for (const status of ['EXPIRED', 'DECLINED'] as SessionStatus[]) {

@@ -71,7 +71,7 @@ describe('Session state machine table (fsd.md section 3, ADR 0002, C-28)', () =>
   });
 
   it('FR-401, D-17: EXPIRED and DECLINED are terminal; a declined session never continues', () => {
-    expect([...TERMINAL_STATUSES].sort()).toEqual(['DECLINED', 'EXPIRED']);
+    expect([...TERMINAL_STATUSES].sort()).toEqual(['DECLINED', 'ERASED', 'EXPIRED']);
     for (const to of SESSION_STATUSES) {
       expect(isAllowedTransition('DECLINED', to)).toBe(false);
       expect(isAllowedTransition('EXPIRED', to)).toBe(false);
@@ -100,5 +100,16 @@ describe('Session state machine table (fsd.md section 3, ADR 0002, C-28)', () =>
       expect(LIVE_STATUSES).not.toContain(s);
     }
     expect(Object.values(SessionStatus).length).toBe(SESSION_STATUSES.length);
+  });
+
+  it('NFR-05, ADR 0004 section 9: ERASED has no exit and nothing in the table moves a session into it (the erasure fence does, outside this table)', () => {
+    expect(TRANSITIONS.ERASED).toEqual([]);
+    for (const to of SESSION_STATUSES) expect(isAllowedTransition('ERASED', to)).toBe(false);
+    for (const from of SESSION_STATUSES) expect(isAllowedTransition(from, 'ERASED')).toBe(false);
+    expect(SESSION_STATUSES).toContain('ERASED');
+  });
+
+  it('TC-021: an ERASED session is a used link (no OTP, no new session)', () => {
+    expect(USED_STATUSES).toContain('ERASED');
   });
 });
