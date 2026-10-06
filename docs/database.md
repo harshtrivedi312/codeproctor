@@ -540,13 +540,15 @@ CREATE TABLE consents (
   signed_name       text,                     -- full legal name typed by the candidate
   signed_at         timestamptz,              -- server time of signing
   declined_at       timestamptz,              -- server time of declining
+  age_confirmed_at  timestamptz,              -- server time of the 18+ confirmation (C-30, D-55); set at sign, NULL on decline and on rows before C-30
   ip                inet,
   user_agent        text,
   pdf_key           text,                     -- signed PDF in object storage; kept through erasure, deleted with the row at R-9 (3 years)
   pdf_generated_at  timestamptz,
   copy_emailed_at   timestamptz,
   CHECK ((signed_at IS NULL) <> (declined_at IS NULL)),
-  CHECK (signed_at IS NULL OR signed_name IS NOT NULL)
+  CHECK (signed_at IS NULL OR signed_name IS NOT NULL),
+  CONSTRAINT consents_age_confirmed_check CHECK (signed_at IS NULL OR age_confirmed_at IS NOT NULL) NOT VALID  -- enforced for new and updated rows; rows signed before C-30 are not touched (ADR 0008 section 11)
 );
 
 CREATE TABLE identity_checks (

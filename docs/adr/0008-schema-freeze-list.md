@@ -238,3 +238,21 @@ It fails with a clear message if `app_user` is missing. `DATABASE_URL` connects 
 
 - **db-engineer:** DB-02 builds `schema.prisma` from the target DDL and ticks sections 2 to 7. DB-03 does section 8. DB-04 follows the seed amendments in prompts/database.md Step 4. DB-05 builds the scope map (ADR 0006). DB-06 implements the retention and erasure rules in database.md Data rules. DB-08 checks all counts in section 1.
 - **architect:** reviews DB-02 and DB-03 against this list. Any later change needs a new ADR and a forward-only migration (build-plan section 10).
+
+## 11. Deltas after the freeze (2026-10-06)
+
+The target of section 1 stays the freeze of 2026-10-01. These forward-only deltas were decided afterwards. Each has its own ADR or owner decision, and each is in `docs/database.md`. The migrations are Database A's (PRs #91 and #100 and the D-55 migration; `app_user_no_temp` is on main).
+
+| Delta | Source | Change |
+| --- | --- | --- |
+| `session_status` | ADR 0004 section 9 (C-06, D-54) | + value `ERASED`, the terminal status of an erased session. `sessions` rows are never deleted. |
+| `appeal_status` | ADR 0004 section 9 (D-54) | + value `CLOSED_ERASED`. |
+| `audit_logs` | ADR 0004 section 9.4 (D-54) | + partial index `audit_logs_retention_marker_idx` for the "no marker yet" retention check. |
+| Grants | ADR 0004 section 9.5, ADR 0006 section 7.2 (D-54) | `REVOKE DELETE, TRUNCATE ON sessions FROM app_user`. |
+| Grants | FU-DBB-18 (migration `app_user_no_temp`, on main) | `REVOKE TEMPORARY ON DATABASE <current database> FROM PUBLIC`, `REVOKE TEMPORARY, CREATE ... FROM app_user`, and `GRANT TEMPORARY ... TO` the database owner, so `app_user` has no TEMPORARY or CREATE on the database (ADR 0006 section 8.8, DL-26). |
+| `identity_check_status` | ADR 0015 (D-54) | + value `WAIVED`. |
+| `identity_checks` | ADR 0015 (D-54) | + columns `video_check_done`, `video_check_by` (foreign key to `users`, `ON DELETE NO ACTION`), `video_check_at`; + CHECKs `identity_checks_waived_check` and `identity_checks_video_check_check`. |
+| `consents` | C-30, D-55 | + column `age_confirmed_at timestamptz` (NULL on decline and on rows before C-30); + `consents_age_confirmed_check CHECK (signed_at IS NULL OR age_confirmed_at IS NOT NULL) NOT VALID` (an architect detail inside the owner-approved column: enforced for new and updated rows, existing rows untouched). |
+
+Totals against section 1: tables 31 (unchanged); enum types 20 (unchanged; `appeal_status` and `identity_check_status` join `session_status`, `proctor_profile` and `event_type` as changed); CHECK constraints 12 to 15; non-unique indexes 24 to 25 (partial indexes 2 to 3); `ON DELETE NO ACTION` foreign keys 0 to 1 (`identity_checks.video_check_by`); no new triggers. The JSON key `accommodations.identityCheckWaived` and the `retention_anchor_at` rules are not schema changes.
+
