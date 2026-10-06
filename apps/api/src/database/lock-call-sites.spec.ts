@@ -13,6 +13,8 @@ import {
   RETENTION_LOCK_FILE,
   SESSION_PROCESSOR_FILE,
   SESSION_STATE_FILE,
+  SESSION_STATE_CLASS,
+  findClassBody,
   findLockExports,
   findMethod,
   lockCallSiteProblems,
@@ -385,10 +387,19 @@ export class S {
         `${SESSION_STATE_FILE}: no wrapper method lockAnySession with a body found`,
       ]),
     );
-    const property =
-      STATE_TEXT.replace('async lockAnySession(', 'lockAnySessionX(') +
-      '\nconst holder = { lockAnySession: 1 };';
-    expect(state(property)).not.toEqual([]);
+    // The bare-mention rule alone: the wrapper is intact, a second mention of the name is not a definition or a member call.
+    expect(state(STATE_TEXT + '\nconst holder = { lockAnySession: 1 };')).toEqual([
+      `${SESSION_STATE_FILE}: lockAnySession is mentioned other than as its wrapper definition or a member call`,
+    ]);
+    expect(state(STATE_TEXT + '\nconst { lockAnySession } = holder;')).toEqual([
+      `${SESSION_STATE_FILE}: lockAnySession is mentioned other than as its wrapper definition or a member call`,
+    ]);
+    // A renamed method is no wrapper (the bare mention is then the only other finding next to the missing wrapper).
+    expect(state(STATE_TEXT.replace('async lockAnySession(', 'lockAnySessionX('))).toEqual(
+      expect.arrayContaining([
+        `${SESSION_STATE_FILE}: no wrapper method lockAnySession with a body found`,
+      ]),
+    );
   });
 
   it('TC-008 exactly ONE .guardLive( member call (any receiver), inside the brace-matched proctorResume body', () => {
@@ -529,6 +540,316 @@ export class S {
       "// a } in a comment\n      const note = '}{'; const t = `${1}`;\n      const result = await this.guardLive(tx, sessionId);",
     );
     expect(state(text)).toEqual([]);
+  });
+
+  const OTHERS = `${SESSION_STATE_FILE}: database/session-locks is reached other than by an import { name as alias } from statement (a require, import(), import x = require, a side-effect import or a re-export): refused`;
+
+  it.each([
+    ['import x = require(...)', "import coreAll = require('../database/session-locks');"],
+    ['const x = require(...)', "const coreAll = require('../database/session-locks');"],
+    ['let x = require(...)', "let coreAll = require('../database/session-locks.js');"],
+    ['const x = await import(...)', "const coreAll = await import('../database/session-locks');"],
+    [
+      'a typed const = require(...)',
+      "const coreAll: unknown = require('../database/session-locks');",
+    ],
+    ['a template-literal specifier', 'const coreAll = require(`../database/session-locks`);'],
+    ['import(...).then(...)', "void import('../database/session-locks').then(() => undefined);"],
+    ['a side-effect import', "import '../database/session-locks';"],
+  ])(
+    'TC-008 S-1 %s next to the named imports is refused: the core is reached by an import { x as alias } from statement and no other way',
+    (_what, extra) => {
+      const problems = state(STATE_TEXT + '\n' + extra);
+      expect(problems).toEqual([OTHERS]);
+    },
+  );
+
+  it('TC-008 S-1 a re-export of the module from the state file is refused, and so are the cores taken from require instead of an import', () => {
+    expect(state(STATE_TEXT + "\nexport { guardLive } from '../database/session-locks';")).toEqual(
+      expect.arrayContaining([OTHERS]),
+    );
+    expect(
+      state(STATE_TEXT + "\nconst f = require('../database/session-locks').guardLive;"),
+    ).toEqual(expect.arrayContaining([OTHERS]));
+    // No import statement of the module at all: the cores come from a destructured require.
+    const viaRequire = STATE_TEXT.replace(/^import \{[^\n]*session-locks';\n/, '').replace(
+      /^import type [^\n]*\n/m,
+      "const { guardLive: coreGuardLive, lockAnySession: coreLockAnySession, lockForAccommodation: coreLockForAccommodation } = require('../database/session-locks');\n",
+    );
+    const problems = state(viaRequire);
+    expect(problems).toContain(OTHERS);
+    for (const name of LOCK_NAMES) {
+      expect(problems).toContain(
+        `${SESSION_STATE_FILE}: the core ${name} is not imported from database/session-locks under an alias`,
+      );
+    }
+  });
+
+  it('TC-008 S-1 a specifier of another module, or the type-only import of the core, is not a finding', () => {
+    expect(
+      state(STATE_TEXT + "\nconst x = require('../database/other');\nvoid import('./elsewhere');"),
+    ).toEqual([]);
+    expect(
+      state(
+        STATE_TEXT.replace(
+          "import type { SessionLockTx } from '../database/session-locks';",
+          "import type { SessionLockTx } from '../database/session-locks.js';",
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  // ---- N2: a thin wrapper, nothing else ----------------------------------------------------------------------------
+
+  const SHAPE = (name: string): string =>
+    `${SESSION_STATE_FILE}: the ${name} wrapper is not exactly "return <alias>(<param1>, <param2>);": a thin wrapper holds nothing else`;
+
+  it.each([
+    [
+      'a closure stored on this instead of the call',
+      'this.leak = (a: Tx, b: string) => coreLockAnySession(a, b);\n    return 1;',
+    ],
+    [
+      'a statement before the return',
+      'this.audit(sessionId);\n    return coreLockAnySession(tx, sessionId);',
+    ],
+    [
+      'a second statement after the call',
+      'const r = await coreLockAnySession(tx, sessionId);\n    this.seen = r;\n    return r;',
+    ],
+    ['the arguments swapped', 'return coreLockAnySession(sessionId, tx);'],
+    ['an extra argument', 'return coreLockAnySession(tx, sessionId, true);'],
+    ['one argument only', 'return coreLockAnySession(tx);'],
+    ['a literal argument', "return coreLockAnySession(tx, 'x');"],
+    [
+      'a chained call on the result',
+      'return coreLockAnySession(tx, sessionId).then((status) => status);',
+    ],
+    ['a condition around the call', 'return tx ? coreLockAnySession(tx, sessionId) : undefined;'],
+    ['no return', 'await coreLockAnySession(tx, sessionId);'],
+  ])(
+    'TC-008 N2 a lockAnySession wrapper with %s fails: the body must be exactly return <alias>(<param1>, <param2>);',
+    (_what, body) => {
+      const text = STATE_TEXT.replace('return coreLockAnySession(tx, sessionId);', body);
+      expect(state(text)).toEqual([SHAPE('lockAnySession')]);
+    },
+  );
+
+  it.each([
+    [
+      'one parameter',
+      'async lockAnySession(tx: SessionLockTx) {\n    return coreLockAnySession(tx, tx);',
+    ],
+    [
+      'three parameters',
+      'async lockAnySession(tx: SessionLockTx, sessionId: string, extra: boolean) {\n    return coreLockAnySession(tx, sessionId);',
+    ],
+    [
+      'a destructured parameter',
+      'async lockAnySession({ tx }: { tx: SessionLockTx }, sessionId: string) {\n    return coreLockAnySession(tx, sessionId);',
+    ],
+  ])('TC-008 N2 a lockAnySession wrapper with %s fails', (_what, header) => {
+    const text = STATE_TEXT.replace(
+      'async lockAnySession(tx: SessionLockTx, sessionId: string) {\n    return coreLockAnySession(tx, sessionId);',
+      header,
+    );
+    expect(state(text)).toEqual([SHAPE('lockAnySession')]);
+  });
+
+  it.each([
+    ['an await', 'return await coreLockAnySession(tx, sessionId);'],
+    ['no semicolon', 'return coreLockAnySession(tx, sessionId)'],
+    [
+      'a line break per argument and a trailing comma',
+      'return coreLockAnySession(\n      tx,\n      sessionId,\n    );',
+    ],
+  ])('TC-008 N2 a lockAnySession wrapper with %s is still the thin wrapper', (_what, body) => {
+    expect(state(STATE_TEXT.replace('return coreLockAnySession(tx, sessionId);', body))).toEqual(
+      [],
+    );
+  });
+
+  it('TC-008 N2 a comment in the wrapper body is not part of the shape (the comments are stripped first)', () => {
+    const text = STATE_TEXT.replace(
+      'return coreLockAnySession(tx, sessionId);',
+      '// the lock\n    return coreLockAnySession(tx, sessionId); // done',
+    );
+    expect(problemsWith(SESSION_STATE_FILE, text)).toEqual([]);
+  });
+
+  it('TC-008 N2 other parameter names are fine when both are handed on, in order', () => {
+    const text = STATE_TEXT.replace(
+      'async lockForAccommodation(tx: SessionLockTx, sessionId: string) {\n    return coreLockForAccommodation(tx, sessionId);',
+      'async lockForAccommodation(client: SessionLockTx, id: string): Promise<SessionStatus> {\n    return coreLockForAccommodation(client, id);',
+    );
+    expect(state(text)).toEqual([]);
+  });
+
+  // ---- N3: proctorResume is the one door to guardLive; the wrappers are looked up in the SessionStateService class ------
+
+  it.each([
+    ['this', 'await this.proctorResume(sid);'],
+    ['self', 'await self.proctorResume(sid);'],
+    ['this?', 'await this?.proctorResume(sid);'],
+    ['a cast receiver', 'await (this as unknown as S).proctorResume(sid);'],
+    ['another object', 'await this.helper.proctorResume(sid);'],
+    ['a line break after the dot', 'await this.\n      proctorResume(sid);'],
+    ['an optional call', 'await this.proctorResume?.(sid);'],
+    ['.call', 'await this.proctorResume.call(this, sid);'],
+    ['.apply', 'await this.proctorResume.apply(this, [sid]);'],
+    ['.bind', 'const f = this.proctorResume.bind(this);'],
+  ])(
+    'TC-008 N3 a .proctorResume( call with %s in another state method fails: none is allowed in the file',
+    (_what, body) => {
+      expect(state(withMethod(body))).toEqual([
+        `${SESSION_STATE_FILE}: 1 .proctorResume( member calls in the state file (any receiver), none are allowed: the controller calls it from outside the file`,
+      ]);
+    },
+  );
+
+  it('TC-008 N3 the proctorResume definition and a plain mention of its name are not calls', () => {
+    expect(state(STATE_TEXT)).toEqual([]);
+    expect(
+      state(
+        STATE_TEXT.replace('return result', "const proctorResumeLabel = 'x';\n      return result"),
+      ),
+    ).toEqual([]);
+  });
+
+  it('TC-008 N3 a SECOND class with a method named like a wrapper cannot supply the wrapper: the lookup is inside the SessionStateService class', () => {
+    const decoy = `class Decoy {\n  async guardLive(tx: Tx, sid: string) {\n    return coreGuardLive(tx, sid);\n  }\n}\n\n`;
+    const withoutWrapper = STATE_TEXT.replace('return coreGuardLive(tx, sessionId);', 'return 1;');
+    const text = withoutWrapper.replace(
+      'export class SessionStateService',
+      `${decoy}export class SessionStateService`,
+    );
+    expect(state(text)).toEqual([
+      `${SESSION_STATE_FILE}: the core guardLive is called outside the guardLive wrapper method`,
+    ]);
+  });
+
+  it('TC-008 N3 a SECOND class with a proctorResume method cannot hold the guardLive call', () => {
+    const decoy = `class Decoy {\n  async proctorResume(tx: Tx, sid: string) {\n    return this.guardLive(tx, sid);\n  }\n}\n\n`;
+    const text = STATE_TEXT.replace(
+      'const result = await this.guardLive(tx, sessionId);',
+      "const result = 'ERASED';",
+    ).replace('export class SessionStateService', `${decoy}export class SessionStateService`);
+    expect(state(text)).toEqual([
+      `${SESSION_STATE_FILE}: the .guardLive( call is not inside proctorResume`,
+    ]);
+  });
+
+  it('TC-008 N3 a state file with no SessionStateService class fails, and a variable class is not the class', () => {
+    expect(state(STATE_TEXT.replace('class SessionStateService', 'class StateService'))).toEqual(
+      expect.arrayContaining([
+        `${SESSION_STATE_FILE}: no class ${SESSION_STATE_CLASS} with a body found`,
+      ]),
+    );
+    expect(
+      state(
+        STATE_TEXT.replace(
+          'export class SessionStateService',
+          'export const SessionStateService = class',
+        ),
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        `${SESSION_STATE_FILE}: no class ${SESSION_STATE_CLASS} with a body found`,
+      ]),
+    );
+  });
+
+  // ---- N6: ways to reach a wrapper that are not a plain member call ---------------------------------------------------
+
+  it.each([
+    [
+      'a destructuring of this',
+      'const { lockAnySession } = this;\n    await lockAnySession(tx, sid);',
+    ],
+    ['a bare call', 'await lockAnySession(tx, sid);'],
+  ])(
+    'TC-008 N6 %s fails: a bare mention of a lock name is neither its definition nor a member call',
+    (_what, body) => {
+      expect(state(withMethod(body))).toEqual([
+        `${SESSION_STATE_FILE}: lockAnySession is mentioned other than as its wrapper definition or a member call`,
+      ]);
+    },
+  );
+
+  it.each([
+    [
+      'Reflect.apply(this.lockAnySession, ...)',
+      'await Reflect.apply(this.lockAnySession, this, [tx, sid]);',
+    ],
+    [
+      'a function held and called with .call',
+      'const f = this.lockAnySession;\n    await f.call(this, tx, sid);',
+    ],
+    [
+      'a function held and called with .apply',
+      'const f = this.lockAnySession;\n    await f.apply(this, [tx, sid]);',
+    ],
+    [
+      'a function put in a list',
+      'const fs = [this.lockAnySession];\n    await fs[0]?.call(this, tx, sid);',
+    ],
+    ['a function handed to another call', 'register(this.lockAnySession);'],
+  ])(
+    'TC-008 N6 %s fails: a reference to a wrapper that is not a call is refused',
+    (_what, body) => {
+      expect(state(withMethod(body))).toEqual([
+        `${SESSION_STATE_FILE}: lockAnySession is referenced as a property, not called`,
+      ]);
+    },
+  );
+
+  it('TC-008 N6 an arrow-property caller of a wrapper fails: it is a member call in the state file', () => {
+    const text = STATE_TEXT.replace(
+      '  async proctorResume(',
+      '  private readonly run = (tx: Tx, sid: string) => this.lockAnySession(tx, sid);\n\n  async proctorResume(',
+    );
+    expect(state(text)).toEqual([
+      `${SESSION_STATE_FILE}: 1 .lockAnySession( member calls in the state file (any receiver), none are allowed`,
+    ]);
+  });
+
+  it('TC-008 N6 an arrow-property WRAPPER is no wrapper: the method with a body is required, and the name is a bare mention', () => {
+    const text = STATE_TEXT.replace(
+      / {2}async lockAnySession[\s\S]*?\n {2}}\n/,
+      '  lockAnySession = (tx: SessionLockTx, sessionId: string) => coreLockAnySession(tx, sessionId);\n',
+    );
+    expect(state(text)).toEqual([
+      `${SESSION_STATE_FILE}: no wrapper method lockAnySession with a body found`,
+      `${SESSION_STATE_FILE}: lockAnySession is mentioned other than as its wrapper definition or a member call`,
+    ]);
+  });
+
+  it('TC-008 N6 a SECOND class that calls a core fails: the core is called once, inside its own wrapper', () => {
+    const text =
+      STATE_TEXT +
+      '\nclass Other {\n  run(tx: Tx, sid: string) {\n    return coreGuardLive(tx, sid);\n  }\n}\n';
+    expect(state(text)).toEqual([
+      `${SESSION_STATE_FILE}: the core guardLive is called 2 times, exactly one call is allowed, inside the guardLive wrapper`,
+    ]);
+  });
+
+  it('TC-008 N7 a lock name in a string or a log message fails like code (fail closed), a comment does not', () => {
+    expect(
+      problemsWith(SESSION_STATE_FILE, withMethod("this.logger.log('guardLive done');")),
+    ).toEqual([
+      `${SESSION_STATE_FILE}: guardLive is mentioned other than as its wrapper definition or a member call`,
+    ]);
+    expect(
+      problemsWith(SESSION_STATE_FILE, withMethod("this.logger.log('lockAnySession done');")),
+    ).toEqual([
+      `${SESSION_STATE_FILE}: lockAnySession is mentioned other than as its wrapper definition or a member call`,
+    ]);
+    expect(
+      problemsWith(
+        SESSION_STATE_FILE,
+        withMethod('// guardLive and lockAnySession are wrapped above\n    return 1;'),
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -773,6 +1094,86 @@ describe('S-B, S3, S4: no export of a lock, an alias, or a wrapper of one (FR-70
     expect(exported("import * as other from '../database/other';\nexport { other };")).toEqual([]);
   });
 
+  it("TC-008 N4 TypeScript's `export =` form is found, for a name, an object, an array and an alias", () => {
+    for (const name of ['guardLive', 'lockForAccommodation', 'lockAnySession']) {
+      for (const text of [
+        `export = ${name};`,
+        `export=${name};`,
+        `export = { ${name} };`,
+        `export = [${name}];`,
+        `const g = ${name};\nexport = g;`,
+        `const locks = { ${name} };\nexport = locks;`,
+      ]) {
+        expect({ text, found: exported(text).length > 0 }).toEqual({ text, found: true });
+      }
+    }
+    expect(exported('export = guardLive;')).toEqual([`${SESSION_STATE_FILE}: exports guardLive`]);
+    expect(exported('export = other;')).toEqual([]);
+  });
+
+  describe('S-1: the core reached by import x = require, require() or import() is the whole core under one name (FR-704, NFR-04, TC-008)', () => {
+    const REACHES = `${SESSION_STATE_FILE}: reaches database/session-locks other than by an import { name } from statement`;
+    const WHOLE = `${SESSION_STATE_FILE}: imports database/session-locks as a namespace`;
+
+    it.each([
+      ['import x = require', "import core = require('../database/session-locks');"],
+      ['const x = require', "const core = require('../database/session-locks');"],
+      ['let x = require', "let core = require('../database/session-locks');"],
+      ['var x = require, double quotes', 'var core = require("../database/session-locks");'],
+      ['a typed const = require', "const core: unknown = require('../database/session-locks');"],
+      ['const x = await import', "const core = await import('../database/session-locks');"],
+      ['const x = import', "const core = import('../database/session-locks');"],
+      ['a template-literal specifier', 'const core = await import(`../database/session-locks`);'],
+      ['a specifier with an extension', "const core = require('../database/session-locks.js');"],
+    ])(
+      'TC-008 S-1 %s is refused: its name is an alias, and the module is reached other than by a named import',
+      (_what, handle) => {
+        expect(exported(handle)).toEqual([REACHES, WHOLE].sort());
+        for (const use of [
+          'export { core };',
+          'export default core;',
+          'export const c = core;',
+          'export const locks = { core };',
+          'const held = core;\nexport { held };',
+          'module.exports = core;',
+          'export = core;',
+        ]) {
+          const found = exported(`${handle}\n${use}`);
+          expect({
+            use,
+            refused: found.includes(WHOLE),
+            exports: found.some((l) => l.includes(' exports ')),
+          }).toEqual({
+            use,
+            refused: true,
+            exports: true,
+          });
+        }
+      },
+    );
+
+    it('TC-008 S-1 a file that only requires or imports() the module, with no handle and no lock name, is not skipped', () => {
+      expect(exported("void import('../database/session-locks');")).toEqual([REACHES]);
+      expect(exported("require('../database/session-locks');")).toEqual([REACHES]);
+      expect(exported("export const g = require('../database/session-locks').guardLive;")).toEqual(
+        expect.arrayContaining([REACHES]),
+      );
+      expect(exported("import '../database/session-locks';")).toEqual([REACHES]);
+      expect(exported("export * from '../database/session-locks';")).toEqual([REACHES]);
+    });
+
+    it('TC-008 S-1 a named import of the module, and the same forms for another module, are not findings', () => {
+      expect(exported("import { SessionLockTx } from '../database/session-locks';")).toEqual([]);
+      expect(
+        exported("import type { SessionLockTx } from '../database/session-locks.js';"),
+      ).toEqual([]);
+      expect(exported("const other = require('../database/other');\nexport { other };")).toEqual(
+        [],
+      );
+      expect(exported("const m = await import('./session-locks-helper');")).toEqual([]);
+    });
+  });
+
   it('TC-008 S3 FAIL-SAFE: a string that spells an export is flagged like code (strings are not stripped), a comment is not', () => {
     expect(exported("export const m = 'export { guardLive }';")).toEqual([
       `${SESSION_STATE_FILE}: exports guardLive`,
@@ -820,5 +1221,51 @@ describe('the text tools: brace matching and method spans (NFR-04, TC-008)', () 
     const bar = findMethod(code, 'bar');
     expect(code.slice((bar?.bodyStart as number) + 1, bar?.bodyEnd)).toContain('return x');
     expect(findMethod(code, 'baz')).toBeUndefined();
+  });
+
+  it('TC-008 N3 findClassBody finds a declared class (export, default, abstract, generics, extends and implements), not a variable class or a longer name', () => {
+    for (const header of [
+      'class A',
+      'export class A',
+      'export default class A',
+      'export abstract class A',
+      'export class A<T extends { x: 1 }> extends B<{ y: 2 }> implements C, D',
+      '@Injectable()\nexport class A',
+    ]) {
+      const code = `${header} {\n  m() {\n    return { a: 1 };\n  }\n}\nconst tail = 1;\n`;
+      const body = findClassBody(code, 'A');
+      expect({
+        header,
+        body: body === undefined ? undefined : code.slice(body.bodyStart, body.bodyEnd + 1),
+      }).toEqual({
+        header,
+        body: '{\n  m() {\n    return { a: 1 };\n  }\n}',
+      });
+    }
+    expect(findClassBody('export const A = class {\n  m() {}\n};', 'A')).toBeUndefined();
+    expect(findClassBody('class AB {\n  m() {}\n}', 'A')).toBeUndefined();
+    expect(findClassBody('class A;', 'A')).toBeUndefined();
+    expect(findClassBody('class A {\n  m() {\n', 'A')).toBeUndefined();
+  });
+
+  it('TC-008 N3 findMethod within a class body ignores a method of the same name in another class', () => {
+    const code = `class First {\n  run() {\n    return 1;\n  }\n}\n\nclass Second {\n  run() {\n    return 2;\n  }\n}\n`;
+    const first = findMethod(code, 'run');
+    expect(code.slice((first?.bodyStart as number) + 1, first?.bodyEnd)).toContain('return 1');
+    const body = findClassBody(code, 'Second') as { bodyStart: number; bodyEnd: number };
+    const second = findMethod(code, 'run', body);
+    expect(code.slice((second?.bodyStart as number) + 1, second?.bodyEnd)).toContain('return 2');
+    expect(findMethod(code, 'missing', body)).toBeUndefined();
+    const only = findClassBody(code, 'First') as { bodyStart: number; bodyEnd: number };
+    expect(
+      findMethod(code.replace('run() {\n    return 1', 'other() {\n    return 1'), 'run', only),
+    ).toBeUndefined();
+  });
+
+  it('TC-008 N2 findMethod reports the parameter parentheses', () => {
+    const code =
+      'class A {\n  async m(a: number, b: string): Promise<void> {\n    return;\n  }\n}\n';
+    const m = findMethod(code, 'm');
+    expect(code.slice((m?.openParen as number) + 1, m?.closeParen)).toBe('a: number, b: string');
   });
 });

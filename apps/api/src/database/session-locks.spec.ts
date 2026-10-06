@@ -44,7 +44,7 @@ import {
   updates,
 } from './testing/session-lock-fakes';
 
-describe('the module surface (S1 of the review of #208): the three locks and nothing else that locks', () => {
+describe('the module surface (S1 of the review of #208): the three locks and nothing else that locks: NFR-04, TC-008', () => {
   it('TC-008 the exports are exactly the three locks, erasedStatusOf and MAX_LOCK_ATTEMPTS: no guardLive without the ERASED stop', () => {
     expect(Object.keys(sessionLocks).sort()).toEqual([
       'MAX_LOCK_ATTEMPTS',
@@ -201,7 +201,7 @@ describe.each(ANY_STATUS_LOCKS)(
   },
 );
 
-describe('each lock throws the retry error of its caller (ADR 0013 section 5.7, ADR 0015 section 6)', () => {
+describe('each lock throws the retry error of its caller (ADR 0013 section 5.7, ADR 0015 section 6): FR-704, NFR-05, TC-008', () => {
   const lost = () => fakeTx(moving(['OPENED', 'CONSENTED', 'VERIFIED', 'IN_PROGRESS'])).tx;
 
   it('TC-008 lockAnySession fails a job with SessionLockRetryError, never a 409 error; lockForAccommodation the reverse', async () => {
@@ -438,7 +438,7 @@ describe('nesting: the STAFF and plain-org split is advisory until the ADR 0006 
   });
 });
 
-describe('the lock needs a transaction client, not the client itself (ADR 0013 section 5.7)', () => {
+describe('the lock needs a transaction client, not the client itself (ADR 0013 section 5.7): NFR-04, TC-008', () => {
   /**
    * The shape of `prisma.client`: the two calls, and the connection methods that Prisma removes from an
    * interactive transaction client (`$transaction` is no discriminator: Prisma 7 leaves it on `tx`).
@@ -525,7 +525,7 @@ describe('the lock needs a transaction client, not the client itself (ADR 0013 s
   });
 });
 
-describe('the three errors (ADR 0013 section 5.7, ADR 0015 section 6)', () => {
+describe('the three errors (ADR 0013 section 5.7, ADR 0015 section 6): FR-704, NFR-05, TC-008', () => {
   it('TC-008 each has its own name and a fixed message, and is a plain Error, not an OrgScopeError', () => {
     for (const [error, name] of [
       [new SessionNotFoundError(), 'SessionNotFoundError'],
