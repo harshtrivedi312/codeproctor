@@ -41,6 +41,12 @@ import { TestStartService } from './test-start.service';
     // BE-09: the real S3-compatible store (StorageService extends the port).
     { provide: ObjectStoragePort, useExisting: StorageService },
   ],
-  exports: [CandidateTokenService, SessionRateLimiter, CandidateMailPort, ObjectStoragePort],
+  exports: [
+    CandidateTokenService,
+    CandidateScope,
+    SessionRateLimiter,
+    CandidateMailPort,
+    ObjectStoragePort,
+  ],
 })
 export class CandidateModule {}

@@ -18,7 +18,6 @@ import {
 import { Candidate, CandidateScoped } from '../candidate/candidate.decorators';
 import type { CandidateContext } from '../candidate/candidate.types';
 import { SessionRateLimiter } from '../candidate/session-rate-limiter';
-import { CandidateRoute } from '../common/auth/candidate-route.decorator';
 import {
   AlreadyUploadedDto,
   MediaConfirmDto,
@@ -32,7 +31,6 @@ import { MediaService } from './media.service';
 const NO_STORE = 'no-store';
 
 @ApiTags('candidate')
-@CandidateScoped()
 @Controller('candidate/session/media')
 export class MediaCandidateController {
   constructor(
@@ -41,7 +39,7 @@ export class MediaCandidateController {
   ) {}
 
   @Post('presign')
-  @CandidateRoute('candidate_media:presign')
+  @CandidateScoped('candidate_media:presign')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)
   @ApiOperation({
@@ -91,7 +89,7 @@ export class MediaCandidateController {
   }
 
   @Post('confirm')
-  @CandidateRoute('candidate_media:presign')
+  @CandidateScoped('candidate_media:presign')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)
   @ApiOperation({
