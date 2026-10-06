@@ -330,7 +330,7 @@ describe('a device granted late writes nothing after a purge or a finish (candid
     expect(seen.slice(before).some((q) => /media\/(presign|confirm)/.test(q.url))).toBe(false);
   });
 
-  it('FR-701: the same after finish(): a microphone granted during the finish leaves nothing on disk', async () => {
+  it('FR-701: a camera granted after finish() has ended leaves nothing on disk', async () => {
     const devices = setupDevices({ deferred: true });
     await startedSession();
     const store = new MemoryStore();
@@ -376,10 +376,80 @@ describe('a device granted late writes nothing after a purge or a finish (candid
     await c.init();
     const starting = c.startRecorders();
     await waitFor(() => expect(devices.getUserMedia).toHaveBeenCalledTimes(1));
+    const seen = recordRequests();
     await c.stop();
     devices.grantUser();
     await starting;
     expect(devices.userStreams[0]?.stops).toHaveBeenCalled();
+    // The chunk the late recorder flushed is still in the store for the next load, and nothing
+    // was sent for it.
+    expect(
+      [...store.data.keys()].some((k) => k.startsWith(`${STORES.chunks}\u0000${SID}:WEBCAM`)),
+    ).toBe(true);
+    expect(seen.some((q) => /media\/(presign|confirm)/.test(q.url))).toBe(false);
+  });
+});
+
+function confirmedChunks(session: object): Record<string, number> {
+  return (session as { confirmedChunks: Record<string, number> }).confirmedChunks;
+}
+
+describe('the real final evidence survives a late device answer during finish (FR-505, ADR 0013 5.5)', () => {
+  // A slow presign that then falls through to the mock's own handler (which records the chunk, so
+  // the confirm that follows finds it).
+  const slowPresign = () =>
+    http.post(`${cand}/session/media/presign`, async () => {
+      await delay(250);
+      return undefined;
+    });
+
+  async function finishWith(settle: 'grant' | 'deny') {
+    const devices = setupDevices({ deferUser: true });
+    const session = await startedSession();
+    server.use(slowPresign());
+    const store = new MemoryStore();
+    const c = controllerFor(store, { finishDrainMs: 5000 });
+    await c.init();
+    await c.shareScreen(); // the screen is recording
+    const starting = c.startRecorders(); // the camera prompt is still open
+    await waitFor(() => expect(devices.getUserMedia).toHaveBeenCalledTimes(1));
+    const finishing = c.finish();
+    await wait(60); // inside the drain: the screen's final chunk is waiting on the slow presign
+    if (settle === 'grant') devices.grantUser();
+    else devices.denyUser();
+    await Promise.all([finishing, starting]);
+    return { devices, session, store };
+  }
+
+  it('FR-505: a camera granted mid-drain does not destroy the screen final chunk, and nothing is left on disk', async () => {
+    const { session, store } = await finishWith('grant');
+    expect(confirmedChunks(session).SCREEN ?? 0).toBeGreaterThanOrEqual(1);
+    expect(store.count(STORES.chunks)).toBe(0);
+    expect([...store.data.keys()].some((k) => k.includes(`${SID}:segment:`))).toBe(false);
+  });
+
+  it('FR-505: a camera DENIED mid-drain changes nothing: the final chunk is uploaded, nothing is purged early', async () => {
+    const { session, store } = await finishWith('deny');
+    expect(confirmedChunks(session).SCREEN ?? 0).toBeGreaterThanOrEqual(1);
+    expect(store.count(STORES.chunks)).toBe(0);
+  });
+
+  it('FR-505 ADR 0013 5.5: a normal finish presigns and confirms the final screen, webcam and audio chunks', async () => {
+    const devices = setupDevices();
+    const session = await startedSession();
+    server.use(slowPresign());
+    const store = new MemoryStore();
+    const c = controllerFor(store, { finishDrainMs: 5000 });
+    await c.init();
+    await c.shareScreen();
+    await c.startRecorders();
+    expect(devices.recorders.length).toBe(3);
+    await c.finish();
+    const confirmed = confirmedChunks(session);
+    expect(confirmed.SCREEN ?? 0).toBeGreaterThanOrEqual(1);
+    expect(confirmed.WEBCAM ?? 0).toBeGreaterThanOrEqual(1);
+    expect(confirmed.AUDIO ?? 0).toBeGreaterThanOrEqual(1);
+    expect(store.count(STORES.chunks)).toBe(0);
   });
 });
 

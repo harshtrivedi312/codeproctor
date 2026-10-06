@@ -63,12 +63,15 @@ export function setupDevices(
     deny?: 'camera' | 'all';
     /** Resolve the display and user media only when the test says so (late grants). */
     deferred?: boolean;
+    /** Only the camera and microphone wait (the screen share is granted at once). */
+    deferUser?: boolean;
   } = {},
-): Devices & { grantDisplay: () => void; grantUser: () => void } {
+): Devices & { grantDisplay: () => void; grantUser: () => void; denyUser: () => void } {
   const display = fakeStream({ displaySurface: 'monitor' });
   const userStreams: ReturnType<typeof fakeStream>[] = [];
   let grantDisplay: () => void = () => undefined;
   let grantUser: () => void = () => undefined;
+  let denyUser: () => void = () => undefined;
   const getDisplayMedia = vi.fn(() =>
     options.deferred
       ? new Promise<MediaStream>((resolve) => {
@@ -80,9 +83,10 @@ export function setupDevices(
     if (options.deny) return Promise.reject(new DOMException('no', 'NotAllowedError'));
     const s = fakeStream();
     userStreams.push(s);
-    return options.deferred
-      ? new Promise<MediaStream>((resolve) => {
+    return options.deferred || options.deferUser
+      ? new Promise<MediaStream>((resolve, reject) => {
           grantUser = () => resolve(s.stream);
+          denyUser = () => reject(new DOMException('no', 'NotAllowedError'));
         })
       : Promise.resolve(s.stream);
   });
@@ -100,6 +104,7 @@ export function setupDevices(
     userStreams,
     grantDisplay: () => grantDisplay(),
     grantUser: () => grantUser(),
+    denyUser: () => denyUser(),
   };
 }
 

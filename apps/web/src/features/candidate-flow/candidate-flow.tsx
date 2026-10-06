@@ -43,6 +43,9 @@ import type { LinkView, SessionTokenResponse } from './wire';
  * link again and enters a new code (ADR 0002). Progress is the server's session status. That the
  * address bar and history hold no token is checked in a real browser (FU-FEB-23), not here.
  */
+/** The flow that is mounted now. Credentials are module-wide, so only it may clear them. */
+let activeFlow: symbol | null = null;
+
 export interface FlowOverrides {
   checker?: SystemChecker;
   identity?: Partial<IdentityDeps>;
@@ -122,20 +125,36 @@ export function CandidateFlow({
     },
   });
 
+  // The credentials are module-wide. A callback that fires after this flow unmounted (a late 401
+  // from the test screen's source, a controller that was still stopping) must not clear the
+  // credentials of whatever flow is running now.
+  const [me] = React.useState(() => Symbol('candidate-flow'));
+  React.useEffect(() => {
+    activeFlow = me;
+    return () => {
+      if (activeFlow === me) activeFlow = null;
+    };
+  }, [me]);
+
   const endSession = React.useCallback(() => {
+    if (activeFlow !== me) return;
     clearCandidateCredentials();
     setTerminal({ reason: 'SESSION_ENDED' });
-  }, []);
+  }, [me]);
 
   const testSource = React.useMemo(
-    () => createAdrSource({ onSessionEnded: endSession }),
+    () => createAdrSource({ onSessionEnded: () => endSession() }),
     [endSession],
   );
 
-  const finishWith = React.useCallback((t: Terminal) => {
-    clearCandidateCredentials();
-    setTerminal(t);
-  }, []);
+  const finishWith = React.useCallback(
+    (t: Terminal) => {
+      if (activeFlow !== me) return;
+      clearCandidateCredentials();
+      setTerminal(t);
+    },
+    [me],
+  );
 
   const onVerified = React.useCallback((session: SessionTokenResponse) => {
     setSessionToken(session.sessionToken);

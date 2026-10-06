@@ -215,6 +215,8 @@ export class ProctorController {
   private readonly mediaProgress: MediaProgress = {};
   /** Set when the data is being purged: nothing more may be sent or written. */
   private purging = false;
+  /** The running finish(), so a late device answer can wait for the real final chunks to go. */
+  private finishPromise: Promise<{ lostBatches: number }> | null = null;
   /** Set while a device granted after the end is dropped: its last chunk must not be uploaded. */
   private dropping = false;
   private stopped = false;
@@ -417,8 +419,8 @@ export class ProctorController {
     }
     if (!outcome.ok) return { ok: false, reason: outcome.reason };
     this.set({ shared: true });
-    await this.pipeline?.recordScreen(outcome.stream);
-    if (this.stopped) await this.dropLate('SCREEN');
+    const recording = await this.pipeline?.recordScreen(outcome.stream);
+    if (this.stopped && recording) await this.dropLate('SCREEN');
     return { ok: true };
   }
 
@@ -438,13 +440,16 @@ export class ProctorController {
     if (this.stopped || !this.pipeline) return;
     const webcam = await this.pipeline.recordWebcam();
     if (this.stopped) {
-      webcam?.getTracks().forEach((t) => t.stop());
-      await this.dropLate('WEBCAM');
+      // Only a stream that was really granted started a recorder; a denied device left nothing.
+      if (webcam) {
+        webcam.getTracks().forEach((t) => t.stop());
+        await this.dropLate('WEBCAM');
+      }
       return;
     }
     const audio = await this.pipeline.recordAudio();
-    if (this.stopped) {
-      audio?.getTracks().forEach((t) => t.stop());
+    if (this.stopped && audio) {
+      audio.getTracks().forEach((t) => t.stop());
       await this.dropLate('AUDIO');
     }
   }
@@ -458,22 +463,43 @@ export class ProctorController {
    */
   private async dropLate(stream: (typeof MEDIA_STREAMS)[number]): Promise<void> {
     if (!this.pipeline) return;
-    if (this.purging || this.finishing) {
-      this.dropping = true;
-      await this.pipeline.finish({ drainTimeoutMs: 0 }).catch(() => undefined);
-      if (this.store) await purgeStore(this.store, this.o.sessionId);
-      this.removeSeqBackup();
+    if (this.purging) {
+      // The data is being deleted: nothing this late recorder wrote may stay or be sent.
+      await this.discardLate();
       return;
     }
+    // Finishing normally, or only leaving the page: stop the recorder so its last chunk is flushed.
     await this.pipeline.stopStream(stream).catch(() => undefined);
+    if (this.finishing) {
+      // That chunk joins the real drain of the final evidence (the screen, webcam and audio chunks
+      // of a normal submit are still being uploaded within the ingest grace). Wait for the finish
+      // to end, and only then remove anything the late recorder wrote after the queue was purged.
+      await this.finishPromise?.catch(() => undefined);
+      await this.discardLate();
+    }
+  }
+
+  /** Finish the pipeline with no drain and purge the store: nothing is left on disk or sent. */
+  private async discardLate(): Promise<void> {
+    if (!this.pipeline) return;
+    this.dropping = true;
+    await this.pipeline.finish({ drainTimeoutMs: 0 }).catch(() => undefined);
+    if (this.store) await purgeStore(this.store, this.o.sessionId);
+    this.removeSeqBackup();
   }
 
   /**
    * The test is over: stop the recorders (final chunks are flushed), then drain events and media in
    * parallel, purge the SDK's own storage and release every device.
    */
-  async finish(): Promise<{ lostBatches: number }> {
-    if (this.finishing || this.torn) return { lostBatches: 0 };
+  finish(): Promise<{ lostBatches: number }> {
+    if (this.finishPromise) return this.finishPromise;
+    if (this.torn) return Promise.resolve({ lostBatches: 0 });
+    this.finishPromise = this.runFinish();
+    return this.finishPromise;
+  }
+
+  private async runFinish(): Promise<{ lostBatches: number }> {
     this.finishing = true;
     this.stopped = true;
     await this.initPromise?.catch(() => undefined);
