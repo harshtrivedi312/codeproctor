@@ -5,6 +5,7 @@ import { nav, router } from './nav-mock';
 import { AuthProvider } from '@/features/auth/auth-provider';
 import { beginSession, publishSession } from '@/lib/auth-session';
 import { resetMockAdminState } from '@/mocks/admin-handlers';
+import { resetMockQuestionState } from '@/mocks/question-handlers';
 import { resetMockAuthState, seedMockRefresh } from '@/mocks/auth-handlers';
 
 export function resetAuthTestState(): void {
@@ -16,6 +17,7 @@ export function resetAuthTestState(): void {
   publishSession(null);
   resetMockAuthState();
   resetMockAdminState();
+  resetMockQuestionState();
 }
 
 export function renderWithAuth(ui: React.ReactElement) {

@@ -3,7 +3,8 @@
     python -m tools.int01.evaluate --synthetic --out /path/outside/repo/report.md
     python -m tools.int01.evaluate --scores scores.csv [--demographics demo.json] --out report.md
 
-scores.csv columns: subject,kind,score  (kind is genuine or impostor; subject is a random code).
+scores.csv columns: subject,kind,score[,status]  (kind is genuine or impostor; status is scored,
+unscored or missing; subject is a random code).
 demographics.json: {"<subject>": {"consent_group_results": true, "<dimension>": "<value>"}}.
 Only volunteers with consent_group_results true (form box C) appear in group results.
 Kept apart from the images and outside the repository. The tool refuses to read
@@ -15,18 +16,24 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Final
 
 from tools.int01 import groups, metrics, report, synthetic
 from tools.int01.safety import inside_git_tree
+
+UNSCORED_GENUINE: Final = (
+    -1.0
+)  # same value score_pairs stores; kept here so the evaluator never trusts the cell
 
 
 def load_scores(path: Path) -> list[groups.ScoredPair]:
     if inside_git_tree(path):
         raise ValueError("scores must be stored outside the repository")
     pairs: list[groups.ScoredPair] = []
-    with path.open(newline="") as fh:
+    with path.open(newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         names = set(reader.fieldnames or ())
         if names not in ({"subject", "kind", "score"}, {"subject", "kind", "score", "status"}):
@@ -35,25 +42,32 @@ def load_scores(path: Path) -> list[groups.ScoredPair]:
             if row["kind"] not in ("genuine", "impostor"):
                 raise ValueError("kind must be genuine or impostor")
             subject = (row["subject"] or "").strip()
-            status = (row.get("status") or "scored").strip()
-            if status not in ("scored", "unscored"):
-                raise ValueError("status must be scored or unscored")
-            try:
-                score = float(row["score"]) if row["score"] not in ("", None) else float("nan")
-            except (TypeError, ValueError):
-                raise ValueError("score must be a number") from None
-            if status == "scored" and score != score:  # NaN: a scored row needs a number
-                raise ValueError("score must be a number")
             if not subject:
                 raise ValueError("subject must not be empty")
-            pairs.append(groups.ScoredPair(subject, row["kind"], score, status == "unscored"))
+            status = (row.get("status") or "scored").strip()
+            if status not in ("scored", "unscored", "missing"):
+                raise ValueError("status must be scored, unscored or missing")
+            if status == "scored":
+                try:
+                    score = float(row["score"])
+                except (TypeError, ValueError):
+                    raise ValueError("score must be a number") from None
+            elif row["kind"] == "genuine" and status == "unscored":
+                score = UNSCORED_GENUINE  # whatever the cell says: it would go to manual review
+            else:
+                score = 0.0  # unscored impostor or missing pair: never read
+            pairs.append(
+                groups.ScoredPair(
+                    subject, row["kind"], score, status == "unscored", status == "missing"
+                )
+            )
     return pairs
 
 
 def load_demographics(path: Path) -> dict[str, groups.SubjectDemo]:
     if inside_git_tree(path):
         raise ValueError("demographics must be stored outside the repository")
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or not all(isinstance(v, dict) for v in data.values()):
         raise ValueError("demographics must be an object of per-volunteer objects")
     return {str(k): groups.parse_subject_demo(v) for k, v in data.items()}
@@ -69,7 +83,7 @@ def run(
 ) -> str:
     # An unscored genuine pair would go to manual review, so its stored -1.0 counts as a false
     # non-match. An unscored impostor pair cannot be a false match: it is left out and counted.
-    usable = [p for p in pairs if not (p.kind == "impostor" and p.unscored)]
+    usable = [p for p in pairs if not p.missing and not (p.kind == "impostor" and p.unscored)]
     g = [p.score for p in usable if p.kind == "genuine"]
     i = [p.score for p in usable if p.kind == "impostor"]
     points = metrics.sweep(g, i, metrics.default_thresholds())
@@ -89,6 +103,7 @@ def run(
         unscored_genuine=sum(1 for p in pairs if p.kind == "genuine" and p.unscored),
         genuine_total=len(g),
         dropped_impostor=sum(1 for p in pairs if p.kind == "impostor" and p.unscored),
+        missing_pairs=sum(1 for p in pairs if p.missing),
     )
 
 
@@ -110,6 +125,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if args.demographics and not args.dimension:
         ap.error("--dimension is required with --demographics (one dimension per report)")
+    try:
+        return _run_cli(args)
+    except UnicodeError:  # a ValueError too: handled first so the position is not printed
+        print("error: an input file is not valid UTF-8 text", file=sys.stderr)
+    except ValueError as e:  # our messages are fixed text; JSON errors carry only a position
+        print(f"error: {e}", file=sys.stderr)
+    except (OSError, RuntimeError, csv.Error):
+        # A path or a cell can hold a volunteer code (RuntimeError: a symlink loop names its
+        # path): say what failed, never with what.
+        print("error: an input or output file could not be read or written", file=sys.stderr)
+    return 2
+
+
+def _run_cli(args: argparse.Namespace) -> int:
     if args.synthetic:
         pairs, demo = synthetic.synthetic_pairs()
         label = "synthetic scores (no real people)"

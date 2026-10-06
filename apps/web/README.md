@@ -124,6 +124,41 @@ to see the code prompt, and disable. `admin@example.test` and an enrolled review
 The mock keeps this state in the same `mock_auth_state` cookie. Code: `src/features/security`.
 Playwright: `e2e/security.spec.ts`.
 
+## Question bank (FE-04, FR-201..FR-205, mock mode)
+
+Sign in as `author@example.test` (`Author-Pass-12345`) or the super admin, then open Questions.
+`recruiter@example.test` can list questions (`question:read`) but has no links into the editor; the
+mock answers 403 to the detail routes for anyone without `question:update` (reference solutions,
+hidden tests and answer keys never reach other roles, TC-011).
+
+| Route                                      | What it is                                                         |
+| ------------------------------------------ | ------------------------------------------------------------------ |
+| `/admin/questions`                         | List: filters (type, difficulty, status, tag) and search           |
+| `/admin/questions/new`                     | Pick a type (coding, multiple choice, short answer), then the form |
+| `/admin/questions/[id]`                    | Editor with tabs, Save, Validate, Publish                          |
+| `/admin/questions/[id]/versions`           | Version history (FR-204)                                           |
+| `/admin/questions/[id]/versions/[version]` | An older version, read-only                                        |
+
+Coding editor tabs: Statement (Markdown, live preview, no raw HTML), Languages and starter code
+(Monaco, self-hosted), Reference solution, Test cases (hidden toggle, weight), Variants (declared
+parameters, per-variant JSON checked against them, rendered preview, per-slot input and output
+overrides, "Prefill from reference solution" that only proposes values until you accept them),
+AI reference solutions (add, supersede, refresh-due badge, publish requirement), Limits. Multiple
+choice and short-answer questions have Statement and Answer.
+
+Mock questions to try: **Merge intervals** (published, 2 versions, variants, refresh due),
+**Rotate an array** (draft; its variant "Rotate by 3" fails validation, TC-012: fix the expected
+output of slot 2, Save, Validate, add two AI solutions for Python, Publish), **Running average**
+(validated, one AI assistant per language), **Cost of binary search** (MCQ), **Status code for a
+created resource** (short answer). The mock "executor" is fake: a slot fails when its expected
+output is blank or starts with `TODO`. State is in memory; reload to reset.
+
+Code map: `src/features/questions` (pages, editor, `tabs/`, `draft.ts` schemas and conversions,
+`template.ts` Mustache `{{name}}`, `params.ts`, `gate.ts` publish gate), `src/mocks/question-*.ts`.
+The question lives only in React Query and component state, never in a URL, storage or log.
+Playwright: `e2e/question-bank.spec.ts`. The placeholder contract is tagged [ARC-02] in
+`docs/followups/frontend.md`.
+
 ## Staff shell and Settings (FE-03, mock mode)
 
 Sign in as above, then use the sidebar. Every route lives under `(staff)/admin/(app)`.
@@ -131,7 +166,7 @@ Sign in as above, then use the sidebar. Every route lives under `(staff)/admin/(
 | Route                     | Who (permission, from the shared matrix) | What it is                                              |
 | ------------------------- | ---------------------------------------- | ------------------------------------------------------- |
 | `/admin`                  | any staff                                | Dashboard with links to your areas                      |
-| `/admin/questions`        | `question:read`                          | Placeholder (Step 4)                                    |
+| `/admin/questions`        | `question:read`                          | Question bank (FE-04, see "Question bank" below)        |
 | `/admin/tests`            | `test:read`                              | Placeholder (Step 5)                                    |
 | `/admin/candidates`       | `invitation:create`, `candidate:erase`   | Candidate list and the erase action (NFR-05, D-19)      |
 | `/admin/review`           | `review_queue:read`                      | Placeholder (Step 11)                                   |
