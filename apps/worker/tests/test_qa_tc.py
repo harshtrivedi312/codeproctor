@@ -219,7 +219,7 @@ def test_TC_076_C28_queue_is_high_then_medium_then_low_whatever_the_scores_and_i
     None
 ):
     items = [
-        # Scores fall as the band rises on purpose: a sort by score alone would put LOW first.
+        # Scores do not follow the band on purpose (LOW 70 is above MEDIUM 65 and HIGH 60): a sort by score alone would put LOW first.
         QueueItem("low-old", "LOW", 70.0, 1),
         QueueItem("med", "MEDIUM", 65.0, 5),
         QueueItem("high", "HIGH", 60.0, 9),

@@ -348,4 +348,78 @@ describe('P1 gate: Playwright JSON', () => {
     const r = gate([rep, jest([ok('TC-902 ok')])]);
     expect(r.out).not.toMatch(/TC-905\s+0 passing, 1 staged/);
   });
+
+  it(
+    'treats an empty spec as not run: a Verified row resting on it fails, and it is no pass',
+    T,
+    () => {
+      const rep = write(
+        'e2e-empty-verified.json',
+        JSON.stringify({
+          suites: [{ title: 'f', specs: [{ title: 'TC-902 empty', ok: true, tests: [] }] }],
+        }),
+      );
+      const r = gate([rep]);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain('matrix says Verified but no test ran');
+      const plain = gate([
+        write(
+          'e2e-empty-plain.json',
+          JSON.stringify({
+            suites: [{ title: 'f', specs: [{ title: 'TC-905 empty', ok: true, tests: [] }] }],
+          }),
+        ),
+        jest([ok('TC-902 ok')]),
+      ]);
+      expect(plain.out).not.toMatch(/TC-905\s+1 test\(s\) passing/);
+      expect(plain.out).not.toMatch(/TC-905\s+0 passing, 1 staged/);
+    },
+  );
+
+  it(
+    'fails on an untagged failing spec next to a failing P2 spec (stats.unexpected 2, one tagged)',
+    T,
+    () => {
+      const rep = write(
+        'e2e-mixed.json',
+        JSON.stringify({
+          suites: [
+            {
+              title: 'f',
+              specs: [
+                { title: 'TC-903 p2 fails', ok: false, tests: [{ status: 'unexpected' }] },
+                { title: 'no id fails', ok: false, tests: [{ status: 'unexpected' }] },
+              ],
+            },
+          ],
+          stats: { unexpected: 2 },
+        }),
+      );
+      const r = gate([rep, jest([ok('TC-902 ok')])]);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain('stats.unexpected 2');
+    },
+  );
+});
+
+describe('P1 gate: a failed file next to a failing non-P1 test', () => {
+  it(
+    'still records the file when only a P2 test failed in it (a beforeAll crash cannot hide)',
+    T,
+    () => {
+      const r = gate([
+        jest([ok('TC-902 ok'), ['TC-903 p2 broken', 'failed']], { fileStatus: 'failed' }),
+      ]);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain('failed with no failed test recorded');
+    },
+  );
+
+  it('does not double-report when a P1 test in the file failed', T, () => {
+    const r = gate([
+      jest([ok('TC-902 ok'), ['TC-901 broken', 'failed']], { fileStatus: 'failed' }),
+    ]);
+    expect(r.code).toBe(1);
+    expect(r.out).not.toContain('failed with no failed test recorded');
+  });
 });

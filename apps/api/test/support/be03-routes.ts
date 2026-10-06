@@ -47,9 +47,9 @@ export const ADMIN_USERS = '/admin/users';
 export const lockEventsPath = `${ADMIN_USERS}/lock-events`;
 
 /**
- * The backend route registry, loaded lazily so this file compiles and the always-run tests pass on
- * a branch where apps/api/src/common/auth/route-permissions.ts and route-registry.ts do not exist
- * yet (they arrive with BE-03). Only called from tests that run behind BE03_READY.
+ * The backend route registry (apps/api/src/common/auth/route-permissions.ts and route-registry.ts),
+ * loaded lazily with jest.requireActual after the test app has reset the module registry.
+ * Only called from tests that run behind BE03_READY.
  * `audited` means the route carries @Audited (the interceptor writes its row); routes that write
  * their audit row inside their own transaction (invite, role, unlock) do not carry it.
  * `candidateData` marks a route that reads or changes candidate data, which must be audited.
@@ -216,8 +216,11 @@ export function backendHasRoute(key: string): boolean {
       '../../src/common/auth/route-permissions',
     );
     return Object.hasOwn(perms.ROUTE_PERMISSIONS, key);
-  } catch {
-    return false;
+  } catch (e) {
+    // Only a missing registry file means "not there"; any other error (a syntax or import error in
+    // the backend file) must surface, not hide the route.
+    if ((e as { code?: string }).code === 'MODULE_NOT_FOUND') return false;
+    throw e;
   }
 }
 
