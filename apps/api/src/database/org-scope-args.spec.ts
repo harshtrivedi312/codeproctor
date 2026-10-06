@@ -630,6 +630,7 @@ describe('system scope: a scalar orgId cannot move a row (ADR 0006 section 8; NF
         ['RefreshToken', 'replacedById'],
         ['VariantTestCase', 'testCaseId'],
         ['IdentityCheck', 'reviewedById'],
+        ['IdentityCheck', 'videoCheckById'],
       ];
       for (const [model, column] of others) {
         expect(() => system(model, operation, build({ [column]: 'x' }))).not.toThrow();
