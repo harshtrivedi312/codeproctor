@@ -14,6 +14,7 @@ import {
   Harness,
   login,
   PASSWORD,
+  settleValidation,
 } from '../support/harness';
 import { actor, Actor, call, flushDeferred, tokenFromUrl } from '../support/be03-helpers';
 import {
@@ -132,9 +133,14 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
           const res = await call(h, route.method, t.path, who.token, t.body);
           expect(route.ok).toContain(res.status);
           const t1 = Date.now();
+          await settleValidation(h); // the validate job writes its own row later (own test below)
 
-          const rows = await since(before);
-          expect(rows).toHaveLength(1); // exactly one: not zero, not a duplicate
+          // Exactly one row of the action under test: not zero, not a duplicate. The validate job's
+          // QUESTION_VALIDATION_FINISHED row is a second action, asserted in its own test.
+          const rows = (await since(before)).filter(
+            (r) => route.id !== 'questions-validate' || r.action === audit.action,
+          );
+          expect(rows).toHaveLength(1);
           const row = rows[0] as AuditLog;
           expect(row.action).toBe(audit.action);
           expect(row.entityType).toBe(audit.entityType);
@@ -178,6 +184,61 @@ function auditSuite(title: string, ready: boolean, routes: Be03Route[]): void {
           if (route.sendsMail) expect(mailTokens.filter((x) => x !== '').length).toBeGreaterThan(0);
           expectNoSecrets(row, [...t.secrets, ...mailTokens, who.token]);
         });
+
+        if (route.id === 'questions-validate') {
+          it(`TC-006 FR-203: ${label} writes exactly one QUESTION_VALIDATION_FINISHED row when the job ends (system write by the starter, no IP, outcome and 12-hex revision only)`, async () => {
+            const who = await as(roleFor(route));
+            const t = await route.prepare(h, h.orgId);
+            const before = await lastId();
+            const res = await call(h, route.method, t.path, who.token, t.body);
+            expect(route.ok).toContain(res.status);
+            await settleValidation(h);
+
+            const rows = await since(before);
+            expect(rows.map((r) => r.action).sort()).toEqual([
+              'QUESTION_VALIDATION_FINISHED',
+              'QUESTION_VALIDATION_STARTED',
+            ]);
+            const started = rows.find(
+              (r) => r.action === 'QUESTION_VALIDATION_STARTED',
+            ) as AuditLog;
+            const row = rows.find((r) => r.action === 'QUESTION_VALIDATION_FINISHED') as AuditLog;
+            expect(row.entityType).toBe('question');
+            expect(row.entityId).toBe(t.entityId);
+            expect(row.orgId).toBe(h.orgId);
+            expect(row.actorId).toBe(who.id);
+            expect(row.ip).toBeNull(); // a system write: no request, so no caller IP
+            const meta = row.metadata as Record<string, unknown>;
+            expect(Object.keys(meta).sort()).toEqual(['outcome', 'revision', 'version']);
+            expect(['PASSED', 'FAILED', 'ERROR', 'STALE']).toContain(meta.outcome);
+            expect(meta.outcome).toBe('ERROR'); // no JUDGE0_URL in the harness: the run cannot execute
+            expect(meta.revision).toMatch(/^[0-9a-f]{12}$/);
+            expect(meta.version).toBe((started.metadata as { version: number }).version);
+            expect(row.createdAt.getTime()).toBeGreaterThanOrEqual(started.createdAt.getTime());
+            expectNoSecrets(row, [...t.secrets, who.token]);
+          });
+
+          it(`TC-006: ${label} refused (401, 403) or on another org's question (404) writes neither STARTED nor FINISHED, even after the job queue is idle`, async () => {
+            const denied = (['SUPER_ADMIN', 'REVIEWER', 'RECRUITER', 'AUTHOR'] as const).filter(
+              (x) => !hasPermission(x, route.permission),
+            );
+            const lowly: Actor[] = [];
+            for (const d of denied) lowly.push(await as(UserRole[d]));
+            const outsider = (orgBStaff[roleFor(route)] ??= await actor(h, roleFor(route), orgB));
+            const t = await route.prepare(h, h.orgId);
+            const before = await lastId();
+            await call(h, route.method, t.path, undefined, t.body).expect(401);
+            for (const who of lowly)
+              await call(h, route.method, t.path, who.token, t.body).expect(403);
+            await call(h, route.method, t.path, outsider.token, t.body).expect(404);
+            await settleValidation(h);
+            expect(await since(before)).toEqual([]);
+          });
+          // GAP: "no FINISHED row when the question is archived or gone while the job runs" is not
+          // driven here: with no JUDGE0_URL the job ends in milliseconds, so an owner-DB archive
+          // cannot be timed between start and finish. The backend's question-validation.e2e-spec
+          // (stubbed port) covers it; recorded in docs/followups/qa.md.
+        }
 
         it(`TC-006: ${label} writes no audit row when refused (401, 403) or when the target is in another org (404)`, async () => {
           const holder = roleFor(route);

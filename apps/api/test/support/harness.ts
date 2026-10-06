@@ -169,11 +169,27 @@ export async function boot(opts: BootOptions = {}): Promise<Harness> {
     settle: () => settle(),
     close: async () => {
       stdout?.mockRestore();
+      await waitForValidation(startedApp); // a running validation job must not write to a closed Prisma
       await startedApp.close();
       await startedOwner.$disconnect();
       await infra.stop();
     },
   };
+}
+
+async function waitForValidation(app: INestApplication<App>): Promise<void> {
+  const { ValidationService } = jest.requireActual<
+    typeof import('../../src/questions/validation.service')
+  >('../../src/questions/validation.service');
+  await app.get(ValidationService, { strict: false }).whenIdle();
+}
+
+/**
+ * Waits until the async question validation job (POST /questions/:id/validate, BE-04c) has finished
+ * and written its QUESTION_VALIDATION_FINISHED row. Call it after every successful validate call.
+ */
+export function settleValidation(h: Harness): Promise<void> {
+  return waitForValidation(h.app);
 }
 
 let seq = 0;
