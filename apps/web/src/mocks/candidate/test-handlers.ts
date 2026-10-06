@@ -341,7 +341,7 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
     http.post(`${cand}/session/section/finish`, async ({ request }) => {
       const r = live(request);
       if (isResponse(r)) return r;
-      let body: { position?: unknown } = {};
+      let body: { position?: unknown };
       try {
         body = (await request.json()) as { position?: unknown };
       } catch {
