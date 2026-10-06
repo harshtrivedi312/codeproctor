@@ -17,7 +17,7 @@
 - The owner provides the AWS x86 host for the spike (build-plan ARC-05). Developer machines are Apple-silicon Macs (status.md R-01).
 - Judge0 v1.13.1 (2024-04-18) is the latest release. It fixed three sandbox escapes rated CVSS 9.1 to 10.0 (CVE-2024-28185, CVE-2024-28189, CVE-2024-29021). One of them reached Judge0's own Postgres from a submission with networking turned on (section 10).
 - Judge0 stores every submission (source code, stdin, expected output, stdout, stderr) in its own Postgres. It has no retention setting (section 10). ADR 0013 raised this as owner question Q23.
-- NFR-01: code run result under 5 s p95. NFR-02: 200 concurrent candidates on the pilot. TC-091: 50 concurrent runs, p95 under 5 s. FR-502: 1 run per 5 s per candidate.
+- NFR-01: code run result under 5 s p95. NFR-02: 200 concurrent candidates on the pilot (superseded: 5 concurrent on the pilot, 200 in production; C-43, ADR 0017). TC-091: 50 concurrent runs, p95 under 5 s. FR-502: 1 run per 5 s per candidate.
 
 ## 2. Decision summary
 
@@ -53,8 +53,8 @@
 | --- | --- | --- | --- | --- | --- |
 | Local (Apple silicon) | **No Judge0.** apps/api unit and contract tests use a fake Judge0 HTTP server that BE-05 writes (section 8.4) | — | — | — | architect detail |
 | CI and spike | Owner-provisioned EC2 x86 host `judge0-x86` in us-east-1: a self-hosted GitHub Actions runner plus Judge0, under the runner rules in section 3.6. Stopped when idle | 4 vCPU / 8 GiB compute-optimized (c7i.xlarge class); upsized for the load spike | Ubuntu 22.04, cgroup v1, pinned kernel | Synthetic only. Its tokens are CI-only values | architect detail; owner question 6 |
-| Staging | Recommended: its own Judge0 instance beside the staging VM, so the red team (QA-02) attacks the pilot topology. Fallback: on the staging VM | 2 vCPU / 4 GiB (c7i.large class) | as above | Synthetic only (D-10) | D-10 (owner); topology: owner question 2 |
-| Pilot | Dedicated Judge0 instance in the pilot VPC, us-east-1 | Start at c7i.2xlarge class (8 vCPU / 16 GiB); the spike picks between that and 16 vCPU | as above | Real candidate code, deleted per section 6. The pilot-size instance used for spike S5 is never promoted as it is: the pilot Judge0 host is built fresh from a clean AMI with pilot-only secrets before any real data (D-10: no staging or spike state is reused) | C-03, D-10 (owner); size and rebuild: architect detail |
+| Staging | **Superseded by C-43 (ADR 0017): no AWS staging; Judge0 runs in the local stack.** Earlier text: its own Judge0 instance beside the staging VM, so the red team (QA-02) attacks the pilot topology. Fallback: on the staging VM | 2 vCPU / 4 GiB (c7i.large class) | as above | Synthetic only (D-10) | D-10 (owner); topology: owner question 2 |
+| Pilot | Dedicated Judge0 instance in the pilot VPC, us-east-1 | **Superseded for the pilot by ADR 0017 section 9: a small instance, sized by the spike.** Earlier text: start at c7i.2xlarge class (8 vCPU / 16 GiB); the spike picks between that and 16 vCPU | as above | Real candidate code, deleted per section 6. The pilot-size instance used for spike S5 is never promoted as it is: the pilot Judge0 host is built fresh from a clean AMI with pilot-only secrets before any real data (D-10: no staging or spike state is reused) | C-03, D-10 (owner); size and rebuild: architect detail |
 | Production | Same as the pilot. More capacity means a bigger instance first; more than one Judge0 host needs a later ADR, because each host has its own queue and database | from pilot measurements | as above | as pilot | architect detail |
 
 ### 3.3 Options rejected for local dev (Apple silicon)
