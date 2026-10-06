@@ -29,7 +29,7 @@ import {
   MIN_DURATION_MIN,
   PROFILES_OFFERED,
 } from '../test-structure';
-import { isStorableText } from '../text-rules';
+import { isStorableText } from '../../questions/text-rules';
 
 /** Like @IsOptional(), but only `undefined` skips validation: an explicit null is a 400. */
 const Opt = (): PropertyDecorator => ValidateIf((_o: unknown, v: unknown) => v !== undefined);
