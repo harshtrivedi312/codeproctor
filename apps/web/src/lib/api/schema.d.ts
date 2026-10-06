@@ -789,7 +789,7 @@ export interface components {
        * @description Cleared by any save
        */
       validatedAt: string | null;
-      validationReport: components['schemas']['ValidationReport'];
+      validationReport: components['schemas']['ValidationReport'] | null;
     };
     QuestionDetail: {
       id: string;

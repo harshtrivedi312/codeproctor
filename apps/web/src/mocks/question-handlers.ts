@@ -169,7 +169,7 @@ function runValidation(v: MockVersion): Report {
     },
     ...v.variants
       .filter((x) => x.active)
-      .map((x) => ({ id: x.id as string | null, label: x.label, overrides: x.overrides })),
+      .map((x) => ({ id: x.id, label: x.label, overrides: x.overrides })),
   ];
   for (const language of languages) {
     for (const slot of slots) {

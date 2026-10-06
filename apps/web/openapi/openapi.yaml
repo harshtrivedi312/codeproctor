@@ -1295,7 +1295,10 @@ components:
             createdAt: { type: string, format: date-time }
             validatedAt:
               { type: string, format: date-time, nullable: true, description: Cleared by any save }
-            validationReport: { $ref: '#/components/schemas/ValidationReport' }
+            validationReport:
+              nullable: true
+              allOf:
+                - $ref: '#/components/schemas/ValidationReport'
     QuestionDetail:
       type: object
       required: [id, slug, type, status, latestVersion, aiReferencePolicy, current]

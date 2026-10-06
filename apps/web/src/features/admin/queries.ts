@@ -8,6 +8,8 @@ export class ApiFailure extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** The API's machine code (for example `validation_required`), when it sent one. */
+    readonly code: string = '',
   ) {
     super(message);
   }
