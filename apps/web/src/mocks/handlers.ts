@@ -3,6 +3,7 @@ import { apiBaseUrl } from '@/lib/env';
 import type { Schemas } from '@/lib/api/client';
 import { createAdminHandlers } from './admin-handlers';
 import { createAuthHandlers } from './auth-handlers';
+import { createFaultHandlers } from './fault-handlers';
 import { createCandidateHandlers } from './candidate/handlers';
 import { createQuestionHandlers } from './question-handlers';
 import { createInvitationHandlers } from './invitation-handlers';
@@ -78,6 +79,8 @@ export function createHandlers(options: Partial<MockOptions> = {}) {
   let lastRunAt = 0;
 
   return [
+    // Faults first, so a test or the demo can make any staff route answer BUSY or a fixed 500.
+    ...createFaultHandlers(),
     ...createAuthHandlers(),
     ...createAdminHandlers({ latencyMs: opts.adminLatencyMs }),
     ...createQuestionHandlers({ latencyMs: opts.adminLatencyMs }),

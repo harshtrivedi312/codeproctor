@@ -14,7 +14,7 @@ import { settleSession } from '@/lib/auth-session';
 import { useAuth } from './auth-provider';
 import { safeNextPath } from './schemas';
 
-type Banner = { kind: 'failed' } | { kind: 'network' } | null;
+type Banner = { kind: 'failed' } | { kind: 'network' } | { kind: 'busy' } | null;
 
 /**
  * One neutral message for every failed sign-in (wrong password, unknown email, locked account), so
@@ -80,6 +80,9 @@ export function LoginForm(): React.JSX.Element {
     if (response.status === 401) {
       setBanner({ kind: 'failed' });
       setFocus('password');
+    } else if (response.status === 503) {
+      // Not retried by itself: every sign-in attempt counts, and a retry would count one more.
+      setBanner({ kind: 'busy' });
     } else {
       setBanner({ kind: 'network' });
     }
@@ -129,6 +132,12 @@ export function LoginForm(): React.JSX.Element {
       {banner?.kind === 'failed' ? (
         <Alert tone="error" role="alert">
           {SIGN_IN_FAILED_MESSAGE}
+        </Alert>
+      ) : null}
+      {banner?.kind === 'busy' ? (
+        <Alert tone="info" role="status" title="The service is busy">
+          We did not try again for you, so this attempt is not counted twice. Wait a moment, then
+          press Sign in again.
         </Alert>
       ) : null}
       {banner?.kind === 'network' ? (

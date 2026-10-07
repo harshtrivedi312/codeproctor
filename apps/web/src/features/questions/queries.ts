@@ -2,6 +2,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiFailure } from '@/features/admin/queries';
 import { api, type Schemas } from '@/lib/api/client';
+import { BUSY_CODE } from '@/lib/api/busy';
 import { useAuth } from '@/features/auth/auth-provider';
 import { can } from '@/features/staff/permissions';
 import { getGeneration } from '@/lib/auth-session';
@@ -42,7 +43,7 @@ function fail(response: Response, error: unknown): never {
   const body = error && typeof error === 'object' ? (error as Record<string, unknown>) : {};
   const text = (v: unknown) => (typeof v === 'string' ? v : '');
   const errors = Array.isArray(body.errors) ? body.errors.map((e) => text(e)).filter(Boolean) : [];
-  const code = body.code === VARIANT_HAS_AI_REFERENCES ? VARIANT_HAS_AI_REFERENCES : '';
+  const code = body.code === VARIANT_HAS_AI_REFERENCES || body.code === BUSY_CODE ? body.code : '';
   throw new ApiFailure(response.status, text(body.detail) || text(body.message), code, errors);
 }
 
@@ -67,11 +68,12 @@ const MAX_LIST_PAGES = 20;
 export function useQuestions(includeArchived: boolean) {
   return useQuery({
     queryKey: questionKeys.list(includeArchived),
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const items: QuestionSummary[] = [];
       for (let page = 1; page <= MAX_LIST_PAGES; page += 1) {
         const { data, error, response } = await api.GET('/v1/questions', {
           params: { query: { page, pageSize: 100, includeArchived } },
+          signal,
         });
         if (!data) fail(response, error);
         items.push(...data.items);
