@@ -1,6 +1,8 @@
 import { setupServer } from 'msw/node';
 import { describe, expect, it } from 'vitest';
 import { apiBaseUrl } from '@/lib/env';
+import { candidateApi } from '@/features/candidate-flow/api';
+import { MOCK_OTP, MOCK_TOKENS } from './handlers';
 import { createHandlers } from '../handlers';
 
 /**
@@ -29,6 +31,41 @@ describe('FU-FEB-08 FR-505 candidate test mocks do not shadow the demo routes', 
         headers: { Authorization: 'Bearer not-a-known-token' },
       });
       expect(candidate.status).toBe(401);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('BE-11 ADR 0013 5.11 the section finish mock follows the documented contract', () => {
+  it('rejects bad bodies and unknown positions, refuses a section not yet open, and is idempotent', async () => {
+    const server = setupServer(...createHandlers({ saveLatencyMs: 0, runLatencyMs: 0 }));
+    server.listen({ onUnhandledFrame: 'error' });
+    try {
+      const r = await candidateApi.startSession(MOCK_TOKENS.consented, MOCK_OTP);
+      if (!r.ok) throw new Error('sign-in failed');
+      await fetch(`${apiBaseUrl}/v1/candidate/session/test/start`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${r.data.sessionToken}` },
+      });
+      const finish = (body: unknown) =>
+        fetch(`${apiBaseUrl}/v1/candidate/session/section/finish`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${r.data.sessionToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(body),
+        });
+      expect((await finish({ position: 0 })).status).toBe(400);
+      expect((await finish({ position: '1' })).status).toBe(400);
+      expect((await finish({})).status).toBe(400);
+      expect((await finish({ position: 3 })).status).toBe(404);
+      expect((await finish({ position: 2 })).status).toBe(409);
+      const first = await finish({ position: 1 });
+      expect(first.status).toBe(202);
+      expect(await first.json()).toEqual({ accepted: true });
+      expect((await finish({ position: 1 })).status).toBe(202);
     } finally {
       server.close();
     }

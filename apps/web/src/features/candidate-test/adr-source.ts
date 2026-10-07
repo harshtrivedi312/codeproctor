@@ -6,7 +6,7 @@ import {
   isOverStatus,
   questionViewSchema,
   runResultSchema,
-  sectionFinishedSchema,
+  sectionFinishAcceptedSchema,
   sessionStateSchema,
   testLayoutSchema,
   type QuestionView,
@@ -149,7 +149,7 @@ export function createAdrSource(hooks: { onSessionEnded: () => void }): TestSour
     async saveDraft(questionId, body) {
       const r = await requestAt(
         draftSavedSchema,
-        `/questions/${encodeURIComponent(questionId)}/draft`,
+        `/answers/${encodeURIComponent(questionId)}/draft`,
         { method: 'PUT', body, authed: true },
       );
       ended(r);
@@ -174,18 +174,18 @@ export function createAdrSource(hooks: { onSessionEnded: () => void }): TestSour
       return { kind: 'error' };
     },
     async finishSection(sectionId) {
-      const r = await requestAt(
-        sectionFinishedSchema,
-        `/sections/${encodeURIComponent(sectionId)}/finish`,
-        { method: 'POST', authed: true },
-      );
+      // The position of the section on screen, the same for every retry of this attempt.
+      const position = Number.parseInt(sectionId, 10);
+      if (!Number.isInteger(position) || position < 1) return { kind: 'failed' };
+      const r = await requestAt(sectionFinishAcceptedSchema, '/session/section/finish', {
+        method: 'POST',
+        body: { position },
+        authed: true,
+      });
       ended(r);
+      // ADR 0002: finished only on a confirmed 202. 409 SECTION_NOT_OPEN is never "finished".
       if (r.ok)
-        return {
-          kind: 'finished',
-          nextSectionId: r.data.nextSectionId,
-          submitted: r.data.submitted,
-        };
+        return { kind: 'finished', nextSectionId: null, submitted: false, acceptedOnly: true };
       if (r.kind === 'problem') return r.status === 409 ? { kind: 'conflict' } : { kind: 'failed' };
       return { kind: 'unreachable' };
     },
