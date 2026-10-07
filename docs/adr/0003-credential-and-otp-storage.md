@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Accepted** 2026-10-01 (a proposed amendment in section 7 is not in force) (D-16): every recommendation as proposed; amended by D-21 (no OTP lockout during a test) and D-22 (self-service password reset). See section 6. Applied to database.md; deltas in ADR 0008. |
+| Status | **Accepted** 2026-10-01 (D-16): every recommendation as proposed; amended by D-21 (no OTP lockout during a test) and D-22 (self-service password reset). See section 6. Applied to database.md; deltas in ADR 0008. |
 | Author | architect |
 | Decides | Q-03, Q-04, Q-05, A-11 item 1 |
 | Serves | FR-101, FR-102, FR-104, FR-106, FR-107 (added by D-22); NFR-04; TC-003, TC-005, TC-007, TC-097, TC-098 |
@@ -77,13 +77,3 @@ Self-service "forgot password" was a gap; D-22 put it in scope (section 6).
   - reset links expire after 30 minutes (staff invite links after 72 hours);
   - invite and reset share the two `set_password_*` columns;
   - a reset clears the login lockout.
-
-## 7. Proposed amendment: refresh reuse grace (owner approval required, not in force)
-
-Status: Proposed. A rotated refresh token that comes back is treated as theft and revokes its family (TC-005). Two simultaneous tabs trip this today: the loser's update waits on the winner's row lock, sees no live row and revokes the family, signing out both. A rotation response lost after commit (the retry carries the old cookie) is a different case, handled by the unknown-commit rule in api-contract section 8 (Refresh bullet), not by this grace.
-
-Preferred first step, no security cost: a client-side single-flight refresh across tabs (Web Locks API, with BroadcastChannel as the fallback), so two tabs never refresh at the same moment. Frontend owns it. The grace below is needed only if the owner wants server-side protection as well.
-
-Proposal: a token rotated less than 10 seconds ago (`replaced_by_id` set; never a token revoked by logout, reset, deactivation or family revocation), whose successor has not been used, answers the fixed 401 without revoking the family. It applies on both reuse paths: the `revokedAt` check before the transaction and the in-transaction `RefreshReuseSignal`. The 401 sets no cookie and clears none (the browser keeps the winning tab's cookie, and a retry succeeds). The grace is a code constant `REFRESH_REUSE_GRACE_MS` (10000; 0 switches it off), not an environment variable. Every grace hit writes a low-severity `AUTH_REFRESH_REUSE_GRACE` audit row or metric, so repeated hits stay visible. The family is marked suspect until it expires or is revoked. If the same user signs in fresh while the mark is set, the suspect family is revoked and a lower-severity alert fires (it cannot be told apart from a legitimate two-tab user signing in on another device). A later use of the successor does not revoke it: the server cannot tell the owner's other tab from an attacker.
-
-Cost: without the suspect mark the grace would disable TC-005 when the attacker wins the race: the attacker rotates T0 to T1, the owner's T0 inside 10 s gets a 401, the owner signs in again, T0 never returns, and the attacker's family lives to the end of its TTL (today the owner's T0 revokes it at once). The mark closes that case only if the owner signs in again during the family's TTL, which a locked-out owner normally does at once. Residual: if the owner never signs in again, the attacker's family is not revoked; a legitimate two-tab user who later signs in elsewhere loses the grace-marked session and a false low-severity alert fires. If the owner is not willing to accept that residual, withdraw the server grace and keep only the single-flight client fix, which has no security cost. Backend builds this only after the owner accepts it.
